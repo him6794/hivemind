@@ -1,0 +1,144 @@
+/* Reset and Fonts */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+body {
+    font-family: Arial, sans-serif;
+    line-height: 1.6;
+    color: #f0f0f0;
+    background-color: #121212;
+}
+
+/* Header */
+header {
+    background: #1f1f1f;
+    padding: 20px 0;
+    position: sticky;
+    top: 0;
+    z-index: 1000;
+}
+header .container {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    width: 90%;
+    margin: 0 auto;
+}
+header .logo {
+    max-width: 150px;
+}
+header nav ul {
+    list-style: none;
+    display: flex;
+}
+header nav ul li {
+    margin: 0 15px;
+}
+header nav ul li a {
+    text-decoration: none;
+    color: #f0f0f0;
+    transition: color 0.3s;
+}
+header nav ul li a:hover {
+    color: #03a9f4;
+}
+
+/* Sections */
+section {
+    padding: 50px 20px;
+}
+section .container {
+    width: 90%;
+    margin: 0 auto;
+    text-align: center;
+}
+section#home {
+    background: url('assets/background.jpg') no-repeat center center/cover;
+    color: #fff;
+    text-align: center;
+    padding: 100px 20px;
+}
+section#home h1 {
+    font-size: 2.5rem;
+    margin-bottom: 20px;
+}
+section#home p {
+    font-size: 1.2rem;
+    margin-bottom: 20px;
+}
+.btn {
+    padding: 10px 20px;
+    background: #03a9f4;
+    color: #fff;
+    text-decoration: none;
+    border-radius: 5px;
+    transition: background 0.3s;
+}
+.btn:hover {
+    background: #0288d1;
+}
+
+/* Features */
+.features-list {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-around;
+    gap: 20px;
+}
+.feature {
+    background: #2c2c2c;
+    padding: 20px;
+    border-radius: 5px;
+    max-width: 300px;
+}
+
+/* Footer */
+footer {
+    background: #1f1f1f;
+    padding: 10px;
+    text-align: center;
+}
+/* Contact Section */
+#contact form {
+    max-width: 600px;
+    margin: 0 auto;
+    background: #2c2c2c;
+    padding: 20px;
+    border-radius: 5px;
+}
+#contact form label {
+    display: block;
+    margin: 10px 0 5px;
+    font-size: 1rem;
+    color: #f0f0f0;
+}
+#contact form input,
+#contact form textarea {
+    width: 100%;
+    padding: 10px;
+    margin-bottom: 10px;
+    border: none;
+    border-radius: 5px;
+    font-size: 1rem;
+    color: #121212;
+}
+#contact form button {
+    background: #03a9f4;
+    color: #fff;
+    border: none;
+    padding: 10px 15px;
+    font-size: 1rem;
+    cursor: pointer;
+    border-radius: 5px;
+    transition: background 0.3s;
+}
+#contact form button:hover {
+    background: #0288d1;
+}
+#status-message {
+    margin-top: 10px;
+    font-size: 1rem;
+    text-align: center;
+}
