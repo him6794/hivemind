@@ -1,0 +1,149 @@
+import grpc
+from typing import Optional
+import nodepool_pb2
+import nodepool_pb2_grpc
+import logging
+import time
+
+# 配置日誌
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+class TestConfig:
+    """測試配置常量"""
+    TEST_USER = "test"
+    TEST_PASSWORD = "password"
+    NEW_PASSWORD = "password"  # 與之前更新密碼一致
+    RECEIVER_USER = "receiver_testuser"
+    RECEIVER_PASSWORD = "password"
+    NODE_ID = "worker-node-002"
+    HOSTNAME = "worker-node-host"
+    CPU_CORES = 4
+    MEMORY_GB = 8
+    TASK_DESCRIPTION = "測試任務"
+    CPT_BUDGET = 50
+    CHANNEL_ADDRESS = "localhost:50051"
+    TIMEOUT = 10  # gRPC 調用超時（秒）
+
+class RPCErrorHandler:
+    """gRPC 錯誤處理裝飾器"""
+    @staticmethod
+    def handle_rpc_error(func):
+        def wrapper(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except grpc.RpcError as e:
+                logging.error(f"{func.__name__} Failed: {e.details() or e.code()}")
+                print(f"{func.__name__} Failed: {e.details() or e.code()}")
+                return None
+            except Exception as e:
+                logging.error(f"{func.__name__} Unexpected Error: {e}")
+                print(f"{func.__name__} Unexpected Error: {e}")
+                return None
+        return wrapper
+
+class UserServiceTester:
+    """用戶服務測試套件"""
+    def __init__(self, stub: nodepool_pb2_grpc.UserServiceStub):
+        self.stub = stub
+        self.current_token = ""
+
+    @RPCErrorHandler.handle_rpc_error
+    def test_register(self, username: str, password: str) -> Optional[nodepool_pb2.StatusResponse]:
+        """測試用戶註冊"""
+        logging.info(f"測試用戶註冊: {username}")
+        request = nodepool_pb2.RegisterRequest(username=username, password=password)
+        response = self.stub.Register(request, timeout=TestConfig.TIMEOUT)
+        print("\n[用戶註冊測試]")
+        self._print_response(response)
+        return response
+
+    @RPCErrorHandler.handle_rpc_error
+    def test_login(self, username: str, password: str) -> Optional[nodepool_pb2.LoginResponse]:
+        """測試用戶登錄"""
+        logging.info(f"測試用戶登錄: {username}")
+        request = nodepool_pb2.LoginRequest(username=username, password=password)
+        response = self.stub.Login(request, timeout=TestConfig.TIMEOUT)
+        print("\n[用戶登錄測試]")
+        self._print_response(response)
+        if response and response.success:
+            self.current_token = response.token
+            print(f"  Token: {response.token}")
+        return response
+
+    @RPCErrorHandler.handle_rpc_error
+    def test_get_balance(self) -> Optional[nodepool_pb2.GetBalanceResponse]:
+        """測試獲取餘額"""
+        logging.info("測試獲取餘額")
+        request = nodepool_pb2.GetBalanceRequest(token=self.current_token)
+        response = self.stub.GetBalance(request, timeout=TestConfig.TIMEOUT)
+        print("\n[餘額查詢測試]")
+        self._print_response(response)
+        if response and response.success:
+            print(f"  Balance: {response.balance}")
+        return response
+
+    @RPCErrorHandler.handle_rpc_error
+    def test_transfer(self, receiver: str, amount: int) -> Optional[nodepool_pb2.StatusResponse]:
+        """測試轉賬功能"""
+        logging.info(f"測試轉賬: 接收者 {receiver}, 金額 {amount}")
+        # 確保接收者存在
+        receiver_reg_response = self.test_register(TestConfig.RECEIVER_USER, TestConfig.RECEIVER_PASSWORD)
+        if receiver_reg_response and not receiver_reg_response.success and "已存在" not in receiver_reg_response.message:
+            logging.warning(f"接收者 {receiver} 註冊失敗且原因異常: {receiver_reg_response.message}")
+            return None
+
+        request = nodepool_pb2.TransferRequest(
+            token=self.current_token,
+            receiver_username=receiver,
+            amount=amount
+        )
+        response = self.stub.Transfer(request, timeout=TestConfig.TIMEOUT)
+        print("\n[轉賬功能測試]")
+        self._print_response(response)
+        return response
+
+    @RPCErrorHandler.handle_rpc_error
+    def test_update_password(self, new_password: str) -> Optional[nodepool_pb2.StatusResponse]:
+        """測試密碼更新"""
+        logging.info("測試密碼更新")
+        request = nodepool_pb2.UpdatePasswordRequest(
+            token=self.current_token,
+            new_password=new_password
+        )
+        response = self.stub.UpdatePassword(request, timeout=TestConfig.TIMEOUT)
+        print("\n[密碼更新測試]")
+        self._print_response(response)
+        return response
+
+    @staticmethod
+    def _print_response(response):
+        """通用響應輸出方法"""
+        if response:
+            print(f"  Success: {response.success}")
+            print(f"  Message: {response.message}")
+
+class NodeServiceTester:
+    """節點服務測試套件"""
+    def __init__(self, stub: nodepool_pb2_grpc.NodeManagerServiceStub):
+        self.stub = stub
+
+    @RPCErrorHandler.handle_rpc_error
+    def test_register_node(self) -> Optional[nodepool_pb2.StatusResponse]:
+        """測試節點註冊"""
+        logging.info(f"測試節點註冊: {TestConfig.NODE_ID}")
+        request = nodepool_pb2.RegisterWorkerNodeRequest(
+            node_id=TestConfig.NODE_ID,
+            hostname=TestConfig.HOSTNAME,
+            cpu_cores=TestConfig.CPU_CORES,
+            memory_gb=TestConfig.MEMORY_GB
+        )
+        response = self.stub.RegisterWorkerNode(request, timeout=TestConfig.TIMEOUT)
+        print("\n[節點註冊測試]")
+        self._print_response(response)
+        return response
+
+    @RPCErrorHandler.handle_rpc_error
+    def test_health_check(self) -> Optional[nodepool_pb2.HealthCheckResponse]:
+        """測試健康檢查"""
+        logging.info("測試健康檢查")
+        reques

@@ -1,0 +1,93 @@
+// nodepool.proto
+syntax = "proto3";
+package nodepool;
+
+option java_multiple_files = true;
+option java_package = "com.example.nodepool";
+option java_outer_classname = "NodepoolProto";
+
+// 節點管理服務
+service NodeManagerService {
+  // 工作節點註冊
+  rpc RegisterWorkerNode(RegisterWorkerNodeRequest) returns (StatusResponse);
+
+  // 健康檢查
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+
+  // 節點報告狀態
+  rpc ReportStatus(ReportStatusRequest) returns (StatusResponse);
+
+  // 獲取節點列表（新增）
+  rpc GetNodeList(GetNodeListRequest) returns (GetNodeListResponse);
+}
+
+// GetNodeList 請求消息（目前可為空）
+message GetNodeListRequest {}
+
+// GetNodeList 回覆消息
+message GetNodeListResponse {
+  bool success = 1;           // 操作是否成功
+  string message = 2;         // 回覆訊息
+  repeated WorkerNodeInfo nodes = 3; // 節點資訊列表
+}
+
+// WorkerNodeInfo 消息（節點資訊結構）
+message WorkerNodeInfo {
+  string node_id = 1;         // 節點 ID
+  string hostname = 2;        // 主機名稱
+  int32 cpu_cores = 3;        // CPU 核心數
+  int64 memory_gb = 4;        // 記憶體大小 (GB)
+  string status = 5;          // 節點狀態 (如 "online", "空闲状态")
+  double last_heartbeat = 6;  // 最後心跳時間戳
+}
+
+// （其他現有消息定義保持不變）
+//  通用消息
+
+//  通用的状态回覆消息
+message StatusResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+//  使用者服务
+
+service UserService {
+  //  使用者注册
+  rpc Register(RegisterRequest) returns (StatusResponse);
+
+  //  使用者登录
+  rpc Login(LoginRequest) returns (LoginResponse);
+
+  //  获取使用者余额
+  rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse);
+
+  //  使用者转账
+  rpc Transfer(TransferRequest) returns (StatusResponse);
+
+  //  更新使用者密码
+  rpc UpdatePassword(UpdatePasswordRequest) returns (StatusResponse);
+}
+
+//  注册请求消息
+message RegisterRequest {
+  string username = 1;
+  string password = 2;
+}
+
+//  登录请求消息
+message LoginRequest {
+  string username = 1;
+  string password = 2;
+}
+
+//  登录回覆消息
+message LoginResponse {
+  bool success = 1;
+  string message = 2;
+  string token = 3; //  登录成功后返回 JWT Token
+}
+
+//  获取余额请求消息
+message GetBalanceRequest {
+  string token = 1; //  使用者Tok

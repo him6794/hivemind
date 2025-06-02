@@ -1,0 +1,87 @@
+import grpc
+import logging
+import re
+import sqlite3
+import bcrypt
+import jwt
+import os
+import datetime
+import threading
+import time
+from concurrent import futures
+from contextlib import contextmanager
+from typing import Dict, Optional, Tuple
+
+import nodepool_pb2_grpc
+import nodepool_pb2
+
+# Constants
+DEFAULT_PORT = 50051
+SECRET_KEY = os.getenv("SECRET_KEY", "your_secret_key")
+TOKEN_EXPIRY_MINUTES = 60
+DB_NAME = "users.db"
+COMMAND_PATTERN = re.compile(r"(\w+)\(([^)]*)\)")
+
+class UserManager:
+    """用户管理类（线程安全）"""
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._init_db()
+        self.active_tokens = {}
+
+    @contextmanager
+    def _db_connection(self):
+        """数据库连接上下文"""
+        conn = sqlite3.connect(DB_NAME)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        try:
+            with self._lock:
+                yield cursor
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            raise e
+        finally:
+            conn.close()
+
+    def _init_db(self):
+        """初始化数据库"""
+        with self._db_connection() as cursor:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT UNIQUE NOT NULL,
+                    password TEXT NOT NULL,
+                    tokens INTEGER DEFAULT 100,
+                    credit_score INTEGER DEFAULT 100
+                )
+            """)
+
+    def execute(self, query: str, params: tuple = ()):
+        """执行数据库操作"""
+        with self._db_connection() as cursor:
+            cursor.execute(query, params)
+            return cursor.rowcount
+
+    def query_one(self, query: str, params: tuple = ()):
+        """查询单条记录"""
+        with self._db_connection() as cursor:
+            cursor.execute(query, params)
+            return cursor.fetchone()
+
+class CommandHandler:
+    """命令处理核心类"""
+    def __init__(self):
+        self.user_manager = UserManager()
+        self.commands = {
+            "register": self.handle_register,
+            "login": self.handle_login,
+            "transfer": self.handle_transfer,
+            "balance": self.handle_balance,
+            "update_password": self.update_password,
+            "node_register": self.handle_node_register,
+            "get_node": self.handle_get_node
+        }
+
+    def process(self, comm

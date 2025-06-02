@@ -1,0 +1,442 @@
+<!doctype html>
+<html>
+<head>
+    <title>Master Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary-color: #4f46e5;
+            --success-color: #10b981;
+            --error-color: #ef4444;
+            --warning-color: #f59e0b;
+            --text-color: #1f2937;
+            --border-color: #e5e7eb;
+            --background-color: #f9fafb;
+            --card-background: #ffffff;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--background-color);
+            color: var(--text-color);
+            line-height: 1.5;
+            padding: 2rem;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2rem;
+        }
+
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .user-info {
+            color: var(--text-color);
+            font-weight: 500;
+        }
+
+        .logout-btn {
+            background-color: var(--error-color);
+            color: white;
+            padding: 0.5rem 1rem;
+            border: none;
+            border-radius: 6px;
+            font-weight: 500;
+            font-size: 0.875rem;
+            cursor: pointer;
+            text-decoration: none;
+            transition: background-color 0.2s;
+        }
+
+        .logout-btn:hover {
+            background-color: #dc2626;
+        }
+
+        h1 {
+            font-size: 1.875rem;
+            font-weight: 600;
+            color: var(--text-color);
+        }
+
+        .upload-btn {
+            background-color: var(--primary-color);
+            color: white;
+            padding: 0.75rem 1.5rem;
+            border: none;
+            border-radius: 6px;
+            font-weight: 500;
+            font-size: 1rem;
+            cursor: pointer;
+            text-decoration: none;
+            transition: background-color 0.2s;
+        }
+
+        .upload-btn:hover {
+            background-color: #4338ca;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .stat-card {
+            background: var(--card-background);
+            border-radius: 12px;
+            padding: 1.5rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+
+        .stat-card.balance {
+            background: linear-gradient(135deg, var(--primary-color), #4338ca);
+            color: white;
+        }
+
+        .stat-card.balance h3,
+        .stat-card.balance .value {
+            color: white;
+        }
+
+        .stat-card h3 {
+            font-size: 1.25rem;
+            font-weight: 500;
+            margin-bottom: 0.5rem;
+            color: var(--text-color);
+        }
+
+        .stat-card .value {
+            font-size: 2rem;
+            font-weight: 600;
+            color: var(--primary-color);
+        }
+
+        .content-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+            gap: 1.5rem;
+        }
+
+        .card {
+            background: var(--card-background);
+            border-radius: 12px;
+            padding: 1.5rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+
+        .card h2 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            color: var(--text-color);
+        }
+
+        .table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .table th,
+        .table td {
+            padding: 0.75rem 1rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .table th {
+            font-weight: 500;
+            color: var(--text-color);
+            background-color: var(--background-color);
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.875rem;
+            font-weight: 500;
+        }
+
+        .status-unknown {
+            background-color: #e5e7eb;
+            color: #374151;
+        }
+
+        .status-running {
+            background-color: #dcfce7;
+            color: #047857;
+        }
+
+        .status-pending {
+            background-color: #fef3c7;
+            color: #b45309;
+        }
+
+        .status-completed {
+            background-color: #dbeafe;
+            color: #1e40af;
+        }
+
+        .status-failed,
+        .status-error {
+            background-color: #fee2e2;
+            color: #b91c1c;
+        }
+
+        .node-status {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 0.5rem;
+        }
+
+        .status-online {
+            background-color: var(--success-color);
+        }
+
+        .status-offline {
+            background-color: var(--error-color);
+        }
+
+        .status-busy {
+            background-color: var(--warning-color);
+        }
+
+        .refresh-btn {
+            background-color: var(--background-color);
+            color: var(--text-color);
+            border: 1px solid var(--border-color);
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.875rem;
+            transition: all 0.2s;
+        }
+
+        .refresh-btn:hover {
+            background-color: var(--border-color);
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Master Dashboard</h1>
+            <div class="header-right">
+                <span class="user-info">Welcome, {{ session.username }}</span>
+                <a href="/upload" class="upload-btn">Upload New Task</a>
+                <a href="/logout" class="logout-btn">Logout</a>
+            </div>
+        </div>
+
+        <div class="stats-grid">
+            <div class="stat-card balance">
+                <h3>CPT Balance</h3>
+                <div class="value" id="cpt-balance">0</div>
+            </div>
+            <div class="stat-card">
+                <h3>Active Tasks</h3>
+                <div class="value" id="active-tasks">0</div>
+            </div>
+            <div class="stat-card">
+                <h3>Online Nodes</h3>
+                <div class="value" id="online-nodes">0</div>
+            </div>
+            <div class="stat-card">
+                <h3>Total CPU Score</h3>
+                <div class="value" id="total-cpu">0</div>
+            </div>
+            <div class="stat-card">
+                <h3>Total GPU Score</h3>
+                <div class="value" id="total-gpu">0</div>
+            </div>
+        </div>
+
+        <div class="content-grid">
+            <div class="card">
+                <div class="card-header">
+                    <h2>Recent Tasks</h2>
+                    <button class="refresh-btn" onclick="refreshTasks()">Refresh</button>
+                </div>
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Task ID</th>
+                            <th>Status</th>
+                            <th>Progress</th>
+                            <th>Last Update</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tasks-table">
+                        <!-- Tasks will be populated by JavaScript -->
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <h2>Node Status</h2>
+                    <button class="refresh-btn" onclick="refreshNodes()">Refresh</button>
+                </div>
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Node ID</th>
+                            <th>Status</th>
+                            <th>CPU Score</th>
+                            <th>GPU Score</th>
+                            <th>Location</th>
+                        </tr>
+                    </thead>
+                    <tbody id="nodes-table">
+                        <!-- Nodes will be populated by JavaScript -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function updateStats(data) {
+            document.getElementById('active-tasks').textContent = data.active_tasks;
+            document.getElementById('online-nodes').textContent = data.online_nodes;
+            document.getElementById('total-cpu').textContent = data.total_cpu;
+            document.getElementById('total-gpu').textContent = data.total_gpu;
+            document.getElementById('cpt-balance').textContent = data.cpt_balance;
+        }
+
+        function updateTasks(tasks) {
+            const tbody = document.getElementById('tasks-table');
+            tbody.innerHTML = '';
+            
+            tasks.forEach(task => {
+                const status = task.status || 'UNKNOWN';
+                const progress = task.progress || '0%';
+                const lastUpdate = task.last_update || '-';
+                const outputTail = task.output_tail || [];
+                const message = task.message || '';
+                
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td>${task.task_id}</td>
+                    <td>
+                        <span class="status-badge status-${status.toLowerCase()}">${status}</span>
+                    </td>
+                    <td>${progress}</td>
+                    <td title="${outputTail.join('\n')}">${lastUpdate}<br>
+                        <small>${message}</small>
+                    </td>
+                `;
+                tbody.appendChild(row);
+            });
+            
+            // 更新統計數據
+            const activeTasks = tasks.filter(t => 
+                t.status && ['PENDING', 'RUNNING'].includes(t.status.toUpperCase())
+            ).length;
+            document.getElementById('active-tasks').textContent = activeTasks;
+        }
+
+        function updateNodes(nodes) {
+            const tbody = document.getElementById('nodes-table');
+            tbody.innerHTML = '';
+            nodes.forEach(node => {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td>${node.node_id}</td>
+                    <td>
+                        <span class="node-status status-${node.status.toLowerCase()}"></span>
+                        ${node.status}
+                    </td>
+                    <td>${node.cpu_score}</td>
+                    <td>${node.gpu_score}</td>
+                    <td>${node.location}</td>
+                `;
+                tbody.appendChild(row);
+            });
+        }
+
+        function refreshTasks() {
+            fetch('/api/tasks')
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    if (data.error) {
+                        console.error('Error fetching tasks:', data.error);
+                    } else {
+                        updateTasks(data.tasks);
+                    }
+                })
+                .catch(error => console.error('Error fetching tasks:', error));
+        }
+
+        function refreshNodes() {
+            fetch('/api/nodes')
+                .then(response => response.json())
+                .then(data => {
+                    updateNodes(data.nodes);
+                    updateStats({
+                        online_nodes: data.nodes.filter(n => n.status === 'ONLINE').length,
+                        total_cpu: data.nodes.reduce((sum, n) => sum + n.cpu_score, 0),
+                        total_gpu: data.nodes.reduce((sum, n) => sum + n.gpu_score, 0),
+                        active_tasks: data.nodes.reduce((sum, n) => sum + (n.status === 'BUSY' ? 1 : 0), 0)
+                    });
+                })
+                .catch(error => console.error('Error fetching nodes:', error));
+        }
+
+        function refreshBalance() {
+            fetch('/api/balance')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.cpt_balance !== undefined) {
+                        document.getElementById('cpt-balance').textContent = data.cpt_balance;
+                    }
+                })
+                .catch(error => console.error('Error fetching balance:', error));
+        }
+
+        // Initial load
+        refreshTasks();
+        refreshNodes();
+        refreshBalance();
+
+        // Auto-refresh every 10 seconds
+        setInterval(() => {
+            refreshTasks();
+            refreshNodes();
+            refreshBalance();
+        }, 10000);
+    </script>
+</body>
+</html>
