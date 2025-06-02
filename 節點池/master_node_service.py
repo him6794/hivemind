@@ -285,6 +285,53 @@ class TaskManager:
             logging.error(f"get_completed_tasks_without_reward error: {e}", exc_info=True)
             return []
 
+    def get_user_tasks(self, user_id):
+        """獲取用戶的所有任務"""
+        tasks = []
+        try:
+            task_keys = self.redis_client.keys("task:*")
+            for key in task_keys:
+                task_id = key.split(":", 1)[1]
+                task_info = self.get_task_info(task_id, include_zip=False)
+                if task_info and str(task_info.get("user_id", "")) == str(user_id):
+                    tasks.append({
+                        "task_id": task_id,
+                        "status": task_info.get("status", "UNKNOWN"),
+                        "created_at": task_info.get("created_at", ""),
+                        "updated_at": task_info.get("updated_at", "")
+                    })
+            return tasks
+        except Exception as e:
+            logging.error(f"get_user_tasks error: {e}", exc_info=True)
+            return []
+
+    def get_task_status(self, task_id):
+        """獲取任務狀態"""
+        task_info = self.get_task_info(task_id, include_zip=False)
+        if task_info:
+            return {
+                "task_id": task_id,
+                "status": task_info.get("status", "UNKNOWN"),
+                "user_id": task_info.get("user_id", ""),
+                "created_at": task_info.get("created_at", ""),
+                "updated_at": task_info.get("updated_at", "")
+            }
+        return None
+
+    def mark_reward_given(self, task_id):
+        """標記獎勵已發放"""
+        task_key = f"task:{task_id}"
+        try:
+            self.redis_client.hset(task_key, "reward_distributed", "1")
+            return True
+        except Exception as e:
+            logging.error(f"標記獎勵失敗: {e}")
+            return False
+
+    def force_stop_task(self, task_id):
+        """強制停止任務"""
+        return self.update_task_status(task_id, "STOPPED")
+
 # --- MasterNodeServiceServicer 類 ---
 class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
     def __init__(self):
@@ -419,7 +466,7 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                 pending_tasks = self.task_manager.get_pending_tasks()
                 if not pending_tasks:
                     logging.debug("當前無待處理任務")
-                    self._stop_event.wait(self.dispatch_interval) # 等待指定時間
+                    self._stop_event.wait(self.dispatch_interval)
                     continue
 
                 # 2. 獲取所有可用節點列表 (一次性獲取)
@@ -489,10 +536,10 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                     gpu_memory_gb_val = float(reqs["gpu_memory_gb"])
                     
                     cpt_cost = (
-                        memory_gb_val +  # 内存需求
-                        cpu_score_val / 100 +  # CPU 分数
-                        gpu_score_val / 100 +  # GPU 分数
-                        gpu_memory_gb_val  # GPU 显存
+                        memory_gb_val +
+                        cpu_score_val / 100 +
+                        gpu_score_val / 100 +
+                        gpu_memory_gb_val
                     )
                     
                     # 最低消費為1個代幣

@@ -170,7 +170,7 @@ class NodeManager:
                         location=node_info.get("location", "N/A"),
                         port=int(node_info.get("port", 0)),
                         gpu_name=node_info.get("gpu_name", "N/A")
-                        # 移除 ip=node_info.get("ip", "") 欄位，proto 沒有定義
+                        # ip 欄位移除，proto 沒有 ip 欄位
                     ))
                 except (ValueError, TypeError) as conv_err:
                     logging.warning(f"轉換節點 {node_id_str} 數值時出錯: {conv_err}, data: {node_info}")

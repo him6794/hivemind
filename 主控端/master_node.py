@@ -1072,6 +1072,36 @@ class TaskStatusUpdater:
             except Exception as e:
                 logging.error(f"任務狀態更新循環發生錯誤: {e}", exc_info=True)
             
+            # 確保時間格式正確
+            created_at = ""
+            updated_at = ""
+            
+            try:
+                # 如果時間戳是數字，轉化為字符串格式
+                if task_info.get("created_at"):
+                    created_timestamp = float(task_info.get("created_at", 0))
+                    created_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(created_timestamp))
+                
+                if task_info.get("updated_at"):
+                    updated_timestamp = float(task_info.get("updated_at", 0))
+                    updated_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(updated_timestamp))
+            except (ValueError, TypeError) as e:
+                logging.warning(f"任務 {task_id} 時間戳格式錯誤: {e}")
+                # 使用當前時間作為備用
+                current_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                created_at = current_time
+                updated_at = current_time
+            
+            # 創建TaskStatus對象
+            task_status = nodepool_pb2.TaskStatus(
+                task_id=task_id,
+                status=task_info.get("status", "UNKNOWN"),
+                created_at=created_at,
+                updated_at=updated_at,
+                assigned_node=task_info.get("assigned_node", "")
+            )
+            all_tasks.append(task_status)
+            
             # 等待下一次更新
             time.sleep(self.update_interval)
 
