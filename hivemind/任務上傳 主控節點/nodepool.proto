@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package nodepool;
+
+message Node {
+  string ip = 1;
+  int32 cpu_score = 2;
+  int32 gpu_score = 3;
+  int32 memory = 4;
+  int32 network_delay = 5;
+  string geographic_location = 6;
+}
+
+message NodeRequest {
+  int32 cpu_score = 1;
+  int32 gpu_score = 2;
+  int32 memory = 3;
+  string geographic_location = 4;
+}
+
+message RegisterResponse {
+  string message = 1;
+}
+
+message UpdateRequest {
+  string ip = 1;
+  string status = 2;  // 更改為 string 類型
+}
+
+message UpdateResponse {
+  string message = 1;
+}
+
+service NodePool {
+  rpc Register(Node) returns (RegisterResponse);
+  rpc Get(NodeRequest) returns (Node);  // 修正為 Node 類別
+  rpc UpdateStatus(UpdateRequest) returns (UpdateResponse);
+}
