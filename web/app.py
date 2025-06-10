@@ -6,9 +6,7 @@ import os
 
 app = Flask(__name__)
 
-# gRPC 客戶端初始化
 def get_grpc_client():
-    # 添加超時設置和連接選項
     options = [
         ('grpc.keepalive_time_ms', 10000),
         ('grpc.keepalive_timeout_ms', 5000),
@@ -25,29 +23,24 @@ def login():
     data = request.json
     username = data.get('username')
     password = data.get('password')
-    
-    print(f"登入嘗試: 用戶名={username}")  # 調試信息
-    
+    print(f"登入嘗試: 用戶名={username}")
     try:
         grpc_client = get_grpc_client()
-        print("gRPC 客戶端已創建")  # 調試信息
-        
-        # 設置超時時間（5秒）
+        print("gRPC 客戶端已創建")
         response = grpc_client.Login(
             nodepool_pb2.LoginRequest(username=username, password=password),
             timeout=5.0
         )
-        print(f"gRPC 響應: success={response.success}, message={response.message}")  # 調試信息
-        
+        print(f"gRPC 響應: success={response.success}, message={response.message}")
         if response.success:
             return jsonify({"message": "Login successful", "token": response.token})
         else:
             return jsonify({"message": "帳號或密碼錯誤"}), 401
     except grpc.RpcError as e:
-        print(f"gRPC 錯誤: {e.code()}, {e.details()}")  # 調試信息
+        print(f"gRPC 錯誤: {e.code()}, {e.details()}")
         return jsonify({"message": f"gRPC 錯誤: {e.details()}"}), 500
     except Exception as e:
-        print(f"一般錯誤: {str(e)}")  # 調試信息
+        print(f"一般錯誤: {str(e)}")
         return jsonify({"message": f"登入失敗: {str(e)}"}), 500
 
 @app.route('/register', methods=['POST'])
@@ -79,12 +72,10 @@ def transfer():
     ))
     return jsonify({"message": response.message})
 
-# 靜態檔案路由
 @app.route('/static/<path:filename>')
 def static_files(filename):
     return send_from_directory(os.path.join(os.path.dirname(__file__), 'static'), filename)
 
-# HTML 頁面路由
 @app.route('/')
 def index():
     return send_from_directory(os.path.dirname(__file__), 'index.html')
@@ -106,4 +97,4 @@ def download_html():
     return send_from_directory(os.path.dirname(__file__), 'download.html')
 
 if __name__ == '__main__':
-    app.run(debug=False, host='0.0.0.0', port=5000) 
+    app.run(debug=False, host='0.0.0.0', port=5000)

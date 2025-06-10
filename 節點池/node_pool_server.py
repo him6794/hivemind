@@ -1,4 +1,3 @@
-# node_pool/node_pool_server.py
 import grpc
 from concurrent import futures
 import logging
@@ -20,7 +19,6 @@ def serve():
     
     master_node_service.auth_manager = user_service
     
-    # 添加服務到服務器
     nodepool_pb2_grpc.add_UserServiceServicer_to_server(user_service, server)
     nodepool_pb2_grpc.add_NodeManagerServiceServicer_to_server(node_manager_service, server)
     nodepool_pb2_grpc.add_MasterNodeServiceServicer_to_server(master_node_service, server)
