@@ -1,280 +1,60 @@
 <!DOCTYPE html>
-<html>
+<html lang="zh-TW">
 <head>
-    <title>Worker Monitor</title>
-    <style>
-        :root {
-            --primary-color: #4f46e5;
-            --secondary-color: #6366f1;
-            --background-color: #f3f4f6;
-            --card-background: #ffffff;
-            --text-color: #1f2937;
-            --border-color: #e5e7eb;
-            --success-color: #10b981;
-            --warning-color: #f59e0b;
-            --error-color: #ef4444;
-            --pending-color: #6366f1;
-        }
-
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-            background-color: var(--background-color);
-            color: var(--text-color);
-            line-height: 1.5;
-        }
-
-        .container {
-            max-width: 1280px;
-            margin: 0 auto;
-            padding: 2rem;
-        }
-
-        .header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 2rem;
-            padding: 1rem;
-            background: var(--card-background);
-            border-radius: 12px;
-            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-        }
-
-        .header h1 {
-            font-size: 1.5rem;
-            font-weight: 600;
-            color: var(--text-color);
-        }
-
-        .header-right {
-            display: flex;
-            align-items: center;
-            gap: 1rem;
-        }
-
-        .user-info {
-            color: var(--text-color);
-            font-size: 0.875rem;
-        }
-
-        .logout-btn {
-            background: linear-gradient(to right, var(--primary-color), var(--secondary-color));
-            color: white;
-            padding: 0.5rem 1rem;
-            border-radius: 6px;
-            text-decoration: none;
-            font-size: 0.875rem;
-            transition: opacity 0.2s;
-        }
-
-        .logout-btn:hover {
-            opacity: 0.9;
-        }
-
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-            gap: 1.5rem;
-            margin-bottom: 2rem;
-        }
-
-        .stat-card {
-            background: var(--card-background);
-            padding: 1.5rem;
-            border-radius: 12px;
-            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-            transition: transform 0.2s;
-        }
-
-        .stat-card:hover {
-            transform: translateY(-2px);
-        }
-
-        .stat-card.balance {
-            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
-            color: white;
-        }
-
-        .stat-card h3 {
-            font-size: 0.875rem;
-            font-weight: 500;
-            margin-bottom: 0.5rem;
-        }
-
-        .stat-card .value {
-            font-size: 1.5rem;
-            font-weight: 600;
-        }
-
-        .content-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
-            gap: 1.5rem;
-        }
-
-        .card {
-            background: var(--card-background);
-            border-radius: 12px;
-            padding: 1.5rem;
-            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-        }
-
-        .table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-
-        .table th,
-        .table td {
-            padding: 0.75rem;
-            text-align: left;
-            border-bottom: 1px solid var(--border-color);
-        }
-
-        .table th {
-            font-weight: 500;
-            color: var(--text-color);
-        }
-
-        .status {
-            display: inline-flex;
-            align-items: center;
-            padding: 0.25rem 0.75rem;
-            border-radius: 9999px;
-            font-size: 0.875rem;
-            font-weight: 500;
-        }
-
-        .status.running { background-color: var(--success-color); color: white; }
-        .status.pending { background-color: var(--pending-color); color: white; }
-        .status.completed { background-color: var(--success-color); color: white; }
-        .status.failed { background-color: var(--error-color); color: white; }
-
-        .refresh-btn {
-            background: linear-gradient(to right, var(--primary-color), var(--secondary-color));
-            color: white;
-            border: none;
-            padding: 0.5rem 1rem;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 0.875rem;
-            transition: opacity 0.2s;
-        }
-
-        .refresh-btn:hover {
-            opacity: 0.9;
-        }
-
-        .card-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 1rem;
-        }
-
-        .card-header h2 {
-            font-size: 1.25rem;
-            font-weight: 600;
-            color: var(--text-color);
-        }
-
-        .chart-container {
-            background: var(--card-background);
-            border-radius: 12px;
-            padding: 1.5rem;
-            margin-bottom: 1.5rem;
-        }
-
-        .logs {
-            background: var(--card-background);
-            border-radius: 8px;
-            padding: 1rem;
-            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-            max-height: 400px;
-            overflow-y: auto;
-            white-space: pre-wrap;
-            font-size: 0.875rem;
-            line-height: 1.5;
-            border: 1px solid var(--border-color);
-        }
-
-        @media (max-width: 768px) {
-            .container {
-                padding: 1rem;
-            }
-            
-            .content-grid {
-                grid-template-columns: 1fr;
-            }
-            
-            .stats-grid {
-                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            }
-        }
-    </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>工作節點監控 - {{ node_id }}</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>Worker Monitor</h1>
+            <h1>工作節點監控</h1>
             <div class="header-right">
-                <span class="user-info">Welcome, {{ username }}</span>
-                <a href="/logout" class="logout-btn">Logout</a>
-            </div>
-        </div>
-
-        <div class="stats-grid">
-            <div class="stat-card balance">
-                <h3>CPT Balance</h3>
-                <div class="value" id="cpt-balance">0</div>
-            </div>
-            <div class="stat-card">
-                <h3>CPU Usage</h3>
-                <div class="value" id="cpu-usage">0%</div>
-            </div>
-            <div class="stat-card">
-                <h3>Memory Usage</h3>
-                <div class="value" id="memory-usage">0%</div>
+                <span class="user-info">用戶: {{ username }}</span>
+                <a href="/logout" class="logout-btn">登出</a>
             </div>
         </div>
 
         <div class="content-grid">
             <div class="card">
-                <div class="card-header">
-                    <h2>Current Task</h2>
-                    <button class="refresh-btn" onclick="refreshStatus()">
-                        <i class="fas fa-sync-alt"></i> Refresh
-                    </button>
-                </div>
+                <h2>節點狀態</h2>
                 <table class="table">
                     <tr>
-                        <th>Task ID</th>
+                        <th>節點ID</th>
+                        <td id="node-id">{{ node_id }}</td>
+                    </tr>
+                    <tr>
+                        <th>狀態</th>
+                        <td><span id="task-status" class="status">{{ initial_status }}</span></td>
+                    </tr>
+                    <tr>
+                        <th>當前任務</th>
                         <td id="task-id">None</td>
                     </tr>
                     <tr>
-                        <th>Status</th>
-                        <td><span id="task-status" class="status">Idle</span></td>
+                        <th>CPT 餘額</th>
+                        <td id="cpt-balance">0</td>
                     </tr>
                     <tr>
-                        <th>Container ID</th>
-                        <td id="container-id">N/A</td>
-                    </tr>
-                    <tr>
-                        <th>Local IP</th>
+                        <th>本機IP</th>
                         <td id="ip-address">N/A</td>
+                    </tr>
+                    <tr>
+                        <th>CPU 使用率</th>
+                        <td id="cpu-usage">0%</td>
+                    </tr>
+                    <tr>
+                        <th>記憶體使用率</th>
+                        <td id="memory-usage">0%</td>
                     </tr>
                 </table>
             </div>
 
             <div class="card">
                 <div class="card-header">
-                    <h2>Resource Usage</h2>
+                    <h2>資源使用趨勢</h2>
                 </div>
                 <div class="chart-container">
                     <canvas id="cpuChart"></canvas>
@@ -286,9 +66,9 @@
 
             <div class="card">
                 <div class="card-header">
-                    <h2>System Logs</h2>
+                    <h2>系統日誌</h2>
                     <button class="refresh-btn" onclick="refreshLogs()">
-                        <i class="fas fa-sync-alt"></i> Refresh
+                        <i class="fas fa-sync-alt"></i> 刷新
                     </button>
                 </div>
                 <div id="logs" class="logs"></div>

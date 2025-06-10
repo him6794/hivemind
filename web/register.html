@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>註冊 - HiveMind 平台</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+</head>
+<body>
+    <!-- 導航欄 -->
+    <nav class="navbar">
+        <div class="navbar-container">
+            <a href="/" class="navbar-brand">🧠 HiveMind</a>
+            <ul class="navbar-nav">
+                <li><a href="/" class="nav-link">首頁</a></li>
+                <li><a href="/download.html" class="nav-link">下載 App</a></li>
+                <li><a href="/login.html" class="nav-link">登入</a></li>
+                <li><a href="/register.html" class="nav-link active">註冊</a></li>
+            </ul>
+            <button class="navbar-toggle" onclick="toggleMobileMenu()">
+                <span></span>
+                <span></span>
+                <span></span>
+            </button>
+        </div>
+    </nav>
+
+    <div class="container register-container">
+        <h2>加入 HiveMind 社群</h2>
+        <p style="margin-bottom: 2rem; color: var(--text-secondary);">
+            創建您的帳戶，開始體驗分散式運算的無限可能
+        </p>
+        
+        <form id="registerForm">
+            <div class="form-group">
+                <label for="username">用戶名</label>
+                <input type="text" id="username" name="username" placeholder="請選擇一個唯一的用戶名" required>
+            </div>
+            
+            <div class="form-group">
+                <label for="password">密碼</label>
+                <input type="password" id="password" name="password" placeholder="請設定一個安全的密碼" required>
+            </div>
+            
+            <div class="form-group">
+                <label for="confirmPassword">確認密碼</label>
+                <input type="password" id="confirmPassword" name="confirmPassword" placeholder="請再次輸入您的密碼" required>
+            </div>
+            
+            <button type="submit" id="registerBtn">
+                創建帳戶
+            </button>
+        </form>
+        
+        <div id="registerMsg" class="message"></div>
+        
+        <div style="margin-top: 2rem; padding-top: 1.5rem; border-top: 1px solid var(--border-color);">
+            <p style="color: var(--text-muted); font-size: 0.9rem;">
+                已經有帳戶了？ <a href="/login.html">立即登入</a>
+            </p>
+            <p style="color: var(--text-muted); font-size: 0.9rem; margin-top: 1rem;">
+                <a href="/">← 回到首頁</a>
+            </p>
+        </div>    </div>
+      <script src="/static/js/register.js"></script>
+    <script src="/static/js/ui-enhancements.js"></script>
+    <script>
+        function toggleMobileMenu() {
+            const nav = document.querySelector('.navbar-nav');
+            nav.classList.toggle('show');
+        }
+
+        // Close mobile menu when clicking outside
+        document.addEventListener('click', function(event) {
+            const nav = document.querySelector('.navbar-nav');
+            const toggle = document.querySelector('.navbar-toggle');
+            
+            if (!nav.contains(event.target) && !toggle.contains(event.target)) {
+                nav.classList.remove('show');
+            }
+        });
+    </script>
+</body>
+</html>

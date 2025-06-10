@@ -21,7 +21,6 @@ REWARD_TRANSFER_RETRIES = int(os.environ.get('REWARD_TRANSFER_RETRIES', 3))
 REWARD_RETRY_DELAY = float(os.environ.get('REWARD_RETRY_DELAY', 5.0))
 UI_HOST = '0.0.0.0'
 UI_PORT = 5001
-
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(threadName)s] - %(message)s')
 
 def login_required(f):
@@ -153,6 +152,22 @@ class MasterNodeUI:
                 cpt_cost = 1.0
             cpt_cost = int(cpt_cost)
             logging.info(f"任務 {task_id} 計算所需代幣: {cpt_cost} CPT")
+            
+            # 檢查用戶餘額是否足夠
+            try:
+                balance_request = nodepool_pb2.GetBalanceRequest(token=self.token)
+                balance_response = self.user_stub.GetBalance(balance_request, timeout=10)
+                if balance_response.success:
+                    user_balance = balance_response.balance
+                    if user_balance < cpt_cost:
+                        logging.error(f"用戶餘額不足: 需要 {cpt_cost} CPT，但只有 {user_balance} CPT")
+                        return task_id, False
+                else:
+                    logging.error(f"無法獲取用戶餘額: {balance_response.message}")
+                    return task_id, False
+            except Exception as e:
+                logging.error(f"檢查用戶餘額時發生錯誤: {e}")
+                return task_id, False
 
             request = nodepool_pb2.UploadTaskRequest(
                 task_id=task_id,
@@ -587,14 +602,25 @@ class MasterNodeUI:
                     for task_id, status_info in self.task_status_cache.items():
                         # 確保這是一個任務記錄而不是節點狀態
                         if isinstance(status_info, dict) and "task_id" in status_info:
+                            last_polled = status_info.get("last_polled")
+                            if last_polled:
+                                try:
+                                    if isinstance(last_polled, (int, float)):
+                                        last_update_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(last_polled))
+                                    else:
+                                        last_update_str = str(last_polled)
+                                except (ValueError, OSError):
+                                    last_update_str = "-"
+                            else:
+                                last_update_str = "-"
+                            
                             task_list.append({
                                 "task_id": task_id,
                                 "status": status_info.get("status", "UNKNOWN"),
                                 "progress": status_info.get("progress", "0%"),
                                 "message": status_info.get("message", ""),
                                 "output_tail": status_info.get("output_tail", []),
-                                "last_update": time.strftime('%Y-%m-%d %H:%M:%S', 
-                                    time.localtime(int(status_info.get("last_polled")))) if status_info.get("last_polled") else "-"
+                                "last_update": last_update_str
                             })
                         
                 # 如果緩存为空，主動從節點池獲取所有任務
@@ -610,16 +636,28 @@ class MasterNodeUI:
                             
                             # 更新任務緩存
                             for task in response.tasks:
-                                task_status = self.poll_task_status(task.task_id)
-                                
-                                task_list.append({
-                                    "task_id": task.task_id,
-                                    "status": task_status.get("status", "UNKNOWN"),
-                                    "progress": task_status.get("progress", "0%"),
-                                    "message": task_status.get("message", ""),
-                                    "output_tail": task_status.get("output_tail", []),
-                                    "last_update": time.strftime('%Y-%m-%d %H:%M:%S', time.time())
-                                })
+                                try:
+                                    task_status = self.poll_task_status(task.task_id)
+                                    
+                                    task_list.append({
+                                        "task_id": task.task_id,
+                                        "status": task_status.get("status", "UNKNOWN"),
+                                        "progress": task_status.get("progress", "0%"),
+                                        "message": task_status.get("message", ""),
+                                        "output_tail": task_status.get("output_tail", []),
+                                        "last_update": time.strftime('%Y-%m-%d %H:%M:%S')
+                                    })
+                                except Exception as task_err:
+                                    logging.error(f"處理任務 {task.task_id} 時出錯: {task_err}")
+                                    # 添加一個基本的任務條目
+                                    task_list.append({
+                                        "task_id": task.task_id,
+                                        "status": "UNKNOWN",
+                                        "progress": "0%",
+                                        "message": "Failed to get task status",
+                                        "output_tail": [],
+                                        "last_update": time.strftime('%Y-%m-%d %H:%M:%S')
+                                    })
                         else:
                             logging.info("節點池未返回任務或請求失敗")
                             
@@ -632,9 +670,9 @@ class MasterNodeUI:
                             if nodes_resp.success and nodes_resp.nodes:
                                 for node in nodes_resp.nodes:
                                     if node.status == "Running" and node.port > 0:
-                                        # 連接到工作節點查詢運行狀態
-                                        worker_address = f'127.0.0.1:{node.port}'
-                                        worker_channel = grpc.insecure_channel(worker_address)
+                                        # 使用節點的 hostname
+                                        node_address = f'{node.hostname}:{node.port}'
+                                        worker_channel = grpc.insecure_channel(node_address)
                                         try:
                                             grpc.channel_ready_future(worker_channel).result(timeout=2)
                                             worker_stub = nodepool_pb2_grpc.WorkerNodeServiceStub(worker_channel)
@@ -642,32 +680,35 @@ class MasterNodeUI:
                                             status_req = nodepool_pb2.RunningStatusRequest(node_id=node.node_id, task_id="")
                                             status_resp = worker_stub.ReportRunningStatus(status_req, timeout=3)
                                             
-                                            if status_resp.success and status_resp.running_task_id:
-                                                # 添加到任務列表
-                                                running_task = {
-                                                    "task_id": status_resp.running_task_id,
-                                                    "status": "RUNNING",
-                                                    "progress": status_resp.progress or "0%",
-                                                    "message": f"Running on {node.node_id}",
-                                                    "output_tail": [],
-                                                    "last_update": time.strftime('%Y-%m-%d %H:%M:%S', time.time())
-                                                }
-                                                
-                                                # 更新緩存
-                                                with self.task_cache_lock:
-                                                    self.task_status_cache[status_resp.running_task_id] = {
-                                                        "task_id": status_resp.running_task_id,
-                                                        "status": "RUNNING",
-                                                        "message": f"Running on {node.node_id}",
-                                                        "last_polled": time.time()
-                                                    }
-                                                
-                                                # 避免重複添加
-                                                if not any(t["task_id"] == status_resp.running_task_id for t in task_list):
-                                                    task_list.append(running_task)
-                                                    logging.info(f"從工作節點 {node.node_id} 發現運行中任務: {status_resp.running_task_id}")
-                                        except Exception as worker_err:
-                                            logging.warning(f"訪問工作節點 {node.node_id} 時出錯: {worker_err}")
+                                            if status_resp.success and hasattr(status_resp, 'message') and "Running Task:" in status_resp.message:
+                                                # 從消息中提取任務ID
+                                                try:
+                                                    running_task_id = status_resp.message.split("Running Task:")[-1].strip()
+                                                    if running_task_id:
+                                                        # 添加到任務列表
+                                                        running_task = {
+                                                            "task_id": running_task_id,
+                                                            "progress": "運行中",
+                                                            "message": f"Running on {node.node_id}",
+                                                            "output_tail": [],
+                                                            "last_update": time.strftime('%Y-%m-%d %H:%M:%S')
+                                                        }
+                                                        
+                                                        # 更新緩存
+                                                        with self.task_cache_lock:
+                                                            self.task_status_cache[running_task_id] = {
+                                                                "task_id": running_task_id,
+                                                                "status": "RUNNING",
+                                                                "message": f"Running on {node.node_id}",
+                                                                "last_polled": time.time()
+                                                            }
+                                                        
+                                                        # 避免重複添加
+                                                        if not any(t["task_id"] == running_task_id for t in task_list):
+                                                            task_list.append(running_task)
+                                                            logging.info(f"從工作節點 {node.node_id} 發現運行中任務: {running_task_id}")
+                                                except Exception as parse_err:
+                                                    logging.warning(f"解析運行中任務ID失敗: {parse_err}")
                                         finally:
                                             worker_channel.close()
                         except Exception as node_err:
@@ -694,7 +735,13 @@ class MasterNodeUI:
                     return redirect(request.url)
 
                 if file and file.filename.endswith('.zip'):
-                    task_id = request.form.get('task_id', f"task_{int(time.time())}")
+                    # 自動生成任務ID
+                    import uuid
+                    import datetime
+                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    task_uuid = str(uuid.uuid4())[:8]
+                    task_id = f"task_{timestamp}_{task_uuid}"
+                    
                     requirements = {
                         "memory_gb": request.form.get('memory_gb', 0),
                         "cpu_score": request.form.get('cpu_score', 0),
@@ -706,14 +753,14 @@ class MasterNodeUI:
                     task_zip_bytes = file.read()
                     _, success = self.upload_task(task_id, task_zip_bytes, requirements)
                     if success:
-                        flash(f'Task "{task_id}" uploaded successfully!', 'success')
+                        flash(f'任務 "{task_id}" 上傳成功！', 'success')
                         with self.task_cache_lock:
-                            self.task_status_cache[task_id] = {"status": "PENDING", "message": "Task submitted via UI"}
+                            self.task_status_cache[task_id] = {"task_id": task_id, "status": "PENDING", "message": "Task submitted via UI"}
                     else:
-                        flash(f'Task "{task_id}" upload failed.', 'error')
+                        flash(f'任務 "{task_id}" 上傳失敗。', 'error')
                     return redirect(url_for('index'))
                 else:
-                    flash('Invalid file type, please upload a .zip file', 'error')
+                    flash('檔案格式無效，請上傳 .zip 檔案', 'error')
                     return redirect(request.url)
             return render_template('master_upload.html')
 
@@ -729,442 +776,364 @@ class MasterNodeUI:
             result = self.request_task_status_and_retrieve(task_id)
             return jsonify(result)
 
-    def start_flask_app(self):
-        def run_flask():
-            log = logging.getLogger('werkzeug')
-            log.setLevel(logging.ERROR)
+        @self.app.route('/api/stop_task/<task_id>', methods=['POST'])
+        @login_required
+        def api_stop_task(task_id):
+            """停止指定的任務"""
             try:
-                logging.info(f"Starting Master UI Flask server on {UI_HOST}:{UI_PORT}...")
-                self.app.run(host=UI_HOST, port=UI_PORT, debug=False, use_reloader=False)
+                # 從請求中獲取停止原因（可選）
+                data = request.get_json() or {}
+                reason = data.get('reason', '用戶手動停止')
+                
+                # 調用停止任務方法
+                success = self.stop_task(task_id, reason)
+                
+                if success:
+                    return jsonify({
+                        "success": True,
+                        "message": f"任務 {task_id} 已成功停止",
+                        "task_id": task_id,
+                        "reason": reason
+                    })
+                else:
+                    return jsonify({
+                        "success": False,
+                        "error": f"停止任務 {task_id} 失敗",
+                        "task_id": task_id
+                    }), 400
+                    
             except Exception as e:
-                logging.error(f"Flask server failed: {e}", exc_info=True)
-                self._stop_event.set()
+                logging.error(f"API 停止任務 {task_id} 失敗: {e}", exc_info=True)
+                return jsonify({
+                    "success": False,
+                    "error": f"內部錯誤: {str(e)}",
+                    "task_id": task_id
+                }), 500
 
-        flask_thread = threading.Thread(target=run_flask, name="FlaskThread", daemon=True)
-        flask_thread.start()
-        logging.info("Flask server thread started.")
-
-    def poll_all_tasks(self):
-        logging.info("Task status polling thread started.")
-        while not self._stop_event.is_set():
+        @self.app.route('/api/task_logs/<task_id>')
+        @login_required
+        def api_task_logs(task_id):
+            """從節點池獲取特定任務的詳細日誌"""
             if not self.master_stub or not self.token:
-                logging.warning("Task polling skipped: Not connected or not logged in.")
-                self._stop_event.wait(self.poll_interval)
-                continue
-
+                return jsonify({"error": "Not connected to gRPC server"}), 500
+            
             try:
-                self.clean_expired_task_cache()
+                # 使用新的 GetTaskLogs RPC，包含 token
+                request = nodepool_pb2.GetTaskLogsRequest(
+                    task_id=task_id,
+                    token=self.token
+                )
                 
-                request = nodepool_pb2.GetNodeListRequest()
-                meta = self._get_grpc_metadata()
-                if not meta:
-                    logging.warning("Missing token for task status polling")
-                    self._stop_event.wait(self.poll_interval)
-                    continue
+                response = self.master_stub.GetTaskLogs(request, timeout=10)
+                
+                if response.success:
+                    # 解析日誌
+                    logs_text = response.logs
+                    formatted_logs = []
+                    
+                    if logs_text:
+                        for line in logs_text.split('\n'):
+                            if line.strip():
+                                # 嘗試解析時間戳和級別
+                                timestamp, content, level = self._parse_log_line(line)
+                                formatted_logs.append({
+                                    "timestamp": timestamp,
+                                    "content": content,
+                                    "level": level
+                                })
+                    
+                    # 同時獲取任務狀態
+                    status_request = nodepool_pb2.PollTaskStatusRequest(task_id=task_id)
+                    status_response = self.master_stub.PollTaskStatus(
+                        status_request, 
+                        metadata=self._get_grpc_metadata(), 
+                        timeout=10
+                    )
+                    
+                    return jsonify({
+                        "task_id": task_id,
+                        "status": status_response.status if status_response else "UNKNOWN",
+                        "message": response.message,
+                        "logs": formatted_logs,
+                        "total_logs": len(formatted_logs)
+                    })
+                else:
+                    return jsonify({
+                        "error": response.message,
+                        "task_id": task_id,
+                        "logs": [],
+                        "total_logs": 0
+                    }), 404
+                    
+            except grpc.RpcError as e:
+                logging.error(f"API GetTaskLogs gRPC error: {e.details()}")
+                return jsonify({"error": f"gRPC Error: {e.details()}"}), 500
+            except Exception as e:
+                logging.error(f"API GetTaskLogs unexpected error: {e}", exc_info=True)
+                return jsonify({"error": f"Unexpected Error: {e}"}), 500
 
-                try:
-                    # 查詢所有節點
-                    node_response = self.node_stub.GetNodeList(request, metadata=meta, timeout=10)
-                    if node_response.success:
-                        for node in node_response.nodes:
-                            if self._stop_event.is_set():
-                                break
-                            
-                            # 更新節點狀態緩存
-                            with self.task_cache_lock:
-                                self.task_status_cache[node.node_id] = {
-                                    "type": "node",
-                                    "status": node.status,
-                                    "last_polled": time.time()
-                                }
-                                
-                            # 只查詢狀態為"Running"的節點上的任務
-                            if node.status == "Running" and node.port > 0:
-                                worker_channel = None
-                                try:
-                                    worker_address = f'127.0.0.1:{node.port}'
-                                    worker_channel = grpc.insecure_channel(worker_address)
-                                    grpc.channel_ready_future(worker_channel).result(timeout=2)
-                                    worker_stub = nodepool_pb2_grpc.WorkerNodeServiceStub(worker_channel)
-                                    
-                                    status_req = nodepool_pb2.RunningStatusRequest(node_id=node.node_id, task_id="")
-                                    status_response = worker_stub.ReportRunningStatus(status_req, timeout=3)
-                                    
-                                    if status_response.success:
-                                        # 更新節點狀態
-                                        with self.task_cache_lock:
-                                            self.task_status_cache[node.node_id]["message"] = status_response.message
-                                        
-                                        # 如果節點正在運行任務，獲取任務信息並更新緩存
-                                        if status_response.running_task_id:
-                                            running_task_id = status_response.running_task_id
-                                            progress = status_response.progress or "0%"
-                                            
-                                            # 更新任務狀態
-                                            with self.task_cache_lock:
-                                                self.task_status_cache[running_task_id] = {
-                                                    "task_id": running_task_id,
-                                                    "type": "task",
-                                                    "status": "RUNNING",
-                                                    "progress": progress,
-                                                    "message": f"Running on {node.node_id}",
-                                                    "assigned_node": node.node_id,
-                                                    "last_polled": time.time()
-                                                }
-                                                
-                                            logging.debug(f"節點 {node.node_id} 正在運行任務 {running_task_id}，進度: {progress}")
-                                        else:
-                                            logging.debug(f"節點 {node.node_id} 狀態: {node.status}，但當前無任務")
-                                
-                                except grpc.FutureTimeoutError:
-                                    logging.warning(f"連接工作節點 {node.node_id} 超時")
-                                except Exception as e:
-                                    logging.error(f"查詢工作節點 {node.node_id} 運行狀態時出錯: {e}")
-                                finally:
-                                    if worker_channel:
-                                        worker_channel.close()
+        @self.app.route('/api/task_live_logs/<task_id>')
+        @login_required
+        def api_task_live_logs(task_id):
+            """獲取任務的實時日誌更新"""
+            try:
+                # 從緩存中獲取任務信息
+                with self.task_cache_lock:
+                    task_info = self.task_status_cache.get(task_id)
+                
+                if not task_info:
+                    return jsonify({"error": f"Task {task_id} not found in cache"}), 404
+                
+                # 如果任務正在運行，嘗試從工作節點獲取實時日誌
+                if task_info.get("status") == "RUNNING" and task_info.get("assigned_node"):
+                    node_id = task_info.get("assigned_node")
                     
-                    # 直接查詢節點池中所有任務的狀態
+                    # 查找節點的端口
                     try:
-                        task_list_req = nodepool_pb2.GetAllTasksRequest(token=self.token)
-                        task_list_resp = self.master_stub.GetAllTasks(task_list_req, metadata=meta, timeout=10)
+                        nodes_req = nodepool_pb2.GetNodeListRequest()
+                        nodes_resp = self.node_stub.GetNodeList(nodes_req, timeout=5)
                         
-                        if task_list_resp.success and task_list_resp.tasks:
-                            for task in task_list_resp.tasks:
-                                # 為每個任務查詢詳細狀態
-                                task_status = self.poll_task_status(task.task_id)
-                                logging.debug(f"節點池中任務 {task.task_id} 狀態: {task_status.get('status', 'UNKNOWN')}")
-                    except Exception as task_err:
-                        logging.error(f"獲取所有任務列表時出錯: {task_err}")
+                        target_node = None
+                        for node in nodes_resp.nodes:
+                            if node.node_id == node_id:
+                                target_node = node
+                                break
+                        
+                        if target_node and target_node.port > 0:
+                            # 使用節點的實際hostname而不是127.0.0.1
+                            worker_address = f'{target_node.hostname}:{target_node.port}'
+                            worker_channel = grpc.insecure_channel(worker_address)
+                            try:
+                                grpc.channel_ready_future(worker_channel).result(timeout=2)
+                                worker_stub = nodepool_pb2_grpc.WorkerNodeServiceStub(worker_channel)
+                                
+                                status_req = nodepool_pb2.RunningStatusRequest(node_id=node_id, task_id=task_id)
+                                status_resp = worker_stub.ReportRunningStatus(status_req, timeout=3)
+                                
+                                if status_resp.success:
+                                    return jsonify({
+                                        "task_id": task_id,
+                                        "status": "RUNNING",
+                                        "live_message": status_resp.message,
+                                        "timestamp": time.strftime('%Y-%m-%d %H:%M:%S')
+                                    })
+                            except Exception as e:
+                                logging.warning(f"無法連接到工作節點 {node_id}: {e}")
+                            finally:
+                                worker_channel.close()
                     
-                except grpc.RpcError as e:
-                    logging.error(f"獲取節點列表時出錯: {e.details()}")
-                except Exception as e:
-                    logging.error(f"節點輪詢過程中發生未知錯誤: {e}")
+                    except Exception as e:
+                        logging.error(f"查找節點信息失敗: {e}")
+                
+                # 返回緩存中的任務信息
+                return jsonify({
+                    "task_id": task_id,
+                    "status": task_info.get("status", "UNKNOWN"),
+                    "message": task_info.get("message", ""),
+                    "output_tail": task_info.get("output_tail", []),
+                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S')
+                })
                 
             except Exception as e:
-                logging.error(f"任務輪詢循環中發生錯誤: {e}")
-            
-            self._stop_event.wait(self.poll_interval)
+                logging.error(f"獲取實時日誌失敗: {e}")
+                return jsonify({"error": f"Error: {str(e)}"}), 500
 
-        logging.info("Task status polling thread stopped.")
-
-    def start_task_polling(self):
-        if not self.task_poll_thread or not self.task_poll_thread.is_alive():
-            self.task_poll_thread = threading.Thread(
-                target=self.poll_all_tasks,
-                name="TaskPollThread",
-                daemon=True
-            )
-            self.task_poll_thread.start()
-            logging.info("Task status polling thread started.")
-
-    def stop_task_polling(self):
-        if self.task_poll_thread and self.task_poll_thread.is_alive():
-            logging.info("Requesting task polling thread stop...")
-            self._stop_event.set()
-            self.task_poll_thread.join(timeout=5)
-            self.task_poll_thread = None
-
-    def start(self):
-        logging.info("Starting MasterNodeUI...")
-        if not self._connect_grpc():
-            logging.error("Failed to connect to gRPC server. Exiting.")
-            return
-        if not self.login():
-            logging.error("MasterNodeUI login failed. UI and reward distribution might not work correctly.")
-        self.start_flask_app()
-        self.reward_thread = threading.Thread(target=self.distribute_rewards, name="RewardThread", daemon=True)
-        self.reward_thread.start()
-        self.start_task_polling()
+    def _detect_log_level(self, log_entry):
+        """檢測日誌條目的級別"""
+        if not isinstance(log_entry, str):
+            return "INFO"
         
-        self.auto_retrieve_thread = threading.Thread(
-            target=self.auto_retrieve_completed_tasks, 
-            name="AutoRetrieveThread", 
-            daemon=True
-        )
-        self.auto_retrieve_thread.start()
-        
-        logging.info("MasterNodeUI started. Running Flask UI and background tasks. Press Ctrl+C to stop.")
-        try:
-            while not self._stop_event.is_set():
-                time.sleep(5)
-        except KeyboardInterrupt:
-            logging.info("Ctrl+C detected. Stopping MasterNodeUI...")
-        finally:
-            self.stop()
+        log_upper = log_entry.upper()
+        if "ERROR" in log_upper or "FAILED" in log_upper:
+            return "ERROR"
+        elif "WARNING" in log_upper or "WARN" in log_upper:
+            return "WARNING"
+        elif "DEBUG" in log_upper:
+            return "DEBUG"
+        else:
+            return "INFO"
 
-    def stop(self):
-        logging.info("Stopping MasterNodeUI services...")
+    def _parse_log_line(self, line):
+        """解析日誌行，提取時間戳、內容和級別"""
+        import re
+        
+        # 嘗試匹配格式: [2024-01-01 12:00:00] [節點ID] 內容
+        # 或者: [2024-01-01 12:00:00] [級別] 內容
+        timestamp_pattern = r'\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]'
+        level_pattern = r'\[(ERROR|WARNING|INFO|DEBUG)\]'
+        
+        timestamp_match = re.search(timestamp_pattern, line)
+        level_match = re.search(level_pattern, line)
+        
+        if timestamp_match:
+            timestamp = timestamp_match.group(1)
+            # 移除時間戳部分
+            content = re.sub(timestamp_pattern, '', line, count=1).strip()
+        else:
+            timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+            content = line
+        
+        if level_match:
+            level = level_match.group(1).lower()
+            # 移除級別部分
+            content = re.sub(level_pattern, '', content, count=1).strip()
+        else:
+            level = self._detect_log_level(content)
+        
+        # 移除節點ID部分（如果存在）
+        node_pattern = r'\[[a-zA-Z0-9_-]+\]'
+        content = re.sub(node_pattern, '', content, count=1).strip()
+        
+        return timestamp, content, level
+
+    def start_reward_distribution(self):
+        if not self.reward_thread or not self.reward_thread.is_alive():
+            self._stop_event.clear()
+            self.reward_thread = threading.Thread(target=self.distribute_rewards, daemon=True)
+            self.reward_thread.start()
+            logging.info("Reward distribution thread started.")
+
+    def start_auto_retrieval(self):
+        if not self.auto_retrieve_thread or not self.auto_retrieve_thread.is_alive():
+            self.auto_retrieve_thread = threading.Thread(target=self.auto_retrieve_completed_tasks, daemon=True)
+            self.auto_retrieve_thread.start()
+            logging.info("Auto retrieval thread started.")
+
+    def stop_threads(self):
         self._stop_event.set()
         if self.reward_thread and self.reward_thread.is_alive():
-            logging.info("Waiting for reward thread to stop...")
             self.reward_thread.join(timeout=5)
         if self.task_poll_thread and self.task_poll_thread.is_alive():
-            logging.info("Waiting for task polling thread to stop...")
             self.task_poll_thread.join(timeout=5)
-        if hasattr(self, 'auto_retrieve_thread') and self.auto_retrieve_thread.is_alive():
-            logging.info("Waiting for auto retrieve thread to stop...")
+        if self.auto_retrieve_thread and self.auto_retrieve_thread.is_alive():
             self.auto_retrieve_thread.join(timeout=5)
-        if self.channel:
-            logging.info("Closing gRPC channel.")
-            self.channel.close()
-        logging.info("MasterNodeUI stopped.")
 
-    def run_batch_from_dir(self, task_dir):
-        if not self.token:
-            if not self.login():
-                logging.error("Login failed, cannot run batch processing.")
-                return
-        tasks = []
-        logging.info(f"Scanning task directory: {task_dir}")
-        if not os.path.isdir(task_dir):
-            logging.error(f"Task directory not found: {task_dir}")
+    def run(self):
+        if not self._connect_grpc():
+            logging.error("無法連接到節點池，退出")
             return
-        for item_name in os.listdir(task_dir):
-            if item_name.endswith(".zip") and not item_name.endswith("_result.zip"):
-                task_id = item_name.replace(".zip", "")
-                task_zip_path = os.path.join(task_dir, item_name)
-                requirements_path = os.path.join(task_dir, f"{task_id}_requirements.txt")
-                if not os.path.exists(requirements_path):
-                    logging.warning(f"Skipping task {task_id}: Requirements file '{requirements_path}' not found.")
-                    continue
-                requirements = {}
-                try:
-                    with open(requirements_path, "r") as f:
-                        for line in f:
-                            if '=' in line:
-                                key, value = line.strip().split("=", 1)
-                                key = key.strip()
-                                value = value.strip()
-                                if key in ["memory_gb", "cpu_score", "gpu_score", "gpu_memory_gb"]:
-                                    try:
-                                        requirements[key] = int(value)
-                                    except ValueError:
-                                        logging.warning(f"Invalid integer value for '{key}' in {requirements_path}: '{value}'. Using 0.")
-                                        requirements[key] = 0
-                                elif key in ["location", "gpu_name"]:
-                                    requirements[key] = value
-                                else:
-                                    logging.warning(f"Unknown key '{key}' in {requirements_path}. Ignoring.")
-                    requirements.setdefault("memory_gb", 0)
-                    requirements.setdefault("cpu_score", 0)
-                    requirements.setdefault("gpu_score", 0)
-                    requirements.setdefault("gpu_memory_gb", 0)
-                    requirements.setdefault("location", "Any")
-                    requirements.setdefault("gpu_name", "")
-                    with open(task_zip_path, "rb") as f_zip:
-                        task_zip_bytes = f_zip.read()
-                    tasks.append((task_id, task_zip_bytes, requirements))
-                except FileNotFoundError:
-                    logging.error(f"Error reading file: {task_zip_path} or {requirements_path}")
-                    continue
-                except Exception as e:
-                    logging.error(f"Error parsing requirements for task {task_id}: {e}")
-                    continue
-        if not tasks:
-            logging.info("No valid tasks found in the directory.")
+
+        if not self.login():
+            logging.error("主控端登錄失敗，退出")
             return
-        logging.info(f"Found {len(tasks)} tasks to process.")
-        uploaded_tasks = []
-        with ThreadPoolExecutor(max_workers=10, thread_name_prefix="Upload") as executor:
-            future_to_task = {
-                executor.submit(self.upload_task, task_id, zip_bytes, reqs): task_id
-                for task_id, zip_bytes, reqs in tasks
-            }
-            for future in as_completed(future_to_task):
-                task_id, success = future.result()
-                if success:
-                    uploaded_tasks.append(task_id)
-                else:
-                    logging.error(f"Batch: Task {task_id} upload failed.")
-        if not uploaded_tasks:
-            logging.error("Batch: All task uploads failed.")
-            return
-        logging.info(f"Batch: Successfully initiated upload for {len(uploaded_tasks)} tasks.")
-        logging.info("Batch: Polling task statuses (simple check)...")
-        all_done = False
-        max_poll_time = 300
-        start_poll_time = time.time()
-        while not all_done and (time.time() - start_poll_time) < max_poll_time:
-            all_done = True
-            current_statuses = {}
-            for task_id in uploaded_tasks:
-                status_info = self.poll_task_status(task_id)
-                current_statuses[task_id] = status_info["status"]
-                if status_info["status"] not in ["COMPLETED", "FAILED", "ERROR"]:
-                    all_done = False
-            logging.info(f"Batch Status Check: {current_statuses}")
-            if not all_done:
-                time.sleep(15)
-        if not all_done:
-            logging.warning("Batch: Max polling time reached, some tasks might not be finished.")
-        logging.info("Batch: Attempting to get results for completed/failed tasks...")
-        results_dir = os.path.join(task_dir, "results")
-        os.makedirs(results_dir, exist_ok=True)
-        for task_id in uploaded_tasks:
-            result_path = os.path.join(results_dir, f"{task_id}_result.zip")
-            self.get_task_result(task_id, result_path)
-        logging.info("Batch processing finished.")
 
-class TaskStatusUpdater:
-    def __init__(self, master_node_service):
-        self.master_node_service = master_node_service
-        self.running = False
-        self.update_thread = None
-        self.update_interval = 10  # 10秒更新一次
-
-    def start(self):
-        """啟動狀態更新線程"""
-        if self.running:
-            return
-        self.running = True
-        self.update_thread = threading.Thread(target=self._update_loop)
-        self.update_thread.daemon = True
-        self.update_thread.start()
-
-    def stop(self):
-        """停止狀態更新線程"""
-        self.running = False
-        if self.update_thread:
-            self.update_thread.join()
-
-    def _update_loop(self):
-        """狀態更新循環"""
-        while self.running:
-            try:
-                # 獲取所有任務的狀態
-                if not self.master_node_service.master_stub or not self.master_node_service.token:
-                    logging.warning("Task status update skipped: Not connected or not logged in.")
-                    time.sleep(self.update_interval)
-                    continue
-
-                # 從任務緩存中獲取所有任務ID
-                with self.master_node_service.task_cache_lock:
-                    task_ids = [
-                        task_id for task_id, info in self.master_node_service.task_status_cache.items()
-                        if isinstance(info, dict) and "task_id" in info
-                    ]
-
-                for task_id in task_ids:
-                    try:
-                        # 使用現有的 PollTaskStatus 服務獲取任務狀態
-                        request = nodepool_pb2.PollTaskStatusRequest(task_id=task_id)
-                        response = self.master_node_service.master_stub.PollTaskStatus(
-                            request, 
-                            metadata=self.master_node_service._get_grpc_metadata(),
-                            timeout=10
-                        )
-                        
-                        # 更新任務緩存
-                        with self.master_node_service.task_cache_lock:
-                            self.master_node_service.task_status_cache[task_id] = {
-                                "task_id": task_id,
-                                "status": response.status,
-                                "message": response.message,
-                                "output_tail": response.output[-5:] if response.output else [],
-                                "last_polled": time.time()
-                            }
-                            
-                    except Exception as e:
-                        logging.error(f"更新任務 {task_id} 狀態時發生錯誤: {e}")
-
-            except Exception as e:
-                logging.error(f"任務狀態更新循環發生錯誤: {e}", exc_info=True)
-            
-            # 確保時間格式正確
-            created_at = ""
-            updated_at = ""
-            
-            try:
-                # 如果時間戳是數字，轉化為字符串格式
-                if task_info.get("created_at"):
-                    created_timestamp = float(task_info.get("created_at", 0))
-                    created_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(created_timestamp))
-                
-                if task_info.get("updated_at"):
-                    updated_timestamp = float(task_info.get("updated_at", 0))
-                    updated_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(updated_timestamp))
-            except (ValueError, TypeError) as e:
-                logging.warning(f"任務 {task_id} 時間戳格式錯誤: {e}")
-                # 使用當前時間作為備用
-                current_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-                created_at = current_time
-                updated_at = current_time
-            
-            # 創建TaskStatus對象
-            task_status = nodepool_pb2.TaskStatus(
-                task_id=task_id,
-                status=task_info.get("status", "UNKNOWN"),
-                created_at=created_at,
-                updated_at=updated_at,
-                assigned_node=task_info.get("assigned_node", "")
-            )
-            all_tasks.append(task_status)
-            
-            # 等待下一次更新
-            time.sleep(self.update_interval)
-
-    def add_user_task(self, user_id, task_id):
-        """添加用戶任務到緩存"""
+        self.start_reward_distribution()
+        self.start_auto_retrieval()
+        
         try:
-            with self.master_node_service.task_cache_lock:
-                self.master_node_service.task_status_cache[task_id] = {
-                    "task_id": task_id,
-                    "status": "PENDING",
-                    "message": "Task submitted",
-                    "last_polled": time.time()
-                }
-            return True
+            logging.info(f"Master Node UI 啟動在 http://{UI_HOST}:{UI_PORT}")
+            self.app.run(host=UI_HOST, port=UI_PORT, debug=False)
+        except KeyboardInterrupt:
+            logging.info("收到中斷信號，正在關閉...")
+        finally:
+            self.stop_threads()
+            if self.channel:
+                self.channel.close()
+
+    def stop_task(self, task_id, reason=None):
+        """停止指定的任務"""
+        if not self.master_stub:
+            logging.error("Cannot stop task: Not connected.")
+            return False
+        
+        if not self.ensure_authenticated():
+            logging.error("Authentication failed, cannot stop task")
+            return False
+        
+        try:
+            request = nodepool_pb2.StopTaskRequest(
+                task_id=task_id,
+                token=self.token
+            )
+            response = self.master_stub.StopTask(request, timeout=10)
+            
+            if response.success:
+                logging.info(f"任務 {task_id} 停止成功: {response.message}")
+                
+                # 更新本地緩存中的任務狀態
+                with self.task_cache_lock:
+                    if task_id in self.task_status_cache:
+                        self.task_status_cache[task_id].update({
+                            "status": "STOPPED",
+                            "last_polled": time.time()
+                        })
+                
+                return True
+            else:
+                logging.error(f"停止任務 {task_id} 失敗: {response.message}")
+                return False
+                
+        except grpc.RpcError as e:
+            logging.error(f"停止任務 {task_id} gRPC 錯誤: {e.details()}")
+            return False
         except Exception as e:
-            logging.error(f"添加用戶任務失敗: {e}", exc_info=True)
+            logging.error(f"停止任務 {task_id} 發生未知錯誤: {e}", exc_info=True)
             return False
 
-    def get_user_tasks(self, user_id):
-        """獲取用戶的所有任務狀態"""
-        try:
-            with self.master_node_service.task_cache_lock:
-                return [
-                    info for info in self.master_node_service.task_status_cache.values()
-                    if isinstance(info, dict) and "task_id" in info
-                ]
-        except Exception as e:
-            logging.error(f"獲取用戶任務失敗: {e}", exc_info=True)
-            return []
+class TaskStatusUpdater:
+    def __init__(self, master_ui):
+        self.master_ui = master_ui
+        self.thread = None
+        self._stop_event = threading.Event()
 
-    def get_task_status(self, task_id):
-        """獲取特定任務的狀態"""
-        try:
-            with self.master_node_service.task_cache_lock:
-                return self.master_node_service.task_status_cache.get(task_id)
-        except Exception as e:
-            logging.error(f"獲取任務狀態失敗: {e}", exc_info=True)
-            return None
+    def start(self):
+        if not self.thread or not self.thread.is_alive():
+            self._stop_event.clear()
+            self.thread = threading.Thread(target=self._update_loop, daemon=True)
+            self.thread.start()
+            logging.info("Task status updater started.")
 
-class MasterNode:
-    def __init__(self):
-        self.task_status_updater = TaskStatusUpdater(self)
-        self.task_status_updater.start()
+    def stop(self):
+        self._stop_event.set()
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=5)
 
-    def __del__(self):
-        self.task_status_updater.stop()
-
-    def get_user_tasks(self, user_id):
-        """获取用户的所有任务状态"""
-        return self.task_status_updater.get_user_tasks(user_id)
-
-    def get_task_status(self, task_id):
-        """获取特定任务的状态"""
-        return self.task_status_updater.get_task_status(task_id)
-
-    def add_user_task(self, user_id, task_id):
-        """添加用户任务"""
-        return self.task_status_updater.add_user_task(user_id, task_id)
+    def _update_loop(self):
+        while not self._stop_event.is_set():
+            try:
+                # 清理過期緩存
+                self.master_ui.clean_expired_task_cache()
+                
+                # 更新任務狀態
+                with self.master_ui.task_cache_lock:
+                    task_ids = list(self.master_ui.task_status_cache.keys())
+                
+                for task_id in task_ids:
+                    if self._stop_event.is_set():
+                        break
+                    
+                    try:
+                        # 只更新任務，跳過節點狀態
+                        with self.master_ui.task_cache_lock:
+                            task_info = self.master_ui.task_status_cache.get(task_id)
+                        
+                        if task_info and isinstance(task_info, dict) and "task_id" in task_info:
+                            current_status = task_info.get("status")
+                            if current_status not in ["COMPLETED", "FAILED", "ERROR"]:
+                                # 更新任務狀態
+                                self.master_ui.poll_task_status(task_id)
+                        
+                    except Exception as e:
+                        logging.warning(f"更新任務 {task_id} 狀態失敗: {e}")
+                    
+                    time.sleep(1)  # 避免過於頻繁的請求
+                
+            except Exception as e:
+                logging.error(f"任務狀態更新循環錯誤: {e}")
+            
+            # 等待下次更新
+            self._stop_event.wait(30)
 
 if __name__ == "__main__":
-    master_ui = MasterNodeUI(
-        username=MASTER_USERNAME,
-        password=MASTER_PASSWORD,
-        grpc_address=GRPC_SERVER_ADDRESS
-    )
-    master_ui.start()
+    master_ui = MasterNodeUI(MASTER_USERNAME, MASTER_PASSWORD, GRPC_SERVER_ADDRESS)
+    try:
+        master_ui.run()
+    except KeyboardInterrupt:
+        logging.info("收到中斷信號，正在關閉...")
+    except Exception as e:
+        logging.error(f"主控端運行時發生錯誤: {e}", exc_info=True)
+    finally:
+        master_ui.stop_threads()
+        if master_ui.channel:
+            master_ui.channel.close()
+        logging.info("主控端已關閉")

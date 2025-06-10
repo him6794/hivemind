@@ -76,6 +76,26 @@
             text-align: center;
         }
 
+        .success-message {
+            background-color: #d1fae5;
+            border: 1px solid #10b981;
+            color: #065f46;
+            padding: 0.75rem;
+            border-radius: 6px;
+            margin-bottom: 1rem;
+            text-align: center;
+        }
+
+        .info-message {
+            background-color: #dbeafe;
+            border: 1px solid #3b82f6;
+            color: #1e40af;
+            padding: 0.75rem;
+            border-radius: 6px;
+            margin-bottom: 1rem;
+            text-align: center;
+        }
+
         .form-group {
             margin-bottom: 1.5rem;
         }
@@ -135,7 +155,9 @@
         </div>
 
         {% if current_status %}
-        <div class="status-message">Current Status: {{ current_status }}</div>
+        <div class="{% if 'Error' in current_status %}error-message{% elif 'Idle' in current_status %}success-message{% else %}info-message{% endif %}">
+            目前狀態: {{ current_status }}
+        </div>
         {% endif %}
 
         {% if error %}

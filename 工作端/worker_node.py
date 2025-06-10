@@ -419,13 +419,13 @@ class WorkerNode:
             self.status = "Reg Failed (Token Error)"
             return False
 
-        # --- 修正: 統一使用用戶名作為 node_id ---
+        # --- 修正: 統一使用用戶名作為 node_id，並正確設置 hostname ---
         mem_gb_int = int(round(self.memory_gb))
         gpu_mem_gb_int = int(round(self.gpu_memory_gb))
 
         req = nodepool_pb2.RegisterWorkerNodeRequest(
             node_id=self.username,            # 使用用戶名作為 node_id
-            hostname=self.local_ip,           # 使用本機 IP 作為 hostname
+            hostname=self.local_ip,           # 使用本機 IP 作為 hostname，這樣節點池可以保存IP
             cpu_cores=self.cpu_cores,
             memory_gb=mem_gb_int,
             cpu_score=self.cpu_score,
@@ -648,7 +648,7 @@ class WorkerNode:
         # Ensures ReportStatusRequest matches proto (node_id, status_message)
         self._log_and_append(f"Status reporting thread started.")
         balance_update_counter = 0
-        report_interval = STATUS_REPORT_INTERVAL
+        report_interval = 3  # 改為每3秒報告一次，確保心跳及時
 
         while not self._stop_event.is_set():
             next_report_time = time.monotonic() + report_interval
@@ -678,6 +678,8 @@ class WorkerNode:
                     resp = self.node_stub.ReportStatus(req, metadata=meta, timeout=10)
                     if not resp.success:
                         self._log_and_append(f"Master status report rejected: {resp.message}", logging.WARNING)
+                    else:
+                        logging.debug(f"節點 {self.node_id} 心跳報告成功: {current_status_msg}")
 
                 except grpc.RpcError as e:
                     logging.error(f"Status report RPC failed: {e.code()} - {e.details()}", exc_info=False)
@@ -696,10 +698,10 @@ class WorkerNode:
 
                 # --- Update CPT Balance Periodically ---
                 balance_update_counter += 1
-                if balance_update_counter >= 5:
+                if balance_update_counter >= 10:  # 每30秒更新一次餘額 (10 * 3秒)
                     # self._log_and_append("Attempting periodic CPT balance update...") # Reduce noise
                     if self.query_cpt_balance():
-                        # self._log_and_append(f"Periodic CPT balance update successful: {self.cpt_balance} CPT") # Reduce noise
+                        # self._log_and_append(f"Periodic CPT balance update successful: {self.cpt_balance} CPT") # Display as int
                         pass
                     else:
                         self._log_and_append("Periodic CPT balance update failed.", logging.WARNING)
@@ -707,7 +709,7 @@ class WorkerNode:
 
             else:
                  # logging.debug("Status reporting paused (not registered or no token).") # Reduce noise
-                 report_interval = STATUS_REPORT_INTERVAL * 2
+                 report_interval = 6  # 未註冊時降低頻率
 
             wait_time = max(0, next_report_time - time.monotonic())
             if self._stop_event.wait(wait_time):
@@ -716,105 +718,97 @@ class WorkerNode:
         self._log_and_append(f"Status reporting thread stopped.")
 
     def start_status_reporting(self):
-        if not self.status_thread or not self.status_thread.is_alive():
-            self._stop_event.clear()
-            self.status_thread = threading.Thread(target=self.report_status, name="StatusReportThread", daemon=True)
-            self.status_thread.start()
-            self._log_and_append("Status reporting thread started.")
-        else:
-             self._log_and_append("Status reporting thread already running.")
+        """Start the status reporting thread."""
+        if self.status_thread and self.status_thread.is_alive():
+            self._log_and_append("Status reporting thread already running.")
+            return
+        
+        self._stop_event.clear()
+        self.status_thread = threading.Thread(target=self.report_status, name="StatusReporter", daemon=True)
+        self.status_thread.start()
+        self._log_and_append("Status reporting thread started.")
 
     def stop_status_reporting(self):
+        """Stop the status reporting thread."""
+        self._stop_event.set()
         if self.status_thread and self.status_thread.is_alive():
-            self._log_and_append("Requesting status reporting thread stop...")
-            self._stop_event.set()
-            self.status_thread = None
-            self._log_and_append("Stop signal sent to status reporting thread.")
-        # else: # Reduce noise
-            # self._log_and_append("Status reporting thread not running or already stopped.")
+            self.status_thread.join(timeout=5)
+            self._log_and_append("Status reporting thread stopped.")
 
-
-    def _send_intermediate_output(self, task_id, output):
-        """Sends log output or intermediate results to the master."""
-        # Adheres to proto: StoreOutputRequest(task_id, output)
-        if not self.is_registered or not self.token or not self.master_stub: return
-        meta = self._get_grpc_metadata()
-        if not meta: return
-
-        max_output_len = 4000
-        if len(output) > max_output_len: output = output[:max_output_len] + "... (truncated)"
-
-        try:
-            req = nodepool_pb2.StoreOutputRequest(task_id=task_id, output=output)
-            self.master_stub.StoreOutput(req, metadata=meta, timeout=5)
-        except grpc.RpcError as e:
-            level = logging.ERROR if e.code() == grpc.StatusCode.UNAUTHENTICATED else logging.WARNING
-            self._log_and_append(f"Failed to send output for task {task_id}: RPC Error {e.code()} - {e.details()}", level)
-            if e.code() == grpc.StatusCode.UNAUTHENTICATED:
-                 self.token = None; self.is_registered = False; self.status = "Error - Auth Failed"
-        except Exception as e:
-            self._log_and_append(f"Failed to send output for task {task_id}: {e}", logging.WARNING)
-
-
-    def _notify_master_task_completion(self, task_id, success, error_message=""):
-        """Notifies the master node about task completion status."""
-        # --- Adhere to proto definition ---
-        # TaskCompletedRequest(task_id, node_id, success)
-        # The error_message is NOT part of the proto request. Log it locally only.
-        if not self.master_stub:
-            logging.error(f"Cannot notify master for task {task_id}: Master stub unavailable.")
+    def _send_intermediate_output(self, task_id, log_line):
+        """Send intermediate output to master during task execution."""
+        if not self.token:
             return
-        if not self.is_registered or not self.token:
-             logging.error(f"Cannot notify master for task {task_id}: Not registered or no token.")
-             return
-
+        
         meta = self._get_grpc_metadata()
         if not meta:
-            logging.error(f"Cannot notify master for task {task_id}: Token missing.")
             return
-
-        # Log the outcome locally, including error if any
-        log_level = logging.INFO if success else logging.ERROR
-        log_message = f"Task {task_id} {'succeeded' if success else 'failed'}"
-        if not success and error_message:
-             # Truncate local log message if needed
-             max_local_error_len = 1024
-             if len(error_message) > max_local_error_len:
-                 error_message_log = error_message[:max_local_error_len] + "... (truncated)"
-             else:
-                 error_message_log = error_message
-             log_message += f": {error_message_log}"
-        self._log_and_append(log_message, level=log_level)
-
-        # Create request according to proto (no error_message field)
-        req = nodepool_pb2.TaskCompletedRequest(
-            task_id=task_id,
-            node_id=self.node_id,
-            success=success
-            # error_message field removed
-        )
-        # ----------------------------------
-
+            
         try:
-            grpc.channel_ready_future(self.channel).result(timeout=5)
-            response = self.master_stub.TaskCompleted(req, metadata=meta, timeout=15)
-            if response.success:
-                logging.info(f"Master acknowledged task {task_id} completion.")
-            else:
-                logging.error(f"Master rejected task {task_id} completion notification: {response.message}")
-        except grpc.RpcError as e:
-            logging.error(f"Notify Master RPC failed for task {task_id}: {e.code()} - {e.details()}")
-            if e.code() == grpc.StatusCode.UNAUTHENTICATED:
-                self.token = None; self.is_registered = False; self.status = "Error - Auth Failed"
+            # 發送到 master 的中途輸出
+            request = nodepool_pb2.IntermediateOutputRequest(
+                task_id=task_id,
+                output_line=log_line
+            )
+            self.master_stub.IntermediateOutput(request, metadata=meta, timeout=5)
+            
+            # 同時發送到節點池的日誌存儲
+            log_request = nodepool_pb2.StoreLogsRequest(
+                node_id=self.node_id,
+                task_id=task_id,
+                logs=log_line,
+                timestamp=int(time.time())
+            )
+            self.master_stub.StoreLogs(log_request, metadata=meta, timeout=5)
+            
         except Exception as e:
-            logging.error(f"Notify Master failed unexpectedly for task {task_id}: {str(e)}", exc_info=True)
-
+            logging.debug(f"Failed to send output/logs: {e}")
 
     def _execute_task_thread(self, task_id, task_zip_bytes):
         """Executes the task in a Docker container within a separate thread."""
-        self.current_task_id = task_id
-        self.status = f"Starting Task: {task_id}"
-        self._log_and_append(f"Task {task_id}: Execution thread started.")
+        # 更新狀態為正在執行
+        self.status = f"Executing Task: {task_id}"
+        self._log_and_append(f"Task {task_id}: 開始執行任務")
+
+        # 立即報告執行狀態
+        try:
+            status_request = nodepool_pb2.ReportStatusRequest(
+                node_id=self.node_id,
+                status_message=f"Executing Task: {task_id}"
+            )
+            response = self.node_stub.ReportStatus(
+                status_request, 
+                metadata=self._get_grpc_metadata(), 
+                timeout=5
+            )
+            if response.success:
+                logging.info(f"成功報告任務執行狀態")
+            else:
+                logging.warning(f"報告任務執行狀態失敗: {response.message}")
+        except Exception as e:
+            logging.error(f"報告任務執行狀態錯誤: {e}")
+
+        # 啟動定期心跳報告線程
+        heartbeat_stop_event = threading.Event()
+        def periodic_heartbeat():
+            while not heartbeat_stop_event.is_set():
+                try:
+                    status_request = nodepool_pb2.ReportStatusRequest(
+                        node_id=self.node_id,
+                        status_message=f"Executing Task: {task_id}"
+                    )
+                    response = self.node_stub.ReportStatus(status_request, metadata=self._get_grpc_metadata(), timeout=5)
+                    if response.success:
+                        logging.debug(f"任務執行期間心跳報告成功")
+                    else:
+                        logging.warning(f"任務執行期間心跳報告失敗: {response.message}")
+                except Exception as e:
+                    logging.error(f"任務執行期間心跳報告錯誤: {e}")
+                
+                heartbeat_stop_event.wait(10)  # 每10秒報告一次
+        
+        heartbeat_thread = threading.Thread(target=periodic_heartbeat, daemon=True)
+        heartbeat_thread.start()
 
         host_temp_dir = None
         container = None
@@ -840,25 +834,19 @@ class WorkerNode:
             try:
                 container = self.docker_client.containers.run(
                     image=f"{DOCKER_BASE_IMAGE}:latest",
-                    # --- THIS IS THE CORRECTED LINE ---
-                    command=["/usr/local/bin/run_task.sh"], # Override the Dockerfile's CMD to run the task script
-                    # ------------------------------------
+                    command=["/usr/local/bin/run_task.sh"],
                     detach=True,
                     name=container_name,
                     volumes={host_zip_path: {'bind': '/tmp/task_archive.zip', 'mode': 'ro'}},
-                    working_dir="/app", # Should match run_task.sh and Dockerfile WORKDIR
-                    remove=False,      # We remove it manually in the finally block after getting logs/results
-                    security_opt=["no-new-privileges"], # Good security practice
-                    user="appuser",    # As defined in Dockerfile
-                    environment={"TASK_ID": task_id, "PYTHONUNBUFFERED": "1"} # Pass task ID and ensure unbuffered output
-                    # Add resource limits if needed, e.g.:
-                    # mem_limit="1g",
-                    # cpu_period=100000, cpu_quota=50000, # 50% of one CPU
+                    working_dir="/app",
+                    remove=False,
+                    security_opt=["no-new-privileges"],
+                    user="appuser",
+                    environment={"TASK_ID": task_id, "PYTHONUNBUFFERED": "1"}
                 )
-                self._log_and_append(f"Task {task_id}: Container {container.id} started, executing /usr/local/bin/run_task.sh.") # Updated log
+                self._log_and_append(f"Task {task_id}: Container {container.id} started, executing /usr/local/bin/run_task.sh.")
             except docker.errors.APIError as e:
                  if "No such image" in str(e): raise docker.errors.ImageNotFound(f"Image {DOCKER_BASE_IMAGE}:latest not found") from e
-                 # Add more specific error handling if needed (e.g., port conflicts, though not applicable here)
                  else: raise RuntimeError(f"Docker API error starting container for task {task_id}: {e}") from e
 
             # Log streaming
@@ -870,219 +858,241 @@ class WorkerNode:
                     if line:
                         # Log to worker's console/file
                         logging.info(f"[Task {task_id} Log]: {line}")
-                        # Send to master
+                        # Send to master and store in nodepool
                         self._send_intermediate_output(task_id, line)
+                        # 另外發送結構化日誌
+                        self._send_structured_log(task_id, line, "INFO")
                 except Exception as log_err:
                      logging.warning(f"Task {task_id}: Error processing log stream line: {log_err}")
 
             # Wait for container completion
             self._log_and_append(f"Task {task_id}: Waiting for container {container.id} to finish...")
-            # It's good to have a timeout on container.wait() to prevent indefinite blocking
-            # The timeout should be configurable or sufficiently long for most tasks.
-            wait_timeout_seconds = 3600 # Example: 1 hour, adjust as needed
+            wait_timeout_seconds = 3600
             result = container.wait(timeout=wait_timeout_seconds)
-            exit_code = result.get('StatusCode', -1) # Docker API returns StatusCode, -1 if not found
+            exit_code = result.get('StatusCode', -1)
             self._log_and_append(f"Task {task_id}: Container {container.id} finished with exit code {exit_code}.")
 
             # Process results
             if exit_code == 0:
                 success = True
                 self._log_and_append(f"Task {task_id}: Execution successful (exit code 0).")
-                results_archive_path = '/app/results.zip' # Path *inside* the container
-                try:
-                    self._log_and_append(f"Task {task_id}: Attempting to retrieve '{results_archive_path}' from container.")
-                    bits, stat = container.get_archive(results_archive_path) # This gets a tar stream
+                
+                possible_results_paths = [
+                    '/app/results.zip',
+                    '/tmp/results.zip',
+                    f'/tmp/task_work_{task_id}/results.zip'
+                ]
+                
+                zip_content = None
+                results_found = False
+                
+                for results_path in possible_results_paths:
+                    try:
+                        self._log_and_append(f"Task {task_id}: Attempting to retrieve '{results_path}' from container.")
+                        bits, stat = container.get_archive(results_path)
+                        
+                        with io.BytesIO(b"".join(bits)) as tar_stream_bytes_io:
+                            with tarfile.open(fileobj=tar_stream_bytes_io, mode='r') as tar:
+                                zip_member_info = None
+                                for member in tar.getmembers():
+                                    if member.isfile() and 'results.zip' in member.name.lower():
+                                        zip_member_info = member
+                                        break
 
-                    zip_content = None
-                    # The archive is a tar stream containing the file. We need to extract it.
-                    with io.BytesIO(b"".join(bits)) as tar_stream_bytes_io: # Join all byte chunks
-                        with tarfile.open(fileobj=tar_stream_bytes_io, mode='r') as tar:
-                            # Find the actual 'results.zip' member in the tar archive
-                            # (it might be nested if the path inside container was complex, but /app/results.zip should be direct)
-                            zip_member_info = None
-                            for member in tar.getmembers():
-                                # Name might be e.g. 'results.zip' or './results.zip' if /app was WORKDIR
-                                # Or 'app/results.zip' if path was absolute from root of tarred dir
-                                # For simplicity, assume it's directly named results.zip or similar
-                                if member.isfile() and 'results.zip' in member.name.lower(): # more robust check
-                                    zip_member_info = member
-                                    break
-
-                            if zip_member_info:
-                                extracted_file = tar.extractfile(zip_member_info)
-                                if extracted_file:
-                                    zip_content = extracted_file.read()
-                                    self._log_and_append(f"Task {task_id}: Successfully extracted {len(zip_content)} bytes for results.zip.")
+                                if zip_member_info:
+                                    extracted_file = tar.extractfile(zip_member_info)
+                                    if extracted_file:
+                                        zip_content = extracted_file.read()
+                                        self._log_and_append(f"Task {task_id}: Successfully extracted {len(zip_content)} bytes from {results_path}")
+                                        results_found = True
+                                        break
+                                    else:
+                                        self._log_and_append(f"Task {task_id}: Could not extract file object from {results_path}", level=logging.WARNING)
                                 else:
-                                    self._log_and_append(f"Task {task_id}: Could not extract file object for results.zip from tar.", level=logging.WARNING)
-                            else:
-                                self._log_and_append(f"Task {task_id}: 'results.zip' not found within the retrieved tar archive.", level=logging.WARNING)
-
-                    if zip_content:
-                        meta_res = self._get_grpc_metadata()
-                        if meta_res:
+                                    self._log_and_append(f"Task {task_id}: 'results.zip' not found in {results_path}", level=logging.WARNING)
+                    
+                    except docker.errors.NotFound:
+                        self._log_and_append(f"Task {task_id}: No '{results_path}' found in container.")
+                        continue
+                    except Exception as e:
+                        self._log_and_append(f"Task {task_id}: Error retrieving from {results_path}: {e}", level=logging.WARNING)
+                        continue
+                
+                if not results_found:
+                    self._log_and_append(f"Task {task_id}: No results file found in any expected location. Task considered successful without results file.")
+                
+                if zip_content:
+                    meta_res = self._get_grpc_metadata()
+                    if meta_res:
+                        try:
                             self._log_and_append(f"Task {task_id}: Storing results ({len(zip_content)} bytes)...")
                             self.master_stub.StoreResult(
                                 nodepool_pb2.StoreResultRequest(task_id=task_id, result_zip=zip_content),
-                                metadata=meta_res, timeout=30 # Timeout for potentially large results
+                                metadata=meta_res, timeout=30
                             )
                             self._log_and_append(f"Task {task_id}: Results stored successfully.")
-                        else:
-                            self._log_and_append(f"Task {task_id}: Cannot store results, token missing.", level=logging.WARNING)
-
-                except docker.errors.NotFound:
-                    self._log_and_append(f"Task {task_id}: No '{results_archive_path}' found in container. Task considered successful without results file.")
-                except tarfile.ReadError as tar_err:
-                    success = False # If results are expected but corrupt, task might be considered failed
-                    error_message = f"Failed to read results archive from container: {tar_err}"
-                    self._log_and_append(f"Task {task_id}: {error_message}", level=logging.ERROR)
-                except grpc.RpcError as grpc_err:
-                     success = False # If storing result fails, this is an issue
-                     error_message = f"Failed to store results via gRPC: {grpc_err.code()} - {grpc_err.details()}"
-                     self._log_and_append(f"Task {task_id}: {error_message}", level=logging.ERROR)
-                except Exception as res_err:
-                    success = False # Any other error in result processing
-                    error_message = f"Error processing/storing results: {res_err}"
-                    self._log_and_append(f"Task {task_id}: {error_message}", level=logging.ERROR)
-                    logging.error(f"Task {task_id} Result Exception", exc_info=True)
+                        except grpc.RpcError as grpc_err:
+                            success = False
+                            error_message = f"Failed to store results via gRPC: {grpc_err.code()} - {grpc_err.details()}"
+                            self._log_and_append(f"Task {task_id}: {error_message}", level=logging.ERROR)
+                        except Exception as res_err:
+                            success = False
+                            error_message = f"Error storing results: {res_err}"
+                            self._log_and_append(f"Task {task_id}: {error_message}", level=logging.ERROR)
+                            logging.error(f"Task {task_id} Store Result Exception", exc_info=True)
+                    else:
+                        self._log_and_append(f"Task {task_id}: Cannot store results, token missing.", level=logging.WARNING)
 
             else: # exit_code != 0
                 success = False
                 error_message = f"Task execution failed inside container with exit code {exit_code}."
                 self._log_and_append(error_message, level=logging.ERROR)
-                # Attempt to get last few log lines for more context on failure
                 try:
-                    # Get final logs after container stop, might have more info
                     final_logs = container.logs(tail=20).decode('utf-8', errors='replace')
                     error_message += f"\n--- Last 20 lines of container log ---\n{final_logs}\n------------------------------------"
-                    # Also log these to worker's main log for debugging
                     logging.error(f"Task {task_id} Failed Container Logs (Final):\n{final_logs}")
                 except Exception as log_fetch_err:
                     logging.warning(f"Task {task_id}: Could not fetch final logs after failure: {log_fetch_err}")
-
 
         # Handle specific exceptions from the try block
         except docker.errors.ImageNotFound as e:
              error_msg = f"Docker image '{DOCKER_BASE_IMAGE}:latest' not found. Build required. {e}"
              logging.critical(error_msg)
-             self.status = "Error - Docker Image Missing" # Update worker status
+             self.status = "Error - Docker Image Missing"
              success = False; error_message = error_msg
-        except docker.errors.APIError as e: # Catch other Docker API errors
+        except docker.errors.APIError as e:
              error_msg = f"Docker API error during task {task_id}: {e}"
              logging.error(error_msg, exc_info=True)
              self.status = "Error - Docker API"
              success = False; error_message = error_msg
-        except RuntimeError as e: # Catch runtime errors like Docker unavailable or container start failure
+        except RuntimeError as e:
              error_msg = f"Runtime error during task {task_id}: {e}"
              logging.error(error_msg, exc_info=True)
              self.status = f"Error - Runtime ({type(e).__name__})"
              success = False; error_message = error_msg
-        except IOError as e: # Catch file saving errors
+        except IOError as e:
              error_msg = f"I/O error during task {task_id}: {e}"
              logging.error(error_msg, exc_info=True)
              self.status = "Error - Task I/O"
              success = False; error_message = error_msg
         except Exception as e:
-             # Catch-all for unexpected errors during execution
              error_msg = f"Unexpected error during task {task_id} execution: {e}"
              logging.error(error_msg, exc_info=True)
              self.status = "Error - Unexpected Task Failure"
              success = False; error_message = error_msg
 
         finally:
-            # Cleanup: Remove the container
+            # 停止心跳線程
+            heartbeat_stop_event.set()
+            if heartbeat_thread.is_alive():
+                heartbeat_thread.join(timeout=2)
+            
+            # 清理容器和臨時目錄
             if container:
                 try:
                     self._log_and_append(f"Task {task_id}: Attempting to stop and remove container {container.id}...")
-                    container.stop(timeout=10) # Give it a chance to stop gracefully
-                    container.remove(force=True) # force=True if stop fails or to ensure removal
+                    container.stop(timeout=10)
+                    container.remove(force=True)
                     self._log_and_append(f"Task {task_id}: Container {container.id} removed.")
                 except docker.errors.NotFound:
                      self._log_and_append(f"Task {task_id}: Container {container.id} already removed or not found.")
-                except docker.errors.APIError as cleanup_err: # Catch Docker API errors during cleanup
+                except docker.errors.APIError as cleanup_err:
                     logging.warning(f"Task {task_id}: API error removing container {container.id}: {cleanup_err}")
-                except Exception as cleanup_err: # Catch other unexpected errors
+                except Exception as cleanup_err:
                     logging.warning(f"Task {task_id}: Unexpected error removing container {container.id}: {cleanup_err}")
 
-            # Cleanup: Remove the host temporary directory
             if host_temp_dir and os.path.exists(host_temp_dir):
                 try:
                     self._log_and_append(f"Task {task_id}: Removing host temp directory {host_temp_dir}...")
                     shutil.rmtree(host_temp_dir)
                     self._log_and_append(f"Task {task_id}: Host temp directory {host_temp_dir} removed.")
-                except OSError as cleanup_err: # Catch errors like permission denied or dir not empty
+                except OSError as cleanup_err:
                     logging.warning(f"Task {task_id}: Error removing host temp directory {host_temp_dir}: {cleanup_err}")
 
             # Notify Master of final completion status
-            # error_message here is for *local logging only* within _notify_master_task_completion
             self._notify_master_task_completion(task_id, success, error_message)
 
-            # Reset Worker Status
-            if self.current_task_id == task_id: # Ensure this is still the task we think it is
+            # Reset Worker Status and report final status
+            if self.current_task_id == task_id:
                 self.current_task_id = None
-                # Set status based on outcome, unless a critical error occurred earlier
-                # that already set a more specific error status for the worker itself.
-                if not self.status.startswith("Error -"): # Avoid overwriting more specific worker errors
+                if not self.status.startswith("Error -"):
                      self.status = "Idle" if success else f"Error - Task Failed ({task_id})"
                 self._log_and_append(f"Task {task_id}: Worker status updated to '{self.status}'.")
+                
+                # 立即報告空閒狀態
+                try:
+                    status_request = nodepool_pb2.ReportStatusRequest(
+                        node_id=self.node_id,
+                        status_message=self.status
+                    )
+                    response = self.node_stub.ReportStatus(status_request, metadata=self._get_grpc_metadata(), timeout=5)
+                    if response.success:
+                        logging.info(f"任務完成後成功更新為空閒狀態")
+                    else:
+                        logging.warning(f"任務完成後狀態更新失敗: {response.message}")
+                except Exception as e:
+                    logging.error(f"任務完成後報告狀態錯誤: {e}")
 
-    def run_grpc_server(self):
-        server = grpc.server(futures.ThreadPoolExecutor(max_workers=10, thread_name_prefix="gRPCWorker"))
-        nodepool_pb2_grpc.add_WorkerNodeServiceServicer_to_server(WorkerNodeServiceServicer(self), server)
-        listen_addr = f'0.0.0.0:{self.port}'
+    def _send_structured_log(self, task_id, message, level="INFO"):
+        """發送結構化日誌到節點池"""
+        if not self.token:
+            return
+        
+        meta = self._get_grpc_metadata()
+        if not meta:
+            return
+            
         try:
-            server.add_insecure_port(listen_addr)
-            server.start()
-            self._log_and_append(f"gRPC server started, listening on {listen_addr}")
-            server.wait_for_termination()
-        except OSError as e:
-            logging.critical(f"gRPC bind failed on {listen_addr}: {e}", exc_info=True)
-            self._log_and_append(f"CRITICAL: gRPC Port {self.port} Busy/Permission Error. Exiting.", logging.CRITICAL)
-            os._exit(1)
+            timestamp = int(time.time())
+            formatted_log = f"[{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp))}] [{level}] {message}"
+            
+            log_request = nodepool_pb2.StoreLogsRequest(
+                node_id=self.node_id,
+                task_id=task_id,
+                logs=formatted_log,
+                timestamp=timestamp
+            )
+            self.master_stub.StoreLogs(log_request, metadata=meta, timeout=5)
+            
         except Exception as e:
-            logging.critical(f"gRPC server failed unexpectedly: {e}", exc_info=True)
-            self._log_and_append(f"CRITICAL: gRPC Failed to Start. Exiting.", logging.CRITICAL)
-            os._exit(1)
-        finally:
-             server.stop(grace=5)
-             self._log_and_append("gRPC server shut down.")
+            logging.debug(f"Failed to send structured log: {e}")
 
-
-    def run(self):
-        """Main execution loop for the worker node."""
-        self._log_and_append(f"Worker Node {self.node_id} starting run cycle.")
-        try:
-            self.run_grpc_server()
-        except Exception as e:
-            logging.critical(f"Worker main run loop encountered a critical error: {e}", exc_info=True)
-            self._log_and_append(f"CRITICAL: Worker run failed. Exiting.", logging.CRITICAL)
-        finally:
-            self._log_and_append(f"Worker Node {self.node_id} run cycle ending. Final cleanup...")
-            self.stop_status_reporting()
-            if self.channel:
-                self.channel.close()
-                self._log_and_append("Closed gRPC channel to Master.")
-            self._log_and_append("Cleanup finished.")
-
-# --- gRPC Servicer 類 ---
-class WorkerNodeServiceServicer(nodepool_pb2_grpc.WorkerNodeServiceServicer):
-    def __init__(self, worker_node_instance: WorkerNode):
-        self.worker_node = worker_node_instance
-        logging.info("WorkerNodeServiceServicer initialized.")
+# --- gRPC服務實現 ---
+class WorkerNodeServicer(nodepool_pb2_grpc.WorkerNodeServiceServicer):
+    def __init__(self, worker_node):
+        self.worker_node = worker_node
 
     def ExecuteTask(self, request, context):
         """Handles ExecuteTask RPC call from the Master."""
-        # Adheres to proto: ExecuteTaskRequest(node_id, task_id, task_zip)
         task_id = request.task_id
         task_zip_bytes = request.task_zip
-        # node_id = request.node_id # Can be used for verification if needed
         logging.info(f"gRPC ExecuteTask request received for Task ID: {task_id} ({len(task_zip_bytes)} bytes)")
+
+        # 檢查是否已經在執行相同的任務
+        if self.worker_node.current_task_id == task_id:
+            warning_msg = f"Node {self.worker_node.node_id} already executing task {task_id}."
+            logging.warning(warning_msg)
+            self.worker_node._log_and_append(f"忽略重複的任務請求 {task_id}", level=logging.WARNING)
+            
+            # 異步報告狀態，不阻塞響應
+            threading.Thread(target=self._async_status_update, args=(f"Executing Task: {task_id}",), daemon=True).start()
+            
+            context.set_details(warning_msg)
+            context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
+            return nodepool_pb2.ExecuteTaskResponse(
+                success=False, 
+                message=f"Task {task_id} already in progress"
+            )
 
         if self.worker_node.current_task_id:
             error_msg = f"Node {self.worker_node.node_id} busy with {self.worker_node.current_task_id}."
             logging.error(error_msg)
-            context.set_details(error_msg); context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
-            # Adheres to proto: ExecuteTaskResponse(success, message, result) - result likely unused on error
+            
+            # 異步報告狀態，不阻塞響應
+            threading.Thread(target=self._async_status_update, args=(f"Executing Task: {self.worker_node.current_task_id}",), daemon=True).start()
+            
+            context.set_details(error_msg)
+            context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
             return nodepool_pb2.ExecuteTaskResponse(success=False, message=error_msg)
 
         if not self.worker_node.docker_available:
@@ -1097,10 +1107,56 @@ class WorkerNodeServiceServicer(nodepool_pb2_grpc.WorkerNodeServiceServicer):
             context.set_details(error_msg); context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             return nodepool_pb2.ExecuteTaskResponse(success=False, message=error_msg)
 
-        # Accept task
+        # 立即設置任務接收狀態
         self.worker_node.current_task_id = task_id
-        self.worker_node.status = f"Accepted Task: {task_id}"
-        logging.info(f"Task {task_id} accepted by {self.worker_node.node_id}. Starting execution thread.")
+        self.worker_node.status = f"Downloading Task: {task_id}"
+        self.worker_node._log_and_append(f"開始接收任務 {task_id} ({len(task_zip_bytes)} bytes)")
+        
+        # 立即報告下載狀態（同步，確保主控端知道我們開始處理）
+        try:
+            status_request = nodepool_pb2.ReportStatusRequest(
+                node_id=self.worker_node.node_id,
+                status_message=f"Downloading Task: {task_id}"
+            )
+            response = self.worker_node.node_stub.ReportStatus(
+                status_request, 
+                metadata=self.worker_node._get_grpc_metadata(), 
+                timeout=5
+            )
+            if response.success:
+                logging.info(f"成功報告任務下載狀態")
+            else:
+                logging.warning(f"報告任務下載狀態失敗: {response.message}")
+        except Exception as e:
+            logging.error(f"報告任務下載狀態錯誤: {e}")
+
+        # 驗證ZIP文件完整性
+        try:
+            import zipfile
+            import io
+            with zipfile.ZipFile(io.BytesIO(task_zip_bytes), 'r') as zip_ref:
+                zip_ref.testzip()  # 驗證ZIP文件完整性
+            self.worker_node._log_and_append(f"任務 {task_id} ZIP文件驗證成功")
+        except Exception as e:
+            self.worker_node.current_task_id = None
+            self.worker_node.status = "Error - Invalid Task Archive"
+            error_msg = f"Task {task_id} ZIP file validation failed: {str(e)}"
+            logging.error(error_msg)
+            self.worker_node._log_and_append(error_msg, level=logging.ERROR)
+            
+            # 報告錯誤狀態
+            threading.Thread(target=self._async_status_update, args=("Error - Invalid Task Archive",), daemon=True).start()
+            
+            context.set_details(error_msg)
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            return nodepool_pb2.ExecuteTaskResponse(success=False, message=error_msg)
+
+        # 更新狀態為已接收，準備執行
+        self.worker_node.status = f"Task Received: {task_id}"
+        logging.info(f"Task {task_id} received and validated by {self.worker_node.node_id}. Starting execution thread.")
+        
+        # 報告任務已接收狀態
+        threading.Thread(target=self._async_status_update, args=(f"Task Received: {task_id}",), daemon=True).start()
 
         try:
             execution_thread = threading.Thread(
@@ -1108,89 +1164,143 @@ class WorkerNodeServiceServicer(nodepool_pb2_grpc.WorkerNodeServiceServicer):
                 args=(task_id, task_zip_bytes), name=f"TaskExec-{task_id}", daemon=True
             )
             execution_thread.start()
-            # Adheres to proto: ExecuteTaskResponse(success, message, result) - result unused on success accept
+            
+            # 立即返回成功響應，表示任務已被接收
             return nodepool_pb2.ExecuteTaskResponse(
-                success=True, message=f"Task {task_id} accepted and started."
+                success=True, message=f"Task {task_id} received and execution started."
             )
         except Exception as e:
             self.worker_node.current_task_id = None
             self.worker_node.status = "Error - Task Start Failed"
             error_msg = f"Failed to start execution thread for task {task_id}: {str(e)}"
             logging.error(error_msg, exc_info=True)
-            # Notify master of failure to start (TaskCompleted is used for final status)
-            self.worker_node._notify_master_task_completion(task_id, False, error_msg) # error_msg for local log only
-            context.set_details(error_msg); context.set_code(grpc.StatusCode.INTERNAL)
+            self.worker_node._notify_master_task_completion(task_id, False, error_msg)
+            
+            # 報告錯誤狀態
+            threading.Thread(target=self._async_status_update, args=("Error - Task Start Failed",), daemon=True).start()
+            
+            context.set_details(error_msg)
+            context.set_code(grpc.StatusCode.INTERNAL)
             return nodepool_pb2.ExecuteTaskResponse(success=False, message=error_msg)
 
-    def ReportOutput(self, request, context):
-        # This RPC seems redundant if worker uses StoreOutput to send logs to Master.
-        # Implement if the worker needs to *receive* output reports *from* the master.
-        # If it's meant for worker->master, StoreOutput should be used instead.
-        logging.warning(f"Received unexpected ReportOutput call for task {request.task_id}. Ignoring.")
-        # Adheres to proto: StatusResponse(success, message)
-        return nodepool_pb2.StatusResponse(success=False, message="ReportOutput RPC not implemented/used by worker")
-
+    def _async_status_update(self, status_message):
+        """異步更新狀態的輔助方法"""
+        try:
+            status_request = nodepool_pb2.ReportStatusRequest(
+                node_id=self.worker_node.node_id,
+                status_message=status_message
+            )
+            response = self.worker_node.node_stub.ReportStatus(
+                status_request, 
+                metadata=self.worker_node._get_grpc_metadata(), 
+                timeout=5
+            )
+            if response.success:
+                logging.debug(f"異步狀態更新成功: {status_message}")
+            else:
+                logging.warning(f"異步狀態更新失敗: {response.message}")
+        except Exception as e:
+            logging.error(f"異步狀態更新錯誤: {e}")
 
     def ReportRunningStatus(self, request, context):
-        """Handles polling from master, potentially for rewards."""
-        # Adheres to proto: RunningStatusRequest(node_id, task_id)
-        node_id = self.worker_node.node_id
-        # task_id_req = request.task_id # Can verify if needed
-        status_msg = self.worker_node.status
-        is_running_task = self.worker_node.current_task_id is not None
-
-        # Simple reward logic (int64)
-        reward = 0 # Default reward (int)
-        if is_running_task:
-            # Example: Give 1 unit if busy
-            reward = 1
-            status_msg = f"Running Task: {self.worker_node.current_task_id}"
-
-        # Adheres to proto: RunningStatusResponse(success, message, cpt_reward)
-        # is_busy field removed
-        return nodepool_pb2.RunningStatusResponse(
+        """Handles ReportRunningStatus RPC call from Master for health checks."""
+        task_id = request.task_id
+        logging.info(f"健康檢查請求: 任務 {task_id}")
+        
+        if self.worker_node.current_task_id == task_id:
+            # 異步更新心跳狀態
+            threading.Thread(target=self._async_status_update, args=(f"Executing Task: {task_id}",), daemon=True).start()
+            
+            return nodepool_pb2.RunningStatusResponse(
                 success=True,
-                message=status_msg,
-                cpt_reward=reward # Send int
-                # is_busy field removed
+                message=f"Task {task_id} is running normally"
+            )
+        else:
+            # 任務不在執行中
+            current_status = f"Not running task {task_id}, current task: {self.worker_node.current_task_id or 'None'}"
+            logging.warning(current_status)
+            return nodepool_pb2.RunningStatusResponse(
+                success=False,
+                message=current_status
+            )
+
+    def StopTaskExecution(self, request, context):
+        """實作工作端停止任務的 gRPC 方法"""
+        task_id = request.task_id
+        logging.info(f"收到 StopTaskExecution 請求，task_id={task_id}")
+
+        # 僅允許停止當前執行的任務
+        if self.worker_node.current_task_id == task_id:
+            try:
+                # 這裡你可以設計一個機制通知執行緒安全終止（如設置 flag，或直接 kill docker container）
+                # 範例：如果有 docker container，可以嘗試停止
+                self.worker_node.status = "STOPPED"
+                self.worker_node._log_and_append(f"收到停止任務指令，嘗試終止任務 {task_id}")
+                # === 新增：恢復節點狀態為 Idle 並清空 current_task_id ===
+                self.worker_node.status = "Idle"
+                self.worker_node.current_task_id = None
+                # 主動回報狀態
+                try:
+                    status_request = nodepool_pb2.ReportStatusRequest(
+                        node_id=self.worker_node.node_id,
+                        status_message="Idle"
+                    )
+                    self.worker_node.node_stub.ReportStatus(
+                        status_request,
+                        metadata=self.worker_node._get_grpc_metadata(),
+                        timeout=5
+                    )
+                except Exception as e:
+                    logging.warning(f"StopTaskExecution 狀態回報失敗: {e}")
+                # === 新增結束 ===
+                return nodepool_pb2.StopTaskExecutionResponse(
+                    success=True,
+                    message=f"任務 {task_id} 停止指令已處理"
                 )
-
-# --- 主程式入口 ---
+            except Exception as e:
+                logging.error(f"停止任務 {task_id} 失敗: {e}")
+                return nodepool_pb2.StopTaskExecutionResponse(
+                    success=False,
+                    message=f"停止任務失敗: {e}"
+                )
+        else:
+            msg = f"當前未執行該任務（目前任務: {self.worker_node.current_task_id or 'None'}）"
+            logging.warning(msg)
+            return nodepool_pb2.StopTaskExecutionResponse(
+                success=False,
+                message=msg
+            )
 if __name__ == "__main__":
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    template_dir = os.path.join(script_dir, "templates")
-    static_dir = os.path.join(script_dir, "static")
-    session_dir = os.path.join(script_dir, "flask_session") # Session dir
-    os.makedirs(template_dir, exist_ok=True)
-    os.makedirs(static_dir, exist_ok=True)
-    os.makedirs(session_dir, exist_ok=True) # Create session dir
-
-    # Create default templates if they don't exist
-    # (Keep the template generation logic, ensure monitor.html displays int balance)
-    login_html_path = os.path.join(template_dir, "login.html")
-    monitor_html_path = os.path.join(template_dir, "monitor.html")
-
-    # Login Template (No changes needed for proto alignment)
-    worker = None
     try:
-        worker = WorkerNode()
-        worker.run()
-    except KeyboardInterrupt:
-        logging.info("Ctrl+C detected. Initiating shutdown...")
-    except SystemExit as e:
-        logging.warning(f"System exit called with code: {e.code}")
-    except ConnectionError as e:
-         logging.critical(f"Initialization failed due to connection error: {e}")
-    except FileNotFoundError as e:
-         logging.critical(f"Initialization failed due to missing file: {e}")
+        # 創建 WorkerNode 實例
+        worker_node = WorkerNode()
+        
+        # 啟動 gRPC 服務器
+        server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+        nodepool_pb2_grpc.add_WorkerNodeServiceServicer_to_server(
+            WorkerNodeServicer(worker_node), server
+        )
+        
+        listen_addr = f'[::]:{NODE_PORT}'
+        server.add_insecure_port(listen_addr)
+        server.start()
+        
+        worker_node._log_and_append(f"gRPC server started on {listen_addr}")
+        logging.info(f"Worker Node {NODE_ID} is running...")
+        logging.info(f"Flask UI: http://localhost:{FLASK_PORT}")
+        logging.info(f"gRPC Port: {NODE_PORT}")
+        
+        # 保持服務運行
+        try:
+            while True:
+                time.sleep(60)
+        except KeyboardInterrupt:
+            logging.info("Shutting down Worker Node...")
+            worker_node._log_and_append("Shutting down...")
+            worker_node.stop_status_reporting()
+            server.stop(grace=5)
+            worker_node._log_and_append("Worker Node stopped.")
+            
     except Exception as e:
-        logging.critical(f"Unhandled exception during worker startup or main run: {e}", exc_info=True)
-    finally:
-        logging.info("Worker node process beginning final shutdown sequence...")
-        if worker:
-            worker.stop_status_reporting()
-            if worker.channel:
-                worker.channel.close()
-                logging.info("Closed gRPC channel to Master.")
-        logging.info("Worker node shutdown sequence complete.")
-        os._exit(0)
+        logging.critical(f"Failed to start Worker Node: {e}", exc_info=True)
+        sys.exit(1)

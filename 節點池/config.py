@@ -6,5 +6,5 @@ class Config:
     DB_PATH = os.getenv("DB_PATH", r"D:\hivemind\節點池\users.db")
     REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
     REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+    REDIS_DB = int(os.getenv("REDIS_DB", 0))
     TOKEN_EXPIRY = int(os.getenv("TOKEN_EXPIRY_MINUTES", 60))
-    

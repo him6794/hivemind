@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HiveMind 分散式運算平台</title>
+    <link rel="stylesheet" href="static/css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+</head>
+<body>
+    <!-- 導航欄 -->
+    <nav class="navbar">
+        <div class="navbar-container">
+            <a href="/" class="navbar-brand">🧠 HiveMind</a>
+            <ul class="navbar-nav">
+                <li><a href="/" class="nav-link active">首頁</a></li>
+                <li><a href="/download.html" class="nav-link">下載 App</a></li>
+                <li><a href="/login.html" class="nav-link">登入</a></li>
+                <li><a href="/register.html" class="nav-link">註冊</a></li>
+            </ul>
+            <button class="navbar-toggle" onclick="toggleMobileMenu()">
+                <span></span>
+                <span></span>
+                <span></span>
+            </button>
+        </div>
+    </nav>
+
+    <div class="container home-container">
+        <!-- Hero Section with Typewriter Effect -->
+        <div class="hero-section">
+            <div class="typewriter">
+                <div class="typewriter-text" id="typewriter">HiveMind</div>
+            </div>
+            <p style="font-size: 1.2rem; margin: 2rem 0; color: var(--text-secondary);">
+                打造下一代分散式運算生態系統
+            </p>
+        </div>
+        
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-value">∞</div>
+                <div class="stat-label">無限算力</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">24/7</div>
+                <div class="stat-label">全天候服務</div>
+            </div>
+        </div>
+
+        <p style="margin-bottom: 2rem; font-size: 1.1rem; line-height: 1.7;">
+            HiveMind 是一個<strong>半去中心化</strong>的計算資源共享平台，讓每個人都能輕鬆租用或提供閒置算力。
+            無論你是需要大量運算的開發者，還是有閒置設備的使用者，HiveMind 都能為你創造價值。
+        </p>
+
+        <div class="home-features">
+            <div class="feature-section">
+                <h2>🌟 我們在做什麼？</h2>
+                <ul>
+                    <li>AI 模型訓練與推論加速</li>
+                    <li>大數據分析與處理</li>
+                    <li>分散式科學計算模擬</li>
+                    <li>彈性 Python 任務執行環境</li>
+                </ul>
+            </div>
+
+            <div class="feature-section">
+                <h2>✅ 為什麼選擇 HiveMind？</h2>
+                <ul>
+                    <li>半去中心化架構：結合中心化管理效率與去中心化彈性</li>
+                    <li>即插即用節點：Docker 隔離技術確保安全無虞</li>
+                    <li>CPT 功能性代幣：平台內流通，用多少付多少</li>
+                    <li>智能任務分配：根據節點效能自動優化資源配置</li>
+                    <li>模組化設計：支援多種任務類型與 API 快速部署</li>
+                </ul>
+            </div>
+        </div>
+
+        <div class="highlight-box">
+            <p style="margin: 0; color: var(--accent-primary); font-weight: 600; font-size: 1.1rem;">
+                💎 提供運算資源的節點將獲得平台 <strong>CPT 代幣</strong> 獎勵
+            </p>
+        </div>
+
+        <div class="highlight-box" style="background: linear-gradient(135deg, rgba(124, 58, 237, 0.1), rgba(0, 212, 255, 0.1));">
+            <p style="font-size: 1.2rem; font-weight: 600; margin-bottom: 1rem;">
+                🚀 準備好加入運算新世代了嗎？
+            </p>
+            <p style="margin: 0; opacity: 0.9;">
+                讓每一台機器都發揮應有價值，告別傳統雲端運算的高成本與限制
+            </p>
+        </div>
+
+        <div class="cta-section">
+            <a href="/login.html">
+                <button style="font-size: 1.1rem; padding: 1.2rem 2.5rem; margin-right: 1rem;">
+                    開始體驗 HiveMind 平台 →
+                </button>
+            </a>
+            <a href="/download.html">
+                <button style="font-size: 1.1rem; padding: 1.2rem 2.5rem; background: linear-gradient(135deg, var(--accent-secondary), var(--accent-tertiary));">
+                    📱 下載手機 App
+                </button>
+            </a>
+        </div>
+    </div>
+    
+    <script src="/static/js/ui-enhancements.js"></script>
+    <script>
+        function toggleMobileMenu() {
+            const nav = document.querySelector('.navbar-nav');
+            nav.classList.toggle('show');
+        }
+
+        // Close mobile menu when clicking outside
+        document.addEventListener('click', function(event) {
+            const nav = document.querySelector('.navbar-nav');
+            const toggle = document.querySelector('.navbar-toggle');
+            
+            if (!nav.contains(event.target) && !toggle.contains(event.target)) {
+                nav.classList.remove('show');
+            }
+        });
+
+        // 打字機效果
+        function typeWriter() {
+            const text = "HiveMind";
+            const element = document.getElementById('typewriter');
+            let i = 0;
+            
+            element.innerHTML = '';
+            
+            function type() {
+                if (i < text.length) {
+                    element.innerHTML += text.charAt(i);
+                    i++;
+                    setTimeout(type, 200);
+                }
+            }
+            
+            type();
+        }
+
+        // 頁面載入後啟動打字機效果
+        window.addEventListener('load', function() {
+            setTimeout(typeWriter, 500);
+        });
+    </script>
+</body>
+</html>

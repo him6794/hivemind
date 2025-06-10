@@ -147,6 +147,94 @@ class TaskManager:
             logging.error(f"更新任務 {task_id} 狀態時發生未知錯誤: {e}", exc_info=True)
             return False
 
+    def store_logs(self, task_id, node_id, logs, timestamp):
+        """存儲任務日誌"""
+        try:
+            # 存儲到任務的日誌字段
+            task_key = f"task:{task_id}"
+            
+            # 檢查任務是否存在
+            if not self.redis_client.exists(task_key):
+                logging.warning(f"嘗試存儲日誌但任務 {task_id} 不存在")
+                return False
+            
+            # 獲取現有日誌
+            current_logs = self.redis_client.hget(task_key, "logs") or ""
+            
+            # 格式化新日誌條目
+            timestamp_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp))
+            new_log_entry = f"[{timestamp_str}] [{node_id}] {logs}"
+            
+            # 追加新日誌
+            updated_logs = current_logs + new_log_entry + "\n"
+            
+            # 限制日誌大小（保留最後 50KB）
+            max_log_size = 50 * 1024
+            if len(updated_logs) > max_log_size:
+                updated_logs = updated_logs[-max_log_size:]
+            
+            # 更新日誌
+            self.redis_client.hset(task_key, "logs", updated_logs)
+            self.redis_client.hset(task_key, "updated_at", str(time.time()))
+            
+            logging.debug(f"任務 {task_id} 日誌已更新 (來自節點 {node_id})")
+            return True
+            
+        except redis.RedisError as e:
+            logging.error(f"Redis 錯誤，存儲任務 {task_id} 日誌失敗: {e}")
+            return False
+        except Exception as e:
+            logging.error(f"存儲任務 {task_id} 日誌時發生未知錯誤: {e}", exc_info=True)
+            return False
+
+    def get_task_logs(self, task_id):
+        """獲取任務日誌"""
+        try:
+            task_key = f"task:{task_id}"
+            
+            if not self.redis_client.exists(task_key):
+                logging.warning(f"獲取日誌失敗：任務 {task_id} 不存在")
+                return None
+            
+            # 獲取任務信息
+            task_info = self.redis_client.hmget(task_key, ["logs", "status", "output"])
+            logs = task_info[0] or ""
+            status = task_info[1] or "UNKNOWN"
+            output = task_info[2] or ""
+            
+            # 合併日誌和輸出
+            combined_logs = []
+            
+            # 添加結構化日誌
+            if logs:
+                for line in logs.strip().split('\n'):
+                    if line.strip():
+                        combined_logs.append(line)
+            
+            # 添加輸出日誌（如果有的話）
+            if output:
+                combined_logs.append(f"--- Task Output ---")
+                for line in output.strip().split('\n'):
+                    if line.strip():
+                        combined_logs.append(line)
+            
+            result = {
+                "task_id": task_id,
+                "status": status,
+                "logs": combined_logs,
+                "total_logs": len(combined_logs)
+            }
+            
+            logging.debug(f"成功獲取任務 {task_id} 的日誌 ({len(combined_logs)} 條)")
+            return result
+            
+        except redis.RedisError as e:
+            logging.error(f"Redis 錯誤，獲取任務 {task_id} 日誌失敗: {e}")
+            return None
+        except Exception as e:
+            logging.error(f"獲取任務 {task_id} 日誌時發生未知錯誤: {e}", exc_info=True)
+            return None
+
     def get_task_info(self, task_id, include_zip=False):
         """獲取任務信息，區分字符串和二進制字段"""
         task_key = f"task:{task_id}"
@@ -154,7 +242,7 @@ class TaskManager:
         string_keys = [
             "memory_gb", "cpu_score", "gpu_score", "gpu_memory_gb",
             "location", "gpu_name", "status", "output", "assigned_node",
-            "user_id", "created_at", "updated_at"  # 確保包含user_id字段
+            "user_id", "created_at", "updated_at", "logs", "cpt_cost"  # 添加 logs 和 cpt_cost 字段
         ]
         binary_keys = ["task_zip", "result_zip"]
 
@@ -166,7 +254,7 @@ class TaskManager:
             string_values = self.redis_client.hmget(task_key, string_keys)
             for key, value in zip(string_keys, string_values):
                 task_info[key] = value if value is not None else ""
-                
+
             # 輸出獲取到的用戶ID，用於調試
             if "user_id" in task_info:
                 logging.debug(f"任務 {task_id} 的用戶ID: {task_info['user_id']}")
@@ -332,6 +420,45 @@ class TaskManager:
         """強制停止任務"""
         return self.update_task_status(task_id, "STOPPED")
 
+    def cleanup_task_data(self, task_id):
+        """清理任務相關數據"""
+        try:
+            task_key = f"task:{task_id}"
+            
+            # 獲取任務信息以便記錄
+            task_info = self.get_task_info(task_id, include_zip=False)
+            user_id = task_info.get("user_id") if task_info else None
+            
+            # 刪除任務數據
+            self.redis_client.delete(task_key)
+            
+            # 從用戶任務集合中移除
+            if user_id:
+                user_tasks_key = f"user:{user_id}:tasks"
+                self.redis_client.srem(user_tasks_key, task_id)
+            
+            # 刪除任務日誌
+            logs_key = f"task_logs:{task_id}"
+            self.redis_client.delete(logs_key)
+            
+            logging.info(f"任務 {task_id} 的所有數據已清理")
+            return True
+            
+        except Exception as e:
+            logging.error(f"清理任務 {task_id} 數據失敗: {e}", exc_info=True)
+            return False
+
+    def check_user_balance_for_next_payment(self, user_id, cpt_cost):
+        """檢查用戶餘額是否足夠下次付款"""
+        try:
+            from user_manager import UserManager
+            user_manager = UserManager()
+            balance = user_manager.get_user_balance(user_id)
+            return balance >= cpt_cost
+        except Exception as e:
+            logging.error(f"檢查用戶 {user_id} 餘額失敗: {e}")
+            return False
+
 # --- MasterNodeServiceServicer 類 ---
 class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
     def __init__(self):
@@ -340,10 +467,12 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
         self._stop_event = threading.Event()
         self.dispatch_interval = 10
         self.dispatcher_thread = None
-        self.health_check_interval = 10
+        self.health_check_interval = 5  # 縮短健康檢查間隔到5秒
         self.reward_interval = 60
-        self.task_health = {}  # {task_id: {"fail_count": 0, "last_check": 0, ...}}
+        self.task_health = {}  # {task_id: {"fail_count": 0, "last_check": 0, "assigned_node": "", "user_id": "", "cpt_cost": 0}}
         self.pending_rewards = []  # [(user_id, worker_node_id, amount, task_id)]
+        self.node_timeout_threshold = 10  # 節點超時閾值：10秒
+        self.auth_manager = None  # 將在 server 啟動時設置
         self.start_task_dispatcher()
         self.start_health_checker()
         self.start_reward_scheduler()
@@ -362,225 +491,12 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
             self.dispatcher_thread.start()
             logging.info("任務分發後台線程已啟動")
 
-    def stop_task_dispatcher(self):
-        """停止後台任務分發線程"""
-        if self.dispatcher_thread and self.dispatcher_thread.is_alive():
-             logging.info("正在停止任務分發後台線程...")
-             self._stop_event.set()
-             self.dispatcher_thread.join(timeout=self.dispatch_interval + 2) # 等待線程結束
-             if self.dispatcher_thread.is_alive():
-                  logging.warning("任務分發線程未能在超時內優雅停止")
-             else:
-                  logging.info("任務分發後台線程已停止")
-        self.dispatcher_thread = None
-
-    def start_health_checker(self):
-        def health_check_loop():
-            while not self._stop_event.is_set():
-                # 檢查所有 RUNNING 任務
-                running_tasks = self.task_manager.get_running_tasks()  # 你需要實作這個方法，回傳所有狀態為 RUNNING 的任務
-                for task in running_tasks:
-                    task_id = task["task_id"]
-                    assigned_node = task.get("assigned_node")
-                    user_id = task.get("user_id")
-                    if not assigned_node:
-                        continue
-                    node_info = self.node_manager.get_node_info(assigned_node)  # 你需要實作這個方法
-                    if not node_info:
-                        continue
-                    # 呼叫工作端健康檢查
-                    try:
-                        worker_channel = grpc.insecure_channel(f"{node_info['ip']}:{node_info['port']}")
-                        stub = nodepool_pb2_grpc.WorkerNodeServiceStub(worker_channel)
-                        resp = stub.HealthCheck(nodepool_pb2.HealthCheckRequest(), timeout=5)
-                        if resp.success:
-                            # 健康，重置 fail_count
-                            self.task_health.setdefault(task_id, {})["fail_count"] = 0
-                        else:
-                            self.task_health.setdefault(task_id, {})["fail_count"] = self.task_health.get(task_id, {}).get("fail_count", 0) + 1
-                    except Exception:
-                        self.task_health.setdefault(task_id, {})["fail_count"] = self.task_health.get(task_id, {}).get("fail_count", 0) + 1
-                    finally:
-                        if worker_channel:
-                            worker_channel.close()
-                    # 如果失敗超過3次，重派任務
-                    if self.task_health[task_id]["fail_count"] >= 3:
-                        self._reassign_task(task_id, user_id)
-                time.sleep(self.health_check_interval)
-        threading.Thread(target=health_check_loop, daemon=True).start()
-
-    def _reassign_task(self, task_id, user_id):
-        # 1. 更新任務狀態為PENDING
-        self.task_manager.update_task_status(task_id, "PENDING", assigned_node=None)
-        # 2. 日誌
-        logging.warning(f"任務 {task_id} 因健康檢查失敗，已重派為PENDING")
-        # 3. 可選：通知主控端
-
-    def start_reward_scheduler(self):
-        def reward_loop():
-            while not self._stop_event.is_set():
-                # 統一處理所有已完成且尚未發獎勵的任務
-                completed_tasks = self.task_manager.get_completed_tasks_without_reward()  # 你需要實作這個方法
-                for task in completed_tasks:
-                    user_id = task["user_id"]
-                    assigned_node_id = task.get("assigned_node")
-                    cpt_cost = int(task.get("cpt_cost", 1))
-                    # 查 assigned_node_id 對應的 username
-                    worker_username = assigned_node_id
-                    # 如果 node_id 是 user_id，則查 username
-                    try:
-                        from user_manager import UserManager
-                        user_manager = UserManager()
-                        # 如果 node_id 是 user_id（數字），查 username
-                        if assigned_node_id and assigned_node_id.isdigit():
-                            user_row = user_manager.query_one("SELECT username FROM users WHERE id = ?", (int(assigned_node_id),))
-                            if user_row:
-                                worker_username = user_row["username"]
-                    except Exception as e:
-                        logging.warning(f"查詢 worker username 失敗: {e}")
-                    # 1. 檢查 user_id 餘額
-                    from user_manager import UserManager
-                    user_manager = UserManager()
-                    balance = user_manager.get_user_balance(user_id)
-                    if balance < cpt_cost:
-                        # 餘額不足，強制停止任務
-                        self.task_manager.force_stop_task(task["task_id"])
-                        logging.warning(f"主控端帳戶 {user_id} 餘額不足，任務 {task['task_id']} 已強制停止")
-                        continue
-                    # 2. 轉帳
-                    success, msg = user_manager.transfer_tokens(user_id, worker_username, cpt_cost)
-                    if success:
-                        self.task_manager.mark_reward_given(task["task_id"])
-                        logging.info(f"任務 {task['task_id']} 獎勵 {cpt_cost} 已由主控端 {user_id} 轉給 {worker_username}")
-                    else:
-                        logging.error(f"任務 {task['task_id']} 發獎勵失敗: {msg}")
-                time.sleep(self.reward_interval)
-        threading.Thread(target=reward_loop, daemon=True).start()
-
     def _dispatch_pending_tasks_loop(self):
         """後台線程循環，定期檢查並分發任務"""
         while not self._stop_event.is_set():
             logging.debug("開始新一輪任務分發檢查...")
             try:
-                # 1. 獲取待處理任務列表
-                pending_tasks = self.task_manager.get_pending_tasks()
-                if not pending_tasks:
-                    logging.debug("當前無待處理任務")
-                    self._stop_event.wait(self.dispatch_interval)
-                    continue
-
-                # 2. 獲取所有可用節點列表 (一次性獲取)
-                all_idle_nodes = [node for node in self.node_manager.get_node_list() if node.status == "Idle"]
-
-                # 移除沒有心跳或IP的節點
-                valid_idle_nodes = []
-                for node in all_idle_nodes:
-                    node_info = self.node_manager.get_node_info(node.node_id)
-                    ip = node_info.get("ip") if node_info else None
-                    last_heartbeat = None
-                    try:
-                        last_heartbeat = float(node.last_heartbeat)
-                    except Exception:
-                        last_heartbeat = 0
-                    # 心跳超過30秒或沒有IP就不列入
-                    if not ip or ip == "" or (time.time() - last_heartbeat > 30):
-                        logging.warning(f"移除無效節點: {node.node_id} (ip={ip}, last_heartbeat={last_heartbeat})")
-                        # 直接從redis刪除該節點資訊
-                        try:
-                            self.node_manager.redis_client.delete(f"node:{node.node_id}")
-                        except Exception as e:
-                            logging.error(f"刪除無效節點 {node.node_id} 失敗: {e}")
-                        continue
-                    valid_idle_nodes.append(node)
-
-                if not valid_idle_nodes:
-                     logging.info("無有效空閒節點可用於分發，等待下一輪")
-                     self._stop_event.wait(self.dispatch_interval)
-                     continue
-
-                logging.info(f"待處理任務: {len(pending_tasks)}, 空閒節點: {len(valid_idle_nodes)}")
-
-                dispatched_task_ids = set()
-                assigned_node_ids = set()
-
-                for task_data in pending_tasks:
-                    if self._stop_event.is_set(): break
-                    task_id = task_data["task_id"]
-                    reqs = task_data["requirements"]
-                    user_id = task_data.get("user_id")
-                    
-                    # 確保user_id不為None
-                    if not user_id:
-                        # 嘗試直接從Redis獲取任務信息來獲取user_id
-                        task_info = self.task_manager.get_task_info(task_id, include_zip=False)
-                        if task_info and task_info.get("user_id"):
-                            user_id = task_info.get("user_id")
-                            logging.info(f"從任務信息重新獲取到用戶ID: {user_id}")
-                        else:
-                            logging.error(f"無法確定任務 {task_id} 的用戶ID，跳過分發")
-                            continue
-
-                    # 檢查用戶餘額
-                    from user_manager import UserManager
-                    user_manager = UserManager()
-                    user_balance_result = user_manager.get_user_balance(user_id)
-                    if isinstance(user_balance_result, tuple):
-                        balance = user_balance_result[-1]
-                    else:
-                        balance = user_balance_result
-                    
-                    # 計算任務所需的 CPT 代币
-                    memory_gb_val = float(reqs["memory_gb"])
-                    cpu_score_val = float(reqs["cpu_score"])
-                    gpu_score_val = float(reqs["gpu_score"])
-                    gpu_memory_gb_val = float(reqs["gpu_memory_gb"])
-                    
-                    cpt_cost = (
-                        memory_gb_val +
-                        cpu_score_val / 100 +
-                        gpu_score_val / 100 +
-                        gpu_memory_gb_val
-                    )
-                    
-                    # 最低消費為1個代幣
-                    if cpt_cost < 1.0:
-                        cpt_cost = 1.0
-                    
-                    logging.info(f"任務 {task_id} 資源需求: 內存={memory_gb_val}GB, CPU分數={cpu_score_val}, " +
-                               f"GPU分數={gpu_score_val}, GPU顯存={gpu_memory_gb_val}GB, " +
-                               f"計算所需代幣: {cpt_cost:.2f} CPT")
-                    
-                    if balance < cpt_cost:
-                        logging.warning(f"用戶 {user_id} 餘額不足，無法分發任務 {task_id} (需要 {cpt_cost:.2f} CPT，目前 {balance:.2f} CPT)")
-                        continue
-
-                    candidate_nodes = [
-                        node for node in valid_idle_nodes
-                        if node.node_id not in assigned_node_ids and
-                           node.memory_gb >= reqs["memory_gb"] and
-                           node.cpu_score >= reqs["cpu_score"] and
-                           node.gpu_score >= reqs["gpu_score"] and
-                           node.gpu_memory_gb >= reqs["gpu_memory_gb"] and
-                           (reqs["location"] == "Any" or node.location == reqs["location"]) and
-                           (not reqs["gpu_name"] or reqs["gpu_name"].lower() == "any" or node.gpu_name == reqs["gpu_name"])
-                    ]
-
-                    # 嘗試分發到所有候選節點，直到成功
-                    dispatched = False
-                    for target_node in sorted(candidate_nodes, key=lambda n: n.cpu_score, reverse=True):
-                        logging.info(f"嘗試將任務 {task_id} 分發給節點 {target_node.node_id} (Port: {target_node.port})...")
-                        if self._try_dispatch_task_to_node(task_id, target_node):
-                            dispatched_task_ids.add(task_id)
-                            assigned_node_ids.add(target_node.node_id)
-                            dispatched = True
-                            break
-                        else:
-                            logging.warning(f"分發任務 {task_id} 給節點 {target_node.node_id} 失敗")
-                    if not dispatched:
-                        logging.warning(f"任務 {task_id} 無法分發給任何可用節點")
-
-                logging.debug(f"本輪任務分發結束，成功分發 {len(dispatched_task_ids)} 個任務")
-
+                self._dispatch_pending_tasks_once()
             except Exception as e:
                 logging.error(f"任務分發循環出錯: {e}", exc_info=True)
 
@@ -588,142 +504,252 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
 
         logging.info("任務分發後台線程循環結束")
 
-    def _try_dispatch_task_to_node(self, task_id, target_node):
-        """
-        嘗試將指定任務分發給目標節點。
+    def start_health_checker(self):
+        def health_check_loop():
+            while not self._stop_event.is_set():
+                try:
+                    # 檢查所有 RUNNING 任務的節點心跳狀態
+                    running_tasks = self.task_manager.get_running_tasks()
+                    current_time = time.time()
+                    
+                    for task in running_tasks:
+                        task_id = task["task_id"]
+                        user_id = task.get("user_id")
+                        
+                        # 獲取完整任務信息
+                        task_info = self.task_manager.get_task_info(task_id, include_zip=False)
+                        if not task_info:
+                            continue
+                            
+                        assigned_node = task_info.get("assigned_node")
+                        if not assigned_node:
+                            continue
 
-        Args:
-            task_id (str): 要分發的任務 ID。
-            target_node (nodepool_pb2.WorkerNodeInfo): 目標工作節點的信息對象。
+                        # 檢查節點狀態
+                        node_info = self.node_manager.get_node_info(assigned_node)
+                        if not node_info:
+                            logging.warning(f"節點 {assigned_node} 信息不存在，任務 {task_id} 可能需要重新分配")
+                            self._increment_task_fail_count(task_id, assigned_node, user_id)
+                            continue
 
-        Returns:
-            bool: 如果任務成功發送給 Worker 並被接受，返回 True，否則返回 False。
-        """
-        # 1. 檢查目標節點端口
-        if not target_node.port or target_node.port <= 0:
-            logging.error(f"節點 {target_node.node_id} 端口無效 ({target_node.port})，無法分發任務 {task_id}")
-            return False
+                        last_heartbeat = node_info.get("last_heartbeat", 0)
+                        if current_time - float(last_heartbeat) > self.node_timeout_threshold:
+                            logging.warning(f"節點 {assigned_node} 心跳超時，任務 {task_id} 標記為失敗")
+                            self._increment_task_fail_count(task_id, assigned_node, user_id)
+                
+                except Exception as e:
+                    logging.error(f"健康檢查錯誤: {e}", exc_info=True)
 
-        # 取得節點 IP（從 Redis 查）
-        node_info = self.node_manager.get_node_info(target_node.node_id)
-        ip = node_info.get("ip") if node_info else None
-        if not ip or ip == "":
-            logging.error(f"節點 {target_node.node_id} 註冊時未提供 IP，無法分發任務 {task_id}")
-            return False
+                self._stop_event.wait(self.health_check_interval)
+        
+        threading.Thread(target=health_check_loop, daemon=True).start()
+        logging.info("健康檢查線程已啟動")
 
-        worker_address = f'{ip}:{target_node.port}'  # 用查到的 IP
-        worker_channel = None
-        logging.info(f"準備分發任務 {task_id} 到節點 {target_node.node_id} ({worker_address})")
+    def start_reward_scheduler(self):
+        """啟動獎勵調度器，定期發放完成任務的獎勵並檢查餘額"""
+        def reward_scheduler_loop():
+            while not self._stop_event.is_set():
+                try:
+                    # 處理正在運行的任務，檢查餘額並發放獎勵
+                    running_tasks = self.task_manager.get_running_tasks()
+                    
+                    for task in running_tasks:
+                        task_id = task["task_id"]
+                        user_id = task.get("user_id")
+                        cpt_cost = int(float(task.get("cpt_cost", 1)))
+                        assigned_node = task.get("assigned_node", "")
+                        
+                        if user_id and assigned_node:
+                            # 檢查用戶餘額是否足夠下次付款
+                            if not self.task_manager.check_user_balance_for_next_payment(user_id, cpt_cost):
+                                # 餘額不足，停止任務
+                                self.task_manager.update_task_status(task_id, "STOPPED", assigned_node=None)
+                                self.node_manager.report_status(assigned_node, "Idle")
+                                
+                                # 從健康檢查中移除
+                                if task_id in self.task_health:
+                                    del self.task_health[task_id]
+                                
+                                # 記錄到日誌
+                                log_message = f"任務 {task_id} 因用戶 {user_id} 餘額不足已自動停止"
+                                logging.warning(log_message)
+                                self.task_manager.store_logs(task_id, "system", log_message, int(time.time()))
+                                continue
+                            
+                            # 發放獎勵給工作節點
+                            from user_manager import UserManager
+                            user_manager = UserManager()
+                            
+                            # 這裡應該發放給節點擁有者，暫時使用 assigned_node 作為接收者用戶名
+                            # 實際應用中需要根據 node_id 查找對應的用戶名
+                            success, msg = user_manager.transfer_tokens(user_id, assigned_node, cpt_cost)
+                            if success:
+                                logging.info(f"任務 {task_id} 轉帳成功: {cpt_cost} CPT 從用戶 {user_id} 到節點 {assigned_node}")
+                                
+                                # 轉帳後再次檢查餘額
+                                if not self.task_manager.check_user_balance_for_next_payment(user_id, cpt_cost):
+                                    # 餘額不足下次付款，停止任務
+                                    self.task_manager.update_task_status(task_id, "STOPPED", assigned_node=None)
+                                    self.node_manager.report_status(assigned_node, "Idle")
+                                    
+                                    if task_id in self.task_health:
+                                        del self.task_health[task_id]
+                                    
+                                    log_message = f"任務 {task_id} 轉帳後餘額不足，已停止任務"
+                                    logging.warning(log_message)
+                                    self.task_manager.store_logs(task_id, "system", log_message, int(time.time()))
+                            else:
+                                logging.error(f"任務 {task_id} 轉帳失敗: {msg}")
+                    
+                    # 獲取已完成但未發放獎勵的任務
+                    completed_tasks = self.task_manager.get_completed_tasks_without_reward()
+                    
+                    for task in completed_tasks:
+                        task_id = task["task_id"]
+                        user_id = task.get("user_id")
+                        
+                        # 獲取任務詳細信息
+                        task_info = self.task_manager.get_task_info(task_id, include_zip=False)
+                        if not task_info:
+                            continue
+                        
+                        assigned_node = task_info.get("assigned_node")
+                        cpt_cost = task_info.get("cpt_cost", "1")
+                        
+                        if assigned_node and user_id:
+                            # 標記獎勵已處理
+                            self.task_manager.mark_reward_given(task_id)
+                            logging.info(f"任務 {task_id} 已完成，標記獎勵已發放")
+                
+                except Exception as e:
+                    logging.error(f"獎勵調度錯誤: {e}", exc_info=True)
+                
+                self._stop_event.wait(self.reward_interval)
+        
+        threading.Thread(target=reward_scheduler_loop, daemon=True).start()
+        logging.info("獎勵調度器已啟動")
 
+    def _increment_task_fail_count(self, task_id, assigned_node, user_id):
+        """增加任務失敗計數"""
         try:
-            # 2. 獲取任務的詳細信息，包括 ZIP 二進制數據
-            #    調用修改後的 get_task_info，確保 include_zip=True
-            task_info = self.task_manager.get_task_info(task_id, include_zip=True)
-
-            # 檢查是否成功獲取任務信息以及 task_zip 是否存在
-            if not task_info:
-                 logging.error(f"無法獲取任務 {task_id} 的信息 (可能任務不存在?)，分發失敗")
-                 return False
-            if "task_zip" not in task_info:
-                logging.error(f"任務 {task_id} 的信息中缺少 'task_zip' 字段，分發失敗")
-                return False
-
-            # 3. 驗證 task_zip 是 bytes 類型
-            task_zip_bytes = task_info.get("task_zip")
-            if not isinstance(task_zip_bytes, bytes):
-                 logging.error(f"任務 {task_id} 的 task_zip 數據類型錯誤 (應為 bytes，實際為 {type(task_zip_bytes)})，分發失敗")
-                 # 處理可能存在的標記，例如 "<binary data>"
-                 if isinstance(task_zip_bytes, str) and task_zip_bytes == "<binary data>":
-                      logging.error(f"任務 {task_id} 的 task_zip 數據未正確獲取 (得到標記)，請檢查 get_task_info 邏輯，分發失敗")
-                 return False
-            if not task_zip_bytes: # 檢查是否為空 bytes
-                 logging.warning(f"任務 {task_id} 的 task_zip 數據為空，仍嘗試分發...")
-                 # 或者根據業務邏輯決定是否允許空 zip 分發
-                 # return False
-
-            # 4. 設置 gRPC 連接和調用超時
-            connect_timeout = 3 # 連接 Worker 的超時時間 (秒)
-            call_timeout = 30   # 調用 Worker ExecuteTask 的超時時間 (秒) - 可能需要根據任務準備時間調整
-
-            # 5. 建立到 Worker 的 gRPC 連接
-            logging.debug(f"正在連接到 Worker {target_node.node_id} at {worker_address}...")
-            worker_channel = grpc.insecure_channel(worker_address)
-            try:
-                 # 嘗試快速檢查連接是否可用，帶超時
-                 grpc.channel_ready_future(worker_channel).result(timeout=connect_timeout)
-                 logging.debug(f"成功連接到 Worker {target_node.node_id}")
-            except grpc.FutureTimeoutError:
-                 logging.warning(f"連接到 Worker {target_node.node_id} ({worker_address}) 超時 ({connect_timeout}s)")
-                 # 連接超時，關閉 channel 並返回失敗
-                 if worker_channel: worker_channel.close()
-                 return False
-
-            # 6. 發送 ExecuteTask 請求給 Worker
-            logging.debug(f"向 Worker {target_node.node_id} 發送 ExecuteTask 請求 (Task ID: {task_id})")
-            worker_stub = nodepool_pb2_grpc.WorkerNodeServiceStub(worker_channel)
-            execute_request = nodepool_pb2.ExecuteTaskRequest(
-                node_id=target_node.node_id, # 可選，用於 Worker 端驗證
-                task_id=task_id,
-                task_zip=task_zip_bytes # 傳遞驗證過的 bytes
-            )
-
-            # 設置調用超時
-            response = worker_stub.ExecuteTask(execute_request, timeout=call_timeout)
-
-            # 7. 處理 Worker 的響應
-            if response.success:
-                logging.info(f"成功將任務 {task_id} 分發給節點 {target_node.node_id}，Worker 已接受")
-                # 更新任務狀態為 RUNNING 並記錄分配的節點
-                update_ok = self.task_manager.update_task_status(task_id, "RUNNING", target_node.node_id)
-                if not update_ok:
-                     logging.error(f"任務 {task_id} 已被 Worker 接受，但在 Redis 中更新狀態失敗！")
-                     # 這是一個潛在的狀態不一致問題，需要關注
-                # 可選：更新 Master 端記錄的節點狀態（雖然 Worker 也會報告）
-                # self.node_manager.report_status(target_node.node_id, "Executing Task")
-                return True # 分發成功
-            else:
-                # Worker 明確拒絕執行任務
-                logging.warning(f"節點 {target_node.node_id} 拒絕執行任務 {task_id}: {response.message}")
-                return False # 分發失敗
-
-        except grpc.RpcError as e:
-            # 處理 gRPC 通信錯誤 (例如 DEADLINE_EXCEEDED, UNAVAILABLE, etc.)
-            error_code = e.code()
-            error_details = e.details()
-            log_level = logging.WARNING # 默認警告級別
-            if error_code == grpc.StatusCode.DEADLINE_EXCEEDED:
-                 log_level = logging.WARNING # 超時可能是暫時的
-                 log_message = f"調用 Worker {target_node.node_id} ({worker_address}) ExecuteTask 超時 ({call_timeout}s)"
-            elif error_code == grpc.StatusCode.UNAVAILABLE:
-                 log_level = logging.WARNING # Worker 可能暫時不可達
-                 log_message = f"Worker {target_node.node_id} ({worker_address}) 不可用"
-            else:
-                 log_level = logging.ERROR # 其他 gRPC 錯誤可能是更嚴重的問題
-                 log_message = f"與 Worker {target_node.node_id} ({worker_address}) 通信時 gRPC 錯誤: {error_code} - {error_details}"
-            logging.log(log_level, log_message)
-            return False # 分發失敗
+            if task_id not in self.task_health:
+                self.task_health[task_id] = {
+                    "fail_count": 0,
+                    "last_check": 0,
+                    "assigned_node": assigned_node,
+                    "user_id": user_id,
+                    "cpt_cost": 0
+                }
+            
+            self.task_health[task_id]["fail_count"] += 1
+            self.task_health[task_id]["last_check"] = time.time()
+            
+            # 如果失敗次數過多，標記任務為失敗
+            if self.task_health[task_id]["fail_count"] >= 3:
+                self.task_manager.update_task_status(task_id, "FAILED")
+                logging.error(f"任務 {task_id} 失敗次數過多，標記為 FAILED")
+                
+                # 從健康檢查中移除
+                del self.task_health[task_id]
+            
         except Exception as e:
-            # 捕獲其他任何意外錯誤
-            logging.error(f"分發任務 {task_id} 給節點 {target_node.node_id} ({worker_address}) 時發生未知錯誤: {e}", exc_info=True)
-            return False # 分發失敗
-        finally:
-            # 無論成功或失敗，都要確保關閉 gRPC channel
-            if worker_channel:
-                worker_channel.close()
-                logging.debug(f"已關閉到 Worker {target_node.node_id} 的 gRPC channel")
-    # --- gRPC 服務方法實現 ---
-    def UploadTask(self, request, context):
-        """處理來自主控端的任務上傳請求，記錄 user_id"""
-        logging.info(f"收到任務上傳請求: 任務 {request.task_id}")
+            logging.error(f"更新任務失敗計數錯誤: {e}")
+
+    def stop_task_dispatcher(self):
+        """停止任務分發線程"""
+        if hasattr(self, '_stop_event'):
+            self._stop_event.set()
+        if hasattr(self, 'dispatcher_thread') and self.dispatcher_thread and self.dispatcher_thread.is_alive():
+            self.dispatcher_thread.join(timeout=2)
+            logging.info("任務分發線程已停止")
+
+    def _dispatch_pending_tasks_once(self):
+        """執行一次任務分發檢查"""
         try:
-            user_id = request.user_id
-            if not user_id:
-                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                context.set_details("缺少用戶ID")
-                return nodepool_pb2.UploadTaskResponse(success=False, message="缺少用戶ID")
-            # 計算任務所需 CPT
-            cpt_cost = self._calculate_cpt_cost(request)
-            # 存儲任務，記錄 user_id 及 cpt_cost
+            pending_tasks = self.task_manager.get_pending_tasks()
+            if not pending_tasks:
+                logging.debug("沒有待處理的任務")
+                return
+            logging.info(f"發現 {len(pending_tasks)} 個待處理任務")
+            for task in pending_tasks:
+                task_id = task["task_id"]
+                requirements = task["requirements"]
+                available_nodes = self.node_manager.get_available_nodes(
+                    requirements["memory_gb"],
+                    requirements["cpu_score"],
+                    requirements["gpu_score"],
+                    requirements["gpu_memory_gb"],
+                    requirements["location"],
+                    requirements["gpu_name"]
+                )
+                if available_nodes:
+                    selected_node = available_nodes[0]
+                    node_id = selected_node.node_id
+                    success = self.task_manager.update_task_status(
+                        task_id, 
+                        "RUNNING", 
+                        assigned_node=node_id
+                    )
+                    if success:
+                        self.node_manager.report_status(node_id, "BUSY")
+                        logging.info(f"任務 {task_id} 已分配給節點 {node_id}")
+                        self.task_health[task_id] = {
+                            "fail_count": 0,
+                            "last_check": time.time(),
+                            "assigned_node": node_id,
+                            "user_id": task.get("user_id", ""),
+                            "cpt_cost": 0
+                        }
+                        # === 新增：主動推送任務到工作端 ===
+                        try:
+                            # 取得節點資訊
+                            node_info = self.node_manager.get_node_info(node_id)
+                            if not node_info:
+                                logging.error(f"找不到節點 {node_id} 的資訊，無法推送任務")
+                                continue
+                            worker_host = node_info.get("hostname", "127.0.0.1")
+                            worker_port = node_info.get("port", 50053)
+                            # 取得任務內容
+                            task_info = self.task_manager.get_task_info(task_id, include_zip=True)
+                            if not task_info:
+                                logging.error(f"找不到任務 {task_id} 的內容，無法推送")
+                                continue
+                            task_zip = task_info.get("task_zip", b"")
+                            # 建立 gRPC 連線並呼叫 ExecuteTask
+                            import nodepool_pb2_grpc
+                            channel = grpc.insecure_channel(f"{worker_host}:{worker_port}")
+                            stub = nodepool_pb2_grpc.WorkerNodeServiceStub(channel)
+                            req = nodepool_pb2.ExecuteTaskRequest(
+                                node_id=node_id,
+                                task_id=task_id,
+                                task_zip=task_zip
+                            )
+                            resp = stub.ExecuteTask(req, timeout=10)
+                            if resp.success:
+                                logging.info(f"已推送任務 {task_id} 給節點 {node_id} 執行")
+                            else:
+                                logging.error(f"推送任務 {task_id} 給節點 {node_id} 失敗: {resp.message}")
+                        except Exception as e:
+                            logging.error(f"推送任務 {task_id} 給節點 {node_id} 發生錯誤: {e}", exc_info=True)
+                        # === 新增結束 ===
+                    else:
+                        logging.error(f"更新任務 {task_id} 狀態失敗")
+                else:
+                    logging.debug(f"任務 {task_id} 暫時沒有符合要求的可用節點")
+        except Exception as e:
+            logging.error(f"分發任務時發生錯誤: {e}", exc_info=True)
+
+    def UploadTask(self, request, context):
+        """處理任務上傳"""
+        try:
+            # 驗證 user_id
+            if not request.user_id:
+                return nodepool_pb2.UploadTaskResponse(
+                    success=False,
+                    message="Missing user_id"
+                )
+            
+            # 存儲任務
             success = self.task_manager.store_task(
                 request.task_id,
                 request.task_zip,
@@ -733,459 +759,399 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                 request.gpu_memory_gb,
                 request.location,
                 request.gpu_name,
-                user_id,
-                cpt_cost=cpt_cost  # 你需要在 store_task 增加這個欄位
+                request.user_id
             )
-            if not success:
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details("任務存儲失敗")
-                return nodepool_pb2.UploadTaskResponse(success=False, message="任務存儲失敗")
-            return nodepool_pb2.UploadTaskResponse(success=True, message="任務已上傳")
+            
+            if success:
+                logging.info(f"任務 {request.task_id} 上傳成功 (用戶: {request.user_id})")
+                return nodepool_pb2.UploadTaskResponse(
+                    success=True,
+                    message="任務已上傳"
+                )
+            else:
+                return nodepool_pb2.UploadTaskResponse(
+                    success=False,
+                    message="任務上傳失敗"
+                )
+                
         except Exception as e:
-            logging.error(f"處理任務 {request.task_id} 上傳時發生未知錯誤: {e}", exc_info=True)
+            logging.error(f"UploadTask 服務錯誤: {e}", exc_info=True)
             context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details("服務器內部錯誤")
-            return nodepool_pb2.UploadTaskResponse(success=False, message="服務器內部錯誤")
-
-    def _calculate_cpt_cost(self, request):
-        # 根據需求計算 CPT 花費
-        memory_gb_val = float(request.memory_gb)
-        cpu_score_val = float(request.cpu_score)
-        gpu_score_val = float(request.gpu_score)
-        gpu_memory_gb_val = float(request.gpu_memory_gb)
-        cpt_cost = memory_gb_val + cpu_score_val / 100 + gpu_score_val / 100 + gpu_memory_gb_val
-        if cpt_cost < 1.0:
-            cpt_cost = 1.0
-        return int(cpt_cost)
+            context.set_details(f"Internal server error: {str(e)}")
+            return nodepool_pb2.UploadTaskResponse(
+                success=False,
+                message=f"Internal error: {str(e)}"
+            )
 
     def PollTaskStatus(self, request, context):
         """輪詢任務狀態"""
-        task_id = request.task_id
-        logging.debug(f"處理任務狀態輪詢請求: {task_id}")
         try:
-            task_info = self.task_manager.get_task_info(task_id, include_zip=False) # 不獲取 zip
-            if task_info:
-                status = task_info.get("status", "UNKNOWN")
-                # 獲取輸出，如果為空則返回空列表
-                output_str = task_info.get("output", "")
-                output_lines = output_str.splitlines() if output_str else []
-                message = f"狀態查詢成功: {status}"
-                logging.debug(f"任務 {task_id} 狀態: {status}, Output lines: {len(output_lines)}")
+            task_info = self.task_manager.get_task_info(request.task_id, include_zip=False)
+            
+            if not task_info:
                 return nodepool_pb2.PollTaskStatusResponse(
-                    task_id=task_id,
-                    status=status,
-                    output=output_lines, # 返回列表
-                    message=message
-                )
-            else:
-                logging.warning(f"輪詢任務 {task_id} 失敗：任務不存在")
-                context.set_code(grpc.StatusCode.NOT_FOUND)
-                context.set_details("任務不存在")
-                return nodepool_pb2.PollTaskStatusResponse(
-                    task_id=task_id,
-                    status="UNKNOWN",
+                    task_id=request.task_id,
+                    status="NOT_FOUND",
                     output=[],
-                    message="任務不存在"
+                    message="Task not found"
                 )
-        except Exception as e:
-            logging.error(f"輪詢任務 {task_id} 狀態時發生錯誤: {e}", exc_info=True)
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details("服務器內部錯誤")
+            
+            # 獲取輸出行
+            output_lines = []
+            if task_info.get("output"):
+                output_lines = task_info["output"].strip().split('\n')
+                output_lines = [line for line in output_lines if line.strip()]
+            
             return nodepool_pb2.PollTaskStatusResponse(
-                task_id=task_id,
+                task_id=request.task_id,
+                status=task_info.get("status", "UNKNOWN"),
+                output=output_lines,
+                message=f"Task status: {task_info.get('status', 'UNKNOWN')}"
+            )
+            
+        except Exception as e:
+            logging.error(f"PollTaskStatus 服務錯誤: {e}", exc_info=True)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(f"Internal server error: {str(e)}")
+            return nodepool_pb2.PollTaskStatusResponse(
+                task_id=request.task_id,
                 status="ERROR",
                 output=[],
-                message=f"狀態查詢失敗: {str(e)}"
+                message=f"Internal error: {str(e)}"
             )
 
     def StoreOutput(self, request, context):
-        """存儲來自 Worker 的中途輸出"""
-        task_id = request.task_id
-        output = request.output
-        logging.debug(f"收到任務 {task_id} 的中途輸出")
-        success = self.task_manager.store_output(task_id, output)
-        if success:
-            return nodepool_pb2.StatusResponse(success=True, message="中途輸出存儲成功")
-        else:
-            # 考慮是否要設置更具體的錯誤碼
+        """存儲任務輸出"""
+        try:
+            success = self.task_manager.store_output(request.task_id, request.output)
+            
+            if success:
+                return nodepool_pb2.StatusResponse(
+                    success=True,
+                    message=f"Output for task {request.task_id} stored successfully"
+                )
+            else:
+                return nodepool_pb2.StatusResponse(
+                    success=False,
+                    message=f"Failed to store output for task {request.task_id}"
+                )
+                
+        except Exception as e:
+            logging.error(f"StoreOutput 服務錯誤: {e}", exc_info=True)
             context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details("中途輸出存儲失敗 (內部錯誤)")
-            return nodepool_pb2.StatusResponse(success=False, message="中途輸出存儲失敗")
+            context.set_details(f"Internal server error: {str(e)}")
+            return nodepool_pb2.StatusResponse(success=False, message=f"Internal error: {str(e)}")
 
     def StoreResult(self, request, context):
-        """存儲來自 Worker 的最終結果"""
-        task_id = request.task_id
-        result_zip = request.result_zip
-        logging.info(f"收到任務 {task_id} 的最終結果 (大小: {len(result_zip)} bytes)")
-        success = self.task_manager.store_result(task_id, result_zip)
-        if success:
-            return nodepool_pb2.StatusResponse(success=True, message="結果存儲成功")
-        else:
+        """存儲任務結果"""
+        try:
+            success = self.task_manager.store_result(request.task_id, request.result_zip)
+            
+            if success:
+                return nodepool_pb2.StatusResponse(
+                    success=True,
+                    message=f"Result for task {request.task_id} stored successfully"
+                )
+            else:
+                return nodepool_pb2.StatusResponse(
+                    success=False,
+                    message=f"Failed to store result for task {request.task_id}"
+                )
+                
+        except Exception as e:
+            logging.error(f"StoreResult 服務錯誤: {e}", exc_info=True)
             context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details("結果存儲失敗 (內部錯誤)")
-            return nodepool_pb2.StatusResponse(success=False, message="結果存儲失敗")
+            context.set_details(f"Internal server error: {str(e)}")
+            return nodepool_pb2.StatusResponse(success=False, message=f"Internal error: {str(e)}")
 
     def GetTaskResult(self, request, context):
-        """客戶端獲取任務結果"""
-        task_id = request.task_id
-        logging.info(f"處理獲取任務 {task_id} 結果的請求")
+        """獲取任務結果"""
         try:
-            result_zip, status = self.task_manager.get_task_result_zip(task_id)
-
-            if status == "COMPLETED":
-                if result_zip:
-                     logging.info(f"成功返回任務 {task_id} 的結果 (大小: {len(result_zip)} bytes)")
-                     return nodepool_pb2.GetTaskResultResponse(
-                        success=True,
-                        message="獲取結果成功",
-                        result_zip=result_zip
-                     )
-                else:
-                     logging.warning(f"任務 {task_id} 狀態為 COMPLETED 但結果 ZIP 為空")
-                     context.set_code(grpc.StatusCode.INTERNAL) # 狀態和數據不一致，算內部錯誤
-                     context.set_details("任務已完成但結果數據丟失")
-                     return nodepool_pb2.GetTaskResultResponse(
+            # 驗證用戶權限（如果有提供 token）
+            task_id = request.task_id
+            user_id = None
+            if hasattr(request, 'token') and request.token:
+                user_id = self.auth_manager._verify_token(request.token)
+                if not user_id:
+                    context.set_code(grpc.StatusCode.UNAUTHENTICATED)
+                    context.set_details("Invalid token")
+                    return nodepool_pb2.GetTaskResultResponse(
                         success=False,
-                        message="任務已完成但結果數據丟失",
+                        message="認證失敗",
                         result_zip=b""
-                     )
-            elif status == "UNKNOWN":
-                 logging.warning(f"獲取任務 {task_id} 結果失敗：任務不存在")
-                 context.set_code(grpc.StatusCode.NOT_FOUND)
-                 context.set_details("任務不存在")
-                 return nodepool_pb2.GetTaskResultResponse(
-                     success=False,
-                     message="任務不存在",
-                     result_zip=b""
-                 )
-            else: # PENDING, RUNNING, FAILED, ERROR 等狀態
-                logging.info(f"獲取任務 {task_id} 結果請求被拒絕：任務狀態為 {status}")
-                context.set_code(grpc.StatusCode.FAILED_PRECONDITION) # 狀態不滿足獲取結果的條件
-                context.set_details(f"任務未完成或已失敗，當前狀態: {status}")
+                    )
+            
+            result_zip, status = self.task_manager.get_task_result_zip(task_id)
+            
+            if status == "COMPLETED":
+                response = nodepool_pb2.GetTaskResultResponse(
+                    success=True,
+                    message=f"Task {task_id} completed successfully",
+                    result_zip=result_zip
+                )
+                
+                # 任務結果成功獲取後，自動清理任務數據
+                # 在後台執行清理以避免阻塞回應
+                def cleanup_task():
+                    try:
+                        # 稍等一會兒確保結果已經發送
+                        import time
+                        time.sleep(2)
+                        
+                        # 清理任務數據和日誌
+                        cleanup_success = self.task_manager.cleanup_task_data(task_id)
+                        if cleanup_success:
+                            logging.info(f"任務 {task_id} 結果下載完成，已自動清理任務數據")
+                        else:
+                            logging.warning(f"任務 {task_id} 數據清理失敗")
+                    except Exception as e:
+                        logging.error(f"清理任務 {task_id} 數據時發生錯誤: {e}", exc_info=True)
+                
+                # 啟動清理任務的背景線程
+                import threading
+                cleanup_thread = threading.Thread(target=cleanup_task, daemon=True)
+                cleanup_thread.start()
+                
+                return response
+                
+            elif status in ["PENDING", "RUNNING"]:
                 return nodepool_pb2.GetTaskResultResponse(
                     success=False,
-                    message=f"任務未完成或已失敗，當前狀態: {status}",
+                    message=f"Task {task_id} is still {status.lower()}",
                     result_zip=b""
                 )
+            else:
+                return nodepool_pb2.GetTaskResultResponse(
+                    success=False,
+                    message=f"Task {task_id} status: {status}",
+                    result_zip=b""
+                )
+                
         except Exception as e:
-            logging.error(f"獲取任務 {task_id} 結果時發生未知錯誤: {e}", exc_info=True)
+            logging.error(f"GetTaskResult 服務錯誤: {e}", exc_info=True)
             context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details("服務器內部錯誤")
+            context.set_details(f"Internal server error: {str(e)}")
             return nodepool_pb2.GetTaskResultResponse(
                 success=False,
-                message=f"獲取結果失敗: {str(e)}",
+                message=f"Internal error: {str(e)}",
                 result_zip=b""
             )
 
     def TaskCompleted(self, request, context):
-        """處理來自 Worker 的任務完成通知"""
-        task_id = request.task_id
-        node_id = request.node_id
-        success = request.success
-        
-        # 添加詳細日誌
-        logging.info(f"開始處理來自節點 {node_id} 的任務 {task_id} 完成通知")
-        
+        """處理任務完成通知"""
         try:
-            status = "COMPLETED" if success else "FAILED"
-            
-            # 記錄任務狀態更新
-            logging.info(f"嘗試將任務 {task_id} 狀態更新為 {status}")
-            update_success = self.task_manager.update_task_status(task_id, status)
-            logging.info(f"任務狀態更新{'成功' if update_success else '失敗'}")
-            
-            if update_success:
-                # 記錄節點狀態更新
-                logging.info(f"嘗試將節點 {node_id} 狀態更新為 Idle")
-                node_update_success, msg = self.node_manager.report_status(node_id, "Idle")
-                logging.info(f"節點狀態更新{'成功' if node_update_success else '失敗'}: {msg}")
+            if request.success:
+                # 任務成功完成
+                success = self.task_manager.update_task_status(request.task_id, "COMPLETED")
                 
-                return nodepool_pb2.StatusResponse(
-                    success=True,
-                    message=f"任務狀態更新成功: {status}"
-                )
+                # 將節點狀態設回 Idle
+                if request.node_id:
+                    self.node_manager.report_status(request.node_id, "Idle")
+                
+                # 從健康檢查中移除
+                if request.task_id in self.task_health:
+                    del self.task_health[request.task_id]
+                
+                message = f"Task {request.task_id} completed successfully"
             else:
-                error_msg = f"更新任務 {task_id} 狀態失敗"
-                logging.error(error_msg)
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details(error_msg)
-                return nodepool_pb2.StatusResponse(
-                    success=False,
-                    message=error_msg
-                )
+                # 任務失敗
+                success = self.task_manager.update_task_status(request.task_id, "FAILED")
+                
+                # 將節點狀態設回 Idle
+                if request.node_id:
+                    self.node_manager.report_status(request.node_id, "Idle")
+                
+                # 從健康檢查中移除
+                if request.task_id in self.task_health:
+                    del self.task_health[request.task_id]
+                
+                message = f"Task {request.task_id} failed"
+            
+            if success:
+                logging.info(message)
+                return nodepool_pb2.StatusResponse(success=True, message=message)
+            else:
+                return nodepool_pb2.StatusResponse(success=False, message=f"Failed to update task status")
+                
         except Exception as e:
-            error_msg = f"處理任務 {task_id} 完成通知時發生錯誤: {str(e)}"
-            logging.error(error_msg, exc_info=True)
+            logging.error(f"TaskCompleted 服務錯誤: {e}", exc_info=True)
             context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(error_msg)
-            return nodepool_pb2.StatusResponse(
+            context.set_details(f"Internal server error: {str(e)}")
+            return nodepool_pb2.StatusResponse(success=False, message=f"Internal error: {str(e)}")
+
+    def GetAllTasks(self, request, context):
+        """獲取所有任務的列表"""
+        logging.info(f"收到 GetAllTasks 請求，token: {request.token[:10] if request.token else 'None'}...")
+        if not self.auth_manager:
+            logging.error("auth_manager 未設置")
+            return nodepool_pb2.GetAllTasksResponse(
                 success=False,
-                message=error_msg
+                message="Authentication service not available",
+                tasks=[]
+            )
+        # 修正：確保 user_id 是 int 或 str，不是 dict
+        user_info = self.auth_manager.verify_token(request.token)
+        if isinstance(user_info, dict):
+            user_id = user_info.get("user_id")
+        else:
+            user_id = user_info
+        if not user_id:
+            logging.warning("GetAllTasks: token 驗證失敗")
+            return nodepool_pb2.GetAllTasksResponse(
+                success=False,
+                message="Invalid or expired token",
+                tasks=[]
+            )
+        try:
+            user_tasks = self.task_manager.get_user_tasks(user_id)
+            logging.info(f"為用戶 {user_id} 找到 {len(user_tasks)} 個任務")
+            tasks = []
+            for task_info in user_tasks:
+                assigned_node = task_info.get("assigned_node", "")
+                tasks.append(nodepool_pb2.TaskStatus(
+                    task_id=task_info["task_id"],
+                    status=task_info["status"],
+                    created_at=task_info.get("created_at", ""),
+                    updated_at=task_info.get("updated_at", ""),
+                    assigned_node=assigned_node
+                ))
+            return nodepool_pb2.GetAllTasksResponse(
+                success=True,
+                message=f"Found {len(tasks)} tasks for user {user_id}",
+                tasks=tasks
+            )
+        except Exception as e:
+            logging.error(f"GetAllTasks 處理失敗: {e}", exc_info=True)
+            return nodepool_pb2.GetAllTasksResponse(
+                success=False,
+                message=f"Error retrieving tasks: {str(e)}",
+                tasks=[]
             )
 
-    def UpdateTaskStatus(self, request, context):
-        """處理來自工作節點的任務狀態更新請求"""
-        task_id = request.task_id
-        status = request.status
-        message = request.message
-        
-        logging.info(f"收到任務 {task_id} 的狀態更新請求: {status}, 訊息: {message}")
-        
+    def GetTaskLogs(self, request, context):
+        """獲取任務日誌"""
         try:
-            # 更新任務狀態
-            update_success = self.task_manager.update_task_status(task_id, status)
-            
-            if update_success:
-                return nodepool_pb2.StatusResponse(
-                    success=True,
-                    message=f"任務狀態成功更新為: {status}"
-                )
-            else:
-                error_msg = f"更新任務 {task_id} 狀態失敗"
-                logging.error(error_msg)
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details(error_msg)
-                return nodepool_pb2.StatusResponse(
+            # 權限驗證（可選）
+            if self.auth_manager:
+                user_id = self.auth_manager.verify_token(request.token)
+                if not user_id:
+                    return nodepool_pb2.GetTaskLogsResponse(
+                        success=False,
+                        message="Invalid or expired token",
+                        logs=""
+                    )
+            # 取得日誌
+            log_info = self.task_manager.get_task_logs(request.task_id)
+            if not log_info:
+                return nodepool_pb2.GetTaskLogsResponse(
                     success=False,
-                    message=error_msg
+                    message="Task not found or no logs",
+                    logs=""
                 )
-                
+            # 將日誌合併為字串
+            logs_str = "\n".join(log_info.get("logs", []))
+            return nodepool_pb2.GetTaskLogsResponse(
+                success=True,
+                message="Logs retrieved successfully",
+                logs=logs_str
+            )
         except Exception as e:
-            error_msg = f"處理任務 {task_id} 狀態更新時發生錯誤: {str(e)}"
-            logging.error(error_msg, exc_info=True)
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(error_msg)
-            return nodepool_pb2.StatusResponse(
+            logging.error(f"GetTaskLogs 服務錯誤: {e}", exc_info=True)
+            return nodepool_pb2.GetTaskLogsResponse(
                 success=False,
-                message=error_msg
+                message=f"Internal error: {str(e)}",
+                logs=""
             )
 
     def StoreLogs(self, request, context):
-        """存儲工作節點回報的日誌"""
+        """存儲任務日誌"""
         try:
-            with self.logs_lock:
-                task_id = request.task_id
-                if task_id not in self.task_logs:
-                    self.task_logs[task_id] = []
-                
-                new_logs = json.loads(request.logs)
-                self.task_logs[task_id].extend(new_logs)
-                
-                # 清理超過6小時的日誌
-                cutoff = time.time() - 21600
-                self.task_logs[task_id] = [
-                    log for log in self.task_logs[task_id]
-                    if log['timestamp'] > cutoff
-                ]
-            
-            return nodepool_pb2.StatusResponse(success=True)
+            success = self.task_manager.store_logs(
+                request.task_id,
+                request.node_id,
+                request.logs,
+                request.timestamp
+            )
+            if success:
+                return nodepool_pb2.StatusResponse(
+                    success=True,
+                    message=f"Logs for task {request.task_id} stored successfully"
+                )
+            else:
+                return nodepool_pb2.StatusResponse(
+                    success=False,
+                    message=f"Failed to store logs for task {request.task_id}"
+                )
         except Exception as e:
-            logging.error(f"存儲日誌失敗: {e}")
-            return nodepool_pb2.StatusResponse(success=False, message=str(e))
+            logging.error(f"StoreLogs 服務錯誤: {e}", exc_info=True)
+            return nodepool_pb2.StatusResponse(
+                success=False,
+                message=f"Internal error: {str(e)}"
+            )
 
-    def GetTaskLogs(self, request, context):
-        """獲取任務的日誌"""
+    def StopTask(self, request, context):
+        """停止任務"""
         try:
-            # 驗證token並獲取用戶ID
-            user_id = self._verify_token(request.token)
+            # 驗證用戶權限
+            user_id = self.auth_manager._verify_token(request.token)
             if not user_id:
                 context.set_code(grpc.StatusCode.UNAUTHENTICATED)
-                context.set_details("無效的令牌")
-                return nodepool_pb2.GetTaskLogsResponse(
-                    success=False,
-                    message="無效的令牌"
-                )
+                context.set_details("Invalid token")
+                return nodepool_pb2.StatusResponse(success=False, message="認證失敗")
             
             task_id = request.task_id
             
-            # 檢查任務是否存在
+            # 檢查任務是否存在且屬於該用戶
             task_info = self.task_manager.get_task_info(task_id, include_zip=False)
             if not task_info:
-                context.set_code(grpc.StatusCode.NOT_FOUND)
-                context.set_details("找不到該任務")
-                return nodepool_pb2.GetTaskLogsResponse(
-                    success=False,
-                    message="找不到該任務"
-                )
+                return nodepool_pb2.StatusResponse(success=False, message="任務不存在")
             
-            # 檢查任務是否屬於該用戶
-            if str(task_info.get("user_id", "")) != str(user_id):
-                context.set_code(grpc.StatusCode.PERMISSION_DENIED)
-                context.set_details("無權訪問此任務的日誌")
-                return nodepool_pb2.GetTaskLogsResponse(
-                    success=False,
-                    message="無權訪問此任務的日誌"
-                )
+            task_user_id = task_info.get("user_id")
+            if str(task_user_id) != str(user_id):
+                return nodepool_pb2.StatusResponse(success=False, message="無權限停止此任務")
             
-            with self.logs_lock:
-                if task_id not in self.task_logs:
-                    return nodepool_pb2.GetTaskLogsResponse(
-                        success=False,
-                        message="找不到該任務的日誌"
-                    )
-                
-                return nodepool_pb2.GetTaskLogsResponse(
-                    success=True,
-                    message="成功獲取任務日誌",
-                    logs=json.dumps(self.task_logs[task_id])
-                )
-        except Exception as e:
-            logging.error(f"獲取日誌失敗: {e}")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(f"服務器內部錯誤: {str(e)}")
-            return nodepool_pb2.GetTaskLogsResponse(
-                success=False,
-                message=f"獲取日誌失敗: {str(e)}"
-            )
-
-    def GetUserTasks(self, request, context):
-        """獲取用戶的所有任務"""
-        try:
-            # 驗證token並獲取用戶ID
-            user_id = self._verify_token(request.token)
-            if not user_id:
-                context.set_code(grpc.StatusCode.UNAUTHENTICATED)
-                context.set_details("Invalid token")
-                return nodepool_pb2.GetUserTasksResponse(success=False, message="Invalid token")
-
-            # 獲取用戶的任務
-            tasks = self.task_manager.get_user_tasks(user_id)
+            current_status = task_info.get("status")
+            if current_status in ["COMPLETED", "FAILED", "STOPPED"]:
+                return nodepool_pb2.StatusResponse(success=False, message=f"任務已處於 {current_status} 狀態，無法停止")
             
-            # 轉換為proto消息
-            task_statuses = []
-            for task in tasks:
-                task_statuses.append(nodepool_pb2.TaskStatus(
-                    task_id=task["task_id"],
-                    status=task["status"],
-                    created_at=task["created_at"],
-                    updated_at=task["updated_at"]
-                ))
-
-            return nodepool_pb2.GetUserTasksResponse(
-                success=True,
-                message="Success",
-                tasks=task_statuses
-            )
-        except Exception as e:
-            logging.error(f"獲取用戶任務失敗: {e}", exc_info=True)
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
-            return nodepool_pb2.GetUserTasksResponse(success=False, message=str(e))
-
-    def GetTaskStatus(self, request, context):
-        """獲取特定任務的狀態"""
-        try:
-            # 驗證token
-            user_id = self._verify_token(request.token)
-            if not user_id:
-                context.set_code(grpc.StatusCode.UNAUTHENTICATED)
-                context.set_details("Invalid token")
-                return nodepool_pb2.GetTaskStatusResponse(success=False, message="Invalid token")
-
-            # 獲取任務狀態
-            task_info = self.task_manager.get_task_status(request.task_id)
-            if not task_info:
-                return nodepool_pb2.GetTaskStatusResponse(
-                    success=False,
-                    message="Task not found"
-                )
-
-            # 檢查任務是否屬於該用戶
-            if str(task_info["user_id"]) != str(user_id):
-                context.set_code(grpc.StatusCode.PERMISSION_DENIED)
-                context.set_details("Task does not belong to user")
-                return nodepool_pb2.GetTaskStatusResponse(
-                    success=False,
-                    message="Task does not belong to user"
-                )
-
-            return nodepool_pb2.GetTaskStatusResponse(
-                success=True,
-                message="Success",
-                task=nodepool_pb2.TaskStatus(
-                    task_id=task_info["task_id"],
-                    status=task_info["status"],
-                    created_at=task_info["created_at"],
-                    updated_at=task_info["updated_at"]
-                )
-            )
-        except Exception as e:
-            logging.error(f"獲取任務狀態失敗: {e}", exc_info=True)
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
-            return nodepool_pb2.GetTaskStatusResponse(success=False, message=str(e))
-
-    def GetAllTasks(self, request, context):
-        """獲取所有任務列表，用於主控端同步"""
-        try:
-            # 驗證token
-            user_id = self._verify_token(request.token)
-            if not user_id:
-                context.set_code(grpc.StatusCode.UNAUTHENTICATED)
-                context.set_details("Invalid token")
-                return nodepool_pb2.GetAllTasksResponse(success=False, message="Invalid token")
-
-            # 從Redis中查詢所有任務鍵
-            task_keys = self.task_manager.redis_client.keys("task:*")
-            all_tasks = []
+            # 停止任務
+            assigned_node = task_info.get("assigned_node")
+            success = self.task_manager.update_task_status(task_id, "STOPPED", assigned_node=None)
             
-            for key in task_keys:
-                task_id = key.split(":", 1)[1]
-                task_info = self.task_manager.get_task_info(task_id, include_zip=False)
-                
-                if task_info:
-                    # 只返回屬於當前用戶的任務
-                    if task_info.get("user_id") and str(task_info.get("user_id")) == str(user_id):
-                        # 確保時間格式正確
-                        created_at = ""
-                        updated_at = ""
-                        
-                        try:
-                            # 如果時間戳是數字，轉化為字符串格式
-                            if task_info.get("created_at"):
-                                created_timestamp = float(task_info.get("created_at", 0))
-                                created_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(created_timestamp))
-                            
-                            if task_info.get("updated_at"):
-                                updated_timestamp = float(task_info.get("updated_at", 0))
-                                updated_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(updated_timestamp))
-                        except (ValueError, TypeError) as e:
-                            logging.warning(f"任務 {task_id} 時間戳格式錯誤: {e}")
-                        
-                        # 創建TaskStatus對象
-                        task_status = nodepool_pb2.TaskStatus(
-                            task_id=task_id,
-                            status=task_info.get("status", "UNKNOWN"),
-                            created_at=created_at,
-                            updated_at=updated_at,
-                            assigned_node=task_info.get("assigned_node", "")
+            # === 通知工作端停止任務（移除 reason 參數） ===
+            if assigned_node:
+                node_info = self.node_manager.get_node_info(assigned_node)
+                if node_info and node_info.get("port", 0) > 0:
+                    worker_host = node_info.get("hostname", "127.0.0.1")
+                    worker_port = node_info.get("port", 50053)
+                    try:
+                        import nodepool_pb2_grpc
+                        channel = grpc.insecure_channel(f"{worker_host}:{worker_port}")
+                        stub = nodepool_pb2_grpc.WorkerNodeServiceStub(channel)
+                        stop_req = nodepool_pb2.StopTaskExecutionRequest(
+                            task_id=task_id
+                            # 不再傳 reason
                         )
-                        all_tasks.append(task_status)
-            
-            logging.info(f"返回用戶 {user_id} 的 {len(all_tasks)} 個任務狀態")
-            return nodepool_pb2.GetAllTasksResponse(
-                success=True,
-                message=f"成功獲取用戶 {user_id} 的任務列表",
-                tasks=all_tasks
-            )
-        except Exception as e:
-            error_msg = f"獲取用戶任務列表失敗: {str(e)}"
-            logging.error(error_msg, exc_info=True)
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(error_msg)
-            return nodepool_pb2.GetAllTasksResponse(
-                success=False,
-                message=error_msg
-            )
+                        stub.StopTaskExecution(stop_req, timeout=5)
+                        logging.info(f"已通知節點 {assigned_node} 停止任務 {task_id}")
+                    except Exception as e:
+                        logging.warning(f"通知節點 {assigned_node} 停止任務 {task_id} 失敗: {e}")
+            # === 新增結束 ===
 
-    def _verify_token(self, token):
-        """驗證token並返回用戶ID"""
-        try:
-            # 這裡需要實現token驗證邏輯
-            # 返回用戶ID或None
-            from user_manager import UserManager
-            user_manager = UserManager()
-            return user_manager.verify_token(token)
+            if success:
+                # 將節點狀態設回 Idle
+                if assigned_node:
+                    self.node_manager.report_status(assigned_node, "Idle")
+                
+                # 從健康檢查中移除
+                if task_id in self.task_health:
+                    del self.task_health[task_id]                
+                return nodepool_pb2.StatusResponse(success=True, message=f"任務 {task_id} 已成功停止")
+            else:
+                return nodepool_pb2.StatusResponse(success=False, message="停止任務失敗")
+                
         except Exception as e:
-            logging.error(f"Token驗證失敗: {e}", exc_info=True)
-            return None
+            logging.error(f"StopTask 服務錯誤: {e}", exc_info=True)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(f"Internal server error: {str(e)}")
+            return nodepool_pb2.StatusResponse(success=False, message=f"內部錯誤: {str(e)}")

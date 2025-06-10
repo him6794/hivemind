@@ -1,3 +1,0 @@
-Register(IP, CPU score, GPU score, memory, network delay, geographic location,) #註冊工作端(工作端ip,cpu分數,gpu分數,內存,網路延遲,地理位置,)
-get(CPU score, GPU score, memory,geographic location,)#獲取(cpu分數,gpu分數,內存,網路延遲,地理位置,)
-Update Status(IP,1)#狀態更新

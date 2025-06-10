@@ -185,8 +185,6 @@ class UserManager:
             
         Returns:
             int: 用戶餘額，或在失敗時返回0
-            或
-            (False, str, int): 如果使用舊格式返回，則為(狀態, 消息, 餘額)
         """
         try:
             # 確保用戶ID有效
@@ -202,8 +200,8 @@ class UserManager:
                 return 0
             
             user = self.query_one(
-                "SELECT tokens FROM users WHERE id = ? OR username = ?",
-                (user_id, user_id)
+                "SELECT tokens FROM users WHERE id = ?",
+                (user_id,)
             )
             
             if user:
@@ -302,6 +300,65 @@ class UserManager:
         except Exception as e:
             logging.error(f"获取所有用户失败: {e}", exc_info=True)
             return []
+
+    def add_balance(self, user_identifier, amount):
+        """增加用戶餘額"""
+        if amount <= 0:
+            return False, "金額必須大於0"
+        
+        try:
+            # 根據類型決定查詢方式
+            if isinstance(user_identifier, str) and not user_identifier.isdigit():
+                # 用戶名
+                user_row = self.query_one("SELECT id, username, tokens FROM users WHERE username = ?", (user_identifier,))
+            else:
+                # 用戶ID
+                user_id = int(user_identifier)
+                user_row = self.query_one("SELECT id, username, tokens FROM users WHERE id = ?", (user_id,))
+            
+            if not user_row:
+                return False, "用戶不存在"
+            
+            new_balance = user_row["tokens"] + amount
+            self.execute("UPDATE users SET tokens = ? WHERE id = ?", (new_balance, user_row["id"]))
+            
+            logging.info(f"用戶 {user_row['username']} (ID: {user_row['id']}) 餘額增加 {amount} CPT，新餘額: {new_balance}")
+            return True, f"成功增加 {amount} CPT，新餘額: {new_balance}"
+            
+        except Exception as e:
+            logging.error(f"增加用戶餘額失敗: {e}", exc_info=True)
+            return False, f"操作失敗: {str(e)}"
+
+    def deduct_balance(self, user_identifier, amount):
+        """扣除用戶餘額"""
+        if amount <= 0:
+            return False, "金額必須大於0"
+        
+        try:
+            # 根據類型決定查詢方式
+            if isinstance(user_identifier, str) and not user_identifier.isdigit():
+                # 用戶名
+                user_row = self.query_one("SELECT id, username, tokens FROM users WHERE username = ?", (user_identifier,))
+            else:
+                # 用戶ID
+                user_id = int(user_identifier)
+                user_row = self.query_one("SELECT id, username, tokens FROM users WHERE id = ?", (user_id,))
+            
+            if not user_row:
+                return False, "用戶不存在"
+            
+            if user_row["tokens"] < amount:
+                return False, f"餘額不足，當前餘額: {user_row['tokens']} CPT，需要: {amount} CPT"
+            
+            new_balance = user_row["tokens"] - amount
+            self.execute("UPDATE users SET tokens = ? WHERE id = ?", (new_balance, user_row["id"]))
+            
+            logging.info(f"用戶 {user_row['username']} (ID: {user_row['id']}) 餘額扣除 {amount} CPT，新餘額: {new_balance}")
+            return True, f"成功扣除 {amount} CPT，新餘額: {new_balance}"
+            
+        except Exception as e:
+            logging.error(f"扣除用戶餘額失敗: {e}", exc_info=True)
+            return False, f"操作失敗: {str(e)}"
 
 if __name__ == "__main__":
     manager = UserManager()

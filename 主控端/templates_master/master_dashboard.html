@@ -140,18 +140,21 @@
             border-radius: 12px;
             padding: 1.5rem;
             box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-        }
-
-        .card h2 {
+        }        .card h2 {
             font-size: 1.5rem;
             font-weight: 600;
             margin-bottom: 1rem;
             color: var(--text-color);
         }
 
-        .table {
+        .table-container {
+            overflow-x: auto;
+            width: 100%;
+        }        .table {
             width: 100%;
             border-collapse: collapse;
+            table-layout: fixed;
+            min-width: 900px;
         }
 
         .table th,
@@ -159,6 +162,32 @@
             padding: 0.75rem 1rem;
             text-align: left;
             border-bottom: 1px solid var(--border-color);
+            word-wrap: break-word;
+        }
+
+        .table th:nth-child(1),
+        .table td:nth-child(1) {
+            width: 25%;
+        }
+
+        .table th:nth-child(2),
+        .table td:nth-child(2) {
+            width: 15%;
+        }
+
+        .table th:nth-child(3),
+        .table td:nth-child(3) {
+            width: 10%;
+        }
+
+        .table th:nth-child(4),
+        .table td:nth-child(4) {
+            width: 35%;
+        }
+
+        .table th:nth-child(5),
+        .table td:nth-child(5) {
+            width: 15%;
         }
 
         .table th {
@@ -242,6 +271,179 @@
             align-items: center;
             margin-bottom: 1rem;
         }
+
+        /* 新增：任務日誌彈窗樣式 */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.5);
+        }
+
+        .modal-content {
+            background-color: var(--card-background);
+            margin: 5% auto;
+            padding: 0;
+            border-radius: 12px;
+            width: 90%;
+            max-width: 1000px;
+            max-height: 80vh;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+
+        .modal-header {
+            padding: 1.5rem;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .modal-header h3 {
+            margin: 0;
+            color: var(--text-color);
+        }
+
+        .close {
+            color: #aaa;
+            float: right;
+            font-size: 28px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+
+        .close:hover,
+        .close:focus {
+            color: var(--text-color);
+            text-decoration: none;
+        }
+
+        .modal-body {
+            padding: 1.5rem;
+            max-height: 60vh;
+            overflow-y: auto;
+        }
+
+        .task-logs {
+            background-color: #1f2937;
+            color: #f3f4f6;
+            padding: 1rem;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            line-height: 1.5;
+            white-space: pre-wrap;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .log-entry {
+            margin-bottom: 0.5rem;
+            padding: 0.25rem;
+            border-left: 3px solid transparent;
+        }
+
+        .log-entry.error {
+            border-left-color: var(--error-color);
+            background-color: rgba(239, 68, 68, 0.1);
+        }
+
+        .log-entry.warning {
+            border-left-color: var(--warning-color);
+            background-color: rgba(245, 158, 11, 0.1);
+        }
+
+        .log-entry.info {
+            border-left-color: var(--success-color);
+            background-color: rgba(16, 185, 129, 0.1);
+        }
+
+        .task-id-link {
+            color: var(--primary-color);
+            text-decoration: none;
+            cursor: pointer;
+            font-weight: 500;
+        }
+
+        .task-id-link:hover {
+            text-decoration: underline;
+        }
+
+        .task-status-info {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1rem;
+        }
+
+        .status-item {
+            padding: 0.75rem;
+            background-color: var(--background-color);
+            border-radius: 6px;
+        }
+
+        .status-item label {
+            font-weight: 500;
+            color: var(--text-color);
+            margin-bottom: 0.25rem;
+            display: block;
+        }
+
+        .status-item .value {
+            color: var(--primary-color);
+            font-weight: 600;
+        }
+
+        .refresh-logs-btn {
+            background-color: var(--primary-color);
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.875rem;
+            margin-left: 1rem;
+        }        .refresh-logs-btn:hover {
+            background-color: #4338ca;
+        }
+
+        .stop-task-btn {
+            background-color: var(--error-color);
+            color: white;
+            border: none;
+            padding: 0.25rem 0.75rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.75rem;
+            margin-right: 0.5rem;
+            transition: background-color 0.2s;
+        }
+
+        .stop-task-btn:hover {
+            background-color: #dc2626;
+        }
+
+        .stop-task-btn:disabled {
+            background-color: #9ca3af;
+            cursor: not-allowed;
+            opacity: 0.6;
+        }
+
+        .action-buttons {
+            display: flex;
+            gap: 0.25rem;
+            align-items: center;
+        }
+
+        .logs-loading {
+            text-align: center;
+            padding: 2rem;
+            color: var(--text-color);
+        }
     </style>
 </head>
 <body>
@@ -278,25 +480,27 @@
             </div>
         </div>
 
-        <div class="content-grid">
-            <div class="card">
+        <div class="content-grid">            <div class="card">
                 <div class="card-header">
                     <h2>Recent Tasks</h2>
                     <button class="refresh-btn" onclick="refreshTasks()">Refresh</button>
                 </div>
-                <table class="table">
-                    <thead>
-                        <tr>
-                            <th>Task ID</th>
-                            <th>Status</th>
-                            <th>Progress</th>
-                            <th>Last Update</th>
-                        </tr>
-                    </thead>
-                    <tbody id="tasks-table">
-                        <!-- Tasks will be populated by JavaScript -->
-                    </tbody>
-                </table>
+                <div class="table-container">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>Task ID</th>
+                                <th>Status</th>
+                                <th>Progress</th>
+                                <th>Last Update</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="tasks-table">
+                            <!-- Tasks will be populated by JavaScript -->
+                        </tbody>
+                    </table>
+                </div>
             </div>
 
             <div class="card">
@@ -308,9 +512,13 @@
                     <thead>
                         <tr>
                             <th>Node ID</th>
+                            <th>Hostname</th>
+                            <th>CPU Cores</th>
+                            <th>Memory</th>
                             <th>Status</th>
-                            <th>CPU Score</th>
-                            <th>GPU Score</th>
+                            <th>Last Heartbeat</th>
+                            <th>Scores</th>
+                            <th>GPU Info</th>
                             <th>Location</th>
                         </tr>
                     </thead>
@@ -329,9 +537,7 @@
             document.getElementById('total-cpu').textContent = data.total_cpu;
             document.getElementById('total-gpu').textContent = data.total_gpu;
             document.getElementById('cpt-balance').textContent = data.cpt_balance;
-        }
-
-        function updateTasks(tasks) {
+        }        function updateTasks(tasks) {
             const tbody = document.getElementById('tasks-table');
             tbody.innerHTML = '';
             
@@ -342,15 +548,30 @@
                 const outputTail = task.output_tail || [];
                 const message = task.message || '';
                 
+                // 判斷是否可以停止任務
+                const canStop = ['PENDING', 'RUNNING'].includes(status.toUpperCase());
+                
                 const row = document.createElement('tr');
                 row.innerHTML = `
-                    <td>${task.task_id}</td>
+                    <td>
+                        <a href="#" class="task-id-link" onclick="showTaskLogs('${task.task_id}')">${task.task_id}</a>
+                    </td>
                     <td>
                         <span class="status-badge status-${status.toLowerCase()}">${status}</span>
                     </td>
                     <td>${progress}</td>
                     <td title="${outputTail.join('\n')}">${lastUpdate}<br>
                         <small>${message}</small>
+                    </td>
+                    <td>
+                        <div class="action-buttons">
+                            <button class="stop-task-btn" 
+                                    onclick="stopTask('${task.task_id}')"
+                                    ${canStop ? '' : 'disabled'}
+                                    title="${canStop ? '停止任務' : '任務無法停止'}">
+                                停止
+                            </button>
+                        </div>
                     </td>
                 `;
                 tbody.appendChild(row);
@@ -366,20 +587,28 @@
         function updateNodes(nodes) {
             const tbody = document.getElementById('nodes-table');
             tbody.innerHTML = '';
+            
             nodes.forEach(node => {
                 const row = document.createElement('tr');
                 row.innerHTML = `
                     <td>${node.node_id}</td>
+                    <td>${node.hostname}</td>
+                    <td>${node.cpu_cores}</td>
+                    <td>${node.memory_gb} GB</td>
                     <td>
-                        <span class="node-status status-${node.status.toLowerCase()}"></span>
-                        ${node.status}
+                        <span class="status-badge status-${node.status.toLowerCase()}">${node.status}</span>
                     </td>
-                    <td>${node.cpu_score}</td>
-                    <td>${node.gpu_score}</td>
+                    <td>${node.last_heartbeat}</td>
+                    <td>CPU: ${node.cpu_score}, GPU: ${node.gpu_score}</td>
+                    <td>${node.gpu_name} (${node.gpu_memory_gb} GB)</td>
                     <td>${node.location}</td>
                 `;
                 tbody.appendChild(row);
             });
+            
+            // 更新統計數據
+            const onlineNodes = nodes.filter(n => n.status === 'ONLINE').length;
+            document.getElementById('online-nodes').textContent = onlineNodes;
         }
 
         function refreshTasks() {
@@ -437,6 +666,166 @@
             refreshNodes();
             refreshBalance();
         }, 10000);
+
+        // 新增：任務日誌相關功能
+        function showTaskLogs(taskId) {
+            const modal = document.getElementById('taskLogsModal');
+            const modalTitle = document.getElementById('modalTaskId');
+            const modalBody = document.getElementById('modalLogsContent');
+            
+            modalTitle.textContent = `任務 ${taskId} 日誌`;
+            modalBody.innerHTML = '<div class="logs-loading">載入中...</div>';
+            modal.style.display = 'block';
+            
+            loadTaskLogs(taskId);
+        }
+
+        function loadTaskLogs(taskId) {
+            fetch(`/api/task_logs/${taskId}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        document.getElementById('modalLogsContent').innerHTML = 
+                            `<div class="text-error">錯誤: ${data.error}</div>`;
+                        return;
+                    }
+                    
+                    displayTaskLogs(data);
+                })
+                .catch(error => {
+                    console.error('Error loading task logs:', error);
+                    document.getElementById('modalLogsContent').innerHTML = 
+                        `<div class="text-error">載入日誌失敗: ${error}</div>`;
+                });
+        }
+
+        function displayTaskLogs(data) {
+            const modalBody = document.getElementById('modalLogsContent');
+            
+            let html = `
+                <div class="task-status-info">
+                    <div class="status-item">
+                        <label>任務狀態</label>
+                        <div class="value">
+                            <span class="status-badge status-${data.status.toLowerCase()}">${data.status}</span>
+                        </div>
+                    </div>
+                    <div class="status-item">
+                        <label>訊息</label>
+                        <div class="value">${data.message || '無'}</div>
+                    </div>
+                    <div class="status-item">
+                        <label>日誌條數</label>
+                        <div class="value">${data.total_logs}</div>
+                    </div>
+                </div>
+            `;
+            
+            if (data.logs && data.logs.length > 0) {
+                html += '<div class="task-logs">';
+                data.logs.forEach(log => {
+                    html += `<div class="log-entry ${log.level}">`;
+                    html += `<span class="timestamp">[${log.timestamp}]</span> `;
+                    html += `<span class="content">${escapeHtml(log.content)}</span>`;
+                    html += '</div>';
+                });
+                html += '</div>';
+            } else {
+                html += '<div class="task-logs">目前無日誌記錄</div>';
+            }
+            
+            modalBody.innerHTML = html;
+            
+            // 自動滾動到底部
+            const logsContainer = modalBody.querySelector('.task-logs');
+            if (logsContainer) {
+                logsContainer.scrollTop = logsContainer.scrollHeight;
+            }
+        }        function refreshTaskLogs() {
+            const modal = document.getElementById('taskLogsModal');
+            if (modal.style.display === 'block') {
+                const taskId = document.getElementById('modalTaskId').textContent.replace('任務 ', '').replace(' 日誌', '');
+                loadTaskLogs(taskId);
+            }
+        }
+
+        async function stopTask(taskId) {
+            if (!confirm(`確定要停止任務 ${taskId} 嗎？`)) {
+                return;
+            }
+
+            const button = event.target;
+            const originalText = button.textContent;
+            
+            try {
+                // 禁用按鈕並顯示載入狀態
+                button.disabled = true;
+                button.textContent = '停止中...';
+                
+                const response = await fetch(`/api/stop_task/${taskId}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        reason: '用戶手動停止'
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    alert(`任務 ${taskId} 已成功停止`);
+                    // 刷新任務列表
+                    refreshTasks();
+                } else {
+                    alert(`停止任務失敗: ${data.error || data.message || '未知錯誤'}`);
+                }
+            } catch (error) {
+                console.error('停止任務時發生錯誤:', error);
+                alert(`停止任務時發生錯誤: ${error.message}`);
+            } finally {
+                // 恢復按鈕狀態
+                button.disabled = false;
+                button.textContent = originalText;
+            }
+        }
+
+        function closeTaskLogsModal() {
+            document.getElementById('taskLogsModal').style.display = 'none';
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // 點擊模態框外部關閉
+        window.onclick = function(event) {
+            const modal = document.getElementById('taskLogsModal');
+            if (event.target === modal) {
+                closeTaskLogsModal();
+            }
+        }
     </script>
+
+    <!-- 任務日誌模態框 -->
+    <div id="taskLogsModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modalTaskId">任務日誌</h3>
+                <div>
+                    <button class="refresh-logs-btn" onclick="refreshTaskLogs()">刷新日誌</button>
+                    <span class="close" onclick="closeTaskLogsModal()">&times;</span>
+                </div>
+            </div>
+            <div class="modal-body">
+                <div id="modalLogsContent">
+                    載入中...
+                </div>
+            </div>
+        </div>
+    </div>
 </body>
 </html>

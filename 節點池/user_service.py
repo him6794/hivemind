@@ -52,8 +52,60 @@ class UserServiceServicer(nodepool_pb2_grpc.UserServiceServicer):
         except Exception as e:
             logging.error(f"Token 驗證錯誤: {e}")
             raise ValueError(f"Token 驗證失敗: {str(e)}")
-    @handle_rpc_errors
 
+    def verify_token(self, token: str):
+        """公開的 token 驗證方法，返回用戶信息字典"""
+        try:
+            user_id = self._verify_token(token)
+            return user_id
+        except ValueError as e:
+            logging.warning(f"Token 驗證失敗: {e}")
+            return None
+        except Exception as e:
+            logging.error(f"Token 驗證時發生錯誤: {e}")
+            return None
+
+    def verify_token_from_metadata(self, context):
+        """從 gRPC metadata 中驗證 token"""
+        try:
+            # 從 gRPC context 的 metadata 中獲取 authorization header
+            metadata = dict(context.invocation_metadata())
+            auth_header = metadata.get('authorization', '')
+            
+            if not auth_header:
+                return {
+                    "success": False,
+                    "message": "Missing authorization header"
+                }
+            
+            # 解析 Bearer token
+            if auth_header.startswith('Bearer '):
+                token = auth_header[7:]  # 移除 'Bearer ' 前綴
+            else:
+                token = auth_header
+            
+            # 驗證 token
+            user_info = self.verify_token(token)
+            if user_info:
+                return {
+                    "success": True,
+                    "user_id": user_info["user_id"],
+                    "message": "Token verified successfully"
+                }
+            else:
+                return {
+                    "success": False,
+                    "message": "Invalid or expired token"
+                }
+                
+        except Exception as e:
+            logging.error(f"從 metadata 驗證 token 時發生錯誤: {e}")
+            return {
+                "success": False,
+                "message": f"Token verification error: {str(e)}"
+            }
+
+    @handle_rpc_errors
     def Register(self, request, context):
         logging.info(f"處理註冊請求: {request.username}")
         hashed_pw = bcrypt.hashpw(request.password.encode(), bcrypt.gensalt()).decode()
@@ -95,19 +147,11 @@ class UserServiceServicer(nodepool_pb2_grpc.UserServiceServicer):
     def GetBalance(self, request, context):
         """獲取用戶餘額"""
         try:
-            user_id = self.user_manager.verify_token(request.token)
-            if not user_id:
-                return nodepool_pb2.GetBalanceResponse(
-                    success=False,
-                    message="Invalid token",
-                    balance=0
-                )
-
+            user_id = self._verify_token(request.token)  # 使用自己的方法而不是 user_manager.verify_token
+            
             balance_result = self.user_manager.get_user_balance(user_id)
             if balance_result is not None:
-                # 從元組中獲取餘額值
-                balance = balance_result[0] if isinstance(balance_result, tuple) else balance_result
-                # 將用戶ID作為消息的一部分返回
+                balance = balance_result
                 message = f"Balance retrieved successfully for user {user_id}"
                 return nodepool_pb2.GetBalanceResponse(
                     success=True,
@@ -189,3 +233,11 @@ class UserServiceServicer(nodepool_pb2_grpc.UserServiceServicer):
                 message="Token 刷新失敗",
                 token=""
             )
+
+    def _generate_token(self, user_id):
+        """生成 JWT Token"""
+        payload = {
+            "user_id": user_id,
+            "exp": datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=60)
+        }
+        return jwt.encode(payload, SECRET_KEY, algorithm="HS256")

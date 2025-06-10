@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>用戶中心 - HiveMind 平台</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+</head>
+<body>
+    <!-- 導航欄 -->
+    <nav class="navbar">
+        <div class="navbar-container">
+            <a href="/" class="navbar-brand">🧠 HiveMind</a>
+            <ul class="navbar-nav">
+                <li><a href="/" class="nav-link">首頁</a></li>
+                <li><a href="/download.html" class="nav-link">下載 App</a></li>
+                <li><a href="/dashboard.html" class="nav-link active">儀表板</a></li>
+                <li><a href="#" class="nav-link" onclick="logout()">登出</a></li>
+            </ul>
+            <button class="navbar-toggle" onclick="toggleMobileMenu()">
+                <span></span>
+                <span></span>
+                <span></span>
+            </button>
+        </div>
+    </nav>
+
+    <div class="container dashboard-container">
+        <h1>歡迎來到 HiveMind</h1>
+        <p style="margin-bottom: 2rem; color: var(--text-secondary);">
+            管理您的帳戶、查看餘額並進行 CPT 轉帳
+        </p>
+
+        <div id="userInfo" style="background: rgba(26, 31, 46, 0.6); padding: 1.5rem; border-radius: 16px; border: 1px solid rgba(255, 255, 255, 0.1); margin-bottom: 2rem;">
+            <div class="dashboard-grid">
+                <div class="stat-card">
+                    <div class="stat-label">用戶名</div>
+                    <div class="stat-value" id="userName" style="font-size: 1.5rem; color: var(--accent-primary);">載入中...</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">CPT 餘額</div>
+                    <div class="stat-value" id="balance" style="font-size: 1.5rem; color: var(--accent-tertiary);">載入中...</div>
+                </div>
+            </div>
+        </div>
+
+        <h2>💸 CPT 轉帳</h2>
+        <form id="transferForm">
+            <div class="form-group">
+                <label for="toUserId">收款人用戶名</label>
+                <input type="text" id="toUserId" name="toUserId" placeholder="請輸入收款人的用戶名" required>
+            </div>
+            
+            <div class="form-group">
+                <label for="amount">轉帳金額 (CPT)</label>
+                <input type="number" id="amount" name="amount" placeholder="請輸入要轉帳的 CPT 數量" min="1" required>
+            </div>
+            
+            <button type="submit" id="transferBtn">
+                發送 CPT
+            </button>
+        </form>
+        
+        <div id="transferMsg" class="message"></div>
+        
+        <div style="margin-top: 3rem; padding-top: 2rem; border-top: 1px solid var(--border-color); text-align: center;">
+            <button onclick="logout()" style="background: linear-gradient(135deg, var(--error-color), #dc2626); padding: 0.8rem 2rem; font-size: 0.9rem;">
+                安全登出
+            </button>
+        </div>    </div>
+      <script src="/static/js/dashboard.js"></script>
+    <script src="/static/js/ui-enhancements.js"></script>
+    <script>
+        function toggleMobileMenu() {
+            const nav = document.querySelector('.navbar-nav');
+            nav.classList.toggle('show');
+        }
+
+        // Close mobile menu when clicking outside
+        document.addEventListener('click', function(event) {
+            const nav = document.querySelector('.navbar-nav');
+            const toggle = document.querySelector('.navbar-toggle');
+            
+            if (!nav.contains(event.target) && !toggle.contains(event.target)) {
+                nav.classList.remove('show');
+            }
+        });
+
+        function logout() {
+            // 清除本地存儲的登入資訊
+            localStorage.removeItem('hivemind_token');
+            localStorage.removeItem('hivemind_username');
+            
+            // 跳轉到首頁
+            window.location.href = '/';
+        }
+    </script>
+</body>
+</html>

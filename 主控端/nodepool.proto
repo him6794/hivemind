@@ -26,12 +26,14 @@ service MasterNodeService {
     rpc StoreLogs(StoreLogsRequest) returns (StatusResponse);
     rpc GetTaskLogs(GetTaskLogsRequest) returns (GetTaskLogsResponse);
     rpc GetAllTasks(GetAllTasksRequest) returns (GetAllTasksResponse);
+    rpc StopTask(StopTaskRequest) returns (StopTaskResponse);
 }
 
 service WorkerNodeService {
     rpc ExecuteTask(ExecuteTaskRequest) returns (ExecuteTaskResponse);
     rpc ReportOutput(ReportOutputRequest) returns (StatusResponse);
     rpc ReportRunningStatus(RunningStatusRequest) returns (RunningStatusResponse);
+    rpc StopTaskExecution(StopTaskExecutionRequest) returns (StopTaskExecutionResponse);
 }
 
 // 訊息定義
@@ -161,6 +163,7 @@ message StoreResultRequest {
 
 message GetTaskResultRequest {
     string task_id = 1;
+    string token = 2;  // 用戶令牌，用於驗證
 }
 
 message GetTaskResultResponse {
@@ -213,6 +216,7 @@ message StoreLogsRequest {
 
 message GetTaskLogsRequest {
     string task_id = 1;
+    string token = 2;  // 用戶令牌，用於驗證
 }
 
 message GetTaskLogsResponse {
@@ -237,4 +241,25 @@ message GetAllTasksResponse {
     bool success = 1;
     string message = 2;
     repeated TaskStatus tasks = 3;
+}
+
+message StopTaskRequest {
+    string task_id = 1;
+    string token = 2;      // 用戶令牌，用於驗證權限
+}
+
+message StopTaskResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// 工作節點停止任務執行的消息
+message StopTaskExecutionRequest {
+    string task_id = 1;
+
+}
+
+message StopTaskExecutionResponse {
+    bool success = 1;
+    string message = 2;
 }

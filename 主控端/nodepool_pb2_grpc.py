@@ -442,6 +442,11 @@ class MasterNodeServiceStub(object):
                 request_serializer=nodepool__pb2.GetAllTasksRequest.SerializeToString,
                 response_deserializer=nodepool__pb2.GetAllTasksResponse.FromString,
                 _registered_method=True)
+        self.StopTask = channel.unary_unary(
+                '/nodepool.MasterNodeService/StopTask',
+                request_serializer=nodepool__pb2.StopTaskRequest.SerializeToString,
+                response_deserializer=nodepool__pb2.StopTaskResponse.FromString,
+                _registered_method=True)
 
 
 class MasterNodeServiceServicer(object):
@@ -501,6 +506,12 @@ class MasterNodeServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def StopTask(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_MasterNodeServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -548,6 +559,11 @@ def add_MasterNodeServiceServicer_to_server(servicer, server):
                     servicer.GetAllTasks,
                     request_deserializer=nodepool__pb2.GetAllTasksRequest.FromString,
                     response_serializer=nodepool__pb2.GetAllTasksResponse.SerializeToString,
+            ),
+            'StopTask': grpc.unary_unary_rpc_method_handler(
+                    servicer.StopTask,
+                    request_deserializer=nodepool__pb2.StopTaskRequest.FromString,
+                    response_serializer=nodepool__pb2.StopTaskResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -803,6 +819,33 @@ class MasterNodeService(object):
             metadata,
             _registered_method=True)
 
+    @staticmethod
+    def StopTask(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/nodepool.MasterNodeService/StopTask',
+            nodepool__pb2.StopTaskRequest.SerializeToString,
+            nodepool__pb2.StopTaskResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
 
 class WorkerNodeServiceStub(object):
     """Missing associated documentation comment in .proto file."""
@@ -828,6 +871,11 @@ class WorkerNodeServiceStub(object):
                 request_serializer=nodepool__pb2.RunningStatusRequest.SerializeToString,
                 response_deserializer=nodepool__pb2.RunningStatusResponse.FromString,
                 _registered_method=True)
+        self.StopTaskExecution = channel.unary_unary(
+                '/nodepool.WorkerNodeService/StopTaskExecution',
+                request_serializer=nodepool__pb2.StopTaskExecutionRequest.SerializeToString,
+                response_deserializer=nodepool__pb2.StopTaskExecutionResponse.FromString,
+                _registered_method=True)
 
 
 class WorkerNodeServiceServicer(object):
@@ -851,6 +899,12 @@ class WorkerNodeServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def StopTaskExecution(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_WorkerNodeServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -868,6 +922,11 @@ def add_WorkerNodeServiceServicer_to_server(servicer, server):
                     servicer.ReportRunningStatus,
                     request_deserializer=nodepool__pb2.RunningStatusRequest.FromString,
                     response_serializer=nodepool__pb2.RunningStatusResponse.SerializeToString,
+            ),
+            'StopTaskExecution': grpc.unary_unary_rpc_method_handler(
+                    servicer.StopTaskExecution,
+                    request_deserializer=nodepool__pb2.StopTaskExecutionRequest.FromString,
+                    response_serializer=nodepool__pb2.StopTaskExecutionResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -951,6 +1010,33 @@ class WorkerNodeService(object):
             '/nodepool.WorkerNodeService/ReportRunningStatus',
             nodepool__pb2.RunningStatusRequest.SerializeToString,
             nodepool__pb2.RunningStatusResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def StopTaskExecution(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/nodepool.WorkerNodeService/StopTaskExecution',
+            nodepool__pb2.StopTaskExecutionRequest.SerializeToString,
+            nodepool__pb2.StopTaskExecutionResponse.FromString,
             options,
             channel_credentials,
             insecure,

@@ -1,18 +1,10 @@
-<!doctype html>
-<html>
+<!DOCTYPE html>
+<html lang="zh-TW">
 <head>
-    <title>Upload Task</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>上傳新任務 - HiveMind 主控台</title>
     <style>
-        :root {
-            --primary-color: #4f46e5;
-            --success-color: #10b981;
-            --error-color: #ef4444;
-            --text-color: #1f2937;
-            --border-color: #e5e7eb;
-            --background-color: #f9fafb;
-        }
-
         * {
             margin: 0;
             padding: 0;
@@ -20,11 +12,10 @@
         }
 
         body {
-            font-family: 'Inter', sans-serif;
-            background-color: var(--background-color);
-            color: var(--text-color);
-            line-height: 1.5;
-            padding: 2rem;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
         }
 
         .container {
@@ -32,150 +23,158 @@
             margin: 0 auto;
             background: white;
             border-radius: 12px;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
             padding: 2rem;
         }
 
         h1 {
-            font-size: 1.875rem;
-            font-weight: 600;
-            margin-bottom: 1.5rem;
-            color: var(--text-color);
-        }
-
-        h3 {
-            font-size: 1.25rem;
-            font-weight: 500;
-            margin: 1.5rem 0 1rem;
-            color: var(--text-color);
-        }
-
-        .form-group {
-            margin-bottom: 1.25rem;
-        }
-
-        label {
-            display: block;
-            font-weight: 500;
-            margin-bottom: 0.5rem;
-            color: var(--text-color);
-        }
-
-        input[type=text],
-        input[type=number],
-        input[type=file] {
-            width: 100%;
-            padding: 0.75rem;
-            border: 1px solid var(--border-color);
-            border-radius: 6px;
-            font-size: 1rem;
-            transition: border-color 0.2s;
-        }
-
-        input[type=text]:focus,
-        input[type=number]:focus,
-        input[type=file]:focus {
-            outline: none;
-            border-color: var(--primary-color);
-            box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
-        }
-
-        input[type=file] {
-            padding: 0.5rem;
-            background-color: var(--background-color);
-        }
-
-        button {
-            background-color: var(--primary-color);
-            color: white;
-            padding: 0.75rem 1.5rem;
-            border: none;
-            border-radius: 6px;
-            font-weight: 500;
-            font-size: 1rem;
-            cursor: pointer;
-            transition: background-color 0.2s;
-        }
-
-        button:hover {
-            background-color: #4338ca;
+            color: #333;
+            margin-bottom: 2rem;
+            text-align: center;
+            font-size: 2rem;
         }
 
         .flash {
             padding: 1rem;
-            margin-bottom: 1.5rem;
-            border-radius: 6px;
+            margin-bottom: 1rem;
+            border-radius: 8px;
             font-weight: 500;
         }
 
         .flash.success {
-            background-color: #dcfce7;
-            color: #047857;
-            border: 1px solid #a7f3d0;
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
         }
 
         .flash.error {
-            background-color: #fee2e2;
-            color: #b91c1c;
-            border: 1px solid #fecaca;
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+
+        .form-group {
+            margin-bottom: 1.5rem;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 600;
+            color: #333;
+        }
+
+        input[type="text"],
+        input[type="number"] {
+            width: 100%;
+            padding: 0.75rem;
+            border: 2px solid #e1e5e9;
+            border-radius: 8px;
+            font-size: 1rem;
+            transition: border-color 0.3s ease;
+        }
+
+        input[type="text"]:focus,
+        input[type="number"]:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .file-input-container {
+            margin-bottom: 2rem;
+        }
+
+        .file-input-label {
+            display: block;
+            padding: 2rem;
+            border: 2px dashed #667eea;
+            border-radius: 12px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            background: #f8f9ff;
+        }
+
+        .file-input-label:hover {
+            border-color: #5a6fd8;
+            background: #f0f2ff;
+        }
+
+        .file-input-label span {
+            color: #667eea;
+            font-size: 1.1rem;
+            font-weight: 600;
+        }
+
+        .file-input {
+            display: none;
+        }
+
+        .requirements-section {
+            background: #f8f9fa;
+            padding: 1.5rem;
+            border-radius: 8px;
+            margin-bottom: 2rem;
+        }
+
+        .requirements-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1rem;
+        }
+
+        button[type="submit"] {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 1rem 2rem;
+            border: none;
+            border-radius: 8px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s ease;
+            width: 100%;
+        }
+
+        button[type="submit"]:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
         }
 
         .back-link {
             display: inline-block;
-            margin-top: 1.5rem;
-            color: var(--primary-color);
+            margin-top: 1rem;
+            color: #667eea;
             text-decoration: none;
             font-weight: 500;
-            transition: color 0.2s;
+            transition: color 0.3s ease;
         }
 
         .back-link:hover {
-            color: #4338ca;
+            color: #5a6fd8;
         }
 
         hr {
             border: none;
-            border-top: 1px solid var(--border-color);
-            margin: 1.5rem 0;
+            height: 1px;
+            background: #e1e5e9;
+            margin: 2rem 0;
         }
 
-        .file-input-container {
-            position: relative;
-            margin-bottom: 1.5rem;
+        .file-selected {
+            border-color: #28a745 !important;
+            background: #f8fff9 !important;
         }
 
-        .file-input-label {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 2rem;
-            border: 2px dashed var(--border-color);
-            border-radius: 6px;
-            cursor: pointer;
-            transition: border-color 0.2s;
-        }
-
-        .file-input-label:hover {
-            border-color: var(--primary-color);
-        }
-
-        .file-input-label span {
-            color: var(--primary-color);
-            font-weight: 500;
-        }
-
-        .file-input {
-            position: absolute;
-            width: 100%;
-            height: 100%;
-            opacity: 0;
-            cursor: pointer;
+        .file-selected span {
+            color: #28a745 !important;
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Upload New Task</h1>
+        <h1>上傳新任務</h1>
 
         {% with messages = get_flashed_messages(with_categories=true) %}
           {% if messages %}
@@ -186,54 +185,111 @@
         {% endwith %}
 
         <form method="post" enctype="multipart/form-data">
-            <div class="form-group">
-                <label for="task_zip">Task ZIP File*</label>
-                <div class="file-input-container">
-                    <label class="file-input-label" for="task_zip">
-                        <span>Click to select or drag a ZIP file here</span>
-                    </label>
-                    <input type="file" id="task_zip" name="task_zip" accept=".zip" required class="file-input">
+            <div class="file-input-container">
+                <label for="task_zip" class="file-input-label">
+                    <span>點擊選擇任務 ZIP 檔案</span>
+                    <input type="file" id="task_zip" name="task_zip" class="file-input" accept=".zip" required>
+                </label>
+            </div>
+
+            <h3>系統需求</h3>
+            <div class="requirements-section">
+                <div class="requirements-grid">
+                    <div class="form-group">
+                        <label for="memory_gb">記憶體需求 (GB)</label>
+                        <input type="number" id="memory_gb" name="memory_gb" value="0" min="0">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="cpu_score">CPU 分數需求</label>
+                        <input type="number" id="cpu_score" name="cpu_score" value="0" min="0">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="gpu_score">GPU 分數需求</label>
+                        <input type="number" id="gpu_score" name="gpu_score" value="0" min="0">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="gpu_memory_gb">GPU 記憶體需求 (GB)</label>
+                        <input type="number" id="gpu_memory_gb" name="gpu_memory_gb" value="0" min="0">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="location">位置需求</label>
+                        <input type="text" id="location" name="location" value="Any" placeholder="Any">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="gpu_name">GPU 名稱需求</label>
+                        <input type="text" id="gpu_name" name="gpu_name" placeholder="留空表示任何GPU">
+                    </div>
                 </div>
             </div>
 
-            <hr>
-
-            <h3>Requirements</h3>
-            
-            <div class="form-group">
-                <label for="memory_gb">Memory (GB)</label>
-                <input type="number" id="memory_gb" name="memory_gb" value="1" min="0">
-            </div>
-
-            <div class="form-group">
-                <label for="cpu_score">Minimum CPU Score</label>
-                <input type="number" id="cpu_score" name="cpu_score" value="0" min="0">
-            </div>
-
-            <div class="form-group">
-                <label for="gpu_score">Minimum GPU Score</label>
-                <input type="number" id="gpu_score" name="gpu_score" value="0" min="0">
-            </div>
-
-            <div class="form-group">
-                <label for="gpu_memory_gb">Minimum VRAM (GB)</label>
-                <input type="number" id="gpu_memory_gb" name="gpu_memory_gb" value="0" min="0">
-            </div>
-
-            <div class="form-group">
-                <label for="gpu_name">Required GPU Name</label>
-                <input type="text" id="gpu_name" name="gpu_name" placeholder="e.g., NVIDIA GeForce RTX 3070 (optional)">
-            </div>
-
-            <div class="form-group">
-                <label for="location">Location</label>
-                <input type="text" id="location" name="location" value="Any">
-            </div>
-
-            <button type="submit">Upload Task</button>
+            <button type="submit">上傳任務</button>
         </form>
 
-        <a href="/" class="back-link">← Back to Dashboard</a>
+        <hr>
+        <a href="{{ url_for('index') }}" class="back-link">← 回到主控台</a>
     </div>
+
+    <script>
+        // 文件選擇顯示
+        document.getElementById('task_zip').addEventListener('change', function(e) {
+            const label = document.querySelector('.file-input-label span');
+            const fileInputLabel = document.querySelector('.file-input-label');
+            
+            if (e.target.files.length > 0) {
+                const fileName = e.target.files[0].name;
+                const fileSize = (e.target.files[0].size / (1024 * 1024)).toFixed(2);
+                label.textContent = `已選擇: ${fileName} (${fileSize} MB)`;
+                fileInputLabel.classList.add('file-selected');
+            } else {
+                label.textContent = '點擊選擇任務 ZIP 檔案';
+                fileInputLabel.classList.remove('file-selected');
+            }
+        });
+
+        // 表單驗證
+        document.querySelector('form').addEventListener('submit', function(e) {
+            const fileInput = document.getElementById('task_zip');
+            
+            if (!fileInput.files.length) {
+                e.preventDefault();
+                alert('請選擇要上傳的 ZIP 檔案');
+                return false;
+            }
+            
+            const file = fileInput.files[0];
+            if (!file.name.toLowerCase().endsWith('.zip')) {
+                e.preventDefault();
+                alert('請選擇 ZIP 格式的檔案');
+                return false;
+            }
+            
+            // 檢查檔案大小 (50MB 限制)
+            const maxSize = 50 * 1024 * 1024;
+            if (file.size > maxSize) {
+                e.preventDefault();
+                alert('檔案大小不能超過 50MB');
+                return false;
+            }
+            
+            // 顯示上傳進度提示
+            const submitBtn = document.querySelector('button[type="submit"]');
+            submitBtn.textContent = '上傳中...';
+            submitBtn.disabled = true;
+        });
+
+        // 數字輸入驗證
+        document.querySelectorAll('input[type="number"]').forEach(input => {
+            input.addEventListener('input', function(e) {
+                if (e.target.value < 0) {
+                    e.target.value = 0;
+                }
+            });
+        });
+    </script>
 </body>
 </html>

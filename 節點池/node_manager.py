@@ -4,14 +4,11 @@ import logging
 import redis
 import time
 import nodepool_pb2
-# nodepool_pb2_grpc 的導入在這個文件中不再需要，因為 Servicer 被移除了
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class NodeManager:
     def __init__(self):
-        # 假設 Redis 運行在 localhost:6379, db=0
-        # decode_responses=True 讓 Redis 返回字符串而不是 bytes
         self.redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
         try:
             self.redis_client.ping()
@@ -20,8 +17,8 @@ class NodeManager:
             logging.error(f"Redis 連線失敗: {e}")
             raise # 啟動時連不上 Redis 就拋出異常
 
-    def register_worker_node(self, node_id, hostname, cpu_cores, memory_gb, cpu_score, gpu_score, gpu_memory_gb, location, port, gpu_name, ip=None):
-        """註冊或更新工作節點資訊，新增 ip 欄位"""
+    def register_worker_node(self, node_id, hostname, cpu_cores, memory_gb, cpu_score, gpu_score, gpu_memory_gb, location, port, gpu_name):
+        """註冊或更新工作節點資訊"""
         node_key = f"node:{node_id}"
         try:
             # 获取现有节点信息
@@ -38,7 +35,6 @@ class NodeManager:
                 "location": location,
                 "port": str(port),
                 "gpu_name": gpu_name,
-                "ip": ip or "",  # 新增
                 "status": "Idle",
                 "last_heartbeat": str(int(time.time())),
                 "is_registered": "True"
@@ -64,52 +60,67 @@ class NodeManager:
             return False, f"未知伺服器錯誤: {e}"
 
     # --- 修改 report_status ---
-    def report_status(self, node_id, status_message):
-        """節點報告狀態並更新心跳"""
-        node_key = f"node:{node_id}"
+    def report_status(self, request, context=None):
+        """處理節點狀態報告"""
+        # 修正：正確處理參數類型
+        if isinstance(request, str):
+            # 如果傳入的是字符串，說明是內部調用
+            node_id = request
+            status_message = context if isinstance(context, str) else "Idle"
+            is_grpc_call = False
+        else:
+            # 如果是 gRPC 請求對象，按正常方式處理
+            node_id = request.node_id
+            status_message = request.status_message
+            is_grpc_call = True
+
+        # 檢查節點是否存在
+        if not self.redis_client.exists(f"node:{node_id}"):
+            error_msg = f"節點 {node_id} 不存在，請先註冊"
+            logging.warning(error_msg)
+            if is_grpc_call:
+                return nodepool_pb2.StatusResponse(success=False, message=error_msg)
+            else:
+                return False, error_msg
+
         try:
-            # 使用 exists 檢查鍵是否存在
-            if not self.redis_client.exists(node_key):
-                logging.warning(f"嘗試報告狀態失敗: 節點 {node_id} 不存在")
-                return False, f"節點 {node_id} 不存在"
-
-            # 获取当前节点信息
-            node_info = self.redis_client.hgetall(node_key)
+            # 獲取現有節點信息
+            node_info = self.get_node_info(node_id)
             if not node_info:
-                logging.warning(f"節點 {node_id} 信息不完整")
-                return False, f"節點 {node_id} 信息不完整"
+                error_msg = f"無法獲取節點 {node_id} 的信息"
+                logging.error(error_msg)
+                if is_grpc_call:
+                    return nodepool_pb2.StatusResponse(success=False, message=error_msg)
+                else:
+                    return False, error_msg
 
-            # 检查节点是否已注册
-            if node_info.get("is_registered") != "True":
-                logging.warning(f"節點 {node_id} 未註冊")
-                return False, f"節點 {node_id} 未註冊"
-
-            # 更新狀態和心跳
+            # 更新狀態和心跳時間
+            current_time = time.time()
+            
+            # 保持原有的 IP 和其他信息，只更新狀態和心跳
             update_data = {
                 "status": status_message,
-                "last_heartbeat": str(int(time.time()))
+                "last_heartbeat": str(current_time),
+                "updated_at": str(current_time)
             }
+            
+            # 更新 Redis 中的節點信息
+            self.redis_client.hset(f"node:{node_id}", mapping=update_data)
+            
+            logging.debug(f"節點 {node_id} 狀態已更新: {status_message}，心跳時間: {current_time}")
+            
+            if is_grpc_call:
+                return nodepool_pb2.StatusResponse(success=True, message="狀態報告成功")
+            else:
+                return True, "狀態更新成功"
 
-            # 如果状态包含余额信息，更新余额
-            if "CPT Balance:" in status_message:
-                try:
-                    balance = int(status_message.split("CPT Balance:")[1].strip().split()[0])
-                    update_data["cpt_balance"] = str(balance)
-                except (ValueError, IndexError):
-                    logging.warning(f"無法從狀態消息中解析餘額: {status_message}")
-
-            # 更新节点信息
-            for field, value in update_data.items():
-                self.redis_client.hset(node_key, field, value)
-
-            logging.debug(f"節點 {node_id} 狀態更新: {status_message}")
-            return True, f"節點 {node_id} 狀態更新成功"
-        except redis.RedisError as e:
-            logging.error(f"Redis 錯誤，節點 {node_id} 狀態報告失敗: {e}")
-            return False, f"Redis 錯誤: {e}"
         except Exception as e:
-            logging.error(f"更新節點 {node_id} 狀態時發生未知錯誤: {e}", exc_info=True)
-            return False, f"未知伺服器錯誤: {e}"
+            error_msg = f"更新節點 {node_id} 狀態失敗: {e}"
+            logging.error(error_msg, exc_info=True)
+            if is_grpc_call:
+                return nodepool_pb2.StatusResponse(success=False, message=error_msg)
+            else:
+                return False, error_msg
 
     # --- 修改 get_node_list ---
     def get_node_list(self):
@@ -170,7 +181,7 @@ class NodeManager:
                         location=node_info.get("location", "N/A"),
                         port=int(node_info.get("port", 0)),
                         gpu_name=node_info.get("gpu_name", "N/A")
-                        # ip 欄位移除，proto 沒有 ip 欄位
+                        # 移除 ip 字段
                     ))
                 except (ValueError, TypeError) as conv_err:
                     logging.warning(f"轉換節點 {node_id_str} 數值時出錯: {conv_err}, data: {node_info}")
@@ -235,9 +246,18 @@ class NodeManager:
                 return None
             return {
                 "node_id": node_id,
-                "ip": node_info.get("ip", "127.0.0.1"),
+                "hostname": node_info.get("hostname", "127.0.0.1"),
                 "port": int(node_info.get("port", 0)),
-                # ...可擴充其他欄位...
+                "status": node_info.get("status", "Unknown"),
+                "last_heartbeat": float(node_info.get("last_heartbeat", 0)),
+                "cpu_cores": int(node_info.get("cpu_cores", 0)),
+                "memory_gb": int(node_info.get("memory_gb", 0)),
+                "cpu_score": int(node_info.get("cpu_score", 0)),
+                "gpu_score": int(node_info.get("gpu_score", 0)),
+                "gpu_memory_gb": int(node_info.get("gpu_memory_gb", 0)),
+                "location": node_info.get("location", "Unknown"),
+                "gpu_name": node_info.get("gpu_name", "Unknown"),
+                "cpt_balance": float(node_info.get("cpt_balance", 0))
             }
         except Exception as e:
             logging.error(f"取得節點 {node_id} 資訊失敗: {e}")

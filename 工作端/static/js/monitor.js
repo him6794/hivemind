@@ -1,56 +1,126 @@
 $(document).ready(function() {
-    // 初始化 Chart.js 圖表 (保持不變)
+    // 初始化 Chart.js 圖表
     const cpuChartCtx = document.getElementById('cpuChart').getContext('2d');
     const memoryChartCtx = document.getElementById('memoryChart').getContext('2d');
 
-    let cpuChart = null; // 初始化為 null
-    let memoryChart = null; // 初始化為 null
+    let cpuChart = null;
+    let memoryChart = null;
 
     try {
+        // Chart.js 初始化 CPU 圖表
         cpuChart = new Chart(cpuChartCtx, {
             type: 'line',
-            data: { labels: [], datasets: [{ label: 'CPU 使用率 (%)', data: [], borderColor: 'rgba(75, 192, 192, 1)', fill: false }] },
-            options: { scales: { x: { title: { display: true, text: '時間' } }, y: { title: { display: true, text: 'CPU 使用率 (%)' }, beginAtZero: true, suggestedMax: 100 } } } // 添加 suggestedMax
+            data: { 
+                labels: [], 
+                datasets: [{ 
+                    label: 'CPU 使用率 (%)', 
+                    data: [], 
+                    borderColor: 'rgba(75, 192, 192, 1)', 
+                    backgroundColor: 'rgba(75, 192, 192, 0.1)',
+                    fill: false,
+                    tension: 0.1
+                }] 
+            },
+            options: { 
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: { 
+                    x: { 
+                        title: { display: true, text: '時間' } 
+                    }, 
+                    y: { 
+                        title: { display: true, text: 'CPU 使用率 (%)' }, 
+                        beginAtZero: true, 
+                        suggestedMax: 100 
+                    } 
+                },
+                plugins: {
+                    legend: {
+                        display: true,
+                        position: 'top'
+                    }
+                }
+            }
         });
 
+        // Chart.js 初始化記憶體圖表
         memoryChart = new Chart(memoryChartCtx, {
             type: 'line',
-            data: { labels: [], datasets: [{ label: '記憶體使用率 (%)', data: [], borderColor: 'rgba(255, 99, 132, 1)', fill: false }] }, // 修改 Label
-            options: { scales: { x: { title: { display: true, text: '時間' } }, y: { title: { display: true, text: '記憶體使用率 (%)' }, beginAtZero: true, suggestedMax: 100 } } } // 修改 Y 軸標題和添加 suggestedMax
+            data: { 
+                labels: [], 
+                datasets: [{ 
+                    label: '記憶體使用率 (%)', 
+                    data: [], 
+                    borderColor: 'rgba(255, 99, 132, 1)', 
+                    backgroundColor: 'rgba(255, 99, 132, 0.1)',
+                    fill: false,
+                    tension: 0.1
+                }] 
+            },
+            options: { 
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: { 
+                    x: { 
+                        title: { display: true, text: '時間' } 
+                    }, 
+                    y: { 
+                        title: { display: true, text: '記憶體使用率 (%)' }, 
+                        beginAtZero: true, 
+                        suggestedMax: 100 
+                    } 
+                },
+                plugins: {
+                    legend: {
+                        display: true,
+                        position: 'top'
+                    }
+                }
+            }
         });
+        
+        console.log("圖表初始化成功");
     } catch (error) {
-        console.error("Failed to initialize charts:", error);
-        // 可以在頁面上顯示錯誤提示
-        $('.chart-container').text('圖表初始化失敗，請檢查控制台日誌。');
+        console.error("圖表初始化失敗:", error);
+        $('.chart-container').html('<div class="text-center text-error">圖表初始化失敗，請檢查控制台日誌。</div>');
     }
-
 
     function updateStatus() {
         $.get('/api/status', function(data) {
             if (data.error) {
                 console.error("Error from /api/status:", data.error);
-                $('#statusData').text(`Error loading status: ${data.error}`);
+                $('#task-status').text('Error loading status').removeClass().addClass('status error');
                 return;
             }
 
-            // 更新文本內容
-            $('#container-id').text(data.container_id || 'N/A');
+            // 更新狀態顯示
+            $('#node-id').text(data.node_id || 'N/A');
             $('#task-id').text(data.current_task_id || 'None');
-            $('#task-status').text(data.status || 'Idle');
-            // 顯示本機 IP
+            
+            // 更新狀態標籤樣式
+            const statusElement = $('#task-status');
+            const status = data.status || 'Idle';
+            statusElement.text(status).removeClass();
+            
+            if (status.toLowerCase().includes('idle')) {
+                statusElement.addClass('status idle');
+            } else if (status.toLowerCase().includes('running') || status.toLowerCase().includes('executing')) {
+                statusElement.addClass('status running');
+            } else if (status.toLowerCase().includes('error') || status.toLowerCase().includes('failed')) {
+                statusElement.addClass('status error');
+            } else {
+                statusElement.addClass('status pending');
+            }
+            
             $('#ip-address').text(data.ip || 'N/A');
-            
-            // 更新 CPT 余额，添加单位显示
-            const cptBalance = data.cpt_balance || 0;
-            $('#cpt-balance').text(`${cptBalance} CPT`);
-            
-            $('#cpu-usage').text((data.cpu_percent || '0') + '%');
-            $('#memory-usage').text((data.memory_percent || '0') + '%');
+            $('#cpt-balance').text(data.cpt_balance || 0);
+            $('#cpu-usage').text((data.cpu_percent || 0) + '%');
+            $('#memory-usage').text((data.memory_percent || 0) + '%');
 
             const now = new Date().toLocaleTimeString();
 
-            // --- 添加防禦性檢查 ---
-            if (cpuChart && cpuChart.data && cpuChart.data.labels && cpuChart.data.datasets && cpuChart.data.datasets[0].data) {
+            // 更新圖表數據
+            if (cpuChart && cpuChart.data && cpuChart.data.labels) {
                 cpuChart.data.labels.push(now);
                 cpuChart.data.datasets[0].data.push(data.cpu_percent || 0);
 
@@ -58,12 +128,10 @@ $(document).ready(function() {
                     cpuChart.data.labels.shift();
                     cpuChart.data.datasets[0].data.shift();
                 }
-                cpuChart.update();
-            } else {
-                console.warn("CPU Chart object or its properties are not ready for update.");
+                cpuChart.update('none');
             }
 
-            if (memoryChart && memoryChart.data && memoryChart.data.labels && memoryChart.data.datasets && memoryChart.data.datasets[0].data) {
+            if (memoryChart && memoryChart.data && memoryChart.data.labels) {
                 memoryChart.data.labels.push(now);
                 memoryChart.data.datasets[0].data.push(data.memory_percent || 0);
 
@@ -71,29 +139,15 @@ $(document).ready(function() {
                     memoryChart.data.labels.shift();
                     memoryChart.data.datasets[0].data.shift();
                 }
-                memoryChart.update();
-            } else {
-                console.warn("Memory Chart object or its properties are not ready for update.");
+                memoryChart.update('none');
             }
-            // --- 檢查結束 ---
 
         }).fail(function(jqXHR, textStatus, errorThrown) {
             console.error("Failed to fetch /api/status:", textStatus, errorThrown);
-            console.error("Response status:", jqXHR.status);
-            $('#statusData').text(`Error loading status: ${textStatus} (${jqXHR.status})`);
+            $('#task-status').text('Connection Error').removeClass().addClass('status error');
 
-            // Claude 建議的檢查
-            if (jqXHR.status === 0 && jqXHR.readyState === 0) {
-                console.warn("Possible redirect due to session expiration");
-                setTimeout(function() {
-                    // Check if we're now at the login page
-                    if (window.location.pathname === '/' || window.location.pathname === '/login') {
-                        alert("Session expired. Please log in again.");
-                        window.location.href = '/login'; // 確保重定向
-                    }
-                }, 500);
-            } else if (jqXHR.status === 401) { // 保留原有的 401 處理
-                alert("Session expired or invalid. Please log in again.");
+            if (jqXHR.status === 401) {
+                alert("會話已過期或無效，請重新登入。");
                 window.location.href = '/login';
             }
         });
@@ -101,48 +155,59 @@ $(document).ready(function() {
 
     function updateLogs() {
         $.get('/api/logs', function(data) {
+            console.log("日誌數據:", data);
+            
             if (data.error) {
                 console.error("Error from /api/logs:", data.error);
-                $('#logs').text(`Error loading logs: ${data.error}`);
+                $('#logs').html(`<div class="text-error">載入日誌錯誤: ${data.error}</div>`);
                 return;
             }
+            
             const logsDiv = $('#logs');
             logsDiv.empty();
+            
             if (data.logs && Array.isArray(data.logs)) {
-                data.logs.forEach(log => {
-                    logsDiv.append($('<div>').text(log));
-                });
+                if (data.logs.length === 0) {
+                    logsDiv.html('<div class="text-center">目前沒有日誌記錄</div>');
+                } else {
+                    data.logs.forEach(log => {
+                        const logEntry = $('<div>').text(log).addClass('log-entry');
+                        logsDiv.append(logEntry);
+                    });
+                    // 自動滾動到底部
+                    logsDiv.scrollTop(logsDiv[0].scrollHeight);
+                }
             } else {
-                logsDiv.text("No logs received or invalid format.");
+                console.warn("日誌數據格式異常:", data);
+                logsDiv.html('<div class="text-warning">未收到有效的日誌數據</div>');
             }
         }).fail(function(jqXHR, textStatus, errorThrown) {
             console.error("Failed to fetch /api/logs:", textStatus, errorThrown);
-            console.error("Response status:", jqXHR.status);
-            $('#logs').text(`Error loading logs: ${textStatus} (${jqXHR.status})`);
+            $('#logs').html(`<div class="text-error">載入日誌錯誤: ${textStatus} (${jqXHR.status})</div>`);
+            
             if (jqXHR.status === 401) {
-                alert("Session expired or invalid. Please log in again.");
+                alert("會話已過期或無效，請重新登入。");
                 window.location.href = '/login';
             }
         });
     }
 
-    // 確保圖表初始化後再開始更新
-    if (cpuChart && memoryChart) {
-        updateStatus();
-        updateLogs();
-        setInterval(updateStatus, 2000);
-        setInterval(updateLogs, 5000);
-    } else {
-        console.error("Charts were not initialized correctly. Status and log updates will not run.");
-        // 可能在此處顯示更明顯的錯誤給用戶
-    }
+    // 初始加載
+    updateStatus();
+    updateLogs();
+    
+    // 定期更新
+    setInterval(updateStatus, 3000);  // 每3秒更新狀態
+    setInterval(updateLogs, 5000);    // 每5秒更新日誌
 
-    // 添加刷新按钮功能
+    // 全局函數
     window.refreshStatus = function() {
+        console.log("手動刷新狀態");
         updateStatus();
     }
 
     window.refreshLogs = function() {
+        console.log("手動刷新日誌");
         updateLogs();
     }
 });
