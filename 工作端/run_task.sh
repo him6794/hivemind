@@ -7,35 +7,30 @@ echo "=== HiveMind Task Execution Script Started ==="
 echo "Task ID: ${TASK_ID:-unknown}"
 echo "User: $(whoami)"
 echo "Working Directory: $(pwd)"
-echo "User ID: $(id)"
 echo "Date: $(date)"
 
-# 檢查任務 ZIP 文件是否存在
-if [ ! -f "/tmp/task_archive.zip" ]; then
-    echo "ERROR: Task archive not found at /tmp/task_archive.zip"
-    exit 1
-fi
-
-# 創建臨時工作目錄，確保用戶有權限
-WORK_DIR="/tmp/task_work_${TASK_ID}"
-mkdir -p "$WORK_DIR"
-cd "$WORK_DIR"
-
-echo "=== Extracting Task Archive to $WORK_DIR ==="
-unzip -q /tmp/task_archive.zip || {
-    echo "ERROR: Failed to extract task archive"
-    exit 1
-}
-
-echo "=== Task Files ==="
+echo "=== Current Directory Contents ==="
 ls -la
 
 # 檢查是否有 requirements.txt
 if [ -f "requirements.txt" ]; then
     echo "=== Installing Python Dependencies ==="
-    pip install --user -r requirements.txt || {
-        echo "WARNING: Some dependencies failed to install, continuing..."
-    }
+    echo "Found requirements.txt, installing dependencies..."
+    cat requirements.txt
+    
+    # 安裝依賴，如果失敗則警告但繼續執行
+    if pip install --user -r requirements.txt; then
+        echo "Dependencies installed successfully"
+    else
+        echo "WARNING: Some dependencies failed to install, continuing anyway..."
+        # 嘗試逐行安裝
+        while IFS= read -r package; do
+            if [[ ! -z "$package" && ! "$package" =~ ^# ]]; then
+                echo "Trying to install: $package"
+                pip install --user "$package" || echo "Failed to install $package, skipping..."
+            fi
+        done < requirements.txt
+    fi
 else
     echo "No requirements.txt found, skipping dependency installation"
 fi
@@ -56,7 +51,9 @@ if [ -z "$SCRIPT_FILE" ]; then
     if [ -n "$SCRIPT_FILE" ]; then
         echo "Using first Python file found: $SCRIPT_FILE"
     else
-        echo "ERROR: No Python script found in task archive"
+        echo "ERROR: No Python script found in task directory"
+        echo "Available files:"
+        ls -la
         exit 1
     fi
 fi
@@ -67,54 +64,17 @@ env | grep -E "^(TASK_|PYTHON)" || true
 
 # 設置 Python 路徑和緩衝
 export PYTHONUNBUFFERED=1
-export PYTHONPATH="$WORK_DIR:$PYTHONPATH"
+export PYTHONPATH="$(pwd):$PYTHONPATH"
 
-python "$SCRIPT_FILE" || {
-    echo "ERROR: Task script execution failed with exit code $?"
-    exit 1
-}
-
-echo "=== Creating Results Archive ==="
-# 創建結果 ZIP 文件
-if [ -d "output" ]; then
-    echo "Found output directory, archiving it..."
-    cd output
-    zip -r ../results.zip . || {
-        echo "WARNING: Failed to create results archive from output directory"
-        cd ..
-        echo "Task completed but no output generated" > result.txt
-        zip results.zip result.txt
-    }
-    cd ..
-elif ls *.out >/dev/null 2>&1 || ls result* >/dev/null 2>&1 || ls output* >/dev/null 2>&1; then
-    echo "Found result files, archiving them..."
-    zip results.zip *.out result* output* 2>/dev/null || {
-        echo "Task completed successfully at $(date)" > result.txt
-        zip results.zip result.txt
-    }
+# 執行 Python 腳本
+echo "Starting script execution..."
+if python "$SCRIPT_FILE"; then
+    echo "=== Task Script Execution Completed Successfully ==="
+    echo "Task execution finished at $(date)"
+    exit 0
 else
-    echo "No specific output found, creating completion marker..."
-    echo "Task completed successfully at $(date)" > result.txt
-    echo "Task ID: ${TASK_ID}" >> result.txt
-    echo "Execution completed in directory: $WORK_DIR" >> result.txt
-    zip results.zip result.txt
-fi
-
-# 將結果移動到期望的位置
-if [ -f "results.zip" ]; then
-    # 在臨時目錄中創建結果，然後移動到 /app（如果可能）
-    if [ -w "/app" ]; then
-        cp results.zip /app/results.zip
-        echo "Results copied to /app/results.zip"
-    else
-        # 如果無法寫入 /app，嘗試創建符號鏈接或在當前目錄保留
-        ln -sf "$WORK_DIR/results.zip" /tmp/results.zip 2>/dev/null || {
-            echo "WARNING: Cannot create symlink, results remain at $WORK_DIR/results.zip"
-        }
-    fi
-    echo "=== Task Execution Completed Successfully ==="
-    echo "Results archive: results.zip ($(du -h results.zip | cut -f1))"
-else
-    echo "ERROR: Failed to create results.zip"
-    exit 1
+    exit_code=$?
+    echo "ERROR: Task script execution failed with exit code $exit_code"
+    echo "Task execution failed at $(date)"
+    exit $exit_code
 fi

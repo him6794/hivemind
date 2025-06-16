@@ -433,16 +433,95 @@
             opacity: 0.6;
         }
 
+        .download-btn {
+            background-color: var(--success-color);
+            color: white;
+            border: none;
+            padding: 0.25rem 0.75rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.75rem;
+            margin-right: 0.5rem;
+            transition: background-color 0.2s;
+        }
+
+        .download-btn:hover {
+            background-color: #059669;
+        }
+
+        .download-btn:disabled {
+            background-color: #9ca3af;
+            cursor: not-allowed;
+            opacity: 0.6;
+        }
+
+        .view-logs-btn {
+            background-color: var(--primary-color);
+            color: white;
+            border: none;
+            padding: 0.25rem 0.75rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.75rem;
+            margin-right: 0.5rem;
+            transition: background-color 0.2s;
+        }
+
+        .view-logs-btn:hover {
+            background-color: #4338ca;
+        }
+
         .action-buttons {
             display: flex;
             gap: 0.25rem;
             align-items: center;
+            flex-wrap: wrap;
         }
 
         .logs-loading {
             text-align: center;
             padding: 2rem;
             color: var(--text-color);
+        }
+
+        .task-filters {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .filter-btn {
+            padding: 0.5rem 1rem;
+            border: 1px solid var(--border-color);
+            background: var(--card-background);
+            color: var(--text-color);
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.875rem;
+            transition: all 0.2s;
+        }
+
+        .filter-btn:hover {
+            background: var(--primary-color);
+            color: white;
+            border-color: var(--primary-color);
+        }
+
+        .filter-btn.active {
+            background: var(--primary-color);
+            color: white;
+            border-color: var(--primary-color);
+        }
+
+        .content-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 1.5rem;
+        }
+
+        .table td:first-child {
+            max-width: 300px;
+            word-break: break-all;
         }
     </style>
 </head>
@@ -451,49 +530,56 @@
         <div class="header">
             <h1>Master Dashboard</h1>
             <div class="header-right">
-                <span class="user-info">Welcome, {{ session.username }}</span>
-                <a href="/upload" class="upload-btn">Upload New Task</a>
-                <a href="/logout" class="logout-btn">Logout</a>
+                <span class="user-info" id="current-user">Welcome, {{ username }}</span>
+                <a href="/upload?user={{ username }}" class="upload-btn">Upload New Task</a>
+                <a href="/logout?user={{ username }}" class="logout-btn">Logout</a>
             </div>
         </div>
 
         <div class="stats-grid">
             <div class="stat-card balance">
-                <h3>CPT Balance</h3>
+                <h3>CPT 餘額</h3>
                 <div class="value" id="cpt-balance">0</div>
             </div>
             <div class="stat-card">
-                <h3>Active Tasks</h3>
+                <h3>活躍任務</h3>
                 <div class="value" id="active-tasks">0</div>
             </div>
             <div class="stat-card">
-                <h3>Online Nodes</h3>
+                <h3>已完成任務</h3>
+                <div class="value" id="completed-tasks">0</div>
+            </div>
+            <div class="stat-card">
+                <h3>在線節點</h3>
                 <div class="value" id="online-nodes">0</div>
-            </div>
-            <div class="stat-card">
-                <h3>Total CPU Score</h3>
-                <div class="value" id="total-cpu">0</div>
-            </div>
-            <div class="stat-card">
-                <h3>Total GPU Score</h3>
-                <div class="value" id="total-gpu">0</div>
             </div>
         </div>
 
-        <div class="content-grid">            <div class="card">
+        <div class="content-grid">
+            <div class="card" style="grid-column: 1 / -1;">
                 <div class="card-header">
-                    <h2>Recent Tasks</h2>
-                    <button class="refresh-btn" onclick="refreshTasks()">Refresh</button>
+                    <h2>任務管理</h2>
+                    <div>
+                        <button class="refresh-btn" onclick="refreshTasks()">刷新</button>
+                        <a href="/upload" class="upload-btn" style="margin-left: 10px;">上傳新任務</a>
+                    </div>
+                </div>
+                <div class="task-filters" style="margin-bottom: 1rem;">
+                    <button class="filter-btn active" onclick="filterTasks('all', this)">全部</button>
+                    <button class="filter-btn" onclick="filterTasks('PENDING', this)">等待中</button>
+                    <button class="filter-btn" onclick="filterTasks('RUNNING', this)">執行中</button>
+                    <button class="filter-btn" onclick="filterTasks('COMPLETED', this)">已完成</button>
+                    <button class="filter-btn" onclick="filterTasks('FAILED', this)">失敗</button>
                 </div>
                 <div class="table-container">
                     <table class="table">
                         <thead>
                             <tr>
-                                <th>Task ID</th>
-                                <th>Status</th>
-                                <th>Progress</th>
-                                <th>Last Update</th>
-                                <th>Actions</th>
+                                <th style="width: 30%;">任務 ID</th>
+                                <th style="width: 15%;">狀態</th>
+                                <th style="width: 15%;">進度</th>
+                                <th style="width: 20%;">最後更新</th>
+                                <th style="width: 20%;">操作</th>
                             </tr>
                         </thead>
                         <tbody id="tasks-table">
@@ -501,72 +587,93 @@
                         </tbody>
                     </table>
                 </div>
-            </div>
-
-            <div class="card">
-                <div class="card-header">
-                    <h2>Node Status</h2>
-                    <button class="refresh-btn" onclick="refreshNodes()">Refresh</button>
+                <div id="no-tasks" style="display: none; text-align: center; padding: 2rem; color: #666;">
+                    目前沒有任務
                 </div>
-                <table class="table">
-                    <thead>
-                        <tr>
-                            <th>Node ID</th>
-                            <th>Hostname</th>
-                            <th>CPU Cores</th>
-                            <th>Memory</th>
-                            <th>Status</th>
-                            <th>Last Heartbeat</th>
-                            <th>Scores</th>
-                            <th>GPU Info</th>
-                            <th>Location</th>
-                        </tr>
-                    </thead>
-                    <tbody id="nodes-table">
-                        <!-- Nodes will be populated by JavaScript -->
-                    </tbody>
-                </table>
             </div>
         </div>
     </div>
 
     <script>
+        let currentFilter = 'all';
+        let allTasks = [];
+
         function updateStats(data) {
-            document.getElementById('active-tasks').textContent = data.active_tasks;
-            document.getElementById('online-nodes').textContent = data.online_nodes;
-            document.getElementById('total-cpu').textContent = data.total_cpu;
-            document.getElementById('total-gpu').textContent = data.total_gpu;
-            document.getElementById('cpt-balance').textContent = data.cpt_balance;
-        }        function updateTasks(tasks) {
+            document.getElementById('active-tasks').textContent = data.active_tasks || 0;
+            document.getElementById('completed-tasks').textContent = data.completed_tasks || 0;
+            document.getElementById('online-nodes').textContent = data.online_nodes || 0;
+            if (data.cpt_balance !== undefined) {
+                document.getElementById('cpt-balance').textContent = data.cpt_balance;
+            }
+        }
+
+        function filterTasks(status, buttonElement) {
+            currentFilter = status;
+            
+            // 更新按鈕樣式
+            document.querySelectorAll('.filter-btn').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            
+            const targetButton = buttonElement || event.target;
+            if (targetButton) {
+                targetButton.classList.add('active');
+            }
+            
+            // 過濾並顯示任務
+            const filteredTasks = status === 'all' ? allTasks : allTasks.filter(task => 
+                task.status && task.status.toUpperCase() === status.toUpperCase()
+            );
+            displayTasks(filteredTasks);
+        }
+
+        function displayTasks(tasks) {
             const tbody = document.getElementById('tasks-table');
+            const noTasksDiv = document.getElementById('no-tasks');
+            
             tbody.innerHTML = '';
+            
+            if (tasks.length === 0) {
+                noTasksDiv.style.display = 'block';
+                return;
+            }
+            
+            noTasksDiv.style.display = 'none';
             
             tasks.forEach(task => {
                 const status = task.status || 'UNKNOWN';
                 const progress = task.progress || '0%';
                 const lastUpdate = task.last_update || '-';
-                const outputTail = task.output_tail || [];
                 const message = task.message || '';
                 
-                // 判斷是否可以停止任務
                 const canStop = ['PENDING', 'RUNNING'].includes(status.toUpperCase());
                 
                 const row = document.createElement('tr');
                 row.innerHTML = `
                     <td>
-                        <a href="#" class="task-id-link" onclick="showTaskLogs('${task.task_id}')">${task.task_id}</a>
+                        <div style="font-weight: 500;">${escapeHtml(task.task_id)}</div>
+                        <div style="font-size: 0.875rem; color: #666; margin-top: 0.25rem;">${escapeHtml(message)}</div>
                     </td>
                     <td>
                         <span class="status-badge status-${status.toLowerCase()}">${status}</span>
                     </td>
                     <td>${progress}</td>
-                    <td title="${outputTail.join('\n')}">${lastUpdate}<br>
-                        <small>${message}</small>
-                    </td>
+                    <td>${lastUpdate}</td>
                     <td>
                         <div class="action-buttons">
+                            <button class="view-logs-btn" 
+                                    onclick="showTaskLogs('${escapeHtml(task.task_id)}')"
+                                    title="查看日誌">
+                                日誌
+                            </button>
+                            <button class="download-btn" 
+                                    onclick="downloadTaskResult('${escapeHtml(task.task_id)}')"
+                                    ${status.toUpperCase() === 'COMPLETED' ? '' : 'disabled'}
+                                    title="${status.toUpperCase() === 'COMPLETED' ? '下載結果' : '任務未完成'}">
+                                下載
+                            </button>
                             <button class="stop-task-btn" 
-                                    onclick="stopTask('${task.task_id}')"
+                                    onclick="stopTask('${escapeHtml(task.task_id)}')"
                                     ${canStop ? '' : 'disabled'}
                                     title="${canStop ? '停止任務' : '任務無法停止'}">
                                 停止
@@ -576,96 +683,96 @@
                 `;
                 tbody.appendChild(row);
             });
-            
-            // 更新統計數據
-            const activeTasks = tasks.filter(t => 
-                t.status && ['PENDING', 'RUNNING'].includes(t.status.toUpperCase())
-            ).length;
-            document.getElementById('active-tasks').textContent = activeTasks;
         }
 
-        function updateNodes(nodes) {
-            const tbody = document.getElementById('nodes-table');
-            tbody.innerHTML = '';
+        function updateTasks(tasks) {
+            allTasks = tasks || [];
             
-            nodes.forEach(node => {
-                const row = document.createElement('tr');
-                row.innerHTML = `
-                    <td>${node.node_id}</td>
-                    <td>${node.hostname}</td>
-                    <td>${node.cpu_cores}</td>
-                    <td>${node.memory_gb} GB</td>
-                    <td>
-                        <span class="status-badge status-${node.status.toLowerCase()}">${node.status}</span>
-                    </td>
-                    <td>${node.last_heartbeat}</td>
-                    <td>CPU: ${node.cpu_score}, GPU: ${node.gpu_score}</td>
-                    <td>${node.gpu_name} (${node.gpu_memory_gb} GB)</td>
-                    <td>${node.location}</td>
-                `;
-                tbody.appendChild(row);
+            const activeTasks = allTasks.filter(t => 
+                t.status && ['PENDING', 'RUNNING'].includes(t.status.toUpperCase())
+            ).length;
+            
+            const completedTasks = allTasks.filter(t => 
+                t.status && t.status.toUpperCase() === 'COMPLETED'
+            ).length;
+            
+            updateStats({
+                active_tasks: activeTasks,
+                completed_tasks: completedTasks
             });
             
-            // 更新統計數據
-            const onlineNodes = nodes.filter(n => n.status === 'ONLINE').length;
-            document.getElementById('online-nodes').textContent = onlineNodes;
+            const filteredTasks = currentFilter === 'all' ? allTasks : allTasks.filter(task => 
+                task.status && task.status.toUpperCase() === currentFilter.toUpperCase()
+            );
+            displayTasks(filteredTasks);
+        }
+
+        // 移除固定的 API_BASE_URL，使用相對路徑
+        
+        function refreshBalance() {
+            fetch('/api/balance?user={{ username }}')
+                .then(response => response.json())
+                .then(data => {
+                    if (!data.error && data.cpt_balance !== undefined) {
+                        document.getElementById('cpt-balance').textContent = data.cpt_balance;
+                    }
+                });
         }
 
         function refreshTasks() {
-            fetch('/api/tasks')
+            fetch('/api/tasks?user={{ username }}')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        updateTasks([]);
+                    } else {
+                        updateTasks(data.tasks || []);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error fetching tasks:', error);
+                    updateTasks([]);
+                });
+        }
+
+        function refreshNodes() {
+            console.log('Refreshing nodes...');
+            fetch('/api/nodes?user={{ username }}')
                 .then(response => {
                     if (!response.ok) {
-                        throw new Error(`HTTP error! status: ${response.status}`);
+                        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
                     }
                     return response.json();
                 })
                 .then(data => {
-                    if (data.error) {
-                        console.error('Error fetching tasks:', data.error);
+                    console.log('Nodes data received:', data);
+                    if (!data.error && data.nodes) {
+                        const onlineNodes = data.nodes.filter(n => n.status === 'ONLINE').length;
+                        document.getElementById('online-nodes').textContent = onlineNodes;
                     } else {
-                        updateTasks(data.tasks);
+                        console.error('Nodes error:', data.error);
                     }
                 })
-                .catch(error => console.error('Error fetching tasks:', error));
+                .catch(error => {
+                    console.error('Error fetching nodes:', error);
+                });
         }
 
-        function refreshNodes() {
-            fetch('/api/nodes')
-                .then(response => response.json())
-                .then(data => {
-                    updateNodes(data.nodes);
-                    updateStats({
-                        online_nodes: data.nodes.filter(n => n.status === 'ONLINE').length,
-                        total_cpu: data.nodes.reduce((sum, n) => sum + n.cpu_score, 0),
-                        total_gpu: data.nodes.reduce((sum, n) => sum + n.gpu_score, 0),
-                        active_tasks: data.nodes.reduce((sum, n) => sum + (n.status === 'BUSY' ? 1 : 0), 0)
-                    });
-                })
-                .catch(error => console.error('Error fetching nodes:', error));
-        }
-
-        function refreshBalance() {
-            fetch('/api/balance')
-                .then(response => response.json())
-                .then(data => {
-                    if (data.cpt_balance !== undefined) {
-                        document.getElementById('cpt-balance').textContent = data.cpt_balance;
-                    }
-                })
-                .catch(error => console.error('Error fetching balance:', error));
-        }
-
-        // Initial load
+        // 初始載入
+        console.log('Initializing dashboard...');
         refreshTasks();
-        refreshNodes();
         refreshBalance();
+        refreshNodes();
 
-        // Auto-refresh every 10 seconds
+        // 定期更新 - 降低頻率以減少服務器負載
         setInterval(() => {
             refreshTasks();
-            refreshNodes();
             refreshBalance();
-        }, 10000);
+        }, 15000);  // 每15秒更新一次
+
+        setInterval(() => {
+            refreshNodes();
+        }, 30000);  // 每30秒更新節點狀態
 
         // 新增：任務日誌相關功能
         function showTaskLogs(taskId) {
@@ -681,7 +788,7 @@
         }
 
         function loadTaskLogs(taskId) {
-            fetch(`/api/task_logs/${taskId}`)
+            fetch(`/api/task_logs/${taskId}?user={{ username }}`)
                 .then(response => response.json())
                 .then(data => {
                     if (data.error) {
@@ -762,24 +869,41 @@
                 button.disabled = true;
                 button.textContent = '停止中...';
                 
-                const response = await fetch(`/api/stop_task/${taskId}`, {
+                console.log(`正在使用主控端權限停止任務 ${taskId}...`);
+                
+                const response = await fetch(`/api/stop_task/${taskId}?user={{ username }}`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
-                        reason: '用戶手動停止'
-                    })
+                    }
                 });
+
+                let data = {};
+                try {
+                    data = await response.json();
+                } catch (e) {
+                    console.error('解析回應JSON失敗:', e);
+                    data = { error: '伺服器回應格式錯誤' };
+                }
                 
-                const data = await response.json();
-                
-                if (data.success) {
+                if (response.ok && data.success) {
                     alert(`任務 ${taskId} 已成功停止`);
                     // 刷新任務列表
                     refreshTasks();
                 } else {
-                    alert(`停止任務失敗: ${data.error || data.message || '未知錯誤'}`);
+                    // 根據不同狀態碼顯示不同訊息
+                    let errorMsg = data.error || data.message || `HTTP ${response.status}`;
+                    
+                    if (response.status === 400) {
+                        errorMsg = data.error || '任務可能不存在或已完成，無法停止';
+                    } else if (response.status === 401) {
+                        errorMsg = '權限不足，請重新登入';
+                    } else if (response.status === 500) {
+                        errorMsg = '伺服器內部錯誤，請稍後再試';
+                    }
+                    
+                    console.error('停止任務失敗:', errorMsg);
+                    alert(`停止任務失敗: ${errorMsg}`);
                 }
             } catch (error) {
                 console.error('停止任務時發生錯誤:', error);
@@ -788,6 +912,58 @@
                 // 恢復按鈕狀態
                 button.disabled = false;
                 button.textContent = originalText;
+            }
+        }
+
+        async function downloadTaskResult(taskId) {
+            try {
+                const button = event.target;
+                const originalText = button.textContent;
+                
+                // 禁用按鈕並顯示載入狀態
+                button.disabled = true;
+                button.textContent = '下載中...';
+                
+                const response = await fetch(`/api/download_result/${taskId}`, {
+                    method: 'GET'
+                });
+                
+                if (response.ok) {
+                    // 獲取檔案名
+                    const contentDisposition = response.headers.get('Content-Disposition');
+                    let filename = `${taskId}_result.zip`;
+                    if (contentDisposition) {
+                        const match = contentDisposition.match(/filename="(.+)"/);
+                        if (match) {
+                            filename = match[1];
+                        }
+                    }
+                    
+                    // 下載檔案
+                    const blob = await response.blob();
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.style.display = 'none';
+                    a.href = url;
+                    a.download = filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                    document.body.removeChild(a);
+                    
+                    alert(`任務結果已下載: ${filename}`);
+                } else {
+                    const errorData = await response.json();
+                    alert(`下載失敗: ${errorData.error || '未知錯誤'}`);
+                }
+            } catch (error) {
+                console.error('下載任務結果時發生錯誤:', error);
+                alert(`下載時發生錯誤: ${error.message}`);
+            } finally {
+                // 恢復按鈕狀態
+                const button = event.target;
+                button.disabled = false;
+                button.textContent = '下載';
             }
         }
 

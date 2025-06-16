@@ -2,40 +2,6 @@ syntax = "proto3";
 
 package nodepool;
 
-// 服務定義
-service UserService {
-    rpc Login(LoginRequest) returns (LoginResponse);
-    rpc Transfer(TransferRequest) returns (TransferResponse);
-    rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse); // 新增 GetBalance RPC
-}
-
-service NodeManagerService {
-    rpc RegisterWorkerNode(RegisterWorkerNodeRequest) returns (StatusResponse);
-    rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
-    rpc ReportStatus(ReportStatusRequest) returns (StatusResponse);
-    rpc GetNodeList(GetNodeListRequest) returns (GetNodeListResponse);
-}
-
-service MasterNodeService {
-    rpc UploadTask(UploadTaskRequest) returns (UploadTaskResponse);
-    rpc PollTaskStatus(PollTaskStatusRequest) returns (PollTaskStatusResponse);
-    rpc StoreOutput(StoreOutputRequest) returns (StatusResponse);
-    rpc StoreResult(StoreResultRequest) returns (StatusResponse);
-    rpc GetTaskResult(GetTaskResultRequest) returns (GetTaskResultResponse);
-    rpc TaskCompleted(TaskCompletedRequest) returns (StatusResponse);
-    rpc StoreLogs(StoreLogsRequest) returns (StatusResponse);
-    rpc GetTaskLogs(GetTaskLogsRequest) returns (GetTaskLogsResponse);
-    rpc GetAllTasks(GetAllTasksRequest) returns (GetAllTasksResponse);
-    rpc StopTask(StopTaskRequest) returns (StopTaskResponse);
-}
-
-service WorkerNodeService {
-    rpc ExecuteTask(ExecuteTaskRequest) returns (ExecuteTaskResponse);
-    rpc ReportOutput(ReportOutputRequest) returns (StatusResponse);
-    rpc ReportRunningStatus(RunningStatusRequest) returns (RunningStatusResponse);
-    rpc StopTaskExecution(StopTaskExecutionRequest) returns (StopTaskExecutionResponse);
-}
-
 // 訊息定義
 message LoginRequest {
     string username = 1;
@@ -172,6 +138,16 @@ message GetTaskResultResponse {
     bytes result_zip = 3;
 }
 
+message ReturnTaskResultRequest {
+    string task_id = 1;
+    bytes result_zip = 2;
+}
+
+message ReturnTaskResultResponse {
+    bool success = 1;
+    string message = 2;
+}
+
 message ExecuteTaskRequest {
     string node_id = 1;
     string task_id = 2;
@@ -262,4 +238,39 @@ message StopTaskExecutionRequest {
 message StopTaskExecutionResponse {
     bool success = 1;
     string message = 2;
+}
+
+// 服務定義
+service UserService {
+    rpc Login(LoginRequest) returns (LoginResponse);
+    rpc Transfer(TransferRequest) returns (TransferResponse);
+    rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse); // 新增 GetBalance RPC
+}
+
+service NodeManagerService {
+    rpc RegisterWorkerNode(RegisterWorkerNodeRequest) returns (StatusResponse);
+    rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+    rpc ReportStatus(ReportStatusRequest) returns (StatusResponse);
+    rpc GetNodeList(GetNodeListRequest) returns (GetNodeListResponse);
+}
+
+service MasterNodeService {
+    rpc UploadTask(UploadTaskRequest) returns (UploadTaskResponse);
+    rpc PollTaskStatus(PollTaskStatusRequest) returns (PollTaskStatusResponse);
+    rpc StoreOutput(StoreOutputRequest) returns (StatusResponse);
+    rpc StoreResult(StoreResultRequest) returns (StatusResponse);
+    rpc GetTaskResult(GetTaskResultRequest) returns (GetTaskResultResponse);
+    rpc TaskCompleted(TaskCompletedRequest) returns (StatusResponse);
+    rpc StoreLogs(StoreLogsRequest) returns (StatusResponse);
+    rpc GetTaskLogs(GetTaskLogsRequest) returns (GetTaskLogsResponse);
+    rpc GetAllTasks(GetAllTasksRequest) returns (GetAllTasksResponse);
+    rpc StopTask(StopTaskRequest) returns (StopTaskResponse);
+    rpc ReturnTaskResult(ReturnTaskResultRequest) returns (ReturnTaskResultResponse);
+}
+
+service WorkerNodeService {
+    rpc ExecuteTask(ExecuteTaskRequest) returns (ExecuteTaskResponse);
+    rpc ReportOutput(ReportOutputRequest) returns (StatusResponse);
+    rpc ReportRunningStatus(RunningStatusRequest) returns (RunningStatusResponse);
+    rpc StopTaskExecution(StopTaskExecutionRequest) returns (StopTaskExecutionResponse);
 }

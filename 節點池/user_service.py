@@ -57,7 +57,18 @@ class UserServiceServicer(nodepool_pb2_grpc.UserServiceServicer):
         """公開的 token 驗證方法，返回用戶信息字典"""
         try:
             user_id = self._verify_token(token)
-            return user_id
+            if user_id:
+                # 獲取完整的用戶信息
+                user_info = self.user_manager.query_one(
+                    "SELECT id, username FROM users WHERE id = ?",
+                    (user_id,)
+                )
+                if user_info:
+                    return {
+                        "user_id": user_info["id"],
+                        "username": user_info["username"]
+                    }
+            return None
         except ValueError as e:
             logging.warning(f"Token 驗證失敗: {e}")
             return None
@@ -147,16 +158,21 @@ class UserServiceServicer(nodepool_pb2_grpc.UserServiceServicer):
     def GetBalance(self, request, context):
         """獲取用戶餘額"""
         try:
-            user_id = self._verify_token(request.token)  # 使用自己的方法而不是 user_manager.verify_token
+            if not request.token:
+                return nodepool_pb2.GetBalanceResponse(
+                    success=False,
+                    message="Token is required",
+                    balance=0
+                )
             
+            user_id = self._verify_token(request.token)
             balance_result = self.user_manager.get_user_balance(user_id)
+            
             if balance_result is not None:
-                balance = balance_result
-                message = f"Balance retrieved successfully for user {user_id}"
                 return nodepool_pb2.GetBalanceResponse(
                     success=True,
-                    message=message,
-                    balance=balance
+                    message=f"Balance retrieved successfully for user {user_id}",
+                    balance=balance_result
                 )
             else:
                 return nodepool_pb2.GetBalanceResponse(

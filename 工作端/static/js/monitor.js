@@ -1,4 +1,7 @@
 $(document).ready(function() {
+    // 固定使用工作端端口 5000
+    const API_BASE_URL = 'http://127.0.0.1:5000';
+
     // 初始化 Chart.js 圖表
     const cpuChartCtx = document.getElementById('cpuChart').getContext('2d');
     const memoryChartCtx = document.getElementById('memoryChart').getContext('2d');
@@ -86,7 +89,7 @@ $(document).ready(function() {
     }
 
     function updateStatus() {
-        $.get('/api/status', function(data) {
+        $.get(`${API_BASE_URL}/api/status`, function(data) {
             if (data.error) {
                 console.error("Error from /api/status:", data.error);
                 $('#task-status').text('Error loading status').removeClass().addClass('status error');
@@ -147,14 +150,16 @@ $(document).ready(function() {
             $('#task-status').text('Connection Error').removeClass().addClass('status error');
 
             if (jqXHR.status === 401) {
-                alert("會話已過期或無效，請重新登入。");
-                window.location.href = '/login';
+                console.warn("會話已過期，3秒後重新導向登入頁面");
+                setTimeout(function() {
+                    window.location.href = '/login';
+                }, 3000);
             }
         });
     }
 
     function updateLogs() {
-        $.get('/api/logs', function(data) {
+        $.get(`${API_BASE_URL}/api/logs`, function(data) {
             console.log("日誌數據:", data);
             
             if (data.error) {
@@ -186,8 +191,10 @@ $(document).ready(function() {
             $('#logs').html(`<div class="text-error">載入日誌錯誤: ${textStatus} (${jqXHR.status})</div>`);
             
             if (jqXHR.status === 401) {
-                alert("會話已過期或無效，請重新登入。");
-                window.location.href = '/login';
+                console.warn("會話已過期，3秒後重新導向登入頁面");
+                setTimeout(function() {
+                    window.location.href = '/login';
+                }, 3000);
             }
         });
     }

@@ -161,8 +161,21 @@ class TaskManager:
             # 獲取現有日誌
             current_logs = self.redis_client.hget(task_key, "logs") or ""
             
+            # 修復時間戳處理 - 將毫秒轉換為秒
+            try:
+                # 如果是毫秒時間戳，轉換為秒
+                if timestamp > 1e12:  # 大於這個值說明是毫秒時間戳
+                    timestamp_seconds = timestamp / 1000.0
+                else:
+                    timestamp_seconds = float(timestamp)
+                
+                timestamp_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp_seconds))
+            except (ValueError, OSError) as e:
+                # 如果時間戳無效，使用當前時間
+                logging.warning(f"無效的時間戳 {timestamp}，使用當前時間: {e}")
+                timestamp_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
+            
             # 格式化新日誌條目
-            timestamp_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp))
             new_log_entry = f"[{timestamp_str}] [{node_id}] {logs}"
             
             # 追加新日誌
@@ -864,205 +877,6 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
             context.set_details(f"Internal server error: {str(e)}")
             return nodepool_pb2.StatusResponse(success=False, message=f"Internal error: {str(e)}")
 
-    def GetTaskResult(self, request, context):
-        """獲取任務結果"""
-        try:
-            # 驗證用戶權限（如果有提供 token）
-            task_id = request.task_id
-            user_id = None
-            if hasattr(request, 'token') and request.token:
-                user_id = self.auth_manager._verify_token(request.token)
-                if not user_id:
-                    context.set_code(grpc.StatusCode.UNAUTHENTICATED)
-                    context.set_details("Invalid token")
-                    return nodepool_pb2.GetTaskResultResponse(
-                        success=False,
-                        message="認證失敗",
-                        result_zip=b""
-                    )
-            
-            result_zip, status = self.task_manager.get_task_result_zip(task_id)
-            
-            if status == "COMPLETED":
-                response = nodepool_pb2.GetTaskResultResponse(
-                    success=True,
-                    message=f"Task {task_id} completed successfully",
-                    result_zip=result_zip
-                )
-                
-                # 任務結果成功獲取後，自動清理任務數據
-                # 在後台執行清理以避免阻塞回應
-                def cleanup_task():
-                    try:
-                        # 稍等一會兒確保結果已經發送
-                        import time
-                        time.sleep(2)
-                        
-                        # 清理任務數據和日誌
-                        cleanup_success = self.task_manager.cleanup_task_data(task_id)
-                        if cleanup_success:
-                            logging.info(f"任務 {task_id} 結果下載完成，已自動清理任務數據")
-                        else:
-                            logging.warning(f"任務 {task_id} 數據清理失敗")
-                    except Exception as e:
-                        logging.error(f"清理任務 {task_id} 數據時發生錯誤: {e}", exc_info=True)
-                
-                # 啟動清理任務的背景線程
-                import threading
-                cleanup_thread = threading.Thread(target=cleanup_task, daemon=True)
-                cleanup_thread.start()
-                
-                return response
-                
-            elif status in ["PENDING", "RUNNING"]:
-                return nodepool_pb2.GetTaskResultResponse(
-                    success=False,
-                    message=f"Task {task_id} is still {status.lower()}",
-                    result_zip=b""
-                )
-            else:
-                return nodepool_pb2.GetTaskResultResponse(
-                    success=False,
-                    message=f"Task {task_id} status: {status}",
-                    result_zip=b""
-                )
-                
-        except Exception as e:
-            logging.error(f"GetTaskResult 服務錯誤: {e}", exc_info=True)
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(f"Internal server error: {str(e)}")
-            return nodepool_pb2.GetTaskResultResponse(
-                success=False,
-                message=f"Internal error: {str(e)}",
-                result_zip=b""
-            )
-
-    def TaskCompleted(self, request, context):
-        """處理任務完成通知"""
-        try:
-            if request.success:
-                # 任務成功完成
-                success = self.task_manager.update_task_status(request.task_id, "COMPLETED")
-                
-                # 將節點狀態設回 Idle
-                if request.node_id:
-                    self.node_manager.report_status(request.node_id, "Idle")
-                
-                # 從健康檢查中移除
-                if request.task_id in self.task_health:
-                    del self.task_health[request.task_id]
-                
-                message = f"Task {request.task_id} completed successfully"
-            else:
-                # 任務失敗
-                success = self.task_manager.update_task_status(request.task_id, "FAILED")
-                
-                # 將節點狀態設回 Idle
-                if request.node_id:
-                    self.node_manager.report_status(request.node_id, "Idle")
-                
-                # 從健康檢查中移除
-                if request.task_id in self.task_health:
-                    del self.task_health[request.task_id]
-                
-                message = f"Task {request.task_id} failed"
-            
-            if success:
-                logging.info(message)
-                return nodepool_pb2.StatusResponse(success=True, message=message)
-            else:
-                return nodepool_pb2.StatusResponse(success=False, message=f"Failed to update task status")
-                
-        except Exception as e:
-            logging.error(f"TaskCompleted 服務錯誤: {e}", exc_info=True)
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(f"Internal server error: {str(e)}")
-            return nodepool_pb2.StatusResponse(success=False, message=f"Internal error: {str(e)}")
-
-    def GetAllTasks(self, request, context):
-        """獲取所有任務的列表"""
-        logging.info(f"收到 GetAllTasks 請求，token: {request.token[:10] if request.token else 'None'}...")
-        if not self.auth_manager:
-            logging.error("auth_manager 未設置")
-            return nodepool_pb2.GetAllTasksResponse(
-                success=False,
-                message="Authentication service not available",
-                tasks=[]
-            )
-        # 修正：確保 user_id 是 int 或 str，不是 dict
-        user_info = self.auth_manager.verify_token(request.token)
-        if isinstance(user_info, dict):
-            user_id = user_info.get("user_id")
-        else:
-            user_id = user_info
-        if not user_id:
-            logging.warning("GetAllTasks: token 驗證失敗")
-            return nodepool_pb2.GetAllTasksResponse(
-                success=False,
-                message="Invalid or expired token",
-                tasks=[]
-            )
-        try:
-            user_tasks = self.task_manager.get_user_tasks(user_id)
-            logging.info(f"為用戶 {user_id} 找到 {len(user_tasks)} 個任務")
-            tasks = []
-            for task_info in user_tasks:
-                assigned_node = task_info.get("assigned_node", "")
-                tasks.append(nodepool_pb2.TaskStatus(
-                    task_id=task_info["task_id"],
-                    status=task_info["status"],
-                    created_at=task_info.get("created_at", ""),
-                    updated_at=task_info.get("updated_at", ""),
-                    assigned_node=assigned_node
-                ))
-            return nodepool_pb2.GetAllTasksResponse(
-                success=True,
-                message=f"Found {len(tasks)} tasks for user {user_id}",
-                tasks=tasks
-            )
-        except Exception as e:
-            logging.error(f"GetAllTasks 處理失敗: {e}", exc_info=True)
-            return nodepool_pb2.GetAllTasksResponse(
-                success=False,
-                message=f"Error retrieving tasks: {str(e)}",
-                tasks=[]
-            )
-
-    def GetTaskLogs(self, request, context):
-        """獲取任務日誌"""
-        try:
-            # 權限驗證（可選）
-            if self.auth_manager:
-                user_id = self.auth_manager.verify_token(request.token)
-                if not user_id:
-                    return nodepool_pb2.GetTaskLogsResponse(
-                        success=False,
-                        message="Invalid or expired token",
-                        logs=""
-                    )
-            # 取得日誌
-            log_info = self.task_manager.get_task_logs(request.task_id)
-            if not log_info:
-                return nodepool_pb2.GetTaskLogsResponse(
-                    success=False,
-                    message="Task not found or no logs",
-                    logs=""
-                )
-            # 將日誌合併為字串
-            logs_str = "\n".join(log_info.get("logs", []))
-            return nodepool_pb2.GetTaskLogsResponse(
-                success=True,
-                message="Logs retrieved successfully",
-                logs=logs_str
-            )
-        except Exception as e:
-            logging.error(f"GetTaskLogs 服務錯誤: {e}", exc_info=True)
-            return nodepool_pb2.GetTaskLogsResponse(
-                success=False,
-                message=f"Internal error: {str(e)}",
-                logs=""
-            )
-
     def StoreLogs(self, request, context):
         """存儲任務日誌"""
         try:
@@ -1089,69 +903,404 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                 message=f"Internal error: {str(e)}"
             )
 
+    def GetTaskLogs(self, request, context):
+        """獲取任務日誌"""
+        try:
+            # 驗證 token
+            username = self._extract_user_from_token(request.token)
+            if not username:
+                return nodepool_pb2.GetTaskLogsResponse(
+                    success=False,
+                    message="Invalid or expired token",
+                    logs=""
+                )
+            
+            # 取得日誌
+            log_info = self.task_manager.get_task_logs(request.task_id)
+            if not log_info:
+                return nodepool_pb2.GetTaskLogsResponse(
+                    success=False,
+                    message="Task not found or no logs",
+                    logs=""
+                )
+            
+            # 將日誌合併為字串
+            logs_str = "\n".join(log_info.get("logs", []))
+            return nodepool_pb2.GetTaskLogsResponse(
+                success=True,
+                message="Logs retrieved successfully",
+                logs=logs_str
+            )
+        except Exception as e:
+            logging.error(f"GetTaskLogs 服務錯誤: {e}", exc_info=True)
+            return nodepool_pb2.GetTaskLogsResponse(
+                success=False,
+                message=f"Internal error: {str(e)}",
+                logs=""
+            )
+
+    def ReturnTaskResult(self, request, context):
+        """工作端回傳任務結果，節點池暫存並更新狀態"""
+        try:
+            task_id = request.task_id
+            result_zip = request.result_zip
+            
+            # 檢查任務當前狀態
+            task_info = self.task_manager.get_task_info(task_id, include_zip=False)
+            if not task_info:
+                logging.error(f"任務 {task_id} 不存在")
+                return nodepool_pb2.ReturnTaskResultResponse(
+                    success=False,
+                    message="Task not found"
+                )
+            
+            current_status = task_info.get("status")
+            logging.info(f"任務 {task_id} 當前狀態: {current_status}")
+            
+            # 只有當任務處於 RUNNING 狀態時才處理結果
+            if current_status == "RUNNING":
+                # 存儲結果並更新狀態為 COMPLETED
+                success = self.task_manager.store_result(task_id, result_zip)
+                if success:
+                    logging.info(f"收到工作端回傳任務 {task_id} 結果，已暫存並標記為 COMPLETED")
+                    return nodepool_pb2.ReturnTaskResultResponse(
+                        success=True,
+                        message="Result stored and status updated to COMPLETED"
+                    )
+                else:
+                    logging.error(f"暫存任務 {task_id} 結果失敗")
+                    return nodepool_pb2.ReturnTaskResultResponse(
+                        success=False,
+                        message="Failed to store result"
+                    )
+            else:
+                logging.warning(f"任務 {task_id} 狀態為 {current_status}，忽略結果上傳")
+                return nodepool_pb2.ReturnTaskResultResponse(
+                    success=False,
+                    message=f"Task status is {current_status}, result ignored"
+                )
+                
+        except Exception as e:
+            logging.error(f"ReturnTaskResult 服務錯誤: {e}", exc_info=True)
+            return nodepool_pb2.ReturnTaskResultResponse(
+                success=False,
+                message=f"Internal error: {str(e)}"
+            )
+
+    def TaskCompleted(self, request, context):
+        """處理任務完成通知"""
+        try:
+            task_id = request.task_id
+            node_id = request.node_id
+            task_success = request.success
+            
+            # 檢查任務當前狀態
+            task_info = self.task_manager.get_task_info(task_id, include_zip=False)
+            if not task_info:
+                logging.warning(f"任務 {task_id} 不存在，無法更新完成狀態")
+                return nodepool_pb2.StatusResponse(success=False, message="Task not found")
+            
+            current_status = task_info.get("status")
+            logging.info(f"收到任務 {task_id} 完成通知，成功: {task_success}，當前狀態: {current_status}")
+            
+            # 如果任務已經是 COMPLETED，不要覆蓋為 FAILED
+            if current_status == "COMPLETED":
+                logging.info(f"任務 {task_id} 已經是 COMPLETED 狀態，保持不變")
+                message = f"Task {task_id} already completed"
+            elif task_success:
+                # 任務成功完成但還未標記為 COMPLETED
+                success = self.task_manager.update_task_status(task_id, "COMPLETED")
+                message = f"Task {task_id} completed successfully"
+                logging.info(message)
+            else:
+                # 任務失敗
+                success = self.task_manager.update_task_status(task_id, "FAILED")
+                message = f"Task {task_id} failed"
+                logging.info(message)
+            
+            # 將節點狀態設回 Idle
+            if node_id:
+                self.node_manager.report_status(node_id, "Idle")
+            
+            # 從健康檢查中移除
+            if task_id in self.task_health:
+                del self.task_health[task_id]
+            
+            return nodepool_pb2.StatusResponse(success=True, message=message)
+                
+        except Exception as e:
+            logging.error(f"TaskCompleted 服務錯誤: {e}", exc_info=True)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(f"Internal server error: {str(e)}")
+            return nodepool_pb2.StatusResponse(success=False, message=f"Internal error: {str(e)}")
+
+    # 修正 GetAllTasks 中的用戶ID查詢問題
+    def GetAllTasks(self, request, context):
+        """獲取用戶的所有任務（修正版本）"""
+        try:
+            if not request.token:
+                return nodepool_pb2.GetAllTasksResponse(
+                    success=False,
+                    message="Token is required"
+                )
+            
+            # 從 token 中獲取用戶名
+            username = self._extract_user_from_token(request.token)
+            if not username:
+                return nodepool_pb2.GetAllTasksResponse(
+                    success=False,
+                    message="Invalid or expired token"
+                )
+            
+            logging.info(f"用戶 {username} 請求獲取所有任務")
+            
+            # 查詢用戶的任務（使用用戶名而不是用戶ID）
+            task_statuses = []
+            try:
+                task_keys = self.task_manager.redis_client.keys("task:*")
+                task_count = 0
+                
+                for key in task_keys:
+                    if task_count >= 100:  # 限制最多返回100個任務
+                        break
+                        
+                    task_id = key.split(":", 1)[1]
+                    task_user_id = self.task_manager.redis_client.hget(key, "user_id")
+                    
+                    # 直接比較用戶名，因為存儲時用的是用戶名
+                    if str(task_user_id) == username:
+                        status = self.task_manager.redis_client.hget(key, "status") or "UNKNOWN"
+                        created_at = self.task_manager.redis_client.hget(key, "created_at") or ""
+                        updated_at = self.task_manager.redis_client.hget(key, "updated_at") or ""
+                        assigned_node = self.task_manager.redis_client.hget(key, "assigned_node") or ""
+                        
+                        task_status = nodepool_pb2.TaskStatus(
+                            task_id=task_id,
+                            status=status,
+                            created_at=created_at,
+                            updated_at=updated_at,
+                            assigned_node=assigned_node
+                        )
+                        task_statuses.append(task_status)
+                        task_count += 1
+                
+            except Exception as e:
+                logging.error(f"查詢用戶任務時發生錯誤: {e}")
+            
+            logging.info(f"返回用戶 {username} 的 {len(task_statuses)} 個任務")
+            return nodepool_pb2.GetAllTasksResponse(
+                success=True,
+                message=f"Found {len(task_statuses)} tasks",
+                tasks=task_statuses
+            )
+            
+        except Exception as e:
+            logging.error(f"GetAllTasks error: {e}", exc_info=True)
+            return nodepool_pb2.GetAllTasksResponse(
+                success=False,
+                message=f"Internal error: {str(e)}"
+            )
+
+    def _extract_user_from_token(self, token):
+        """從 token 中提取用戶名（簡化實現）"""
+        try:
+            import jwt
+            from config import Config
+            
+            # 直接解析 JWT token
+            payload = jwt.decode(token, Config.SECRET_KEY, algorithms=["HS256"])
+            user_id = payload.get("user_id")
+            
+            if user_id:
+                # 從資料庫獲取用戶名
+                from user_manager import UserManager
+                user_manager = UserManager()
+                user_info = user_manager.query_one("SELECT username FROM users WHERE id = ?", (user_id,))
+                if user_info:
+                    return user_info["username"]
+                else:
+                    logging.warning(f"找不到用戶ID {user_id} 對應的用戶名")
+                    return None
+            return None
+        except jwt.ExpiredSignatureError:
+            logging.warning("Token 已過期")
+            return None
+        except jwt.InvalidTokenError:
+            logging.warning("無效的 Token")
+            return None
+        except Exception as e:
+            logging.error(f"Extract user from token failed: {e}")
+            return None
+
     def StopTask(self, request, context):
         """停止任務"""
         try:
-            # 驗證用戶權限
-            user_id = self.auth_manager._verify_token(request.token)
-            if not user_id:
-                context.set_code(grpc.StatusCode.UNAUTHENTICATED)
-                context.set_details("Invalid token")
-                return nodepool_pb2.StatusResponse(success=False, message="認證失敗")
-            
             task_id = request.task_id
+            token = request.token
             
-            # 檢查任務是否存在且屬於該用戶
+            logging.info(f"收到停止任務請求: task_id={task_id}, token={token[:10]}...")
+            
+            # 驗證 token 並獲取用戶信息
+            username = self._extract_user_from_token(token)
+            if not username:
+                logging.warning(f"停止任務 {task_id} 失敗: 無效或過期的 token")
+                return nodepool_pb2.StopTaskResponse(
+                    success=False, 
+                    message="Invalid or expired token"
+                )
+            
+            # 獲取用戶ID
+            from user_manager import UserManager
+            user_manager = UserManager()
+            user_info = user_manager.query_one("SELECT id FROM users WHERE username = ?", (username,))
+            if not user_info:
+                logging.warning(f"停止任務 {task_id} 失敗: 找不到用戶 {username}")
+                return nodepool_pb2.StopTaskResponse(
+                    success=False, 
+                    message="User not found"
+                )
+            
+            user_id = str(user_info["id"])
+            logging.info(f"用戶 {username} (ID: {user_id}) 請求停止任務 {task_id}")
+            
+            # 檢查任務是否存在
             task_info = self.task_manager.get_task_info(task_id, include_zip=False)
             if not task_info:
-                return nodepool_pb2.StatusResponse(success=False, message="任務不存在")
+                logging.warning(f"停止任務 {task_id} 失敗: 任務不存在")
+                return nodepool_pb2.StopTaskResponse(
+                    success=False, 
+                    message="任務不存在"
+                )
             
-            task_user_id = task_info.get("user_id")
-            if str(task_user_id) != str(user_id):
-                return nodepool_pb2.StatusResponse(success=False, message="無權限停止此任務")
+            # 檢查任務所有權 - 重要：這裡要正確比較用戶
+            task_user_id = task_info.get("user_id", "")
+            logging.info(f"任務 {task_id} 的擁有者: {task_user_id}, 請求停止的用戶: {username}")
             
+            # 修正：任務存儲時可能使用用戶名，所以需要靈活比較
+            task_belongs_to_user = (
+                str(task_user_id) == str(user_id) or  # 比較用戶ID
+                str(task_user_id) == username         # 比較用戶名
+            )
+            
+            if not task_belongs_to_user:
+                logging.warning(f"用戶 {username} 無權限停止任務 {task_id} (任務擁有者: {task_user_id})")
+                return nodepool_pb2.StopTaskResponse(
+                    success=False, 
+                    message="無權限停止此任務"
+                )
+            
+            # 檢查任務當前狀態
             current_status = task_info.get("status")
             if current_status in ["COMPLETED", "FAILED", "STOPPED"]:
-                return nodepool_pb2.StatusResponse(success=False, message=f"任務已處於 {current_status} 狀態，無法停止")
+                logging.info(f"任務 {task_id} 已處於 {current_status} 狀態，無需停止")
+                return nodepool_pb2.StopTaskResponse(
+                    success=False, 
+                    message=f"任務已處於 {current_status} 狀態，無法停止"
+                )
             
-            # 停止任務
+            # 執行停止任務
             assigned_node = task_info.get("assigned_node")
             success = self.task_manager.update_task_status(task_id, "STOPPED", assigned_node=None)
             
-            # === 通知工作端停止任務（移除 reason 參數） ===
-            if assigned_node:
-                node_info = self.node_manager.get_node_info(assigned_node)
-                if node_info and node_info.get("port", 0) > 0:
-                    worker_host = node_info.get("hostname", "127.0.0.1")
-                    worker_port = node_info.get("port", 50053)
+            if success:
+                # 通知工作端停止任務
+                if assigned_node:
                     try:
-                        import nodepool_pb2_grpc
-                        channel = grpc.insecure_channel(f"{worker_host}:{worker_port}")
-                        stub = nodepool_pb2_grpc.WorkerNodeServiceStub(channel)
-                        stop_req = nodepool_pb2.StopTaskExecutionRequest(
-                            task_id=task_id
-                            # 不再傳 reason
-                        )
-                        stub.StopTaskExecution(stop_req, timeout=5)
-                        logging.info(f"已通知節點 {assigned_node} 停止任務 {task_id}")
+                        node_info = self.node_manager.get_node_info(assigned_node)
+                        if node_info and node_info.get("port", 0) > 0:
+                            worker_host = node_info.get("hostname", "127.0.0.1")
+                            worker_port = node_info.get("port", 50053)
+                            
+                            import nodepool_pb2_grpc
+                            channel = grpc.insecure_channel(f"{worker_host}:{worker_port}")
+                            stub = nodepool_pb2_grpc.WorkerNodeServiceStub(channel)
+                            stop_req = nodepool_pb2.StopTaskExecutionRequest(task_id=task_id)
+                            stub.StopTaskExecution(stop_req, timeout=5)
+                            channel.close()
+                            logging.info(f"已通知節點 {assigned_node} 停止任務 {task_id}")
                     except Exception as e:
                         logging.warning(f"通知節點 {assigned_node} 停止任務 {task_id} 失敗: {e}")
-            # === 新增結束 ===
-
-            if success:
+                
                 # 將節點狀態設回 Idle
                 if assigned_node:
                     self.node_manager.report_status(assigned_node, "Idle")
                 
                 # 從健康檢查中移除
                 if task_id in self.task_health:
-                    del self.task_health[task_id]                
-                return nodepool_pb2.StatusResponse(success=True, message=f"任務 {task_id} 已成功停止")
+                    del self.task_health[task_id]
+                
+                logging.info(f"任務 {task_id} 已成功停止 (用戶: {username})")
+                return nodepool_pb2.StopTaskResponse(
+                    success=True, 
+                    message=f"任務 {task_id} 已成功停止"
+                )
             else:
-                return nodepool_pb2.StatusResponse(success=False, message="停止任務失敗")
+                logging.error(f"停止任務 {task_id} 失敗: 無法更新任務狀態")
+                return nodepool_pb2.StopTaskResponse(
+                    success=False, 
+                    message="停止任務失敗"
+                )
                 
         except Exception as e:
             logging.error(f"StopTask 服務錯誤: {e}", exc_info=True)
+            return nodepool_pb2.StopTaskResponse(
+                success=False, 
+                message=f"內部錯誤: {str(e)}"
+            )
+
+    def GetTaskResult(self, request, context):
+        """主控端請求任務結果，節點池回傳暫存的 ZIP"""
+        try:
+            task_id = request.task_id
+            
+            # 驗證 token（如果有提供）
+            if hasattr(request, 'token') and request.token:
+                username = self._extract_user_from_token(request.token)
+                if not username:
+                    context.set_code(grpc.StatusCode.UNAUTHENTICATED)
+                    context.set_details("Invalid or expired token")
+                    return nodepool_pb2.GetTaskResultResponse(
+                        success=False,
+                        message="Authentication failed",
+                        result_zip=b""
+                    )
+                
+                # 檢查任務是否屬於該用戶
+                task_info = self.task_manager.get_task_info(task_id, include_zip=False)
+                if task_info and str(task_info.get("user_id")) != username:
+                    context.set_code(grpc.StatusCode.PERMISSION_DENIED)
+                    context.set_details("Access denied")
+                    return nodepool_pb2.GetTaskResultResponse(
+                        success=False,
+                        message="Access denied to this task",
+                        result_zip=b""
+                    )
+            
+            result_zip, status = self.task_manager.get_task_result_zip(task_id)
+            if status == "COMPLETED":
+                return nodepool_pb2.GetTaskResultResponse(
+                    success=True,
+                    message=f"Task {task_id} completed successfully",
+                    result_zip=result_zip
+                )
+            elif status in ["PENDING", "RUNNING"]:
+                return nodepool_pb2.GetTaskResultResponse(
+                    success=False,
+                    message=f"Task {task_id} is still {status.lower()}",
+                    result_zip=b""
+                )
+            else:
+                return nodepool_pb2.GetTaskResultResponse(
+                    success=False,
+                    message=f"Task {task_id} status: {status}",
+                    result_zip=b""
+                )
+        except Exception as e:
+            logging.error(f"GetTaskResult 服務錯誤: {e}", exc_info=True)
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(f"Internal server error: {str(e)}")
-            return nodepool_pb2.StatusResponse(success=False, message=f"內部錯誤: {str(e)}")
+            return nodepool_pb2.GetTaskResultResponse(
+                success=False,
+                message=f"Internal error: {str(e)}",
+                result_zip=b""
+            )

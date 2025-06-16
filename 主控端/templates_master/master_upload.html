@@ -184,7 +184,7 @@
           {% endif %}
         {% endwith %}
 
-        <form method="post" enctype="multipart/form-data">
+        <form method="post" enctype="multipart/form-data" action="/upload?user={{ username }}">
             <div class="file-input-container">
                 <label for="task_zip" class="file-input-label">
                     <span>點擊選擇任務 ZIP 檔案</span>
@@ -231,7 +231,7 @@
         </form>
 
         <hr>
-        <a href="{{ url_for('index') }}" class="back-link">← 回到主控台</a>
+        <a href="{{ url_for('index') }}?user={{ username }}" class="back-link">← 回到主控台</a>
     </div>
 
     <script>

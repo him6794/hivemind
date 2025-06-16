@@ -447,6 +447,11 @@ class MasterNodeServiceStub(object):
                 request_serializer=nodepool__pb2.StopTaskRequest.SerializeToString,
                 response_deserializer=nodepool__pb2.StopTaskResponse.FromString,
                 _registered_method=True)
+        self.ReturnTaskResult = channel.unary_unary(
+                '/nodepool.MasterNodeService/ReturnTaskResult',
+                request_serializer=nodepool__pb2.ReturnTaskResultRequest.SerializeToString,
+                response_deserializer=nodepool__pb2.ReturnTaskResultResponse.FromString,
+                _registered_method=True)
 
 
 class MasterNodeServiceServicer(object):
@@ -512,6 +517,12 @@ class MasterNodeServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ReturnTaskResult(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_MasterNodeServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -564,6 +575,11 @@ def add_MasterNodeServiceServicer_to_server(servicer, server):
                     servicer.StopTask,
                     request_deserializer=nodepool__pb2.StopTaskRequest.FromString,
                     response_serializer=nodepool__pb2.StopTaskResponse.SerializeToString,
+            ),
+            'ReturnTaskResult': grpc.unary_unary_rpc_method_handler(
+                    servicer.ReturnTaskResult,
+                    request_deserializer=nodepool__pb2.ReturnTaskResultRequest.FromString,
+                    response_serializer=nodepool__pb2.ReturnTaskResultResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -836,6 +852,33 @@ class MasterNodeService(object):
             '/nodepool.MasterNodeService/StopTask',
             nodepool__pb2.StopTaskRequest.SerializeToString,
             nodepool__pb2.StopTaskResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ReturnTaskResult(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/nodepool.MasterNodeService/ReturnTaskResult',
+            nodepool__pb2.ReturnTaskResultRequest.SerializeToString,
+            nodepool__pb2.ReturnTaskResultResponse.FromString,
             options,
             channel_credentials,
             insecure,

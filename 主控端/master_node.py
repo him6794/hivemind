@@ -3,13 +3,15 @@ import os
 import time
 import logging
 import zipfile
+import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import nodepool_pb2  # Updated proto with TransferRequest
+import nodepool_pb2
 import nodepool_pb2_grpc
 import threading
-from flask import Flask, jsonify, request, render_template, redirect, url_for, flash, session
+from flask import Flask, jsonify, request, render_template, redirect, url_for, flash
 import io
 from functools import wraps
+import uuid
 
 # --- Configuration ---
 GRPC_SERVER_ADDRESS = os.environ.get('GRPC_SERVER_ADDRESS', '127.0.0.1:50051')
@@ -23,15 +25,6 @@ UI_HOST = '0.0.0.0'
 UI_PORT = 5001
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(threadName)s] - %(message)s')
 
-def login_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if 'username' not in session:
-            flash('Please login to access this page.', 'error')
-            return redirect(url_for('login'))
-        return f(*args, **kwargs)
-    return decorated_function
-
 class MasterNodeUI:
     def __init__(self, username, password, grpc_address):
         self.username = username
@@ -41,7 +34,7 @@ class MasterNodeUI:
         self.user_stub = None
         self.master_stub = None
         self.node_stub = None
-        self.token = None
+        self.token = None  # 只在 MasterNodeUI 實例內部維護
         self.reward_thread = None
         self.task_poll_thread = None
         self.auto_retrieve_thread = None
@@ -52,9 +45,82 @@ class MasterNodeUI:
 
         self.app = Flask(__name__, template_folder="templates_master", static_folder="static_master")
         self.setup_flask_routes()
+        
+        # 配置Flask應用，避免與工作端衝突
         self.app.secret_key = FLASK_SECRET_KEY
+        self.app.config.update(
+            # 使用不同的session cookie名稱，避免與工作端衝突
+            SESSION_COOKIE_NAME='master_session',
+            SESSION_COOKIE_SECURE=False,
+            SESSION_COOKIE_HTTPONLY=True,
+            SESSION_COOKIE_SAMESITE='Lax',
+            SESSION_COOKIE_PATH='/',
+            SESSION_COOKIE_DOMAIN=None,  # 確保cookie域名不衝突
+            PERMANENT_SESSION_LIFETIME=datetime.timedelta(hours=24),  # 24小時會話
+            # 添加這個import
+            SESSION_REFRESH_EACH_REQUEST=True  # 每次請求刷新會話
+        )
+        
         self.task_status_updater = TaskStatusUpdater(self)
         self.task_status_updater.start()
+
+        # 用戶會話管理 - 存在後端陣列，不存在瀏覽器
+        self.user_list = []  # [{username, token, cpt_balance, login_time}]
+        self.user_list_lock = threading.Lock()
+
+    def add_or_update_user(self, username, token):
+        with self.user_list_lock:
+            for user in self.user_list:
+                if user['username'] == username:
+                    user['token'] = token
+                    user['login_time'] = datetime.datetime.now()
+                    return
+            self.user_list.append({
+                'username': username,
+                'token': token,
+                'cpt_balance': 0,
+                'login_time': datetime.datetime.now()
+            })
+
+    def get_user(self, username):
+        with self.user_list_lock:
+            for user in self.user_list:
+                if user['username'] == username:
+                    return user
+        return None
+
+    def remove_user(self, username):
+        with self.user_list_lock:
+            self.user_list = [u for u in self.user_list if u['username'] != username]
+
+    def get_balance(self, username):
+        user = self.get_user(username)
+        if not user:
+            return 0
+        try:
+            req = nodepool_pb2.GetBalanceRequest(username=username, token=user['token'])
+            resp = self.user_stub.GetBalance(req, timeout=30)
+            if resp.success:
+                user['cpt_balance'] = resp.balance
+                return resp.balance
+            else:
+                return 0
+        except Exception:
+            return 0
+
+    def get_tasks(self, username):
+        user = self.get_user(username)
+        if not user:
+            return []
+        try:
+            req = nodepool_pb2.GetAllTasksRequest(token=user['token'])
+            resp = self.master_stub.GetAllTasks(req, timeout=30)
+            if resp.success:
+                return resp.tasks
+            else:
+                return []
+        except Exception:
+            return []
 
     def _connect_grpc(self):
         try:
@@ -73,60 +139,59 @@ class MasterNodeUI:
             self.channel = None
             return False
 
-    def login(self):
+    def login(self, username=None, password=None):
+        # 支援外部傳入帳密
+        username = username or self.username
+        password = password or self.password
         if not self.channel or not self.user_stub:
             logging.error("gRPC connection not established. Cannot login.")
             return False
 
-        request = nodepool_pb2.LoginRequest(username=self.username, password=self.password)
+        request = nodepool_pb2.LoginRequest(username=username, password=password)
         try:
             response = self.user_stub.Login(request, timeout=15)
+            logging.info(f"LoginResponse: success={response.success}, token={response.token}")
             if response.success and response.token:
-                self.token = response.token
-                logging.info(f"MasterNodeUI logged in successfully. Token: {self.token[:10]}...")
+                self.add_or_update_user(username, response.token)
+                # 若是自己登入，也更新 self.token
+                if username == self.username:
+                    self.token = response.token
+                    logging.info(f"MasterNodeUI self.token set: {self.token}")
                 return True
             else:
-                logging.error(f"MasterNodeUI login failed: {response.message}")
-                self.token = None
                 return False
         except grpc.RpcError as e:
             logging.error(f"MasterNodeUI login gRPC error: {e.code()} - {e.details()}")
-            self.token = None
             return False
         except Exception as e:
             logging.error(f"MasterNodeUI login unexpected error: {e}", exc_info=True)
-            self.token = None
             return False
 
     def _get_grpc_metadata(self):
+        # 只用 self.token，不用 session['token']
         if self.token:
-            logging.debug(f"附加 token 到 metadata: {self.token}")
             return [('authorization', f'Bearer {self.token}')]
-        logging.warning("Attempting gRPC call without a valid token.")
         return None
 
-    def ensure_authenticated(self):
-        """確保主控端有有效的 token"""
-        if not self.token:
-            return self.login()
-        
+    def _get_user_id_from_token(self):
+        """從 token 中獲取用戶ID（修正版本）"""
         try:
-            balance_request = nodepool_pb2.GetBalanceRequest(token=self.token)
-            self.user_stub.GetBalance(balance_request)
-            return True
-        except grpc.RpcError as e:
-            if e.code() == grpc.StatusCode.UNAUTHENTICATED:
-                logging.warning("Token 已失效，嘗試重新登錄")
-                return self.login()
-            else:
-                logging.error(f"驗證 token 時發生錯誤: {e.details()}")
-                return False
+            # 主控端始終使用自己的用戶名，不依賴session
+            return self.username
+            
+        except Exception as e:
+            logging.error(f"獲取用戶ID失敗: {e}")
+            return self.username
+
+    def ensure_authenticated(self):
+        """確保主控端有有效的 token（簡化版本）"""
+        return bool(self.token)
 
     def upload_task(self, task_id, task_zip_bytes, requirements):
+        # 只用 self.token，不用 session['token']
         if not self.ensure_authenticated():
             logging.error("認證失敗，無法上傳任務")
             return task_id, False
-        
         if not self.master_stub or not self.token:
             logging.error("Cannot upload task: Not connected or not logged in.")
             return task_id, False
@@ -155,8 +220,11 @@ class MasterNodeUI:
             
             # 檢查用戶餘額是否足夠
             try:
-                balance_request = nodepool_pb2.GetBalanceRequest(token=self.token)
-                balance_response = self.user_stub.GetBalance(balance_request, timeout=10)
+                balance_request = nodepool_pb2.GetBalanceRequest(
+                    username=user_id,
+                    token=self.token
+                )
+                balance_response = self.user_stub.GetBalance(balance_request, timeout=30)  # 增加超時時間
                 if balance_response.success:
                     user_balance = balance_response.balance
                     if user_balance < cpt_cost:
@@ -179,9 +247,8 @@ class MasterNodeUI:
                 location=requirements.get("location", "Any"),
                 gpu_name=requirements.get("gpu_name", ""),
                 user_id=user_id
-                # 若 proto 有 cpt_cost 欄位，這裡加上 cpt_cost=cpt_cost
             )
-            response = self.master_stub.UploadTask(request, timeout=30)
+            response = self.master_stub.UploadTask(request, timeout=60)  # 增加超時時間
             if response.success:
                 logging.info(f"Task {task_id} uploaded successfully: {response.message}")
                 # 添加到任務緩存
@@ -203,23 +270,80 @@ class MasterNodeUI:
             logging.error(f"Task {task_id} upload unexpected error: {e}", exc_info=True)
             return task_id, False
 
-    def _get_user_id_from_token(self):
-        """從 token 中獲取用戶ID"""
+    def upload_task_with_user(self, username, task_id, task_zip_bytes, requirements):
+        user = self.get_user(username)
+        if not user:
+            logging.error(f"找不到用戶 {username}，無法上傳任務")
+            return task_id, False
+        token = user['token']
+
+        logging.info(f"Uploading task: {task_id}, Memory: {requirements.get('memory_gb')}GB, "
+                     f"CPU: {requirements.get('cpu_score')}, GPU: {requirements.get('gpu_score')}, "
+                     f"VRAM: {requirements.get('gpu_memory_gb')}GB, Loc: {requirements.get('location')}, "
+                     f"GPU Name: {requirements.get('gpu_name', 'Any')}")
         try:
-            # 使用 GetBalance 請求來獲取用戶ID
-            request = nodepool_pb2.GetBalanceRequest(token=self.token)
-            response = self.user_stub.GetBalance(request, timeout=10)
+            # 計算 cpt_cost，與節點池一致
+            memory_gb_val = float(requirements.get("memory_gb", 0))
+            cpu_score_val = float(requirements.get("cpu_score", 0))
+            gpu_score_val = float(requirements.get("gpu_score", 0))
+            gpu_memory_gb_val = float(requirements.get("gpu_memory_gb", 0))
+            cpt_cost = memory_gb_val + cpu_score_val / 100 + gpu_score_val / 100 + gpu_memory_gb_val
+            if cpt_cost < 1.0:
+                cpt_cost = 1.0
+            cpt_cost = int(cpt_cost)
+            logging.info(f"任務 {task_id} 計算所需代幣: {cpt_cost} CPT")
+            
+            # 檢查用戶餘額是否足夠
+            try:
+                balance_request = nodepool_pb2.GetBalanceRequest(
+                    username=username,
+                    token=token
+                )
+                balance_response = self.user_stub.GetBalance(balance_request, timeout=30)  # 增加超時時間
+                if balance_response.success:
+                    user['cpt_balance'] = balance_response.balance
+                    if balance_response.balance < cpt_cost:
+                        logging.error(f"用戶 {username} 餘額不足: 需要 {cpt_cost} CPT，但只有 {balance_response.balance} CPT")
+                        return task_id, False
+                else:
+                    logging.error(f"無法獲取用戶 {username} 餘額: {balance_response.message}")
+                    return task_id, False
+            except Exception as e:
+                logging.error(f"檢查用戶 {username} 餘額時發生錯誤: {e}")
+                return task_id, False
+
+            request = nodepool_pb2.UploadTaskRequest(
+                task_id=task_id,
+                task_zip=task_zip_bytes,
+                memory_gb=int(requirements.get("memory_gb", 0)),
+                cpu_score=int(requirements.get("cpu_score", 0)),
+                gpu_score=int(requirements.get("gpu_score", 0)),
+                gpu_memory_gb=int(requirements.get("gpu_memory_gb", 0)),
+                location=requirements.get("location", "Any"),
+                gpu_name=requirements.get("gpu_name", ""),
+                user_id=username
+            )
+            metadata = [('authorization', f'Bearer {token}')]
+            response = self.master_stub.UploadTask(request, metadata=metadata, timeout=60)
             if response.success:
-                # 從消息中解析用戶ID
-                message = response.message
-                if "for user" in message:
-                    user_id = message.split("for user")[-1].strip()
-                    return user_id
-            logging.error("無法從響應中獲取用戶ID")
-            return None
+                logging.info(f"Task {task_id} uploaded successfully: {response.message}")
+                with self.task_cache_lock:
+                    self.task_status_cache[task_id] = {
+                        "task_id": task_id,
+                        "status": "PENDING",
+                        "message": "Task submitted",
+                        "last_polled": time.time()
+                    }
+                return task_id, True
+            else:
+                logging.error(f"Task {task_id} upload failed on server: {response.message}")
+                return task_id, False
+        except grpc.RpcError as e:
+            logging.error(f"Task {task_id} upload gRPC error: {e.details()}")
+            return task_id, False
         except Exception as e:
-            logging.error(f"獲取用戶ID失敗: {e}")
-            return None
+            logging.error(f"Task {task_id} upload unexpected error: {e}", exc_info=True)
+            return task_id, False
 
     def poll_task_status(self, task_id):
         if not self.master_stub:
@@ -232,11 +356,11 @@ class MasterNodeUI:
 
         try:
             request = nodepool_pb2.PollTaskStatusRequest(task_id=task_id)
-            response = self.master_stub.PollTaskStatus(request, metadata=self._get_grpc_metadata(), timeout=10)
+            response = self.master_stub.PollTaskStatus(request, metadata=self._get_grpc_metadata(), timeout=30)  # 增加超時時間
             logging.debug(f"Polled task {task_id} status: {response.status}")
             with self.task_cache_lock:
                 self.task_status_cache[task_id] = {
-                    "task_id": task_id,  # 添加 task_id 字段
+                    "task_id": task_id,
                     "status": response.status,
                     "output_tail": response.output[-5:] if response.output else [],
                     "message": response.message,
@@ -256,7 +380,11 @@ class MasterNodeUI:
             logging.error("Cannot get task result: Not connected.")
             return False
         try:
-            request = nodepool_pb2.GetTaskResultRequest(task_id=task_id)
+            # 使用主控端的token
+            request = nodepool_pb2.GetTaskResultRequest(
+                task_id=task_id,
+                token=self.token  # 只用 self.token
+            )
             response = self.master_stub.GetTaskResult(request, timeout=60)
             if response.success and response.result_zip:
                 os.makedirs(os.path.dirname(download_path), exist_ok=True)
@@ -446,7 +574,7 @@ class MasterNodeUI:
                     pending_tasks = {
                         task_id: info for task_id, info in self.task_status_cache.items()
                         if info.get("task_id") # 確保這是一個任務，不是節點
-                        and info.get("status") not in ["COMPLETED", "FAILED", "ERROR"]
+                        and info.get("status") not in ["COMPLETED", "FAILED", "ERROR", "STOPPED"]
                     }
                 
                 if pending_tasks:
@@ -496,235 +624,140 @@ class MasterNodeUI:
         
         logging.info("Auto task retrieval thread stopped.")
 
+    def _create_user_session(self, username, token):
+        """創建用戶會話"""
+        session_id = str(uuid.uuid4())
+        session_data = {
+            'username': username,
+            'token': token,
+            'login_time': datetime.datetime.now(),
+            'cpt_balance': 0,
+            'created_at': time.time()
+        }
+        
+        with self.session_lock:
+            self.user_sessions[session_id] = session_data
+        
+        return session_id
+
+    def _get_user_session(self, session_id):
+        """根據會話ID獲取用戶資料"""
+        with self.session_lock:
+            return self.user_sessions.get(session_id)
+
+    def _update_session_balance(self, session_id, balance):
+        """更新會話中的餘額"""
+        with self.session_lock:
+            if session_id in self.user_sessions:
+                self.user_sessions[session_id]['cpt_balance'] = balance
+
+    def _clear_user_session(self, session_id):
+        """清除用戶會話"""
+        with self.session_lock:
+            if session_id in self.user_sessions:
+                del self.user_sessions[session_id]
+
     def setup_flask_routes(self):
         @self.app.route('/login', methods=['GET', 'POST'])
         def login():
             if request.method == 'POST':
                 username = request.form.get('username')
                 password = request.form.get('password')
-                # 呼叫節點池 gRPC 進行帳號密碼驗證
                 if not self.channel or not self.user_stub:
                     flash('主控端未連接到節點池，請稍後再試。', 'error')
                     return render_template('login.html')
-                try:
-                    request_obj = nodepool_pb2.LoginRequest(username=username, password=password)
-                    response = self.user_stub.Login(request_obj, timeout=10)
-                    if response.success and response.token:
-                        session['username'] = username
-                        session['token'] = response.token
-                        self.token = response.token  # 更新主控端 token
-                        flash('Login successful!', 'success')
-                        return redirect(url_for('index'))
-                    else:
-                        flash('Invalid username or password', 'error')
-                except grpc.RpcError as e:
-                    flash(f'gRPC 連線錯誤: {e.details()}', 'error')
-                except Exception as e:
-                    flash(f'登入時發生錯誤: {e}', 'error')
+                if self.login(username, password):
+                    flash('Login successful!', 'success')
+                    return redirect(url_for('index') + f"?user={username}")
+                else:
+                    flash('Invalid username or password', 'error')
             return render_template('login.html')
 
         @self.app.route('/logout')
         def logout():
-            session.pop('username', None)
+            username = request.args.get('user')
+            if username:
+                self.remove_user(username)
             flash('You have been logged out.', 'success')
             return redirect(url_for('login'))
 
         @self.app.route('/')
-        @login_required
         def index():
-            return render_template('master_dashboard.html')
+            username = request.args.get('user')
+            if not username or not self.get_user(username):
+                return redirect(url_for('login'))
+            return render_template('master_dashboard.html', username=username)
+
+        @self.app.route('/api/balance')
+        def api_balance():
+            username = request.args.get('user')
+            if not username or not self.get_user(username):
+                return jsonify({"error": "請先登入", "cpt_balance": 0}), 401
+            balance = self.get_balance(username)
+            return jsonify({"cpt_balance": balance})
+
+        @self.app.route('/api/tasks')
+        def api_tasks():
+            username = request.args.get('user')
+            if not username or not self.get_user(username):
+                return jsonify({"error": "請先登入", "tasks": []}), 401
+            tasks = self.get_tasks(username)
+            task_list = []
+            for task in tasks:
+                created_time = ""
+                if getattr(task, "created_at", None):
+                    try:
+                        created_timestamp = float(task.created_at)
+                        created_time = time.strftime('%H:%M:%S', time.localtime(created_timestamp))
+                    except:
+                        created_time = "未知"
+                task_list.append({
+                    "task_id": task.task_id,
+                    "status": task.status,
+                    "progress": "100%" if task.status == "COMPLETED" else "50%" if task.status == "RUNNING" else "0%",
+                    "message": f"狀態: {task.status}",
+                    "last_update": created_time
+                })
+            return jsonify({"tasks": task_list})
 
         @self.app.route('/api/nodes')
-        @login_required
         def api_nodes():
+            username = request.args.get('user')
+            if not username or not self.get_user(username):
+                return jsonify({"error": "請先登入", "nodes": []}), 401
             if not self.node_stub:
-                return jsonify({"error": "Not connected to gRPC server"}), 500
+                return jsonify({"error": "Not connected to gRPC server", "nodes": []}), 200
             try:
-                request = nodepool_pb2.GetNodeListRequest()
-                response = self.node_stub.GetNodeList(request, timeout=10)
+                grpc_request = nodepool_pb2.GetNodeListRequest()
+                response = self.node_stub.GetNodeList(grpc_request, timeout=30)
                 if response.success:
                     nodes_list = []
                     for node in response.nodes:
+                        status = "ONLINE" if node.status else "OFFLINE"
                         nodes_list.append({
                             "node_id": node.node_id,
-                            "hostname": node.hostname,
+                            "status": status,
                             "cpu_cores": node.cpu_cores,
                             "memory_gb": node.memory_gb,
-                            "status": node.status,
-                            "last_heartbeat": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(int(node.last_heartbeat))) if node.last_heartbeat else 'N/A',
                             "cpu_score": node.cpu_score,
                             "gpu_score": node.gpu_score,
-                            "gpu_memory_gb": node.gpu_memory_gb,
-                            "gpu_name": node.gpu_name,
-                            "location": node.location,
-                            "port": node.port,
+                            "last_heartbeat": time.strftime('%H:%M:%S', time.localtime(int(node.last_heartbeat))) if node.last_heartbeat else 'N/A',
                         })
                     return jsonify({"nodes": nodes_list})
                 else:
-                    return jsonify({"error": f"Failed to get node list: {response.message}"}), 500
+                    return jsonify({"error": f"Failed to get node list: {response.message}", "nodes": []}), 200
             except grpc.RpcError as e:
                 logging.error(f"API GetNodeList gRPC error: {e.details()}")
-                return jsonify({"error": f"gRPC Error: {e.details()}"}), 500
+                return jsonify({"error": "節點池連接超時", "nodes": []}), 200
             except Exception as e:
                 logging.error(f"API GetNodeList unexpected error: {e}", exc_info=True)
-                return jsonify({"error": f"Unexpected Error: {e}"}), 500
-
-        @self.app.route('/api/balance')
-        @login_required
-        def api_balance():
-            if not self.user_stub or not self.token:
-                return jsonify({"error": "Not connected to gRPC server"}), 500
-            try:
-                request = nodepool_pb2.GetBalanceRequest(token=self.token)
-                response = self.user_stub.GetBalance(request, timeout=10)
-                if response.success:
-                    return jsonify({"cpt_balance": response.balance})
-                else:
-                    return jsonify({"error": f"Failed to get balance: {response.message}"}), 500
-            except grpc.RpcError as e:
-                logging.error(f"API GetBalance gRPC error: {e.details()}")
-                return jsonify({"error": f"gRPC Error: {e.details()}"}), 500
-            except Exception as e:
-                logging.error(f"API GetBalance unexpected error: {e}", exc_info=True)
-                return jsonify({"error": f"Unexpected Error: {e}"}), 500
-
-        @self.app.route('/api/tasks')
-        @login_required 
-        def api_tasks():
-            task_list = []
-            try:
-                meta = self._get_grpc_metadata()
-                if not meta:
-                    return jsonify({"error": "Not authenticated"}), 401
-                    
-                # 從緩存獲取任務狀態
-                with self.task_cache_lock:
-                    for task_id, status_info in self.task_status_cache.items():
-                        # 確保這是一個任務記錄而不是節點狀態
-                        if isinstance(status_info, dict) and "task_id" in status_info:
-                            last_polled = status_info.get("last_polled")
-                            if last_polled:
-                                try:
-                                    if isinstance(last_polled, (int, float)):
-                                        last_update_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(last_polled))
-                                    else:
-                                        last_update_str = str(last_polled)
-                                except (ValueError, OSError):
-                                    last_update_str = "-"
-                            else:
-                                last_update_str = "-"
-                            
-                            task_list.append({
-                                "task_id": task_id,
-                                "status": status_info.get("status", "UNKNOWN"),
-                                "progress": status_info.get("progress", "0%"),
-                                "message": status_info.get("message", ""),
-                                "output_tail": status_info.get("output_tail", []),
-                                "last_update": last_update_str
-                            })
-                        
-                # 如果緩存为空，主動從節點池獲取所有任務
-                if not task_list:
-                    logging.info("緩存中無任務，嘗試從節點池獲取任務列表")
-                    try:
-                        # 從master_node_service獲取活動任務
-                        request = nodepool_pb2.GetAllTasksRequest(token=self.token)
-                        response = self.master_stub.GetAllTasks(request, metadata=meta, timeout=15)
-                        
-                        if response.success and response.tasks:
-                            logging.info(f"從節點池獲取到 {len(response.tasks)} 個任務")
-                            
-                            # 更新任務緩存
-                            for task in response.tasks:
-                                try:
-                                    task_status = self.poll_task_status(task.task_id)
-                                    
-                                    task_list.append({
-                                        "task_id": task.task_id,
-                                        "status": task_status.get("status", "UNKNOWN"),
-                                        "progress": task_status.get("progress", "0%"),
-                                        "message": task_status.get("message", ""),
-                                        "output_tail": task_status.get("output_tail", []),
-                                        "last_update": time.strftime('%Y-%m-%d %H:%M:%S')
-                                    })
-                                except Exception as task_err:
-                                    logging.error(f"處理任務 {task.task_id} 時出錯: {task_err}")
-                                    # 添加一個基本的任務條目
-                                    task_list.append({
-                                        "task_id": task.task_id,
-                                        "status": "UNKNOWN",
-                                        "progress": "0%",
-                                        "message": "Failed to get task status",
-                                        "output_tail": [],
-                                        "last_update": time.strftime('%Y-%m-%d %H:%M:%S')
-                                    })
-                        else:
-                            logging.info("節點池未返回任務或請求失敗")
-                            
-                        # 直接查詢工作節點的運行中任務
-                        try:
-                            # 先獲取所有節點
-                            nodes_req = nodepool_pb2.GetNodeListRequest()
-                            nodes_resp = self.node_stub.GetNodeList(nodes_req, metadata=meta, timeout=10)
-                            
-                            if nodes_resp.success and nodes_resp.nodes:
-                                for node in nodes_resp.nodes:
-                                    if node.status == "Running" and node.port > 0:
-                                        # 使用節點的 hostname
-                                        node_address = f'{node.hostname}:{node.port}'
-                                        worker_channel = grpc.insecure_channel(node_address)
-                                        try:
-                                            grpc.channel_ready_future(worker_channel).result(timeout=2)
-                                            worker_stub = nodepool_pb2_grpc.WorkerNodeServiceStub(worker_channel)
-                                            
-                                            status_req = nodepool_pb2.RunningStatusRequest(node_id=node.node_id, task_id="")
-                                            status_resp = worker_stub.ReportRunningStatus(status_req, timeout=3)
-                                            
-                                            if status_resp.success and hasattr(status_resp, 'message') and "Running Task:" in status_resp.message:
-                                                # 從消息中提取任務ID
-                                                try:
-                                                    running_task_id = status_resp.message.split("Running Task:")[-1].strip()
-                                                    if running_task_id:
-                                                        # 添加到任務列表
-                                                        running_task = {
-                                                            "task_id": running_task_id,
-                                                            "progress": "運行中",
-                                                            "message": f"Running on {node.node_id}",
-                                                            "output_tail": [],
-                                                            "last_update": time.strftime('%Y-%m-%d %H:%M:%S')
-                                                        }
-                                                        
-                                                        # 更新緩存
-                                                        with self.task_cache_lock:
-                                                            self.task_status_cache[running_task_id] = {
-                                                                "task_id": running_task_id,
-                                                                "status": "RUNNING",
-                                                                "message": f"Running on {node.node_id}",
-                                                                "last_polled": time.time()
-                                                            }
-                                                        
-                                                        # 避免重複添加
-                                                        if not any(t["task_id"] == running_task_id for t in task_list):
-                                                            task_list.append(running_task)
-                                                            logging.info(f"從工作節點 {node.node_id} 發現運行中任務: {running_task_id}")
-                                                except Exception as parse_err:
-                                                    logging.warning(f"解析運行中任務ID失敗: {parse_err}")
-                                        finally:
-                                            worker_channel.close()
-                        except Exception as node_err:
-                            logging.error(f"查詢節點任務時出錯: {node_err}")
-                    except Exception as e:
-                        logging.error(f"從節點池獲取任務列表失敗: {e}")
-                        
-                return jsonify({"tasks": task_list})
-                        
-            except Exception as e:
-                logging.error(f"處理任務列表請求時出錯: {e}")
-                return jsonify({"error": str(e), "tasks": []}), 500
+                return jsonify({"error": "獲取節點列表失敗", "nodes": []}), 200
 
         @self.app.route('/upload', methods=['GET', 'POST'])
-        @login_required
         def upload_task_ui():
+            username = request.args.get('user')
+            if not username or not self.get_user(username):
+                return redirect(url_for('login'))
             if request.method == 'POST':
                 if 'task_zip' not in request.files:
                     flash('No task_zip file part', 'error')
@@ -733,15 +766,12 @@ class MasterNodeUI:
                 if file.filename == '':
                     flash('No selected file', 'error')
                     return redirect(request.url)
-
                 if file and file.filename.endswith('.zip'):
-                    # 自動生成任務ID
                     import uuid
                     import datetime
                     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                     task_uuid = str(uuid.uuid4())[:8]
                     task_id = f"task_{timestamp}_{task_uuid}"
-                    
                     requirements = {
                         "memory_gb": request.form.get('memory_gb', 0),
                         "cpu_score": request.form.get('cpu_score', 0),
@@ -751,105 +781,157 @@ class MasterNodeUI:
                         "gpu_name": request.form.get('gpu_name', '')
                     }
                     task_zip_bytes = file.read()
-                    _, success = self.upload_task(task_id, task_zip_bytes, requirements)
+                    _, success = self.upload_task_with_user(username, task_id, task_zip_bytes, requirements)
                     if success:
                         flash(f'任務 "{task_id}" 上傳成功！', 'success')
                         with self.task_cache_lock:
                             self.task_status_cache[task_id] = {"task_id": task_id, "status": "PENDING", "message": "Task submitted via UI"}
                     else:
                         flash(f'任務 "{task_id}" 上傳失敗。', 'error')
-                    return redirect(url_for('index'))
+                    return redirect(url_for('index') + f"?user={username}")
                 else:
                     flash('檔案格式無效，請上傳 .zip 檔案', 'error')
                     return redirect(request.url)
-            return render_template('master_upload.html')
+            return render_template('master_upload.html', username=username)
 
         @self.app.route('/api/poll_task/<task_id>')
-        @login_required
         def api_poll_task(task_id):
             status_info = self.poll_task_status(task_id)
             return jsonify(status_info)
 
         @self.app.route('/api/task_status_and_retrieve/<task_id>')
-        @login_required
         def api_task_status_and_retrieve(task_id):
             result = self.request_task_status_and_retrieve(task_id)
             return jsonify(result)
 
         @self.app.route('/api/stop_task/<task_id>', methods=['POST'])
-        @login_required
         def api_stop_task(task_id):
-            """停止指定的任務"""
+            username = request.args.get('user')
+            user = self.get_user(username)
+            token = user['token'] if user else None
+            
+            if not username:
+                logging.error(f"缺少用戶參數，無法停止任務 {task_id}")
+                return jsonify({
+                    "success": False,
+                    "error": "缺少用戶參數",
+                    "task_id": task_id
+                }), 400
+            
+            if not user:
+                logging.error(f"用戶 {username} 未登入，無法停止任務 {task_id}")
+                return jsonify({
+                    "success": False,
+                    "error": "用戶未登入，請重新登入",
+                    "task_id": task_id
+                }), 401
+            
+            if not token:
+                logging.error(f"用戶 {username} token為空，無法停止任務 {task_id}")
+                return jsonify({
+                    "success": False,
+                    "error": "用戶token已過期，請重新登入",
+                    "task_id": task_id
+                }), 401
+            
+            if not self.master_stub:
+                logging.error(f"gRPC stub 未初始化，無法停止任務 {task_id}")
+                return jsonify({
+                    "success": False,
+                    "error": "服務未連接到節點池",
+                    "task_id": task_id
+                }), 500
+            
             try:
-                # 從請求中獲取停止原因（可選）
-                data = request.get_json() or {}
-                reason = data.get('reason', '用戶手動停止')
+                logging.info(f"用戶 {username} 請求停止任務 {task_id}")
+                logging.info(f"使用用戶 {username} 的token停止任務 {task_id}: {token[:10]}...")
                 
-                # 調用停止任務方法
-                success = self.stop_task(task_id, reason)
+                # 創建停止任務請求，只使用 task_id 和 token
+                req = nodepool_pb2.StopTaskRequest(
+                    task_id=task_id,
+                    token=token  # 使用請求用戶的token
+                )
                 
-                if success:
+                logging.info(f"發送停止任務請求到節點池: task_id={task_id}, user={username}")
+                
+                # 發送 gRPC 請求到節點池
+                response = self.master_stub.StopTask(req, timeout=30)
+                
+                logging.info(f"節點池回應停止任務請求: success={response.success}, message={response.message}")
+                
+                if response.success:
+                    # 更新本地緩存
+                    with self.task_cache_lock:
+                        if task_id in self.task_status_cache:
+                            self.task_status_cache[task_id].update({
+                                "status": "STOPPED",
+                                "last_polled": time.time()
+                            })
+                    
                     return jsonify({
                         "success": True,
                         "message": f"任務 {task_id} 已成功停止",
                         "task_id": task_id,
-                        "reason": reason
                     })
                 else:
+                    logging.warning(f"節點池拒絕停止任務請求: {response.message}")
                     return jsonify({
                         "success": False,
-                        "error": f"停止任務 {task_id} 失敗",
+                        "error": f"節點池拒絕停止任務: {response.message}",
+                        "message": f"停止任務 {task_id} 失敗: {response.message}",
                         "task_id": task_id
                     }), 400
                     
+            except grpc.RpcError as e:
+                logging.error(f"停止任務 {task_id} gRPC 錯誤: {e.code()} - {e.details()}")
+                return jsonify({
+                    "success": False,
+                    "error": f"gRPC 錯誤: {e.details()}",
+                    "message": f"停止任務時發生 gRPC 錯誤",
+                    "task_id": task_id
+                }), 500
             except Exception as e:
                 logging.error(f"API 停止任務 {task_id} 失敗: {e}", exc_info=True)
                 return jsonify({
                     "success": False,
                     "error": f"內部錯誤: {str(e)}",
+                    "message": f"停止任務時發生內部錯誤",
                     "task_id": task_id
                 }), 500
 
         @self.app.route('/api/task_logs/<task_id>')
-        @login_required
         def api_task_logs(task_id):
-            """從節點池獲取特定任務的詳細日誌"""
-            if not self.master_stub or not self.token:
+            username = request.args.get('user')
+            user = self.get_user(username)
+            token = user['token'] if user else None
+            if not token:
+                return jsonify({"error": "用戶未登入或token已過期"}), 401
+            if not self.master_stub:
                 return jsonify({"error": "Not connected to gRPC server"}), 500
-            
             try:
-                # 使用新的 GetTaskLogs RPC，包含 token
-                request = nodepool_pb2.GetTaskLogsRequest(
+                req = nodepool_pb2.GetTaskLogsRequest(
                     task_id=task_id,
-                    token=self.token
+                    token=token
                 )
-                
-                response = self.master_stub.GetTaskLogs(request, timeout=10)
-                
+                response = self.master_stub.GetTaskLogs(req, timeout=10)
                 if response.success:
-                    # 解析日誌
                     logs_text = response.logs
                     formatted_logs = []
-                    
                     if logs_text:
                         for line in logs_text.split('\n'):
                             if line.strip():
-                                # 嘗試解析時間戳和級別
                                 timestamp, content, level = self._parse_log_line(line)
                                 formatted_logs.append({
                                     "timestamp": timestamp,
                                     "content": content,
                                     "level": level
                                 })
-                    
-                    # 同時獲取任務狀態
                     status_request = nodepool_pb2.PollTaskStatusRequest(task_id=task_id)
                     status_response = self.master_stub.PollTaskStatus(
                         status_request, 
                         metadata=self._get_grpc_metadata(), 
                         timeout=10
                     )
-                    
                     return jsonify({
                         "task_id": task_id,
                         "status": status_response.status if status_response else "UNKNOWN",
@@ -864,7 +946,6 @@ class MasterNodeUI:
                         "logs": [],
                         "total_logs": 0
                     }), 404
-                    
             except grpc.RpcError as e:
                 logging.error(f"API GetTaskLogs gRPC error: {e.details()}")
                 return jsonify({"error": f"gRPC Error: {e.details()}"}), 500
@@ -872,71 +953,44 @@ class MasterNodeUI:
                 logging.error(f"API GetTaskLogs unexpected error: {e}", exc_info=True)
                 return jsonify({"error": f"Unexpected Error: {e}"}), 500
 
-        @self.app.route('/api/task_live_logs/<task_id>')
-        @login_required
-        def api_task_live_logs(task_id):
-            """獲取任務的實時日誌更新"""
+        @self.app.route('/api/download_result/<task_id>')
+        def api_download_result(task_id):
+            username = request.args.get('user')
+            user = self.get_user(username)
+            token = user['token'] if user else None
+            if not token:
+                return jsonify({"error": "用戶未登入或token已過期"}), 401
+            if not self.master_stub:
+                return jsonify({"error": "Not connected to gRPC server"}), 500
             try:
-                # 從緩存中獲取任務信息
-                with self.task_cache_lock:
-                    task_info = self.task_status_cache.get(task_id)
-                
-                if not task_info:
-                    return jsonify({"error": f"Task {task_id} not found in cache"}), 404
-                
-                # 如果任務正在運行，嘗試從工作節點獲取實時日誌
-                if task_info.get("status") == "RUNNING" and task_info.get("assigned_node"):
-                    node_id = task_info.get("assigned_node")
-                    
-                    # 查找節點的端口
-                    try:
-                        nodes_req = nodepool_pb2.GetNodeListRequest()
-                        nodes_resp = self.node_stub.GetNodeList(nodes_req, timeout=5)
-                        
-                        target_node = None
-                        for node in nodes_resp.nodes:
-                            if node.node_id == node_id:
-                                target_node = node
-                                break
-                        
-                        if target_node and target_node.port > 0:
-                            # 使用節點的實際hostname而不是127.0.0.1
-                            worker_address = f'{target_node.hostname}:{target_node.port}'
-                            worker_channel = grpc.insecure_channel(worker_address)
-                            try:
-                                grpc.channel_ready_future(worker_channel).result(timeout=2)
-                                worker_stub = nodepool_pb2_grpc.WorkerNodeServiceStub(worker_channel)
-                                
-                                status_req = nodepool_pb2.RunningStatusRequest(node_id=node_id, task_id=task_id)
-                                status_resp = worker_stub.ReportRunningStatus(status_req, timeout=3)
-                                
-                                if status_resp.success:
-                                    return jsonify({
-                                        "task_id": task_id,
-                                        "status": "RUNNING",
-                                        "live_message": status_resp.message,
-                                        "timestamp": time.strftime('%Y-%m-%d %H:%M:%S')
-                                    })
-                            except Exception as e:
-                                logging.warning(f"無法連接到工作節點 {node_id}: {e}")
-                            finally:
-                                worker_channel.close()
-                    
-                    except Exception as e:
-                        logging.error(f"查找節點信息失敗: {e}")
-                
-                # 返回緩存中的任務信息
-                return jsonify({
-                    "task_id": task_id,
-                    "status": task_info.get("status", "UNKNOWN"),
-                    "message": task_info.get("message", ""),
-                    "output_tail": task_info.get("output_tail", []),
-                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S')
-                })
-                
+                req = nodepool_pb2.GetTaskResultRequest(
+                    task_id=task_id,
+                    token=token
+                )
+                response = self.master_stub.GetTaskResult(req, timeout=60)
+                if response.success and response.result_zip:
+                    from flask import Response
+                    def generate():
+                        yield response.result_zip
+                    filename = f"{task_id}_result.zip"
+                    return Response(
+                        generate(),
+                        mimetype='application/zip',
+                        headers={
+                            'Content-Disposition': f'attachment; filename="{filename}"',
+                            'Content-Length': str(len(response.result_zip))
+                        }
+                    )
+                else:
+                    return jsonify({
+                        "error": response.message or "Failed to get task result"
+                    }), 404
+            except grpc.RpcError as e:
+                logging.error(f"Download result gRPC error: {e.details()}")
+                return jsonify({"error": f"gRPC Error: {e.details()}"}), 500
             except Exception as e:
-                logging.error(f"獲取實時日誌失敗: {e}")
-                return jsonify({"error": f"Error: {str(e)}"}), 500
+                logging.error(f"Download result unexpected error: {e}", exc_info=True)
+                return jsonify({"error": f"Unexpected Error: {e}"}), 500
 
     def _detect_log_level(self, log_entry):
         """檢測日誌條目的級別"""
@@ -1021,8 +1075,11 @@ class MasterNodeUI:
         self.start_auto_retrieval()
         
         try:
-            logging.info(f"Master Node UI 啟動在 http://{UI_HOST}:{UI_PORT}")
-            self.app.run(host=UI_HOST, port=UI_PORT, debug=False)
+            # 確保主控端使用不同的端口，避免與工作端衝突
+            actual_ui_port = UI_PORT
+            logging.info(f"主控端 Master Node UI 啟動在 http://{UI_HOST}:{actual_ui_port}")
+            logging.info(f"工作端應該使用端口 5000，主控端使用端口 {actual_ui_port}")
+            self.app.run(host=UI_HOST, port=actual_ui_port, debug=False)
         except KeyboardInterrupt:
             logging.info("收到中斷信號，正在關閉...")
         finally:
@@ -1043,7 +1100,7 @@ class MasterNodeUI:
         try:
             request = nodepool_pb2.StopTaskRequest(
                 task_id=task_id,
-                token=self.token
+                token=self.token  # 只用 self.token
             )
             response = self.master_stub.StopTask(request, timeout=10)
             
@@ -1062,12 +1119,11 @@ class MasterNodeUI:
             else:
                 logging.error(f"停止任務 {task_id} 失敗: {response.message}")
                 return False
-                
         except grpc.RpcError as e:
             logging.error(f"停止任務 {task_id} gRPC 錯誤: {e.details()}")
             return False
         except Exception as e:
-            logging.error(f"停止任務 {task_id} 發生未知錯誤: {e}", exc_info=True)
+            logging.error(f"停止任務 {task_id} 意外錯誤: {e}", exc_info=True)
             return False
 
 class TaskStatusUpdater:
@@ -1094,35 +1150,33 @@ class TaskStatusUpdater:
                 # 清理過期緩存
                 self.master_ui.clean_expired_task_cache()
                 
-                # 更新任務狀態
+                # 只更新活躍任務的狀態
                 with self.master_ui.task_cache_lock:
-                    task_ids = list(self.master_ui.task_status_cache.keys())
+                    active_tasks = {
+                        task_id: info for task_id, info in self.master_ui.task_status_cache.items()
+                        if isinstance(info, dict) and "task_id" in info
+                        and info.get("status") not in ["COMPLETED", "FAILED", "ERROR", "STOPPED"]
+                    }
                 
-                for task_id in task_ids:
-                    if self._stop_event.is_set():
-                        break
+                # 降低更新頻率
+                if active_tasks:
+                    logging.debug(f"更新 {len(active_tasks)} 個活躍任務狀態")
                     
-                    try:
-                        # 只更新任務，跳過節點狀態
-                        with self.master_ui.task_cache_lock:
-                            task_info = self.master_ui.task_status_cache.get(task_id)
+                    for task_id in list(active_tasks.keys())[:3]:  # 一次只更新3個任務
+                        if self._stop_event.is_set():
+                            break
                         
-                        if task_info and isinstance(task_info, dict) and "task_id" in task_info:
-                            current_status = task_info.get("status")
-                            if current_status not in ["COMPLETED", "FAILED", "ERROR"]:
-                                # 更新任務狀態
-                                self.master_ui.poll_task_status(task_id)
-                        
-                    except Exception as e:
-                        logging.warning(f"更新任務 {task_id} 狀態失敗: {e}")
-                    
-                    time.sleep(1)  # 避免過於頻繁的請求
+                        try:
+                            self.master_ui.poll_task_status(task_id)
+                            time.sleep(5)  # 增加等待時間
+                        except Exception as e:
+                            logging.warning(f"更新任務 {task_id} 狀態失敗: {e}")
                 
             except Exception as e:
                 logging.error(f"任務狀態更新循環錯誤: {e}")
             
-            # 等待下次更新
-            self._stop_event.wait(30)
+            # 等待更長時間再次更新
+            self._stop_event.wait(120)  # 每2分鐘更新一次
 
 if __name__ == "__main__":
     master_ui = MasterNodeUI(MASTER_USERNAME, MASTER_PASSWORD, GRPC_SERVER_ADDRESS)
@@ -1134,6 +1188,79 @@ if __name__ == "__main__":
         logging.error(f"主控端運行時發生錯誤: {e}", exc_info=True)
     finally:
         master_ui.stop_threads()
+        if master_ui.channel:
+            master_ui.channel.close()
+        logging.info("主控端已關閉")
+        if master_ui.channel:
+            master_ui.channel.close()
+        logging.info("主控端已關閉")
+                
+
+class TaskStatusUpdater:
+    def __init__(self, master_ui):
+        self.master_ui = master_ui
+        self.thread = None
+        self._stop_event = threading.Event()
+
+    def start(self):
+        if not self.thread or not self.thread.is_alive():
+            self._stop_event.clear()
+            self.thread = threading.Thread(target=self._update_loop, daemon=True)
+            self.thread.start()
+            logging.info("Task status updater started.")
+
+    def stop(self):
+        self._stop_event.set()
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=5)
+
+    def _update_loop(self):
+        while not self._stop_event.is_set():
+            try:
+                # 清理過期緩存
+                self.master_ui.clean_expired_task_cache()
+                
+                # 只更新活躍任務的狀態
+                with self.master_ui.task_cache_lock:
+                    active_tasks = {
+                        task_id: info for task_id, info in self.master_ui.task_status_cache.items()
+                        if isinstance(info, dict) and "task_id" in info
+                        and info.get("status") not in ["COMPLETED", "FAILED", "ERROR", "STOPPED"]
+                    }
+                
+                # 降低更新頻率
+                if active_tasks:
+                    logging.debug(f"更新 {len(active_tasks)} 個活躍任務狀態")
+                    
+                    for task_id in list(active_tasks.keys())[:3]:  # 一次只更新3個任務
+                        if self._stop_event.is_set():
+                            break
+                        
+                        try:
+                            self.master_ui.poll_task_status(task_id)
+                            time.sleep(5)  # 增加等待時間
+                        except Exception as e:
+                            logging.warning(f"更新任務 {task_id} 狀態失敗: {e}")
+                
+            except Exception as e:
+                logging.error(f"任務狀態更新循環錯誤: {e}")
+            
+            # 等待更長時間再次更新
+            self._stop_event.wait(120)  # 每2分鐘更新一次
+
+if __name__ == "__main__":
+    master_ui = MasterNodeUI(MASTER_USERNAME, MASTER_PASSWORD, GRPC_SERVER_ADDRESS)
+    try:
+        master_ui.run()
+    except KeyboardInterrupt:
+        logging.info("收到中斷信號，正在關閉...")
+    except Exception as e:
+        logging.error(f"主控端運行時發生錯誤: {e}", exc_info=True)
+    finally:
+        master_ui.stop_threads()
+        if master_ui.channel:
+            master_ui.channel.close()
+        logging.info("主控端已關閉")
         if master_ui.channel:
             master_ui.channel.close()
         logging.info("主控端已關閉")
