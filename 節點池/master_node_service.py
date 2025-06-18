@@ -33,6 +33,13 @@ class TaskManager:
             logging.info(f"存儲任務 {task_id} 的詳細信息: memory_gb={memory_gb}, cpu_score={cpu_score}, "
                          f"gpu_score={gpu_score}, gpu_memory_gb={gpu_memory_gb}, user_id={user_id}")
             
+            # 計算 CPT 成本：cpu_score + gpu_score + memory_gb + gpu_memory_gb
+            calculated_cpt_cost = int(cpu_score) + int(gpu_score) + int(memory_gb) + int(gpu_memory_gb)
+            # 確保至少為 1
+            calculated_cpt_cost = max(1, calculated_cpt_cost)
+            
+            logging.info(f"任務 {task_id} 計算的 CPT 成本: {calculated_cpt_cost} (CPU:{cpu_score} + GPU:{gpu_score} + MEM:{memory_gb} + GPU_MEM:{gpu_memory_gb})")
+            
             # 存儲二進制數據時需要特別處理，其他存為字符串
             task_info = {
                 "memory_gb": str(memory_gb),
@@ -46,12 +53,9 @@ class TaskManager:
                 "assigned_node": "",
                 "user_id": str(user_id),
                 "created_at": str(time.time()),
-                "updated_at": str(time.time())
+                "updated_at": str(time.time()),
+                "cpt_cost": str(calculated_cpt_cost)  # 使用計算出的 CPT 成本
             }
-            
-            # 添加 cpt_cost 字段
-            if cpt_cost is not None:
-                task_info["cpt_cost"] = str(cpt_cost)
             
             # 先存儲非二進制數據
             self.redis_client.hset(task_key, mapping=task_info)
@@ -73,9 +77,10 @@ class TaskManager:
 
             # 驗證存儲是否成功
             stored_user_id = self.redis_client.hget(task_key, "user_id")
-            logging.info(f"任務 {task_id} 存儲後驗證: 用戶ID = {stored_user_id}")
+            stored_cpt_cost = self.redis_client.hget(task_key, "cpt_cost")
+            logging.info(f"任務 {task_id} 存儲後驗證: 用戶ID = {stored_user_id}, CPT成本 = {stored_cpt_cost}")
 
-            logging.info(f"任務 {task_id} 已存儲 (用戶ID: {user_id}, 需求 GPU: '{gpu_name}')")
+            logging.info(f"任務 {task_id} 已存儲 (用戶ID: {user_id}, CPT成本: {calculated_cpt_cost}/分鐘, 需求 GPU: '{gpu_name}')")
             return True
         except redis.RedisError as e:
             logging.error(f"Redis 錯誤，任務 {task_id} 存儲失敗: {e}")
@@ -346,9 +351,12 @@ class TaskManager:
                     gpu_memory_gb = self.redis_client.hget(key, "gpu_memory_gb")
                     location = self.redis_client.hget(key, "location") or "Any"
                     gpu_name = self.redis_client.hget(key, "gpu_name") or ""
+                    cpt_cost = self.redis_client.hget(key, "cpt_cost") or "1"  # 從 Redis 讀取 cpt_cost
+                    
                     tasks.append({
                         "task_id": task_id,
                         "user_id": user_id,
+                        "cpt_cost": cpt_cost,  # 包含 cpt_cost
                         "requirements": {
                             "memory_gb": int(memory_gb or 0),
                             "cpu_score": int(cpu_score or 0),
@@ -469,15 +477,18 @@ class TaskManager:
             logging.error(f"清理任務 {task_id} 數據失敗: {e}", exc_info=True)
             return False
 
-    def check_user_balance_for_next_payment(self, user_id, cpt_cost):
-        """檢查用戶餘額是否足夠下次付款"""
+    def check_user_balance_for_next_payment(self, username, cpt_cost):
+        """檢查用戶餘額是否足夠下次付款（使用用戶名）"""
         try:
             from user_manager import UserManager
             user_manager = UserManager()
-            balance = user_manager.get_user_balance(user_id)
-            return balance >= cpt_cost
+            # 使用用戶名查詢餘額
+            user_row = user_manager.query_one("SELECT tokens FROM users WHERE username = ?", (username,))
+            if user_row:
+                return user_row['tokens'] >= cpt_cost
+            return False
         except Exception as e:
-            logging.error(f"檢查用戶 {user_id} 餘額失敗: {e}")
+            logging.error(f"檢查用戶 {username} 餘額失敗: {e}")
             return False
 
 # --- MasterNodeServiceServicer 類 ---
@@ -582,12 +593,24 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                     
                     for task in running_tasks:
                         task_id = task["task_id"]
-                        user_id = task.get("user_id")
-                        cpt_cost = int(float(task.get("cpt_cost", 1)))
-                        assigned_node = task.get("assigned_node", "")
+                        user_id = task.get("user_id")  # 任務發起者用戶名
+                        
+                        # 從 Redis 直接讀取 cpt_cost，而不是從 get_task_info
+                        try:
+                            cpt_cost_from_redis = self.task_manager.redis_client.hget(f"task:{task_id}", "cpt_cost")
+                            if not cpt_cost_from_redis or cpt_cost_from_redis == "":
+                                cpt_cost = 1  # 默認值
+                            else:
+                                cpt_cost = int(float(cpt_cost_from_redis))
+                        except (ValueError, TypeError) as e:
+                            logging.warning(f"任務 {task_id} 的 cpt_cost 值無效: '{cpt_cost_from_redis}', 使用默認值 1")
+                            cpt_cost = 1  # 默認值
+                        
+                        # 獲取分配的節點信息
+                        assigned_node = self.task_manager.redis_client.hget(f"task:{task_id}", "assigned_node")
                         
                         if user_id and assigned_node:
-                            # 檢查用戶餘額是否足夠下次付款
+                            # 檢查任務發起者餘額是否足夠下次付款
                             if not self.task_manager.check_user_balance_for_next_payment(user_id, cpt_cost):
                                 # 餘額不足，停止任務
                                 self.task_manager.update_task_status(task_id, "STOPPED", assigned_node=None)
@@ -598,20 +621,24 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                                     del self.task_health[task_id]
                                 
                                 # 記錄到日誌
-                                log_message = f"任務 {task_id} 因用戶 {user_id} 餘額不足已自動停止"
+                                log_message = f"任務 {task_id} 因用戶 {user_id} 餘額不足已自動停止 (每分鐘需要 {cpt_cost} CPT)"
                                 logging.warning(log_message)
                                 self.task_manager.store_logs(task_id, "system", log_message, int(time.time()))
                                 continue
                             
-                            # 發放獎勵給工作節點
+                            # 發放獎勵：從任務發起者轉帳給工作端用戶
                             from user_manager import UserManager
                             user_manager = UserManager()
                             
-                            # 這裡應該發放給節點擁有者，暫時使用 assigned_node 作為接收者用戶名
-                            # 實際應用中需要根據 node_id 查找對應的用戶名
-                            success, msg = user_manager.transfer_tokens(user_id, assigned_node, cpt_cost)
+                            # 使用用戶名進行轉帳
+                            success, msg = user_manager.transfer_tokens(
+                                user_id,        # 發送者用戶名（任務發起者）
+                                assigned_node,  # 接收者用戶名（工作端用戶）
+                                cpt_cost
+                            )
+                            
                             if success:
-                                logging.info(f"任務 {task_id} 轉帳成功: {cpt_cost} CPT 從用戶 {user_id} 到節點 {assigned_node}")
+                                logging.info(f"任務 {task_id} 轉帳成功: {cpt_cost} CPT 從發起者 {user_id} 到工作端 {assigned_node}")
                                 
                                 # 轉帳後再次檢查餘額
                                 if not self.task_manager.check_user_balance_for_next_payment(user_id, cpt_cost):
@@ -622,11 +649,22 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                                     if task_id in self.task_health:
                                         del self.task_health[task_id]
                                     
-                                    log_message = f"任務 {task_id} 轉帳後餘額不足，已停止任務"
+                                    log_message = f"任務 {task_id} 轉帳後發起者餘額不足，已停止任務"
                                     logging.warning(log_message)
                                     self.task_manager.store_logs(task_id, "system", log_message, int(time.time()))
                             else:
                                 logging.error(f"任務 {task_id} 轉帳失敗: {msg}")
+                                # 轉帳失敗，考慮停止任務
+                                if "餘額不足" in msg:
+                                    self.task_manager.update_task_status(task_id, "STOPPED", assigned_node=None)
+                                    self.node_manager.report_status(assigned_node, "Idle")
+                                    
+                                    if task_id in self.task_health:
+                                        del self.task_health[task_id]
+                                    
+                                    log_message = f"任務 {task_id} 因轉帳失敗已停止: {msg}"
+                                    logging.warning(log_message)
+                                    self.task_manager.store_logs(task_id, "system", log_message, int(time.time()))
                     
                     # 獲取已完成但未發放獎勵的任務
                     completed_tasks = self.task_manager.get_completed_tasks_without_reward()
@@ -641,7 +679,6 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                             continue
                         
                         assigned_node = task_info.get("assigned_node")
-                        cpt_cost = task_info.get("cpt_cost", "1")
                         
                         if assigned_node and user_id:
                             # 標記獎勵已處理
@@ -697,10 +734,15 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
             if not pending_tasks:
                 logging.debug("沒有待處理的任務")
                 return
+            logging.info(f"===== 任務分發開始 =====")
             logging.info(f"發現 {len(pending_tasks)} 個待處理任務")
+            
             for task in pending_tasks:
                 task_id = task["task_id"]
                 requirements = task["requirements"]
+                
+                logging.info(f"處理任務 {task_id}，需求: {requirements}")
+                
                 available_nodes = self.node_manager.get_available_nodes(
                     requirements["memory_gb"],
                     requirements["cpu_score"],
@@ -709,60 +751,132 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                     requirements["location"],
                     requirements["gpu_name"]
                 )
+                
                 if available_nodes:
                     selected_node = available_nodes[0]
                     node_id = selected_node.node_id
-                    success = self.task_manager.update_task_status(
-                        task_id, 
-                        "RUNNING", 
-                        assigned_node=node_id
-                    )
-                    if success:
-                        self.node_manager.report_status(node_id, "BUSY")
-                        logging.info(f"任務 {task_id} 已分配給節點 {node_id}")
-                        self.task_health[task_id] = {
-                            "fail_count": 0,
-                            "last_check": time.time(),
-                            "assigned_node": node_id,
-                            "user_id": task.get("user_id", ""),
-                            "cpt_cost": 0
-                        }
-                        # === 新增：主動推送任務到工作端 ===
+                    logging.info(f"為任務 {task_id} 選擇節點: {node_id}")
+                    
+                    # 先嘗試推送任務到工作端，成功後才更新狀態
+                    task_pushed_successfully = False
+                    
+                    try:
+                        # 取得節點資訊
+                        node_info = self.node_manager.get_node_info(node_id)
+                        if not node_info:
+                            logging.error(f"找不到節點 {node_id} 的資訊，無法推送任務")
+                            continue
+                        
+                        worker_host = node_info.get("hostname")
+                        worker_port = node_info.get("port", 50053)
+                        
+                        logging.info(f"節點 {node_id} 詳細信息: host={worker_host}, port={worker_port}")
+                        
+                        # 驗證節點連接性
+                        if not worker_host or worker_host == "127.0.0.1":
+                            logging.warning(f"節點 {node_id} 使用無效 IP {worker_host}，跳過推送")
+                            continue
+                        
+                        # 取得任務內容並檢查大小
+                        task_info = self.task_manager.get_task_info(task_id, include_zip=True)
+                        if not task_info:
+                            logging.error(f"找不到任務 {task_id} 的內容，無法推送")
+                            continue
+                        task_zip = task_info.get("task_zip", b"")
+                        
+                        # 根據檔案大小動態調整超時時間
+                        file_size_mb = len(task_zip) / (1024 * 1024)
+                        base_timeout = 30  # 基礎30秒
+                        size_timeout = max(file_size_mb * 2, 10)  # 每MB給2秒，最少10秒
+                        total_timeout = min(base_timeout + size_timeout, 120)  # 最多2分鐘
+                        
+                        logging.info(f"推送任務 {task_id} 到 {worker_host}:{worker_port} (大小: {file_size_mb:.1f}MB, 超時: {total_timeout:.0f}秒)")
+                        
+                        # 建立 gRPC 連線
+                        import nodepool_pb2_grpc
+                        channel = grpc.insecure_channel(
+                            f"{worker_host}:{worker_port}",
+                            options=[
+                                ('grpc.keepalive_time_ms', 10000),
+                                ('grpc.keepalive_timeout_ms', 5000),
+                                ('grpc.keepalive_permit_without_calls', True),
+                                ('grpc.http2.max_pings_without_data', 0),
+                                ('grpc.http2.min_time_between_pings_ms', 10000),
+                                ('grpc.http2.min_ping_interval_without_data_ms', 5000),
+                                # 增加消息大小限制以支持大檔案
+                                ('grpc.max_receive_message_length', 100 * 1024 * 1024),  # 100MB
+                                ('grpc.max_send_message_length', 100 * 1024 * 1024),     # 100MB
+                            ]
+                        )
+                        
+                        # 先測試連接（快速測試）
                         try:
-                            # 取得節點資訊
-                            node_info = self.node_manager.get_node_info(node_id)
-                            if not node_info:
-                                logging.error(f"找不到節點 {node_id} 的資訊，無法推送任務")
-                                continue
-                            worker_host = node_info.get("hostname", "127.0.0.1")
-                            worker_port = node_info.get("port", 50053)
-                            # 取得任務內容
-                            task_info = self.task_manager.get_task_info(task_id, include_zip=True)
-                            if not task_info:
-                                logging.error(f"找不到任務 {task_id} 的內容，無法推送")
-                                continue
-                            task_zip = task_info.get("task_zip", b"")
-                            # 建立 gRPC 連線並呼叫 ExecuteTask
-                            import nodepool_pb2_grpc
-                            channel = grpc.insecure_channel(f"{worker_host}:{worker_port}")
-                            stub = nodepool_pb2_grpc.WorkerNodeServiceStub(channel)
-                            req = nodepool_pb2.ExecuteTaskRequest(
-                                node_id=node_id,
-                                task_id=task_id,
-                                task_zip=task_zip
-                            )
-                            resp = stub.ExecuteTask(req, timeout=10)
-                            if resp.success:
-                                logging.info(f"已推送任務 {task_id} 給節點 {node_id} 執行")
-                            else:
-                                logging.error(f"推送任務 {task_id} 給節點 {node_id} 失敗: {resp.message}")
-                        except Exception as e:
-                            logging.error(f"推送任務 {task_id} 給節點 {node_id} 發生錯誤: {e}", exc_info=True)
-                        # === 新增結束 ===
-                    else:
-                        logging.error(f"更新任務 {task_id} 狀態失敗")
+                            grpc.channel_ready_future(channel).result(timeout=5)
+                            logging.info(f"成功連接到節點 {node_id} ({worker_host}:{worker_port})")
+                        except grpc.FutureTimeoutError:
+                            logging.error(f"連接到節點 {node_id} 超時，節點可能離線")
+                            channel.close()
+                            continue
+                        
+                        stub = nodepool_pb2_grpc.WorkerNodeServiceStub(channel)
+                        req = nodepool_pb2.ExecuteTaskRequest(
+                            node_id=node_id,
+                            task_id=task_id,
+                            task_zip=task_zip
+                        )
+                        
+                        logging.info(f"開始發送 ExecuteTask 請求到節點 {node_id}...")
+                        
+                        # 使用動態計算的超時時間
+                        resp = stub.ExecuteTask(req, timeout=total_timeout)
+                        channel.close()
+                        
+                        logging.info(f"收到節點 {node_id} 的響應: success={resp.success}, message='{resp.message}'")
+                        
+                        if resp.success:
+                            logging.info(f"已成功推送任務 {task_id} 給節點 {node_id} (耗時包含 {file_size_mb:.1f}MB 傳輸)")
+                            task_pushed_successfully = True
+                        else:
+                            logging.error(f"節點 {node_id} 拒絕任務 {task_id}: {resp.message}")
+                            continue
+                            
+                    except grpc.RpcError as e:
+                        if e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
+                            logging.error(f"推送任務 {task_id} 給節點 {node_id} 超時 (檔案大小: {file_size_mb:.1f}MB)，可能是網路或檔案傳輸較慢")
+                        elif e.code() == grpc.StatusCode.UNAVAILABLE:
+                            logging.error(f"無法連接到節點 {node_id}，節點可能離線")
+                        elif e.code() == grpc.StatusCode.RESOURCE_EXHAUSTED:
+                            logging.error(f"推送任務 {task_id} 失敗：訊息太大 (檔案大小: {file_size_mb:.1f}MB)")
+                        else:
+                            logging.error(f"推送任務 {task_id} 給節點 {node_id} gRPC 錯誤: {e.code()} - {e.details()}")
+                        continue
+                    except Exception as e:
+                        logging.error(f"推送任務 {task_id} 給節點 {node_id} 發生錯誤: {e}", exc_info=True)
+                        continue
+                    
+                    # 只有成功推送任務後才更新狀態和設置節點為忙碌
+                    if task_pushed_successfully:
+                        success = self.task_manager.update_task_status(
+                            task_id, 
+                            "RUNNING", 
+                            assigned_node=node_id
+                        )
+                        if success:
+                            self.node_manager.report_status(node_id, "BUSY")
+                            logging.info(f"任務 {task_id} 已成功分配給節點 {node_id} 並開始執行")
+                            self.task_health[task_id] = {
+                                "fail_count": 0,
+                                "last_check": time.time(),
+                                "assigned_node": node_id,
+                                "user_id": task.get("user_id", ""),
+                                "cpt_cost": 0
+                            }
+                        else:
+                            logging.error(f"更新任務 {task_id} 狀態失敗")
                 else:
                     logging.debug(f"任務 {task_id} 暫時沒有符合要求的可用節點")
+            
+            logging.info(f"===== 任務分發結束 =====")
         except Exception as e:
             logging.error(f"分發任務時發生錯誤: {e}", exc_info=True)
 

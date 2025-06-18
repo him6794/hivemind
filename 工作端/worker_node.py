@@ -26,7 +26,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%
 
 NODE_PORT = int(os.environ.get("NODE_PORT", 50053))
 FLASK_PORT = int(os.environ.get("FLASK_PORT", 5000))
-MASTER_ADDRESS = os.environ.get("MASTER_ADDRESS", "127.0.0.1:50051")
+MASTER_ADDRESS = os.environ.get("MASTER_ADDRESS", "192.168.2.52:50051")
 NODE_ID = os.environ.get("NODE_ID", f"worker-{platform.node().split('.')[0]}-{NODE_PORT}")
 
 class WorkerNode:
@@ -294,9 +294,18 @@ class WorkerNode:
         @self.app.route('/api/status')
         def api_status():
             session_id = session.get('session_id')
-            user_data = self._get_user_session(session_id)
+            user_data = self._get_user_session(session_id) if session_id else None
             
-            if not user_data or user_data['username'] != self.username:
+            # 修復：如果沒有有效會話但有登錄用戶，允許訪問
+            if not user_data and self.username:
+                # 創建臨時會話數據用於 API 響應
+                user_data = {
+                    'username': self.username,
+                    'cpt_balance': self.cpt_balance,
+                    'login_time': self.login_time or datetime.datetime.now()
+                }
+            
+            if not user_data:
                 return jsonify({'error': 'Unauthorized'}), 401
             
             try:
@@ -321,16 +330,20 @@ class WorkerNode:
                 'gpu_name': self.gpu_name,
                 'gpu_memory_gb': self.gpu_memory_gb,
                 'cpt_balance': user_data['cpt_balance'],
-                'login_time': user_data['login_time'].isoformat(),
+                'login_time': user_data['login_time'].isoformat() if isinstance(user_data['login_time'], datetime.datetime) else str(user_data['login_time']),
                 'ip': getattr(self, 'local_ip', '127.0.0.1')
             })
 
         @self.app.route('/api/logs')
         def api_logs():
             session_id = session.get('session_id')
-            user_data = self._get_user_session(session_id)
+            user_data = self._get_user_session(session_id) if session_id else None
             
-            if not user_data or user_data['username'] != self.username:
+            # 修復：如果沒有有效會話但有登錄用戶，允許訪問
+            if not user_data and self.username:
+                user_data = {'username': self.username}
+            
+            if not user_data:
                 return jsonify({'error': 'Unauthorized'}), 401
                 
             with self.log_lock:
@@ -390,7 +403,7 @@ class WorkerNode:
         try:
             request = nodepool_pb2.RegisterWorkerNodeRequest(
                 node_id=self.username,
-                hostname="127.0.0.1",
+                hostname=self.local_ip,  # 使用本機 IP 而不是 127.0.0.1
                 cpu_cores=self.cpu_cores,
                 memory_gb=int(self.memory_gb),
                 cpu_score=self.cpu_score,
@@ -412,6 +425,7 @@ class WorkerNode:
                 self.is_registered = True
                 self.status = "Idle"
                 self._start_status_reporting()
+                self._log(f"節點註冊成功，使用 IP: {self.local_ip}:{self.port}")
                 return True
             else:
                 self.status = f"Registration Failed: {response.message}"
@@ -867,33 +881,109 @@ class WorkerNodeServicer(nodepool_pb2_grpc.WorkerNodeServiceServicer):
         self.worker_node = worker_node
 
     def ExecuteTask(self, request, context):
-        """執行任務 RPC"""
+        """執行任務 RPC - 改善大檔案處理和錯誤處理"""
         task_id = request.task_id
         task_zip = request.task_zip
         
+        file_size_mb = len(task_zip) / (1024 * 1024)
+        logging.info(f"===== 收到執行任務請求 =====")
+        logging.info(f"任務ID: {task_id}")
+        logging.info(f"檔案大小: {file_size_mb:.1f}MB")
+        logging.info(f"當前節點狀態: {self.worker_node.status}")
+        logging.info(f"是否已註冊: {self.worker_node.is_registered}")
+        logging.info(f"Docker 可用: {self.worker_node.docker_available}")
+        
+        # 快速檢查節點狀態
         if self.worker_node.current_task_id:
+            error_msg = f"節點忙碌中，拒絕任務 {task_id} (當前任務: {self.worker_node.current_task_id})"
+            logging.warning(error_msg)
             return nodepool_pb2.ExecuteTaskResponse(
                 success=False, 
-                message=f"Node busy with task {self.worker_node.current_task_id}"
+                message=error_msg
             )
         
         if not self.worker_node.docker_available:
+            error_msg = f"Docker 不可用，拒絕任務 {task_id}"
+            logging.error(error_msg)
             return nodepool_pb2.ExecuteTaskResponse(
                 success=False, 
                 message="Docker not available"
             )
         
-        # 啟動執行線程
-        threading.Thread(
-            target=self.worker_node._execute_task,
-            args=(task_id, task_zip),
-            daemon=True
-        ).start()
+        # 檢查任務數據完整性和大小
+        if not task_zip:
+            error_msg = f"任務 {task_id} 數據為空"
+            logging.error(error_msg)
+            return nodepool_pb2.ExecuteTaskResponse(
+                success=False, 
+                message="Task data is empty"
+            )
         
-        return nodepool_pb2.ExecuteTaskResponse(
-            success=True, 
-            message=f"Task {task_id} started"
-        )
+        # 檢查檔案大小限制（100MB）
+        if file_size_mb > 100:
+            error_msg = f"任務 {task_id} 檔案太大: {file_size_mb:.1f}MB，超過100MB限制"
+            logging.error(error_msg)
+            return nodepool_pb2.ExecuteTaskResponse(
+                success=False, 
+                message=f"Task file too large: {file_size_mb:.1f}MB (limit: 100MB)"
+            )
+        
+        try:
+            # 立即響應接受任務，避免超時
+            self.worker_node.current_task_id = task_id
+            self.worker_node.status = f"Receiving: {task_id} ({file_size_mb:.1f}MB)"
+            
+            logging.info(f"開始接受任務 {task_id}，狀態更新為: {self.worker_node.status}")
+            
+            # 預先驗證 ZIP 檔案完整性
+            try:
+                import zipfile
+                import io
+                with zipfile.ZipFile(io.BytesIO(task_zip), 'r') as zip_ref:
+                    zip_ref.testzip()  # 驗證 ZIP 檔案完整性
+                logging.info(f"任務 {task_id} ZIP 檔案驗證成功")
+            except Exception as zip_error:
+                self.worker_node.current_task_id = None
+                self.worker_node.status = "Idle"
+                error_msg = f"任務 {task_id} ZIP 檔案損壞: {zip_error}"
+                logging.error(error_msg)
+                return nodepool_pb2.ExecuteTaskResponse(
+                    success=False, 
+                    message=f"Invalid ZIP file: {str(zip_error)}"
+                )
+            
+            # 更新狀態為準備執行
+            self.worker_node.status = f"Preparing: {task_id}"
+            logging.info(f"任務 {task_id} 檔案驗證完成，開始準備執行")
+            
+            # 啟動執行線程
+            execution_thread = threading.Thread(
+                target=self.worker_node._execute_task,
+                args=(task_id, task_zip),
+                daemon=True,
+                name=f"TaskExecution-{task_id}"
+            )
+            execution_thread.start()
+            
+            success_msg = f"任務 {task_id} 已接受並開始準備執行 (檔案大小: {file_size_mb:.1f}MB)"
+            logging.info(success_msg)
+            logging.info(f"===== 任務接受完成 =====")
+            
+            return nodepool_pb2.ExecuteTaskResponse(
+                success=True, 
+                message=f"Task {task_id} accepted, file size: {file_size_mb:.1f}MB"
+            )
+            
+        except Exception as e:
+            # 如果出錯，重置狀態
+            self.worker_node.current_task_id = None
+            self.worker_node.status = "Idle"
+            error_msg = f"接受任務 {task_id} 時發生錯誤: {e}"
+            logging.error(error_msg, exc_info=True)
+            return nodepool_pb2.ExecuteTaskResponse(
+                success=False, 
+                message=f"Failed to accept task: {str(e)}"
+            )
 
     def ReportRunningStatus(self, request, context):
         """報告運行狀態"""

@@ -216,8 +216,8 @@ class UserManager:
             logging.error(f"查詢用戶 {user_id} 餘額時發生錯誤: {e}")
             return 0
 
-    def transfer_tokens(self, sender_user_id, receiver_username, amount):
-        """執行轉帳操作，保證原子性"""
+    def transfer_tokens(self, sender_identifier, receiver_username, amount):
+        """執行轉帳操作，保證原子性 - 支持用戶名或用戶ID作為發送者"""
         if amount <= 0:
             return False, "轉帳金額必須大於零"
         if not receiver_username:
@@ -225,29 +225,35 @@ class UserManager:
 
         try:
             with self._db_connection() as cursor:
-                # 1. 檢查發送者餘額 (使用 SELECT FOR UPDATE 進行鎖定)
-                cursor.execute("""
-                    SELECT tokens FROM users WHERE id = ?
-                    """, (sender_user_id,))
+                # 1. 獲取發送者信息（支持用戶名或用戶ID）
+                if isinstance(sender_identifier, str) and not sender_identifier.isdigit():
+                    # 發送者是用戶名
+                    cursor.execute("SELECT id, username, tokens FROM users WHERE username = ?", (sender_identifier,))
+                else:
+                    # 發送者是用戶ID
+                    sender_id = int(sender_identifier)
+                    cursor.execute("SELECT id, username, tokens FROM users WHERE id = ?", (sender_id,))
+                
                 sender_row = cursor.fetchone()
                 if not sender_row:
                     return False, "發送者帳戶不存在"
                 
                 sender_tokens = sender_row['tokens']
+                sender_id = sender_row['id']
+                sender_name = sender_row['username']
+                
                 if sender_tokens < amount:
                     return False, f"餘額不足 (需要 {amount}, 只有 {sender_tokens})"
 
                 # 2. 檢查接收者是否存在
-                cursor.execute("""
-                    SELECT id FROM users WHERE username = ?
-                    """, (receiver_username,))
+                cursor.execute("SELECT id FROM users WHERE username = ?", (receiver_username,))
                 if not cursor.fetchone():
                     return False, "接收者帳戶不存在"
 
                 # 3. 執行轉帳操作
                 cursor.execute("""
                     UPDATE users SET tokens = tokens - ? WHERE id = ? AND tokens >= ?
-                    """, (amount, sender_user_id, amount))
+                    """, (amount, sender_id, amount))
                 
                 if cursor.rowcount == 0:
                     return False, "餘額不足或帳戶狀態已改變"
@@ -256,10 +262,8 @@ class UserManager:
                     UPDATE users SET tokens = tokens + ? WHERE username = ?
                     """, (amount, receiver_username))
 
-                # cursor.rowcount 檢查在這裡不是必要的，因為我們已經確認了接收者存在
-
             # 如果執行到這裡，說明事務已成功提交
-            logging.info(f"轉帳成功: {amount} 從用戶 {sender_user_id} 到 {receiver_username}")
+            logging.info(f"轉帳成功: {amount} 從用戶 {sender_name} 到 {receiver_username}")
             return True, "转账成功"
 
         except Exception as e:
