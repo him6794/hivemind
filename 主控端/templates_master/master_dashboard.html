@@ -230,6 +230,11 @@
             color: #b91c1c;
         }
 
+        .status-stopped {
+            background-color: #fef3c7;
+            color: #d97706;
+        }
+
         .node-status {
             display: inline-block;
             width: 8px;
@@ -561,7 +566,7 @@
                     <h2>任務管理</h2>
                     <div>
                         <button class="refresh-btn" onclick="refreshTasks()">刷新</button>
-                        <a href="/upload" class="upload-btn" style="margin-left: 10px;">上傳新任務</a>
+                        <a href="/upload?user={{ username }}" class="upload-btn" style="margin-left: 10px;">上傳新任務</a>
                     </div>
                 </div>
                 <div class="task-filters" style="margin-bottom: 1rem;">
@@ -569,6 +574,7 @@
                     <button class="filter-btn" onclick="filterTasks('PENDING', this)">等待中</button>
                     <button class="filter-btn" onclick="filterTasks('RUNNING', this)">執行中</button>
                     <button class="filter-btn" onclick="filterTasks('COMPLETED', this)">已完成</button>
+                    <button class="filter-btn" onclick="filterTasks('STOPPED', this)">已停止</button>
                     <button class="filter-btn" onclick="filterTasks('FAILED', this)">失敗</button>
                 </div>
                 <div class="table-container">
@@ -647,6 +653,8 @@
                 const message = task.message || '';
                 
                 const canStop = ['PENDING', 'RUNNING'].includes(status.toUpperCase());
+                // 修正：允許 COMPLETED、STOPPED 和 FAILED 狀態的任務下載（可能有部分結果）
+                const canDownload = ['COMPLETED', 'STOPPED', 'FAILED'].includes(status.toUpperCase());
                 
                 const row = document.createElement('tr');
                 row.innerHTML = `
@@ -668,8 +676,8 @@
                             </button>
                             <button class="download-btn" 
                                     onclick="downloadTaskResult('${escapeHtml(task.task_id)}')"
-                                    ${status.toUpperCase() === 'COMPLETED' ? '' : 'disabled'}
-                                    title="${status.toUpperCase() === 'COMPLETED' ? '下載結果' : '任務未完成'}">
+                                    ${canDownload ? '' : 'disabled'}
+                                    title="${canDownload ? '下載結果' : '任務未完成或無結果'}">
                                 下載
                             </button>
                             <button class="stop-task-btn" 
@@ -857,7 +865,7 @@
         }
 
         async function stopTask(taskId) {
-            if (!confirm(`確定要停止任務 ${taskId} 嗎？`)) {
+            if (!confirm(`確定要停止任務 ${taskId} 嗎？\n\n注意：停止的任務仍會打包部分結果供您下載。`)) {
                 return;
             }
 
@@ -869,7 +877,7 @@
                 button.disabled = true;
                 button.textContent = '停止中...';
                 
-                console.log(`正在使用主控端權限停止任務 ${taskId}...`);
+                console.log(`正在停止任務 ${taskId}...`);
                 
                 const response = await fetch(`/api/stop_task/${taskId}?user={{ username }}`, {
                     method: 'POST',
@@ -887,11 +895,15 @@
                 }
                 
                 if (response.ok && data.success) {
-                    alert(`任務 ${taskId} 已成功停止`);
+                    // 顯示成功消息
+                    const message = data.message || `任務 ${taskId} 已成功停止`;
+                    const note = data.note || '';
+                    alert(`${message}\n\n${note}`);
+                    
                     // 刷新任務列表
                     refreshTasks();
                 } else {
-                    // 根據不同狀態碼顯示不同訊息
+                    // 處理錯誤情況
                     let errorMsg = data.error || data.message || `HTTP ${response.status}`;
                     
                     if (response.status === 400) {
@@ -924,7 +936,8 @@
                 button.disabled = true;
                 button.textContent = '下載中...';
                 
-                const response = await fetch(`/api/download_result/${taskId}`, {
+                // 修正：添加用戶參數到下載請求
+                const response = await fetch(`/api/download_result/${taskId}?user={{ username }}`, {
                     method: 'GET'
                 });
                 
@@ -951,10 +964,17 @@
                     window.URL.revokeObjectURL(url);
                     document.body.removeChild(a);
                     
-                    alert(`任務結果已下載: ${filename}`);
+                    console.log(`任務結果已下載: ${filename}`);
                 } else {
-                    const errorData = await response.json();
-                    alert(`下載失敗: ${errorData.error || '未知錯誤'}`);
+                    let errorMsg = '下載失敗';
+                    try {
+                        const errorData = await response.json();
+                        errorMsg = errorData.error || '未知錯誤';
+                    } catch (e) {
+                        errorMsg = `HTTP ${response.status}: ${response.statusText}`;
+                    }
+                    console.error('下載失敗:', errorMsg);
+                    alert(`下載失敗: ${errorMsg}`);
                 }
             } catch (error) {
                 console.error('下載任務結果時發生錯誤:', error);

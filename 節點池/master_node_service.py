@@ -296,7 +296,7 @@ class TaskManager:
             return None
 
     def get_task_result_zip(self, task_id):
-        """專門獲取結果 ZIP (確保獲取 bytes)"""
+        """專門獲取結果 ZIP (確保獲取 bytes) - 支援 STOPPED 狀態"""
         task_key = f"task:{task_id}"
         try:
             temp_client_no_decode = redis.Redis(host='localhost', port=6379, db=0, decode_responses=False)
@@ -306,13 +306,21 @@ class TaskManager:
 
             status_str = status_bytes.decode() if status_bytes else "UNKNOWN"
 
-            if status_str == "COMPLETED":
+            # 允許 COMPLETED 和 STOPPED 狀態的任務下載結果
+            if status_str in ["COMPLETED", "STOPPED"]:
                 if result_zip:
+                    logging.info(f"任務 {task_id} 狀態為 {status_str}，返回結果 ZIP ({len(result_zip)} bytes)")
                     return result_zip, status_str
                 else:
-                    logging.warning(f"任務 {task_id} 狀態為 COMPLETED 但結果 ZIP 為空")
+                    logging.warning(f"任務 {task_id} 狀態為 {status_str} 但結果 ZIP 為空")
                     return b"", status_str
+            elif status_str in ["PENDING", "RUNNING"]:
+                return b"", status_str
             else:
+                # 對於其他狀態（如 FAILED），也檢查是否有結果
+                if result_zip:
+                    logging.info(f"任務 {task_id} 狀態為 {status_str}，但有結果可下載")
+                    return result_zip, status_str
                 return b"", status_str
 
         except redis.RedisError as e:
@@ -521,7 +529,7 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
         def health_check_loop():
             while not self._stop_event.is_set():
                 try:
-                    # 檢查所有 RUNNING 任務的節點心跳狀態
+                    # 檢查所有 RUNNING 任務的節點心跳狀態（排除 STOPPED 狀態）
                     running_tasks = self.task_manager.get_running_tasks()
                     current_time = time.time()
                     
@@ -532,6 +540,12 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                         # 獲取完整任務信息
                         task_info = self.task_manager.get_task_info(task_id, include_zip=False)
                         if not task_info:
+                            continue
+                        
+                        # 檢查任務狀態，如果是 STOPPED 則跳過健康檢查
+                        current_status = task_info.get("status")
+                        if current_status == "STOPPED":
+                            logging.debug(f"任務 {task_id} 已停止，跳過健康檢查")
                             continue
                             
                         assigned_node = task_info.get("assigned_node")
@@ -940,51 +954,47 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
             )
 
     def ReturnTaskResult(self, request, context):
-        """工作端回傳任務結果，節點池暫存並更新狀態"""
+        """接收工作端傳回的任務結果（包括停止的任務）"""
         try:
             task_id = request.task_id
             result_zip = request.result_zip
             
-            # 檢查任務當前狀態
-            task_info = self.task_manager.get_task_info(task_id, include_zip=False)
-            if not task_info:
-                logging.error(f"任務 {task_id} 不存在")
-                return nodepool_pb2.ReturnTaskResultResponse(
-                    success=False,
-                    message="Task not found"
-                )
+            logging.info(f"接收到任務 {task_id} 的結果 ({len(result_zip)} bytes)")
             
-            current_status = task_info.get("status")
-            logging.info(f"任務 {task_id} 當前狀態: {current_status}")
-            
-            # 只有當任務處於 RUNNING 狀態時才處理結果
-            if current_status == "RUNNING":
-                # 存儲結果並更新狀態為 COMPLETED
-                success = self.task_manager.store_result(task_id, result_zip)
-                if success:
-                    logging.info(f"收到工作端回傳任務 {task_id} 結果，已暫存並標記為 COMPLETED")
-                    return nodepool_pb2.ReturnTaskResultResponse(
-                        success=True,
-                        message="Result stored and status updated to COMPLETED"
-                    )
-                else:
-                    logging.error(f"暫存任務 {task_id} 結果失敗")
-                    return nodepool_pb2.ReturnTaskResultResponse(
-                        success=False,
-                        message="Failed to store result"
-                    )
-            else:
-                logging.warning(f"任務 {task_id} 狀態為 {current_status}，忽略結果上傳")
-                return nodepool_pb2.ReturnTaskResultResponse(
-                    success=False,
-                    message=f"Task status is {current_status}, result ignored"
-                )
+            # 存儲結果
+            if self.task_manager.store_result(task_id, result_zip):
+                # 獲取任務信息以便清理
+                task_info = self.task_manager.get_task_info(task_id, include_zip=False)
+                assigned_node = task_info.get("assigned_node") if task_info else None
                 
+                # 清理節點狀態
+                if assigned_node:
+                    self.node_manager.report_status(assigned_node, "Idle")
+                    logging.info(f"節點 {assigned_node} 狀態已重置為 Idle")
+                
+                # 從健康檢查中移除
+                if task_id in self.task_health:
+                    del self.task_health[task_id]
+                
+                # 更新任務的 assigned_node 為空（表示已完成）
+                self.task_manager.update_task_status(task_id, task_info.get("status", "COMPLETED"), assigned_node=None)
+                
+                logging.info(f"任務 {task_id} 結果已成功存儲並清理完成")
+                return nodepool_pb2.ReturnTaskResultResponse(
+                    success=True,
+                    message="Task result stored successfully"
+                )
+            else:
+                logging.error(f"存儲任務 {task_id} 結果失敗")
+                return nodepool_pb2.ReturnTaskResultResponse(
+                    success=False,
+                    message="Failed to store task result"
+                )
         except Exception as e:
-            logging.error(f"ReturnTaskResult 服務錯誤: {e}", exc_info=True)
+            logging.error(f"ReturnTaskResult 錯誤: {e}", exc_info=True)
             return nodepool_pb2.ReturnTaskResultResponse(
                 success=False,
-                message=f"Internal error: {str(e)}"
+                message=f"Error: {str(e)}"
             )
 
     def TaskCompleted(self, request, context):
@@ -1008,7 +1018,7 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                 logging.info(f"任務 {task_id} 已經是 COMPLETED 狀態，保持不變")
                 message = f"Task {task_id} already completed"
             elif task_success:
-                # 任務成功完成但還未標記為 COMPLETED
+                # 任務成功完成但還未標记為 COMPLETED
                 success = self.task_manager.update_task_status(task_id, "COMPLETED")
                 message = f"Task {task_id} completed successfully"
                 logging.info(message)
@@ -1172,7 +1182,7 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                     message="任務不存在"
                 )
             
-            # 檢查任務所有權 - 重要：這裡要正確比較用戶
+            # 檢查任務所有權
             task_user_id = task_info.get("user_id", "")
             logging.info(f"任務 {task_id} 的擁有者: {task_user_id}, 請求停止的用戶: {username}")
             
@@ -1198,48 +1208,64 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                     message=f"任務已處於 {current_status} 狀態，無法停止"
                 )
             
-            # 執行停止任務
-            assigned_node = task_info.get("assigned_node")
-            success = self.task_manager.update_task_status(task_id, "STOPPED", assigned_node=None)
-            
-            if success:
-                # 通知工作端停止任務
-                if assigned_node:
-                    try:
-                        node_info = self.node_manager.get_node_info(assigned_node)
-                        if node_info and node_info.get("port", 0) > 0:
-                            worker_host = node_info.get("hostname", "127.0.0.1")
-                            worker_port = node_info.get("port", 50053)
-                            
-                            import nodepool_pb2_grpc
-                            channel = grpc.insecure_channel(f"{worker_host}:{worker_port}")
-                            stub = nodepool_pb2_grpc.WorkerNodeServiceStub(channel)
-                            stop_req = nodepool_pb2.StopTaskExecutionRequest(task_id=task_id)
-                            stub.StopTaskExecution(stop_req, timeout=5)
-                            channel.close()
-                            logging.info(f"已通知節點 {assigned_node} 停止任務 {task_id}")
-                    except Exception as e:
-                        logging.warning(f"通知節點 {assigned_node} 停止任務 {task_id} 失敗: {e}")
-                
-                # 將節點狀態設回 Idle
-                if assigned_node:
-                    self.node_manager.report_status(assigned_node, "Idle")
-                
-                # 從健康檢查中移除
-                if task_id in self.task_health:
-                    del self.task_health[task_id]
-                
-                logging.info(f"任務 {task_id} 已成功停止 (用戶: {username})")
-                return nodepool_pb2.StopTaskResponse(
-                    success=True, 
-                    message=f"任務 {task_id} 已成功停止"
-                )
-            else:
-                logging.error(f"停止任務 {task_id} 失敗: 無法更新任務狀態")
+            # 立即更新任務狀態為 STOPPED，這樣健康檢查就不會視為超時
+            success = self.task_manager.update_task_status(task_id, "STOPPED")
+            if not success:
+                logging.error(f"更新任務 {task_id} 狀態為 STOPPED 失敗")
                 return nodepool_pb2.StopTaskResponse(
                     success=False, 
-                    message="停止任務失敗"
+                    message="更新任務狀態失敗"
                 )
+            
+            # 記錄停止日誌
+            stop_log = f"任務 {task_id} 已被用戶 {username} 請求停止"
+            self.task_manager.store_logs(task_id, "system", stop_log, int(time.time()))
+            
+            # 執行停止任務
+            assigned_node = task_info.get("assigned_node")
+            
+            # 通知工作端停止任務（工作端會負責打包結果）
+            if assigned_node:
+                try:
+                    node_info = self.node_manager.get_node_info(assigned_node)
+                    if node_info and node_info.get("port", 0) > 0:
+                        worker_host = node_info.get("hostname", "127.0.0.1")
+                        worker_port = node_info.get("port", 50053)
+                        
+                        import nodepool_pb2_grpc
+                        channel = grpc.insecure_channel(f"{worker_host}:{worker_port}")
+                        stub = nodepool_pb2_grpc.WorkerNodeServiceStub(channel)
+                        stop_req = nodepool_pb2.StopTaskExecutionRequest(task_id=task_id)
+                        
+                        # 發送停止請求給工作端，不用等太久，因為狀態已更新
+                        stop_response = stub.StopTaskExecution(stop_req, timeout=50)  # 50秒足夠
+                        channel.close()
+                        
+                        if stop_response.success:
+                            logging.info(f"已成功通知節點 {assigned_node} 停止任務 {task_id}")
+                            
+                            # 記錄成功通知日誌
+                            success_log = f"任務 {task_id} 停止請求已發送到節點 {assigned_node}，工作端正在打包結果"
+                            self.task_manager.store_logs(task_id, "system", success_log, int(time.time()))
+                            
+                        else:
+                            logging.warning(f"節點 {assigned_node} 拒絕停止任務 {task_id}: {stop_response.message}")
+                            # 即使工作端拒絕，狀態已經更新為 STOPPED，這是合理的
+                            
+                except Exception as e:
+                    logging.warning(f"通知節點 {assigned_node} 停止任務 {task_id} 失敗: {e}")
+                    # 即使通知失敗，狀態已經更新為 STOPPED
+            
+            # 從健康檢查中移除（如果存在）
+            if task_id in self.task_health:
+                del self.task_health[task_id]
+                logging.info(f"任務 {task_id} 已從健康檢查中移除")
+            
+            # 成功停止（狀態已更新）
+            return nodepool_pb2.StopTaskResponse(
+                success=True, 
+                message=f"任務 {task_id} 已停止，工作端正在處理結果打包"
+            )
                 
         except Exception as e:
             logging.error(f"StopTask 服務錯誤: {e}", exc_info=True)
@@ -1249,7 +1275,7 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
             )
 
     def GetTaskResult(self, request, context):
-        """主控端請求任務結果，節點池回傳暫存的 ZIP"""
+        """主控端請求任務結果，節點池回傳暫存的 ZIP - 支援 STOPPED 狀態"""
         try:
             task_id = request.task_id
             
@@ -1277,18 +1303,42 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                     )
             
             result_zip, status = self.task_manager.get_task_result_zip(task_id)
-            if status == "COMPLETED":
-                return nodepool_pb2.GetTaskResultResponse(
-                    success=True,
-                    message=f"Task {task_id} completed successfully",
-                    result_zip=result_zip
-                )
+            
+            # 支援 COMPLETED 和 STOPPED 狀態的結果下載
+            if status in ["COMPLETED", "STOPPED"]:
+                if result_zip:
+                    status_msg = "completed successfully" if status == "COMPLETED" else "stopped but has partial results"
+                    return nodepool_pb2.GetTaskResultResponse(
+                        success=True,
+                        message=f"Task {task_id} {status_msg}",
+                        result_zip=result_zip
+                    )
+                else:
+                    return nodepool_pb2.GetTaskResultResponse(
+                        success=False,
+                        message=f"Task {task_id} is {status.lower()} but no result available",
+                        result_zip=b""
+                    )
             elif status in ["PENDING", "RUNNING"]:
                 return nodepool_pb2.GetTaskResultResponse(
                     success=False,
                     message=f"Task {task_id} is still {status.lower()}",
                     result_zip=b""
                 )
+            elif status == "FAILED":
+                # 失敗的任務也可能有部分結果
+                if result_zip:
+                    return nodepool_pb2.GetTaskResultResponse(
+                        success=True,
+                        message=f"Task {task_id} failed but has partial results",
+                        result_zip=result_zip
+                    )
+                else:
+                    return nodepool_pb2.GetTaskResultResponse(
+                        success=False,
+                        message=f"Task {task_id} failed with no results",
+                        result_zip=b""
+                    )
             else:
                 return nodepool_pb2.GetTaskResultResponse(
                     success=False,

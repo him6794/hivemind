@@ -151,12 +151,10 @@
     <div class="login-container">
         <div class="login-header">
             <h1>Worker Node Login</h1>
-            <h2>Node ID: {{ node_id }}</h2>
         </div>
 
         {% if current_status %}
         <div class="{% if 'Error' in current_status %}error-message{% elif 'Idle' in current_status %}success-message{% else %}info-message{% endif %}">
-            目前狀態: {{ current_status }}
         </div>
         {% endif %}
 

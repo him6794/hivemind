@@ -8,9 +8,8 @@ import datetime
 from user_manager import UserManager
 import nodepool_pb2
 import nodepool_pb2_grpc
-from config import Config  # 導入 Config 類
+from config import Config
 
-# 使用 Config.SECRET_KEY
 SECRET_KEY = Config.SECRET_KEY
 
 def handle_rpc_errors(func):
@@ -58,7 +57,6 @@ class UserServiceServicer(nodepool_pb2_grpc.UserServiceServicer):
         try:
             user_id = self._verify_token(token)
             if user_id:
-                # 獲取完整的用戶信息
                 user_info = self.user_manager.query_one(
                     "SELECT id, username FROM users WHERE id = ?",
                     (user_id,)
@@ -79,7 +77,6 @@ class UserServiceServicer(nodepool_pb2_grpc.UserServiceServicer):
     def verify_token_from_metadata(self, context):
         """從 gRPC metadata 中驗證 token"""
         try:
-            # 從 gRPC context 的 metadata 中獲取 authorization header
             metadata = dict(context.invocation_metadata())
             auth_header = metadata.get('authorization', '')
             
@@ -89,13 +86,11 @@ class UserServiceServicer(nodepool_pb2_grpc.UserServiceServicer):
                     "message": "Missing authorization header"
                 }
             
-            # 解析 Bearer token
             if auth_header.startswith('Bearer '):
-                token = auth_header[7:]  # 移除 'Bearer ' 前綴
+                token = auth_header[7:]  
             else:
                 token = auth_header
             
-            # 驗證 token
             user_info = self.verify_token(token)
             if user_info:
                 return {

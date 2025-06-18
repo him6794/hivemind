@@ -69,6 +69,8 @@ class WorkerNode:
         self.user_sessions = {}  # session_id -> user_data
         self.session_lock = threading.Lock()
 
+        self._stop_current_task = False  # 添加停止標誌
+
     def _init_hardware(self):
         """初始化硬體信息"""
         try:
@@ -537,11 +539,13 @@ class WorkerNode:
         """執行任務"""
         self.current_task_id = task_id
         self.status = f"Executing: {task_id}"
+        self._stop_current_task = False  # 重置停止標誌
         
         temp_dir = None
         container = None
         success = False
-        task_logs = []  # 收集任務日誌
+        task_logs = []
+        stop_requested = False
         
         try:
             if not self.docker_available:
@@ -564,7 +568,7 @@ class WorkerNode:
             shutil.copy2(script_src, script_dst)
             os.chmod(script_dst, 0o755)
 
-            # 執行容器 - 使用 workspace 內的腳本
+            # 執行容器
             container_name = f"task-{task_id}-{secrets.token_hex(4)}"
             container = self.docker_client.containers.run(
                 "hivemind-worker:latest",
@@ -577,77 +581,130 @@ class WorkerNode:
                 remove=False
             )
             
-            self._log(f"Task {task_id} container started, collecting logs...")
+            self._log(f"Task {task_id} container started, monitoring...")
             
             # 發送初始日誌
             initial_log = f"任務 {task_id} 開始執行\n容器名稱: {container_name}\n工作目錄: {workspace}"
             task_logs.append(initial_log)
             self._send_task_logs(task_id, initial_log)
             
-            # 收集日誌 - 使用非阻塞方式並定期發送到節點池
+            # 簡化的監控邏輯 - 定期檢查停止請求和容器狀態
             log_buffer = []
             log_send_counter = 0
+            last_log_fetch = time.time()
             
-            for log_line in container.logs(stream=True, follow=True):
-                line = log_line.decode('utf-8', errors='replace').strip()
-                if line:
-                    # 本地日誌
-                    self._log(f"[Task {task_id}]: {line}")
+            while True:
+                # 優先檢查停止請求
+                if self._stop_current_task:
+                    stop_requested = True
+                    stop_log = f"收到停止請求，立即終止任務 {task_id}"
+                    self._log(stop_log)
+                    task_logs.append(stop_log)
+                    self._send_task_logs(task_id, stop_log)
                     
-                    # 收集到緩衝區
-                    log_buffer.append(line)
-                    task_logs.append(line)
-                    log_send_counter += 1
+                    # 立即強制停止容器
+                    try:
+                        container.kill()
+                        stop_log = f"容器已強制停止: {container_name}"
+                        self._log(stop_log)
+                        task_logs.append(stop_log)
+                        self._send_task_logs(task_id, stop_log)
+                    except Exception as e:
+                        error_log = f"強制停止容器失敗: {str(e)}"
+                        self._log(error_log, logging.WARNING)
+                        task_logs.append(error_log)
+                        self._send_task_logs(task_id, error_log)
                     
-                    # 每20行或每30秒發送一次日誌到節點池
-                    if log_send_counter >= 20:
-                        logs_to_send = "\n".join(log_buffer)
-                        self._send_task_logs(task_id, logs_to_send)
-                        log_buffer.clear()
-                        log_send_counter = 0
+                    break
                 
-                # 檢查容器是否還在運行
+                # 檢查容器狀態
                 try:
                     container.reload()
                     if container.status != 'running':
+                        self._log(f"Container {container_name} stopped naturally, status: {container.status}")
                         break
-                except:
+                except Exception as e:
+                    self._log(f"Failed to check container status: {e}")
                     break
+                
+                # 每隔1秒嘗試收集一次日誌（非阻塞）
+                current_time = time.time()
+                if current_time - last_log_fetch > 1.0:
+                    try:
+                        # 獲取最新的日誌（非阻塞，只獲取新的日誌）
+                        logs = container.logs(since=int(last_log_fetch)).decode('utf-8', errors='replace')
+                        if logs.strip():
+                            log_lines = logs.strip().split('\n')
+                            for line in log_lines:
+                                if line.strip():
+                                    self._log(f"[Task {task_id}]: {line}")
+                                    log_buffer.append(line)
+                                    task_logs.append(line)  # 保存到任務日誌列表
+                                    log_send_counter += 1
+                            
+                            # 每20行或每3秒發送一次日誌
+                            if log_send_counter >= 20 or len(log_buffer) > 0:
+                                logs_to_send = "\n".join(log_buffer)
+                                self._send_task_logs(task_id, logs_to_send)
+                                log_buffer.clear()
+                                log_send_counter = 0
+                        
+                        last_log_fetch = current_time
+                    except Exception as e:
+                        self._log(f"Error collecting logs: {e}", logging.WARNING)
+                
+                # 短暫休眠，確保能快速響應停止請求
+                time.sleep(0.1)
             
             # 發送剩餘的日誌
             if log_buffer:
                 logs_to_send = "\n".join(log_buffer)
                 self._send_task_logs(task_id, logs_to_send)
+                # 也加入到任務日誌列表
+                task_logs.extend(log_buffer)
             
-            # 等待完成
-            result = container.wait(timeout=3600)
-            success = result.get('StatusCode', -1) == 0
+            # 處理任務完成或停止
+            if stop_requested:
+                success = False
+                completion_log = f"任務 {task_id} 被用戶強制停止"
+            else:
+                # 任務自然結束，檢查退出碼
+                try:
+                    result = container.wait(timeout=2)
+                    success = result.get('StatusCode', -1) == 0
+                    completion_log = f"任務 {task_id} 執行完成，退出碼: {result.get('StatusCode', -1)}"
+                except Exception as e:
+                    success = False
+                    completion_log = f"任務 {task_id} 完成狀態檢查失敗: {str(e)}"
             
-            completion_log = f"任務 {task_id} 執行完成，退出碼: {result.get('StatusCode', -1)}"
             self._log(completion_log)
             task_logs.append(completion_log)
             self._send_task_logs(task_id, completion_log)
             
-            self._log(f"Task {task_id} completed with status: {success}")
+            # 立即打包結果，包含任務日誌
+            result_zip = self._create_result_zip(task_id, workspace, success, stop_requested, task_logs)
             
-            # 打包結果
-            result_zip = self._create_result_zip(task_id, workspace, success)
-            
-            # 發送結果
+            # 發送結果到節點池
             if result_zip:
-                self.master_stub.ReturnTaskResult(
-                    nodepool_pb2.ReturnTaskResultRequest(
-                        task_id=task_id,
-                        result_zip=result_zip
-                    ),
-                    metadata=[('authorization', f'Bearer {self.token}')],
-                    timeout=30
-                )
-                
-                result_log = f"任務 {task_id} 結果已發送到節點池"
-                self._log(result_log)
-                task_logs.append(result_log)
-                self._send_task_logs(task_id, result_log)
+                try:
+                    self.master_stub.ReturnTaskResult(
+                        nodepool_pb2.ReturnTaskResultRequest(
+                            task_id=task_id,
+                            result_zip=result_zip
+                        ),
+                        metadata=[('authorization', f'Bearer {self.token}')],
+                        timeout=30
+                    )
+                    
+                    result_log = f"任務 {task_id} 結果已發送到節點池（狀態: {'強制停止' if stop_requested else '完成'}）"
+                    self._log(result_log)
+                    task_logs.append(result_log)
+                    self._send_task_logs(task_id, result_log)
+                except Exception as e:
+                    error_log = f"發送任務結果失敗: {str(e)}"
+                    self._log(error_log, logging.ERROR)
+                    task_logs.append(error_log)
+                    self._send_task_logs(task_id, error_log)
             
         except Exception as e:
             error_log = f"任務 {task_id} 執行失敗: {str(e)}"
@@ -657,12 +714,15 @@ class WorkerNode:
             success = False
         
         finally:
-            # 清理
+            # 清理容器（強制清理）
             if container:
                 try:
-                    container.stop(timeout=10)
+                    try:
+                        container.kill()  # 確保強制停止
+                    except:
+                        pass
                     container.remove(force=True)
-                    cleanup_log = f"任務 {task_id} 容器已清理"
+                    cleanup_log = f"任務 {task_id} 容器已強制清理"
                     self._log(cleanup_log)
                     task_logs.append(cleanup_log)
                     self._send_task_logs(task_id, cleanup_log)
@@ -672,6 +732,7 @@ class WorkerNode:
                     task_logs.append(cleanup_error)
                     self._send_task_logs(task_id, cleanup_error)
             
+            # 清理臨時目錄
             if temp_dir and os.path.exists(temp_dir):
                 try:
                     shutil.rmtree(temp_dir)
@@ -692,7 +753,7 @@ class WorkerNode:
                     nodepool_pb2.TaskCompletedRequest(
                         task_id=task_id,
                         node_id=self.node_id,
-                        success=success
+                        success=success and not stop_requested
                     ),
                     metadata=[('authorization', f'Bearer {self.token}')],
                     timeout=10
@@ -703,17 +764,51 @@ class WorkerNode:
             # 重置狀態
             self.current_task_id = None
             self.status = "Idle"
-            self._log(f"Task {task_id} cleanup completed, status reset to Idle")
+            self._stop_current_task = False
+            status_msg = "強制停止並已打包結果" if stop_requested else "執行完成"
+            self._log(f"Task {task_id} cleanup completed, status reset to Idle ({status_msg})")
 
-    def _create_result_zip(self, task_id, workspace, success):
-        """創建結果 ZIP"""
+    def _create_result_zip(self, task_id, workspace, success, stopped=False, task_logs=None):
+        """創建結果 ZIP，包含停止狀態信息和任務日誌"""
         try:
-            # 創建執行日誌
+            # 創建執行日誌，包含停止信息
             log_file = os.path.join(workspace, "execution_log.txt")
             with open(log_file, 'w', encoding='utf-8') as f:
                 f.write(f"Task ID: {task_id}\n")
-                f.write(f"Status: {'Success' if success else 'Failed'}\n")
+                if stopped:
+                    f.write(f"Status: Stopped by user\n")
+                    f.write(f"Execution Result: Terminated\n")
+                else:
+                    f.write(f"Status: {'Success' if success else 'Failed'}\n")
+                    f.write(f"Execution Result: {'Completed' if success else 'Error'}\n")
                 f.write(f"Time: {datetime.datetime.now()}\n")
+                f.write(f"Node: {self.node_id}\n")
+                
+                if stopped:
+                    f.write(f"\nNote: This task was stopped by user request.\n")
+                    f.write(f"Any partial results or intermediate files are included in this package.\n")
+            
+            # 創建任務完整日誌文件
+            if task_logs:
+                task_log_file = os.path.join(workspace, "task_logs.txt")
+                with open(task_log_file, 'w', encoding='utf-8') as f:
+                    f.write(f"=== Task {task_id} Complete Logs ===\n")
+                    f.write(f"Generated at: {datetime.datetime.now()}\n")
+                    f.write(f"Status: {'Stopped by user' if stopped else ('Success' if success else 'Failed')}\n")
+                    f.write(f"Node: {self.node_id}\n\n")
+                    
+                    for log_entry in task_logs:
+                        f.write(f"{log_entry}\n")
+                    
+                    f.write(f"\n=== End of Logs ===\n")
+            
+            # 創建停止狀態文件（如果任務被停止）
+            if stopped:
+                stop_file = os.path.join(workspace, "task_stopped.txt")
+                with open(stop_file, 'w', encoding='utf-8') as f:
+                    f.write(f"Task {task_id} was stopped by user request at {datetime.datetime.now()}\n")
+                    f.write(f"This file indicates that the task did not complete normally.\n")
+                    f.write(f"Check execution_log.txt and task_logs.txt for more details.\n")
             
             # 打包整個工作目錄
             zip_buffer = io.BytesIO()
@@ -724,10 +819,31 @@ class WorkerNode:
                         arcname = os.path.relpath(file_path, workspace)
                         zip_file.write(file_path, arcname)
             
+            result_size = len(zip_buffer.getvalue())
+            self._log(f"Created result zip for task {task_id}: {result_size} bytes ({'stopped' if stopped else 'completed'}), logs included")
             return zip_buffer.getvalue()
+            
         except Exception as e:
             self._log(f"Failed to create result zip: {e}", logging.ERROR)
-            return None
+            
+            # 如果打包失敗，創建一個包含錯誤信息的簡單ZIP
+            try:
+                zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                    error_content = f"Task {task_id} packaging failed: {str(e)}\n"
+                    error_content += f"Status: {'Stopped' if stopped else 'Failed'}\n"
+                    error_content += f"Time: {datetime.datetime.now()}\n"
+                    
+                    # 嘗試包含部分日誌
+                    if task_logs:
+                        error_content += f"\n=== Partial Logs ===\n"
+                        for log_entry in task_logs[-50:]:  # 最後50行日誌
+                            error_content += f"{log_entry}\n"
+                    
+                    zip_file.writestr("error_log.txt", error_content)
+                return zip_buffer.getvalue()
+            except:
+                return None
 
     def _log(self, message, level=logging.INFO):
         """記錄日誌"""
@@ -794,15 +910,41 @@ class WorkerNodeServicer(nodepool_pb2_grpc.WorkerNodeServiceServicer):
             )
 
     def StopTaskExecution(self, request, context):
-        """停止任務執行"""
+        """立即強制停止任務執行並打包結果"""
         task_id = request.task_id
         if self.worker_node.current_task_id == task_id:
-            self.worker_node.current_task_id = None
-            self.worker_node.status = "Idle"
-            return nodepool_pb2.StopTaskExecutionResponse(
-                success=True,
-                message=f"Task {task_id} stopped"
-            )
+            logging.info(f"收到停止任務 {task_id} 的請求，立即執行強制停止")
+            
+            # 立即設置停止標誌
+            self.worker_node._stop_current_task = True
+            
+            # 等待任務處理停止請求，但時間較短
+            max_wait_time = 10  # 減少到10秒
+            wait_count = 0
+            while self.worker_node.current_task_id == task_id and wait_count < max_wait_time:
+                time.sleep(0.5)  # 更頻繁檢查
+                wait_count += 0.5
+                
+                # 每2秒報告一次進度
+                if int(wait_count) % 2 == 0 and wait_count > 0:
+                    logging.info(f"強制停止任務 {task_id} 處理中... ({wait_count:.1f}/{max_wait_time}秒)")
+            
+            if wait_count >= max_wait_time:
+                # 如果超時，直接重置狀態
+                self.worker_node.current_task_id = None
+                self.worker_node.status = "Idle"
+                self.worker_node._stop_current_task = False
+                logging.warning(f"任務 {task_id} 超時強制停止（{max_wait_time} 秒）")
+                return nodepool_pb2.StopTaskExecutionResponse(
+                    success=True,
+                    message=f"Task {task_id} force stopped (timeout after {max_wait_time}s)"
+                )
+            else:
+                logging.info(f"任務 {task_id} 已成功停止並打包結果（耗時 {wait_count:.1f} 秒）")
+                return nodepool_pb2.StopTaskExecutionResponse(
+                    success=True,
+                    message=f"Task {task_id} successfully stopped and results packaged (took {wait_count:.1f}s)"
+                )
         else:
             return nodepool_pb2.StopTaskExecutionResponse(
                 success=False,
