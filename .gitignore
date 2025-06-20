@@ -184,12 +184,6 @@ Desktop.ini
 *.old
 *.tmp
 
-# Node.js (如果有前端資源)
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
 # 壓縮文件
 *.zip
 *.tar.gz
