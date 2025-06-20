@@ -3,13 +3,16 @@ import grpc
 import logging
 import redis
 import time
-import nodepool_pb2
-import nodepool_pb2_grpc
 import threading
 import json
+import jwt
+import nodepool_pb2
+import nodepool_pb2_grpc
 
 # 從正確的位置導入 NodeManager
 from node_manager import NodeManager
+from user_manager import UserManager
+from config import Config
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(threadName)s] - %(message)s')
 
@@ -627,7 +630,6 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                                 continue
                             
                             # 發放獎勵：從任務發起者轉帳給工作端用戶
-                            from user_manager import UserManager
                             user_manager = UserManager()
                             
                             # 使用用戶名進行轉帳
@@ -793,7 +795,6 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                         logging.info(f"推送任務 {task_id} 到 {worker_host}:{worker_port} (大小: {file_size_mb:.1f}MB, 超時: {total_timeout:.0f}秒)")
                         
                         # 建立 gRPC 連線
-                        import nodepool_pb2_grpc
                         channel = grpc.insecure_channel(
                             f"{worker_host}:{worker_port}",
                             options=[
@@ -1228,16 +1229,12 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
     def _extract_user_from_token(self, token):
         """從 token 中提取用戶名（簡化實現）"""
         try:
-            import jwt
-            from config import Config
-            
             # 直接解析 JWT token
             payload = jwt.decode(token, Config.SECRET_KEY, algorithms=["HS256"])
             user_id = payload.get("user_id")
             
             if user_id:
                 # 從資料庫獲取用戶名
-                from user_manager import UserManager
                 user_manager = UserManager()
                 user_info = user_manager.query_one("SELECT username FROM users WHERE id = ?", (user_id,))
                 if user_info:
@@ -1274,7 +1271,6 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                 )
             
             # 獲取用戶ID
-            from user_manager import UserManager
             user_manager = UserManager()
             user_info = user_manager.query_one("SELECT id FROM users WHERE username = ?", (username,))
             if not user_info:
@@ -1346,7 +1342,6 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                         worker_host = node_info.get("hostname", "127.0.0.1")
                         worker_port = node_info.get("port", 50053)
                         
-                        import nodepool_pb2_grpc
                         channel = grpc.insecure_channel(f"{worker_host}:{worker_port}")
                         stub = nodepool_pb2_grpc.WorkerNodeServiceStub(channel)
                         stop_req = nodepool_pb2.StopTaskExecutionRequest(task_id=task_id)
