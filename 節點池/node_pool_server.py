@@ -30,6 +30,7 @@ def serve():
         options=options
     )
     
+    # 初始化服務時會自動創建存儲目錄
     user_service = UserServiceServicer()
     node_manager_service = NodeManagerServiceServicer()
     master_node_service = MasterNodeServiceServicer()
@@ -42,6 +43,7 @@ def serve():
     
     server.add_insecure_port(f'[::]:{DEFAULT_PORT}')
     logging.info(f"節點池服務已啟動，端口: {DEFAULT_PORT}")
+    logging.info(f"任務文件存儲目錄: d:/hivemind/task_storage")
     server.start()
     server.wait_for_termination()
     

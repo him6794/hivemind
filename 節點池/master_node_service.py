@@ -6,6 +6,8 @@ import time
 import threading
 import json
 import jwt
+import os
+import shutil
 import nodepool_pb2
 import nodepool_pb2_grpc
 
@@ -16,11 +18,192 @@ from config import Config
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(threadName)s] - %(message)s')
 
-# --- TaskManager 類保持不變 ---
+# 新增文件存儲管理器
+class FileStorageManager:
+    def __init__(self, base_path="d:/hivemind/task_storage"):
+        self.base_path = base_path
+        self.ensure_directory()
+    
+    def ensure_directory(self):
+        """確保存儲目錄存在"""
+        try:
+            os.makedirs(self.base_path, exist_ok=True)
+            logging.info(f"任務存儲目錄已準備: {self.base_path}")
+        except Exception as e:
+            logging.error(f"創建存儲目錄失敗: {e}")
+            raise
+    
+    def get_task_zip_path(self, task_id):
+        """獲取任務ZIP文件路徑"""
+        return os.path.join(self.base_path, f"task_{task_id}.zip")
+    
+    def get_result_zip_path(self, task_id):
+        """獲取結果ZIP文件路徑"""
+        return os.path.join(self.base_path, f"result_{task_id}.zip")
+    
+    def store_task_zip(self, task_id, task_zip_data):
+        """存儲任務ZIP到硬碟"""
+        try:
+            file_path = self.get_task_zip_path(task_id)
+            with open(file_path, 'wb') as f:
+                f.write(task_zip_data)
+            logging.debug(f"任務 {task_id} ZIP已存儲到: {file_path} ({len(task_zip_data)} bytes)")
+            return True
+        except Exception as e:
+            logging.error(f"存儲任務 {task_id} ZIP失敗: {e}")
+            return False
+    
+    def store_result_zip(self, task_id, result_zip_data):
+        """存儲結果ZIP到硬碟"""
+        try:
+            file_path = self.get_result_zip_path(task_id)
+            with open(file_path, 'wb') as f:
+                f.write(result_zip_data)
+            logging.debug(f"任務 {task_id} 結果ZIP已存儲到: {file_path} ({len(result_zip_data)} bytes)")
+            return True
+        except Exception as e:
+            logging.error(f"存儲任務 {task_id} 結果ZIP失敗: {e}")
+            return False
+    
+    def get_task_zip(self, task_id):
+        """從硬碟讀取任務ZIP"""
+        try:
+            file_path = self.get_task_zip_path(task_id)
+            if os.path.exists(file_path):
+                with open(file_path, 'rb') as f:
+                    data = f.read()
+                logging.debug(f"已讀取任務 {task_id} ZIP: {len(data)} bytes")
+                return data
+            else:
+                logging.warning(f"任務 {task_id} ZIP文件不存在: {file_path}")
+                return b""
+        except Exception as e:
+            logging.error(f"讀取任務 {task_id} ZIP失敗: {e}")
+            return b""
+    
+    def get_result_zip(self, task_id):
+        """從硬碟讀取結果ZIP"""
+        try:
+            file_path = self.get_result_zip_path(task_id)
+            if os.path.exists(file_path):
+                with open(file_path, 'rb') as f:
+                    data = f.read()
+                logging.debug(f"已讀取任務 {task_id} 結果ZIP: {len(data)} bytes")
+                return data
+            else:
+                logging.debug(f"任務 {task_id} 結果ZIP文件不存在: {file_path}")
+                return b""
+        except Exception as e:
+            logging.error(f"讀取任務 {task_id} 結果ZIP失敗: {e}")
+            return b""
+    
+    def task_zip_exists(self, task_id):
+        """檢查任務ZIP是否存在"""
+        return os.path.exists(self.get_task_zip_path(task_id))
+    
+    def result_zip_exists(self, task_id):
+        """檢查結果ZIP是否存在"""
+        return os.path.exists(self.get_result_zip_path(task_id))
+    
+    def cleanup_task_files(self, task_id):
+        """清理任務相關文件"""
+        try:
+            task_file = self.get_task_zip_path(task_id)
+            result_file = self.get_result_zip_path(task_id)
+            
+            files_removed = 0
+            if os.path.exists(task_file):
+                os.remove(task_file)
+                files_removed += 1
+                logging.debug(f"已刪除任務文件: {task_file}")
+            
+            if os.path.exists(result_file):
+                os.remove(result_file)
+                files_removed += 1
+                logging.debug(f"已刪除結果文件: {result_file}")
+            
+            if files_removed > 0:
+                logging.info(f"任務 {task_id} 已清理 {files_removed} 個文件")
+            return True
+        except Exception as e:
+            logging.error(f"清理任務 {task_id} 文件失敗: {e}")
+            return False
+    
+    def mark_for_cleanup(self, task_id):
+        """標記任務文件可以清理（在結果成功傳輸後）"""
+        try:
+            # 創建一個標記文件，表示這個任務的文件可以被清理
+            cleanup_marker_path = os.path.join(self.base_path, f"cleanup_{task_id}.marker")
+            with open(cleanup_marker_path, 'w') as f:
+                f.write(str(time.time()))  # 記錄標記時間
+            logging.debug(f"任務 {task_id} 已標記為可清理")
+            return True
+        except Exception as e:
+            logging.error(f"標記任務 {task_id} 清理失敗: {e}")
+            return False
+    
+    def is_marked_for_cleanup(self, task_id):
+        """檢查任務是否已標記為可清理"""
+        cleanup_marker_path = os.path.join(self.base_path, f"cleanup_{task_id}.marker")
+        return os.path.exists(cleanup_marker_path)
+    
+    def cleanup_task_files_if_marked(self, task_id):
+        """如果任務已標記為可清理，則清理文件"""
+        if not self.is_marked_for_cleanup(task_id):
+            return False
+            
+        try:
+            task_file = self.get_task_zip_path(task_id)
+            result_file = self.get_result_zip_path(task_id)
+            cleanup_marker = os.path.join(self.base_path, f"cleanup_{task_id}.marker")
+            
+            files_removed = 0
+            
+            # 刪除任務文件
+            if os.path.exists(task_file):
+                os.remove(task_file)
+                files_removed += 1
+                logging.info(f"已刪除任務文件: {task_file}")
+            
+            # 刪除結果文件
+            if os.path.exists(result_file):
+                os.remove(result_file)
+                files_removed += 1
+                logging.info(f"已刪除結果文件: {result_file}")
+            
+            # 刪除清理標記文件
+            if os.path.exists(cleanup_marker):
+                os.remove(cleanup_marker)
+                logging.debug(f"已刪除清理標記: {cleanup_marker}")
+            
+            if files_removed > 0:
+                logging.info(f"任務 {task_id} 已清理 {files_removed} 個文件（結果已成功傳輸）")
+            
+            return True
+        except Exception as e:
+            logging.error(f"清理已標記任務 {task_id} 文件失敗: {e}")
+            return False
+    
+    def delayed_cleanup_task_files(self, task_id, delay_seconds=5):
+        """延遲清理任務文件，確保文件傳輸完成"""
+        def cleanup_after_delay():
+            try:
+                time.sleep(delay_seconds)
+                self.cleanup_task_files_if_marked(task_id)
+            except Exception as e:
+                logging.error(f"延遲清理任務 {task_id} 失敗: {e}")
+        
+        # 在後台線程中執行延遲清理
+        cleanup_thread = threading.Thread(target=cleanup_after_delay, daemon=True)
+        cleanup_thread.start()
+        logging.debug(f"任務 {task_id} 已安排 {delay_seconds} 秒後清理")
+
+# --- TaskManager 類修改版本 ---
 class TaskManager:
     def __init__(self):
         # decode_responses=True for easier handling
         self.redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+        self.file_storage = FileStorageManager()  # 新增文件存儲管理器
         try:
             self.redis_client.ping()
             logging.info("TaskManager: Redis 連線成功")
@@ -29,7 +212,7 @@ class TaskManager:
             raise
 
     def store_task(self, task_id, task_zip, memory_gb, cpu_score, gpu_score, gpu_memory_gb, location, gpu_name, user_id, cpt_cost=None):
-        """存儲任務信息，包括用戶ID與cpt_cost"""
+        """存儲任務信息，ZIP文件存到硬碟，其他信息存到Redis"""
         task_key = f"task:{task_id}"
         try:
             # 記錄詳細的輸入參數
@@ -43,7 +226,14 @@ class TaskManager:
             
             logging.info(f"任務 {task_id} 計算的 CPT 成本: {calculated_cpt_cost} (CPU:{cpu_score} + GPU:{gpu_score} + MEM:{memory_gb} + GPU_MEM:{gpu_memory_gb})")
             
-            # 存儲二進制數據時需要特別處理，其他存為字符串
+            # 存儲ZIP文件到硬碟
+            if task_zip:
+                if not self.file_storage.store_task_zip(task_id, task_zip):
+                    logging.error(f"任務 {task_id} ZIP文件存儲失敗")
+                    return False
+                logging.info(f"任務 {task_id} ZIP文件已存儲到硬碟 ({len(task_zip)} bytes)")
+            
+            # 存儲任務元數據到Redis（不包含ZIP文件）
             task_info = {
                 "memory_gb": str(memory_gb),
                 "cpu_score": str(cpu_score),
@@ -57,18 +247,12 @@ class TaskManager:
                 "user_id": str(user_id),
                 "created_at": str(time.time()),
                 "updated_at": str(time.time()),
-                "cpt_cost": str(calculated_cpt_cost)  # 使用計算出的 CPT 成本
+                "cpt_cost": str(calculated_cpt_cost),
+                "has_task_zip": "1" if task_zip else "0"  # 標記是否有ZIP文件
             }
             
-            # 先存儲非二進制數據
+            # 存儲元數據到Redis
             self.redis_client.hset(task_key, mapping=task_info)
-            
-            # 單獨存儲二進制數據，使用不會自動解碼的客戶端
-            if task_zip:
-                temp_client_no_decode = redis.Redis(host='localhost', port=6379, db=0, decode_responses=False)
-                temp_client_no_decode.hset(task_key, "task_zip", task_zip)
-                temp_client_no_decode.close()
-                logging.debug(f"任務 {task_id} 的二進制ZIP數據已存儲 ({len(task_zip)} bytes)")
             
             # 將任務ID添加到用戶的任務集合中
             if user_id:
@@ -87,9 +271,13 @@ class TaskManager:
             return True
         except redis.RedisError as e:
             logging.error(f"Redis 錯誤，任務 {task_id} 存儲失敗: {e}")
+            # 如果Redis失敗，清理可能已存儲的文件
+            self.file_storage.cleanup_task_files(task_id)
             return False
         except Exception as e:
             logging.error(f"存儲任務 {task_id} 時發生未知錯誤: {e}", exc_info=True)
+            # 如果出錯，清理可能已存儲的文件
+            self.file_storage.cleanup_task_files(task_id)
             return False
 
     def store_output(self, task_id, output):
@@ -113,15 +301,22 @@ class TaskManager:
             return False
 
     def store_result(self, task_id, result_zip):
-        """存儲任務的最終結果 ZIP"""
+        """存儲任務的最終結果 ZIP到硬碟"""
         task_key = f"task:{task_id}"
         try:
+            # 存儲結果ZIP到硬碟
+            if result_zip and not self.file_storage.store_result_zip(task_id, result_zip):
+                logging.error(f"任務 {task_id} 結果ZIP存儲失敗")
+                return False
+            
+            # 更新Redis中的狀態和標記
             update_data = {
-                "result_zip": result_zip,
-                "status": "COMPLETED"
+                "status": "COMPLETED",
+                "has_result_zip": "1" if result_zip else "0",
+                "updated_at": str(time.time())
             }
             self.redis_client.hset(task_key, mapping=update_data)
-            logging.info(f"任務 {task_id} 結果已存儲，狀態更新為 COMPLETED")
+            logging.info(f"任務 {task_id} 結果已存儲到硬碟，狀態更新為 COMPLETED")
             return True
         except redis.RedisError as e:
             logging.error(f"Redis 錯誤，任務 {task_id} 結果存儲失敗: {e}")
@@ -257,15 +452,15 @@ class TaskManager:
             return None
 
     def get_task_info(self, task_id, include_zip=False):
-        """獲取任務信息，區分字符串和二進制字段"""
+        """獲取任務信息，根據需要從硬碟讀取ZIP文件"""
         task_key = f"task:{task_id}"
         task_info = {}
         string_keys = [
             "memory_gb", "cpu_score", "gpu_score", "gpu_memory_gb",
             "location", "gpu_name", "status", "output", "assigned_node",
-            "user_id", "created_at", "updated_at", "logs", "cpt_cost"  # 添加 logs 和 cpt_cost 字段
+            "user_id", "created_at", "updated_at", "logs", "cpt_cost",
+            "has_task_zip", "has_result_zip"  # 添加ZIP文件存在標記
         ]
-        binary_keys = ["task_zip", "result_zip"]
 
         try:
             if not self.redis_client.exists(task_key):
@@ -282,16 +477,25 @@ class TaskManager:
             else:
                 logging.warning(f"任務 {task_id} 沒有獲取到用戶ID")
 
+            # 根據需要從硬碟讀取ZIP文件
             if include_zip:
-                temp_client_no_decode = redis.Redis(host='localhost', port=6379, db=0, decode_responses=False)
-                for key in binary_keys:
-                    binary_value = temp_client_no_decode.hget(task_key, key)
-                    task_info[key] = binary_value if binary_value else b""
-                temp_client_no_decode.close()
+                # 讀取任務ZIP
+                if task_info.get("has_task_zip") == "1":
+                    task_zip = self.file_storage.get_task_zip(task_id)
+                    task_info["task_zip"] = task_zip
+                else:
+                    task_info["task_zip"] = b""
+                
+                # 讀取結果ZIP
+                if task_info.get("has_result_zip") == "1":
+                    result_zip = self.file_storage.get_result_zip(task_id)
+                    task_info["result_zip"] = result_zip
+                else:
+                    task_info["result_zip"] = b""
             else:
-                for key in binary_keys:
-                    field_exists = self.redis_client.hexists(task_key, key)
-                    task_info[key] = "<binary data>" if field_exists else "<empty>"
+                # 不包含ZIP時，顯示存在狀態
+                task_info["task_zip"] = "<file on disk>" if task_info.get("has_task_zip") == "1" else "<empty>"
+                task_info["result_zip"] = "<file on disk>" if task_info.get("has_result_zip") == "1" else "<empty>"
 
             logging.debug(f"成功獲取任務 {task_id} 的信息 (include_zip={include_zip})")
             return task_info
@@ -304,32 +508,36 @@ class TaskManager:
             return None
 
     def get_task_result_zip(self, task_id):
-        """專門獲取結果 ZIP (確保獲取 bytes) - 支援 STOPPED 狀態"""
+        """專門獲取結果 ZIP (從硬碟讀取) - 支援 STOPPED 狀態"""
         task_key = f"task:{task_id}"
         try:
-            temp_client_no_decode = redis.Redis(host='localhost', port=6379, db=0, decode_responses=False)
-            result_zip = temp_client_no_decode.hget(task_key, "result_zip")
-            status_bytes = temp_client_no_decode.hget(task_key, "status")
-            temp_client_no_decode.close()
-
-            status_str = status_bytes.decode() if status_bytes else "UNKNOWN"
+            # 從Redis獲取狀態
+            status = self.redis_client.hget(task_key, "status") or "UNKNOWN"
+            has_result = self.redis_client.hget(task_key, "has_result_zip") == "1"
 
             # 允許 COMPLETED 和 STOPPED 狀態的任務下載結果
-            if status_str in ["COMPLETED", "STOPPED"]:
-                if result_zip:
-                    logging.info(f"任務 {task_id} 狀態為 {status_str}，返回結果 ZIP ({len(result_zip)} bytes)")
-                    return result_zip, status_str
+            if status in ["COMPLETED", "STOPPED"]:
+                if has_result:
+                    result_zip = self.file_storage.get_result_zip(task_id)
+                    if result_zip:
+                        logging.info(f"任務 {task_id} 狀態為 {status}，從硬碟返回結果 ZIP ({len(result_zip)} bytes)")
+                        return result_zip, status
+                    else:
+                        logging.warning(f"任務 {task_id} 狀態為 {status} 但硬碟上無結果文件")
+                        return b"", status
                 else:
-                    logging.warning(f"任務 {task_id} 狀態為 {status_str} 但結果 ZIP 為空")
-                    return b"", status_str
-            elif status_str in ["PENDING", "RUNNING"]:
-                return b"", status_str
+                    logging.warning(f"任務 {task_id} 狀態為 {status} 但標記為無結果 ZIP")
+                    return b"", status
+            elif status in ["PENDING", "RUNNING"]:
+                return b"", status
             else:
                 # 對於其他狀態（如 FAILED），也檢查是否有結果
-                if result_zip:
-                    logging.info(f"任務 {task_id} 狀態為 {status_str}，但有結果可下載")
-                    return result_zip, status_str
-                return b"", status_str
+                if has_result:
+                    result_zip = self.file_storage.get_result_zip(task_id)
+                    if result_zip:
+                        logging.info(f"任務 {task_id} 狀態為 {status}，但有結果可下載")
+                        return result_zip, status
+                return b"", status
 
         except redis.RedisError as e:
             logging.error(f"Redis 錯誤，獲取任務 {task_id} 結果 ZIP 失敗: {e}")
@@ -453,7 +661,7 @@ class TaskManager:
         return self.update_task_status(task_id, "STOPPED")
 
     def cleanup_task_data(self, task_id):
-        """清理任務相關數據"""
+        """清理任務相關數據，包括硬碟文件"""
         try:
             task_key = f"task:{task_id}"
             
@@ -461,7 +669,10 @@ class TaskManager:
             task_info = self.get_task_info(task_id, include_zip=False)
             user_id = task_info.get("user_id") if task_info else None
             
-            # 刪除任務數據
+            # 清理硬碟文件（立即清理，不等待標記）
+            self.file_storage.cleanup_task_files(task_id)
+            
+            # 刪除Redis中的任務數據
             self.redis_client.delete(task_key)
             
             # 從用戶任務集合中移除
@@ -473,7 +684,7 @@ class TaskManager:
             logs_key = f"task_logs:{task_id}"
             self.redis_client.delete(logs_key)
             
-            logging.info(f"任務 {task_id} 的所有數據已清理")
+            logging.info(f"任務 {task_id} 的所有數據(包括硬碟文件)已清理")
             return True
             
         except Exception as e:
@@ -483,7 +694,6 @@ class TaskManager:
     def check_user_balance_for_next_payment(self, username, cpt_cost):
         """檢查用戶餘額是否足夠下次付款（使用用戶名）"""
         try:
-            from user_manager import UserManager
             user_manager = UserManager()
             # 使用用戶名查詢餘額
             user_row = user_manager.query_one("SELECT tokens FROM users WHERE username = ?", (username,))
@@ -504,15 +714,12 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
         self.dispatcher_thread = None
         self.health_check_interval = 5  # 縮短健康檢查間隔到5秒
         self.reward_interval = 60
-        self.task_health = {}  # {task_id: {"fail_count": 0, "last_check": 0, "assigned_node": "", "user_id": "", "cpt_cost": 0}}
-        self.pending_rewards = []  # [(user_id, worker_node_id, amount, task_id)]
+        self.task_health = {}
         self.node_timeout_threshold = 10  # 節點超時閾值：10秒
         self.auth_manager = None  # 將在 server 啟動時設置
         self.start_task_dispatcher()
         self.start_health_checker()
         self.start_reward_scheduler()
-        self.task_logs = {}  # 儲存任務日誌
-        self.logs_lock = threading.Lock()
 
     def __del__(self):
         """確保在對象銷毀時停止後台線程"""
@@ -1384,7 +1591,7 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
             )
 
     def GetTaskResult(self, request, context):
-        """主控端請求任務結果，節點池回傳暫存的 ZIP - 支援 STOPPED 狀態"""
+        """主控端請求任務結果，節點池回傳暫存的 ZIP - 支援 STOPPED 狀態，傳輸完成後自動清理文件"""
         try:
             task_id = request.task_id
             
@@ -1417,6 +1624,15 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
             if status in ["COMPLETED", "STOPPED"]:
                 if result_zip:
                     status_msg = "completed successfully" if status == "COMPLETED" else "stopped but has partial results"
+                    
+                    # 在成功返回結果前，標記文件可以清理
+                    self.task_manager.file_storage.mark_for_cleanup(task_id)
+                    
+                    # 安排延遲清理，確保文件傳輸完成
+                    self.task_manager.file_storage.delayed_cleanup_task_files(task_id, delay_seconds=10)
+                    
+                    logging.info(f"任務 {task_id} 結果已成功傳輸 ({len(result_zip)} bytes)，已安排文件清理")
+                    
                     return nodepool_pb2.GetTaskResultResponse(
                         success=True,
                         message=f"Task {task_id} {status_msg}",
@@ -1437,6 +1653,12 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
             elif status == "FAILED":
                 # 失敗的任務也可能有部分結果
                 if result_zip:
+                    # 失敗的任務結果也需要清理
+                    self.task_manager.file_storage.mark_for_cleanup(task_id)
+                    self.task_manager.file_storage.delayed_cleanup_task_files(task_id, delay_seconds=10)
+                    
+                    logging.info(f"任務 {task_id} 失敗但有部分結果已傳輸，已安排文件清理")
+                    
                     return nodepool_pb2.GetTaskResultResponse(
                         success=True,
                         message=f"Task {task_id} failed but has partial results",
