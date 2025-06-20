@@ -18,29 +18,76 @@ $(document).ready(function() {
                 datasets: [{ 
                     label: 'CPU 使用率 (%)', 
                     data: [], 
-                    borderColor: 'rgba(75, 192, 192, 1)', 
-                    backgroundColor: 'rgba(75, 192, 192, 0.1)',
-                    fill: false,
-                    tension: 0.1
+                    borderColor: '#6366f1',
+                    backgroundColor: 'rgba(99, 102, 241, 0.1)',
+                    fill: true,
+                    tension: 0.4,
+                    borderWidth: 3,
+                    pointBackgroundColor: '#6366f1',
+                    pointBorderColor: '#ffffff',
+                    pointBorderWidth: 2,
+                    pointRadius: 5,
+                    pointHoverRadius: 7
                 }] 
             },
             options: { 
                 responsive: true,
                 maintainAspectRatio: false,
+                interaction: {
+                    intersect: false,
+                    mode: 'index'
+                },
                 scales: { 
                     x: { 
-                        title: { display: true, text: '時間' } 
+                        title: { 
+                            display: true, 
+                            text: '時間',
+                            color: '#64748b',
+                            font: { weight: 'bold' }
+                        },
+                        grid: {
+                            color: 'rgba(148, 163, 184, 0.1)'
+                        },
+                        ticks: {
+                            color: '#64748b'
+                        }
                     }, 
                     y: { 
-                        title: { display: true, text: 'CPU 使用率 (%)' }, 
+                        title: { 
+                            display: true, 
+                            text: 'CPU 使用率 (%)',
+                            color: '#64748b',
+                            font: { weight: 'bold' }
+                        }, 
                         beginAtZero: true, 
-                        suggestedMax: 100 
+                        suggestedMax: 100,
+                        grid: {
+                            color: 'rgba(148, 163, 184, 0.1)'
+                        },
+                        ticks: {
+                            color: '#64748b'
+                        }
                     } 
                 },
                 plugins: {
                     legend: {
                         display: true,
-                        position: 'top'
+                        position: 'top',
+                        labels: {
+                            usePointStyle: true,
+                            padding: 20,
+                            color: '#1e293b',
+                            font: { weight: 'bold' }
+                        }
+                    },
+                    tooltip: {
+                        backgroundColor: 'rgba(15, 23, 42, 0.9)',
+                        titleColor: '#f1f5f9',
+                        bodyColor: '#f1f5f9',
+                        borderColor: '#6366f1',
+                        borderWidth: 1,
+                        cornerRadius: 8,
+                        displayColors: false
                     }
                 }
             }
@@ -54,29 +101,76 @@ $(document).ready(function() {
                 datasets: [{ 
                     label: '記憶體使用率 (%)', 
                     data: [], 
-                    borderColor: 'rgba(255, 99, 132, 1)', 
-                    backgroundColor: 'rgba(255, 99, 132, 0.1)',
-                    fill: false,
-                    tension: 0.1
+                    borderColor: '#8b5cf6',
+                    backgroundColor: 'rgba(139, 92, 246, 0.1)',
+                    fill: true,
+                    tension: 0.4,
+                    borderWidth: 3,
+                    pointBackgroundColor: '#8b5cf6',
+                    pointBorderColor: '#ffffff',
+                    pointBorderWidth: 2,
+                    pointRadius: 5,
+                    pointHoverRadius: 7
                 }] 
             },
             options: { 
                 responsive: true,
                 maintainAspectRatio: false,
+                interaction: {
+                    intersect: false,
+                    mode: 'index'
+                },
                 scales: { 
                     x: { 
-                        title: { display: true, text: '時間' } 
+                        title: { 
+                            display: true, 
+                            text: '時間',
+                            color: '#64748b',
+                            font: { weight: 'bold' }
+                        },
+                        grid: {
+                            color: 'rgba(148, 163, 184, 0.1)'
+                        },
+                        ticks: {
+                            color: '#64748b'
+                        }
                     }, 
                     y: { 
-                        title: { display: true, text: '記憶體使用率 (%)' }, 
+                        title: { 
+                            display: true, 
+                            text: '記憶體使用率 (%)',
+                            color: '#64748b',
+                            font: { weight: 'bold' }
+                        }, 
                         beginAtZero: true, 
-                        suggestedMax: 100 
+                        suggestedMax: 100,
+                        grid: {
+                            color: 'rgba(148, 163, 184, 0.1)'
+                        },
+                        ticks: {
+                            color: '#64748b'
+                        }
                     } 
                 },
                 plugins: {
                     legend: {
                         display: true,
-                        position: 'top'
+                        position: 'top',
+                        labels: {
+                            usePointStyle: true,
+                            padding: 20,
+                            color: '#1e293b',
+                            font: { weight: 'bold' }
+                        }
+                    },
+                    tooltip: {
+                        backgroundColor: 'rgba(15, 23, 42, 0.9)',
+                        titleColor: '#f1f5f9',
+                        bodyColor: '#f1f5f9',
+                        borderColor: '#8b5cf6',
+                        borderWidth: 1,
+                        cornerRadius: 8,
+                        displayColors: false
                     }
                 }
             }
@@ -117,15 +211,23 @@ $(document).ready(function() {
             
             $('#ip-address').text(data.ip || 'N/A');
             $('#cpt-balance').text(data.cpt_balance || 0);
-            $('#cpu-usage').text((data.cpu_percent || 0) + '%');
-            $('#memory-usage').text((data.memory_percent || 0) + '%');
-
+            
+            const cpuPercent = data.cpu_percent || 0;
+            const memoryPercent = data.memory_percent || 0;
+            
+            $('#cpu-usage').text(cpuPercent + '%');
+            $('#memory-usage').text(memoryPercent + '%');
+            
+            // 更新資源卡片
+            $('#cpu-metric').text(cpuPercent + '%');
+            $('#memory-metric').text(memoryPercent + '%');
+            
             const now = new Date().toLocaleTimeString();
 
             // 更新圖表數據
             if (cpuChart && cpuChart.data && cpuChart.data.labels) {
                 cpuChart.data.labels.push(now);
-                cpuChart.data.datasets[0].data.push(data.cpu_percent || 0);
+                cpuChart.data.datasets[0].data.push(cpuPercent);
 
                 if (cpuChart.data.labels.length > 20) {
                     cpuChart.data.labels.shift();
@@ -136,7 +238,7 @@ $(document).ready(function() {
 
             if (memoryChart && memoryChart.data && memoryChart.data.labels) {
                 memoryChart.data.labels.push(now);
-                memoryChart.data.datasets[0].data.push(data.memory_percent || 0);
+                memoryChart.data.datasets[0].data.push(memoryPercent);
 
                 if (memoryChart.data.labels.length > 20) {
                     memoryChart.data.labels.shift();
@@ -173,7 +275,7 @@ $(document).ready(function() {
             
             if (data.logs && Array.isArray(data.logs)) {
                 if (data.logs.length === 0) {
-                    logsDiv.html('<div class="text-center">目前沒有日誌記錄</div>');
+                    logsDiv.html('<div class="text-center" style="opacity: 0.7;">目前沒有日誌記錄</div>');
                 } else {
                     data.logs.forEach(log => {
                         const logEntry = $('<div>').text(log).addClass('log-entry');

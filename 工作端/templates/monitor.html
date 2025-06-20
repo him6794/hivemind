@@ -5,57 +5,87 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>工作節點監控 - {{ node_id }}</title>
     <link rel="stylesheet" href="/static/css/style.css">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=SF+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>工作節點監控</h1>
+            <h1>工作節點監控面板</h1>
             <div class="header-right">
-                <span class="user-info">用戶: {{ username }}</span>
-                <a href="/logout" class="logout-btn">登出</a>
+                <div class="user-info">
+                    <i class="fas fa-user"></i>
+                    {{ username }}
+                </div>
+                <a href="/logout" class="logout-btn">
+                    <i class="fas fa-sign-out-alt"></i>
+                    登出
+                </a>
             </div>
         </div>
 
         <div class="content-grid">
+            <!-- 節點狀態卡片 -->
             <div class="card">
-                <h2>節點狀態</h2>
+                <h2 data-icon=>節點狀態</h2>
                 <table class="table">
                     <tr>
-                        <th>節點ID</th>
+                        <th><i class="fas fa-tag"></i> 節點ID</th>
                         <td id="node-id">{{ node_id }}</td>
                     </tr>
                     <tr>
-                        <th>狀態</th>
+                        <th><i class="fas fa-circle"></i> 狀態</th>
                         <td><span id="task-status" class="status">{{ initial_status }}</span></td>
                     </tr>
                     <tr>
-                        <th>當前任務</th>
+                        <th><i class="fas fa-tasks"></i> 當前任務</th>
                         <td id="task-id">None</td>
                     </tr>
                     <tr>
-                        <th>CPT 餘額</th>
+                        <th><i class="fas fa-coins"></i> CPT 餘額</th>
                         <td id="cpt-balance">0</td>
                     </tr>
                     <tr>
-                        <th>本機IP</th>
+                        <th><i class="fas fa-network-wired"></i> 本機IP</th>
                         <td id="ip-address">檢測中...</td>
                     </tr>
                     <tr>
-                        <th>CPU 使用率</th>
+                        <th><i class="fas fa-microchip"></i> CPU 使用率</th>
                         <td id="cpu-usage">0%</td>
                     </tr>
                     <tr>
-                        <th>記憶體使用率</th>
+                        <th><i class="fas fa-memory"></i> 記憶體使用率</th>
                         <td id="memory-usage">0%</td>
                     </tr>
                 </table>
             </div>
 
+            <!-- 系統資源卡片 -->
             <div class="card">
                 <div class="card-header">
-                    <h2>資源使用趨勢</h2>
+                    <h2 data-icon=>系統資源</h2>
                 </div>
+                
+                <!-- CPU 使用率 -->
+                <div class="metric-card">
+                    <div class="metric-icon">⚡</div>
+                    <div class="metric-content">
+                        <h3 id="cpu-metric">0%</h3>
+                        <p>CPU 使用率</p>
+                    </div>
+                </div>
+                
+                <!-- 記憶體使用率 -->
+                <div class="metric-card" style="margin-top: 1rem;">
+                    <div class="metric-icon"></div>
+                    <div class="metric-content">
+                        <h3 id="memory-metric">0%</h3>
+                        <p>記憶體使用率</p>
+                    </div>
+                </div>
+                
+                <!-- 圖表區域 -->
                 <div class="chart-container">
                     <canvas id="cpuChart"></canvas>
                 </div>
@@ -64,21 +94,24 @@
                 </div>
             </div>
 
+            <!-- 系統日誌卡片 -->
             <div class="card">
                 <div class="card-header">
-                    <h2>系統日誌</h2>
+                    <h2 data-icon=>系統日誌</h2>
                     <button class="refresh-btn" onclick="refreshLogs()">
-                        <i class="fas fa-sync-alt"></i> 刷新
+                        <i class="fas fa-sync-alt"></i>
+                        刷新日誌
                     </button>
                 </div>
-                <div id="logs" class="logs"></div>
+                <div id="logs" class="logs">
+                    <div class="text-center" style="opacity: 0.7;">載入日誌中...</div>
+                </div>
             </div>
         </div>
     </div>
 
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script src="https://kit.fontawesome.com/a076d05399.js"></script>
     <script src="/static/js/monitor.js"></script>
 </body>
 </html>

@@ -16,16 +16,15 @@ import uuid
 # --- Configuration ---
 GRPC_SERVER_ADDRESS = os.environ.get('GRPC_SERVER_ADDRESS', '127.0.0.1:50051')
 FLASK_SECRET_KEY = os.environ.get('FLASK_SECRET_KEY', 'a-default-master-secret-key')
-MASTER_USERNAME = os.environ.get('MASTER_USERNAME', 'test')
-MASTER_PASSWORD = os.environ.get('MASTER_PASSWORD', 'password')
+# 移除預設的用戶名和密碼
+MASTER_USERNAME = os.environ.get('MASTER_USERNAME')  # 不設默認值
+MASTER_PASSWORD = os.environ.get('MASTER_PASSWORD')  # 不設默認值
 UI_HOST = '0.0.0.0'
 UI_PORT = 5001
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(threadName)s] - %(message)s')
 
 class MasterNodeUI:
-    def __init__(self, username, password, grpc_address):
-        self.username = username
-        self.password = password
+    def __init__(self, grpc_address):  # 移除預設用戶名密碼參數
         self.grpc_address = grpc_address
         self.channel = None
         self.user_stub = None
@@ -82,9 +81,7 @@ class MasterNodeUI:
             logging.error(f"Failed to connect to gRPC server: {e}")
             return False
 
-    def login(self, username=None, password=None):
-        username = username or self.username
-        password = password or self.password
+    def login(self, username, password):  # 移除默認參數
         if not self.channel or not self.user_stub:
             logging.error("gRPC connection not established. Cannot login.")
             return False
@@ -94,8 +91,6 @@ class MasterNodeUI:
             response = self.user_stub.Login(request, timeout=15)
             if response.success and response.token:
                 self.add_or_update_user(username, response.token)
-                if username == self.username:
-                    self.token = response.token
                 logging.info(f"User {username} logged in successfully")
                 return True
             else:
@@ -297,16 +292,76 @@ class MasterNodeUI:
                 return redirect(url_for('login'))
             
             if request.method == 'POST':
+                # 詳細的檔案驗證
+                logging.info(f"收到用戶 {username} 的檔案上傳請求")
+                logging.info(f"請求的 files 鍵: {list(request.files.keys())}")
+                logging.info(f"請求的 form 鍵: {list(request.form.keys())}")
+                
+                # 檢查是否有檔案在請求中
                 if 'task_zip' not in request.files:
+                    logging.warning("請求中沒有 task_zip 檔案欄位")
+                    logging.warning(f"可用的檔案欄位: {list(request.files.keys())}")
                     flash('請選擇 ZIP 檔案', 'error')
-                    return redirect(request.url)
+                    return render_template('master_upload.html', username=username)
                     
                 file = request.files['task_zip']
-                if file.filename == '':
-                    flash('未選擇檔案', 'error')
-                    return redirect(request.url)
+                logging.info(f"接收到檔案物件: {file}")
+                logging.info(f"檔案名稱: {file.filename}")
+                logging.info(f"檔案內容類型: {file.content_type}")
+                
+                # 檢查檔案名稱
+                if not file.filename or file.filename == '':
+                    logging.warning("檔案名稱為空")
+                    flash('未選擇檔案，請選擇一個 ZIP 檔案', 'error')
+                    return render_template('master_upload.html', username=username)
+                
+                # 檢查檔案格式
+                if not file.filename.lower().endswith('.zip'):
+                    logging.warning(f"檔案格式錯誤: {file.filename}")
+                    flash('檔案格式無效，請上傳 .zip 檔案', 'error')
+                    return render_template('master_upload.html', username=username)
+                
+                # 檢查檔案內容是否存在
+                try:
+                    # 先讀取檔案內容
+                    file_content = file.read()
+                    logging.info(f"成功讀取檔案內容，大小: {len(file_content)} bytes")
                     
-                if file and file.filename.endswith('.zip'):
+                    if len(file_content) == 0:
+                        logging.warning("檔案內容為空")
+                        flash('上傳的檔案為空，請選擇有效的 ZIP 檔案', 'error')
+                        return render_template('master_upload.html', username=username)
+                    
+                    # 檢查檔案大小 (50MB)
+                    max_size = 50 * 1024 * 1024
+                    if len(file_content) > max_size:
+                        logging.warning(f"檔案太大: {len(file_content)} bytes")
+                        flash('檔案大小超過 50MB 限制', 'error')
+                        return render_template('master_upload.html', username=username)
+                    
+                    # 驗證 ZIP 檔案格式
+                    try:
+                        import zipfile
+                        import io
+                        zip_buffer = io.BytesIO(file_content)
+                        with zipfile.ZipFile(zip_buffer, 'r') as zip_file:
+                            # 檢查 ZIP 檔案是否有效
+                            zip_file.testzip()
+                            file_list = zip_file.namelist()
+                            logging.info(f"ZIP 檔案驗證成功，包含 {len(file_list)} 個檔案")
+                            if len(file_list) > 0:
+                                logging.info(f"ZIP 內容範例: {file_list[:5]}")
+                    except zipfile.BadZipFile:
+                        logging.warning("無效的 ZIP 檔案")
+                        flash('無效的 ZIP 檔案，請確認檔案沒有損壞', 'error')
+                        return render_template('master_upload.html', username=username)
+                    except Exception as e:
+                        logging.error(f"ZIP 檔案驗證錯誤: {e}")
+                        flash('檔案驗證失敗，請嘗試重新上傳', 'error')
+                        return render_template('master_upload.html', username=username)
+                    
+                    logging.info(f"檔案驗證通過: {file.filename}, 大小: {len(file_content)} bytes")
+                    
                     # 生成任務ID
                     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                     task_uuid = str(uuid.uuid4())[:8]
@@ -322,20 +377,26 @@ class MasterNodeUI:
                         "gpu_name": request.form.get('gpu_name', '')
                     }
                     
-                    # 讀取檔案並上傳
-                    task_zip_bytes = file.read()
-                    _, success = self.upload_task_with_user(username, task_id, task_zip_bytes, requirements)
+                    logging.info(f"準備上傳任務 {task_id}，需求: {requirements}")
+                    
+                    # 上傳任務
+                    _, success = self.upload_task_with_user(username, task_id, file_content, requirements)
                     
                     if success:
                         flash(f'任務 "{task_id}" 上傳成功！', 'success')
+                        logging.info(f"任務 {task_id} 上傳成功")
+                        return redirect(url_for('index') + f"?user={username}")
                     else:
-                        flash(f'任務 "{task_id}" 上傳失敗。', 'error')
-                    
-                    return redirect(url_for('index') + f"?user={username}")
-                else:
-                    flash('檔案格式無效，請上傳 .zip 檔案', 'error')
-                    return redirect(request.url)
+                        flash(f'任務 "{task_id}" 上傳失敗，請檢查系統狀態或稍後再試', 'error')
+                        logging.error(f"任務 {task_id} 上傳失敗")
+                        return render_template('master_upload.html', username=username)
+                        
+                except Exception as e:
+                    logging.error(f"處理上傳檔案時發生錯誤: {e}", exc_info=True)
+                    flash('處理檔案時發生錯誤，請稍後再試', 'error')
+                    return render_template('master_upload.html', username=username)
             
+            # GET 請求，顯示上傳頁面
             return render_template('master_upload.html', username=username)
 
         @self.app.route('/api/stop_task/<task_id>', methods=['POST'])
@@ -501,12 +562,10 @@ class MasterNodeUI:
             logging.error("無法連接到節點池，退出")
             return
 
-        if not self.login():
-            logging.error("主控端登錄失敗，退出")
-            return
-
+        # 移除自動登錄邏輯，要求用戶手動登錄
         try:
             logging.info(f"主控端啟動在 http://{UI_HOST}:{UI_PORT}")
+            logging.info("請通過 Web 界面登錄以使用主控台功能")
             self.app.run(host=UI_HOST, port=UI_PORT, debug=False)
         except KeyboardInterrupt:
             logging.info("收到中斷信號，正在關閉...")
@@ -515,7 +574,8 @@ class MasterNodeUI:
                 self.channel.close()
 
 if __name__ == "__main__":
-    master_ui = MasterNodeUI(MASTER_USERNAME, MASTER_PASSWORD, GRPC_SERVER_ADDRESS)
+    # 移除預設用戶名密碼的傳遞
+    master_ui = MasterNodeUI(GRPC_SERVER_ADDRESS)
     try:
         master_ui.run()
     except KeyboardInterrupt:

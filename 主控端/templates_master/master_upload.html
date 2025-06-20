@@ -4,7 +4,31 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>上傳新任務 - HiveMind 主控台</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <style>
+        :root {
+            --primary-color: #64748b;
+            --secondary-color: #475569;
+            --accent-color: #374151;
+            --success-color: #059669;
+            --warning-color: #d97706;
+            --error-color: #dc2626;
+            --background-color: #f8fafc;
+            --card-background: #ffffff;
+            --card-background-light: #f8fafc;
+            --text-primary: #1e293b;
+            --text-secondary: #64748b;
+            --text-muted: #94a3b8;
+            --border-color: #e2e8f0;
+            --border-light: #f1f5f9;
+            --shadow-xs: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+            --shadow-sm: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+            --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+            --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+            --gradient-subtle: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+        }
+
         * {
             margin: 0;
             padding: 0;
@@ -12,8 +36,9 @@
         }
 
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: var(--background-color);
+            color: var(--text-primary);
             min-height: 100vh;
             padding: 20px;
         }
@@ -21,64 +46,77 @@
         .container {
             max-width: 800px;
             margin: 0 auto;
-            background: white;
+            background: var(--card-background);
             border-radius: 12px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            box-shadow: var(--shadow-lg);
             padding: 2rem;
+            border: 1px solid var(--border-color);
         }
 
         h1 {
-            color: #333;
+            color: var(--text-primary);
             margin-bottom: 2rem;
             text-align: center;
-            font-size: 2rem;
+            font-size: 1.875rem;
+            font-weight: 600;
+            letter-spacing: -0.025em;
         }
 
         .flash {
-            padding: 1rem;
+            padding: 0.875rem 1rem;
             margin-bottom: 1rem;
             border-radius: 8px;
             font-weight: 500;
+            font-size: 0.875rem;
+            border: 1px solid;
         }
 
         .flash.success {
-            background-color: #d4edda;
-            color: #155724;
-            border: 1px solid #c3e6cb;
+            background: #ecfdf5;
+            color: var(--success-color);
+            border-color: #a7f3d0;
         }
 
         .flash.error {
-            background-color: #f8d7da;
-            color: #721c24;
-            border: 1px solid #f5c6cb;
+            background: #fef2f2;
+            color: var(--error-color);
+            border-color: #fecaca;
         }
 
         .form-group {
-            margin-bottom: 1.5rem;
+            margin-bottom: 1.25rem;
         }
 
         label {
             display: block;
             margin-bottom: 0.5rem;
-            font-weight: 600;
-            color: #333;
+            font-weight: 500;
+            color: var(--text-primary);
+            font-size: 0.875rem;
         }
 
         input[type="text"],
         input[type="number"] {
             width: 100%;
             padding: 0.75rem;
-            border: 2px solid #e1e5e9;
+            border: 1px solid var(--border-color);
             border-radius: 8px;
-            font-size: 1rem;
-            transition: border-color 0.3s ease;
+            font-size: 0.95rem;
+            transition: border-color 0.2s ease;
+            background: var(--card-background);
+            color: var(--text-primary);
+        }
+
+        input[type="text"]::placeholder,
+        input[type="number"]::placeholder {
+            color: var(--text-muted);
         }
 
         input[type="text"]:focus,
         input[type="number"]:focus {
             outline: none;
-            border-color: #667eea;
-            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 3px rgb(100 116 139 / 0.1);
         }
 
         .file-input-container {
@@ -87,24 +125,24 @@
 
         .file-input-label {
             display: block;
-            padding: 2rem;
-            border: 2px dashed #667eea;
+            padding: 3rem 2rem;
+            border: 2px dashed var(--border-color);
             border-radius: 12px;
             text-align: center;
             cursor: pointer;
-            transition: all 0.3s ease;
-            background: #f8f9ff;
+            transition: all 0.2s ease;
+            background: var(--card-background-light);
         }
 
         .file-input-label:hover {
-            border-color: #5a6fd8;
-            background: #f0f2ff;
+            border-color: var(--primary-color);
+            background: #f1f5f9;
         }
 
         .file-input-label span {
-            color: #667eea;
-            font-size: 1.1rem;
-            font-weight: 600;
+            color: var(--text-secondary);
+            font-size: 1rem;
+            font-weight: 500;
         }
 
         .file-input {
@@ -112,10 +150,11 @@
         }
 
         .requirements-section {
-            background: #f8f9fa;
+            background: var(--card-background-light);
             padding: 1.5rem;
             border-radius: 8px;
             margin-bottom: 2rem;
+            border: 1px solid var(--border-light);
         }
 
         .requirements-grid {
@@ -125,50 +164,52 @@
         }
 
         button[type="submit"] {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: var(--text-primary);
             color: white;
-            padding: 1rem 2rem;
+            padding: 0.875rem 2rem;
             border: none;
             border-radius: 8px;
-            font-size: 1.1rem;
-            font-weight: 600;
+            font-size: 0.95rem;
+            font-weight: 500;
             cursor: pointer;
-            transition: transform 0.2s ease;
+            transition: all 0.2s ease;
             width: 100%;
         }
 
         button[type="submit"]:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+            background: var(--primary-color);
+            transform: translateY(-1px);
+            box-shadow: var(--shadow-md);
         }
 
         .back-link {
             display: inline-block;
             margin-top: 1rem;
-            color: #667eea;
+            color: var(--text-secondary);
             text-decoration: none;
             font-weight: 500;
-            transition: color 0.3s ease;
+            transition: color 0.2s ease;
+            font-size: 0.875rem;
         }
 
         .back-link:hover {
-            color: #5a6fd8;
+            color: var(--text-primary);
         }
 
         hr {
             border: none;
             height: 1px;
-            background: #e1e5e9;
+            background: var(--border-color);
             margin: 2rem 0;
         }
 
         .file-selected {
-            border-color: #28a745 !important;
-            background: #f8fff9 !important;
+            border-color: var(--success-color) !important;
+            background: #ecfdf5 !important;
         }
 
         .file-selected span {
-            color: #28a745 !important;
+            color: var(--success-color) !important;
         }
     </style>
 </head>
