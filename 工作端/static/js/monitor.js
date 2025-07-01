@@ -1,6 +1,6 @@
 $(document).ready(function() {
-    // 固定使用工作端端口 5000
-    const API_BASE_URL = 'http://127.0.0.1:5000';
+    // 動態檢測API地址
+    const API_BASE_URL = window.location.origin;
 
     // 初始化 Chart.js 圖表
     const cpuChartCtx = document.getElementById('cpuChart').getContext('2d');

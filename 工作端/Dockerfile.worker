@@ -1,0 +1,57 @@
+FROM python:3.12
+
+# 設置環境變量
+ENV PYTHONUNBUFFERED=1
+ENV DEBIAN_FRONTEND=noninteractive
+ENV GRPC_SERVER_HOST=192.168.2.52
+ENV GRPC_SERVER_PORT=50051
+ENV NODE_PORT=50053
+ENV FLASK_PORT=5000
+ENV FLASK_HOST=0.0.0.0
+ENV MASTER_ADDRESS=192.168.2.52:50051
+ENV HOST_IP=192.168.2.52
+
+# 安裝系統依賴和 Docker CLI
+RUN apt-get update && apt-get install -y \
+    bash \
+    curl \
+    git \
+    build-essential \
+    ca-certificates \
+    gnupg \
+    lsb-release \
+    net-tools \
+    iputils-ping \
+    telnet \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null \
+    && apt-get update \
+    && apt-get install -y docker-ce-cli \
+    && rm -rf /var/lib/apt/lists/*
+
+# 創建應用程序目錄
+WORKDIR /app
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY worker_node.py /app/
+COPY run_task.sh /app/
+COPY nodepool_pb2.py /app/
+COPY nodepool_pb2_grpc.py /app/
+COPY templates/ /app/templates/
+COPY static/ /app/static/
+COPY Dockerfile /app/
+
+# 設置執行權限
+RUN chmod +x /app/run_task.sh
+
+# 暴露端口
+EXPOSE 5000 50053
+
+# 配置網路路由，讓外部可以訪問 Docker 內部網路
+RUN echo '#!/bin/bash' > /app/setup_network.sh && \
+    echo 'ip route add 172.17.0.0/16 via 172.17.0.1 || true' >> /app/setup_network.sh && \
+    chmod +x /app/setup_network.sh
+
+# 啟動命令 - 強制使用指定的主機 IP
+CMD ["/bin/bash", "-c", "export HOST_IP=192.168.2.52 && python worker_node.py"]

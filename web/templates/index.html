@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+
+{% block content %}
+<!-- 英雄區塊 -->
+<section class="py-20 px-4">
+    <div class="max-w-7xl mx-auto text-center">
+        <h1 class="text-5xl md:text-7xl font-bold mb-6 bg-gradient-to-r from-purple-400 via-pink-400 to-red-400 bg-clip-text text-transparent">
+            解放運算潛力
+        </h1>
+        <h2 class="text-2xl md:text-3xl font-semibold mb-8 text-gray-300">
+            重塑計算邊界
+        </h2>
+        <p class="text-xl text-gray-400 mb-12 max-w-3xl mx-auto leading-relaxed">
+            你的計算任務，交給全球的閒置資源。我們打造了一個新世代的分布式運算平台，讓你不再受限於本地硬體的瓶頸。
+        </p>
+        <div class="flex flex-col sm:flex-row gap-4 justify-center">
+            <a href="/register" class="bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 px-8 py-4 rounded-xl text-lg font-semibold transform hover:scale-105 transition-all duration-200">
+                立即開始
+            </a>
+            <a href="/download" class="border border-purple-500 hover:bg-purple-500/20 px-8 py-4 rounded-xl text-lg font-semibold transform hover:scale-105 transition-all duration-200">
+                下載客戶端
+            </a>
+        </div>
+    </div>
+</section>
+
+<!-- 特色介紹 -->
+<section class="py-20 px-4 bg-black/20">
+    <div class="max-w-7xl mx-auto">
+        <div class="grid md:grid-cols-2 gap-16 items-center">
+            <!-- 給節點提供者 -->
+            <div class="space-y-6">
+                <h3 class="text-3xl font-bold text-purple-400">給節點提供者</h3>
+                <p class="text-gray-300 text-lg">
+                    將你閒置的運算資源貨幣化。只需簡單設定，即可讓你的電腦成為平台上的工作節點，協助完成全球任務，同時獲得酬勞。
+                </p>
+                <div class="space-y-4">
+                    <div class="flex items-center space-x-3">
+                        <i class="fas fa-shield-alt text-green-400 text-xl"></i>
+                        <span>安全沙箱執行環境</span>
+                    </div>
+                    <div class="flex items-center space-x-3">
+                        <i class="fas fa-cogs text-blue-400 text-xl"></i>
+                        <span>彈性任務分配機制</span>
+                    </div>
+                    <div class="flex items-center space-x-3">
+                        <i class="fas fa-coins text-yellow-400 text-xl"></i>
+                        <span>按工作量獲得報酬</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 給任務發起者 -->
+            <div class="space-y-6">
+                <h3 class="text-3xl font-bold text-pink-400">給任務發起者</h3>
+                <p class="text-gray-300 text-lg">
+                    無需投資昂貴伺服器，也能享有超級電腦的規模效能。你可以自由設計任務模組，根據效能需求動態調用節點資源。
+                </p>
+                <div class="space-y-4">
+                    <div class="flex items-center space-x-3">
+                        <i class="fas fa-code text-purple-400 text-xl"></i>
+                        <span>gRPC API 模組化任務設計</span>
+                    </div>
+                    <div class="flex items-center space-x-3">
+                        <i class="fas fa-chart-line text-green-400 text-xl"></i>
+                        <span>任務可追蹤、可回溯</span>
+                    </div>
+                    <div class="flex items-center space-x-3">
+                        <i class="fas fa-server text-blue-400 text-xl"></i>
+                        <span>自訂 master node 或使用平台服務</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- 核心特色 -->
+<section class="py-20 px-4">
+    <div class="max-w-7xl mx-auto">
+        <h2 class="text-4xl font-bold text-center mb-16 bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">
+            核心特色
+        </h2>
+        <div class="grid md:grid-cols-3 gap-8">
+            <div class="bg-gradient-to-br from-purple-900/50 to-pink-900/50 p-8 rounded-2xl backdrop-blur-lg border border-purple-500/20">
+                <div class="text-4xl mb-4 text-purple-400">
+                    <i class="fas fa-puzzle-piece"></i>
+                </div>
+                <h3 class="text-xl font-bold mb-4">模組化設計</h3>
+                <p class="text-gray-300">每個任務都是可插拔的功能模組，降低耦合、提升維護效率</p>
+            </div>
+            
+            <div class="bg-gradient-to-br from-blue-900/50 to-purple-900/50 p-8 rounded-2xl backdrop-blur-lg border border-blue-500/20">
+                <div class="text-4xl mb-4 text-blue-400">
+                    <i class="fas fa-network-wired"></i>
+                </div>
+                <h3 class="text-xl font-bold mb-4">節點池架構</h3>
+                <p class="text-gray-300">集中節點管理、自動健康檢查、動態資源分配</p>
+            </div>
+            
+            <div class="bg-gradient-to-br from-green-900/50 to-blue-900/50 p-8 rounded-2xl backdrop-blur-lg border border-green-500/20">
+                <div class="text-4xl mb-4 text-green-400">
+                    <i class="fab fa-docker"></i>
+                </div>
+                <h3 class="text-xl font-bold mb-4">容器化執行</h3>
+                <p class="text-gray-300">每個任務在隔離的 Docker 容器中執行，確保安全與一致性</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- CTA區塊 -->
+<section class="py-20 px-4 bg-gradient-to-r from-purple-900/50 to-pink-900/50">
+    <div class="max-w-4xl mx-auto text-center">
+        <h2 class="text-4xl font-bold mb-6">為什麼選擇我們？</h2>
+        <p class="text-xl text-gray-300 mb-8 leading-relaxed">
+            因為我們不只是提供資源，而是打造一個真正去中心化、可插拔、可擴展的運算生態系。這不僅是雲端計算的未來，也是去中心化計算的開端。
+        </p>
+        <a href="/register" class="inline-block bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 px-8 py-4 rounded-xl text-lg font-semibold transform hover:scale-105 transition-all duration-200">
+            加入 HiveMind 生態系
+        </a>
+    </div>
+</section>
+{% endblock %}

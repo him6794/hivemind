@@ -1,0 +1,6 @@
+Flask
+docker
+grpcio
+grpcio-tools
+psutil
+protobuf

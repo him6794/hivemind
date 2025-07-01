@@ -161,6 +161,12 @@ task_*.zip
 results/
 temp/
 
+# 版本下載文件
+downloads/
+releases/
+*.release.zip
+version_*.zip
+
 # 日誌文件
 *.log
 logs/

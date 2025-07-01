@@ -20,6 +20,7 @@ import secrets
 import shutil
 import socket
 import uuid
+import webbrowser
 
 # 配置
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(threadName)s] - %(message)s')
@@ -369,8 +370,23 @@ class WorkerNode:
                 self._log(f"Flask failed to start: {e}", logging.ERROR)
                 os._exit(1)
         
+        # 啟動 Flask 服務
         threading.Thread(target=run_flask, daemon=True).start()
         self._log(f"Flask started on port {self.flask_port}")
+        
+        # 延遲開啟瀏覽器
+        def open_browser():
+            time.sleep(2)  # 等待 Flask 完全啟動
+            url = f"http://127.0.0.1:{self.flask_port}"
+            try:
+                webbrowser.open(url)
+                self._log(f"瀏覽器已開啟: {url}")
+            except Exception as e:
+                self._log(f"無法開啟瀏覽器: {e}", logging.WARNING)
+                self._log(f"請手動開啟: {url}")
+        
+        # 在獨立線程中開啟瀏覽器
+        threading.Thread(target=open_browser, daemon=True).start()
 
     def _login(self, username, password):
         """登入到節點池"""

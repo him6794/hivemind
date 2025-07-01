@@ -21,4 +21,5 @@ RUN pip install --no-cache-dir \
 # 切換用戶
 USER appuser
 
+# 本映像可用於 Podman 執行
 CMD ["bash", "/app/run_task.sh"]

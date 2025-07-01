@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+
+{% block title %}註冊 - HiveMind{% endblock %}
+
+{% block content %}
+<div class="min-h-screen flex items-center justify-center py-12 px-4 sm:px-6 lg:px-8">
+    <div class="max-w-md w-full space-y-8">
+        <div class="text-center">
+            <h2 class="text-3xl font-bold bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">
+                創建新帳戶
+            </h2>
+            <p class="mt-2 text-gray-400">加入 HiveMind 分布式運算平台</p>
+        </div>
+        
+        <div class="bg-white/10 backdrop-blur-lg rounded-xl p-8 border border-purple-500/20">
+            <form id="registerForm" class="space-y-6">
+                <div>
+                    <label for="username" class="block text-sm font-medium text-gray-300 mb-2">
+                        用戶名
+                    </label>
+                    <input id="username" name="username" type="text" required
+                        class="w-full px-3 py-3 bg-gray-800 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                        placeholder="請輸入用戶名">
+                </div>
+                
+                <div>
+                    <label for="email" class="block text-sm font-medium text-gray-300 mb-2">
+                        電子郵箱
+                    </label>
+                    <input id="email" name="email" type="email" required
+                        class="w-full px-3 py-3 bg-gray-800 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                        placeholder="請輸入電子郵箱">
+                </div>
+                
+                <div>
+                    <label for="password" class="block text-sm font-medium text-gray-300 mb-2">
+                        密碼
+                    </label>
+                    <input id="password" name="password" type="password" required
+                        class="w-full px-3 py-3 bg-gray-800 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                        placeholder="請輸入密碼">
+                </div>
+                
+                <div>
+                    <label for="confirmPassword" class="block text-sm font-medium text-gray-300 mb-2">
+                        確認密碼
+                    </label>
+                    <input id="confirmPassword" name="confirmPassword" type="password" required
+                        class="w-full px-3 py-3 bg-gray-800 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                        placeholder="請再次輸入密碼">
+                </div>
+                
+                <div id="error-message" class="hidden bg-red-500/20 border border-red-500 text-red-300 px-4 py-3 rounded-lg"></div>
+                <div id="success-message" class="hidden bg-green-500/20 border border-green-500 text-green-300 px-4 py-3 rounded-lg"></div>
+                
+                <button type="submit" id="submitBtn"
+                    class="w-full bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white font-bold py-3 px-4 rounded-lg transform hover:scale-105 transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-purple-500">
+                    <span id="submitText">創建帳戶</span>
+                    <i id="loadingIcon" class="fas fa-spinner fa-spin hidden ml-2"></i>
+                </button>
+            </form>
+            
+            <div class="mt-6 text-center">
+                <p class="text-gray-400">
+                    已經有帳戶了？
+                    <a href="/login" class="text-purple-400 hover:text-purple-300 font-medium">
+                        立即登入
+                    </a>
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.getElementById('registerForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    
+    const submitBtn = document.getElementById('submitBtn');
+    const submitText = document.getElementById('submitText');
+    const loadingIcon = document.getElementById('loadingIcon');
+    const errorMsg = document.getElementById('error-message');
+    const successMsg = document.getElementById('success-message');
+    
+    // 隱藏之前的訊息
+    errorMsg.classList.add('hidden');
+    successMsg.classList.add('hidden');
+    
+    // 顯示載入狀態
+    submitBtn.disabled = true;
+    submitText.textContent = '創建中...';
+    loadingIcon.classList.remove('hidden');
+    
+    const formData = new FormData(e.target);
+    const password = formData.get('password');
+    const confirmPassword = formData.get('confirmPassword');
+    
+    // 驗證密碼
+    if (password !== confirmPassword) {
+        showError('密碼與確認密碼不一致');
+        resetButton();
+        return;
+    }
+    
+    try {
+        const response = await fetch('/api/register', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                username: formData.get('username'),
+                email: formData.get('email'),
+                password: password
+            })
+        });
+        
+        const data = await response.json();
+        
+        if (response.ok) {
+            // 儲存認證資訊
+            localStorage.setItem('auth_token', data.access_token);
+            localStorage.setItem('user', JSON.stringify(data.user));
+            
+            showSuccess('註冊成功！正在跳轉...');
+            setTimeout(() => {
+                window.location.href = '/';
+            }, 1500);
+        } else {
+            showError(data.error || '註冊失敗');
+            resetButton();
+        }
+    } catch (error) {
+        showError('網路錯誤，請稍後再試');
+        resetButton();
+    }
+    
+    function showError(message) {
+        errorMsg.textContent = message;
+        errorMsg.classList.remove('hidden');
+    }
+    
+    function showSuccess(message) {
+        successMsg.textContent = message;
+        successMsg.classList.remove('hidden');
+    }
+    
+    function resetButton() {
+        submitBtn.disabled = false;
+        submitText.textContent = '創建帳戶';
+        loadingIcon.classList.add('hidden');
+    }
+});
+</script>
+{% endblock %}
