@@ -16,12 +16,21 @@ def build_exe():
         shutil.rmtree(output_dir)
     os.makedirs(output_dir, exist_ok=True)
     
-    # 簡化的 Nuitka 打包命令，避免可能的問題
+    # 檢查圖標文件是否存在
+    icon_path = "file.ico"
+    icon_option = []
+    if os.path.exists(icon_path):
+        icon_option = [f"--windows-icon-from-ico={icon_path}"]
+        print(f"✅ 找到圖標文件: {icon_path}")
+    else:
+        print("⚠️  未找到圖標文件 file.ico，將使用默認圖標")
+    
+    # 修改的 Nuitka 打包命令，保留控制台
     nuitka_cmd = [
         sys.executable, "-m", "nuitka",
         "--standalone",  # 獨立打包
         "--onefile",     # 打包成單一檔案
-        "--windows-console-mode=attach",  # Windows 控制台模式
+        "--windows-console-mode=force",  # 強制顯示控制台終端
         "--include-package=flask",
         "--include-package=grpc",
         "--include-package=docker",
@@ -49,6 +58,10 @@ def build_exe():
         "--verbose",        # 詳細輸出
         "worker_node.py"
     ]
+    
+    # 添加圖標選項（如果存在）
+    if icon_option:
+        nuitka_cmd.extend(icon_option)
     
     try:
         # 執行打包
@@ -132,6 +145,12 @@ def check_dependencies():
         if not os.path.exists(file_path):
             missing_files.append(file_path)
     
+    # 檢查圖標文件（可選）
+    if os.path.exists("file.ico"):
+        print("✅ 圖標文件 file.ico 存在")
+    else:
+        print("⚠️  圖標文件 file.ico 不存在，將使用默認圖標")
+    
     if missing_files:
         print("❌ 缺少必要檔案:")
         for file in missing_files:
@@ -164,15 +183,24 @@ def create_simple_build():
     """創建簡化版本的打包，如果完整版失敗"""
     print("\n嘗試簡化版本打包...")
     
+    # 檢查圖標文件
+    icon_option = []
+    if os.path.exists("file.ico"):
+        icon_option = ["--windows-icon-from-ico=file.ico"]
+    
     simple_cmd = [
         sys.executable, "-m", "nuitka",
         "--onefile",
-        "--windows-console-mode=attach",
+        "--windows-console-mode=force",  # 保留控制台
         "--assume-yes-for-downloads",
         "--show-progress",
         "--output-dir=dist",
         "worker_node.py"
     ]
+    
+    # 添加圖標選項（如果存在）
+    if icon_option:
+        simple_cmd.extend(icon_option)
     
     try:
         print("執行簡化打包命令...")
@@ -182,6 +210,9 @@ def create_simple_build():
         exe_path = os.path.join("dist", "worker_node.exe")
         if os.path.exists(exe_path):
             print(f"✅ 可執行檔案: {exe_path}")
+            print("✅ 控制台終端已保留，運行時會顯示終端窗口")
+            if icon_option:
+                print("✅ 自定義圖標已應用")
             print("⚠️  注意: 簡化版本可能缺少某些資源檔案，請手動複製 templates 和 static 目錄到 exe 同一目錄")
             return True
         
@@ -218,10 +249,14 @@ if __name__ == "__main__":
     if build_exe():
         print("\n🎉 打包完成！")
         print("📁 可執行檔案位於 dist/worker_node.exe")
+        print("✅ 控制台終端已保留，運行時會顯示狀態信息")
         print("🚀 執行以下命令啟動:")
         print("   cd dist")
         print("   worker_node.exe")
-        print("\n💡 提示: exe 檔案會自動開啟瀏覽器到 http://127.0.0.1:5000")
+        print("\n💡 提示:")
+        print("   - exe 會保持終端窗口開啟顯示狀態")
+        print("   - 會自動開啟瀏覽器到 http://127.0.0.1:5000")
+        print("   - 可以在終端中看到連接和任務執行狀態")
     else:
         print("\n❓ 完整版本打包失敗，是否嘗試簡化版本? (y/n): ", end="")
         try:
@@ -229,6 +264,7 @@ if __name__ == "__main__":
             if choice == 'y' or choice == 'yes':
                 if create_simple_build():
                     print("\n🎉 簡化版本打包完成！")
+                    print("✅ 控制台終端已保留")
                     print("⚠️  請手動複製 templates 和 static 目錄到 dist/ 目錄")
                 else:
                     print("\n❌ 所有打包方式都失敗了")

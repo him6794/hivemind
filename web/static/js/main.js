@@ -246,15 +246,47 @@ window.joinVPN = async function() {
         if (response.ok) {
             app.showNotification('VPN配置生成成功', 'success');
             
-            // 創建模態框
+            // 自動下載配置檔案
+            const blob = new Blob([data.config], { type: 'text/plain' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${data.client_name}.conf`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            window.URL.revokeObjectURL(url);
+            
+            // 創建詳細信息模態框
             const modal = document.createElement('div');
             modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
             modal.innerHTML = `
                 <div class="bg-white dark:bg-neutral-800 p-6 rounded-lg max-w-2xl w-full mx-4 max-h-[80vh] overflow-auto">
-                    <h3 class="text-xl font-bold mb-4 text-neutral-900 dark:text-neutral-100">VPN配置文件</h3>
-                    <pre class="bg-neutral-100 dark:bg-neutral-900 p-4 rounded text-sm overflow-auto max-h-60 text-neutral-900 dark:text-neutral-100">${data.config}</pre>
-                    <div class="mt-4 flex space-x-2">
-                        <button onclick="downloadVPNConfig()" class="btn-primary">下載配置</button>
+                    <h3 class="text-xl font-bold mb-4 text-neutral-900 dark:text-neutral-100">
+                        <i class="fas fa-shield-alt mr-2"></i>VPN配置已生成
+                    </h3>
+                    <div class="space-y-3 mb-4">
+                        <div class="flex justify-between">
+                            <span class="font-medium text-neutral-700 dark:text-neutral-300">客戶端名稱：</span>
+                            <span class="text-neutral-600 dark:text-neutral-400">${data.client_name}</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="font-medium text-neutral-700 dark:text-neutral-300">分配 IP：</span>
+                            <span class="text-neutral-600 dark:text-neutral-400">${data.client_ip}</span>
+                        </div>
+                    </div>
+                    <div class="bg-neutral-100 dark:bg-neutral-900 p-4 rounded text-xs font-mono overflow-auto max-h-40 mb-4">
+                        ${data.config.replace(/\n/g, '<br>')}
+                    </div>
+                    <div class="text-sm text-neutral-600 dark:text-neutral-400 mb-4">
+                        配置檔案已自動下載。請按照以下步驟設置：
+                        <ul class="list-disc list-inside mt-2 space-y-1">
+                            <li>Windows: 安裝 WireGuard → 導入配置 → 激活</li>
+                            <li>手機: 安裝 WireGuard 應用 → 掃描或導入配置</li>
+                        </ul>
+                    </div>
+                    <div class="flex space-x-2">
+                        <a href="/vpn" class="btn-primary">前往 VPN 管理</a>
                         <button onclick="this.closest('.fixed').remove()" class="btn-secondary">關閉</button>
                     </div>
                 </div>

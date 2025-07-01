@@ -25,7 +25,6 @@
                         <li><a href="#node-setup" class="text-neutral-600 dark:text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 transition">節點設置</a></li>
                         <li><a href="#task-development" class="text-neutral-600 dark:text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 transition">任務開發</a></li>
                         <li><a href="#platform-architecture" class="text-neutral-600 dark:text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 transition">平台架構</a></li>
-                        <li><a href="#vpn-config" class="text-neutral-600 dark:text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 transition">VPN 配置</a></li>
                         <li><a href="#troubleshooting" class="text-neutral-600 dark:text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 transition">故障排除</a></li>
                     </ul>
                 </div>
@@ -57,9 +56,6 @@
                         </div>
                         
                         <div>
-                            <h3 class="text-xl font-semibold mb-3 text-neutral-800 dark:text-neutral-200">3. 設置 VPN</h3>
-                            <p class="text-neutral-600 dark:text-neutral-400 mb-3">
-                                為了安全連接到 HiveMind 網路，您需要配置 VPN。登入後可在下載頁面獲取您的專屬配置檔案。
                             </p>
                         </div>
                     </div>
@@ -102,12 +98,6 @@
                             </div>
                             <p class="text-neutral-600 dark:text-neutral-400 mb-3">執行轉帳操作。需要認證。</p>
                             
-                            <h4 class="font-medium mb-2 text-neutral-700 dark:text-neutral-300">請求體：</h4>
-                            <pre class="bg-neutral-800 dark:bg-neutral-900 rounded-lg p-4 text-sm overflow-x-auto text-neutral-200"><code>{
-  "amount": 100.0,
-  "type": "withdraw",
-  "description": "提現到錢包"
-}</code></pre>
                         </div>
                     </div>
                 </section>
@@ -131,10 +121,7 @@
                             <h3 class="text-xl font-semibold mb-3 text-neutral-800 dark:text-neutral-200">配置步驟</h3>
                             <ol class="list-decimal list-inside text-neutral-600 dark:text-neutral-400 space-y-2 ml-4">
                                 <li>下載並安裝節點客戶端</li>
-                                <li>設置 VPN 連接</li>
-                                <li>配置節點參數</li>
                                 <li>啟動節點服務</li>
-                                <li>驗證節點狀態</li>
                             </ol>
                         </div>
                     </div>
@@ -259,30 +246,6 @@
                     </div>
                 </section>
                 
-                <!-- VPN 配置 -->
-                <section id="vpn-config" class="card p-8">
-                    <h2 class="text-3xl font-bold mb-6 text-neutral-800 dark:text-neutral-200">VPN 配置</h2>
-                    
-                    <div class="space-y-6">
-                        <div>
-                            <h3 class="text-xl font-semibold mb-3 text-neutral-800 dark:text-neutral-200">WireGuard 設置</h3>
-                            <p class="text-neutral-600 dark:text-neutral-400 mb-3">
-                                HiveMind 使用 WireGuard VPN 技術確保節點間的安全通信。
-                            </p>
-                        </div>
-                        
-                        <div>
-                            <h3 class="text-xl font-semibold mb-3 text-neutral-800 dark:text-neutral-200">配置步驟</h3>
-                            <ol class="list-decimal list-inside text-neutral-600 dark:text-neutral-400 space-y-2 ml-4">
-                                <li>登入 HiveMind 平台</li>
-                                <li>前往下載頁面</li>
-                                <li>下載您的專屬 VPN 配置檔案</li>
-                                <li>在您的設備上安裝 WireGuard</li>
-                                <li>導入配置檔案並啟動連接</li>
-                            </ol>
-                        </div>
-                    </div>
-                </section>
                 
                 <!-- 故障排除 -->
                 <section id="troubleshooting" class="card p-8">
@@ -296,7 +259,7 @@
                                 <div>
                                     <h4 class="font-medium mb-2 text-neutral-700 dark:text-neutral-300">連接失敗</h4>
                                     <p class="text-neutral-600 dark:text-neutral-400 text-sm">
-                                        檢查網路連接和防火牆設置，確保 VPN 配置正確。
+                                        檢查網路連接和防火牆設置。
                                     </p>
                                 </div>
                                 
