@@ -6,10 +6,10 @@
 <div class="py-20 px-4">
     <div class="max-w-6xl mx-auto">
         <div class="text-center mb-16">
-            <h1 class="text-4xl font-bold mb-6 bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">
+            <h1 class="text-4xl font-bold mb-6 text-neutral-900 dark:text-neutral-100">
                 開發者文檔
             </h1>
-            <p class="text-xl text-gray-400">
+            <p class="text-xl text-neutral-600 dark:text-neutral-400">
                 學習如何使用 HiveMind 分布式運算平台
             </p>
         </div>
@@ -17,15 +17,16 @@
         <div class="grid lg:grid-cols-4 gap-8">
             <!-- 側邊導航 -->
             <div class="lg:col-span-1">
-                <div class="bg-white/5 rounded-xl p-6 sticky top-8">
-                    <h3 class="font-bold mb-4">文檔導航</h3>
+                <div class="card p-6 sticky top-8">
+                    <h3 class="font-bold mb-4 text-neutral-800 dark:text-neutral-200">文檔導航</h3>
                     <ul class="space-y-2">
-                        <li><a href="#quick-start" class="text-purple-400 hover:text-purple-300">快速開始</a></li>
-                        <li><a href="#api-reference" class="text-purple-400 hover:text-purple-300">API 參考</a></li>
-                        <li><a href="#node-setup" class="text-purple-400 hover:text-purple-300">節點設置</a></li>
-                        <li><a href="#task-development" class="text-purple-400 hover:text-purple-300">任務開發</a></li>
-                        <li><a href="#vpn-config" class="text-purple-400 hover:text-purple-300">VPN 配置</a></li>
-                        <li><a href="#troubleshooting" class="text-purple-400 hover:text-purple-300">故障排除</a></li>
+                        <li><a href="#quick-start" class="text-neutral-600 dark:text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 transition">快速開始</a></li>
+                        <li><a href="#api-reference" class="text-neutral-600 dark:text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 transition">API 參考</a></li>
+                        <li><a href="#node-setup" class="text-neutral-600 dark:text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 transition">節點設置</a></li>
+                        <li><a href="#task-development" class="text-neutral-600 dark:text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 transition">任務開發</a></li>
+                        <li><a href="#platform-architecture" class="text-neutral-600 dark:text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 transition">平台架構</a></li>
+                        <li><a href="#vpn-config" class="text-neutral-600 dark:text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 transition">VPN 配置</a></li>
+                        <li><a href="#troubleshooting" class="text-neutral-600 dark:text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 transition">故障排除</a></li>
                     </ul>
                 </div>
             </div>
@@ -33,31 +34,31 @@
             <!-- 主要內容 -->
             <div class="lg:col-span-3 space-y-12">
                 <!-- 快速開始 -->
-                <section id="quick-start" class="bg-white/5 rounded-xl p-8">
-                    <h2 class="text-3xl font-bold mb-6 text-purple-400">快速開始</h2>
+                <section id="quick-start" class="card p-8">
+                    <h2 class="text-3xl font-bold mb-6 text-neutral-800 dark:text-neutral-200">快速開始</h2>
                     
                     <div class="space-y-6">
                         <div>
-                            <h3 class="text-xl font-semibold mb-3">1. 註冊帳戶</h3>
-                            <p class="text-gray-300 mb-3">
-                                首先需要在 HiveMind 平台註冊一個帳戶。前往 <a href="/register" class="text-purple-400">註冊頁面</a> 創建您的帳戶。
+                            <h3 class="text-xl font-semibold mb-3 text-neutral-800 dark:text-neutral-200">1. 註冊帳戶</h3>
+                            <p class="text-neutral-600 dark:text-neutral-400 mb-3">
+                                首先需要在 HiveMind 平台註冊一個帳戶。前往 <a href="/register" class="text-neutral-800 dark:text-neutral-200 underline">註冊頁面</a> 創建您的帳戶。
                             </p>
                         </div>
                         
                         <div>
-                            <h3 class="text-xl font-semibold mb-3">2. 下載客戶端</h3>
-                            <p class="text-gray-300 mb-3">
+                            <h3 class="text-xl font-semibold mb-3 text-neutral-800 dark:text-neutral-200">2. 下載客戶端</h3>
+                            <p class="text-neutral-600 dark:text-neutral-400 mb-3">
                                 根據您的需求下載對應的客戶端：
                             </p>
-                            <ul class="list-disc list-inside text-gray-300 space-y-1 ml-4">
+                            <ul class="list-disc list-inside text-neutral-600 dark:text-neutral-400 space-y-1 ml-4">
                                 <li>節點客戶端：貢獻您的運算資源</li>
                                 <li>任務客戶端：提交運算任務</li>
                             </ul>
                         </div>
                         
                         <div>
-                            <h3 class="text-xl font-semibold mb-3">3. 設置 VPN</h3>
-                            <p class="text-gray-300 mb-3">
+                            <h3 class="text-xl font-semibold mb-3 text-neutral-800 dark:text-neutral-200">3. 設置 VPN</h3>
+                            <p class="text-neutral-600 dark:text-neutral-400 mb-3">
                                 為了安全連接到 HiveMind 網路，您需要配置 VPN。登入後可在下載頁面獲取您的專屬配置檔案。
                             </p>
                         </div>
@@ -65,44 +66,44 @@
                 </section>
                 
                 <!-- API 參考 -->
-                <section id="api-reference" class="bg-white/5 rounded-xl p-8">
-                    <h2 class="text-3xl font-bold mb-6 text-blue-400">API 參考</h2>
+                <section id="api-reference" class="card p-8">
+                    <h2 class="text-3xl font-bold mb-6 text-neutral-800 dark:text-neutral-200">API 參考</h2>
                     
                     <div class="space-y-6">
                         <div>
-                            <h3 class="text-xl font-semibold mb-3">認證</h3>
-                            <div class="bg-gray-800 rounded-lg p-4 mb-3">
-                                <code class="text-green-400">POST /api/login</code>
+                            <h3 class="text-xl font-semibold mb-3 text-neutral-800 dark:text-neutral-200">認證</h3>
+                            <div class="bg-neutral-800 dark:bg-neutral-900 rounded-lg p-4 mb-3">
+                                <code class="text-neutral-200">POST /api/login</code>
                             </div>
-                            <p class="text-gray-300 mb-3">用戶登入，獲取訪問令牌。</p>
+                            <p class="text-neutral-600 dark:text-neutral-400 mb-3">用戶登入，獲取訪問令牌。</p>
                             
-                            <h4 class="font-medium mb-2">請求體：</h4>
-                            <pre class="bg-gray-800 rounded-lg p-4 text-sm overflow-x-auto"><code>{
+                            <h4 class="font-medium mb-2 text-neutral-700 dark:text-neutral-300">請求體：</h4>
+                            <pre class="bg-neutral-800 dark:bg-neutral-900 rounded-lg p-4 text-sm overflow-x-auto text-neutral-200"><code>{
   "username": "your_username",
   "password": "your_password"
 }</code></pre>
                         </div>
                         
                         <div>
-                            <h3 class="text-xl font-semibold mb-3">餘額查詢</h3>
-                            <div class="bg-gray-800 rounded-lg p-4 mb-3">
-                                <code class="text-green-400">GET /api/balance</code>
+                            <h3 class="text-xl font-semibold mb-3 text-neutral-800 dark:text-neutral-200">餘額查詢</h3>
+                            <div class="bg-neutral-800 dark:bg-neutral-900 rounded-lg p-4 mb-3">
+                                <code class="text-neutral-200">GET /api/balance</code>
                             </div>
-                            <p class="text-gray-300 mb-3">查詢用戶帳戶餘額。需要認證。</p>
+                            <p class="text-neutral-600 dark:text-neutral-400 mb-3">查詢用戶帳戶餘額。需要認證。</p>
                             
-                            <h4 class="font-medium mb-2">請求頭：</h4>
-                            <pre class="bg-gray-800 rounded-lg p-4 text-sm overflow-x-auto"><code>Authorization: Bearer &lt;your_token&gt;</code></pre>
+                            <h4 class="font-medium mb-2 text-neutral-700 dark:text-neutral-300">請求頭：</h4>
+                            <pre class="bg-neutral-800 dark:bg-neutral-900 rounded-lg p-4 text-sm overflow-x-auto text-neutral-200"><code>Authorization: Bearer &lt;your_token&gt;</code></pre>
                         </div>
                         
                         <div>
-                            <h3 class="text-xl font-semibold mb-3">轉帳</h3>
-                            <div class="bg-gray-800 rounded-lg p-4 mb-3">
-                                <code class="text-green-400">POST /api/transfer</code>
+                            <h3 class="text-xl font-semibold mb-3 text-neutral-800 dark:text-neutral-200">轉帳</h3>
+                            <div class="bg-neutral-800 dark:bg-neutral-900 rounded-lg p-4 mb-3">
+                                <code class="text-neutral-200">POST /api/transfer</code>
                             </div>
-                            <p class="text-gray-300 mb-3">執行轉帳操作。需要認證。</p>
+                            <p class="text-neutral-600 dark:text-neutral-400 mb-3">執行轉帳操作。需要認證。</p>
                             
-                            <h4 class="font-medium mb-2">請求體：</h4>
-                            <pre class="bg-gray-800 rounded-lg p-4 text-sm overflow-x-auto"><code>{
+                            <h4 class="font-medium mb-2 text-neutral-700 dark:text-neutral-300">請求體：</h4>
+                            <pre class="bg-neutral-800 dark:bg-neutral-900 rounded-lg p-4 text-sm overflow-x-auto text-neutral-200"><code>{
   "amount": 100.0,
   "type": "withdraw",
   "description": "提現到錢包"
@@ -112,13 +113,13 @@
                 </section>
                 
                 <!-- 節點設置 -->
-                <section id="node-setup" class="bg-white/5 rounded-xl p-8">
-                    <h2 class="text-3xl font-bold mb-6 text-green-400">節點設置</h2>
+                <section id="node-setup" class="card p-8">
+                    <h2 class="text-3xl font-bold mb-6 text-neutral-800 dark:text-neutral-200">節點設置</h2>
                     
                     <div class="space-y-6">
                         <div>
-                            <h3 class="text-xl font-semibold mb-3">系統要求</h3>
-                            <ul class="list-disc list-inside text-gray-300 space-y-1 ml-4">
+                            <h3 class="text-xl font-semibold mb-3 text-neutral-800 dark:text-neutral-200">系統要求</h3>
+                            <ul class="list-disc list-inside text-neutral-600 dark:text-neutral-400 space-y-1 ml-4">
                                 <li>穩定的網路連接</li>
                                 <li>至少 4GB RAM</li>
                                 <li>2GB 可用儲存空間</li>
@@ -127,8 +128,8 @@
                         </div>
                         
                         <div>
-                            <h3 class="text-xl font-semibold mb-3">配置步驟</h3>
-                            <ol class="list-decimal list-inside text-gray-300 space-y-2 ml-4">
+                            <h3 class="text-xl font-semibold mb-3 text-neutral-800 dark:text-neutral-200">配置步驟</h3>
+                            <ol class="list-decimal list-inside text-neutral-600 dark:text-neutral-400 space-y-2 ml-4">
                                 <li>下載並安裝節點客戶端</li>
                                 <li>設置 VPN 連接</li>
                                 <li>配置節點參數</li>
@@ -140,49 +141,139 @@
                 </section>
                 
                 <!-- 任務開發 -->
-                <section id="task-development" class="bg-white/5 rounded-xl p-8">
-                    <h2 class="text-3xl font-bold mb-6 text-yellow-400">任務開發</h2>
+                <section id="task-development" class="card p-8">
+                    <h2 class="text-3xl font-bold mb-6 text-neutral-800 dark:text-neutral-200">任務開發</h2>
                     
                     <div class="space-y-6">
                         <div>
-                            <h3 class="text-xl font-semibold mb-3">gRPC 介面</h3>
-                            <p class="text-gray-300 mb-3">
+                            <h3 class="text-xl font-semibold mb-3 text-neutral-800 dark:text-neutral-200">gRPC 介面</h3>
+                            <p class="text-neutral-600 dark:text-neutral-400 mb-3">
                                 HiveMind 使用 gRPC 作為任務通信協議。您需要實現特定的服務介面來開發自定義任務。
                             </p>
                         </div>
                         
                         <div>
-                            <h3 class="text-xl font-semibold mb-3">任務容器化</h3>
-                            <p class="text-gray-300 mb-3">
+                            <h3 class="text-xl font-semibold mb-3 text-neutral-800 dark:text-neutral-200">任務容器化</h3>
+                            <p class="text-neutral-600 dark:text-neutral-400 mb-3">
                                 所有任務都在 Docker 容器中執行，確保環境一致性和安全性。
                             </p>
                             
-                            <h4 class="font-medium mb-2">示例 Dockerfile：</h4>
-                            <pre class="bg-gray-800 rounded-lg p-4 text-sm overflow-x-auto"><code>FROM python:3.9-slim
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-COPY . .
-CMD ["python", "task.py"]</code></pre>
+                        </div>
+                    </div>
+                </section>
+                
+                <!-- 平台架構 -->
+                <section id="platform-architecture" class="card p-8">
+                    <h2 class="text-3xl font-bold mb-6 text-neutral-800 dark:text-neutral-200">平台架構</h2>
+                    
+                    <div class="space-y-6">
+                        <div>
+                            <h3 class="text-xl font-semibold mb-3 text-neutral-800 dark:text-neutral-200">系統組成</h3>
+                            <p class="text-neutral-600 dark:text-neutral-400 mb-4">
+                                HiveMind 是一個中心化的分布式運算系統，採用高效的 gRPC 通訊，並結合 Docker、Redis、Flask 等技術，實現高效、安全的任務分發與執行。
+                            </p>
+                            
+                            <div class="grid md:grid-cols-3 gap-6 mb-6">
+                                <div class="card p-5">
+                                    <h4 class="font-semibold mb-2 text-neutral-800 dark:text-neutral-200">主控端</h4>
+                                    <ul class="list-disc list-inside text-neutral-600 dark:text-neutral-400 space-y-1">
+                                        <li>上傳任務</li>
+                                        <li>查詢任務執行結果</li>
+                                        <li>提供 Web 介面與 API（Flask）</li>
+                                    </ul>
+                                </div>
+                                
+                                <div class="card p-5">
+                                    <h4 class="font-semibold mb-2 text-neutral-800 dark:text-neutral-200">節點池</h4>
+                                    <ul class="list-disc list-inside text-neutral-600 dark:text-neutral-400 space-y-1">
+                                        <li>管理工作端</li>
+                                        <li>分配任務給工作端</li>
+                                        <li>收集與儲存執行結果（Redis）</li>
+                                    </ul>
+                                </div>
+                                
+                                <div class="card p-5">
+                                    <h4 class="font-semibold mb-2 text-neutral-800 dark:text-neutral-200">工作端</h4>
+                                    <ul class="list-disc list-inside text-neutral-600 dark:text-neutral-400 space-y-1">
+                                        <li>接收任務並於 Docker 容器中執行</li>
+                                        <li>回傳執行結果給節點池</li>
+                                        <li>定時回報心跳</li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div>
+                            <h3 class="text-xl font-semibold mb-3 text-neutral-800 dark:text-neutral-200">系統流程</h3>
+                            <ol class="list-decimal list-inside text-neutral-600 dark:text-neutral-400 space-y-2 ml-4">
+                                <li><strong>工作端啟動</strong> - 登入帳戶並向節點池註冊，回報 CPU、RAM、GPU 等資訊。</li>
+                                <li><strong>節點池註冊</strong> - 收到註冊資訊後，將工作端資訊暫存於 Redis。</li>
+                                <li><strong>主控端上傳任務</strong> - 節點池分配任務給合適的工作端。</li>
+                                <li><strong>任務執行</strong> - 工作端於 Docker 容器執行任務，並回傳結果至節點池。</li>
+                                <li><strong>結果查詢</strong> - 主控端查詢任務結果或日誌，節點池回傳對應資料。</li>
+                                <li><strong>心跳監控</strong> - 工作端每秒回報心跳，若 10 秒未收到心跳，節點池將其移除並重新分配任務。</li>
+                                <li><strong>資源費用結算</strong> - 任務執行期間，主控端帳戶會依據資源消耗扣除 CPT 代幣，並轉帳給工作端。</li>
+                            </ol>
+                        </div>
+                        
+                        <div>
+                            <h3 class="text-xl font-semibold mb-3 text-neutral-800 dark:text-neutral-200">代幣體系（CPT）</h3>
+                            <ul class="list-disc list-inside text-neutral-600 dark:text-neutral-400 space-y-1 ml-4">
+                                <li><strong>用途</strong>：作為資源費用計算單位</li>
+                                <li><strong>分配</strong>：每個帳戶註冊時獲得 150 CPT，總量 1,000,000,000,000 CPT</li>
+                                <li><strong>消耗</strong>：主控端上傳任務需支付 CPT，費用依資源消耗計算</li>
+                                <li><strong>獲取</strong>：工作端完成任務可獲得 CPT</li>
+                                <li><strong>打賞</strong>：用戶可打賞開源項目</li>
+                            </ul>
+                        </div>
+                        
+                        <div>
+                            <h3 class="text-xl font-semibold mb-3 text-neutral-800 dark:text-neutral-200">技術棧</h3>
+                            <div class="grid md:grid-cols-2 gap-4">
+                                <div class="flex items-center space-x-2">
+                                    <i class="fas fa-server text-neutral-600 dark:text-neutral-400"></i>
+                                    <span class="text-neutral-700 dark:text-neutral-300">gRPC：高效通訊</span>
+                                </div>
+                                <div class="flex items-center space-x-2">
+                                    <i class="fas fa-database text-neutral-600 dark:text-neutral-400"></i>
+                                    <span class="text-neutral-700 dark:text-neutral-300">Redis：資料暫存</span>
+                                </div>
+                                <div class="flex items-center space-x-2">
+                                    <i class="fab fa-docker text-neutral-600 dark:text-neutral-400"></i>
+                                    <span class="text-neutral-700 dark:text-neutral-300">Docker：任務容器化執行</span>
+                                </div>
+                                <div class="flex items-center space-x-2">
+                                    <i class="fab fa-python text-neutral-600 dark:text-neutral-400"></i>
+                                    <span class="text-neutral-700 dark:text-neutral-300">Python：後端邏輯</span>
+                                </div>
+                                <div class="flex items-center space-x-2">
+                                    <i class="fas fa-flask text-neutral-600 dark:text-neutral-400"></i>
+                                    <span class="text-neutral-700 dark:text-neutral-300">Flask：Web 介面與 API</span>
+                                </div>
+                                <div class="flex items-center space-x-2">
+                                    <i class="fas fa-shield-alt text-neutral-600 dark:text-neutral-400"></i>
+                                    <span class="text-neutral-700 dark:text-neutral-300">VPN：通訊安全與虛擬內網</span>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </section>
                 
                 <!-- VPN 配置 -->
-                <section id="vpn-config" class="bg-white/5 rounded-xl p-8">
-                    <h2 class="text-3xl font-bold mb-6 text-indigo-400">VPN 配置</h2>
+                <section id="vpn-config" class="card p-8">
+                    <h2 class="text-3xl font-bold mb-6 text-neutral-800 dark:text-neutral-200">VPN 配置</h2>
                     
                     <div class="space-y-6">
                         <div>
-                            <h3 class="text-xl font-semibold mb-3">WireGuard 設置</h3>
-                            <p class="text-gray-300 mb-3">
+                            <h3 class="text-xl font-semibold mb-3 text-neutral-800 dark:text-neutral-200">WireGuard 設置</h3>
+                            <p class="text-neutral-600 dark:text-neutral-400 mb-3">
                                 HiveMind 使用 WireGuard VPN 技術確保節點間的安全通信。
                             </p>
                         </div>
                         
                         <div>
-                            <h3 class="text-xl font-semibold mb-3">配置步驟</h3>
-                            <ol class="list-decimal list-inside text-gray-300 space-y-2 ml-4">
+                            <h3 class="text-xl font-semibold mb-3 text-neutral-800 dark:text-neutral-200">配置步驟</h3>
+                            <ol class="list-decimal list-inside text-neutral-600 dark:text-neutral-400 space-y-2 ml-4">
                                 <li>登入 HiveMind 平台</li>
                                 <li>前往下載頁面</li>
                                 <li>下載您的專屬 VPN 配置檔案</li>
@@ -194,31 +285,31 @@ CMD ["python", "task.py"]</code></pre>
                 </section>
                 
                 <!-- 故障排除 -->
-                <section id="troubleshooting" class="bg-white/5 rounded-xl p-8">
-                    <h2 class="text-3xl font-bold mb-6 text-red-400">故障排除</h2>
+                <section id="troubleshooting" class="card p-8">
+                    <h2 class="text-3xl font-bold mb-6 text-neutral-800 dark:text-neutral-200">故障排除</h2>
                     
                     <div class="space-y-6">
                         <div>
-                            <h3 class="text-xl font-semibold mb-3">常見問題</h3>
+                            <h3 class="text-xl font-semibold mb-3 text-neutral-800 dark:text-neutral-200">常見問題</h3>
                             
                             <div class="space-y-4">
                                 <div>
-                                    <h4 class="font-medium mb-2">連接失敗</h4>
-                                    <p class="text-gray-300 text-sm">
+                                    <h4 class="font-medium mb-2 text-neutral-700 dark:text-neutral-300">連接失敗</h4>
+                                    <p class="text-neutral-600 dark:text-neutral-400 text-sm">
                                         檢查網路連接和防火牆設置，確保 VPN 配置正確。
                                     </p>
                                 </div>
                                 
                                 <div>
-                                    <h4 class="font-medium mb-2">任務執行失敗</h4>
-                                    <p class="text-gray-300 text-sm">
+                                    <h4 class="font-medium mb-2 text-neutral-700 dark:text-neutral-300">任務執行失敗</h4>
+                                    <p class="text-neutral-600 dark:text-neutral-400 text-sm">
                                         檢查 Docker 環境和任務代碼，查看節點日誌獲取詳細錯誤資訊。
                                     </p>
                                 </div>
                                 
                                 <div>
-                                    <h4 class="font-medium mb-2">餘額異常</h4>
-                                    <p class="text-gray-300 text-sm">
+                                    <h4 class="font-medium mb-2 text-neutral-700 dark:text-neutral-300">餘額異常</h4>
+                                    <p class="text-neutral-600 dark:text-neutral-400 text-sm">
                                         聯繫客服或查看交易記錄，確認所有操作都已正確執行。
                                     </p>
                                 </div>
@@ -226,38 +317,18 @@ CMD ["python", "task.py"]</code></pre>
                         </div>
                         
                         <div>
-                            <h3 class="text-xl font-semibold mb-3">獲取幫助</h3>
-                            <p class="text-gray-300 mb-3">
+                            <h3 class="text-xl font-semibold mb-3 text-neutral-800 dark:text-neutral-200">獲取幫助</h3>
+                            <p class="text-neutral-600 dark:text-neutral-400 mb-3">
                                 如果問題仍然存在，可以通過以下方式獲取幫助：
                             </p>
-                            <ul class="list-disc list-inside text-gray-300 space-y-1 ml-4">
+                            <ul class="list-disc list-inside text-neutral-600 dark:text-neutral-400 space-y-1 ml-4">
                                 <li>加入我們的 <a href="https://discord.gg/hivemind" class="text-purple-400">Discord 社群</a></li>
-                                <li>在 <a href="https://github.com/hivemind-platform" class="text-purple-400">GitHub</a> 提交 Issue</li>
-                                <li>發送郵件至 support@hivemind.com</li>
+                                <li>在 <a href="https://github.com/him6794/hivemind" class="text-purple-400">GitHub</a> 提交 Issue</li>
+                                <li>發送郵件至 hivemind@justin0711.com</li>
                             </ul>
-                        </div>
-                    </div>
                 </section>
             </div>
         </div>
     </div>
 </div>
-{% endblock %}
-
-{% block scripts %}
-<script>
-// 平滑滾動到錨點
-document.querySelectorAll('a[href^="#"]').forEach(anchor => {
-    anchor.addEventListener('click', function (e) {
-        e.preventDefault();
-        const target = document.querySelector(this.getAttribute('href'));
-        if (target) {
-            target.scrollIntoView({
-                behavior: 'smooth',
-                block: 'start'
-            });
-        }
-    });
-});
-</script>
 {% endblock %}

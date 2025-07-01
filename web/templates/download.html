@@ -6,82 +6,82 @@
 <div class="py-20 px-4">
     <div class="max-w-4xl mx-auto">
         <div class="text-center mb-16">
-            <h1 class="text-4xl font-bold mb-6 bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">
+            <h1 class="text-4xl font-bold mb-6 text-neutral-900 dark:text-neutral-100">
                 下載 HiveMind
             </h1>
-            <p class="text-xl text-gray-400">
+            <p class="text-xl text-neutral-600 dark:text-neutral-400">
                 選擇適合您的客戶端開始使用分布式運算平台
             </p>
         </div>
         
         <div class="grid md:grid-cols-2 gap-8 mb-12">
             <!-- 節點客戶端 -->
-            <div class="bg-gradient-to-br from-purple-900/50 to-pink-900/50 p-8 rounded-2xl backdrop-blur-lg border border-purple-500/20">
+            <div class="card p-8">
                 <div class="text-center mb-6">
-                    <i class="fas fa-server text-5xl text-purple-400 mb-4"></i>
-                    <h3 class="text-2xl font-bold mb-2">節點客戶端</h3>
-                    <p class="text-gray-300">將您的閒置資源貢獻給網路，獲得報酬</p>
+                    <i class="fas fa-server text-5xl text-neutral-600 dark:text-neutral-400 mb-4"></i>
+                    <h3 class="text-2xl font-bold mb-2 text-neutral-800 dark:text-neutral-200">節點客戶端</h3>
+                    <p class="text-neutral-600 dark:text-neutral-400">將您的閒置資源貢獻給網路，獲得報酬</p>
                 </div>
                 
                 <div class="space-y-4 mb-6">
                     <div class="flex items-center space-x-3">
-                        <i class="fas fa-check text-green-400"></i>
-                        <span>自動任務分配</span>
+                        <i class="fas fa-check text-neutral-600 dark:text-neutral-400"></i>
+                        <span class="text-neutral-700 dark:text-neutral-300">自動任務分配</span>
                     </div>
                     <div class="flex items-center space-x-3">
-                        <i class="fas fa-check text-green-400"></i>
-                        <span>安全沙箱環境</span>
+                        <i class="fas fa-check text-neutral-600 dark:text-neutral-400"></i>
+                        <span class="text-neutral-700 dark:text-neutral-300">安全沙箱環境</span>
                     </div>
                     <div class="flex items-center space-x-3">
-                        <i class="fas fa-check text-green-400"></i>
-                        <span>即時收益追蹤</span>
+                        <i class="fas fa-check text-neutral-600 dark:text-neutral-400"></i>
+                        <span class="text-neutral-700 dark:text-neutral-300">即時收益追蹤</span>
                     </div>
                 </div>
                 
                 <div class="space-y-3">
-                    <button onclick="downloadClient('node')" class="w-full bg-purple-600 hover:bg-purple-700 px-6 py-3 rounded-lg font-medium transition-all duration-200">
+                    <button onclick="downloadClient('node')" class="btn-secondary w-full">
                         <i class="fab fa-windows mr-2"></i>Windows 版本
                     </button>
-                    <button onclick="downloadClient('node')" class="w-full bg-purple-600 hover:bg-purple-700 px-6 py-3 rounded-lg font-medium transition-all duration-200">
+                    <button onclick="downloadClient('node')" class="btn-secondary w-full">
                         <i class="fab fa-linux mr-2"></i>Linux 版本
                     </button>
-                    <button onclick="downloadClient('node')" class="w-full bg-purple-600 hover:bg-purple-700 px-6 py-3 rounded-lg font-medium transition-all duration-200">
+                    <button onclick="downloadClient('node')" class="btn-secondary w-full">
                         <i class="fab fa-apple mr-2"></i>macOS 版本
                     </button>
                 </div>
             </div>
             
             <!-- 任務客戶端 -->
-            <div class="bg-gradient-to-br from-blue-900/50 to-purple-900/50 p-8 rounded-2xl backdrop-blur-lg border border-blue-500/20">
+            <div class="card p-8">
                 <div class="text-center mb-6">
-                    <i class="fas fa-rocket text-5xl text-blue-400 mb-4"></i>
-                    <h3 class="text-2xl font-bold mb-2">任務客戶端</h3>
-                    <p class="text-gray-300">提交運算任務，利用分布式網路加速處理</p>
+                    <i class="fas fa-rocket text-5xl text-neutral-600 dark:text-neutral-400 mb-4"></i>
+                    <h3 class="text-2xl font-bold mb-2 text-neutral-800 dark:text-neutral-200">任務客戶端</h3>
+                    <p class="text-neutral-600 dark:text-neutral-400">提交運算任務，利用分布式網路加速處理</p>
                 </div>
                 
                 <div class="space-y-4 mb-6">
                     <div class="flex items-center space-x-3">
-                        <i class="fas fa-check text-green-400"></i>
-                        <span>任務模組化設計</span>
+                        <i class="fas fa-check text-neutral-600 dark:text-neutral-400"></i>
+                        <span class="text-neutral-700 dark:text-neutral-300">任務模組化設計</span>
                     </div>
                     <div class="flex items-center space-x-3">
-                        <i class="fas fa-check text-green-400"></i>
-                        <span>即時進度監控</span>
+                        <i class="fas fa-check text-neutral-600 dark:text-neutral-400"></i>
+                        <span class="text-neutral-700 dark:text-neutral-300">即時進度監控</span>
                     </div>
                     <div class="flex items-center space-x-3">
-                        <i class="fas fa-check text-green-400"></i>
-                        <span>彈性資源調度</span>
+                        <i class="fas fa-check text-neutral-600 dark:text-neutral-400"></i>
+                        <span class="text-neutral-700 dark:text-neutral-300">彈性資源調度</span>
                     </div>
                 </div>
                 
                 <div class="space-y-3">
-                    <button onclick="downloadClient('task')" class="w-full bg-blue-600 hover:bg-blue-700 px-6 py-3 rounded-lg font-medium transition-all duration-200">
+                    <button onclick="downloadClient('task')" class="btn-secondary w-full">
                         <i class="fab fa-windows mr-2"></i>Windows 版本
                     </button>
-                    <button onclick="downloadClient('task')" class="w-full bg-blue-600 hover:bg-blue-700 px-6 py-3 rounded-lg font-medium transition-all duration-200">
+                    <button onclick="downloadClient('task')" class="btn-secondary w-full">
                         <i class="fab fa-linux mr-2"></i>Linux 版本
                     </button>
-                    <button onclick="downloadClient('task')" class="w-full bg-blue-600 hover:bg-blue-700 px-6 py-3 rounded-lg font-medium transition-all duration-200">
+                    <button onclick="downloadClient('task')" class="btn-secondary w-full">
                         <i class="fab fa-apple mr-2"></i>macOS 版本
                     </button>
                 </div>
@@ -89,35 +89,35 @@
         </div>
         
         <!-- VPN配置下載 -->
-        <div id="vpn-section" class="hidden bg-gradient-to-br from-green-900/50 to-blue-900/50 p-8 rounded-2xl backdrop-blur-lg border border-green-500/20">
+        <div id="vpn-section" class="hidden card p-8 mb-12">
             <div class="text-center">
-                <i class="fas fa-shield-alt text-5xl text-green-400 mb-4"></i>
-                <h3 class="text-2xl font-bold mb-4">VPN 配置</h3>
-                <p class="text-gray-300 mb-6">下載您的專屬VPN配置檔案，安全連接到HiveMind網路</p>
-                <button onclick="downloadVPNConfig()" class="bg-green-600 hover:bg-green-700 px-8 py-3 rounded-lg font-medium transition-all duration-200">
+                <i class="fas fa-shield-alt text-5xl text-neutral-600 dark:text-neutral-400 mb-4"></i>
+                <h3 class="text-2xl font-bold mb-4 text-neutral-800 dark:text-neutral-200">VPN 配置</h3>
+                <p class="text-neutral-600 dark:text-neutral-400 mb-6">下載您的專屬VPN配置檔案，安全連接到HiveMind網路</p>
+                <button onclick="downloadVPNConfig()" class="btn-primary">
                     <i class="fas fa-download mr-2"></i>下載 VPN 配置
                 </button>
             </div>
         </div>
         
         <!-- 系統需求 -->
-        <div class="mt-12 bg-white/5 p-8 rounded-2xl">
-            <h3 class="text-2xl font-bold mb-6 text-center">系統需求</h3>
+        <div class="card p-8">
+            <h3 class="text-2xl font-bold mb-6 text-center text-neutral-800 dark:text-neutral-200">系統需求</h3>
             <div class="grid md:grid-cols-3 gap-6">
                 <div class="text-center">
-                    <i class="fab fa-windows text-3xl text-blue-400 mb-3"></i>
-                    <h4 class="font-semibold mb-2">Windows</h4>
-                    <p class="text-sm text-gray-400">Windows 10 或更新版本<br>4GB RAM, 2GB 儲存空間</p>
+                    <i class="fab fa-windows text-3xl text-neutral-600 dark:text-neutral-400 mb-3"></i>
+                    <h4 class="font-semibold mb-2 text-neutral-800 dark:text-neutral-200">Windows</h4>
+                    <p class="text-sm text-neutral-600 dark:text-neutral-400">Windows 10 或更新版本<br>4GB RAM, 2GB 儲存空間</p>
                 </div>
                 <div class="text-center">
-                    <i class="fab fa-linux text-3xl text-yellow-400 mb-3"></i>
-                    <h4 class="font-semibold mb-2">Linux</h4>
-                    <p class="text-sm text-gray-400">Ubuntu 18.04+ 或等效發行版<br>4GB RAM, 2GB 儲存空間</p>
+                    <i class="fab fa-linux text-3xl text-neutral-600 dark:text-neutral-400 mb-3"></i>
+                    <h4 class="font-semibold mb-2 text-neutral-800 dark:text-neutral-200">Linux</h4>
+                    <p class="text-sm text-neutral-600 dark:text-neutral-400">Ubuntu 18.04+ 或等效發行版<br>4GB RAM, 2GB 儲存空間</p>
                 </div>
                 <div class="text-center">
-                    <i class="fab fa-apple text-3xl text-gray-400 mb-3"></i>
-                    <h4 class="font-semibold mb-2">macOS</h4>
-                    <p class="text-sm text-gray-400">macOS 10.15 或更新版本<br>4GB RAM, 2GB 儲存空間</p>
+                    <i class="fab fa-apple text-3xl text-neutral-600 dark:text-neutral-400 mb-3"></i>
+                    <h4 class="font-semibold mb-2 text-neutral-800 dark:text-neutral-200">macOS</h4>
+                    <p class="text-sm text-neutral-600 dark:text-neutral-400">macOS 10.15 或更新版本<br>4GB RAM, 2GB 儲存空間</p>
                 </div>
             </div>
         </div>
@@ -127,7 +127,6 @@
 
 {% block scripts %}
 <script>
-// 檢查用戶是否已登入並顯示VPN下載選項
 document.addEventListener('DOMContentLoaded', () => {
     const token = localStorage.getItem('auth_token');
     if (token) {

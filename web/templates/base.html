@@ -4,60 +4,52 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}HiveMind - 分布式運算平台{% endblock %}</title>
-    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/main.css') }}" rel="stylesheet">
+    <link rel="icon" href="{{ url_for('static', filename='img/file.ico') }}">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/alpinejs/3.10.2/cdn.min.js" defer></script>
-    <style>
-        html, body { transition: background 0.3s, color 0.3s; }
-        .theme-toggle-btn {
-            @apply rounded-full p-2 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 transition;
-        }
-    </style>
 </head>
-<body class="bg-gradient-to-br from-gray-100 via-purple-100 to-pink-100 text-gray-900 dark:bg-gradient-to-br dark:from-gray-900 dark:via-purple-900 dark:to-violet-900 dark:text-white min-h-screen transition-colors duration-300">
+<body class="bg-neutral-100 dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100 min-h-screen transition">
     <!-- 導航欄 -->
-    <nav class="bg-white/70 dark:bg-black/20 backdrop-blur-lg border-b border-purple-500/20 shadow-sm">
+    <nav class="bg-white/90 dark:bg-neutral-800/90 backdrop-blur-lg border-b border-neutral-200 dark:border-neutral-700 shadow-sm">
         <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
             <div class="flex items-center justify-between h-16">
                 <div class="flex items-center">
-                    <a href="/" class="text-2xl font-bold bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">
-                        <i class="fas fa-network-wired mr-2"></i>HiveMind
+                    <a href="/" class="text-2xl font-bold text-neutral-900 dark:text-neutral-100 flex items-center">
+                        <img src="{{ url_for('static', filename='img/file.png') }}" alt="HiveMind" width="70" height="70" class="mr-2">HiveMind
                     </a>
                 </div>
                 <div class="flex items-center space-x-2">
-                    <!-- 主題切換按鈕 -->
-                    <button id="theme-toggle" class="theme-toggle-btn mr-2" title="切換主題">
-                        <i id="theme-toggle-icon" class="fas fa-moon text-gray-700 dark:text-yellow-300"></i>
-                    </button>
                     <div class="hidden md:block">
                         <div class="ml-6 flex items-baseline space-x-4">
-                            <a href="/" class="hover:bg-purple-700/50 dark:hover:bg-purple-700/30 px-3 py-2 rounded-md text-sm font-medium transition-all duration-200">主頁</a>
-                            <a href="/download" class="hover:bg-purple-700/50 dark:hover:bg-purple-700/30 px-3 py-2 rounded-md text-sm font-medium transition-all duration-200">下載</a>
-                            <a href="/docs" class="hover:bg-purple-700/50 dark:hover:bg-purple-700/30 px-3 py-2 rounded-md text-sm font-medium transition-all duration-200">文檔</a>
-                            <a href="https://github.com/hivemind-platform" target="_blank" class="hover:bg-purple-700/50 dark:hover:bg-purple-700/30 px-3 py-2 rounded-md text-sm font-medium transition-all duration-200">
+                            <a href="/" class="nav-link">主頁</a>
+                            <a href="/download" class="nav-link">下載</a>
+                            <a href="/docs" class="nav-link">文檔</a>
+                            <a href="https://github.com/him6794/hivemind" target="_blank" class="nav-link">
                                 <i class="fab fa-github mr-1"></i>GitHub
                             </a>
-                            <a href="https://discord.gg/hivemind" target="_blank" class="hover:bg-purple-700/50 dark:hover:bg-purple-700/30 px-3 py-2 rounded-md text-sm font-medium transition-all duration-200">
+                            <a href="https://discord.gg/hivemind" target="_blank" class="nav-link">
                                 <i class="fab fa-discord mr-1"></i>社區
                             </a>
                         </div>
                     </div>
                     <div class="flex items-center space-x-4">
                         <div id="auth-buttons">
-                            <a href="/login" class="bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200">登入</a>
-                            <a href="/register" class="bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200">註冊</a>
+                            <a href="/login" class="btn-secondary">登入</a>
+                            <a href="/register" class="btn-primary">註冊</a>
                         </div>
                         <div id="user-menu" class="hidden">
                             <div class="relative" x-data="{ open: false }">
-                                <button @click="open = !open" class="flex items-center space-x-2 bg-purple-600/50 px-3 py-2 rounded-lg">
+                                <button @click="open = !open" class="flex items-center space-x-2 btn-secondary">
                                     <i class="fas fa-user"></i>
                                     <span id="username-display"></span>
                                     <i class="fas fa-chevron-down"></i>
                                 </button>
-                                <div x-show="open" @click.away="open = false" class="absolute right-0 mt-2 w-48 bg-gray-800 dark:bg-gray-900 rounded-lg shadow-lg py-2">
-                                    <a href="/balance" class="block px-4 py-2 hover:bg-gray-700 dark:hover:bg-gray-700">查看餘額</a>
-                                    <a href="#" onclick="joinVPN()" class="block px-4 py-2 hover:bg-gray-700 dark:hover:bg-gray-700">加入VPN</a>
-                                    <a href="#" onclick="logout()" class="block px-4 py-2 hover:bg-gray-700 dark:hover:bg-gray-700">登出</a>
+                                <div x-show="open" @click.away="open = false" class="absolute right-0 mt-2 w-48 bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg shadow-lg py-2">
+                                    <a href="/balance" class="block px-4 py-2 text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-700">查看餘額</a>
+                                    <a href="#" onclick="joinVPN()" class="block px-4 py-2 text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-700">加入VPN</a>
+                                    <a href="#" onclick="logout()" class="block px-4 py-2 text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-700">登出</a>
                                 </div>
                             </div>
                         </div>
@@ -72,34 +64,36 @@
         {% block content %}{% endblock %}
     </main>
 
-    <!-- 主題切換腳本 -->
+    <!-- 統一JavaScript -->
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    
+    <!-- 主題切換功能 -->
     <script>
-    // 主題切換
-    function setTheme(dark) {
-        if (dark) {
-            document.documentElement.classList.add('dark');
-            localStorage.setItem('theme', 'dark');
-            document.getElementById('theme-toggle-icon').classList.remove('fa-moon');
-            document.getElementById('theme-toggle-icon').classList.add('fa-sun');
-        } else {
-            document.documentElement.classList.remove('dark');
-            localStorage.setItem('theme', 'light');
-            document.getElementById('theme-toggle-icon').classList.remove('fa-sun');
-            document.getElementById('theme-toggle-icon').classList.add('fa-moon');
+        function setTheme(dark) {
+            if (dark) {
+                document.documentElement.classList.add('dark');
+                localStorage.setItem('theme', 'dark');
+                document.getElementById('theme-toggle-icon').classList.remove('fa-moon');
+                document.getElementById('theme-toggle-icon').classList.add('fa-sun');
+            } else {
+                document.documentElement.classList.remove('dark');
+                localStorage.setItem('theme', 'light');
+                document.getElementById('theme-toggle-icon').classList.remove('fa-sun');
+                document.getElementById('theme-toggle-icon').classList.add('fa-moon');
+            }
         }
-    }
-    // 初始化主題
-    (function() {
-        const theme = localStorage.getItem('theme');
-        if (theme === 'dark' || (!theme && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
-            setTheme(true);
-        } else {
-            setTheme(false);
-        }
-        document.getElementById('theme-toggle').onclick = function() {
-            setTheme(!document.documentElement.classList.contains('dark'));
-        };
-    })();
+        // 初始化主題
+        (function() {
+            const theme = localStorage.getItem('theme');
+            if (theme === 'dark' || (!theme && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+                setTheme(true);
+            } else {
+                setTheme(false);
+            }
+            document.getElementById('theme-toggle').onclick = function() {
+                setTheme(!document.documentElement.classList.contains('dark'));
+            };
+        })();
     </script>
 
     <!-- 通用JavaScript -->

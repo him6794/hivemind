@@ -3,33 +3,35 @@
 {% block title %}餘額查詢與轉帳 - HiveMind{% endblock %}
 
 {% block content %}
-<div class="min-h-[70vh] flex items-center justify-center py-8" style="background: #f8fafc;">
-    <div class="w-full max-w-xl bg-white rounded-2xl shadow-xl border border-gray-200 p-8" style="box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.08), 0 4px 6px -4px rgb(0 0 0 / 0.08);">
-        <h2 class="text-3xl font-bold text-center mb-8" style="color: #64748b; letter-spacing: -0.03em;">
-            <i class="fas fa-coins mr-2" style="color: #f59e42;"></i>我的餘額
-        </h2>
-        <div class="flex flex-col items-center mb-8">
-            <div class="text-5xl font-extrabold mb-2" id="balance-value" style="color: #059669;">--</div>
-            <div class="text-gray-500 text-lg">HVC</div>
+<div class="min-h-screen flex items-center justify-center p-4 bg-neutral-100 dark:bg-neutral-900">
+    <div class="w-full max-w-xl">
+        <div class="card card-large">
+            <h2 class="text-3xl font-bold text-center mb-8 text-neutral-900 dark:text-neutral-100">
+                <i class="fas fa-coins mr-2 text-neutral-600 dark:text-neutral-400"></i>我的餘額
+            </h2>
+            <div class="text-center mb-8">
+                <div class="text-5xl font-bold mb-2 text-neutral-800 dark:text-neutral-200" id="balance-value">--</div>
+                <div class="text-neutral-500 dark:text-neutral-400 text-lg">HVC</div>
+            </div>
+            <hr class="my-8 border-neutral-200 dark:border-neutral-700">
+            <h3 class="text-xl font-semibold mb-4 text-center text-neutral-800 dark:text-neutral-200">
+                <i class="fas fa-exchange-alt mr-2"></i>轉帳
+            </h3>
+            <form id="transferForm" class="space-y-6">
+                <div>
+                    <label for="receiver" class="form-label">收款人用戶名</label>
+                    <input id="receiver" name="receiver" type="text" required class="form-input" placeholder="請輸入對方用戶名">
+                </div>
+                <div>
+                    <label for="amount" class="form-label">金額</label>
+                    <input id="amount" name="amount" type="number" min="1" step="1" required class="form-input" placeholder="請輸入金額">
+                </div>
+                <div id="transfer-message" class="hidden"></div>
+                <button type="submit" class="btn-primary w-full">
+                    <i class="fas fa-paper-plane mr-2"></i>轉帳
+                </button>
+            </form>
         </div>
-        <hr class="my-8 border-gray-200">
-        <h3 class="text-xl font-semibold mb-4 text-center" style="color: #475569;">
-            <i class="fas fa-exchange-alt mr-2"></i>轉帳
-        </h3>
-        <form id="transferForm" class="space-y-6">
-            <div>
-                <label for="receiver" class="block text-sm font-medium mb-1" style="color: #64748b;">收款人用戶名</label>
-                <input id="receiver" name="receiver" type="text" required class="w-full px-4 py-3 bg-gray-100 border border-gray-300 rounded-lg text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-[#64748b] focus:border-transparent" placeholder="請輸入對方用戶名">
-            </div>
-            <div>
-                <label for="amount" class="block text-sm font-medium mb-1" style="color: #64748b;">金額</label>
-                <input id="amount" name="amount" type="number" min="1" step="1" required class="w-full px-4 py-3 bg-gray-100 border border-gray-300 rounded-lg text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-[#64748b] focus:border-transparent" placeholder="請輸入金額">
-            </div>
-            <div id="transfer-message" class="hidden px-4 py-2 rounded-lg text-center"></div>
-            <button type="submit" class="w-full bg-[#64748b] hover:bg-[#475569] text-white font-bold py-3 px-4 rounded-lg shadow-lg transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-[#64748b]">
-                <i class="fas fa-paper-plane mr-2"></i>轉帳
-            </button>
-        </form>
     </div>
 </div>
 {% endblock %}
@@ -42,6 +44,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         window.location.href = '/login';
         return;
     }
+    
     // 查詢餘額
     try {
         const resp = await fetch('/api/balance', {
@@ -50,8 +53,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         const data = await resp.json();
         if (resp.ok) {
             document.getElementById('balance-value').textContent = data.balance;
-        } else {
-            document.getElementById('balance-value').textContent = '--';
         }
     } catch {
         document.getElementById('balance-value').textContent = '--';
@@ -63,9 +64,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         const receiver = document.getElementById('receiver').value;
         const amount = document.getElementById('amount').value;
         const msgDiv = document.getElementById('transfer-message');
+        
         msgDiv.classList.add('hidden');
-        msgDiv.textContent = '';
-        msgDiv.className = 'hidden px-4 py-2 rounded-lg text-center';
 
         try {
             const resp = await fetch('/api/transfer', {
@@ -79,17 +79,16 @@ document.addEventListener('DOMContentLoaded', async () => {
             const data = await resp.json();
             if (resp.ok) {
                 msgDiv.textContent = '轉帳成功！新餘額：' + data.new_balance;
-                msgDiv.className = 'bg-green-50 border border-green-400 text-green-700 px-4 py-2 rounded-lg text-center mt-2';
-                msgDiv.classList.remove('hidden');
+                msgDiv.className = 'message message-success';
                 document.getElementById('balance-value').textContent = data.new_balance;
             } else {
                 msgDiv.textContent = data.error || '轉帳失敗';
-                msgDiv.className = 'bg-red-50 border border-red-400 text-red-700 px-4 py-2 rounded-lg text-center mt-2';
-                msgDiv.classList.remove('hidden');
+                msgDiv.className = 'message message-error';
             }
+            msgDiv.classList.remove('hidden');
         } catch {
             msgDiv.textContent = '網路錯誤，請稍後再試';
-            msgDiv.className = 'bg-red-50 border border-red-400 text-red-700 px-4 py-2 rounded-lg text-center mt-2';
+            msgDiv.className = 'message message-error';
             msgDiv.classList.remove('hidden');
         }
     });
