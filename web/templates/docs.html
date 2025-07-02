@@ -3,9 +3,9 @@
 {% block title %}文檔 - HiveMind{% endblock %}
 
 {% block content %}
-<div class="py-20 px-4">
+<div class="py-20 px-4 bg-neutral-100 dark:bg-neutral-900 transition min-h-screen">
     <div class="max-w-6xl mx-auto">
-        <div class="text-center mb-16">
+        <div class="text-center mb-16 animate-fade-in-down">
             <h1 class="text-4xl font-bold mb-6 text-neutral-900 dark:text-neutral-100">
                 開發者文檔
             </h1>
@@ -13,11 +13,10 @@
                 學習如何使用 HiveMind 分布式運算平台
             </p>
         </div>
-        
         <div class="grid lg:grid-cols-4 gap-8">
             <!-- 側邊導航 -->
             <div class="lg:col-span-1">
-                <div class="card p-6 sticky top-8">
+                <div class="card p-6 sticky top-8 animate-fade-in-up">
                     <h3 class="font-bold mb-4 text-neutral-800 dark:text-neutral-200">文檔導航</h3>
                     <ul class="space-y-2">
                         <li><a href="#quick-start" class="text-neutral-600 dark:text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 transition">快速開始</a></li>
@@ -29,11 +28,10 @@
                     </ul>
                 </div>
             </div>
-            
             <!-- 主要內容 -->
             <div class="lg:col-span-3 space-y-12">
                 <!-- 快速開始 -->
-                <section id="quick-start" class="card p-8">
+                <section id="quick-start" class="card p-8 animate-fade-in-up">
                     <h2 class="text-3xl font-bold mb-6 text-neutral-800 dark:text-neutral-200">快速開始</h2>
                     
                     <div class="space-y-6">
@@ -62,7 +60,7 @@
                 </section>
                 
                 <!-- API 參考 -->
-                <section id="api-reference" class="card p-8">
+                <section id="api-reference" class="card p-8 animate-fade-in-up">
                     <h2 class="text-3xl font-bold mb-6 text-neutral-800 dark:text-neutral-200">API 參考</h2>
                     
                     <div class="space-y-6">
@@ -103,7 +101,7 @@
                 </section>
                 
                 <!-- 節點設置 -->
-                <section id="node-setup" class="card p-8">
+                <section id="node-setup" class="card p-8 animate-fade-in-up">
                     <h2 class="text-3xl font-bold mb-6 text-neutral-800 dark:text-neutral-200">節點設置</h2>
                     
                     <div class="space-y-6">
@@ -128,7 +126,7 @@
                 </section>
                 
                 <!-- 任務開發 -->
-                <section id="task-development" class="card p-8">
+                <section id="task-development" class="card p-8 animate-fade-in-up">
                     <h2 class="text-3xl font-bold mb-6 text-neutral-800 dark:text-neutral-200">任務開發</h2>
                     
                     <div class="space-y-6">
@@ -150,7 +148,7 @@
                 </section>
                 
                 <!-- 平台架構 -->
-                <section id="platform-architecture" class="card p-8">
+                <section id="platform-architecture" class="card p-8 animate-fade-in-up">
                     <h2 class="text-3xl font-bold mb-6 text-neutral-800 dark:text-neutral-200">平台架構</h2>
                     
                     <div class="space-y-6">
@@ -248,7 +246,7 @@
                 
                 
                 <!-- 故障排除 -->
-                <section id="troubleshooting" class="card p-8">
+                <section id="troubleshooting" class="card p-8 animate-fade-in-up">
                     <h2 class="text-3xl font-bold mb-6 text-neutral-800 dark:text-neutral-200">故障排除</h2>
                     
                     <div class="space-y-6">

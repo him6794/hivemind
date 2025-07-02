@@ -5,16 +5,16 @@
 {% block content %}
 <div class="min-h-screen flex items-center justify-center p-4 bg-neutral-100 dark:bg-neutral-900 transition">
     <div class="w-full max-w-md">
-        <div class="text-center mb-8">
+        <div class="text-center mb-8 animate-fade-in-down">
             <div class="flex justify-center mb-4">
-                <span class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-neutral-200 dark:bg-neutral-800">
+                <span class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-neutral-200 dark:bg-neutral-800 shadow-lg">
                     <i class="fas fa-network-wired text-3xl text-neutral-600 dark:text-neutral-300"></i>
                 </span>
             </div>
             <h2 class="text-3xl font-bold text-neutral-900 dark:text-neutral-100 mb-2 tracking-tight">創建新帳戶</h2>
             <p class="text-neutral-500 dark:text-neutral-400">加入 HiveMind 分布式運算平台</p>
         </div>
-        <div class="card card-large">
+        <div class="card card-large animate-fade-in-up">
             <form id="registerForm" class="space-y-6" onsubmit="handleRegister(event)">
                 <div>
                     <label for="username" class="form-label">用戶名</label>
@@ -34,7 +34,7 @@
                 </div>
                 <div id="error-message" class="hidden message message-error"></div>
                 <div id="success-message" class="hidden message message-success"></div>
-                <button type="submit" id="submitBtn" class="btn-primary w-full">
+                <button type="submit" id="submitBtn" class="btn-primary w-full transition-all duration-200 hover:scale-105">
                     <span id="submitText">創建帳戶</span>
                     <i id="loadingIcon" class="fas fa-spinner fa-spin hidden ml-2"></i>
                 </button>
@@ -94,9 +94,13 @@ document.getElementById('registerForm').addEventListener('submit', async (e) => 
         const data = await response.json();
 
         if (response.ok) {
-            localStorage.setItem('auth_token', data.access_token);
-            localStorage.setItem('user', JSON.stringify(data.user));
-
+            localStorage.setItem('access_token', data.access_token);
+            localStorage.setItem('user_info', JSON.stringify(data.user));
+            
+            // 通知狀態已改變並立即更新UI
+            document.dispatchEvent(new Event('authChanged'));
+            if (typeof checkAuth === 'function') checkAuth(); // 立即更新UI
+            
             showSuccess('註冊成功！正在跳轉...');
             setTimeout(() => {
                 window.location.href = '/';

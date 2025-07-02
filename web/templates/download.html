@@ -5,7 +5,7 @@
 {% block content %}
 <div class="py-20 px-4">
     <div class="max-w-4xl mx-auto">
-        <div class="text-center mb-16">
+        <div class="text-center mb-16 animate-fade-in-down">
             <h1 class="text-4xl font-bold mb-6 text-neutral-900 dark:text-neutral-100">
                 下載 HiveMind
             </h1>
@@ -16,13 +16,12 @@
         
         <div class="grid md:grid-cols-2 gap-8 mb-12">
             <!-- 節點客戶端 -->
-            <div class="card p-8">
+            <div class="card p-8 animate-fade-in-up">
                 <div class="text-center mb-6">
                     <i class="fas fa-server text-5xl text-neutral-600 dark:text-neutral-400 mb-4"></i>
                     <h3 class="text-2xl font-bold mb-2 text-neutral-800 dark:text-neutral-200">節點客戶端</h3>
                     <p class="text-neutral-600 dark:text-neutral-400">將您的閒置資源貢獻給網路，獲得報酬</p>
                 </div>
-                
                 <div class="space-y-4 mb-6">
                     <div class="flex items-center space-x-3">
                         <i class="fas fa-check text-neutral-600 dark:text-neutral-400"></i>
@@ -37,28 +36,25 @@
                         <span class="text-neutral-700 dark:text-neutral-300">即時收益追蹤</span>
                     </div>
                 </div>
-                
                 <div class="space-y-3">
-                    <button onclick="downloadClient('node')" class="btn-secondary w-full">
+                    <button onclick="downloadClient('node')" class="btn-secondary w-full transition-all duration-200 hover:scale-105">
                         <i class="fab fa-windows mr-2"></i>Windows 版本
                     </button>
-                    <button onclick="downloadClient('node')" class="btn-secondary w-full">
+                    <button onclick="downloadClient('node')" class="btn-secondary w-full transition-all duration-200 hover:scale-105">
                         <i class="fab fa-linux mr-2"></i>Linux 版本
                     </button>
-                    <button onclick="downloadClient('node')" class="btn-secondary w-full">
+                    <button onclick="downloadClient('node')" class="btn-secondary w-full transition-all duration-200 hover:scale-105">
                         <i class="fab fa-apple mr-2"></i>macOS 版本
                     </button>
                 </div>
             </div>
-            
             <!-- 任務客戶端 -->
-            <div class="card p-8">
+            <div class="card p-8 animate-fade-in-up">
                 <div class="text-center mb-6">
                     <i class="fas fa-rocket text-5xl text-neutral-600 dark:text-neutral-400 mb-4"></i>
                     <h3 class="text-2xl font-bold mb-2 text-neutral-800 dark:text-neutral-200">任務客戶端</h3>
                     <p class="text-neutral-600 dark:text-neutral-400">提交運算任務，利用分布式網路加速處理</p>
                 </div>
-                
                 <div class="space-y-4 mb-6">
                     <div class="flex items-center space-x-3">
                         <i class="fas fa-check text-neutral-600 dark:text-neutral-400"></i>
@@ -73,35 +69,32 @@
                         <span class="text-neutral-700 dark:text-neutral-300">彈性資源調度</span>
                     </div>
                 </div>
-                
                 <div class="space-y-3">
-                    <button onclick="downloadClient('task')" class="btn-secondary w-full">
+                    <button onclick="downloadClient('task')" class="btn-secondary w-full transition-all duration-200 hover:scale-105">
                         <i class="fab fa-windows mr-2"></i>Windows 版本
                     </button>
-                    <button onclick="downloadClient('task')" class="btn-secondary w-full">
+                    <button onclick="downloadClient('task')" class="btn-secondary w-full transition-all duration-200 hover:scale-105">
                         <i class="fab fa-linux mr-2"></i>Linux 版本
                     </button>
-                    <button onclick="downloadClient('task')" class="btn-secondary w-full">
+                    <button onclick="downloadClient('task')" class="btn-secondary w-full transition-all duration-200 hover:scale-105">
                         <i class="fab fa-apple mr-2"></i>macOS 版本
                     </button>
                 </div>
             </div>
         </div>
-        
         <!-- VPN配置下載 -->
-        <div id="vpn-section" class="hidden card p-8 mb-12">
+        <div id="vpn-section" class="hidden card p-8 mb-12 animate-fade-in-up">
             <div class="text-center">
                 <i class="fas fa-shield-alt text-5xl text-neutral-600 dark:text-neutral-400 mb-4"></i>
                 <h3 class="text-2xl font-bold mb-4 text-neutral-800 dark:text-neutral-200">VPN 配置</h3>
                 <p class="text-neutral-600 dark:text-neutral-400 mb-6">下載您的專屬VPN配置檔案，安全連接到HiveMind網路</p>
-                <button onclick="downloadVPNConfig()" class="btn-primary">
+                <button onclick="downloadVPNConfig()" class="btn-primary transition-all duration-200 hover:scale-105">
                     <i class="fas fa-download mr-2"></i>下載 VPN 配置
                 </button>
             </div>
         </div>
-        
         <!-- 系統需求 -->
-        <div class="card p-8">
+        <div class="card p-8 animate-fade-in-up">
             <h3 class="text-2xl font-bold mb-6 text-center text-neutral-800 dark:text-neutral-200">系統需求</h3>
             <div class="grid md:grid-cols-3 gap-6">
                 <div class="text-center">
@@ -128,14 +121,14 @@
 {% block scripts %}
 <script>
 document.addEventListener('DOMContentLoaded', () => {
-    const token = localStorage.getItem('auth_token');
+    const token = localStorage.getItem('access_token');
     if (token) {
         document.getElementById('vpn-section').classList.remove('hidden');
     }
 });
 
 async function downloadClient(type) {
-    const token = localStorage.getItem('auth_token');
+    const token = localStorage.getItem('access_token');
     if (!token) {
         alert('請先登入才能下載客戶端');
         window.location.href = '/login';
@@ -160,7 +153,7 @@ async function downloadClient(type) {
 }
 
 async function downloadVPNConfig() {
-    const token = localStorage.getItem('auth_token');
+    const token = localStorage.getItem('access_token');
     if (!token) {
         alert('請先登入');
         return;
@@ -194,3 +187,4 @@ async function downloadVPNConfig() {
 }
 </script>
 {% endblock %}
+

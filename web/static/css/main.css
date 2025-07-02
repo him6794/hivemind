@@ -685,6 +685,38 @@ nav {
                 border-color 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
+/* 動畫效果 */
+@keyframes fade-in-down {
+    0% { opacity: 0; transform: translateY(-30px);}
+    100% { opacity: 1; transform: translateY(0);}
+}
+@keyframes fade-in-up {
+    0% { opacity: 0; transform: translateY(30px);}
+    100% { opacity: 1; transform: translateY(0);}
+}
+.animate-fade-in-down {
+    animation: fade-in-down 0.7s cubic-bezier(0.4,0,0.2,1);
+}
+.animate-fade-in-up {
+    animation: fade-in-up 0.4s cubic-bezier(0.4,0,0.2,1);
+}
+.transition-all {
+    transition-property: all;
+    transition-duration: 0.2s;
+    transition-timing-function: cubic-bezier(0.4,0,0.2,1);
+}
+.transition-transform {
+    transition-property: transform;
+    transition-duration: 0.3s;
+    transition-timing-function: cubic-bezier(0.4,0,0.2,1);
+}
+.hover\:scale-105:hover {
+    transform: scale(1.05);
+}
+.hover\:scale-110:hover {
+    transform: scale(1.10);
+}
+
 /* 波紋效果 */
 @keyframes ripple {
     0% {
@@ -718,4 +750,60 @@ nav {
 .ripple-effect:active::before {
     width: 300px;
     height: 300px;
+}
+
+/* 霓虹發光特效（hover時才有） */
+.hover\:neon-glow:hover, .hover\:neon-glow-text:hover {
+    text-shadow:
+        0 0 8px #00ffe7,
+        0 0 16px #00ffe7,
+        0 0 24px #00ffe7,
+        0 0 32px #00ffe7;
+    color: #00ffe7 !important;
+    transition: text-shadow 0.3s, color 0.3s;
+}
+.hover\:neon-glow-img:hover {
+    filter: drop-shadow(0 0 8px #00ffe7) drop-shadow(0 0 16px #00ffe7);
+    transition: filter 0.3s;
+}
+.hover\:neon-glow-btn:hover, .hover\:neon-glow-btn:focus {
+    box-shadow: 0 0 16px #00ffe7, 0 0 32px #00ffe7;
+    color: #fff !important;
+    border-color: #fff !important;
+    background: rgba(0,255,231,0.12) !important;
+    transition: box-shadow 0.3s, color 0.3s, border-color 0.3s, background 0.3s;
+}
+
+/* 只在深色模式顯示動畫背景，且動畫層級最低 */
+#matrix-bg {
+    display: none;
+    position: fixed;
+    inset: 0;
+    width: 100vw !important;
+    height: 100vh !important;
+    pointer-events: none;
+    z-index: -1 !important; /* 讓背景永遠在最底層 */
+}
+.dark #matrix-bg {
+    display: block;
+    opacity: 0.25;
+    background: transparent;
+    z-index: -1 !important;
+}
+
+/* 主要內容包裹層與內容都在動畫之上 */
+#main-content-wrapper {
+    position: relative;
+    z-index: 1;
+}
+
+/* 導航欄確保在最上層 */
+nav {
+    position: relative;
+    z-index: 10;
+}
+
+/* 下拉選單強制在最上層 */
+#user-dropdown {
+    z-index: 1001 !important;
 }

@@ -5,16 +5,16 @@
 {% block content %}
 <div class="min-h-screen flex items-center justify-center p-4 bg-neutral-100 dark:bg-neutral-900 transition">
     <div class="w-full max-w-md">
-        <div class="text-center mb-8">
+        <div class="text-center mb-8 animate-fade-in-down">
             <div class="flex justify-center mb-4">
-                <span class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-neutral-200 dark:bg-neutral-800">
+                <span class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-neutral-200 dark:bg-neutral-800 shadow-lg">
                     <i class="fas fa-network-wired text-3xl text-neutral-600 dark:text-neutral-300"></i>
                 </span>
             </div>
             <h2 class="text-3xl font-bold text-neutral-900 dark:text-neutral-100 mb-2 tracking-tight">歡迎回來</h2>
             <p class="text-neutral-500 dark:text-neutral-400">登入您的 HiveMind 帳戶</p>
         </div>
-        <div class="card card-large">
+        <div class="card card-large animate-fade-in-up">
             <form id="loginForm" class="space-y-6" onsubmit="handleLogin(event)">
                 <div>
                     <label for="username" class="form-label">用戶名</label>
@@ -26,7 +26,7 @@
                 </div>
                 <div id="error-message" class="hidden message message-error"></div>
                 <div id="success-message" class="hidden message message-success"></div>
-                <button type="submit" id="submitBtn" class="btn-primary w-full">
+                <button type="submit" id="submitBtn" class="btn-primary w-full transition-all duration-200 hover:scale-105">
                     <span id="submitText">登入</span>
                     <i id="loadingIcon" class="fas fa-spinner fa-spin hidden ml-2"></i>
                 </button>
@@ -84,9 +84,13 @@ async function handleLogin(event) {
             successMessage.textContent = result.message || '登入成功！';
             successMessage.classList.remove('hidden');
             
-            // 儲存 token
+            // 儲存 token 和用戶信息 (統一使用 access_token 和 user_info)
             localStorage.setItem('access_token', result.access_token);
             localStorage.setItem('user_info', JSON.stringify(result.user));
+            
+            // 通知狀態已改變並立即更新UI
+            document.dispatchEvent(new Event('authChanged'));
+            checkAuth(); // 立即更新UI
             
             // 延遲跳轉到首頁
             setTimeout(() => {

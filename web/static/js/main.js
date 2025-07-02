@@ -1,16 +1,19 @@
 /* filepath: d:\hivemind\web\static\js\main.js */
 class HiveMindApp {
     constructor() {
-        this.token = localStorage.getItem('auth_token');
-        this.user = JSON.parse(localStorage.getItem('user') || 'null');
+        // 統一使用 access_token 和 user_info
+        this.token = localStorage.getItem('access_token');
+        this.user = JSON.parse(localStorage.getItem('user_info') || 'null');
         this.init();
     }
 
     init() {
         this.initTheme();
-        this.updateAuthUI();
+        // 移除這一行，避免與 base.html 衝突
+        // this.updateAuthUI();
         this.setupEventListeners();
-        this.checkAuthStatus();
+        // 移除這一行，避免與 base.html 衝突
+        // this.checkAuthStatus();
     }
 
     // 主題管理
@@ -53,18 +56,8 @@ class HiveMindApp {
 
     // 認證UI更新
     updateAuthUI() {
-        const authButtons = document.getElementById('auth-buttons');
-        const userMenu = document.getElementById('user-menu');
-        const usernameDisplay = document.getElementById('username-display');
-
-        if (this.token && this.user && this.user.username) {
-            if (authButtons) authButtons.classList.add('hidden');
-            if (userMenu) userMenu.classList.remove('hidden');
-            if (usernameDisplay) usernameDisplay.textContent = this.user.username;
-        } else {
-            if (authButtons) authButtons.classList.remove('hidden');
-            if (userMenu) userMenu.classList.add('hidden');
-        }
+        // 不要控制 UI 元素的顯示/隱藏
+        // 留給 base.html 處理
     }
 
     // 事件監聽器設定
@@ -97,21 +90,12 @@ class HiveMindApp {
     }
 
     // 檢查認證狀態
-    async checkAuthStatus() {
+    checkAuthStatus() {
         if (!this.token) return;
 
         try {
-            const response = await this.apiCall('/api/balance', 'GET');
-            if (response.ok) {
-                const data = await response.json();
-                if (this.user) {
-                    this.user.balance = data.balance;
-                    localStorage.setItem('user', JSON.stringify(this.user));
-                }
-                this.updateAuthUI();
-            } else {
-                this.logout();
-            }
+            // 僅檢查，不更新 UI
+            this.apiCall('/api/balance', 'GET');
         } catch (error) {
             console.error('檢查認證狀態失敗:', error);
         }
@@ -139,11 +123,11 @@ class HiveMindApp {
 
     // 登出
     logout() {
-        localStorage.removeItem('auth_token');
-        localStorage.removeItem('user');
+        localStorage.removeItem('access_token');
+        localStorage.removeItem('user_info');
         this.token = null;
         this.user = null;
-        this.updateAuthUI();
+        document.dispatchEvent(new Event('authChanged'));
         window.location.href = '/';
     }
 
@@ -386,8 +370,9 @@ window.handleLogin = async function(event) {
         const data = await response.json();
         
         if (response.ok) {
-            localStorage.setItem('auth_token', data.access_token);
-            localStorage.setItem('user', JSON.stringify(data.user));
+            localStorage.setItem('access_token', data.access_token);
+            localStorage.setItem('user_info', JSON.stringify(data.user));
+            document.dispatchEvent(new Event('authChanged'));
             
             if (successMsg) {
                 successMsg.textContent = '登入成功！正在跳轉...';
@@ -464,8 +449,9 @@ window.handleRegister = async function(event) {
         const data = await response.json();
         
         if (response.ok) {
-            localStorage.setItem('auth_token', data.access_token);
-            localStorage.setItem('user', JSON.stringify(data.user));
+            localStorage.setItem('access_token', data.access_token);
+            localStorage.setItem('user_info', JSON.stringify(data.user));
+            document.dispatchEvent(new Event('authChanged'));
             
             if (successMsg) {
                 successMsg.textContent = '註冊成功！正在跳轉...';
