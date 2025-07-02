@@ -22,17 +22,12 @@ import socket
 import uuid
 import webbrowser
 
-# 配置乾淨的日誌輸出
-logging.basicConfig(
-    level=logging.INFO, 
-    format='%(asctime)s - %(message)s',
-    datefmt='%H:%M:%S'
-)
-
 # 配置
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(threadName)s] - %(message)s')
+
 NODE_PORT = int(os.environ.get("NODE_PORT", 50053))
 FLASK_PORT = int(os.environ.get("FLASK_PORT", 5000))
-MASTER_ADDRESS = os.environ.get("MASTER_ADDRESS", "192.168.2.52:50051")
+MASTER_ADDRESS = os.environ.get("MASTER_ADDRESS", "127.0.0.1:50051")
 NODE_ID = os.environ.get("NODE_ID", f"worker-{platform.node().split('.')[0]}-{NODE_PORT}")
 
 class WorkerNode:
@@ -43,17 +38,13 @@ class WorkerNode:
         self.flask_port = FLASK_PORT
         
         # 狀態管理
-        self.status = "正在初始化..."
+        self.status = "Initializing"
         self.current_task_id = None
         self.username = None
         self.token = None
         self.is_registered = False
         self.login_time = None
         self.cpt_balance = 0
-        
-        # VPN 相關
-        self.vpn_connected = False
-        self.vpn_config_path = None
         
         # 線程控制
         self.status_thread = None
@@ -64,240 +55,22 @@ class WorkerNode:
         # 硬體信息
         self._init_hardware()
         
-        # 顯示啟動信息
-        self._show_startup_banner()
-        
-        # 檢查 Docker
-        self._wait_for_docker()
+        # Docker 初始化
+        self._init_docker()
         
         # gRPC 連接
         self._init_grpc()
         
-        # 請求 VPN 配置
-        self._request_vpn_config()
-        
         # Flask 應用
         self._init_flask()
         
-        self.status = "等待登入"
+        self.status = "Waiting for Login"
 
-        # 用戶會話管理
-        self.user_sessions = {}
+        # 用戶會話管理 - 存在後端陣列，不存在瀏覽器
+        self.user_sessions = {}  # session_id -> user_data
         self.session_lock = threading.Lock()
-        self._stop_current_task = False
 
-    def _show_startup_banner(self):
-        """顯示啟動橫幅"""
-        print("\n" + "="*60)
-        print("🔥 HiveMind 工作節點啟動中...")
-        print("="*60)
-        print(f"節點ID: {self.node_id}")
-        print(f"本機IP: {self.local_ip}")
-        print(f"gRPC端口: {self.port}")
-        print(f"Web端口: {self.flask_port}")
-        print(f"目標節點池: {self.master_address}")
-        print("="*60)
-
-    def _wait_for_docker(self):
-        """等待 Docker 服務啟動"""
-        print("🐳 檢查 Docker 服務狀態...")
-        
-        max_wait = 60  # 最多等待60秒
-        wait_time = 0
-        
-        while wait_time < max_wait:
-            try:
-                self.docker_client = docker.from_env(timeout=5)
-                self.docker_client.ping()
-                self.docker_available = True
-                print("✅ Docker 服務已就緒")
-                
-                # 檢查鏡像
-                try:
-                    self.docker_client.images.get("hivemind-worker:latest")
-                    print("✅ 工作節點鏡像已準備")
-                except docker.errors.ImageNotFound:
-                    print("⚠️  工作節點鏡像未找到，將使用默認配置")
-                
-                return True
-                
-            except Exception as e:
-                self.docker_available = False
-                if wait_time == 0:
-                    print("⏳ Docker 服務未啟動，等待中...")
-                    print("   請確保 Docker Desktop 已啟動")
-                
-                # 每10秒顯示一次等待狀態
-                if wait_time > 0 and wait_time % 10 == 0:
-                    print(f"   已等待 {wait_time}秒...")
-                
-                time.sleep(2)
-                wait_time += 2
-        
-        print("❌ Docker 服務啟動超時，將在無 Docker 模式下運行")
-        self.docker_available = False
-        return False
-
-    def _request_vpn_config(self):
-        """請求 VPN 配置並嘗試連接"""
-        print("\n🔐 VPN 配置階段...")
-        
-        if not hasattr(self, 'user_stub'):
-            print("⚠️  gRPC 連接未建立，跳過 VPN 配置")
-            return False
-        
-        try:
-            print("🔄 嘗試獲取 VPN 配置...")
-            
-            # 嘗試不同的認證方式獲取 VPN 配置
-            try:
-                # 如果有現有 token，嘗試使用
-                if hasattr(self, 'token') and self.token:
-                    response = self.user_stub.GetVPNConfig(
-                        nodepool_pb2.GetVPNConfigRequest(token=self.token),
-                        timeout=10
-                    )
-                else:
-                    # 嘗試匿名獲取（如果節點池支援）
-                    response = self.user_stub.GetVPNConfig(
-                        nodepool_pb2.GetVPNConfigRequest(token="anonymous"),
-                        timeout=10
-                    )
-                
-                if response.success and response.config:
-                    print("✅ VPN 配置獲取成功")
-                    return self._setup_vpn_connection(response.config, response.client_name)
-                else:
-                    print(f"⚠️  VPN 配置獲取失敗: {response.message}")
-                    
-            except grpc.RpcError as e:
-                if e.code() == grpc.StatusCode.UNAUTHENTICATED:
-                    print("ℹ️  需要登入後才能獲取 VPN 配置")
-                else:
-                    print(f"⚠️  VPN 配置請求失敗: {e.details()}")
-                    
-        except Exception as e:
-            print(f"⚠️  VPN 配置過程出錯: {e}")
-        
-        print("ℹ️  將在無 VPN 模式下運行，部分功能可能受限")
-        return False
-
-    def _setup_vpn_connection(self, vpn_config, client_name):
-        """設置 VPN 連接"""
-        try:
-            # 確保配置目錄存在
-            config_dir = os.path.join(os.path.dirname(__file__), "vpn_configs")
-            os.makedirs(config_dir, exist_ok=True)
-            
-            # 保存 VPN 配置文件
-            config_filename = f"{client_name}.conf"
-            self.vpn_config_path = os.path.join(config_dir, config_filename)
-            
-            with open(self.vpn_config_path, 'w', encoding='utf-8') as f:
-                f.write(vpn_config)
-            
-            print(f"💾 VPN 配置已保存: {config_filename}")
-            
-            # 嘗試自動連接 VPN
-            if self._connect_vpn():
-                print("✅ VPN 連接成功")
-                self.vpn_connected = True
-                return True
-            else:
-                print("⚠️  VPN 自動連接失敗")
-                print(f"📁 配置文件位置: {self.vpn_config_path}")
-                print("ℹ️  請手動導入 WireGuard 配置並連接")
-                return False
-                
-        except Exception as e:
-            print(f"❌ VPN 設置失敗: {e}")
-            return False
-
-    def _connect_vpn(self):
-        """嘗試自動連接 VPN"""
-        try:
-            if platform.system() == "Windows":
-                return self._connect_vpn_windows()
-            else:
-                return self._connect_vpn_linux()
-        except Exception as e:
-            print(f"VPN 連接出錯: {e}")
-            return False
-
-    def _connect_vpn_windows(self):
-        """Windows VPN 連接"""
-        try:
-            # 檢查 WireGuard 是否安裝
-            wg_paths = [
-                "C:/Program Files/WireGuard/wireguard.exe",
-                "C:/Program Files (x86)/WireGuard/wireguard.exe"
-            ]
-            
-            wg_path = None
-            for path in wg_paths:
-                if os.path.exists(path):
-                    wg_path = path
-                    break
-            
-            if not wg_path:
-                print("⚠️  未找到 WireGuard，請手動連接")
-                return False
-            
-            print("🔗 嘗試啟動 WireGuard 連接...")
-            
-            # 使用 WireGuard CLI 方式（如果支援）
-            try:
-                result = subprocess.run([
-                    wg_path, "/installtunnelservice", self.vpn_config_path
-                ], capture_output=True, text=True, timeout=15)
-                
-                if result.returncode == 0:
-                    print("✅ VPN 隧道服務已安裝")
-                    time.sleep(2)  # 等待連接建立
-                    return True
-                    
-            except Exception:
-                pass
-            
-            # 如果命令行方式失敗，嘗試打開 GUI
-            print("🖥️  啟動 WireGuard GUI...")
-            subprocess.Popen([wg_path], shell=False)
-            print("ℹ️  請在 WireGuard GUI 中手動導入配置文件並連接")
-            
-            return False
-            
-        except Exception as e:
-            print(f"Windows VPN 連接失敗: {e}")
-            return False
-
-    def _connect_vpn_linux(self):
-        """Linux VPN 連接"""
-        try:
-            # 檢查 wg-quick 是否可用
-            result = subprocess.run(['which', 'wg-quick'], 
-                                  capture_output=True, text=True)
-            
-            if result.returncode != 0:
-                print("⚠️  未找到 wg-quick，請手動安裝 WireGuard")
-                return False
-            
-            print("🔗 嘗試啟動 WireGuard 連接...")
-            
-            # 使用 wg-quick 連接
-            result = subprocess.run([
-                'sudo', 'wg-quick', 'up', self.vpn_config_path
-            ], capture_output=True, text=True, timeout=15)
-            
-            if result.returncode == 0:
-                print("✅ VPN 連接成功")
-                return True
-            else:
-                print(f"⚠️  VPN 連接失敗: {result.stderr}")
-                return False
-                
-        except Exception as e:
-            print(f"Linux VPN 連接失敗: {e}")
-            return False
+        self._stop_current_task = False  # 添加停止標誌
 
     def _init_hardware(self):
         """初始化硬體信息"""
@@ -314,8 +87,11 @@ class WorkerNode:
             self.cpu_score = self._benchmark_cpu()
             self.gpu_score, self.gpu_name, self.gpu_memory_gb = self._detect_gpu()
             
+            self._log(f"Hardware: CPU={self.cpu_cores} cores, RAM={self.memory_gb:.1f}GB")
+            self._log(f"Performance: CPU={self.cpu_score}, GPU={self.gpu_score}")
+            self._log(f"Local IP: {self.local_ip}")
         except Exception as e:
-            print(f"❌ 硬體檢測失敗: {e}")
+            self._log(f"Hardware detection failed: {e}", logging.ERROR)
             # 設置預設值
             self.hostname = "unknown"
             self.cpu_cores = 1
@@ -330,6 +106,7 @@ class WorkerNode:
     def _get_local_ip(self):
         """獲取本機 IP 地址"""
         try:
+            # 連接到一個不存在的地址來獲取本機 IP
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
             ip = s.getsockname()[0]
@@ -359,6 +136,7 @@ class WorkerNode:
                                       creationflags=subprocess.CREATE_NO_WINDOW)
                 output = result.stdout
                 
+                # 解析輸出
                 lines = [line.strip() for line in output.split('\n') if '=' in line]
                 data = {}
                 for line in lines:
@@ -378,9 +156,27 @@ class WorkerNode:
         except:
             return 0, "Detection Failed", 0.0
 
+    def _init_docker(self):
+        """初始化 Docker"""
+        try:
+            self.docker_client = docker.from_env(timeout=10)
+            self.docker_client.ping()
+            self.docker_available = True
+            
+            # 檢查鏡像
+            try:
+                self.docker_client.images.get("hivemind-worker:latest")
+                self._log("Docker image found")
+            except docker.errors.ImageNotFound:
+                self._log("Docker image not found", logging.WARNING)
+                
+        except Exception as e:
+            self._log(f"Docker initialization failed: {e}", logging.WARNING)
+            self.docker_available = False
+            self.docker_client = None
+
     def _init_grpc(self):
         """初始化 gRPC 連接"""
-        print("\n🌐 連接到節點池...")
         try:
             self.channel = grpc.insecure_channel(self.master_address)
             grpc.channel_ready_future(self.channel).result(timeout=10)
@@ -389,10 +185,9 @@ class WorkerNode:
             self.node_stub = nodepool_pb2_grpc.NodeManagerServiceStub(self.channel)
             self.master_stub = nodepool_pb2_grpc.MasterNodeServiceStub(self.channel)
             
-            print(f"✅ 已連接到節點池: {self.master_address}")
+            self._log(f"Connected to master at {self.master_address}")
         except Exception as e:
-            print(f"❌ 節點池連接失敗: {e}")
-            print("⚠️  請檢查節點池地址和網路連接")
+            self._log(f"gRPC connection failed: {e}", logging.ERROR)
             sys.exit(1)
 
     def _init_flask(self):
@@ -400,15 +195,16 @@ class WorkerNode:
         self.app = Flask(__name__, template_folder="templates", static_folder="static")
         self.app.secret_key = secrets.token_hex(32)
         
+        # 配置會話持久性，使用不同的cookie名稱避免與主控端衝突
         self.app.config.update(
-            SESSION_COOKIE_NAME='worker_session',
-            SESSION_COOKIE_SECURE=False,
+            SESSION_COOKIE_NAME='worker_session',  # 與主控端不同的cookie名稱
+            SESSION_COOKIE_SECURE=False,  # 如果使用HTTPS則設為True
             SESSION_COOKIE_HTTPONLY=True,
             SESSION_COOKIE_SAMESITE='Lax',
             SESSION_COOKIE_PATH='/',
             SESSION_COOKIE_DOMAIN=None,
-            PERMANENT_SESSION_LIFETIME=datetime.timedelta(hours=24),
-            SESSION_REFRESH_EACH_REQUEST=True
+            PERMANENT_SESSION_LIFETIME=datetime.timedelta(hours=24),  # 24小時會話
+            SESSION_REFRESH_EACH_REQUEST=True  # 每次請求刷新會話
         )
         
         self._setup_routes()
@@ -571,40 +367,26 @@ class WorkerNode:
                 self.app.run(host='0.0.0.0', port=self.flask_port, debug=False, 
                            use_reloader=False, threaded=True)
             except Exception as e:
-                print(f"❌ Flask 啟動失敗: {e}")
+                self._log(f"Flask failed to start: {e}", logging.ERROR)
                 os._exit(1)
         
+        # 啟動 Flask 服務
         threading.Thread(target=run_flask, daemon=True).start()
+        self._log(f"Flask started on port {self.flask_port}")
         
-        def show_ready_message():
-            time.sleep(2)
-            print("\n" + "="*60)
-            print("🚀 工作節點已就緒！")
-            print("="*60)
-            print(f"🌐 Web 管理介面: http://127.0.0.1:{self.flask_port}")
-            print(f"🔧 節點狀態: {self.status}")
-            print(f"🐳 Docker: {'✅ 可用' if self.docker_available else '❌ 不可用'}")
-            print(f"🔐 VPN: {'✅ 已連接' if self.vpn_connected else '⚠️  未連接'}")
-            print("="*60)
-            print("ℹ️  請在 Web 介面中登入以開始接收任務")
-            
+        # 延遲開啟瀏覽器
+        def open_browser():
+            time.sleep(2)  # 等待 Flask 完全啟動
             url = f"http://127.0.0.1:{self.flask_port}"
             try:
                 webbrowser.open(url)
-            except Exception:
-                pass
+                self._log(f"瀏覽器已開啟: {url}")
+            except Exception as e:
+                self._log(f"無法開啟瀏覽器: {e}", logging.WARNING)
+                self._log(f"請手動開啟: {url}")
         
-        threading.Thread(target=show_ready_message, daemon=True).start()
-
-    def _log(self, message, level=logging.INFO):
-        """記錄日誌"""
-        # 只記錄到內部日誌，不輸出到控制台（保持控制台乾淨）
-        with self.log_lock:
-            timestamp = datetime.datetime.now().strftime('%H:%M:%S')
-            level_name = logging.getLevelName(level)
-            self.logs.append(f"{timestamp} - {level_name} - {message}")
-            if len(self.logs) > 500:
-                self.logs.pop(0)
+        # 在獨立線程中開啟瀏覽器
+        threading.Thread(target=open_browser, daemon=True).start()
 
     def _login(self, username, password):
         """登入到節點池"""
@@ -1093,6 +875,22 @@ class WorkerNode:
             except:
                 return None
 
+    def _log(self, message, level=logging.INFO):
+        """記錄日誌"""
+        if level == logging.INFO:
+            logging.info(message)
+        elif level == logging.WARNING:
+            logging.warning(message)
+        elif level == logging.ERROR:
+            logging.error(message)
+        
+        with self.log_lock:
+            timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+            level_name = logging.getLevelName(level)
+            self.logs.append(f"{timestamp} - {level_name} - {message}")
+            if len(self.logs) > 500:  # 限制日誌數量
+                self.logs.pop(0)
+
 # gRPC 服務實現
 class WorkerNodeServicer(nodepool_pb2_grpc.WorkerNodeServiceServicer):
     def __init__(self, worker_node):
@@ -1261,13 +1059,10 @@ class WorkerNodeServicer(nodepool_pb2_grpc.WorkerNodeServiceServicer):
 
 if __name__ == "__main__":
     try:
-        print("🔥 啟動 HiveMind 工作節點...")
-        
         # 創建工作節點
         worker = WorkerNode()
         
         # 啟動 gRPC 服務
-        print("\n⚙️  啟動 gRPC 服務...")
         server = grpc.server(futures.ThreadPoolExecutor(max_workers=5))
         nodepool_pb2_grpc.add_WorkerNodeServiceServicer_to_server(
             WorkerNodeServicer(worker), server
@@ -1276,20 +1071,18 @@ if __name__ == "__main__":
         server.add_insecure_port(f'[::]:{NODE_PORT}')
         server.start()
         
-        print(f"✅ gRPC 服務已啟動在端口 {NODE_PORT}")
+        worker._log(f"Worker Node started on port {NODE_PORT}")
+        worker._log(f"Flask UI: http://localhost:{FLASK_PORT}")
         
         # 保持運行
         try:
-            print("\n⏳ 工作節點運行中... (按 Ctrl+C 停止)")
             while True:
                 time.sleep(60)
         except KeyboardInterrupt:
-            print("\n🛑 收到停止信號...")
+            worker._log("Shutting down...")
             worker._stop_status_reporting()
             server.stop(grace=5)
-            print("✅ 工作節點已停止")
             
     except Exception as e:
-        print(f"❌ 工作節點啟動失敗: {e}")
-        input("按 Enter 鍵退出...")
+        logging.critical(f"Failed to start worker: {e}")
         sys.exit(1)

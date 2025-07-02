@@ -1,4 +1,4 @@
-/* 基本變數定義 */
+/* 🎨 深色模式配色指南實現 */
 :root {
     --primary-color: #64748b;
     --secondary-color: #475569;
@@ -17,14 +17,29 @@
     --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
 }
 
-/* 深色主題變數 */
+/* 🌙 深色主題配色（按照指南） */
 .dark {
-    --background-color: #0f172a;
-    --card-background: #1e293b;
-    --text-primary: #f1f5f9;
-    --text-secondary: #cbd5e1;
-    --text-muted: #64748b;
-    --border-color: #334155;
+    /* 🪨 背景色 */
+    --background-color: #121212;        /* 主背景 - 超深灰 */
+    --card-background: #1E1E1E;         /* 卡片背景 - 比背景稍亮 */
+    --surface-background: #1A1A1A;      /* 區塊背景 */
+    --divider-color: #2A2A2A;           /* 分隔線 */
+    
+    /* 🧾 字體顏色 */
+    --text-primary: #E0E0E0;            /* 主文 - 高亮度灰白 */
+    --text-secondary: #B0B0B0;          /* 次文 - 稍低對比 */
+    --text-muted: #777777;              /* 輕文 - 提示文字 */
+    
+    /* 🧲 按鈕顏色 */
+    --primary-button-bg: #1E88E5;       /* 主要按鈕 - 亮藍 */
+    --secondary-button-bg: #2C2C2C;     /* 次要按鈕 */
+    --danger-button-bg: #E53935;        /* 危險按鈕 */
+    
+    /* 🧩 輔助元素 */
+    --border-color: #333333;            /* 邊框 - 低對比 */
+    --menu-background: #1C1C1C;         /* 選單背景 */
+    --hover-overlay: rgba(255,255,255,0.05);  /* 懸停效果 */
+    --ripple-effect: rgba(255,255,255,0.1);   /* 點擊波紋 */
 }
 
 /* 基本樣式重置 */
@@ -36,10 +51,171 @@
 
 body {
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: var(--background-color);
-    color: var(--text-primary);
     line-height: 1.6;
     transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* 確保導航欄可見 */
+nav {
+    position: relative;
+    z-index: 1000;
+}
+
+/* 確保主題切換按鈕可見且正常工作 */
+#theme-toggle {
+    background: #e5e7eb !important;
+    border: 1px solid #d1d5db !important;
+    color: #374151 !important;
+    cursor: pointer !important;
+    padding: 0.5rem !important;
+    border-radius: 0.5rem !important;
+    transition: all 0.3s ease !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: auto !important;
+    height: auto !important;
+}
+
+.dark #theme-toggle {
+    background: #374151 !important;
+    border-color: #4b5563 !important;
+    color: #f9fafb !important;
+}
+
+#theme-toggle:hover {
+    background: #d1d5db !important;
+    transform: translateY(-1px) !important;
+}
+
+.dark #theme-toggle:hover {
+    background: #4b5563 !important;
+}
+
+/* 確保圖標可見 */
+#theme-toggle-icon {
+    font-size: 1rem !important;
+    transition: all 0.3s ease !important;
+}
+
+/* 🎨 深色模式文字顏色修正 */
+/* 標題文字 */
+.text-neutral-900 { color: #171717; }
+.dark .text-neutral-900 { color: #ffffff !important; }
+
+.text-neutral-800 { color: #262626; }
+.dark .text-neutral-800 { color: #f5f5f5 !important; }
+
+.text-neutral-700 { color: #404040; }
+.dark .text-neutral-700 { color: #e5e5e5 !important; }
+
+/* 副標題和正文 */
+.text-neutral-600 { color: #525252; }
+.dark .text-neutral-600 { color: #d4d4d4 !important; }
+
+.text-neutral-500 { color: #737373; }
+.dark .text-neutral-500 { color: #a3a3a3 !important; }
+
+.text-neutral-400 { color: #a3a3a3; }
+.dark .text-neutral-400 { color: #888888 !important; }
+
+.text-neutral-300 { color: #d4d4d4; }
+.dark .text-neutral-300 { color: #b0b0b0 !important; }
+
+.text-neutral-200 { color: #e5e5e5; }
+.dark .text-neutral-200 { color: #e0e0e0 !important; }
+
+.text-neutral-100 { color: #f5f5f5; }
+.dark .text-neutral-100 { color: #ffffff !important; }
+
+/* 背景色修正 */
+.bg-neutral-100 { background-color: #f5f5f5; }
+.dark .bg-neutral-100 { background-color: #121212 !important; }
+
+.bg-neutral-800 { background-color: #262626; }
+.dark .bg-neutral-800 { background-color: #1e1e1e !important; }
+
+.bg-neutral-900 { background-color: #171717; }
+.dark .bg-neutral-900 { background-color: #0a0a0a !important; }
+
+/* 邊框色修正 */
+.border-neutral-200 { border-color: #e5e5e5; }
+.dark .border-neutral-200 { border-color: #333333 !important; }
+
+.border-neutral-700 { border-color: #404040; }
+.dark .border-neutral-700 { border-color: #2a2a2a !important; }
+
+/* 圖示確保在深色模式下可見 */
+.fas, .fab {
+    color: inherit;
+}
+
+/* 確保卡片在深色模式下的可見性 */
+.card {
+    background: var(--card-background);
+    border: 1px solid var(--border-color);
+    border-radius: 1rem;
+    padding: 1.5rem;
+    box-shadow: var(--shadow-sm);
+    transition: all 0.2s ease;
+}
+
+.dark .card {
+    background: var(--card-background) !important;
+    border-color: var(--border-color) !important;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3) !important;
+}
+
+.card:hover {
+    box-shadow: var(--shadow-md);
+}
+
+.dark .card:hover {
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4) !important;
+    background: #222222 !important;
+}
+
+/* 確保導航欄可見 */
+nav {
+    position: relative;
+    z-index: 1000;
+}
+
+/* 確保主題切換按鈕可見且正常工作 */
+#theme-toggle {
+    background: #e5e7eb !important;
+    border: 1px solid #d1d5db !important;
+    color: #374151 !important;
+    cursor: pointer !important;
+    padding: 0.5rem !important;
+    border-radius: 0.5rem !important;
+    transition: all 0.3s ease !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: auto !important;
+    height: auto !important;
+}
+
+.dark #theme-toggle {
+    background: #374151 !important;
+    border-color: #4b5563 !important;
+    color: #f9fafb !important;
+}
+
+#theme-toggle:hover {
+    background: #d1d5db !important;
+    transform: translateY(-1px) !important;
+}
+
+.dark #theme-toggle:hover {
+    background: #4b5563 !important;
+}
+
+/* 確保圖標可見 */
+#theme-toggle-icon {
+    font-size: 1rem !important;
+    transition: all 0.3s ease !important;
 }
 
 /* 導航欄樣式 */
@@ -169,9 +345,9 @@ body {
 }
 
 .dark .message-error {
-    background-color: rgba(220, 38, 38, 0.1);
-    color: #fca5a5;
-    border-color: rgba(220, 38, 38, 0.3);
+    background-color: rgba(229, 57, 53, 0.1);
+    color: #ff8a80;
+    border-color: rgba(229, 57, 53, 0.3);
 }
 
 /* Tailwind 風格工具類 */
@@ -306,53 +482,240 @@ body {
 
 /* 主題切換相關 */
 .theme-toggle-btn {
-    background: none;
-    border: none;
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.2);
     color: var(--text-secondary);
     cursor: pointer;
-    padding: 0.5rem;
-    border-radius: 0.375rem;
-    transition: all 0.2s ease;
+    padding: 0.625rem;
+    border-radius: 0.5rem;
+    transition: all 0.3s ease;
+    backdrop-filter: blur(8px);
+    font-size: 1.125rem;
+    width: 2.75rem;
+    height: 2.75rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .theme-toggle-btn:hover {
+    background: rgba(255, 255, 255, 0.15);
+    border-color: rgba(255, 255, 255, 0.3);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+}
+
+.dark .theme-toggle-btn {
+    background: rgba(255, 255, 255, 0.05);
+    border-color: var(--border-color);
+    color: var(--text-secondary);
+}
+
+.dark .theme-toggle-btn:hover {
+    background: var(--hover-overlay);
+    border-color: #444444;
     color: var(--text-primary);
+}
+
+/* 🎨 深色模式按鈕樣式更新 */
+.btn-primary {
+    background-color: var(--text-primary);
+    color: var(--background-color);
+    border: none;
+    padding: 0.75rem 1.5rem;
+    border-radius: 0.5rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.dark .btn-primary {
+    background-color: var(--primary-button-bg);
+    color: #FFFFFF;
+}
+
+.btn-primary:hover {
+    background-color: var(--primary-color);
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-md);
+}
+
+.dark .btn-primary:hover {
+    background-color: #1976D2;
+    box-shadow: 0 4px 12px rgba(30, 136, 229, 0.3);
+}
+
+.btn-secondary {
+    background-color: transparent;
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    padding: 0.75rem 1.5rem;
+    border-radius: 0.5rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.dark .btn-secondary {
+    background-color: var(--secondary-button-bg);
+    color: var(--text-primary);
+    border-color: var(--border-color);
+}
+
+.btn-secondary:hover {
     background-color: var(--border-color);
 }
 
-/* 深色模式的背景和顏色 */
-.dark .bg-neutral-100 { background-color: #171717; }
-.dark .bg-neutral-800 { background-color: #262626; }
-.dark .bg-neutral-900 { background-color: #171717; }
-.dark .text-neutral-100 { color: #f5f5f5; }
-.dark .text-neutral-200 { color: #e5e5e5; }
-.dark .text-neutral-300 { color: #d4d4d4; }
-.dark .text-neutral-400 { color: #a3a3a3; }
-.dark .bg-white\/90 { background-color: rgba(38, 38, 38, 0.9); }
-
-/* 媒體查詢 */
-@media (min-width: 768px) {
-    .md\:block { display: block; }
-    .md\:grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .md\:grid-cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.dark .btn-secondary:hover {
+    background-color: #3A3A3A;
+    border-color: #444444;
 }
 
-@media (min-width: 1024px) {
-    .lg\:col-span-1 { grid-column: span 1 / span 1; }
-    .lg\:col-span-3 { grid-column: span 3 / span 3; }
-    .lg\:grid-cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-    .lg\:px-8 { padding-left: 2rem; padding-right: 2rem; }
+/* 🎨 卡片樣式深色優化 */
+.card {
+    background: var(--card-background);
+    border: 1px solid var(--border-color);
+    border-radius: 1rem;
+    padding: 1.5rem;
+    box-shadow: var(--shadow-sm);
+    transition: all 0.2s ease;
 }
 
-/* 列表樣式 */
-.list-disc { list-style-type: disc; }
-.list-decimal { list-style-type: decimal; }
-.list-inside { list-style-position: inside; }
+.dark .card {
+    background: var(--card-background) !important;
+    border-color: var(--border-color) !important;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3) !important;
+}
 
-/* 其他工具類 */
-.overflow-x-auto { overflow-x: auto; }
-.overflow-auto { overflow: auto; }
-.underline { text-decoration: underline; }
-.tracking-tight { letter-spacing: -0.025em; }
-.whitespace-nowrap { white-spacing: nowrap; }
-.overflow-hidden { overflow: hidden; }
+.card:hover {
+    box-shadow: var(--shadow-md);
+}
+
+.dark .card:hover {
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4) !important;
+    background: #222222 !important;
+}
+
+/* 🎨 表單樣式深色優化 */
+.form-input {
+    width: 100%;
+    padding: 0.75rem 1rem;
+    background-color: var(--card-background);
+    border: 1px solid var(--border-color);
+    border-radius: 0.5rem;
+    color: var(--text-primary);
+    transition: all 0.2s ease;
+}
+
+.dark .form-input {
+    background-color: var(--surface-background);
+    border-color: var(--border-color);
+    color: var(--text-primary);
+}
+
+.form-input:focus {
+    outline: none;
+    border-color: var(--primary-color);
+    box-shadow: 0 0 0 3px rgb(100 116 139 / 0.1);
+}
+
+.dark .form-input:focus {
+    border-color: var(--primary-button-bg);
+    box-shadow: 0 0 0 3px rgba(30, 136, 229, 0.2);
+}
+
+.form-input::placeholder {
+    color: var(--text-muted);
+}
+
+/* 🎨 訊息樣式深色優化 */
+.message-success {
+    background-color: #f0fdf4;
+    color: var(--success-color);
+    border-color: #bbf7d0;
+}
+
+.dark .message-success {
+    background-color: rgba(5, 150, 105, 0.1);
+    color: #6ee7b7;
+    border-color: rgba(5, 150, 105, 0.3);
+}
+
+.message-error {
+    background-color: #fef2f2;
+    color: var(--error-color);
+    border-color: #fecaca;
+}
+
+.dark .message-error {
+    background-color: rgba(229, 57, 53, 0.1);
+    color: #ff8a80;
+    border-color: rgba(229, 57, 53, 0.3);
+}
+
+/* 🎨 深色模式專用工具類 */
+.dark .bg-neutral-100 { background-color: var(--background-color); }
+.dark .bg-neutral-800 { background-color: var(--card-background); }
+.dark .bg-neutral-900 { background-color: var(--surface-background); }
+.dark .text-neutral-100 { color: var(--text-primary); }
+.dark .text-neutral-200 { color: var(--text-primary); }
+.dark .text-neutral-300 { color: var(--text-secondary); }
+.dark .text-neutral-400 { color: var(--text-secondary); }
+.dark .text-neutral-500 { color: var(--text-muted); }
+.dark .border-neutral-700 { border-color: var(--border-color); }
+
+/* 🎨 懸停效果增強 */
+.dark .hover\:bg-gray-700\/50:hover {
+    background-color: var(--hover-overlay);
+}
+
+.dark .hover\:bg-gray-100:hover {
+    background-color: var(--hover-overlay);
+}
+
+/* 🎨 漸變背景深色優化 */
+.dark .bg-gradient-to-br {
+    background: linear-gradient(135deg, var(--background-color) 0%, #0A0A0A 50%, var(--surface-background) 100%);
+}
+
+/* 🎨 動畫和過渡效果 */
+.transition-theme {
+    transition: background-color 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+                color 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+                border-color 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* 波紋效果 */
+@keyframes ripple {
+    0% {
+        transform: scale(0);
+        opacity: 1;
+    }
+    100% {
+        transform: scale(4);
+        opacity: 0;
+    }
+}
+
+.ripple-effect {
+    position: relative;
+    overflow: hidden;
+}
+
+.ripple-effect::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 0;
+    height: 0;
+    border-radius: 50%;
+    background: var(--ripple-effect);
+    transform: translate(-50%, -50%);
+    transition: width 0.6s, height 0.6s;
+}
+
+.ripple-effect:active::before {
+    width: 300px;
+    height: 300px;
+}

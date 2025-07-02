@@ -43,3 +43,89 @@
 {% endblock %}
 
 {% block scripts %}
+<script>
+async function handleLogin(event) {
+    event.preventDefault();
+    
+    const submitBtn = document.getElementById('submitBtn');
+    const submitText = document.getElementById('submitText');
+    const loadingIcon = document.getElementById('loadingIcon');
+    const errorMessage = document.getElementById('error-message');
+    const successMessage = document.getElementById('success-message');
+    
+    // 隱藏之前的消息
+    errorMessage.classList.add('hidden');
+    successMessage.classList.add('hidden');
+    
+    // 顯示載入狀態
+    submitBtn.disabled = true;
+    submitText.textContent = '登入中...';
+    loadingIcon.classList.remove('hidden');
+    
+    try {
+        const formData = new FormData(event.target);
+        const loginData = {
+            username: formData.get('username'),
+            password: formData.get('password')
+        };
+        
+        const response = await fetch('/api/login', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(loginData)
+        });
+        
+        const result = await response.json();
+        
+        if (response.ok) {
+            // 登入成功
+            successMessage.textContent = result.message || '登入成功！';
+            successMessage.classList.remove('hidden');
+            
+            // 儲存 token
+            localStorage.setItem('access_token', result.access_token);
+            localStorage.setItem('user_info', JSON.stringify(result.user));
+            
+            // 延遲跳轉到首頁
+            setTimeout(() => {
+                window.location.href = '/';
+            }, 1000);
+        } else {
+            // 登入失敗
+            errorMessage.textContent = result.error || '登入失敗，請重試';
+            errorMessage.classList.remove('hidden');
+        }
+    } catch (error) {
+        console.error('登入錯誤:', error);
+        errorMessage.textContent = '網路錯誤，請檢查您的連線';
+        errorMessage.classList.remove('hidden');
+    } finally {
+        // 恢復按鈕狀態
+        submitBtn.disabled = false;
+        submitText.textContent = '登入';
+        loadingIcon.classList.add('hidden');
+    }
+}
+
+// 檢查是否已經登入
+document.addEventListener('DOMContentLoaded', function() {
+    const token = localStorage.getItem('access_token');
+    if (token) {
+        // 如果已經有 token，跳轉到首頁
+        window.location.href = '/';
+    }
+});
+
+// 回車鍵提交表單
+document.addEventListener('keypress', function(event) {
+    if (event.key === 'Enter') {
+        const form = document.getElementById('loginForm');
+        if (form) {
+            form.dispatchEvent(new Event('submit'));
+        }
+    }
+});
+</script>
+{% endblock %}
