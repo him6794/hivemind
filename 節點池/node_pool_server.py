@@ -7,6 +7,7 @@ import nodepool_pb2_grpc
 from user_service import UserServiceServicer
 from node_manager_service import NodeManagerServiceServicer
 from master_node_service import MasterNodeServiceServicer
+from config import Config
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 DEFAULT_PORT=50051
@@ -43,7 +44,7 @@ def serve():
     
     server.add_insecure_port(f'[::]:{DEFAULT_PORT}')
     logging.info(f"節點池服務已啟動，端口: {DEFAULT_PORT}")
-    logging.info(f"任務文件存儲目錄: d:/hivemind/task_storage")
+    logging.info(f"任務文件存儲目錄: {getattr(Config, 'TASK_STORAGE_PATH', '/mnt/myusb/hivemind/task_storage')}")
     server.start()
     server.wait_for_termination()
     

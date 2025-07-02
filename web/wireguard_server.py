@@ -57,12 +57,15 @@ class WireGuardServer:
         self.monitoring_active = False
         self.connection_log = []
         
-        self._load_or_generate_server_keys()
-        self._setup_firewall()
-        self._setup_server()
-        
-        # 啟動連接監控
-        self._start_connection_monitoring()
+        # 只允許主進程做底層初始化
+        is_gunicorn_worker = "gunicorn" in os.environ.get("SERVER_SOFTWARE", "")
+        is_main_process = os.getpid() == os.getppid() or os.environ.get("IS_WG_MASTER") == "1"
+        do_init = not is_gunicorn_worker or is_main_process
+        if do_init:
+            self._load_or_generate_server_keys()
+            self._setup_firewall()
+            self._setup_server()
+            self._start_connection_monitoring()
         
     def _find_wireguard_tools(self):
         """尋找WireGuard工具路徑"""

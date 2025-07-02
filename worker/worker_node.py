@@ -21,13 +21,15 @@ import shutil
 import socket
 import uuid
 import webbrowser
+import netifaces
+import requests  # 新增
 
 # 配置
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(threadName)s] - %(message)s')
 
 NODE_PORT = int(os.environ.get("NODE_PORT", 50053))
 FLASK_PORT = int(os.environ.get("FLASK_PORT", 5000))
-MASTER_ADDRESS = os.environ.get("MASTER_ADDRESS", "127.0.0.1:50051")
+MASTER_ADDRESS = os.environ.get("MASTER_ADDRESS", "10.0.0.1:50051")
 NODE_ID = os.environ.get("NODE_ID", f"worker-{platform.node().split('.')[0]}-{NODE_PORT}")
 
 class WorkerNode:
@@ -36,7 +38,7 @@ class WorkerNode:
         self.port = NODE_PORT
         self.master_address = MASTER_ADDRESS
         self.flask_port = FLASK_PORT
-        
+
         # 狀態管理
         self.status = "Initializing"
         self.current_task_id = None
@@ -45,32 +47,84 @@ class WorkerNode:
         self.is_registered = False
         self.login_time = None
         self.cpt_balance = 0
-        
+
         # 線程控制
         self.status_thread = None
         self._stop_event = threading.Event()
         self.logs = []
         self.log_lock = threading.Lock()
-        
+
+        # 用戶會話管理
+        self.user_sessions = {}
+        self.session_lock = threading.Lock()
+        self._stop_current_task = False
+
+        # 先自動連線 VPN
+        self._auto_join_vpn()  # <-- 移到最前面
+
         # 硬體信息
         self._init_hardware()
-        
         # Docker 初始化
         self._init_docker()
-        
         # gRPC 連接
         self._init_grpc()
-        
         # Flask 應用
         self._init_flask()
-        
         self.status = "Waiting for Login"
 
-        # 用戶會話管理 - 存在後端陣列，不存在瀏覽器
-        self.user_sessions = {}  # session_id -> user_data
-        self.session_lock = threading.Lock()
+    def _auto_join_vpn(self):
+        """自動請求主控端 /api/vpn/join 取得 WireGuard 配置並連線 VPN"""
+        try:
+            api_url = "https://hivemind.justin0711.com/api/vpn/join"
+            client_name = self.node_id
+            resp = requests.post(api_url, json={"client_name": client_name}, timeout=15, verify=True)
+            try:
+                resp_json = resp.json()
+            except Exception:
+                resp_json = {}
+            if resp.status_code == 200 and resp_json.get("success"):
+                config_content = resp_json.get("config")
+                # Worker 端直接寫 wg0.conf 在當前目錄
+                config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wg0.conf")
+                try:
+                    with open(config_path, "w") as f:
+                        f.write(config_content)
+                    self._log(f"自動取得 WireGuard 配置並寫入 {config_path}")
+                except Exception as e:
+                    self._log(f"寫入 WireGuard 配置失敗: {e}", logging.WARNING)
+                    return
+                # Windows/Linux 都在當前目錄執行 wg-quick，需有權限與路徑
+                result = os.system(f"wg-quick down {config_path} 2>/dev/null; wg-quick up {config_path}")
+                if result == 0:
+                    self._log("WireGuard VPN 啟動成功")
+                else:
+                    self._log("WireGuard VPN 啟動失敗，請檢查權限與配置", logging.WARNING)
+                    self._prompt_manual_vpn(config_path)
+            else:
+                error_msg = resp_json.get("error") if resp_json else resp.text
+                self._log(f"自動取得 WireGuard 配置失敗: {error_msg}", logging.WARNING)
+                if error_msg and "VPN 服務不可用" in error_msg:
+                    self._log("請確認主控端 Flask 啟動時有正確初始化 WireGuardServer，且 /api/vpn/join 可用", logging.WARNING)
+                self._prompt_manual_vpn()
+        except Exception as e:
+            self._log(f"自動請求 /api/vpn/join 失敗: {e}", logging.WARNING)
+            self._prompt_manual_vpn()
 
-        self._stop_current_task = False  # 添加停止標誌
+    def _prompt_manual_vpn(self, config_path=None):
+        """提示用戶手動連線 WireGuard"""
+        msg = (
+            "\n[提示] 自動連線 WireGuard 失敗，請手動連線 VPN：\n"
+            "1. 請找到您的設定檔(wg0.conf)。\n"
+            "2. 手動打開wireguard客戶端導入配置\n"
+            "3. 如遇權限問題請用管理員/Root 權限執行。\n"
+
+        )
+        print(msg)
+        print('如果您已經連線好請按y')
+        a=input()
+        if a=='y':
+            self._log("用戶已確認手動連線 WireGuard")
+        
 
     def _init_hardware(self):
         """初始化硬體信息"""
@@ -104,9 +158,17 @@ class WorkerNode:
             self.gpu_memory_gb = 0.0
 
     def _get_local_ip(self):
-        """獲取本機 IP 地址"""
+        """獲取本機 IP 地址（WireGuard 啟動後會多一個 wg0 介面）"""
         try:
-            # 連接到一個不存在的地址來獲取本機 IP
+            # 嘗試取得 wg0 介面的 IP（如果存在）
+            if 'wg0' in netifaces.interfaces():
+                addrs = netifaces.ifaddresses('wg0')
+                if netifaces.AF_INET in addrs:
+                    wg0_ip = addrs[netifaces.AF_INET][0]['addr']
+                    return wg0_ip
+        except Exception:
+            pass
+        try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
             ip = s.getsockname()[0]
@@ -420,8 +482,8 @@ class WorkerNode:
             request = nodepool_pb2.RegisterWorkerNodeRequest(
                 node_id=self.username,
                 hostname=self.local_ip,  # 使用本機 IP 而不是 127.0.0.1
-                cpu_cores=self.cpu_cores,
-                memory_gb=int(self.memory_gb),
+                cpu_cores=int(self.cpu_cores/1000),
+                memory_gb=int(self.memory_gb/10),
                 cpu_score=self.cpu_score,
                 gpu_score=self.gpu_score,
                 gpu_name=self.gpu_name,
@@ -1059,7 +1121,6 @@ class WorkerNodeServicer(nodepool_pb2_grpc.WorkerNodeServiceServicer):
 
 if __name__ == "__main__":
     try:
-        # 創建工作節點
         worker = WorkerNode()
         
         # 啟動 gRPC 服務

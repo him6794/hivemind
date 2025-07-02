@@ -20,7 +20,12 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%
 
 # 新增文件存儲管理器
 class FileStorageManager:
-    def __init__(self, base_path="d:/hivemind/task_storage"):
+    def __init__(self, base_path=None):
+        # 修正：預設為 Linux 路徑，可用環境變數或 config 覆蓋
+        if base_path is None:
+            base_path = os.environ.get("TASK_STORAGE_PATH") \
+                or getattr(Config, "TASK_STORAGE_PATH", None) \
+                or "/mnt/myusb/hivemind/task_storage"
         self.base_path = base_path
         self.ensure_directory()
     
@@ -903,7 +908,11 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
         logging.info("獎勵調度器已啟動")
 
     def _increment_task_fail_count(self, task_id, assigned_node, user_id):
-        """增加任務失敗計數"""
+        """
+        增加任務失敗計數。
+        - 如果是 worker 超時（健康檢查發現節點失聯），則重新分發（設為 PENDING）。
+        - 如果是任務本身失敗（worker 回報失敗），則直接設為 FAILED，不重新分發。
+        """
         try:
             if task_id not in self.task_health:
                 self.task_health[task_id] = {
@@ -917,14 +926,12 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
             self.task_health[task_id]["fail_count"] += 1
             self.task_health[task_id]["last_check"] = time.time()
             
-            # 如果失敗次數過多，標記任務為失敗
+            # 只有健康檢查（worker 超時）才會進來這裡
             if self.task_health[task_id]["fail_count"] >= 3:
-                self.task_manager.update_task_status(task_id, "FAILED")
-                logging.error(f"任務 {task_id} 失敗次數過多，標記為 FAILED")
-                
-                # 從健康檢查中移除
+                # 重新分發：設為 PENDING，assigned_node 設為 None
+                self.task_manager.update_task_status(task_id, "PENDING", assigned_node=None)
+                logging.warning(f"任務 {task_id} 失敗次數過多（worker 超時），已重設為 PENDING，等待重新分發")
                 del self.task_health[task_id]
-            
         except Exception as e:
             logging.error(f"更新任務失敗計數錯誤: {e}")
 
@@ -1345,10 +1352,13 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                 message = f"Task {task_id} completed successfully"
                 logging.info(message)
             else:
-                # 任務失敗
+                # 任務本身失敗（worker 回報失敗），直接設為 FAILED，不重新分發
                 success = self.task_manager.update_task_status(task_id, "FAILED")
                 message = f"Task {task_id} failed"
                 logging.info(message)
+                # 從健康檢查中移除，**不會進行重新分發**
+                if task_id in self.task_health:
+                    del self.task_health[task_id]
             
             # 將節點狀態設回 Idle
             if node_id:
@@ -1359,7 +1369,6 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                 del self.task_health[task_id]
             
             return nodepool_pb2.StatusResponse(success=True, message=message)
-                
         except Exception as e:
             logging.error(f"TaskCompleted 服務錯誤: {e}", exc_info=True)
             context.set_code(grpc.StatusCode.INTERNAL)
@@ -1546,7 +1555,7 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                 try:
                     node_info = self.node_manager.get_node_info(assigned_node)
                     if node_info and node_info.get("port", 0) > 0:
-                        worker_host = node_info.get("hostname", "127.0.0.1")
+                        worker_host = node_info.get("hostname")
                         worker_port = node_info.get("port", 50053)
                         
                         channel = grpc.insecure_channel(f"{worker_host}:{worker_port}")
@@ -1653,7 +1662,7 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
             elif status == "FAILED":
                 # 失敗的任務也可能有部分結果
                 if result_zip:
-                    # 失敗的任務結果也需要清理
+                    #  失敗的任務結果也需要清理
                     self.task_manager.file_storage.mark_for_cleanup(task_id)
                     self.task_manager.file_storage.delayed_cleanup_task_files(task_id, delay_seconds=10)
                     

@@ -12,9 +12,10 @@ from flask import Flask, jsonify, request, render_template, redirect, url_for, f
 import io
 from functools import wraps
 import uuid
+import requests  # 新增
 
 # --- Configuration ---
-GRPC_SERVER_ADDRESS = os.environ.get('GRPC_SERVER_ADDRESS', '127.0.0.1:50051')
+GRPC_SERVER_ADDRESS = os.environ.get('GRPC_SERVER_ADDRESS', '10.0.0.1:50051')
 FLASK_SECRET_KEY = os.environ.get('FLASK_SECRET_KEY', 'a-default-master-secret-key')
 # 移除預設的用戶名和密碼
 MASTER_USERNAME = os.environ.get('MASTER_USERNAME')  # 不設默認值
@@ -557,7 +558,64 @@ class MasterNodeUI:
         
         return timestamp, content, level
 
+    def auto_join_vpn(self):
+        """
+        主控端自動請求 /api/vpn/join 取得 WireGuard 配置並嘗試連線 VPN。
+        若自動連線失敗，提示用戶手動連線。
+        """
+        try:
+            api_url = "https://hivemind.justin0711.com/api/vpn/join"
+            nodename = os.environ.get("COMPUTERNAME", "master")
+            client_name = f"master-{nodename}-{os.getpid()}"
+            resp = requests.post(api_url, json={"client_name": client_name}, timeout=15, verify=True)
+            try:
+                resp_json = resp.json()
+            except Exception:
+                resp_json = {}
+            if resp.status_code == 200 and resp_json.get("success"):
+                config_content = resp_json.get("config")
+                config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wg0.conf")
+                try:
+                    with open(config_path, "w") as f:
+                        f.write(config_content)
+                    logging.info(f"自動取得 WireGuard 配置並寫入 {config_path}")
+                except Exception as e:
+                    logging.warning(f"寫入 WireGuard 配置失敗: {e}")
+                    return
+                # 嘗試自動啟動 VPN
+                result = os.system(f"wg-quick down {config_path} 2>/dev/null; wg-quick up {config_path}")
+                if result == 0:
+                    logging.info("WireGuard VPN 啟動成功")
+                else:
+                    logging.warning("WireGuard VPN 啟動失敗，請檢查權限與配置")
+                    self.prompt_manual_vpn(config_path)
+            else:
+                error_msg = resp_json.get("error") if resp_json else resp.text
+                logging.warning(f"自動取得 WireGuard 配置失敗: {error_msg}")
+                if error_msg and "VPN 服務不可用" in error_msg:
+                    logging.warning("請確認主控端 Flask 啟動時有正確初始化 WireGuardServer，且 /api/vpn/join 可用")
+                self.prompt_manual_vpn()
+        except Exception as e:
+            logging.warning(f"自動請求 /api/vpn/join 失敗: {e}")
+            self.prompt_manual_vpn()
+
+    def prompt_manual_vpn(self, config_path=None):
+        """提示用戶手動連線 WireGuard"""
+        msg = (
+            "\n[提示] 主控端自動連線 WireGuard 失敗，請手動連線 VPN：\n"
+            "1. 請找到您的設定檔(wg0.conf)。\n"
+            "2. 手動打開wireguard客戶端導入配置\n"
+            "3. 如遇權限問題請用管理員/Root 權限執行。\n"
+        )
+        print(msg)
+        print('如果您已經連線好請按y')
+        a = input()
+        if a == 'y':
+            logging.info("用戶已確認主控端手動連線 WireGuard")
+
     def run(self):
+        # 先自動連線 VPN
+        self.auto_join_vpn()
         if not self._connect_grpc():
             logging.error("無法連接到節點池，退出")
             return

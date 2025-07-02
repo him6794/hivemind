@@ -5,11 +5,11 @@ import os
 import sys
 import time
 from collections import defaultdict
-# 添加 VPN 模組路徑
+import requests
+# 添加節點池模組路徑
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'vpn')))
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from 節點池 import user_service
-from wireguard_server import WireGuardServer
 from dotenv import load_dotenv
 
 # 載入環境變數
@@ -18,15 +18,14 @@ load_dotenv()
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
 
-# 從環境變數載入配置
-WIREGUARD_CONFIG = {
-    'server_ip': os.getenv('WIREGUARD_SERVER_IP', '114.25.181.43'),
-    'server_port': int(os.getenv('WIREGUARD_SERVER_PORT', '51820')),
-    'network': os.getenv('WIREGUARD_NETWORK', '10.0.0.0/24'),
-    'dns_servers': os.getenv('VPN_DNS_SERVERS', '8.8.8.8,1.1.1.1').split(','),
-    'persistent_keepalive': int(os.getenv('VPN_PERSISTENT_KEEPALIVE', '25')),
-    'mtu': int(os.getenv('VPN_MTU', '1420'))
+# VPN 服務配置
+VPN_SERVICE_CONFIG = {
+    'host': os.getenv('VPN_SERVICE_HOST', '127.0.0.1'),
+    'port': int(os.getenv('VPN_SERVICE_PORT', '5008')),
+    'timeout': int(os.getenv('VPN_SERVICE_TIMEOUT', '10'))
 }
+
+VPN_SERVICE_URL = f"http://{VPN_SERVICE_CONFIG['host']}:{VPN_SERVICE_CONFIG['port']}"
 
 SECURITY_CONFIG = {
     'rate_limit_seconds': int(os.getenv('RATE_LIMIT_SECONDS', '5')),
@@ -36,15 +35,13 @@ SECURITY_CONFIG = {
 }
 
 STORAGE_CONFIG = {
-    'config_dir': os.getenv('CONFIG_DIR', 'd:/hivemind/wireguard_configs'),
-    'log_dir': os.getenv('LOG_DIR', 'd:/hivemind/vpn/logs'),
-    'upload_dir': os.getenv('UPLOAD_DIR', 'd:/hivemind/uploads'),
+    'log_dir': os.getenv('LOG_DIR', '/mnt/myusb/hivemind/vpn/logs'),
+    'upload_dir': os.getenv('UPLOAD_DIR', '/mnt/myusb/hivemind/uploads'),
     'max_file_size': int(os.getenv('MAX_FILE_SIZE', '10485760'))
 }
 
 # 初始化服務
 user_service_obj = user_service.UserServiceServicer()
-wireguard_server = None
 
 # IP 限流字典
 ip_rate_limit = defaultdict(float)
@@ -61,71 +58,31 @@ def check_rate_limit(ip_address):
     ip_rate_limit[ip_address] = current_time
     return True
 
-def init_wireguard_server():
-    """初始化 WireGuard 伺服器"""
-    global wireguard_server
+def call_vpn_service(endpoint, method='GET', data=None):
+    """調用 VPN 服務的通用方法"""
     try:
-        # 確保配置目錄存在
-        os.makedirs(STORAGE_CONFIG['config_dir'], exist_ok=True)
-        os.makedirs(STORAGE_CONFIG['log_dir'], exist_ok=True)
+        url = f"{VPN_SERVICE_URL}{endpoint}"
         
-        wireguard_server = WireGuardServer(
-            interface_name="wg0",
-            server_port=WIREGUARD_CONFIG['server_port'],
-            network=WIREGUARD_CONFIG['network']
-        )
+        if method == 'GET':
+            response = requests.get(url, timeout=VPN_SERVICE_CONFIG['timeout'])
+        elif method == 'POST':
+            response = requests.post(url, json=data, timeout=VPN_SERVICE_CONFIG['timeout'])
+        elif method == 'DELETE':
+            response = requests.delete(url, timeout=VPN_SERVICE_CONFIG['timeout'])
+        else:
+            return None, f"不支援的 HTTP 方法: {method}"
         
-        # 如果有預設的伺服器密鑰，使用它們
-        server_private_key = os.getenv('WIREGUARD_SERVER_PRIVATE_KEY')
-        server_public_key = os.getenv('WIREGUARD_SERVER_PUBLIC_KEY')
-        
-        if server_private_key and server_public_key:
-            wireguard_server.server_private_key = server_private_key
-            wireguard_server.server_public_key = server_public_key
-            print("使用環境變數中的 WireGuard 伺服器密鑰")
-        
-        print(f"WireGuard 伺服器初始化成功 - 端口: {WIREGUARD_CONFIG['server_port']}")
-        
-    except Exception as e:
-        print(f"WireGuard 伺服器初始化失敗: {e}")
-        wireguard_server = None
-
-def validate_user_limits(username):
-    """檢查用戶客戶端數量限制"""
-    if not wireguard_server:
-        return False
-        
-    user_client_count = sum(1 for client_name in wireguard_server.clients.keys() 
-                           if client_name.startswith(username))
-    
-    return user_client_count < SECURITY_CONFIG['max_clients_per_user']
-
-def get_server_endpoint():
-    """獲取伺服器端點"""
-    external_ip = WIREGUARD_CONFIG['server_ip']
-    
-    # 如果是佔位符IP，嘗試獲取真實外部IP
-    if external_ip == "YOUR_SERVER_IP" or external_ip == "0.0.0.0":
-        try:
-            import urllib.request
-            ip_services = os.getenv('EXTERNAL_IP_SERVICE', 'https://ipv4.icanhazip.com')
-            backup_services = os.getenv('BACKUP_IP_SERVICES', '').split(',')
+        if response.status_code == 200:
+            return response.json(), None
+        else:
+            return None, f"VPN 服務錯誤: {response.status_code}"
             
-            for service in [ip_services] + backup_services:
-                if service.strip():
-                    try:
-                        response = urllib.request.urlopen(service.strip(), timeout=5)
-                        external_ip = response.read().decode().strip()
-                        break
-                    except:
-                        continue
-        except:
-            external_ip = "YOUR_SERVER_IP"
-    
-    return f"{external_ip}:{WIREGUARD_CONFIG['server_port']}"
-
-# 啟動時初始化
-init_wireguard_server()
+    except requests.exceptions.ConnectionError:
+        return None, "無法連接到 VPN 服務，請確認 VPN 服務器已啟動"
+    except requests.exceptions.Timeout:
+        return None, "VPN 服務請求超時"
+    except Exception as e:
+        return None, f"VPN 服務調用失敗: {str(e)}"
 
 # API路由 - 使用節點池服務
 @app.route('/api/register', methods=['POST'])
@@ -315,9 +272,6 @@ def transfer():
 
 @app.route('/api/vpn/join', methods=['POST'])
 def join_vpn():
-    """加入VPN - 無需登入，僅限流保護，直接返回配置文件"""
-    global wireguard_server
-    
     # 獲取客戶端真實 IP
     client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
     if ',' in client_ip:
@@ -330,74 +284,26 @@ def join_vpn():
             'rate_limit_seconds': RATE_LIMIT_SECONDS,
             'client_ip': client_ip
         }), 429
-    
-    if not wireguard_server:
-        return jsonify({'error': 'VPN 服務不可用'}), 500
-    
+
     try:
         data = request.get_json() if request.is_json else {}
         custom_name = data.get('client_name', '').strip()
         
-        # 生成客戶端名稱
-        timestamp = int(datetime.now().timestamp())
-        ip_suffix = client_ip.replace('.', '_').replace(':', '_')
+        # 調用 VPN 服務創建客戶端
+        vpn_data = {
+            'client_ip': client_ip,
+            'client_name': custom_name
+        }
         
-        if custom_name and len(custom_name) <= 20 and custom_name.replace('_', '').replace('-', '').isalnum():
-            client_name = f"{custom_name}_{timestamp}"
-        else:
-            client_name = f"client_{ip_suffix}_{timestamp}"
+        result, error = call_vpn_service('/vpn/create_client', 'POST', vpn_data)
         
-        # 檢查客戶端名稱是否已存在
-        if client_name in wireguard_server.clients:
-            client_name = f"{client_name}_{uuid.uuid4().hex[:6]}"
-        
-        # 使用 WireGuard 伺服器生成配置
-        try:
-            client_config = wireguard_server.add_client(client_name)
-            
-            # 使用環境變數自定義配置內容
-            dns_servers = ', '.join(WIREGUARD_CONFIG['dns_servers'])
-            server_endpoint = get_server_endpoint()
-            
-            vpn_config_content = f"""[Interface]
-PrivateKey = {client_config['private_key']}
-Address = {client_config['ip']}/24
-DNS = {dns_servers}
-MTU = {WIREGUARD_CONFIG['mtu']}
-
-[Peer]
-PublicKey = {client_config['server_public_key']}
-Endpoint = {server_endpoint}
-AllowedIPs = 0.0.0.0/0
-PersistentKeepalive = {WIREGUARD_CONFIG['persistent_keepalive']}
-"""
-            
-            # 保存配置文件到指定目錄
-            config_file_path = os.path.join(STORAGE_CONFIG['config_dir'], f"{client_name}.conf")
-            with open(config_file_path, 'w', encoding='utf-8') as f:
-                f.write(vpn_config_content)
-            
-            # 記錄生成事件
-            if hasattr(wireguard_server, 'logger'):
-                wireguard_server.logger.info(f"為 IP {client_ip} 生成 VPN 配置，客戶端: {client_name}")
-            
-            return jsonify({
-                'success': True,
-                'message': 'VPN 配置生成成功',
-                'config': vpn_config_content,
-                'client_name': client_name,
-                'client_ip': client_config['ip'],
-                'server_endpoint': server_endpoint,
-                'generated_at': datetime.now().isoformat(),
-                'config_file_path': config_file_path,
-                'filename': f"{client_name}.conf"
-            }), 200
-            
-        except Exception as e:
+        if error:
             return jsonify({
                 'success': False,
-                'error': f'生成 VPN 配置失敗: {str(e)}'
+                'error': error
             }), 500
+        
+        return jsonify(result), 200
             
     except Exception as e:
         return jsonify({
@@ -407,11 +313,6 @@ PersistentKeepalive = {WIREGUARD_CONFIG['persistent_keepalive']}
 
 @app.route('/api/vpn/status', methods=['GET'])
 def vpn_status():
-    global wireguard_server
-    
-    if not wireguard_server:
-        return jsonify({'error': 'VPN 服務不可用'}), 500
-    
     try:
         auth_header = request.headers.get('Authorization', '')
         if not auth_header.startswith('Bearer '):
@@ -424,35 +325,24 @@ def vpn_status():
         
         username = user_info.get('username', f"user_{user_info['user_id']}")
         
-        # 獲取用戶的客戶端列表
-        user_clients = []
-        for client_name, client_info in wireguard_server.clients.items():
-            if client_name.startswith(username):
-                user_clients.append({
-                    'name': client_name,
-                    'ip': client_info['ip'],
-                    'created': 'N/A'  # 可以從文件時間戳獲取
-                })
+        # 調用 VPN 服務獲取狀態
+        result, error = call_vpn_service('/vpn/status')
         
-        return jsonify({
-            'server_status': 'running' if wireguard_server.monitoring_active else 'stopped',
-            'server_ip': wireguard_server.server_ip,
-            'server_port': wireguard_server.server_port,
-            'total_clients': len(wireguard_server.clients),
-            'user_clients': user_clients,
-            'recent_connections': wireguard_server.connection_log[-10:] if hasattr(wireguard_server, 'connection_log') else []
-        }), 200
+        if error:
+            return jsonify({'error': error}), 500
+        
+        # 過濾用戶的客戶端
+        all_clients = result.get('clients', [])
+        user_clients = [client for client in all_clients if client.startswith(username)]
+        
+        result['user_clients'] = user_clients
+        return jsonify(result), 200
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/vpn/disconnect/<client_name>', methods=['DELETE'])
 def disconnect_vpn_client(client_name):
-    global wireguard_server
-    
-    if not wireguard_server:
-        return jsonify({'error': 'VPN 服務不可用'}), 500
-    
     try:
         auth_header = request.headers.get('Authorization', '')
         if not auth_header.startswith('Bearer '):
@@ -469,13 +359,14 @@ def disconnect_vpn_client(client_name):
         if not client_name.startswith(username):
             return jsonify({'error': '無權限操作此客戶端'}), 403
         
-        # 移除客戶端
-        if wireguard_server.remove_client(client_name):
-            wireguard_server.logger.info(f"用戶 {username} 移除客戶端: {client_name}")
-            return jsonify({'message': f'客戶端 {client_name} 已移除'}), 200
-        else:
-            return jsonify({'error': '客戶端不存在'}), 404
-            
+        # 調用 VPN 服務移除客戶端
+        result, error = call_vpn_service(f'/vpn/remove_client/{client_name}', 'DELETE')
+        
+        if error:
+            return jsonify({'error': error}), 500
+        
+        return jsonify(result), 200
+        
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -505,24 +396,22 @@ def download_file(file_type):
             }), 200
             
         elif file_type == 'vpn-config':
-            if not wireguard_server:
-                return jsonify({'error': 'VPN 服務不可用'}), 500
-                
-            # 生成新的 VPN 配置
-            client_name = f"{username}_{int(datetime.now().timestamp())}"
+            # 調用 VPN 服務生成配置
+            vpn_data = {
+                'client_ip': request.remote_addr,
+                'client_name': username
+            }
             
-            try:
-                client_config = wireguard_server.add_client(client_name)
-                vpn_config_content = wireguard_server.get_client_config(client_name)
-                
-                return jsonify({
-                    'config': vpn_config_content,
-                    'client_name': client_name,
-                    'client_ip': client_config['ip']
-                }), 200
-                
-            except Exception as e:
-                return jsonify({'error': f'生成 VPN 配置失敗: {str(e)}'}), 500
+            result, error = call_vpn_service('/vpn/create_client', 'POST', vpn_data)
+            
+            if error:
+                return jsonify({'error': error}), 500
+            
+            return jsonify({
+                'config': result.get('config'),
+                'client_name': result.get('client_name'),
+                'client_ip': result.get('client_ip')
+            }), 200
         else:
             return jsonify({'error': '不支援的文件類型'}), 404
             
@@ -532,39 +421,39 @@ def download_file(file_type):
 @app.route('/api/vpn/config', methods=['GET'])
 def get_vpn_config_info():
     """獲取 VPN 配置信息（不包含敏感資料）"""
-    return jsonify({
-        'server_info': {
-            'endpoint': get_server_endpoint(),
-            'network': WIREGUARD_CONFIG['network'],
-            'dns_servers': WIREGUARD_CONFIG['dns_servers'],
-            'persistent_keepalive': WIREGUARD_CONFIG['persistent_keepalive'],
-            'mtu': WIREGUARD_CONFIG['mtu']
-        },
-        'limits': {
-            'rate_limit_seconds': SECURITY_CONFIG['rate_limit_seconds'],
-            'max_clients_per_user': SECURITY_CONFIG['max_clients_per_user']
-        },
-        'total_clients': len(wireguard_server.clients) if wireguard_server else 0
-    }), 200
+    result, error = call_vpn_service('/vpn/config_info')
+    
+    if error:
+        return jsonify({'error': error}), 500
+    
+    return jsonify(result), 200
 
 @app.route('/api/system/health', methods=['GET'])
 def health_check():
     """系統健康檢查"""
+    # 檢查 VPN 服務狀態
+    vpn_health, vpn_error = call_vpn_service('/health')
+    
     health_status = {
         'status': 'healthy',
         'timestamp': datetime.now().isoformat(),
         'services': {
             'user_service': bool(user_service_obj),
-            'wireguard_server': bool(wireguard_server),
-            'config_directory': os.path.exists(STORAGE_CONFIG['config_dir']),
+            'vpn_service': vpn_health is not None,
             'log_directory': os.path.exists(STORAGE_CONFIG['log_dir'])
         },
         'configuration': {
             'rate_limit_enabled': RATE_LIMIT_SECONDS > 0,
             'max_clients_per_user': SECURITY_CONFIG['max_clients_per_user'],
-            'debug_mode': app.debug
+            'debug_mode': app.debug,
+            'vpn_service_url': VPN_SERVICE_URL
         }
     }
+    
+    if vpn_health:
+        health_status['vpn_service_status'] = vpn_health
+    else:
+        health_status['vpn_service_error'] = vpn_error
     
     # 檢查是否有任何服務異常
     if not all(health_status['services'].values()):
@@ -597,22 +486,17 @@ def docs_page():
 def balance_page():
     return render_template('balance.html')
 
-@app.route('/vpn')
-def vpn_page():
-    return render_template('vpn.html')
-
 if __name__ == '__main__':
     # 從環境變數讀取運行配置
     host = os.getenv('FLASK_HOST', '0.0.0.0')
-    port = int(os.getenv('FLASK_PORT', '5000'))  # 改為 5000
+    port = int(os.getenv('FLASK_PORT', '5007'))
     debug = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
     
     print(f"啟動 Flask 應用程式:")
     print(f"  - 主機: {host}")
     print(f"  - 端口: {port}")
     print(f"  - 調試模式: {debug}")
-    print(f"  - 配置目錄: {STORAGE_CONFIG['config_dir']}")
-    print(f"  - 日誌目錄: {STORAGE_CONFIG['log_dir']}")
+    print(f"  - VPN 服務 URL: {VPN_SERVICE_URL}")
     print(f"  - 限流設置: {RATE_LIMIT_SECONDS} 秒")
     
     app.run(debug=debug, host=host, port=port)
