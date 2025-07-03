@@ -4,3 +4,6 @@ grpcio
 grpcio-tools
 psutil
 protobuf
+netifaces
+requests
+nuitka

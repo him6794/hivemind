@@ -158,23 +158,57 @@ class WorkerNode:
             self.gpu_memory_gb = 0.0
 
     def _get_local_ip(self):
-        """獲取本機 IP 地址（WireGuard 啟動後會多一個 wg0 介面）"""
+        """獲取本機 IP 地址（優先使用 WireGuard 網卡）"""
         try:
-            # 嘗試取得 wg0 介面的 IP（如果存在）
-            if 'wg0' in netifaces.interfaces():
-                addrs = netifaces.ifaddresses('wg0')
-                if netifaces.AF_INET in addrs:
-                    wg0_ip = addrs[netifaces.AF_INET][0]['addr']
-                    return wg0_ip
-        except Exception:
-            pass
+            # 檢查所有網卡接口
+            interfaces = netifaces.interfaces()
+            self._log(f"檢測到網卡接口: {interfaces}")
+            
+            # 優先檢查 WireGuard 相關接口
+            wg_interfaces = [iface for iface in interfaces if 'wg' in iface.lower() or 'wireguard' in iface.lower()]
+            
+            if wg_interfaces:
+                for wg_iface in wg_interfaces:
+                    try:
+                        addrs = netifaces.ifaddresses(wg_iface)
+                        if netifaces.AF_INET in addrs:
+                            wg_ip = addrs[netifaces.AF_INET][0]['addr']
+                            self._log(f"檢測到 WireGuard 網卡 {wg_iface}，IP: {wg_ip}")
+                            return wg_ip
+                    except Exception as e:
+                        self._log(f"檢查 {wg_iface} 接口失敗: {e}")
+                        continue
+            
+            # 檢查是否有 10.0.0.x 網段的 IP（VPN 網段）
+            for iface in interfaces:
+                try:
+                    addrs = netifaces.ifaddresses(iface)
+                    if netifaces.AF_INET in addrs:
+                        for addr_info in addrs[netifaces.AF_INET]:
+                            ip = addr_info['addr']
+                            # 檢查是否在 VPN 網段
+                            if ip.startswith('10.0.0.') and ip != '10.0.0.1':
+                                self._log(f"檢測到 VPN 網段 IP: {ip} (接口: {iface})")
+                                return ip
+                except Exception as e:
+                    continue
+            
+            # 如果沒有找到 VPN IP，使用預設方法
+            self._log("未檢測到 WireGuard 網卡，使用預設網卡")
+            
+        except Exception as e:
+            self._log(f"網卡檢測失敗: {e}")
+        
+        # 預設方法：連接外部服務獲取本機 IP
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
             ip = s.getsockname()[0]
             s.close()
+            self._log(f"使用預設方法獲取 IP: {ip}")
             return ip
         except:
+            self._log("所有方法都失敗，使用 127.0.0.1")
             return "127.0.0.1"
 
     def _benchmark_cpu(self):

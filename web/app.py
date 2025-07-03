@@ -12,6 +12,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from 節點池 import user_service
 from dotenv import load_dotenv
 
+
 # 載入環境變數
 load_dotenv()
 

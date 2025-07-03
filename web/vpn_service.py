@@ -187,8 +187,8 @@ MTU = {WIREGUARD_CONFIG['mtu']}
 
 [Peer]
 PublicKey = 7aDDz8JkS4qIAp9NUJ8FoN0UkioFw6jnBvQ9qScZGTI=
-Endpoint = {server_endpoint}
-AllowedIPs = 0.0.0.0:50051,0.0.0.0:50052,0.0.0.0:50053
+Endpoint = hivemindvpn.justin0711.com:51820
+AllowedIPs = 10.0.0.0/24
 PersistentKeepalive = {WIREGUARD_CONFIG['persistent_keepalive']}
 """
             
