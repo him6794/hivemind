@@ -1,0 +1,276 @@
+syntax = "proto3";
+
+package nodepool;
+
+// 訊息定義
+message LoginRequest {
+    string username = 1;
+    string password = 2;
+}
+
+message LoginResponse {
+    bool success = 1;
+    string message = 2;
+    string token = 3;
+}
+
+message TransferRequest {
+    string token = 1;
+    string receiver_username = 2;
+    int64 amount = 3;
+}
+
+message TransferResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message GetBalanceRequest {
+    string username = 1;
+    string token = 2;  // 新增這一行
+}
+
+message GetBalanceResponse {
+    bool success = 1;
+    string message = 2;
+    int64 balance = 3;
+}
+
+message RegisterWorkerNodeRequest {
+    string node_id = 1;
+    string hostname = 2;
+    int32 cpu_cores = 3;
+    int32 memory_gb = 4;
+    int32 cpu_score = 5;
+    int32 gpu_score = 6;
+    int32 gpu_memory_gb = 7;
+    string location = 8;
+    int32 port = 9;
+    string gpu_name = 12;
+}
+
+message StatusResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+    bool healthy = 1;
+    string message = 2;
+}
+
+message ReportStatusRequest {
+    string node_id = 1;
+    string status_message = 2;
+}
+
+message WorkerNodeInfo {
+    string node_id = 1;
+    string hostname = 2;
+    int32 cpu_cores = 3;
+    int32 memory_gb = 4;
+    string status = 5;
+    double last_heartbeat = 6;
+    int32 cpu_score = 7;
+    int32 gpu_score = 8;
+    int32 gpu_memory_gb = 9;
+    string location = 10;
+    int32 port = 11;
+    string gpu_name = 12;
+}
+
+message GetNodeListRequest {}
+
+message GetNodeListResponse {
+    bool success = 1;
+    string message = 2;
+    repeated WorkerNodeInfo nodes = 3;
+}
+
+message UploadTaskRequest {
+    string task_id = 1;
+    bytes task_zip = 2;
+    int32 memory_gb = 3;
+    int32 cpu_score = 4;
+    int32 gpu_score = 5;
+    int32 gpu_memory_gb = 6;
+    string location = 7;
+    string gpu_name = 8;
+    string user_id = 9;  // 添加用戶ID字段
+}
+
+message UploadTaskResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message PollTaskStatusRequest {
+    string task_id = 1;
+}
+
+message PollTaskStatusResponse {
+    string task_id = 1; // Fixed typo from 'рука_id'
+    string status = 2;
+    repeated string output = 3;
+    string message = 4;
+}
+
+message StoreOutputRequest {
+    string task_id = 1;
+    string output = 2;
+}
+
+message StoreResultRequest {
+    string task_id = 1;
+    bytes result_zip = 2;
+}
+
+message GetTaskResultRequest {
+    string task_id = 1;
+    string token = 2;  // 用戶令牌，用於驗證
+}
+
+message GetTaskResultResponse {
+    bool success = 1;
+    string message = 2;
+    bytes result_zip = 3;
+}
+
+message ReturnTaskResultRequest {
+    string task_id = 1;
+    bytes result_zip = 2;
+}
+
+message ReturnTaskResultResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message ExecuteTaskRequest {
+    string node_id = 1;
+    string task_id = 2;
+    bytes task_zip = 3;
+}
+
+message ExecuteTaskResponse {
+    bool success = 1;
+    string message = 2;
+    bytes result = 3;
+}
+
+message ReportOutputRequest {
+    string node_id = 1;
+    string task_id = 2;
+    string output = 3;
+}
+
+message RunningStatusRequest {
+    string node_id = 1;
+    string task_id = 2;
+}
+
+message RunningStatusResponse {
+    bool success = 1;
+    string message = 2;
+    int64 cpt_reward = 3;
+}
+
+message TaskCompletedRequest {
+    string task_id = 1;
+    string node_id = 2;
+    bool success = 3;
+}
+
+message StoreLogsRequest {
+    string node_id = 1;
+    string task_id = 2;
+    string logs = 3;  // JSON 格式的日誌數據
+    int64 timestamp = 4;
+}
+
+message GetTaskLogsRequest {
+    string task_id = 1;
+    string token = 2;  // 用戶令牌，用於驗證
+}
+
+message GetTaskLogsResponse {
+    bool success = 1;
+    string message = 2;
+    string logs = 3;  // JSON 格式的日誌數據
+}
+
+message GetAllTasksRequest {
+    string token = 1;
+}
+
+message TaskStatus {
+    string task_id = 1;
+    string status = 2;
+    string created_at = 3;
+    string updated_at = 4;
+    string assigned_node = 5;
+}
+
+message GetAllTasksResponse {
+    bool success = 1;
+    string message = 2;
+    repeated TaskStatus tasks = 3;
+}
+
+message StopTaskRequest {
+    string task_id = 1;
+    string token = 2;      // 用戶令牌，用於驗證權限
+}
+
+message StopTaskResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// 工作節點停止任務執行的消息
+message StopTaskExecutionRequest {
+    string task_id = 1;
+
+}
+
+message StopTaskExecutionResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// 服務定義
+service UserService {
+    rpc Login(LoginRequest) returns (LoginResponse);
+    rpc Transfer(TransferRequest) returns (TransferResponse);
+    rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse); // 新增 GetBalance RPC
+}
+
+service NodeManagerService {
+    rpc RegisterWorkerNode(RegisterWorkerNodeRequest) returns (StatusResponse);
+    rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+    rpc ReportStatus(ReportStatusRequest) returns (StatusResponse);
+    rpc GetNodeList(GetNodeListRequest) returns (GetNodeListResponse);
+}
+
+service MasterNodeService {
+    rpc UploadTask(UploadTaskRequest) returns (UploadTaskResponse);
+    rpc PollTaskStatus(PollTaskStatusRequest) returns (PollTaskStatusResponse);
+    rpc StoreOutput(StoreOutputRequest) returns (StatusResponse);
+    rpc StoreResult(StoreResultRequest) returns (StatusResponse);
+    rpc GetTaskResult(GetTaskResultRequest) returns (GetTaskResultResponse);
+    rpc TaskCompleted(TaskCompletedRequest) returns (StatusResponse);
+    rpc StoreLogs(StoreLogsRequest) returns (StatusResponse);
+    rpc GetTaskLogs(GetTaskLogsRequest) returns (GetTaskLogsResponse);
+    rpc GetAllTasks(GetAllTasksRequest) returns (GetAllTasksResponse);
+    rpc StopTask(StopTaskRequest) returns (StopTaskResponse);
+    rpc ReturnTaskResult(ReturnTaskResultRequest) returns (ReturnTaskResultResponse);
+}
+
+service WorkerNodeService {
+    rpc ExecuteTask(ExecuteTaskRequest) returns (ExecuteTaskResponse);
+    rpc ReportOutput(ReportOutputRequest) returns (StatusResponse);
+    rpc ReportRunningStatus(RunningStatusRequest) returns (RunningStatusResponse);
+    rpc StopTaskExecution(StopTaskExecutionRequest) returns (StopTaskExecutionResponse);
+}

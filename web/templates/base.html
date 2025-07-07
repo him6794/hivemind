@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="zh-TW" class="">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}HiveMind - 分布式運算平台{% endblock %}</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/main.css') }}" rel="stylesheet">
+    <link rel="icon" href="{{ url_for('static', filename='img/file.ico') }}">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/alpinejs/3.10.2/cdn.min.js" defer></script>
+</head>
+<body class="bg-neutral-100 dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100 min-h-screen transition overflow-x-hidden">
+    <!-- 矩陣動畫背景（僅深色模式顯示，z-index: 0） -->
+    <canvas id="matrix-bg" class="fixed inset-0 w-full h-full pointer-events-none" style="z-index:0"></canvas>
+    <!-- 主要內容包裹層（z-index: 1） -->
+    <div id="main-content-wrapper" style="position:relative; z-index:1;">
+        <!-- 導航欄 -->
+        <nav class="bg-white/90 dark:bg-neutral-800/90 backdrop-blur-lg border-b border-neutral-200 dark:border-neutral-700 shadow-sm animate-fade-in-down relative z-10">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <div class="flex items-center justify-between h-16">
+                    <div class="flex items-center">
+                        <a href="/" class="text-2xl font-bold text-neutral-900 dark:text-neutral-100 flex items-center transition-transform duration-300 hover:neon-glow">
+                            <img src="{{ url_for('static', filename='img/file.png') }}" alt="HiveMind" width="40" height="40" class="mr-2 drop-shadow-md hover:neon-glow-img">
+                            <span class="tracking-tight">HiveMind</span>
+                        </a>
+                    </div>
+                    <div class="flex items-center space-x-6">
+                        <a href="/" class="nav-link transition-all duration-200 hover:neon-glow-text">主頁</a>
+                        <a href="/download" class="nav-link transition-all duration-200 hover:neon-glow-text">下載</a>
+                        <a href="/docs" class="nav-link transition-all duration-200 hover:neon-glow-text">文檔</a>
+                        <a href="https://github.com/him6794/hivemind" target="_blank" class="nav-link flex items-center transition-all duration-200 hover:neon-glow-text">
+                            <i class="fab fa-github mr-1"></i>GitHub
+                        </a>
+                        <a href="https://discord.gg/p2hApGE4T3" target="_blank" class="nav-link flex items-center transition-all duration-200 hover:neon-glow-text">
+                            <i class="fab fa-discord mr-1"></i>社區
+                        </a>
+                        <button id="theme-toggle" class="ml-2 p-2 rounded-lg bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors transition-transform duration-200 hover:neon-glow-btn" title="切換深淺模式">
+                            <i id="theme-toggle-icon" class="fas fa-moon text-gray-700 dark:text-yellow-300"></i>
+                        </button>
+                        <div class="flex items-center space-x-2 ml-2">
+                            <div id="auth-buttons" class="flex space-x-2">
+                                <a href="/login" id="login-link" class="btn-secondary transition-all duration-200 hover:neon-glow-btn" role="button" tabindex="0">登入</a>
+                                <a href="/register" id="register-link" class="btn-primary transition-all duration-200 hover:neon-glow-btn" role="button" tabindex="0">註冊</a>
+                            </div>
+                            <div id="user-menu" class="hidden">
+                                <div class="relative">
+                                    <button type="button" id="user-menu-btn" class="flex items-center space-x-2 btn-secondary transition-all duration-200 hover:neon-glow-btn">
+                                        <i class="fas fa-user"></i>
+                                        <span id="username-display"></span>
+                                        <i class="fas fa-chevron-down ml-2"></i>
+                                    </button>
+                                    <div id="user-dropdown" class="absolute right-0 mt-2 w-48 bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg shadow-lg py-2 animate-fade-in-up hidden" style="z-index:1001">
+                                        <a href="/balance" id="show-balance-link" class="w-full text-left block px-4 py-2 text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-700 transition bg-transparent border-0 cursor-pointer">查看餘額</a>
+                                        <button
+                                            type="button"
+                                            id="logout-link"
+                                            class="w-full text-left block px-4 py-2 rounded-lg font-medium text-white bg-red-600 hover:bg-red-700 dark:bg-red-700 dark:hover:bg-red-800 transition border-0 cursor-pointer focus:outline-none focus:ring-2 focus:ring-red-400"
+                                        >
+                                            登出
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </nav>
+        <!-- 主要內容 -->
+        <main class="relative z-10">
+            {% block content %}{% endblock %}
+        </main>
+    </div>
+    <!-- 主題切換腳本 -->
+    <script>
+    // 主題切換功能
+    function setTheme(dark) {
+        const html = document.documentElement;
+        const icon = document.getElementById('theme-toggle-icon');
+        const matrixBg = document.getElementById('matrix-bg');
+        if (dark) {
+            html.classList.add('dark');
+            localStorage.setItem('theme', 'dark');
+            if (icon) {
+                icon.classList.remove('fa-moon');
+                icon.classList.add('fa-sun');
+                icon.classList.remove('text-gray-700');
+                icon.classList.add('text-yellow-300');
+            }
+            if (matrixBg) matrixBg.classList.remove('hidden');
+        } else {
+            html.classList.remove('dark');
+            localStorage.setItem('theme', 'light');
+            if (icon) {
+                icon.classList.remove('fa-sun');
+                icon.classList.add('fa-moon');
+                icon.classList.remove('text-yellow-300');
+                icon.classList.add('text-gray-700');
+            }
+            if (matrixBg) matrixBg.classList.add('hidden');
+        }
+    }
+    // 初始化主題
+    (function() {
+        const theme = localStorage.getItem('theme');
+        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        if (theme === 'dark' || (!theme && prefersDark)) {
+            setTheme(true);
+        } else {
+            setTheme(false);
+        }
+        const themeToggle = document.getElementById('theme-toggle');
+        if (themeToggle) {
+            themeToggle.addEventListener('click', function() {
+                const isDark = document.documentElement.classList.contains('dark');
+                setTheme(!isDark);
+            });
+        }
+    })();
+    </script>
+    <!-- 矩陣動畫背景（只初始化一次，動畫不重來） -->
+    <script>
+    // filepath: d:\hivemind\web\templates\base.html (matrix-bg)
+    (function() {
+        let started = false;
+        let matrixInterval = null;
+        function startMatrix() {
+            if (started) return;
+            started = true;
+            const canvas = document.getElementById('matrix-bg');
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            let width = window.innerWidth;
+            let height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+            const fontSize = 18;
+            const columns = Math.floor(width / fontSize);
+            // 讓每個 drops[i] 隨機起始高度
+            const drops = Array.from({length: columns}, () => Math.floor(Math.random() * (height / fontSize)));
+            const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+            function draw() {
+                ctx.clearRect(0, 0, width, height);
+                ctx.fillStyle = 'rgba(16,24,40,0.15)';
+                ctx.fillRect(0, 0, width, height);
+                ctx.font = fontSize + "px monospace";
+                ctx.shadowColor = "#00ffe7";
+                ctx.shadowBlur = 8;
+                for (let i = 0; i < drops.length; i++) {
+                    const text = chars[Math.floor(Math.random() * chars.length)];
+                    ctx.fillStyle = "#00ffe7";
+                    ctx.fillText(text, i * fontSize, drops[i] * fontSize);
+                    if (drops[i] * fontSize > height && Math.random() > 0.975) {
+                        drops[i] = 0;
+                    }
+                    drops[i]++;
+                }
+                ctx.shadowBlur = 0;
+            }
+            matrixInterval = setInterval(draw, 50);
+            window.addEventListener('resize', () => {
+                width = window.innerWidth;
+                height = window.innerHeight;
+                canvas.width = width;
+                canvas.height = height;
+                // 重新隨機 drops 起始位置
+                for (let i = 0; i < drops.length; i++) {
+                    drops[i] = Math.floor(Math.random() * (height / fontSize));
+                }
+            });
+        }
+        function stopMatrix() {
+            if (matrixInterval) clearInterval(matrixInterval);
+            started = false;
+        }
+        function updateMatrixVisibility() {
+            const isDark = document.documentElement.classList.contains('dark');
+            const canvas = document.getElementById('matrix-bg');
+            if (canvas) {
+                if (isDark) {
+                    canvas.style.display = 'block';
+                    startMatrix();
+                } else {
+                    canvas.style.display = 'none';
+                    stopMatrix();
+                }
+            }
+        }
+        document.addEventListener('DOMContentLoaded', updateMatrixVisibility);
+        // 切換主題時啟用/停用動畫
+        document.addEventListener('DOMContentLoaded', function() {
+            const observer = new MutationObserver(updateMatrixVisibility);
+            observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+        });
+    })();
+    // 登入狀態與下拉選單控制
+    function checkAuth() {
+        // 統一用 access_token/user_info
+        const token = localStorage.getItem('access_token');
+        const user = JSON.parse(localStorage.getItem('user_info') || '{}');
+        const authButtons = document.getElementById('auth-buttons');
+        const userMenu = document.getElementById('user-menu');
+        const usernameDisplay = document.getElementById('username-display');
+        
+        console.log("檢查認證狀態:", token ? "有 token" : "無 token", user);
+        
+        // 強制檢查並更新 UI
+        if (token && user && user.username) {
+            console.log("用戶已登入:", user.username);
+            document.body.classList.add('user-logged-in');
+            
+            // 隱藏登入/註冊按鈕
+            if (authButtons) {
+                authButtons.style.display = 'none';
+                authButtons.classList.add('hidden');
+                console.log("已隱藏登入/註冊按鈕");
+            }
+            
+            // 顯示用戶選單
+            if (userMenu) {
+                userMenu.style.display = 'block';
+                userMenu.classList.remove('hidden');
+                console.log("已顯示用戶選單");
+            }
+            
+            // 設置用戶名
+            if (usernameDisplay) {
+                usernameDisplay.textContent = user.username;
+            }
+        } else {
+            console.log("用戶未登入");
+            document.body.classList.remove('user-logged-in');
+            
+            // 顯示登入/註冊按鈕
+            if (authButtons) {
+                authButtons.style.display = 'flex';
+                authButtons.classList.remove('hidden');
+                console.log("已顯示登入/註冊按鈕");
+            }
+            
+            // 隱藏用戶選單
+            if (userMenu) {
+                userMenu.style.display = 'none';
+                userMenu.classList.add('hidden');
+                console.log("已隱藏用戶選單");
+            }
+        }
+    }
+    
+    // 全局提供 checkAuth 函數
+    window.checkAuth = checkAuth;
+    
+    // 初始化UI控制 (在DOMContentLoaded 和 window.onload 都檢查一次)
+    document.addEventListener('DOMContentLoaded', function() {
+        console.log("頁面載入完成，檢查登入狀態");
+        setTimeout(checkAuth, 0); // 使用 setTimeout 確保在事件循環的下一個週期執行
+        
+        // 監聽認證狀態變更事件
+        document.addEventListener('authChanged', function() {
+            console.log("認證狀態變更，重新檢查");
+            setTimeout(checkAuth, 0);
+        });
+
+        // 下拉選單控制
+        const userMenuBtn = document.getElementById('user-menu-btn');
+        const userDropdown = document.getElementById('user-dropdown');
+        
+        if (userMenuBtn && userDropdown) {
+            // 點擊選單按鈕時切換顯示
+            userMenuBtn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                const isHidden = userDropdown.classList.contains('hidden');
+                
+                if (isHidden) {
+                    userDropdown.classList.remove('hidden');
+                } else {
+                    userDropdown.classList.add('hidden');
+                }
+            });
+            
+            // 點擊其他地方關閉選單
+            document.addEventListener('click', function(e) {
+                if (!userDropdown.contains(e.target) && e.target !== userMenuBtn) {
+                    userDropdown.classList.add('hidden');
+                }
+            });
+        }
+        
+        // 綁定登出功能
+        const logoutBtn = document.getElementById('logout-link');
+        if (logoutBtn) {
+            logoutBtn.addEventListener('click', function() {
+                logout();
+            });
+        }
+    });
+    
+    // 確保頁面完全載入後再次檢查
+    window.onload = function() {
+        console.log("視窗載入完成，再次檢查登入狀態");
+        setTimeout(checkAuth, 100);
+    };
+    
+    // 登出功能
+    function logout() {
+        console.log("執行登出");
+        localStorage.removeItem('access_token');
+        localStorage.removeItem('user_info');
+        // 同時清除舊的鍵名，以防萬一
+        localStorage.removeItem('auth_token');
+        localStorage.removeItem('user');
+        
+        document.dispatchEvent(new Event('authChanged'));
+        setTimeout(function() {
+            window.location.href = '/';
+        }, 100);
+    }
+    </script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

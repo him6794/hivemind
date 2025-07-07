@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>上傳新任務 - HiveMind 主控台</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        :root {
+            --primary-color: #64748b;
+            --secondary-color: #475569;
+            --accent-color: #374151;
+            --success-color: #059669;
+            --warning-color: #d97706;
+            --error-color: #dc2626;
+            --background-color: #f8fafc;
+            --card-background: #ffffff;
+            --card-background-light: #f8fafc;
+            --text-primary: #1e293b;
+            --text-secondary: #64748b;
+            --text-muted: #94a3b8;
+            --border-color: #e2e8f0;
+            --border-light: #f1f5f9;
+            --shadow-xs: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+            --shadow-sm: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+            --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+            --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+            --gradient-subtle: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: var(--background-color);
+            color: var(--text-primary);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: var(--card-background);
+            border-radius: 12px;
+            box-shadow: var(--shadow-lg);
+            padding: 2rem;
+            border: 1px solid var(--border-color);
+        }
+
+        h1 {
+            color: var(--text-primary);
+            margin-bottom: 2rem;
+            text-align: center;
+            font-size: 1.875rem;
+            font-weight: 600;
+            letter-spacing: -0.025em;
+        }
+
+        .flash {
+            padding: 0.875rem 1rem;
+            margin-bottom: 1rem;
+            border-radius: 8px;
+            font-weight: 500;
+            font-size: 0.875rem;
+            border: 1px solid;
+        }
+
+        .flash.success {
+            background: #ecfdf5;
+            color: var(--success-color);
+            border-color: #a7f3d0;
+        }
+
+        .flash.error {
+            background: #fef2f2;
+            color: var(--error-color);
+            border-color: #fecaca;
+        }
+
+        .form-group {
+            margin-bottom: 1.25rem;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 500;
+            color: var(--text-primary);
+            font-size: 0.875rem;
+        }
+
+        input[type="text"],
+        input[type="number"] {
+            width: 100%;
+            padding: 0.75rem;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            font-size: 0.95rem;
+            transition: border-color 0.2s ease;
+            background: var(--card-background);
+            color: var(--text-primary);
+        }
+
+        input[type="text"]::placeholder,
+        input[type="number"]::placeholder {
+            color: var(--text-muted);
+        }
+
+        input[type="text"]:focus,
+        input[type="number"]:focus {
+            outline: none;
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 3px rgb(100 116 139 / 0.1);
+        }
+
+        select {
+            width: 100%;
+            padding: 0.75rem;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            font-size: 0.95rem;
+            transition: border-color 0.2s ease;
+            background: var(--card-background);
+            color: var(--text-primary);
+            cursor: pointer;
+            appearance: none; /* 移除預設箭頭 */
+            background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='%23374151' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M2 5l6 6 6-6'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 0.75rem center;
+            background-size: 16px;
+            padding-right: 2.5rem; /* 為箭頭留空間 */
+        }
+
+        select:focus {
+            outline: none;
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 3px rgb(100 116 139 / 0.1);
+        }
+
+        select option {
+            padding: 0.75rem;
+            background: var(--card-background);
+            color: var(--text-primary);
+        }
+
+        /* 確保 select 不會被其他樣式覆蓋 */
+        .form-group select {
+            width: 100%;
+            padding: 0.75rem 2.5rem 0.75rem 0.75rem;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            font-size: 0.95rem;
+            background: var(--card-background) url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='%23374151' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M2 5l6 6 6-6'/%3E%3C/svg%3E") no-repeat right 0.75rem center;
+            background-size: 16px;
+            appearance: none;
+            cursor: pointer;
+        }
+
+        .file-input-container {
+            margin-bottom: 2rem;
+        }
+
+        .file-input-label {
+            display: block;
+            padding: 3rem 2rem;
+            border: 2px dashed var(--border-color);
+            border-radius: 12px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            background: var(--card-background-light);
+        }
+
+        .file-input-label:hover {
+            border-color: var(--primary-color);
+            background: #f1f5f9;
+        }
+
+        .file-input-label span {
+            color: var(--text-secondary);
+            font-size: 1rem;
+            font-weight: 500;
+        }
+
+        .file-input {
+            display: none;
+        }
+
+        .requirements-section {
+            background: var(--card-background-light);
+            padding: 1.5rem;
+            border-radius: 8px;
+            margin-bottom: 2rem;
+            border: 1px solid var(--border-light);
+        }
+
+        .requirements-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1rem;
+        }
+
+        button[type="submit"] {
+            background: var(--text-primary);
+            color: white;
+            padding: 0.875rem 2rem;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.95rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            width: 100%;
+        }
+
+        button[type="submit"]:hover {
+            background: var(--primary-color);
+            transform: translateY(-1px);
+            box-shadow: var(--shadow-md);
+        }
+
+        .back-link {
+            display: inline-block;
+            margin-top: 1rem;
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-weight: 500;
+            transition: color 0.2s ease;
+            font-size: 0.875rem;
+        }
+
+        .back-link:hover {
+            color: var(--text-primary);
+        }
+
+        hr {
+            border: none;
+            height: 1px;
+            background: var(--border-color);
+            margin: 2rem 0;
+        }
+
+        .file-selected {
+            border-color: var(--success-color) !important;
+            background: #ecfdf5 !important;
+        }
+
+        .file-selected span {
+            color: var(--success-color) !important;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>上傳新任務</h1>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+          {% if messages %}
+            {% for category, message in messages %}
+              <div class="flash {{ category }}">{{ message }}</div>
+            {% endfor %}
+          {% endif %}
+        {% endwith %}
+
+        <form method="post" enctype="multipart/form-data" action="/upload?user={{ username }}">
+            <div class="file-input-container">
+                <label for="task_zip" class="file-input-label">
+                    <span>點擊選擇任務 ZIP 檔案</span>
+                    <input type="file" id="task_zip" name="task_zip" class="file-input" accept=".zip" required>
+                </label>
+            </div>
+
+            <h3>系統需求</h3>
+            <div class="requirements-section">
+                <div class="requirements-grid">
+                    <div class="form-group">
+                        <label for="memory_gb">記憶體需求 (GB)</label>
+                        <input type="number" id="memory_gb" name="memory_gb" value="0" min="0">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="cpu_score">CPU 分數需求</label>
+                        <input type="number" id="cpu_score" name="cpu_score" value="0" min="0">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="gpu_score">GPU 分數需求</label>
+                        <input type="number" id="gpu_score" name="gpu_score" value="0" min="0">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="gpu_memory_gb">GPU 記憶體需求 (GB)</label>
+                        <input type="number" id="gpu_memory_gb" name="gpu_memory_gb" value="0" min="0">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="location">位置需求</label>
+                        <select id="location" name="location">
+                            <option value="Any">任何地區</option>
+                            <option value="亞洲">亞洲</option>
+                            <option value="歐洲">歐洲</option>
+                            <option value="北美">北美</option>
+                            <option value="南美">南美</option>
+                            <option value="非洲">非洲</option>
+                            <option value="大洋洲">大洋洲</option>
+                            <option value="Unknown">未知地區</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="gpu_name">GPU 名稱需求</label>
+                        <input type="text" id="gpu_name" name="gpu_name" placeholder="留空表示任何GPU">
+                    </div>
+                </div>
+            </div>
+
+            <button type="submit">上傳任務</button>
+        </form>
+
+        <hr>
+        <a href="{{ url_for('index') }}?user={{ username }}" class="back-link">← 回到主控台</a>
+    </div>
+
+    <script>
+        // 文件選擇顯示
+        document.getElementById('task_zip').addEventListener('change', function(e) {
+            const label = document.querySelector('.file-input-label span');
+            const fileInputLabel = document.querySelector('.file-input-label');
+            
+            if (e.target.files.length > 0) {
+                const fileName = e.target.files[0].name;
+                const fileSize = (e.target.files[0].size / (1024 * 1024)).toFixed(2);
+                label.textContent = `已選擇: ${fileName} (${fileSize} MB)`;
+                fileInputLabel.classList.add('file-selected');
+            } else {
+                label.textContent = '點擊選擇任務 ZIP 檔案';
+                fileInputLabel.classList.remove('file-selected');
+            }
+        });
+
+        // 表單驗證
+        document.querySelector('form').addEventListener('submit', function(e) {
+            const fileInput = document.getElementById('task_zip');
+            
+            if (!fileInput.files.length) {
+                e.preventDefault();
+                alert('請選擇要上傳的 ZIP 檔案');
+                return false;
+            }
+            
+            const file = fileInput.files[0];
+            if (!file.name.toLowerCase().endsWith('.zip')) {
+                e.preventDefault();
+                alert('請選擇 ZIP 格式的檔案');
+                return false;
+            }
+            
+            // 檢查檔案大小 (50MB 限制)
+            const maxSize = 50 * 1024 * 1024;
+            if (file.size > maxSize) {
+                e.preventDefault();
+                alert('檔案大小不能超過 50MB');
+                return false;
+            }
+            
+            // 顯示上傳進度提示
+            const submitBtn = document.querySelector('button[type="submit"]');
+            submitBtn.textContent = '上傳中...';
+            submitBtn.disabled = true;
+        });
+
+        // 數字輸入驗證
+        document.querySelectorAll('input[type="number"]').forEach(input => {
+            input.addEventListener('input', function(e) {
+                if (e.target.value < 0) {
+                    e.target.value = 0;
+                }
+            });
+        });
+    </script>
+</body>
+</html>

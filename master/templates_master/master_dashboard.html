@@ -1,0 +1,1124 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HiveMind 主控台</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        :root {
+            --primary-color: #64748b;
+            --secondary-color: #475569;
+            --accent-color: #374151;
+            --success-color: #059669;
+            --warning-color: #d97706;
+            --error-color: #dc2626;
+            --background-color: #f8fafc;
+            --card-background: #ffffff;
+            --card-background-light: #f8fafc;
+            --text-primary: #1e293b;
+            --text-secondary: #64748b;
+            --text-muted: #94a3b8;
+            --border-color: #e2e8f0;
+            --border-light: #f1f5f9;
+            --shadow-xs: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+            --shadow-sm: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+            --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+            --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+            --gradient-subtle: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+            --border-radius: 12px;
+            --border-radius-sm: 8px;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: var(--background-color);
+            color: var(--text-primary);
+            line-height: 1.6;
+            margin: 0;
+            padding: 24px;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: var(--card-background);
+            border-radius: var(--border-radius);
+            box-shadow: var(--shadow-lg);
+            overflow: hidden;
+            border: 1px solid var(--border-color);
+        }
+
+        /* 頭部樣式 */
+        .header {
+            background: var(--gradient-subtle);
+            color: var(--text-primary);
+            padding: 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .header h1 {
+            font-size: 1.875rem;
+            font-weight: 600;
+            margin: 0;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            letter-spacing: -0.025em;
+        }
+
+        .header h1::before {
+            content: '👑';
+            font-size: 1.25rem;
+            opacity: 0.7;
+        }
+
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .user-info {
+            background: var(--card-background);
+            padding: 0.5rem 1rem;
+            border-radius: 50px;
+            font-weight: 500;
+            font-size: 0.875rem;
+            border: 1px solid var(--border-color);
+            color: var(--text-secondary);
+        }
+
+        .upload-btn {
+            background: var(--success-color);
+            color: white;
+            padding: 0.5rem 1rem;
+            border: none;
+            border-radius: 50px;
+            font-weight: 500;
+            text-decoration: none;
+            transition: all 0.2s ease;
+            font-size: 0.875rem;
+            display: flex;
+            align-items: center;
+            gap: 0.375rem;
+        }
+
+        .upload-btn:hover {
+            background: #047857;
+            transform: translateY(-1px);
+        }
+
+        .logout-btn {
+            background: var(--text-primary);
+            color: white;
+            padding: 0.5rem 1rem;
+            border: none;
+            border-radius: 50px;
+            font-weight: 500;
+            text-decoration: none;
+            transition: all 0.2s ease;
+            font-size: 0.875rem;
+            display: flex;
+            align-items: center;
+            gap: 0.375rem;
+        }
+
+        .logout-btn:hover {
+            background: var(--primary-color);
+            transform: translateY(-1px);
+        }
+
+        /* 統計卡片網格 */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1.5rem;
+            padding: 2rem;
+            background: var(--background-color);
+        }
+
+        .stat-card {
+            background: var(--card-background);
+            border-radius: var(--border-radius);
+            padding: 1.5rem;
+            box-shadow: var(--shadow-sm);
+            border: 1px solid var(--border-color);
+            transition: all 0.2s ease;
+        }
+
+        .stat-card:hover {
+            box-shadow: var(--shadow-md);
+        }
+
+        .stat-card.balance {
+            background: var(--text-primary);
+            color: white;
+            border-color: var(--text-primary);
+        }
+
+        .stat-card h3 {
+            font-size: 1rem;
+            font-weight: 500;
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            opacity: 0.8;
+        }
+
+        .stat-card .value {
+            font-size: 2rem;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 0.5rem;
+        }
+
+        .stat-card.balance .value {
+            color: white;
+        }
+
+        /* 內容網格 */
+        .content-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 1.5rem;
+            padding: 2rem;
+            background: var(--background-color);
+        }
+
+        .card {
+            background: var(--card-background);
+            border-radius: var(--border-radius);
+            padding: 1.5rem;
+            box-shadow: var(--shadow-sm);
+            border: 1px solid var(--border-color);
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+        }
+
+        .card h2 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .refresh-btn {
+            background: var(--card-background);
+            color: var(--text-secondary);
+            border: 1px solid var(--border-color);
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.8125rem;
+        }
+
+        .refresh-btn:hover {
+            background: var(--text-primary);
+            color: white;
+            border-color: var(--text-primary);
+        }
+
+        /* 任務過濾器 */
+        .task-filters {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1.5rem;
+            flex-wrap: wrap;
+        }
+
+        .filter-btn {
+            padding: 0.5rem 1rem;
+            border: 1px solid var(--border-color);
+            background: var(--card-background);
+            color: var(--text-secondary);
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: all 0.2s ease;
+            font-size: 0.8125rem;
+        }
+
+        .filter-btn:hover,
+        .filter-btn.active {
+            background: var(--text-primary);
+            color: white;
+            border-color: var(--text-primary);
+        }
+
+        /* 表格樣式 */
+        .table-container {
+            overflow-x: auto;
+            border-radius: var(--border-radius-sm);
+            border: 1px solid var(--border-color);
+            background: var(--card-background);
+        }
+
+        .table {
+            width: 100%;
+            border-collapse: collapse;
+            min-width: 900px;
+        }
+
+        .table th,
+        .table td {
+            padding: 0.875rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border-light);
+            vertical-align: middle;
+        }
+
+        .table th {
+            background: var(--card-background-light);
+            font-weight: 500;
+            color: var(--text-secondary);
+            font-size: 0.8125rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .table td {
+            color: var(--text-primary);
+        }
+
+        .table tr:hover {
+            background: var(--card-background-light);
+        }
+
+        /* 狀態標籤 */
+        .status-badge {
+            padding: 0.25rem 0.75rem;
+            border-radius: 50px;
+            font-weight: 500;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.25rem;
+        }
+
+        .status-pending {
+            background: #fffbeb;
+            color: var(--warning-color);
+            border: 1px solid #fed7aa;
+        }
+
+        .status-running {
+            background: #eff6ff;
+            color: #2563eb;
+            border: 1px solid #93c5fd;
+        }
+
+        .status-completed {
+            background: #ecfdf5;
+            color: var(--success-color);
+            border: 1px solid #a7f3d0;
+        }
+
+        .status-stopped {
+            background: #fffbeb;
+            color: var(--warning-color);
+            border: 1px solid #fed7aa;
+        }
+
+        .status-failed {
+            background: #fef2f2;
+            color: var(--error-color);
+            border: 1px solid #fecaca;
+        }
+
+        .status-unknown {
+            background: var(--card-background-light);
+            color: var(--text-muted);
+            border: 1px solid var(--border-color);
+        }
+
+        /* 操作按鈕 */
+        .action-buttons {
+            display: flex;
+            gap: 0.375rem;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .view-logs-btn,
+        .download-btn,
+        .stop-task-btn {
+            padding: 0.375rem 0.75rem;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.75rem;
+            font-weight: 500;
+            transition: all 0.2s ease;
+        }
+
+        .view-logs-btn {
+            background: var(--text-primary);
+            color: white;
+        }
+
+        .download-btn {
+            background: var(--success-color);
+            color: white;
+        }
+
+        .stop-task-btn {
+            background: var(--error-color);
+            color: white;
+        }
+
+        .view-logs-btn:hover,
+        .download-btn:hover,
+        .stop-task-btn:hover {
+            transform: translateY(-1px);
+            box-shadow: var(--shadow-sm);
+        }
+
+        .view-logs-btn:disabled,
+        .download-btn:disabled,
+        .stop-task-btn:disabled {
+            background: var(--text-muted);
+            cursor: not-allowed;
+            transform: none;
+            opacity: 0.6;
+        }
+
+        /* 模態框樣式 */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.5);
+            backdrop-filter: blur(4px);
+        }
+
+        .modal-content {
+            background: var(--card-background);
+            margin: 5% auto;
+            padding: 0;
+            border-radius: var(--border-radius);
+            width: 90%;
+            max-width: 1000px;
+            max-height: 80vh;
+            box-shadow: var(--shadow-lg);
+            border: 1px solid var(--border-color);
+        }
+
+        .modal-header {
+            padding: 1.5rem;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: var(--card-background-light);
+        }
+
+        .modal-header h3 {
+            margin: 0;
+            font-size: 1.125rem;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .close {
+            color: var(--text-muted);
+            font-size: 24px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: color 0.2s ease;
+        }
+
+        .close:hover {
+            color: var(--text-primary);
+        }
+
+        .modal-body {
+            padding: 1.5rem;
+            max-height: 60vh;
+            overflow-y: auto;
+        }
+
+        .task-logs {
+            background: var(--text-primary);
+            color: #f8fafc;
+            padding: 1rem;
+            border-radius: var(--border-radius-sm);
+            font-family: 'SF Mono', 'Monaco', 'Cascadia Code', 'Roboto Mono', Consolas, monospace;
+            font-size: 0.8125rem;
+            line-height: 1.5;
+            white-space: pre-wrap;
+            max-height: 400px;
+            overflow-y: auto;
+            border: 1px solid var(--border-color);
+        }
+
+        .task-status-info {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1rem;
+        }
+
+        .status-item {
+            padding: 0.75rem;
+            background: var(--card-background-light);
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+        }
+
+        .status-item label {
+            font-weight: 500;
+            color: var(--text-secondary);
+            margin-bottom: 0.25rem;
+            display: block;
+            font-size: 0.8125rem;
+        }
+
+        .status-item .value {
+            color: var(--text-primary);
+            font-weight: 500;
+        }
+
+        .refresh-logs-btn {
+            background: var(--text-primary);
+            color: white;
+            border: none;
+            padding: 0.375rem 0.75rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.8125rem;
+            margin-left: 1rem;
+        }
+
+        .refresh-logs-btn:hover {
+            background: var(--primary-color);
+        }
+
+        #no-tasks {
+            text-align: center;
+            padding: 3rem;
+            color: var(--text-secondary);
+            background: var(--card-background-light);
+            border-radius: var(--border-radius-sm);
+            border: 1px solid var(--border-color);
+        }
+
+        /* 響應式設計 */
+        @media (max-width: 1024px) {
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        @media (max-width: 768px) {
+            body {
+                padding: 16px;
+            }
+            
+            .header {
+                padding: 1.5rem;
+                flex-direction: column;
+                gap: 1rem;
+                text-align: center;
+            }
+            
+            .header-right {
+                flex-direction: row;
+                flex-wrap: wrap;
+                justify-content: center;
+                gap: 0.5rem;
+            }
+            
+            .stats-grid {
+                grid-template-columns: 1fr;
+                padding: 1.5rem;
+                gap: 1rem;
+            }
+            
+            .content-grid {
+                padding: 1.5rem;
+                gap: 1rem;
+            }
+            
+            .header h1 {
+                font-size: 1.5rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>HiveMind 主控台</h1>
+            <div class="header-right">
+                <div class="user-info">
+                    <i class="fas fa-user"></i>
+                    {{ username }}
+                </div>
+                <a href="/upload?user={{ username }}" class="upload-btn">
+                    <i class="fas fa-upload"></i>
+                    上傳新任務
+                </a>
+                <a href="/logout?user={{ username }}" class="logout-btn">
+                    <i class="fas fa-sign-out-alt"></i>
+                    登出
+                </a>
+            </div>
+        </div>
+
+        <div class="stats-grid">
+            <div class="stat-card balance">
+                <h3>
+                    <i class="fas fa-coins"></i>
+                    CPT 餘額
+                </h3>
+                <div class="value" id="cpt-balance">0</div>
+            </div>
+            <div class="stat-card">
+                <h3>
+                    <i class="fas fa-play"></i>
+                    執行中任務
+                </h3>
+                <div class="value" id="active-tasks">0</div>
+            </div>
+            <div class="stat-card">
+                <h3>
+                    <i class="fas fa-check"></i>
+                    已完成任務
+                </h3>
+                <div class="value" id="completed-tasks">0</div>
+            </div>
+            <div class="stat-card">
+                <h3>
+                    <i class="fas fa-server"></i>
+                    在線節點
+                </h3>
+                <div class="value" id="online-nodes">0</div>
+            </div>
+        </div>
+
+        <div class="content-grid">
+            <div class="card">
+                <div class="card-header">
+                    <h2>
+                        <i class="fas fa-tasks"></i>
+                        任務管理
+                    </h2>
+                    <div style="display: flex; gap: 1rem;">
+                        <button class="refresh-btn" onclick="refreshTasks()">
+                            <i class="fas fa-sync-alt"></i>
+                            刷新
+                        </button>
+                        <a href="/upload?user={{ username }}" class="upload-btn">
+                            <i class="fas fa-plus"></i>
+                            新任務
+                        </a>
+                    </div>
+                </div>
+                
+                <div class="task-filters">
+                    <button class="filter-btn active" onclick="filterTasks('all', this)">
+                        <i class="fas fa-list"></i>
+                        全部
+                    </button>
+                    <button class="filter-btn" onclick="filterTasks('PENDING', this)">
+                        <i class="fas fa-clock"></i>
+                        等待中
+                    </button>
+                    <button class="filter-btn" onclick="filterTasks('RUNNING', this)">
+                        <i class="fas fa-play"></i>
+                        執行中
+                    </button>
+                    <button class="filter-btn" onclick="filterTasks('COMPLETED', this)">
+                        <i class="fas fa-check"></i>
+                        已完成
+                    </button>
+                    <button class="filter-btn" onclick="filterTasks('STOPPED', this)">
+                        <i class="fas fa-stop"></i>
+                        已停止
+                    </button>
+                    <button class="filter-btn" onclick="filterTasks('FAILED', this)">
+                        <i class="fas fa-times"></i>
+                        失敗
+                    </button>
+                </div>
+                
+                <div class="table-container">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th style="width: 30%;">任務 ID</th>
+                                <th style="width: 15%;">狀態</th>
+                                <th style="width: 15%;">進度</th>
+                                <th style="width: 20%;">最後更新</th>
+                                <th style="width: 20%;">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="tasks-table">
+                            <!-- 任務將通過 JavaScript 填充 -->
+                        </tbody>
+                    </table>
+                </div>
+                <div id="no-tasks" style="display: none;">
+                    <i class="fas fa-inbox" style="font-size: 3rem; margin-bottom: 1rem; opacity: 0.5;"></i>
+                    <div>目前沒有任務</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentFilter = 'all';
+        let allTasks = [];
+
+        function updateStats(data) {
+            document.getElementById('active-tasks').textContent = data.active_tasks || 0;
+            document.getElementById('completed-tasks').textContent = data.completed_tasks || 0;
+            document.getElementById('online-nodes').textContent = data.online_nodes || 0;
+            if (data.cpt_balance !== undefined) {
+                document.getElementById('cpt-balance').textContent = data.cpt_balance;
+            }
+        }
+
+        function filterTasks(status, buttonElement) {
+            currentFilter = status;
+            
+            // 更新按鈕樣式
+            document.querySelectorAll('.filter-btn').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            
+            const targetButton = buttonElement || event.target;
+            if (targetButton) {
+                targetButton.classList.add('active');
+            }
+            
+            // 過濾並顯示任務
+            const filteredTasks = status === 'all' ? allTasks : allTasks.filter(task => 
+                task.status && task.status.toUpperCase() === status.toUpperCase()
+            );
+            displayTasks(filteredTasks);
+        }
+
+        function displayTasks(tasks) {
+            const tbody = document.getElementById('tasks-table');
+            const noTasksDiv = document.getElementById('no-tasks');
+            
+            tbody.innerHTML = '';
+            
+            if (tasks.length === 0) {
+                noTasksDiv.style.display = 'block';
+                return;
+            }
+            
+            noTasksDiv.style.display = 'none';
+            
+            tasks.forEach(task => {
+                const status = task.status || 'UNKNOWN';
+                const progress = task.progress || '0%';
+                const lastUpdate = task.last_update || '-';
+                const message = task.message || '';
+                
+                const canStop = ['PENDING', 'RUNNING'].includes(status.toUpperCase());
+                // 修正：允許 COMPLETED、STOPPED 和 FAILED 狀態的任務下載（可能有部分結果）
+                const canDownload = ['COMPLETED', 'STOPPED', 'FAILED'].includes(status.toUpperCase());
+                
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td>
+                        <div style="font-weight: 500;">${escapeHtml(task.task_id)}</div>
+                        <div style="font-size: 0.875rem; color: #666; margin-top: 0.25rem;">${escapeHtml(message)}</div>
+                    </td>
+                    <td>
+                        <span class="status-badge status-${status.toLowerCase()}">${status}</span>
+                    </td>
+                    <td>${progress}</td>
+                    <td>${lastUpdate}</td>
+                    <td>
+                        <div class="action-buttons">
+                            <button class="view-logs-btn" 
+                                    onclick="showTaskLogs('${escapeHtml(task.task_id)}')"
+                                    title="查看日誌">
+                                日誌
+                            </button>
+                            <button class="download-btn" 
+                                    onclick="downloadTaskResult('${escapeHtml(task.task_id)}')"
+                                    ${canDownload ? '' : 'disabled'}
+                                    title="${canDownload ? '下載結果' : '任務未完成或無結果'}">
+                                下載
+                            </button>
+                            <button class="stop-task-btn" 
+                                    onclick="stopTask('${escapeHtml(task.task_id)}')"
+                                    ${canStop ? '' : 'disabled'}
+                                    title="${canStop ? '停止任務' : '任務無法停止'}">
+                                停止
+                            </button>
+                        </div>
+                    </td>
+                `;
+                tbody.appendChild(row);
+            });
+        }
+
+        function updateTasks(tasks) {
+            allTasks = tasks || [];
+            
+            const activeTasks = allTasks.filter(t => 
+                t.status && ['PENDING', 'RUNNING'].includes(t.status.toUpperCase())
+            ).length;
+            
+            const completedTasks = allTasks.filter(t => 
+                t.status && t.status.toUpperCase() === 'COMPLETED'
+            ).length;
+            
+            updateStats({
+                active_tasks: activeTasks,
+                completed_tasks: completedTasks
+            });
+            
+            const filteredTasks = currentFilter === 'all' ? allTasks : allTasks.filter(task => 
+                task.status && task.status.toUpperCase() === currentFilter.toUpperCase()
+            );
+            displayTasks(filteredTasks);
+        }
+
+        // 移除固定的 API_BASE_URL，使用相對路徑
+        
+        function refreshBalance() {
+            fetch('/api/balance?user={{ username }}')
+                .then(response => response.json())
+                .then(data => {
+                    if (!data.error && data.cpt_balance !== undefined) {
+                        document.getElementById('cpt-balance').textContent = data.cpt_balance;
+                    }
+                });
+        }
+
+        function refreshTasks() {
+            fetch('/api/tasks?user={{ username }}')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        updateTasks([]);
+                    } else {
+                        updateTasks(data.tasks || []);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error fetching tasks:', error);
+                    updateTasks([]);
+                });
+        }
+
+        function refreshNodes() {
+            console.log('Refreshing nodes...');
+            fetch('/api/nodes?user={{ username }}')
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    console.log('Nodes data received:', data);
+                    if (!data.error && data.nodes) {
+                        const onlineNodes = data.nodes.filter(n => n.status === 'ONLINE').length;
+                        document.getElementById('online-nodes').textContent = onlineNodes;
+                    } else {
+                        console.error('Nodes error:', data.error);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error fetching nodes:', error);
+                });
+        }
+
+        // 初始載入
+        console.log('Initializing dashboard...');
+        refreshTasks();
+        refreshBalance();
+        refreshNodes();
+
+        // 定期更新 - 降低頻率以減少服務器負載
+        setInterval(() => {
+            refreshTasks();
+            refreshBalance();
+        }, 15000);  // 每15秒更新一次
+
+        setInterval(() => {
+            refreshNodes();
+        }, 30000);  // 每30秒更新節點狀態
+
+        // 新增：任務日誌相關功能
+        function showTaskLogs(taskId) {
+            const modal = document.getElementById('taskLogsModal');
+            const modalTitle = document.getElementById('modalTaskId');
+            const modalBody = document.getElementById('modalLogsContent');
+            
+            modalTitle.textContent = `任務 ${taskId} 日誌`;
+            modalBody.innerHTML = '<div class="logs-loading">載入中...</div>';
+            modal.style.display = 'block';
+            
+            loadTaskLogs(taskId);
+        }
+
+        function loadTaskLogs(taskId) {
+            fetch(`/api/task_logs/${taskId}?user={{ username }}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        document.getElementById('modalLogsContent').innerHTML = 
+                            `<div class="text-error">錯誤: ${data.error}</div>`;
+                        return;
+                    }
+                    
+                    displayTaskLogs(data);
+                })
+                .catch(error => {
+                    console.error('Error loading task logs:', error);
+                    document.getElementById('modalLogsContent').innerHTML = 
+                        `<div class="text-error">載入日誌失敗: ${error}</div>`;
+                });
+        }
+
+        function displayTaskLogs(data) {
+            const modalBody = document.getElementById('modalLogsContent');
+            
+            let html = `
+                <div class="task-status-info">
+                    <div class="status-item">
+                        <label>任務狀態</label>
+                        <div class="value">
+                            <span class="status-badge status-${data.status.toLowerCase()}">${data.status}</span>
+                        </div>
+                    </div>
+                    <div class="status-item">
+                        <label>訊息</label>
+                        <div class="value">${data.message || '無'}</div>
+                    </div>
+                    <div class="status-item">
+                        <label>日誌條數</label>
+                        <div class="value">${data.total_logs}</div>
+                    </div>
+                </div>
+            `;
+            
+            if (data.logs && data.logs.length > 0) {
+                html += '<div class="task-logs">';
+                data.logs.forEach(log => {
+                    html += `<div class="log-entry ${log.level}">`;
+                    html += `<span class="timestamp">[${log.timestamp}]</span> `;
+                    html += `<span class="content">${escapeHtml(log.content)}</span>`;
+                    html += '</div>';
+                });
+                html += '</div>';
+            } else {
+                html += '<div class="task-logs">目前無日誌記錄</div>';
+            }
+            
+            modalBody.innerHTML = html;
+            
+            // 自動滾動到底部
+            const logsContainer = modalBody.querySelector('.task-logs');
+            if (logsContainer) {
+                logsContainer.scrollTop = logsContainer.scrollHeight;
+            }
+        }        function refreshTaskLogs() {
+            const modal = document.getElementById('taskLogsModal');
+            if (modal.style.display === 'block') {
+                const taskId = document.getElementById('modalTaskId').textContent.replace('任務 ', '').replace(' 日誌', '');
+                loadTaskLogs(taskId);
+            }
+        }
+
+        async function stopTask(taskId) {
+            if (!confirm(`確定要停止任務 ${taskId} 嗎？\n\n注意：停止的任務仍會打包部分結果供您下載。`)) {
+                return;
+            }
+
+            const button = event.target;
+            const originalText = button.textContent;
+            
+            try {
+                // 禁用按鈕並顯示載入狀態
+                button.disabled = true;
+                button.textContent = '停止中...';
+                
+                console.log(`正在停止任務 ${taskId}...`);
+                
+                const response = await fetch(`/api/stop_task/${taskId}?user={{ username }}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                let data = {};
+                try {
+                    data = await response.json();
+                } catch (e) {
+                    console.error('解析回應JSON失敗:', e);
+                    data = { error: '伺服器回應格式錯誤' };
+                }
+                
+                if (response.ok && data.success) {
+                    // 顯示成功消息
+                    const message = data.message || `任務 ${taskId} 已成功停止`;
+                    const note = data.note || '';
+                    alert(`${message}\n\n${note}`);
+                    
+                    // 刷新任務列表
+                    refreshTasks();
+                } else {
+                    // 處理錯誤情況
+                    let errorMsg = data.error || data.message || `HTTP ${response.status}`;
+                    
+                    if (response.status === 400) {
+                        errorMsg = data.error || '任務可能不存在或已完成，無法停止';
+                    } else if (response.status === 401) {
+                        errorMsg = '權限不足，請重新登入';
+                    } else if (response.status === 500) {
+                        errorMsg = '伺服器內部錯誤，請稍後再試';
+                    }
+                    
+                    console.error('停止任務失敗:', errorMsg);
+                    alert(`停止任務失敗: ${errorMsg}`);
+                }
+            } catch (error) {
+                console.error('停止任務時發生錯誤:', error);
+                alert(`停止任務時發生錯誤: ${error.message}`);
+            } finally {
+                // 恢復按鈕狀態
+                button.disabled = false;
+                button.textContent = originalText;
+            }
+        }
+
+        async function downloadTaskResult(taskId) {
+            try {
+                const button = event.target;
+                const originalText = button.textContent;
+                
+                // 禁用按鈕並顯示載入狀態
+                button.disabled = true;
+                button.textContent = '下載中...';
+                
+                // 修正：添加用戶參數到下載請求
+                const response = await fetch(`/api/download_result/${taskId}?user={{ username }}`, {
+                    method: 'GET'
+                });
+                
+                if (response.ok) {
+                    // 獲取檔案名
+                    const contentDisposition = response.headers.get('Content-Disposition');
+                    let filename = `${taskId}_result.zip`;
+                    if (contentDisposition) {
+                        const match = contentDisposition.match(/filename="(.+)"/);
+                        if (match) {
+                            filename = match[1];
+                        }
+                    }
+                    
+                    // 下載檔案
+                    const blob = await response.blob();
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.style.display = 'none';
+                    a.href = url;
+                    a.download = filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                    document.body.removeChild(a);
+                    
+                    console.log(`任務結果已下載: ${filename}`);
+                } else {
+                    let errorMsg = '下載失敗';
+                    try {
+                        const errorData = await response.json();
+                        errorMsg = errorData.error || '未知錯誤';
+                    } catch (e) {
+                        errorMsg = `HTTP ${response.status}: ${response.statusText}`;
+                    }
+                    console.error('下載失敗:', errorMsg);
+                    alert(`下載失敗: ${errorMsg}`);
+                }
+            } catch (error) {
+                console.error('下載任務結果時發生錯誤:', error);
+                alert(`下載時發生錯誤: ${error.message}`);
+            } finally {
+                // 恢復按鈕狀態
+                const button = event.target;
+                button.disabled = false;
+                button.textContent = '下載';
+            }
+        }
+
+        function closeTaskLogsModal() {
+            document.getElementById('taskLogsModal').style.display = 'none';
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // 點擊模態框外部關閉
+        window.onclick = function(event) {
+            const modal = document.getElementById('taskLogsModal');
+            if (event.target === modal) {
+                closeTaskLogsModal();
+            }
+        }
+    </script>
+
+    <!-- 任務日誌模態框 -->
+    <div id="taskLogsModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modalTaskId">任務日誌</h3>
+                <div>
+                    <button class="refresh-logs-btn" onclick="refreshTaskLogs()">刷新日誌</button>
+                    <span class="close" onclick="closeTaskLogsModal()">&times;</span>
+                </div>
+            </div>
+            <div class="modal-body">
+                <div id="modalLogsContent">
+                    載入中...
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+
+{% block title %}下載 - HiveMind{% endblock %}
+
+{% block content %}
+<div class="py-20 px-4">
+    <div class="max-w-4xl mx-auto">
+        <div class="text-center mb-16 animate-fade-in-down">
+            <h1 class="text-4xl font-bold mb-6 text-neutral-900 dark:text-neutral-100">
+                下載 HiveMind
+            </h1>
+            <p class="text-xl text-neutral-600 dark:text-neutral-400">
+                選擇適合您的客戶端開始使用分布式運算平台
+            </p>
+        </div>
+        <div class="download-flex-row">
+            <!-- 節點客戶端 -->
+            <div class="card p-8 animate-fade-in-up flex-1 flex flex-col items-center">
+                <div class="text-center mb-6">
+                    <i class="fas fa-server text-5xl text-neutral-600 dark:text-neutral-400 mb-4"></i>
+                    <h3 class="text-2xl font-bold mb-2 text-neutral-800 dark:text-neutral-200">工作端</h3>
+                    <p class="text-neutral-600 dark:text-neutral-400">
+                        將您的閒置資源貢獻給網路，獲得報酬
+                    </p>
+                </div>
+                <a href="https://github.com/him6794/hivemind/releases/download/worker/HiveMindWorkerSetup.exe"
+                   class="btn-primary w-full transition-all duration-200 hover:scale-105 flex items-center justify-center"
+                   style="height: 48px;" target="_blank" rel="noopener">
+                    <i class="fab fa-windows mr-2"></i>下載 Windows 版本
+                </a>
+            </div>
+            <!-- 主控端 -->
+            <div class="card p-8 animate-fade-in-up flex-1 flex flex-col items-center">
+                <div class="text-center mb-6">
+                    <i class="fas fa-rocket text-5xl text-neutral-600 dark:text-neutral-400 mb-4"></i>
+                    <h3 class="text-2xl font-bold mb-2 text-neutral-800 dark:text-neutral-200">主控端</h3>
+                    <p class="text-neutral-600 dark:text-neutral-400">
+                        部署主控伺服器，管理分布式運算任務
+                    </p>
+                </div>
+                <a href="https://github.com/him6794/hivemind/releases/download/worker/HiveMindmasterSetup.exe"
+                   class="btn-primary w-full transition-all duration-200 hover:scale-105 flex items-center justify-center"
+                   style="height: 48px;" target="_blank" rel="noopener">
+                    <i class="fab fa-windows mr-2"></i>下載 Windows 版本
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

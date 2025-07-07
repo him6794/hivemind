@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+
+{% block title %}餘額查詢與轉帳 - HiveMind{% endblock %}
+
+{% block content %}
+<div class="min-h-screen flex items-center justify-center p-4 bg-neutral-100 dark:bg-neutral-900 transition">
+    <div class="w-full max-w-xl">
+        <div class="card card-large animate-fade-in-up">
+            <h2 class="text-3xl font-bold text-center mb-8 text-neutral-900 dark:text-neutral-100">
+                <i class="fas fa-coins mr-2 text-purple-400"></i>我的餘額
+            </h2>
+            <div class="text-center mb-8">
+                <div class="text-5xl font-bold mb-2 text-neutral-900 dark:text-neutral-100" id="balance-value">--</div>
+                <div class="text-neutral-500 dark:text-neutral-400 text-lg">CPT</div>
+            </div>
+            <hr class="my-8 border-neutral-200 dark:border-neutral-700">
+            <h3 class="text-xl font-semibold mb-4 text-center text-neutral-900 dark:text-neutral-100">
+                <i class="fas fa-exchange-alt mr-2"></i>轉帳
+            </h3>
+            <form id="transferForm" class="space-y-6">
+                <div>
+                    <label for="receiver" class="form-label">收款人用戶名</label>
+                    <input id="receiver" name="receiver" type="text" required class="form-input" placeholder="請輸入對方用戶名">
+                </div>
+                <div>
+                    <label for="amount" class="form-label">金額</label>
+                    <input id="amount" name="amount" type="number" min="1" step="1" required class="form-input" placeholder="請輸入金額">
+                </div>
+                <div id="transfer-message" class="hidden"></div>
+                <button type="submit" class="btn-primary w-full transition-all duration-200 hover:scale-105">
+                    <i class="fas fa-paper-plane mr-2"></i>轉帳
+                </button>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', async () => {
+    const token = localStorage.getItem('access_token');
+    if (!token) {
+        window.location.href = '/login';
+        return;
+    }
+    
+    // 查詢餘額
+    try {
+        const resp = await fetch('/api/balance', {
+            headers: { 'Authorization': 'Bearer ' + token }
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            document.getElementById('balance-value').textContent = data.balance;
+        }
+    } catch {
+        document.getElementById('balance-value').textContent = '--';
+    }
+
+    // 轉帳表單
+    document.getElementById('transferForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const receiver = document.getElementById('receiver').value;
+        const amount = document.getElementById('amount').value;
+        const msgDiv = document.getElementById('transfer-message');
+        
+        msgDiv.classList.add('hidden');
+
+        try {
+            const resp = await fetch('/api/transfer', {
+                method: 'POST',
+                headers: {
+                    'Authorization': 'Bearer ' + token,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ receiver, amount: Number(amount) })
+            });
+            const data = await resp.json();
+            if (resp.ok) {
+                msgDiv.textContent = '轉帳成功！新餘額：' + data.new_balance;
+                msgDiv.className = 'message message-success mb-2';
+                document.getElementById('balance-value').textContent = data.new_balance;
+                document.getElementById('transferForm').reset();
+            } else {
+                msgDiv.textContent = data.error || '轉帳失敗';
+                msgDiv.className = 'message message-error mb-2';
+            }
+            msgDiv.classList.remove('hidden');
+        } catch {
+            msgDiv.textContent = '網路錯誤，請稍後再試';
+            msgDiv.className = 'message message-error mb-2';
+            msgDiv.classList.remove('hidden');
+        }
+    });
+});
+</script>
+{% endblock %}
