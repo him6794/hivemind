@@ -1600,97 +1600,103 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
             )
 
     def GetTaskResult(self, request, context):
-        """主控端請求任務結果，節點池回傳暫存的 ZIP - 支援 STOPPED 狀態，傳輸完成後自動清理文件"""
-        try:
-            task_id = request.task_id
-            
-            # 驗證 token（如果有提供）
-            if hasattr(request, 'token') and request.token:
-                username = self._extract_user_from_token(request.token)
-                if not username:
-                    context.set_code(grpc.StatusCode.UNAUTHENTICATED)
-                    context.set_details("Invalid or expired token")
+            """主控端請求任務結果，節點池回傳暫存的 ZIP - 支援 STOPPED 狀態，傳輸完成後自動清理文件和Redis數據"""
+            try:
+                task_id = request.task_id
+
+                # 驗證 token（如果有提供）
+                if hasattr(request, 'token') and request.token:
+                    username = self._extract_user_from_token(request.token)
+                    if not username:
+                        context.set_code(grpc.StatusCode.UNAUTHENTICATED)
+                        context.set_details("Invalid or expired token")
+                        return nodepool_pb2.GetTaskResultResponse(
+                            success=False,
+                            message="Authentication failed",
+                            result_zip=b""
+                        )
+
+                    # 檢查任務是否屬於該用戶
+                    task_info = self.task_manager.get_task_info(task_id, include_zip=False)
+                    if task_info and str(task_info.get("user_id")) != username:
+                        context.set_code(grpc.StatusCode.PERMISSION_DENIED)
+                        context.set_details("Access denied")
+                        return nodepool_pb2.GetTaskResultResponse(
+                            success=False,
+                            message="Access denied to this task",
+                            result_zip=b""
+                        )
+
+                result_zip, status = self.task_manager.get_task_result_zip(task_id)
+
+                # 支援 COMPLETED 和 STOPPED 狀態的結果下載
+                if status in ["COMPLETED", "STOPPED"]:
+                    if result_zip:
+                        status_msg = "completed successfully" if status == "COMPLETED" else "stopped but has partial results"
+
+                        # 在成功返回結果前，標記文件可以清理
+                        self.task_manager.file_storage.mark_for_cleanup(task_id)
+
+                        # 安排延遲清理文件，確保文件傳輸完成
+                        self.task_manager.file_storage.delayed_cleanup_task_files(task_id, delay_seconds=10)
+
+                        # 清理Redis數據（包括任務元數據、日誌和用戶任務關聯）
+                        self.task_manager.cleanup_task_data(task_id)
+
+                        logging.info(f"任務 {task_id} 結果已成功傳輸 ({len(result_zip)} bytes)，已清理Redis數據並安排文件清理")
+
+                        return nodepool_pb2.GetTaskResultResponse(
+                            success=True,
+                            message=f"Task {task_id} {status_msg}",
+                            result_zip=result_zip
+                        )
+                    else:
+                        return nodepool_pb2.GetTaskResultResponse(
+                            success=False,
+                            message=f"Task {task_id} is {status.lower()} but no result available",
+                            result_zip=b""
+                        )
+                elif status in ["PENDING", "RUNNING"]:
                     return nodepool_pb2.GetTaskResultResponse(
                         success=False,
-                        message="Authentication failed",
+                        message=f"Task {task_id} is still {status.lower()}",
                         result_zip=b""
                     )
-                
-                # 檢查任務是否屬於該用戶
-                task_info = self.task_manager.get_task_info(task_id, include_zip=False)
-                if task_info and str(task_info.get("user_id")) != username:
-                    context.set_code(grpc.StatusCode.PERMISSION_DENIED)
-                    context.set_details("Access denied")
-                    return nodepool_pb2.GetTaskResultResponse(
-                        success=False,
-                        message="Access denied to this task",
-                        result_zip=b""
-                    )
-            
-            result_zip, status = self.task_manager.get_task_result_zip(task_id)
-            
-            # 支援 COMPLETED 和 STOPPED 狀態的結果下載
-            if status in ["COMPLETED", "STOPPED"]:
-                if result_zip:
-                    status_msg = "completed successfully" if status == "COMPLETED" else "stopped but has partial results"
-                    
-                    # 在成功返回結果前，標記文件可以清理
-                    self.task_manager.file_storage.mark_for_cleanup(task_id)
-                    
-                    # 安排延遲清理，確保文件傳輸完成
-                    self.task_manager.file_storage.delayed_cleanup_task_files(task_id, delay_seconds=10)
-                    
-                    logging.info(f"任務 {task_id} 結果已成功傳輸 ({len(result_zip)} bytes)，已安排文件清理")
-                    
-                    return nodepool_pb2.GetTaskResultResponse(
-                        success=True,
-                        message=f"Task {task_id} {status_msg}",
-                        result_zip=result_zip
-                    )
+                elif status == "FAILED":
+                    # 失敗的任務也可能有部分結果
+                    if result_zip:
+                        # 失敗的任務結果也需要清理
+                        self.task_manager.file_storage.mark_for_cleanup(task_id)
+                        self.task_manager.file_storage.delayed_cleanup_task_files(task_id, delay_seconds=10)
+
+                        # 清理Redis數據
+                        self.task_manager.cleanup_task_data(task_id)
+
+                        logging.info(f"任務 {task_id} 失敗但有部分結果已傳輸，已清理Redis數據並安排文件清理")
+
+                        return nodepool_pb2.GetTaskResultResponse(
+                            success=True,
+                            message=f"Task {task_id} failed but has partial results",
+                            result_zip=result_zip
+                        )
+                    else:
+                        return nodepool_pb2.GetTaskResultResponse(
+                            success=False,
+                            message=f"Task {task_id} failed with no results",
+                            result_zip=b""
+                        )
                 else:
                     return nodepool_pb2.GetTaskResultResponse(
                         success=False,
-                        message=f"Task {task_id} is {status.lower()} but no result available",
+                        message=f"Task {task_id} status: {status}",
                         result_zip=b""
                     )
-            elif status in ["PENDING", "RUNNING"]:
+            except Exception as e:
+                logging.error(f"GetTaskResult 服務錯誤: {e}", exc_info=True)
+                context.set_code(grpc.StatusCode.INTERNAL)
+                context.set_details(f"Internal server error: {str(e)}")
                 return nodepool_pb2.GetTaskResultResponse(
                     success=False,
-                    message=f"Task {task_id} is still {status.lower()}",
+                    message=f"Internal error: {str(e)}",
                     result_zip=b""
                 )
-            elif status == "FAILED":
-                # 失敗的任務也可能有部分結果
-                if result_zip:
-                    #  失敗的任務結果也需要清理
-                    self.task_manager.file_storage.mark_for_cleanup(task_id)
-                    self.task_manager.file_storage.delayed_cleanup_task_files(task_id, delay_seconds=10)
-                    
-                    logging.info(f"任務 {task_id} 失敗但有部分結果已傳輸，已安排文件清理")
-                    
-                    return nodepool_pb2.GetTaskResultResponse(
-                        success=True,
-                        message=f"Task {task_id} failed but has partial results",
-                        result_zip=result_zip
-                    )
-                else:
-                    return nodepool_pb2.GetTaskResultResponse(
-                        success=False,
-                        message=f"Task {task_id} failed with no results",
-                        result_zip=b""
-                    )
-            else:
-                return nodepool_pb2.GetTaskResultResponse(
-                    success=False,
-                    message=f"Task {task_id} status: {status}",
-                    result_zip=b""
-                )
-        except Exception as e:
-            logging.error(f"GetTaskResult 服務錯誤: {e}", exc_info=True)
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(f"Internal server error: {str(e)}")
-            return nodepool_pb2.GetTaskResultResponse(
-                success=False,
-                message=f"Internal error: {str(e)}",
-                result_zip=b""
-            )

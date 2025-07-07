@@ -129,12 +129,12 @@
             background: var(--card-background);
             color: var(--text-primary);
             cursor: pointer;
-            appearance: none; /* 移除預設箭頭 */
+            appearance: none;
             background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='%23374151' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M2 5l6 6 6-6'/%3E%3C/svg%3E");
             background-repeat: no-repeat;
             background-position: right 0.75rem center;
             background-size: 16px;
-            padding-right: 2.5rem; /* 為箭頭留空間 */
+            padding-right: 2.5rem;
         }
 
         select:focus {
@@ -149,7 +149,6 @@
             color: var(--text-primary);
         }
 
-        /* 確保 select 不會被其他樣式覆蓋 */
         .form-group select {
             width: 100%;
             padding: 0.75rem 2.5rem 0.75rem 0.75rem;
@@ -317,6 +316,11 @@
                         <label for="gpu_name">GPU 名稱需求</label>
                         <input type="text" id="gpu_name" name="gpu_name" placeholder="留空表示任何GPU">
                     </div>
+
+                    <div class="form-group">
+                        <label for="repeat_count">重複上傳次數</label>
+                        <input type="number" id="repeat_count" name="repeat_count" value="1" min="1" max="100" required>
+                    </div>
                 </div>
             </div>
 
@@ -347,6 +351,7 @@
         // 表單驗證
         document.querySelector('form').addEventListener('submit', function(e) {
             const fileInput = document.getElementById('task_zip');
+            const repeatCountInput = document.getElementById('repeat_count');
             
             if (!fileInput.files.length) {
                 e.preventDefault();
@@ -369,6 +374,14 @@
                 return false;
             }
             
+            // 驗證重複次數
+            const repeatCount = parseInt(repeatCountInput.value);
+            if (isNaN(repeatCount) || repeatCount < 1 || repeatCount > 100) {
+                e.preventDefault();
+                alert('重複次數必須在 1 到 100 之間');
+                return false;
+            }
+            
             // 顯示上傳進度提示
             const submitBtn = document.querySelector('button[type="submit"]');
             submitBtn.textContent = '上傳中...';
@@ -378,8 +391,11 @@
         // 數字輸入驗證
         document.querySelectorAll('input[type="number"]').forEach(input => {
             input.addEventListener('input', function(e) {
-                if (e.target.value < 0) {
-                    e.target.value = 0;
+                if (e.target.value < parseInt(e.target.min)) {
+                    e.target.value = e.target.min;
+                }
+                if (e.target.max && e.target.value > parseInt(e.target.max)) {
+                    e.target.value = e.target.max;
                 }
             });
         });

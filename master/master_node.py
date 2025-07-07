@@ -293,12 +293,10 @@ class MasterNodeUI:
                 return redirect(url_for('login'))
             
             if request.method == 'POST':
-                # 詳細的檔案驗證
                 logging.info(f"收到用戶 {username} 的檔案上傳請求")
                 logging.info(f"請求的 files 鍵: {list(request.files.keys())}")
                 logging.info(f"請求的 form 鍵: {list(request.form.keys())}")
                 
-                # 檢查是否有檔案在請求中
                 if 'task_zip' not in request.files:
                     logging.warning("請求中沒有 task_zip 檔案欄位")
                     logging.warning(f"可用的檔案欄位: {list(request.files.keys())}")
@@ -310,21 +308,17 @@ class MasterNodeUI:
                 logging.info(f"檔案名稱: {file.filename}")
                 logging.info(f"檔案內容類型: {file.content_type}")
                 
-                # 檢查檔案名稱
                 if not file.filename or file.filename == '':
                     logging.warning("檔案名稱為空")
                     flash('未選擇檔案，請選擇一個 ZIP 檔案', 'error')
                     return render_template('master_upload.html', username=username)
                 
-                # 檢查檔案格式
                 if not file.filename.lower().endswith('.zip'):
                     logging.warning(f"檔案格式錯誤: {file.filename}")
                     flash('檔案格式無效，請上傳 .zip 檔案', 'error')
                     return render_template('master_upload.html', username=username)
                 
-                # 檢查檔案內容是否存在
                 try:
-                    # 先讀取檔案內容
                     file_content = file.read()
                     logging.info(f"成功讀取檔案內容，大小: {len(file_content)} bytes")
                     
@@ -333,20 +327,15 @@ class MasterNodeUI:
                         flash('上傳的檔案為空，請選擇有效的 ZIP 檔案', 'error')
                         return render_template('master_upload.html', username=username)
                     
-                    # 檢查檔案大小 (50MB)
                     max_size = 50 * 1024 * 1024
                     if len(file_content) > max_size:
                         logging.warning(f"檔案太大: {len(file_content)} bytes")
                         flash('檔案大小超過 50MB 限制', 'error')
                         return render_template('master_upload.html', username=username)
                     
-                    # 驗證 ZIP 檔案格式
                     try:
-                        import zipfile
-                        import io
                         zip_buffer = io.BytesIO(file_content)
                         with zipfile.ZipFile(zip_buffer, 'r') as zip_file:
-                            # 檢查 ZIP 檔案是否有效
                             zip_file.testzip()
                             file_list = zip_file.namelist()
                             logging.info(f"ZIP 檔案驗證成功，包含 {len(file_list)} 個檔案")
@@ -363,12 +352,16 @@ class MasterNodeUI:
                     
                     logging.info(f"檔案驗證通過: {file.filename}, 大小: {len(file_content)} bytes")
                     
-                    # 生成任務ID
-                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                    task_uuid = str(uuid.uuid4())[:8]
-                    task_id = f"task_{timestamp}_{task_uuid}"
+                    # 獲取重複次數
+                    try:
+                        repeat_count = int(request.form.get('repeat_count', 1))
+                        if repeat_count < 1 or repeat_count > 100:
+                            flash('重複次數必須在 1 到 100 之間', 'error')
+                            return render_template('master_upload.html', username=username)
+                    except ValueError:
+                        flash('無效的重複次數，請輸入數字', 'error')
+                        return render_template('master_upload.html', username=username)
                     
-                    # 獲取需求參數
                     requirements = {
                         "memory_gb": request.form.get('memory_gb', 0),
                         "cpu_score": request.form.get('cpu_score', 0),
@@ -378,26 +371,35 @@ class MasterNodeUI:
                         "gpu_name": request.form.get('gpu_name', '')
                     }
                     
-                    logging.info(f"準備上傳任務 {task_id}，需求: {requirements}")
+                    success_count = 0
+                    task_ids = []
+                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                     
-                    # 上傳任務
-                    _, success = self.upload_task_with_user(username, task_id, file_content, requirements)
+                    for i in range(repeat_count):
+                        task_uuid = str(uuid.uuid4())[:8]
+                        task_id = f"task_{timestamp}_{task_uuid}_{i+1}"
+                        logging.info(f"準備上傳任務 {task_id}，需求: {requirements}")
+                        task_id, success = self.upload_task_with_user(username, task_id, file_content, requirements)
+                        if success:
+                            success_count += 1
+                            task_ids.append(task_id)
+                        else:
+                            logging.error(f"任務 {task_id} 上傳失敗")
                     
-                    if success:
-                        flash(f'任務 "{task_id}" 上傳成功！', 'success')
-                        logging.info(f"任務 {task_id} 上傳成功")
-                        return redirect(url_for('index') + f"?user={username}")
+                    if success_count == repeat_count:
+                        flash(f'成功上傳 {success_count}/{repeat_count} 個任務: {", ".join(task_ids)}', 'success')
+                        logging.info(f"成功上傳 {success_count}/{repeat_count} 個任務")
                     else:
-                        flash(f'任務 "{task_id}" 上傳失敗，請檢查系統狀態或稍後再試', 'error')
-                        logging.error(f"任務 {task_id} 上傳失敗")
-                        return render_template('master_upload.html', username=username)
+                        flash(f'僅成功上傳 {success_count}/{repeat_count} 個任務: {", ".join(task_ids)}', 'warning')
+                        logging.warning(f"僅成功上傳 {success_count}/{repeat_count} 個任務")
+                    
+                    return redirect(url_for('index') + f"?user={username}")
                         
                 except Exception as e:
                     logging.error(f"處理上傳檔案時發生錯誤: {e}", exc_info=True)
                     flash('處理檔案時發生錯誤，請稍後再試', 'error')
                     return render_template('master_upload.html', username=username)
             
-            # GET 請求，顯示上傳頁面
             return render_template('master_upload.html', username=username)
 
         @self.app.route('/api/stop_task/<task_id>', methods=['POST'])
