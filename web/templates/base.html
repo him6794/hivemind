@@ -9,11 +9,15 @@
     <link href="{{ url_for('static', filename='css/main.css') }}" rel="stylesheet">
     <link rel="icon" href="{{ url_for('static', filename='img/file.ico') }}">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/alpinejs/3.10.2/cdn.min.js" defer></script>
+    <!-- Barba.js 與 GSAP -->
+    <script src="https://unpkg.com/@barba/core"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
 </head>
 <body class="bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 min-h-screen transition overflow-x-hidden font-sans">
+    <!-- 頁面切換淡入淡出動畫遮罩 -->
+    <div id="page-fade" class="fixed inset-0 bg-white dark:bg-gray-900 opacity-0 pointer-events-none transition-opacity duration-500 z-50"></div>
     <!-- 矩陣動畫背景（僅深色模式顯示，z-index: 0） -->
     <canvas id="matrix-bg" class="fixed inset-0 w-full h-full pointer-events-none" style="z-index:0"></canvas>
-    <!-- 主要內容包裹層（z-index: 1） -->
     <div id="main-content-wrapper" style="position:relative; z-index:1;">
         <!-- 導航欄 -->
         <nav class="bg-white/90 dark:bg-gray-800/90 backdrop-blur-lg border-b border-gray-200 dark:border-gray-700 shadow-sm relative z-10">
@@ -67,10 +71,14 @@
                 </div>
             </div>
         </nav>
-        <!-- 主要內容 -->
-        <main class="relative z-10">
-            {% block content %}{% endblock %}
-        </main>
+        <!-- 主要內容（Barba.js 容器） -->
+        <div id="barba-wrapper" data-barba="wrapper">
+          <div class="barba-container" data-barba="container">
+            <main id="page-content" class="relative z-10 opacity-0 transition-opacity duration-500">
+                {% block content %}{% endblock %}
+            </main>
+          </div>
+        </div>
     </div>
     <!-- 主題切換腳本 -->
     <script>
@@ -266,5 +274,73 @@
     }
     </script>
     {% block scripts %}{% endblock %}
+    <script>
+    // Barba.js 無縫切換動畫
+    const pageOrder = [
+      '/', '/download', '/docs', '/sponsor', '/terms', '/privacy'
+    ];
+    let lastPath = window.location.pathname;
+
+    barba.init({
+      transitions: [{
+        name: 'dynamic-slide',
+        async leave(data) {
+          const from = pageOrder.indexOf(lastPath);
+          const to = pageOrder.indexOf(data.next.url.path);
+          let direction = 'right';
+          if (to > from) direction = 'left';
+          if (to < from) direction = 'right';
+          if (direction === 'left') {
+            await gsap.to(data.current.container, {opacity: 0, x: -100, duration: 0.2});
+          } else {
+            await gsap.to(data.current.container, {opacity: 0, x: 100, duration: 0.2});
+          }
+        },
+        async enter(data) {
+          const from = pageOrder.indexOf(lastPath);
+          const to = pageOrder.indexOf(data.next.url.path);
+          let direction = 'right';
+          if (to > from) direction = 'left';
+          if (to < from) direction = 'right';
+          if (direction === 'left') {
+            await gsap.from(data.next.container, {opacity: 0, x: 100, duration: 0.2});
+          } else {
+            await gsap.from(data.next.container, {opacity: 0, x: -100, duration: 0.2});
+          }
+          lastPath = data.next.url.path;
+        }
+      }]
+    });
+    // 頁面切換淡入淡出動畫
+    document.querySelectorAll('a[href]:not([target="_blank"])').forEach(link => {
+      link.addEventListener('click', function(e) {
+        // 只處理同站連結
+        if (link.href && !link.href.startsWith('javascript:') && !link.href.startsWith('#') && link.origin === window.location.origin) {
+          e.preventDefault();
+          const fade = document.getElementById('page-fade');
+          fade.classList.remove('opacity-0');
+          fade.classList.add('opacity-100');
+          setTimeout(() => {
+            window.location = link.href;
+          }, 400);
+        }
+      });
+    });
+    window.addEventListener('pageshow', function() {
+      const fade = document.getElementById('page-fade');
+      fade.classList.remove('opacity-100');
+      fade.classList.add('opacity-0');
+    });
+    // 內容淡入動畫
+    window.addEventListener('DOMContentLoaded', function() {
+      const content = document.getElementById('page-content');
+      if (content) {
+        setTimeout(() => {
+          content.classList.remove('opacity-0');
+          content.classList.add('opacity-100');
+        }, 50);
+      }
+    });
+    </script>
 </body>
 </html>
