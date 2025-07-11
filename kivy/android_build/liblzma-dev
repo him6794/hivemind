@@ -1,0 +1,54 @@
+Reading package lists...
+Building dependency tree...
+Reading state information...
+build-essential is already the newest version (12.10ubuntu1).
+build-essential set to manually installed.
+zlib1g-dev is already the newest version (1:1.3.dfsg-3.1ubuntu2.1).
+zlib1g-dev set to manually installed.
+wget is already the newest version (1.21.4-1ubuntu4.1).
+wget set to manually installed.
+curl is already the newest version (8.5.0-2ubuntu10.6).
+curl set to manually installed.
+xz-utils is already the newest version (5.6.1+really5.4.5-1ubuntu0.2).
+xz-utils set to manually installed.
+The following additional packages will be installed:
+  bsdextrautils bsdutils bzip2-doc eject fdisk icu-devtools libblkid1
+  libbrotli-dev libbz2-dev libclang-cpp18 libevent-2.1-7t64 libfdisk1
+  libfontconfig-dev libfontconfig1-dev libfreetype-dev libgcrypt20-dev
+  libgmp-dev libgmpxx4ldbl libgnutls-dane0t64 libgnutls-openssl27t64
+  libgnutls28-dev libgpg-error-dev libicu-dev libidn2-dev libllvm18 libmount1
+  libncurses-dev libncurses6 libnspr4-dev libnss3-dev libp11-kit-dev libpfm4
+  libpkgconf3 libpng-dev libpng-tools libsmartcols1 libtasn1-6-dev
+  libtasn1-doc libunbound8 libuuid1 libxext-dev libxft-dev libxmlsec1t64
+  libxmlsec1t64-gcrypt libxmlsec1t64-gnutls libxmlsec1t64-nss
+  libxmlsec1t64-openssl libxrender-dev libxslt1-dev libxslt1.1 libxss-dev
+  libz3-4 libz3-dev llvm-18 llvm-18-dev llvm-18-linker-tools llvm-18-runtime
+  llvm-18-tools llvm-runtime mount nettle-dev pkgconf pkgconf-bin tcl tcl-dev
+  tcl8.6 tcl8.6-dev tk tk8.6 tk8.6-dev util-linux uuid-dev uuid-runtime
+Suggested packages:
+  freetype2-doc libgcrypt20-doc gmp-doc libgmp10-doc libmpfr-dev dns-root-data
+  gnutls-bin gnutls-doc icu-doc cryptsetup-bin ncurses-doc p11-kit-doc
+  readline-doc sqlite3-doc libssl-doc libxext-doc llvm-18-doc nfs-common
+  tcl-doc tcl-tclreadline tcl8.6-doc tk-doc tk8.6-doc dosfstools
+  util-linux-extra util-linux-locales
+The following NEW packages will be installed:
+  bzip2-doc icu-devtools libbrotli-dev libbz2-dev libclang-cpp18
+  libevent-2.1-7t64 libffi-dev libfontconfig-dev libfontconfig1-dev
+  libfreetype-dev libgcrypt20-dev libgmp-dev libgmpxx4ldbl libgnutls-dane0t64
+  libgnutls-openssl27t64 libgnutls28-dev libgpg-error-dev libicu-dev
+  libidn2-dev libllvm18 libncurses-dev libncurses6 libnspr4-dev libnss3-dev
+  libp11-kit-dev libpfm4 libpkgconf3 libpng-dev libpng-tools libreadline-dev
+  libsqlite3-dev libssl-dev libtasn1-6-dev libtasn1-doc libunbound8
+  libxext-dev libxft-dev libxml2-dev libxmlsec1-dev libxmlsec1t64
+  libxmlsec1t64-gcrypt libxmlsec1t64-gnutls libxmlsec1t64-nss
+  libxmlsec1t64-openssl libxrender-dev libxslt1-dev libxslt1.1 libxss-dev
+  libz3-4 libz3-dev llvm llvm-18 llvm-18-dev llvm-18-linker-tools
+  llvm-18-runtime llvm-18-tools llvm-runtime nettle-dev pkgconf pkgconf-bin
+  tcl tcl-dev tcl8.6 tcl8.6-dev tk tk-dev tk8.6 tk8.6-dev uuid-dev
+The following packages will be upgraded:
+  bsdextrautils bsdutils eject fdisk libblkid1 libfdisk1 libmount1
+  libsmartcols1 libuuid1 mount util-linux uuid-runtime
+12 upgraded, 69 newly installed, 0 to remove and 52 not upgraded.
+Need to get 149 MB of archives.
+After this operation, 786 MB of additional disk space will be used.
+Do you want to continue? [Y/n] 

@@ -665,6 +665,18 @@ def docs_page():
 def balance_page():
     return render_template('balance.html')
 
+@app.route('/sponsor')
+def sponsor_page():
+    return render_template('sponsor.html')
+
+@app.route('/terms')
+def terms_page():
+    return render_template('terms.html')
+
+@app.route('/privacy')
+def privacy_page():
+    return render_template('privacy.html')
+
 if __name__ == '__main__':
     # 從環境變數讀取運行配置
     host = os.getenv('FLASK_HOST', '0.0.0.0')

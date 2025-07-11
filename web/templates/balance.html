@@ -3,31 +3,31 @@
 {% block title %}餘額查詢與轉帳 - HiveMind{% endblock %}
 
 {% block content %}
-<div class="min-h-screen flex items-center justify-center p-4 bg-neutral-100 dark:bg-neutral-900 transition">
+<div class="min-h-screen flex items-center justify-center p-4 bg-gray-100 dark:bg-gray-900 transition">
     <div class="w-full max-w-xl">
-        <div class="card card-large animate-fade-in-up">
-            <h2 class="text-3xl font-bold text-center mb-8 text-neutral-900 dark:text-neutral-100">
+        <div class="bg-white dark:bg-gray-800 rounded-2xl shadow-xl p-8 animate-fade-in-up">
+            <h2 class="text-3xl font-bold text-center mb-8 text-gray-900 dark:text-white">
                 <i class="fas fa-coins mr-2 text-purple-400"></i>我的餘額
             </h2>
             <div class="text-center mb-8">
-                <div class="text-5xl font-bold mb-2 text-neutral-900 dark:text-neutral-100" id="balance-value">--</div>
-                <div class="text-neutral-500 dark:text-neutral-400 text-lg">CPT</div>
+                <div class="text-5xl font-bold mb-2 text-gray-900 dark:text-white" id="balance-value">--</div>
+                <div class="text-gray-500 dark:text-gray-400 text-lg">CPT</div>
             </div>
-            <hr class="my-8 border-neutral-200 dark:border-neutral-700">
-            <h3 class="text-xl font-semibold mb-4 text-center text-neutral-900 dark:text-neutral-100">
+            <hr class="my-8 border-gray-200 dark:border-gray-700">
+            <h3 class="text-xl font-semibold mb-4 text-center text-gray-900 dark:text-white">
                 <i class="fas fa-exchange-alt mr-2"></i>轉帳
             </h3>
             <form id="transferForm" class="space-y-6">
                 <div>
-                    <label for="receiver" class="form-label">收款人用戶名</label>
-                    <input id="receiver" name="receiver" type="text" required class="form-input" placeholder="請輸入對方用戶名">
+                    <label for="receiver" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">收款人用戶名</label>
+                    <input id="receiver" name="receiver" type="text" required class="block w-full px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 transition" placeholder="請輸入對方用戶名">
                 </div>
                 <div>
-                    <label for="amount" class="form-label">金額</label>
-                    <input id="amount" name="amount" type="number" min="1" step="1" required class="form-input" placeholder="請輸入金額">
+                    <label for="amount" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">金額</label>
+                    <input id="amount" name="amount" type="number" min="1" step="1" required class="block w-full px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 transition" placeholder="請輸入金額">
                 </div>
-                <div id="transfer-message" class="hidden"></div>
-                <button type="submit" class="btn-primary w-full transition-all duration-200 hover:scale-105">
+                <div id="transfer-message" class="hidden w-full text-center text-red-600 bg-red-100 dark:bg-red-900 dark:text-red-300 rounded-lg px-4 py-2 text-sm"></div>
+                <button type="submit" class="w-full px-4 py-2 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-600 transition-all duration-200 flex items-center justify-center gap-2">
                     <i class="fas fa-paper-plane mr-2"></i>轉帳
                 </button>
             </form>

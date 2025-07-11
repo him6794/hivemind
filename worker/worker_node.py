@@ -15,8 +15,13 @@ from zipfile import ZipFile, ZIP_DEFLATED
 from io import BytesIO
 from sys import exit
 from tempfile import mkdtemp
-from subprocess import run, CREATE_NO_WINDOW
+from subprocess import run
 from platform import node, system
+# 只在 Windows 匯入 CREATE_NO_WINDOW
+try:
+    from subprocess import CREATE_NO_WINDOW
+except ImportError:
+    CREATE_NO_WINDOW = None
 from datetime import datetime, timedelta
 from secrets import token_hex
 from shutil import copy2, rmtree
@@ -307,8 +312,9 @@ class WorkerNode:
         try:
             if system() == "Windows":
                 cmd = 'wmic path Win32_VideoController get Name, AdapterRAM /VALUE'
+                # 僅在 Windows 下傳遞 creationflags
                 result = run(cmd, capture_output=True, text=True, timeout=10, 
-                            creationflags=CREATE_NO_WINDOW)
+                            creationflags=CREATE_NO_WINDOW if CREATE_NO_WINDOW else 0)
                 output = result.stdout
                 
                 # 解析輸出
@@ -371,7 +377,13 @@ class WorkerNode:
 
     def _init_flask(self):
         """初始化 Flask 應用"""
-        self.app = Flask(__name__, template_folder="templates", static_folder="static")
+        from os.path import dirname, abspath, join
+        base_dir = dirname(abspath(__file__))
+        self.app = Flask(
+            __name__,
+            template_folder=join(base_dir, "templates"),
+            static_folder=join(base_dir, "static")
+        )
         self.app.secret_key = token_hex(32)
         
         # 配置會話持久性，使用不同的cookie名稱避免與主控端衝突

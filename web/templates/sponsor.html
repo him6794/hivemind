@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}贊助列表 - HiveMind{% endblock %}
+{% block content %}
+<section class="max-w-2xl mx-auto py-16 px-4">
+  <div class="bg-white dark:bg-gray-800 rounded-2xl shadow-lg border border-gray-200 dark:border-gray-700 p-10 text-center animate-fade-in-down">
+    <h1 class="text-3xl font-bold mb-6 text-gray-900 dark:text-white">贊助列表</h1>
+    <p class="text-lg text-gray-700 dark:text-gray-300 mb-8">感謝以下贊助者對 HiveMind 的支持！</p>
+    <div class="flex flex-col items-center gap-8">
+      <!-- 贊助者卡片 -->
+      <a href="https://justin0711.com" target="_blank" class="block w-full max-w-xs bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl shadow-md hover:shadow-lg transition p-6 flex flex-col items-center group">
+        <img src="{{ url_for('static', filename='img/justin.png') }}" alt="Justin" class="w-20 h-20 rounded-full mb-4 shadow group-hover:scale-105 transition-transform" onerror="this.style.display='none'">
+        <div class="font-bold text-xl text-gray-900 dark:text-white mb-1 transition">Justin</div>
+        <div class="text-sm text-gray-500 dark:text-gray-300">主要開發者</div>
+      </a>
+      <!-- 更多贊助者可複製上方卡片格式新增 -->
+    </div>
+  </div>
+</section>
+{% endblock %} 

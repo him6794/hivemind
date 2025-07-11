@@ -1,0 +1,288 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:padding="16dp">
+
+    <ScrollView
+        android:id="@+id/infoScrollView"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintHeight_percent="0.4">
+
+        <androidx.constraintlayout.widget.ConstraintLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:padding="8dp">
+
+            <TextView
+                android:id="@+id/nodeInfoTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="節點資訊"
+                android:textSize="20sp"
+                android:textStyle="bold"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toTopOf="parent" />
+
+            <TextView
+                android:id="@+id/nodeIdLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="節點ID:"
+                android:textStyle="bold"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toBottomOf="@id/nodeInfoTitle"
+                android:layout_marginTop="8dp" />
+
+            <TextView
+                android:id="@+id/nodeIdValue"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:text="未知"
+                app:layout_constraintStart_toEndOf="@id/nodeIdLabel"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintTop_toTopOf="@id/nodeIdLabel"
+                android:layout_marginStart="8dp" />
+
+            <TextView
+                android:id="@+id/statusLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="狀態:"
+                android:textStyle="bold"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toBottomOf="@id/nodeIdValue"
+                android:layout_marginTop="8dp" />
+
+            <TextView
+                android:id="@+id/statusValue"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:text="閒置"
+                app:layout_constraintStart_toEndOf="@id/statusLabel"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintTop_toTopOf="@id/statusLabel"
+                android:layout_marginStart="8dp" />
+
+            <TextView
+                android:id="@+id/taskIdLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="任務ID:"
+                android:textStyle="bold"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toBottomOf="@id/statusValue"
+                android:layout_marginTop="8dp" />
+
+            <TextView
+                android:id="@+id/taskIdValue"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:text="無"
+                app:layout_constraintStart_toEndOf="@id/taskIdLabel"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintTop_toTopOf="@id/taskIdLabel"
+                android:layout_marginStart="8dp" />
+
+            <TextView
+                android:id="@+id/balanceLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="CPT餘額:"
+                android:textStyle="bold"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toBottomOf="@id/taskIdValue"
+                android:layout_marginTop="8dp" />
+
+            <TextView
+                android:id="@+id/balanceValue"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:text="0"
+                app:layout_constraintStart_toEndOf="@id/balanceLabel"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintTop_toTopOf="@id/balanceLabel"
+                android:layout_marginStart="8dp" />
+
+            <TextView
+                android:id="@+id/hardwareTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="硬體資訊"
+                android:textSize="20sp"
+                android:textStyle="bold"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toBottomOf="@id/balanceValue"
+                android:layout_marginTop="16dp" />
+
+            <TextView
+                android:id="@+id/cpuCoresLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="CPU核心:"
+                android:textStyle="bold"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toBottomOf="@id/hardwareTitle"
+                android:layout_marginTop="8dp" />
+
+            <TextView
+                android:id="@+id/cpuCoresValue"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:text="0"
+                app:layout_constraintStart_toEndOf="@id/cpuCoresLabel"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintTop_toTopOf="@id/cpuCoresLabel"
+                android:layout_marginStart="8dp" />
+
+            <TextView
+                android:id="@+id/memoryLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="記憶體:"
+                android:textStyle="bold"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toBottomOf="@id/cpuCoresValue"
+                android:layout_marginTop="8dp" />
+
+            <TextView
+                android:id="@+id/memoryValue"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:text="0 GB"
+                app:layout_constraintStart_toEndOf="@id/memoryLabel"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintTop_toTopOf="@id/memoryLabel"
+                android:layout_marginStart="8dp" />
+
+            <TextView
+                android:id="@+id/cpuScoreLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="CPU評分:"
+                android:textStyle="bold"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toBottomOf="@id/memoryValue"
+                android:layout_marginTop="8dp" />
+
+            <TextView
+                android:id="@+id/cpuScoreValue"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:text="0"
+                app:layout_constraintStart_toEndOf="@id/cpuScoreLabel"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintTop_toTopOf="@id/cpuScoreLabel"
+                android:layout_marginStart="8dp" />
+
+            <TextView
+                android:id="@+id/gpuScoreLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="GPU評分:"
+                android:textStyle="bold"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toBottomOf="@id/cpuScoreValue"
+                android:layout_marginTop="8dp" />
+
+            <TextView
+                android:id="@+id/gpuScoreValue"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:text="0"
+                app:layout_constraintStart_toEndOf="@id/gpuScoreLabel"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintTop_toTopOf="@id/gpuScoreLabel"
+                android:layout_marginStart="8dp" />
+
+            <TextView
+                android:id="@+id/gpuNameLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="GPU名稱:"
+                android:textStyle="bold"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toBottomOf="@id/gpuScoreValue"
+                android:layout_marginTop="8dp" />
+
+            <TextView
+                android:id="@+id/gpuNameValue"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:text="未檢測到"
+                app:layout_constraintStart_toEndOf="@id/gpuNameLabel"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintTop_toTopOf="@id/gpuNameLabel"
+                android:layout_marginStart="8dp" />
+
+            <TextView
+                android:id="@+id/locationLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="地區:"
+                android:textStyle="bold"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toBottomOf="@id/gpuNameValue"
+                android:layout_marginTop="8dp" />
+
+            <TextView
+                android:id="@+id/locationValue"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:text="Unknown"
+                app:layout_constraintStart_toEndOf="@id/locationLabel"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintTop_toTopOf="@id/locationLabel"
+                android:layout_marginStart="8dp" />
+
+            <TextView
+                android:id="@+id/loginTimeLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="登入時間:"
+                android:textStyle="bold"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toBottomOf="@id/locationValue"
+                android:layout_marginTop="8dp" />
+
+            <TextView
+                android:id="@+id/loginTimeValue"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:text="--"
+                app:layout_constraintStart_toEndOf="@id/loginTimeLabel"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintTop_toTopOf="@id/loginTimeLabel"
+                android:layout_marginStart="8dp" />
+
+        </androidx.constraintlayout.widget.ConstraintLayout>
+    </ScrollView>
+
+    <TextView
+        android:id="@+id/logsTitle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="日誌"
+        android:textSize="20sp"
+        android:textStyle="bold"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/infoScrollView"
+        android:layout_marginTop="8dp" />
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/logsRecyclerView"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/logsTitle"
+        android:layout_marginTop="8dp" />
+
+</androidx.constraintlayout.widget.ConstraintLayout>

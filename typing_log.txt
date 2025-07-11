@@ -1,0 +1,2418 @@
+[2025-07-10 09:16:19] VS Code 後台自動輸入程式啟動
+[2025-07-10 09:16:19] 配置設定: {
+    "min_typing_length": 10,
+    "max_typing_length": 50,
+    "min_delay": 5,
+    "max_delay": 30,
+    "save_every": 3,
+    "log_file": "typing_log.txt",
+    "active_hours": {
+        "start": 9,
+        "end": 18
+    }
+}
+[2025-07-10 09:16:27] 已輸入並保存: while )
+return << ol mjb
+in kspn return bvskkzg No...
+[2025-07-10 09:16:59] 已輸入: q
+cs w try try except yh
+as
+in eg
+r [ for
+mwb impo...
+[2025-07-10 09:17:25] 已輸入並保存: False
+for
+k + ock + /
+==
+fvhz
+in
+return
+with False...
+[2025-07-10 09:17:47] 已輸入: zsjaidg el is
+%
+return with [ pqasmwbh c rygajh ...
+[2025-07-10 09:18:12] 已輸入並保存: d flljtf True
+ydgk rwhqo
+% from i ixw psc
+krbemwvq...
+[2025-07-10 09:18:32] 已輸入: is True
+qsymsgrk oqlwp else npuv hzh
+xiryld emdht ...
+[2025-07-10 09:18:42] 已輸入: True
+b class |
+]
+scc from try hgz
+>> [ ...
+[2025-07-10 09:19:04] 已輸入: xlvjzh
+return
+class ** import wikhmll wazjme != jo...
+[2025-07-10 09:19:25] 已輸入並保存: yctk < fojz >> unrddul ccdaqmdh
+unmc == btnewjo cl...
+[2025-07-10 09:19:42] 已輸入: return
+import okp as class or - as / pu for <= els...
+[2025-07-10 09:20:17] 已輸入並保存: << try in import else def w def
+class class
+while ...
+[2025-07-10 09:20:50] 已輸入並保存: as ~ jvwuu
+qq
+yyobc
+not as
+except pyyvdbbg
+from kn...
+[2025-07-10 09:21:25] 已輸入: mmdwlat bp while setvmbc except else ''' Docstring...
+[2025-07-10 09:21:43] 已輸入並保存: def eiarwka
+or from t == zlzohk
+teebyfkw from | lb...
+[2025-07-10 09:22:23] 已輸入: try return
+ncux fwwime >> rb import h
+with
+** vltp...
+[2025-07-10 09:22:54] 已輸入: class
+jusesiqw is
+yww
+as
+while h else rxhkcz None ...
+[2025-07-10 09:23:10] 已輸入: xq class True else
+None is class | fhmlaym mjoyc x...
+[2025-07-10 09:23:30] 已輸入並保存: - %
+etj eltyibw (
+bahzon ''' Docstring ''' tngrhdz...
+[2025-07-10 09:23:50] 已輸入: kvwv or cfoebuw vej =
+whr try except
+xpgygv ficxzk...
+[2025-07-10 09:24:29] 已輸入: gafivvbs """ Docstring """ jkwco mwtz import
+# Com...
+[2025-07-10 09:24:51] 已輸入並保存: zv
+try { nges
+qzbsj
+ueclkvea while ilpfaen dvxen d...
+[2025-07-10 09:25:17] 已輸入並保存: True - ksiknccb return byoxawx import iwg iamoym p...
+[2025-07-10 09:25:33] 已輸入: g class != for is dtjjtc qqehno
+class ...
+[2025-07-10 09:25:53] 已輸入: oras ** with try with !=
+jzub
+eksiucol in
+fkgrzxht...
+[2025-07-10 09:26:13] 已輸入: """ Docstring """
+^ from // for
+...
+[2025-07-10 09:26:30] 已輸入: kauj except mvyfx
+unjjx
+class def with qa // with
+...
+[2025-07-10 09:27:00] 已輸入並保存: def yg edecghxi and
+jkn } lkd class from import tj...
+[2025-07-10 09:27:10] 已輸入: & hgvxkk hvj
+j uj import
+!=
+u nyxubpxy
+...
+[2025-07-10 09:27:42] 已輸入: vkrz <<
+except else ''' Docstring ''' nbnwolnt
+atv...
+[2025-07-10 09:28:14] 已輸入: yqz
+ujnxnu qbxotwys gjdc
+qct from
+while
+...
+[2025-07-10 09:28:43] 已輸入: qq < i hvw import as ...
+[2025-07-10 09:29:01] 已輸入並保存: =
+try chqrsxlo
+nbgjx
+for tqopfxj [
+vqf ow >=
+""" D...
+[2025-07-10 09:29:27] 已輸入並保存: m if pbyrqruc
+as except
+vle
+ogtfqory
+...
+[2025-07-10 09:29:52] 已輸入: zjx is True with zcsy except
+try
+def
+kzedizd moejp...
+[2025-07-10 09:30:18] 已輸入: lf eklze kg
+}
+xp
+hoxxfu return waoeaodl fcfd
+cbvmn...
+[2025-07-10 09:30:44] 已輸入並保存: >
+return zxfbh >> ckeqnajv & False ...
+[2025-07-10 09:31:02] 已輸入並保存: trce
+return grfu qcswx
+except <
+with try <<
+gwiksd...
+[2025-07-10 09:31:14] 已輸入: + < if import as import ...
+[2025-07-10 09:31:50] 已輸入: try
+for & def
+in
+from None & n
+e
+try rvxob for cla...
+[2025-07-10 09:32:13] 已輸入: atxtpl
+bozrq while pr
+try None def eoxhvz ...
+[2025-07-10 09:32:25] 已輸入: import zo ''' Docstring ''' in # Comment <
+try
+plw...
+[2025-07-10 09:32:30] 程式被用戶中斷
+[2025-07-10 09:44:40] VS Code 後台自動輸入程式啟動
+[2025-07-10 09:44:40] 配置設定: {
+    "min_typing_length": 10,
+    "max_typing_length": 50,
+    "min_delay": 5,
+    "max_delay": 30,
+    "save_every": 3,
+    "log_file": "typing_log.txt",
+    "active_hours": {
+        "start": 9,
+        "end": 18
+    }
+}
+[2025-07-10 09:44:45] 已輸入: |
+e wjb return
+in tz
+/ khhtv
+as for while
+while
+^ ...
+[2025-07-10 09:44:47] 程式被用戶中斷
+[2025-07-10 10:00:52] VS Code 後台自動輸入程式啟動
+[2025-07-10 10:00:52] 配置設定: {
+    "min_typing_length": 10,
+    "max_typing_length": 50,
+    "min_delay": 5,
+    "max_delay": 30,
+    "save_every": 3,
+    "log_file": "typing_log.txt",
+    "active_hours": {
+        "start": 9,
+        "end": 18
+    }
+}
+[2025-07-10 10:00:52] 程式被用戶中斷
+[2025-07-10 10:00:55] VS Code 後台自動輸入程式啟動
+[2025-07-10 10:00:55] 配置設定: {
+    "min_typing_length": 10,
+    "max_typing_length": 50,
+    "min_delay": 5,
+    "max_delay": 30,
+    "save_every": 3,
+    "log_file": "typing_log.txt",
+    "active_hours": {
+        "start": 9,
+        "end": 18
+    }
+}
+[2025-07-10 10:01:08] 已輸入: t poixddqj itultn or None >> class xqiqb from
+j xd...
+[2025-07-10 10:01:35] 已輸入: bjvd >> while ''' Docstring ''' except
+from didcdo...
+[2025-07-10 10:02:11] 已輸入: y ll
+ezw for ~ tbsmsdi
+& lppqbw ] wpd with ihmmrun...
+[2025-07-10 10:02:29] 已輸入並保存: iu for > x lljniox != False except ceby jodv
+def ...
+[2025-07-10 10:03:06] 已輸入: mbl
+while * in # Comment
+except lvme for
+and False...
+[2025-07-10 10:03:13] 已輸入: else True %
+False
+True
+...
+[2025-07-10 10:03:38] 已輸入並保存: ptic in
+""" Docstring """ bx gtwgnh False
+jky as ...
+[2025-07-10 10:04:06] 已輸入: in except
+# Comment ^
+ol ...
+[2025-07-10 10:04:19] 已輸入: import
+j if
+akdfqaqp
+cowufcp from ar vvhzs ...
+[2025-07-10 10:04:41] 已輸入: and except as
+ycan def
+bzk
+& import exuv nufvs if ...
+[2025-07-10 10:05:00] 已輸入: auor / ls xfwrhi (
+try ** from vl True <= else not...
+[2025-07-10 10:05:31] 已輸入: twyo import class
+c ** in
+jsqyon ...
+[2025-07-10 10:05:39] 已輸入: True return as qwcerr
+}
+r ...
+[2025-07-10 10:06:03] 已輸入並保存: dh
+z while
+nck
+import in scjdqczl False ca
+...
+[2025-07-10 10:06:34] 已輸入: ''' Docstring ''' return in """ Docstring """
+gqju...
+[2025-07-10 10:07:07] 已輸入: return True
+as
+else
+class q import dvkj tutbo ...
+[2025-07-10 10:07:25] 已輸入: try while def
+blmolfp if hzvxxa vdpy
+izxkm rrhskya...
+[2025-07-10 10:07:49] 已輸入並保存: in ^
+None >=
+>>
+import dmb from import
+<<
+...
+[2025-07-10 10:08:05] 已輸入: dvyhbwfq = else r with
+fym sh
+try
+sapxvz kpfipyb
+f...
+[2025-07-10 10:08:28] 已輸入並保存: pklfpf dlrltv True ocq << ( return **
+and n aqtjq ...
+[2025-07-10 10:08:44] 已輸入: arp =
+< else != <=
+return
+] oemcdm sisqdt tudqxku ...
+[2025-07-10 10:08:58] 已輸入並保存: bt
+class with hguptwmu >=
+] for
+// as idyxefz fpys...
+[2025-07-10 10:09:15] 已輸入: or None
+try
+^ gya for vtz owysnpvm } except from
+y...
+[2025-07-10 10:09:34] 已輸入並保存: / erhmrzm with // return
+) return
+dbgxpzhr def w e...
+[2025-07-10 10:10:09] 已輸入並保存: * zyfnnv (
+is
+for None
+in == { except = vxnarjs ] ...
+[2025-07-10 10:10:42] 已輸入並保存: blrl cvp nom ctmvsjb
++ try ioys
+<< | ''' Docstring...
+[2025-07-10 10:11:01] 已輸入並保存: pflml bcu oxvh ea
+pywmyqw with
+^
+with lrywbcpd ~ o...
+[2025-07-10 10:11:20] 已輸入: in gcdxgol
+qvbwma } with with
+...
+[2025-07-10 10:11:52] 已輸入: maigvjq
+amjw <= None == ubpbn with ujpstks in & as...
+[2025-07-10 10:12:27] 已輸入並保存: for from
+if
+if
+try } /
+> for class ** !=
+if [ ** ...
+[2025-07-10 10:12:52] 已輸入並保存: None """ Docstring """ if dllqfqr ewlj in uhhewj j...
+[2025-07-10 10:13:21] 已輸入: //
+try return * lacc if
+import wmvmh
+>> blegqylt
+y...
+[2025-07-10 10:13:54] 已輸入並保存: from
+False awc
+else bedggehc iuuc boeagt
+~ vtefdol...
+[2025-07-10 10:14:11] 已輸入: [ d
+while
+( else t pnrflm s
+with in
+ahvhy udv
+retu...
+[2025-07-10 10:14:28] 已輸入並保存: esixjtp uu not zsbkhtjd
+from
+tepbkvo except
+with u...
+[2025-07-10 10:14:40] 已輸入: nbs
+bb
+qzmlsmq
+| qflzgg afkteo
+x
+| sgmhn from
+x ~ ...
+[2025-07-10 10:15:16] 已輸入並保存: zggki ( return
+t } kgmdbfwl <<
+>> None rpfbcff by ...
+[2025-07-10 10:15:52] 已輸入並保存: with
+class uykhhp try from hctp with
+iu except
+[ =...
+[2025-07-10 10:16:16] 已輸入並保存: None r for pevkp < or xvpkdxa + ) from zreocix j
+q...
+[2025-07-10 10:16:46] 已輸入: + = xxfjblm or
+in
+msuofxmq ...
+[2025-07-10 10:17:15] 已輸入: vml == nkfr / [ l ijxbih
+from while < - myjpp ...
+[2025-07-10 10:17:38] 已輸入: ( rjicdy None h import qiukeh * } % while
+from koy...
+[2025-07-10 10:18:01] 已輸入: myhh if
+xel
+with as if ** ( [
+# Comment
+try bkwcqh...
+[2025-07-10 10:18:24] 已輸入: hjcem """ Docstring """ is
+True for import gpwhbfi...
+[2025-07-10 10:18:32] 已輸入並保存: import
+(
+except **
+as *
+ymzb < ...
+[2025-07-10 10:18:51] 已輸入並保存: dyd rkzep ~
+else for except
+None ...
+[2025-07-10 10:19:25] 已輸入: jer jsrumzdy debkn
+> dukr << hgksb
+wfkc not else ~...
+[2025-07-10 10:19:51] 已輸入: *
+wewryev
+xdbelx None j jsq
+...
+[2025-07-10 10:20:10] 已輸入: udouw
+return bincmsbt with dzgvb
+pcq | htflrvmv
+<<...
+[2025-07-10 10:20:26] 已輸入: { as with hszvjl ) hdxzy +
+return uwqzhnko
+try txz...
+[2025-07-10 10:20:54] 已輸入並保存: else nwtvomt
+return else
+btwxxoi
+> << trp if >= fo...
+[2025-07-10 10:21:21] 已輸入: and [ lvmulo
+znaloil hmvrzqas
+except
+# Comment def...
+[2025-07-10 10:21:42] 已輸入: for kqexox
+is
+zdtvbsu return for else
+bpyerxcx wnb...
+[2025-07-10 10:22:06] 已輸入: return try nmosbc try with >= / ...
+[2025-07-10 10:22:40] 已輸入: ueckji while ~ as [
+w import as uqzzfevz
+from impo...
+[2025-07-10 10:23:08] 已輸入: { k
+# Comment zm
+None
+with not class
+<=
+% evgaorkw...
+[2025-07-10 10:23:25] 已輸入: ic
+ofwuggvy vyddwce return ffz
+docz class
+from ...
+[2025-07-10 10:23:41] 已輸入並保存: as /
+ffotu
+as except
+ntkkhmzk
+if
+def as n niwhwnp ...
+[2025-07-10 10:24:05] 已輸入並保存: kimocwor ''' Docstring ''' -
+in from > } is keqeo ...
+[2025-07-10 10:24:33] 已輸入: [ je
+cawb """ Docstring """ for - > None /
+return ...
+[2025-07-10 10:25:04] 已輸入並保存: } def zhelt in eln
+with
+axcholw s <
+sq in import )...
+[2025-07-10 10:25:20] 已輸入: ljsifac False ** iuu nvoyqh
+lf
+- iuit and ...
+[2025-07-10 10:25:59] 已輸入: # Comment thczfpt dupqytf != from
+- -
+for if
+(
+% f...
+[2025-07-10 10:26:20] 已輸入並保存: or rekxvzsc in vbib jum cuymxnrd and ur k or hxhmu...
+[2025-07-10 10:26:41] 已輸入並保存: in
+with wtccrk True | risuf not
+n dsuuh not
+s
+qdwh...
+[2025-07-10 10:27:15] 已輸入: return def i
+<< = not True giwhxvil in from
+return...
+[2025-07-10 10:27:33] 已輸入: riegwzt hf None odk
+{ e
+for g or ( is xx > <<
+clas...
+[2025-07-10 10:27:58] 已輸入: fqyxy
+>> yyexcog v while
+pom
+!= import return with...
+[2025-07-10 10:28:16] 已輸入: != def << while
+wcztjc
+qqd
+= +
+*
+return
+vqsdgiki /...
+[2025-07-10 10:28:32] 已輸入: with
+qwovcpiz
+ikng ] def ygtrisg return
+!= // if ^...
+[2025-07-10 10:28:52] 已輸入: &
+= ojjg
+ntbdsgf
+ixikmfun import ltze as { r
+# Com...
+[2025-07-10 10:29:07] 已輸入: >> idlg knvg // <
+True >= ...
+[2025-07-10 10:29:30] 已輸入並保存: ) fglv eaegpezg >
+while
+qilsuj while import and Fa...
+[2025-07-10 10:29:59] 已輸入: ** def % False j ...
+[2025-07-10 10:30:14] 程式被用戶中斷
+[2025-07-10 10:30:22] VS Code 後台自動輸入程式啟動
+[2025-07-10 10:30:22] 配置設定: {
+    "min_typing_length": 10,
+    "max_typing_length": 50,
+    "min_delay": 5,
+    "max_delay": 30,
+    "save_every": 3,
+    "log_file": "typing_log.txt",
+    "active_hours": {
+        "start": 9,
+        "end": 18
+    }
+}
+[2025-07-10 10:30:32] 已輸入: while
+// msee
+svq def
+from
+bp import zpocfdvs whil...
+[2025-07-10 10:30:48] 已輸入並保存: kpfimt class
+) tkqu yim
+>> ] vfiaabao buawcix
+b tr...
+[2025-07-10 10:31:18] 已輸入: - ^ whbnxub
+[
+jd jq
+ffqbyq # Comment
+except yxf py...
+[2025-07-10 10:31:46] 已輸入: class + ''' Docstring ''' ackwcubn import
++ uvipq ...
+[2025-07-10 10:32:11] 已輸入: <
+for
+chrj bgadqh else gpqcajnk def from na
+not wi...
+[2025-07-10 10:32:37] 已輸入: w def return phonq try if
+g
+lequcc dkoljppp
+...
+[2025-07-10 10:33:14] 已輸入: None
+ctmkemtp [ ** class try / mxzly as // for
+for...
+[2025-07-10 10:33:39] 已輸入並保存: else vtcvck """ Docstring """ kue j gtyknghp
+kfl m...
+[2025-07-10 10:34:04] 已輸入並保存: is >= import is else varrgg import
+except
+while [ ...
+[2025-07-10 10:34:22] 已輸入並保存: True ** < << >>
+} jjm
+qnyz hyfnsotk def
+...
+[2025-07-10 10:34:43] 已輸入並保存: return nqv
+vvlthitz
+wknzsjvu or pckhmb mld
+nqh whi...
+[2025-07-10 10:35:20] 已輸入: True
+x <= except qfarlt class
+omhe uvff b import [...
+[2025-07-10 10:35:38] 已輸入並保存: """ Docstring """ else +
+[ <= class xnho
+ndtxhihn ...
+[2025-07-10 10:35:56] 已輸入: << while import != trrkgzv < True
+xdbmmxc &
+while
+...
+[2025-07-10 10:36:24] 已輸入: eu True [ else
+cwv
+mtqfma
+except class <= wc
+if as...
+[2025-07-10 10:36:37] 已輸入: not dynrh ivib as
+helao ** >> poukzh
+iru try for i...
+[2025-07-10 10:36:58] 已輸入: encnkn def ) lvvurtu bfhrsduk
+or except qmp try h
+...
+[2025-07-10 10:37:36] 已輸入: ''' Docstring '''
+return << {
+and
+mhmuwuop { ** fr...
+[2025-07-10 10:37:47] 已輸入並保存: iccyatue if
+return <=
+if wymoj
+ul [ ...
+[2025-07-10 10:38:16] 已輸入並保存: * { gjxe as // ilspmbkf else except
+for ioudcjis
+u...
+[2025-07-10 10:38:43] 已輸入: gjpfj
+- import lmbmn dauy class
+cg != hynkqj txbrn...
+[2025-07-10 10:39:09] 已輸入: """ Docstring """ jcuwiujn rh
+qa
+<
+gbaimm and
+is
+e...
+[2025-07-10 10:39:25] 已輸入: rh svsdbd xmaphaav
+f False
+)
+None return << << qyf...
+[2025-07-10 10:39:36] 已輸入並保存: amrj phfs >= //
+gnkifvm
+with >=
+...
+[2025-07-10 10:39:49] 已輸入: k unrokiw in drbjd / < # Comment
+...
+[2025-07-10 10:40:21] 已輸入並保存: lb
+yxtogxwk and
+in
+niritv sjqgcht ...
+[2025-07-10 10:40:35] 已輸入: gb except if
+utiu cxvo <= *
+cqbf (
+( uyvbyogu
+hvhk...
+[2025-07-10 10:41:08] 已輸入: muehwt as
+varbf // def <= { qz >= == o
+<=
+( else t...
+[2025-07-10 10:41:25] 已輸入並保存: kvusz
+def ozbx
+rijnee
+juvnxvc as
+...
+[2025-07-10 10:42:01] 已輸入: """ Docstring """
+from ioirny
+y ''' Docstring ''' ...
+[2025-07-10 10:42:28] 已輸入: cmvt **
+fumkay |
+class
+def ...
+[2025-07-10 10:42:59] 已輸入: while from &
+with
+} +
+} zixses pvcu jg ** - i kbso...
+[2025-07-10 10:43:23] 已輸入: wkuppcsn
+return import if eqwj
+if yt
+except xmlrvu...
+[2025-07-10 10:43:42] 已輸入並保存: nlyudpz ciuo ] * y }
+bl
+import fftq def
+return lhb...
+[2025-07-10 10:44:08] 已輸入: except
+<< vcieimq +
+g if if ^ oyilqvk pfirqz
+impor...
+[2025-07-10 10:44:46] 已輸入: |
+import
+while [ mopbhl > while ajvci % in try unz...
+[2025-07-10 10:45:01] 已輸入: c
+except else
+try
+t jkktoss fohasu - xr pfmj impor...
+[2025-07-10 10:45:11] 已輸入並保存: None class def if < as
+...
+[2025-07-10 10:45:30] 已輸入: """ Docstring """
+kuj } r != fkny while
+> eohu wit...
+[2025-07-10 10:45:53] 已輸入: ) while # Comment /
+< ixuty # Comment enuqzz
+''' D...
+[2025-07-10 10:46:07] 已輸入並保存: c if if for
+amq ==
+while >= g wkj
+( from udnxl gls...
+[2025-07-10 10:46:17] 已輸入: in iwea
+ofqsw cqtpq return and ...
+[2025-07-10 10:46:41] 已輸入並保存: None nuka return
++ kxbir qvnk for not as as cuu im...
+[2025-07-10 10:46:57] 已輸入: from vbnxks
+!=
+for gnwjosyu ipiaqixi else bqeykmjr...
+[2025-07-10 10:47:12] 已輸入: from ] sx == s buftvpge rcgb
+cbgl from l mr class ...
+[2025-07-10 10:47:38] 已輸入: not
+] mlszl and
+] while except True fnmz <= vee oa...
+[2025-07-10 10:48:05] 已輸入: return >=
+def hl
+<< is x ...
+[2025-07-10 10:48:24] 已輸入: ^
+u
+mdjde n def
+}
+&
+in def
+xxvru class vucpiavq tr...
+[2025-07-10 10:48:50] 已輸入並保存: + ''' Docstring ''' as fdjrzy
+ib oaqaznpy if pjs
+n...
+[2025-07-10 10:49:23] 已輸入並保存: jb ~ = a knsvvs else while
+...
+[2025-07-10 10:49:46] 已輸入: eiilzpk >= from v
+hbmxzc # Comment
+psxtyopq
+is
+...
+[2025-07-10 10:50:01] 已輸入並保存: """ Docstring """ cprawh return
+odir from else imp...
+[2025-07-10 10:50:38] 已輸入: {
+aagkk not
+^ is f
+def (
+with eaekcolh
+for wh
+tk c...
+[2025-07-10 10:50:50] 已輸入: u chfz aur
+na while >> True jdeb
+ftrx
+sr <
+ahvtnml...
+[2025-07-10 10:51:07] 已輸入: class True not with
+def else except except except
+...
+[2025-07-10 10:51:22] 已輸入: except [ d except > while import owa ''' Docstring...
+[2025-07-10 10:51:43] 已輸入: oatu with gfcewmlc / g nq // k from
++ as
+or
+if
+sov...
+[2025-07-10 10:51:58] 已輸入: c
++ u } = << yaw jhppr
+qefbl
+** with
+while * not w...
+[2025-07-10 10:52:17] 已輸入: ji ''' Docstring ''' as +
+while vvystmp agpxpj
+"""...
+[2025-07-10 10:52:29] 已輸入: except & as pdzwx
+gnshqcx iiatjl
+sny != bqbsovq hf...
+[2025-07-10 10:52:49] 已輸入: qluvuq
+while as and class
+gqaznwx
+qmlsl =
+idwrbb <...
+[2025-07-10 10:53:16] 已輸入: jzyequ import None def xj } eo ...
+[2025-07-10 10:53:38] 已輸入: >> dxjhidhq tovjg nsbucjj
+uecvvbfv eiqwzauc
+m
+None...
+[2025-07-10 10:53:53] 已輸入: class &
+bvkk not xjg
+else from ...
+[2025-07-10 10:54:26] 已輸入: coiamq ^ zxtq wwphvaqc
+bfzzumei while mhuttzh
+...
+[2025-07-10 10:54:49] 已輸入: if else >> hjwnuln in wzugwmzw and while
+import
+> ...
+[2025-07-10 10:55:05] 已輸入: ha from ==
+from kyjwmpth ...
+[2025-07-10 10:55:26] 已輸入: |
+if
++
+with dusemnrp | <= ^ osyxkfm annlex yrvk
+**...
+[2025-07-10 10:56:00] 已輸入並保存: for
+True
+// fjjdedlb
+^
+e qmwc while # Comment * sg...
+[2025-07-10 10:56:37] 已輸入: { > in ibhkoqj with
+fqxayv
+o else <= day
+vj fmsjtp...
+[2025-07-10 10:57:08] 已輸入: in fpztho
+rqvjal & wghas puqovc ...
+[2025-07-10 10:57:29] 已輸入: q
+** btdbwdeh import uwhmy ipzn
+not
+fe if
+with
+yhr...
+[2025-07-10 10:57:50] 已輸入: in None znp True while class + or
+afugmp & while <...
+[2025-07-10 10:58:18] 已輸入: else & as
+dxu
+% hr
+- def ...
+[2025-07-10 10:58:29] 已輸入並保存: ugppe zoy
+class % cfz # Comment { xmo
+if
+^ ...
+[2025-07-10 10:58:54] 已輸入: lu sd
+else mwzd in class ...
+[2025-07-10 10:59:17] 已輸入: usmyow as
+hxtdfknh aio &
+z from ...
+[2025-07-10 10:59:42] 已輸入: yqrobjn class
+class is ufuiq
+in jrsum """ Docstrin...
+[2025-07-10 11:00:03] 已輸入: from % ecw xluwj mfygpc [ & for ^ iul fqjbywxl dc
+...
+[2025-07-10 11:00:38] 已輸入並保存: def try hjqpxal
+for
+from
+cs try return
+i
+ypw retur...
+[2025-07-10 11:00:56] 已輸入: bincsfe k % rcnmwtso in as return qms adfenac gdgv...
+[2025-07-10 11:01:07] 已輸入: nzzg
+kiue
+>= for
+from >
+tl
+- as
+<
+def o
+...
+[2025-07-10 11:01:38] 已輸入並保存: or
+cnzgsta yahwkgt ( jqkxqabb szipzrq knwpob wlgb
+...
+[2025-07-10 11:02:09] 已輸入: oonito
+else duf return dpoo mvs xs t
+except and ~
+...
+[2025-07-10 11:02:30] 已輸入: qrioq
+return >> pderk //
+return == vntqcjfk ...
+[2025-07-10 11:02:55] 已輸入: in else not yj if return try
+~
+np n
++ devsd
+mquosf...
+[2025-07-10 11:03:24] 已輸入並保存: wgdqd try us in | >> for while uedlqc mxebukb
+^ xr...
+[2025-07-10 11:03:48] 已輸入: return ucdbnzu | ]
+return >=
+< return >
+import ] n...
+[2025-07-10 11:03:55] 已輸入: with
+else ~ x << cpzew ...
+[2025-07-10 11:04:26] 已輸入: """ Docstring """ # Comment
+- # Comment
+q def fh h...
+[2025-07-10 11:05:00] 已輸入: as from or if else
+izdl = >> != ekhpxp [
+a
+while <...
+[2025-07-10 11:05:30] 已輸入: // None in return is bbwcob
+fatdy
+-
+<< mk // if tk...
+[2025-07-10 11:05:44] 已輸入: / pzhvnno
+except fdkpys ~ eprqgy
+vocz
+is
+except
+Tr...
+[2025-07-10 11:06:18] 已輸入: import class for ckuwyfs
+try - ...
+[2025-07-10 11:06:34] 已輸入並保存: <<
+import is with smgud return ydsxuflo
+| ...
+[2025-07-10 11:07:05] 已輸入並保存: ( try from while
+[
+minit +
+x if
+* ifwlrtbr ...
+[2025-07-10 11:07:27] 已輸入並保存: class
+rri not kdn > hqh class [ with != from
+...
+[2025-07-10 11:08:01] 已輸入並保存: and with
+while dt hdaea glcq //
+False not while ea...
+[2025-07-10 11:08:22] 已輸入: class return else fyguwbit
+None
+** for from
+{ nrld...
+[2025-07-10 11:08:41] 已輸入: eqop and
+lqdfdoyk wmh for class
+mgepltxl
+<
+except ...
+[2025-07-10 11:09:01] 已輸入: ** lwfayez and else bk qwioqz e ...
+[2025-07-10 11:09:17] 已輸入: is qntsnykn osblsph
+""" Docstring """ dzhn *
+...
+[2025-07-10 11:09:38] 已輸入並保存: woj oq
+else qr
+tq with ^ class ...
+[2025-07-10 11:10:13] 已輸入: try
+as iymu if - gnqftdm
+yp or False gjixdjzk qim ...
+[2025-07-10 11:10:36] 已輸入並保存: algbpg ehldfe with
+gqnhq with
+) for fib wno ycid "...
+[2025-07-10 11:11:03] 已輸入: kpxyvqk
+class = boeu
+lwebj & import from
+if gngghe...
+[2025-07-10 11:11:34] 已輸入: return qbwomue import
+~
+def >= tz
+else def from
+an...
+[2025-07-10 11:11:55] 已輸入: [ try
+if if in
+while
+# Comment return dfiaalvi == ...
+[2025-07-10 11:12:06] 已輸入: with ukygnqj vpyrdy /
+fcpgnr fgjccffa kyuopc ...
+[2025-07-10 11:12:35] 已輸入並保存: >=
+fvvv from fjaetrpf
+with return from as
+class cl...
+[2025-07-10 11:12:44] 已輸入: & imfbahaz
+True x class while ...
+[2025-07-10 11:12:59] 已輸入: + k <
+from if auinld ~
+else from + { hmw
+return
+...
+[2025-07-10 11:13:26] 已輸入並保存: hqzkt else
+& for
+m k try <
+if ]
+{ jbhbtwy
+from bsx...
+[2025-07-10 11:13:50] 已輸入: except
+gym
+import
+while
+else as rn hd else
+^ ...
+[2025-07-10 11:14:21] 已輸入並保存: kfsidw eypcv
+** [
+p
+with tud try ke pxvb ootyzho %...
+[2025-07-10 11:14:42] 已輸入並保存: return skwio import
+xltzaf ovyg
+bfxee lhpgqsm
+not ...
+[2025-07-10 11:15:02] 已輸入: j
+uvppesy
+try None
+while
+as szxrrule
+fg atfmeto wh...
+[2025-07-10 11:15:13] 已輸入並保存: in ) cbwhe >=
+oggfhh
+^ class g
+<<
+kgigpp lmdh
+...
+[2025-07-10 11:15:46] 已輸入並保存: if oeisuhnp y ''' Docstring ''' in **
+as if try
+fo...
+[2025-07-10 11:16:02] 已輸入並保存: hmkxig
+def ucv import < return ) { b id
+~ aijtjqy ...
+[2025-07-10 11:16:21] 已輸入: with su tuzvjm
+^ as ~ | otowzm
+<= | ...
+[2025-07-10 11:16:46] 已輸入並保存: for def
+if {
+return h ''' Docstring ''' return
+def...
+[2025-07-10 11:17:19] 已輸入並保存: bex &
+ebghsczq t ojz
+else //
+& >>
+~
+ljspozrw retur...
+[2025-07-10 11:17:45] 已輸入: xnerph
+in <= ohit eh except jjvvi idlx != with
+...
+[2025-07-10 11:18:17] 已輸入: totirwuo ubrzlqht mzhw
+mk except << dgpucs return
+...
+[2025-07-10 11:18:46] 已輸入: witw >> with
+** + in as
+def qttqde
+except import
+e...
+[2025-07-10 11:19:29] 已輸入並保存: >= -
+as in ** tdou in mw bxoeh [ fhkan
+vvvwgrsg de...
+[2025-07-10 11:19:42] 已輸入: else if %
+i
+class except False cydcl mwq rr
+okget
+...
+[2025-07-10 11:20:05] 已輸入: from
+mrenbdsw
+wijhywu
+>= wzp try ( cbb hzap
+return...
+[2025-07-10 11:20:34] 已輸入: [ return from
+with else None jgq
+d ando keqpr crm ...
+[2025-07-10 11:21:01] 已輸入: [ import
+hjwe
+usko while
+# Comment except } ...
+[2025-07-10 11:21:12] 已輸入並保存: kzmenlp cf
+try
+pymnd
+abcfyq omanmlxt
+dftto with
+s ...
+[2025-07-10 11:21:44] 已輸入並保存: import -
+while is q amdiqrvy
+except
+def falja >=
+n...
+[2025-07-10 11:22:07] 已輸入並保存: jytr not <= def import
+~ [ bnjiuo in >= """ Docstr...
+[2025-07-10 11:22:31] 已輸入: except njo | ( q ...
+[2025-07-10 11:22:52] 已輸入: if [ vjlcoceq >> yf
+>> lwjptdo
+[ havdmwth except i...
+[2025-07-10 11:23:06] 已輸入並保存: sfaf
+- ntlfdqe
+rz
+if jftki a
+...
+[2025-07-10 11:23:44] 已輸入: & for
+==
+xodos
+qjwk class szdt
+< y try
++ yuq == <
+...
+[2025-07-10 11:24:06] 已輸入: False return
+kkbyzix ^ while - /
+)
+else class vxy ...
+[2025-07-10 11:24:15] 已輸入: with else while ~ True
+...
+[2025-07-10 11:24:31] 已輸入: * ==
+=
+with
+< for
+else except
+<< if quwi
+vgcz !=
+...
+[2025-07-10 11:25:02] 已輸入: pljm
+ylppzqa
+def def
+if watieptc ^ class return pp...
+[2025-07-10 11:25:37] 已輸入: except kujq as import def
+!=
+kudvam >> nqtj
+* else...
+[2025-07-10 11:26:05] 已輸入: drwu zrmn import hbqvfqj
+from
+~ == with (
+~
+sgywcz...
+[2025-07-10 11:26:39] 已輸入並保存: False ** for ==
+tnsjffoi
+uhxhrzrw ( jazwmxjq class...
+[2025-07-10 11:27:08] 已輸入並保存: dcr from cdnrg False {
+as & # Comment
+xmlcrh retur...
+[2025-07-10 11:27:24] 已輸入並保存: %
+== [
+fbgcalc qq ytdkcao << for
+rkbxw i import r ...
+[2025-07-10 11:27:42] 已輸入: fuklj tdxe
+olt wier False
+kgdii qn ^
+not } ozh
+pkx...
+[2025-07-10 11:28:01] 已輸入: if def ukstfdpz vyqz nmtitkwk qw kynywsal and
+True...
+[2025-07-10 11:28:12] 已輸入: h
+zjdkhepr
+d except try
+} False
+with
+in ...
+[2025-07-10 11:28:30] 已輸入並保存: None
+None
+""" Docstring """ amkvmfzx }
+for & in wh...
+[2025-07-10 11:29:04] 已輸入: with
+<<
+return allk hqknlanx > True
+tnzxu kdddmds
+...
+[2025-07-10 11:29:16] 已輸入並保存: ] ] yhxbub
+is ] def ...
+[2025-07-10 11:29:48] 已輸入: while + zh h uokbplb class
+wqwrh try nfggln kubtms...
+[2025-07-10 11:30:27] 已輸入: cekdfx wporysr try / **
+r fvrgl
+<<
+xfokgib
+jzlomei...
+[2025-07-10 11:31:09] 已輸入並保存: from
+xkvazrl
+[
+rzsondj if ywks goteohkz rvnz retur...
+[2025-07-10 11:31:42] 已輸入: return
+etx def ) except kjmuowud
+yaci
+{ for uvwl F...
+[2025-07-10 11:32:02] 已輸入: if
+ssqikzz exx
+pqvr xcr neol l
+**
+...
+[2025-07-10 11:32:17] 已輸入並保存: lvk >>
+vprooz l = zfbhxear ...
+[2025-07-10 11:32:40] 已輸入並保存: ( - unvwz
+if else
+try
+as dg iw jdy and fgdrpn whil...
+[2025-07-10 11:32:58] 已輸入: quaw vqfoxitd
+try if pmxkjoms -
+try rtpmuhle excep...
+[2025-07-10 11:33:22] 已輸入: else deyuwe
+<< <
+else ) cssf enifxslx ( try
+except...
+[2025-07-10 11:33:36] 已輸入並保存: and
+False
+>>
+erouq g
+def [
+''' Docstring ''' class...
+[2025-07-10 11:33:56] 已輸入: ** }
+from for
+and
+< vmszsc import }
+ip from djbvd
+...
+[2025-07-10 11:34:18] 已輸入: {
+while
+jocng return rnbgeiyv def import True
+- wq...
+[2025-07-10 11:34:47] 已輸入並保存: nglif
+import jq eoqgyzt a hal
+sgrl
+nmn - ydatii qw...
+[2025-07-10 11:35:27] 已輸入: # Comment
+class with hxxrd
+from < xrda False ~
+hlx...
+[2025-07-10 11:35:39] 已輸入並保存: while
+ieubru
+if } for ''' Docstring '''
+...
+[2025-07-10 11:36:08] 已輸入: class in + ''' Docstring '''
+try in mogqvhso << ef...
+[2025-07-10 11:36:44] 已輸入: og }
+wotohcki for in ]
+jc
+cd
+eileqlns <
+True in kg...
+[2025-07-10 11:37:09] 已輸入並保存: try % }
+hxygmsvi
+iirxgqod k ruvppvp
+)
+for
+for clas...
+[2025-07-10 11:37:22] 已輸入: ) rapfxao
+[ >> ifckgi schzzw ) None
+with izocaro
+|...
+[2025-07-10 11:37:36] 已輸入: try = scotwc tjgmfy gd { ~
+import / mea
+False - qj...
+[2025-07-10 11:37:55] 已輸入: mslu except qjaljzs
+for from >>
+od + << mqydvnp im...
+[2025-07-10 11:38:08] 已輸入: lieadt wg p d bvsyxv
+n * hsil
+else < try class
+...
+[2025-07-10 11:38:37] 已輸入並保存: = evolb if
+~ +
+orqvq spevuxk v
+z if apakcqo ...
+[2025-07-10 11:39:11] 已輸入: from
+ggfeggu
+==
+oeso snswqges iyzibzw //
+s <= raob...
+[2025-07-10 11:39:31] 已輸入: in wpsy import [ class oecpavg
+tsaqwcjn ujvp
+retur...
+[2025-07-10 11:40:06] 已輸入: ezmsrh
+""" Docstring """
+tnnjuupb
+* for px % in xv...
+[2025-07-10 11:40:39] 已輸入並保存: if def is ( False lr except
+try
+^ as
+puyfmll
+jhd )...
+[2025-07-10 11:41:14] 已輸入並保存: else while
+- def
+''' Docstring ''' eynf qbsh while...
+[2025-07-10 11:41:31] 已輸入: or
+not
+from r ugljfrs
+xd
+pafzs na =
+eu << with
+as ...
+[2025-07-10 11:41:57] 已輸入: ahnkehha ( vgr ( fras is try siakrln qhdv as ( ret...
+[2025-07-10 11:42:14] 已輸入並保存: &
+fytewij jn class if
+svu in
+else
+if swq * return ...
+[2025-07-10 11:42:29] 已輸入: try
+with
+zv odlnee or
+and
+import ctgc yemhxrg else...
+[2025-07-10 11:42:48] 已輸入並保存: with
+| yh else in ynzr eidjjvep from
+...
+[2025-07-10 11:43:07] 已輸入: ntysilh try hjsq while
+mm with
+as gpfm xgpyc ^
+whi...
+[2025-07-10 11:43:32] 已輸入並保存: * as
+svux not
+and
+grosktij or lfaxtb as utdus y
+wh...
+[2025-07-10 11:43:48] 已輸入並保存: class >
+is nxdy
+/ ...
+[2025-07-10 11:44:16] 已輸入: } and
+tztex if from
+xfdp
+None
+...
+[2025-07-10 11:44:42] 已輸入: trtd except
+<<
+wlyzhwzo kz tggakhpn
+return ^ def n...
+[2025-07-10 11:44:57] 已輸入: klnmj ]
+hhuxgdlz
+w xzj
+try <= except
+// yy akjmlxq...
+[2025-07-10 11:45:28] 已輸入: bmx
+appygbpy from w or
+except ...
+[2025-07-10 11:45:39] 已輸入: bja as fkgqk in
+else ...
+[2025-07-10 11:46:03] 已輸入並保存: except lqlim qhu return >= def == krurbzu
+wkfnyb f...
+[2025-07-10 11:46:34] 已輸入並保存: while vfafkud &
+| nn } in
+>>
+as
+while czjgk from w...
+[2025-07-10 11:46:45] 已輸入: g onypud from
+dqpt rmnlrdbq # Comment with
+...
+[2025-07-10 11:47:12] 已輸入並保存: ktsitte
+~
+import True
+npzu while class frsma
+sk
+<<...
+[2025-07-10 11:47:39] 已輸入: ywbavms oucztgk lfcpui
+- as * zlgl
+diuya pgtb vodj...
+[2025-07-10 11:48:05] 已輸入: f
+yb gbs
+>> / &
+or
+except
+jdtns
+wnbcrlih zbhp
+qy T...
+[2025-07-10 11:48:27] 已輸入: a if cslqq xcngd yd
+krre ossgt
+eivc from
+>> xict i...
+[2025-07-10 11:49:08] 已輸入: eypdsiri from import uhs not as from
+rpcfa
+import ...
+[2025-07-10 11:49:45] 已輸入並保存: """ Docstring """ as
+# Comment sb + as av ]
+epusoi...
+[2025-07-10 11:50:20] 已輸入並保存: zeepue ucgljn // znjiize pxmlxabj *
+in with
+dzor r...
+[2025-07-10 11:50:44] 已輸入: tobrmxfg class mkga )
+as
+fau fwvdiub < False
+} vbj...
+[2025-07-10 11:51:24] 已輸入並保存: [ in pp class
+ipdy while if xzbagsmk
+om while
+praq...
+[2025-07-10 11:51:50] 已輸入並保存: or
+ccs from
+class
+pzbr or
+with
+trooik if
+else slmu...
+[2025-07-10 11:52:26] 已輸入: with = from <= >
+>> fvjb from xjrbk - % nzti >= %
+...
+[2025-07-10 11:52:53] 已輸入: seteafa
+while
+from
+as
+asf *
+...
+[2025-07-10 11:53:04] 已輸入並保存: tyvackie << l
+import != hcawp wlkto |
+...
+[2025-07-10 11:53:19] 已輸入並保存: try
+jvjobms from from ezof if & lawid !=
+oj loljbe...
+[2025-07-10 11:53:50] 已輸入: else if ec while
+>=
+with
+jrihd
+ua if ...
+[2025-07-10 11:53:59] 已輸入: pueukn
+for
+and
+>= &
+...
+[2025-07-10 11:54:30] 已輸入: sjkh
+try class o ujgre rjaejjr in liqazg
+[ try whi...
+[2025-07-10 11:55:04] 已輸入並保存: if & ''' Docstring ''' / vgaqpo onzuiym
+q while
+if...
+[2025-07-10 11:55:20] 已輸入並保存: rsfwtaqr in ezapkg { return ''' Docstring '''
+...
+[2025-07-10 11:55:34] 已輸入並保存: & i import
+krywqw from
+joeaz return ziia
+~ <
+uww ^...
+[2025-07-10 11:56:02] 已輸入並保存: < // +
+for % ykloy and while ''' Docstring ''' x ...
+[2025-07-10 11:56:27] 已輸入: usx
+znrpfqrs else eueonmxg
+ilipmo if
+kpboqgqm
+g sw...
+[2025-07-10 11:56:41] 已輸入: in import efidx while ot no
+xlvolmw rkdvmxya qz
+de...
+[2025-07-10 11:57:12] 已輸入: False
+/ mxn // > xakekfhv
+else / if ...
+[2025-07-10 11:57:49] 已輸入: + try
+q vbjy (
+vorowazh
+u
+try
+teyikzsj |
+& - } bex...
+[2025-07-10 11:58:28] 已輸入: except
+zn for
+jupqldvh
+except
+as
+while
+None with n...
+[2025-07-10 11:58:55] 已輸入並保存: as / while for & is cpgfkmh tpwiih zkvyzefw False
+...
+[2025-07-10 11:59:13] 已輸入: from None try bbwgm
+wix with
+# Comment tdd class
+w...
+[2025-07-10 11:59:34] 已輸入: if =
+class
+aipzoqti sqjqxwm ale class
+eawpcq lkves...
+[2025-07-10 11:59:59] 已輸入: return ylm gxiuc with with >= ( otazzutd ...
+[2025-07-10 12:00:34] 已輸入: = w
+= } vvrmxp +
+dcm and
+axtrqtcz
+xt <= except tib...
+[2025-07-10 12:00:59] 已輸入: c vdvxcmli %
+isphjecv mbjuaub in
+def or
+urafil lb
+...
+[2025-07-10 12:01:16] 已輸入並保存: except &
+return with
+acseduq pp
+rnrrzhpf ujiap
+** ...
+[2025-07-10 12:01:26] 已輸入: def iqex from vc mf
+< vmrhz [
+ondwq try
+and else ...
+[2025-07-10 12:02:02] 已輸入: if try
+rihpfdoy jocw ywyvnz ofuhtw * # Comment n n...
+[2025-07-10 12:02:24] 已輸入: in import as
+= / = try from import qrxoyk hcrybwno...
+[2025-07-10 12:02:55] 已輸入: import
+sunhhkau
+xlsi
+ubwq try from i try
+vdb in wh...
+[2025-07-10 12:03:18] 已輸入並保存: vjeiumw
+try // plifgs
+>
+yzpcohk prjbgbm
+bcogl try ...
+[2025-07-10 12:03:35] 已輸入並保存: ppjv
+and
+as with """ Docstring """
+from try vnacqs...
+[2025-07-10 12:04:13] 已輸入: cwnkxjwj
+|
+s
+else
+m jmcwft wxsa while zguwtq b cla...
+[2025-07-10 12:04:28] 已輸入: & <=
+t # Comment gak while import class
+...
+[2025-07-10 12:04:53] 已輸入: xrqgkmlq ]
+from mf def
+xfmjwax def
+== n joendb wit...
+[2025-07-10 12:05:16] 已輸入: def while
+import
+return from
+try
+def
+as
+} zka ...
+[2025-07-10 12:05:49] 已輸入: for
++
+in uhwu
+from
+cohhynms
+import lb != ...
+[2025-07-10 12:06:01] 已輸入: vsxjuq << ] coki &
+wiik
+...
+[2025-07-10 12:06:30] 已輸入並保存: def """ Docstring """ import hxlzulds ce in
+ye eor...
+[2025-07-10 12:06:57] 已輸入: as cgw ** fyw iryjcl ...
+[2025-07-10 12:07:20] 已輸入: l else vjpvgm on
+""" Docstring """ tligcg kyh with...
+[2025-07-10 12:07:47] 已輸入: &
+>=
+as
+burpi
+) class pkndp // ...
+[2025-07-10 12:08:08] 已輸入: try dy for lxwiuugo bvq True
+lidneb for
+import '''...
+[2025-07-10 12:08:42] 已輸入並保存: while try ] << kpuc """ Docstring """
+return != is...
+[2025-07-10 12:09:06] 已輸入並保存: biwhokac pmwtut
+''' Docstring ''' elidyzv mohy == ...
+[2025-07-10 12:09:48] 已輸入: import try eeditb except jgknifce if not sm wjnsnl...
+[2025-07-10 12:10:28] 已輸入: + else <= ( < for crkivyr yacqdyla fwuwx is hzmznv...
+[2025-07-10 12:11:10] 已輸入: vne
+''' Docstring ''' True +
+with
+crid ''' Docstri...
+[2025-07-10 12:11:39] 已輸入並保存: *
+return xcwt else hgdpll ^
+try
+&
+a
+...
+[2025-07-10 12:12:05] 已輸入: jhzho for gpqni l
+tfvutr
+**
+ycmmlszv
+for
+]
+r
+is tr...
+[2025-07-10 12:12:42] 已輸入: ykagiikt
+import
+''' Docstring ''' return class rtp...
+[2025-07-10 12:13:08] 已輸入: with != l xcyqpn
+>=
+) while gme - pycq usi
+or
+in <...
+[2025-07-10 12:13:41] 已輸入並保存: ^
+for == qglxzr
+qgjsck # Comment
+cv ldtvynkk
+<= as...
+[2025-07-10 12:14:09] 已輸入: daiqpe // pduz try
+for while if or class for
+zhawh...
+[2025-07-10 12:14:39] 已輸入: g
+and bcush
+mibr return cjeutirm
+] ...
+[2025-07-10 12:15:01] 已輸入: from gekt ^ True def
+] for
+...
+[2025-07-10 12:15:30] 已輸入並保存: else
+ctjtynp nzpnud tegrjn } < sdbfdx import ...
+[2025-07-10 12:15:42] 已輸入並保存: dhkmb
+is class or False in for +
+racf as ...
+[2025-07-10 12:16:15] 已輸入: == if
+byds undpdtcb except // except except
+''' Do...
+[2025-07-10 12:16:30] 已輸入並保存: eqizi == != bxanuntk [ else qpw
+hhdz for
+jw with
+...
+[2025-07-10 12:17:09] 已輸入並保存: hnhefxrr while
+jzdoqeks
+if != zxnw
+*
+i
+except csx
+...
+[2025-07-10 12:17:28] 已輸入: ymhhfdyu iwpmy as ^ from lxx ...
+[2025-07-10 12:18:10] 已輸入: kcoxgbw ebwyuoe ''' Docstring ''' return <<
+num ld...
+[2025-07-10 12:18:35] 已輸入: pgnufihc as None - oyyz hfru
+except ecy
+aqqln try ...
+[2025-07-10 12:19:03] 已輸入並保存: wjbrevqj def
+return
+< bjt except ...
+[2025-07-10 12:19:35] 已輸入並保存: def zunjuxr tiqkvfz
+f mhcbzlh xbnqlte n << if ''' ...
+[2025-07-10 12:20:07] 已輸入: witmfyyr yzjacrk in while
+pcank ekqpb ** << in mcb...
+[2025-07-10 12:20:42] 已輸入並保存: else eydv nmomtkb hvxh rr )
+uj /
+pajm None
+cetxpp ...
+[2025-07-10 12:21:01] 已輸入: onqskfy
+''' Docstring ''' ==
+# Comment < >= pswzm
+...
+[2025-07-10 12:21:34] 已輸入: rcehikv for ''' Docstring ''' // jgu w
+and
+def & g...
+[2025-07-10 12:21:49] 已輸入並保存: yqrpxnt
+try with
+durelfv
+while ''' Docstring ''' f...
+[2025-07-10 12:22:18] 已輸入並保存: ''' Docstring '''
+uq /
+fixhlg lzrbsxa as < = impor...
+[2025-07-10 12:22:49] 已輸入: as
+with == rvfmu
+pkhr zu { as /
+<=
+ocq
+True
+sontml...
+[2025-07-10 12:23:04] 已輸入: if upfmrpq except and
+gxo """ Docstring """ ) impo...
+[2025-07-10 12:23:36] 已輸入: from
+else in
+eprlr if import
+is as k lqd in try
+>=...
+[2025-07-10 12:23:55] 已輸入: >>
+//
+> /
+go try sek with in // rhhk <= if as or
+v...
+[2025-07-10 12:24:29] 已輸入並保存: yfbtzz
+except qyuadbwy for mqhnatlp vtiwxof
+in
+= f...
+[2025-07-10 12:24:50] 已輸入: in try ==
+for try
+mmyqjyb None |
+| & brxvdz ~ or l...
+[2025-07-10 12:25:13] 已輸入並保存: jw * ''' Docstring ''' orotgnn uy is
+True try zulr...
+[2025-07-10 12:25:28] 已輸入: return qnqb
+with else
+is with [ wrmpbkwe
+...
+[2025-07-10 12:26:01] 已輸入: varlmrjy def ] while while
+jzkri import
+i for clas...
+[2025-07-10 12:26:36] 已輸入並保存: try dzfixlt class <=
+try while sslyh {
+while
+is
+as...
+[2025-07-10 12:26:48] 已輸入: l else
++ -
+=
+with q / { [ try
+as moz False < try
+i...
+[2025-07-10 12:27:02] 已輸入: =
+= return sid gva ''' Docstring ''' as h = ] ...
+[2025-07-10 12:27:41] 已輸入並保存: == <
+while ^ wd
+ropcrko pe import asswjhy ( try el...
+[2025-07-10 12:28:18] 已輸入: jeh as / ~ def and yer else sf lwtubaa
+mjqfcpe
+fro...
+[2025-07-10 12:28:48] 已輸入並保存: lazfbbuh return jzign
+rquimlop # Comment >>
+...
+[2025-07-10 12:29:04] 已輸入: vwqzvao ''' Docstring '''
+with in import ufnjzvcr
+...
+[2025-07-10 12:29:31] 已輸入並保存: or in def and + and
+def
+if as
+try
+osd // /
+class o...
+[2025-07-10 12:30:10] 已輸入: qc try uvlora is else
+lpxggxbx
+d in
+gou
+vyx
+(
+swzo...
+[2025-07-10 12:30:22] 已輸入: |
+whcq
+( ( zlyw in
+skk <
+...
+[2025-07-10 12:30:44] 已輸入: if = ^ <
+vxtgjq return
+g in
+try lnojrsb qiqtc
+!= F...
+[2025-07-10 12:30:59] 已輸入並保存: j ~
+!=
+[
+duhf try if class > try klld capnspkm bnd...
+[2025-07-10 12:31:39] 已輸入: jpsoygk
+gj try csjgvdz
+( class >=
+False
+//
+""" Doc...
+[2025-07-10 12:32:11] 已輸入: ] for def in b eiovus
+for <= bkivsyzg ...
+[2025-07-10 12:32:42] 已輸入並保存: ''' Docstring '''
+except
+odeslb uknqa iykdjdlz fwe...
+[2025-07-10 12:33:06] 已輸入: **
+qd - njdiot }
+False
+{ hqgq else as
+uvpmn rayjwq...
+[2025-07-10 12:33:27] 已輸入並保存: o import from
+else
+== glg with
+| zbfexef !=
++ ifnq...
+[2025-07-10 12:33:50] 已輸入: else
+~ in
+None ~
+try
+except ...
+[2025-07-10 12:34:10] 已輸入並保存: in with dpymnnaa
+True vyqxxzv bqd def + khhjp ri f...
+[2025-07-10 12:34:30] 已輸入: return lanjlcdp in rd from cnuj for while
+mmfobist...
+[2025-07-10 12:35:03] 已輸入並保存: jahfvlze ( else > vo
++
+if except
+wdihv def rlpuwud...
+[2025-07-10 12:35:35] 已輸入並保存: ajs * in
+import for /
+in
+from False
+else as
+** if
+...
+[2025-07-10 12:36:16] 已輸入: smavg lvzt
+from qmfdgsp gewk
+try as cpsl **
+thbfcl...
+[2025-07-10 12:36:46] 已輸入: != [
+hqyyp
+] = << -
+return
+xu
+dvgcvf try
+ksuberc z...
+[2025-07-10 12:37:23] 已輸入: c while nisbvzw if kgtqlm
+loqgfl { # Comment
+or > ...
+[2025-07-10 12:37:37] 已輸入: return
+>> for
+True != else
+except ...
+[2025-07-10 12:37:56] 已輸入並保存: class p ]
+from alj else a
+def
+npconvl ==
+hkbgn fro...
+[2025-07-10 12:38:29] 已輸入並保存: with == while return
+n
+(
+yzelulvh
+as lg if vmisnhs...
+[2025-07-10 12:38:50] 已輸入並保存: <= class for return
+<= if okpuadsn zm |
+...
+[2025-07-10 12:39:25] 已輸入: ( vrqes as while
+gngfghbf != mk import or from Tru...
+[2025-07-10 12:39:58] 已輸入: while
+not
+hpy i bpy
+class
+lgh scruc def athq - [
+g...
+[2025-07-10 12:40:14] 已輸入: False
+uzw try
+in a def except
+cs rpeyrmfi exdsbyg
+...
+[2025-07-10 12:40:37] 已輸入: * try # Comment # Comment >> not qg gck ) as
+''' D...
+[2025-07-10 12:40:57] 已輸入: igiljml * oubyp <= ihzgoi ykpk as & import **
+qrnz...
+[2025-07-10 12:41:04] 已輸入: syq import ofk in dxr ...
+[2025-07-10 12:41:22] 已輸入並保存: and
+from hms ibjq
+return nu
+xg yqya * tkwt | True
+...
+[2025-07-10 12:41:54] 已輸入: ==
+lj jkspe
+gmlzgsy
+else in """ Docstring """ Fals...
+[2025-07-10 12:42:16] 已輸入: or
+tu np oxhy for try oickfu import
+<= or for whil...
+[2025-07-10 12:42:41] 已輸入: gpbndhm <=
+else
+with class in
+% ...
+[2025-07-10 12:43:00] 已輸入: from yfpzsr
+class with
+ku yqlpiy & in <<
+) muu as ...
+[2025-07-10 12:43:15] 已輸入並保存: else x while >
+^ hvzr for = from cj and p
+class mf...
+[2025-07-10 12:43:36] 已輸入: tzol
+try try while
+wm
+class
+while ...
+[2025-07-10 12:44:09] 已輸入: dg in gowz
+with
+} """ Docstring """ + byyau
+| +
+im...
+[2025-07-10 12:44:41] 已輸入: if """ Docstring """ def { if try not ]
+z
+try vfqm...
+[2025-07-10 12:45:17] 已輸入並保存: if while nbwk ofdqflh
+* yfqqmel # Comment try c
+im...
+[2025-07-10 12:45:29] 已輸入並保存: from
+return
+eosyc return ewegv
+jakgqqcx razjowlh
+c...
+[2025-07-10 12:45:50] 已輸入: ~ if <= + with xgtg >> else
+if >>
+}
+import ==
+exce...
+[2025-07-10 12:46:16] 已輸入: ~
+=
+zagx import >> True
+% import &
+xsadywp
+and >> ...
+[2025-07-10 12:46:38] 已輸入: wrqoiku import **
+!=
+with
+as frfnx as import briuy...
+[2025-07-10 12:47:05] 已輸入: not if { { # Comment class
+dmmdo
+oq cdwe
+nrt True ...
+[2025-07-10 12:47:20] 已輸入並保存: psq pyjdt abfq
+cgsqb >> poixryad
+% # Comment impor...
+[2025-07-10 12:47:55] 已輸入: nfkfx rrmd in class return >> dvmbi wxhsnm icsdqfe...
+[2025-07-10 12:48:24] 已輸入: None
+with chnb vjrvsjy <= while # Comment
+{ class
+...
+[2025-07-10 12:48:50] 已輸入: ss
+jgpcljjb while != biwhrzb
+tmj ujwiw wkrwht
+>=
+h...
+[2025-07-10 12:49:00] 已輸入: is in njfmhm ffs False bsslmup ...
+[2025-07-10 12:49:38] 已輸入並保存: | mvw
+srvdcmd
+pm ugh """ Docstring """
+// kym retu...
+[2025-07-10 12:50:04] 已輸入並保存: is ahn xxqfbe yl ~ and
+lsvqp *
+twkwvgms
+/
+...
+[2025-07-10 12:50:24] 已輸入: return fwvl cj
+class ntop
+try
+madvaix
+awjgx qjvofy...
+[2025-07-10 12:50:45] 已輸入: is == in
+( fmidpw yacqedy False dxiqdt i rol
+^
+% a...
+[2025-07-10 12:51:12] 已輸入並保存: vvumk ek g // -
+>> def fvjfxtfo v class for False ...
+[2025-07-10 12:51:47] 已輸入並保存: in
+ulqhs if oxuf for return =
+if nsm with for
+ws
+c...
+[2025-07-10 12:52:09] 已輸入並保存: sv < << exx h u spqmjbgg hdpeke << else > sw ubleg...
+[2025-07-10 12:52:30] 已輸入: try def
+""" Docstring """
+nch
+def
+zdygubtn
+...
+[2025-07-10 12:52:47] 已輸入: e
+try
+as
+return
+efcm return while
+vead yq
+jdlnpeb
+...
+[2025-07-10 12:53:13] 已輸入: True ska
+>> as try cyxc
+% in # Comment
+cddlcgf def...
+[2025-07-10 12:53:35] 已輸入: i ''' Docstring ''' None q >
+aynkl powkl
+...
+[2025-07-10 12:53:53] 已輸入: jyrjv c
+ruq //
+zkopsat = # Comment
+qjuad ^ ikb ugl...
+[2025-07-10 12:54:19] 已輸入: [ in
+gedrxbap False import
+& try
+now
+while >= ~ tr...
+[2025-07-10 12:54:42] 已輸入並保存: mynlo fmns
+from bhaqe ==
+< as else ''' Docstring '...
+[2025-07-10 12:55:06] 已輸入: from me up
+~ k
+| fmeipah <<
+''' Docstring ''' and ...
+[2025-07-10 12:55:29] 已輸入: << qgb
+class
+p except ) class f > ''' Docstring ''...
+[2025-07-10 12:56:02] 已輸入: & r
++ None tlhotq
+else tvahowc else
+...
+[2025-07-10 12:56:36] 已輸入: ** except | else [ qibv # Comment *
+in
+return
+< cj...
+[2025-07-10 12:56:57] 已輸入並保存: [ with """ Docstring """ nrjl import gofujg
+if ...
+[2025-07-10 12:57:22] 已輸入並保存: ) class
+v < in ^ with
+rie except for
+class None
+cl...
+[2025-07-10 12:57:56] 已輸入: } gmwf h rcefjf in import
+from from import
+return ...
+[2025-07-10 12:58:28] 已輸入: liunv
+guuliqx } **
+xmnl
+else
+gaukgoo fpxmdsp in
+ww...
+[2025-07-10 12:58:45] 已輸入並保存: wkcmkt /
+gfk { ''' Docstring ''' & [ qv !=
+axu o
+}...
+[2025-07-10 12:59:03] 已輸入並保存: True except def ellnqte with import
+ijnp *
+!= # Co...
+[2025-07-10 12:59:37] 已輸入: class
+ksjt
+for
+from
+dmtcxg ldq p with
+]
+d
+import
+f...
+[2025-07-10 12:59:55] 已輸入: blbcez else
+obgm not s vj
+makyrhzo for
++ import lq...
+[2025-07-10 13:00:37] 已輸入: with
+zhfcegs from
+else
+d jyfunxqu False for ''' Do...
+[2025-07-10 13:00:58] 已輸入並保存: else
+kl iy < from vf epvpews in ef except lncu evb...
+[2025-07-10 13:01:25] 已輸入: crknpek return None zigaz
+nnypmin
+edqwzs iiln
+(
+lr...
+[2025-07-10 13:01:48] 已輸入: fsbv qibpis wvats
+import dyzawscl except )
+from ...
+[2025-07-10 13:02:02] 已輸入並保存: fiy return
+<= sbdqai xkmfwkt while return
+while & ...
+[2025-07-10 13:02:38] 已輸入並保存: z >= txwvyv as
+} ozqbajo from class
+nhuwlfga qafj
+...
+[2025-07-10 13:02:51] 已輸入: !=
+True def from
+vpro
+% u zoauu
+in if fdb pdfa ...
+[2025-07-10 13:03:19] 已輸入: try
+gtcyd else for bnhltg } nqwwqe == from yxi
+> c...
+[2025-07-10 13:03:38] 已輸入: ]
+hs qkcsvde ntgijjwz vg
+not """ Docstring """ imp...
+[2025-07-10 13:04:07] 已輸入: yi gltsy >> import != // fsqmqq mwxr
+==
+for
+except...
+[2025-07-10 13:04:28] 已輸入: [ za
+class from ==
+{ = > ** except =
+ibhtzgq try i...
+[2025-07-10 13:04:58] 已輸入: mmqt in
+]
+if <=
+with )
+None or qtdr
+''' Docstring ...
+[2025-07-10 13:05:19] 已輸入: *
+or except *
+return
+zjegi
+utthce ...
+[2025-07-10 13:05:55] 已輸入: ( c ) dakck
+^ None rpznqnhx
+d
+{ in swpdaizh v impo...
+[2025-07-10 13:06:24] 已輸入並保存: for eevvgi
+False } axuc
+else warcsxy dn k ) kqoew ...
+[2025-07-10 13:06:35] 已輸入並保存: kldnp > True except fquiraup << class <
+import ...
+[2025-07-10 13:06:54] 已輸入並保存: False
+~ ~ zzma
+= ifrhv
+* alfuhr in nvzsl
+...
+[2025-07-10 13:07:27] 已輸入並保存: /
+with
+fynaq tom * """ Docstring """ flbfhfvl
+zkw ...
+[2025-07-10 13:07:59] 已輸入: ''' Docstring ''' nvjow
+xeasnn ** None wd
+jrbx
+<=
+...
+[2025-07-10 13:08:38] 已輸入: as
+and
+''' Docstring ''' psryzyo
+kexx qfleroh
+i + ...
+[2025-07-10 13:08:54] 已輸入: as eh from
+zc
+try
+u return ...
+[2025-07-10 13:09:14] 已輸入: == for +
+sx *
+tpu n ''' Docstring ''' False if kc ...
+[2025-07-10 13:09:37] 已輸入: import from uazbqds i in
+class kxm sw from [ hv tx...
+[2025-07-10 13:09:58] 已輸入: """ Docstring """
+& try
+rckxd
+zjacfoki
+in ) wznknr...
+[2025-07-10 13:10:29] 已輸入並保存: piicfpu
+zk
+moqai hlzqy =
+mb huidc with == as ^ k
+a...
+[2025-07-10 13:11:05] 已輸入: False akoeorjj and
+< else (
+unstyvs """ Docstring ...
+[2025-07-10 13:11:35] 已輸入並保存: not else in moh from irzmiixd return return
+wmarcj...
+[2025-07-10 13:12:05] 已輸入: sad True
+if except class
+import ...
+[2025-07-10 13:12:32] 已輸入: import or """ Docstring """
+exyxoifl zajup is clas...
+[2025-07-10 13:13:12] 已輸入: rfluosay
+return try import ) se True for zulimouw ...
+[2025-07-10 13:13:48] 已輸入: import
+} qgj import kyfhkv
+in ''' Docstring '''
+{
+...
+[2025-07-10 13:14:10] 已輸入並保存: ''' Docstring ''' orxwfc in from gv if as
+// [ ...
+[2025-07-10 13:14:39] 已輸入: + def
+try
+cn ^ utqsiqh zmz =
+yu ''' Docstring ''' ...
+[2025-07-10 13:15:11] 已輸入並保存: >>
+d
+aakl pncfbshr iekqx return c q def if != iid ...
+[2025-07-10 13:15:29] 已輸入: class try oexziy // h l ]
+bcy eerchtk czeziile d -...
+[2025-07-10 13:16:00] 已輸入並保存: import gcxsup )
+class ccer
+from + ^ return tzo
+u
+#...
+[2025-07-10 13:16:30] 已輸入: qgzo
+>>
+ixkde import
+while else and
+with
+= xymbxie...
+[2025-07-10 13:16:57] 已輸入: is h hmaeun ]
+ttkn except while while rjyctb def n...
+[2025-07-10 13:17:30] 已輸入: def <<
+ml ~ pr kste xyt None
+else else //
+>= ...
+[2025-07-10 13:18:08] 已輸入: ~
+efu None
+yas {
+with
+>>
+''' Docstring '''
+gohnafu...
+[2025-07-10 13:18:23] 已輸入並保存: urqmolw import != q
+l dvr } class jjhjq
+in dcxlk h...
+[2025-07-10 13:18:57] 已輸入並保存: qmiv
+return or m
+enqcjdkx
+<=
+dl
+for
+qk with except...
+[2025-07-10 13:19:26] 已輸入並保存: faj import uuzjro vdxmd * except g ^ morrz
+ehlvm e...
+[2025-07-10 13:19:50] 已輸入: if else ) except ebvuafmn in
+jqjkraq
+go
+tpxppbtq z...
+[2025-07-10 13:20:17] 已輸入: cg
+^
+uqfr
+tekaf ewdjhy
+except
+vafpvru
+import retur...
+[2025-07-10 13:20:41] 已輸入: <= lwbd import
+/
+return
+and
+else from as gfq yqk r...
+[2025-07-10 13:20:58] 已輸入並保存: class
+adxvyj from xvztp
+gmijrdsi sxpkwmq x
+i
+whbyn...
+[2025-07-10 13:21:16] 已輸入: h for with j gwhtzhb
+return is try & as else
+with
+...
+[2025-07-10 13:21:43] 已輸入並保存: !=
+goucnmcu jwfdzhyn if yhutxl if def
+while i
+nl e...
+[2025-07-10 13:22:01] 已輸入並保存: def vb # Comment
+xcix from
+= codczd na False with ...
+[2025-07-10 13:22:17] 已輸入: try for ^
+s for z ** ** True
+} import > None
+[ for...
+[2025-07-10 13:22:41] 已輸入: else ahplwks ex sbmecdpz
+[ return
+if dcurnx for
+ch...
+[2025-07-10 13:23:16] 已輸入: None try with sugxgwyl dcedaa
+axe import
+except
+ve...
+[2025-07-10 13:23:53] 已輸入並保存: jgqrhoql except
+not hw
+ip except = ngznb do rhsno ...
+[2025-07-10 13:24:17] 已輸入: twpqn a
+else
+as
+if while lz != jeiceehw try != as ...
+[2025-07-10 13:24:34] 已輸入: q
+rdurfm try except >= nwn one ...
+[2025-07-10 13:24:51] 已輸入並保存: False in in
+uufoh
+^
+} %
+* r for ...
+[2025-07-10 13:25:14] 已輸入: jgxh
+nin return tczwtcxj twfffvk qcl
+ja el
+ozw for...
+[2025-07-10 13:25:41] 已輸入: for &
+return
+pmb ''' Docstring '''
+dmd
+] except >>...
+[2025-07-10 13:26:12] 已輸入並保存: not try
+jznqqtau phacc rm ^
+< True
+>=
+lc dvj dxaoa...
+[2025-07-10 13:26:27] 已輸入: mkk >> l
+~
+in and if
+turxwo
+} ba except return != ...
+[2025-07-10 13:26:51] 已輸入: False import
+aqlizqm n ech except
+try ...
+[2025-07-10 13:27:15] 已輸入: !=
+(
+== while from oygs
+with try p
+vyxgbbf qhmlf <...
+[2025-07-10 13:27:29] 已輸入: class
+uemfrs qg
+lsxuvfbs rjpsmlk else // nkllf x s...
+[2025-07-10 13:27:57] 已輸入: atlmd fodgq = except &
+from import tb zqknw
+hbsjc ...
+[2025-07-10 13:28:10] 已輸入: with zk + class zjmm ogmpeok hctrdw
+...
+[2025-07-10 13:28:44] 已輸入: """ Docstring """
+import iw
+uc ag
+fagajegp
+s retur...
+[2025-07-10 13:29:10] 已輸入: rrpe while
+& ycgmfblr
+with
+for None for qbekrtd
+>=...
+[2025-07-10 13:29:33] 已輸入並保存: cuanuhtw in False
+ua is in except + except import ...
+[2025-07-10 13:29:52] 已輸入: duqrqu # Comment / ttnrxmt ^ ghavytzy
+from
+False
+p...
+[2025-07-10 13:30:13] 已輸入並保存: >= in
+try # Comment gnywb hco def esshqr
+def ...
+[2025-07-10 13:30:27] 已輸入: fwbbjyj
+in try return
+qjxf
+% inb
+gognfn { = [ try ...
+[2025-07-10 13:30:42] 已輸入: with // True
+r - for
+kr with ...
+[2025-07-10 13:30:59] 已輸入: lrngc
+> ^ return kmhvpl
+or
+cakci zxjn
+( with
+ir ]
+...
+[2025-07-10 13:31:20] 已輸入並保存: igcoo ) + ) yuybpwbq
+qucbymwp
+return def
+cwmdu ret...
+[2025-07-10 13:31:45] 已輸入並保存: =
+-
+xsb with << pntp not } mnkgg
+try ...
+[2025-07-10 13:32:07] 已輸入: from lowk
+from not
+from
+/ True orvxvlf cnoxlqxm hx...
+[2025-07-10 13:32:35] 已輸入並保存: + for import in >>
+l in * p
+""" Docstring """ wqw ...
+[2025-07-10 13:32:51] 已輸入並保存: o
+* else from class wk
+and == gcbondc ovth
+cxhgyec...
+[2025-07-10 13:33:23] 已輸入: > okamdct with
+* mjkeht
+= uxif
+for << ky ==
+...
+[2025-07-10 13:33:59] 已輸入: > *
+import (
+ii tdgsqq or except except
+ha ( from
+...
+[2025-07-10 13:34:09] 已輸入並保存: nxtpa def
+except
+import import go p ...
+[2025-07-10 13:34:25] 已輸入: orvvmiky
+p ktmee ''' Docstring ''' # Comment |
+imp...
+[2025-07-10 13:34:56] 已輸入: ajobw
+idsxv
+iuq tfwe
+try
+# Comment """ Docstring "...
+[2025-07-10 13:35:18] 已輸入: % as
+< po
+~ with class tyw
+rwq return mshcu >>
+...
+[2025-07-10 13:35:38] 已輸入: for w uqlk
+)
+] >= { ~ twx psbxvbuq
+except | } //
+e...
+[2025-07-10 13:35:55] 已輸入: { # Comment class def y elybo iscud vcsy ...
+[2025-07-10 13:36:15] 已輸入: ljababdw % weaobbvn ( fdfutym
+if o kxon ~ else try...
+[2025-07-10 13:36:58] 已輸入: ri durm wbezcwi as
+from class - y return
+from qq p...
+[2025-07-10 13:37:29] 已輸入並保存: looxkoxj else ggpahj sjd
+z
+with with xmsh lw with ...
+[2025-07-10 13:37:54] 已輸入: w
+wtpmzkk
+ouqbzpy as
+lqb
+szzuj
+c
+in cym != yutzjt
+...
+[2025-07-10 13:38:30] 已輸入: xls
+return ^ zafeve
+zlh
+class
+qdcfryyy except if l...
+[2025-07-10 13:38:44] 已輸入: zwwi / feotppjt as } budi def scob zxowd
+is lsa fo...
+[2025-07-10 13:39:03] 已輸入: # Comment lw while
+return dbciyoy
+&
+True return el...
+[2025-07-10 13:39:41] 已輸入並保存: == ] False while for try if yf tt >> nnn return ex...
+[2025-07-10 13:40:18] 已輸入並保存: ylgnw }
+not try ea else ( from for lbqzb
+nihzk qq ...
+[2025-07-10 13:40:40] 已輸入: return negokmq ljzitcfp None in
+return
+bhc [
+if in...
+[2025-07-10 13:41:15] 已輸入: c = ''' Docstring ''' as != rrebzv import
+cyjd
+in ...
+[2025-07-10 13:41:53] 已輸入並保存: tvk ( pxcvpnnp
+def
+with ondeyrt ** slwhv wgb class...
+[2025-07-10 13:42:28] 已輸入: vmze from
+* rikxvg if >= is with with ] as
+not try...
+[2025-07-10 13:42:53] 已輸入: with
+** yk
+[
+or
+x
+~ / as
+...
+[2025-07-10 13:43:34] 已輸入: ** (
+| zilz
+wwq w while for def yfutnkpt return [
+...
+[2025-07-10 13:43:57] 已輸入並保存: False class
+''' Docstring ''' else except ksotub
+m...
+[2025-07-10 13:44:27] 已輸入: lrppn tovhyia { or return for True
+ydfioc
+qtclrxki...
+[2025-07-10 13:44:50] 已輸入: True from as as def hxtldgwf % else
+rth < &
+> ...
+[2025-07-10 13:45:04] 已輸入: else as return ojwe and else
+with >> def p
+except ...
+[2025-07-10 13:45:34] 已輸入並保存: ij
+for
+vwh ( except import
+return try ^
+in unn try...
+[2025-07-10 13:46:00] 已輸入: ] bcbeov >> hckz qy while
+...
+[2025-07-10 13:46:28] 已輸入: else or { humviz except
+try
+iti from ( llr
+fxayk ...
+[2025-07-10 13:47:07] 已輸入: from
+] as gzmognc
+for ^ & z
+yffnkzd lstwzjyx > <=
+...
+[2025-07-10 13:47:44] 已輸入並保存: axbiju else =
+# Comment lzwviuk nbmmakp from def v...
+[2025-07-10 13:48:21] 已輸入: hwhlbb hrmjuuju
+else with kksjrmg
+try vpo
+None y g...
+[2025-07-10 13:48:58] 已輸入: while -
+def import
+qy juht # Comment
+ouzo while
+no...
+[2025-07-10 13:49:39] 已輸入並保存: csxpb
+uggvkw or if zcaj szyynky dtfb import ggllao...
+[2025-07-10 13:50:00] 已輸入並保存: swstiko djeffjp dfgxnaxa import
+is with gqh >=
+in ...
+[2025-07-10 13:50:35] 已輸入並保存: while
+**
+* yxxcr
+jzhown
+cwzhli heublh not hqtlsizw...
+[2025-07-10 13:51:02] 已輸入並保存: } |
+wmjclbu
+fdph pqejpyo else except with bkwaznw ...
+[2025-07-10 13:51:24] 已輸入: def /
+cp for def
+<= def
+as while
+else s return |
+>...
+[2025-07-10 13:51:41] 已輸入: <= kfpdyt [ try None c with else as cueovzw ...
+[2025-07-10 13:52:08] 已輸入並保存: return xqh
+& False [ ...
+[2025-07-10 13:52:34] 已輸入: epsiex
+if
+zg bpess
+while **
+gr ed > for class not ...
+[2025-07-10 13:53:14] 已輸入: vhcnj exchqdg
+class <=
+sezat for >> fxzhn zbpn els...
+[2025-07-10 13:53:32] 已輸入: td in
+not ^ import if
+...
+[2025-07-10 13:54:06] 已輸入: ( iynqwhc lfpxvavd
+try """ Docstring """ for hngba...
+[2025-07-10 13:54:43] 已輸入: << ^ jp
+dpdpwzcn
+False not
+uxht
+from for jbvpv try...
+[2025-07-10 13:55:01] 已輸入: return
+in ^
+bdsm wqrdkatn return class wd | rvsiwa...
+[2025-07-10 13:55:20] 已輸入並保存: from else
+bvnfpv hm
+import ...
+[2025-07-10 13:55:57] 已輸入: as ) zdf try
+for & aphg in iifv ^ while while or
+w...
+[2025-07-10 13:56:23] 已輸入: for sroevo while m
+m
+rwqaq %
+dwnv dhijefv << [ yku...
+[2025-07-10 13:56:31] 已輸入: qsew ) > bcseunm pfrfdir la
+...
+[2025-07-10 13:56:59] 已輸入: spzvlvcm in ] jfpqw yusuaj >> rqqui
+rr
+with
+bjsoib...
+[2025-07-10 13:57:14] 已輸入: g with ~
+for
+xv
+while > return as l cum except lwg...
+[2025-07-10 13:57:40] 已輸入: except ] not
+try avhbuiv
+try
+!= else ''' Docstring...
+[2025-07-10 13:57:50] 已輸入: jzxblg if
+ytscxgd
+// try mozwausi ...
+[2025-07-10 13:58:11] 已輸入: a
+jlsi
+def unvjym """ Docstring """ in in in
+msceu...
+[2025-07-10 13:58:32] 已輸入: is +
+m ui
+""" Docstring """ vjbkn ~ not << knfpsc ...
+[2025-07-10 13:59:09] 已輸入: gcdg != yzpfequ while except not rmiul tfamyh
+[
+im...
+[2025-07-10 13:59:38] 已輸入並保存: &
+import %
+obwqjcij
+reakobo != else try ''' Docstr...
+[2025-07-10 14:00:22] 已輸入: return kjz
+None try mh return
+fravkxtn with e tgvd...
+[2025-07-10 14:00:56] 已輸入並保存: w
+~ return
+= izw cz
+jkivciyf dv ...
+[2025-07-10 14:01:07] 程式被用戶中斷
