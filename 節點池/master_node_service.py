@@ -1,4 +1,3 @@
-# node_pool/master_node_service.py
 import grpc
 import logging
 import redis
@@ -10,18 +9,14 @@ import os
 import shutil
 import nodepool_pb2
 import nodepool_pb2_grpc
-
-# 從正確的位置導入 NodeManager
 from node_manager import NodeManager
 from user_manager import UserManager
 from config import Config
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(threadName)s] - %(message)s')
 
-# 新增文件存儲管理器
 class FileStorageManager:
     def __init__(self, base_path=None):
-        # 修正：預設為 Linux 路徑，可用環境變數或 config 覆蓋
         if base_path is None:
             base_path = os.environ.get("TASK_STORAGE_PATH") \
                 or getattr(Config, "TASK_STORAGE_PATH", None) \
@@ -30,7 +25,6 @@ class FileStorageManager:
         self.ensure_directory()
     
     def ensure_directory(self):
-        """確保存儲目錄存在"""
         try:
             os.makedirs(self.base_path, exist_ok=True)
             logging.info(f"任務存儲目錄已準備: {self.base_path}")
@@ -39,15 +33,12 @@ class FileStorageManager:
             raise
     
     def get_task_zip_path(self, task_id):
-        """獲取任務ZIP文件路徑"""
         return os.path.join(self.base_path, f"task_{task_id}.zip")
     
     def get_result_zip_path(self, task_id):
-        """獲取結果ZIP文件路徑"""
         return os.path.join(self.base_path, f"result_{task_id}.zip")
     
     def store_task_zip(self, task_id, task_zip_data):
-        """存儲任務ZIP到硬碟"""
         try:
             file_path = self.get_task_zip_path(task_id)
             with open(file_path, 'wb') as f:
@@ -59,7 +50,6 @@ class FileStorageManager:
             return False
     
     def store_result_zip(self, task_id, result_zip_data):
-        """存儲結果ZIP到硬碟"""
         try:
             file_path = self.get_result_zip_path(task_id)
             with open(file_path, 'wb') as f:
@@ -71,7 +61,6 @@ class FileStorageManager:
             return False
     
     def get_task_zip(self, task_id):
-        """從硬碟讀取任務ZIP"""
         try:
             file_path = self.get_task_zip_path(task_id)
             if os.path.exists(file_path):
@@ -87,7 +76,6 @@ class FileStorageManager:
             return b""
     
     def get_result_zip(self, task_id):
-        """從硬碟讀取結果ZIP"""
         try:
             file_path = self.get_result_zip_path(task_id)
             if os.path.exists(file_path):
@@ -103,15 +91,12 @@ class FileStorageManager:
             return b""
     
     def task_zip_exists(self, task_id):
-        """檢查任務ZIP是否存在"""
         return os.path.exists(self.get_task_zip_path(task_id))
     
     def result_zip_exists(self, task_id):
-        """檢查結果ZIP是否存在"""
         return os.path.exists(self.get_result_zip_path(task_id))
     
     def cleanup_task_files(self, task_id):
-        """清理任務相關文件"""
         try:
             task_file = self.get_task_zip_path(task_id)
             result_file = self.get_result_zip_path(task_id)
@@ -135,12 +120,10 @@ class FileStorageManager:
             return False
     
     def mark_for_cleanup(self, task_id):
-        """標記任務文件可以清理（在結果成功傳輸後）"""
         try:
-            # 創建一個標記文件，表示這個任務的文件可以被清理
             cleanup_marker_path = os.path.join(self.base_path, f"cleanup_{task_id}.marker")
             with open(cleanup_marker_path, 'w') as f:
-                f.write(str(time.time()))  # 記錄標記時間
+                f.write(str(time.time()))
             logging.debug(f"任務 {task_id} 已標記為可清理")
             return True
         except Exception as e:
@@ -148,12 +131,10 @@ class FileStorageManager:
             return False
     
     def is_marked_for_cleanup(self, task_id):
-        """檢查任務是否已標記為可清理"""
         cleanup_marker_path = os.path.join(self.base_path, f"cleanup_{task_id}.marker")
         return os.path.exists(cleanup_marker_path)
     
     def cleanup_task_files_if_marked(self, task_id):
-        """如果任務已標記為可清理，則清理文件"""
         if not self.is_marked_for_cleanup(task_id):
             return False
             
@@ -164,19 +145,16 @@ class FileStorageManager:
             
             files_removed = 0
             
-            # 刪除任務文件
             if os.path.exists(task_file):
                 os.remove(task_file)
                 files_removed += 1
                 logging.info(f"已刪除任務文件: {task_file}")
             
-            # 刪除結果文件
             if os.path.exists(result_file):
                 os.remove(result_file)
                 files_removed += 1
                 logging.info(f"已刪除結果文件: {result_file}")
             
-            # 刪除清理標記文件
             if os.path.exists(cleanup_marker):
                 os.remove(cleanup_marker)
                 logging.debug(f"已刪除清理標記: {cleanup_marker}")
@@ -190,7 +168,6 @@ class FileStorageManager:
             return False
     
     def delayed_cleanup_task_files(self, task_id, delay_seconds=5):
-        """延遲清理任務文件，確保文件傳輸完成"""
         def cleanup_after_delay():
             try:
                 time.sleep(delay_seconds)
@@ -198,17 +175,14 @@ class FileStorageManager:
             except Exception as e:
                 logging.error(f"延遲清理任務 {task_id} 失敗: {e}")
         
-        # 在後台線程中執行延遲清理
         cleanup_thread = threading.Thread(target=cleanup_after_delay, daemon=True)
         cleanup_thread.start()
         logging.debug(f"任務 {task_id} 已安排 {delay_seconds} 秒後清理")
 
-# --- TaskManager 類修改版本 ---
 class TaskManager:
     def __init__(self):
-        # decode_responses=True for easier handling
         self.redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
-        self.file_storage = FileStorageManager()  # 新增文件存儲管理器
+        self.file_storage = FileStorageManager()
         try:
             self.redis_client.ping()
             logging.info("TaskManager: Redis 連線成功")
@@ -217,28 +191,22 @@ class TaskManager:
             raise
 
     def store_task(self, task_id, task_zip, memory_gb, cpu_score, gpu_score, gpu_memory_gb, location, gpu_name, user_id, cpt_cost=None):
-        """存儲任務信息，ZIP文件存到硬碟，其他信息存到Redis"""
         task_key = f"task:{task_id}"
         try:
-            # 記錄詳細的輸入參數
             logging.info(f"存儲任務 {task_id} 的詳細信息: memory_gb={memory_gb}, cpu_score={cpu_score}, "
                          f"gpu_score={gpu_score}, gpu_memory_gb={gpu_memory_gb}, user_id={user_id}")
             
-            # 計算 CPT 成本：cpu_score + gpu_score + memory_gb + gpu_memory_gb
             calculated_cpt_cost = int(cpu_score) + int(gpu_score) + int(memory_gb) + int(gpu_memory_gb)
-            # 確保至少為 1
             calculated_cpt_cost = max(1, calculated_cpt_cost)
             
             logging.info(f"任務 {task_id} 計算的 CPT 成本: {calculated_cpt_cost} (CPU:{cpu_score} + GPU:{gpu_score} + MEM:{memory_gb} + GPU_MEM:{gpu_memory_gb})")
             
-            # 存儲ZIP文件到硬碟
             if task_zip:
                 if not self.file_storage.store_task_zip(task_id, task_zip):
                     logging.error(f"任務 {task_id} ZIP文件存儲失敗")
                     return False
                 logging.info(f"任務 {task_id} ZIP文件已存儲到硬碟 ({len(task_zip)} bytes)")
             
-            # 存儲任務元數據到Redis（不包含ZIP文件）
             task_info = {
                 "memory_gb": str(memory_gb),
                 "cpu_score": str(cpu_score),
@@ -253,13 +221,11 @@ class TaskManager:
                 "created_at": str(time.time()),
                 "updated_at": str(time.time()),
                 "cpt_cost": str(calculated_cpt_cost),
-                "has_task_zip": "1" if task_zip else "0"  # 標記是否有ZIP文件
+                "has_task_zip": "1" if task_zip else "0"
             }
             
-            # 存儲元數據到Redis
             self.redis_client.hset(task_key, mapping=task_info)
             
-            # 將任務ID添加到用戶的任務集合中
             if user_id:
                 user_tasks_key = f"user:{user_id}:tasks"
                 self.redis_client.sadd(user_tasks_key, task_id)
@@ -267,7 +233,6 @@ class TaskManager:
             else:
                 logging.warning(f"任務 {task_id} 無用戶ID，未能關聯到用戶")
 
-            # 驗證存儲是否成功
             stored_user_id = self.redis_client.hget(task_key, "user_id")
             stored_cpt_cost = self.redis_client.hget(task_key, "cpt_cost")
             logging.info(f"任務 {task_id} 存儲後驗證: 用戶ID = {stored_user_id}, CPT成本 = {stored_cpt_cost}")
@@ -276,12 +241,10 @@ class TaskManager:
             return True
         except redis.RedisError as e:
             logging.error(f"Redis 錯誤，任務 {task_id} 存儲失敗: {e}")
-            # 如果Redis失敗，清理可能已存儲的文件
             self.file_storage.cleanup_task_files(task_id)
             return False
         except Exception as e:
             logging.error(f"存儲任務 {task_id} 時發生未知錯誤: {e}", exc_info=True)
-            # 如果出錯，清理可能已存儲的文件
             self.file_storage.cleanup_task_files(task_id)
             return False
 
@@ -309,12 +272,10 @@ class TaskManager:
         """存儲任務的最終結果 ZIP到硬碟"""
         task_key = f"task:{task_id}"
         try:
-            # 存儲結果ZIP到硬碟
             if result_zip and not self.file_storage.store_result_zip(task_id, result_zip):
                 logging.error(f"任務 {task_id} 結果ZIP存儲失敗")
                 return False
             
-            # 更新Redis中的狀態和標記
             update_data = {
                 "status": "COMPLETED",
                 "has_result_zip": "1" if result_zip else "0",
@@ -358,43 +319,33 @@ class TaskManager:
     def store_logs(self, task_id, node_id, logs, timestamp):
         """存儲任務日誌"""
         try:
-            # 存儲到任務的日誌字段
             task_key = f"task:{task_id}"
             
-            # 檢查任務是否存在
             if not self.redis_client.exists(task_key):
                 logging.warning(f"嘗試存儲日誌但任務 {task_id} 不存在")
                 return False
             
-            # 獲取現有日誌
             current_logs = self.redis_client.hget(task_key, "logs") or ""
             
-            # 修復時間戳處理 - 將毫秒轉換為秒
             try:
-                # 如果是毫秒時間戳，轉換為秒
-                if timestamp > 1e12:  # 大於這個值說明是毫秒時間戳
+                if timestamp > 1e12:
                     timestamp_seconds = timestamp / 1000.0
                 else:
                     timestamp_seconds = float(timestamp)
                 
                 timestamp_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp_seconds))
             except (ValueError, OSError) as e:
-                # 如果時間戳無效，使用當前時間
                 logging.warning(f"無效的時間戳 {timestamp}，使用當前時間: {e}")
                 timestamp_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
             
-            # 格式化新日誌條目
             new_log_entry = f"[{timestamp_str}] [{node_id}] {logs}"
             
-            # 追加新日誌
             updated_logs = current_logs + new_log_entry + "\n"
             
-            # 限制日誌大小（保留最後 50KB）
             max_log_size = 50 * 1024
             if len(updated_logs) > max_log_size:
                 updated_logs = updated_logs[-max_log_size:]
             
-            # 更新日誌
             self.redis_client.hset(task_key, "logs", updated_logs)
             self.redis_client.hset(task_key, "updated_at", str(time.time()))
             
@@ -417,22 +368,18 @@ class TaskManager:
                 logging.warning(f"獲取日誌失敗：任務 {task_id} 不存在")
                 return None
             
-            # 獲取任務信息
             task_info = self.redis_client.hmget(task_key, ["logs", "status", "output"])
             logs = task_info[0] or ""
             status = task_info[1] or "UNKNOWN"
             output = task_info[2] or ""
             
-            # 合併日誌和輸出
             combined_logs = []
             
-            # 添加結構化日誌
             if logs:
                 for line in logs.strip().split('\n'):
                     if line.strip():
                         combined_logs.append(line)
             
-            # 添加輸出日誌（如果有的話）
             if output:
                 combined_logs.append(f"--- Task Output ---")
                 for line in output.strip().split('\n'):
@@ -464,7 +411,7 @@ class TaskManager:
             "memory_gb", "cpu_score", "gpu_score", "gpu_memory_gb",
             "location", "gpu_name", "status", "output", "assigned_node",
             "user_id", "created_at", "updated_at", "logs", "cpt_cost",
-            "has_task_zip", "has_result_zip"  # 添加ZIP文件存在標記
+            "has_task_zip", "has_result_zip" 
         ]
 
         try:
@@ -476,29 +423,24 @@ class TaskManager:
             for key, value in zip(string_keys, string_values):
                 task_info[key] = value if value is not None else ""
 
-            # 輸出獲取到的用戶ID，用於調試
             if "user_id" in task_info:
                 logging.debug(f"任務 {task_id} 的用戶ID: {task_info['user_id']}")
             else:
                 logging.warning(f"任務 {task_id} 沒有獲取到用戶ID")
 
-            # 根據需要從硬碟讀取ZIP文件
             if include_zip:
-                # 讀取任務ZIP
                 if task_info.get("has_task_zip") == "1":
                     task_zip = self.file_storage.get_task_zip(task_id)
                     task_info["task_zip"] = task_zip
                 else:
                     task_info["task_zip"] = b""
                 
-                # 讀取結果ZIP
                 if task_info.get("has_result_zip") == "1":
                     result_zip = self.file_storage.get_result_zip(task_id)
                     task_info["result_zip"] = result_zip
                 else:
                     task_info["result_zip"] = b""
             else:
-                # 不包含ZIP時，顯示存在狀態
                 task_info["task_zip"] = "<file on disk>" if task_info.get("has_task_zip") == "1" else "<empty>"
                 task_info["result_zip"] = "<file on disk>" if task_info.get("has_result_zip") == "1" else "<empty>"
 
@@ -516,11 +458,9 @@ class TaskManager:
         """專門獲取結果 ZIP (從硬碟讀取) - 支援 STOPPED 狀態"""
         task_key = f"task:{task_id}"
         try:
-            # 從Redis獲取狀態
             status = self.redis_client.hget(task_key, "status") or "UNKNOWN"
             has_result = self.redis_client.hget(task_key, "has_result_zip") == "1"
 
-            # 允許 COMPLETED 和 STOPPED 狀態的任務下載結果
             if status in ["COMPLETED", "STOPPED"]:
                 if has_result:
                     result_zip = self.file_storage.get_result_zip(task_id)
@@ -536,7 +476,6 @@ class TaskManager:
             elif status in ["PENDING", "RUNNING"]:
                 return b"", status
             else:
-                # 對於其他狀態（如 FAILED），也檢查是否有結果
                 if has_result:
                     result_zip = self.file_storage.get_result_zip(task_id)
                     if result_zip:
@@ -567,12 +506,12 @@ class TaskManager:
                     gpu_memory_gb = self.redis_client.hget(key, "gpu_memory_gb")
                     location = self.redis_client.hget(key, "location") or "Any"
                     gpu_name = self.redis_client.hget(key, "gpu_name") or ""
-                    cpt_cost = self.redis_client.hget(key, "cpt_cost") or "1"  # 從 Redis 讀取 cpt_cost
+                    cpt_cost = self.redis_client.hget(key, "cpt_cost") or "1"
                     
                     tasks.append({
                         "task_id": task_id,
                         "user_id": user_id,
-                        "cpt_cost": cpt_cost,  # 包含 cpt_cost
+                        "cpt_cost": cpt_cost,
                         "requirements": {
                             "memory_gb": int(memory_gb or 0),
                             "cpu_score": int(cpu_score or 0),
@@ -670,22 +609,17 @@ class TaskManager:
         try:
             task_key = f"task:{task_id}"
             
-            # 獲取任務信息以便記錄
             task_info = self.get_task_info(task_id, include_zip=False)
             user_id = task_info.get("user_id") if task_info else None
             
-            # 清理硬碟文件（立即清理，不等待標記）
             self.file_storage.cleanup_task_files(task_id)
             
-            # 刪除Redis中的任務數據
             self.redis_client.delete(task_key)
             
-            # 從用戶任務集合中移除
             if user_id:
                 user_tasks_key = f"user:{user_id}:tasks"
                 self.redis_client.srem(user_tasks_key, task_id)
             
-            # 刪除任務日誌
             logs_key = f"task_logs:{task_id}"
             self.redis_client.delete(logs_key)
             
@@ -700,7 +634,6 @@ class TaskManager:
         """檢查用戶餘額是否足夠下次付款（使用用戶名）"""
         try:
             user_manager = UserManager()
-            # 使用用戶名查詢餘額
             user_row = user_manager.query_one("SELECT tokens FROM users WHERE username = ?", (username,))
             if user_row:
                 return user_row['tokens'] >= cpt_cost
@@ -709,7 +642,6 @@ class TaskManager:
             logging.error(f"檢查用戶 {username} 餘額失敗: {e}")
             return False
 
-# --- MasterNodeServiceServicer 類 ---
 class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
     def __init__(self):
         self.task_manager = TaskManager()
@@ -717,11 +649,11 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
         self._stop_event = threading.Event()
         self.dispatch_interval = 10
         self.dispatcher_thread = None
-        self.health_check_interval = 5  # 縮短健康檢查間隔到5秒
+        self.health_check_interval = 5
         self.reward_interval = 60
         self.task_health = {}
-        self.node_timeout_threshold = 10  # 節點超時閾值：10秒
-        self.auth_manager = None  # 將在 server 啟動時設置
+        self.node_timeout_threshold = 10
+        self.auth_manager = None
         self.start_task_dispatcher()
         self.start_health_checker()
         self.start_reward_scheduler()
@@ -755,7 +687,6 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
         def health_check_loop():
             while not self._stop_event.is_set():
                 try:
-                    # 檢查所有 RUNNING 任務的節點心跳狀態（排除 STOPPED 狀態）
                     running_tasks = self.task_manager.get_running_tasks()
                     current_time = time.time()
                     
@@ -763,12 +694,10 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                         task_id = task["task_id"]
                         user_id = task.get("user_id")
                         
-                        # 獲取完整任務信息
                         task_info = self.task_manager.get_task_info(task_id, include_zip=False)
                         if not task_info:
                             continue
                         
-                        # 檢查任務狀態，如果是 STOPPED 則跳過健康檢查
                         current_status = task_info.get("status")
                         if current_status == "STOPPED":
                             logging.debug(f"任務 {task_id} 已停止，跳過健康檢查")
@@ -778,7 +707,6 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                         if not assigned_node:
                             continue
 
-                        # 檢查節點狀態
                         node_info = self.node_manager.get_node_info(assigned_node)
                         if not node_info:
                             logging.warning(f"節點 {assigned_node} 信息不存在，任務 {task_id} 可能需要重新分配")
@@ -799,64 +727,52 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
         logging.info("健康檢查線程已啟動")
 
     def start_reward_scheduler(self):
-        """啟動獎勵調度器，定期發放完成任務的獎勵並檢查餘額"""
         def reward_scheduler_loop():
             while not self._stop_event.is_set():
                 try:
-                    # 處理正在運行的任務，檢查餘額並發放獎勵
                     running_tasks = self.task_manager.get_running_tasks()
                     
                     for task in running_tasks:
                         task_id = task["task_id"]
-                        user_id = task.get("user_id")  # 任務發起者用戶名
+                        user_id = task.get("user_id")
                         
-                        # 從 Redis 直接讀取 cpt_cost，而不是從 get_task_info
                         try:
                             cpt_cost_from_redis = self.task_manager.redis_client.hget(f"task:{task_id}", "cpt_cost")
                             if not cpt_cost_from_redis or cpt_cost_from_redis == "":
-                                cpt_cost = 1  # 默認值
+                                cpt_cost = 1 
                             else:
                                 cpt_cost = int(float(cpt_cost_from_redis))
                         except (ValueError, TypeError) as e:
                             logging.warning(f"任務 {task_id} 的 cpt_cost 值無效: '{cpt_cost_from_redis}', 使用默認值 1")
-                            cpt_cost = 1  # 默認值
+                            cpt_cost = 1 
                         
-                        # 獲取分配的節點信息
                         assigned_node = self.task_manager.redis_client.hget(f"task:{task_id}", "assigned_node")
                         
                         if user_id and assigned_node:
-                            # 檢查任務發起者餘額是否足夠下次付款
                             if not self.task_manager.check_user_balance_for_next_payment(user_id, cpt_cost):
-                                # 餘額不足，停止任務
                                 self.task_manager.update_task_status(task_id, "STOPPED", assigned_node=None)
                                 self.node_manager.report_status(assigned_node, "Idle")
                                 
-                                # 從健康檢查中移除
                                 if task_id in self.task_health:
                                     del self.task_health[task_id]
                                 
-                                # 記錄到日誌
                                 log_message = f"任務 {task_id} 因用戶 {user_id} 餘額不足已自動停止 (每分鐘需要 {cpt_cost} CPT)"
                                 logging.warning(log_message)
                                 self.task_manager.store_logs(task_id, "system", log_message, int(time.time()))
                                 continue
                             
-                            # 發放獎勵：從任務發起者轉帳給工作端用戶
                             user_manager = UserManager()
                             
-                            # 使用用戶名進行轉帳
                             success, msg = user_manager.transfer_tokens(
-                                user_id,        # 發送者用戶名（任務發起者）
-                                assigned_node,  # 接收者用戶名（工作端用戶）
+                                user_id,       
+                                assigned_node,  
                                 cpt_cost
                             )
                             
                             if success:
                                 logging.info(f"任務 {task_id} 轉帳成功: {cpt_cost} CPT 從發起者 {user_id} 到工作端 {assigned_node}")
                                 
-                                # 轉帳後再次檢查餘額
                                 if not self.task_manager.check_user_balance_for_next_payment(user_id, cpt_cost):
-                                    # 餘額不足下次付款，停止任務
                                     self.task_manager.update_task_status(task_id, "STOPPED", assigned_node=None)
                                     self.node_manager.report_status(assigned_node, "Idle")
                                     
@@ -868,7 +784,6 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                                     self.task_manager.store_logs(task_id, "system", log_message, int(time.time()))
                             else:
                                 logging.error(f"任務 {task_id} 轉帳失敗: {msg}")
-                                # 轉帳失敗，考慮停止任務
                                 if "餘額不足" in msg:
                                     self.task_manager.update_task_status(task_id, "STOPPED", assigned_node=None)
                                     self.node_manager.report_status(assigned_node, "Idle")
@@ -880,14 +795,12 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                                     logging.warning(log_message)
                                     self.task_manager.store_logs(task_id, "system", log_message, int(time.time()))
                     
-                    # 獲取已完成但未發放獎勵的任務
                     completed_tasks = self.task_manager.get_completed_tasks_without_reward()
                     
                     for task in completed_tasks:
                         task_id = task["task_id"]
                         user_id = task.get("user_id")
                         
-                        # 獲取任務詳細信息
                         task_info = self.task_manager.get_task_info(task_id, include_zip=False)
                         if not task_info:
                             continue
@@ -895,7 +808,6 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                         assigned_node = task_info.get("assigned_node")
                         
                         if assigned_node and user_id:
-                            # 標記獎勵已處理
                             self.task_manager.mark_reward_given(task_id)
                             logging.info(f"任務 {task_id} 已完成，標記獎勵已發放")
                 
@@ -908,11 +820,6 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
         logging.info("獎勵調度器已啟動")
 
     def _increment_task_fail_count(self, task_id, assigned_node, user_id):
-        """
-        增加任務失敗計數。
-        - 如果是 worker 超時（健康檢查發現節點失聯），則重新分發（設為 PENDING）。
-        - 如果是任務本身失敗（worker 回報失敗），則直接設為 FAILED，不重新分發。
-        """
         try:
             if task_id not in self.task_health:
                 self.task_health[task_id] = {
@@ -926,9 +833,7 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
             self.task_health[task_id]["fail_count"] += 1
             self.task_health[task_id]["last_check"] = time.time()
             
-            # 只有健康檢查（worker 超時）才會進來這裡
             if self.task_health[task_id]["fail_count"] >= 3:
-                # 重新分發：設為 PENDING，assigned_node 設為 None
                 self.task_manager.update_task_status(task_id, "PENDING", assigned_node=None)
                 logging.warning(f"任務 {task_id} 失敗次數過多（worker 超時），已重設為 PENDING，等待重新分發")
                 del self.task_health[task_id]
@@ -973,11 +878,9 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                     node_id = selected_node.node_id
                     logging.info(f"為任務 {task_id} 選擇節點: {node_id}")
                     
-                    # 先嘗試推送任務到工作端，成功後才更新狀態
                     task_pushed_successfully = False
                     
                     try:
-                        # 取得節點資訊
                         node_info = self.node_manager.get_node_info(node_id)
                         if not node_info:
                             logging.error(f"找不到節點 {node_id} 的資訊，無法推送任務")
@@ -988,27 +891,23 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                         
                         logging.info(f"節點 {node_id} 詳細信息: host={worker_host}, port={worker_port}")
                         
-                        # 驗證節點連接性
                         if not worker_host or worker_host == "127.0.0.1":
                             logging.warning(f"節點 {node_id} 使用無效 IP {worker_host}，跳過推送")
                             continue
                         
-                        # 取得任務內容並檢查大小
                         task_info = self.task_manager.get_task_info(task_id, include_zip=True)
                         if not task_info:
                             logging.error(f"找不到任務 {task_id} 的內容，無法推送")
                             continue
                         task_zip = task_info.get("task_zip", b"")
                         
-                        # 根據檔案大小動態調整超時時間
                         file_size_mb = len(task_zip) / (1024 * 1024)
-                        base_timeout = 30  # 基礎30秒
-                        size_timeout = max(file_size_mb * 2, 10)  # 每MB給2秒，最少10秒
-                        total_timeout = min(base_timeout + size_timeout, 120)  # 最多2分鐘
+                        base_timeout = 30
+                        size_timeout = max(file_size_mb * 2, 10)
+                        total_timeout = min(base_timeout + size_timeout, 120)
                         
                         logging.info(f"推送任務 {task_id} 到 {worker_host}:{worker_port} (大小: {file_size_mb:.1f}MB, 超時: {total_timeout:.0f}秒)")
                         
-                        # 建立 gRPC 連線
                         channel = grpc.insecure_channel(
                             f"{worker_host}:{worker_port}",
                             options=[
@@ -1018,13 +917,11 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                                 ('grpc.http2.max_pings_without_data', 0),
                                 ('grpc.http2.min_time_between_pings_ms', 10000),
                                 ('grpc.http2.min_ping_interval_without_data_ms', 5000),
-                                # 增加消息大小限制以支持大檔案
-                                ('grpc.max_receive_message_length', 100 * 1024 * 1024),  # 100MB
-                                ('grpc.max_send_message_length', 100 * 1024 * 1024),     # 100MB
+                                ('grpc.max_receive_message_length', 100 * 1024 * 1024),
+                                ('grpc.max_send_message_length', 100 * 1024 * 1024),
                             ]
                         )
                         
-                        # 先測試連接（快速測試）
                         try:
                             grpc.channel_ready_future(channel).result(timeout=5)
                             logging.info(f"成功連接到節點 {node_id} ({worker_host}:{worker_port})")
@@ -1042,7 +939,6 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                         
                         logging.info(f"開始發送 ExecuteTask 請求到節點 {node_id}...")
                         
-                        # 使用動態計算的超時時間
                         resp = stub.ExecuteTask(req, timeout=total_timeout)
                         channel.close()
                         
@@ -1069,7 +965,6 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                         logging.error(f"推送任務 {task_id} 給節點 {node_id} 發生錯誤: {e}", exc_info=True)
                         continue
                     
-                    # 只有成功推送任務後才更新狀態和設置節點為忙碌
                     if task_pushed_successfully:
                         success = self.task_manager.update_task_status(
                             task_id, 
