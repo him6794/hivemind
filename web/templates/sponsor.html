@@ -2,32 +2,54 @@
 {% block title %}Sponsors - HiveMind{% endblock %}
 {% block content %}
 
-<!-- Page Content -->
+<!-- Page Header -->
+<header class="bg-dark py-5">
+    <div class="container px-5">
+        <div class="text-center">
+            <h1 class="display-5 fw-bolder text-white mb-2 slide-in-up" data-i18n="sponsor">贊助列表</h1>
+            <p class="lead fw-normal text-white-50 mb-0 slide-in-up delay-200" data-i18n="sponsor_thanks">感謝以下贊助者對 HiveMind 的支持！</p>
+        </div>
+    </div>
+</header>
+
+<!-- Sponsors Section -->
 <section class="py-5">
     <div class="container px-5 my-5">
-        <div class="text-center mb-5">
-            <h1 class="fw-bolder" data-i18n="sponsor">贊助列表</h1>
-            <p class="lead fw-normal text-muted mb-0" data-i18n="sponsor_thanks">感謝以下贊助者對 HiveMind 的支持！</p>
-        </div>
         <div class="row gx-5 justify-content-center">
             <div class="col-lg-8">
                 <div class="row gx-4 gy-4 justify-content-center">
                     <!-- 贊助者卡片 -->
-                    <div class="col-md-6 col-lg-4">
-                        <div class="card text-center h-100 shadow border-0">
-                            <div class="card-body p-4">
-                                <img src="{{ url_for('static', filename='img/justin.png') }}" alt="Justin" class="rounded-circle mb-3" style="width: 80px; height: 80px; object-fit: cover;" onerror="this.style.display='none'">
-                                <h5 class="card-title fw-bold">Justin</h5>
-                                <p class="card-text text-muted" data-i18n="sponsor_main_developer">主要開發者</p>
-                                <a href="https://justin0711.com" target="_blank" class="btn btn-outline-primary btn-sm">
-                                    <i class="fas fa-external-link-alt me-1"></i>
-                                    Visit Website
+                    <div class="col-md-6 col-lg-6">
+                        <div class="card text-center h-100 shadow border-0 hover-lift">
+                            <div class="card-body p-5">
+                                <div class="feature bg-gradient text-white rounded-3 mb-4 mx-auto">
+                                    <i class="fas fa-user"></i>
+                                </div>
+                                <h4 class="card-title fw-bold mb-3">Justin</h4>
+                                <p class="card-text text-muted mb-4" data-i18n="sponsor_main_developer">主要開發者</p>
+                                <a href="https://justin0711.com" target="_blank" class="btn btn-outline-primary btn-hover-lift">
+                                    <i class="fas fa-external-link-alt me-2"></i>
+                                    <span data-i18n="visit_website">訪問網站</span>
                                 </a>
                             </div>
                         </div>
                     </div>
-                    <!-- 更多贊助者可複製上方卡片格式新增 -->
+                    <!-- 可以在這裡添加更多贊助者 -->
                 </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Call to action -->
+<section class="py-5 bg-gradient-primary-to-secondary text-white">
+    <div class="container px-5">
+        <div class="text-center cta-section">
+            <h2 class="fw-bolder mb-3" data-i18n="become_sponsor">成為贊助者</h2>
+            <p class="lead mb-4" data-i18n="sponsor_cta_desc">支持 HiveMind 的發展，讓更多人享受分布式運算的便利</p>
+            <div>
+                <a class="btn btn-outline-light btn-lg me-3 btn-hover-glow" href="https://github.com/him6794/hivemind" target="_blank" data-i18n="support_project">支持專案</a>
+                <a class="btn btn-light btn-lg btn-hover-lift" href="https://discord.gg/p2hApGE4T3" target="_blank" data-i18n="join_community">加入社群</a>
             </div>
         </div>
     </div>

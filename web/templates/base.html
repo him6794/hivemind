@@ -26,7 +26,7 @@
         <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
             <div class="container px-5">
                 <a class="navbar-brand" href="/">
-                    <img src="{{ url_for('static', filename='img/file.png') }}" alt="HiveMind" width="30" height="30" class="me-2">
+                    <img src="{{ url_for('static', filename='img/file.svg') }}" alt="HiveMind" width="30" height="30" class="me-2">
                     HiveMind
                 </a>
                 <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarSupportedContent" aria-controls="navbarSupportedContent" aria-expanded="false" aria-label="Toggle navigation">
@@ -44,7 +44,7 @@
                         
                         <!-- 語言切換按鈕 -->
                         <li class="nav-item">
-                            <button class="btn btn-outline-light btn-sm ms-2" onclick="toggleLang()" data-i18n="switch_lang">切換語言</button>
+                            <button class="btn btn-outline-light btn-sm ms-2" onclick="if(typeof toggleLang === 'function') toggleLang()" data-i18n="switch_lang">切換語言</button>
                         </li>
                         
                         <!-- 用戶認證按鈕 -->

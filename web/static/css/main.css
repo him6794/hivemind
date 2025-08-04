@@ -1,75 +1,26 @@
-/* Hero 區塊背景 */
-.hero {
-  background: linear-gradient(to right, #6a11cb, #2575fc);
-  color: white;
+/* 基礎設定和變數 */
+:root {
+    --primary-color: #6366f1;
+    --secondary-color: #8b5cf6;
+    --accent-color: #06b6d4;
+    --success-color: #10b981;
+    --warning-color: #f59e0b;
+    --danger-color: #ef4444;
+    --dark-color: #1f2937;
+    --light-color: #f8fafc;
+    --text-muted: #6b7280;
+    --border-radius: 0.75rem;
+    --transition: all 0.3s ease;
+    --shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.15);
+    --shadow-hover: 0 1rem 3rem rgba(0, 0, 0, 0.175);
 }
-
-.hero .btn {
-  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-}
-
-.hero .btn:hover {
-  transform: scale(1.05);
-  transition: transform 0.2s ease-in-out;
-}
-
-/* 卡片陰影 */
-.card {
-  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-}
-
-.card:hover {
-  transform: translateY(-5px);
-  transition: all 0.3s ease-in-out;
-  box-shadow: 0 1rem 3rem rgba(0, 0, 0, 0.175);
-}
-
-/* Footer 樣式 */
-footer {
-  font-size: 0.9rem;
-}
-
-footer a:hover {
-  text-decoration: underline;
-}
-
-/* Custom styles based on Start Bootstrap Modern Business */
 
 /* 確保頁面最小高度 */
 .min-vh-100 {
     min-height: 100vh !important;
 }
 
-/* Feature icons */
-.feature {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    height: 4rem;
-    width: 4rem;
-    font-size: 2rem;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-}
-
-/* Gradient backgrounds */
-.bg-gradient-primary-to-secondary {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-}
-
-/* Hover effects */
-.btn:hover {
-    transform: translateY(-2px);
-    transition: all 0.2s ease-in-out;
-}
-
-/* Card hover effects */
-.card:hover {
-    transform: translateY(-5px);
-    transition: all 0.3s ease-in-out;
-    box-shadow: 0 1rem 3rem rgba(0, 0, 0, 0.175);
-}
-
-/* Custom animations */
+/* 基礎動畫 */
 @keyframes fadeInUp {
     from {
         opacity: 0;
@@ -81,103 +32,494 @@ footer a:hover {
     }
 }
 
-.animate-fade-in-up {
-    animation: fadeInUp 0.6s ease-out;
+@keyframes slideInLeft {
+    from {
+        opacity: 0;
+        transform: translateX(-30px);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
 }
 
-/* Hero image styling */
-.hero-image {
-    filter: drop-shadow(0 1rem 2rem rgba(0, 0, 0, 0.2));
+@keyframes slideInRight {
+    from {
+        opacity: 0;
+        transform: translateX(30px);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+
+@keyframes slideInUp {
+    from {
+        opacity: 0;
+        transform: translateY(30px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@keyframes pulseGlow {
+    0%, 100% {
+        box-shadow: 0 0 20px rgba(102, 126, 234, 0.3);
+    }
+    50% {
+        box-shadow: 0 0 30px rgba(102, 126, 234, 0.6);
+    }
+}
+
+@keyframes floating {
+    0%, 100% {
+        transform: translateY(0px);
+    }
+    50% {
+        transform: translateY(-10px);
+    }
+}
+
+/* 動畫類別 */
+.fade-in-up {
+    opacity: 0;
+    animation: fadeInUp 0.6s ease-out forwards;
+}
+
+.slide-in-left {
+    opacity: 0;
+    animation: slideInLeft 0.6s ease-out forwards;
+}
+
+.slide-in-right {
+    opacity: 0;
+    animation: slideInRight 0.6s ease-out forwards;
+}
+
+.slide-in-up {
+    opacity: 0;
+    animation: slideInUp 0.6s ease-out forwards;
+}
+
+/* 延遲動畫 */
+.delay-100 { animation-delay: 0.1s; }
+.delay-200 { animation-delay: 0.2s; }
+.delay-300 { animation-delay: 0.3s; }
+.delay-400 { animation-delay: 0.4s; }
+
+/* Hero 區塊樣式 */
+.hero-content {
+    z-index: 2;
+    position: relative;
+}
+
+.floating-particles {
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+}
+
+.floating-particles::before,
+.floating-particles::after {
+    content: '';
+    position: absolute;
+    width: 200px;
+    height: 200px;
+    background: linear-gradient(45deg, rgba(102, 126, 234, 0.1), rgba(118, 75, 162, 0.1));
+    border-radius: 50%;
+    animation: floating 6s ease-in-out infinite;
+}
+
+.floating-particles::before {
+    top: 10%;
+    left: 10%;
+    animation-delay: 0s;
+}
+
+.floating-particles::after {
+    top: 60%;
+    right: 10%;
+    animation-delay: 3s;
+}
+
+/* 網路節點動畫 */
+.hero-illustration {
+    position: relative;
+    width: 300px;
+    height: 300px;
+    margin: 0 auto;
+}
+
+.network-node {
+    position: absolute;
+    width: 20px;
+    height: 20px;
+    background: var(--primary-color);
+    border-radius: 50%;
+    animation: pulseGlow 2s infinite;
+}
+
+.network-node.node-1 { top: 20%; left: 20%; animation-delay: 0s; }
+.network-node.node-2 { top: 20%; right: 20%; animation-delay: 0.5s; }
+.network-node.node-3 { bottom: 20%; left: 20%; animation-delay: 1s; }
+.network-node.node-4 { bottom: 20%; right: 20%; animation-delay: 1.5s; }
+
+.network-connection {
+    position: absolute;
+    background: linear-gradient(45deg, var(--primary-color), var(--accent-color));
+    height: 2px;
+    opacity: 0.6;
+}
+
+.network-connection.conn-1 {
+    top: 25%;
+    left: 25%;
+    right: 25%;
+    transform: rotate(0deg);
+}
+
+.network-connection.conn-2 {
+    top: 40%;
+    left: 22%;
+    width: 56%;
+    transform: rotate(90deg);
+}
+
+.network-connection.conn-3 {
+    bottom: 25%;
+    left: 25%;
+    right: 25%;
+    transform: rotate(45deg);
+}
+
+/* 性能圖表 */
+.performance-chart {
+    background: white;
+    border-radius: var(--border-radius);
+    padding: 2rem;
+    box-shadow: var(--shadow);
+}
+
+.bar-item {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.bar-label {
+    min-width: 120px;
+    font-weight: 500;
+    font-size: 0.9rem;
+    color: var(--text-muted);
+}
+
+.bar-container {
+    flex: 1;
+    background: #f1f5f9;
+    border-radius: 10px;
+    height: 20px;
+    position: relative;
+    overflow: hidden;
+}
+
+.bar {
+    height: 100%;
+    border-radius: 10px;
+    width: 0;
+    transition: width 1s ease-out;
+    position: relative;
+}
+
+.bar-traditional {
+    background: linear-gradient(90deg, var(--warning-color), #fb923c);
+}
+
+.bar-cloud {
+    background: linear-gradient(90deg, var(--accent-color), var(--primary-color));
+}
+
+.bar-hivemind {
+    background: linear-gradient(90deg, var(--primary-color), var(--secondary-color));
+}
+
+.bar-value {
+    position: absolute;
+    right: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 0.8rem;
+    font-weight: bold;
+    color: white;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+
+/* 技術優勢樣式 */
+.advantage-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    background: rgba(99, 102, 241, 0.1);
+    border-radius: 50%;
+    margin-top: 5px;
+}
+
+.advantage-item {
+    opacity: 0;
+    transform: translateX(-30px);
+    transition: all 0.6s ease;
+    padding: 1.5rem;
+    border-radius: var(--border-radius);
+    background: white;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    margin-bottom: 1rem;
+    border-left: 4px solid var(--primary-color);
+}
+
+.advantage-item.animate {
+    opacity: 1;
+    transform: translateX(0);
+}
+
+.advantage-item:hover {
+    transform: translateX(10px);
+    box-shadow: var(--shadow-hover);
+}
+
+.advantage-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 50px;
+    height: 50px;
+    background: rgba(99, 102, 241, 0.1);
+    border-radius: 50%;
+    margin-top: 5px;
+    transition: var(--transition);
+}
+
+.advantage-item:hover .advantage-icon {
+    background: rgba(99, 102, 241, 0.2);
+    transform: scale(1.1);
+}
+
+/* Feature icons */
+.feature {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 4rem;
+    width: 4rem;
+    font-size: 2rem;
+    background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+    transition: var(--transition);
+}
+
+/* 統計數據樣式增強 */
+.stat-item {
+    opacity: 0;
+    transform: translateY(30px);
+    transition: all 0.6s ease;
+    padding: 1.5rem;
+    border-radius: var(--border-radius);
+    background: rgba(255, 255, 255, 0.15);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.stat-item.animate {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+/* 工作流程樣式 */
+.workflow-step {
+    opacity: 0;
+    transform: translateY(40px);
+    transition: all 0.6s ease;
+    padding: 2rem;
+    border-radius: var(--border-radius);
+    background: white;
+    box-shadow: var(--shadow);
+    border: 1px solid #e2e8f0;
+}
+
+.workflow-step.animate {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.workflow-step:hover {
+    transform: translateY(-10px);
+    box-shadow: var(--shadow-hover);
+}
+
+.step-number {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 70px;
+    height: 70px;
+    background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+    color: white;
+    border-radius: 50%;
+    font-size: 1.75rem;
+    font-weight: bold;
+    margin: 0 auto;
+    box-shadow: var(--shadow);
+    position: relative;
+    z-index: 2;
+}
+
+.step-number::before {
+    content: '';
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+    filter: blur(10px);
+    opacity: 0.3;
+    z-index: -1;
+}
+
+/* 團隊價值觀 */
+.team-value {
+    text-align: center;
+    opacity: 0;
+    transform: scale(0.8);
+    transition: all 0.6s ease;
+    padding: 2rem;
+    border-radius: var(--border-radius);
+    background: white;
+    box-shadow: var(--shadow);
+}
+
+.team-value.animate {
+    opacity: 1;
+    transform: scale(1);
+}
+
+.team-value:hover {
+    transform: scale(1.05);
+    box-shadow: var(--shadow-hover);
+}
+
+.value-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 80px;
+    height: 80px;
+    background: rgba(99, 102, 241, 0.1);
+    border-radius: 50%;
+    margin: 0 auto;
+    transition: var(--transition);
+}
+
+.team-value:hover .value-icon {
+    background: rgba(99, 102, 241, 0.2);
+    transform: scale(1.1);
+}
+
+/* 按鈕樣式 */
+.btn-hover-glow {
+    transition: var(--transition);
+}
+
+.btn-hover-glow:hover {
+    box-shadow: 0 0 20px rgba(102, 126, 234, 0.5);
+    transform: translateY(-2px);
+}
+
+.btn-hover-lift {
+    transition: var(--transition);
+}
+
+.btn-hover-lift:hover {
+    transform: translateY(-3px);
+    box-shadow: var(--shadow-hover);
+}
+
+.btn-primary {
+    background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+    border: none;
+    box-shadow: var(--shadow);
+    transition: var(--transition);
+}
+
+.btn-primary:hover {
+    background: linear-gradient(135deg, #5855eb 0%, #7c3aed 100%);
+    box-shadow: var(--shadow-hover);
+    transform: translateY(-2px);
+}
+
+.btn-outline-primary {
+    border-color: var(--primary-color);
+    color: var(--primary-color);
+    transition: var(--transition);
+}
+
+.btn-outline-primary:hover {
+    background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+    border-color: var(--primary-color);
+    color: white;
+    transform: translateY(-2px);
 }
 
 /* Navigation styling */
 .navbar-dark .navbar-nav .nav-link:hover {
     color: #fff;
     background-color: rgba(255, 255, 255, 0.1);
-    border-radius: 0.375rem;
-    transition: all 0.2s ease-in-out;
+    border-radius: var(--border-radius);
+    transition: var(--transition);
 }
 
-.navbar-dark .navbar-nav .nav-link {
-    padding: 0.5rem 1rem;
-    margin: 0 0.25rem;
-}
-
-/* Feature section styling */
-#features .col {
-    transition: transform 0.3s ease-in-out;
-}
-
-#features .col:hover {
-    transform: translateY(-10px);
-}
-
-/* Form styling */
-.form-floating > .form-control:focus ~ label {
-    color: #667eea;
-}
-
-.form-floating > .form-control:focus {
-    border-color: #667eea;
-    box-shadow: 0 0 0 0.2rem rgba(102, 126, 234, 0.25);
-}
-
-.form-floating > .form-control:not(:placeholder-shown) ~ label {
-    opacity: 0.65;
-    transform: scale(0.85) translateY(-0.5rem) translateX(0.15rem);
-}
-
-.form-floating > label {
-    position: absolute;
-    top: 0;
-    left: 0;
-    height: 100%;
-    padding: 1rem 0.75rem;
-    pointer-events: none;
-    border: 1px solid transparent;
-    transform-origin: 0 0;
-    transition: opacity 0.1s ease-in-out, transform 0.1s ease-in-out;
-}
-
-/* Download page cards */
+/* 卡片統一樣式 */
 .card {
-    border-radius: 1rem;
-    overflow: hidden;
-}
-
-.badge {
-    font-size: 0.75rem;
-    padding: 0.5rem 1rem;
-}
-
-/* Login page specific styles */
-.bg-light.rounded-3 {
-    border-radius: 1rem !important;
-    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.15);
-}
-
-/* Alert styles */
-.alert {
-    border-radius: 0.75rem;
+    border-radius: var(--border-radius);
     border: none;
+    box-shadow: var(--shadow);
+    transition: var(--transition);
 }
 
-.alert-danger {
-    background-color: #f8d7da;
-    color: #721c24;
+.card:hover {
+    transform: translateY(-5px);
+    box-shadow: var(--shadow-hover);
 }
 
-.alert-success {
-    background-color: #d1e7dd;
-    color: #0f5132;
+/* 修復 Bootstrap 5 的類別 */
+.d-none {
+    display: none !important;
 }
 
-/* Loading animation */
-@keyframes spin {
-    0% { transform: rotate(0deg); }
-    100% { transform: rotate(360deg); }
+/* 確保 Turnstile 驗證框置中 */
+.cf-turnstile {
+    margin: 0 auto;
 }
 
+/* 滾動條美化 */
+::-webkit-scrollbar {
+    width: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: #f1f1f1;
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--primary-color);
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--secondary-color);
+}
 .fa-spin {
     animation: spin 1s linear infinite;
 }
@@ -187,12 +529,85 @@ footer.mt-auto {
     margin-top: auto !important;
 }
 
-/* 確保頁面結構正確 */
-body.d-flex.flex-column {
-    min-height: 100vh;
+/* Custom button styles */
+.btn-primary {
+    background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+    border: none;
+    box-shadow: var(--shadow);
 }
 
-/* Responsive adjustments */
+.btn-primary:hover {
+    background: linear-gradient(135deg, #5a6fd8 0%, #6a4190 100%);
+    box-shadow: var(--shadow-hover);
+}
+
+.btn-outline-primary {
+    border-color: var(--primary-color);
+    color: var(--primary-color);
+}
+
+.btn-outline-primary:hover {
+    background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+    border-color: var(--primary-color);
+    color: white;
+}
+
+/* CTA 區塊增強可見性 */
+.cta-section {
+    position: relative;
+    z-index: 1;
+    padding: 3rem 0;
+    background: #ffffff !important; /* 白色背景讓黑色文字清楚可見 */
+}
+
+.cta-section h2,
+.cta-section p,
+.cta-section .lead {
+    color: #000000 !important;
+    text-shadow: none;
+    font-weight: bold;
+}
+
+.cta-section .btn {
+    font-size: 1.1rem;
+    padding: 1rem 2.5rem;
+    border-radius: var(--border-radius);
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.15);
+    transition: var(--transition);
+    font-weight: bold;
+    border-width: 2px;
+}
+
+.cta-section .btn:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 8px 25px rgba(0, 0, 0, 0.25);
+}
+
+.cta-section .btn-outline-light {
+    border-color: var(--primary-color);
+    color: var(--primary-color) !important;
+    background: transparent;
+}
+
+.cta-section .btn-outline-light:hover {
+    background: var(--primary-color) !important;
+    color: white !important;
+    border-color: var(--primary-color);
+}
+
+.cta-section .btn-light {
+    background: var(--primary-color) !important;
+    color: white !important;
+    border: 2px solid var(--primary-color);
+}
+
+.cta-section .btn-light:hover {
+    background: var(--secondary-color) !important;
+    color: white !important;
+    border-color: var(--secondary-color);
+}
+
+/* 響應式調整 */
 @media (max-width: 768px) {
     .display-5 {
         font-size: 2.5rem;
@@ -208,77 +623,49 @@ body.d-flex.flex-column {
         padding-left: 1.5rem !important;
         padding-right: 1.5rem !important;
     }
-}
-
-/* Dark theme support */
-@media (prefers-color-scheme: dark) {
-    .bg-light {
-        background-color: #f8f9fa !important;
+    
+    .hero-illustration {
+        width: 200px;
+        height: 200px;
     }
     
-    .text-muted {
-        color: #6c757d !important;
+    .step-number {
+        width: 60px;
+        height: 60px;
+        font-size: 1.5rem;
     }
-}
-
-/* Custom button styles */
-.btn-primary {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    border: none;
-    box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
-}
-
-.btn-primary:hover {
-    background: linear-gradient(135deg, #5a6fd8 0%, #6a4190 100%);
-    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.15);
-}
-
-.btn-outline-primary {
-    border-color: #667eea;
-    color: #667eea;
-}
-
-.btn-outline-primary:hover {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    border-color: #667eea;
-    color: white;
-}
-
-/* Footer links */
-.link-light:hover {
-    color: #ffffff !important;
-    text-decoration: underline;
-}
-
-/* Utility classes */
-.text-decoration-none:hover {
-    text-decoration: underline !important;
-}
-
-/* Bootstrap utilities extension */
-.bg-gradient {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-}
-
-/* Animation delays */
-.delay-100 {
-    animation-delay: 0.1s;
-}
-
-.delay-200 {
-    animation-delay: 0.2s;
-}
-
-.delay-300 {
-    animation-delay: 0.3s;
-}
-
-/* 修復 Bootstrap 5 的 d-none 類別 */
-.d-none {
-    display: none !important;
-}
-
-/* 確保 Turnstile 驗證框置中 */
-.cf-turnstile {
-    margin: 0 auto;
+    
+    .stat-item {
+        padding: 1rem;
+        margin-bottom: 1rem;
+    }
+    
+    .workflow-step {
+        padding: 1.5rem;
+        margin-bottom: 2rem;
+    }
+    
+    .advantage-item {
+        padding: 1rem;
+        transform: translateY(20px);
+    }
+    
+    .advantage-item.animate {
+        transform: translateY(0);
+    }
+    
+    .team-value {
+        padding: 1.5rem;
+        margin-bottom: 1rem;
+    }
+    
+    .cta-section {
+        padding: 2rem 0;
+    }
+    
+    .cta-section .btn {
+        font-size: 1rem;
+        padding: 0.875rem 2rem;
+        margin-bottom: 1rem;
+    }
 }

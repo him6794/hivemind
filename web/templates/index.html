@@ -3,62 +3,236 @@
 {% block content %}
 
 <!-- Header - Hero Section -->
-<header class="bg-dark py-5">
-    <div class="container px-5">
+<header class="bg-dark py-5 position-relative overflow-hidden">
+    <!-- 動畫背景元素 -->
+    <div class="position-absolute top-0 start-0 w-100 h-100">
+        <div class="floating-particles"></div>
+    </div>
+    <div class="container px-5 position-relative">
         <div class="row gx-5 align-items-center justify-content-center">
-            <div class="col-lg-8 col-xl-7 col-xxl-6">
-                <div class="my-5 text-center text-xl-start">
-                    <h1 class="display-5 fw-bolder text-white mb-2" data-i18n="welcome">解鎖分散式運算的力量</h1>
-                    <p class="lead fw-normal text-white-50 mb-4" data-i18n="subtitle">工作端 + 節點池，打造高效能分布式平台，讓你專注開發、我們處理執行。</p>
-                    <div class="d-grid gap-3 d-sm-flex justify-content-sm-center justify-content-xl-start">
-                        <a class="btn btn-primary btn-lg px-4 me-sm-3" href="/register" data-i18n="register">立即開始使用</a>
-                        <a class="btn btn-outline-light btn-lg px-4" href="https://github.com/him6794/hivemind" target="_blank" data-i18n="github">查看 GitHub</a>
+            <div class="col-lg-12">
+                <div class="my-5 text-center hero-content">
+                    <h1 class="display-5 fw-bolder text-white mb-2 slide-in-left" data-i18n="welcome">解鎖分散式運算的力量</h1>
+                    <p class="lead fw-normal text-white-50 mb-4 slide-in-left delay-200" data-i18n="subtitle">工作端 + 節點池，打造高效能分布式平台，讓你專注開發、我們處理執行。</p>
+                    <div class="d-grid gap-3 d-sm-flex justify-content-center slide-in-left delay-400">
+                        <a class="btn btn-primary btn-lg px-4 me-sm-3 btn-hover-glow" href="/register" data-i18n="register">立即開始使用</a>
+                        <a class="btn btn-outline-light btn-lg px-4 btn-hover-lift" href="https://github.com/him6794/hivemind" target="_blank" data-i18n="github">查看 GitHub</a>
                     </div>
                 </div>
-            </div>
-            <div class="col-xl-5 col-xxl-6 d-none d-xl-block text-center">
-                <img class="img-fluid rounded-3 my-5" src="{{ url_for('static', filename='img/hero-image.jpg') }}" alt="HiveMind 分布式運算" style="max-width: 400px;" />
             </div>
         </div>
     </div>
 </header>
+
+<!-- 系統資源統計區塊 -->
+<section class="py-5 bg-primary">
+    <div class="container px-5">
+        <div class="text-center mb-4">
+            <h3 class="fw-bolder text-white mb-2" data-i18n="system_resources">系統資源</h3>
+            <p class="text-white-50" data-i18n="resource_subtitle">我們的分布式網路提供強大的運算資源</p>
+        </div>
+        <div class="row gx-5 text-center text-white">
+            <div class="col-lg-3 col-md-6 mb-4 mb-lg-0">
+                <div class="stat-item fade-in-up">
+                    <div class="h2 fw-bolder mb-0"><span class="counter" data-target="1000">0</span>+GB</div>
+                    <p class="mb-0" data-i18n="total_ram">總記憶體</p>
+                </div>
+            </div>
+            <div class="col-lg-3 col-md-6 mb-4 mb-lg-0">
+                <div class="stat-item fade-in-up delay-100">
+                    <div class="h2 fw-bolder mb-0"><span class="counter" data-target="500">0</span>+GB</div>
+                    <p class="mb-0" data-i18n="total_vram">顯示記憶體</p>
+                </div>
+            </div>
+            <div class="col-lg-3 col-md-6 mb-4 mb-lg-0">
+                <div class="stat-item fade-in-up delay-200">
+                    <div class="h2 fw-bolder mb-0"><span class="counter" data-target="700">0</span>+</div>
+                    <p class="mb-0" data-i18n="cpu_cores">CPU 核心</p>
+                </div>
+            </div>
+            <div class="col-lg-3 col-md-6">
+                <div class="stat-item fade-in-up delay-300">
+                    <div class="h2 fw-bolder mb-0"><span class="counter" data-target="99">0</span>%</div>
+                    <p class="mb-0" data-i18n="uptime">可用時間</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
 
 <!-- Features section -->
 <section class="py-5" id="features">
     <div class="container px-5 my-5">
         <div class="row gx-5">
             <div class="col-lg-4 mb-5 mb-lg-0">
-                <h2 class="fw-bolder mb-0" data-i18n="better_computing_experience">打造更好的運算體驗</h2>
+                <div class="feature-intro slide-in-left">
+                    <h2 class="fw-bolder mb-3" data-i18n="better_computing_experience">打造更好的運算體驗</h2>
+                    <p class="text-muted" data-i18n="features_intro">我們提供全方位的分布式運算解決方案，讓您的專案擁有無限可能。</p>
+                </div>
             </div>
             <div class="col-lg-8">
                 <div class="row gx-5 row-cols-1 row-cols-md-2">
                     <div class="col mb-5 h-100">
-                        <div class="feature bg-gradient text-white rounded-3 mb-3">
-                            <i class="fas fa-cubes"></i>
+                        <div class="feature-card hover-lift">
+                            <div class="feature bg-gradient text-white rounded-3 mb-3 pulse-glow">
+                                <i class="fas fa-cubes"></i>
+                            </div>
+                            <h2 class="h5" data-i18n="feature1_title">模組化架構</h2>
+                            <p class="mb-0 text-muted" data-i18n="feature1_desc">將工作拆解為可分配的子任務，自由擴展你的運算能力。</p>
                         </div>
-                        <h2 class="h5" data-i18n="feature1_title">模組化架構</h2>
-                        <p class="mb-0" data-i18n="feature1_desc">將工作拆解為可分配的子任務，自由擴展你的運算能力。</p>
                     </div>
                     <div class="col mb-5 h-100">
-                        <div class="feature bg-gradient text-white rounded-3 mb-3">
-                            <i class="fas fa-network-wired"></i>
+                        <div class="feature-card hover-lift delay-100">
+                            <div class="feature bg-gradient text-white rounded-3 mb-3 pulse-glow">
+                                <i class="fas fa-network-wired"></i>
+                            </div>
+                            <h2 class="h5" data-i18n="feature2_title">即時節點分配</h2>
+                            <p class="mb-0 text-muted" data-i18n="feature2_desc">節點池自動分配最合適的節點，支援自定義任務標準。</p>
                         </div>
-                        <h2 class="h5" data-i18n="feature2_title">即時節點分配</h2>
-                        <p class="mb-0" data-i18n="feature2_desc">節點池自動分配最合適的節點，支援自定義任務標準。</p>
                     </div>
                     <div class="col mb-5 mb-md-0 h-100">
-                        <div class="feature bg-gradient text-white rounded-3 mb-3">
-                            <i class="fas fa-shield-alt"></i>
+                        <div class="feature-card hover-lift delay-200">
+                            <div class="feature bg-gradient text-white rounded-3 mb-3 pulse-glow">
+                                <i class="fas fa-shield-alt"></i>
+                            </div>
+                            <h2 class="h5" data-i18n="feature3_title">安全與隔離</h2>
+                            <p class="mb-0 text-muted" data-i18n="feature3_desc">任務在 Docker 容器中執行，保證節點之間彼此獨立、安全。</p>
                         </div>
-                        <h2 class="h5" data-i18n="feature3_title">安全與隔離</h2>
-                        <p class="mb-0" data-i18n="feature3_desc">任務在 Docker 容器中執行，保證節點之間彼此獨立、安全。</p>
                     </div>
                     <div class="col h-100">
-                        <div class="feature bg-gradient text-white rounded-3 mb-3">
-                            <i class="fas fa-rocket"></i>
+                        <div class="feature-card hover-lift delay-300">
+                            <div class="feature bg-gradient text-white rounded-3 mb-3 pulse-glow">
+                                <i class="fas fa-rocket"></i>
+                            </div>
+                            <h2 class="h5" data-i18n="high_performance_title">高性能處理</h2>
+                            <p class="mb-0 text-muted" data-i18n="high_performance_desc">充分利用分布式架構，提供前所未有的運算效能和可擴展性。</p>
                         </div>
-                        <h2 class="h5" data-i18n="high_performance_title">高性能處理</h2>
-                        <p class="mb-0" data-i18n="high_performance_desc">充分利用分布式架構，提供前所未有的運算效能和可擴展性。</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- 工作流程說明 -->
+<section class="py-5 bg-light">
+    <div class="container px-5 my-5">
+        <div class="text-center mb-5">
+            <h2 class="fw-bolder mb-3" data-i18n="how_it_works">運作流程</h2>
+            <p class="lead text-muted" data-i18n="workflow_intro">簡單三步驟，開始您的分布式運算之旅</p>
+        </div>
+        <div class="row gx-5">
+            <div class="col-lg-4 mb-5 mb-lg-0">
+                <div class="workflow-step text-center fade-in-up">
+                    <div class="step-number mb-3">1</div>
+                    <div class="step-icon mb-3">
+                        <i class="fas fa-user-plus fa-2x text-primary"></i>
+                    </div>
+                    <h4 class="fw-bolder mb-3" data-i18n="step1_title">註冊帳戶</h4>
+                    <p class="text-muted" data-i18n="step1_desc">創建您的 HiveMind 帳戶，開始享受分布式運算服務。</p>
+                </div>
+            </div>
+            <div class="col-lg-4 mb-5 mb-lg-0">
+                <div class="workflow-step text-center fade-in-up delay-100">
+                    <div class="step-number mb-3">2</div>
+                    <div class="step-icon mb-3">
+                        <i class="fas fa-download fa-2x text-primary"></i>
+                    </div>
+                    <h4 class="fw-bolder mb-3" data-i18n="step2_title">下載客戶端</h4>
+                    <p class="text-muted" data-i18n="step2_desc">選擇適合的客戶端版本，快速部署到您的環境中。</p>
+                </div>
+            </div>
+            <div class="col-lg-4">
+                <div class="workflow-step text-center fade-in-up delay-200">
+                    <div class="step-number mb-3">3</div>
+                    <div class="step-icon mb-3">
+                        <i class="fas fa-play fa-2x text-primary"></i>
+                    </div>
+                    <h4 class="fw-bolder mb-3" data-i18n="step3_title">開始運算</h4>
+                    <p class="text-muted" data-i18n="step3_desc">提交您的運算任務，體驗高效能分布式處理。</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- 技術優勢 -->
+<section class="py-5">
+    <div class="container px-5 my-5">
+        <div class="row gx-5 align-items-center">
+            <div class="col-lg-6 mb-5 mb-lg-0">
+                <div class="tech-advantages slide-in-left">
+                    <h2 class="fw-bolder mb-4" data-i18n="tech_advantages">技術優勢</h2>
+                    <div class="advantage-item mb-4">
+                        <div class="d-flex align-items-start">
+                            <div class="flex-shrink-0">
+                                <div class="advantage-icon">
+                                    <i class="fas fa-bolt text-primary"></i>
+                                </div>
+                            </div>
+                            <div class="ms-3">
+                                <h5 class="fw-bolder" data-i18n="advantage1_title">高效並行</h5>
+                                <p class="text-muted mb-0" data-i18n="advantage1_desc">透過多節點並行處理，大幅提升運算效率。</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="advantage-item mb-4">
+                        <div class="d-flex align-items-start">
+                            <div class="flex-shrink-0">
+                                <div class="advantage-icon">
+                                    <i class="fas fa-expand-arrows-alt text-primary"></i>
+                                </div>
+                            </div>
+                            <div class="ms-3">
+                                <h5 class="fw-bolder" data-i18n="advantage2_title">彈性擴展</h5>
+                                <p class="text-muted mb-0" data-i18n="advantage2_desc">根據需求動態調整運算資源，靈活配置。</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="advantage-item">
+                        <div class="d-flex align-items-start">
+                            <div class="flex-shrink-0">
+                                <div class="advantage-icon">
+                                    <i class="fas fa-lock text-primary"></i>
+                                </div>
+                            </div>
+                            <div class="ms-3">
+                                <h5 class="fw-bolder" data-i18n="advantage3_title">安全可靠</h5>
+                                <p class="text-muted mb-0" data-i18n="advantage3_desc">採用安全標準，確保數據和運算過程的安全性。</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-lg-6">
+                <div class="tech-visual slide-in-right">
+                    <div class="performance-chart">
+                        <div class="chart-title text-center mb-4">
+                            <h5 class="fw-bolder" data-i18n="performance_comparison">效能對比</h5>
+                        </div>
+                        <div class="chart-bars">
+                            <div class="bar-item mb-3">
+                                <div class="bar-label" data-i18n="traditional_computing">傳統運算</div>
+                                <div class="bar-container">
+                                    <div class="bar bar-traditional" data-width="30"></div>
+                                    <span class="bar-value">30%</span>
+                                </div>
+                            </div>
+                            <div class="bar-item mb-3">
+                                <div class="bar-label" data-i18n="cloud_computing">雲端運算</div>
+                                <div class="bar-container">
+                                    <div class="bar bar-cloud" data-width="65"></div>
+                                    <span class="bar-value">65%</span>
+                                </div>
+                            </div>
+                            <div class="bar-item">
+                                <div class="bar-label" data-i18n="hivemind_computing">HiveMind</div>
+                                <div class="bar-container">
+                                    <div class="bar bar-hivemind" data-width="100"></div>
+                                    <span class="bar-value">100%</span>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -70,15 +244,37 @@
 <section class="py-5 bg-light">
     <div class="container px-5 my-5">
         <div class="row gx-5 justify-content-center">
-            <div class="col-lg-10 col-xl-7">
-                <div class="text-center">
-                    <div class="fs-4 mb-4 fst-italic" data-i18n="about_desc">我們是一群相信「運算力應人人可用」的開發者，打造這套平台，目標是讓任何人都能輕鬆取得分散式資源，不再受限本機硬體。</div>
-                    <div class="d-flex align-items-center justify-content-center">
-                        <img class="rounded-circle me-3" src="{{ url_for('static', filename='img/team.jpg') }}" alt="團隊" style="width: 40px; height: 40px;" />
-                        <div class="fw-bold" data-i18n="team_info">
-                            HiveMind 開發團隊
-                            <span class="fw-bold text-primary mx-1">/</span>
-                            分布式運算專家
+            <div class="col-lg-10 col-xl-8">
+                <div class="text-center fade-in-up">
+                    <h2 class="fw-bolder mb-4" data-i18n="about_title">關於我們</h2>
+                    <p class="lead text-muted mb-4" data-i18n="about_desc">我們是一群相信「運算力應人人可用」的開發者，打造這套平台，目標是讓任何人都能輕鬆取得分散式資源，不再受限本機硬體。</p>
+                    <div class="row gx-4 justify-content-center">
+                        <div class="col-lg-4 col-md-6 mb-4">
+                            <div class="team-value">
+                                <div class="value-icon mb-3">
+                                    <i class="fas fa-heart fa-2x text-primary"></i>
+                                </div>
+                                <h5 class="fw-bolder" data-i18n="value1_title">開放創新</h5>
+                                <p class="text-muted small" data-i18n="value1_desc">擁抱開源精神，持續創新技術</p>
+                            </div>
+                        </div>
+                        <div class="col-lg-4 col-md-6 mb-4">
+                            <div class="team-value">
+                                <div class="value-icon mb-3">
+                                    <i class="fas fa-users fa-2x text-primary"></i>
+                                </div>
+                                <h5 class="fw-bolder" data-i18n="value2_title">社群驅動</h5>
+                                <p class="text-muted small" data-i18n="value2_desc">以用戶需求為核心，共同成長</p>
+                            </div>
+                        </div>
+                        <div class="col-lg-4 col-md-6">
+                            <div class="team-value">
+                                <div class="value-icon mb-3">
+                                    <i class="fas fa-globe fa-2x text-primary"></i>
+                                </div>
+                                <h5 class="fw-bolder" data-i18n="value3_title">全球視野</h5>
+                                <p class="text-muted small" data-i18n="value3_desc">建設普惠的全球運算網路</p>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -88,13 +284,124 @@
 </section>
 
 <!-- Call to action section -->
-<section class="py-5 bg-gradient-primary-to-secondary text-white">
+<section class="py-5 bg-light text-dark cta-section">
     <div class="container px-5 my-5">
         <div class="text-center">
-            <h2 class="display-4 fw-bolder mb-4" data-i18n="ready_to_start">準備開始了嗎？</h2>
-            <a class="btn btn-outline-light btn-lg px-5 py-3 fs-6 fw-bolder" href="/register" data-i18n="register_now">立即註冊</a>
+            <h2 class="display-4 fw-bolder mb-4 slide-in-up" data-i18n="ready_to_start">準備開始了嗎？</h2>
+            <p class="lead mb-4 slide-in-up delay-100" data-i18n="cta_subtitle">加入 HiveMind，體驗前所未有的分布式運算能力</p>
+            <div class="slide-in-up delay-200">
+                <a class="btn btn-outline-light btn-lg px-5 py-3 fs-6 fw-bolder btn-hover-glow me-3" href="/register" data-i18n="register_now">立即註冊</a>
+                <a class="btn btn-light btn-lg px-5 py-3 fs-6 fw-bolder btn-hover-lift" href="/download" data-i18n="download_client">下載客戶端</a>
+            </div>
         </div>
     </div>
 </section>
 
+{% endblock %}
+
+{% block scripts %}
+<script>
+// 數字動畫計數器
+function animateCounters() {
+    const counters = document.querySelectorAll('.counter');
+    const speed = 50; // 調整速度讓動畫更明顯
+    
+    counters.forEach(counter => {
+        let startValue = 0;
+        const endValue = +counter.getAttribute('data-target');
+        const increment = endValue / speed;
+        
+        const animate = () => {
+            startValue += increment;
+            if (startValue < endValue) {
+                counter.innerText = Math.ceil(startValue);
+                requestAnimationFrame(animate);
+            } else {
+                counter.innerText = endValue;
+            }
+        }
+        animate();
+    });
+}
+
+// 性能圖表動畫
+function animatePerformanceChart() {
+    const bars = document.querySelectorAll('.bar');
+    bars.forEach((bar, index) => {
+        setTimeout(() => {
+            const width = bar.getAttribute('data-width');
+            bar.style.width = width + '%';
+        }, index * 300);
+    });
+}
+
+// 滾動動畫觀察器
+const observerOptions = {
+    threshold: 0.2,
+    rootMargin: '0px 0px -50px 0px'
+};
+
+const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+        if (entry.isIntersecting) {
+            entry.target.classList.add('animate');
+            
+            // 觸發計數器動畫
+            if (entry.target.classList.contains('stat-item') || entry.target.querySelector('.counter')) {
+                setTimeout(animateCounters, 200);
+            }
+            
+            // 觸發圖表動畫
+            if (entry.target.querySelector('.performance-chart')) {
+                setTimeout(animatePerformanceChart, 500);
+            }
+            
+            // 觸發工作流程動畫
+            if (entry.target.classList.contains('workflow-step')) {
+                entry.target.style.opacity = '1';
+                entry.target.style.transform = 'translateY(0)';
+            }
+            
+            // 觸發技術優勢動畫
+            if (entry.target.classList.contains('advantage-item')) {
+                entry.target.style.opacity = '1';
+                entry.target.style.transform = 'translateX(0)';
+            }
+            
+            // 觸發團隊價值觀動畫
+            if (entry.target.classList.contains('team-value')) {
+                entry.target.style.opacity = '1';
+                entry.target.style.transform = 'scale(1)';
+            }
+        }
+    });
+}, observerOptions);
+
+// 觀察所有需要動畫的元素
+document.addEventListener('DOMContentLoaded', () => {
+    // 觀察統計數據
+    const statItems = document.querySelectorAll('.stat-item');
+    statItems.forEach(el => observer.observe(el));
+    
+    // 觀察工作流程
+    const workflowSteps = document.querySelectorAll('.workflow-step');
+    workflowSteps.forEach(el => observer.observe(el));
+    
+    // 觀察技術優勢
+    const advantageItems = document.querySelectorAll('.advantage-item');
+    advantageItems.forEach(el => observer.observe(el));
+    
+    // 觀察性能圖表
+    const performanceChart = document.querySelector('.performance-chart');
+    if (performanceChart) observer.observe(performanceChart);
+    
+    // 觀察團隊價值觀
+    const teamValues = document.querySelectorAll('.team-value');
+    teamValues.forEach(el => observer.observe(el));
+    
+    // 觀察其他動畫元素
+    const animatedElements = document.querySelectorAll('.fade-in-up, .slide-in-left, .slide-in-right, .slide-in-up, .hover-lift');
+    animatedElements.forEach(el => observer.observe(el));
+});
+</script>
 {% endblock %}
