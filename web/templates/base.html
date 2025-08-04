@@ -1,627 +1,133 @@
 <!DOCTYPE html>
-<html lang="zh-TW" class="dark">
+<html lang="zh-TW">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="description" content="HiveMind - 分布式運算平台" />
+    <meta name="author" content="Justin" />
     <title>{% block title %}HiveMind - 分布式運算平台{% endblock %}</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Favicon -->
+    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='img/file.ico') }}" />
+    <!-- Bootstrap icons -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.5.0/font/bootstrap-icons.css" rel="stylesheet" />
+    <!-- Font Awesome -->
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css">
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
-    <link rel="icon" href="{{ url_for('static', filename='img/file.ico') }}">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/alpinejs/3.10.2/cdn.min.js" defer></script><script>document.addEventListener('DOMContentLoaded', () => {const $navbarBurgers = Array.prototype.slice.call(document.querySelectorAll('.navbar-burger'), 0);$navbarBurgers.forEach( el => {el.addEventListener('click', () => {const target = el.dataset.target;const $target = document.getElementById(target);el.classList.toggle('is-active');$target.classList.toggle('is-active');});});});</script>
-    <!-- Barba.js 與 GSAP -->
-    <script src="https://unpkg.com/@barba/core"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
-    <script>
-    // i18n 字典（全站 key，請依需求持續擴充）
-    const i18n = {
-        "zh-tw": {
-            "github": "GitHub",
-            "community": "社區",
-            "logout": "登出",
-            "view_balance": "查看餘額",
-            "switch_lang": "切換語言",
-            "welcome": "解鎖分散式運算的力量",
-            "subtitle": "工作端 + 節點池，打造高效能分布式平台，讓你專注開發、我們處理執行。",
-            "feature1_title": "模組化架構",
-            "feature1_desc": "將工作拆解為可分配的子任務，自由擴展你的運算能力。",
-            "feature2_title": "即時節點分配",
-            "feature2_desc": "節點池自動分配最合適的節點，支援自定義任務標準。",
-            "feature3_title": "安全與隔離",
-            "feature3_desc": "任務在 Docker 容器中執行，保證節點之間彼此獨立、安全。",
-            "about_title": "關於我們",
-            "about_desc": "我們是一群相信「運算力應人人可用」的開發者，打造這套平台，目標是讓任何人都能輕鬆取得分散式資源，不再受限本機硬體。",
-            "footer_copyright": "© 2025 Hivemind Project. Built with love by Justin.",
-            // 登入頁面
-            "login_title": "歡迎回來",
-            "login_subtitle": "登入您的 HiveMind 帳戶",
-            "login_username_label": "用戶名",
-            "login_username_placeholder": "請輸入用戶名",
-            "login_password_label": "密碼",
-            "login_password_placeholder": "請輸入密碼",
-            "login_captcha_label": "人機驗證",
-            "login_btn": "登入",
-            "login_no_account": "還沒有帳戶？",
-            "login_register_link": "立即註冊",
-            // 註冊頁面
-            "register_title": "註冊帳號",
-            "register_username_label": "用戶名",
-            "register_username_placeholder": "請輸入用戶名",
-            "register_password_label": "密碼",
-            "register_password_placeholder": "請輸入密碼",
-            "register_confirm_label": "確認密碼",
-            "register_confirm_placeholder": "請再次輸入密碼",
-            "register_captcha_label": "人機驗證",
-            "register_btn": "創建帳戶",
-            "register_already_account": "已經有帳戶了？",
-            "register_login_link": "立即登入",
-            // 下載頁面
-            "download_title": "下載 HiveMind",
-            "download_subtitle": "選擇適合您的客戶端開始使用分布式運算平台",
-            "worker_title": "工作端",
-            "worker_description": "將您的閒置資源貢獻給網路，獲得報酬",
-            "master_title": "主控端",
-            "master_description": "部署主控伺服器，管理分布式運算任務",
-            "download_windows": "下載 Windows 版本",
-            "download_linux": "下載 Linux 版本",
-            // 餘額頁面
-            "balance_title": "餘額查詢與轉帳",
-            "balance_my_balance": "我的餘額",
-            "balance_transfer": "轉帳",
-            "balance_receiver_label": "收款人用戶名",
-            "balance_amount_label": "金額",
-            "balance_transfer_btn": "轉帳",
-            // 贊助頁面
-            "sponsor_thanks": "感謝以下贊助者對 HiveMind 的支持！",
-            "sponsor_main_developer": "主要開發者",
-            // 條款頁面
-            "terms_agreement": "使用本平台即表示您同意遵守相關法律法規及本條款內容。",
-            "terms_illegal": "不得利用本平台進行任何非法、侵權或損害他人權益之行為。",
-            "terms_changes": "平台有權隨時調整服務內容、條款及政策，重大變更將公告通知。",
-            "terms_violation": "如有違反條款，平台有權暫停或終止您的使用權限。",
-            "terms_contact": "如有疑問，請聯絡我們：",
-            // 隱私政策頁面
-            "privacy_welcome": "歡迎使用 HiveMind 分布式運算平台（以下簡稱「本平台」）。我們非常重視您的個人資料保護，請詳細閱讀本政策：",
-            "privacy_collection_title": "1. 資料蒐集",
-            "privacy_collection_content": "本平台僅於註冊、登入、使用服務時，蒐集必要的帳號、Email、登入紀錄等資訊。",
-            "privacy_collection_note": "我們不會主動蒐集您的敏感個資。",
-            "privacy_cookie_title": "2. Cookie 與追蹤",
-            "privacy_cookie_content": "僅用於登入狀態維護與平台安全，不做廣告追蹤。",
-            "privacy_usage_title": "3. 資料用途",
-            "privacy_usage_content": "僅用於帳號管理、服務提供、平台安全與法令遵循。",
-            "privacy_third_party_title": "4. 第三方服務",
-            "privacy_third_party_content": "本平台可能串接第三方登入、金流等服務，僅於必要時傳遞最少資訊。",
-            "privacy_security_title": "5. 資料安全",
-            "privacy_security_content": "我們採用加密、權限控管等措施，保障您的資料安全。",
-            "privacy_rights_title": "6. 您的權利",
-            "privacy_rights_content": "您可隨時查詢、更正、刪除您的個人資料，或聯絡我們行使權利。",
-            "privacy_contact_title": "7. 聯絡方式",
-            "privacy_contact_content": "如有任何隱私疑慮，請來信",
-            "privacy_revision": "本政策如有修訂，將公告於本頁面。",
-            // 文檔頁面
-            "docs_subtitle": "學習如何使用 HiveMind 分布式運算平台",
-            "docs_navigation": "文檔導航",
-            "docs_quick_start": "快速開始",
-            "docs_api_reference": "API 參考",
-            "docs_node_setup": "節點設置",
-            "docs_task_development": "任務開發",
-            "docs_platform_architecture": "平台架構",
-            "docs_troubleshooting": "故障排除",
-            // 頁面標題
-            "home": "主頁",
-            "login": "登入",
-            "register": "註冊",
-            "download": "下載",
-            "balance": "餘額查詢與轉帳",
-            "sponsor": "贊助列表",
-            "terms": "用戶條款",
-            "privacy": "隱私權政策"
-        },
-        "en": {
-            "github": "GitHub",
-            "community": "Community",
-            "logout": "Logout",
-            "view_balance": "View Balance",
-            "switch_lang": "Switch Language",
-            "welcome": "Unlock the Power of Distributed Computing",
-            "subtitle": "Worker + Node Pool, build a high-performance distributed platform. You focus on development, we handle the execution.",
-            "feature1_title": "Modular Architecture",
-            "feature1_desc": "Break down tasks into manageable subtasks and scale your computing power freely.",
-            "feature2_title": "Instant Node Allocation",
-            "feature2_desc": "The node pool automatically allocates the most suitable nodes, supporting custom task criteria.",
-            "feature3_title": "Security and Isolation",
-            "feature3_desc": "Tasks run in Docker containers, ensuring independence and security between nodes.",
-            "about_title": "About Us",
-            "about_desc": "We are a group of developers who believe that 'computing power should be accessible to all'. We created this platform to enable anyone to easily access distributed resources, no longer limited by local hardware.",
-            "footer_copyright": "© 2025 Hivemind Project. Built with love by Justin.",
-            // 登入頁面
-            "login_title": "Welcome Back",
-            "login_subtitle": "Sign in to your HiveMind account",
-            "login_username_label": "Username",
-            "login_username_placeholder": "Please enter username",
-            "login_password_label": "Password",
-            "login_password_placeholder": "Please enter password",
-            "login_captcha_label": "Human Verification",
-            "login_btn": "Login",
-            "login_no_account": "Don't have an account?",
-            "login_register_link": "Sign up now",
-            // 註冊頁面
-            "register_title": "Register Account",
-            "register_username_label": "Username",
-            "register_username_placeholder": "Please enter username",
-            "register_password_label": "Password",
-            "register_password_placeholder": "Please enter password",
-            "register_confirm_label": "Confirm Password",
-            "register_confirm_placeholder": "Please enter password again",
-            "register_captcha_label": "Human Verification",
-            "register_btn": "Create Account",
-            "register_already_account": "Already have an account?",
-            "register_login_link": "Sign in now",
-            // 下載頁面
-            "download_title": "Download HiveMind",
-            "download_subtitle": "Choose the client that suits your needs to start using the distributed computing platform",
-            "worker_title": "Worker Client",
-            "worker_description": "Contribute your idle resources to the network and earn rewards",
-            "master_title": "Master Client",
-            "master_description": "Deploy master server to manage distributed computing tasks",
-            "download_windows": "Download Windows Version",
-            "download_linux": "Download Linux Version",
-            // 餘額頁面
-            "balance_title": "Balance & Transfer",
-            "balance_my_balance": "My Balance",
-            "balance_transfer": "Transfer",
-            "balance_receiver_label": "Recipient Username",
-            "balance_amount_label": "Amount",
-            "balance_transfer_btn": "Transfer",
-            // 贊助頁面
-            "sponsor_thanks": "Thank you to the following sponsors for supporting HiveMind!",
-            "sponsor_main_developer": "Lead Developer",
-            // 條款頁面
-            "terms_agreement": "By using this platform, you agree to comply with relevant laws and regulations and the terms of this agreement.",
-            "terms_illegal": "You may not use this platform for any illegal, infringing, or harmful activities that damage the rights of others.",
-            "terms_changes": "The platform reserves the right to adjust service content, terms, and policies at any time. Major changes will be announced.",
-            "terms_violation": "If you violate the terms, the platform has the right to suspend or terminate your usage rights.",
-            "terms_contact": "If you have any questions, please contact us:",
-            // 隱私政策頁面
-            "privacy_welcome": "Welcome to the HiveMind distributed computing platform (hereinafter referred to as 'this platform'). We take your personal data protection very seriously. Please read this policy carefully:",
-            "privacy_collection_title": "1. Data Collection",
-            "privacy_collection_content": "This platform only collects necessary account, email, and login record information when registering, logging in, and using services.",
-            "privacy_collection_note": "We will not actively collect your sensitive personal data.",
-            "privacy_cookie_title": "2. Cookies and Tracking",
-            "privacy_cookie_content": "Only used for login status maintenance and platform security, no advertising tracking.",
-            "privacy_usage_title": "3. Data Usage",
-            "privacy_usage_content": "Only used for account management, service provision, platform security, and legal compliance.",
-            "privacy_third_party_title": "4. Third-party Services",
-            "privacy_third_party_content": "This platform may integrate third-party login, payment, and other services, only passing minimal information when necessary.",
-            "privacy_security_title": "5. Data Security",
-            "privacy_security_content": "We adopt encryption, access control, and other measures to protect your data security.",
-            "privacy_rights_title": "6. Your Rights",
-            "privacy_rights_content": "You can query, correct, and delete your personal data at any time, or contact us to exercise your rights.",
-            "privacy_contact_title": "7. Contact Information",
-            "privacy_contact_content": "If you have any privacy concerns, please email",
-            "privacy_revision": "If this policy is revised, it will be announced on this page.",
-            // 文檔頁面
-            "docs_subtitle": "Learn how to use the HiveMind distributed computing platform",
-            "docs_navigation": "Documentation Navigation",
-            "docs_quick_start": "Quick Start",
-            "docs_api_reference": "API Reference",
-            "docs_node_setup": "Node Setup",
-            "docs_task_development": "Task Development",
-            "docs_platform_architecture": "Platform Architecture",
-            "docs_troubleshooting": "Troubleshooting",
-            // 頁面標題
-            "home": "Home",
-            "login": "Login",
-            "register": "Register",
-            "download": "Download",
-            "balance": "Balance & Transfer",
-            "sponsor": "Sponsors",
-            "terms": "Terms",
-            "privacy": "Privacy Policy"
-        }
-    };
-
-    function getLang() {
-        // 強制使用繁體中文，除非用戶明確選擇了其他語言
-        const savedLang = localStorage.getItem('lang');
-        if (savedLang === 'en') {
-            return 'en';
-        }
-        return 'zh-tw';
-    }
-    function setLang(lang) {
-        localStorage.setItem('lang', lang);
-        document.querySelectorAll('[data-i18n]').forEach(el => {
-            const key = el.getAttribute('data-i18n');
-            const translation = i18n[lang][key];
-            el.textContent = translation || key;
-        });
-        
-        // 處理 placeholder 翻譯
-        document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
-            const key = el.getAttribute('data-i18n-placeholder');
-            const translation = i18n[lang][key];
-            el.placeholder = translation || el.placeholder;
-        });
-        
-        // 更新頁面標題
-        updatePageTitle(lang);
-    }
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <!-- Custom CSS -->
+    <link href="{{ url_for('static', filename='css/main.css') }}" rel="stylesheet" />
     
-    function updatePageTitle(lang) {
-        const currentPath = window.location.pathname;
-        let titleKey = 'home';
-        
-        // 根據路徑確定標題鍵值
-        if (currentPath === '/login') titleKey = 'login';
-        else if (currentPath === '/register') titleKey = 'register';
-        else if (currentPath === '/download') titleKey = 'download';
-        else if (currentPath === '/balance') titleKey = 'balance';
-        else if (currentPath === '/sponsor') titleKey = 'sponsor';
-        else if (currentPath === '/terms') titleKey = 'terms';
-        else if (currentPath === '/privacy') titleKey = 'privacy';
-        
-        const title = i18n[lang][titleKey] || i18n[lang]['home'];
-        document.title = `${title} - HiveMind`;
-    }
-    function toggleLang() {
-        const lang = getLang() === 'zh-tw' ? 'en' : 'zh-tw';
-        setLang(lang);
-    }
-    document.addEventListener('DOMContentLoaded', () => {
-        console.log('=== 翻譯系統初始化 ===');
-        const lang = getLang();
-        console.log('檢測到的語言:', lang);
-        console.log('localStorage 中的語言:', localStorage.getItem('lang'));
-        console.log('瀏覽器語言:', navigator.language);
-        setLang(lang);
-        updatePageTitle(lang);
-        console.log('=== 翻譯系統初始化完成 ===');
-    });
-    </script>
+    <!-- i18n 翻譯系統 -->
+    <script src="{{ url_for('static', filename='js/i18n.js') }}"></script>
 </head>
-<body class="has-background-light dark:has-background-dark has-text-dark dark:has-text-light min-h-screen font-sans">
-    <!-- 頁面切換淡入淡出動畫遮罩 -->
-    <div id="page-fade" class="fixed inset-0 bg-white dark:bg-gray-900 opacity-0 pointer-events-none transition-opacity duration-500 z-50"></div>
-    <!-- 矩陣動畫背景（僅深色模式顯示，z-index: 0） -->
-    <canvas id="matrix-bg" class="fixed inset-0 w-full h-full pointer-events-none hidden" style="z-index:0"></canvas>
-    <div id="main-content-wrapper" class="pt-16">
-        <!-- 導航欄 -->
-        <nav class="navbar is-transparent is-fixed-top" role="navigation" aria-label="main navigation">
-            <div class="container">
-                <div class="navbar-brand"><a href="/" class="navbar-item"><img src="{{ url_for('static', filename='img/file.png') }}" alt="HiveMind" width="40" height="40" class="mr-2"><span class="title is-4">HiveMind</span></a><a role="button" class="navbar-burger" aria-label="menu" aria-expanded="false" data-target="navbarMenu"><span aria-hidden="true"></span><span aria-hidden="true"></span><span aria-hidden="true"></span></a></div><div id="navbarMenu" class="navbar-menu">
-                    <div class="navbar-start">
-                        <a href="/" class="text-2xl font-bold text-gray-900 dark:text-gray-100 flex items-center transition-transform duration-300 hover:scale-105">
-                            <img src="{{ url_for('static', filename='img/file.png') }}" alt="HiveMind" width="40" height="40" class="mr-2 drop-shadow-md">
-                            <span class="tracking-tight">HiveMind</span>
-                        </a>
-                    </div>
-                    <div class="navbar-end"><div class="navbar-item has-dropdown is-hoverable"><a class="navbar-link">功能</a><div class="navbar-dropdown"><a href="/download" class="navbar-item" data-i18n="download">下載</a><a href="/sponsor" class="navbar-item" data-i18n="sponsor">贊助列表</a></div></div>
-                        <a href="/" class="navbar-item has-text-grey-dark dark:has-text-grey-light hover:has-text-blue" data-i18n="home">主頁</a>
-                        <a href="/download" class="navbar-item has-text-grey-dark dark:has-text-grey-light hover:has-text-blue" data-i18n="download">下載</a>
-                        <a href="/sponsor" class="navbar-item has-text-grey-dark dark:has-text-grey-light hover:has-text-blue" data-i18n="sponsor">贊助列表</a>
-                        <a href="/terms" class="navbar-item has-text-grey-dark dark:has-text-grey-light hover:has-text-blue" data-i18n="terms">用戶條款</a>
-                        <a href="/privacy" class="navbar-item has-text-grey-dark dark:has-text-grey-light hover:has-text-blue" data-i18n="privacy">隱私權政策</a>
-                        <a href="https://github.com/him6794/hivemind" target="_blank" class="navbar-item has-text-grey-dark dark:has-text-grey-light hover:has-text-blue" data-i18n="github">
-                            <i class="fab fa-github mr-1"></i><span data-i18n="github">GitHub</span>
-                        </a>
-                        <a href="https://discord.gg/p2hApGE4T3" target="_blank" class="navbar-item has-text-grey-dark dark:has-text-grey-light hover:has-text-blue" data-i18n="community">
-                            <i class="fab fa-discord mr-1"></i><span data-i18n="community">社區</span>
-                        </a>
-                        <button onclick="toggleLang()" class="navbar-item button is-text has-text-grey-dark dark:has-text-grey-light" data-i18n="switch_lang">
-                            <i class="fas fa-language mr-1"></i><span data-i18n="switch_lang">切換語言</span>
-                        </button>
-                        <div class="navbar-item"><div class="buttons is-right">
-                            <div id="auth-buttons" class="flex space-x-2">
-                                <a href="/login" id="login-link" class="button is-outlined is-primary mr-2" data-i18n="login">登入</a>
-                                <a href="/register" id="register-link" class="button is-primary" data-i18n="register">註冊</a>
-                            </div>
-                            <div id="user-menu" class="hidden dropdown">
-                                <div class="dropdown-trigger">
-                                    <button type="button" id="user-menu-btn" class="button is-outlined is-primary">
-                                        <i class="fas fa-user mr-2"></i>
-                                        <span id="username-display"></span>
-                                        <i class="fas fa-chevron-down ml-2"></i>
-                                    </button>
-                                </div>
-                                <div id="user-dropdown" class="dropdown-menu" role="menu">
-                                    <div class="dropdown-content">
-                                        <a href="/balance" id="show-balance-link" class="dropdown-item" data-i18n="view_balance">查看餘額</a>
-                                        <hr class="dropdown-divider">
-                                        <button type="button" id="logout-link" class="dropdown-item has-background-danger has-text-white" data-i18n="logout">登出</button>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
+<body class="d-flex flex-column min-vh-100">
+    <main class="flex-shrink-0">
+        <!-- Navigation -->
+        <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+            <div class="container px-5">
+                <a class="navbar-brand" href="/">
+                    <img src="{{ url_for('static', filename='img/file.png') }}" alt="HiveMind" width="30" height="30" class="me-2">
+                    HiveMind
+                </a>
+                <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarSupportedContent" aria-controls="navbarSupportedContent" aria-expanded="false" aria-label="Toggle navigation">
+                    <span class="navbar-toggler-icon"></span>
+                </button>
+                <div class="collapse navbar-collapse" id="navbarSupportedContent">
+                    <ul class="navbar-nav ms-auto mb-2 mb-lg-0">
+                        <li class="nav-item"><a class="nav-link" href="/" data-i18n="home">主頁</a></li>
+                        <li class="nav-item"><a class="nav-link" href="/download" data-i18n="download">下載</a></li>
+                        <li class="nav-item"><a class="nav-link" href="/sponsor" data-i18n="sponsor">贊助列表</a></li>
+                        <li class="nav-item"><a class="nav-link" href="/terms" data-i18n="terms">用戶條款</a></li>
+                        <li class="nav-item"><a class="nav-link" href="/privacy" data-i18n="privacy">隱私權政策</a></li>
+                        <li class="nav-item"><a class="nav-link" href="https://github.com/him6794/hivemind" target="_blank" data-i18n="github">GitHub</a></li>
+                        <li class="nav-item"><a class="nav-link" href="https://discord.gg/p2hApGE4T3" target="_blank" data-i18n="community">社區</a></li>
+                        
+                        <!-- 語言切換按鈕 -->
+                        <li class="nav-item">
+                            <button class="btn btn-outline-light btn-sm ms-2" onclick="toggleLang()" data-i18n="switch_lang">切換語言</button>
+                        </li>
+                        
+                        <!-- 用戶認證按鈕 -->
+                        <li class="nav-item ms-2" id="auth-buttons">
+                            <a href="/login" class="btn btn-outline-primary btn-sm me-2" data-i18n="login">登入</a>
+                            <a href="/register" class="btn btn-primary btn-sm" data-i18n="register">註冊</a>
+                        </li>
+                        
+                        <!-- 用戶選單 -->
+                        <li class="nav-item dropdown d-none" id="user-menu">
+                            <a class="nav-link dropdown-toggle" id="navbarDropdownUser" href="#" role="button" data-bs-toggle="dropdown" aria-expanded="false">
+                                <i class="fas fa-user me-1"></i><span id="username-display"></span>
+                            </a>
+                            <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="navbarDropdownUser">
+                                <li><a class="dropdown-item" href="/balance" data-i18n="view_balance">查看餘額</a></li>
+                                <li><hr class="dropdown-divider"></li>
+                                <li><button class="dropdown-item text-danger" onclick="logout()" data-i18n="logout">登出</button></li>
+                            </ul>
+                        </li>
+                    </ul>
                 </div>
             </div>
         </nav>
-        <!-- 主要內容（Barba.js 容器） -->
-        <div id="barba-wrapper" data-barba="wrapper">
-          <div class="barba-container" data-barba="container">
-            <main id="page-content" class="section relative z-10">
-                {% block content %}{% endblock %}
-            </main>
-          </div>
+        
+        <!-- Main Content -->
+        {% block content %}{% endblock %}
+    </main>
+    
+    <!-- Footer -->
+    <footer class="bg-dark py-4 mt-auto">
+        <div class="container px-5">
+            <div class="row align-items-center justify-content-between flex-column flex-sm-row">
+                <div class="col-auto">
+                    <div class="small m-0 text-white" data-i18n="footer_copyright">© 2025 Hivemind Project. Built with love by Justin.</div>
+                </div>
+                <div class="col-auto">
+                    <a class="link-light small" href="/privacy" data-i18n="privacy">隱私權政策</a>
+                    <span class="text-white mx-1">&middot;</span>
+                    <a class="link-light small" href="/terms" data-i18n="terms">使用條款</a>
+                    <span class="text-white mx-1">&middot;</span>
+                    <a class="link-light small" href="https://github.com/him6794/hivemind" target="_blank" data-i18n="github">GitHub</a>
+                </div>
+            </div>
         </div>
-    </div>
-    <!-- 主題切換腳本 -->
+    </footer>
+    
+    <!-- Bootstrap core JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/js/bootstrap.bundle.min.js"></script>
+    
+    <!-- 認證處理腳本 -->
     <script>
-    // 主題切換功能
-    function setTheme(dark) {
-        const html = document.documentElement;
-        const icon = document.getElementById('theme-toggle-icon');
-        const matrixBg = document.getElementById('matrix-bg');
-        if (dark) {
-            html.classList.add('dark');
-            localStorage.setItem('theme', 'dark');
-            if (icon) {
-                icon.classList.remove('fa-moon');
-                icon.classList.add('fa-sun');
-                icon.classList.remove('text-gray-700');
-                icon.classList.add('text-yellow-300');
-            }
-            if (matrixBg) matrixBg.classList.remove('hidden');
-        } else {
-            html.classList.remove('dark');
-            localStorage.setItem('theme', 'light');
-            if (icon) {
-                icon.classList.remove('fa-sun');
-                icon.classList.add('fa-moon');
-                icon.classList.remove('text-yellow-300');
-                icon.classList.add('text-gray-700');
-            }
-            if (matrixBg) matrixBg.classList.add('hidden');
-        }
-    }
-    // 初始化主題
-    (function() {
-        const theme = localStorage.getItem('theme');
-        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-        if (theme === 'dark' || (!theme && prefersDark)) {
-            setTheme(true);
-        } else {
-            setTheme(false);
-        }
-        const themeToggle = document.getElementById('theme-toggle');
-        if (themeToggle) {
-            themeToggle.addEventListener('click', function() {
-                const isDark = document.documentElement.classList.contains('dark');
-                setTheme(!isDark);
-            });
-        }
-    })();
-    // 矩陣動畫背景（只初始化一次，動畫不重來）
-    (function() {
-        let started = false;
-        let matrixInterval = null;
-        function startMatrix() {
-            if (started) return;
-            started = true;
-            const canvas = document.getElementById('matrix-bg');
-            if (!canvas) return;
-            const ctx = canvas.getContext('2d');
-            let width = window.innerWidth;
-            let height = window.innerHeight;
-            canvas.width = width;
-            canvas.height = height;
-            const fontSize = 18;
-            const columns = Math.floor(width / fontSize);
-            const drops = Array.from({length: columns}, () => Math.floor(Math.random() * (height / fontSize)));
-            const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-            function draw() {
-                ctx.clearRect(0, 0, width, height);
-                ctx.fillStyle = 'rgba(16,24,40,0.15)';
-                ctx.fillRect(0, 0, width, height);
-                ctx.font = fontSize + "px monospace";
-                ctx.shadowColor = "#00ffe7";
-                ctx.shadowBlur = 8;
-                for (let i = 0; i < drops.length; i++) {
-                    const text = chars[Math.floor(Math.random() * chars.length)];
-                    ctx.fillStyle = "#00ffe7";
-                    ctx.fillText(text, i * fontSize, drops[i] * fontSize);
-                    if (drops[i] * fontSize > height && Math.random() > 0.975) {
-                        drops[i] = 0;
-                    }
-                    drops[i]++;
-                }
-                ctx.shadowBlur = 0;
-            }
-            matrixInterval = setInterval(draw, 50);
-            window.addEventListener('resize', () => {
-                width = window.innerWidth;
-                height = window.innerHeight;
-                canvas.width = width;
-                canvas.height = height;
-                for (let i = 0; i < drops.length; i++) {
-                    drops[i] = Math.floor(Math.random() * (height / fontSize));
-                }
-            });
-        }
-        function stopMatrix() {
-            if (matrixInterval) clearInterval(matrixInterval);
-            started = false;
-        }
-        function updateMatrixVisibility() {
-            const isDark = document.documentElement.classList.contains('dark');
-            const canvas = document.getElementById('matrix-bg');
-            if (canvas) {
-                if (isDark) {
-                    canvas.classList.remove('hidden');
-                    startMatrix();
-                } else {
-                    canvas.classList.add('hidden');
-                    stopMatrix();
-                }
-            }
-        }
-        document.addEventListener('DOMContentLoaded', updateMatrixVisibility);
-        document.addEventListener('DOMContentLoaded', function() {
-            const observer = new MutationObserver(updateMatrixVisibility);
-            observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
-        });
-    })();
-    // 登入狀態與下拉選單控制
     function checkAuth() {
         const token = localStorage.getItem('access_token');
         const user = JSON.parse(localStorage.getItem('user_info') || '{}');
         const authButtons = document.getElementById('auth-buttons');
         const userMenu = document.getElementById('user-menu');
         const usernameDisplay = document.getElementById('username-display');
+        
         if (token && user && user.username) {
-            document.body.classList.add('user-logged-in');
-            if (authButtons) {
-                authButtons.style.display = 'none';
-                authButtons.classList.add('hidden');
-            }
-            if (userMenu) {
-                userMenu.style.display = 'block';
-                userMenu.classList.remove('hidden');
-            }
+            authButtons.classList.add('d-none');
+            userMenu.classList.remove('d-none');
             if (usernameDisplay) {
                 usernameDisplay.textContent = user.username;
             }
         } else {
-            document.body.classList.remove('user-logged-in');
-            if (authButtons) {
-                authButtons.style.display = 'flex';
-                authButtons.classList.remove('hidden');
-            }
-            if (userMenu) {
-                userMenu.style.display = 'none';
-                userMenu.classList.add('hidden');
-            }
+            authButtons.classList.remove('d-none');
+            userMenu.classList.add('d-none');
         }
     }
-    window.checkAuth = checkAuth;
-    document.addEventListener('DOMContentLoaded', function() {
-        setTimeout(checkAuth, 0);
-        document.addEventListener('authChanged', function() {
-            setTimeout(checkAuth, 0);
-        });
-        const userMenuBtn = document.getElementById('user-menu-btn');
-        const userDropdown = document.getElementById('user-dropdown');
-        if (userMenuBtn && userDropdown) {
-            userMenuBtn.addEventListener('click', function(e) {
-                e.stopPropagation();
-                const isHidden = userDropdown.classList.contains('hidden');
-                if (isHidden) {
-                    // 確保下拉選單顯示在最上層
-                    userDropdown.classList.remove('hidden');
-                    userDropdown.style.zIndex = '100'; // 提高 z-index
-                    
-                    // 修復可能的溢出隱藏問題
-                    document.body.appendChild(userDropdown);
-                    
-                    // 重新定位下拉選單
-                    const rect = userMenuBtn.getBoundingClientRect();
-                    userDropdown.style.position = 'fixed';
-                    userDropdown.style.top = rect.bottom + 'px';
-                    userDropdown.style.right = (window.innerWidth - rect.right) + 'px';
-                } else {
-                    userDropdown.classList.add('hidden');
-                }
-            });
-            document.addEventListener('click', function(e) {
-                if (!userDropdown.contains(e.target) && e.target !== userMenuBtn) {
-                    userDropdown.classList.add('hidden');
-                }
-            });
-        }
-        const logoutBtn = document.getElementById('logout-link');
-        if (logoutBtn) {
-            logoutBtn.addEventListener('click', function() {
-                logout();
-            });
-        }
-    });
-    window.onload = function() {
-        setTimeout(checkAuth, 100);
-    };
+    
     function logout() {
         localStorage.removeItem('access_token');
         localStorage.removeItem('user_info');
-        localStorage.removeItem('auth_token');
-        localStorage.removeItem('user');
         document.dispatchEvent(new Event('authChanged'));
-        setTimeout(function() {
-            window.location.href = '/';
-        }, 100);
+        window.location.href = '/';
     }
+    
+    document.addEventListener('DOMContentLoaded', checkAuth);
+    document.addEventListener('authChanged', checkAuth);
+    
+    window.checkAuth = checkAuth;
     </script>
+    
     {% block scripts %}{% endblock %}
-    <script>
-    // Barba.js 無縫切換動畫
-    const pageOrder = [
-      '/', '/download', '/docs', '/sponsor', '/terms', '/privacy'
-    ];
-    let lastPath = window.location.pathname;
-
-    barba.init({
-      transitions: [{
-        name: 'dynamic-slide',
-        async leave(data) {
-          const from = pageOrder.indexOf(lastPath);
-          const to = pageOrder.indexOf(data.next.url.path);
-          let direction = 'right';
-          if (to > from) direction = 'left';
-          if (to < from) direction = 'right';
-          if (direction === 'left') {
-            await gsap.to(data.current.container, {opacity: 0, x: -100, duration: 0.2});
-          } else {
-            await gsap.to(data.current.container, {opacity: 0, x: 100, duration: 0.2});
-          }
-        },
-        async enter(data) {
-          const from = pageOrder.indexOf(lastPath);
-          const to = pageOrder.indexOf(data.next.url.path);
-          let direction = 'right';
-          if (to > from) direction = 'left';
-          if (to < from) direction = 'right';
-          if (direction === 'left') {
-            await gsap.from(data.next.container, {opacity: 0, x: 100, duration: 0.2});
-          } else {
-            await gsap.from(data.next.container, {opacity: 0, x: -100, duration: 0.2});
-          }
-          lastPath = data.next.url.path;
-        }
-      }]
-    });
-    // 頁面切換淡入淡出動畫
-    document.querySelectorAll('a[href]:not([target="_blank"])').forEach(link => {
-      link.addEventListener('click', function(e) {
-        // 只處理同站連結
-        if (link.href && !link.href.startsWith('javascript:') && !link.href.startsWith('#') && link.origin === window.location.origin) {
-          e.preventDefault();
-          const fade = document.getElementById('page-fade');
-          fade.classList.remove('opacity-0');
-          fade.classList.add('opacity-100');
-          setTimeout(() => {
-            window.location = link.href;
-          }, 400);
-        }
-      });
-    });
-    window.addEventListener('pageshow', function() {
-      const fade = document.getElementById('page-fade');
-      fade.classList.remove('opacity-100');
-      fade.classList.add('opacity-0');
-    });
-    // 內容淡入動畫
-    window.addEventListener('DOMContentLoaded', function() {
-      const content = document.getElementById('page-content');
-      if (content) {
-        setTimeout(() => {
-          content.classList.remove('opacity-0');
-          content.classList.add('opacity-100');
-        }, 50);
-      }
-    });
-    </script>
-    <div class="container w-full flex justify-end px-8 pt-6">
-      <button onclick="toggleLang()" class="px-3 py-1 rounded bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200 hover:bg-blue-100 dark:hover:bg-blue-600 transition" id="lang-switch-btn" data-i18n="switch_lang">切換語言</button>
-    </div>
 </body>
 </html>

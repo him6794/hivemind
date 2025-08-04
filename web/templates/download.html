@@ -1,43 +1,99 @@
 {% extends "base.html" %}
 {% block title %}Download - HiveMind{% endblock %}
 {% block content %}
-<div class="bg-gray-100 dark:bg-gray-900 min-h-screen pt-10 pb-10">
-    <div class="max-w-4xl mx-auto px-4">
-        <div class="bg-white dark:bg-gray-800 rounded-2xl shadow-xl p-10 mb-10 text-center animate-fade-in-down">
-            <h1 class="text-3xl font-bold mb-4 text-gray-900 dark:text-white" data-i18n="download_title">下載 HiveMind</h1>
-            <p class="text-lg text-gray-700 dark:text-gray-300 mb-6" data-i18n="download_subtitle">選擇適合您的客戶端開始使用分布式運算平台</p>
+
+<!-- Page Content -->
+<section class="py-5">
+    <div class="container px-5 my-5">
+        <div class="text-center mb-5">
+            <h1 class="fw-bolder" data-i18n="download_title">下載 HiveMind</h1>
+            <p class="lead fw-normal text-muted mb-0" data-i18n="download_subtitle">選擇適合您的客戶端開始使用分布式運算平台</p>
         </div>
-        <div class="flex flex-col md:flex-row gap-8 animate-fade-in-up">
-            <div class="bg-white dark:bg-gray-800 rounded-2xl shadow-lg p-8 flex flex-col items-center transition-all duration-300 hover:scale-105 hover:shadow-2xl w-full md:w-1/2 mb-8 md:mb-0">
-                <i class="fas fa-server text-4xl text-gray-700 dark:text-gray-300 mb-4"></i>
-                <h3 class="text-xl font-bold mb-2 text-gray-900 dark:text-white text-center w-full" data-i18n="worker_title">工作端</h3>
-                <div class="flex flex-col md:flex-row items-start justify-between w-full gap-4 mb-4">
-                    <p class="text-gray-700 dark:text-gray-300 text-left flex-1" data-i18n="worker_description">將您的閒置資源貢獻給網路，獲得報酬</p>
-                    <div class="flex flex-col space-y-3 min-w-[180px]">
-                        <a href="https://github.com/him6794/hivemind/releases/download/worker/HiveMindWorkerSetup.exe"
-                           class="w-full px-4 py-2 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-600 flex items-center justify-center transition"
-                           target="_blank" rel="noopener" data-i18n="download_windows">
-                            <i class="fab fa-windows mr-2"></i><span data-i18n="download_windows">下載 Windows 版本</span>
-                        </a>
-                        <a href="https://github.com/him6794/hivemind/releases/download/worker/HiveMindworkersetup.sh"
-                           class="w-full px-4 py-2 rounded-lg border border-blue-600 text-blue-600 bg-white hover:bg-blue-50 dark:bg-gray-900 dark:text-blue-400 dark:border-blue-400 dark:hover:bg-gray-700 font-semibold flex items-center justify-center transition"
-                           target="_blank" rel="noopener" data-i18n="download_linux">
-                            <i class="fab fa-linux mr-2"></i><span data-i18n="download_linux">下載 Linux 版本</span>
-                        </a>
+        <div class="row gx-5">
+            <!-- Worker Client -->
+            <div class="col-lg-6 mb-5">
+                <div class="card h-100 shadow border-0">
+                    <div class="card-body p-4">
+                        <div class="badge bg-primary bg-gradient rounded-pill mb-2" data-i18n="popular">熱門</div>
+                        <div class="text-center p-3">
+                            <div class="feature bg-gradient text-white rounded-3 mb-3 mx-auto">
+                                <i class="fas fa-server"></i>
+                            </div>
+                            <h3 class="h4 fw-bolder" data-i18n="worker_title">工作端</h3>
+                            <p class="text-muted" data-i18n="worker_description">將您的閒置資源貢獻給網路，獲得報酬</p>
+                        </div>
+                        <div class="d-grid gap-2">
+                            <a class="btn btn-primary" href="https://github.com/him6794/hivemind/releases/download/worker/HiveMindWorkerSetup.exe" target="_blank" rel="noopener">
+                                <i class="fab fa-windows me-2"></i><span data-i18n="download_windows">下載 Windows 版本</span>
+                            </a>
+                            <a class="btn btn-outline-primary" href="https://github.com/him6794/hivemind/releases/download/worker/HiveMindworkersetup.sh" target="_blank" rel="noopener">
+                                <i class="fab fa-linux me-2"></i><span data-i18n="download_linux">下載 Linux 版本</span>
+                            </a>
+                        </div>
                     </div>
                 </div>
             </div>
-            <div class="bg-white dark:bg-gray-800 rounded-2xl shadow-lg p-8 flex flex-col items-center transition-all duration-300 hover:scale-105 hover:shadow-2xl w-full md:w-1/2">
-                <i class="fas fa-rocket text-4xl text-gray-700 dark:text-gray-300 mb-4"></i>
-                <h3 class="text-xl font-bold mb-2 text-gray-900 dark:text-white text-center w-full" data-i18n="master_title">主控端</h3>
-                <p class="text-gray-700 dark:text-gray-300 mb-4 text-left w-full" data-i18n="master_description">部署主控伺服器，管理分布式運算任務</p>
-                <a href="https://github.com/him6794/hivemind/releases/download/master/HiveMindmasterSetup.exe"
-                   class="px-4 py-2 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-600 flex items-center justify-center mt-auto transition"
-                   target="_blank" rel="noopener" data-i18n="download_windows">
-                    <i class="fab fa-windows mr-2"></i><span data-i18n="download_windows">下載 Windows 版本</span>
-                </a>
+            <!-- Master Client -->
+            <div class="col-lg-6 mb-5">
+                <div class="card h-100 shadow border-0">
+                    <div class="card-body p-4">
+                        <div class="badge bg-secondary bg-gradient rounded-pill mb-2" data-i18n="enterprise">企業級</div>
+                        <div class="text-center p-3">
+                            <div class="feature bg-gradient text-white rounded-3 mb-3 mx-auto" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
+                                <i class="fas fa-rocket"></i>
+                            </div>
+                            <h3 class="h4 fw-bolder" data-i18n="master_title">主控端</h3>
+                            <p class="text-muted" data-i18n="master_description">部署主控伺服器，管理分布式運算任務</p>
+                        </div>
+                        <div class="d-grid">
+                            <a class="btn btn-primary" href="https://github.com/him6794/hivemind/releases/download/master/HiveMindmasterSetup.exe" target="_blank" rel="noopener">
+                                <i class="fab fa-windows me-2"></i><span data-i18n="download_windows">下載 Windows 版本</span>
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <!-- Coming Soon Features -->
+        <div class="row gx-5 mt-5">
+            <div class="col-12">
+                <h2 class="fw-bolder text-center mb-4" data-i18n="coming_soon">即將推出</h2>
+            </div>
+            <div class="col-md-4 mb-4">
+                <div class="card text-center border-0 bg-light">
+                    <div class="card-body p-4">
+                        <div class="feature bg-secondary bg-gradient text-white rounded-3 mb-3 mx-auto">
+                            <i class="fas fa-globe"></i>
+                        </div>
+                        <h4 class="fw-bolder" data-i18n="web_version">Web 版本</h4>
+                        <p class="text-muted" data-i18n="web_version_desc">瀏覽器直接運行，無需安裝</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4 mb-4">
+                <div class="card text-center border-0 bg-light">
+                    <div class="card-body p-4">
+                        <div class="feature bg-success bg-gradient text-white rounded-3 mb-3 mx-auto">
+                            <i class="fas fa-mobile-alt"></i>
+                        </div>
+                        <h4 class="fw-bolder" data-i18n="mobile_version">移動版本</h4>
+                        <p class="text-muted" data-i18n="mobile_version_desc">Android 和 iOS 應用程式</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4 mb-4">
+                <div class="card text-center border-0 bg-light">
+                    <div class="card-body p-4">
+                        <div class="feature bg-warning bg-gradient text-white rounded-3 mb-3 mx-auto">
+                            <i class="fas fa-cloud"></i>
+                        </div>
+                        <h4 class="fw-bolder" data-i18n="cloud_version">雲端版本</h4>
+                        <p class="text-muted" data-i18n="cloud_version_desc">一鍵部署到雲端平台</p>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
-</div>
+</section>
+
 {% endblock %}

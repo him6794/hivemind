@@ -1,210 +1,284 @@
-:root {
-  --primary: #6c5ce7;
-  --primary-light: #8a7af0;
-  --primary-dark: #5a4cd9;
-  --secondary: #00cec9;
-  --secondary-color: #00cec9;
-  --accent: #fd79a8;
-  --accent-color: #fd79a8;
-  --background: #f8f9fa;
-  --card-bg: #ffffff;
-  --text-primary: #2d3436;
-  --text-secondary: #636e72;
-  --shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
-  --radius: 12px;
-}
-
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-  font-family: 'Inter', system-ui, sans-serif;
-}
-
-body {
-  background-color: var(--background);
-  color: var(--text-primary);
-  line-height: 1.6;
-  overflow-x: hidden;
-}
-
-.container {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 0 20px;
-}
-
-/* Navigation */
-.navbar {
-  background: rgba(255, 255, 255, 0.95);
-  backdrop-filter: blur(10px);
-  box-shadow: var(--shadow);
-  padding: 1rem 0;
-  position: sticky;
-  top: 0;
-  z-index: 100;
-}
-
-.navbar-brand {
-  font-size: 1.5rem;
-  font-weight: 700;
-  color: var(--primary);
-  text-decoration: none;
-}
-
-/* Buttons */
-.btn {
-  display: inline-block;
-  padding: 0.8rem 1.8rem;
-  border-radius: var(--radius);
-  font-weight: 600;
-  text-decoration: none;
-  transition: all 0.3s ease;
-  border: none;
-  cursor: pointer;
-}
-
-.btn-primary {
-  background-color: var(--primary);
+/* Hero 區塊背景 */
+.hero {
+  background: linear-gradient(to right, #6a11cb, #2575fc);
   color: white;
 }
 
-.btn-primary:hover {
-  background-color: var(--primary-dark);
-  transform: translateY(-2px);
-  box-shadow: 0 6px 15px rgba(108, 92, 231, 0.3);
+.hero .btn {
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
 }
 
-/* Cards */
+.hero .btn:hover {
+  transform: scale(1.05);
+  transition: transform 0.2s ease-in-out;
+}
+
+/* 卡片陰影 */
 .card {
-  background: var(--card-bg);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-  padding: 2rem;
-  transition: transform 0.3s ease, box-shadow 0.3s ease;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
 }
 
 .card:hover {
   transform: translateY(-5px);
-  box-shadow: 0 12px 25px rgba(0, 0, 0, 0.12);
+  transition: all 0.3s ease-in-out;
+  box-shadow: 0 1rem 3rem rgba(0, 0, 0, 0.175);
 }
 
-/* Hero Section */
-.hero {
-  padding: 6rem 0;
-  background: linear-gradient(135deg, #f5f7fa 0%, #e4eaf5 100%);
-  margin-bottom: 4rem;
-  text-align: center;
+/* Footer 樣式 */
+footer {
+  font-size: 0.9rem;
 }
 
-.hero-title {
-  font-size: 3rem;
-  font-weight: 800;
-  margin-bottom: 1rem;
-  background: linear-gradient(90deg, var(--primary), var(--secondary));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+footer a:hover {
+  text-decoration: underline;
 }
 
-/* Animations */
-.animate-fade-in-up {
-  animation: fadeInUp 0.8s ease forwards;
-  opacity: 0;
+/* Custom styles based on Start Bootstrap Modern Business */
+
+/* 確保頁面最小高度 */
+.min-vh-100 {
+    min-height: 100vh !important;
 }
 
+/* Feature icons */
+.feature {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 4rem;
+    width: 4rem;
+    font-size: 2rem;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+}
+
+/* Gradient backgrounds */
+.bg-gradient-primary-to-secondary {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+}
+
+/* Hover effects */
+.btn:hover {
+    transform: translateY(-2px);
+    transition: all 0.2s ease-in-out;
+}
+
+/* Card hover effects */
+.card:hover {
+    transform: translateY(-5px);
+    transition: all 0.3s ease-in-out;
+    box-shadow: 0 1rem 3rem rgba(0, 0, 0, 0.175);
+}
+
+/* Custom animations */
 @keyframes fadeInUp {
-  from {
-    opacity: 0;
-    transform: translateY(20px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+    from {
+        opacity: 0;
+        transform: translateY(30px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
 }
 
+.animate-fade-in-up {
+    animation: fadeInUp 0.6s ease-out;
+}
+
+/* Hero image styling */
+.hero-image {
+    filter: drop-shadow(0 1rem 2rem rgba(0, 0, 0, 0.2));
+}
+
+/* Navigation styling */
+.navbar-dark .navbar-nav .nav-link:hover {
+    color: #fff;
+    background-color: rgba(255, 255, 255, 0.1);
+    border-radius: 0.375rem;
+    transition: all 0.2s ease-in-out;
+}
+
+.navbar-dark .navbar-nav .nav-link {
+    padding: 0.5rem 1rem;
+    margin: 0 0.25rem;
+}
+
+/* Feature section styling */
+#features .col {
+    transition: transform 0.3s ease-in-out;
+}
+
+#features .col:hover {
+    transform: translateY(-10px);
+}
+
+/* Form styling */
+.form-floating > .form-control:focus ~ label {
+    color: #667eea;
+}
+
+.form-floating > .form-control:focus {
+    border-color: #667eea;
+    box-shadow: 0 0 0 0.2rem rgba(102, 126, 234, 0.25);
+}
+
+.form-floating > .form-control:not(:placeholder-shown) ~ label {
+    opacity: 0.65;
+    transform: scale(0.85) translateY(-0.5rem) translateX(0.15rem);
+}
+
+.form-floating > label {
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 100%;
+    padding: 1rem 0.75rem;
+    pointer-events: none;
+    border: 1px solid transparent;
+    transform-origin: 0 0;
+    transition: opacity 0.1s ease-in-out, transform 0.1s ease-in-out;
+}
+
+/* Download page cards */
+.card {
+    border-radius: 1rem;
+    overflow: hidden;
+}
+
+.badge {
+    font-size: 0.75rem;
+    padding: 0.5rem 1rem;
+}
+
+/* Login page specific styles */
+.bg-light.rounded-3 {
+    border-radius: 1rem !important;
+    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.15);
+}
+
+/* Alert styles */
+.alert {
+    border-radius: 0.75rem;
+    border: none;
+}
+
+.alert-danger {
+    background-color: #f8d7da;
+    color: #721c24;
+}
+
+.alert-success {
+    background-color: #d1e7dd;
+    color: #0f5132;
+}
+
+/* Loading animation */
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+.fa-spin {
+    animation: spin 1s linear infinite;
+}
+
+/* Footer 固定在底部 */
+footer.mt-auto {
+    margin-top: auto !important;
+}
+
+/* 確保頁面結構正確 */
+body.d-flex.flex-column {
+    min-height: 100vh;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .display-5 {
+        font-size: 2.5rem;
+    }
+    
+    .feature {
+        height: 3rem;
+        width: 3rem;
+        font-size: 1.5rem;
+    }
+    
+    .container.px-5 {
+        padding-left: 1.5rem !important;
+        padding-right: 1.5rem !important;
+    }
+}
+
+/* Dark theme support */
+@media (prefers-color-scheme: dark) {
+    .bg-light {
+        background-color: #f8f9fa !important;
+    }
+    
+    .text-muted {
+        color: #6c757d !important;
+    }
+}
+
+/* Custom button styles */
+.btn-primary {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    border: none;
+    box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+}
+
+.btn-primary:hover {
+    background: linear-gradient(135deg, #5a6fd8 0%, #6a4190 100%);
+    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.15);
+}
+
+.btn-outline-primary {
+    border-color: #667eea;
+    color: #667eea;
+}
+
+.btn-outline-primary:hover {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    border-color: #667eea;
+    color: white;
+}
+
+/* Footer links */
+.link-light:hover {
+    color: #ffffff !important;
+    text-decoration: underline;
+}
+
+/* Utility classes */
+.text-decoration-none:hover {
+    text-decoration: underline !important;
+}
+
+/* Bootstrap utilities extension */
+.bg-gradient {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+}
+
+/* Animation delays */
 .delay-100 {
-  animation-delay: 0.1s;
+    animation-delay: 0.1s;
 }
 
 .delay-200 {
-  animation-delay: 0.2s;
+    animation-delay: 0.2s;
 }
 
-/* Custom Classes */
-.feature-icon {
-  font-size: 3rem;
-  color: var(--primary);
-  margin-bottom: 1.5rem;
+.delay-300 {
+    animation-delay: 0.3s;
 }
 
-.about-section {
-  padding: 3rem;
+/* 修復 Bootstrap 5 的 d-none 類別 */
+.d-none {
+    display: none !important;
 }
 
-.footer {
-  background-color: var(--card-bg);
-  padding: 3rem 0;
-  margin-top: 4rem;
-  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.05);
-}
-
-.footer-content {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
-  gap: 1rem;
-}
-
-.footer-links {
-  display: flex;
-  gap: 1.5rem;
-  margin-top: 1rem;
-}
-
-.footer-links a {
-  color: var(--text-secondary);
-  text-decoration: none;
-  transition: color 0.3s ease;
-}
-
-.footer-links a:hover {
-  color: var(--primary);
-}
-
-/* Language Switch Button */
-#lang-switch-btn {
-  background-color: transparent;
-  color: var(--primary);
-  border: 1px solid var(--primary);
-  padding: 0.5rem 1rem;
-  border-radius: var(--radius);
-  cursor: pointer;
-  transition: all 0.3s ease;
-}
-
-#lang-switch-btn:hover {
-  background-color: var(--primary);
-  color: white;
-}
-
-/* Responsive */
-@media (max-width: 768px) {
-  .hero-title {
-    font-size: 2.2rem;
-  }
-  .card {
-    padding: 1.5rem;
-  }
-  .columns {
-    flex-direction: column;
-    gap: 2rem;
-  }
-  .footer-links {
-    flex-direction: column;
-    gap: 0.5rem;
-  }
+/* 確保 Turnstile 驗證框置中 */
+.cf-turnstile {
+    margin: 0 auto;
 }

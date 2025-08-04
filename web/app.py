@@ -685,4 +685,4 @@ if __name__ == '__main__':
     print(f"  - VPN 服務 URL: {VPN_SERVICE_URL}")
     print(f"  - 限流設置: {RATE_LIMIT_SECONDS} 秒")
     
-    app.run(debug=debug, host=host, port=80)
+    app.run(debug=debug, host=host, port=5000)

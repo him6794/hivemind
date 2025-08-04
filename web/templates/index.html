@@ -2,143 +2,99 @@
 {% block title %}HiveMind - 解鎖分散式運算的力量{% endblock %}
 {% block content %}
 
-<!-- 語言切換按鈕 -->
-<div class="container mx-auto px-4 py-4 flex justify-end">
-  <button onclick="toggleLang()" id="lang-switch-btn" class="button is-small" data-i18n="switch_lang">切換語言</button>
-</div>
-
-<!-- Hero 區塊 -->
-<section class="hero"><div class="hero-body"><div class="container">
-  <div class="flex flex-col items-center justify-center text-center max-w-3xl mx-auto gap-8 animate-fade-in-up">
-    <h1 class="title is-1" data-i18n="welcome">解鎖分散式運算的力量</h1>
-    <p class="subtitle is-2" data-i18n="subtitle">工作端 + 節點池，打造高效能分布式平台，讓你專注開發、我們處理執行。</p>
-    <div class="buttons">
-      <a href="/register" class="button is-primary is-large" data-i18n="register">立即開始使用</a>
-      <a href="https://github.com/him6794/hivemind" target="_blank" class="button is-outlined is-primary is-large" data-i18n="github">查看 GitHub</a>
+<!-- Header - Hero Section -->
+<header class="bg-dark py-5">
+    <div class="container px-5">
+        <div class="row gx-5 align-items-center justify-content-center">
+            <div class="col-lg-8 col-xl-7 col-xxl-6">
+                <div class="my-5 text-center text-xl-start">
+                    <h1 class="display-5 fw-bolder text-white mb-2" data-i18n="welcome">解鎖分散式運算的力量</h1>
+                    <p class="lead fw-normal text-white-50 mb-4" data-i18n="subtitle">工作端 + 節點池，打造高效能分布式平台，讓你專注開發、我們處理執行。</p>
+                    <div class="d-grid gap-3 d-sm-flex justify-content-sm-center justify-content-xl-start">
+                        <a class="btn btn-primary btn-lg px-4 me-sm-3" href="/register" data-i18n="register">立即開始使用</a>
+                        <a class="btn btn-outline-light btn-lg px-4" href="https://github.com/him6794/hivemind" target="_blank" data-i18n="github">查看 GitHub</a>
+                    </div>
+                </div>
+            </div>
+            <div class="col-xl-5 col-xxl-6 d-none d-xl-block text-center">
+                <img class="img-fluid rounded-3 my-5" src="{{ url_for('static', filename='img/hero-image.jpg') }}" alt="HiveMind 分布式運算" style="max-width: 400px;" />
+            </div>
+        </div>
     </div>
-  </div>
-</div></div></section>
+</header>
 
-<!-- 功能/特色區 -->
-<section class="section"><div class="container">
-  <div class="columns">
-    <div class="column"><div class="card animate-fade-in-up">
-      <div class="card-content text-center">
-        <div class="feature-icon mb-6"><i class="fas fa-cubes"></i></div>
-        <h3 class="title is-4 mb-4" data-i18n="feature1_title">模組化架構</h3>
-        <p class="content" data-i18n="feature1_desc">將工作拆解為可分配的子任務，自由擴展你的運算能力。</p>
-      </div>
-    </div></div>
-    <div class="column"><div class="card animate-fade-in-up delay-100">
-      <div class="card-content text-center">
-        <div class="feature-icon mb-6" style="color: var(--secondary-color);"><i class="fas fa-network-wired"></i></div>
-        <h3 class="title is-4 mb-4" data-i18n="feature2_title">即時節點分配</h3>
-        <p class="content" data-i18n="feature2_desc">節點池自動分配最合適的節點，支援自定義任務標準。</p>
-      </div>
-    </div></div>
-    <div class="column"><div class="card animate-fade-in-up delay-200">
-      <div class="card-content text-center">
-        <div class="feature-icon mb-6" style="color: var(--accent-color);"><i class="fas fa-shield-alt"></i></div>
-        <h3 class="title is-4 mb-4" data-i18n="feature3_title">安全與隔離</h3>
-        <p class="content" data-i18n="feature3_desc">任務在 Docker 容器中執行，保證節點之間彼此獨立、安全。</p>
-      </div>
-    </div></div>
-  </div>
-</div></section>
-
-<!-- 關於我們 -->
-<section class="section"><div class="container">
-  <div class="max-w-3xl mx-auto"><div class="card about-section animate-fade-in-up">
-    <div class="card-content text-center">
-      <h2 class="title is-3 mb-6" data-i18n="about_title">關於我們</h2>
-      <p class="content" data-i18n="about_desc">
-        我們是一群相信「運算力應人人可用」的開發者，打造這套平台，目標是讓任何人都能輕鬆取得分散式資源，不再受限本機硬體。
-      </p>
+<!-- Features section -->
+<section class="py-5" id="features">
+    <div class="container px-5 my-5">
+        <div class="row gx-5">
+            <div class="col-lg-4 mb-5 mb-lg-0">
+                <h2 class="fw-bolder mb-0" data-i18n="better_computing_experience">打造更好的運算體驗</h2>
+            </div>
+            <div class="col-lg-8">
+                <div class="row gx-5 row-cols-1 row-cols-md-2">
+                    <div class="col mb-5 h-100">
+                        <div class="feature bg-gradient text-white rounded-3 mb-3">
+                            <i class="fas fa-cubes"></i>
+                        </div>
+                        <h2 class="h5" data-i18n="feature1_title">模組化架構</h2>
+                        <p class="mb-0" data-i18n="feature1_desc">將工作拆解為可分配的子任務，自由擴展你的運算能力。</p>
+                    </div>
+                    <div class="col mb-5 h-100">
+                        <div class="feature bg-gradient text-white rounded-3 mb-3">
+                            <i class="fas fa-network-wired"></i>
+                        </div>
+                        <h2 class="h5" data-i18n="feature2_title">即時節點分配</h2>
+                        <p class="mb-0" data-i18n="feature2_desc">節點池自動分配最合適的節點，支援自定義任務標準。</p>
+                    </div>
+                    <div class="col mb-5 mb-md-0 h-100">
+                        <div class="feature bg-gradient text-white rounded-3 mb-3">
+                            <i class="fas fa-shield-alt"></i>
+                        </div>
+                        <h2 class="h5" data-i18n="feature3_title">安全與隔離</h2>
+                        <p class="mb-0" data-i18n="feature3_desc">任務在 Docker 容器中執行，保證節點之間彼此獨立、安全。</p>
+                    </div>
+                    <div class="col h-100">
+                        <div class="feature bg-gradient text-white rounded-3 mb-3">
+                            <i class="fas fa-rocket"></i>
+                        </div>
+                        <h2 class="h5" data-i18n="high_performance_title">高性能處理</h2>
+                        <p class="mb-0" data-i18n="high_performance_desc">充分利用分布式架構，提供前所未有的運算效能和可擴展性。</p>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
-  </div></div>
-</div></section>
+</section>
 
-<!-- Footer -->
-<footer class="footer"><div class="container">
-  <div class="footer-content text-sm animate-fade-in-up">
-    <span data-i18n="footer_copyright">© 2025 Hivemind Project. Built with love by Justin.</span>
-    <div class="footer-links">
-      <a href="https://github.com/him6794/hivemind" target="_blank" data-i18n="github">GitHub</a>
-      <a href="/privacy" data-i18n="privacy">隱私權政策</a>
-      <a href="/terms" data-i18n="terms">使用條款</a>
+<!-- About section -->
+<section class="py-5 bg-light">
+    <div class="container px-5 my-5">
+        <div class="row gx-5 justify-content-center">
+            <div class="col-lg-10 col-xl-7">
+                <div class="text-center">
+                    <div class="fs-4 mb-4 fst-italic" data-i18n="about_desc">我們是一群相信「運算力應人人可用」的開發者，打造這套平台，目標是讓任何人都能輕鬆取得分散式資源，不再受限本機硬體。</div>
+                    <div class="d-flex align-items-center justify-content-center">
+                        <img class="rounded-circle me-3" src="{{ url_for('static', filename='img/team.jpg') }}" alt="團隊" style="width: 40px; height: 40px;" />
+                        <div class="fw-bold" data-i18n="team_info">
+                            HiveMind 開發團隊
+                            <span class="fw-bold text-primary mx-1">/</span>
+                            分布式運算專家
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
-  </div>
-</div></footer>
+</section>
 
-<script>
-// i18n 字典
-const i18n = {
-    "zh-tw": {
-        "welcome": "解鎖分散式運算的力量",
-        "subtitle": "工作端 + 節點池，打造高效能分布式平台，讓你專注開發、我們處理執行。",
-        "login": "登入",
-        "register": "立即開始使用",
-        "download": "下載",
-        "github": "GitHub",
-        "feature1_title": "模組化架構",
-        "feature1_desc": "將工作拆解為可分配的子任務，自由擴展你的運算能力。",
-        "feature2_title": "即時節點分配",
-        "feature2_desc": "節點池自動分配最合適的節點，支援自定義任務標準。",
-        "feature3_title": "安全與隔離",
-        "feature3_desc": "任務在 Docker 容器中執行，保證節點之間彼此獨立、安全。",
-        "about_title": "關於我們",
-        "about_desc": "我們是一群相信「運算力應人人可用」的開發者，打造這套平台，目標是讓任何人都能輕鬆取得分散式資源，不再受限本機硬體。",
-        "switch_lang": "切換語言",
-        "privacy": "隱私權政策",
-        "terms": "使用條款",
-        "footer_copyright": "© 2025 Hivemind Project. Built with love by Justin."
-    },
-    "en": {
-        "welcome": "Unlock the Power of Distributed Computing",
-        "subtitle": "Worker + Node Pool, build a high-performance distributed platform. You focus on development, we handle the execution.",
-        "login": "Login",
-        "register": "Get Started",
-        "download": "Download",
-        "github": "GitHub",
-        "feature1_title": "Modular Architecture",
-        "feature1_desc": "Break down tasks into manageable subtasks and scale your computing power freely.",
-        "feature2_title": "Instant Node Allocation",
-        "feature2_desc": "The node pool automatically allocates the most suitable nodes, supporting custom task criteria.",
-        "feature3_title": "Security and Isolation",
-        "feature3_desc": "Tasks run in Docker containers, ensuring independence and security between nodes.",
-        "about_title": "About Us",
-        "about_desc": "We are a group of developers who believe that 'computing power should be accessible to all'. We created this platform to enable anyone to easily access distributed resources, no longer limited by local hardware.",
-        "switch_lang": "Switch Language",
-        "privacy": "Privacy Policy",
-        "terms": "Terms of Use",
-        "footer_copyright": "© 2025 Hivemind Project. Built with love by Justin."
-    }
-};
-
-// 取得目前語言
-function getLang() {
-    return localStorage.getItem('lang') || (navigator.language === 'zh-TW' ? 'zh-tw' : 'en');
-}
-
-// 設定語言並更新頁面
-function setLang(lang) {
-    localStorage.setItem('lang', lang);
-    document.querySelectorAll('[data-i18n]').forEach(el => {
-        const key = el.getAttribute('data-i18n');
-        el.textContent = i18n[lang][key] || key;
-    });
-}
-
-// 切換語言
-function toggleLang() {
-    const lang = getLang() === 'zh-tw' ? 'en' : 'zh-tw';
-    setLang(lang);
-}
-
-// 頁面載入時自動設置語言
-document.addEventListener('DOMContentLoaded', () => {
-    setLang(getLang());
-});
-</script>
+<!-- Call to action section -->
+<section class="py-5 bg-gradient-primary-to-secondary text-white">
+    <div class="container px-5 my-5">
+        <div class="text-center">
+            <h2 class="display-4 fw-bolder mb-4" data-i18n="ready_to_start">準備開始了嗎？</h2>
+            <a class="btn btn-outline-light btn-lg px-5 py-3 fs-6 fw-bolder" href="/register" data-i18n="register_now">立即註冊</a>
+        </div>
+    </div>
+</section>
 
 {% endblock %}

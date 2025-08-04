@@ -1,16 +1,47 @@
 {% extends "base.html" %}
-{% block title %}Terms - HiveMind{% endblock %}
+{% block title %}Terms of Service - HiveMind{% endblock %}
 {% block content %}
-<section class="max-w-2xl mx-auto py-16 px-4">
-  <div class="bg-white dark:bg-gray-800 rounded-2xl shadow-lg border border-gray-200 dark:border-gray-700 p-10 text-center animate-fade-in-down">
-    <h1 class="text-3xl font-bold mb-6 text-gray-900 dark:text-white" data-i18n="terms">用戶條款</h1>
-    <div class="space-y-5 text-gray-800 dark:text-gray-200">
-      <p data-i18n="terms_agreement">使用本平台即表示您同意遵守相關法律法規及本條款內容。</p>
-      <p data-i18n="terms_illegal">不得利用本平台進行任何非法、侵權或損害他人權益之行為。</p>
-      <p data-i18n="terms_changes">平台有權隨時調整服務內容、條款及政策，重大變更將公告通知。</p>
-      <p data-i18n="terms_violation">如有違反條款，平台有權暫停或終止您的使用權限。</p>
-      <p><span data-i18n="terms_contact">如有疑問，請聯絡我們：</span><a href="mailto:hivemind@justin0711.com" class="underline hover:text-blue-600 dark:hover:text-blue-400">hivemind@justin0711.com</a></p>
+
+<!-- Page Content -->
+<section class="py-5">
+    <div class="container px-5 my-5">
+        <div class="text-center mb-5">
+            <h1 class="fw-bolder" data-i18n="terms_title">使用條款</h1>
+        </div>
+        <div class="row gx-5 justify-content-center">
+            <div class="col-lg-10 col-xl-8">
+                <div class="card shadow border-0">
+                    <div class="card-body p-5">
+                        <div class="mb-4">
+                            <h3 class="fw-bolder mb-3" data-i18n="terms_service_agreement">1. 服務條款同意</h3>
+                            <p data-i18n="terms_agreement">使用本平台即表示您同意遵守相關法律法規及本條款內容。</p>
+                        </div>
+                        
+                        <div class="mb-4">
+                            <h3 class="fw-bolder mb-3" data-i18n="terms_prohibited_behavior">2. 禁止行為</h3>
+                            <p data-i18n="terms_illegal">不得利用本平台進行任何非法、侵權或損害他人權益之行為。</p>
+                        </div>
+                        
+                        <div class="mb-4">
+                            <h3 class="fw-bolder mb-3" data-i18n="terms_service_changes">3. 服務變更</h3>
+                            <p data-i18n="terms_changes">平台有權隨時調整服務內容、條款及政策，重大變更將公告通知。</p>
+                        </div>
+                        
+                        <div class="mb-4">
+                            <h3 class="fw-bolder mb-3" data-i18n="terms_violation_handling">4. 違規處理</h3>
+                            <p data-i18n="terms_violation">如有違反條款，平台有權暫停或終止您的使用權限。</p>
+                        </div>
+                        
+                        <div class="alert alert-primary" role="alert">
+                            <i class="fas fa-envelope me-2"></i>
+                            <span data-i18n="terms_contact">如有疑問，請聯絡我們：</span>
+                            <a href="mailto:hivemind@justin0711.com" class="alert-link">hivemind@justin0711.com</a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
-  </div>
 </section>
+
 {% endblock %}
