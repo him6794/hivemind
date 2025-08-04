@@ -1,8 +1,6 @@
 syntax = "proto3";
 
 package nodepool;
-
-// 訊息定義
 message LoginRequest {
     string username = 1;
     string password = 2;
@@ -12,6 +10,16 @@ message LoginResponse {
     bool success = 1;
     string message = 2;
     string token = 3;
+}
+
+message RegisterRequest {
+    string username = 1;
+    string password = 2;
+}
+
+message RegisterResponse {
+    bool success = 1;
+    string message = 2;
 }
 
 message TransferRequest {
@@ -37,8 +45,8 @@ message GetBalanceResponse {
 }
 
 message RegisterWorkerNodeRequest {
-    string node_id = 1;
-    string hostname = 2;
+    string node_id = 1;//用戶名
+    string hostname = 2;//ip
     int32 cpu_cores = 3;
     int32 memory_gb = 4;
     int32 cpu_score = 5;
@@ -47,6 +55,7 @@ message RegisterWorkerNodeRequest {
     string location = 8;
     int32 port = 9;
     string gpu_name = 12;
+    string docker_status = 13;
 }
 
 message StatusResponse {
@@ -66,29 +75,6 @@ message ReportStatusRequest {
     string status_message = 2;
 }
 
-message WorkerNodeInfo {
-    string node_id = 1;
-    string hostname = 2;
-    int32 cpu_cores = 3;
-    int32 memory_gb = 4;
-    string status = 5;
-    double last_heartbeat = 6;
-    int32 cpu_score = 7;
-    int32 gpu_score = 8;
-    int32 gpu_memory_gb = 9;
-    string location = 10;
-    int32 port = 11;
-    string gpu_name = 12;
-}
-
-message GetNodeListRequest {}
-
-message GetNodeListResponse {
-    bool success = 1;
-    string message = 2;
-    repeated WorkerNodeInfo nodes = 3;
-}
-
 message UploadTaskRequest {
     string task_id = 1;
     bytes task_zip = 2;
@@ -98,7 +84,7 @@ message UploadTaskRequest {
     int32 gpu_memory_gb = 6;
     string location = 7;
     string gpu_name = 8;
-    string user_id = 9;  // 添加用戶ID字段
+    string user_id = 9;
 }
 
 message UploadTaskResponse {
@@ -111,7 +97,7 @@ message PollTaskStatusRequest {
 }
 
 message PollTaskStatusResponse {
-    string task_id = 1; // Fixed typo from 'рука_id'
+    string task_id = 1;
     string status = 2;
     repeated string output = 3;
     string message = 4;
@@ -152,6 +138,10 @@ message ExecuteTaskRequest {
     string node_id = 1;
     string task_id = 2;
     bytes task_zip = 3;
+    int32 cpu=4;
+    int32 gpu=5;
+    int32 memory_gb = 6;
+    int32 gpu_memory_gb = 7;
 }
 
 message ExecuteTaskResponse {
@@ -169,6 +159,11 @@ message ReportOutputRequest {
 message RunningStatusRequest {
     string node_id = 1;
     string task_id = 2;
+    int32 cpu_usage = 3; // CPU 使用率
+    int32 memory_usage = 4; //記憶體總使用量
+    int32 gpu_usage = 5; // GPU 使用率
+    int32 gpu_memory_usage = 6; // GPU 記憶體使用量
+
 }
 
 message RunningStatusResponse {
@@ -221,7 +216,7 @@ message GetAllTasksResponse {
 
 message StopTaskRequest {
     string task_id = 1;
-    string token = 2;      // 用戶令牌，用於驗證權限
+    string token = 2;
 }
 
 message StopTaskResponse {
@@ -240,9 +235,35 @@ message StopTaskExecutionResponse {
     string message = 2;
 }
 
+message WorkerNodeInfo {
+    string node_id = 1;
+    string hostname = 2;
+    int32 cpu_cores = 3;
+    int32 memory_gb = 4;
+    string status = 5;
+    double last_heartbeat = 6;
+    int32 cpu_score = 7;
+    int32 gpu_score = 8;
+    int32 gpu_memory_gb = 9;
+    string location = 10;
+    int32 port = 11;
+    string gpu_name = 12;
+}
+
+message GetNodeListRequest {
+    // 空請求，獲取所有節點列表
+}
+
+message GetNodeListResponse {
+    bool success = 1;
+    string message = 2;
+    repeated WorkerNodeInfo nodes = 3;
+}
+
 // 服務定義
 service UserService {
     rpc Login(LoginRequest) returns (LoginResponse);
+    rpc Register(RegisterRequest) returns (RegisterResponse);
     rpc Transfer(TransferRequest) returns (TransferResponse);
     rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse); // 新增 GetBalance RPC
 }

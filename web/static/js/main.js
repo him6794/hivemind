@@ -10,49 +10,34 @@ class HiveMindApp {
 
     init() {
         this.initTheme();
-        // 移除這一行，避免與 base.html 衝突
-        // this.updateAuthUI();
         this.setupEventListeners();
-        // 移除這一行，避免與 base.html 衝突
-        // this.checkAuthStatus();
     }
 
-    // 主題管理
+    // 主題管理 - 強制深色模式
     initTheme() {
-        const theme = localStorage.getItem('theme');
-        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-        
-        if (theme === 'dark' || (!theme && prefersDark)) {
-            this.setTheme(true);
-        } else {
-            this.setTheme(false);
-        }
+        // 強制設定深色模式，忽略用戶偏好和裝置設定
+        this.setTheme(true);
     }
 
     setTheme(dark) {
         const html = document.documentElement;
-        const icon = document.getElementById('theme-toggle-icon');
         
-        if (dark) {
-            html.classList.add('dark');
-            localStorage.setItem('theme', 'dark');
-            if (icon) {
-                icon.classList.remove('fa-moon');
-                icon.classList.add('fa-sun');
-            }
-        } else {
-            html.classList.remove('dark');
-            localStorage.setItem('theme', 'light');
-            if (icon) {
-                icon.classList.remove('fa-sun');
-                icon.classList.add('fa-moon');
-            }
+        // 強制深色模式
+        html.classList.add('dark');
+        localStorage.setItem('theme', 'dark');
+        
+        // 確保矩陣背景顯示
+        const matrixBg = document.getElementById('matrix-bg');
+        if (matrixBg) {
+            matrixBg.style.display = 'block';
+            matrixBg.classList.remove('hidden');
         }
     }
 
+    // 移除主題切換功能
     toggleTheme() {
-        const isDark = document.documentElement.classList.contains('dark');
-        this.setTheme(!isDark);
+        // 不執行任何操作，保持深色模式
+        return;
     }
 
     // 認證UI更新
@@ -63,11 +48,11 @@ class HiveMindApp {
 
     // 事件監聽器設定
     setupEventListeners() {
-        // 主題切換按鈕
-        const themeToggle = document.getElementById('theme-toggle');
-        if (themeToggle) {
-            themeToggle.addEventListener('click', () => this.toggleTheme());
-        }
+        // 移除主題切換按鈕事件監聽器
+        // const themeToggle = document.getElementById('theme-toggle');
+        // if (themeToggle) {
+        //     themeToggle.addEventListener('click', () => this.toggleTheme());
+        // }
 
         // 登出按鈕
         const logoutBtn = document.getElementById('logout-btn');

@@ -7,6 +7,6 @@ class Config:
     REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
     REDIS_DB = int(os.getenv("REDIS_DB", 0))
     TOKEN_EXPIRY = int(os.getenv("TOKEN_EXPIRY_MINUTES", 60))
-    TASK_STORAGE_PATH = os.getenv("TASK_STORAGE_PATH", "/mnt/myusb/hivemind/task_storage")
+    TASK_STORAGE_PATH = os.getenv("TASK_STORAGE_PATH", "d:/hivemind/task_storage")
     REDIS_DB = int(os.getenv("REDIS_DB", 0))
     TOKEN_EXPIRY = int(os.getenv("TOKEN_EXPIRY_MINUTES", 60))

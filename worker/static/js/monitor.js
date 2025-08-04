@@ -192,22 +192,55 @@ $(document).ready(function() {
 
             // 更新狀態顯示
             $('#node-id').text(data.node_id || 'N/A');
-            $('#task-id').text(data.current_task_id || 'None');
             
-            // 更新狀態標籤樣式
+            // 支援多任務模式
+            if (data.tasks && data.tasks.length > 0) {
+                // 顯示任務數量
+                $('#task-id').text(`${data.task_count} 個任務運行中`);
+                
+                // 顯示第一個任務ID（向後相容）
+                if (data.current_task_id && data.current_task_id !== "None") {
+                    $('#task-id').append(` (主要: ${data.current_task_id})`);
+                }
+                
+                // 如果存在任務列表容器，更新任務列表
+                if ($('#tasks-list').length) {
+                    updateTasksList(data.tasks);
+                } else {
+                    // 否則只顯示第一個任務的ID
+                    $('#task-id').text(data.current_task_id !== "None" ? data.current_task_id : "無任務");
+                }
+            } else {
+                $('#task-id').text("無任務");
+            }
+            
+            // 更新狀態標籤樣式，支援新的負載狀態
             const statusElement = $('#task-status');
             const status = data.status || 'Idle';
             statusElement.text(status).removeClass();
             
-            if (status.toLowerCase().includes('idle')) {
+            if (status.toLowerCase().includes('idle') || status.toLowerCase().includes('light load')) {
                 statusElement.addClass('status idle');
-            } else if (status.toLowerCase().includes('running') || status.toLowerCase().includes('executing')) {
+            } else if (status.toLowerCase().includes('running') || status.toLowerCase().includes('medium load')) {
                 statusElement.addClass('status running');
+            } else if (status.toLowerCase().includes('heavy load') || status.toLowerCase().includes('full')) {
+                statusElement.addClass('status error');
             } else if (status.toLowerCase().includes('error') || status.toLowerCase().includes('failed')) {
                 statusElement.addClass('status error');
             } else {
                 statusElement.addClass('status pending');
             }
+            
+            // 顯示Docker狀態
+            if ($('#docker-status').length) {
+                const dockerStatus = data.docker_status || (data.docker_available ? 'available' : 'unavailable');
+                $('#docker-status').text(dockerStatus);
+                $('#docker-status').removeClass().addClass('status ' + 
+                    (dockerStatus === 'available' ? 'idle' : 'error'));
+            }
+            
+            // 更新資源使用情況
+            updateResourcesDisplay(data);
             
             $('#ip-address').text(data.ip || 'N/A');
             $('#cpt-balance').text(data.cpt_balance || 0);
@@ -218,13 +251,31 @@ $(document).ready(function() {
             $('#cpu-usage').text(cpuPercent + '%');
             $('#memory-usage').text(memoryPercent + '%');
             
-            // 更新資源卡片
-            $('#cpu-metric').text(cpuPercent + '%');
-            $('#memory-metric').text(memoryPercent + '%');
+            // 更新資源卡片，加入負載狀態顏色
+            const cpuElement = $('#cpu-metric');
+            const memoryElement = $('#memory-metric');
             
-            const now = new Date().toLocaleTimeString();
+            cpuElement.text(cpuPercent + '%');
+            memoryElement.text(memoryPercent + '%');
+            
+            // 根據負載調整顏色
+            function updateLoadColor(element, percent) {
+                element.removeClass('load-normal load-medium load-high');
+                if (percent > 80) {
+                    element.addClass('load-high');
+                } else if (percent > 60) {
+                    element.addClass('load-medium');
+                } else {
+                    element.addClass('load-normal');
+                }
+            }
+            
+            updateLoadColor(cpuElement.parent(), cpuPercent);
+            updateLoadColor(memoryElement.parent(), memoryPercent);
 
             // 更新圖表數據
+            const now = new Date().toLocaleTimeString();
+
             if (cpuChart && cpuChart.data && cpuChart.data.labels) {
                 cpuChart.data.labels.push(now);
                 cpuChart.data.datasets[0].data.push(cpuPercent);
@@ -318,5 +369,85 @@ $(document).ready(function() {
     window.refreshLogs = function() {
         console.log("手動刷新日誌");
         updateLogs();
+    }
+    
+    // 新增函數：更新任務列表
+    function updateTasksList(tasks) {
+        const tasksListEl = $('#tasks-list');
+        tasksListEl.empty();
+
+        if (!tasks || tasks.length === 0) {
+            tasksListEl.html('<div class="text-center p-3">目前沒有執行中的任務</div>');
+            return;
+        }
+
+        tasks.forEach(task => {
+            const taskEl = $('<div>').addClass('task-item p-2 my-1 border rounded');
+
+            // 計算執行時間
+            const startTime = new Date(task.start_time);
+            const now = new Date();
+            const duration = Math.floor((now - startTime) / 1000); // 秒
+            const hours = Math.floor(duration / 3600);
+            const minutes = Math.floor((duration % 3600) / 60);
+            const seconds = duration % 60;
+            const durationStr = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+
+            // 格式化資源
+            const resources = task.resources || {};
+            const resourcesStr = `CPU: ${resources.cpu || 0}, RAM: ${resources.memory_gb || 0}GB, GPU: ${resources.gpu || 0}`;
+
+            taskEl.html(`
+                <div><strong>ID:</strong> ${task.id}</div>
+                <div><strong>狀態:</strong> <span class="status ${task.status === 'Executing' ? 'running' : 'pending'}">${task.status}</span></div>
+                <div><strong>開始時間:</strong> ${new Date(task.start_time).toLocaleString()}</div>
+                <div><strong>執行時間:</strong> ${durationStr}</div>
+                <div><strong>資源:</strong> ${resourcesStr}</div>
+            `);
+
+            tasksListEl.append(taskEl);
+        });
+    }
+
+    // 新增函數：更新資源顯示
+    function updateResourcesDisplay(data) {
+        // 如果存在資源區塊
+        if ($('#resource-status').length) {
+            const availableResources = data.available_resources || {};
+            const totalResources = data.total_resources || {};
+
+            // 計算資源使用百分比
+            const cpuUsagePercent = totalResources.cpu ? Math.round(((totalResources.cpu - availableResources.cpu) / totalResources.cpu) * 100) : 0;
+            const memoryUsagePercent = totalResources.memory_gb ? Math.round(((totalResources.memory_gb - availableResources.memory_gb) / totalResources.memory_gb) * 100) : 0;
+            const gpuUsagePercent = totalResources.gpu ? Math.round(((totalResources.gpu - availableResources.gpu) / totalResources.gpu) * 100) : 0;
+
+            // 更新進度條
+            updateProgressBar('#cpu-progress', cpuUsagePercent);
+            updateProgressBar('#memory-progress', memoryUsagePercent);
+            updateProgressBar('#gpu-progress', gpuUsagePercent);
+
+            // 更新數值
+            $('#cpu-usage-value').text(`${totalResources.cpu - availableResources.cpu}/${totalResources.cpu} (${cpuUsagePercent}%)`);
+            $('#memory-usage-value').text(`${(totalResources.memory_gb - availableResources.memory_gb).toFixed(1)}/${totalResources.memory_gb.toFixed(1)}GB (${memoryUsagePercent}%)`);
+            $('#gpu-usage-value').text(`${totalResources.gpu - availableResources.gpu}/${totalResources.gpu} (${gpuUsagePercent}%)`);
+        }
+    }
+
+    // 更新進度條
+    function updateProgressBar(selector, percent) {
+        const progressBar = $(selector);
+        if (progressBar.length) {
+            progressBar.css('width', percent + '%');
+
+            // 根據百分比調整顏色
+            progressBar.removeClass('bg-success bg-warning bg-danger');
+            if (percent > 80) {
+                progressBar.addClass('bg-danger');
+            } else if (percent > 60) {
+                progressBar.addClass('bg-warning');
+            } else {
+                progressBar.addClass('bg-success');
+            }
+        }
     }
 });

@@ -1,13 +1,13 @@
 {% extends "base.html" %}
 
-{% block title %}餘額查詢與轉帳 - HiveMind{% endblock %}
+{% block title %}Balance & Transfer - HiveMind{% endblock %}
 
 {% block content %}
 <div class="min-h-screen flex items-center justify-center p-4 bg-gray-100 dark:bg-gray-900 transition">
     <div class="w-full max-w-xl">
         <div class="bg-white dark:bg-gray-800 rounded-2xl shadow-xl p-8 animate-fade-in-up">
             <h2 class="text-3xl font-bold text-center mb-8 text-gray-900 dark:text-white">
-                <i class="fas fa-coins mr-2 text-purple-400"></i>我的餘額
+                <i class="fas fa-coins mr-2 text-purple-400"></i><span data-i18n="balance_my_balance">我的餘額</span>
             </h2>
             <div class="text-center mb-8">
                 <div class="text-5xl font-bold mb-2 text-gray-900 dark:text-white" id="balance-value">--</div>
@@ -15,20 +15,20 @@
             </div>
             <hr class="my-8 border-gray-200 dark:border-gray-700">
             <h3 class="text-xl font-semibold mb-4 text-center text-gray-900 dark:text-white">
-                <i class="fas fa-exchange-alt mr-2"></i>轉帳
+                <i class="fas fa-exchange-alt mr-2"></i><span data-i18n="balance_transfer">轉帳</span>
             </h3>
             <form id="transferForm" class="space-y-6">
                 <div>
-                    <label for="receiver" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">收款人用戶名</label>
+                    <label for="receiver" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1" data-i18n="balance_receiver_label">收款人用戶名</label>
                     <input id="receiver" name="receiver" type="text" required class="block w-full px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 transition" placeholder="請輸入對方用戶名">
                 </div>
                 <div>
-                    <label for="amount" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">金額</label>
+                    <label for="amount" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1" data-i18n="balance_amount_label">金額</label>
                     <input id="amount" name="amount" type="number" min="1" step="1" required class="block w-full px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 transition" placeholder="請輸入金額">
                 </div>
                 <div id="transfer-message" class="hidden w-full text-center text-red-600 bg-red-100 dark:bg-red-900 dark:text-red-300 rounded-lg px-4 py-2 text-sm"></div>
                 <button type="submit" class="w-full px-4 py-2 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-600 transition-all duration-200 flex items-center justify-center gap-2">
-                    <i class="fas fa-paper-plane mr-2"></i>轉帳
+                    <i class="fas fa-paper-plane mr-2"></i><span data-i18n="balance_transfer_btn">轉帳</span>
                 </button>
             </form>
         </div>
@@ -78,17 +78,20 @@ document.addEventListener('DOMContentLoaded', async () => {
             });
             const data = await resp.json();
             if (resp.ok) {
-                msgDiv.textContent = '轉帳成功！新餘額：' + data.new_balance;
+                const lang = localStorage.getItem('lang') || 'zh-tw';
+                const successMsg = lang === 'zh-tw' ? '轉帳成功！新餘額：' : 'Transfer successful! New balance: ';
+                msgDiv.textContent = successMsg + data.new_balance;
                 msgDiv.className = 'message message-success mb-2';
                 document.getElementById('balance-value').textContent = data.new_balance;
                 document.getElementById('transferForm').reset();
             } else {
-                msgDiv.textContent = data.error || '轉帳失敗';
+                msgDiv.textContent = data.error || (lang === 'zh-tw' ? '轉帳失敗' : 'Transfer failed');
                 msgDiv.className = 'message message-error mb-2';
             }
             msgDiv.classList.remove('hidden');
         } catch {
-            msgDiv.textContent = '網路錯誤，請稍後再試';
+            const lang = localStorage.getItem('lang') || 'zh-tw';
+            msgDiv.textContent = lang === 'zh-tw' ? '網路錯誤，請稍後再試' : 'Network error, please try again later';
             msgDiv.className = 'message message-error mb-2';
             msgDiv.classList.remove('hidden');
         }

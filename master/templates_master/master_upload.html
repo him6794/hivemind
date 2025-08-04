@@ -314,12 +314,78 @@
 
                     <div class="form-group">
                         <label for="gpu_name">GPU 名稱需求</label>
-                        <input type="text" id="gpu_name" name="gpu_name" placeholder="留空表示任何GPU">
+                        <select id="gpu_name" name="gpu_name">
+                            <option value="">任何GPU</option>
+                            <optgroup label="NVIDIA RTX 40系列">
+                                <option value="RTX 4090" data-memory="24" data-score="2800">RTX 4090 (24GB)</option>
+                                <option value="RTX 4080" data-memory="16" data-score="2400">RTX 4080 (16GB)</option>
+                                <option value="RTX 4070 Ti" data-memory="12" data-score="2000">RTX 4070 Ti (12GB)</option>
+                                <option value="RTX 4070" data-memory="12" data-score="1800">RTX 4070 (12GB)</option>
+                                <option value="RTX 4060 Ti" data-memory="16" data-score="1500">RTX 4060 Ti (16GB)</option>
+                                <option value="RTX 4060 Ti 8GB" data-memory="8" data-score="1400">RTX 4060 Ti (8GB)</option>
+                                <option value="RTX 4060" data-memory="8" data-score="1200">RTX 4060 (8GB)</option>
+                            </optgroup>
+                            <optgroup label="NVIDIA RTX 30系列">
+                                <option value="RTX 3090" data-memory="24" data-score="2200">RTX 3090 (24GB)</option>
+                                <option value="RTX 3080 Ti" data-memory="12" data-score="2000">RTX 3080 Ti (12GB)</option>
+                                <option value="RTX 3080" data-memory="10" data-score="1900">RTX 3080 (10GB)</option>
+                                <option value="RTX 3070 Ti" data-memory="8" data-score="1600">RTX 3070 Ti (8GB)</option>
+                                <option value="RTX 3070" data-memory="8" data-score="1500">RTX 3070 (8GB)</option>
+                                <option value="RTX 3060 Ti" data-memory="8" data-score="1300">RTX 3060 Ti (8GB)</option>
+                                <option value="RTX 3060" data-memory="12" data-score="1000">RTX 3060 (12GB)</option>
+                            </optgroup>
+                            <optgroup label="NVIDIA RTX 20系列">
+                                <option value="RTX 2080 Ti" data-memory="11" data-score="1400">RTX 2080 Ti (11GB)</option>
+                                <option value="RTX 2080" data-memory="8" data-score="1200">RTX 2080 (8GB)</option>
+                                <option value="RTX 2070" data-memory="8" data-score="1000">RTX 2070 (8GB)</option>
+                                <option value="RTX 2060" data-memory="6" data-score="800">RTX 2060 (6GB)</option>
+                            </optgroup>
+                            <optgroup label="NVIDIA GTX系列">
+                                <option value="GTX 1080 Ti" data-memory="11" data-score="900">GTX 1080 Ti (11GB)</option>
+                                <option value="GTX 1080" data-memory="8" data-score="750">GTX 1080 (8GB)</option>
+                                <option value="GTX 1070" data-memory="8" data-score="650">GTX 1070 (8GB)</option>
+                                <option value="GTX 1060" data-memory="6" data-score="450">GTX 1060 (6GB)</option>
+                            </optgroup>
+                            <optgroup label="AMD RX 7000系列">
+                                <option value="RX 7900 XTX" data-memory="24" data-score="2500">RX 7900 XTX (24GB)</option>
+                                <option value="RX 7900 XT" data-memory="20" data-score="2200">RX 7900 XT (20GB)</option>
+                                <option value="RX 7800 XT" data-memory="16" data-score="1800">RX 7800 XT (16GB)</option>
+                                <option value="RX 7700 XT" data-memory="12" data-score="1500">RX 7700 XT (12GB)</option>
+                            </optgroup>
+                            <optgroup label="AMD RX 6000系列">
+                                <option value="RX 6900 XT" data-memory="16" data-score="1900">RX 6900 XT (16GB)</option>
+                                <option value="RX 6800 XT" data-memory="16" data-score="1700">RX 6800 XT (16GB)</option>
+                                <option value="RX 6700 XT" data-memory="12" data-score="1300">RX 6700 XT (12GB)</option>
+                                <option value="RX 6600 XT" data-memory="8" data-score="1000">RX 6600 XT (8GB)</option>
+                            </optgroup>
+                            <optgroup label="專業顯卡">
+                                <option value="A100" data-memory="40" data-score="3500">Tesla A100 (40GB)</option>
+                                <option value="V100" data-memory="32" data-score="2800">Tesla V100 (32GB)</option>
+                                <option value="RTX A6000" data-memory="48" data-score="2600">RTX A6000 (48GB)</option>
+                                <option value="RTX A5000" data-memory="24" data-score="2000">RTX A5000 (24GB)</option>
+                                <option value="RTX A4000" data-memory="16" data-score="1500">RTX A4000 (16GB)</option>
+                            </optgroup>
+                        </select>
                     </div>
 
                     <div class="form-group">
                         <label for="repeat_count">重複上傳次數</label>
                         <input type="number" id="repeat_count" name="repeat_count" value="1" min="1" max="100" required>
+                        <small style="color: var(--text-muted); font-size: 0.8rem; margin-top: 0.25rem; display: block;">
+                            💡 提示：多個任務會根據節點負載自動分散到不同的工作節點並行執行
+                        </small>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="task_priority">任務優先級</label>
+                        <select id="task_priority" name="task_priority">
+                            <option value="normal">一般優先級</option>
+                            <option value="high">高優先級 (+20% CPT)</option>
+                            <option value="urgent">緊急優先級 (+50% CPT)</option>
+                        </select>
+                        <small style="color: var(--text-muted); font-size: 0.8rem; margin-top: 0.25rem; display: block;">
+                            💡 您的信任分數影響任務分配優先級，高信任用戶任務會優先分配到高性能節點
+                        </small>
                     </div>
                 </div>
             </div>
@@ -399,6 +465,69 @@
                 }
             });
         });
+
+        // GPU 選擇自動填入
+        document.getElementById('gpu_name').addEventListener('change', function(e) {
+            const selected = e.target.selectedOptions[0];
+            const gpuMemoryInput = document.getElementById('gpu_memory_gb');
+            const gpuScoreInput = document.getElementById('gpu_score');
+            
+            if (selected && selected.dataset.memory && selected.dataset.score) {
+                // 自動填入GPU記憶體和分數
+                gpuMemoryInput.value = selected.dataset.memory;
+                gpuScoreInput.value = selected.dataset.score;
+                
+                // 資源需求說明增強
+                showResourceInfo(selected.dataset.memory, selected.dataset.score);
+                
+                // 視覺提示
+                gpuMemoryInput.style.backgroundColor = '#ecfdf5';
+                gpuScoreInput.style.backgroundColor = '#ecfdf5';
+                
+                // 2秒後恢復原色
+                setTimeout(() => {
+                    gpuMemoryInput.style.backgroundColor = '';
+                    gpuScoreInput.style.backgroundColor = '';
+                }, 2000);
+            } else {
+                // 選擇"任何GPU"時清空
+                gpuMemoryInput.value = '0';
+                gpuScoreInput.value = '0';
+                hideResourceInfo();
+            }
+        });
+
+        function showResourceInfo(gpuMemory, gpuScore) {
+            // 估算每分鐘 CPT 成本
+            const cpuScore = parseInt(document.getElementById('cpu_score').value) || 0;
+            const memoryGb = parseInt(document.getElementById('memory_gb').value) || 0;
+            const estimatedCost = Math.max(1, Math.ceil((cpuScore + parseInt(gpuScore) + memoryGb + parseInt(gpuMemory)) / 100));
+            
+            // 顯示資源使用說明
+            const infoDiv = document.getElementById('resource-info') || createResourceInfoDiv();
+            infoDiv.innerHTML = `
+                <div style="background: #f0f9ff; border: 1px solid #0ea5e9; border-radius: 6px; padding: 1rem; margin: 1rem 0;">
+                    <h4 style="margin: 0 0 0.5rem 0; color: #0369a1;">📊 資源分配預估</h4>
+                    <p style="margin: 0.25rem 0; font-size: 0.875rem;">💰 預估每分鐘成本: <strong>${estimatedCost} CPT</strong></p>
+                    <p style="margin: 0.25rem 0; font-size: 0.875rem;">🎯 任務將分配到: <strong>高信任節點群 > 中信任節點群 > 低信任節點群</strong></p>
+                    <p style="margin: 0.25rem 0; font-size: 0.875rem;">⚡ 多任務將並行執行，提高處理效率</p>
+                </div>
+            `;
+        }
+
+        function hideResourceInfo() {
+            const infoDiv = document.getElementById('resource-info');
+            if (infoDiv) {
+                infoDiv.remove();
+            }
+        }
+
+        function createResourceInfoDiv() {
+            const div = document.createElement('div');
+            div.id = 'resource-info';
+            document.querySelector('.requirements-section').appendChild(div);
+            return div;
+        }
     </script>
 </body>
 </html>

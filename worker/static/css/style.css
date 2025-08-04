@@ -320,6 +320,127 @@ body {
     height: 250px;
 }
 
+/* 多任務容器樣式 */
+.task-container {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+}
+
+.task-card {
+    background: var(--card-background);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius-sm);
+    padding: 1rem;
+    transition: all 0.2s ease;
+}
+
+.task-card:hover {
+    box-shadow: var(--shadow-md);
+    border-color: var(--primary-color);
+}
+
+.task-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.75rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--border-light);
+}
+
+.task-id {
+    font-weight: 600;
+    color: var(--text-primary);
+    font-size: 0.875rem;
+}
+
+.task-status {
+    padding: 0.25rem 0.5rem;
+    border-radius: 12px;
+    font-size: 0.75rem;
+    font-weight: 500;
+}
+
+/* 資源使用率條 */
+.resource-bar {
+    margin: 0.5rem 0;
+}
+
+.resource-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    margin-bottom: 0.25rem;
+}
+
+.progress-bar {
+    width: 100%;
+    height: 8px;
+    background: var(--border-light);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--success-color), var(--warning-color), var(--error-color));
+    border-radius: 4px;
+    transition: width 0.3s ease;
+}
+
+.progress-fill.low { background: var(--success-color); }
+.progress-fill.medium { background: var(--warning-color); }
+.progress-fill.high { background: var(--error-color); }
+
+/* Docker 狀態指示器 */
+.docker-status {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0.75rem 0;
+    padding: 0.5rem;
+    background: var(--card-background-light);
+    border-radius: var(--border-radius-sm);
+    border: 1px solid var(--border-color);
+}
+
+.docker-indicator {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--error-color);
+}
+
+.docker-indicator.enabled {
+    background: var(--success-color);
+}
+
+.docker-indicator.partial {
+    background: var(--warning-color);
+}
+
+/* 信任分數顯示 */
+.trust-score {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.875rem;
+}
+
+.trust-badge {
+    padding: 0.25rem 0.5rem;
+    border-radius: 12px;
+    font-weight: 500;
+    font-size: 0.75rem;
+}
+
+.trust-badge.high { background: #ecfdf5; color: var(--success-color); }
+.trust-badge.medium { background: #fffbeb; color: var(--warning-color); }
+.trust-badge.low { background: #fef2f2; color: var(--error-color); }
+
 /* 響應式設計 */
 @media (max-width: 1024px) {
     .content-grid {

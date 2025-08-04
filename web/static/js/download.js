@@ -1,7 +1,10 @@
 function downloadFile(fileType, buttonElement) {
     const token = localStorage.getItem('access_token');
+    const lang = localStorage.getItem('lang') || 'zh-tw';
+    
     if (!token) {
-        alert('請先登入才能下載檔案');
+        const message = lang === 'zh-tw' ? '請先登入才能下載檔案' : 'Please login to download files';
+        alert(message);
         window.location.href = '/login';
         return;
     }
@@ -9,7 +12,7 @@ function downloadFile(fileType, buttonElement) {
     // 禁用按鈕防止重複點擊
     const originalText = buttonElement.textContent;
     buttonElement.disabled = true;
-    buttonElement.textContent = '下載中...';
+    buttonElement.textContent = lang === 'zh-tw' ? '下載中...' : 'Downloading...';
 
     // 檢查是否為開發中的項目
     const developmentItems = ['server', 'mobile', 'web'];
@@ -24,14 +27,18 @@ function downloadFile(fileType, buttonElement) {
         .then(response => response.json())
         .then(data => {
             if (data.status === 'development') {
-                alert(`${data.message}\n預計發布時間: ${data.estimated_release || '待定'}`);
+                const releaseTime = lang === 'zh-tw' ? '預計發布時間' : 'Estimated Release';
+                const pending = lang === 'zh-tw' ? '待定' : 'TBD';
+                alert(`${data.message}\n${releaseTime}: ${data.estimated_release || pending}`);
             } else {
-                alert(data.error || '未知錯誤');
+                const unknownError = lang === 'zh-tw' ? '未知錯誤' : 'Unknown error';
+                alert(data.error || unknownError);
             }
         })
         .catch(error => {
             console.error('Error:', error);
-            alert('請求失敗');
+            const requestFailed = lang === 'zh-tw' ? '請求失敗' : 'Request failed';
+            alert(requestFailed);
         })
         .finally(() => {
             buttonElement.disabled = false;
@@ -46,11 +53,11 @@ function downloadFile(fileType, buttonElement) {
     if (!progressBar) {
         progressWrapper = document.createElement('div');
         progressWrapper.id = 'download-progress-wrapper';
-        progressWrapper.className = 'fixed top-8 right-8 z-50 w-80 bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg shadow-lg p-4 flex flex-col items-center transition-theme';
+        progressWrapper.className = 'fixed top-8 right-8 z-50 w-80 bg-gray-800 border border-gray-700 rounded-lg shadow-lg p-4 flex flex-col items-center transition-theme';
         
         progressBar = document.createElement('div');
         progressBar.id = 'download-progress-bar';
-        progressBar.className = 'w-full h-4 bg-neutral-200 dark:bg-neutral-700 rounded-full overflow-hidden mb-2';
+        progressBar.className = 'w-full h-4 bg-gray-700 rounded-full overflow-hidden mb-2';
         
         const bar = document.createElement('div');
         bar.className = 'h-full w-0 bg-green-500 transition-all duration-300';
@@ -59,7 +66,7 @@ function downloadFile(fileType, buttonElement) {
         
         const percent = document.createElement('span');
         percent.id = 'download-progress-percent';
-        percent.className = 'text-sm font-medium text-green-600 dark:text-green-400';
+        percent.className = 'text-sm font-medium text-green-400';
         percent.textContent = '0%';
         
         progressWrapper.appendChild(progressBar);

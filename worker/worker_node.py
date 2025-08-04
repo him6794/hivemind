@@ -30,11 +30,13 @@ from uuid import uuid4
 from webbrowser import open as web_open
 from netifaces import interfaces, ifaddresses, AF_INET
 from requests import post, get, exceptions
+import venv
+import threading
 basicConfig(level=INFO, format='%(asctime)s - %(levelname)s - [%(threadName)s] - %(message)s')
 
 NODE_PORT = int(environ.get("NODE_PORT", 50053))
 FLASK_PORT = int(environ.get("FLASK_PORT", 5000))
-MASTER_ADDRESS = environ.get("MASTER_ADDRESS", "10.0.0.1:50051")
+MASTER_ADDRESS = environ.get("MASTER_ADDRESS", "127.0.0.1:50051")
 NODE_ID = environ.get("NODE_ID", f"worker-{node().split('.')[0]}-{NODE_PORT}")
 
 class WorkerNode:
@@ -46,23 +48,42 @@ class WorkerNode:
 
         # 狀態管理
         self.status = "Initializing"
-        self.current_task_id = None
+        # 改為字典以支持多任務
+        self.running_tasks = {}  # {task_id: {"status": status, "resources": {}, "start_time": time()}}
+        self.task_locks = {}  # {task_id: threading.Lock()}
         self.username = None
         self.token = None
         self.is_registered = False
         self.login_time = None
         self.cpt_balance = 0
+        self.trust_score = 0  # 添加信任分數
+        self.trust_group = "low"  # 信任分組: high, medium, low
 
         # 線程控制
         self.status_thread = None
         self._stop_event = Event()
         self.logs = []
         self.log_lock = Lock()
+        self.resources_lock = Lock()  # 添加資源鎖
+
+        # 資源管理
+        self.available_resources = {
+            "cpu": 0,        # CPU 分數
+            "memory_gb": 0,  # 可用內存GB
+            "gpu": 0,        # GPU 分數
+            "gpu_memory_gb": 0  # GPU 內存GB
+        }
+        self.total_resources = {
+            "cpu": 0,
+            "memory_gb": 0,
+            "gpu": 0,
+            "gpu_memory_gb": 0
+        }
 
         # 用戶會話管理
         self.user_sessions = {}
         self.session_lock = Lock()
-        self._stop_current_task = False
+        self.task_stop_events = {}  # {task_id: Event()}
 
         # 先自動連線 VPN
         self._auto_join_vpn()
@@ -150,6 +171,17 @@ class WorkerNode:
             self.cpu_score = self._benchmark_cpu()
             self.gpu_score, self.gpu_name, self.gpu_memory_gb = self._detect_gpu()
             
+            # 設置初始可用資源與總資源
+            self.total_resources = {
+                "cpu": self.cpu_score,
+                "memory_gb": self.memory_gb,
+                "gpu": self.gpu_score,
+                "gpu_memory_gb": self.gpu_memory_gb
+            }
+            
+            # 初始時所有資源都可用
+            self.available_resources = self.total_resources.copy()
+            
             self._log(f"Hardware: CPU={self.cpu_cores} cores, RAM={self.memory_gb:.1f}GB available (Total: {self.total_memory_gb:.1f}GB)")
             self._log(f"Performance: CPU={self.cpu_score}, GPU={self.gpu_score}")
             self._log(f"Location: {self.location}")
@@ -167,6 +199,15 @@ class WorkerNode:
             self.gpu_score = 0
             self.gpu_name = "Not Detected"
             self.gpu_memory_gb = 0.0
+            
+            # 設置預設資源
+            self.total_resources = {
+                "cpu": 0,
+                "memory_gb": 0,
+                "gpu": 0,
+                "gpu_memory_gb": 0
+            }
+            self.available_resources = self.total_resources.copy()
 
     def _auto_detect_location(self):
         """靜默自動檢測地區"""
@@ -343,6 +384,7 @@ class WorkerNode:
             self.docker_client = from_env(timeout=10)
             self.docker_client.ping()
             self.docker_available = True
+            self.docker_status = "available"
             
             # 檢查或拉取鏡像
             try:
@@ -360,6 +402,7 @@ class WorkerNode:
             self._log(f"Docker initialization failed: {e}", WARNING)
             self.docker_available = False
             self.docker_client = None
+            self.docker_status = "unavailable"
 
     def _init_grpc(self):
         """初始化 gRPC 連接"""
@@ -565,12 +608,29 @@ class WorkerNode:
                 cpu_percent_val, mem = 0, None
                 current_available_gb = self.memory_gb
 
+            # 獲取目前執行中的任務
+            with self.resources_lock:
+                task_count = len(self.running_tasks)
+                # 對於前端相容性，如果有任務則使用第一個任務的ID
+                current_task_id = next(iter(self.running_tasks.keys()), None) if task_count > 0 else None
+                
+                # 生成任務列表
+                tasks = []
+                for task_id, task_info in self.running_tasks.items():
+                    tasks.append({
+                        'id': task_id,
+                        'status': task_info.get('status', 'Unknown'),
+                        'start_time': datetime.fromtimestamp(task_info.get('start_time', time())).isoformat(),
+                        'resources': task_info.get('resources', {})
+                    })
+
             return jsonify({
                 'node_id': self.node_id,
                 'status': self.status,
-                'current_task_id': self.current_task_id or "None",
+                'current_task_id': current_task_id or "None",  # 為舊版前端提供向後相容性
                 'is_registered': self.is_registered,
                 'docker_available': self.docker_available,
+                'docker_status': getattr(self, 'docker_status', 'unknown'),
                 'cpu_percent': round(cpu_percent_val, 1),
                 'cpu_cores': self.cpu_cores,
                 'memory_percent': round(mem.percent, 1) if mem else 0,
@@ -583,7 +643,11 @@ class WorkerNode:
                 'gpu_memory_gb': self.gpu_memory_gb,
                 'cpt_balance': user_data['cpt_balance'],
                 'login_time': user_data['login_time'].isoformat() if isinstance(user_data['login_time'], datetime) else str(user_data['login_time']),
-                'ip': getattr(self, 'local_ip', '127.0.0.1')
+                'ip': getattr(self, 'local_ip', '127.0.0.1'),
+                'task_count': task_count,
+                'tasks': tasks,  # 添加任務列表
+                'available_resources': self.available_resources,
+                'total_resources': self.total_resources
             })
 
         @self.app.route('/api/logs')
@@ -610,6 +674,36 @@ class WorkerNode:
             session.clear()
             self._logout()
             return redirect(url_for('index'))
+
+        # 添加任務狀態路由
+        @self.app.route('/api/tasks')
+        def api_tasks():
+            session_id = session.get('session_id')
+            user_data = self._get_user_session(session_id) if session_id else None
+            
+            if not user_data and self.username:
+                user_data = {'username': self.username}
+            
+            if not user_data:
+                return jsonify({'error': 'Unauthorized'}), 401
+                
+            # 返回所有正在運行的任務
+            tasks_info = []
+            with self.resources_lock:
+                for task_id, task_data in self.running_tasks.items():
+                    tasks_info.append({
+                        'task_id': task_id,
+                        'status': task_data.get('status', 'Unknown'),
+                        'start_time': datetime.fromtimestamp(task_data.get('start_time', 0)).isoformat(),
+                        'elapsed': round(time() - task_data.get('start_time', time()), 1),
+                        'resources': task_data.get('resources', {})
+                    })
+            
+            return jsonify({
+                'tasks': tasks_info,
+                'total_resources': self.total_resources,
+                'available_resources': self.available_resources
+            })
 
     def _start_flask(self):
         """啟動 Flask 服務"""
@@ -651,6 +745,35 @@ class WorkerNode:
                 self.token = response.token
                 self.login_time = datetime.now()
                 self.status = "Logged In"
+                
+                # 嘗試獲取用戶信任分數
+                try:
+                    balance_response = self.user_stub.GetBalance(
+                        nodepool_pb2.GetBalanceRequest(username=username, token=response.token),
+                        metadata=[('authorization', f'Bearer {response.token}')],
+                        timeout=10
+                    )
+                    if balance_response.success:
+                        self.cpt_balance = balance_response.balance
+                        # 假設信任分數在返回數據中 (實際可能需要另外的API)
+                        self.trust_score = int(balance_response.balance / 10)  # 臨時計算信任分數
+                        
+                        # 根據信任分數設置信任群組
+                        if self.trust_score > 100:
+                            self.trust_group = "high"
+                        elif self.trust_score >= 50:
+                            self.trust_group = "medium"
+                        else:
+                            self.trust_group = "low"
+                        
+                        # Docker不可用則強制為低信任群組
+                        if not self.docker_available:
+                            self.trust_group = "low"
+                            
+                        self._log(f"User {username} trust score: {self.trust_score}, group: {self.trust_group}")
+                except Exception as e:
+                    self._log(f"Failed to get trust score: {e}", WARNING)
+                
                 self._log(f"User {username} logged in successfully")
                 return True
             else:
@@ -668,17 +791,19 @@ class WorkerNode:
             return False
 
         try:
+            # 添加docker狀態到註冊請求
             request = nodepool_pb2.RegisterWorkerNodeRequest(
                 node_id=self.username,
                 hostname=self.local_ip,  # 使用本機 IP 而不是 127.0.0.1
-                cpu_cores=int(self.cpu_cores/1000),
-                memory_gb=int(self.memory_gb/10),
+                cpu_cores=int(self.cpu_cores),
+                memory_gb=int(self.memory_gb),
                 cpu_score=self.cpu_score,
                 gpu_score=self.gpu_score,
                 gpu_name=self.gpu_name,
                 gpu_memory_gb=int(self.gpu_memory_gb),
                 location=self.location,
-                port=self.port
+                port=self.port,
+                docker_status=self.docker_status  # 新增docker狀態
             )
             
             response = self.node_stub.RegisterWorkerNode(
@@ -710,13 +835,48 @@ class WorkerNode:
         self.username = None
         self.is_registered = False
         self.status = "Waiting for Login"
-        self.current_task_id = None
+        
+        # 清理所有運行中任務
+        self._stop_all_tasks()
+        
         self.login_time = None
         self.cpt_balance = 0
+        self.trust_score = 0
+        self.trust_group = "low"
         self._stop_status_reporting()
         
         if old_username:
             self._log(f"User {old_username} logged out")
+    
+    def _stop_all_tasks(self):
+        """停止所有運行中的任務"""
+        task_ids = list(self.running_tasks.keys())
+        for task_id in task_ids:
+            self._log(f"停止任務 {task_id} (登出操作)")
+            self._stop_task(task_id)
+        
+        # 等待所有任務停止
+        timeout = 30
+        start_time = time()
+        while self.running_tasks and time() - start_time < timeout:
+            sleep(0.5)
+        
+        # 強制清理
+        with self.resources_lock:
+            self.running_tasks.clear()
+            self.task_locks.clear()
+            self.task_stop_events.clear()
+            
+            # 重置可用資源
+            self.available_resources = self.total_resources.copy()
+
+    def _stop_task(self, task_id):
+        """停止指定任務"""
+        if task_id in self.task_stop_events:
+            self.task_stop_events[task_id].set()
+            self._log(f"已發送停止信號給任務 {task_id}")
+            return True
+        return False
 
     def _start_status_reporting(self):
         """開始狀態報告"""
@@ -738,9 +898,16 @@ class WorkerNode:
         while not self._stop_event.is_set():
             if self.is_registered and self.token:
                 try:
-                    status_msg = f"Executing Task: {self.current_task_id}" if self.current_task_id else self.status
+                    # 決定狀態消息
+                    with self.resources_lock:
+                        task_count = len(self.running_tasks)
                     
-                    # 無論是否在執行任務都要發送心跳
+                    if task_count > 0:
+                        status_msg = f"Running {task_count} tasks"
+                    else:
+                        status_msg = self.status
+                    
+                    # 發送心跳
                     self.node_stub.ReportStatus(
                         nodepool_pb2.ReportStatusRequest(
                             node_id=self.node_id,
@@ -753,15 +920,77 @@ class WorkerNode:
                     # 更新餘額
                     self._update_balance()
                     
-                    # 調試日誌
-                    if self.current_task_id:
-                        self._log(f"Heartbeat sent while executing task {self.current_task_id}")
+                    # 為所有運行中的任務回報資源使用情況
+                    self._report_all_tasks_resource_usage()
                     
                 except Exception as e:
                     self._log(f"Status report failed: {e}", WARNING)
             
             # 縮短心跳間隔以確保連接穩定
-            self._stop_event.wait(1) 
+            self._stop_event.wait(5) 
+
+    def _report_all_tasks_resource_usage(self):
+        """回報所有任務的資源使用情況"""
+        if not self.running_tasks:
+            return
+            
+        try:
+            with self.resources_lock:
+                task_ids = list(self.running_tasks.keys())
+            
+            for task_id in task_ids:
+                try:
+                    self._report_task_resource_usage(task_id)
+                except Exception as e:
+                    self._log(f"回報任務 {task_id} 資源使用失敗: {e}", WARNING)
+        except Exception as e:
+            self._log(f"回報任務資源使用發生錯誤: {e}", WARNING)
+
+    def _report_task_resource_usage(self, task_id):
+        """回報單個任務的資源使用情況"""
+        if not self.token:
+            return
+            
+        try:
+            # 獲取任務資源使用情況
+            with self.resources_lock:
+                if task_id not in self.running_tasks:
+                    return
+                    
+                task_data = self.running_tasks[task_id]
+                resources = task_data.get('resources', {})
+            
+            # 估算當前資源使用情況（實際實現可能需要更複雜的監控）
+            cpu_usage = int(resources.get('cpu', 0) * 0.8)  # 簡化：假設使用申請資源的80%
+            memory_usage = int(resources.get('memory_gb', 0) * 0.7 * 1024)  # 轉換為MB
+            gpu_usage = int(resources.get('gpu', 0) * 0.5)  # 簡化：假設使用申請資源的50%
+            gpu_memory_usage = int(resources.get('gpu_memory_gb', 0) * 0.6 * 1024)  # 轉換為MB
+            
+            # 發送資源使用報告
+            try:
+                # 對於每個任務，向主節點匯報資源使用情況
+                self._log(f"向主節點匯報任務 {task_id} 資源使用: CPU={cpu_usage}, MEM={memory_usage}MB, GPU={gpu_usage}, GPU_MEM={gpu_memory_usage}MB")
+                
+                # 這裡不使用 ReportRunningStatus，因為該方法是由主節點調用工作節點的
+                # 相反，我們使用 StoreOutput 方法來傳送資源使用信息
+                usage_info = f"{{\"cpu\":{cpu_usage},\"memory\":{memory_usage},\"gpu\":{gpu_usage},\"gpu_memory\":{gpu_memory_usage}}}"
+                
+                response = self.master_stub.StoreOutput(
+                    nodepool_pb2.StoreOutputRequest(
+                        task_id=task_id,
+                        output=f"RESOURCE_USAGE: {usage_info}"
+                    ),
+                    metadata=[('authorization', f'Bearer {self.token}')],
+                    timeout=10
+                )
+                
+                if response.success:
+                    self._log(f"成功匯報任務 {task_id} 資源使用")
+            except Exception as e:
+                self._log(f"向主節點匯報資源使用失敗: {e}", WARNING)
+            
+        except Exception as e:
+            self._log(f"回報任務 {task_id} 資源使用失敗: {e}", WARNING)
 
     def _update_balance(self):
         """更新 CPT 餘額"""
@@ -815,11 +1044,86 @@ class WorkerNode:
             self._log(f"Error sending logs for task {task_id}: {e}", WARNING)
             return False
 
-    def _execute_task(self, task_id, task_zip_bytes):
+    def _check_resources_available(self, required_resources):
+        """檢查是否有足夠資源運行任務"""
+        with self.resources_lock:
+            for resource_type, required_amount in required_resources.items():
+                if resource_type in self.available_resources:
+                    if self.available_resources[resource_type] < required_amount:
+                        return False
+            return True
+
+    def _allocate_resources(self, task_id, required_resources):
+        """分配資源給任務"""
+        with self.resources_lock:
+            # 檢查資源是否足夠
+            for resource_type, required_amount in required_resources.items():
+                if resource_type in self.available_resources:
+                    if self.available_resources[resource_type] < required_amount:
+                        return False
+            
+            # 扣除資源
+            for resource_type, required_amount in required_resources.items():
+                if resource_type in self.available_resources:
+                    self.available_resources[resource_type] -= required_amount
+            
+            # 記錄任務使用的資源
+            self.running_tasks[task_id] = {
+                "status": "Allocated",
+                "resources": required_resources,
+                "start_time": time()
+            }
+            
+            # 創建任務的鎖和停止事件
+            self.task_locks[task_id] = threading.Lock()
+            self.task_stop_events[task_id] = Event()
+            
+            return True
+
+    def _release_resources(self, task_id):
+        """釋放任務使用的資源"""
+        with self.resources_lock:
+            if task_id not in self.running_tasks:
+                return
+            
+            # 獲取任務使用的資源
+            task_resources = self.running_tasks[task_id].get('resources', {})
+            
+            # 歸還資源
+            for resource_type, amount in task_resources.items():
+                if resource_type in self.available_resources:
+                    self.available_resources[resource_type] += amount
+            
+            # 清理任務數據
+            del self.running_tasks[task_id]
+            
+            # 清理鎖和停止事件
+            if task_id in self.task_locks:
+                del self.task_locks[task_id]
+            if task_id in self.task_stop_events:
+                del self.task_stop_events[task_id]
+
+    def _execute_task(self, task_id, task_zip_bytes, required_resources=None):
         """執行任務"""
-        self.current_task_id = task_id
-        self.status = f"Executing: {task_id}"
-        self._stop_current_task = False
+        if not required_resources:
+            required_resources = {
+                "cpu": 1,
+                "memory_gb": 1,
+                "gpu": 0,
+                "gpu_memory_gb": 0
+            }
+        
+        # 更新任務狀態
+        with self.resources_lock:
+            if task_id in self.running_tasks:
+                self.running_tasks[task_id]["status"] = "Executing"
+        
+        # 獲取任務的停止事件
+        stop_event = self.task_stop_events.get(task_id)
+        if not stop_event:
+            self._log(f"找不到任務 {task_id} 的停止事件", ERROR)
+            self._release_resources(task_id)
+            return
         
         temp_dir = None
         container = None
@@ -828,9 +1132,9 @@ class WorkerNode:
         stop_requested = False
         
         try:
-            if not self.docker_available:
-                raise RuntimeError("Docker not available")
-
+            # 決定使用Docker還是venv
+            use_docker = self.docker_available
+            
             # 創建臨時目錄
             temp_dir = mkdtemp(prefix=f"task_{task_id}_")
             workspace = join(temp_dir, "workspace")
@@ -848,122 +1152,217 @@ class WorkerNode:
             copy2(script_src, script_dst)
             chmod(script_dst, 0o755)
 
-            # 執行容器，使用新的鏡像名稱
-            container_name = f"task-{task_id}-{token_hex(4)}"
-            container = self.docker_client.containers.run(
-                "justin308/hivemind-worker:latest",
-                command=["bash", "/app/task/run_task.sh"],
-                detach=True,
-                name=container_name,
-                volumes={workspace: {'bind': '/app/task', 'mode': 'rw'}},
-                working_dir="/app/task",
-                environment={"TASK_ID": task_id, "PYTHONUNBUFFERED": "1"},
-                remove=False
-            )
-            
-            self._log(f"Task {task_id} container started, monitoring...")
-            
-            # 發送初始日誌
-            initial_log = f"任務 {task_id} 開始執行\n容器名稱: {container_name}\n工作目錄: {workspace}"
-            task_logs.append(initial_log)
-            self._send_task_logs(task_id, initial_log)
-            
-            # 簡化的監控邏輯 - 定期檢查停止請求和容器狀態
-            log_buffer = []
-            log_send_counter = 0
-            last_log_fetch = time()
-            
-            while True:
-                # 優先檢查停止請求
-                if self._stop_current_task:
+            if use_docker:
+                # 使用Docker運行任務
+                container_name = f"task-{task_id}-{token_hex(4)}"
+                
+                # 設置Docker資源限制
+                mem_limit = f"{int(required_resources.get('memory_gb', 1) * 1024)}m"
+                cpu_limit = required_resources.get('cpu', 1) / 100  # Docker CPU限制為相對值
+                
+                # 設置GPU相關配置
+                device_requests = []
+                if required_resources.get('gpu', 0) > 0:
+                    device_requests.append({
+                        'Driver': 'nvidia',
+                        'Count': -1,  # 使用所有可用GPU
+                        'Capabilities': [['gpu']]
+                    })
+                
+                container = self.docker_client.containers.run(
+                    "justin308/hivemind-worker:latest",
+                    command=["bash", "/app/task/run_task.sh"],
+                    detach=True,
+                    name=container_name,
+                    volumes={workspace: {'bind': '/app/task', 'mode': 'rw'}},
+                    working_dir="/app/task",
+                    environment={"TASK_ID": task_id, "PYTHONUNBUFFERED": "1"},
+                    mem_limit=mem_limit,
+                    nano_cpus=int(cpu_limit * 1e9),  # 轉換為納秒CPU時間
+                    device_requests=device_requests if device_requests else None,
+                    remove=False
+                )
+                
+                self._log(f"Task {task_id} Docker container started with resources: CPU={cpu_limit}, Memory={mem_limit}")
+                
+                # 監控Docker容器
+                log_buffer = []
+                log_send_counter = 0
+                last_log_fetch = time()
+                
+                while not stop_event.is_set():
+                    try:
+                        # 檢查容器狀態
+                        container.reload()
+                        if container.status != 'running':
+                            self._log(f"Container {container_name} stopped, status: {container.status}")
+                            break
+                        
+                        # 收集日誌
+                        current_time = time()
+                        if current_time - last_log_fetch > 1.0:
+                            logs = container.logs(since=int(last_log_fetch)).decode('utf-8', errors='replace')
+                            if logs.strip():
+                                log_lines = logs.strip().split('\n')
+                                for line in log_lines:
+                                    if line.strip():
+                                        self._log(f"[Task {task_id}]: {line}")
+                                        log_buffer.append(line)
+                                        task_logs.append(line)
+                                        log_send_counter += 1
+                                
+                                # 每20行或每3秒發送一次日誌
+                                if log_send_counter >= 20 or len(log_buffer) > 0:
+                                    logs_to_send = "\n".join(log_buffer)
+                                    self._send_task_logs(task_id, logs_to_send)
+                                    log_buffer.clear()
+                                    log_send_counter = 0
+                            
+                            last_log_fetch = current_time
+                    except Exception as e:
+                        self._log(f"Error monitoring container: {e}", WARNING)
+                        break
+                    
+                    # 短暫休眠
+                    sleep(0.1)
+                
+                # 處理停止請求
+                if stop_event.is_set():
                     stop_requested = True
                     stop_log = f"收到停止請求，立即終止任務 {task_id}"
                     self._log(stop_log)
                     task_logs.append(stop_log)
                     self._send_task_logs(task_id, stop_log)
                     
-                    # 立即強制停止容器
                     try:
                         container.kill()
-                        stop_log = f"容器已強制停止: {container_name}"
-                        self._log(stop_log)
-                        task_logs.append(stop_log)
-                        self._send_task_logs(task_id, stop_log)
                     except Exception as e:
-                        error_log = f"強制停止容器失敗: {str(e)}"
-                        self._log(error_log, WARNING)
-                        task_logs.append(error_log)
-                        self._send_task_logs(task_id, error_log)
-                    
-                    break
-                
-                # 檢查容器狀態
-                try:
-                    container.reload()
-                    if container.status != 'running':
-                        self._log(f"Container {container_name} stopped naturally, status: {container.status}")
-                        break
-                except Exception as e:
-                    self._log(f"Failed to check container status: {e}")
-                    break
-                
-                # 每隔1秒嘗試收集一次日誌（非阻塞）
-                current_time = time()
-                if current_time - last_log_fetch > 1.0:
+                        self._log(f"強制停止容器失敗: {e}", WARNING)
+                else:
+                    # 檢查容器退出狀態
                     try:
-                        # 獲取最新的日誌（非阻塞，只獲取新的日誌）
-                        logs = container.logs(since=int(last_log_fetch)).decode('utf-8', errors='replace')
-                        if logs.strip():
-                            log_lines = logs.strip().split('\n')
-                            for line in log_lines:
-                                if line.strip():
-                                    self._log(f"[Task {task_id}]: {line}")
-                                    log_buffer.append(line)
-                                    task_logs.append(line)
-                                    log_send_counter += 1
+                        result = container.wait(timeout=2)
+                        success = result.get('StatusCode', -1) == 0
+                    except Exception as e:
+                        self._log(f"Failed to get container exit status: {e}", WARNING)
+                        success = False
+            else:
+                # 使用venv運行任務
+                venv_dir = join(temp_dir, "venv")
+                self._log(f"Creating virtual environment for task {task_id} at {venv_dir}")
+                
+                # 創建虛擬環境
+                venv.create(venv_dir, with_pip=True)
+                
+                # 準備運行腳本（修改run_task.sh或創建新腳本）
+                venv_script = join(workspace, "run_venv.sh")
+                with open(venv_script, 'w') as f:
+                    f.write(f"""#!/bin/bash
+# 激活虛擬環境
+source {join(venv_dir, 'bin/activate')} || source {join(venv_dir, 'Scripts/activate')}
+
+# 安裝依賴
+if [ -f requirements.txt ]; then
+    pip install -r requirements.txt
+fi
+
+# 運行任務
+if [ -f run.py ]; then
+    python run.py
+elif [ -f main.py ]; then
+    python main.py
+else
+    # 尋找並運行第一個找到的Python文件
+    PYTHON_FILE=$(find . -maxdepth 1 -name "*.py" | head -1)
+    if [ ! -z "$PYTHON_FILE" ]; then
+        python $PYTHON_FILE
+    else
+        echo "No Python file found"
+        exit 1
+    fi
+fi
+""")
+                chmod(venv_script, 0o755)
+                
+                # 啟動任務執行進程
+                import subprocess
+                process = None
+                
+                try:
+                    self._log(f"Starting task {task_id} with venv")
+                    
+                    # 使用subprocess運行腳本
+                    process = subprocess.Popen(
+                        [venv_script],
+                        cwd=workspace,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        universal_newlines=True,
+                        bufsize=1
+                    )
+                    
+                    # 設置結果監控
+                    log_buffer = []
+                    log_send_counter = 0
+                    
+                    # 監控輸出
+                    for line in iter(process.stdout.readline, ''):
+                        if stop_event.is_set():
+                            break
                             
-                            # 每20行或每3秒發送一次日誌
-                            if log_send_counter >= 20 or len(log_buffer) > 0:
+                        if line.strip():
+                            self._log(f"[Task {task_id}]: {line.strip()}")
+                            log_buffer.append(line.strip())
+                            task_logs.append(line.strip())
+                            log_send_counter += 1
+                            
+                            # 定期發送日誌
+                            if log_send_counter >= 20:
                                 logs_to_send = "\n".join(log_buffer)
                                 self._send_task_logs(task_id, logs_to_send)
                                 log_buffer.clear()
                                 log_send_counter = 0
-                        
-                        last_log_fetch = current_time
-                    except Exception as e:
-                        self._log(f"Error collecting logs: {e}", WARNING)
-                
-                # 短暫休眠，確保能快速響應停止請求
-                sleep(0.1)
-            
-            # 發送剩餘的日誌
-            if log_buffer:
-                logs_to_send = "\n".join(log_buffer)
-                self._send_task_logs(task_id, logs_to_send)
-                task_logs.extend(log_buffer)
+                    
+                    # 等待進程完成
+                    process.wait(timeout=1)
+                    success = process.returncode == 0
+                    
+                except subprocess.TimeoutExpired:
+                    self._log(f"Process timed out for task {task_id}", WARNING)
+                    success = False
+                    
+                # 處理停止請求
+                if stop_event.is_set():
+                    stop_requested = True
+                    stop_log = f"收到停止請求，立即終止任務 {task_id}"
+                    self._log(stop_log)
+                    task_logs.append(stop_log)
+                    self._send_task_logs(task_id, stop_log)
+                    
+                    # 終止進程
+                    if process and process.poll() is None:
+                        try:
+                            process.terminate()
+                            sleep(0.5)
+                            if process.poll() is None:
+                                process.kill()
+                        except Exception as e:
+                            self._log(f"終止進程失敗: {e}", WARNING)
             
             # 處理任務完成或停止
             if stop_requested:
-                success = False
                 completion_log = f"任務 {task_id} 被用戶強制停止"
             else:
-                # 任務自然結束，檢查退出碼
-                try:
-                    result = container.wait(timeout=2)
-                    success = result.get('StatusCode', -1) == 0
-                    completion_log = f"任務 {task_id} 執行完成，退出碼: {result.get('StatusCode', -1)}"
-                except Exception as e:
-                    success = False
-                    completion_log = f"任務 {task_id} 完成狀態檢查失敗: {str(e)}"
+                completion_log = f"任務 {task_id} 執行完成，狀態: {'成功' if success else '失敗'}"
             
             self._log(completion_log)
             task_logs.append(completion_log)
             self._send_task_logs(task_id, completion_log)
             
-            # 立即打包結果，包含任務日誌
+            # 打包結果
             result_zip = self._create_result_zip(task_id, workspace, success, stop_requested, task_logs)
             
-            # 發送結果到節點池
+            # 發送結果
             if result_zip:
                 try:
                     self.master_stub.ReturnTaskResult(
@@ -974,59 +1373,33 @@ class WorkerNode:
                         metadata=[('authorization', f'Bearer {self.token}')],
                         timeout=30
                     )
-                    
-                    result_log = f"任務 {task_id} 結果已發送到節點池（狀態: {'強制停止' if stop_requested else '完成'}）"
-                    self._log(result_log)
-                    task_logs.append(result_log)
-                    self._send_task_logs(task_id, result_log)
+                    self._log(f"任務 {task_id} 結果已發送")
                 except Exception as e:
-                    error_log = f"發送任務結果失敗: {str(e)}"
-                    self._log(error_log, ERROR)
-                    task_logs.append(error_log)
-                    self._send_task_logs(task_id, error_log)
-            
+                    self._log(f"發送任務結果失敗: {e}", ERROR)
+                    
         except Exception as e:
-            error_log = f"任務 {task_id} 執行失敗: {str(e)}"
+            error_log = f"任務 {task_id} 執行失敗: {e}"
             self._log(error_log, ERROR)
             task_logs.append(error_log)
             self._send_task_logs(task_id, error_log)
             success = False
-        
+            
         finally:
-            # 清理容器（強制清理）
+            # 清理容器
             if container:
                 try:
-                    try:
-                        container.kill()
-                    except:
-                        pass
                     container.remove(force=True)
-                    cleanup_log = f"任務 {task_id} 容器已強制清理"
-                    self._log(cleanup_log)
-                    task_logs.append(cleanup_log)
-                    self._send_task_logs(task_id, cleanup_log)
-                except Exception as e:
-                    cleanup_error = f"清理容器失敗: {str(e)}"
-                    self._log(cleanup_error, WARNING)
-                    task_logs.append(cleanup_error)
-                    self._send_task_logs(task_id, cleanup_error)
-            
+                except:
+                    pass
+                    
             # 清理臨時目錄
             if temp_dir and exists(temp_dir):
                 try:
                     rmtree(temp_dir)
-                    self._log(f"Temporary directory {temp_dir} cleaned up")
-                except Exception as e:
-                    self._log(f"Failed to clean up temp dir: {e}", WARNING)
+                except:
+                    pass
             
-            # 發送最終的完整日誌
-            try:
-                final_logs = "\n".join(task_logs)
-                self._send_task_logs(task_id, f"=== 任務完整日誌 ===\n{final_logs}\n=== 日誌結束 ===")
-            except Exception as e:
-                self._log(f"Failed to send final logs: {e}", WARNING)
-            
-            # 通知完成
+            # 通知任務完成
             try:
                 self.master_stub.TaskCompleted(
                     nodepool_pb2.TaskCompletedRequest(
@@ -1040,12 +1413,9 @@ class WorkerNode:
             except Exception as e:
                 self._log(f"Failed to notify task completion: {e}", WARNING)
             
-            # 重置狀態
-            self.current_task_id = None
-            self.status = "Idle"
-            self._stop_current_task = False
-            status_msg = "強制停止並已打包結果" if stop_requested else "執行完成"
-            self._log(f"Task {task_id} cleanup completed, status reset to Idle ({status_msg})")
+            # 釋放資源
+            self._release_resources(task_id)
+            self._log(f"Task {task_id} resources released, status: {'success' if success else 'failed'}")
 
     def _create_result_zip(self, task_id, workspace, success, stopped=False, task_logs=None):
         """創建結果 ZIP，包含停止狀態信息和任務日誌"""
@@ -1150,29 +1520,37 @@ class WorkerNodeServicer(nodepool_pb2_grpc.WorkerNodeServiceServicer):
         task_id = request.task_id
         task_zip = request.task_zip
         
+        # 獲取任務所需資源
+        required_resources = {
+            "cpu": request.cpu,
+            "memory_gb": request.memory_gb,
+            "gpu": request.gpu,
+            "gpu_memory_gb": request.gpu_memory_gb
+        }
+        
         file_size_mb = len(task_zip) / (1024 * 1024)
         info(f"===== 收到執行任務請求 =====")
         info(f"任務ID: {task_id}")
         info(f"檔案大小: {file_size_mb:.1f}MB")
+        info(f"請求資源: CPU={required_resources['cpu']}, RAM={required_resources['memory_gb']}GB, GPU={required_resources['gpu']}, GPU_MEM={required_resources['gpu_memory_gb']}GB")
         info(f"當前節點狀態: {self.worker_node.status}")
-        info(f"是否已註冊: {self.worker_node.is_registered}")
-        info(f"Docker 可用: {self.worker_node.docker_available}")
         
-        # 快速檢查節點狀態
-        if self.worker_node.current_task_id:
-            error_msg = f"節點忙碌中，拒絕任務 {task_id} (當前任務: {self.worker_node.current_task_id})"
+        # 檢查是否有足夠資源
+        if not self.worker_node._check_resources_available(required_resources):
+            error_msg = f"資源不足，拒絕任務 {task_id}"
             warning(error_msg)
             return nodepool_pb2.ExecuteTaskResponse(
                 success=False, 
                 message=error_msg
             )
         
-        if not self.worker_node.docker_available:
-            error_msg = f"Docker 不可用，拒絕任務 {task_id}"
-            error(error_msg)
+        # 檢查Docker要求
+        if not self.worker_node.docker_available and self.worker_node.trust_score <= 50:
+            error_msg = f"無Docker環境且信任分數低，拒絕任務 {task_id}"
+            warning(error_msg)
             return nodepool_pb2.ExecuteTaskResponse(
                 success=False, 
-                message="Docker not available"
+                message="Docker unavailable and trust score too low"
             )
         
         # 檢查任務數據完整性和大小
@@ -1194,20 +1572,12 @@ class WorkerNodeServicer(nodepool_pb2_grpc.WorkerNodeServiceServicer):
             )
         
         try:
-            # 立即響應接受任務，避免超時
-            self.worker_node.current_task_id = task_id
-            self.worker_node.status = f"Receiving: {task_id} ({file_size_mb:.1f}MB)"
-            
-            info(f"開始接受任務 {task_id}，狀態更新為: {self.worker_node.status}")
-            
-            # 預先驗證 ZIP 檔案完整性
+            # 驗證ZIP檔案
             try:
                 with ZipFile(BytesIO(task_zip), 'r') as zip_ref:
                     zip_ref.testzip()
                 info(f"任務 {task_id} ZIP 檔案驗證成功")
             except Exception as zip_error:
-                self.worker_node.current_task_id = None
-                self.worker_node.status = "Idle"
                 error_msg = f"任務 {task_id} ZIP 檔案損壞: {zip_error}"
                 error(error_msg)
                 return nodepool_pb2.ExecuteTaskResponse(
@@ -1215,14 +1585,19 @@ class WorkerNodeServicer(nodepool_pb2_grpc.WorkerNodeServiceServicer):
                     message=f"Invalid ZIP file: {str(zip_error)}"
                 )
             
-            # 更新狀態為準備執行
-            self.worker_node.status = f"Preparing: {task_id}"
-            info(f"任務 {task_id} 檔案驗證完成，開始準備執行")
+            # 分配資源
+            if not self.worker_node._allocate_resources(task_id, required_resources):
+                error_msg = f"資源分配失敗，拒絕任務 {task_id}"
+                warning(error_msg)
+                return nodepool_pb2.ExecuteTaskResponse(
+                    success=False, 
+                    message="Failed to allocate resources"
+                )
             
             # 啟動執行線程
             execution_thread = Thread(
                 target=self.worker_node._execute_task,
-                args=(task_id, task_zip),
+                args=(task_id, task_zip, required_resources),
                 daemon=True,
                 name=f"TaskExecution-{task_id}"
             )
@@ -1230,17 +1605,15 @@ class WorkerNodeServicer(nodepool_pb2_grpc.WorkerNodeServiceServicer):
             
             success_msg = f"任務 {task_id} 已接受並開始準備執行 (檔案大小: {file_size_mb:.1f}MB)"
             info(success_msg)
-            info(f"===== 任務接受完成 =====")
             
             return nodepool_pb2.ExecuteTaskResponse(
                 success=True, 
-                message=f"Task {task_id} accepted, file size: {file_size_mb:.1f}MB"
+                message=success_msg
             )
             
         except Exception as e:
-            # 如果出錯，重置狀態
-            self.worker_node.current_task_id = None
-            self.worker_node.status = "Idle"
+            # 如果出錯，釋放資源
+            self.worker_node._release_resources(task_id)
             error_msg = f"接受任務 {task_id} 時發生錯誤: {e}"
             error(error_msg)
             return nodepool_pb2.ExecuteTaskResponse(
@@ -1248,60 +1621,104 @@ class WorkerNodeServicer(nodepool_pb2_grpc.WorkerNodeServiceServicer):
                 message=f"Failed to accept task: {str(e)}"
             )
 
+    def ReportOutput(self, request, context):
+        """報告任務輸出"""
+        node_id = request.node_id
+        task_id = request.task_id
+        output = request.output
+        
+        if node_id != self.worker_node.node_id:
+            return nodepool_pb2.StatusResponse(
+                success=False,
+                message=f"Node ID mismatch: {node_id} != {self.worker_node.node_id}"
+            )
+        
+        try:
+            # 檢查任務是否存在
+            with self.worker_node.resources_lock:
+                if task_id not in self.worker_node.running_tasks:
+                    return nodepool_pb2.StatusResponse(
+                        success=False,
+                        message=f"Task {task_id} not found"
+                    )
+            
+            # 發送輸出到主節點
+            self.worker_node._send_task_logs(task_id, output)
+            
+            return nodepool_pb2.StatusResponse(
+                success=True,
+                message=f"Output reported for task {task_id}"
+            )
+        except Exception as e:
+            return nodepool_pb2.StatusResponse(
+                success=False,
+                message=f"Failed to report output: {str(e)}"
+            )
+
     def ReportRunningStatus(self, request, context):
         """報告運行狀態"""
         task_id = request.task_id
-        if self.worker_node.current_task_id == task_id:
+        
+        # 檢查任務是否存在
+        with self.worker_node.resources_lock:
+            if task_id not in self.worker_node.running_tasks:
+                return nodepool_pb2.RunningStatusResponse(
+                    success=False,
+                    message=f"Not running task {task_id}"
+                )
+        
+        # 獲取CPU和內存使用率（這裡只是示例）
+        cpu_usage = request.cpu_usage
+        memory_usage = request.memory_usage
+        gpu_usage = request.gpu_usage
+        gpu_memory_usage = request.gpu_memory_usage
+        
+        # 發送狀態報告
+        try:
+            # 模擬發送狀態報告
+            self.worker_node._log(f"Reporting status for task {task_id}: CPU={cpu_usage}%, MEM={memory_usage}MB, GPU={gpu_usage}%, GPU_MEM={gpu_memory_usage}MB")
+            
+            # 這裡可以添加更多邏輯，如計算CPT獎勵等
+            cpt_reward = 1  # 簡單示例，實際應該基於資源使用量計算
+            
             return nodepool_pb2.RunningStatusResponse(
                 success=True,
-                message=f"Task {task_id} running"
+                message=f"Task {task_id} running",
+                cpt_reward=cpt_reward
             )
-        else:
+        except Exception as e:
+            self.worker_node._log(f"Failed to report status: {e}", WARNING)
             return nodepool_pb2.RunningStatusResponse(
                 success=False,
-                message=f"Not running task {task_id}"
+                message=f"Failed to report status: {str(e)}"
             )
 
     def StopTaskExecution(self, request, context):
         """立即強制停止任務執行並打包結果"""
         task_id = request.task_id
-        if self.worker_node.current_task_id == task_id:
-            info(f"收到停止任務 {task_id} 的請求，立即執行強制停止")
-            
-            # 立即設置停止標誌
-            self.worker_node._stop_current_task = True
-            
-            # 等待任務處理停止請求，但時間較短
-            max_wait_time = 10
-            wait_count = 0
-            while self.worker_node.current_task_id == task_id and wait_count < max_wait_time:
-                sleep(0.5)
-                wait_count += 0.5
-                
-                # 每2秒報告一次進度
-                if int(wait_count) % 2 == 0 and wait_count > 0:
-                    info(f"強制停止任務 {task_id} 處理中... ({wait_count:.1f}/{max_wait_time}秒)")
-            
-            if wait_count >= max_wait_time:
-                # 如果超時，直接重置狀態
-                self.worker_node.current_task_id = None
-                self.worker_node.status = "Idle"
-                self.worker_node._stop_current_task = False
-                warning(f"任務 {task_id} 超時強制停止（{max_wait_time} 秒）")
+        
+        # 檢查任務是否存在
+        with self.worker_node.resources_lock:
+            if task_id not in self.worker_node.running_tasks:
                 return nodepool_pb2.StopTaskExecutionResponse(
-                    success=True,
-                    message=f"Task {task_id} force stopped (timeout after {max_wait_time}s)"
+                    success=False,
+                    message=f"Task {task_id} not running"
                 )
-            else:
-                info(f"任務 {task_id} 已成功停止並打包結果（耗時 {wait_count:.1f} 秒）")
-                return nodepool_pb2.StopTaskExecutionResponse(
-                    success=True,
-                    message=f"Task {task_id} successfully stopped and results packaged (took {wait_count:.1f}s)"
-                )
+        
+        info(f"收到停止任務 {task_id} 的請求，立即執行強制停止")
+        
+        # 發送停止信號
+        success = self.worker_node._stop_task(task_id)
+        
+        if success:
+            return nodepool_pb2.StopTaskExecutionResponse(
+                success=True,
+                message=f"Stop signal sent to task {task_id}"
+            )
         else:
             return nodepool_pb2.StopTaskExecutionResponse(
                 success=False,
-                message=f"Task {task_id} not running"
+                message=f"Failed to send stop signal to task {task_id}"
             )
 
 if __name__ == "__main__":
@@ -1309,7 +1726,7 @@ if __name__ == "__main__":
         worker = WorkerNode()
         
         # 啟動 gRPC 服務
-        server = grpc.server(ThreadPoolExecutor(max_workers=5))
+        server = grpc.server(ThreadPoolExecutor(max_workers=10))  # 增加工作線程數
         nodepool_pb2_grpc.add_WorkerNodeServiceServicer_to_server(
             WorkerNodeServicer(worker), server
         )
@@ -1319,6 +1736,8 @@ if __name__ == "__main__":
         
         worker._log(f"Worker Node started on port {NODE_PORT}")
         worker._log(f"Flask UI: http://localhost:{FLASK_PORT}")
+        worker._log(f"Docker status: {worker.docker_status}")
+        worker._log(f"Available resources: CPU={worker.available_resources['cpu']}, Memory={worker.available_resources['memory_gb']}GB, GPU={worker.available_resources['gpu']}")
         
         # 保持運行
         try:
@@ -1327,6 +1746,7 @@ if __name__ == "__main__":
         except KeyboardInterrupt:
             worker._log("Shutting down...")
             worker._stop_status_reporting()
+            worker._stop_all_tasks()
             server.stop(grace=5)
             
     except Exception as e:

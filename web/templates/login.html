@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}登入 - HiveMind{% endblock %}
+{% block title %}Login - HiveMind{% endblock %}
 
 {% block content %}
 <div class="min-h-screen flex items-center justify-center p-4 bg-gray-100 dark:bg-gray-900 transition">
@@ -11,37 +11,37 @@
                     <i class="fas fa-network-wired text-3xl text-gray-600 dark:text-gray-300"></i>
                 </span>
             </div>
-            <h2 class="text-3xl font-bold text-gray-900 dark:text-white mb-2 tracking-tight">歡迎回來</h2>
-            <p class="text-gray-500 dark:text-gray-400">登入您的 HiveMind 帳戶</p>
+            <h2 class="text-3xl font-bold text-gray-900 dark:text-white mb-2 tracking-tight" data-i18n="login_title">歡迎回來</h2>
+            <p class="text-gray-500 dark:text-gray-400" data-i18n="login_subtitle">登入您的 HiveMind 帳戶</p>
         </div>
         <div class="bg-white dark:bg-gray-800 rounded-2xl shadow-xl p-8 animate-fade-in-up">
             <form id="loginForm" class="space-y-6" onsubmit="handleLogin(event)">
                 <div>
-                    <label for="username" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">用戶名</label>
-                    <input id="username" name="username" type="text" required class="block w-full px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 transition" placeholder="請輸入用戶名">
+                    <label for="username" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1" data-i18n="login_username_label">用戶名</label>
+                    <input id="username" name="username" type="text" required class="block w-full px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 transition" data-i18n-placeholder="login_username_placeholder" placeholder="請輸入用戶名">
                 </div>
                 <div>
-                    <label for="password" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">密碼</label>
-                    <input id="password" name="password" type="password" required class="block w-full px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 transition" placeholder="請輸入密碼">
+                    <label for="password" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1" data-i18n="login_password_label">密碼</label>
+                    <input id="password" name="password" type="password" required class="block w-full px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 transition" data-i18n-placeholder="login_password_placeholder" placeholder="請輸入密碼">
                 </div>
                 <!-- Cloudflare Turnstile 人機驗證 -->
                 <div>
-                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">人機驗證</label>
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1" data-i18n="login_captcha_label">人機驗證</label>
                     <div class="flex justify-center">
                         <div class="cf-turnstile" data-sitekey="0x4AAAAAABkJQaM8US5k-aWw" data-theme="auto"></div>
                     </div>
                 </div>
                 <div id="error-message" class="hidden w-full text-center text-red-600 bg-red-100 dark:bg-red-900 dark:text-red-300 rounded-lg px-4 py-2 text-sm"></div>
                 <div id="success-message" class="hidden w-full text-center text-green-600 bg-green-100 dark:bg-green-900 dark:text-green-300 rounded-lg px-4 py-2 text-sm"></div>
-                <button type="submit" id="submitBtn" class="w-full px-4 py-2 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-600 transition-all duration-200 flex items-center justify-center gap-2">
+                <button type="submit" id="submitBtn" class="w-full px-4 py-2 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-600 transition-all duration-200 flex items-center justify-center gap-2" data-i18n="login_btn">
                     <span id="submitText">登入</span>
                     <i id="loadingIcon" class="fas fa-spinner fa-spin hidden ml-2"></i>
                 </button>
             </form>
             <div class="mt-6 text-center">
-                <p class="text-gray-500 dark:text-gray-400">
+                <p class="text-gray-500 dark:text-gray-400" data-i18n="login_no_account">
                     還沒有帳戶？
-                    <a href="/register" class="text-blue-600 dark:text-blue-400 underline hover:text-blue-800 dark:hover:text-blue-200 font-medium transition">立即註冊</a>
+                    <a href="/register" class="text-blue-600 dark:text-blue-400 underline hover:text-blue-800 dark:hover:text-blue-200 font-medium transition" data-i18n="login_register_link">立即註冊</a>
                 </p>
             </div>
         </div>
@@ -67,15 +67,16 @@ async function handleLogin(event) {
     
     // 檢查人機驗證
     const turnstileResponse = document.querySelector('.cf-turnstile [name="cf-turnstile-response"]')?.value;
+    const lang = localStorage.getItem('lang') || 'zh-tw';
     if (!turnstileResponse) {
-        errorMessage.textContent = '請完成人機驗證';
+        errorMessage.textContent = lang === 'zh-tw' ? '請完成人機驗證' : 'Please complete human verification';
         errorMessage.classList.remove('hidden');
         return;
     }
     
     // 顯示載入狀態
     submitBtn.disabled = true;
-    submitText.textContent = '登入中...';
+    submitText.textContent = lang === 'zh-tw' ? '登入中...' : 'Logging in...';
     loadingIcon.classList.remove('hidden');
     
     try {
@@ -98,7 +99,8 @@ async function handleLogin(event) {
         
         if (response.ok) {
             // 登入成功
-            successMessage.textContent = result.message || '登入成功！';
+            const successMsg = lang === 'zh-tw' ? '登入成功！' : 'Login successful!';
+            successMessage.textContent = result.message || successMsg;
             successMessage.classList.remove('hidden');
             
             // 儲存 token 和用戶信息 (統一使用 access_token 和 user_info)
@@ -115,7 +117,8 @@ async function handleLogin(event) {
             }, 1000);
         } else {
             // 登入失敗
-            errorMessage.textContent = result.error || '登入失敗，請重試';
+            const failMsg = lang === 'zh-tw' ? '登入失敗，請重試' : 'Login failed, please try again';
+            errorMessage.textContent = result.error || failMsg;
             errorMessage.classList.remove('hidden');
             // 重置人機驗證
             if (typeof turnstile !== 'undefined') {
@@ -124,7 +127,8 @@ async function handleLogin(event) {
         }
     } catch (error) {
         console.error('登入錯誤:', error);
-        errorMessage.textContent = '網路錯誤，請檢查您的連線';
+        const networkError = lang === 'zh-tw' ? '網路錯誤，請檢查您的連線' : 'Network error, please check your connection';
+        errorMessage.textContent = networkError;
         errorMessage.classList.remove('hidden');
         if (typeof turnstile !== 'undefined') {
             turnstile.reset();
@@ -132,10 +136,12 @@ async function handleLogin(event) {
     } finally {
         // 恢復按鈕狀態
         submitBtn.disabled = false;
-        submitText.textContent = '登入';
+        submitText.textContent = lang === 'zh-tw' ? '登入' : 'Login';
         loadingIcon.classList.add('hidden');
     }
 }
+
+
 
 // 檢查是否已經登入
 document.addEventListener('DOMContentLoaded', function() {

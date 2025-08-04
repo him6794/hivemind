@@ -656,11 +656,6 @@ def register_page():
 @app.route('/download')
 def download_page():
     return render_template('download.html')
-
-@app.route('/docs')
-def docs_page():
-    return render_template('docs.html')
-
 @app.route('/balance')
 def balance_page():
     return render_template('balance.html')
@@ -680,7 +675,7 @@ def privacy_page():
 if __name__ == '__main__':
     # 從環境變數讀取運行配置
     host = os.getenv('FLASK_HOST', '0.0.0.0')
-    port = int(os.getenv('FLASK_PORT', '5007'))
+    port = int(os.getenv('FLASK_PORT', '80'))
     debug = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
     
     print(f"啟動 Flask 應用程式:")
@@ -690,4 +685,4 @@ if __name__ == '__main__':
     print(f"  - VPN 服務 URL: {VPN_SERVICE_URL}")
     print(f"  - 限流設置: {RATE_LIMIT_SECONDS} 秒")
     
-    app.run(debug=debug, host=host, port=port)
+    app.run(debug=debug, host=host, port=80)

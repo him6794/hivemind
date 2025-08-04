@@ -40,6 +40,11 @@ class UserServiceStub(object):
                 request_serializer=nodepool__pb2.LoginRequest.SerializeToString,
                 response_deserializer=nodepool__pb2.LoginResponse.FromString,
                 _registered_method=True)
+        self.Register = channel.unary_unary(
+                '/nodepool.UserService/Register',
+                request_serializer=nodepool__pb2.RegisterRequest.SerializeToString,
+                response_deserializer=nodepool__pb2.RegisterResponse.FromString,
+                _registered_method=True)
         self.Transfer = channel.unary_unary(
                 '/nodepool.UserService/Transfer',
                 request_serializer=nodepool__pb2.TransferRequest.SerializeToString,
@@ -57,6 +62,12 @@ class UserServiceServicer(object):
     """
 
     def Login(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def Register(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -82,6 +93,11 @@ def add_UserServiceServicer_to_server(servicer, server):
                     servicer.Login,
                     request_deserializer=nodepool__pb2.LoginRequest.FromString,
                     response_serializer=nodepool__pb2.LoginResponse.SerializeToString,
+            ),
+            'Register': grpc.unary_unary_rpc_method_handler(
+                    servicer.Register,
+                    request_deserializer=nodepool__pb2.RegisterRequest.FromString,
+                    response_serializer=nodepool__pb2.RegisterResponse.SerializeToString,
             ),
             'Transfer': grpc.unary_unary_rpc_method_handler(
                     servicer.Transfer,
@@ -122,6 +138,33 @@ class UserService(object):
             '/nodepool.UserService/Login',
             nodepool__pb2.LoginRequest.SerializeToString,
             nodepool__pb2.LoginResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Register(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/nodepool.UserService/Register',
+            nodepool__pb2.RegisterRequest.SerializeToString,
+            nodepool__pb2.RegisterResponse.FromString,
             options,
             channel_credentials,
             insecure,

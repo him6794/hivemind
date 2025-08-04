@@ -15,7 +15,7 @@ import uuid
 import requests  # 新增
 
 # --- Configuration ---
-GRPC_SERVER_ADDRESS = os.environ.get('GRPC_SERVER_ADDRESS', '10.0.0.1:50051')
+GRPC_SERVER_ADDRESS = os.environ.get('GRPC_SERVER_ADDRESS', '127.0.0.1:50051')
 FLASK_SECRET_KEY = os.environ.get('FLASK_SECRET_KEY', 'a-default-master-secret-key')
 # 移除預設的用戶名和密碼
 MASTER_USERNAME = os.environ.get('MASTER_USERNAME')  # 不設默認值
@@ -41,7 +41,7 @@ class MasterNodeUI:
         self.setup_flask_routes()
         
         # 用戶會話管理
-        self.user_list = []  # [{username, token, cpt_balance, login_time}]
+        self.user_list = []
         self.user_list_lock = threading.Lock()
 
     def add_or_update_user(self, username, token):
@@ -142,16 +142,24 @@ class MasterNodeUI:
             balance_response = self.user_stub.GetBalance(balance_request, timeout=30)
             if balance_response.success:
                 user['cpt_balance'] = balance_response.balance
-                # 簡化成本計算
+                
+                # 增強的成本計算 - 支持任務優先級
                 memory_gb_val = float(requirements.get("memory_gb", 0))
                 cpu_score_val = float(requirements.get("cpu_score", 0))
                 gpu_score_val = float(requirements.get("gpu_score", 0))
                 gpu_memory_gb_val = float(requirements.get("gpu_memory_gb", 0))
-                cpt_cost = max(1, int(memory_gb_val + cpu_score_val / 100 + gpu_score_val / 100 + gpu_memory_gb_val))
+                base_cost = max(1, int(memory_gb_val + cpu_score_val / 100 + gpu_score_val / 100 + gpu_memory_gb_val))
+                
+                # 應用優先級倍數
+                priority = requirements.get("task_priority", "normal")
+                priority_multiplier = {"normal": 1.0, "high": 1.2, "urgent": 1.5}.get(priority, 1.0)
+                cpt_cost = int(base_cost * priority_multiplier)
                 
                 if balance_response.balance < cpt_cost:
-                    logging.error(f"用戶 {username} 餘額不足: 需要 {cpt_cost} CPT，但只有 {balance_response.balance} CPT")
+                    logging.error(f"用戶 {username} 餘額不足: 需要 {cpt_cost} CPT (基本: {base_cost}, 優先級: {priority}), 但只有 {balance_response.balance} CPT")
                     return task_id, False
+                    
+                logging.info(f"任務 {task_id} 成本計算: 基本 {base_cost} CPT, 優先級 {priority} (x{priority_multiplier}), 總計 {cpt_cost} CPT")
             else:
                 logging.error(f"無法獲取用戶 {username} 餘額")
                 return task_id, False
@@ -171,13 +179,15 @@ class MasterNodeUI:
             response = self.master_stub.UploadTask(request, metadata=metadata, timeout=60)
             
             if response.success:
-                logging.info(f"Task {task_id} uploaded successfully")
+                logging.info(f"Task {task_id} uploaded successfully with priority {priority}")
                 with self.task_cache_lock:
                     self.task_status_cache[task_id] = {
                         "task_id": task_id,
                         "status": "PENDING",
-                        "message": "Task submitted",
-                        "last_polled": time.time()
+                        "message": f"Task submitted (Priority: {priority})",
+                        "last_polled": time.time(),
+                        "priority": priority,
+                        "estimated_cost": cpt_cost
                     }
                 return task_id, True
             else:
@@ -241,12 +251,30 @@ class MasterNodeUI:
                         created_time = time.strftime('%H:%M:%S', time.localtime(created_timestamp))
                     except:
                         created_time = "未知"
+                
+                # 獲取任務的資源信息
+                resource_info = ""
+                if hasattr(task, 'assigned_node') and task.assigned_node:
+                    resource_info = f"節點: {task.assigned_node}"
+                
+                # 從緩存獲取額外信息
+                cache_info = self.task_status_cache.get(task.task_id, {})
+                priority = cache_info.get('priority', 'normal')
+                estimated_cost = cache_info.get('estimated_cost', 0)
+                
+                priority_icons = {"normal": "🔵", "high": "🟡", "urgent": "🔴"}
+                priority_text = f"{priority_icons.get(priority, '🔵')} {priority.title()}"
+                
                 task_list.append({
                     "task_id": task.task_id,
                     "status": task.status,
-                    "progress": "100%" if task.status == "COMPLETED" else "50%" if task.status == "RUNNING" else "0%",
-                    "message": f"狀態: {task.status}",
-                    "last_update": created_time
+                    "progress": "100%" if task.status == "COMPLETED" else "75%" if task.status == "RUNNING" else "25%" if task.status == "PENDING" else "0%",
+                    "message": f"狀態: {task.status} | 優先級: {priority_text}",
+                    "last_update": created_time,
+                    "assigned_node": getattr(task, 'assigned_node', '等待分配'),
+                    "resource_info": resource_info,
+                    "priority": priority,
+                    "estimated_cost": estimated_cost
                 })
             return jsonify({"tasks": task_list})
 
@@ -368,7 +396,8 @@ class MasterNodeUI:
                         "gpu_score": request.form.get('gpu_score', 0),
                         "gpu_memory_gb": request.form.get('gpu_memory_gb', 0),
                         "location": request.form.get('location', 'Any'),
-                        "gpu_name": request.form.get('gpu_name', '')
+                        "gpu_name": request.form.get('gpu_name', ''),
+                        "task_priority": request.form.get('task_priority', 'normal')  # 新增優先級
                     }
                     
                     success_count = 0
@@ -617,7 +646,9 @@ class MasterNodeUI:
 
     def run(self):
         # 先自動連線 VPN
-        self.auto_join_vpn()
+
+        
+        #self.auto_join_vpn()
         if not self._connect_grpc():
             logging.error("無法連接到節點池，退出")
             return

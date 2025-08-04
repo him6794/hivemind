@@ -81,7 +81,7 @@ def build_executable():
     ensure_required_files()
     stop_progress(progress)
     
-    # Nuitka 打包參數 - 必須包含 HTML 模板
+    # Nuitka 打包參數 - 包含拆分邏輯依賴
     nuitka_args = [
         sys.executable, "-m", "nuitka",
         "--standalone",
@@ -100,6 +100,10 @@ def build_executable():
         # 包含 protobuf 檔案
         "--include-data-file=nodepool_pb2.py=nodepool_pb2.py",
         "--include-data-file=nodepool_pb2_grpc.py=nodepool_pb2_grpc.py",
+        # 包含拆分邏輯需要的模組
+        "--include-module=tempfile",
+        "--include-module=shutil",
+        "--include-module=json",
     ]
     
     # 平台特定參數

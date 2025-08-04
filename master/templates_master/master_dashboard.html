@@ -748,40 +748,66 @@
                 const progress = task.progress || '0%';
                 const lastUpdate = task.last_update || '-';
                 const message = task.message || '';
+                const assignedNode = task.assigned_node || '等待分配';
+                const resourceInfo = task.resource_info || '';
                 
                 const canStop = ['PENDING', 'RUNNING'].includes(status.toUpperCase());
                 // 修正：允許 COMPLETED、STOPPED 和 FAILED 狀態的任務下載（可能有部分結果）
                 const canDownload = ['COMPLETED', 'STOPPED', 'FAILED'].includes(status.toUpperCase());
                 
+                // 狀態圖標
+                let statusIcon = '';
+                switch(status.toUpperCase()) {
+                    case 'PENDING': statusIcon = '⏳'; break;
+                    case 'RUNNING': statusIcon = '▶️'; break;
+                    case 'COMPLETED': statusIcon = '✅'; break;
+                    case 'STOPPED': statusIcon = '⏹️'; break;
+                    case 'FAILED': statusIcon = '❌'; break;
+                    default: statusIcon = '❓'; break;
+                }
+                
                 const row = document.createElement('tr');
                 row.innerHTML = `
                     <td>
                         <div style="font-weight: 500;">${escapeHtml(task.task_id)}</div>
-                        <div style="font-size: 0.875rem; color: #666; margin-top: 0.25rem;">${escapeHtml(message)}</div>
+                        <div style="font-size: 0.875rem; color: #666; margin-top: 0.25rem;">
+                            ${escapeHtml(message)}
+                            ${assignedNode !== '等待分配' ? `<br>📍 節點: ${escapeHtml(assignedNode)}` : ''}
+                            ${resourceInfo ? `<br>💾 ${escapeHtml(resourceInfo)}` : ''}
+                        </div>
                     </td>
                     <td>
-                        <span class="status-badge status-${status.toLowerCase()}">${status}</span>
+                        <span class="status-badge status-${status.toLowerCase()}">
+                            ${statusIcon} ${status}
+                        </span>
                     </td>
-                    <td>${progress}</td>
+                    <td>
+                        <div style="display: flex; align-items: center; gap: 0.5rem;">
+                            <div style="flex-grow: 1; background: #f1f5f9; border-radius: 4px; height: 8px;">
+                                <div style="background: var(--primary-color); height: 100%; border-radius: 4px; width: ${progress}; transition: width 0.3s ease;"></div>
+                            </div>
+                            <span style="font-size: 0.8rem; color: var(--text-secondary);">${progress}</span>
+                        </div>
+                    </td>
                     <td>${lastUpdate}</td>
                     <td>
                         <div class="action-buttons">
                             <button class="view-logs-btn" 
                                     onclick="showTaskLogs('${escapeHtml(task.task_id)}')"
                                     title="查看日誌">
-                                日誌
+                                📋 日誌
                             </button>
                             <button class="download-btn" 
                                     onclick="downloadTaskResult('${escapeHtml(task.task_id)}')"
                                     ${canDownload ? '' : 'disabled'}
                                     title="${canDownload ? '下載結果' : '任務未完成或無結果'}">
-                                下載
+                                💾 下載
                             </button>
                             <button class="stop-task-btn" 
                                     onclick="stopTask('${escapeHtml(task.task_id)}')"
                                     ${canStop ? '' : 'disabled'}
                                     title="${canStop ? '停止任務' : '任務無法停止'}">
-                                停止
+                                🛑 停止
                             </button>
                         </div>
                     </td>

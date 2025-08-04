@@ -132,23 +132,26 @@ class UserManager:
     def login_user(self, username, password):
         """登錄用戶，返回 token"""
         if not username or not password:
-             return False, "用戶名和密碼不能為空", ""
+            return False, "用戶名和密碼不能為空", None
+        
         try:
-            user = self.query_one(
-                "SELECT id, password FROM users WHERE username = ?",
-                (username,)
-            )
-            # 檢查 user 是否存在以及密碼是否匹配
-            if user and bcrypt.checkpw(password.encode(), user["password"].encode()):
-                token = self._generate_token(user["id"])
-                logging.info(f"用戶 {username} (ID: {user['id']}) 登錄成功")
-                return True, "登录成功", token
+            user = self.query_one("SELECT id, username, password FROM users WHERE username = ?", (username,))
+            if user and bcrypt.checkpw(password.encode(), user['password'].encode()):
+                # 生成 JWT token
+                payload = {
+                    'user_id': user['id'],
+                    'username': user['username'],
+                    'exp': datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=TOKEN_EXPIRY_MINUTES)
+                }
+                token = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
+                logging.info(f"用戶 {username} 登錄成功")
+                return True, "登錄成功", token
             else:
                 logging.warning(f"用戶 {username} 登錄失敗：用戶名或密碼錯誤")
-                return False, "用户名或密码错误", ""
+                return False, "用戶名或密碼錯誤", None
         except Exception as e:
-             logging.error(f"用戶 {username} 登錄時發生錯誤: {e}", exc_info=True)
-             return False, "服務器內部錯誤", ""
+            logging.error(f"用戶 {username} 登錄時發生錯誤: {e}", exc_info=True)
+            return False, "服務器內部錯誤", None
 
     def _generate_token(self, user_id):
         """生成 JWT Token"""
@@ -216,58 +219,88 @@ class UserManager:
             logging.error(f"查詢用戶 {user_id} 餘額時發生錯誤: {e}")
             return 0
 
-    def transfer_tokens(self, sender_identifier, receiver_username, amount):
-        """執行轉帳操作，保證原子性 - 支持用戶名或用戶ID作為發送者"""
-        if amount <= 0:
-            return False, "轉帳金額必須大於零"
-        if not receiver_username:
-            return False, "接收者用戶名不能為空"
+    def get_user_credit_score(self, username):
+        """獲取用戶信用評分"""
+        try:
+            user = self.query_one("SELECT credit_score FROM users WHERE username = ?", (username,))
+            if user:
+                return user['credit_score']
+            else:
+                logging.warning(f"找不到用戶 {username}，返回默認信用評分 100")
+                return 100
+        except Exception as e:
+            logging.error(f"獲取用戶 {username} 信用評分失敗: {e}")
+            return 100
 
+    def update_user_credit_score(self, user_identifier, new_credit_score):
+        """
+        更新用戶信用評分
+        
+        Args:
+            user_identifier: 用戶名或用戶ID
+            new_credit_score: 新的信用評分
+            
+        Returns:
+            tuple: (success: bool, message: str)
+        """
+        if new_credit_score < 0 or new_credit_score > 1000:
+            return False, "信用評分必須在 0-1000 之間"
+        
+        try:
+            # 根據類型決定查詢方式
+            if isinstance(user_identifier, str) and not user_identifier.isdigit():
+                # 用戶名
+                user_row = self.query_one("SELECT id, username, credit_score FROM users WHERE username = ?", (user_identifier,))
+            else:
+                # 用戶ID
+                user_id = int(user_identifier)
+                user_row = self.query_one("SELECT id, username, credit_score FROM users WHERE id = ?", (user_id,))
+            
+            if not user_row:
+                return False, "用戶不存在"
+            
+            old_score = user_row["credit_score"]
+            rows_affected = self.execute("UPDATE users SET credit_score = ? WHERE id = ?", (new_credit_score, user_row["id"]))
+            
+            if rows_affected > 0:
+                logging.info(f"用戶 {user_row['username']} (ID: {user_row['id']}) 信用評分已更新: {old_score} → {new_credit_score}")
+                return True, f"信用評分已更新: {old_score} → {new_credit_score}"
+            else:
+                return False, "更新信用評分失敗"
+                
+        except Exception as e:
+            logging.error(f"更新用戶 {user_identifier} 信用評分失敗: {e}", exc_info=True)
+            return False, f"操作失敗: {str(e)}"
+
+    def transfer_tokens(self, sender_username, receiver_username, amount):
+        """轉帳 tokens（用戶名版本）"""
+        if amount <= 0:
+            return False, "轉帳金額必須大於 0"
+        
         try:
             with self._db_connection() as cursor:
-                # 1. 獲取發送者信息（支持用戶名或用戶ID）
-                if isinstance(sender_identifier, str) and not sender_identifier.isdigit():
-                    # 發送者是用戶名
-                    cursor.execute("SELECT id, username, tokens FROM users WHERE username = ?", (sender_identifier,))
-                else:
-                    # 發送者是用戶ID
-                    sender_id = int(sender_identifier)
-                    cursor.execute("SELECT id, username, tokens FROM users WHERE id = ?", (sender_id,))
+                # 檢查發送方餘額
+                sender = cursor.execute("SELECT tokens FROM users WHERE username = ?", (sender_username,)).fetchone()
+                if not sender:
+                    return False, f"發送方用戶 {sender_username} 不存在"
                 
-                sender_row = cursor.fetchone()
-                if not sender_row:
-                    return False, "發送者帳戶不存在"
+                if sender['tokens'] < amount:
+                    return False, f"發送方餘額不足，當前餘額: {sender['tokens']}"
                 
-                sender_tokens = sender_row['tokens']
-                sender_id = sender_row['id']
-                sender_name = sender_row['username']
+                # 檢查接收方是否存在
+                receiver = cursor.execute("SELECT id FROM users WHERE username = ?", (receiver_username,)).fetchone()
+                if not receiver:
+                    return False, f"接收方用戶 {receiver_username} 不存在"
                 
-                if sender_tokens < amount:
-                    return False, f"餘額不足 (需要 {amount}, 只有 {sender_tokens})"
-
-                # 2. 檢查接收者是否存在
-                cursor.execute("SELECT id FROM users WHERE username = ?", (receiver_username,))
-                if not cursor.fetchone():
-                    return False, "接收者帳戶不存在"
-
-                # 3. 執行轉帳操作
-                cursor.execute("""
-                    UPDATE users SET tokens = tokens - ? WHERE id = ? AND tokens >= ?
-                    """, (amount, sender_id, amount))
+                # 執行轉帳
+                cursor.execute("UPDATE users SET tokens = tokens - ? WHERE username = ?", (amount, sender_username))
+                cursor.execute("UPDATE users SET tokens = tokens + ? WHERE username = ?", (amount, receiver_username))
                 
-                if cursor.rowcount == 0:
-                    return False, "餘額不足或帳戶狀態已改變"
-
-                cursor.execute("""
-                    UPDATE users SET tokens = tokens + ? WHERE username = ?
-                    """, (amount, receiver_username))
-
-            # 如果執行到這裡，說明事務已成功提交
-            logging.info(f"轉帳成功: {amount} 從用戶 {sender_name} 到 {receiver_username}")
-            return True, "转账成功"
-
+                logging.info(f"轉帳成功: {sender_username} -> {receiver_username}, 金額: {amount}")
+                return True, "轉帳成功"
+                
         except Exception as e:
-            logging.error(f"轉帳錯誤: {e}", exc_info=True)
+            logging.error(f"轉帳失敗: {e}", exc_info=True)
             return False, f"轉帳失敗: {str(e)}"
 
     def update_user_password(self, user_id, new_password):
@@ -363,7 +396,6 @@ class UserManager:
         except Exception as e:
             logging.error(f"扣除用戶餘額失敗: {e}", exc_info=True)
             return False, f"操作失敗: {str(e)}"
-
 if __name__ == "__main__":
     manager = UserManager()
     manager.register_user('justin', 'password')
