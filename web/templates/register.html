@@ -30,13 +30,6 @@
                             <input class="form-control" id="confirmPassword" name="confirmPassword" type="password" required data-i18n-placeholder="register_confirm_placeholder" placeholder="請再次輸入密碼" />
                             <label for="confirmPassword" data-i18n="register_confirm_label">確認密碼</label>
                         </div>
-                        <!-- Cloudflare Turnstile 人機驗證 -->
-                        <div class="mb-3">
-                            <label class="form-label" data-i18n="register_captcha_label">人機驗證</label>
-                            <div class="d-flex justify-content-center">
-                                <div class="cf-turnstile" data-sitekey="0x4AAAAAABkJQaM8US5k-aWw" data-theme="auto"></div>
-                            </div>
-                        </div>
                         <div id="error-message" class="alert alert-danger d-none"></div>
                         <div id="success-message" class="alert alert-success d-none"></div>
                         <div class="d-grid">
@@ -61,7 +54,6 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 <script>
 async function handleRegister(event) {
     event.preventDefault();
@@ -87,12 +79,24 @@ async function handleRegister(event) {
         return;
     }
     
-    // 檢查人機驗證
-    const turnstileResponse = document.querySelector('.cf-turnstile [name="cf-turnstile-response"]')?.value;
-    if (!turnstileResponse) {
-        errorMessage.textContent = lang === 'zh-tw' ? '請完成人機驗證' : 'Please complete human verification';
-        errorMessage.classList.remove('d-none');
-        return;
+    // 檢查是否為本機開發環境
+    const isLocalDev = window.location.hostname === 'localhost' || 
+                      window.location.hostname === '127.0.0.1' || 
+                      window.location.hostname.includes('127.0.0.1');
+    
+    let turnstileResponse = '';
+    
+    if (!isLocalDev) {
+        // 生產環境才檢查人機驗證
+        turnstileResponse = document.querySelector('.cf-turnstile [name="cf-turnstile-response"]')?.value;
+        if (!turnstileResponse) {
+            errorMessage.textContent = lang === 'zh-tw' ? '請完成人機驗證' : 'Please complete human verification';
+            errorMessage.classList.remove('d-none');
+            return;
+        }
+    } else {
+        // 本機開發環境使用假的token
+        turnstileResponse = 'dev-bypass-token';
     }
     
     // 顯示載入狀態
@@ -142,7 +146,7 @@ async function handleRegister(event) {
             errorMessage.textContent = result.error || failMsg;
             errorMessage.classList.remove('d-none');
             // 重置人機驗證
-            if (typeof turnstile !== 'undefined') {
+            if (!isLocalDev && typeof turnstile !== 'undefined') {
                 turnstile.reset();
             }
         }
@@ -151,7 +155,7 @@ async function handleRegister(event) {
         const networkError = lang === 'zh-tw' ? '網路錯誤，請檢查您的連線' : 'Network error, please check your connection';
         errorMessage.textContent = networkError;
         errorMessage.classList.remove('d-none');
-        if (typeof turnstile !== 'undefined') {
+        if (!isLocalDev && typeof turnstile !== 'undefined') {
             turnstile.reset();
         }
     } finally {

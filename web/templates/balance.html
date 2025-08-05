@@ -1,39 +1,72 @@
 {% extends "base.html" %}
-
 {% block title %}Balance & Transfer - HiveMind{% endblock %}
-
 {% block content %}
-<div class="min-h-screen flex items-center justify-center p-4 bg-gray-100 dark:bg-gray-900 transition">
-    <div class="w-full max-w-xl">
-        <div class="bg-white dark:bg-gray-800 rounded-2xl shadow-xl p-8 animate-fade-in-up">
-            <h2 class="text-3xl font-bold text-center mb-8 text-gray-900 dark:text-white">
-                <i class="fas fa-coins mr-2 text-purple-400"></i><span data-i18n="balance_my_balance">我的餘額</span>
-            </h2>
-            <div class="text-center mb-8">
-                <div class="text-5xl font-bold mb-2 text-gray-900 dark:text-white" id="balance-value">--</div>
-                <div class="text-gray-500 dark:text-gray-400 text-lg">CPT</div>
-            </div>
-            <hr class="my-8 border-gray-200 dark:border-gray-700">
-            <h3 class="text-xl font-semibold mb-4 text-center text-gray-900 dark:text-white">
-                <i class="fas fa-exchange-alt mr-2"></i><span data-i18n="balance_transfer">轉帳</span>
-            </h3>
-            <form id="transferForm" class="space-y-6">
-                <div>
-                    <label for="receiver" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1" data-i18n="balance_receiver_label">收款人用戶名</label>
-                    <input id="receiver" name="receiver" type="text" required class="block w-full px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 transition" placeholder="請輸入對方用戶名">
-                </div>
-                <div>
-                    <label for="amount" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1" data-i18n="balance_amount_label">金額</label>
-                    <input id="amount" name="amount" type="number" min="1" step="1" required class="block w-full px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 transition" placeholder="請輸入金額">
-                </div>
-                <div id="transfer-message" class="hidden w-full text-center text-red-600 bg-red-100 dark:bg-red-900 dark:text-red-300 rounded-lg px-4 py-2 text-sm"></div>
-                <button type="submit" class="w-full px-4 py-2 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-600 transition-all duration-200 flex items-center justify-center gap-2">
-                    <i class="fas fa-paper-plane mr-2"></i><span data-i18n="balance_transfer_btn">轉帳</span>
-                </button>
-            </form>
+
+<!-- Page Header -->
+<header class="bg-dark py-5">
+    <div class="container px-5">
+        <div class="text-center">
+            <h1 class="display-5 fw-bolder text-white mb-2 slide-in-up" data-i18n="balance_title">餘額與轉帳</h1>
+            <p class="lead fw-normal text-white-50 mb-0 slide-in-up delay-200" data-i18n="balance_subtitle">查看您的帳戶餘額並進行轉帳操作</p>
         </div>
     </div>
-</div>
+</header>
+
+<!-- Balance Section -->
+<section class="py-5">
+    <div class="container px-5 my-5">
+        <div class="row gx-5 justify-content-center">
+            <!-- Balance Display -->
+            <div class="col-lg-6 mb-5">
+                <div class="card h-100 shadow border-0 hover-lift">
+                    <div class="card-body p-5 text-center">
+                        <div class="feature bg-gradient text-white rounded-3 mb-4 mx-auto">
+                            <i class="fas fa-coins"></i>
+                        </div>
+                        <h3 class="h4 fw-bolder mb-3" data-i18n="balance_my_balance">我的餘額</h3>
+                        <div class="display-4 fw-bold text-primary mb-2" id="balance-value">--</div>
+                        <p class="text-muted mb-0">CPT</p>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Transfer Form -->
+            <div class="col-lg-6 mb-5">
+                <div class="card h-100 shadow border-0">
+                    <div class="card-body p-5">
+                        <div class="text-center mb-4">
+                            <div class="feature bg-gradient text-white rounded-3 mb-3 mx-auto">
+                                <i class="fas fa-exchange-alt"></i>
+                            </div>
+                            <h3 class="h4 fw-bolder" data-i18n="balance_transfer">轉帳</h3>
+                        </div>
+                        
+                        <form id="transferForm">
+                            <div class="form-floating mb-3">
+                                <input class="form-control" id="receiver" name="receiver" type="text" required data-i18n-placeholder="balance_receiver_placeholder" placeholder="請輸入收款人用戶名" />
+                                <label for="receiver" data-i18n="balance_receiver_label">收款人用戶名</label>
+                            </div>
+                            <div class="form-floating mb-3">
+                                <input class="form-control" id="amount" name="amount" type="number" min="1" step="1" required data-i18n-placeholder="balance_amount_placeholder" placeholder="請輸入金額" />
+                                <label for="amount" data-i18n="balance_amount_label">金額</label>
+                            </div>
+                            
+                            <div id="transfer-message" class="alert d-none"></div>
+                            
+                            <div class="d-grid">
+                                <button class="btn btn-primary btn-lg" type="submit">
+                                    <i class="fas fa-paper-plane me-2"></i>
+                                    <span data-i18n="balance_transfer_btn">確認轉帳</span>
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
 {% endblock %}
 
 {% block scripts %}
@@ -64,8 +97,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         const receiver = document.getElementById('receiver').value;
         const amount = document.getElementById('amount').value;
         const msgDiv = document.getElementById('transfer-message');
+        const lang = localStorage.getItem('lang') || 'zh-tw';
         
-        msgDiv.classList.add('hidden');
+        // 重置消息樣式
+        msgDiv.classList.add('d-none');
+        msgDiv.classList.remove('alert-success', 'alert-danger');
 
         try {
             const resp = await fetch('/api/transfer', {
@@ -77,23 +113,23 @@ document.addEventListener('DOMContentLoaded', async () => {
                 body: JSON.stringify({ receiver, amount: Number(amount) })
             });
             const data = await resp.json();
+            
             if (resp.ok) {
-                const lang = localStorage.getItem('lang') || 'zh-tw';
                 const successMsg = lang === 'zh-tw' ? '轉帳成功！新餘額：' : 'Transfer successful! New balance: ';
                 msgDiv.textContent = successMsg + data.new_balance;
-                msgDiv.className = 'message message-success mb-2';
+                msgDiv.classList.add('alert-success');
                 document.getElementById('balance-value').textContent = data.new_balance;
                 document.getElementById('transferForm').reset();
             } else {
                 msgDiv.textContent = data.error || (lang === 'zh-tw' ? '轉帳失敗' : 'Transfer failed');
-                msgDiv.className = 'message message-error mb-2';
+                msgDiv.classList.add('alert-danger');
             }
-            msgDiv.classList.remove('hidden');
+            msgDiv.classList.remove('d-none');
         } catch {
-            const lang = localStorage.getItem('lang') || 'zh-tw';
-            msgDiv.textContent = lang === 'zh-tw' ? '網路錯誤，請稍後再試' : 'Network error, please try again later';
-            msgDiv.className = 'message message-error mb-2';
-            msgDiv.classList.remove('hidden');
+            const errorMsg = lang === 'zh-tw' ? '網路錯誤，請稍後再試' : 'Network error, please try again later';
+            msgDiv.textContent = errorMsg;
+            msgDiv.classList.add('alert-danger');
+            msgDiv.classList.remove('d-none');
         }
     });
 });

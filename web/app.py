@@ -97,37 +97,46 @@ def call_vpn_service(endpoint, method='GET', data=None):
 def verify_turnstile(token, ip_address):
     """驗證 Cloudflare Turnstile token"""
     try:
+        # 本機開發自動通過
+        if (
+            ip_address in ("127.0.0.1", "::1", "localhost")
+            or os.getenv("FLASK_ENV") == "development"
+            or os.getenv("FLASK_DEBUG", "False").lower() in ("1", "true", "yes")
+        ):
+            print("🚧 本機開發模式，自動通過 Turnstile 驗證")
+            return True
+
         # 暫時跳過驗證用於測試
-        print("🚧 暫時跳過 Turnstile 驗證（測試模式）")
-        return True
+        # print("🚧 暫時跳過 Turnstile 驗證（測試模式）")
+        # return True
         
         # 如果沒有提供 token，直接返回 False
         if not token:
             print("❌ Turnstile: 沒有提供 token")
             return False
-            
+
         secret_key = os.getenv('TURNSTILE_SECRET_KEY')
         if not secret_key:
             print("❌ Turnstile: 沒有設定 TURNSTILE_SECRET_KEY 環境變數")
             return False
-            
+
         print(f"🔑 Turnstile: 使用密鑰 {secret_key[:10]}...")
-        
+
         response = requests.post('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
             'secret': secret_key,
             'response': token,
             'remoteip': ip_address
         }, timeout=10)
-        
+
         result = response.json()
         success = result.get('success', False)
-        
+
         if not success:
             error_codes = result.get('error-codes', [])
             print(f"❌ Turnstile 驗證失敗: {error_codes}")
         else:
             print("✅ Turnstile 驗證成功")
-        
+
         return success
     except Exception as e:
         print(f"❌ Turnstile 驗證錯誤: {e}")
@@ -676,7 +685,7 @@ if __name__ == '__main__':
     # 從環境變數讀取運行配置
     host = os.getenv('FLASK_HOST', '0.0.0.0')
     port = int(os.getenv('FLASK_PORT', '80'))
-    debug = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
+    debug = os.getenv('FLASK_DEBUG', 'False')
     
     print(f"啟動 Flask 應用程式:")
     print(f"  - 主機: {host}")

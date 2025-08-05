@@ -70,18 +70,31 @@ async function handleLogin(event) {
     errorMessage.classList.add('d-none');
     successMessage.classList.add('d-none');
     
-    // 檢查人機驗證
-    const turnstileResponse = document.querySelector('.cf-turnstile [name="cf-turnstile-response"]')?.value;
-    const lang = localStorage.getItem('lang') || 'zh-tw';
-    if (!turnstileResponse) {
-        errorMessage.textContent = lang === 'zh-tw' ? '請完成人機驗證' : 'Please complete human verification';
-        errorMessage.classList.remove('d-none');
-        return;
+    // 檢查是否為本機開發環境
+    const isLocalDev = window.location.hostname === 'localhost' || 
+                      window.location.hostname === '127.0.0.1' || 
+                      window.location.hostname.includes('127.0.0.1');
+    
+    let turnstileResponse = '';
+    
+    if (!isLocalDev) {
+        // 生產環境才檢查人機驗證
+        turnstileResponse = document.querySelector('.cf-turnstile [name="cf-turnstile-response"]')?.value;
+        if (!turnstileResponse) {
+            const lang = localStorage.getItem('lang') || 'zh-tw';
+            errorMessage.textContent = lang === 'zh-tw' ? '請完成人機驗證' : 'Please complete human verification';
+            errorMessage.classList.remove('d-none');
+            return;
+        }
+    } else {
+        // 本機開發環境使用假的token
+        turnstileResponse = 'dev-bypass-token';
     }
     
     // 顯示載入狀態
+    const lang = localStorage.getItem('lang') || 'zh-tw';
     submitBtn.disabled = true;
-    submitText.textContent = lang === 'zh-tw' ? '登入中...' : 'Logging in...';
+    submitText.textContent = lang === 'zh-tw' ? '登入中...' : 'Signing in...';
     loadingIcon.classList.remove('d-none');
     
     try {
@@ -104,7 +117,7 @@ async function handleLogin(event) {
         
         if (response.ok) {
             // 登入成功
-            const successMsg = lang === 'zh-tw' ? '登入成功！' : 'Login successful!';
+            const successMsg = lang === 'zh-tw' ? '登入成功！正在跳轉...' : 'Login successful! Redirecting...';
             successMessage.textContent = result.message || successMsg;
             successMessage.classList.remove('d-none');
             
@@ -119,14 +132,14 @@ async function handleLogin(event) {
             // 延遲跳轉到首頁
             setTimeout(() => {
                 window.location.href = '/';
-            }, 1000);
+            }, 1500);
         } else {
             // 登入失敗
-            const failMsg = lang === 'zh-tw' ? '登入失敗，請重試' : 'Login failed, please try again';
+            const failMsg = lang === 'zh-tw' ? '登入失敗，請檢查帳號密碼' : 'Login failed, please check your credentials';
             errorMessage.textContent = result.error || failMsg;
             errorMessage.classList.remove('d-none');
             // 重置人機驗證
-            if (typeof turnstile !== 'undefined') {
+            if (!isLocalDev && typeof turnstile !== 'undefined') {
                 turnstile.reset();
             }
         }
@@ -135,7 +148,7 @@ async function handleLogin(event) {
         const networkError = lang === 'zh-tw' ? '網路錯誤，請檢查您的連線' : 'Network error, please check your connection';
         errorMessage.textContent = networkError;
         errorMessage.classList.remove('d-none');
-        if (typeof turnstile !== 'undefined') {
+        if (!isLocalDev && typeof turnstile !== 'undefined') {
             turnstile.reset();
         }
     } finally {

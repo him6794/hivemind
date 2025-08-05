@@ -114,19 +114,21 @@ const i18n = {
         "web_version_desc": "直接在瀏覽器運行，無需安裝",
         "mobile_version": "手機版",
         "mobile_version_desc": "Android 與 iOS 應用程式",
-        "cloud_version": "雲端版",
-        "cloud_version_desc": "一鍵部署至雲端平台",
-        "need_help": "需要協助？",
+        "docker_version": "docker版本",
+        "docker_version_desc": "一鍵部署至雲端平台",
         "help_subtitle": "查看我們的文檔或聯繫支援團隊",
         "view_docs": "查看文檔",
         "join_community": "加入社群",
 
         // 餘額頁面
         "balance_title": "餘額與轉帳",
+        "balance_subtitle": "查看您的帳戶餘額並進行轉帳操作",
         "balance_my_balance": "我的餘額",
         "balance_transfer": "轉帳",
-        "balance_receiver_label": "收款人使用者名稱",
+        "balance_receiver_label": "收款人用戶名",
+        "balance_receiver_placeholder": "請輸入收款人用戶名",
         "balance_amount_label": "金額",
+        "balance_amount_placeholder": "請輸入金額",
         "balance_transfer_btn": "確認轉帳",
 
         // 贊助頁面
@@ -279,26 +281,29 @@ const i18n = {
         "web_version_desc": "Run directly in browser, no installation required",
         "mobile_version": "Mobile Version",
         "mobile_version_desc": "Android and iOS applications",
-        "cloud_version": "Cloud Version",
-        "cloud_version_desc": "One-click deployment to cloud platforms",
+        "docker_version": "Docker Version",
+        "docker_version_desc": "One-click deployment to cloud platforms",
         "need_help": "Need Help?",
         "help_subtitle": "Check our documentation or contact the support team",
         "view_docs": "View Docs",
         "join_community": "Join Community",
 
-        // Balance Page
+        // 餘額頁面
         "balance_title": "Balance & Transfer",
+        "balance_subtitle": "View your account balance and perform transfer operations",
         "balance_my_balance": "My Balance",
         "balance_transfer": "Transfer",
         "balance_receiver_label": "Recipient Username",
+        "balance_receiver_placeholder": "Please enter recipient username",
         "balance_amount_label": "Amount",
+        "balance_amount_placeholder": "Please enter amount",
         "balance_transfer_btn": "Confirm Transfer",
 
-        // Sponsor Page
+        // 贊助頁面
         "sponsor_thanks": "Thank you to the following sponsors for supporting HiveMind!",
         "sponsor_main_developer": "Lead Developer",
 
-        // Terms Page
+        // 條款頁面
         "terms_title": "Terms of Service",
         "terms_service_agreement": "Service Agreement",
         "terms_prohibited_behavior": "Prohibited Behavior",
