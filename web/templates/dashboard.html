@@ -1,0 +1,435 @@
+{% extends "base.html" %}
+{% block title %}Balance & Transfer - HiveMind{% endblock %}
+{% block content %}
+
+<!-- Page Header -->
+<header class="bg-dark py-5">
+    <div class="container px-5">
+        <div class="text-center">
+            <h1 class="display-5 fw-bolder text-white mb-2 slide-in-up" data-i18n="balance_title">我的面板</h1>
+            <p class="lead fw-normal text-white-50 mb-0 slide-in-up delay-200" data-i18n="balance_subtitle">查看您的帳戶餘額並進行轉帳操作</p>
+        </div>
+    </div>
+
+</header>
+
+<!-- Balance Section -->
+<section class="py-5">
+    <div class="container px-5 my-5">
+        <div class="row gx-5 justify-content-center">
+            <!-- Balance Display -->
+            <div class="col-lg-4 mb-5">
+                <div class="card h-100 shadow border-0 hover-lift">
+                    <div class="card-body p-5 text-center">
+                        <div class="feature bg-gradient text-white rounded-3 mb-4 mx-auto">
+                            <i class="fas fa-coins"></i>
+                        </div>
+                        <h3 class="h4 fw-bolder mb-3" data-i18n="balance_my_balance">我的餘額</h3>
+                        <div class="display-4 fw-bold text-primary mb-2" id="balance-value">--</div>
+                        <p class="text-muted mb-0">CPT</p>
+                        
+                        <!-- 電子郵件狀態顯示 -->
+                        <div class="mt-4 pt-3 border-top">
+                            <h6 class="fw-bolder mb-2" data-i18n="balance_email_status">電子郵件狀態</h6>
+                            <div id="email-status">
+                                <div class="d-flex align-items-center justify-content-center">
+                                    <i class="fas fa-spinner fa-spin me-2"></i>
+                                    <span data-i18n="loading">載入中...</span>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- 信任分數顯示 -->
+                        <div class="mt-4 pt-3 border-top">
+                            <h6 class="fw-bolder mb-2" data-i18n="balance_credit_score">信任分數</h6>
+                            <div id="credit-score-display" class="text-center">
+                                <div class="h4 fw-bold text-info mb-1" id="credit-score-value">--</div>
+                                <small class="text-muted" data-i18n="balance_credit_score_range">範圍: 0-1000</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Transfer Form -->
+            <div class="col-lg-4 mb-5">
+                <div class="card h-100 shadow border-0">
+                    <div class="card-body p-5">
+                        <div class="text-center mb-4">
+                            <div class="feature bg-gradient text-white rounded-3 mb-3 mx-auto">
+                                <i class="fas fa-exchange-alt"></i>
+                            </div>
+                            <h3 class="h4 fw-bolder" data-i18n="balance_transfer">轉帳</h3>
+                        </div>
+                        
+                        <form id="transferForm">
+                            <div class="form-floating mb-3">
+                                <input class="form-control" id="receiver" name="receiver" type="text" required data-i18n-placeholder="balance_receiver_placeholder" placeholder="請輸入收款人用戶名" />
+                                <label for="receiver" data-i18n="balance_receiver_label">收款人用戶名</label>
+                            </div>
+                            <div class="form-floating mb-3">
+                                <input class="form-control" id="amount" name="amount" type="number" min="1" step="1" required data-i18n-placeholder="balance_amount_placeholder" placeholder="請輸入金額" />
+                                <label for="amount" data-i18n="balance_amount_label">金額</label>
+                            </div>
+                            
+                            <div id="transfer-message" class="alert d-none"></div>
+                            
+                            <div class="d-grid">
+                                <button class="btn btn-primary btn-lg" type="submit">
+                                    <i class="fas fa-paper-plane me-2"></i>
+                                    <span data-i18n="balance_transfer_btn">確認轉帳</span>
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Email & Security Management -->
+            <div class="col-lg-4 mb-5">
+                <div class="card h-100 shadow border-0">
+                    <div class="card-body p-5">
+                        <div class="text-center mb-4">
+                            <div class="feature bg-gradient text-white rounded-3 mb-3 mx-auto">
+                                <i class="fas fa-user-cog"></i>
+                            </div>
+                            <h3 class="h4 fw-bolder" data-i18n="balance_account_settings">帳戶設定</h3>
+                        </div>
+                        
+                        <!-- 電子郵件管理 -->
+                        <div class="mb-4">
+                            <h6 class="fw-bolder mb-3" data-i18n="balance_email_management">電子郵件管理</h6>
+                            <form id="emailForm">
+                                <div class="form-floating mb-3">
+                                    <input class="form-control" id="email" name="email" type="email" data-i18n-placeholder="balance_email_placeholder" placeholder="請輸入電子郵件" />
+                                    <label for="email" data-i18n="balance_email_label">電子郵件</label>
+                                </div>
+                                <div class="d-grid mb-3">
+                                    <button class="btn btn-outline-primary" type="submit">
+                                        <i class="fas fa-envelope me-2"></i>
+                                        <span data-i18n="balance_update_email_btn">更新電子郵件</span>
+                                    </button>
+                                </div>
+                            </form>
+                            <div id="email-message" class="alert d-none"></div>
+                        </div>
+
+                        <!-- 密碼變更 -->
+                        <div class="mb-4">
+                            <h6 class="fw-bolder mb-3" data-i18n="balance_password_management">密碼管理</h6>
+                            <form id="passwordForm">
+                                <div class="form-floating mb-3">
+                                    <input class="form-control" id="currentPassword" name="currentPassword" type="password" required data-i18n-placeholder="balance_current_password_placeholder" placeholder="請輸入目前密碼" />
+                                    <label for="currentPassword" data-i18n="balance_current_password_label">目前密碼</label>
+                                </div>
+                                <div class="form-floating mb-3">
+                                    <input class="form-control" id="newPassword" name="newPassword" type="password" required data-i18n-placeholder="balance_new_password_placeholder" placeholder="請輸入新密碼" />
+                                    <label for="newPassword" data-i18n="balance_new_password_label">新密碼</label>
+                                </div>
+                                <div class="form-floating mb-3">
+                                    <input class="form-control" id="confirmNewPassword" name="confirmNewPassword" type="password" required data-i18n-placeholder="balance_confirm_new_password_placeholder" placeholder="請再次輸入新密碼" />
+                                    <label for="confirmNewPassword" data-i18n="balance_confirm_new_password_label">確認新密碼</label>
+                                </div>
+                                <div class="d-grid">
+                                    <button class="btn btn-outline-danger" type="submit">
+                                        <i class="fas fa-key me-2"></i>
+                                        <span data-i18n="balance_update_password_btn">更新密碼</span>
+                                    </button>
+                                </div>
+                            </form>
+                            <div id="password-message" class="alert d-none"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/i18n.js') }}"></script>
+<script>
+document.addEventListener('DOMContentLoaded', async () => {
+    const token = localStorage.getItem('access_token');
+    if (!token) {
+        window.location.href = '/login';
+        return;
+    }
+    
+    // 初始化翻譯
+    const lang = localStorage.getItem('lang') || 'zh-tw';
+    if (window.i18n) {
+        translatePage(lang);
+    }
+    
+    // 載入用戶資料
+    await loadUserData();
+    
+    // 設定表單事件監聽器
+    setupFormHandlers();
+});
+
+async function loadUserData() {
+    const token = localStorage.getItem('access_token');
+    
+    try {
+        // 查詢餘額
+        const balanceResp = await fetch('/api/balance', {
+            headers: { 'Authorization': 'Bearer ' + token }
+        });
+        const balanceData = await balanceResp.json();
+        if (balanceResp.ok) {
+            document.getElementById('balance-value').textContent = balanceData.balance;
+        } else {
+            document.getElementById('balance-value').textContent = '--';
+        }
+        
+        // 查詢用戶詳細資料（包含電子郵件狀態和信任分數）
+        const userResp = await fetch('/api/user/profile', {
+            headers: { 'Authorization': 'Bearer ' + token }
+        });
+        
+        if (userResp.ok) {
+            const userData = await userResp.json();
+            updateEmailStatus(userData);
+            updateCreditScore(userData);
+            // 如果有電子郵件，預填到表單中
+            if (userData.email) {
+                document.getElementById('email').value = userData.email;
+            }
+        } else {
+            console.error('Failed to load user profile:', await userResp.text());
+            updateEmailStatus(null);
+            updateCreditScore(null);
+        }
+    } catch (error) {
+        console.error('載入用戶資料失敗:', error);
+        document.getElementById('balance-value').textContent = '--';
+        updateEmailStatus(null);
+        updateCreditScore(null);
+    }
+}
+
+function updateEmailStatus(userData) {
+    const emailStatusDiv = document.getElementById('email-status');
+    const lang = localStorage.getItem('lang') || 'zh-tw';
+    
+    if (!userData) {
+        emailStatusDiv.innerHTML = `
+            <div class="text-muted">
+                <i class="fas fa-exclamation-triangle me-2"></i>
+                <span>${lang === 'zh-tw' ? '載入失敗' : 'Load failed'}</span>
+            </div>`;
+        return;
+    }
+    
+    if (!userData.email) {
+        // 未設定電子郵件
+        emailStatusDiv.innerHTML = `
+            <div class="text-warning">
+                <i class="fas fa-envelope me-2"></i>
+                <span data-i18n="balance_email_not_set">${lang === 'zh-tw' ? '未設定電子郵件' : 'Email not set'}</span>
+            </div>
+            <small class="text-muted mt-1 d-block" data-i18n="balance_email_reward_hint">
+                ${lang === 'zh-tw' ? '驗證電子郵件可獲得100 CPT' : 'Verify email to get 100 CPT'}
+            </small>`;
+    } else if (userData.email_verified) {
+        // 已驗證
+        emailStatusDiv.innerHTML = `
+            <div class="text-success">
+                <i class="fas fa-check-circle me-2"></i>
+                <span data-i18n="balance_email_verified">${lang === 'zh-tw' ? '已驗證' : 'Verified'}</span>
+            </div>
+            <small class="text-muted mt-1 d-block">${userData.email}</small>`;
+    } else {
+        // 未驗證
+        emailStatusDiv.innerHTML = `
+            <div class="text-danger">
+                <i class="fas fa-times-circle me-2"></i>
+                <span data-i18n="balance_email_unverified">${lang === 'zh-tw' ? '未驗證' : 'Unverified'}</span>
+            </div>
+            <small class="text-muted mt-1 d-block">${userData.email}</small>
+            <small class="text-warning mt-1 d-block" data-i18n="balance_email_check_inbox">
+                ${lang === 'zh-tw' ? '請檢查您的信箱' : 'Please check your inbox'}
+            </small>`;
+    }
+}
+
+function updateCreditScore(userData) {
+    const creditScoreValue = document.getElementById('credit-score-value');
+    
+    if (!userData || typeof userData.credit_score === 'undefined') {
+        creditScoreValue.textContent = '--';
+        return;
+    }
+    
+    const score = userData.credit_score || 100;
+    creditScoreValue.textContent = score;
+    
+    // 根據分數設置顏色
+    creditScoreValue.className = 'h4 fw-bold mb-1';
+    if (score >= 100) {
+        creditScoreValue.classList.add('text-success');
+    } else if (score >= 50) {
+        creditScoreValue.classList.add('text-info');
+    } else if (score >= 20) {
+        creditScoreValue.classList.add('text-warning');
+    } else {
+        creditScoreValue.classList.add('text-danger');
+    }
+}
+
+function setupFormHandlers() {
+    const lang = localStorage.getItem('lang') || 'zh-tw';
+    const token = localStorage.getItem('access_token');
+    const translations = window.i18n && window.i18n[lang] ? window.i18n[lang] : {};
+    
+    // 轉帳表單
+    document.getElementById('transferForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const receiver = document.getElementById('receiver').value;
+        const amount = document.getElementById('amount').value;
+        const msgDiv = document.getElementById('transfer-message');
+        
+        msgDiv.classList.add('d-none');
+        msgDiv.classList.remove('alert-success', 'alert-danger');
+
+        try {
+            const resp = await fetch('/api/transfer', {
+                method: 'POST',
+                headers: {
+                    'Authorization': 'Bearer ' + token,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ receiver, amount: Number(amount) })
+            });
+            const data = await resp.json();
+            
+            if (resp.ok) {
+                const successMsg = lang === 'zh-tw' ? '轉帳成功！新餘額：' : 'Transfer successful! New balance: ';
+                msgDiv.textContent = data.message + ' New balance: ' + data.new_balance;
+                msgDiv.classList.add('alert-success');
+                document.getElementById('balance-value').textContent = data.new_balance;
+                document.getElementById('transferForm').reset();
+            } else {
+                msgDiv.textContent = data.error || (lang === 'zh-tw' ? '轉帳失敗' : 'Transfer failed');
+                msgDiv.classList.add('alert-danger');
+            }
+            msgDiv.classList.remove('d-none');
+        } catch {
+            const errorMsg = lang === 'zh-tw' ? '網路錯誤，請稍後再試' : 'Network error, please try again later';
+            msgDiv.textContent = errorMsg;
+            msgDiv.classList.add('alert-danger');
+            msgDiv.classList.remove('d-none');
+        }
+    });
+    
+    // 電子郵件表單
+    document.getElementById('emailForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const email = document.getElementById('email').value;
+        const msgDiv = document.getElementById('email-message');
+        const submitBtn = e.target.querySelector('button[type="submit"]');
+        
+        msgDiv.classList.add('d-none');
+        msgDiv.classList.remove('alert-success', 'alert-danger', 'alert-warning');
+
+        // 禁用按鈕防止重複提交
+        submitBtn.disabled = true;
+        const originalText = submitBtn.innerHTML;
+        submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>' + (lang === 'zh-tw' ? '發送中...' : 'Sending...');
+
+        try {
+            const resp = await fetch('/api/user/update-email', {
+                method: 'POST',
+                headers: {
+                    'Authorization': 'Bearer ' + token,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ email })
+            });
+            const data = await resp.json();
+            
+            if (resp.ok) {
+                msgDiv.textContent = data.message;
+                msgDiv.classList.add('alert-success');
+                // 重新載入用戶資料
+                setTimeout(loadUserData, 1000);
+            } else {
+                msgDiv.textContent = data.error;
+                msgDiv.classList.add('alert-danger');
+            }
+            msgDiv.classList.remove('d-none');
+        } catch {
+            const errorMsg = lang === 'zh-tw' ? '網路錯誤，請稍後再試' : 'Network error, please try again later';
+            msgDiv.textContent = errorMsg;
+            msgDiv.classList.add('alert-danger');
+            msgDiv.classList.remove('d-none');
+        } finally {
+            // 恢復按鈕狀態
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = originalText;
+        }
+    });
+    
+    // 密碼變更表單
+    document.getElementById('passwordForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const currentPassword = document.getElementById('currentPassword').value;
+        const newPassword = document.getElementById('newPassword').value;
+        const confirmNewPassword = document.getElementById('confirmNewPassword').value;
+        const msgDiv = document.getElementById('password-message');
+        
+        msgDiv.classList.add('d-none');
+        msgDiv.classList.remove('alert-success', 'alert-danger');
+        
+        // 驗證新密碼
+        if (newPassword !== confirmNewPassword) {
+            msgDiv.textContent = lang === 'zh-tw' ? '新密碼與確認密碼不一致' : 'New passwords do not match';
+            msgDiv.classList.add('alert-danger');
+            msgDiv.classList.remove('d-none');
+            return;
+        }
+        
+        if (newPassword.length < 6) {
+            msgDiv.textContent = lang === 'zh-tw' ? '密碼長度至少需要6個字元' : 'Password must be at least 6 characters';
+            msgDiv.classList.add('alert-danger');
+            msgDiv.classList.remove('d-none');
+            return;
+        }
+
+        try {
+            const resp = await fetch('/api/user/change-password', {
+                method: 'POST',
+                headers: {
+                    'Authorization': 'Bearer ' + token,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ 
+                    current_password: currentPassword,
+                    new_password: newPassword 
+                })
+            });
+            const data = await resp.json();
+            
+            if (resp.ok) {
+                msgDiv.textContent = data.message;
+                msgDiv.classList.add('alert-success');
+                document.getElementById('passwordForm').reset();
+            } else {
+                msgDiv.textContent = data.error;
+                msgDiv.classList.add('alert-danger');
+            }
+            msgDiv.classList.remove('d-none');
+        } catch {
+            const errorMsg = lang === 'zh-tw' ? '網路錯誤，請稍後再試' : 'Network error, please try again later';
+            msgDiv.textContent = errorMsg;
+            msgDiv.classList.add('alert-danger');
+            msgDiv.classList.remove('d-none');
+        }
+    });
+}
+</script>
+{% endblock %}

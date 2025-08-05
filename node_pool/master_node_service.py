@@ -12,6 +12,7 @@ import nodepool_pb2_grpc
 from node_manager import NodeManager
 from user_manager import UserManager
 from config import Config
+from database_manager import DatabaseManager
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(threadName)s] - %(message)s')
 
@@ -183,6 +184,7 @@ class TaskManager:
     def __init__(self):
         self.redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
         self.file_storage = FileStorageManager()
+        self.db_manager = DatabaseManager()  # 新增數據庫管理器
         try:
             self.redis_client.ping()
             logging.info("TaskManager: Redis 連線成功")
@@ -631,13 +633,9 @@ class TaskManager:
             return False
 
     def check_user_balance_for_next_payment(self, username, cpt_cost):
-        """檢查用戶餘額是否足夠下次付款（使用用戶名）"""
+        """檢查用戶餘額是否足夠下次付款（使用數據庫管理器）"""
         try:
-            user_manager = UserManager()
-            user_row = user_manager.query_one("SELECT tokens FROM users WHERE username = ?", (username,))
-            if user_row:
-                return user_row['tokens'] >= cpt_cost
-            return False
+            return self.db_manager.check_user_balance_sufficient(username, cpt_cost)
         except Exception as e:
             logging.error(f"檢查用戶 {username} 餘額失敗: {e}")
             return False
@@ -786,9 +784,8 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                                 self.task_manager.store_logs(task_id, "system", log_message, int(time.time()))
                                 continue
                             
-                            user_manager = UserManager()
-                            
-                            success, msg = user_manager.transfer_tokens(
+                            # 使用數據庫管理器進行轉帳
+                            success, msg = self.task_manager.db_manager.transfer_tokens(
                                 user_id,       
                                 assigned_node,  
                                 adjusted_cost
@@ -844,26 +841,31 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
         threading.Thread(target=reward_scheduler_loop, daemon=True).start()
         logging.info("獎勵調度器已啟動（包含動態負載調整）")
 
-    def _increment_task_fail_count(self, task_id, assigned_node, user_id):
+    def _extract_user_from_token(self, token):
+        """從 token 中提取用戶名（使用數據庫管理器）"""
         try:
-            if task_id not in self.task_health:
-                self.task_health[task_id] = {
-                    "fail_count": 0,
-                    "last_check": 0,
-                    "assigned_node": assigned_node,
-                    "user_id": user_id,
-                    "cpt_cost": 0
-                }
+            # 直接解析 JWT token
+            payload = jwt.decode(token, Config.SECRET_KEY, algorithms=["HS256"])
+            user_id = payload.get("user_id")
             
-            self.task_health[task_id]["fail_count"] += 1
-            self.task_health[task_id]["last_check"] = time.time()
-            
-            if self.task_health[task_id]["fail_count"] >= 3:
-                self.task_manager.update_task_status(task_id, "PENDING", assigned_node=None)
-                logging.warning(f"任務 {task_id} 失敗次數過多（worker 超時），已重設為 PENDING，等待重新分發")
-                del self.task_health[task_id]
+            if user_id:
+                # 從資料庫獲取用戶名
+                user_info = self.task_manager.db_manager.get_user_by_id(user_id)
+                if user_info:
+                    return user_info["username"]
+                else:
+                    logging.warning(f"找不到用戶ID {user_id} 對應的用戶名")
+                    return None
+            return None
+        except jwt.ExpiredSignatureError:
+            logging.warning("Token 已過期")
+            return None
+        except jwt.InvalidTokenError:
+            logging.warning("無效的 Token")
+            return None
         except Exception as e:
-            logging.error(f"更新任務失敗計數錯誤: {e}")
+            logging.error(f"Extract user from token failed: {e}")
+            return None
 
     def stop_task_dispatcher(self):
         """停止任務分發線程"""
@@ -1334,7 +1336,7 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
             )
 
     def _extract_user_from_token(self, token):
-        """從 token 中提取用戶名（簡化實現）"""
+        """從 token 中提取用戶名（使用數據庫管理器）"""
         try:
             # 直接解析 JWT token
             payload = jwt.decode(token, Config.SECRET_KEY, algorithms=["HS256"])
@@ -1342,8 +1344,7 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
             
             if user_id:
                 # 從資料庫獲取用戶名
-                user_manager = UserManager()
-                user_info = user_manager.query_one("SELECT username FROM users WHERE id = ?", (user_id,))
+                user_info = self.task_manager.db_manager.get_user_by_id(user_id)
                 if user_info:
                     return user_info["username"]
                 else:

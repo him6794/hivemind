@@ -214,6 +214,18 @@ logs/
 config.ini
 .env
 
+# 環境變數和配置文件
+.env
+.env.local
+.env.development
+.env.production
+.env.test
+節點池/.env
+web/.env
+vpn/.env
+config.ini
+secrets.json
+
 # 開發工具
 .vscode/
 .idea/

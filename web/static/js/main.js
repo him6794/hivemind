@@ -529,8 +529,8 @@ window.handleRegister = async function(event) {
             },
             body: JSON.stringify({
                 username: formData.get('username'),
-                email: formData.get('email'),
                 password: password
+                // 移除 email 欄位
             })
         });
         

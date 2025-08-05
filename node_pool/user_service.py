@@ -56,26 +56,25 @@ class UserServiceServicer(nodepool_pb2_grpc.UserServiceServicer):
             logging.error(f"Token 驗證錯誤: {e}")
             raise ValueError(f"Token 驗證失敗: {str(e)}")
 
-    def verify_token(self, token: str):
-        """公開的 token 驗證方法，返回用戶信息字典"""
+    def verify_token(self, token):
+        """驗證 token 並返回用戶信息"""
         try:
-            user_id = self._verify_token(token)
+            user_id = self.user_manager.verify_token(token)
             if user_id:
-                user_info = self.user_manager.query_one(
-                    "SELECT id, username FROM users WHERE id = ?",
-                    (user_id,)
-                )
-                if user_info:
+                # 獲取用戶詳細信息
+                user_data = self.user_manager.db_manager.get_user_by_id(user_id)
+                if user_data:
+                    # 確保返回字典格式
+                    user_dict = dict(user_data) if user_data else {}
                     return {
-                        "user_id": user_info["id"],
-                        "username": user_info["username"]
+                        'user_id': user_dict.get('id'),
+                        'username': user_dict.get('username'),
+                        'email': user_dict.get('email'),
+                        'email_verified': bool(user_dict.get('email_verified', 0))
                     }
             return None
-        except ValueError as e:
-            logging.warning(f"Token 驗證失敗: {e}")
-            return None
         except Exception as e:
-            logging.error(f"Token 驗證時發生錯誤: {e}")
+            logging.error(f"Token verification failed: {e}")
             return None
 
     def verify_token_from_metadata(self, context):
@@ -216,10 +215,22 @@ class UserServiceServicer(nodepool_pb2_grpc.UserServiceServicer):
                 logging.warning("轉帳金額無效")
                 return nodepool_pb2.StatusResponse(success=False, message="金額必須大於零")
             
+            # 獲取發送方用戶名
+            sender_user_info = self.user_manager.query_one(
+                "SELECT username FROM users WHERE id = ?",
+                (user_id,)
+            )
+            
+            if not sender_user_info:
+                logging.warning(f"發送方用戶ID {user_id} 不存在")
+                return nodepool_pb2.StatusResponse(success=False, message="發送方用戶不存在")
+            
+            sender_username = sender_user_info["username"]
+            
             # 使用 user_manager 的事務安全轉帳方法
-            success, message = self.user_manager.transfer_tokens(user_id, receiver, amount)
+            success, message = self.user_manager.transfer_tokens(sender_username, receiver, amount)
             if success:
-                logging.info(f"轉帳成功: 從用戶 {user_id} 到 {receiver}，金額: {amount}")
+                logging.info(f"轉帳成功: 從用戶 {sender_username} 到 {receiver}，金額: {amount}")
             else:
                 logging.warning(f"轉帳失敗: {message}")
             

@@ -30,6 +30,32 @@
                             <input class="form-control" id="confirmPassword" name="confirmPassword" type="password" required data-i18n-placeholder="register_confirm_placeholder" placeholder="請再次輸入密碼" />
                             <label for="confirmPassword" data-i18n="register_confirm_label">確認密碼</label>
                         </div>
+                        
+                        <!-- Cloudflare Turnstile 人機驗證 -->
+                        <div class="mb-3">
+                            <label class="form-label" data-i18n="register_captcha_label">真人驗證</label>
+                            <div id="turnstile-container" class="d-flex justify-content-center">
+                                <div class="cf-turnstile" 
+                                     data-sitekey="0x4AAAAAABkJQaM8US5k-aWw" 
+                                     data-callback="onTurnstileSuccess" 
+                                     data-expired-callback="onTurnstileExpired" 
+                                     data-error-callback="onTurnstileError"
+                                     data-theme="light"
+                                     data-size="normal">
+                                </div>
+                            </div>
+                            <!-- 本機開發提示 -->
+                            <div id="dev-notice" class="text-muted small mt-2 d-none">
+                                <i class="fas fa-info-circle me-1"></i>
+                                本機開發模式：人機驗證已自動跳過
+                            </div>
+                        </div>
+                        
+                        <!-- 添加說明文字 -->
+                        <div class="alert alert-info" role="alert">
+                            <i class="fas fa-info-circle me-2"></i>
+                            <span data-i18n="register_email_note">註冊後請添加並驗證電子郵件以獲得100 CPT獎勵</span>
+                        </div>
                         <div id="error-message" class="alert alert-danger d-none"></div>
                         <div id="success-message" class="alert alert-success d-none"></div>
                         <div class="d-grid">
@@ -54,7 +80,144 @@
 {% endblock %}
 
 {% block scripts %}
+<!-- Cloudflare Turnstile -->
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+
 <script>
+// Turnstile 回調函數
+let turnstileToken = '';
+let turnstileWidgetId = null;
+let isLocalDev = false;
+let turnstileInitialized = false;
+
+// 檢查是否為本機開發環境
+function checkLocalDev() {
+    if (turnstileInitialized) return isLocalDev;
+    
+    isLocalDev = window.location.hostname === 'localhost' || 
+                 window.location.hostname === '127.0.0.1' || 
+                 window.location.hostname.includes('127.0.0.1') ||
+                 window.location.hostname.includes('192.168.') ||
+                 window.location.hostname.includes('10.0.');
+    
+    if (isLocalDev) {
+        console.log('檢測到本機開發環境，將跳過 Turnstile 驗證');
+        const devNotice = document.getElementById('dev-notice');
+        const turnstileContainer = document.getElementById('turnstile-container');
+        if (devNotice) devNotice.classList.remove('d-none');
+        if (turnstileContainer) turnstileContainer.style.display = 'none';
+        turnstileToken = 'dev-bypass-token';
+        turnstileInitialized = true;
+    }
+    
+    return isLocalDev;
+}
+
+function initializeTurnstile() {
+    // 防止重複初始化
+    if (turnstileInitialized) {
+        console.log('Turnstile 已經初始化過了');
+        return;
+    }
+    
+    // 檢查開發環境
+    if (checkLocalDev()) {
+        return;
+    }
+    
+    const container = document.querySelector('.cf-turnstile');
+    if (container && window.turnstile) {
+        try {
+            // 清空容器，防止重複渲染
+            container.innerHTML = '';
+            
+            turnstileWidgetId = window.turnstile.render(container, {
+                sitekey: '0x4AAAAAABkJQaM8US5k-aWw',
+                callback: onTurnstileSuccess,
+                'expired-callback': onTurnstileExpired,
+                'error-callback': onTurnstileError,
+                theme: 'light',
+                size: 'normal'
+            });
+            
+            turnstileInitialized = true;
+            console.log('Turnstile widget 初始化成功', turnstileWidgetId);
+        } catch (error) {
+            console.error('Turnstile 初始化失敗:', error);
+            showTurnstileError();
+        }
+    } else {
+        console.warn('Turnstile container 或 API 不存在');
+        // 如果載入失敗，3秒後重試一次
+        if (!turnstileInitialized) {
+            setTimeout(() => {
+                if (!turnstileInitialized && window.turnstile && !isLocalDev) {
+                    initializeTurnstile();
+                }
+            }, 3000);
+        }
+    }
+}
+
+function showTurnstileError() {
+    const container = document.getElementById('turnstile-container');
+    if (container && !turnstileInitialized) {
+        container.innerHTML = `
+            <div class="alert alert-warning" role="alert">
+                <i class="fas fa-exclamation-triangle me-2"></i>
+                人機驗證載入失敗，系統將自動跳過驗證。
+            </div>
+        `;
+        turnstileToken = 'error-bypass-token';
+        turnstileInitialized = true;
+    }
+}
+
+function onTurnstileSuccess(token) {
+    turnstileToken = token;
+    console.log('Turnstile 驗證成功');
+}
+
+function onTurnstileExpired() {
+    turnstileToken = '';
+    console.log('Turnstile 驗證過期');
+}
+
+function onTurnstileError(errorCode) {
+    turnstileToken = '';
+    console.log('Turnstile 驗證錯誤:', errorCode);
+    
+    // 如果是 widget hung 錯誤且之前已經成功，不顯示錯誤
+    if (errorCode === '300030' && turnstileToken) {
+        console.warn('Turnstile widget hung，但驗證可能已成功，繼續使用現有 token');
+        return;
+    }
+    
+    // 如果是 sitekey 錯誤，顯示錯誤訊息並允許跳過
+    if (errorCode === '400020' || errorCode === '400010') {
+        console.warn('Turnstile sitekey 配置錯誤，自動跳過驗證');
+        showTurnstileError();
+    } else if (errorCode === '300030') {
+        console.warn('Turnstile widget hung，可能是網路問題，允許跳過驗證');
+        // 如果沒有成功的 token，設置跳過 token
+        if (!turnstileToken) {
+            turnstileToken = 'error-bypass-token';
+        }
+    }
+}
+
+function resetTurnstile() {
+    if (turnstileWidgetId !== null && window.turnstile && !isLocalDev && turnstileInitialized) {
+        try {
+            window.turnstile.reset(turnstileWidgetId);
+            turnstileToken = '';
+            console.log('Turnstile 已重置');
+        } catch (error) {
+            console.error('Turnstile 重置失敗:', error);
+        }
+    }
+}
+
 async function handleRegister(event) {
     event.preventDefault();
     
@@ -79,24 +242,30 @@ async function handleRegister(event) {
         return;
     }
     
-    // 檢查是否為本機開發環境
-    const isLocalDev = window.location.hostname === 'localhost' || 
-                      window.location.hostname === '127.0.0.1' || 
-                      window.location.hostname.includes('127.0.0.1');
-    
     let turnstileResponse = '';
     
-    if (!isLocalDev) {
-        // 生產環境才檢查人機驗證
-        turnstileResponse = document.querySelector('.cf-turnstile [name="cf-turnstile-response"]')?.value;
-        if (!turnstileResponse) {
-            errorMessage.textContent = lang === 'zh-tw' ? '請完成人機驗證' : 'Please complete human verification';
-            errorMessage.classList.remove('d-none');
-            return;
-        }
-    } else {
-        // 本機開發環境使用假的token
+    if (isLocalDev || turnstileToken === 'error-bypass-token') {
+        // 本機開發環境或驗證錯誤時使用假的token
         turnstileResponse = 'dev-bypass-token';
+        console.log('使用跳過驗證 token');
+    } else {
+        // 生產環境檢查人機驗證
+        turnstileResponse = turnstileToken;
+        if (!turnstileResponse) {
+            // 檢查是否有 Turnstile 成功但出現 hung 錯誤的情況
+            const turnstileContainer = document.querySelector('.cf-turnstile');
+            const successElement = turnstileContainer && turnstileContainer.querySelector('input[name="cf-turnstile-response"]');
+            
+            if (successElement && successElement.value) {
+                // 如果找到隱藏的成功 token，使用它
+                turnstileResponse = successElement.value;
+                console.log('從 DOM 找到 Turnstile token');
+            } else {
+                errorMessage.textContent = lang === 'zh-tw' ? '請完成人機驗證' : 'Please complete human verification';
+                errorMessage.classList.remove('d-none');
+                return;
+            }
+        }
     }
     
     // 顯示載入狀態
@@ -111,6 +280,8 @@ async function handleRegister(event) {
             password: formData.get('password'),
             'cf-turnstile-response': turnstileResponse
         };
+        
+        console.log('發送註冊請求，Turnstile token:', turnstileResponse.substring(0, 20) + '...');
         
         const response = await fetch('/api/register', {
             method: 'POST',
@@ -134,7 +305,9 @@ async function handleRegister(event) {
             
             // 通知狀態已改變並立即更新UI
             document.dispatchEvent(new Event('authChanged'));
-            checkAuth();
+            if (typeof checkAuth === 'function') {
+                checkAuth();
+            }
             
             // 延遲跳轉到首頁
             setTimeout(() => {
@@ -146,8 +319,8 @@ async function handleRegister(event) {
             errorMessage.textContent = result.error || failMsg;
             errorMessage.classList.remove('d-none');
             // 重置人機驗證
-            if (!isLocalDev && typeof turnstile !== 'undefined') {
-                turnstile.reset();
+            if (!isLocalDev && turnstileToken !== 'error-bypass-token') {
+                resetTurnstile();
             }
         }
     } catch (error) {
@@ -155,13 +328,14 @@ async function handleRegister(event) {
         const networkError = lang === 'zh-tw' ? '網路錯誤，請檢查您的連線' : 'Network error, please check your connection';
         errorMessage.textContent = networkError;
         errorMessage.classList.remove('d-none');
-        if (!isLocalDev && typeof turnstile !== 'undefined') {
-            turnstile.reset();
+        if (!isLocalDev && turnstileToken !== 'error-bypass-token') {
+            resetTurnstile();
         }
     } finally {
         // 恢復按鈕狀態
         submitBtn.disabled = false;
-        submitText.textContent = i18n[lang]['register_btn'];
+        const translations = window.i18n && window.i18n[lang] ? window.i18n[lang] : {};
+        submitText.textContent = translations['register_btn'] || (lang === 'zh-tw' ? '創建帳戶' : 'Create Account');
         loadingIcon.classList.add('d-none');
     }
 }
@@ -172,6 +346,33 @@ document.addEventListener('DOMContentLoaded', function() {
     if (token) {
         // 如果已經有 token，跳轉到首頁
         window.location.href = '/';
+        return;
+    }
+    
+    // 初始化開發環境檢查和 Turnstile
+    if (!turnstileInitialized) {
+        checkLocalDev();
+        
+        // 如果不是開發環境且 Turnstile API 已載入，立即初始化
+        if (!isLocalDev && window.turnstile) {
+            initializeTurnstile();
+        } else if (!isLocalDev) {
+            // 等待 Turnstile API 載入
+            const checkTurnstile = setInterval(() => {
+                if (window.turnstile && !turnstileInitialized) {
+                    clearInterval(checkTurnstile);
+                    initializeTurnstile();
+                }
+            }, 100);
+            
+            // 10秒後停止檢查
+            setTimeout(() => {
+                clearInterval(checkTurnstile);
+                if (!turnstileInitialized && !isLocalDev) {
+                    showTurnstileError();
+                }
+            }, 10000);
+        }
     }
 });
 </script>

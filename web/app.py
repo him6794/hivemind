@@ -6,48 +6,47 @@ import sys
 import time
 from collections import defaultdict
 import requests
-
+import bcrypt
 # 添加節點池模組路徑
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'vpn')))
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from 節點池 import user_service
-from dotenv import load_dotenv
+from nodepool import user_service
+from nodepool.config import Config
 
 
-# 載入環境變數
-load_dotenv()
 
-# 添加調試信息來檢查環境變數是否正確載入
-print("🔧 檢查環境變數載入狀態:")
-print(f"  - SECRET_KEY: {'已設定' if os.getenv('SECRET_KEY') else '使用預設值'}")
-print(f"  - TURNSTILE_SECRET_KEY: {os.getenv('TURNSTILE_SECRET_KEY', '未設定')}")
-print(f"  - FLASK_HOST: {os.getenv('FLASK_HOST', '未設定')}")
-print(f"  - FLASK_PORT: {os.getenv('FLASK_PORT', '未設定')}")
-print(f"  - FLASK_DEBUG: {os.getenv('FLASK_DEBUG', '未設定')}")
+# 添加調試信息來檢查配置載入狀態
+print("🔧 檢查配置載入狀態:")
+print(f"  - SECRET_KEY: {'已設定' if Config.SECRET_KEY != 'dev-secret-key-change-in-production' else '使用預設值'}")
+print(f"  - TURNSTILE_SECRET_KEY: {'已設定' if Config.TURNSTILE_SECRET_KEY else '未設定'}")
+print(f"  - RESEND_API_KEY: {'已設定' if Config.RESEND_API_KEY else '未設定'}")
+print(f"  - BASE_URL: {Config.BASE_URL}")
+print(f"  - 開發模式: {Config.is_development()}")
+
+# 驗證必要配置
+missing_configs = Config.validate_config()
+if missing_configs:
+    print("⚠️  警告：以下配置缺失或使用預設值:")
+    for config in missing_configs:
+        print(f"    - {config}")
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
+app.config['SECRET_KEY'] = Config.SECRET_KEY
 
-# VPN 服務配置
-VPN_SERVICE_CONFIG = {
-    'host': os.getenv('VPN_SERVICE_HOST', '127.0.0.1'),
-    'port': int(os.getenv('VPN_SERVICE_PORT', '5008')),
-    'timeout': int(os.getenv('VPN_SERVICE_TIMEOUT', '10'))
-}
-
-VPN_SERVICE_URL = f"http://{VPN_SERVICE_CONFIG['host']}:{VPN_SERVICE_CONFIG['port']}"
+# 使用 Config 的配置
+VPN_SERVICE_URL = f"http://{Config.VPN_SERVICE_HOST}:{Config.VPN_SERVICE_PORT}"
 
 SECURITY_CONFIG = {
-    'rate_limit_seconds': int(os.getenv('RATE_LIMIT_SECONDS', '5')),
-    'max_clients_per_user': int(os.getenv('MAX_CLIENTS_PER_USER', '5')),
-    'jwt_secret': os.getenv('JWT_SECRET_KEY', 'jwt-secret-change-this'),
-    'token_expiration_hours': int(os.getenv('TOKEN_EXPIRATION_HOURS', '24'))
+    'rate_limit_seconds': Config.RATE_LIMIT_SECONDS,
+    'max_clients_per_user': Config.MAX_CLIENTS_PER_USER,
+    'jwt_secret': Config.JWT_SECRET_KEY,
+    'token_expiration_hours': Config.TOKEN_EXPIRATION_HOURS
 }
 
 STORAGE_CONFIG = {
-    'log_dir': os.getenv('LOG_DIR', '/mnt/myusb/hivemind/vpn/logs'),
-    'upload_dir': os.getenv('UPLOAD_DIR', '/mnt/myusb/hivemind/uploads'),
-    'max_file_size': int(os.getenv('MAX_FILE_SIZE', '10485760'))
+    'log_dir': Config.LOG_DIR,
+    'upload_dir': Config.UPLOAD_DIR,
+    'max_file_size': Config.MAX_FILE_SIZE
 }
 
 # 初始化服務
@@ -55,7 +54,7 @@ user_service_obj = user_service.UserServiceServicer()
 
 # IP 限流字典
 ip_rate_limit = defaultdict(float)
-RATE_LIMIT_SECONDS = SECURITY_CONFIG['rate_limit_seconds']
+RATE_LIMIT_SECONDS = Config.RATE_LIMIT_SECONDS
 
 def check_rate_limit(ip_address):
     """檢查 IP 是否在限流範圍內"""
@@ -68,17 +67,53 @@ def check_rate_limit(ip_address):
     ip_rate_limit[ip_address] = current_time
     return True
 
+# 添加郵件發送限流字典
+email_rate_limit = defaultdict(float)
+EMAIL_RATE_LIMIT_SECONDS = 60  # 60秒限制（針對單個用戶）
+
+def check_email_rate_limit(user_id):
+    """檢查郵件發送是否在限流範圍內（針對單個用戶）"""
+    current_time = time.time()
+    last_request_time = email_rate_limit[user_id]
+    
+    if current_time - last_request_time < EMAIL_RATE_LIMIT_SECONDS:
+        return False, int(EMAIL_RATE_LIMIT_SECONDS - (current_time - last_request_time))
+    
+    return True, 0
+
+def update_email_rate_limit(user_id):
+    """更新郵件發送時間（只有成功發送才調用）"""
+    email_rate_limit[user_id] = time.time()
+
+# 添加忘記密碼限流字典
+forgot_password_rate_limit = defaultdict(float)
+FORGOT_PASSWORD_RATE_LIMIT_SECONDS = 60  # 60秒限制
+
+def check_forgot_password_rate_limit(email):
+    """檢查忘記密碼請求是否在限流範圍內"""
+    current_time = time.time()
+    last_request_time = forgot_password_rate_limit[email]
+    
+    if current_time - last_request_time < FORGOT_PASSWORD_RATE_LIMIT_SECONDS:
+        return False, int(FORGOT_PASSWORD_RATE_LIMIT_SECONDS - (current_time - last_request_time))
+    
+    return True, 0
+
+def update_forgot_password_rate_limit(email):
+    """更新忘記密碼請求時間（只有成功發送才調用）"""
+    forgot_password_rate_limit[email] = time.time()
+
 def call_vpn_service(endpoint, method='GET', data=None):
     """調用 VPN 服務的通用方法"""
     try:
         url = f"{VPN_SERVICE_URL}{endpoint}"
         
         if method == 'GET':
-            response = requests.get(url, timeout=VPN_SERVICE_CONFIG['timeout'])
+            response = requests.get(url, timeout=Config.VPN_SERVICE_TIMEOUT)
         elif method == 'POST':
-            response = requests.post(url, json=data, timeout=VPN_SERVICE_CONFIG['timeout'])
+            response = requests.post(url, json=data, timeout=Config.VPN_SERVICE_TIMEOUT)
         elif method == 'DELETE':
-            response = requests.delete(url, timeout=VPN_SERVICE_CONFIG['timeout'])
+            response = requests.delete(url, timeout=Config.VPN_SERVICE_TIMEOUT)
         else:
             return None, f"不支援的 HTTP 方法: {method}"
         
@@ -100,30 +135,24 @@ def verify_turnstile(token, ip_address):
         # 本機開發自動通過
         if (
             ip_address in ("127.0.0.1", "::1", "localhost")
-            or os.getenv("FLASK_ENV") == "development"
-            or os.getenv("FLASK_DEBUG", "False").lower() in ("1", "true", "yes")
+            or Config.is_development()
         ):
-            print("🚧 本機開發模式，自動通過 Turnstile 驗證")
+            print("🚧 開發模式，自動通過 Turnstile 驗證")
             return True
-
-        # 暫時跳過驗證用於測試
-        # print("🚧 暫時跳過 Turnstile 驗證（測試模式）")
-        # return True
         
         # 如果沒有提供 token，直接返回 False
         if not token:
             print("❌ Turnstile: 沒有提供 token")
             return False
 
-        secret_key = os.getenv('TURNSTILE_SECRET_KEY')
-        if not secret_key:
+        if not Config.TURNSTILE_SECRET_KEY:
             print("❌ Turnstile: 沒有設定 TURNSTILE_SECRET_KEY 環境變數")
             return False
 
-        print(f"🔑 Turnstile: 使用密鑰 {secret_key[:10]}...")
+        print(f"🔑 Turnstile: 使用密鑰 {Config.TURNSTILE_SECRET_KEY[:10]}...")
 
         response = requests.post('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
-            'secret': secret_key,
+            'secret': Config.TURNSTILE_SECRET_KEY,
             'response': token,
             'remoteip': ip_address
         }, timeout=10)
@@ -146,7 +175,7 @@ def verify_turnstile(token, ip_address):
 @app.route('/api/register', methods=['POST'])
 def register():
     if not user_service_obj:
-        return jsonify({'error': '用戶服務不可用'}), 500
+        return jsonify({'error': 'User service unavailable'}), 500
     
     try:
         data = request.get_json()
@@ -161,10 +190,10 @@ def register():
         
         # 驗證人機驗證
         if not turnstile_response:
-            return jsonify({'error': '請完成人機驗證'}), 400
+            return jsonify({'error': 'Please complete human verification'}), 400
             
         if not verify_turnstile(turnstile_response, client_ip):
-            return jsonify({'error': '人機驗證失敗，請重試'}), 400
+            return jsonify({'error': 'Human verification failed, please try again'}), 400
         
         # 創建模擬的gRPC請求對象
         class MockRequest:
@@ -196,7 +225,7 @@ def register():
             
             if login_response.success:
                 return jsonify({
-                    'message': '註冊成功',
+                    'message': 'Registration successful',
                     'access_token': login_response.token,
                     'user': {
                         'username': username,
@@ -204,7 +233,7 @@ def register():
                     }
                 }), 201
             else:
-                return jsonify({'error': '註冊成功但登入失敗'}), 500
+                return jsonify({'error': 'Registration successful but login failed'}), 500
         else:
             return jsonify({'error': response.message}), 400
             
@@ -214,7 +243,7 @@ def register():
 @app.route('/api/login', methods=['POST'])
 def login():
     if not user_service_obj:
-        return jsonify({'error': '用戶服務不可用'}), 500
+        return jsonify({'error': 'User service unavailable'}), 500
     
     try:
         data = request.get_json()
@@ -229,10 +258,10 @@ def login():
         
         # 驗證人機驗證
         if not turnstile_response:
-            return jsonify({'error': '請完成人機驗證'}), 400
+            return jsonify({'error': 'Please complete human verification'}), 400
             
         if not verify_turnstile(turnstile_response, client_ip):
-            return jsonify({'error': '人機驗證失敗，請重試'}), 400
+            return jsonify({'error': 'Human verification failed, please try again'}), 400
         
         # 創建模擬的gRPC請求對象
         class MockRequest:
@@ -257,7 +286,7 @@ def login():
             balance = balance_response.balance if balance_response.success else 0.0
             
             return jsonify({
-                'message': '登入成功',
+                'message': 'Login successful',
                 'access_token': response.token,
                 'user': {
                     'username': username,
@@ -311,12 +340,12 @@ def refresh_token():
 @app.route('/api/balance', methods=['GET'])
 def get_balance():
     if not user_service_obj:
-        return jsonify({'error': '用戶服務不可用'}), 500
+        return jsonify({'error': 'User service unavailable'}), 500
     
     try:
         auth_header = request.headers.get('Authorization', '')
         if not auth_header.startswith('Bearer '):
-            return jsonify({'error': '無效的認證令牌'}), 401
+            return jsonify({'error': 'Invalid authentication token'}), 401
         
         token = auth_header[7:]  # 移除 'Bearer ' 前綴
         
@@ -340,7 +369,7 @@ def get_balance():
             # 檢查是否為 Token 過期
             if response.message == "TOKEN_EXPIRED":
                 return jsonify({
-                    'error': 'Token 已過期',
+                    'error': 'Token expired',
                     'error_code': 'TOKEN_EXPIRED'
                 }), 401
             else:
@@ -352,12 +381,12 @@ def get_balance():
 @app.route('/api/transfer', methods=['POST'])
 def transfer():
     if not user_service_obj:
-        return jsonify({'error': '用戶服務不可用'}), 500
+        return jsonify({'error': 'User service unavailable'}), 500
     
     try:
         auth_header = request.headers.get('Authorization', '')
         if not auth_header.startswith('Bearer '):
-            return jsonify({'error': '無效的認證令牌'}), 401
+            return jsonify({'error': 'Invalid authentication token'}), 401
         
         token = auth_header[7:]
         data = request.get_json()
@@ -388,7 +417,7 @@ def transfer():
             balance_response = user_service_obj.GetBalance(balance_request, mock_context)
             
             return jsonify({
-                'message': '轉帳成功',
+                'message': 'Transfer successful',
                 'new_balance': balance_response.balance if balance_response.success else 0.0
             }), 200
         else:
@@ -497,114 +526,6 @@ def disconnect_vpn_client(client_name):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/download/<file_type>')
-def download_file(file_type):
-    if not user_service_obj:
-        return jsonify({'error': '用戶服務不可用'}), 500
-    
-    try:
-        auth_header = request.headers.get('Authorization', '')
-        if not auth_header.startswith('Bearer '):
-            return jsonify({'error': '請先登入'}), 401
-        
-        token = auth_header[7:]
-        user_info = user_service_obj.verify_token(token)
-        if not user_info:
-            return jsonify({'error': '無效的認證令牌'}), 401
-        
-        username = user_info.get('username', f"user_{user_info['user_id']}")
-        
-        # 定義下載檔案的路徑
-        download_dir = os.path.join(os.path.dirname(__file__), 'downloads')
-        
-        if file_type == 'worker':
-            # 返回工作端 ZIP 檔案
-            file_path = os.path.join(download_dir, 'hivemind-worker.zip')
-            if os.path.exists(file_path):
-                return send_file(
-                    file_path, 
-                    as_attachment=True, 
-                    download_name='HiveMind-Worker.zip',
-                    mimetype='application/zip'
-                )
-            else:
-                return jsonify({'error': '工作端檔案不存在'}), 404
-                
-        elif file_type == 'master':
-            # 返回主控端 ZIP 檔案
-            file_path = os.path.join(download_dir, 'hivemind-master.zip')
-            if os.path.exists(file_path):
-                return send_file(
-                    file_path, 
-                    as_attachment=True, 
-                    download_name='HiveMind-Master.zip',
-                    mimetype='application/zip'
-                )
-            else:
-                return jsonify({'error': '主控端檔案不存在'}), 404
-                
-        elif file_type == 'server':
-            # 伺服器端開發中
-            return jsonify({
-                'status': 'development',
-                'message': '伺服器端正在開發中，敬請期待！',
-                'estimated_release': '2024年第二季度'
-            }), 200
-            
-        elif file_type == 'mobile':
-            # 移動端開發中
-            return jsonify({
-                'status': 'development',
-                'message': '移動端正在開發中，敬請期待！',
-                'platforms': ['Android', 'iOS'],
-                'estimated_release': '2024年第三季度'
-            }), 200
-            
-        elif file_type == 'web':
-            # Web 端開發中
-            return jsonify({
-                'status': 'development',
-                'message': 'Web 端正在開發中，敬請期待！',
-                'features': ['瀏覽器直接運行', '無需安裝', '跨平台支持'],
-                'estimated_release': '2024年第四季度'
-            }), 200
-            
-        elif file_type == 'vpn-config':
-            # VPN 配置檔案
-            vpn_data = {
-                'client_ip': request.remote_addr,
-                'client_name': username
-            }
-            
-            result, error = call_vpn_service('/vpn/create_client', 'POST', vpn_data)
-            
-            if error:
-                return jsonify({'error': error}), 500
-            
-            # 創建臨時配置檔案
-            import tempfile
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.conf', delete=False) as f:
-                f.write(result.get('config', ''))
-                temp_path = f.name
-            
-            try:
-                return send_file(
-                    temp_path,
-                    as_attachment=True,
-                    download_name=f'{username}_wireguard.conf',
-                    mimetype='text/plain'
-                )
-            finally:
-                # 下載完成後刪除臨時檔案
-                try:
-                    os.unlink(temp_path)
-                except:
-                    pass
-        else:
-            return jsonify({'error': '不支援的檔案類型'}), 404
-            
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/vpn/config', methods=['GET'])
 def get_vpn_config_info():
@@ -665,9 +586,9 @@ def register_page():
 @app.route('/download')
 def download_page():
     return render_template('download.html')
-@app.route('/balance')
-def balance_page():
-    return render_template('balance.html')
+@app.route('/dashboard')
+def dashboard_page():
+    return render_template('dashboard.html')
 
 @app.route('/sponsor')
 def sponsor_page():
@@ -675,23 +596,265 @@ def sponsor_page():
 
 @app.route('/terms')
 def terms_page():
-    return render_template('terms.html')
+    return render_template('reset_password.html')
 
-@app.route('/privacy')
-def privacy_page():
-    return render_template('privacy.html')
+@app.route('/forgot-password')
+def forgot_password_page():
+    """忘記密碼頁面"""
+    return render_template('forgot_password.html')
+
+@app.route('/api/user/profile', methods=['GET'])
+def get_user_profile():
+    """獲取用戶資料"""
+    if not user_service_obj:
+        return jsonify({'error': 'User service unavailable'}), 500
+    
+    try:
+        auth_header = request.headers.get('Authorization', '')
+        if not auth_header.startswith('Bearer '):
+            return jsonify({'error': 'Invalid authentication token'}), 401
+        
+        token = auth_header[7:]
+        
+        # 驗證 token 並獲取用戶信息
+        user_info = user_service_obj.verify_token(token)
+        if not user_info:
+            return jsonify({'error': 'Invalid authentication token'}), 401
+        
+        # 從數據庫獲取完整用戶資料
+        user_id = user_info.get('user_id')
+        user_data = user_service_obj.user_manager.db_manager.get_user_by_id(user_id)
+        
+        if user_data:
+            user_dict = dict(user_data) if user_data else {}
+            
+            return jsonify({
+                'username': user_dict.get('username', ''),
+                'email': user_dict.get('email'),
+                'email_verified': bool(user_dict.get('email_verified', 0)),
+                'tokens': user_dict.get('tokens', 0),
+                'credit_score': user_dict.get('credit_score', 100),
+                'created_at': user_dict.get('created_at')
+            }), 200
+        else:
+            return jsonify({'error': 'User not found'}), 404
+            
+    except Exception as e:
+        print(f"Error in get_user_profile: {e}")  # 添加調試信息
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/user/update-email', methods=['POST'])
+def update_user_email():
+    """更新用戶電子郵件"""
+    if not user_service_obj:
+        return jsonify({'error': 'User service unavailable'}), 500
+    
+    try:
+        auth_header = request.headers.get('Authorization', '')
+        if not auth_header.startswith('Bearer '):
+            return jsonify({'error': 'Invalid authentication token'}), 401
+        
+        token = auth_header[7:]
+        data = request.get_json()
+        email = data.get('email', '').strip()
+        
+        if not email:
+            return jsonify({'error': 'Please enter a valid email address'}), 400
+        
+        # 驗證 token 並獲取用戶信息
+        user_info = user_service_obj.verify_token(token)
+        if not user_info:
+            return jsonify({'error': 'Invalid authentication token'}), 401
+        
+        user_id = user_info.get('user_id')
+        
+        # 獲取用戶當前的電子郵件
+        current_user = user_service_obj.user_manager.db_manager.get_user_by_id(user_id)
+        if not current_user:
+            return jsonify({'error': 'User not found'}), 404
+        
+        current_user_dict = dict(current_user)
+        current_email = current_user_dict.get('email')
+        
+        # 檢查新電子郵件是否與當前電子郵件相同
+        if current_email and current_email.lower() == email.lower():
+            return jsonify({'error': 'The new email address is the same as your current email address'}), 400
+        
+        # 檢查郵件發送限流（針對單個用戶）
+        can_send, wait_time = check_email_rate_limit(user_id)
+        if not can_send:
+            return jsonify({
+                'error': f'Please wait {wait_time} seconds before sending another verification email'
+            }), 429
+        
+        # 檢查電子郵件是否已被其他用戶使用
+        existing_user = user_service_obj.user_manager.db_manager.get_user_by_email(email)
+        if existing_user and existing_user['id'] != user_id:
+            return jsonify({'error': 'This email is already used by another user'}), 400
+        
+        # 更新電子郵件並發送驗證郵件
+        success, message = user_service_obj.user_manager.db_manager.update_user_email_and_send_verification(user_id, email)
+        
+        if success:
+            # 只有成功發送郵件才更新限流時間
+            update_email_rate_limit(user_id)
+            return jsonify({'message': message}), 200
+        else:
+            # 發送失敗不計入限流，用戶可以立即重試
+            return jsonify({'error': message}), 400
+            
+    except Exception as e:
+        print(f"Error in update_user_email: {e}")  # 添加調試信息
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/user/change-password', methods=['POST'])
+def change_user_password():
+    """變更用戶密碼"""
+    if not user_service_obj:
+        return jsonify({'error': 'User service unavailable'}), 500
+    
+    try:
+        auth_header = request.headers.get('Authorization', '')
+        if not auth_header.startswith('Bearer '):
+            return jsonify({'error': 'Invalid authentication token'}), 401
+        
+        token = auth_header[7:]
+        data = request.get_json()
+        current_password = data.get('current_password', '')
+        new_password = data.get('new_password', '')
+        
+        if not current_password or not new_password:
+            return jsonify({'error': 'Please enter current password and new password'}), 400
+        
+        if len(new_password) < 6:
+            return jsonify({'error': 'Password must be at least 6 characters long'}), 400
+        
+        # 驗證 token 並獲取用戶信息
+        user_info = user_service_obj.verify_token(token)
+        if not user_info:
+            return jsonify({'error': 'Invalid authentication token'}), 401
+        
+        user_id = user_info.get('user_id')
+        
+        # 驗證目前密碼
+        user_data = user_service_obj.user_manager.db_manager.get_user_by_id(user_id)
+        if not user_data:
+            return jsonify({'error': 'User not found'}), 404
+            
+        # 將 sqlite3.Row 轉換為字典
+        user_dict = dict(user_data)
+        
+        if not bcrypt.checkpw(current_password.encode(), user_dict['password'].encode()):
+            return jsonify({'error': 'Current password is incorrect'}), 400
+        
+        # 更新密碼
+        success, message = user_service_obj.user_manager.update_user_password(user_id, new_password)
+        
+        if success:
+            return jsonify({'message': 'Password updated successfully'}), 200
+        else:
+            return jsonify({'error': message}), 400
+            
+    except Exception as e:
+        print(f"Error in change_user_password: {e}")  # 添加調試信息
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/user/verify-email/<token>', methods=['GET'])
+def verify_email(token):
+    """驗證電子郵件"""
+    if not user_service_obj:
+        return jsonify({'error': 'User service unavailable'}), 500
+    
+    try:
+        success, message = user_service_obj.user_manager.db_manager.verify_user_email(token)
+        
+        if success:
+            return jsonify({'message': message}), 200
+        else:
+            return jsonify({'error': message}), 400
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/user/forgot-password', methods=['POST'])
+def forgot_password():
+    """發送密碼重設郵件"""
+    if not user_service_obj:
+        return jsonify({'error': 'User service unavailable'}), 500
+    
+    try:
+        data = request.get_json()
+        email = data.get('email', '').strip()
+        
+        if not email:
+            return jsonify({'error': 'Please enter your email address'}), 400
+        
+        # 檢查忘記密碼限流（針對單個郵件地址）
+        can_send, wait_time = check_forgot_password_rate_limit(email)
+        if not can_send:
+            return jsonify({
+                'error': f'Please wait {wait_time} seconds before requesting another password reset email'
+            }), 429
+        
+        # 創建密碼重設 token 並發送郵件
+        success, message = user_service_obj.user_manager.db_manager.create_password_reset_token(email)
+        
+        if success:
+            # 只有成功發送郵件才更新限流時間
+            update_forgot_password_rate_limit(email)
+            return jsonify({'message': message}), 200
+        else:
+            # 發送失敗不計入限流，用戶可以立即重試
+            return jsonify({'error': message}), 400
+            
+    except Exception as e:
+        print(f"Error in forgot_password: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/user/reset-password', methods=['POST'])
+def reset_password():
+    """使用 token 重設密碼"""
+    if not user_service_obj:
+        return jsonify({'error': 'User service unavailable'}), 500
+    
+    try:
+        data = request.get_json()
+        token = data.get('token', '')
+        new_password = data.get('new_password', '')
+        confirm_password = data.get('confirm_password', '')
+        
+        if not token or not new_password or not confirm_password:
+            return jsonify({'error': 'All fields are required'}), 400
+        
+        if new_password != confirm_password:
+            return jsonify({'error': 'Passwords do not match'}), 400
+        
+        if len(new_password) < 6:
+            return jsonify({'error': 'Password must be at least 6 characters long'}), 400
+        
+        # 重設密碼
+        success, message = user_service_obj.user_manager.db_manager.reset_password_with_token(token, new_password)
+        
+        if success:
+            return jsonify({'message': message}), 200
+        else:
+            return jsonify({'error': message}), 400
+            
+    except Exception as e:
+        print(f"Error in reset_password: {e}")
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    # 從環境變數讀取運行配置
-    host = os.getenv('FLASK_HOST', '0.0.0.0')
-    port = int(os.getenv('FLASK_PORT', '80'))
-    debug = os.getenv('FLASK_DEBUG', 'False')
-    
     print(f"啟動 Flask 應用程式:")
-    print(f"  - 主機: {host}")
-    print(f"  - 端口: {port}")
-    print(f"  - 調試模式: {debug}")
+    print(f"  - 主機: {Config.FLASK_HOST}")
+    print(f"  - 端口: {Config.FLASK_PORT}")
+    print(f"  - 調試模式: {Config.FLASK_DEBUG}")
+    print(f"  - 環境: {Config.FLASK_ENV}")
     print(f"  - VPN 服務 URL: {VPN_SERVICE_URL}")
-    print(f"  - 限流設置: {RATE_LIMIT_SECONDS} 秒")
+    print(f"  - 限流設置: {Config.RATE_LIMIT_SECONDS} 秒")
     
-    app.run(debug=debug, host=host, port=5000)
+    app.run(
+        debug=Config.FLASK_DEBUG, 
+        host=Config.FLASK_HOST, 
+        port=Config.FLASK_PORT
+    )

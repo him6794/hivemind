@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+{% block title %}Email Verification - HiveMind{% endblock %}
+{% block content %}
+
+<!-- Page Header -->
+<header class="bg-dark py-5">
+    <div class="container px-5">
+        <div class="text-center">
+            <h1 class="display-5 fw-bolder text-white mb-2" data-i18n="email_verification_title">電子郵件驗證</h1>
+            <p class="lead fw-normal text-white-50 mb-0" data-i18n="email_verification_subtitle">驗證您的電子郵件地址</p>
+        </div>
+    </div>
+</header>
+
+<!-- Verification Result -->
+<section class="py-5">
+    <div class="container px-5 my-5">
+        <div class="row gx-5 justify-content-center">
+            <div class="col-lg-8 col-xl-6">
+                <div class="card shadow border-0 text-center">
+                    <div class="card-body p-5">
+                        <div id="verification-result">
+                            <div class="mb-4">
+                                <i class="fas fa-spinner fa-spin fa-3x text-primary"></i>
+                            </div>
+                            <h3 class="fw-bolder mb-3" data-i18n="verifying">驗證中...</h3>
+                            <p class="text-muted" data-i18n="please_wait">請稍候，正在驗證您的電子郵件地址</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/i18n.js') }}"></script>
+<script>
+document.addEventListener('DOMContentLoaded', async () => {
+    // 初始化翻譯
+    const lang = localStorage.getItem('lang') || 'zh-tw';
+    if (window.i18n) {
+        translatePage(lang);
+    }
+    
+    const resultDiv = document.getElementById('verification-result');
+    
+    // 從 URL 路徑獲取驗證 token
+    const pathParts = window.location.pathname.split('/');
+    const token = pathParts[pathParts.length - 1];
+    
+    if (!token || token === 'verify-email') {
+        showError(lang === 'zh-tw' ? '無效的驗證連結' : 'Invalid verification link');
+        return;
+    }
+    
+    try {
+        const response = await fetch(`/api/user/verify-email/${token}`, {
+            method: 'GET'
+        });
+        
+        const data = await response.json();
+        
+        if (response.ok) {
+            showSuccess(data.message);
+        } else {
+            showError(data.error);
+        }
+    } catch (error) {
+        console.error('Verification error:', error);
+        showError(lang === 'zh-tw' ? '驗證過程中發生錯誤，請稍後再試' : 'An error occurred during verification, please try again later');
+    }
+});
+
+function showSuccess(message) {
+    const lang = localStorage.getItem('lang') || 'zh-tw';
+    const resultDiv = document.getElementById('verification-result');
+    
+    // 檢查是否包含獎勵信息
+    const hasReward = message.includes('100 CPT');
+    
+    const translations = window.i18n && window.i18n[lang] ? window.i18n[lang] : {};
+    
+    const rewardAlert = hasReward ? `
+        <div class="alert alert-success" role="alert">
+            <i class="fas fa-coins me-2"></i>
+            <strong>${translations['verification_reward'] || (lang === 'zh-tw' ? '恭喜！您已獲得 100 CPT 獎勵代幣' : 'Congratulations! You have received 100 CPT reward tokens')}</strong>
+        </div>
+    ` : `
+        <div class="alert alert-info" role="alert">
+            <i class="fas fa-info-circle me-2"></i>
+            <strong>${translations['verification_no_reward'] || (lang === 'zh-tw' ? '電子郵件驗證成功（獎勵僅限首次驗證）' : 'Email verified successfully (reward only for first verification)')}</strong>
+        </div>
+    `;
+    
+    resultDiv.innerHTML = `
+        <div class="mb-4">
+            <i class="fas fa-check-circle fa-3x text-success"></i>
+        </div>
+        <h3 class="fw-bolder mb-3 text-success">${translations['verification_success'] || (lang === 'zh-tw' ? '驗證成功！' : 'Verification Successful!')}</h3>
+        <p class="text-muted mb-4">${message}</p>
+        ${rewardAlert}
+        <div class="d-grid gap-2 d-md-flex justify-content-md-center">
+            <a href="/dashboard" class="btn btn-primary btn-lg">
+                <i class="fas fa-wallet me-2"></i>
+                <span>${translations['view_balance'] || (lang === 'zh-tw' ? '查看餘額' : 'View Balance')}</span>
+            </a>
+            <a href="/" class="btn btn-outline-primary btn-lg">
+                <i class="fas fa-home me-2"></i>
+                <span>${translations['back_to_home'] || (lang === 'zh-tw' ? '返回首頁' : 'Back to Home')}</span>
+            </a>
+        </div>
+    `;
+}
+
+function showError(message) {
+    const lang = localStorage.getItem('lang') || 'zh-tw';
+    const resultDiv = document.getElementById('verification-result');
+    const translations = window.i18n && window.i18n[lang] ? window.i18n[lang] : {};
+    
+    resultDiv.innerHTML = `
+        <div class="mb-4">
+            <i class="fas fa-times-circle fa-3x text-danger"></i>
+        </div>
+        <h3 class="fw-bolder mb-3 text-danger">${translations['verification_failed'] || (lang === 'zh-tw' ? '驗證失敗' : 'Verification Failed')}</h3>
+        <p class="text-muted mb-4">${message}</p>
+        <div class="alert alert-warning" role="alert">
+            <i class="fas fa-info-circle me-2"></i>
+            <span>${translations['verification_error_info'] || (lang === 'zh-tw' ? '如果您已經驗證過，請忽略此錯誤' : 'If you have already verified, please ignore this error')}</span>
+        </div>
+        <div class="d-grid gap-2 d-md-flex justify-content-md-center">
+            <a href="/balance" class="btn btn-primary btn-lg">
+                <i class="fas fa-envelope me-2"></i>
+                <span>${translations['resend_verification'] || (lang === 'zh-tw' ? '重新發送驗證郵件' : 'Resend Verification Email')}</span>
+            </a>
+            <a href="/" class="btn btn-outline-primary btn-lg">
+                <i class="fas fa-home me-2"></i>
+                <span>${translations['back_to_home'] || (lang === 'zh-tw' ? '返回首頁' : 'Back to Home')}</span>
+            </a>
+        </div>
+    `;
+}
+</script>
+{% endblock %}
