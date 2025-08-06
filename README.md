@@ -1,67 +1,168 @@
-# HiveMind Distributed Computing Platform
+# HiveMind 分布式計算平台
 
-[中文說明（繁體）](./README.zh-TW.md)
+## 項目概述
+HiveMind是一個高效的分布式計算平台，旨在通過將計算任務分配到多個節點來實現高性能計算。平台採用模塊化架構，支持動態節點分配、資源監控和安全隔離，為用戶提供靈活且強大的分布式計算解決方案。
 
-This platform is a centralized distributed computing system utilizing efficient gRPC communication, combined with Docker, Redis, and Flask technologies to achieve secure and high-performance task distribution and execution.
+## 核心功能
+- **模塊化架構**：將任務分解為可管理的子任務，實現計算能力的自由擴展
+- **即時節點分配**：節點池自動分配最合適的節點，支持自定義任務標準
+- **安全隔離**：任務在Docker容器中執行，確保節點之間的獨立性和安全性
+- **高性能處理**：利用分布式架構提供卓越的計算能力和可伸縮性
+- **資源監控**：實時追蹤CPU、內存和GPU使用率，優化資源分配
+- **獎勵機制**：根據節點貢獻（CPU、內存和GPU使用率）計算獎勵，通過使用率倍數(0.8-1.5)和GPU獎勵係數(使用率的1%)計算總獎勵
 
-## Architecture
+## 系統架構
+### 主要模組
+1. **主控節點 (master)**
+   - 負責任務分配、節點管理和協調：基於節點負載值動態分配任務
+   - 提供Web管理界面和API接口：使用Flask框架構建RESTful API
+   - 維護節點狀態和任務進度：通過gRPC與工作節點通信，使用Protocol Buffers定義數據結構
+   - 任務存儲管理：將任務數據存儲在/mnt/myusb/hivemind/task_storage目錄
 
-- **Master Node**  
-  - Upload tasks
-  - Query task execution results
-  - Provides web interface and API (Flask)
+2. **工作節點 (worker)**
+   - 執行分配的計算任務：通過Docker容器化運行任務，使用justin308/hivemind-worker鏡像
+   - 監控本地資源使用情況：實時採集CPU、內存和GPU使用率，每30秒向主控節點報告
+   - 任務生命週期管理：負責任務的啟動、監控、終止和結果回傳
+   - 自動重連機制：斷網後自動嘗試重新連接主控節點
 
-- **Node Pool**  
-  - Manages worker nodes
-  - Assigns tasks to worker nodes
-  - Collects and stores execution results (Redis)
+3. **節點池管理 (node_pool)**
+   - 管理節點註冊和狀態追蹤，通過定期心跳檢查節點健康狀態
+   - 實現節點負載均衡：基於CPU使用率、內存佔用率計算節點負載值(max(cpu_usage, memory_usage))，優先選擇低負載節點分配任務
+   - 處理節點間通信和數據傳輸，使用gRPC協議進行節點間高效通信
+   - 任務狀態監控：記錄任務執行狀態和資源使用統計，用於獎勵計算和故障恢復
 
-- **Worker Node**  
-  - Receives tasks and executes them in Docker containers
-  - Returns execution results to the node pool
-  - Sends heartbeat signals regularly
+4. **Web界面 (web)**
+   - 用戶交互界面，支持任務提交和監控：使用Flask框架和模板引擎構建
+   - 節點狀態可視化：實時顯示CPU、內存和GPU使用率統計
+   - 用戶賬戶和權限管理：支持註冊、登錄和餘額管理功能
+   - VPN配置生成：自動生成WireGuard VPN配置文件，支持節點安全通信
 
-## System Workflow
+## 安裝指南
+### 先決條件
+- Python 3.8+ 
+- Docker
+- Git
+- pip (Python包管理工具)
+- 網絡連接
 
-1. **Worker Node Startup**  
-   Logs in and registers with the node pool, reporting CPU, RAM, GPU, and other information.
-2. **Node Pool Registration**  
-   Stores worker node information in Redis upon registration.
-3. **Task Upload by Master Node**  
-   Node pool assigns tasks to suitable worker nodes.
-4. **Task Execution**  
-   Worker node executes the task in a Docker container and returns the result to the node pool.
-5. **Result Query**  
-   Master node queries task results or logs, and the node pool returns the corresponding data.
-6. **Heartbeat Monitoring**  
-   Worker node sends a heartbeat every second. If no heartbeat is received for 10 seconds, the node pool removes the worker node and reassigns the task.
-7. **Resource Fee Settlement**  
-   During task execution, the master node account is charged CPT tokens based on resource usage, which are transferred to the worker node.
+### 快速安裝
+1. 克隆倉庫
+```bash
+```
 
-## Token System (CPT)
+2. 安裝依賴
+```bash
+pip install -r requirements.txt
+```
 
-- **Purpose**: Used as the unit for resource fee calculation
-- **Distribution**: Each account receives 150 CPT upon registration; total supply is 1,000,000,000,000 CPT
-- **Consumption**: Master node must pay CPT to upload tasks, with fees calculated based on resource usage
-- **Earning**: Worker nodes earn CPT by completing tasks
-- **Tipping**: Users can tip open-source projects with CPT
+3. 啟動主控節點
+```bash
+cd master
+python master_node.py
+# 或運行打包好的可執行文件
+HiveMind-Master.exe
+```
 
-## Technology Stack
+4. 啟動工作節點
+```bash
+cd worker
+python worker_node.py
+# 或運行打包好的可執行文件
+HiveMind-Worker.exe
+```
 
-- **gRPC**: Efficient communication
-- **Redis**: Data caching
-- **Docker**: Containerized task execution
-- **Python**: Backend logic
-- **Flask**: Web interface and API
-- **VPN**: Secure communication and virtual intranet
+5. 訪問Web界面
+打開瀏覽器訪問: http://localhost:5000
 
-## Installation & Startup
+## 使用方法
+### 基本流程
+1. **註冊賬戶**
+   - 在Web界面完成用戶註冊
+   - 登錄系統獲取認證令牌
 
-1. Install dependencies:
-   ```powershell
-   pip install -r requirements.txt
-   ```
-2. Install Docker and Redis services
-3. Start services:
-   - Master Node Web Interface: `http://127.0.0.1:5001`
-   - Worker Node Web Interface: `http://127.0.0.1:5000`
+2. **提交任務**
+   - 準備任務代碼和數據
+   - 通過Web界面或API上傳任務
+   - 配置資源需求（CPU、內存、GPU等）
+
+3. **監控任務**
+   - 在儀表板查看任務狀態
+   - 監控資源使用情況
+   - 查看任務日誌和輸出
+
+4. **獲取結果**
+   - 任務完成後下載結果
+   - 查看計算統計和資源消耗報告
+
+### 示例代碼
+通過API提交任務：
+```python
+import requests
+
+API_URL = "http://localhost:5000/api/tasks"
+TOKEN = "your_auth_token"
+
+payload = {
+    "task_name": "image_processing",
+    "task_file": open("task.zip", "rb"),
+    "cpu_cores": 4,
+    "memory_gb": 8,
+    "gpu_required": True
+}
+
+headers = {"Authorization": f"Bearer {TOKEN}"}
+response = requests.post(API_URL, files=payload, headers=headers)
+print(response.json())
+```
+
+## 技術細節
+### 通信協議
+- 使用gRPC進行節點間高效通信
+- 定義了嚴格的Protobuf數據結構
+- 支持同步和異步任務處理
+
+### 容器化技術
+- 所有任務在隔離的Docker容器中執行
+- 預定義多種基礎鏡像（Python、CUDA等）
+- 自動資源限制和隔離
+
+### 資源管理
+- 實時監控CPU、內存和GPU使用率
+- 基於負載的動態任務調度
+- 資源使用統計和獎勵計算
+
+### 安全特性
+- 節點身份驗證和授權
+- 數據傳輸加密
+- 任務隔離和資源限制
+
+## 開發和貢獻
+### 項目結構
+```
+hivemind/
+├── master/         # 主控節點
+├── node_pool/      # 節點池管理
+├── web/            # Web界面
+├── worker/         # 工作節點
+└── requirements.txt # 依賴管理
+```
+
+### 構建可執行文件
+主控節點打包：
+```bash
+cd master
+python build.py
+```
+
+工作節點打包：
+```bash
+cd worker
+python make.py
+```
+
+## 許可證
+本項目採用GNU General Public License v3.0許可證 - 詳見LICENSE.txt文件。
+
+## 聯繫我們
+- 項目網站: https://hivemind.justin0711.com
+- 支持郵箱: hivemind@justin0711.com

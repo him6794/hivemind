@@ -10,8 +10,8 @@ import bcrypt
 # 添加節點池模組路徑
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'vpn')))
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from nodepool import user_service
-from nodepool.config import Config
+from node_pool import user_service
+from node_pool.config import Config
 
 
 

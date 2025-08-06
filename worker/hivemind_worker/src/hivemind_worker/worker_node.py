@@ -1,3 +1,9 @@
+from sys import exit, path
+from os.path import join, dirname, abspath, exists, relpath
+from os import environ, makedirs, chmod, walk, _exit, system
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 from docker import from_env
 from docker.errors import ImageNotFound, APIError
 import grpc
@@ -7,13 +13,10 @@ from flask import Flask, jsonify, request, render_template, session, redirect, u
 import nodepool_pb2
 import nodepool_pb2_grpc
 from concurrent.futures import ThreadPoolExecutor
-from os import environ, makedirs, chmod, walk, _exit, system
-from os.path import join, dirname, abspath, exists, relpath
 from psutil import cpu_count, virtual_memory, cpu_percent
 from time import time, sleep
 from zipfile import ZipFile, ZIP_DEFLATED
 from io import BytesIO
-from sys import exit
 from tempfile import mkdtemp
 from subprocess import run
 from platform import node, system
@@ -1766,8 +1769,8 @@ class WorkerNodeServicer(nodepool_pb2_grpc.WorkerNodeServiceServicer):
                 success=False,
                 message=f"Failed to send stop signal to task {task_id}"
             )
-
-if __name__ == "__main__":
+def run_worker_node():
+    """啟動 Worker Node"""
     try:
         worker = WorkerNode()
         
@@ -1798,3 +1801,5 @@ if __name__ == "__main__":
     except Exception as e:
         critical(f"Failed to start worker: {e}")
         exit(1)
+if __name__ == '__main__':
+    run_worker_node()
