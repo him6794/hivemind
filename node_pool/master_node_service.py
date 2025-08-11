@@ -740,6 +740,7 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                         task_id = task["task_id"]
                         user_id = task.get("user_id")
                         
+                        # 使用任務上傳時計算的固定CPT費用（每分鐘）
                         try:
                             cpt_cost_from_redis = self.task_manager.redis_client.hget(f"task:{task_id}", "cpt_cost")
                             if not cpt_cost_from_redis or cpt_cost_from_redis == "":
@@ -753,33 +754,19 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                         assigned_node = self.task_manager.redis_client.hget(f"task:{task_id}", "assigned_node")
                         
                         if user_id and assigned_node:
-                            # 檢查節點負載，根據負載調整費用
-                            node_load_info = self.node_manager.get_node_load_info(assigned_node)
-                            if node_load_info:
-                                load_status = node_load_info.get("load_status", "Unknown")
-                                avg_load = (node_load_info.get("current_cpu_usage", 0) + 
-                                          node_load_info.get("current_memory_usage", 0)) / 2
-                                
-                                # 根據節點負載調整費用
-                                if avg_load > 80:
-                                    adjusted_cost = int(cpt_cost * 1.3)  # 高負載增加30%費用
-                                elif avg_load > 60:
-                                    adjusted_cost = int(cpt_cost * 1.1)  # 中高負載增加10%費用
-                                else:
-                                    adjusted_cost = cpt_cost  # 正常費用
-                                
-                                logging.debug(f"任務 {task_id} 節點 {assigned_node} 負載 {avg_load}%, 調整費用: {cpt_cost} -> {adjusted_cost}")
-                            else:
-                                adjusted_cost = cpt_cost
+                            # 使用固定費用，不再根據節點負載調整
+                            final_cost = cpt_cost
                             
-                            if not self.task_manager.check_user_balance_for_next_payment(user_id, adjusted_cost):
+                            logging.debug(f"任務 {task_id} 使用固定費用: {final_cost} CPT/分鐘")
+                            
+                            if not self.task_manager.check_user_balance_for_next_payment(user_id, final_cost):
                                 self.task_manager.update_task_status(task_id, "STOPPED", assigned_node=None)
                                 self.node_manager.report_status(assigned_node, "Idle")
                                 
                                 if task_id in self.task_health:
                                     del self.task_health[task_id]
                                 
-                                log_message = f"任務 {task_id} 因用戶 {user_id} 餘額不足已自動停止 (每分鐘需要 {adjusted_cost} CPT，節點負載調整)"
+                                log_message = f"任務 {task_id} 因用戶 {user_id} 餘額不足已自動停止 (每分鐘需要 {final_cost} CPT)"
                                 logging.warning(log_message)
                                 self.task_manager.store_logs(task_id, "system", log_message, int(time.time()))
                                 continue
@@ -788,13 +775,13 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                             success, msg = self.task_manager.db_manager.transfer_tokens(
                                 user_id,       
                                 assigned_node,  
-                                adjusted_cost
+                                final_cost
                             )
                             
                             if success:
-                                logging.info(f"任務 {task_id} 轉帳成功: {adjusted_cost} CPT 從發起者 {user_id} 到工作端 {assigned_node} (負載調整)")
+                                logging.info(f"任務 {task_id} 轉帳成功: {final_cost} CPT 從發起者 {user_id} 到工作端 {assigned_node}")
                                 
-                                if not self.task_manager.check_user_balance_for_next_payment(user_id, adjusted_cost):
+                                if not self.task_manager.check_user_balance_for_next_payment(user_id, final_cost):
                                     self.task_manager.update_task_status(task_id, "STOPPED", assigned_node=None)
                                     self.node_manager.report_status(assigned_node, "Idle")
                                     
@@ -839,7 +826,7 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                 self._stop_event.wait(self.reward_interval)
         
         threading.Thread(target=reward_scheduler_loop, daemon=True).start()
-        logging.info("獎勵調度器已啟動（包含動態負載調整）")
+        logging.info("獎勵調度器已啟動（使用固定費率）")
 
     def _extract_user_from_token(self, token):
         """從 token 中提取用戶名（使用數據庫管理器）"""

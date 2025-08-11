@@ -18,6 +18,31 @@ HiveMind Worker 是分布式计算平台的工作节点组件，负责执行主�
 - 基于资源使用率动态调整任务优先级
 
 ### 3. 节点通信
+#### gRPC接口定义
+```protobuf
+// 节点状态上报接口
+service NodeService {
+  rpc ReportNodeStatus (NodeStatusRequest) returns (NodeStatusResponse);
+  rpc RegisterNode (NodeRegistrationRequest) returns (NodeRegistrationResponse);
+  rpc Heartbeat (HeartbeatRequest) returns (HeartbeatResponse);
+}
+
+// 任务管理接口
+service TaskService {
+  rpc AssignTask (TaskAssignmentRequest) returns (TaskAssignmentResponse);
+  rpc SubmitTaskResult (TaskResultRequest) returns (TaskResultResponse);
+  rpc CancelTask (TaskCancelRequest) returns (TaskCancelResponse);
+}
+```
+
+#### VPN配置自动生成流程
+1. 节点启动时检查wg0.conf文件是否存在
+2. 如不存在，调用`vpn_service.generate_config()`生成新配置
+3. 通过HTTPS安全获取主控节点公钥
+4. 本地生成私钥和IP配置
+5. 自动启动WireGuard服务并验证连接
+6. 配置变更时自动重启VPN连接
+
 - 使用gRPC协议与主控节点通信
 - 实现自动重连机制，处理网络中断情况
 - 通过Protobuf定义数据结构，确保通信效率和兼容性
@@ -30,6 +55,17 @@ HiveMind Worker 是分布式计算平台的工作节点组件，负责执行主�
 - 节点身份验证和授权
 
 ## 安装与配置
+
+### Docker镜像构建
+```bash
+# 构建worker镜像
+python3 build.py --docker
+
+docker build -t justin308/hivemind-worker:latest .
+
+# 推送镜像到仓库
+docker push justin308/hivemind-worker:latest
+```
 
 ### 系统要求
 - Windows或Linux操作系统
@@ -46,6 +82,8 @@ pip install -r requirements.txt
 
 # 确保Docker服务正在运行
 systemctl start docker  # Linux
+# Windows: 启动Docker Desktop或在PowerShell中执行
+# Start-Process 'C:\Program Files\Docker\Docker\Docker Desktop.exe'
 # 或在Windows上启动Docker Desktop
 ```
 
@@ -87,7 +125,7 @@ PersistentKeepalive = 25
 ### 启动worker节点
 ```bash
 # 直接运行Python脚本
-python worker_node.py
+python3 worker_node.py
 
 # 或使用打包好的可执行文件
 ./HiveMind-Worker.exe  # Windows
@@ -98,16 +136,16 @@ python worker_node.py
 ### 命令行参数
 ```bash
 # 指定配置文件
-python worker_node.py --config ./custom_config.conf
+python3 worker_node.py --config ./custom_config.conf
 
 # 启用调试模式
-python worker_node.py --debug
+python3 worker_node.py --debug
 
 # 指定日志文件
-python worker_node.py --log-file ./worker.log
+python3 worker_node.py --log-file ./worker.log
 
 # 覆盖主控节点地址
-python worker_node.py --master-url https://custom-master-url.com
+python3 worker_node.py --master-url https://custom-master-url.com
 ```
 
 ### 监控界面
@@ -124,15 +162,29 @@ browser http://localhost:5001/monitor.html
 
 ## 技术实现细节
 
-### 任务执行流程
-1. 接收主控节点分配的任务
-2. 拉取必要的Docker镜像（如justin308/hivemind-worker）
-3. 创建容器并配置资源限制
-4. 挂载任务数据卷
-5. 启动容器并监控执行过程
-6. 收集任务输出和日志
-7. 将结果压缩并返回给主控节点
-8. 清理容器和临时文件
+### 任务执行完整生命周期
+1. **任务接收**：通过gRPC从主控节点接收任务定义和资源需求
+2. **环境准备**：
+   - 验证本地Docker环境
+   - 拉取所需镜像版本
+   - 创建隔离网络和存储卷
+3. **任务调度**：
+   - 根据节点信任等级分配资源
+   - 应用CPU/内存/GPU限制
+   - 设置任务超时时间
+4. **执行监控**：
+   - 实时捕获容器输出
+   - 每5秒检查一次运行状态
+   - 资源使用率超过阈值时触发预警
+5. **结果处理**：
+   - 任务完成后收集输出文件
+   - 生成执行报告和资源使用统计
+   - 通过gRPC流式传输结果
+6. **清理工作**：
+   - 删除临时容器和网络
+   - 保留失败任务的调试数据
+   - 更新本地任务历史数据库
+**注**：以下为简化流程，详细生命周期请参见上文「任务执行完整生命周期」章节
 
 ### 资源监控实现
 资源监控通过以下方式实现：
@@ -195,10 +247,30 @@ worker/
 ├── Dockerfile           # Docker镜像构建文件
 ├── README.md            # 本文档
 ├── build.py             # 可执行文件构建脚本
-├── hivemind_worker/     # Python包源代码
+├── hivemind_worker/
 │   ├── __init__.py
 │   ├── main.py          # 入口点
-│   └── src/             # 源代码目录
+│   ├── src/
+│   │   └── hivemind_worker/
+│   │       ├── communication/
+│   │       │   ├── grpc_client.py
+│   │       │   └── vpn_configurator.py
+│   │       ├── monitoring/
+│   │       │   ├── resource_collector.py
+│   │       │   └── stats_aggregator.py
+│   │       └── task_management/
+│   │       ├── communication/
+│   │       │   ├── grpc_client.py
+│   │       │   └── vpn_configurator.py
+│   │       ├── monitoring/
+│   │       │   ├── resource_collector.py
+│   │       │   └── stats_aggregator.py
+│   │       └── task_management/
+│   │           ├── docker_handler.py
+│   │           └── task_executor.py
+│   ├── pyproject.toml
+│   ├── setup_logic.ps1
+│   └── setup_worker.iss
 ├── install.sh           # 安装脚本
 ├── make.py              # 构建脚本
 ├── requirements.txt     # Python依赖

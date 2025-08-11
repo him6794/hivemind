@@ -797,7 +797,7 @@ class NodeManager:
             return None
 
     def report_running_status(self, request, context=None):
-        """處理運行狀態報告 - 區分節點狀態和任務狀態"""
+        """處理運行狀態報告 - 簡化版本，移除動態獎勵計算"""
         try:
             node_id = request.node_id
             task_id = request.task_id
@@ -861,7 +861,7 @@ class NodeManager:
                     return nodepool_pb2.RunningStatusResponse(
                         success=True, 
                         message=f"Node {node_id} load status updated: {load_status}", 
-                        cpt_reward=0
+                        cpt_reward=0  # 不再動態計算獎勵
                     )
                 else:
                     return True, f"節點負載狀態已更新: {load_status}"
@@ -883,37 +883,16 @@ class NodeManager:
                 self.redis_client.hset(task_status_key, mapping=task_update_data)
                 self.redis_client.expire(task_status_key, 3600)  # 1小時後過期
                 
-                # 計算CPT獎勵（基於實際資源使用）
-                base_reward = 1  # 基礎獎勵
-                
-                # 根據實際使用率調整獎勵
-                avg_usage = (cpu_usage + memory_usage) / 2
-                if avg_usage > 80:
-                    usage_multiplier = 1.5  # 高使用率獎勵
-                elif avg_usage > 50:
-                    usage_multiplier = 1.2
-                elif avg_usage > 20:
-                    usage_multiplier = 1.0
-                else:
-                    usage_multiplier = 0.8  # 低使用率減少獎勵
-                
-                # GPU使用額外獎勵
-                gpu_bonus = 0
-                if gpu_usage > 0:
-                    gpu_bonus = gpu_usage * 0.01  # GPU使用率的1%作為額外獎勵
-                
-                total_reward = int(base_reward * usage_multiplier + gpu_bonus)
-                
-                logging.debug(f"任務 {task_id} CPT獎勵計算: 基礎={base_reward}, 使用率倍數={usage_multiplier}, GPU獎勵={gpu_bonus}, 總計={total_reward}")
+                logging.debug(f"任務 {task_id} 資源使用狀態已更新")
                 
                 if context:
                     return nodepool_pb2.RunningStatusResponse(
                         success=True, 
                         message=f"Task {task_id} resource usage updated", 
-                        cpt_reward=total_reward
+                        cpt_reward=0  # 獎勵改由任務調度器按固定費率計算
                     )
                 else:
-                    return True, f"任務資源使用狀態已更新，獎勵: {total_reward} CPT"
+                    return True, f"任務資源使用狀態已更新"
         
         except Exception as e:
             error_msg = f"處理運行狀態報告失敗: {e}"
@@ -953,6 +932,27 @@ class NodeManager:
                 "load_status": "Unknown",
                 "last_load_report": 0
             }
+
+    def get_task_resource_usage(self, task_id):
+        """獲取任務的實際資源使用情況"""
+        try:
+            task_status_key = f"task_status:{task_id}"
+            if not self.redis_client.exists(task_status_key):
+                return None
+            
+            usage_data = self.redis_client.hgetall(task_status_key)
+            return {
+                "node_id": usage_data.get("node_id", ""),
+                "actual_cpu_usage": int(usage_data.get("actual_cpu_usage", 0)),
+                "actual_memory_usage": int(usage_data.get("actual_memory_usage", 0)),
+                "actual_gpu_usage": int(usage_data.get("actual_gpu_usage", 0)),
+                "actual_gpu_memory_usage": int(usage_data.get("actual_gpu_memory_usage", 0)),
+                "last_resource_report": float(usage_data.get("last_resource_report", 0))
+            }
+        except Exception as e:
+            logging.error(f"獲取任務 {task_id} 資源使用失敗: {e}")
+            return None
+            
 
     def get_task_resource_usage(self, task_id):
         """獲取任務的實際資源使用情況"""

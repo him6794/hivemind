@@ -36,7 +36,7 @@ basicConfig(level=INFO, format='%(asctime)s - %(levelname)s - [%(threadName)s] -
 
 NODE_PORT = int(environ.get("NODE_PORT", 50053))
 FLASK_PORT = int(environ.get("FLASK_PORT", 5000))
-MASTER_ADDRESS = environ.get("MASTER_ADDRESS", "10.0.0.1:50051")
+MASTER_ADDRESS = environ.get("MASTER_ADDRESS", "127.0.0.1:50051")
 NODE_ID = environ.get("NODE_ID", f"worker-{node().split('.')[0]}-{NODE_PORT}")
 
 class WorkerNode:
@@ -86,7 +86,7 @@ class WorkerNode:
         self.task_stop_events = {}  # {task_id: Event()}
 
         # 先自動連線 VPN
-        self._auto_join_vpn()
+        #self._auto_join_vpn()
 
         # 硬體信息
         self._init_hardware()
@@ -1771,8 +1771,7 @@ if __name__ == "__main__":
     try:
         worker = WorkerNode()
         
-        # 啟動 gRPC 服務
-        server = grpc.server(ThreadPoolExecutor(max_workers=10))  # 增加工作線程數
+        server = grpc.server(ThreadPoolExecutor(max_workers=10))
         nodepool_pb2_grpc.add_WorkerNodeServiceServicer_to_server(
             WorkerNodeServicer(worker), server
         )
@@ -1785,7 +1784,6 @@ if __name__ == "__main__":
         worker._log(f"Docker status: {worker.docker_status}")
         worker._log(f"Available resources: CPU={worker.available_resources['cpu']}, Memory={worker.available_resources['memory_gb']}GB, GPU={worker.available_resources['gpu']}")
         
-        # 保持運行
         try:
             while True:
                 sleep(60)

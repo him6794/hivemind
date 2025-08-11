@@ -1,8 +1,11 @@
-; -- HiveMind Worker 安裝包 --
+; -- HiveMind Worker Inno Setup Script (Final Correct Version) --
+
 [Setup]
 AppName=HiveMind Worker
-AppVersion=1.1
-DefaultDirName={pf}\HiveMindWorker
+AppVersion=2.0
+PrivilegesRequired=admin
+UsePreviousAppDir=no
+DefaultDirName=C:\HiveMindWorker
 DefaultGroupName=HiveMind Worker
 OutputDir=.
 OutputBaseFilename=HiveMindWorkerSetup
@@ -13,32 +16,23 @@ LicenseFile=用戶條款.txt
 [Files]
 ; 用戶條款（僅供安裝程式顯示，不會安裝到目標機器）
 Source: "用戶條款.txt"; Flags: dontcopy
+; {cm:Fix_Final} 將 PowerShell 腳本作為一個獨立檔案包含進來
+Source: "setup_logic.ps1"; DestDir: "{tmp}"; Flags: deleteafterinstall
 
 [Run]
-; 安裝 Python 3.12
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""Invoke-WebRequest -UseBasicParsing -OutFile ""{tmp}\python-installer.exe"" https://www.python.org/ftp/python/3.12.0/python-3.12.0-amd64.exe; Start-Process -Wait -FilePath ""{tmp}\python-installer.exe"" -ArgumentList '/quiet InstallAllUsers=1 PrependPath=1'"""; StatusMsg: "正在安裝 Python 3.12..."; Flags: runhidden
+; 1. 檢查並安裝 Python 3.12
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""if (-not (Get-Command python -ErrorAction SilentlyContinue)) {{ Write-Host '正在下載 Python 3.12...'; Invoke-WebRequest -UseBasicParsing -OutFile '{tmp}\python-installer.exe' 'https://www.python.org/ftp/python/3.12.0/python-3.12.0-amd64.exe'; Write-Host '正在安裝 Python 3.12...'; Start-Process -Wait -FilePath '{tmp}\python-installer.exe' -ArgumentList '/quiet InstallAllUsers=1 PrependPath=1'; Write-Host '重新載入環境變數...'; $env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path','User') }} else {{ Write-Host 'Python 已安裝，跳過安裝步驟' }}"""; StatusMsg: "檢查並安裝 Python 3.12..."; Flags: runhidden waituntilterminated
 
-; 創建虛擬環境
-Filename: "python"; Parameters: "-m venv ""{app}\venv"""; StatusMsg: "正在創建 Python 虛擬環境..."; Flags: runhidden
+; 2. 檢查並安裝 WireGuard
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""if (-not (Get-Service -Name WireGuardManager -ErrorAction SilentlyContinue)) {{ Write-Host '正在下載 WireGuard...'; Invoke-WebRequest -UseBasicParsing -OutFile '{tmp}\wireguard-installer.exe' 'https://download.wireguard.com/windows-client/wireguard-installer.exe'; Write-Host '正在安裝 WireGuard...'; Start-Process -Wait -FilePath '{tmp}\wireguard-installer.exe' -ArgumentList '/install /quiet' }} else {{ Write-Host 'WireGuard 已安裝，跳過安裝步驟' }}"""; StatusMsg: "檢查並安裝 WireGuard..."; Flags: runhidden waituntilterminated
 
-; 在虛擬環境中安裝 hivemind_worker
-Filename: "{app}\venv\Scripts\pip.exe"; Parameters: "install hivemind_worker"; StatusMsg: "正在安裝 hivemind_worker..."; Flags: runhidden
+; 3. 檢查並安裝 Docker Desktop
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""if (-not (Get-Process 'Docker Desktop' -ErrorAction SilentlyContinue)) {{ if (-not (Test-Path '{tmp}\docker-desktop-installer.exe')) {{ Write-Host '正在下載 Docker Desktop...'; Invoke-WebRequest -UseBasicParsing -OutFile '{tmp}\docker-desktop-installer.exe' 'https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe' }}; Write-Host '正在啟動 Docker Desktop 安裝程式...'; Start-Process -FilePath '{tmp}\docker-desktop-installer.exe' }} else {{ Write-Host 'Docker Desktop 已在運行，跳過安裝步驟' }}"""; StatusMsg: "檢查並安裝 Docker Desktop...";
 
-; 安裝 WireGuard（官方安裝程式）
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""Invoke-WebRequest -UseBasicParsing -OutFile wireguard-installer.exe https://download.wireguard.com/windows-client/wireguard-installer.exe; Start-Process -Wait -FilePath .\wireguard-installer.exe -ArgumentList '/install /quiet'"""; StatusMsg: "正在安裝 WireGuard..."; Flags: runhidden
+; {cm:Fix_Final} 執行外部的 PowerShell 腳本，並將安裝路徑 {app} 作為參數傳遞給它
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{tmp}\setup_logic.ps1"" -AppDir ""{app}"""; StatusMsg: "創建虛擬環境、安裝套件並建立啟動檔..."; Flags: runhidden waituntilterminated
 
-; Docker 安裝步驟 (分為下載和安裝兩個階段)
-; 階段 1: 下載 Docker Desktop 安裝包
-; 將下載的檔案存放到臨時目錄 {tmp}
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""Invoke-WebRequest -UseBasicParsing -OutFile ""{tmp}\docker-desktop-installer.exe"" https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe"""; StatusMsg: "正在下載 Docker Desktop 安裝包..."; Flags: runhidden
-; 階段 2: 安裝 Docker Desktop
-; 從臨時目錄執行非靜默安裝，將會顯示 Docker 安裝介面
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""Start-Process -Wait -FilePath ""{tmp}\docker-desktop-installer.exe"""""; StatusMsg: "正在安裝 Docker Desktop (請手動操作)..."; 
-
-; 創建啟動批次檔
-Filename: "cmd.exe"; Parameters: "/c echo @echo off > ""{app}\start_hivemind.bat"" && echo cd /d ""{app}"" >> ""{app}\start_hivemind.bat"" && echo call venv\Scripts\activate >> ""{app}\start_hivemind.bat"" && echo python -c ""import hivemind_worker; hivemind_worker.main()"" >> ""{app}\start_hivemind.bat"""; StatusMsg: "正在創建啟動腳本..."; Flags: runhidden
-
-; 啟動主程式
+; 4. 啟動主程式
 Filename: "{app}\start_hivemind.bat"; Description: "啟動 HiveMind Worker"; Flags: nowait postinstall skipifsilent
 
 [Icons]
