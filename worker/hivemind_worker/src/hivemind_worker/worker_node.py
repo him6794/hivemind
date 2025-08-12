@@ -39,7 +39,7 @@ basicConfig(level=INFO, format='%(asctime)s - %(levelname)s - [%(threadName)s] -
 
 NODE_PORT = int(environ.get("NODE_PORT", 50053))
 FLASK_PORT = int(environ.get("FLASK_PORT", 5000))
-MASTER_ADDRESS = environ.get("MASTER_ADDRESS", "10.0.0.1:50051")
+MASTER_ADDRESS = environ.get("MASTER_ADDRESS", "127.0.0.1:50051")
 NODE_ID = environ.get("NODE_ID", f"worker-{node().split('.')[0]}-{NODE_PORT}")
 
 class WorkerNode:
@@ -96,7 +96,7 @@ class WorkerNode:
         # Docker 初始化
         self._init_docker()
         # gRPC 連接
-        self._init_grpc()
+        self._init_grpc()  # 確保 gRPC stub 初始化在 Flask 之前
         # Flask 應用
         self._init_flask()
         self.status = "Waiting for Login"
@@ -117,41 +117,42 @@ class WorkerNode:
                 try:
                     with open(config_path, "w") as f:
                         f.write(config_content)
-                    self._log(f"自動取得 WireGuard 配置並寫入 {config_path}")
+                    self._log(f"Automatically obtained WireGuard config and wrote to {config_path}")
                 except Exception as e:
-                    self._log(f"寫入 WireGuard 配置失敗: {e}", WARNING)
+                    self._log(f"Failed to write WireGuard config: {e}", WARNING)
                     return
                 # Windows/Linux 都在當前目錄執行 wg-quick，需有權限與路徑
                 from os import system
                 result = system(f"wg-quick down {config_path} 2>/dev/null; wg-quick up {config_path}")
                 if result == 0:
-                    self._log("WireGuard VPN 啟動成功")
+                    self._log("WireGuard VPN started successfully")
                 else:
-                    self._log("WireGuard VPN 啟動失敗，請檢查權限與配置", WARNING)
+                    self._log("WireGuard VPN failed to start, please check permissions and config", WARNING)
                     self._prompt_manual_vpn(config_path)
             else:
                 error_msg = resp_json.get("error") if resp_json else resp.text
-                self._log(f"自動取得 WireGuard 配置失敗: {error_msg}", WARNING)
+                self._log(f"Failed to automatically obtain WireGuard config: {error_msg}", WARNING)
                 if error_msg and "VPN 服務不可用" in error_msg:
-                    self._log("請確認主控端 Flask 啟動時有正確初始化 WireGuardServer，且 /api/vpn/join 可用", WARNING)
+                    self._log("Please ensure the master Flask started with WireGuardServer initialized and /api/vpn/join is available", WARNING)
                 self._prompt_manual_vpn()
         except Exception as e:
-            self._log(f"自動請求 /api/vpn/join 失敗: {e}", WARNING)
+            self._log(f"Failed to request /api/vpn/join automatically: {e}", WARNING)
             self._prompt_manual_vpn()
 
     def _prompt_manual_vpn(self, config_path=None):
         """提示用戶手動連線 WireGuard"""
         msg = (
-            "\n[提示] 自動連線 WireGuard 失敗，請手動連線 VPN：\n"
-            "1. 請找到您的設定檔(wg0.conf)。\n"
-            "2. 手動打開wireguard客戶端導入配置\n"
-            "3. 如遇權限問題請用管理員/Root 權限執行。\n"
+            "\n[Notice] Failed to connect to WireGuard automatically. Please connect to VPN manually:\n"
+            "1. Find your config file (wg0.conf).\n"
+            "2. Open your WireGuard client and import the config.\n"
+            "3. If you encounter permission issues, run as administrator/root.\n"
         )
         print(msg)
-        print('如果您已經連線好請按y')
+        print('If you have already connected, please press y')
         a = input()
         if a == 'y':
-            self._log("用戶已確認手動連線 WireGuard")
+            # 不記錄任何日誌
+            pass
 
     def _init_hardware(self):
         """初始化硬體信息"""
@@ -249,23 +250,23 @@ class WorkerNode:
                         
                         if continent and country:
                             continent_mapping = {
-                                'Asia': '亞洲', 'Africa': '非洲', 'North America': '北美',
-                                'South America': '南美', 'Europe': '歐洲', 'Oceania': '大洋洲'
+                                'Asia': 'Asia', 'Africa': 'Africa', 'North America': 'North America',
+                                'South America': 'South America', 'Europe': 'Europe', 'Oceania': 'Oceania'
                             }
                             
                             detected_region = continent_mapping.get(continent)
                             if detected_region:
-                                self._log(f"自動檢測地區: {country} -> {detected_region}")
+                                self._log(f"Auto-detected location: {country} -> {detected_region}")
                                 return detected_region
                         
                 except (exceptions.RequestException, Exception):
                     continue
             
-            self._log("地區檢測失敗，使用 Unknown")
+            self._log("Location detection failed, using Unknown")
             return "Unknown"
                     
         except Exception as e:
-            self._log(f"地區檢測錯誤: {e}")
+            self._log(f"Location detection error: {e}")
             return "Unknown"
 
     def _get_local_ip(self):
@@ -273,7 +274,7 @@ class WorkerNode:
         try:
             # 檢查所有網卡接口
             interfaces_list = interfaces()
-            self._log(f"檢測到網卡接口: {interfaces_list}")
+            self._log(f"Detected network interfaces: {interfaces_list}")
             
             # 優先檢查 WireGuard 相關接口
             wg_interfaces = [iface for iface in interfaces_list if 'wg' in iface.lower() or 'wireguard' in iface.lower()]
@@ -284,10 +285,10 @@ class WorkerNode:
                         addrs = ifaddresses(wg_iface)
                         if AF_INET in addrs:
                             wg_ip = addrs[AF_INET][0]['addr']
-                            self._log(f"檢測到 WireGuard 網卡 {wg_iface}，IP: {wg_ip}")
+                            self._log(f"Detected WireGuard interface {wg_iface}, IP: {wg_ip}")
                             return wg_ip
                     except Exception as e:
-                        self._log(f"檢查 {wg_iface} 接口失敗: {e}")
+                        self._log(f"Failed to check interface {wg_iface}: {e}")
                         continue
             
             # 檢查是否有 10.0.0.x 網段的 IP（VPN 網段）
@@ -299,16 +300,16 @@ class WorkerNode:
                             ip = addr_info['addr']
                             # 檢查是否在 VPN 網段
                             if ip.startswith('10.0.0.') and ip != '10.0.0.1':
-                                self._log(f"檢測到 VPN 網段 IP: {ip} (接口: {iface})")
+                                self._log(f"Detected VPN subnet IP: {ip} (interface: {iface})")
                                 return ip
                 except Exception as e:
                     continue
             
             # 如果沒有找到 VPN IP，使用預設方法
-            self._log("未檢測到 WireGuard 網卡，使用預設網卡")
+            self._log("No WireGuard interface detected, using default interface")
             
         except Exception as e:
-            self._log(f"網卡檢測失敗: {e}")
+            self._log(f"Network interface detection failed: {e}")
         
         # 預設方法：連接外部服務獲取本機 IP
         try:
@@ -316,28 +317,28 @@ class WorkerNode:
             s.connect(("8.8.8.8", 80))
             ip = s.getsockname()[0]
             s.close()
-            self._log(f"使用預設方法獲取 IP: {ip}")
+            self._log(f"Obtained IP using default method: {ip}")
             return ip
         except:
-            self._log("所有方法都失敗，使用 127.0.0.1")
+            self._log("All methods failed, using 127.0.0.1")
             return "127.0.0.1"
 
     def update_location(self, new_location):
         """更新節點地區設定"""
-        available_locations = ["亞洲", "非洲", "北美", "南美", "歐洲", "大洋洲", "Unknown"]
+        available_locations = ["Asia", "Africa", "North America", "South America", "Europe", "Oceania", "Unknown"]
         
         if new_location in available_locations:
             old_location = self.location
             self.location = new_location
-            self._log(f"地區已更新: {old_location} -> {new_location}")
+            self._log(f"Location updated: {old_location} -> {new_location}")
             
             # 如果已註冊，需要重新註冊以更新地區信息
             if self.is_registered and self.token:
                 self._register()
             
-            return True, f"地區已更新為: {new_location}"
+            return True, f"Location updated to: {new_location}"
         else:
-            return False, f"無效的地區選擇: {new_location}"
+            return False, f"Invalid location selection: {new_location}"
 
     def _benchmark_cpu(self):
         """簡化的 CPU 基準測試"""
@@ -423,7 +424,6 @@ class WorkerNode:
 
     def _init_flask(self):
         """初始化 Flask 應用"""
-        from os.path import dirname, abspath, join
         base_dir = dirname(abspath(__file__))
         self.app = Flask(
             __name__,
@@ -432,6 +432,12 @@ class WorkerNode:
         )
         self.app.secret_key = token_hex(32)
         
+        # 關閉 Flask 預設日誌
+        import logging
+        log = logging.getLogger('werkzeug')
+        log.setLevel(logging.ERROR)
+        self.app.logger.disabled = True
+
         # 配置會話持久性，使用不同的cookie名稱避免與主控端衝突
         self.app.config.update(
             SESSION_COOKIE_NAME='worker_session',  # 與主控端不同的cookie名稱
@@ -484,7 +490,7 @@ class WorkerNode:
         """設置 Flask 路由"""
         @self.app.route('/')
         def index():
-            available_locations = ["亞洲", "非洲", "北美", "南美", "歐洲", "大洋洲", "Unknown"]
+            available_locations = ["Asia", "Africa", "North America", "South America", "Europe", "Oceania", "Unknown"]
             return render_template('login.html', 
                                  node_id=self.node_id, 
                                  current_status=self.status,
@@ -499,7 +505,7 @@ class WorkerNode:
             if not user_data:
                 return redirect(url_for('index'))
             
-            available_locations = ["亞洲", "非洲", "北美", "南美", "歐洲", "大洋洲", "Unknown"]
+            available_locations = ["Asia", "Africa", "North America", "South America", "Europe", "Oceania", "Unknown"]
             return render_template('monitor.html', 
                                  username=user_data['username'],
                                  node_id=self.node_id, 
@@ -516,7 +522,7 @@ class WorkerNode:
                 if user_data and user_data['username'] == self.username:
                     return redirect(url_for('monitor'))
                 
-                available_locations = ["亞洲", "非洲", "北美", "南美", "歐洲", "大洋洲", "Unknown"]
+                available_locations = ["Asia", "Africa", "North America", "South America", "Europe", "Oceania", "Unknown"]
                 return render_template('login.html', 
                                      node_id=self.node_id, 
                                      current_status=self.status,
@@ -532,18 +538,18 @@ class WorkerNode:
             if selected_location:
                 success, message = self.update_location(selected_location)
                 if not success:
-                    available_locations = ["亞洲", "非洲", "北美", "南美", "歐洲", "大洋洲", "Unknown"]
+                    available_locations = ["Asia", "Africa", "North America", "South America", "Europe", "Oceania", "Unknown"]
                     return render_template('login.html', 
-                                         error=f"地區設定錯誤: {message}", 
+                                         error=f"Location setting error: {message}", 
                                          node_id=self.node_id, 
                                          current_status=self.status,
                                          current_location=self.location,
                                          available_locations=available_locations)
             
             if not username or not password:
-                available_locations = ["亞洲", "非洲", "北美", "南美", "歐洲", "大洋洲", "Unknown"]
+                available_locations = ["Asia", "Africa", "North America", "South America", "Europe", "Oceania", "Unknown"]
                 return render_template('login.html', 
-                                     error="請輸入用戶名和密碼", 
+                                     error="Please enter username and password", 
                                      node_id=self.node_id, 
                                      current_status=self.status,
                                      current_location=self.location,
@@ -557,9 +563,9 @@ class WorkerNode:
                 self._log(f"User '{username}' logged in successfully, location: {self.location}")
                 return redirect(url_for('monitor'))
             else:
-                available_locations = ["亞洲", "非洲", "北美", "南美", "歐洲", "大洋洲", "Unknown"]
+                available_locations = ["Asia", "Africa", "North America", "South America", "Europe", "Oceania", "Unknown"]
                 return render_template('login.html', 
-                                     error=f"登入失敗: {self.status}", 
+                                     error=f"Login failed: {self.status}", 
                                      node_id=self.node_id, 
                                      current_status=self.status,
                                      current_location=self.location,
@@ -578,13 +584,13 @@ class WorkerNode:
                 new_location = data.get('location')
                 
                 if not new_location:
-                    return jsonify({'success': False, 'error': '請選擇地區'})
+                    return jsonify({'success': False, 'error': 'Please select a location'})
                 
                 success, message = self.update_location(new_location)
                 return jsonify({'success': success, 'message': message, 'current_location': self.location})
                 
             except Exception as e:
-                return jsonify({'success': False, 'error': f'更新失敗: {str(e)}'})
+                return jsonify({'success': False, 'error': f'Update failed: {str(e)}'})
 
         @self.app.route('/api/status')
         def api_status():
@@ -630,7 +636,7 @@ class WorkerNode:
             return jsonify({
                 'node_id': self.node_id,
                 'status': self.status,
-                'current_task_id': current_task_id or "None",  # 為舊版前端提供向後相容性
+                'current_task_id': current_task_id or "None",  # backward compatibility for old frontend
                 'is_registered': self.is_registered,
                 'docker_available': self.docker_available,
                 'docker_status': getattr(self, 'docker_status', 'unknown'),
@@ -648,7 +654,7 @@ class WorkerNode:
                 'login_time': user_data['login_time'].isoformat() if isinstance(user_data['login_time'], datetime) else str(user_data['login_time']),
                 'ip': getattr(self, 'local_ip', '127.0.0.1'),
                 'task_count': task_count,
-                'tasks': tasks,  # 添加任務列表
+                'tasks': tasks,  # add task list
                 'available_resources': self.available_resources,
                 'total_resources': self.total_resources
             })
@@ -1529,17 +1535,18 @@ fi
                 return None
 
     def _log(self, message, level=INFO):
-        """記錄日誌"""
+        """Log only errors in English, except VPN prompt."""
+        if level == ERROR or level == WARNING:
+            # Only print error/warning to console, always in English
+            print(f"[{level}] {message}")
+        # Keep logs in memory for web UI, but only in English
         if level == INFO:
-            info(message)
-        elif level == WARNING:
-            warning(message)
-        elif level == ERROR:
-            error(message)
-        
+            return  # Do not store info logs
+        from datetime import datetime
         with self.log_lock:
             timestamp = datetime.now().strftime('%H:%M:%S')
             level_name = getLevelName(level)
+            # Only store error/warning logs, always in English
             self.logs.append(f"{timestamp} - {level_name} - {message}")
             if len(self.logs) > 500:
                 self.logs.pop(0)

@@ -1,8 +1,8 @@
 $(document).ready(function() {
-    // 動態檢測API地址
+    // Dynamically detect API address
     const API_BASE_URL = window.location.origin;
 
-    // 初始化 Chart.js 圖表
+    // Initialize Chart.js charts
     const cpuChartCtx = document.getElementById('cpuChart').getContext('2d');
     const memoryChartCtx = document.getElementById('memoryChart').getContext('2d');
 
@@ -10,13 +10,13 @@ $(document).ready(function() {
     let memoryChart = null;
 
     try {
-        // Chart.js 初始化 CPU 圖表
+        // Chart.js initialize CPU chart
         cpuChart = new Chart(cpuChartCtx, {
             type: 'line',
             data: { 
                 labels: [], 
                 datasets: [{ 
-                    label: 'CPU 使用率 (%)', 
+                    label: 'CPU Usage (%)', 
                     data: [], 
                     borderColor: '#6366f1',
                     backgroundColor: 'rgba(99, 102, 241, 0.1)',
@@ -41,7 +41,7 @@ $(document).ready(function() {
                     x: { 
                         title: { 
                             display: true, 
-                            text: '時間',
+                            text: 'Time',
                             color: '#64748b',
                             font: { weight: 'bold' }
                         },
@@ -55,7 +55,7 @@ $(document).ready(function() {
                     y: { 
                         title: { 
                             display: true, 
-                            text: 'CPU 使用率 (%)',
+                            text: 'CPU Usage (%)',
                             color: '#64748b',
                             font: { weight: 'bold' }
                         }, 
@@ -93,13 +93,13 @@ $(document).ready(function() {
             }
         });
 
-        // Chart.js 初始化記憶體圖表
+        // Chart.js initialize memory chart
         memoryChart = new Chart(memoryChartCtx, {
             type: 'line',
             data: { 
                 labels: [], 
                 datasets: [{ 
-                    label: '記憶體使用率 (%)', 
+                    label: 'Memory Usage (%)', 
                     data: [], 
                     borderColor: '#8b5cf6',
                     backgroundColor: 'rgba(139, 92, 246, 0.1)',
@@ -124,7 +124,7 @@ $(document).ready(function() {
                     x: { 
                         title: { 
                             display: true, 
-                            text: '時間',
+                            text: 'Time',
                             color: '#64748b',
                             font: { weight: 'bold' }
                         },
@@ -138,7 +138,7 @@ $(document).ready(function() {
                     y: { 
                         title: { 
                             display: true, 
-                            text: '記憶體使用率 (%)',
+                            text: 'Memory Usage (%)',
                             color: '#64748b',
                             font: { weight: 'bold' }
                         }, 
@@ -176,10 +176,10 @@ $(document).ready(function() {
             }
         });
         
-        console.log("圖表初始化成功");
+        console.log("Charts initialized successfully");
     } catch (error) {
-        console.error("圖表初始化失敗:", error);
-        $('.chart-container').html('<div class="text-center text-error">圖表初始化失敗，請檢查控制台日誌。</div>');
+        console.error("Chart initialization failed:", error);
+        $('.chart-container').html('<div class="text-center text-error">Chart initialization failed, please check the console logs.</div>');
     }
 
     function updateStatus() {
@@ -190,31 +190,31 @@ $(document).ready(function() {
                 return;
             }
 
-            // 更新狀態顯示
+            // Update status display
             $('#node-id').text(data.node_id || 'N/A');
             
-            // 支援多任務模式
+            // Support multi-task mode
             if (data.tasks && data.tasks.length > 0) {
-                // 顯示任務數量
-                $('#task-id').text(`${data.task_count} 個任務運行中`);
+                // Display task count
+                $('#task-id').text(`${data.task_count} tasks running`);
                 
-                // 顯示第一個任務ID（向後相容）
+                // Display the first task ID (for backward compatibility)
                 if (data.current_task_id && data.current_task_id !== "None") {
-                    $('#task-id').append(` (主要: ${data.current_task_id})`);
+                    $('#task-id').append(` (Main: ${data.current_task_id})`);
                 }
                 
-                // 如果存在任務列表容器，更新任務列表
+                // If the task list container exists, update the task list
                 if ($('#tasks-list').length) {
                     updateTasksList(data.tasks);
                 } else {
-                    // 否則只顯示第一個任務的ID
-                    $('#task-id').text(data.current_task_id !== "None" ? data.current_task_id : "無任務");
+                    // Otherwise, only display the ID of the first task
+                    $('#task-id').text(data.current_task_id !== "None" ? data.current_task_id : "no tasks");
                 }
             } else {
-                $('#task-id').text("無任務");
+                $('#task-id').text("no tasks");
             }
             
-            // 更新狀態標籤樣式，支援新的負載狀態
+            // Update status label style, support new load states
             const statusElement = $('#task-status');
             const status = data.status || 'Idle';
             statusElement.text(status).removeClass();
@@ -231,7 +231,7 @@ $(document).ready(function() {
                 statusElement.addClass('status pending');
             }
             
-            // 顯示Docker狀態
+            // Display Docker status
             if ($('#docker-status').length) {
                 const dockerStatus = data.docker_status || (data.docker_available ? 'available' : 'unavailable');
                 $('#docker-status').text(dockerStatus);
@@ -239,7 +239,7 @@ $(document).ready(function() {
                     (dockerStatus === 'available' ? 'idle' : 'error'));
             }
             
-            // 更新資源使用情況
+            // Update resource usage
             updateResourcesDisplay(data);
             
             $('#ip-address').text(data.ip || 'N/A');
@@ -251,14 +251,14 @@ $(document).ready(function() {
             $('#cpu-usage').text(cpuPercent + '%');
             $('#memory-usage').text(memoryPercent + '%');
             
-            // 更新資源卡片，加入負載狀態顏色
+            // Update resource cards with load status colors
             const cpuElement = $('#cpu-metric');
             const memoryElement = $('#memory-metric');
             
             cpuElement.text(cpuPercent + '%');
             memoryElement.text(memoryPercent + '%');
             
-            // 根據負載調整顏色
+            // Adjust color based on load
             function updateLoadColor(element, percent) {
                 element.removeClass('load-normal load-medium load-high');
                 if (percent > 80) {
@@ -273,7 +273,7 @@ $(document).ready(function() {
             updateLoadColor(cpuElement.parent(), cpuPercent);
             updateLoadColor(memoryElement.parent(), memoryPercent);
 
-            // 更新圖表數據
+            // Update chart data
             const now = new Date().toLocaleTimeString();
 
             if (cpuChart && cpuChart.data && cpuChart.data.labels) {
@@ -303,7 +303,7 @@ $(document).ready(function() {
             $('#task-status').text('Connection Error').removeClass().addClass('status error');
 
             if (jqXHR.status === 401) {
-                console.warn("會話已過期，3秒後重新導向登入頁面");
+                console.warn("Session expired, redirecting to login page in 3 seconds");
                 setTimeout(function() {
                     window.location.href = '/login';
                 }, 3000);
@@ -313,11 +313,11 @@ $(document).ready(function() {
 
     function updateLogs() {
         $.get(`${API_BASE_URL}/api/logs`, function(data) {
-            console.log("日誌數據:", data);
+            console.log("Log data:", data);
             
             if (data.error) {
                 console.error("Error from /api/logs:", data.error);
-                $('#logs').html(`<div class="text-error">載入日誌錯誤: ${data.error}</div>`);
+                $('#logs').html(`<div class="text-error">Error loading logs: ${data.error}</div>`);
                 return;
             }
             
@@ -326,25 +326,25 @@ $(document).ready(function() {
             
             if (data.logs && Array.isArray(data.logs)) {
                 if (data.logs.length === 0) {
-                    logsDiv.html('<div class="text-center" style="opacity: 0.7;">目前沒有日誌記錄</div>');
+                    logsDiv.html('<div class="text-center" style="opacity: 0.7;">Currently no log records</div>');
                 } else {
                     data.logs.forEach(log => {
                         const logEntry = $('<div>').text(log).addClass('log-entry');
                         logsDiv.append(logEntry);
                     });
-                    // 自動滾動到底部
+                    // Auto-scroll to the bottom
                     logsDiv.scrollTop(logsDiv[0].scrollHeight);
                 }
             } else {
-                console.warn("日誌數據格式異常:", data);
-                logsDiv.html('<div class="text-warning">未收到有效的日誌數據</div>');
+                console.warn("Invalid log data format:", data);
+                logsDiv.html('<div class="text-warning">Did not receive valid log data</div>');
             }
         }).fail(function(jqXHR, textStatus, errorThrown) {
             console.error("Failed to fetch /api/logs:", textStatus, errorThrown);
-            $('#logs').html(`<div class="text-error">載入日誌錯誤: ${textStatus} (${jqXHR.status})</div>`);
+            $('#logs').html(`<div class="text-error">Error loading logs: ${textStatus} (${jqXHR.status})</div>`);
             
             if (jqXHR.status === 401) {
-                console.warn("會話已過期，3秒後重新導向登入頁面");
+                console.warn("Session expired, redirecting to login page in 3 seconds");
                 setTimeout(function() {
                     window.location.href = '/login';
                 }, 3000);
@@ -352,94 +352,94 @@ $(document).ready(function() {
         });
     }
 
-    // 初始加載
+    // Initial load
     updateStatus();
     updateLogs();
     
-    // 定期更新
-    setInterval(updateStatus, 3000);  // 每3秒更新狀態
-    setInterval(updateLogs, 5000);    // 每5秒更新日誌
+    // Regular updates
+    setInterval(updateStatus, 3000);  // Update status every 3 seconds
+    setInterval(updateLogs, 5000);    // Update logs every 5 seconds
 
-    // 全局函數
+    // Global functions
     window.refreshStatus = function() {
-        console.log("手動刷新狀態");
+        console.log("Manually refreshing status");
         updateStatus();
     }
 
     window.refreshLogs = function() {
-        console.log("手動刷新日誌");
+        console.log("Manually refreshing logs");
         updateLogs();
     }
     
-    // 新增函數：更新任務列表
+    // New function: update task list
     function updateTasksList(tasks) {
         const tasksListEl = $('#tasks-list');
         tasksListEl.empty();
 
         if (!tasks || tasks.length === 0) {
-            tasksListEl.html('<div class="text-center p-3">目前沒有執行中的任務</div>');
+            tasksListEl.html('<div class="text-center p-3">Currently no tasks are running</div>');
             return;
         }
 
         tasks.forEach(task => {
             const taskEl = $('<div>').addClass('task-item p-2 my-1 border rounded');
 
-            // 計算執行時間
+            // Calculate execution time
             const startTime = new Date(task.start_time);
             const now = new Date();
-            const duration = Math.floor((now - startTime) / 1000); // 秒
+            const duration = Math.floor((now - startTime) / 1000); // seconds
             const hours = Math.floor(duration / 3600);
             const minutes = Math.floor((duration % 3600) / 60);
             const seconds = duration % 60;
             const durationStr = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
 
-            // 格式化資源
+            // Format resources
             const resources = task.resources || {};
             const resourcesStr = `CPU: ${resources.cpu || 0}, RAM: ${resources.memory_gb || 0}GB, GPU: ${resources.gpu || 0}`;
 
             taskEl.html(`
                 <div><strong>ID:</strong> ${task.id}</div>
-                <div><strong>狀態:</strong> <span class="status ${task.status === 'Executing' ? 'running' : 'pending'}">${task.status}</span></div>
-                <div><strong>開始時間:</strong> ${new Date(task.start_time).toLocaleString()}</div>
-                <div><strong>執行時間:</strong> ${durationStr}</div>
-                <div><strong>資源:</strong> ${resourcesStr}</div>
+                <div><strong>Status:</strong> <span class="status ${task.status === 'Executing' ? 'running' : 'pending'}">${task.status}</span></div>
+                <div><strong>Start Time:</strong> ${new Date(task.start_time).toLocaleString()}</div>
+                <div><strong>Execution Time:</strong> ${durationStr}</div>
+                <div><strong>Resources:</strong> ${resourcesStr}</div>
             `);
 
             tasksListEl.append(taskEl);
         });
     }
 
-    // 新增函數：更新資源顯示
+    // New function: update resource display
     function updateResourcesDisplay(data) {
-        // 如果存在資源區塊
+        // If resource block exists
         if ($('#resource-status').length) {
             const availableResources = data.available_resources || {};
             const totalResources = data.total_resources || {};
 
-            // 計算資源使用百分比
+            // Calculate resource usage percentage
             const cpuUsagePercent = totalResources.cpu ? Math.round(((totalResources.cpu - availableResources.cpu) / totalResources.cpu) * 100) : 0;
             const memoryUsagePercent = totalResources.memory_gb ? Math.round(((totalResources.memory_gb - availableResources.memory_gb) / totalResources.memory_gb) * 100) : 0;
             const gpuUsagePercent = totalResources.gpu ? Math.round(((totalResources.gpu - availableResources.gpu) / totalResources.gpu) * 100) : 0;
 
-            // 更新進度條
+            // Update progress bars
             updateProgressBar('#cpu-progress', cpuUsagePercent);
             updateProgressBar('#memory-progress', memoryUsagePercent);
             updateProgressBar('#gpu-progress', gpuUsagePercent);
 
-            // 更新數值
+            // Update values
             $('#cpu-usage-value').text(`${totalResources.cpu - availableResources.cpu}/${totalResources.cpu} (${cpuUsagePercent}%)`);
             $('#memory-usage-value').text(`${(totalResources.memory_gb - availableResources.memory_gb).toFixed(1)}/${totalResources.memory_gb.toFixed(1)}GB (${memoryUsagePercent}%)`);
             $('#gpu-usage-value').text(`${totalResources.gpu - availableResources.gpu}/${totalResources.gpu} (${gpuUsagePercent}%)`);
         }
     }
 
-    // 更新進度條
+    // Update progress bar
     function updateProgressBar(selector, percent) {
         const progressBar = $(selector);
         if (progressBar.length) {
             progressBar.css('width', percent + '%');
 
-            // 根據百分比調整顏色
+            // Adjust color based on percentage
             progressBar.removeClass('bg-success bg-warning bg-danger');
             if (percent > 80) {
                 progressBar.addClass('bg-danger');

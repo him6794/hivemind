@@ -93,7 +93,7 @@ class WorkerNode:
         # Docker 初始化
         self._init_docker()
         # gRPC 連接
-        self._init_grpc()
+        self._init_grpc()  # 確保 gRPC stub 初始化在 Flask 之前
         # Flask 應用
         self._init_flask()
         self.status = "Waiting for Login"
