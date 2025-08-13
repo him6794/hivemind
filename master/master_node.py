@@ -648,7 +648,7 @@ class MasterNodeUI:
         # 先自動連線 VPN
 
         
-        #self.auto_join_vpn()
+        self.auto_join_vpn()
         if not self._connect_grpc():
             logging.error("無法連接到節點池，退出")
             return
