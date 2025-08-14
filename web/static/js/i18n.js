@@ -132,8 +132,12 @@ const i18n = {
         "balance_transfer_btn": "確認轉帳",
 
         // 贊助頁面
-        "sponsor_thanks": "感謝以下贊助商對 HiveMind 的支持！",
+        "sponsor_thanks": "感謝以下贊助者對 HiveMind 的支持！",
         "sponsor_main_developer": "主要開發者",
+        "visit_website": "訪問網站",
+        "become_sponsor": "成為贊助者",
+        "sponsor_cta_desc": "支持 HiveMind 的發展，讓更多人享受分布式運算的便利",
+        "support_project": "支持專案",
 
         // 條款頁面
         "terms_title": "服務條款",
@@ -622,6 +626,10 @@ const i18n = {
         // 贊助頁面
         "sponsor_thanks": "Thank you to the following sponsors for supporting HiveMind!",
         "sponsor_main_developer": "Lead Developer",
+        "visit_website": "Visit Website",
+        "become_sponsor": "Become a Sponsor",
+        "sponsor_cta_desc": "Support HiveMind's development and let more people enjoy the convenience of distributed computing",
+        "support_project": "Support Project",
 
         // 條款頁面
         "terms_title": "Terms of Service",
@@ -734,13 +742,13 @@ const i18n = {
 };
 
 /**
- * 獲取儲存在 localStorage 中的語言設定，預設為 'zh-tw'
+ * 獲取儲存在 localStorage 中的語言設定，預設為 'en'
  * @returns {string} 當前語言 ('en' 或 'zh-tw')
  */
 function getLang() {
-    // 優先從 localStorage 讀取，若無則預設為 'zh-tw'
+    // 優先從 localStorage 讀取，若無則預設為 'en'
     const savedLang = localStorage.getItem('lang');
-    return savedLang === 'en' ? 'en' : 'zh-tw';
+    return savedLang === 'zh-tw' ? 'zh-tw' : 'en';
 }
 
 /**
@@ -822,7 +830,4 @@ if (typeof window !== 'undefined') {
     window.setLang = setLang;
     window.getLang = getLang;
     window.i18n = i18n;
-    // 如果有需要，也可以將其他函式掛載到全域
-    // window.setLang = setLang;
-    // window.getLang = getLang;
 }
