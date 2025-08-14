@@ -39,7 +39,7 @@ basicConfig(level=INFO, format='%(asctime)s - %(levelname)s - [%(threadName)s] -
 
 NODE_PORT = int(environ.get("NODE_PORT", 50053))
 FLASK_PORT = int(environ.get("FLASK_PORT", 5000))
-MASTER_ADDRESS = environ.get("MASTER_ADDRESS", "127.0.0.1:50051")
+MASTER_ADDRESS = environ.get("MASTER_ADDRESS", "10.0.0.1:50051")
 NODE_ID = environ.get("NODE_ID", f"worker-{node().split('.')[0]}-{NODE_PORT}")
 
 class WorkerNode:

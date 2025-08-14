@@ -663,8 +663,7 @@ class MasterNodeUI:
         finally:
             if self.channel:
                 self.channel.close()
-
-if __name__ == "__main__":
+def run_master_node():
     # Remove default username/password passing
     master_ui = MasterNodeUI(GRPC_SERVER_ADDRESS)
     try:
