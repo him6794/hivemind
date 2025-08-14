@@ -471,8 +471,9 @@ class DatabaseManager:
                     logging.warning("Email service not enabled")
                     return False
             
-            # 構建驗證連結
-            verification_url = urljoin(Config.BASE_URL, f'/verify-email/{verification_token}')
+            # 構建驗證連結 - 確保 BASE_URL 正確格式
+            base_url = Config.BASE_URL.rstrip('/')  # 移除末尾斜杠
+            verification_url = f"{base_url}/verify-email/{verification_token}"
             
             # 電子郵件內容（英文版）
             html_content = f"""
@@ -707,8 +708,9 @@ class DatabaseManager:
                     logging.warning("Email service not enabled")
                     return False
             
-            # 構建重設連結
-            reset_url = urljoin(Config.BASE_URL, f'/reset-password/{reset_token}')
+            # 構建重設連結 - 確保 BASE_URL 正確格式
+            base_url = Config.BASE_URL.rstrip('/')  # 移除末尾斜杠
+            reset_url = f"{base_url}/reset-password/{reset_token}"
             
             # 電子郵件內容（英文版）
             html_content = f"""
