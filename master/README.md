@@ -123,11 +123,6 @@ UI_PORT=5001
 # 日志级别
 LOG_LEVEL=INFO
 
-# 管理员凭证（生产环境必须修改）
-MASTER_USERNAME=admin
-MASTER_PASSWORD=secure_password
-```
-
 ### VPN配置示例
 ```
 [Interface]
@@ -150,27 +145,11 @@ PersistentKeepalive = 25
 # 直接运行Python脚本
 python3 master_node.py
 
-# 或使用打包好的可执行文件
-./HiveMind-Master.exe  # Windows
-# 或
-./HiveMind-Master     # Linux
-```
-
 ### 访问Web管理界面
 ```bash
 # 默认地址
 http://localhost:5001/login
 ```
-
-### 构建可执行文件
-```bash
-# 使用Nuitka打包
-python3 build.py
-
-# 输出文件位于dist/目录
-```
-
-## API接口
 
 ### gRPC接口
 | 服务 | 方法 | 描述 |
@@ -195,18 +174,15 @@ python3 build.py
 ```
 master/
 ├── master_node.py          # 主程序入口
-├── vpn.py                  # VPN配置管理
 ├── requirements.txt        # 依赖列表
-├── build.py                # 打包脚本
 ├── wg0.conf                # WireGuard配置
 ├── nodepool_pb2.py         # Protobuf生成文件
 ├── nodepool_pb2_grpc.py    # gRPC生成文件
-├── data/                   # 数据存储目录
 ├── templates_master/       # Web界面模板
 │   ├── login.html          # 登录页面
 │   ├── master_dashboard.html # 主控面板
 │   └── master_upload.html  # 任务上传页面
-└── static_master/          # Web静态资源
+└── static/          # Web静态资源
 ```
 
 ## 故障排除

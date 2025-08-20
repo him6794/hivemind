@@ -1,0 +1,41 @@
+這是一個類似於cloudflare worker的庫,用途是讓使用者能夠使用這個庫來去掉用hivemind網路的worker
+之後worker的docker會拔掉,不需要控制安全性,因為能調用的庫是自己寫的
+需要的功能:
+長期儲存檔案 將檔案分散儲存在各個worker上(會分片)
+保留原生python邏輯,移除部分不安全依賴如:os
+密鑰遠端獲取,將密鑰存在節點池資料庫內,由節點池代理向外發送
+dns解析,將外部域名解析到worker上,先解析到節點池,再由節點池代理到worker上
+
+需要的rpc功能:
+push(file)#上傳完整檔案
+returnpush(file_id,status)#返回上傳結果
+get(file_id)#獲取完整檔案
+returnget(file,status)#返回獲取結果
+Revise(file_id,sha256,time,user_id,difference)#修正並同步
+returnRevise(file_id,status)#返回修正結果
+synchronous(file_id,difference)#同步檔案
+returnsynchronous(file_id,status)#返回同步結果
+
+密鑰遠端部分,任務的每個對外函式都需要包成rpc函式給節點池代理
+上傳節點池部分節點池運算資源依舊扣款,鼓勵用戶將任務運算放在worker上,不放在節點池,節點池只做代理調用
+例子:
+a():
+    return('123')
+b():
+    return('456')
+
+worker:
+    將a包成rpc函式
+    將b包成rpc函式
+節點池能夠遠端代理a和b的調用,以及如果裡面有token也可以運行在節點池
+
+dns解析:
+將域名轉發到節點池的域名上 dns.hivemind.justin0711.com cloudflare不代理
+節點池收到dns解析後找到運行該任務的worker,並使用rpc請求訪問worker,將傳回的結果返回
+
+master可以監測運行他任務的worker效能
+如果worker調線,將會由節點池將任務再分配給其他worker,保證持續運行,而不是重頭開始
+
+
+這只是一個庫,不是完整系統,系統已經寫好,不需要再做管理節點,只需要作運算的函式庫就好
+讓之後可以直接調用
