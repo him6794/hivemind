@@ -14,9 +14,9 @@
 
 > **🌍 Language / 語言選擇**
 > 
-> <a href="README.en.md">🇺🇸 English</a> | 
-> <a href="README.zh-TW.md">🇹🇼 繁體中文</a> | 
-> **📖 Current: English**
+> <a href="documentation/en/README.md">🇺🇸 English</a> | 
+> <a href="documentation/zh-tw/README.md">🇹🇼 繁體中文</a> | 
+> **📖 完整文檔 Full Documentation**
 
 </div>
 
@@ -25,6 +25,21 @@
 <div align="center">
 
 **HiveMind** is an open-source distributed computing platform designed to build a decentralized computing network that allows users to share idle computing resources and earn token rewards.
+
+</div>
+
+## 📚 完整文檔系統 Complete Documentation
+
+<div align="center">
+
+**🎯 快速導航 Quick Navigation**
+
+| 語言 Language | 主文檔 Main Docs | API 文檔 | 部署指南 Deployment | 開發指南 Development |
+|---------------|------------------|----------|-------------------|-------------------|
+| **🇹🇼 中文** | [完整中文文檔](documentation/zh-tw/README.md) | [API 說明](documentation/zh-tw/api.md) | [部署指南](documentation/zh-tw/deployment.md) | [開發指南](documentation/zh-tw/developer.md) |
+| **🇺🇸 English** | [Complete English Docs](documentation/en/README.md) | [API Reference](documentation/en/api.md) | [Deployment Guide](documentation/en/deployment.md) | [Developer Guide](documentation/en/developer.md) |
+
+**📋 模組文檔 Module Documentation**: [Node Pool](documentation/zh-tw/modules/node-pool.md) • [TaskWorker](documentation/zh-tw/modules/taskworker.md) • [Troubleshooting](documentation/zh-tw/troubleshooting.md)
 
 </div>
 
@@ -136,34 +151,7 @@ Earn **CPT (Computing Power Token)** by contributing computing resources:
 
 **Note**: Token reward system is currently under development.
 
-## 📚 Documentation
-
-<div align="center">
-
-### 📖 Complete Documentation
-
-| Document | Description | Status |
-|----------|-------------|--------|
-| **[Main Documentation](documentation/README.md)** | Complete bilingual documentation center | ✅ Available |
-| **[API Documentation](documentation/zh-tw/api.md)** | Complete gRPC API reference | ✅ Available |
-| **[Deployment Guide](documentation/zh-tw/deployment.md)** | Detailed deployment instructions | ✅ Available |
-| **[Troubleshooting](documentation/zh-tw/troubleshooting.md)** | Common issues and solutions | ✅ Available |
-| **[Developer Guide](documentation/zh-tw/developer.md)** | Development standards and guidelines | ✅ Available |
-
-### 🔧 Module Documentation
-
-| Module | Description | Status |
-|--------|-------------|--------|
-| **[Node Pool](documentation/zh-tw/modules/node-pool.md)** | Resource scheduling system | ✅ Available |
-| **[Master Node](documentation/zh-tw/modules/master-node.md)** | Management and monitoring | 🚧 Development |
-| **[Worker Node](documentation/zh-tw/modules/worker-node.md)** | Worker node implementation | 🚧 Development |
-| **[TaskWorker](documentation/zh-tw/modules/taskworker.md)** | Distributed task execution library | ✅ Available |
-| **[AI Module](documentation/zh-tw/modules/ai.md)** | Distributed AI model execution | 🚧 Development |
-| **[BT Module](documentation/zh-tw/modules/bt.md)** | P2P file transfer system | 🚧 Development |
-
-</div>
-
-## 🚀 Web Interface
+##  Web Interface
 
 After deployment, access the available interfaces:
 
@@ -244,6 +232,6 @@ This project is licensed under the **GNU General Public License v3.0** - see the
 [![GitHub Stars](https://img.shields.io/github/stars/him6794/hivemind?style=social)](https://github.com/him6794/hivemind)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE.txt)
 
-**[GitHub Repository](https://github.com/him6794/hivemind) | [Issues & Discussions](https://github.com/him6794/hivemind/issues)**
+**[GitHub Repository](https://github.com/him6794/hivemind) | [📚 完整文檔 Complete Documentation](documentation/README.md) | [Issues & Discussions](https://github.com/him6794/hivemind/issues)**
 
 </div>
