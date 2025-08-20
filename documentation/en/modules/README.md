@@ -28,21 +28,19 @@ This directory contains detailed technical documentation for all HiveMind module
   - Resource monitoring
   - Status reporting
 
-### 🧠 AI Module
+### � Artificial Intelligence Module
 
-- **[AI Module](ai.md)** - Artificial Intelligence Module
-  - Model splitting and distribution
-  - Intelligent task scheduling
-  - Identity recognition system
-  - Status: Under Development
+- **[AI Module](ai.md)** - Machine Learning Service
+  - Model identification and analysis
+  - Reinforcement learning algorithms
+  - Distributed training support
 
-### 📂 File Transfer
+### 🌐 File Transfer Module
 
-- **[BT Module](bt.md)** - BitTorrent Module
-  - P2P file transfer
-  - Seed management and tracking
-  - Distributed storage
-  - Status: Complete
+- **[BT Module](bt.md)** - BitTorrent P2P Transfer
+  - Torrent file creation and management
+  - P2P network integration
+  - Distributed file sharing
 
 ### 🌐 Web Services
 
