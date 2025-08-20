@@ -144,20 +144,22 @@ Earn **CPT (Computing Power Token)** by contributing computing resources:
 
 | Document | Description | Status |
 |----------|-------------|--------|
-| **[API Documentation](docs/API.md)** | Complete gRPC API reference | ✅ Available |
-| **[Deployment Guide](docs/DEPLOYMENT.md)** | Detailed deployment instructions | ✅ Available |
-| **[Troubleshooting](docs/TROUBLESHOOTING.md)** | Common issues and solutions | 🚧 Development |
-| **[Developer Guide](docs/DEVELOPER.md)** | Development standards and guidelines | 🚧 Development |
+| **[Main Documentation](documentation/README.md)** | Complete bilingual documentation center | ✅ Available |
+| **[API Documentation](documentation/zh-tw/api.md)** | Complete gRPC API reference | ✅ Available |
+| **[Deployment Guide](documentation/zh-tw/deployment.md)** | Detailed deployment instructions | ✅ Available |
+| **[Troubleshooting](documentation/zh-tw/troubleshooting.md)** | Common issues and solutions | ✅ Available |
+| **[Developer Guide](documentation/zh-tw/developer.md)** | Development standards and guidelines | ✅ Available |
 
 ### 🔧 Module Documentation
 
 | Module | Description | Status |
 |--------|-------------|--------|
-| **[AI Module](ai/README.md)** | Distributed AI model execution | 🚧 Development |
-| **[BT Module](bt/README.md)** | P2P file transfer system | 🚧 Development |
-| **[Worker Module](worker/README.md)** | Worker node implementation | ✅ Available |
-| **[Node Pool](node_pool/README.md)** | Resource scheduling system | ✅ Available |
-| **[Master Node](master/README.md)** | Management and monitoring | ✅ Available |
+| **[Node Pool](documentation/zh-tw/modules/node-pool.md)** | Resource scheduling system | ✅ Available |
+| **[Master Node](documentation/zh-tw/modules/master-node.md)** | Management and monitoring | 🚧 Development |
+| **[Worker Node](documentation/zh-tw/modules/worker-node.md)** | Worker node implementation | 🚧 Development |
+| **[TaskWorker](documentation/zh-tw/modules/taskworker.md)** | Distributed task execution library | ✅ Available |
+| **[AI Module](documentation/zh-tw/modules/ai.md)** | Distributed AI model execution | 🚧 Development |
+| **[BT Module](documentation/zh-tw/modules/bt.md)** | P2P file transfer system | 🚧 Development |
 
 </div>
 

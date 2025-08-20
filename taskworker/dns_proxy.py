@@ -16,7 +16,7 @@ class DNSProxy(taskworker_pb2_grpc.DNSServiceServicer):
             # 實際實現需要與節點池的 DNS 服務對接
             
             return taskworker_pb2.DNSResponse(
-                resolved_ip="dns.hivemind.justin0711.com",
+                resolved_ip="127.0.0.1",  # 實際實現時將由節點池提供正確的 IP
                 status=True,
                 message="域名解析成功"
             )
