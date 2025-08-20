@@ -1,4 +1,10 @@
-# Module Documentation
+#- **[Worker Node](worker-node.md)** - Execution Nodes
+  - Multi-task parallel execution engine
+  - Docker containerized secure execution  
+  - VPN auto-connection management
+  - Trust scoring system
+  - Modern Web management interface
+  - Real-time resource monitoring and health checksule Documentation
 - **[Worker Node](worker-node.md)** - Worker Nodes
   - Task execution engine
   - Resource monitoring

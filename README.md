@@ -143,7 +143,7 @@ docker-compose ps
 | **Feature** | **Description** | **Status** | **Tech Stack** |
 |:---:|:---:|:---:|:---:|
 | **Node Pool** | Resource scheduling & task distribution | ✅ **Production** | gRPC, SQLite, Redis |
-| **Worker Nodes** | Distributed task execution units | ✅ **Production** | Docker, Python, Monitoring |
+| **Worker Nodes** | Multi-task execution with containerization | ✅ **Production** | Docker, Python, Flask, VPN |
 | **Master Node** | Web interface & system orchestration | ✅ **Production** | Flask, WireGuard VPN |
 | **TaskWorker** | Lightweight task execution framework | ✅ **Production** | gRPC, Protocol Buffers |
 | **AI Module** | Intelligent resource optimization | **Development** | Q-Learning, TensorFlow |

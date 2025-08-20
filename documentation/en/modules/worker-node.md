@@ -1,860 +1,624 @@
 # Worker Node Module Documentation
 
+HiveMind Worker Node is the core execution unit of the distributed computing platform, providing enterprise-grade task execution, resource management, and monitoring capabilities.
+
 ## 📋 Overview
 
-The Worker Node is the computational execution node of the HiveMind distributed computing platform, responsible for receiving and executing computational tasks assigned by the Master Node and returning results to the system.
+Worker Node is a complete distributed computing execution node with the following features:
 
-## 🏗️ System Architecture
+### Core Features
+- **🎯 Multi-Task Parallel Execution**: Support for concurrent execution of multiple computational tasks
+- **🐳 Docker Containerized Execution**: Secure isolated task execution environment
+- **🔗 Automatic VPN Connection**: Auto-connect to HiveMind distributed network
+- **📊 Real-time Resource Monitoring**: CPU, memory, GPU real-time monitoring
+- **🌐 Web Management Interface**: Modern node management interface
+- **⚡ Trust Scoring System**: Dynamic trust scoring based on node performance
+- **🔒 User Session Management**: Secure multi-user session support
+
+### Technical Architecture
 
 ```
-┌─────────────────────┐
-│    Worker Node      │
-├─────────────────────┤
-│ • Task Executor     │
-│ • Resource Monitor  │
-│ • Result Handler    │
-│ • Status Reporter   │
-│ • Docker Engine     │
-└─────────────────────┘
-        │
-        ├─ gRPC Client (to Node Pool)
-        ├─ Docker Containers
-        ├─ Local Storage
-        └─ System Resources
+┌─────────────────────────────────────────────────────┐
+│                Worker Node Architecture             │
+├─────────────────────────────────────────────────────┤
+│                                                     │
+│  ┌─────────────────┐    ┌─────────────────┐        │
+│  │   Flask Web     │    │   gRPC Service  │        │
+│  │   Interface     │    │   (Port 50053)  │        │
+│  │  (Port 5000)    │    │                 │        │
+│  └─────────────────┘    └─────────────────┘        │
+│           │                       │                 │
+│           └───────────┬───────────┘                 │
+│                       │                             │
+│  ┌─────────────────────────────────────────────────┐│
+│  │            Core WorkerNode Class                ││
+│  │  ┌─────────────────────────────────────────────┐││
+│  │  │ Multi-Task Execution Engine                 │││
+│  │  │ • running_tasks: Dict[task_id, task_info]   │││
+│  │  │ • task_locks: Dict[task_id, Lock]           │││
+│  │  │ • task_stop_events: Dict[task_id, Event]    │││
+│  │  └─────────────────────────────────────────────┘││
+│  │  ┌─────────────────────────────────────────────┐││
+│  │  │ Resource Management System                  │││
+│  │  │ • available_resources: CPU/Memory/GPU       │││
+│  │  │ • total_resources: System capabilities      │││
+│  │  │ • resources_lock: Thread-safe access       │││
+│  │  └─────────────────────────────────────────────┘││
+│  │  ┌─────────────────────────────────────────────┐││
+│  │  │ Trust & Security System                     │││
+│  │  │ • trust_score: 0-100 reliability score     │││
+│  │  │ • trust_group: high/medium/low              │││
+│  │  │ • user_sessions: Multi-user support        │││
+│  │  └─────────────────────────────────────────────┘││
+│  └─────────────────────────────────────────────────┘│
+│           │                       │                 │
+│  ┌─────────────────┐    ┌─────────────────┐        │
+│  │  Docker Engine  │    │ VPN Connection  │        │
+│  │                 │    │ WireGuard Auto  │        │
+│  └─────────────────┘    └─────────────────┘        │
+└─────────────────────────────────────────────────────┘
 ```
 
-## 🔧 Core Components
-
-### 1. Worker Node Main (`worker_node.py`)
-- **Function**: Main worker node service
-- **Protocol**: gRPC Client to Node Pool
-- **Container**: Docker-based task execution environment
-
-**Main Features**:
-```python
-class WorkerNode:
-    def __init__(self, node_id, node_pool_address):
-        self.node_id = node_id
-        self.node_pool_client = NodePoolClient(node_pool_address)
-        self.task_executor = TaskExecutor()
-        self.resource_monitor = ResourceMonitor()
-        
-    def start(self):
-        """Start worker node"""
-        self.register_with_node_pool()
-        self.start_heartbeat()
-        self.start_task_polling()
-        
-    def register_with_node_pool(self):
-        """Register node with Node Pool"""
-        
-    def execute_task(self, task):
-        """Execute assigned task"""
-        
-    def report_result(self, task_id, result):
-        """Report task execution result"""
-```
-
-### 2. Task Executor (`task_executor.py`)
-- **Function**: Task execution engine
-- **Support**: Docker containerized execution
-- **Isolation**: Process and resource isolation
-
-### 3. Resource Monitor (`resource_monitor.py`)
-- **Function**: System resource monitoring
-- **Metrics**: CPU, memory, disk, network
-- **Reporting**: Real-time resource usage
-
-### 4. Docker Manager (`docker_manager.py`)
-- **Function**: Docker container management
-- **Responsibilities**: Container creation, execution, cleanup
-- **Security**: Container security configuration
-
-## 🗂️ File Structure
+## 🗂️ New Architecture File Structure
 
 ```
 worker/
-├── worker_node.py              # Main worker node service
-├── task_executor.py           # Task execution engine
-├── resource_monitor.py        # Resource monitor
-├── docker_manager.py          # Docker container manager
-├── nodepool_pb2.py           # Protocol Buffer files
-├── nodepool_pb2_grpc.py      # gRPC client files
-├── nodepool.proto            # Protocol Buffer definitions
-├── requirements.txt          # Python dependencies
-├── Dockerfile               # Docker image build file
-├── run_task.sh             # Task execution script
-├── build.py                # Build script
-├── make.py                 # Compilation script
-├── file.ico                # Application icon
-├── README.md               # Module documentation
-├── README.en.md            # English documentation
-├── static/                 # Static resources
-├── templates/              # HTML templates
-├── hivemind_worker/        # Worker packaging project
-└── HiveMind-Worker-Release/ # Release package
-    ├── install.sh          # Installation script
-    ├── start_worker.cmd    # Windows startup script
-    └── ...
+├── src/
+│   └── hivemind_worker/           # Main Python package
+│       ├── worker_node.py         # Core worker node implementation
+│       ├── nodepool_pb2.py        # gRPC Protocol Buffers
+│       ├── nodepool_pb2_grpc.py   # gRPC service client
+│       ├── __init__.py            # Package initialization
+│       ├── static/                # Web interface static resources
+│       │   ├── css/              # Style files
+│       │   ├── js/               # JavaScript files
+│       │   └── images/           # Image resources
+│       └── templates/             # Flask HTML templates
+│           ├── dashboard.html     # Main dashboard
+│           ├── login.html         # Login page
+│           └── tasks.html         # Task management page
+├── main.py                        # Main entry point
+├── pyproject.toml                 # Python project configuration
+├── requirements.txt               # Dependencies
+├── Dockerfile                     # Docker build file
+├── run_task.sh                    # Task execution script
+├── nodepool.proto                 # gRPC service definitions
+└── README.md                      # Documentation
+```
+
+## 🔧 Core Components Detailed
+
+### 1. Main WorkerNode Class
+
+```python
+class WorkerNode:
+    def __init__(self):
+        # Basic node information
+        self.node_id = NODE_ID
+        self.port = NODE_PORT
+        self.master_address = MASTER_ADDRESS
+        
+        # Multi-task execution system
+        self.running_tasks = {}     # {task_id: task_info}
+        self.task_locks = {}        # {task_id: threading.Lock()}
+        self.task_stop_events = {}  # {task_id: Event()}
+        
+        # Resource management system
+        self.available_resources = {
+            "cpu": 0,               # CPU score
+            "memory_gb": 0,         # Available memory GB
+            "gpu": 0,               # GPU score  
+            "gpu_memory_gb": 0      # GPU memory GB
+        }
+        
+        # Trust and security system
+        self.trust_score = 0        # 0-100 trust score
+        self.trust_group = "low"    # high/medium/low
+        self.user_sessions = {}     # Multi-user sessions
+```
+
+### 2. Multi-Task Execution Engine
+
+**Parallel Task Support**:
+```python
+def execute_task(self, task_id, task_data):
+    """Execute task (supports parallelism)"""
+    # 1. Create task-specific lock and stop event
+    self.task_locks[task_id] = threading.Lock()
+    self.task_stop_events[task_id] = threading.Event()
+    
+    # 2. Allocate resources
+    required_resources = self._calculate_task_resources(task_data)
+    if not self._allocate_resources(task_id, required_resources):
+        return {"error": "Insufficient resources"}
+    
+    # 3. Execute task in separate thread
+    task_thread = threading.Thread(
+        target=self._run_task_in_thread,
+        args=(task_id, task_data),
+        name=f"Task-{task_id}"
+    )
+    task_thread.start()
+    
+    return {"status": "started", "task_id": task_id}
+
+def _run_task_in_thread(self, task_id, task_data):
+    """Execute task in separate thread"""
+    try:
+        # Update task status to running
+        with self.task_locks[task_id]:
+            self.running_tasks[task_id] = {
+                "status": "RUNNING",
+                "start_time": time(),
+                "resources": task_data.get("required_resources", {})
+            }
+        
+        # Execute Docker container task
+        result = self._execute_docker_task(task_id, task_data)
+        
+        # Update completion status
+        with self.task_locks[task_id]:
+            self.running_tasks[task_id]["status"] = "COMPLETED"
+            self.running_tasks[task_id]["result"] = result
+            
+    except Exception as e:
+        with self.task_locks[task_id]:
+            self.running_tasks[task_id]["status"] = "FAILED"
+            self.running_tasks[task_id]["error"] = str(e)
+    finally:
+        # Release resources
+        self._release_task_resources(task_id)
+```
+
+### 3. Dynamic Resource Management
+
+**Intelligent Resource Allocation**:
+```python
+def _allocate_resources(self, task_id, required_resources):
+    """Allocate resources for task"""
+    with self.resources_lock:
+        # Check if sufficient resources available
+        if (self.available_resources["cpu"] >= required_resources.get("cpu", 0) and
+            self.available_resources["memory_gb"] >= required_resources.get("memory_gb", 0) and
+            self.available_resources["gpu"] >= required_resources.get("gpu", 0)):
+            
+            # Allocate resources
+            for resource, amount in required_resources.items():
+                self.available_resources[resource] -= amount
+            
+            # Record task resource usage
+            self.running_tasks[task_id] = {
+                "status": "ALLOCATED",
+                "resources": required_resources,
+                "start_time": time()
+            }
+            return True
+        
+        return False
+
+def _release_task_resources(self, task_id):
+    """Release task resources"""
+    with self.resources_lock:
+        if task_id in self.running_tasks:
+            task_resources = self.running_tasks[task_id].get("resources", {})
+            
+            # Return resources
+            for resource, amount in task_resources.items():
+                if resource in self.available_resources:
+                    self.available_resources[resource] += amount
+                    # Ensure not exceeding total resource limits
+                    self.available_resources[resource] = min(
+                        self.available_resources[resource],
+                        self.total_resources[resource]
+                    )
+```
+
+### 4. VPN Auto-Connection System
+
+**Automatic Network Joining**:
+```python
+def _auto_join_vpn(self):
+    """Auto-connect to HiveMind VPN network"""
+    try:
+        # Check if already connected to VPN
+        if self._check_vpn_connection():
+            self._log("Already connected to HiveMind network")
+            return
+        
+        # Guide user for manual connection (non-interactive mode)
+        self._log("VPN connection required for HiveMind network")
+        self._log("Please ensure WireGuard VPN is configured and running")
+        
+        # Wait for user confirmation
+        print("If you have already connected, please press y")
+        response = input()
+        if response.lower() == 'y':
+            self._log("VPN connection confirmed")
+        
+    except Exception as e:
+        self._log(f"VPN setup failed: {e}", WARNING)
+
+def _get_local_ip(self):
+    """Get local IP (prioritize WireGuard interface)"""
+    try:
+        interfaces_list = interfaces()
+        
+        # Prioritize WireGuard interfaces
+        wg_interfaces = [iface for iface in interfaces_list 
+                        if 'wg' in iface.lower() or 'wireguard' in iface.lower()]
+        
+        if wg_interfaces:
+            for wg_iface in wg_interfaces:
+                addrs = ifaddresses(wg_iface)
+                if AF_INET in addrs:
+                    return addrs[AF_INET][0]['addr']
+        
+        # Check 10.0.0.x VPN subnet
+        for iface in interfaces_list:
+            addrs = ifaddresses(iface)
+            if AF_INET in addrs:
+                for addr_info in addrs[AF_INET]:
+                    ip = addr_info['addr']
+                    if ip.startswith('10.0.0.') and ip != '10.0.0.1':
+                        return ip
+        
+        return '127.0.0.1'
+        
+    except Exception as e:
+        self._log(f"IP detection failed: {e}")
+        return '127.0.0.1'
+```
+
+## 🌐 Web Management Interface
+
+Worker Node provides a modern Web management interface supporting:
+
+### Main Functional Pages
+
+1. **Dashboard (`/dashboard`)**
+   - Real-time node status monitoring
+   - Resource utilization charts
+   - Task execution statistics
+   - System performance metrics
+
+2. **Task Management (`/tasks`)**
+   - Current running task list
+   - Task history records
+   - Task detailed information
+   - Task stop controls
+
+3. **System Monitoring (`/monitor`)**
+   - CPU utilization
+   - Memory usage status
+   - Docker status
+   - Network connection status
+
+### RESTful API Endpoints
+
+```python
+# System status API
+@app.route('/api/status')
+def api_status():
+    """Get complete node status information"""
+    return jsonify({
+        'node_id': self.node_id,
+        'status': self.status,
+        'is_registered': self.is_registered,
+        'docker_available': self.docker_available,
+        'cpu_percent': cpu_percent(),
+        'memory_percent': virtual_memory().percent,
+        'available_resources': self.available_resources,
+        'total_resources': self.total_resources,
+        'running_tasks': len(self.running_tasks),
+        'trust_score': self.trust_score,
+        'trust_group': self.trust_group
+    })
+
+# Task management API
+@app.route('/api/tasks')
+def api_tasks():
+    """Get all running tasks"""
+    tasks_info = []
+    with self.resources_lock:
+        for task_id, task_data in self.running_tasks.items():
+            tasks_info.append({
+                'task_id': task_id,
+                'status': task_data.get('status', 'Unknown'),
+                'start_time': datetime.fromtimestamp(
+                    task_data.get('start_time', 0)
+                ).isoformat(),
+                'elapsed': time() - task_data.get('start_time', time()),
+                'resources': task_data.get('resources', {})
+            })
+    return jsonify({'tasks': tasks_info})
+
+# Task control API
+@app.route('/api/stop_task/<task_id>', methods=['POST'])
+def api_stop_task(task_id):
+    """Stop specified task"""
+    if task_id in self.task_stop_events:
+        self.task_stop_events[task_id].set()
+        return jsonify({'success': True, 'message': f'Task {task_id} stopped'})
+    return jsonify({'success': False, 'error': 'Task not found'}), 404
+```
+
+## 🐳 Docker Container Management
+
+### Containerized Task Execution
+
+```python
+def _execute_docker_task(self, task_id, task_data):
+    """Execute task in Docker container"""
+    try:
+        # 1. Prepare work directory
+        work_dir = self._prepare_task_workspace(task_id, task_data)
+        
+        # 2. Create Docker container
+        container = self.docker_client.containers.run(
+            image=task_data.get('docker_image', 'justin308/hivemind-worker:latest'),
+            command=task_data.get('command', 'python task.py'),
+            name=f"task-{task_id}",
+            volumes={work_dir: {'bind': '/workspace', 'mode': 'rw'}},
+            working_dir='/workspace',
+            mem_limit=task_data.get('memory_limit', '1g'),
+            cpu_quota=task_data.get('cpu_quota', 100000),
+            detach=True,
+            remove=False,
+            network_mode='bridge',
+            environment=task_data.get('environment', {})
+        )
+        
+        # 3. Monitor container execution
+        while container.status != 'exited':
+            # Check stop signal
+            if self.task_stop_events[task_id].is_set():
+                container.stop(timeout=10)
+                break
+                
+            sleep(1)
+            container.reload()
+        
+        # 4. Collect execution results
+        logs = container.logs(stdout=True, stderr=True).decode('utf-8')
+        exit_code = container.attrs['State']['ExitCode']
+        
+        # 5. Collect output files
+        result_files = self._collect_task_results(container, work_dir)
+        
+        # 6. Cleanup container
+        container.remove()
+        
+        return {
+            'exit_code': exit_code,
+            'logs': logs,
+            'files': result_files,
+            'status': 'completed' if exit_code == 0 else 'failed'
+        }
+        
+    except Exception as e:
+        self._log(f"Docker task execution failed: {e}", ERROR)
+        return {'error': str(e), 'status': 'failed'}
+```
+
+## 📊 Trust Scoring System
+
+Worker Node implements a dynamic trust scoring mechanism:
+
+### Trust Score Calculation
+
+```python
+def update_trust_score(self, task_result):
+    """Update node trust score"""
+    if task_result.get('status') == 'completed':
+        # Successfully completed tasks increase trust score
+        self.trust_score = min(100, self.trust_score + 2)
+    elif task_result.get('status') == 'failed':
+        # Failed tasks decrease trust score
+        self.trust_score = max(0, self.trust_score - 5)
+    
+    # Update trust group
+    if self.trust_score >= 80:
+        self.trust_group = "high"
+    elif self.trust_score >= 50:
+        self.trust_group = "medium"
+    else:
+        self.trust_group = "low"
+    
+    self._log(f"Trust score updated: {self.trust_score} (Group: {self.trust_group})")
 ```
 
 ## 🚀 Deployment and Configuration
 
-### Local Development Environment
+### Environment Variable Configuration
+
 ```bash
-cd worker
-pip install -r requirements.txt
-python worker_node.py --node-id=worker-001 --node-pool=localhost:50051
+# Basic configuration
+NODE_PORT=50053                    # gRPC service port
+FLASK_PORT=5000                    # Web interface port
+MASTER_ADDRESS=10.0.0.1:50051     # Master Node address
+NODE_ID=worker-hostname-50053      # Node unique identifier
+
+# Docker configuration
+DOCKER_ENABLED=true                # Enable Docker support
+DOCKER_NETWORK=hivemind           # Docker network name
+
+# Resource configuration
+MAX_CPU_CORES=4                   # Maximum CPU cores
+MAX_MEMORY_GB=8                   # Maximum memory GB
+MAX_CONCURRENT_TASKS=3            # Maximum concurrent tasks
+
+# Security configuration
+SESSION_TIMEOUT=24                # Session timeout (hours)
+TRUST_THRESHOLD=50               # Trust score threshold
 ```
 
-### Docker Container Deployment
-```bash
-# Build Docker image
-docker build -t hivemind-worker .
+### Using Python Package Installation
 
-# Run Worker container
+```bash
+# 1. Install from source
+cd worker/
+pip install -e .
+
+# 2. Use pre-built package
+pip install hivemind_worker==0.0.7
+
+# 3. Run Worker Node
+python -m hivemind_worker.worker_node
+```
+
+### Docker Deployment
+
+```bash
+# 1. Build Docker image
+docker build -t hivemind-worker:latest .
+
+# 2. Run container
 docker run -d \
-  --name hivemind-worker-001 \
-  -e NODE_ID=worker-001 \
-  -e NODE_POOL_ADDRESS=host.docker.internal:50051 \
+  --name hivemind-worker \
+  --network host \
+  -e MASTER_ADDRESS=10.0.0.1:50051 \
+  -e NODE_PORT=50053 \
+  -e FLASK_PORT=5000 \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  hivemind-worker
+  hivemind-worker:latest
 ```
 
-### Configuration File Example
-```python
-# config.py
-import os
+## 🔍 Monitoring and Logging
 
-class WorkerConfig:
-    # Node configuration
-    NODE_ID = os.environ.get('NODE_ID') or f'worker-{uuid.uuid4().hex[:8]}'
-    NODE_POOL_ADDRESS = os.environ.get('NODE_POOL_ADDRESS') or 'localhost:50051'
-    
-    # Resource limits
-    MAX_CPU_CORES = int(os.environ.get('MAX_CPU_CORES') or 0)  # 0 = unlimited
-    MAX_MEMORY_GB = float(os.environ.get('MAX_MEMORY_GB') or 0)  # 0 = unlimited
-    MAX_DISK_GB = float(os.environ.get('MAX_DISK_GB') or 0)    # 0 = unlimited
-    
-    # Task configuration
-    TASK_TIMEOUT = int(os.environ.get('TASK_TIMEOUT') or 3600)  # 1 hour
-    MAX_CONCURRENT_TASKS = int(os.environ.get('MAX_CONCURRENT_TASKS') or 1)
-    
-    # Heartbeat configuration
-    HEARTBEAT_INTERVAL = int(os.environ.get('HEARTBEAT_INTERVAL') or 30)  # 30 seconds
-    
-    # Docker configuration
-    DOCKER_ENABLED = os.environ.get('DOCKER_ENABLED', 'true').lower() == 'true'
-    DOCKER_NETWORK = os.environ.get('DOCKER_NETWORK') or 'hivemind'
-    
-    # Storage configuration
-    WORK_DIR = os.environ.get('WORK_DIR') or './work'
-    TEMP_DIR = os.environ.get('TEMP_DIR') or './temp'
-    LOG_DIR = os.environ.get('LOG_DIR') or './logs'
+### Logging System
+
+Worker Node provides comprehensive logging:
+
+```python
+def _log(self, message, level=INFO):
+    """Thread-safe logging"""
+    with self.log_lock:
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        log_entry = f"[{timestamp}] {getLevelName(level)}: {message}"
+        
+        # Add to memory logs
+        self.logs.append({
+            'timestamp': timestamp,
+            'level': getLevelName(level),
+            'message': message
+        })
+        
+        # Maintain log size limit
+        if len(self.logs) > 1000:
+            self.logs = self.logs[-500:]  # Keep latest 500 entries
+        
+        print(log_entry)
 ```
 
-## 📡 Communication with Node Pool
+### Health Checks
 
-### gRPC Client Implementation
 ```python
-import grpc
-import time
-from concurrent import futures
-from worker import nodepool_pb2, nodepool_pb2_grpc
-
-class NodePoolClient:
-    def __init__(self, address):
-        self.address = address
-        self.channel = grpc.insecure_channel(address)
-        self.stub = nodepool_pb2_grpc.NodeManagerStub(self.channel)
-        
-    def register_node(self, node_info):
-        """Register node with Node Pool"""
-        request = nodepool_pb2.RegisterNodeRequest(
-            node_id=node_info['node_id'],
-            ip_address=node_info['ip_address'],
-            port=node_info['port'],
-            cpu_cores=node_info['cpu_cores'],
-            memory_gb=node_info['memory_gb'],
-            disk_gb=node_info['disk_gb'],
-            capabilities=node_info.get('capabilities', [])
-        )
-        
-        try:
-            response = self.stub.RegisterNode(request)
-            return response.success
-        except grpc.RpcError as e:
-            print(f"Node registration failed: {e}")
-            return False
+@app.route('/health')
+def health_check():
+    """Health check endpoint"""
+    checks = {
+        'docker': self._check_docker_health(),
+        'grpc': self._check_grpc_connection(),
+        'resources': self._check_resource_availability(),
+        'vpn': self._check_vpn_connection()
+    }
     
-    def send_heartbeat(self, node_id, status):
-        """Send heartbeat signal"""
-        request = nodepool_pb2.UpdateNodeStatusRequest(
-            node_id=node_id,
-            status=status,
-            timestamp=int(time.time())
-        )
-        
-        try:
-            response = self.stub.UpdateNodeStatus(request)
-            return response.success
-        except grpc.RpcError as e:
-            print(f"Heartbeat send failed: {e}")
-            return False
+    all_healthy = all(check['status'] == 'healthy' for check in checks.values())
     
-    def get_assigned_tasks(self, node_id):
-        """Get tasks assigned to this node"""
-        request = nodepool_pb2.GetAssignedTasksRequest(node_id=node_id)
-        
-        try:
-            response = self.stub.GetAssignedTasks(request)
-            return response.tasks
-        except grpc.RpcError as e:
-            print(f"Get tasks failed: {e}")
-            return []
-    
-    def report_task_result(self, task_id, result, status):
-        """Report task execution result"""
-        request = nodepool_pb2.ReportTaskResultRequest(
-            task_id=task_id,
-            node_id=self.node_id,
-            result=result,
-            status=status,
-            timestamp=int(time.time())
-        )
-        
-        try:
-            response = self.stub.ReportTaskResult(request)
-            return response.success
-        except grpc.RpcError as e:
-            print(f"Result report failed: {e}")
-            return False
-```
-
-## 🐳 Docker Task Execution
-
-### Docker Container Management
-```python
-import docker
-import json
-import tempfile
-import os
-
-class DockerTaskExecutor:
-    def __init__(self):
-        self.client = docker.from_env()
-        self.network_name = 'hivemind'
-        self.ensure_network_exists()
-    
-    def ensure_network_exists(self):
-        """Ensure HiveMind network exists"""
-        try:
-            self.client.networks.get(self.network_name)
-        except docker.errors.NotFound:
-            self.client.networks.create(
-                self.network_name,
-                driver="bridge",
-                options={"com.docker.network.bridge.enable_icc": "true"}
-            )
-    
-    def execute_task(self, task):
-        """Execute task in Docker container"""
-        container_name = f"hivemind-task-{task['id']}"
-        
-        # Prepare task data
-        work_dir = tempfile.mkdtemp(prefix=f"task-{task['id']}-")
-        self.prepare_task_data(task, work_dir)
-        
-        try:
-            # Create and start container
-            container = self.client.containers.run(
-                image=task.get('docker_image', 'python:3.9-slim'),
-                command=task['command'],
-                name=container_name,
-                network=self.network_name,
-                volumes={
-                    work_dir: {'bind': '/workspace', 'mode': 'rw'}
-                },
-                working_dir='/workspace',
-                mem_limit=task.get('memory_limit', '1g'),
-                cpu_quota=task.get('cpu_quota', 100000),  # 1 CPU core
-                detach=True,
-                remove=False  # Keep container to get results
-            )
-            
-            # Wait for container completion
-            result = container.wait(timeout=task.get('timeout', 3600))
-            
-            # Get output
-            logs = container.logs(stdout=True, stderr=True).decode('utf-8')
-            
-            # Get result files
-            result_data = self.collect_results(container, work_dir)
-            
-            # Cleanup container
-            container.remove()
-            
-            return {
-                'status': 'completed' if result['StatusCode'] == 0 else 'failed',
-                'exit_code': result['StatusCode'],
-                'logs': logs,
-                'result_data': result_data
-            }
-            
-        except docker.errors.ContainerError as e:
-            return {
-                'status': 'failed',
-                'error': str(e),
-                'exit_code': e.exit_status
-            }
-        except Exception as e:
-            return {
-                'status': 'failed',
-                'error': str(e)
-            }
-        finally:
-            # Cleanup work directory
-            self.cleanup_work_dir(work_dir)
-    
-    def prepare_task_data(self, task, work_dir):
-        """Prepare task execution data files"""
-        # Write task configuration
-        with open(os.path.join(work_dir, 'task.json'), 'w') as f:
-            json.dump(task, f, indent=2)
-        
-        # Write task data files
-        if 'input_files' in task:
-            for filename, content in task['input_files'].items():
-                file_path = os.path.join(work_dir, filename)
-                os.makedirs(os.path.dirname(file_path), exist_ok=True)
-                
-                if isinstance(content, str):
-                    with open(file_path, 'w') as f:
-                        f.write(content)
-                else:
-                    with open(file_path, 'wb') as f:
-                        f.write(content)
-    
-    def collect_results(self, container, work_dir):
-        """Collect task execution results"""
-        result_data = {}
-        
-        # Copy result files from container
-        try:
-            # Get result directory contents
-            archive, _ = container.get_archive('/workspace/results')
-            
-            # Extract and read files
-            import tarfile
-            import io
-            
-            tar = tarfile.open(fileobj=io.BytesIO(archive.read()))
-            for member in tar.getmembers():
-                if member.isfile():
-                    file_data = tar.extractfile(member).read()
-                    result_data[member.name] = file_data
-            
-        except docker.errors.NotFound:
-            # No result directory, check for result files
-            pass
-        
-        return result_data
-```
-
-### Task Type Support
-
-#### Python Computation Tasks
-```python
-def execute_python_task(self, task):
-    """Execute Python computation task"""
-    python_code = task['code']
-    requirements = task.get('requirements', [])
-    
-    # Create Dockerfile
-    dockerfile_content = f"""
-FROM python:3.9-slim
-
-# Install dependencies
-RUN pip install {' '.join(requirements)}
-
-# Copy task code
-COPY task.py /app/task.py
-WORKDIR /app
-
-# Execute task
-CMD ["python", "task.py"]
-"""
-    
-    return self.execute_custom_docker_task(task, dockerfile_content, {'task.py': python_code})
-```
-
-#### Machine Learning Tasks
-```python
-def execute_ml_task(self, task):
-    """Execute machine learning task"""
-    model_type = task['model_type']
-    training_data = task['training_data']
-    
-    if model_type == 'tensorflow':
-        return self.execute_tensorflow_task(task)
-    elif model_type == 'pytorch':
-        return self.execute_pytorch_task(task)
-    elif model_type == 'scikit-learn':
-        return self.execute_sklearn_task(task)
-    else:
-        raise ValueError(f"Unsupported model type: {model_type}")
-```
-
-#### Data Processing Tasks
-```python
-def execute_data_processing_task(self, task):
-    """Execute data processing task"""
-    processing_type = task['processing_type']
-    input_data = task['input_data']
-    
-    if processing_type == 'csv_analysis':
-        return self.execute_csv_analysis(task)
-    elif processing_type == 'image_processing':
-        return self.execute_image_processing(task)
-    elif processing_type == 'text_analysis':
-        return self.execute_text_analysis(task)
-    else:
-        raise ValueError(f"Unsupported processing type: {processing_type}")
-```
-
-## 📊 Resource Monitoring
-
-### System Resource Monitoring
-```python
-import psutil
-import time
-import threading
-
-class ResourceMonitor:
-    def __init__(self, update_interval=5):
-        self.update_interval = update_interval
-        self.monitoring = False
-        self.metrics = {}
-        
-    def start_monitoring(self):
-        """Start resource monitoring"""
-        self.monitoring = True
-        monitor_thread = threading.Thread(target=self._monitor_loop)
-        monitor_thread.daemon = True
-        monitor_thread.start()
-    
-    def stop_monitoring(self):
-        """Stop resource monitoring"""
-        self.monitoring = False
-    
-    def _monitor_loop(self):
-        """Main monitoring loop"""
-        while self.monitoring:
-            self.metrics = self.collect_metrics()
-            time.sleep(self.update_interval)
-    
-    def collect_metrics(self):
-        """Collect system metrics"""
-        return {
-            'timestamp': time.time(),
-            'cpu': {
-                'percent': psutil.cpu_percent(interval=1),
-                'count': psutil.cpu_count(),
-                'freq': psutil.cpu_freq()._asdict() if psutil.cpu_freq() else None
-            },
-            'memory': psutil.virtual_memory()._asdict(),
-            'disk': psutil.disk_usage('/')._asdict(),
-            'network': psutil.net_io_counters()._asdict(),
-            'processes': len(psutil.pids()),
-            'load_avg': os.getloadavg() if hasattr(os, 'getloadavg') else None
-        }
-    
-    def get_current_metrics(self):
-        """Get current metrics"""
-        return self.metrics.copy()
-    
-    def is_resource_available(self, required_resources):
-        """Check if sufficient resources available for task execution"""
-        current = self.get_current_metrics()
-        
-        # Check CPU
-        if 'cpu_cores' in required_resources:
-            if current['cpu']['percent'] > 90:  # CPU usage too high
-                return False
-        
-        # Check memory
-        if 'memory_gb' in required_resources:
-            required_memory = required_resources['memory_gb'] * 1024 * 1024 * 1024
-            available_memory = current['memory']['available']
-            if required_memory > available_memory:
-                return False
-        
-        # Check disk space
-        if 'disk_gb' in required_resources:
-            required_disk = required_resources['disk_gb'] * 1024 * 1024 * 1024
-            available_disk = current['disk']['free']
-            if required_disk > available_disk:
-                return False
-        
-        return True
-```
-
-### Container Resource Monitoring
-```python
-class ContainerMonitor:
-    def __init__(self, docker_client):
-        self.docker_client = docker_client
-        
-    def monitor_container(self, container_id):
-        """Monitor resource usage of specified container"""
-        try:
-            container = self.docker_client.containers.get(container_id)
-            stats = container.stats(stream=False)
-            
-            return self.parse_container_stats(stats)
-        except docker.errors.NotFound:
-            return None
-    
-    def parse_container_stats(self, stats):
-        """Parse container statistics data"""
-        # CPU usage calculation
-        cpu_delta = stats['cpu_stats']['cpu_usage']['total_usage'] - \
-                   stats['precpu_stats']['cpu_usage']['total_usage']
-        system_delta = stats['cpu_stats']['system_cpu_usage'] - \
-                      stats['precpu_stats']['system_cpu_usage']
-        
-        cpu_percent = 0.0
-        if system_delta > 0:
-            cpu_percent = (cpu_delta / system_delta) * len(stats['cpu_stats']['cpu_usage']['percpu_usage']) * 100.0
-        
-        # Memory usage
-        memory_usage = stats['memory_stats']['usage']
-        memory_limit = stats['memory_stats']['limit']
-        memory_percent = (memory_usage / memory_limit) * 100.0
-        
-        # Network I/O
-        network_rx = 0
-        network_tx = 0
-        for interface, data in stats['networks'].items():
-            network_rx += data['rx_bytes']
-            network_tx += data['tx_bytes']
-        
-        return {
-            'cpu_percent': cpu_percent,
-            'memory_usage': memory_usage,
-            'memory_limit': memory_limit,
-            'memory_percent': memory_percent,
-            'network_rx': network_rx,
-            'network_tx': network_tx,
-            'timestamp': time.time()
-        }
-```
-
-## 🔍 Logging and Monitoring
-
-### Structured Logging
-```python
-import logging
-import json
-from datetime import datetime
-
-class StructuredLogger:
-    def __init__(self, name, log_file=None):
-        self.logger = logging.getLogger(name)
-        self.logger.setLevel(logging.INFO)
-        
-        # Create formatter
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        
-        # Console handler
-        console_handler = logging.StreamHandler()
-        console_handler.setFormatter(formatter)
-        self.logger.addHandler(console_handler)
-        
-        # File handler
-        if log_file:
-            file_handler = logging.FileHandler(log_file)
-            file_handler.setFormatter(formatter)
-            self.logger.addHandler(file_handler)
-    
-    def log_task_event(self, event_type, task_id, details=None):
-        """Log task-related events"""
-        log_data = {
-            'timestamp': datetime.utcnow().isoformat(),
-            'event_type': event_type,
-            'task_id': task_id,
-            'node_id': self.node_id,
-            'details': details or {}
-        }
-        
-        self.logger.info(json.dumps(log_data))
-    
-    def log_system_event(self, event_type, details=None):
-        """Log system-related events"""
-        log_data = {
-            'timestamp': datetime.utcnow().isoformat(),
-            'event_type': event_type,
-            'node_id': self.node_id,
-            'details': details or {}
-        }
-        
-        self.logger.info(json.dumps(log_data))
-```
-
-### Health Check
-```python
-class HealthChecker:
-    def __init__(self, worker_node):
-        self.worker_node = worker_node
-        
-    def check_health(self):
-        """Perform health check"""
-        health_status = {
-            'status': 'healthy',
-            'timestamp': time.time(),
-            'checks': {}
-        }
-        
-        # Check Node Pool connection
-        health_status['checks']['node_pool'] = self._check_node_pool_connection()
-        
-        # Check Docker service
-        health_status['checks']['docker'] = self._check_docker_service()
-        
-        # Check system resources
-        health_status['checks']['resources'] = self._check_system_resources()
-        
-        # Check disk space
-        health_status['checks']['disk_space'] = self._check_disk_space()
-        
-        # Determine overall status
-        if any(check['status'] == 'unhealthy' for check in health_status['checks'].values()):
-            health_status['status'] = 'unhealthy'
-        
-        return health_status
-    
-    def _check_node_pool_connection(self):
-        """Check Node Pool connection"""
-        try:
-            self.worker_node.node_pool_client.ping()
-            return {'status': 'healthy', 'message': 'Node Pool connection OK'}
-        except Exception as e:
-            return {'status': 'unhealthy', 'message': f'Node Pool connection failed: {str(e)}'}
-    
-    def _check_docker_service(self):
-        """Check Docker service"""
-        try:
-            docker_client = docker.from_env()
-            docker_client.ping()
-            return {'status': 'healthy', 'message': 'Docker service OK'}
-        except Exception as e:
-            return {'status': 'unhealthy', 'message': f'Docker service failed: {str(e)}'}
-    
-    def _check_system_resources(self):
-        """Check system resources"""
-        try:
-            cpu_percent = psutil.cpu_percent(interval=1)
-            memory = psutil.virtual_memory()
-            
-            if cpu_percent > 95:
-                return {'status': 'unhealthy', 'message': f'High CPU usage: {cpu_percent}%'}
-            
-            if memory.percent > 95:
-                return {'status': 'unhealthy', 'message': f'High memory usage: {memory.percent}%'}
-            
-            return {'status': 'healthy', 'message': 'System resources OK'}
-        except Exception as e:
-            return {'status': 'unhealthy', 'message': f'Resource check failed: {str(e)}'}
-    
-    def _check_disk_space(self):
-        """Check disk space"""
-        try:
-            disk = psutil.disk_usage('/')
-            if disk.percent > 90:
-                return {'status': 'unhealthy', 'message': f'Low disk space: {disk.percent}% used'}
-            
-            return {'status': 'healthy', 'message': 'Disk space OK'}
-        except Exception as e:
-            return {'status': 'unhealthy', 'message': f'Disk check failed: {str(e)}'}
+    return jsonify({
+        'status': 'healthy' if all_healthy else 'unhealthy',
+        'checks': checks,
+        'timestamp': datetime.now().isoformat()
+    }), 200 if all_healthy else 503
 ```
 
 ## 🔧 Common Troubleshooting
 
-### 1. Docker Container Execution Failure
-**Problem**: Container startup or execution failure
-**Solution**:
+### 1. Docker Connection Issues
+
 ```bash
 # Check Docker service status
-sudo systemctl status docker
+systemctl status docker
 
-# Check if Docker images exist
-docker images
+# Restart Docker service
+sudo systemctl restart docker
 
+# Check Docker permissions
+sudo usermod -aG docker $USER
+```
+
+### 2. VPN Connection Issues
+
+```bash
+# Check WireGuard status
+sudo wg show
+
+# Restart WireGuard
+sudo systemctl restart wg-quick@wg0
+
+# Check routing table
+ip route | grep 10.0.0
+```
+
+### 3. Resource Shortage Issues
+
+```python
+# Check system resources
+@app.route('/api/resources')
+def check_resources():
+    return jsonify({
+        'cpu_available': psutil.cpu_percent(interval=1),
+        'memory_available': psutil.virtual_memory().available / (1024**3),
+        'disk_available': psutil.disk_usage('/').free / (1024**3),
+        'running_tasks': len(self.running_tasks)
+    })
+```
+
+### 4. Task Execution Failures
+
+Check task logs:
+```bash
 # Check container logs
-docker logs <container_id>
+docker logs task-{task_id}
 
-# Clean up stopped containers
-docker container prune
-```
-
-### 2. Node Pool Connection Issues
-**Problem**: Unable to connect to Node Pool service
-**Solution**:
-```python
-# Implement connection retry mechanism
-import time
-import grpc
-
-def connect_with_retry(address, max_retries=5, retry_delay=2):
-    for attempt in range(max_retries):
-        try:
-            channel = grpc.insecure_channel(address)
-            # Test connection
-            grpc.channel_ready_future(channel).result(timeout=10)
-            return channel
-        except grpc.FutureTimeoutError:
-            if attempt < max_retries - 1:
-                print(f"Connection failed, retrying in {retry_delay} seconds...")
-                time.sleep(retry_delay)
-                retry_delay *= 2  # Exponential backoff
-            else:
-                raise Exception("Unable to connect to Node Pool")
-```
-
-### 3. Insufficient Resources Problem
-**Problem**: Insufficient system resources to execute tasks
-**Solution**:
-```python
-# Implement resource checking and waiting mechanism
-def wait_for_resources(required_resources, timeout=300):
-    start_time = time.time()
-    
-    while time.time() - start_time < timeout:
-        if resource_monitor.is_resource_available(required_resources):
-            return True
-        
-        print("Insufficient resources, waiting...")
-        time.sleep(10)
-    
-    return False
-
-# Usage
-if wait_for_resources({'memory_gb': 2, 'cpu_cores': 1}):
-    execute_task(task)
-else:
-    report_task_failed(task_id, "Insufficient resources")
+# Check work directory
+ls -la /tmp/hivemind/tasks/{task_id}/
 ```
 
 ## 📈 Performance Optimization
 
-### Task Execution Optimization
+### 1. Resource Scheduling Optimization
+
 ```python
-# Task preloading
-class TaskPreloader:
-    def __init__(self, docker_client):
-        self.docker_client = docker_client
-        self.preloaded_images = set()
+def _optimize_resource_allocation(self):
+    """Optimize resource allocation strategy"""
+    # Adjust resource allocation based on historical data
+    cpu_utilization = self._get_average_cpu_usage()
+    memory_utilization = self._get_average_memory_usage()
     
-    def preload_image(self, image_name):
-        """Preload Docker image"""
-        if image_name not in self.preloaded_images:
-            try:
-                self.docker_client.images.pull(image_name)
-                self.preloaded_images.add(image_name)
-                print(f"Preloaded image: {image_name}")
-            except Exception as e:
-                print(f"Image preload failed: {e}")
-
-# Parallel task execution
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-class ParallelTaskExecutor:
-    def __init__(self, max_concurrent_tasks=2):
-        self.max_concurrent_tasks = max_concurrent_tasks
-        self.executor = ThreadPoolExecutor(max_workers=max_concurrent_tasks)
-        self.running_tasks = {}
-    
-    def submit_task(self, task):
-        """Submit task for parallel execution"""
-        if len(self.running_tasks) < self.max_concurrent_tasks:
-            future = self.executor.submit(self.execute_task, task)
-            self.running_tasks[task['id']] = future
-            return True
-        return False
-    
-    def check_completed_tasks(self):
-        """Check completed tasks"""
-        completed_tasks = []
-        
-        for task_id, future in list(self.running_tasks.items()):
-            if future.done():
-                try:
-                    result = future.result()
-                    completed_tasks.append({'task_id': task_id, 'result': result})
-                except Exception as e:
-                    completed_tasks.append({'task_id': task_id, 'error': str(e)})
-                
-                del self.running_tasks[task_id]
-        
-        return completed_tasks
+    # Dynamically adjust available resources
+    if cpu_utilization < 0.7:
+        self.available_resources['cpu'] = min(
+            self.total_resources['cpu'],
+            self.available_resources['cpu'] * 1.1
+        )
 ```
 
-### Resource Usage Optimization
+### 2. Network Optimization
+
 ```python
-# Memory management
-import gc
-
-class MemoryManager:
-    def __init__(self, memory_threshold=80):
-        self.memory_threshold = memory_threshold
-    
-    def check_memory_usage(self):
-        """Check memory usage"""
-        memory = psutil.virtual_memory()
-        return memory.percent
-    
-    def cleanup_memory(self):
-        """Clean up memory"""
-        gc.collect()
-        
-        # Clean up unused Docker images
-        docker_client = docker.from_env()
-        docker_client.images.prune()
-        
-        # Clean up unused containers
-        docker_client.containers.prune()
-
-# Disk space management
-class DiskManager:
-    def __init__(self, cleanup_threshold=85):
-        self.cleanup_threshold = cleanup_threshold
-    
-    def cleanup_old_files(self, directory, days=7):
-        """Clean up old files"""
-        import os
-        import time
-        
-        current_time = time.time()
-        cutoff_time = current_time - (days * 24 * 60 * 60)
-        
-        for root, dirs, files in os.walk(directory):
-            for file in files:
-                file_path = os.path.join(root, file)
-                if os.path.getmtime(file_path) < cutoff_time:
-                    try:
-                        os.remove(file_path)
-                        print(f"Deleted old file: {file_path}")
-                    except Exception as e:
-                        print(f"File deletion failed: {e}")
+def _optimize_network_settings(self):
+    """Optimize network settings"""
+    # Adjust gRPC connection parameters
+    options = [
+        ('grpc.keepalive_time_ms', 30000),
+        ('grpc.keepalive_timeout_ms', 10000),
+        ('grpc.keepalive_permit_without_calls', True),
+        ('grpc.http2.max_pings_without_data', 0),
+        ('grpc.http2.min_time_between_pings_ms', 10000),
+        ('grpc.http2.min_ping_interval_without_data_ms', 300000)
+    ]
+    return options
 ```
 
----
-
-**Related Documentation**:
-- [Node Pool Module](node-pool.md)
-- [Master Node Module](master-node.md)
-- [TaskWorker Module](taskworker.md)
-- [API Documentation](../api.md)
-- [Deployment Guide](../deployment.md)
+This updated Worker Node documentation reflects the latest architectural improvements, including multi-task support, trust scoring system, VPN auto-connection, and modernized Web interface.
