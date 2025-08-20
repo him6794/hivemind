@@ -1,6 +1,17 @@
 # Module Documentation
+- **[Worker Node](worker-node.md)** - Worker Nodes
+  - Task execution engine
+  - Resource monitoring
+  - Status reporting
 
-This directory contains detailed technical documentation for all HiveMind modules.
+### 🌐 Web Service Module
+
+- **[Web Module](web.md)** - Web Service Interface
+  - Flask web application
+  - VPN service management
+  - WireGuard server integration
+
+### 🤖 Artificial Intelligence Moduledirectory contains detailed technical documentation for all HiveMind modules.
 
 ## Module List
 

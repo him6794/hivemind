@@ -28,6 +28,13 @@
   - 資源監控
   - 狀態報告
 
+### 🌐 Web 服務模組
+
+- **[Web Module](web.md)** - Web 服務界面
+  - Flask Web 應用程式
+  - VPN 服務管理
+  - WireGuard 伺服器整合
+
 ### 🤖 人工智慧模組
 
 - **[AI Module](ai.md)** - 機器學習服務
