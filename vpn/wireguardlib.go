@@ -129,6 +129,24 @@ func StartWireGuard(configPath *C.char) *C.char {
 			interfaceName, err, string(output)))
 	}
 
+	// 添加路由到 VPN 網路
+	// 假設 VPN 閘道是網段的第一個 IP (10.0.0.1)
+	gatewayIP := "10.0.0.1"
+
+	// 使用 netsh 添加路由，這比 route 命令更可靠
+	routeCmd := exec.Command("netsh", "interface", "ip", "add", "route",
+		"prefix=10.0.0.0/24",
+		fmt.Sprintf("interface=\"%s\"", interfaceName),
+		fmt.Sprintf("nexthop=%s", gatewayIP),
+		"metric=1")
+	routeOutput, routeErr := routeCmd.CombinedOutput()
+	if routeErr != nil {
+		log.Printf("警告: 添加路由失敗: %v\n輸出: %s", routeErr, string(routeOutput))
+		// 不要因為路由失敗而終止連接，因為可能已經有路由存在
+	} else {
+		log.Printf("成功添加路由到 10.0.0.0/24 via %s", gatewayIP)
+	}
+
 	// 存儲活動設備
 	activeMutex.Lock()
 	activeDevices[cfgPath] = wgDevice
@@ -154,10 +172,17 @@ func StopWireGuard(configPath *C.char) *C.char {
 		tunDevice.Close()
 		delete(activeTunDevices, cfgPath)
 
-		// 清理 IP 地址
+		// 清理 IP 地址和路由
 		interfaceName := "myvpn0"
 		localIP, _, err := parseInterfaceAddress(cfgPath)
 		if err == nil {
+			// 刪除路由
+			routeDelCmd := exec.Command("netsh", "interface", "ip", "delete", "route",
+				"prefix=10.0.0.0/24",
+				fmt.Sprintf("interface=\"%s\"", interfaceName))
+			routeDelCmd.Run() // 忽略錯誤，因為路由可能已經不存在
+
+			// 刪除 IP 地址
 			cleanupCmd := exec.Command("netsh", "interface", "ip", "delete", "address",
 				fmt.Sprintf("name=\"%s\"", interfaceName),
 				fmt.Sprintf("addr=%s", localIP),
