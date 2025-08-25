@@ -7,10 +7,27 @@ load_dotenv(dotenv_path=env_path)
 
 class Config:
     # === 資料庫配置 ===
-    DB_PATH = os.getenv('DB_PATH', os.path.join(os.path.dirname(__file__), 'db', 'nodepool.db'))
+    DB_PATH = os.getenv('DB_PATH', os.path.join(os.path.dirname(__file__), 'db', 'users.db'))
+
+    @staticmethod
+    def get_database_url():
+        """安全地獲取資料庫路徑，防止路徑遍歷攻擊"""
+        db_path = Config.DB_PATH
+        # 規範化路徑以防止路徑遍歷
+        db_path = os.path.normpath(db_path)
+        # 確保路徑不包含危險字符
+        if '..' in db_path or db_path.startswith('/'):
+            # 如果路徑看起來不安全，使用默認路徑
+            db_path = os.path.join(os.path.dirname(__file__), 'db', 'users.db')
+        return db_path
     
     # === JWT 安全配置 ===
-    SECRET_KEY = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
+    SECRET_KEY = os.getenv('SECRET_KEY')
+    if not SECRET_KEY or SECRET_KEY == 'dev-secret-key-change-in-production':
+        import secrets
+        SECRET_KEY = secrets.token_urlsafe(32)
+        print("警告: 使用隨機生成的密鑰，建議在生產環境設置 SECRET_KEY 環境變量")
+    
     TOKEN_EXPIRY = int(os.getenv('TOKEN_EXPIRY', '60'))  # 分鐘
     
     # === 電子郵件服務配置 ===
@@ -36,7 +53,25 @@ class Config:
     # === 安全配置 ===
     RATE_LIMIT_SECONDS = int(os.getenv('RATE_LIMIT_SECONDS', '5'))
     MAX_CLIENTS_PER_USER = int(os.getenv('MAX_CLIENTS_PER_USER', '5'))
-    JWT_SECRET_KEY = os.getenv('JWT_SECRET_KEY', 'jwt-secret-change-this')
+    
+    # 信任的代理 IP 列表（用於安全的 X-Forwarded-For 處理）
+    TRUSTED_PROXIES = os.getenv('TRUSTED_PROXIES', '127.0.0.1,::1').split(',')
+    
+    # Cloudflare IP 範圍
+    CLOUDFLARE_IPS = os.getenv('CLOUDFLARE_IPS', '').split(',')
+    
+    # 是否啟用嚴格的 IP 驗證
+    STRICT_IP_VALIDATION = os.getenv('STRICT_IP_VALIDATION', 'True').lower() in ('true', '1', 'yes')
+    
+    # 是否信任 Cloudflare 代理
+    TRUST_CLOUDFLARE = os.getenv('TRUST_CLOUDFLARE', 'True').lower() in ('true', '1', 'yes')
+    
+    # 檢查 JWT 密鑰安全性
+    JWT_SECRET_KEY = os.getenv('JWT_SECRET_KEY')
+    if not JWT_SECRET_KEY or JWT_SECRET_KEY == 'jwt-secret-change-this':
+        JWT_SECRET_KEY = secrets.token_urlsafe(32)
+        print("警告: 使用隨機生成的 JWT 密鑰，建議在生產環境設置 JWT_SECRET_KEY 環境變量")
+    
     TOKEN_EXPIRATION_HOURS = int(os.getenv('TOKEN_EXPIRATION_HOURS', '24'))
     
     # === 儲存配置 ===

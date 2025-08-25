@@ -7,14 +7,13 @@ import time
 from collections import defaultdict
 import requests
 import bcrypt
+import ipaddress
+
 # 添加節點池模組路徑
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'vpn')))
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from node_pool import user_service
 from node_pool.config import Config
-
-
-
 # 添加調試信息來檢查配置載入狀態
 print("🔧 檢查配置載入狀態:")
 print(f"  - SECRET_KEY: {'已設定' if Config.SECRET_KEY != 'dev-secret-key-change-in-production' else '使用預設值'}")
@@ -32,6 +31,46 @@ if missing_configs:
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = Config.SECRET_KEY
+
+@app.after_request
+def add_security_headers(response):
+    """添加安全頭部"""
+    # 僅在非開發模式下添加安全頭部
+    if not Config.is_development():
+        # 內容安全政策 - 放寬限制以允許常用的 CDN
+        response.headers['Content-Security-Policy'] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline' 'unsafe-eval' "
+            "https://challenges.cloudflare.com "
+            "https://static.cloudflareinsights.com "
+            "https://cdn.jsdelivr.net "
+            "https://cdnjs.cloudflare.com; "
+            "style-src 'self' 'unsafe-inline' "
+            "https://cdn.jsdelivr.net "
+            "https://cdnjs.cloudflare.com "
+            "https://fonts.googleapis.com; "
+            "font-src 'self' "
+            "https://cdn.jsdelivr.net "
+            "https://cdnjs.cloudflare.com "
+            "https://fonts.gstatic.com; "
+            "img-src 'self' data: https:; "
+            "connect-src 'self' https:; "
+            "frame-src https://challenges.cloudflare.com;"
+        )
+        
+        # 其他安全頭部
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        response.headers['X-Frame-Options'] = 'DENY'
+        response.headers['X-XSS-Protection'] = '1; mode=block'
+        
+        # 在 HTTPS 環境下添加 HSTS
+        if request.is_secure or request.headers.get('X-Forwarded-Proto') == 'https':
+            response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+    
+    # 移除伺服器資訊
+    response.headers.pop('Server', None)
+    
+    return response
 
 # 使用 Config 的配置
 VPN_SERVICE_URL = f"http://{Config.VPN_SERVICE_HOST}:{Config.VPN_SERVICE_PORT}"
@@ -129,14 +168,105 @@ def call_vpn_service(endpoint, method='GET', data=None):
     except Exception as e:
         return None, f"VPN 服務調用失敗: {str(e)}"
 
+def get_real_client_ip(request):
+    """安全地獲取客戶端真實 IP（支援 Cloudflare + Nginx）"""
+    
+    # 從配置獲取信任的代理 IP 列表
+    TRUSTED_PROXIES = [ip.strip() for ip in Config.TRUSTED_PROXIES if ip.strip()]
+    
+    # 獲取 Cloudflare IP 範圍
+    CLOUDFLARE_IP_RANGES = []
+    if Config.TRUST_CLOUDFLARE and Config.CLOUDFLARE_IPS:
+        for ip_range in Config.CLOUDFLARE_IPS:
+            ip_range = ip_range.strip()
+            if ip_range:
+                try:
+                    CLOUDFLARE_IP_RANGES.append(ipaddress.ip_network(ip_range, strict=False))
+                except ValueError:
+                    continue
+    
+    remote_addr = request.environ.get('REMOTE_ADDR', request.remote_addr)
+    
+    def is_trusted_proxy(ip_str):
+        """檢查 IP 是否為信任的代理"""
+        if ip_str in TRUSTED_PROXIES:
+            return True
+        
+        # 檢查是否為 Cloudflare IP
+        if Config.TRUST_CLOUDFLARE:
+            try:
+                ip_obj = ipaddress.ip_address(ip_str)
+                for cf_range in CLOUDFLARE_IP_RANGES:
+                    if ip_obj in cf_range:
+                        return True
+            except ValueError:
+                pass
+        
+        return False
+    
+    # 只有當請求來自信任的代理時，才檢查轉發頭部
+    if is_trusted_proxy(remote_addr):
+        # Cloudflare 提供的真實 IP 頭部（優先級順序）
+        forwarded_headers = [
+            'CF-Connecting-IP',      # Cloudflare 提供的真實客戶端 IP
+            'X-Forwarded-For',       # 標準轉發頭部
+            'X-Real-IP',             # Nginx 常用頭部
+        ]
+        
+        for header in forwarded_headers:
+            forwarded_ip = request.headers.get(header)
+            if forwarded_ip:
+                # 處理可能的多個 IP（取第一個）
+                client_ip = forwarded_ip.split(',')[0].strip()
+                # 驗證 IP 格式
+                try:
+                    ipaddress.ip_address(client_ip)
+                    print(f"🌐 使用 {header} 獲取客戶端 IP: {client_ip}")
+                    return client_ip
+                except ValueError:
+                    continue
+    
+    print(f"🔒 使用直連 IP: {remote_addr}")
+    return remote_addr
+
+def is_rate_limit_bypassed(ip_address):
+    """檢查 IP 是否嘗試繞過限流（安全檢查）"""
+    # 如果未啟用嚴格驗證，跳過檢查
+    if not Config.STRICT_IP_VALIDATION:
+        return False
+    
+    # 在 Cloudflare 環境下，允許某些私有 IP（如內部服務通信）
+    if Config.TRUST_CLOUDFLARE:
+        # 允許的內部 IP 模式（如果需要）
+        allowed_internal_ips = ['127.0.0.1', '::1']
+        if ip_address in allowed_internal_ips:
+            return False
+    
+    # 檢查是否為可疑的 IP 模式
+    suspicious_patterns = [
+        'localhost',
+        '10.0.0.',      # 私有 IP 段 A
+        '192.168.',     # 私有 IP 段 C
+        '172.16.',      # 私有 IP 段 B (部分)
+        '172.17.',      # Docker 默認網段
+        '172.18.',
+        '172.19.',
+        '172.20.',
+    ]
+    
+    for pattern in suspicious_patterns:
+        if ip_address.startswith(pattern):
+            # 記錄可疑活動
+            print(f"⚠️  檢測到可疑 IP 嘗試繞過限流: {ip_address}")
+            return True
+    
+    return False
+
 def verify_turnstile(token, ip_address):
     """驗證 Cloudflare Turnstile token"""
     try:
-        # 本機開發自動通過
-        if (
-            ip_address in ("127.0.0.1", "::1", "localhost")
-            or Config.is_development()
-        ):
+        # 僅在開發模式下自動通過，不再檢查 IP
+        if Config.is_development():
             print("🚧 開發模式，自動通過 Turnstile 驗證")
             return True
         
@@ -183,10 +313,8 @@ def register():
         password = data.get('password')
         turnstile_response = data.get('cf-turnstile-response')
         
-        # 獲取客戶端 IP
-        client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
-        if ',' in client_ip:
-            client_ip = client_ip.split(',')[0].strip()
+        # 獲取客戶端 IP（安全方式）
+        client_ip = get_real_client_ip(request)
         
         # 驗證人機驗證
         if not turnstile_response:
@@ -251,10 +379,8 @@ def login():
         password = data.get('password')
         turnstile_response = data.get('cf-turnstile-response')
         
-        # 獲取客戶端 IP
-        client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
-        if ',' in client_ip:
-            client_ip = client_ip.split(',')[0].strip()
+        # 獲取客戶端 IP（安全方式）
+        client_ip = get_real_client_ip(request)
         
         # 驗證人機驗證
         if not turnstile_response:
@@ -428,10 +554,14 @@ def transfer():
 
 @app.route('/api/vpn/join', methods=['POST'])
 def join_vpn():
-    # 獲取客戶端真實 IP
-    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
-    if ',' in client_ip:
-        client_ip = client_ip.split(',')[0].strip()
+    # 獲取客戶端真實 IP（安全方式）
+    client_ip = get_real_client_ip(request)
+    
+    # 檢查是否嘗試繞過限流
+    if is_rate_limit_bypassed(client_ip):
+        return jsonify({
+            'error': '檢測到可疑請求，請使用有效的公共 IP 地址'
+        }), 403
     
     # 檢查限流
     if not check_rate_limit(client_ip):
@@ -602,7 +732,6 @@ def terms_page():
 def forgot_password_page():
     """忘記密碼頁面"""
     return render_template('forgot_password.html')
-
 @app.route('/api/user/profile', methods=['GET'])
 def get_user_profile():
     """獲取用戶資料"""
