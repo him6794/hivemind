@@ -825,4 +825,4 @@ class HiveMindUser(User):
 **版本**: v1.0  
 **狀態**: 完整的開發者指南
 
-**如需幫助**: 請參考項目 [Wiki](https://github.com/him6794/hivemind/wiki) 或在 [Discord](https://discord.gg/hivemind) 中聯繫開發團隊。
+**如需幫助**: 請參考項目 [Wiki](https://github.com/him6794/hivemind/wiki) 或在 [Discord](https://discord.gg/p2hApGE4T3) 中聯繫開發團隊。

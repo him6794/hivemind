@@ -825,4 +825,4 @@ class HiveMindUser(User):
 **Version**: v1.0  
 **Status**: Complete developer guide
 
-**For Help**: Please refer to the project [Wiki](https://github.com/him6794/hivemind/wiki) or contact the development team on [Discord](https://discord.gg/hivemind).
+**For Help**: Please refer to the project [Wiki](https://github.com/him6794/hivemind/wiki) or contact the development team on [Discord](https://discord.gg/p2hApGE4T3).
