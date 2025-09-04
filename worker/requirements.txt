@@ -5,3 +5,4 @@ flask
 psutil
 netifaces
 requests
+Nuitka

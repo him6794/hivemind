@@ -36,11 +36,29 @@ HiveMind is an **open-source distributed computing platform** that revolutionize
 
 | **Documentation** | **Getting Started** | **Development** |
 |:---:|:---:|:---:|
-| [English Docs](documentation/en/README.md) | [Quick Start](#quick-start) | [Contributing](CONTRIBUTING.md) |
-| [中文文檔](documentation/zh-tw/README.md) | [Docker Setup](#docker-deployment) | [API Reference](documentation/en/api.md) |
-| [Module Docs](documentation/en/modules/README.md) | [Installation](#installation) | [Changelog](CHANGELOG.md) |
+| [📚 官網文檔中心](web/DOCS_README.md) | [Quick Start](#quick-start) | [Contributing](CONTRIBUTING.md) |
+| [English Docs](documentation/en/README.md) | [Docker Setup](#docker-deployment) | [API Reference](documentation/en/api.md) |
+| [中文文檔](documentation/zh-tw/README.md) | [Installation](#installation) | [Changelog](CHANGELOG.md) |
+| [Module Docs](documentation/en/modules/README.md) | [Web Docs](#-新增web-文檔系統) | [GitHub Issues](https://github.com/him6794/hivemind/issues) |
 
 </div>
+
+### 🌐 新增：Web 文檔系統
+
+我們全新打造了現代化的 Web 文檔系統，提供更好的閱讀體驗：
+
+- **🎯 文檔中心：** [啟動 Web 服務](web/DOCS_README.md) 後訪問 `http://localhost:5000/docs/zh/`
+- **📥 安裝指南：** 完整的安裝教程和故障排除
+- **🚀 快速開始：** 5分鐘體驗 HiveMind 核心功能  
+- **🔧 API 文檔：** 完整的 gRPC API 參考和代碼示例
+- **❓ 常見問題：** 智能搜索的 FAQ 系統
+
+```bash
+# 啟動 Web 文檔系統
+cd web
+python app.py
+# 然後訪問 http://localhost:5000/docs/zh/
+```
 
 ## System Architecture
 

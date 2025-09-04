@@ -15,8 +15,8 @@
                     <h1 class="display-5 fw-bolder text-white mb-2 slide-in-left" data-i18n="welcome">解鎖分散式運算的力量</h1>
                     <p class="lead fw-normal text-white-50 mb-4 slide-in-left delay-200" data-i18n="subtitle">工作端 + 節點池，打造高效能分布式平台，讓你專注開發、我們處理執行。</p>
                     <div class="d-grid gap-3 d-sm-flex justify-content-center slide-in-left delay-400">
-                        <a class="btn btn-primary btn-lg px-4 me-sm-3 btn-hover-glow" href="/register" data-i18n="register">立即開始使用</a>
-                        <a class="btn btn-outline-light btn-lg px-4 btn-hover-lift" href="https://github.com/him6794/hivemind" target="_blank" data-i18n="github">查看 GitHub</a>
+                        <a class="btn btn-primary btn-lg px-4 me-sm-3 btn-hover-glow" href="/register" data-i18n="register_now">立即註冊</a>
+                        <a class="btn btn-outline-light btn-lg px-4 btn-hover-lift" href="#" id="hero-docs-link" data-i18n="view_docs">查看文檔</a>
                     </div>
                 </div>
             </div>
@@ -129,7 +129,8 @@
                         <i class="fas fa-user-plus fa-2x text-primary"></i>
                     </div>
                     <h4 class="fw-bolder mb-3" data-i18n="step1_title">註冊帳戶</h4>
-                    <p class="text-muted" data-i18n="step1_desc">創建您的 HiveMind 帳戶，開始享受分布式運算服務。</p>
+                    <p class="text-muted mb-3" data-i18n="step1_desc">創建您的 HiveMind 帳戶，開始享受分布式運算服務。</p>
+                    <a href="/register" class="btn btn-outline-primary btn-sm" data-i18n="register_now">立即註冊</a>
                 </div>
             </div>
             <div class="col-lg-4 mb-5 mb-lg-0">
@@ -139,17 +140,19 @@
                         <i class="fas fa-download fa-2x text-primary"></i>
                     </div>
                     <h4 class="fw-bolder mb-3" data-i18n="step2_title">下載客戶端</h4>
-                    <p class="text-muted" data-i18n="step2_desc">選擇適合的客戶端版本，快速部署到您的環境中。</p>
+                    <p class="text-muted mb-3" data-i18n="step2_desc">選擇適合的客戶端版本，快速部署到您的環境中。</p>
+                    <a href="/download" class="btn btn-outline-primary btn-sm" data-i18n="download_client">下載客戶端</a>
                 </div>
             </div>
             <div class="col-lg-4">
                 <div class="workflow-step text-center fade-in-up delay-200">
                     <div class="step-number mb-3">3</div>
                     <div class="step-icon mb-3">
-                        <i class="fas fa-play fa-2x text-primary"></i>
+                        <i class="fas fa-book fa-2x text-primary"></i>
                     </div>
-                    <h4 class="fw-bolder mb-3" data-i18n="step3_title">開始運算</h4>
-                    <p class="text-muted" data-i18n="step3_desc">提交您的運算任務，體驗高效能分布式處理。</p>
+                    <h4 class="fw-bolder mb-3" data-i18n="step3_title">查看文檔</h4>
+                    <p class="text-muted mb-3" data-i18n="step3_desc">閱讀完整的使用指南和 API 文檔，快速上手。</p>
+                    <a href="#" class="btn btn-outline-primary btn-sm docs-link" data-i18n="view_docs">查看文檔</a>
                 </div>
             </div>
         </div>
@@ -284,7 +287,7 @@
 </section>
 
 <!-- Call to action section -->
-<section class="py-5 bg-light text-dark cta-section">
+<section class="py-5 bg-gradient-primary text-white cta-section">
     <div class="container px-5 my-5">
         <div class="text-center">
             <h2 class="display-4 fw-bolder mb-4 slide-in-up" data-i18n="ready_to_start">準備開始了嗎？</h2>
@@ -292,6 +295,7 @@
             <div class="slide-in-up delay-200">
                 <a class="btn btn-outline-light btn-lg px-5 py-3 fs-6 fw-bolder btn-hover-glow me-3" href="/register" data-i18n="register_now">立即註冊</a>
                 <a class="btn btn-light btn-lg px-5 py-3 fs-6 fw-bolder btn-hover-lift" href="/download" data-i18n="download_client">下載客戶端</a>
+            </div>
             </div>
         </div>
     </div>
@@ -403,5 +407,153 @@ document.addEventListener('DOMContentLoaded', () => {
     const animatedElements = document.querySelectorAll('.fade-in-up, .slide-in-left, .slide-in-right, .slide-in-up, .hover-lift');
     animatedElements.forEach(el => observer.observe(el));
 });
+</script>
+
+<script>
+// 添加按鈕點擊追蹤和反饋
+document.addEventListener('DOMContentLoaded', () => {
+    // 智能文檔跳轉處理
+    function setupDocsNavigation() {
+        const getCurrentLang = () => localStorage.getItem('lang') || 'zh-tw';
+        
+        // 主要文檔連結
+        document.querySelectorAll('.docs-link, #hero-docs-link').forEach(link => {
+            link.addEventListener('click', function(e) {
+                e.preventDefault();
+                const lang = getCurrentLang();
+                const url = lang === 'en' ? '/docs/md/en/README' : '/docs/md/zh-tw/README';
+                window.location.href = url;
+            });
+        });
+        
+        // API 文檔連結
+        document.querySelectorAll('.api-docs-link').forEach(link => {
+            link.addEventListener('click', function(e) {
+                e.preventDefault();
+                const lang = getCurrentLang();
+                const url = lang === 'en' ? '/docs/md/en/api' : '/docs/md/zh-tw/api';
+                window.location.href = url;
+            });
+        });
+        
+        // 部署指南連結
+        document.querySelectorAll('.deployment-docs-link').forEach(link => {
+            link.addEventListener('click', function(e) {
+                e.preventDefault();
+                const lang = getCurrentLang();
+                const url = lang === 'en' ? '/docs/md/en/deployment' : '/docs/md/zh-tw/deployment';
+                window.location.href = url;
+            });
+        });
+        
+        // 開發者指南連結
+        document.querySelectorAll('.developer-docs-link').forEach(link => {
+            link.addEventListener('click', function(e) {
+                e.preventDefault();
+                const lang = getCurrentLang();
+                const url = lang === 'en' ? '/docs/md/en/developer' : '/docs/md/zh-tw/developer';
+                window.location.href = url;
+            });
+        });
+    }
+    
+    // 初始化文檔導航
+    setupDocsNavigation();
+    
+    // 為所有按鈕添加點擊反饋效果
+    const buttons = document.querySelectorAll('.btn');
+    buttons.forEach(button => {
+        // 檢查按鈕是否有有效連結
+        if (button.tagName === 'A' && !button.href) {
+            console.warn('Button without href found:', button);
+            button.href = '#';
+            button.addEventListener('click', (e) => {
+                e.preventDefault();
+                console.log('Button clicked but no valid href:', button.textContent);
+            });
+        }
+        
+        // 添加點擊反饋效果
+        button.addEventListener('click', function(e) {
+            // 創建漣漪效果
+            const ripple = document.createElement('span');
+            const rect = this.getBoundingClientRect();
+            const size = Math.max(rect.width, rect.height);
+            const x = e.clientX - rect.left - size / 2;
+            const y = e.clientY - rect.top - size / 2;
+            
+            ripple.style.width = ripple.style.height = size + 'px';
+            ripple.style.left = x + 'px';
+            ripple.style.top = y + 'px';
+            ripple.className = 'ripple';
+            
+            this.appendChild(ripple);
+            
+            setTimeout(() => {
+                ripple.remove();
+            }, 600);
+        });
+    });
+    
+    // 檢查並修復無效連結
+    const links = document.querySelectorAll('a[href="#"], a[href=""]');
+    links.forEach(link => {
+        console.warn('Invalid link found:', link);
+        link.addEventListener('click', (e) => {
+            e.preventDefault();
+            // 根據按鈕內容決定跳轉位置
+            const text = link.textContent.toLowerCase();
+            if (text.includes('文檔') || text.includes('docs')) {
+                window.location.href = '/docs';
+            } else if (text.includes('註冊') || text.includes('register')) {
+                window.location.href = '/register';
+            } else if (text.includes('下載') || text.includes('download')) {
+                window.location.href = '/download';
+            } else if (text.includes('github')) {
+                window.open('https://github.com/him6794/hivemind', '_blank');
+            }
+        });
+    });
+});
+
+// 添加 CSS 漣漪效果
+const style = document.createElement('style');
+style.textContent = `
+    .btn {
+        position: relative;
+        overflow: hidden;
+    }
+    
+    .ripple {
+        position: absolute;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.3);
+        pointer-events: none;
+        transform: scale(0);
+        animation: ripple-animation 0.6s ease-out;
+    }
+    
+    @keyframes ripple-animation {
+        to {
+            transform: scale(4);
+            opacity: 0;
+        }
+    }
+    
+    .btn-hover-glow:hover {
+        box-shadow: 0 0 20px rgba(var(--bs-primary-rgb), 0.5);
+        transform: translateY(-2px);
+    }
+    
+    .btn-hover-lift:hover {
+        transform: translateY(-3px);
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
+    }
+    
+    .bg-gradient-primary {
+        background: linear-gradient(135deg, var(--bs-primary), #0056b3);
+    }
+`;
+document.head.appendChild(style);
 </script>
 {% endblock %}

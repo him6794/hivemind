@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, render_template, send_file
+from flask import Flask, request, jsonify, render_template, send_file, redirect
 from datetime import datetime, timedelta
 import uuid
 import os
@@ -8,6 +8,8 @@ from collections import defaultdict
 import requests
 import bcrypt
 import ipaddress
+import markdown
+from pathlib import Path
 
 # 添加節點池模組路徑
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'vpn')))
@@ -90,6 +92,95 @@ STORAGE_CONFIG = {
 
 # 初始化服務
 user_service_obj = user_service.UserServiceServicer()
+
+# 文檔路徑配置
+DOCS_BASE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'documentation'))
+
+def load_markdown_file(file_path):
+    """載入並轉換 Markdown 檔案為 HTML"""
+    try:
+        full_path = os.path.join(DOCS_BASE_PATH, file_path)
+        if not os.path.exists(full_path):
+            return None, f"檔案不存在: {file_path}"
+        
+        with open(full_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # 配置 markdown 擴展
+        md = markdown.Markdown(extensions=[
+            'markdown.extensions.codehilite',
+            'markdown.extensions.fenced_code',
+            'markdown.extensions.tables',
+            'markdown.extensions.toc',
+            'markdown.extensions.meta'
+        ])
+        
+        html_content = md.convert(content)
+        
+        # 獲取元數據（如果有的話）
+        meta = getattr(md, 'Meta', {})
+        
+        return {
+            'content': html_content,
+            'meta': meta,
+            'toc': md.toc if hasattr(md, 'toc') else ''
+        }, None
+        
+    except Exception as e:
+        return None, f"讀取檔案錯誤: {str(e)}"
+
+def get_docs_navigation():
+    """獲取文檔導航結構"""
+    navigation = {
+        'zh-tw': {
+            'title': '中文文檔',
+            'items': [
+                {'name': 'README', 'path': 'zh-tw/README.md', 'title': '概述'},
+                {'name': 'api', 'path': 'zh-tw/api.md', 'title': 'API 文檔'},
+                {'name': 'deployment', 'path': 'zh-tw/deployment.md', 'title': '部署指南'},
+                {'name': 'developer', 'path': 'zh-tw/developer.md', 'title': '開發者指南'},
+                {'name': 'troubleshooting', 'path': 'zh-tw/troubleshooting.md', 'title': '故障排除'},
+                {
+                    'name': 'modules',
+                    'title': '模組文檔',
+                    'children': [
+                        {'name': 'README', 'path': 'zh-tw/modules/README.md', 'title': '模組概述'},
+                        {'name': 'node-pool', 'path': 'zh-tw/modules/node-pool.md', 'title': '節點池'},
+                        {'name': 'master-node', 'path': 'zh-tw/modules/master-node.md', 'title': 'Master 節點'},
+                        {'name': 'worker-node', 'path': 'zh-tw/modules/worker-node.md', 'title': 'Worker 節點'},
+                        {'name': 'web', 'path': 'zh-tw/modules/web.md', 'title': 'Web 介面'},
+                        {'name': 'taskworker', 'path': 'zh-tw/modules/taskworker.md', 'title': 'TaskWorker'},
+                        {'name': 'ai', 'path': 'zh-tw/modules/ai.md', 'title': 'AI 模組'},
+                        {'name': 'bt', 'path': 'zh-tw/modules/bt.md', 'title': 'BT 模組'},
+                    ]
+                }
+            ]
+        },
+        'en': {
+            'title': 'English Documentation',
+            'items': [
+                {'name': 'README', 'path': 'en/README.md', 'title': 'Overview'},
+                {'name': 'api', 'path': 'en/api.md', 'title': 'API Documentation'},
+                {'name': 'deployment', 'path': 'en/deployment.md', 'title': 'Deployment Guide'},
+                {'name': 'developer', 'path': 'en/developer.md', 'title': 'Developer Guide'},
+                {
+                    'name': 'modules',
+                    'title': 'Module Documentation',
+                    'children': [
+                        {'name': 'README', 'path': 'en/modules/README.md', 'title': 'Module Overview'},
+                        {'name': 'node-pool', 'path': 'en/modules/node-pool.md', 'title': 'Node Pool'},
+                        {'name': 'master-node', 'path': 'en/modules/master-node.md', 'title': 'Master Node'},
+                        {'name': 'worker-node', 'path': 'en/modules/worker-node.md', 'title': 'Worker Node'},
+                        {'name': 'web', 'path': 'en/modules/web.md', 'title': 'Web Interface'},
+                        {'name': 'taskworker', 'path': 'en/modules/taskworker.md', 'title': 'TaskWorker'},
+                        {'name': 'ai', 'path': 'en/modules/ai.md', 'title': 'AI Module'},
+                        {'name': 'bt', 'path': 'en/modules/bt.md', 'title': 'BT Module'},
+                    ]
+                }
+            ]
+        }
+    }
+    return navigation
 
 # IP 限流字典
 ip_rate_limit = defaultdict(float)
@@ -732,6 +823,167 @@ def terms_page():
 def forgot_password_page():
     """忘記密碼頁面"""
     return render_template('forgot_password.html')
+
+# 文檔路由
+@app.route('/docs')
+def docs_index():
+    """文檔首頁 - 重定向到主要文檔"""
+    return redirect('/docs/md/zh-tw/README')
+
+@app.route('/docs/')
+def docs_index_slash():
+    """文檔首頁 - 重定向到主要文檔"""
+    return redirect('/docs/md/zh-tw/README')
+
+@app.route('/docs/zh/')
+def docs_zh_index():
+    """中文文檔首頁 - 重定向到主要文檔"""
+    return redirect('/docs/md/zh-tw/README')
+
+@app.route('/docs/test')
+def docs_test():
+    """文檔測試頁面"""
+    return render_template('docs/test_markdown.html')
+
+@app.route('/docs/md/<path:doc_path>')
+def serve_markdown_doc(doc_path):
+    """動態載入 Markdown 文檔"""
+    try:
+        # 確保路徑安全，防止目錄遍歷攻擊
+        if '..' in doc_path or doc_path.startswith('/'):
+            return jsonify({'error': '無效的文檔路徑'}), 400
+        
+        # 添加 .md 擴展名（如果沒有的話）
+        if not doc_path.endswith('.md'):
+            doc_path += '.md'
+        
+        # 載入 Markdown 檔案
+        result, error = load_markdown_file(doc_path)
+        
+        if error:
+            return jsonify({'error': error}), 404
+        
+        # 獲取導航結構
+        navigation_data = get_docs_navigation()
+        
+        # 確定語言
+        lang = 'zh-tw' if doc_path.startswith('zh-tw/') else 'en'
+        
+        # 添加麵包屑導航
+        breadcrumbs = generate_breadcrumbs(doc_path)
+        
+        # 確保傳遞正確的導航數據
+        nav_data = navigation_data.get(lang, {})
+        
+        # 調試信息
+        print(f"Debug: doc_path={doc_path}, lang={lang}")
+        print(f"Debug: nav_data type={type(nav_data)}")
+        print(f"Debug: nav_data keys={list(nav_data.keys()) if isinstance(nav_data, dict) else 'Not a dict'}")
+        if isinstance(nav_data, dict) and 'items' in nav_data:
+            print(f"Debug: nav_data.items type={type(nav_data['items'])}")
+        
+        return render_template('docs/markdown_viewer.html', 
+                             content=result['content'],
+                             meta=result.get('meta', {}),
+                             toc=result.get('toc', ''),
+                             doc_path=doc_path,
+                             navigation=nav_data,
+                             current_lang=lang,
+                             breadcrumbs=breadcrumbs)
+    
+    except Exception as e:
+        print(f"Error in serve_markdown_doc: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'error': f'服務器錯誤: {str(e)}',
+            'doc_path': doc_path
+        }), 500
+
+# 生成麵包屑導航
+def generate_breadcrumbs(doc_path):
+    """生成麵包屑導航"""
+    try:
+        parts = doc_path.replace('.md', '').split('/')
+        breadcrumbs = []
+        
+        for i, part in enumerate(parts):
+            if i == 0:  # 語言
+                breadcrumbs.append({
+                    'name': '中文文檔' if part == 'zh-tw' else 'English Docs',
+                    'url': f'/docs/md/{part}/README'
+                })
+            elif part == 'modules':
+                breadcrumbs.append({
+                    'name': '模組文檔' if parts[0] == 'zh-tw' else 'Modules',
+                    'url': f'/docs/md/{"/".join(parts[:i+1])}/README'
+                })
+            else:
+                breadcrumbs.append({
+                    'name': part.replace('-', ' ').title(),
+                    'url': f'/docs/md/{"/".join(parts[:i+1])}'
+                })
+        
+        return breadcrumbs
+    except Exception as e:
+        print(f"Error generating breadcrumbs: {e}")
+        return []
+
+def search_documentation(query, lang='zh-tw'):
+    """搜索文檔內容"""
+    results = []
+    try:
+        search_paths = [
+            os.path.join(DOCS_BASE_PATH, lang),
+        ]
+        
+        for search_path in search_paths:
+            if not os.path.exists(search_path):
+                continue
+                
+            for root, dirs, files in os.walk(search_path):
+                for file in files:
+                    if file.endswith('.md'):
+                        file_path = os.path.join(root, file)
+                        try:
+                            with open(file_path, 'r', encoding='utf-8') as f:
+                                content = f.read().lower()
+                                
+                            if query.lower() in content:
+                                rel_path = os.path.relpath(file_path, DOCS_BASE_PATH)
+                                
+                                # 提取標題
+                                lines = content.split('\n')
+                                title = file.replace('.md', '').replace('-', ' ').title()
+                                for line in lines[:10]:
+                                    if line.startswith('# '):
+                                        title = line[2:].strip()
+                                        break
+                                
+                                # 提取摘要
+                                excerpt = ''
+                                content_lines = content.split('\n')
+                                for line in content_lines:
+                                    if query.lower() in line.lower() and len(line.strip()) > 10:
+                                        excerpt = line.strip()[:200] + '...'
+                                        break
+                                
+                                results.append({
+                                    'title': title,
+                                    'path': rel_path.replace('\\', '/'),
+                                    'url': f'/docs/md/{rel_path.replace("\\", "/")}',
+                                    'excerpt': excerpt
+                                })
+                                
+                        except Exception:
+                            continue
+    except Exception as e:
+        print(f"Error in search_documentation: {e}")
+    
+    return results[:10]  # 限制結果數量
+
+# ...existing code...
+
 @app.route('/api/user/profile', methods=['GET'])
 def get_user_profile():
     """獲取用戶資料"""

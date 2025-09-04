@@ -8,3 +8,4 @@ requests==2.32.3
 bcrypt
 pyjwt
 redis==5.0.1
+dotenv
