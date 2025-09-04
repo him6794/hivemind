@@ -239,7 +239,32 @@ const i18n = {
         "confirm": "確認",
         "save": "儲存",
         "close": "關閉",
-        "back_to_home": "返回首頁"
+        "back_to_home": "返回首頁",
+        
+        // 文檔相關翻譯
+        "docs.documentation": "文檔",
+        "docs.print": "列印",
+        "docs.view_source": "查看原始碼",
+        "docs.search": "搜索文檔...",
+        "docs.last_updated": "最後更新",
+        "docs.edit_on_github": "在 GitHub 上編輯",
+        "docs.table_of_contents": "目錄",
+        "docs.navigation": "文檔導航",
+        "docs.home": "首頁",
+        "docs.api": "API 文檔",
+        "docs.deployment": "部署指南",
+        "docs.developer": "開發者指南",
+        "docs.modules": "模組文檔",
+        "docs.modules_overview": "模組概述",
+        "docs.node_pool": "節點池",
+        "docs.web_interface": "Web 介面",
+        "language": "語言",
+        "chinese": "中文",
+        "english": "English",
+        "common.error": "錯誤",
+        "common.unknown_error": "發生了未知錯誤",
+        "common.close": "關閉",
+        "common.loading": "載入中..."
     },
     "en": {
         // Navbar
@@ -481,7 +506,32 @@ const i18n = {
         "confirm": "Confirm",
         "save": "Save",
         "close": "Close",
-        "back_to_home": "Back to Home"
+        "back_to_home": "Back to Home",
+        
+        // 文檔相關翻譯
+        "docs.documentation": "Documentation",
+        "docs.print": "Print",
+        "docs.view_source": "View Source",
+        "docs.search": "Search documentation...",
+        "docs.last_updated": "Last Updated",
+        "docs.edit_on_github": "Edit on GitHub",
+        "docs.table_of_contents": "Table of Contents",
+        "docs.navigation": "Documentation Navigation",
+        "docs.home": "Home",
+        "docs.api": "API Documentation",
+        "docs.deployment": "Deployment Guide",
+        "docs.developer": "Developer Guide",
+        "docs.modules": "Module Documentation",
+        "docs.modules_overview": "Module Overview",
+        "docs.node_pool": "Node Pool",
+        "docs.web_interface": "Web Interface",
+        "language": "Language",
+        "chinese": "中文",
+        "english": "English",
+        "common.error": "Error",
+        "common.unknown_error": "An unknown error occurred",
+        "common.close": "Close",
+        "common.loading": "Loading..."
     }
 };
 
@@ -514,7 +564,27 @@ function setLang(lang) {
         document.querySelectorAll('[data-i18n]').forEach(el => {
             const key = el.getAttribute('data-i18n');
             
-            if (langDict[key]) {
+            // 處理嵌套的翻譯鍵（如 docs.print）
+            if (key.includes('.')) {
+                const keys = key.split('.');
+                let translation = langDict;
+                for (const k of keys) {
+                    if (translation && translation[k]) {
+                        translation = translation[k];
+                    } else {
+                        translation = null;
+                        break;
+                    }
+                }
+                if (translation && typeof translation === 'string') {
+                    el.textContent = translation;
+                } else if (langDict[key]) {
+                    // 如果嵌套方式找不到，嘗試直接使用完整鍵名
+                    el.textContent = langDict[key];
+                } else {
+                    console.warn(`Translation key "${key}" not found for language "${lang}".`);
+                }
+            } else if (langDict[key]) {
                 el.textContent = langDict[key];
             } else {
                 console.warn(`Translation key "${key}" not found for language "${lang}".`);
@@ -525,7 +595,27 @@ function setLang(lang) {
         document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
             const key = el.getAttribute('data-i18n-placeholder');
             
-            if (langDict[key]) {
+            // 處理嵌套的翻譯鍵
+            if (key.includes('.')) {
+                const keys = key.split('.');
+                let translation = langDict;
+                for (const k of keys) {
+                    if (translation && translation[k]) {
+                        translation = translation[k];
+                    } else {
+                        translation = null;
+                        break;
+                    }
+                }
+                if (translation && typeof translation === 'string') {
+                    el.placeholder = translation;
+                } else if (langDict[key]) {
+                    // 如果嵌套方式找不到，嘗試直接使用完整鍵名
+                    el.placeholder = langDict[key];
+                } else {
+                    console.warn(`Placeholder key "${key}" not found for language "${lang}".`);
+                }
+            } else if (langDict[key]) {
                 el.placeholder = langDict[key];
             } else {
                 console.warn(`Placeholder key "${key}" not found for language "${lang}".`);
