@@ -1,0 +1,8 @@
+grpcio==1.60.0
+grpcio-tools==1.60.0
+redis==5.0.1
+flask==3.0.0
+flask-cors==4.0.0
+protobuf==4.25.1
+psutil==5.9.6
+requests==2.31.0

@@ -11,6 +11,7 @@ class HiveMindApp {
     init() {
         this.initTheme();
         this.setupEventListeners();
+        this.initNavbarAnimations();
     }
 
     // 主題管理 - 強制深色模式
@@ -40,6 +41,209 @@ class HiveMindApp {
         return;
     }
 
+    // 初始化導航欄動畫
+    initNavbarAnimations() {
+        this.setupNavbarScroll();
+        this.setupDropdownHover();
+        this.setActiveNavItem();
+        this.initNavbarLoadAnimation();
+        this.setupNavbarResponsive();
+    }
+
+    // 導航欄滾動效果
+    setupNavbarScroll() {
+        const navbar = document.querySelector('.navbar');
+        if (!navbar) return;
+
+        let lastScrollY = window.scrollY;
+        let ticking = false;
+
+        const updateNavbar = () => {
+            const currentScrollY = window.scrollY;
+            
+            if (currentScrollY > 50) {
+                navbar.classList.add('scrolled');
+            } else {
+                navbar.classList.remove('scrolled');
+            }
+
+            // 滾動方向檢測
+            if (currentScrollY > lastScrollY && currentScrollY > 100) {
+                navbar.style.transform = 'translateY(-100%)';
+            } else {
+                navbar.style.transform = 'translateY(0)';
+            }
+
+            lastScrollY = currentScrollY;
+            ticking = false;
+        };
+
+        window.addEventListener('scroll', () => {
+            if (!ticking) {
+                requestAnimationFrame(updateNavbar);
+                ticking = true;
+            }
+        });
+
+        // 初始檢查
+        updateNavbar();
+    }
+
+    // 下拉選單懸停效果
+    setupDropdownHover() {
+        const dropdowns = document.querySelectorAll('.navbar .dropdown');
+        
+        dropdowns.forEach(dropdown => {
+            const menu = dropdown.querySelector('.dropdown-menu');
+            if (!menu) return;
+            
+            let timeout;
+
+            dropdown.addEventListener('mouseenter', () => {
+                clearTimeout(timeout);
+                menu.classList.add('show');
+                
+                // 添加動畫效果
+                menu.style.opacity = '0';
+                menu.style.transform = 'translateY(-10px) scale(0.95)';
+                menu.offsetHeight; // 強制重排
+                
+                menu.style.transition = 'all 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94)';
+                menu.style.opacity = '1';
+                menu.style.transform = 'translateY(0) scale(1)';
+            });
+
+            dropdown.addEventListener('mouseleave', () => {
+                timeout = setTimeout(() => {
+                    menu.style.opacity = '0';
+                    menu.style.transform = 'translateY(-10px) scale(0.95)';
+                    
+                    setTimeout(() => {
+                        menu.classList.remove('show');
+                    }, 300);
+                }, 150);
+            });
+        });
+    }
+
+    // 活躍頁面檢測
+    setActiveNavItem() {
+        const currentPath = window.location.pathname;
+        const navLinks = document.querySelectorAll('.navbar .nav-link');
+        
+        navLinks.forEach(link => {
+            link.classList.remove('active');
+            const href = link.getAttribute('href');
+            
+            if (href === currentPath || 
+                (currentPath === '/' && href === '/') ||
+                (currentPath.startsWith('/docs') && href.includes('docs')) ||
+                (currentPath.startsWith('/download') && href.includes('download')) ||
+                (currentPath.startsWith('/sponsor') && href.includes('sponsor'))) {
+                link.classList.add('active');
+            }
+        });
+    }
+
+    // 導航欄載入動畫
+    initNavbarLoadAnimation() {
+        const navbar = document.querySelector('.navbar');
+        const navItems = document.querySelectorAll('.navbar-nav .nav-item');
+        
+        if (!navbar) return;
+
+        // 添加載入動畫樣式
+        const style = document.createElement('style');
+        style.textContent = `
+            .navbar {
+                transform: translateY(-100%);
+                transition: transform 0.8s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+            }
+            
+            .navbar.loaded {
+                transform: translateY(0);
+            }
+            
+            .navbar-nav .nav-item {
+                opacity: 0;
+                transform: translateY(-20px);
+                transition: all 0.6s ease-out;
+            }
+            
+            .navbar-nav .nav-item.fade-in {
+                opacity: 1;
+                transform: translateY(0);
+            }
+            
+            .navbar-brand {
+                opacity: 0;
+                transform: scale(0.8);
+                transition: all 0.6s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+            }
+            
+            .navbar-brand.fade-in {
+                opacity: 1;
+                transform: scale(1);
+            }
+        `;
+        document.head.appendChild(style);
+
+        // 觸發載入動畫
+        setTimeout(() => {
+            navbar.classList.add('loaded');
+            
+            const brand = document.querySelector('.navbar-brand');
+            if (brand) {
+                setTimeout(() => brand.classList.add('fade-in'), 200);
+            }
+            
+            navItems.forEach((item, index) => {
+                setTimeout(() => {
+                    item.classList.add('fade-in');
+                }, 400 + (index * 100));
+            });
+        }, 100);
+    }
+
+    // 響應式導航處理
+    setupNavbarResponsive() {
+        const navbarToggler = document.querySelector('.navbar-toggler');
+        const navbarCollapse = document.querySelector('.navbar-collapse');
+        
+        if (!navbarToggler || !navbarCollapse) return;
+
+        navbarToggler.addEventListener('click', () => {
+            const isExpanded = navbarToggler.getAttribute('aria-expanded') === 'true';
+            
+            // 添加旋轉動畫
+            navbarToggler.style.transform = isExpanded ? 'rotate(0deg)' : 'rotate(90deg)';
+            
+            // 摺疊動畫
+            if (!isExpanded) {
+                navbarCollapse.style.maxHeight = '0';
+                navbarCollapse.style.overflow = 'hidden';
+                
+                setTimeout(() => {
+                    navbarCollapse.style.maxHeight = navbarCollapse.scrollHeight + 'px';
+                }, 10);
+            }
+        });
+
+        // 監聽摺疊狀態變化
+        navbarCollapse.addEventListener('shown.bs.collapse', () => {
+            navbarCollapse.style.maxHeight = 'none';
+        });
+
+        navbarCollapse.addEventListener('hide.bs.collapse', () => {
+            navbarCollapse.style.maxHeight = navbarCollapse.scrollHeight + 'px';
+            navbarCollapse.style.overflow = 'hidden';
+            
+            setTimeout(() => {
+                navbarCollapse.style.maxHeight = '0';
+            }, 10);
+        });
+    }
+
     // 認證UI更新
     updateAuthUI() {
         // 不要控制 UI 元素的顯示/隱藏
@@ -48,12 +252,6 @@ class HiveMindApp {
 
     // 事件監聽器設定
     setupEventListeners() {
-        // 移除主題切換按鈕事件監聽器
-        // const themeToggle = document.getElementById('theme-toggle');
-        // if (themeToggle) {
-        //     themeToggle.addEventListener('click', () => this.toggleTheme());
-        // }
-
         // 登出按鈕
         const logoutBtn = document.getElementById('logout-btn');
         if (logoutBtn) {
@@ -72,6 +270,123 @@ class HiveMindApp {
                     });
                 }
             });
+        });
+
+        // 導航連結懸停效果
+        this.setupNavLinkHoverEffects();
+        
+        // 語言切換按鈕特殊效果
+        this.setupLanguageToggleEffect();
+    }
+
+    // 導航連結懸停效果
+    setupNavLinkHoverEffects() {
+        const navLinks = document.querySelectorAll('.navbar .nav-link');
+        
+        navLinks.forEach(link => {
+            // 添加波紋效果
+            link.addEventListener('click', function(e) {
+                const ripple = document.createElement('span');
+                const rect = this.getBoundingClientRect();
+                const size = Math.max(rect.width, rect.height);
+                const x = e.clientX - rect.left - size / 2;
+                const y = e.clientY - rect.top - size / 2;
+                
+                ripple.style.cssText = `
+                    position: absolute;
+                    width: ${size}px;
+                    height: ${size}px;
+                    left: ${x}px;
+                    top: ${y}px;
+                    background: rgba(255, 255, 255, 0.3);
+                    border-radius: 50%;
+                    transform: scale(0);
+                    animation: ripple 0.6s ease-out;
+                    pointer-events: none;
+                `;
+                
+                this.style.position = 'relative';
+                this.style.overflow = 'hidden';
+                this.appendChild(ripple);
+                
+                setTimeout(() => {
+                    if (ripple.parentNode) {
+                        ripple.remove();
+                    }
+                }, 600);
+            });
+
+            // 磁吸效果
+            link.addEventListener('mouseenter', function() {
+                this.style.transform = 'translateY(-2px)';
+                this.style.boxShadow = '0 4px 12px rgba(96, 165, 250, 0.3)';
+            });
+
+            link.addEventListener('mouseleave', function() {
+                if (!this.classList.contains('active')) {
+                    this.style.transform = 'translateY(0)';
+                    this.style.boxShadow = 'none';
+                }
+            });
+        });
+
+        // 添加波紋動畫樣式
+        if (!document.getElementById('ripple-animation')) {
+            const style = document.createElement('style');
+            style.id = 'ripple-animation';
+            style.textContent = `
+                @keyframes ripple {
+                    from {
+                        transform: scale(0);
+                        opacity: 1;
+                    }
+                    to {
+                        transform: scale(4);
+                        opacity: 0;
+                    }
+                }
+            `;
+            document.head.appendChild(style);
+        }
+    }
+
+    // 語言切換按鈕特殊效果
+    setupLanguageToggleEffect() {
+        const langButton = document.querySelector('.navbar .btn[onclick*="toggleLang"]');
+        if (!langButton) return;
+
+        // 添加彩虹閃爍效果
+        let shimmerInterval;
+        
+        langButton.addEventListener('mouseenter', () => {
+            if (shimmerInterval) clearInterval(shimmerInterval);
+            
+            let hue = 0;
+            shimmerInterval = setInterval(() => {
+                langButton.style.background = `linear-gradient(45deg, 
+                    hsl(${hue}, 70%, 60%), 
+                    hsl(${(hue + 60) % 360}, 70%, 60%))`;
+                hue = (hue + 10) % 360;
+            }, 100);
+        });
+
+        langButton.addEventListener('mouseleave', () => {
+            if (shimmerInterval) {
+                clearInterval(shimmerInterval);
+                shimmerInterval = null;
+            }
+            langButton.style.background = '';
+        });
+
+        // 點擊時的特殊動畫
+        langButton.addEventListener('click', () => {
+            langButton.style.transform = 'scale(0.95) rotate(360deg)';
+            langButton.style.transition = 'transform 0.6s cubic-bezier(0.68, -0.55, 0.265, 1.55)';
+            
+            setTimeout(() => {
+                langButton.style.transform = '';
+                langButton.style.transition = '';
+            }, 600);
         });
     }
 

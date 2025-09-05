@@ -480,192 +480,345 @@
     transition: var(--transition);
 }
 
-/* 卡片統一樣式 */
-.card {
-    border-radius: var(--border-radius);
-    border: none;
-    box-shadow: var(--shadow);
-    transition: var(--transition);
+/* 導航欄動畫增強 */
+.navbar {
+    transition: all 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+    backdrop-filter: saturate(180%) blur(20px);
 }
 
-.card:hover {
-    transform: translateY(-5px);
-    box-shadow: var(--shadow-hover);
+/* 導航欄滾動效果 */
+.navbar.scrolled {
+    background: rgba(31, 41, 55, 0.95) !important;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
 }
 
-/* 修復 Bootstrap 5 的類別 */
-.d-none {
-    display: none !important;
-}
-
-/* 確保 Turnstile 驗證框置中 */
-.cf-turnstile {
-    margin: 0 auto;
-}
-
-/* 滾動條美化 */
-::-webkit-scrollbar {
-    width: 8px;
-}
-
-::-webkit-scrollbar-track {
-    background: #f1f1f1;
-}
-
-::-webkit-scrollbar-thumb {
-    background: var(--primary-color);
-    border-radius: 4px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-    background: var(--secondary-color);
-}
-.fa-spin {
-    animation: spin 1s linear infinite;
-}
-
-/* Footer 固定在底部 */
-footer.mt-auto {
-    margin-top: auto !important;
-}
-
-/* Custom button styles */
-.btn-primary {
-    background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
-    border: none;
-    box-shadow: var(--shadow);
-}
-
-.btn-primary:hover {
-    background: linear-gradient(135deg, #5a6fd8 0%, #6a4190 100%);
-    box-shadow: var(--shadow-hover);
-}
-
-.btn-outline-primary {
-    border-color: var(--primary-color);
-    color: var(--primary-color);
-}
-
-.btn-outline-primary:hover {
-    background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
-    border-color: var(--primary-color);
-    color: white;
-}
-
-/* CTA 區塊增強可見性 */
-.cta-section {
+/* 品牌 Logo 動畫 */
+.navbar-brand {
+    transition: all 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
     position: relative;
-    z-index: 1;
-    padding: 3rem 0;
-    background: #ffffff !important; /* 白色背景讓黑色文字清楚可見 */
 }
 
-.cta-section h2,
-.cta-section p,
-.cta-section .lead {
-    color: #000000 !important;
-    text-shadow: none;
-    font-weight: bold;
+.navbar-brand:hover {
+    transform: scale(1.05);
+    color: #60a5fa !important;
 }
 
-.cta-section .btn {
-    font-size: 1.1rem;
-    padding: 1rem 2.5rem;
-    border-radius: var(--border-radius);
-    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.15);
-    transition: var(--transition);
-    font-weight: bold;
-    border-width: 2px;
+.navbar-brand img {
+    transition: all 0.3s ease;
 }
 
-.cta-section .btn:hover {
-    transform: translateY(-3px);
-    box-shadow: 0 8px 25px rgba(0, 0, 0, 0.25);
+.navbar-brand:hover img {
+    transform: rotate(360deg);
+    filter: drop-shadow(0 0 10px rgba(96, 165, 250, 0.6));
 }
 
-.cta-section .btn-outline-light {
-    border-color: var(--primary-color);
-    color: var(--primary-color) !important;
-    background: transparent;
+/* 導航連結動畫 */
+.navbar .nav-link {
+    position: relative;
+    overflow: hidden;
+    transition: all 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+    border-radius: 8px;
+    margin: 0 4px;
 }
 
-.cta-section .btn-outline-light:hover {
-    background: var(--primary-color) !important;
-    color: white !important;
-    border-color: var(--primary-color);
+/* 底線動畫效果 */
+.navbar .nav-link::before {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 50%;
+    width: 0;
+    height: 2px;
+    background: linear-gradient(90deg, #60a5fa, #34d399);
+    transition: all 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+    transform: translateX(-50%);
+    border-radius: 2px;
 }
 
-.cta-section .btn-light {
-    background: var(--primary-color) !important;
-    color: white !important;
-    border: 2px solid var(--primary-color);
+.navbar .nav-link:hover::before {
+    width: 80%;
 }
 
-.cta-section .btn-light:hover {
-    background: var(--secondary-color) !important;
-    color: white !important;
-    border-color: var(--secondary-color);
+/* 光波動畫效果 */
+.navbar .nav-link::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.1), transparent);
+    transition: left 0.6s ease;
 }
 
-/* 響應式調整 */
-@media (max-width: 768px) {
-    .display-5 {
-        font-size: 2.5rem;
-    }
-    
-    .feature {
-        height: 3rem;
-        width: 3rem;
-        font-size: 1.5rem;
-    }
-    
-    .container.px-5 {
-        padding-left: 1.5rem !important;
-        padding-right: 1.5rem !important;
-    }
-    
-    .hero-illustration {
-        width: 200px;
-        height: 200px;
-    }
-    
-    .step-number {
-        width: 60px;
-        height: 60px;
-        font-size: 1.5rem;
-    }
-    
-    .stat-item {
+.navbar .nav-link:hover::after {
+    left: 100%;
+}
+
+.navbar .nav-link:hover {
+    color: #60a5fa !important;
+    background-color: rgba(96, 165, 250, 0.1);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(96, 165, 250, 0.3);
+}
+
+/* 按鈕動畫 */
+.navbar .btn {
+    position: relative;
+    overflow: hidden;
+    transition: all 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+    border-radius: 8px;
+}
+
+.navbar .btn::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 0;
+    height: 0;
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 50%;
+    transition: all 0.6s ease;
+    transform: translate(-50%, -50%);
+}
+
+.navbar .btn:hover::before {
+    width: 300px;
+    height: 300px;
+}
+
+.navbar .btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+}
+
+.navbar .btn:active {
+    transform: translateY(0);
+}
+
+/* 下拉選單動畫 */
+.navbar .dropdown-menu {
+    border: none;
+    border-radius: 12px;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+    backdrop-filter: blur(20px);
+    background: rgba(45, 55, 72, 0.95);
+    margin-top: 8px;
+    opacity: 0;
+    transform: translateY(-10px) scale(0.95);
+    transition: all 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+    pointer-events: none;
+}
+
+.navbar .dropdown:hover .dropdown-menu,
+.navbar .dropdown-menu.show {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    pointer-events: auto;
+}
+
+.navbar .dropdown-item {
+    transition: all 0.3s ease;
+    border-radius: 8px;
+    margin: 2px 8px;
+    position: relative;
+    overflow: hidden;
+}
+
+.navbar .dropdown-item::before {
+    content: '';
+    position: absolute;
+    left: -100%;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(96, 165, 250, 0.1), transparent);
+    transition: left 0.5s ease;
+}
+
+.navbar .dropdown-item:hover::before {
+    left: 100%;
+}
+
+.navbar .dropdown-item:hover {
+    background-color: rgba(96, 165, 250, 0.2);
+    color: #60a5fa;
+    transform: translateX(5px);
+}
+
+/* Navbar toggler 動畫 */
+.navbar-toggler {
+    border: none;
+    transition: all 0.3s ease;
+    position: relative;
+}
+
+.navbar-toggler:focus {
+    box-shadow: none;
+}
+
+.navbar-toggler:hover {
+    transform: scale(1.1);
+    background-color: rgba(96, 165, 250, 0.1);
+}
+
+.navbar-toggler-icon {
+    transition: all 0.3s ease;
+    position: relative;
+}
+
+.navbar-toggler[aria-expanded="true"] .navbar-toggler-icon {
+    transform: rotate(90deg);
+}
+
+/* 響應式導航摺疊動畫 */
+.navbar-collapse {
+    transition: all 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+}
+
+.navbar-collapse.collapsing {
+    transition: height 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+}
+
+@media (max-width: 991.98px) {
+    .navbar-nav {
+        background: rgba(31, 41, 55, 0.95);
+        border-radius: 12px;
+        margin-top: 1rem;
         padding: 1rem;
-        margin-bottom: 1rem;
+        backdrop-filter: blur(20px);
     }
     
-    .workflow-step {
-        padding: 1.5rem;
-        margin-bottom: 2rem;
+    .navbar .nav-link {
+        margin: 4px 0;
+        padding: 12px 16px;
     }
     
-    .advantage-item {
-        padding: 1rem;
-        transform: translateY(20px);
+    .navbar .nav-link:hover {
+        transform: translateX(10px);
     }
-    
-    .advantage-item.animate {
+}
+
+/* 語言切換按鈕特殊動畫 */
+.navbar .btn[onclick*="toggleLang"] {
+    background: linear-gradient(45deg, #60a5fa, #34d399);
+    border: none;
+    position: relative;
+    overflow: hidden;
+}
+
+.navbar .btn[onclick*="toggleLang"]::after {
+    content: '';
+    position: absolute;
+    top: -50%;
+    left: -50%;
+    width: 200%;
+    height: 200%;
+    background: linear-gradient(45deg, transparent 40%, rgba(255, 255, 255, 0.1) 50%, transparent 60%);
+    transform: rotate(45deg);
+    animation: shimmer 2s infinite;
+}
+
+@keyframes shimmer {
+    0% { transform: translateX(-100%) rotate(45deg); }
+    100% { transform: translateX(100%) rotate(45deg); }
+}
+
+.navbar .btn[onclick*="toggleLang"]:hover {
+    background: linear-gradient(45deg, #3b82f6, #10b981);
+    box-shadow: 0 6px 20px rgba(96, 165, 250, 0.4);
+}
+
+/* 用戶頭像動畫 (如果有的話) */
+.navbar .dropdown-toggle[data-bs-toggle="dropdown"] {
+    transition: all 0.3s ease;
+}
+
+.navbar .dropdown-toggle[data-bs-toggle="dropdown"]:hover {
+    transform: scale(1.1);
+    filter: drop-shadow(0 0 10px rgba(96, 165, 250, 0.6));
+}
+
+/* 載入時導航欄入場動畫 */
+@keyframes navbarSlideDown {
+    from {
+        transform: translateY(-100%);
+        opacity: 0;
+    }
+    to {
+        transform: translateY(0);
+        opacity: 1;
+    }
+}
+
+.navbar {
+    animation: navbarSlideDown 0.8s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+}
+
+/* 導航項目依序出現動畫 */
+@keyframes navItemFadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(-20px);
+    }
+    to {
+        opacity: 1;
         transform: translateY(0);
     }
-    
-    .team-value {
-        padding: 1.5rem;
-        margin-bottom: 1rem;
-    }
-    
-    .cta-section {
-        padding: 2rem 0;
-    }
-    
-    .cta-section .btn {
-        font-size: 1rem;
-        padding: 0.875rem 2rem;
-        margin-bottom: 1rem;
+}
+
+.navbar-nav .nav-item {
+    animation: navItemFadeIn 0.6s ease-out both;
+}
+
+.navbar-nav .nav-item:nth-child(1) { animation-delay: 0.1s; }
+.navbar-nav .nav-item:nth-child(2) { animation-delay: 0.2s; }
+.navbar-nav .nav-item:nth-child(3) { animation-delay: 0.3s; }
+.navbar-nav .nav-item:nth-child(4) { animation-delay: 0.4s; }
+.navbar-nav .nav-item:nth-child(5) { animation-delay: 0.5s; }
+.navbar-nav .nav-item:nth-child(6) { animation-delay: 0.6s; }
+.navbar-nav .nav-item:nth-child(7) { animation-delay: 0.7s; }
+.navbar-nav .nav-item:nth-child(8) { animation-delay: 0.8s; }
+
+/* 脈衝動畫效果 */
+@keyframes pulse {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.05); }
+}
+
+/* 活躍頁面指示器 */
+.navbar .nav-link.active {
+    background: linear-gradient(135deg, rgba(96, 165, 250, 0.2), rgba(52, 211, 153, 0.2));
+    color: #60a5fa !important;
+    animation: pulse 2s infinite;
+}
+
+.navbar .nav-link.active::before {
+    width: 80%;
+    background: linear-gradient(90deg, #60a5fa, #34d399);
+}
+
+/* 暗色模式動畫調整 */
+[data-theme="dark"] .navbar .nav-link:hover {
+    background-color: rgba(96, 165, 250, 0.15);
+}
+
+[data-theme="dark"] .navbar.scrolled {
+    background: rgba(17, 24, 39, 0.95) !important;
+    border-bottom-color: rgba(255, 255, 255, 0.05);
+}
+
+/* 減少動畫設定 */
+@media (prefers-reduced-motion: reduce) {
+    .navbar *,
+    .navbar *::before,
+    .navbar *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
     }
 }
+
+/* ...existing code... */

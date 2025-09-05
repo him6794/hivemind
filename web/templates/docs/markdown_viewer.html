@@ -484,69 +484,523 @@
             background: #343a40;
         }
 
-        /* Responsive */
-        @media (max-width: 768px) {
-            .sidebar {
-                transform: translateX(-100%);
+        /* 動畫效果 */
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(30px);
             }
-            
-            .main-content {
-                margin-left: 0;
-                padding: 1rem;
-            }
-            
-            .content-wrapper {
-                border-radius: 0;
-                box-shadow: none;
-            }
-            
-            .content-header,
-            .content-body {
-                padding: 1rem;
+            to {
+                opacity: 1;
+                transform: translateY(0);
             }
         }
 
-        /* Scrollbar styling */
-        .sidebar::-webkit-scrollbar {
-            width: 6px;
+        @keyframes fadeInLeft {
+            from {
+                opacity: 0;
+                transform: translateX(-30px);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
         }
 
-        .sidebar::-webkit-scrollbar-track {
-            background: #f1f1f1;
+        @keyframes fadeInRight {
+            from {
+                opacity: 0;
+                transform: translateX(30px);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
         }
 
-        .sidebar::-webkit-scrollbar-thumb {
-            background: #c1c1c1;
-            border-radius: 3px;
+        @keyframes slideDown {
+            from {
+                opacity: 0;
+                transform: translateY(-20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
         }
 
-        .sidebar::-webkit-scrollbar-thumb:hover {
-            background: #a8a8a8;
+        @keyframes scaleIn {
+            from {
+                opacity: 0;
+                transform: scale(0.9);
+            }
+            to {
+                opacity: 1;
+                transform: scale(1);
+            }
         }
 
-        /* Loading animation */
-        .loading {
-            text-align: center;
-            padding: 2rem;
+        @keyframes pulse {
+            0%, 100% {
+                transform: scale(1);
+            }
+            50% {
+                transform: scale(1.05);
+            }
         }
 
-        .spinner {
-            border: 4px solid #f3f3f3;
-            border-top: 4px solid var(--primary-color);
+        @keyframes shimmer {
+            0% {
+                background-position: -200% center;
+            }
+            100% {
+                background-position: 200% center;
+            }
+        }
+
+        /* 載入狀態 */
+        .page-loading {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .page-loaded {
+            animation: fadeInUp 0.6s ease-out forwards;
+        }
+
+        /* Navbar 動畫 */
+        .navbar {
+            animation: slideDown 0.5s ease-out;
+            backdrop-filter: saturate(180%) blur(20px);
+            transition: all 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+        }
+
+        .navbar.scrolled {
+            box-shadow: 0 2px 20px rgba(0, 0, 0, 0.1);
+        }
+
+        .navbar-brand {
+            transition: transform 0.3s ease;
+        }
+
+        .navbar-brand:hover {
+            transform: scale(1.05);
+        }
+
+        .navbar .nav-link {
+            position: relative;
+            overflow: hidden;
+            transition: all 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+        }
+
+        .navbar .nav-link::before {
+            content: '';
+            position: absolute;
+            bottom: 0;
+            left: 50%;
+            width: 0;
+            height: 2px;
+            background: linear-gradient(90deg, var(--primary-color), var(--success-color));
+            transition: all 0.3s ease;
+            transform: translateX(-50%);
+        }
+
+        .navbar .nav-link:hover::before {
+            width: 80%;
+        }
+
+        /* Sidebar 動畫 */
+        .sidebar {
+            animation: fadeInLeft 0.6s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+        }
+
+        .sidebar-toggle {
+            transition: all 0.3s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+        }
+
+        .sidebar-toggle:hover {
+            transform: scale(1.1) rotate(90deg);
+            box-shadow: 0 4px 16px rgba(0, 122, 255, 0.4);
+        }
+
+        .sidebar-toggle:active {
+            transform: scale(0.95);
+        }
+
+        /* Navigation links 動畫 */
+        .nav-link {
+            position: relative;
+            overflow: hidden;
+            transition: all 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+        }
+
+        .nav-link::before {
+            content: '';
+            position: absolute;
+            left: -100%;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.1), transparent);
+            transition: left 0.5s ease;
+        }
+
+        .nav-link:hover::before {
+            left: 100%;
+        }
+
+        .nav-link:hover {
+            transform: translateX(5px);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        .nav-link.active {
+            animation: pulse 2s infinite;
+        }
+
+        /* Search input 動畫 */
+        .search-input {
+            transition: all 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+        }
+
+        .search-input:focus {
+            transform: scale(1.02);
+            box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.1), 0 4px 16px rgba(0, 122, 255, 0.2);
+        }
+
+        /* Main content 動畫 */
+        .main-content {
+            animation: fadeInRight 0.7s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+        }
+
+        .content-wrapper {
+            transition: all 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+        }
+
+        .content-wrapper:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+        }
+
+        .content-header {
+            background: linear-gradient(135deg, var(--light-bg), rgba(0, 122, 255, 0.05));
+            position: relative;
+            overflow: hidden;
+        }
+
+        .content-header::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: linear-gradient(45deg, transparent 40%, rgba(255, 255, 255, 0.05) 50%, transparent 60%);
+            animation: shimmer 3s infinite;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+
+        .content-header:hover::before {
+            opacity: 1;
+        }
+
+        /* 標題動畫 */
+        .content-header h1 {
+            animation: fadeInUp 0.8s ease-out 0.2s both;
+        }
+
+        .content-header p {
+            animation: fadeInUp 0.8s ease-out 0.4s both;
+        }
+
+        /* 按鈕動畫 */
+        .btn {
+            position: relative;
+            overflow: hidden;
+            transition: all 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+        }
+
+        .btn::before {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 0;
+            height: 0;
+            background: rgba(255, 255, 255, 0.2);
             border-radius: 50%;
-            width: 40px;
-            height: 40px;
-            animation: spin 1s linear infinite;
-            margin: 0 auto;
+            transition: all 0.6s ease;
+            transform: translate(-50%, -50%);
         }
 
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
+        .btn:hover::before {
+            width: 300px;
+            height: 300px;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+        }
+
+        .btn:active {
+            transform: translateY(0);
+        }
+
+        /* Breadcrumb 動畫 */
+        .breadcrumb {
+            animation: fadeInUp 0.6s ease-out 0.3s both;
+        }
+
+        .breadcrumb-item {
+            transition: all 0.3s ease;
+        }
+
+        .breadcrumb-item:hover {
+            transform: scale(1.05);
+        }
+
+        /* TOC 動畫 */
+        .toc-container {
+            animation: scaleIn 0.6s ease-out 0.5s both;
+            transition: all 0.3s ease;
+        }
+
+        .toc-container:hover {
+            transform: scale(1.02);
+        }
+
+        /* Markdown content 動畫 */
+        .markdown-content {
+            animation: fadeInUp 0.8s ease-out 0.4s both;
+        }
+
+        .markdown-content h1,
+        .markdown-content h2,
+        .markdown-content h3,
+        .markdown-content h4,
+        .markdown-content h5,
+        .markdown-content h6 {
+            transition: all 0.3s ease;
+            position: relative;
+        }
+
+        .markdown-content h1:hover,
+        .markdown-content h2:hover,
+        .markdown-content h3:hover {
+            color: var(--primary-color);
+            transform: translateX(5px);
+        }
+
+        /* Code block 動畫 */
+        .markdown-content pre {
+            transition: all 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+            position: relative;
+        }
+
+        .markdown-content pre:hover {
+            transform: scale(1.02);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+        }
+
+        .copy-button {
+            transition: all 0.3s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+        }
+
+        .copy-button:hover {
+            transform: scale(1.1);
+            background: rgba(255, 255, 255, 0.2);
+        }
+
+        .copy-button.copied {
+            animation: pulse 0.6s ease;
+        }
+
+        /* Table 動畫 */
+        .markdown-content table {
+            animation: fadeInUp 0.6s ease-out;
+        }
+
+        .markdown-content tr {
+            transition: all 0.3s ease;
+        }
+
+        .markdown-content tr:hover {
+            transform: scale(1.01);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        /* Blockquote 動畫 */
+        .markdown-content blockquote {
+            transition: all 0.3s ease;
+            position: relative;
+        }
+
+        .markdown-content blockquote:hover {
+            transform: translateX(5px);
+            box-shadow: 0 4px 16px rgba(0, 122, 255, 0.1);
+        }
+
+        /* 滾動進度條 */
+        .scroll-progress {
+            position: fixed;
+            top: var(--header-height);
+            left: 0;
+            width: 0%;
+            height: 3px;
+            background: linear-gradient(90deg, var(--primary-color), var(--success-color));
+            z-index: 9999;
+            transition: width 0.3s ease;
+        }
+
+        /* 回到頂部按鈕 */
+        .back-to-top {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            width: 50px;
+            height: 50px;
+            background: var(--primary-color);
+            color: white;
+            border: none;
+            border-radius: 50%;
+            box-shadow: 0 4px 16px rgba(0, 122, 255, 0.3);
+            opacity: 0;
+            visibility: hidden;
+            transition: all 0.3s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+            z-index: 1000;
+        }
+
+        .back-to-top.visible {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        .back-to-top:hover {
+            transform: scale(1.1) translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0, 122, 255, 0.4);
+        }
+
+        .back-to-top:active {
+            transform: scale(0.95);
+        }
+
+        /* 懸浮動畫元素 */
+        .floating-elements {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: -1;
+            overflow: hidden;
+        }
+
+        .floating-dot {
+            position: absolute;
+            width: 4px;
+            height: 4px;
+            background: var(--primary-color);
+            border-radius: 50%;
+            opacity: 0.3;
+            animation: float 6s ease-in-out infinite;
+        }
+
+        @keyframes float {
+            0%, 100% {
+                transform: translateY(0) rotate(0deg);
+            }
+            50% {
+                transform: translateY(-20px) rotate(180deg);
+            }
+        }
+
+        /* 視覺反饋動畫 */
+        .ripple {
+            position: relative;
+            overflow: hidden;
+        }
+
+        .ripple::before {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 0;
+            height: 0;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.5);
+            transform: translate(-50%, -50%);
+            transition: width 0.6s, height 0.6s;
+        }
+
+        .ripple:active::before {
+            width: 300px;
+            height: 300px;
+        }
+
+        /* 加載骨架屏 */
+        .skeleton {
+            background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+            background-size: 200% 100%;
+            animation: shimmer 1.5s infinite;
+        }
+
+        /* Dark theme 動畫調整 */
+        [data-theme="dark"] .floating-dot {
+            background: var(--success-color);
+        }
+
+        [data-theme="dark"] .skeleton {
+            background: linear-gradient(90deg, #2a2a2a 25%, #3a3a3a 50%, #2a2a2a 75%);
+            background-size: 200% 100%;
+        }
+
+        /* 響應式動畫 */
+        @media (max-width: 768px) {
+            .content-wrapper:hover {
+                transform: none;
+            }
+            
+            .markdown-content pre:hover {
+                transform: none;
+            }
+            
+            .floating-elements {
+                display: none;
+            }
+        }
+
+        /* 減少動畫 (用戶偏好) */
+        @media (prefers-reduced-motion: reduce) {
+            *,
+            *::before,
+            *::after {
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
+            }
+        }
+
+        body.page-loading {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        body.page-loaded {
+            animation: fadeInUp 0.6s ease-out forwards;
         }
     </style>
 </head>
-<body>
+<body class="page-loading">
+    <!-- 滾動進度條 -->
+    <div class="scroll-progress" id="scroll-progress"></div>
+
+    <!-- 懸浮動畫元素 -->
+    <div class="floating-elements" id="floating-elements"></div>
+
     <!-- Navigation Bar -->
     <nav class="navbar navbar-expand-lg navbar-dark bg-dark fixed-top">
         <div class="container-fluid">
@@ -797,8 +1251,233 @@
     <script>
         // 等待所有資源載入完成
         document.addEventListener('DOMContentLoaded', function() {
-            console.log('DOM loaded, initializing...');
+            console.log('DOM loaded, initializing with animations...');
             
+            // 頁面載入完成動畫
+            setTimeout(() => {
+                document.body.classList.remove('page-loading');
+                document.body.classList.add('page-loaded');
+            }, 100);
+
+            // 創建懸浮動畫元素
+            function createFloatingElements() {
+                const container = document.getElementById('floating-elements');
+                if (!container) return;
+
+                for (let i = 0; i < 15; i++) {
+                    const dot = document.createElement('div');
+                    dot.className = 'floating-dot';
+                    dot.style.left = Math.random() * 100 + '%';
+                    dot.style.top = Math.random() * 100 + '%';
+                    dot.style.animationDelay = Math.random() * 6 + 's';
+                    dot.style.animationDuration = (3 + Math.random() * 6) + 's';
+                    container.appendChild(dot);
+                }
+            }
+
+            // 滾動進度條
+            function updateScrollProgress() {
+                const scrollProgress = document.getElementById('scroll-progress');
+                if (!scrollProgress) return;
+
+                const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
+                const scrollHeight = document.documentElement.scrollHeight - document.documentElement.clientHeight;
+                const progress = (scrollTop / scrollHeight) * 100;
+                
+                scrollProgress.style.width = progress + '%';
+            }
+
+            // 回到頂部按鈕
+            function setupBackToTop() {
+                const backToTopBtn = document.getElementById('back-to-top');
+                if (!backToTopBtn) return;
+
+                function toggleBackToTop() {
+                    if (window.pageYOffset > 300) {
+                        backToTopBtn.classList.add('visible');
+                    } else {
+                        backToTopBtn.classList.remove('visible');
+                    }
+                }
+
+                backToTopBtn.addEventListener('click', function() {
+                    window.scrollTo({
+                        top: 0,
+                        behavior: 'smooth'
+                    });
+                });
+
+                window.addEventListener('scroll', toggleBackToTop);
+                toggleBackToTop(); // 初始檢查
+            }
+
+            // Navbar 滾動效果
+            function setupNavbarScroll() {
+                const navbar = document.querySelector('.navbar');
+                if (!navbar) return;
+
+                window.addEventListener('scroll', function() {
+                    if (window.scrollY > 50) {
+                        navbar.classList.add('scrolled');
+                    } else {
+                        navbar.classList.remove('scrolled');
+                    }
+                });
+            }
+
+            // 懸停動畫效果
+            function setupHoverEffects() {
+                // 為所有按鈕添加 ripple 效果
+                document.querySelectorAll('.btn').forEach(btn => {
+                    btn.classList.add('ripple');
+                });
+
+                // 為導航鏈接添加動畫
+                document.querySelectorAll('.nav-link').forEach(link => {
+                    link.addEventListener('mouseenter', function() {
+                        this.style.transform = 'translateX(5px)';
+                    });
+                    
+                    link.addEventListener('mouseleave', function() {
+                        if (!this.classList.contains('active')) {
+                            this.style.transform = 'translateX(0)';
+                        }
+                    });
+                });
+            }
+
+            // 滾動觸發動畫
+            function setupScrollAnimations() {
+                const observer = new IntersectionObserver((entries) => {
+                    entries.forEach(entry => {
+                        if (entry.isIntersecting) {
+                            entry.target.style.opacity = '1';
+                            entry.target.style.transform = 'translateY(0)';
+                        }
+                    });
+                }, {
+                    threshold: 0.1,
+                    rootMargin: '0px 0px -50px 0px'
+                });
+
+                // 觀察所有需要動畫的元素
+                document.querySelectorAll('.markdown-content h1, .markdown-content h2, .markdown-content h3, .markdown-content p, .markdown-content pre, .markdown-content blockquote, .markdown-content table').forEach(el => {
+                    el.style.opacity = '0';
+                    el.style.transform = 'translateY(20px)';
+                    el.style.transition = 'opacity 0.6s ease, transform 0.6s ease';
+                    observer.observe(el);
+                });
+            }
+
+            // 程式碼複製動畫
+            function enhanceCopyButtons() {
+                document.querySelectorAll('.copy-button').forEach(button => {
+                    const originalClick = button.onclick;
+                    button.onclick = function(e) {
+                        // 添加點擊動畫
+                        this.style.transform = 'scale(0.95)';
+                        setTimeout(() => {
+                            this.style.transform = 'scale(1)';
+                        }, 150);
+
+                        // 執行原有功能
+                        if (originalClick) {
+                            originalClick.call(this, e);
+                        }
+                    };
+                });
+            }
+
+            // 搜尋輸入動畫
+            function setupSearchAnimation() {
+                const searchInput = document.getElementById('search-input');
+                if (!searchInput) return;
+
+                searchInput.addEventListener('focus', function() {
+                    this.parentElement.style.transform = 'scale(1.02)';
+                });
+
+                searchInput.addEventListener('blur', function() {
+                    this.parentElement.style.transform = 'scale(1)';
+                });
+
+                // 搜尋結果高亮動畫
+                searchInput.addEventListener('input', function() {
+                    const query = this.value.toLowerCase();
+                    document.querySelectorAll('.nav-link').forEach(link => {
+                        if (query && link.textContent.toLowerCase().includes(query)) {
+                            link.style.background = 'rgba(0, 122, 255, 0.1)';
+                            link.style.transform = 'scale(1.02)';
+                        } else {
+                            link.style.background = '';
+                            link.style.transform = '';
+                        }
+                    });
+                });
+            }
+
+            // 頁面切換動畫
+            function setupPageTransitions() {
+                document.querySelectorAll('a[href^="/docs"]').forEach(link => {
+                    link.addEventListener('click', function(e) {
+                        if (this.hostname === window.location.hostname) {
+                            e.preventDefault();
+                            
+                            // 淡出動畫
+                            document.body.style.opacity = '0.5';
+                            document.body.style.transform = 'scale(0.98)';
+                            
+                            setTimeout(() => {
+                                window.location.href = this.href;
+                            }, 300);
+                        }
+                    });
+                });
+            }
+
+            // 主題切換動畫
+            function setupThemeTransition() {
+                const style = document.createElement('style');
+                style.innerHTML = `
+                    * {
+                        transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+                    }
+                `;
+                document.head.appendChild(style);
+            }
+
+            // 初始化所有動畫
+            function initializeAnimations() {
+                createFloatingElements();
+                setupBackToTop();
+                setupNavbarScroll();
+                setupHoverEffects();
+                setupScrollAnimations();
+                enhanceCopyButtons();
+                setupSearchAnimation();
+                setupPageTransitions();
+                setupThemeTransition();
+
+                // 滾动事件
+                window.addEventListener('scroll', function() {
+                    updateScrollProgress();
+                    
+                    // 視差效果
+                    const scrolled = window.pageYOffset;
+                    const parallax = document.querySelector('.content-header');
+                    if (parallax) {
+                        parallax.style.transform = `translateY(${scrolled * 0.1}px)`;
+                    }
+                });
+            }
+
+            // 檢查是否支援動畫
+            const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+            
+            if (!prefersReducedMotion) {
+                initializeAnimations();
+            }
+
             // 初始化 i18n - 使用簡單的函數調用
             const currentLang = getLang();
             setLang(currentLang);
@@ -1105,7 +1784,7 @@
                 showError('頁面載入時發生錯誤: ' + e.message);
             });
 
-            console.log('All event listeners initialized');
+            console.log('All event listeners and animations initialized');
         });
     </script>
 </body>

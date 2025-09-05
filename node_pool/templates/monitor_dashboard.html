@@ -1,0 +1,698 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HiveMind Node Pool Monitor</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            color: #333;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 30px;
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .header p {
+            font-size: 1.1rem;
+            opacity: 0.9;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .stat-card {
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+            border-left: 5px solid #667eea;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 40px rgba(0,0,0,0.15);
+        }
+
+        .stat-card h3 {
+            color: #666;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 10px;
+        }
+
+        .stat-value {
+            font-size: 2.2rem;
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 5px;
+        }
+
+        .stat-label {
+            color: #888;
+            font-size: 0.9rem;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: #f0f0f0;
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+
+        .progress-fill {
+            height: 100%;
+            transition: width 0.3s ease;
+            border-radius: 4px;
+        }
+
+        .progress-cpu { background: linear-gradient(90deg, #4facfe, #00f2fe); }
+        .progress-memory { background: linear-gradient(90deg, #fa709a, #fee140); }
+        .progress-gpu { background: linear-gradient(90deg, #a8edea, #fed6e3); }
+
+        .nodes-section {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            margin-bottom: 30px;
+        }
+
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 25px;
+        }
+
+        .section-title {
+            font-size: 1.5rem;
+            color: #333;
+            font-weight: 600;
+        }
+
+        .refresh-btn {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: all 0.3s ease;
+        }
+
+        .refresh-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .filters {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+
+        .filter-btn {
+            padding: 8px 16px;
+            border: 2px solid #e0e0e0;
+            background: white;
+            border-radius: 20px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 0.9rem;
+        }
+
+        .filter-btn.active {
+            background: #667eea;
+            color: white;
+            border-color: #667eea;
+        }
+
+        .nodes-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+            gap: 20px;
+        }
+
+        .node-card {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 20px;
+            transition: all 0.3s ease;
+            border: 2px solid transparent;
+        }
+
+        .node-card.online {
+            border-left-color: #28a745;
+        }
+
+        .node-card.offline {
+            border-left-color: #dc3545;
+            opacity: 0.7;
+        }
+
+        .node-card.busy {
+            border-left-color: #ffc107;
+        }
+
+        .node-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .node-id {
+            font-weight: bold;
+            font-size: 1.1rem;
+            color: #333;
+        }
+
+        .status-badge {
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 500;
+            text-transform: uppercase;
+        }
+
+        .status-online { background: #d4edda; color: #155724; }
+        .status-offline { background: #f8d7da; color: #721c24; }
+        .status-busy { background: #fff3cd; color: #856404; }
+
+        .node-info {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 15px;
+            font-size: 0.9rem;
+        }
+
+        .info-item {
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .info-label {
+            color: #666;
+        }
+
+        .info-value {
+            font-weight: 500;
+            color: #333;
+        }
+
+        .resources-section {
+            margin-top: 15px;
+        }
+
+        .resource-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .resource-label {
+            font-size: 0.85rem;
+            color: #666;
+            flex: 1;
+        }
+
+        .resource-usage {
+            flex: 2;
+            margin: 0 10px;
+        }
+
+        .resource-text {
+            font-size: 0.8rem;
+            color: #333;
+            min-width: 60px;
+            text-align: right;
+        }
+
+        .small-progress {
+            height: 4px;
+            background: #e0e0e0;
+            border-radius: 2px;
+            overflow: hidden;
+        }
+
+        .small-progress-fill {
+            height: 100%;
+            transition: width 0.3s ease;
+            border-radius: 2px;
+        }
+
+        .trust-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 0.75rem;
+            font-weight: 500;
+            margin-left: 5px;
+        }
+
+        .trust-high { background: #d4edda; color: #155724; }
+        .trust-normal { background: #fff3cd; color: #856404; }
+        .trust-low { background: #f8d7da; color: #721c24; }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 40px;
+            height: 40px;
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .last-updated {
+            text-align: center;
+            color: #888;
+            font-size: 0.9rem;
+            margin-top: 20px;
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 10px;
+            }
+            
+            .header h1 {
+                font-size: 2rem;
+            }
+            
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .nodes-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .section-header {
+                flex-direction: column;
+                gap: 15px;
+            }
+            
+            .filters {
+                justify-content: center;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🐝 HiveMind Node Pool Monitor</h1>
+            <p>實時監控 Worker 節點狀態和集群資源</p>
+        </div>
+
+        <!-- 集群統計 -->
+        <div class="stats-grid" id="statsGrid">
+            <div class="loading">
+                <div class="spinner"></div>
+                <p>載入中...</p>
+            </div>
+        </div>
+
+        <!-- 節點列表 -->
+        <div class="nodes-section">
+            <div class="section-header">
+                <h2 class="section-title">Worker 節點狀態</h2>
+                <div style="display: flex; gap: 10px;">
+                    <button class="refresh-btn" onclick="forceRefresh()">🔄 強制刷新</button>
+                    <button class="refresh-btn" onclick="loadData()">� 重新載入</button>
+                </div>
+            </div>
+
+            <div class="filters">
+                <button class="filter-btn active" data-filter="all">全部節點</button>
+                <button class="filter-btn" data-filter="online">線上節點</button>
+                <button class="filter-btn" data-filter="offline">離線節點</button>
+                <button class="filter-btn" data-filter="busy">忙碌節點</button>
+                <button class="filter-btn" data-filter="high">高信任</button>
+                <button class="filter-btn" data-filter="normal">普通信任</button>
+                <button class="filter-btn" data-filter="low">低信任</button>
+            </div>
+
+            <div class="nodes-grid" id="nodesGrid">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <p>載入節點資料中...</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="last-updated" id="lastUpdated"></div>
+    </div>
+
+    <script>
+        let allNodes = [];
+        let currentFilter = 'all';
+        let refreshInterval;
+
+        // 初始化
+        document.addEventListener('DOMContentLoaded', function() {
+            loadData();
+            // 更頻繁的更新 - 每5秒更新一次
+            refreshInterval = setInterval(loadData, 5000);
+
+            // 設置過濾器事件
+            document.querySelectorAll('.filter-btn').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+                    this.classList.add('active');
+                    currentFilter = this.dataset.filter;
+                    filterNodes();
+                });
+            });
+        });
+
+        async function loadData() {
+            try {
+                const response = await fetch('/api/nodes');
+                const data = await response.json();
+
+                if (data.success) {
+                    allNodes = data.nodes;
+                    updateStatsGrid(data.stats, data.total_nodes);
+                    filterNodes();
+                    updateLastUpdated(data.timestamp);
+                } else {
+                    showError('載入失敗: ' + data.error);
+                }
+            } catch (error) {
+                showError('網路錯誤: ' + error.message);
+            }
+        }
+
+        async function forceRefresh() {
+            try {
+                // 停止自動刷新，避免衝突
+                clearInterval(refreshInterval);
+                
+                // 顯示載入狀態
+                document.getElementById('nodesGrid').innerHTML = `
+                    <div class="loading" style="grid-column: 1/-1;">
+                        <div class="spinner"></div>
+                        <p>強制刷新中，清理離線節點...</p>
+                    </div>
+                `;
+                
+                const response = await fetch('/api/force_refresh');
+                const data = await response.json();
+
+                if (data.success) {
+                    console.log(`強制刷新完成，清理了 ${data.cleaned_nodes} 個離線節點`);
+                    // 重新載入數據
+                    await loadData();
+                } else {
+                    showError('強制刷新失敗: ' + data.error);
+                }
+                
+                // 恢復自動刷新
+                refreshInterval = setInterval(loadData, 5000);
+                
+            } catch (error) {
+                showError('強制刷新錯誤: ' + error.message);
+                // 恢復自動刷新
+                refreshInterval = setInterval(loadData, 5000);
+            }
+        }
+
+        function updateStatsGrid(stats, totalNodes) {
+            const statsGrid = document.getElementById('statsGrid');
+            
+            statsGrid.innerHTML = `
+                <div class="stat-card">
+                    <h3>總節點數</h3>
+                    <div class="stat-value">${totalNodes}</div>
+                    <div class="stat-label">註冊節點</div>
+                </div>
+                
+                <div class="stat-card">
+                    <h3>線上節點</h3>
+                    <div class="stat-value" style="color: #28a745;">${stats.online_nodes}</div>
+                    <div class="stat-label">可用 / 離線: ${stats.offline_nodes}</div>
+                </div>
+                
+                <div class="stat-card">
+                    <h3>忙碌節點</h3>
+                    <div class="stat-value" style="color: #ffc107;">${stats.busy_nodes}</div>
+                    <div class="stat-label">執行任務中</div>
+                </div>
+                
+                <div class="stat-card">
+                    <h3>CPU 利用率</h3>
+                    <div class="stat-value" style="color: #667eea;">${stats.resource_utilization.cpu_percent}%</div>
+                    <div class="progress-bar">
+                        <div class="progress-fill progress-cpu" style="width: ${stats.resource_utilization.cpu_percent}%"></div>
+                    </div>
+                </div>
+                
+                <div class="stat-card">
+                    <h3>記憶體利用率</h3>
+                    <div class="stat-value" style="color: #fa709a;">${stats.resource_utilization.memory_percent}%</div>
+                    <div class="progress-bar">
+                        <div class="progress-fill progress-memory" style="width: ${stats.resource_utilization.memory_percent}%"></div>
+                    </div>
+                </div>
+                
+                <div class="stat-card">
+                    <h3>GPU 利用率</h3>
+                    <div class="stat-value" style="color: #a8edea;">${stats.resource_utilization.gpu_percent}%</div>
+                    <div class="progress-bar">
+                        <div class="progress-fill progress-gpu" style="width: ${stats.resource_utilization.gpu_percent}%"></div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function filterNodes() {
+            let filteredNodes = allNodes;
+
+            if (currentFilter !== 'all') {
+                filteredNodes = allNodes.filter(node => {
+                    switch (currentFilter) {
+                        case 'online':
+                            return node.is_online;
+                        case 'offline':
+                            return !node.is_online;
+                        case 'busy':
+                            return parseInt(node.current_tasks) > 0;
+                        case 'high':
+                            return node.trust_level === 'high';
+                        case 'normal':
+                            return node.trust_level === 'normal';
+                        case 'low':
+                            return node.trust_level === 'low';
+                        default:
+                            return true;
+                    }
+                });
+            }
+
+            updateNodesGrid(filteredNodes);
+        }
+
+        function updateNodesGrid(nodes) {
+            const nodesGrid = document.getElementById('nodesGrid');
+            
+            if (nodes.length === 0) {
+                nodesGrid.innerHTML = '<div style="text-align: center; color: #666; grid-column: 1/-1;">沒有符合條件的節點</div>';
+                return;
+            }
+
+            nodesGrid.innerHTML = nodes.map(node => {
+                const statusClass = node.is_online ? (parseInt(node.current_tasks) > 0 ? 'busy' : 'online') : 'offline';
+                const statusText = node.is_online ? (parseInt(node.current_tasks) > 0 ? '忙碌' : '線上') : '離線';
+                const trustClass = `trust-${node.trust_level}`;
+                const trustText = {
+                    'high': '高信任',
+                    'normal': '普通',
+                    'low': '低信任'
+                }[node.trust_level] || '未知';
+
+                // 計算資源利用率
+                const cpuTotal = parseInt(node.total_cpu_score) || 0;
+                const cpuAvailable = parseInt(node.available_cpu_score) || 0;
+                const cpuUtilization = cpuTotal > 0 ? Math.round((1 - cpuAvailable / cpuTotal) * 100) : 0;
+
+                const memoryTotal = parseFloat(node.total_memory_gb) || 0;
+                const memoryAvailable = parseFloat(node.available_memory_gb) || 0;
+                const memoryUtilization = memoryTotal > 0 ? Math.round((1 - memoryAvailable / memoryTotal) * 100) : 0;
+
+                const gpuTotal = parseInt(node.total_gpu_score) || 0;
+                const gpuAvailable = parseInt(node.available_gpu_score) || 0;
+                const gpuUtilization = gpuTotal > 0 ? Math.round((1 - gpuAvailable / gpuTotal) * 100) : 0;
+
+                // 計算離線時間
+                const offlineTime = node.offline_duration > 0 ? formatDuration(node.offline_duration) : '';
+
+                // 格式化心跳時間
+                const lastSeen = node.last_heartbeat > 0 ? 
+                    new Date(node.last_heartbeat * 1000).toLocaleString('zh-TW') : '從未';
+
+                return `
+                    <div class="node-card ${statusClass}">
+                        <div class="node-header">
+                            <div class="node-id">
+                                ${node.node_id}
+                                <span class="trust-badge ${trustClass}">${trustText}</span>
+                            </div>
+                            <span class="status-badge status-${statusClass}">
+                                ${statusText}
+                                ${!node.is_online && offlineTime ? ` (${offlineTime})` : ''}
+                            </span>
+                        </div>
+                        
+                        <div class="node-info">
+                            <div class="info-item">
+                                <span class="info-label">位置:</span>
+                                <span class="info-value">${node.location || '未知'}</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">主機:</span>
+                                <span class="info-value">${node.hostname}:${node.port}</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">Docker:</span>
+                                <span class="info-value">${node.docker_status === 'available' ? '✅ 可用' : '❌ 不可用'}</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">任務數:</span>
+                                <span class="info-value">${node.current_tasks} 個</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">上次心跳:</span>
+                                <span class="info-value">${lastSeen}</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">信用分數:</span>
+                                <span class="info-value">${node.credit_score || 0}</span>
+                            </div>
+                        </div>
+
+                        <div class="resources-section">
+                            <div class="resource-item">
+                                <span class="resource-label">CPU (${cpuAvailable}/${cpuTotal})</span>
+                                <div class="resource-usage">
+                                    <div class="small-progress">
+                                        <div class="small-progress-fill progress-cpu" style="width: ${cpuUtilization}%"></div>
+                                    </div>
+                                </div>
+                                <span class="resource-text">${cpuUtilization}%</span>
+                            </div>
+                            
+                            <div class="resource-item">
+                                <span class="resource-label">記憶體 (${memoryAvailable.toFixed(1)}/${memoryTotal.toFixed(1)}GB)</span>
+                                <div class="resource-usage">
+                                    <div class="small-progress">
+                                        <div class="small-progress-fill progress-memory" style="width: ${memoryUtilization}%"></div>
+                                    </div>
+                                </div>
+                                <span class="resource-text">${memoryUtilization}%</span>
+                            </div>
+                            
+                            ${gpuTotal > 0 ? `
+                            <div class="resource-item">
+                                <span class="resource-label">GPU (${gpuAvailable}/${gpuTotal})</span>
+                                <div class="resource-usage">
+                                    <div class="small-progress">
+                                        <div class="small-progress-fill progress-gpu" style="width: ${gpuUtilization}%"></div>
+                                    </div>
+                                </div>
+                                <span class="resource-text">${gpuUtilization}%</span>
+                            </div>
+                            ` : ''}
+                        </div>
+
+                        ${node.running_task_ids && node.running_task_ids.trim() ? `
+                        <div style="margin-top: 10px; font-size: 0.8rem; color: #666;">
+                            <strong>執行中任務:</strong><br>
+                            ${node.running_task_ids.split(',').filter(id => id.trim()).map(taskId => 
+                                `<span style="background: #e3f2fd; padding: 2px 6px; margin: 2px; border-radius: 4px; display: inline-block;">${taskId.trim()}</span>`
+                            ).join('')}
+                        </div>
+                        ` : ''}
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function updateLastUpdated(timestamp) {
+            const lastUpdated = document.getElementById('lastUpdated');
+            const date = new Date(timestamp);
+            lastUpdated.textContent = `最後更新: ${date.toLocaleString('zh-TW')}`;
+        }
+
+        function showError(message) {
+            document.getElementById('statsGrid').innerHTML = `
+                <div style="grid-column: 1/-1; text-align: center; color: #dc3545; padding: 20px;">
+                    ❌ ${message}
+                </div>
+            `;
+        }
+
+        function refreshData() {
+            loadData();
+        }
+
+        function formatDuration(seconds) {
+            if (seconds < 60) {
+                return `${Math.floor(seconds)}秒`;
+            } else if (seconds < 3600) {
+                return `${Math.floor(seconds / 60)}分鐘`;
+            } else {
+                return `${Math.floor(seconds / 3600)}小時`;
+            }
+        }
+    </script>
+</body>
+</html>
