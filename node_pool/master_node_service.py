@@ -651,7 +651,7 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
         self.dispatch_interval = 10
         self.health_check_interval = 5
         self.reward_interval = 60
-        self.node_timeout_threshold = 30  # 修復：添加缺失的屬性
+        self.node_timeout_threshold = 60  # 增加到 60 秒，避免任務執行時誤判為超時
         
         # 狀態追蹤
         self.task_health = {}
@@ -718,8 +718,15 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                             continue
 
                         last_heartbeat = node_info.get("last_heartbeat", 0)
-                        if current_time - float(last_heartbeat) > self.node_timeout_threshold:
-                            logging.warning(f"節點 {assigned_node} 心跳超時，任務 {task_id} 標記為失敗")
+                        node_status = node_info.get("status", "Unknown")
+                        
+                        # 如果節點正在執行任務，給予更多時間
+                        timeout_threshold = self.node_timeout_threshold
+                        if "Running" in node_status or "Executing" in node_status:
+                            timeout_threshold = self.node_timeout_threshold * 2  # 執行中的任務給予雙倍超時時間
+                        
+                        if current_time - float(last_heartbeat) > timeout_threshold:
+                            logging.warning(f"節點 {assigned_node} 心跳超時 (狀態: {node_status}, 超時: {timeout_threshold}s)，任務 {task_id} 標記為失敗")
                             self._increment_task_fail_count(task_id, assigned_node, user_id)
                 
                 except Exception as e:
@@ -739,6 +746,17 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                     for task in running_tasks:
                         task_id = task["task_id"]
                         user_id = task.get("user_id")
+                        
+                        # 檢查任務實際狀態，避免對已失敗/停止的任務扣費
+                        current_task_info = self.task_manager.get_task_info(task_id, include_zip=False)
+                        if not current_task_info:
+                            logging.debug(f"任務 {task_id} 不存在，跳過扣費")
+                            continue
+                            
+                        current_status = current_task_info.get("status")
+                        if current_status not in ["RUNNING", "EXECUTING"]:
+                            logging.debug(f"任務 {task_id} 狀態為 {current_status}，跳過扣費")
+                            continue
                         
                         # 使用任務上傳時計算的固定CPT費用（每分鐘）
                         try:
@@ -827,6 +845,31 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
         
         threading.Thread(target=reward_scheduler_loop, daemon=True).start()
         logging.info("獎勵調度器已啟動（使用固定費率）")
+
+    def _increment_task_fail_count(self, task_id, assigned_node, user_id):
+        """增加任務失敗計數並處理任務失敗邏輯"""
+        try:
+            # 將任務標記為失敗
+            self.task_manager.update_task_status(task_id, "FAILED", assigned_node=assigned_node)
+            
+            # 更新節點狀態為空閒
+            if assigned_node:
+                self.node_manager.report_status(assigned_node, "Idle")
+            
+            # 從健康檢查列表中移除
+            if task_id in self.task_health:
+                del self.task_health[task_id]
+            
+            # 記錄失敗日誌
+            log_message = f"任務 {task_id} 因節點 {assigned_node} 心跳超時標記為失敗"
+            logging.info(log_message)
+            
+            # 存儲失敗日誌
+            if hasattr(self.task_manager, 'store_logs'):
+                self.task_manager.store_logs(task_id, "system", log_message, int(time.time()))
+            
+        except Exception as e:
+            logging.error(f"處理任務失敗計數錯誤: {e}", exc_info=True)
 
     def _extract_user_from_token(self, token):
         """從 token 中提取用戶名（使用數據庫管理器）"""
@@ -1188,6 +1231,38 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                 success = self.task_manager.update_task_status(task_id, "FAILED")
                 message = f"Task {task_id} failed"
                 logging.info(message)
+            
+            # 修復任務執行失敗時的轉帳邏輯
+            # 只有在任務真正成功完成時才進行轉帳
+            if task_success and current_status != "COMPLETED":
+                try:
+                    # 檢查是否存在 transfer_cpt 方法，否則使用 transfer_tokens
+                    if hasattr(self.db_manager, 'transfer_cpt'):
+                        transfer_result = self.db_manager.transfer_cpt(
+                            from_user=task_info.get("user_id"),
+                            to_user=node_id,  # 假設 node_id 對應的用戶為任務分配的用戶
+                            amount=float(task_info.get("cpt_cost", 1)),
+                            reason=f"任務 {task_id} 完成"
+                        )
+                    else:
+                        # 使用 transfer_tokens 方法
+                        transfer_result, _ = self.db_manager.transfer_tokens(
+                            task_info.get("user_id"),
+                            node_id,
+                            int(task_info.get("cpt_cost", 1))
+                        )
+                    
+                    if transfer_result:
+                        logging.info(f"任務 {task_id} 完成後轉帳成功: {task_info.get('cpt_cost', 1)} CPT 從發起者 {task_info.get('user_id')} 到工作端 {node_id}")
+                    else:
+                        logging.warning(f"任務 {task_id} 完成後轉帳失敗，請檢查系統")
+                except Exception as e:
+                    logging.error(f"任務 {task_id} 完成後轉帳處理失敗: {e}")
+            else:
+                if not task_success:
+                    logging.info(f"任務 {task_id} 執行失敗，不進行 CPT 轉帳獎勵")
+                elif current_status == "COMPLETED":
+                    logging.info(f"任務 {task_id} 已經完成並轉帳，跳過重複轉帳")
             
             # 從健康檢查中移除
             if task_id in self.task_health:

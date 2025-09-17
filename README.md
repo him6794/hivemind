@@ -83,8 +83,8 @@ HiveMind employs a sophisticated multi-layered architecture designed for scalabi
 
 | Component | Purpose | Technology Stack |
 |-----------|---------|------------------|
-| **Node Pool** | Central resource management and task scheduling | Python, gRPC, SQLite |
-| **Worker Nodes** | Distributed task execution units | Docker, Python, Resource Monitoring |
+| **Node Pool** | Central resource management, task scheduling, and multi-level trust system | Python, gRPC, Redis, SQLite |
+| **Worker Nodes** | Distributed task execution with containerization support | Docker, Python, Resource Monitoring |
 | **Master Node** | System orchestration and web interface | Flask, WireGuard VPN |
 | **TaskWorker** | Lightweight task execution framework | gRPC, Protocol Buffers |
 | **AI Module** | Intelligent resource optimization | Q-Learning, Model Analysis |
@@ -134,8 +134,8 @@ pip install -r requirements.txt
 
 | **Component** | **Launch Command** | **Description** |
 |:---:|:---:|:---:|
-| **Node Pool** | `cd node_pool && python node_pool_server.py` | Central management service |
-| **Worker Node** | `cd worker && python worker_node.py` | Computational worker |
+| **Node Pool** | `cd node_pool && python node_pool_server.py` | Central management with trust-based scheduling |
+| **Worker Node** | `cd worker && python worker_node.py` | Computational worker with resource monitoring |
 | **Master Node** | `cd master && python master_node.py` | Web interface & orchestration |
 | **TaskWorker** | `cd taskworker && python worker.py` | Lightweight task executor |
 
@@ -160,8 +160,8 @@ docker-compose ps
 
 | **Feature** | **Description** | **Status** | **Tech Stack** |
 |:---:|:---:|:---:|:---:|
-| **Node Pool** | Resource scheduling & task distribution | ✅ **Production** | gRPC, SQLite, Redis |
-| **Worker Nodes** | Multi-task execution with containerization | ✅ **Production** | Docker, Python, Flask, VPN |
+| **Node Pool** | Multi-level trust system, resource scheduling & dynamic allocation | ✅ **Production** | gRPC, Redis, SQLite, JWT |
+| **Worker Nodes** | Multi-task execution with Docker containerization | ✅ **Production** | Docker, Python, Flask, VPN |
 | **Master Node** | Web interface & system orchestration | ✅ **Production** | Flask, WireGuard VPN |
 | **TaskWorker** | Lightweight task execution framework | ✅ **Production** | gRPC, Protocol Buffers |
 | **AI Module** | Intelligent resource optimization | **Development** | Q-Learning, TensorFlow |

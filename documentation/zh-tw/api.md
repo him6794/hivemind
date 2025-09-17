@@ -18,29 +18,58 @@ HiveMind 使用 gRPC 協議進行服務間通訊，所有 API 接口都基於 Pr
 
 ## gRPC 服務定義
 
-### NodePool 服務
+基於實際的 `worker/nodepool.proto` 文件，HiveMind 包含四個主要的 gRPC 服務：
 
-**文件**: `nodepool.proto`
+### UserService (用戶服務)
+
+**文件**: `worker/nodepool.proto`
 
 ```protobuf
-service NodePoolService {
-  // 節點管理
-  rpc RegisterNode(RegisterNodeRequest) returns (RegisterNodeResponse);
-  rpc UnregisterNode(UnregisterNodeRequest) returns (UnregisterNodeResponse);
-  rpc UpdateNodeStatus(UpdateNodeStatusRequest) returns (UpdateNodeStatusResponse);
-  rpc GetNodeInfo(GetNodeInfoRequest) returns (GetNodeInfoResponse);
-  
-  // 用戶管理
-  rpc RegisterUser(RegisterUserRequest) returns (RegisterUserResponse);
-  rpc LoginUser(LoginUserRequest) returns (LoginUserResponse);
-  rpc LogoutUser(LogoutUserRequest) returns (LogoutUserResponse);
-  rpc GetUserInfo(GetUserInfoRequest) returns (GetUserInfoResponse);
-  
-  // 任務管理
-  rpc SubmitTask(SubmitTaskRequest) returns (SubmitTaskResponse);
-  rpc GetTaskStatus(GetTaskStatusRequest) returns (GetTaskStatusResponse);
-  rpc CancelTask(CancelTaskRequest) returns (CancelTaskResponse);
-  rpc GetTaskResult(GetTaskResultRequest) returns (GetTaskResultResponse);
+service UserService {
+    rpc Login(LoginRequest) returns (LoginResponse);
+    rpc Register(RegisterRequest) returns (RegisterResponse);
+    rpc Transfer(TransferRequest) returns (TransferResponse);
+    rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse);
+}
+```
+
+### NodeManagerService (節點管理服務)
+
+```protobuf
+service NodeManagerService {
+    rpc RegisterWorkerNode(RegisterWorkerNodeRequest) returns (StatusResponse);
+    rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+    rpc ReportStatus(ReportStatusRequest) returns (StatusResponse);
+    rpc GetNodeList(GetNodeListRequest) returns (GetNodeListResponse);
+}
+```
+
+### MasterNodeService (主節點服務)
+
+```protobuf
+service MasterNodeService {
+    rpc UploadTask(UploadTaskRequest) returns (UploadTaskResponse);
+    rpc PollTaskStatus(PollTaskStatusRequest) returns (PollTaskStatusResponse);
+    rpc StoreOutput(StoreOutputRequest) returns (StatusResponse);
+    rpc StoreResult(StoreResultRequest) returns (StatusResponse);
+    rpc GetTaskResult(GetTaskResultRequest) returns (GetTaskResultResponse);
+    rpc TaskCompleted(TaskCompletedRequest) returns (StatusResponse);
+    rpc StoreLogs(StoreLogsRequest) returns (StatusResponse);
+    rpc GetTaskLogs(GetTaskLogsRequest) returns (GetTaskLogsResponse);
+    rpc GetAllTasks(GetAllTasksRequest) returns (GetAllTasksResponse);
+    rpc StopTask(StopTaskRequest) returns (StopTaskResponse);
+    rpc ReturnTaskResult(ReturnTaskResultRequest) returns (ReturnTaskResultResponse);
+}
+```
+
+### WorkerNodeService (工作節點服務)
+
+```protobuf
+service WorkerNodeService {
+    rpc ExecuteTask(ExecuteTaskRequest) returns (ExecuteTaskResponse);
+    rpc ReportOutput(ReportOutputRequest) returns (StatusResponse);
+    rpc ReportRunningStatus(RunningStatusRequest) returns (RunningStatusResponse);
+    rpc StopTaskExecution(StopTaskExecutionRequest) returns (StopTaskExecutionResponse);
 }
 ```
 
@@ -48,139 +77,375 @@ service NodePoolService {
 
 ### 用戶註冊
 
-**方法**: `RegisterUser`
+**方法**: `Register`
+**服務**: `UserService`
 
 **請求參數**:
 ```protobuf
-message RegisterUserRequest {
-  string username = 1;      // 用戶名 (3-20字符，字母數字下劃線)
-  string password = 2;      // 密碼 (最少8字符)
-  string email = 3;         // 電子郵件地址
+message RegisterRequest {
+    string username = 1;     // 用戶名
+    string password = 2;     // 密碼
 }
 ```
 
 **回應參數**:
 ```protobuf
-message RegisterUserResponse {
-  bool success = 1;         // 是否成功
-  string message = 2;       // 回應訊息
-  string user_id = 3;       // 用戶ID (成功時返回)
+message RegisterResponse {
+    bool success = 1;        // 是否成功
+    string message = 2;      // 回應訊息
 }
 ```
-
-**錯誤碼**:
-- `USER_EXISTS`: 用戶名已存在
-- `INVALID_EMAIL`: 無效的電子郵件格式
-- `WEAK_PASSWORD`: 密碼強度不足
 
 ### 用戶登入
 
-**方法**: `LoginUser`
+**方法**: `Login`
+**服務**: `UserService`
 
 **請求參數**:
 ```protobuf
-message LoginUserRequest {
-  string username = 1;      // 用戶名
-  string password = 2;      // 密碼
+message LoginRequest {
+    string username = 1;     // 用戶名
+    string password = 2;     // 密碼
 }
 ```
 
 **回應參數**:
 ```protobuf
-message LoginUserResponse {
-  bool success = 1;         // 是否成功
-  string message = 2;       // 回應訊息
-  string session_token = 3; // 會話令牌
-  UserInfo user_info = 4;   // 用戶資訊
+message LoginResponse {
+    bool success = 1;        // 是否成功
+    string message = 2;      // 回應訊息
+    string token = 3;        // JWT 認證令牌
+}
+```
+
+### 餘額查詢
+
+**方法**: `GetBalance`
+**服務**: `UserService`
+
+**請求參數**:
+```protobuf
+message GetBalanceRequest {
+    string username = 1;     // 用戶名
+    string token = 2;        // 認證令牌
+}
+```
+
+**回應參數**:
+```protobuf
+message GetBalanceResponse {
+    bool success = 1;        // 是否成功
+    string message = 2;      // 回應訊息
+    int64 balance = 3;       // 用戶餘額
+}
+```
+
+### 轉帳交易
+
+**方法**: `Transfer`
+**服務**: `UserService`
+
+**請求參數**:
+```protobuf
+message TransferRequest {
+    string token = 1;            // 認證令牌
+    string receiver_username = 2; // 接收者用戶名
+    int64 amount = 3;           // 轉帳金額
+}
+```
+
+**回應參數**:
+```protobuf
+message TransferResponse {
+    bool success = 1;        // 是否成功
+    string message = 2;      // 回應訊息
 }
 ```
 
 ## 節點管理 API
 
-### 節點註冊
+### 工作節點註冊
 
-**方法**: `RegisterNode`
+**方法**: `RegisterWorkerNode`
+**服務**: `NodeManagerService`
 
 **請求參數**:
 ```protobuf
-message RegisterNodeRequest {
-  string node_id = 1;       // 節點ID
-  string node_type = 2;     // 節點類型 (worker/master)
-  string hostname = 3;      // 主機名
-  int32 port = 4;          // 端口號
-  NodeCapabilities capabilities = 5; // 節點能力
+message RegisterWorkerNodeRequest {
+    string node_id = 1;          // 節點ID (用戶名)
+    string hostname = 2;         // IP 地址
+    int32 cpu_cores = 3;         // CPU 核心數
+    int32 memory_gb = 4;         // 記憶體容量 (GB)
+    int32 cpu_score = 5;         // CPU 效能分數
+    int32 gpu_score = 6;         // GPU 效能分數
+    int32 gpu_memory_gb = 7;     // GPU 記憶體容量 (GB)
+    string location = 8;         // 地理位置
+    int32 port = 9;             // 服務端口
+    string gpu_name = 10;        // GPU 名稱
+    int32 trust_level = 11;      // 信任等級
+    double last_heartbeat = 12;   // 最後心跳時間
+    string docker_status = 13;    // Docker 狀態
 }
 ```
 
 **回應參數**:
 ```protobuf
-message RegisterNodeResponse {
-  bool success = 1;         // 是否成功
-  string message = 2;       // 回應訊息
-  string assigned_id = 3;   // 分配的節點ID
+message StatusResponse {
+    bool success = 1;        // 是否成功
+    string message = 2;      // 回應訊息
 }
 ```
 
-### 節點狀態更新
+### 健康檢查
 
-**方法**: `UpdateNodeStatus`
+**方法**: `HealthCheck`
+**服務**: `NodeManagerService`
 
 **請求參數**:
 ```protobuf
-message UpdateNodeStatusRequest {
-  string node_id = 1;       // 節點ID
-  NodeStatus status = 2;    // 節點狀態
-  ResourceUsage resource_usage = 3; // 資源使用情況
+message HealthCheckRequest {
+    string node_id = 1;      // 節點ID
+}
+```
+
+**回應參數**:
+```protobuf
+message HealthCheckResponse {
+    string status = 1;       // 健康狀態
+    string message = 2;      // 狀態訊息
+}
+```
+
+### 狀態報告
+
+**方法**: `ReportStatus`
+**服務**: `NodeManagerService`
+
+**請求參數**:
+```protobuf
+message ReportStatusRequest {
+    string node_id = 1;      // 節點ID
+    string status = 2;       // 節點狀態
+}
+```
+
+### 獲取節點列表
+
+**方法**: `GetNodeList`
+**服務**: `NodeManagerService`
+
+**請求參數**:
+```protobuf
+message GetNodeListRequest {
+    // 空請求，獲取所有節點
+}
+```
+
+**回應參數**:
+```protobuf
+message GetNodeListResponse {
+    repeated WorkerNodeInfo nodes = 1; // 節點列表
+}
+
+message WorkerNodeInfo {
+    string node_id = 1;          // 節點ID
+    string hostname = 2;         // IP 地址
+    int32 cpu_cores = 3;         // CPU 核心數
+    int32 memory_gb = 4;         // 記憶體容量
+    int32 cpu_score = 5;         // CPU 效能分數
+    int32 gpu_score = 6;         // GPU 效能分數
+    int32 gpu_memory_gb = 7;     // GPU 記憶體容量
+    string location = 8;         // 地理位置
+    int32 port = 9;             // 服務端口
+    string gpu_name = 10;        // GPU 名稱
+    int32 trust_level = 11;      // 信任等級
+    double last_heartbeat = 12;   // 最後心跳時間
+    string docker_status = 13;    // Docker 狀態
 }
 ```
 
 ## 任務管理 API
 
-### 提交任務
+### 上傳任務
 
-**方法**: `SubmitTask`
+**方法**: `UploadTask`
+**服務**: `MasterNodeService`
 
 **請求參數**:
 ```protobuf
-message SubmitTaskRequest {
-  string user_id = 1;       // 用戶ID
-  string task_type = 2;     // 任務類型
-  bytes task_data = 3;      // 任務數據
-  TaskRequirements requirements = 4; // 任務需求
-  TaskPriority priority = 5; // 任務優先級
+message UploadTaskRequest {
+    string task_id = 1;      // 任務ID
+    bytes task_data = 2;     // 任務數據
+    string user_id = 3;      // 用戶ID
 }
 ```
 
 **回應參數**:
 ```protobuf
-message SubmitTaskResponse {
-  bool success = 1;         // 是否成功
-  string message = 2;       // 回應訊息
-  string task_id = 3;       // 任務ID
-  string estimated_time = 4; // 預估完成時間
+message UploadTaskResponse {
+    bool success = 1;        // 是否成功
+    string message = 2;      // 回應訊息
 }
 ```
 
 ### 查詢任務狀態
 
-**方法**: `GetTaskStatus`
+**方法**: `PollTaskStatus`
+**服務**: `MasterNodeService`
 
 **請求參數**:
 ```protobuf
-message GetTaskStatusRequest {
-  string task_id = 1;       // 任務ID
-  string user_id = 2;       // 用戶ID
+message PollTaskStatusRequest {
+    string task_id = 1;      // 任務ID
 }
 ```
 
 **回應參數**:
 ```protobuf
-message GetTaskStatusResponse {
-  bool success = 1;         // 是否成功
-  string message = 2;       // 回應訊息
-  TaskStatus status = 3;    // 任務狀態
-  float progress = 4;       // 完成進度 (0.0-1.0)
-  string assigned_node = 5; // 分配的節點
+message PollTaskStatusResponse {
+    bool success = 1;            // 是否成功
+    string message = 2;          // 回應訊息
+    string status = 3;           // 任務狀態
+    repeated string output = 4;   // 輸出內容
+}
+```
+
+### 獲取任務結果
+
+**方法**: `GetTaskResult`
+**服務**: `MasterNodeService`
+
+**請求參數**:
+```protobuf
+message GetTaskResultRequest {
+    string task_id = 1;      // 任務ID
+}
+```
+
+**回應參數**:
+```protobuf
+message GetTaskResultResponse {
+    bool success = 1;        // 是否成功
+    string message = 2;      // 回應訊息
+    bytes result_data = 3;   // 結果數據
+}
+```
+
+### 停止任務
+
+**方法**: `StopTask`
+**服務**: `MasterNodeService`
+
+**請求參數**:
+```protobuf
+message StopTaskRequest {
+    string task_id = 1;      // 任務ID
+}
+```
+
+**回應參數**:
+```protobuf
+message StopTaskResponse {
+    bool success = 1;        // 是否成功
+    string message = 2;      // 回應訊息
+}
+```
+
+### 獲取所有任務
+
+**方法**: `GetAllTasks`
+**服務**: `MasterNodeService`
+
+**請求參數**:
+```protobuf
+message GetAllTasksRequest {
+    // 空請求，獲取所有任務
+}
+```
+
+**回應參數**:
+```protobuf
+message GetAllTasksResponse {
+    repeated TaskStatus tasks = 1; // 任務列表
+}
+
+message TaskStatus {
+    string task_id = 1;       // 任務ID
+    string status = 2;        // 任務狀態
+    string assigned_node = 3; // 分配的節點
+    double created_at = 4;    // 創建時間
+    double started_at = 5;    // 開始時間
+    double completed_at = 6;  // 完成時間
+    string user_id = 7;       // 用戶ID
+}
+```
+
+## 工作節點 API
+
+### 執行任務
+
+**方法**: `ExecuteTask`
+**服務**: `WorkerNodeService`
+
+**請求參數**:
+```protobuf
+message ExecuteTaskRequest {
+    string task_id = 1;      // 任務ID
+    bytes task_data = 2;     // 任務數據
+}
+```
+
+**回應參數**:
+```protobuf
+message ExecuteTaskResponse {
+    bool success = 1;        // 是否成功
+    string message = 2;      // 回應訊息
+}
+```
+
+### 報告運行狀態
+
+**方法**: `ReportRunningStatus`
+**服務**: `WorkerNodeService`
+
+**請求參數**:
+```protobuf
+message RunningStatusRequest {
+    string node_id = 1;          // 節點ID
+    string task_id = 2;          // 任務ID
+    int32 cpu_usage = 3;         // CPU 使用率
+    int32 memory_usage = 4;      // 記憶體使用率
+    int32 gpu_usage = 5;         // GPU 使用率
+    int32 gpu_memory_usage = 6;  // GPU 記憶體使用率
+}
+```
+
+**回應參數**:
+```protobuf
+message RunningStatusResponse {
+    bool success = 1;        // 是否成功
+    string message = 2;      // 回應訊息
+    int64 cpt_reward = 3;    // CPT 獎勵
+}
+```
+
+### 停止任務執行
+
+**方法**: `StopTaskExecution`
+**服務**: `WorkerNodeService`
+
+**請求參數**:
+```protobuf
+message StopTaskExecutionRequest {
+    string task_id = 1;      // 任務ID
+}
+```
+
+**回應參數**:
+```protobuf
+message StopTaskExecutionResponse {
+    bool success = 1;        // 是否成功
+    string message = 2;      // 回應訊息
 }
 ```
 
@@ -282,32 +547,114 @@ HiveMind 使用基於令牌的認證機制：
 
 ### Python 客戶端範例
 
+#### 用戶服務範例
+
 ```python
 import grpc
 from node_pool import nodepool_pb2_grpc, nodepool_pb2
 
 # 創建連接
 channel = grpc.insecure_channel('localhost:50051')
-stub = nodepool_pb2_grpc.NodePoolServiceStub(channel)
+user_stub = nodepool_pb2_grpc.UserServiceStub(channel)
 
 # 用戶註冊
-request = nodepool_pb2.RegisterUserRequest(
-    username="testuser",
-    password="password123",
-    email="test@example.com"
-)
-response = stub.RegisterUser(request)
-print(f"註冊結果: {response.success}, 訊息: {response.message}")
-
-# 用戶登入
-login_request = nodepool_pb2.LoginUserRequest(
+register_request = nodepool_pb2.RegisterRequest(
     username="testuser",
     password="password123"
 )
-login_response = stub.LoginUser(login_request)
+register_response = user_stub.Register(register_request)
+print(f"註冊結果: {register_response.success}, 訊息: {register_response.message}")
+
+# 用戶登入
+login_request = nodepool_pb2.LoginRequest(
+    username="testuser",
+    password="password123"
+)
+login_response = user_stub.Login(login_request)
 if login_response.success:
-    session_token = login_response.session_token
-    print(f"登入成功，令牌: {session_token}")
+    token = login_response.token
+    print(f"登入成功，令牌: {token}")
+    
+    # 查詢餘額
+    balance_request = nodepool_pb2.GetBalanceRequest(
+        username="testuser",
+        token=token
+    )
+    balance_response = user_stub.GetBalance(balance_request)
+    print(f"用戶餘額: {balance_response.balance}")
+```
+
+#### 節點管理服務範例
+
+```python
+# 節點管理服務
+node_stub = nodepool_pb2_grpc.NodeManagerServiceStub(channel)
+
+# 註冊工作節點
+register_node_request = nodepool_pb2.RegisterWorkerNodeRequest(
+    node_id="worker-001",
+    hostname="192.168.1.100",
+    cpu_cores=8,
+    memory_gb=16,
+    cpu_score=1000,
+    gpu_score=2000,
+    gpu_memory_gb=8,
+    location="Asia/Taipei",
+    port=50052,
+    gpu_name="RTX 4090",
+    trust_level=100,
+    last_heartbeat=1640995200.0,
+    docker_status="enabled"
+)
+node_response = node_stub.RegisterWorkerNode(register_node_request)
+print(f"節點註冊: {node_response.success}")
+
+# 健康檢查
+health_request = nodepool_pb2.HealthCheckRequest(node_id="worker-001")
+health_response = node_stub.HealthCheck(health_request)
+print(f"節點健康狀態: {health_response.status}")
+```
+
+#### 主節點服務範例
+
+```python
+# 主節點服務
+master_stub = nodepool_pb2_grpc.MasterNodeServiceStub(channel)
+
+# 上傳任務
+task_data = b"print('Hello, HiveMind!')"
+upload_request = nodepool_pb2.UploadTaskRequest(
+    task_id="task-001",
+    task_data=task_data,
+    user_id="user123"
+)
+upload_response = master_stub.UploadTask(upload_request)
+print(f"任務上傳: {upload_response.success}")
+
+# 查詢任務狀態
+status_request = nodepool_pb2.PollTaskStatusRequest(task_id="task-001")
+status_response = master_stub.PollTaskStatus(status_request)
+print(f"任務狀態: {status_response.status}")
+print(f"任務輸出: {status_response.output}")
+```
+
+#### 工作節點服務範例
+
+```python
+# 工作節點服務  
+worker_stub = nodepool_pb2_grpc.WorkerNodeServiceStub(channel)
+
+# 報告運行狀態
+status_request = nodepool_pb2.RunningStatusRequest(
+    node_id="worker-001",
+    task_id="task-001",
+    cpu_usage=75,
+    memory_usage=60,
+    gpu_usage=85,
+    gpu_memory_usage=70
+)
+status_response = worker_stub.ReportRunningStatus(status_request)
+print(f"CPT 獎勵: {status_response.cpt_reward}")
 ```
 
 ## 性能考量

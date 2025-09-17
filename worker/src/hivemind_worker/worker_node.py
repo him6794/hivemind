@@ -13,7 +13,147 @@ from flask import Flask, jsonify, request, render_template, session, redirect, u
 import nodepool_pb2
 import nodepool_pb2_grpc
 from concurrent.futures import ThreadPoolExecutor
-from psutil import cpu_count, virtual_memory, cpu_percent
+
+# Go-based psutil replacement
+import ctypes
+from collections import namedtuple
+from ctypes import c_int, c_double, c_ulonglong, c_char_p
+
+# Try to load Go DLL for better performance
+try:
+    dll_path = os.path.join(os.path.dirname(__file__), "psutil.dll")
+    if os.path.exists(dll_path):
+        _go_lib = ctypes.CDLL(dll_path)
+        # Setup function signatures
+        _go_lib.get_cpu_count.restype = c_int
+        _go_lib.get_cpu_count.argtypes = []
+        _go_lib.get_memory_total.restype = c_ulonglong
+        _go_lib.get_memory_total.argtypes = []
+        _go_lib.get_memory_available.restype = c_ulonglong
+        _go_lib.get_memory_available.argtypes = []
+        _go_lib.get_memory_percent.restype = c_double
+        _go_lib.get_memory_percent.argtypes = []
+        _go_lib.get_hostname_length.restype = c_int
+        _go_lib.get_hostname_length.argtypes = []
+        _go_lib.get_hostname_data.restype = c_int
+        _go_lib.get_hostname_data.argtypes = [c_char_p, c_int]
+        _go_lib.get_cpu_score.restype = c_int
+        _go_lib.get_cpu_score.argtypes = []
+        _go_lib.get_gpu_name_length.restype = c_int
+        _go_lib.get_gpu_name_length.argtypes = []
+        _go_lib.get_gpu_name_data.restype = c_int
+        _go_lib.get_gpu_name_data.argtypes = [c_char_p, c_int]
+        _go_lib.get_gpu_memory.restype = c_double
+        _go_lib.get_gpu_memory.argtypes = []
+        _go_lib.get_gpu_score.restype = c_int
+        _go_lib.get_gpu_score.argtypes = []
+        _go_lib.get_gpu_available.restype = c_int
+        _go_lib.get_gpu_available.argtypes = []
+        
+        USING_GO_PSUTIL = True
+        print("[Worker] Using Go-based psutil replacement for better performance")
+    else:
+        _go_lib = None
+        USING_GO_PSUTIL = False
+        print(f"[Worker] Go DLL not found at {dll_path}, falling back to Python psutil")
+except Exception as e:
+    _go_lib = None
+    USING_GO_PSUTIL = False
+    print(f"[Worker] Failed to load Go DLL: {e}, falling back to Python psutil")
+
+# Memory info namedtuple compatible with psutil
+VirtualMemory = namedtuple('VirtualMemory', ['total', 'available', 'percent', 'used', 'free'])
+
+def cpu_count(logical=True):
+    """Get CPU count using Go library or fallback to Python"""
+    if USING_GO_PSUTIL:
+        return _go_lib.get_cpu_count()
+    else:
+        from psutil import cpu_count as psutil_cpu_count
+        return psutil_cpu_count(logical=logical)
+
+def virtual_memory():
+    """Get memory info using Go library or fallback to Python"""
+    if USING_GO_PSUTIL:
+        total = _go_lib.get_memory_total()
+        available = _go_lib.get_memory_available()
+        percent = _go_lib.get_memory_percent()
+        used = total - available
+        free = available
+        return VirtualMemory(total=total, available=available, percent=percent, used=used, free=free)
+    else:
+        from psutil import virtual_memory as psutil_virtual_memory
+        return psutil_virtual_memory()
+
+def cpu_percent():
+    """Get CPU usage percentage - fallback to Python psutil with proper interval handling"""
+    from psutil import cpu_percent as psutil_cpu_percent
+    import time
+    
+    # 首次調用設定基準，然後等待短暫時間並再次調用以獲取準確的 CPU 使用率
+    try:
+        # 非阻塞調用
+        usage = psutil_cpu_percent(interval=0.1)
+        return usage if usage > 0 else 0.1  # 避免返回 0
+    except Exception:
+        # 如果出錯，返回一個合理的默認值
+        return 5.0
+
+def get_hostname():
+    """Get hostname using Go library or fallback"""
+    if USING_GO_PSUTIL:
+        length = _go_lib.get_hostname_length()
+        if length <= 0:
+            return "unknown"
+        buffer = ctypes.create_string_buffer(length + 1)
+        _go_lib.get_hostname_data(buffer, length + 1)
+        return buffer.value.decode('utf-8')
+    else:
+        import socket
+        return socket.gethostname()
+
+def get_cpu_score():
+    """Get CPU benchmark score using Go library or fallback"""
+    if USING_GO_PSUTIL:
+        return _go_lib.get_cpu_score()
+    else:
+        import time
+        start_time = time.time()
+        result = 0
+        for i in range(100000):
+            result += i % 1000
+        duration = time.time() - start_time
+        return int((100000 / duration) / 10) if duration > 0.01 else 1000
+
+def get_gpu_info():
+    """Get GPU info using Go library or fallback"""
+    if USING_GO_PSUTIL:
+        name_length = _go_lib.get_gpu_name_length()
+        if name_length <= 0:
+            name = "Not Detected"
+        else:
+            buffer = ctypes.create_string_buffer(name_length + 1)
+            _go_lib.get_gpu_name_data(buffer, name_length + 1)
+            name = buffer.value.decode('utf-8')
+        
+        memory = _go_lib.get_gpu_memory()
+        score = _go_lib.get_gpu_score()
+        available = _go_lib.get_gpu_available() == 1
+        
+        return {
+            'name': name,
+            'memory_gb': memory,
+            'score': score,
+            'available': available
+        }
+    else:
+        return {
+            'name': 'Not Detected (Python fallback)',
+            'memory_gb': 0.0,
+            'score': 0,
+            'available': False
+        }
+
 from time import time, sleep
 from zipfile import ZipFile, ZIP_DEFLATED
 from io import BytesIO
@@ -38,8 +178,8 @@ import threading
 basicConfig(level=INFO, format='%(asctime)s - %(levelname)s - [%(threadName)s] - %(message)s')
 
 NODE_PORT = int(environ.get("NODE_PORT", 50053))
-FLASK_PORT = int(environ.get("FLASK_PORT", 5000))
-MASTER_ADDRESS = environ.get("MASTER_ADDRESS", "10.0.0.1:50051")
+FLASK_PORT = int(environ.get("FLASK_PORT", 5001))
+MASTER_ADDRESS = environ.get("MASTER_ADDRESS", "127.0.0.1:50051")
 NODE_ID = environ.get("NODE_ID", f"worker-{node().split('.')[0]}-{NODE_PORT}")
 
 class WorkerNode:
@@ -89,7 +229,7 @@ class WorkerNode:
         self.task_stop_events = {}  # {task_id: Event()}
 
         # 先自動連線 VPN
-        self._auto_join_vpn()
+        #self._auto_join_vpn()
 
         # 硬體信息
         self._init_hardware()
@@ -385,24 +525,34 @@ class WorkerNode:
     def _init_docker(self):
         """初始化 Docker"""
         try:
+            print(f"[Worker] Initializing Docker client...")
             self.docker_client = from_env(timeout=10)
+            print(f"[Worker] Docker client created, testing connection...")
             self.docker_client.ping()
             self.docker_available = True
             self.docker_status = "available"
+            print(f"[Worker] Docker connection successful!")
             
             # 檢查或拉取鏡像
             try:
                 self.docker_client.images.get("justin308/hivemind-worker:latest")
+                print(f"[Worker] Docker image 'justin308/hivemind-worker:latest' found")
                 self._log("Docker image found")
             except ImageNotFound:
+                print(f"[Worker] Docker image not found, pulling 'justin308/hivemind-worker:latest'")
                 self._log("Docker image not found, pulling justin308/hivemind-worker:latest")
                 try:
                     self.docker_client.images.pull("justin308/hivemind-worker:latest")
+                    print(f"[Worker] Docker image pulled successfully")
                     self._log("Docker image pulled successfully")
                 except Exception as e:
+                    print(f"[Worker] Failed to pull docker image: {e}")
                     self._log(f"Failed to pull docker image: {e}", WARNING)
+            
+            print(f"[Worker] Docker initialization completed successfully!")
                     
         except Exception as e:
+            print(f"[Worker] Docker initialization failed: {e}")
             self._log(f"Docker initialization failed: {e}", WARNING)
             self.docker_available = False
             self.docker_client = None
@@ -610,7 +760,7 @@ class WorkerNode:
                 return jsonify({'error': 'Unauthorized'}), 401
             
             try:
-                cpu_percent_val = cpu_percent(interval=0.1)
+                cpu_percent_val = cpu_percent()  # 移除不支持的 interval 參數
                 mem = virtual_memory()
                 current_available_gb = round(mem.available / (1024**3), 2)
             except:
@@ -927,7 +1077,7 @@ class WorkerNode:
                         status_msg = self.status
                     
                     # 發送心跳
-                    self.node_stub.ReportStatus(
+                    response = self.node_stub.ReportStatus(
                         nodepool_pb2.ReportStatusRequest(
                             node_id=self.node_id,
                             status_message=status_msg
@@ -935,6 +1085,14 @@ class WorkerNode:
                         metadata=[('authorization', f'Bearer {self.token}')],
                         timeout=10
                     )
+                    
+                    if not response.success:
+                        self._log(f"狀態報告失敗: {response.message}", WARNING)
+                    else:
+                        # 只在第一次報告或狀態變化時記錄
+                        if not hasattr(self, '_last_reported_status') or self._last_reported_status != status_msg:
+                            self._log(f"狀態已報告: {status_msg}")
+                            self._last_reported_status = status_msg
                     
                     # 更新餘額
                     self._update_balance()
@@ -982,7 +1140,7 @@ class WorkerNode:
             # 獲取真實的系統資源使用情況
             try:
                 # 獲取當前系統 CPU 使用率
-                current_cpu_percent = cpu_percent(interval=0.1)
+                current_cpu_percent = cpu_percent()  # 移除不支持的 interval 參數
                 
                 # 獲取當前內存使用情況
                 memory_info = virtual_memory()
@@ -1172,8 +1330,15 @@ class WorkerNode:
         stop_requested = False
         
         try:
-            # 決定使用Docker還是venv
-            use_docker = self.docker_available
+            # 決定使用Docker還是venv，但優先檢查 Docker 可用性
+            use_docker = self.docker_available and self.docker_client is not None
+            
+            self._log(f"任務 {task_id} 執行模式判斷：docker_available={self.docker_available}, docker_client={'存在' if self.docker_client else '不存在'}, 最終使用={'Docker' if use_docker else 'venv'}")
+            
+            if not use_docker:
+                self._log(f"Docker 不可用，將使用 venv 執行任務 {task_id}，Docker 狀態: {self.docker_status}", WARNING)
+            else:
+                self._log(f"使用 Docker 執行任務 {task_id}")
             
             # 創建臨時目錄
             temp_dir = mkdtemp(prefix=f"task_{task_id}_")
@@ -1186,19 +1351,18 @@ class WorkerNode:
 
             self._log(f"Task {task_id} files extracted to {workspace}")
 
-            # 確保 run_task.sh 存在於 workspace
-            script_src = join(dirname(__file__), "run_task.sh")
-            script_dst = join(workspace, "run_task.sh")
-            copy2(script_src, script_dst)
-            chmod(script_dst, 0o755)
-
             if use_docker:
                 # 使用Docker運行任務
                 container_name = f"task-{task_id}-{token_hex(4)}"
                 
-                # 設置Docker資源限制
-                mem_limit = f"{int(required_resources.get('memory_gb', 1) * 1024)}m"
-                cpu_limit = required_resources.get('cpu', 1) / 100  # Docker CPU限制為相對值
+                # 設置Docker資源限制，確保最小值
+                mem_gb = max(required_resources.get('memory_gb', 1), 0.5)  # 最少 0.5GB
+                mem_limit = f"{int(mem_gb * 1024)}m"
+                
+                cpu_score = max(required_resources.get('cpu', 1), 1)  # 最少 CPU 分數為 1
+                cpu_limit = max(cpu_score / 100, 0.1)  # Docker CPU限制為相對值，最少 0.1
+                
+                self._log(f"Docker 資源配置：memory={mem_limit}, cpu_limit={cpu_limit}")
                 
                 # 設置GPU相關配置
                 device_requests = []
@@ -1209,120 +1373,200 @@ class WorkerNode:
                         'Capabilities': [['gpu']]
                     })
                 
-                container = self.docker_client.containers.run(
-                    "justin308/hivemind-worker:latest",
-                    command=["bash", "/app/task/run_task.sh"],
-                    detach=True,
-                    name=container_name,
-                    volumes={workspace: {'bind': '/app/task', 'mode': 'rw'}},
-                    working_dir="/app/task",
-                    environment={"TASK_ID": task_id, "PYTHONUNBUFFERED": "1"},
-                    mem_limit=mem_limit,
-                    nano_cpus=int(cpu_limit * 1e9),  # 轉換為納秒CPU時間
-                    device_requests=device_requests if device_requests else None,
-                    remove=False
-                )
-                
-                self._log(f"Task {task_id} Docker container started with resources: CPU={cpu_limit}, Memory={mem_limit}")
-                
-                # 監控Docker容器
-                log_buffer = []
-                log_send_counter = 0
-                last_log_fetch = time()
-                
-                while not stop_event.is_set():
+                try:
+                    self._log(f"嘗試啟動 Docker 容器 {container_name}")
+                    print(f"[DEBUG] Docker 容器配置：")
+                    print(f"[DEBUG] - 鏡像：justin308/hivemind-worker:latest")
+                    print(f"[DEBUG] - 容器內執行腳本：/app/run_task.sh (容器內部自帶)")
+                    print(f"[DEBUG] - 工作目錄：/app/task")
+                    print(f"[DEBUG] - 宿主機目錄：{workspace}")
+                    
+                    # 列出工作空間中的任務文件
+                    if exists(workspace):
+                        files_in_workspace = os.listdir(workspace)
+                        print(f"[DEBUG] - 工作空間任務文件：{files_in_workspace}")
+                    
+                    container = self.docker_client.containers.run(
+                        "justin308/hivemind-worker:latest",
+                        # Docker 容器內部沒有 run_task.sh，直接執行任務
+                        # 先查找可執行的 Python 腳本，然後執行
+                        command=["sh", "-c", """
+                        echo "=== HiveMind Docker Task Execution ===" &&
+                        echo "Task ID: ${TASK_ID:-unknown}" &&
+                        echo "Working Directory: $(pwd)" &&
+                        echo "Available files:" &&
+                        ls -la &&
+                        echo "=== Installing Requirements ===" &&
+                        if [ -f requirements.txt ]; then
+                            echo "Installing requirements..." &&
+                            pip install --user -r requirements.txt || echo "Requirements installation failed"
+                        else
+                            echo "No requirements.txt found"
+                        fi &&
+                        echo "=== Finding and executing Python script ===" &&
+                        SCRIPT_FILE="" &&
+                        for script in main.py app.py run.py start.py; do
+                            if [ -f "$script" ]; then
+                                SCRIPT_FILE="$script"
+                                echo "Found script: $SCRIPT_FILE"
+                                break
+                            fi
+                        done &&
+                        if [ -z "$SCRIPT_FILE" ]; then
+                            SCRIPT_FILE=$(find . -name "*.py" -type f | head -n 1)
+                            if [ -n "$SCRIPT_FILE" ]; then
+                                echo "Using first Python file found: $SCRIPT_FILE"
+                            else
+                                echo "ERROR: No Python script found"
+                                exit 1
+                            fi
+                        fi &&
+                        echo "=== Executing $SCRIPT_FILE ===" &&
+                        python "$SCRIPT_FILE" &&
+                        echo "=== Task completed successfully ==="
+                        """],
+                        detach=True,
+                        name=container_name,
+                        volumes={workspace: {'bind': '/app/task', 'mode': 'rw'}},
+                        working_dir="/app/task",
+                        environment={"TASK_ID": task_id, "PYTHONUNBUFFERED": "1"},
+                        mem_limit=mem_limit,
+                        nano_cpus=int(cpu_limit * 1e9),  # 轉換為納秒CPU時間
+                        device_requests=device_requests if device_requests else None,
+                        remove=False
+                    )
+                    
+                    self._log(f"Task {task_id} Docker container started successfully with resources: CPU={cpu_limit}, Memory={mem_limit}")
+                    print(f"[DEBUG] 容器 {container_name} 已啟動，狀態: {container.status}")
+                    print(f"[DEBUG] 容器 ID: {container.id}")
+                    
+                    # 立即檢查容器是否正在運行
+                    container.reload()
+                    print(f"[DEBUG] 容器重新載入後狀態: {container.status}")
+                    
+                    # 獲取初始日誌
                     try:
-                        # 檢查容器狀態
-                        container.reload()
-                        if container.status != 'running':
-                            self._log(f"Container {container_name} stopped, status: {container.status}")
+                        initial_logs = container.logs().decode('utf-8', errors='replace')
+                        if initial_logs.strip():
+                            print(f"[DEBUG] 容器初始日誌:\n{initial_logs}")
+                        else:
+                            print(f"[DEBUG] 容器暫無日誌輸出")
+                    except Exception as log_error:
+                        print(f"[DEBUG] 無法獲取容器日誌: {log_error}")
+                except Exception as docker_error:
+                    self._log(f"Docker 容器啟動失敗: {docker_error}", ERROR)
+                    print(f"[ERROR] Docker 容器啟動失敗: {docker_error}")
+                    print(f"[INFO] 錯誤詳情：{str(docker_error)}")
+                    self._log(f"嘗試使用 venv 執行任務 {task_id}", WARNING)
+                    print(f"[INFO] 由於 Docker 失敗，切換到 venv 執行模式")
+                    use_docker = False  # 切換到 venv 執行模式
+                    container = None  # 確保 container 為 None
+                    # 繼續執行 venv 邏輯
+                    
+                if use_docker and container:
+                    # 監控Docker容器
+                    log_buffer = []
+                    log_send_counter = 0
+                    last_log_fetch = time()
+                    
+                    print(f"[DEBUG] 開始監控容器 {container_name}")
+                    
+                    while not stop_event.is_set():
+                        try:
+                            # 檢查容器狀態
+                            container.reload()
+                            print(f"[DEBUG] 容器狀態檢查: {container.status}")
+                            
+                            if container.status != 'running':
+                                self._log(f"Container {container_name} stopped, status: {container.status}")
+                                print(f"[DEBUG] 容器已停止，最終狀態: {container.status}")
+                                
+                                # 獲取退出日誌
+                                try:
+                                    exit_logs = container.logs().decode('utf-8', errors='replace')
+                                    if exit_logs.strip():
+                                        print(f"[DEBUG] 容器退出日誌:\n{exit_logs}")
+                                        # 將退出日誌添加到任務日誌中
+                                        for line in exit_logs.strip().split('\n'):
+                                            if line.strip():
+                                                self._log(f"[Task {task_id}]: {line}")
+                                                task_logs.append(line)
+                                except Exception as e:
+                                    print(f"[DEBUG] 無法獲取退出日誌: {e}")
+                                break
+                            
+                            # 收集日誌
+                            current_time = time()
+                            if current_time - last_log_fetch > 1.0:
+                                logs = container.logs(since=int(last_log_fetch)).decode('utf-8', errors='replace')
+                                if logs.strip():
+                                    log_lines = logs.strip().split('\n')
+                                    for line in log_lines:
+                                        if line.strip():
+                                            self._log(f"[Task {task_id}]: {line}")
+                                            log_buffer.append(line)
+                                            task_logs.append(line)
+                                            log_send_counter += 1
+                                    
+                                    # 每20行或每3秒發送一次日誌
+                                    if log_send_counter >= 20 or len(log_buffer) > 0:
+                                        logs_to_send = "\n".join(log_buffer)
+                                        self._send_task_logs(task_id, logs_to_send)
+                                        log_buffer.clear()
+                                        log_send_counter = 0
+                                
+                                last_log_fetch = current_time
+                        except Exception as e:
+                            self._log(f"Error monitoring container: {e}", WARNING)
                             break
                         
-                        # 收集日誌
-                        current_time = time()
-                        if current_time - last_log_fetch > 1.0:
-                            logs = container.logs(since=int(last_log_fetch)).decode('utf-8', errors='replace')
-                            if logs.strip():
-                                log_lines = logs.strip().split('\n')
-                                for line in log_lines:
-                                    if line.strip():
-                                        self._log(f"[Task {task_id}]: {line}")
-                                        log_buffer.append(line)
-                                        task_logs.append(line)
-                                        log_send_counter += 1
-                                
-                                # 每20行或每3秒發送一次日誌
-                                if log_send_counter >= 20 or len(log_buffer) > 0:
-                                    logs_to_send = "\n".join(log_buffer)
-                                    self._send_task_logs(task_id, logs_to_send)
-                                    log_buffer.clear()
-                                    log_send_counter = 0
-                            
-                            last_log_fetch = current_time
-                    except Exception as e:
-                        self._log(f"Error monitoring container: {e}", WARNING)
-                        break
+                        # 短暫休眠
+                        sleep(0.1)
                     
-                    # 短暫休眠
-                    sleep(0.1)
+                    # 處理停止請求
+                    if stop_event.is_set():
+                        stop_requested = True
+                        stop_log = f"收到停止請求，立即終止任務 {task_id}"
+                        self._log(stop_log)
+                        task_logs.append(stop_log)
+                        self._send_task_logs(task_id, stop_log)
+                        
+                        try:
+                            container.kill()
+                        except Exception as e:
+                            self._log(f"強制停止容器失敗: {e}", WARNING)
+                    else:
+                        # 檢查容器退出狀態
+                        try:
+                            result = container.wait(timeout=2)
+                            success = result.get('StatusCode', -1) == 0
+                        except Exception as e:
+                            self._log(f"Failed to get container exit status: {e}", WARNING)
+                            success = False
+            
+            if not use_docker:  # 使用venv執行或Docker失敗後的備用方案
+                print(f"[INFO] 開始執行 venv 模式任務 {task_id}")
                 
-                # 處理停止請求
-                if stop_event.is_set():
-                    stop_requested = True
-                    stop_log = f"收到停止請求，立即終止任務 {task_id}"
-                    self._log(stop_log)
-                    task_logs.append(stop_log)
-                    self._send_task_logs(task_id, stop_log)
-                    
-                    try:
-                        container.kill()
-                    except Exception as e:
-                        self._log(f"強制停止容器失敗: {e}", WARNING)
+                # 對於 venv 模式，需要複製 run_task.sh 到工作空間
+                worker_root = join(dirname(__file__), "..", "..")  # 向上兩級到 worker 目錄
+                script_src = join(worker_root, "run_task.sh")
+                script_dst = join(workspace, "run_task.sh")
+                
+                if exists(script_src):
+                    copy2(script_src, script_dst)
+                    chmod(script_dst, 0o755)
+                    print(f"[INFO] 成功複製 run_task.sh 到 venv 工作空間")
                 else:
-                    # 檢查容器退出狀態
-                    try:
-                        result = container.wait(timeout=2)
-                        success = result.get('StatusCode', -1) == 0
-                    except Exception as e:
-                        self._log(f"Failed to get container exit status: {e}", WARNING)
-                        success = False
-            else:
+                    print(f"[WARNING] run_task.sh 不存在於 {script_src}，venv 模式可能無法正常執行")
+                
                 # 使用venv運行任務
                 venv_dir = join(temp_dir, "venv")
                 self._log(f"Creating virtual environment for task {task_id} at {venv_dir}")
+                print(f"[INFO] 創建虛擬環境: {venv_dir}")
                 
                 # 創建虛擬環境
+                import venv
                 venv.create(venv_dir, with_pip=True)
-                
-                # 準備運行腳本（修改run_task.sh或創建新腳本）
-                venv_script = join(workspace, "run_venv.sh")
-                with open(venv_script, 'w') as f:
-                    f.write(f"""#!/bin/bash
-# 激活虛擬環境
-source {join(venv_dir, 'bin/activate')} || source {join(venv_dir, 'Scripts/activate')}
-
-# 安裝依賴
-if [ -f requirements.txt ]; then
-    pip install -r requirements.txt
-fi
-
-# 運行任務
-if [ -f run.py ]; then
-    python run.py
-elif [ -f main.py ]; then
-    python main.py
-else
-    # 尋找並運行第一個找到的Python文件
-    PYTHON_FILE=$(find . -maxdepth 1 -name "*.py" | head -1)
-    if [ ! -z "$PYTHON_FILE" ]; then
-        python $PYTHON_FILE
-    else
-        echo "No Python file found"
-        exit 1
-    fi
-fi
-""")
-                chmod(venv_script, 0o755)
                 
                 # 啟動任務執行進程
                 import subprocess
@@ -1331,9 +1575,46 @@ fi
                 try:
                     self._log(f"Starting task {task_id} with venv")
                     
+                    # 確定虛擬環境的Python路徑
+                    if os.name == 'nt':  # Windows
+                        venv_python = join(venv_dir, 'Scripts', 'python.exe')
+                        venv_pip = join(venv_dir, 'Scripts', 'pip.exe')
+                    else:  # Unix/Linux
+                        venv_python = join(venv_dir, 'bin', 'python')
+                        venv_pip = join(venv_dir, 'bin', 'pip')
+                    
+                    # 安裝依賴
+                    requirements_file = join(workspace, 'requirements.txt')
+                    if exists(requirements_file):
+                        self._log(f"Installing requirements for task {task_id}")
+                        pip_process = subprocess.Popen(
+                            [venv_pip, 'install', '-r', 'requirements.txt'],
+                            cwd=workspace,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            universal_newlines=True
+                        )
+                        pip_output, _ = pip_process.communicate()
+                        self._log(f"Pip install output: {pip_output}")
+                    
+                    # 尋找要執行的Python腳本
+                    print(f"[INFO] 尋找可執行腳本在目錄: {workspace}")
+                    script_path, cmd = self._find_executable_script(workspace)
+                    print(f"[INFO] 找到的腳本: {script_path}, 命令: {cmd}")
+                    if not script_path:
+                        print(f"[ERROR] 找不到可執行腳本")
+                        raise Exception("找不到可執行的腳本文件")
+                    
+                    # 如果是Python文件，使用虛擬環境的Python
+                    if script_path.endswith('.py'):
+                        # 確保使用虛擬環境的Python執行檔案
+                        cmd = [venv_python, script_path]
+                        print(f"[INFO] 使用 venv Python: {venv_python}")
+                        print(f"[INFO] 最終執行命令: {cmd}")
+                    
                     # 使用subprocess運行腳本
                     process = subprocess.Popen(
-                        [venv_script],
+                        cmd,
                         cwd=workspace,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
@@ -1420,6 +1701,8 @@ fi
         except Exception as e:
             error_log = f"任務 {task_id} 執行失敗: {e}"
             self._log(error_log, ERROR)
+            print(f"[ERROR] {error_log}")  # 添加控制台輸出以便調試
+            print(f"[DEBUG] 執行模式: {'Docker' if use_docker else 'venv'}")  # 添加執行模式調試信息
             task_logs.append(error_log)
             self._send_task_logs(task_id, error_log)
             success = False
@@ -1550,6 +1833,67 @@ fi
             self.logs.append(f"{timestamp} - {level_name} - {message}")
             if len(self.logs) > 500:
                 self.logs.pop(0)
+
+    def _find_executable_script(self, task_dir):
+        """查找可執行的腳本文件"""
+        # 按優先級順序檢查腳本
+        script_candidates = [
+            # (檔案名, 執行命令前綴, 描述)
+            ('run.bat', [], 'Windows批次檔') if os.name == 'nt' else ('run.sh', ['bash'], 'Bash腳本'),
+            ('run.cmd', [], 'Windows命令檔'),
+            ('run.py', ['python'], 'Python執行腳本'),
+            ('main.py', ['python'], 'Python主程式'),
+            ('app.py', ['python'], 'Python應用程式'),
+            ('index.py', ['python'], 'Python索引檔'),
+            ('start.py', ['python'], 'Python啟動檔')
+        ]
+        
+        for script_name, cmd_prefix, description in script_candidates:
+            script_path = os.path.join(task_dir, script_name)
+            if os.path.exists(script_path):
+                # 檢查命令是否可用
+                if cmd_prefix:
+                    try:
+                        # 對於python命令，跳過版本檢查，直接使用
+                        if cmd_prefix[0] == 'python':
+                            self._log(f"找到可執行腳本: {script_name} ({description})")
+                            return script_path, [script_name]  # 只返回檔案名，讓調用者決定使用哪個 python 執行檔
+                        
+                        # 檢查其他命令是否存在
+                        import subprocess
+                        result = subprocess.run([cmd_prefix[0], '--version'], 
+                                              capture_output=True, timeout=5)
+                        if result.returncode != 0:
+                            self._log(f"命令 {cmd_prefix[0]} 不可用，跳過 {script_name}")
+                            continue
+                    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                        self._log(f"命令 {cmd_prefix[0]} 檢查失敗，跳過 {script_name}")
+                        continue
+                
+                self._log(f"找到可執行腳本: {script_name} ({description})")
+                return script_path, cmd_prefix + [script_path] if cmd_prefix else [script_path]
+        
+        # 如果沒有標準腳本，尋找任何 Python 檔案
+        try:
+            python_files = [f for f in os.listdir(task_dir) if f.endswith('.py')]
+            if python_files:
+                # 優先選擇常見的主檔案名稱
+                priority_files = ['main.py', 'app.py', 'run.py', 'start.py']
+                selected_file = None
+                for pf in priority_files:
+                    if pf in python_files:
+                        selected_file = pf
+                        break
+                if not selected_file:
+                    selected_file = python_files[0]
+                
+                script_path = os.path.join(task_dir, selected_file)
+                self._log(f"使用找到的Python檔案: {selected_file}")
+                return script_path, [selected_file]  # 只返回檔案名，讓調用者決定使用哪個 python 執行檔
+        except OSError as e:
+            self._log(f"無法讀取任務目錄: {e}")
+        
+        return None, None
 
 # gRPC 服務實現
 class WorkerNodeServicer(nodepool_pb2_grpc.WorkerNodeServiceServicer):
@@ -1710,7 +2054,7 @@ class WorkerNodeServicer(nodepool_pb2_grpc.WorkerNodeServiceServicer):
         
         # 獲取真實的系統資源使用情況
         try:
-            cpu_usage = cpu_percent(interval=0.1)
+            cpu_usage = cpu_percent()  # 移除不支持的 interval 參數
             memory_info = virtual_memory()
             memory_usage = int((memory_info.total - memory_info.available) / (1024 * 1024))
             
@@ -1776,37 +2120,125 @@ class WorkerNodeServicer(nodepool_pb2_grpc.WorkerNodeServiceServicer):
                 success=False,
                 message=f"Failed to send stop signal to task {task_id}"
             )
+
+    def _execute_task_safely(self, task_id, task_dir, cmd):
+        """安全地執行任務"""
+        import subprocess
+        import time
+        
+        self._log(f"執行命令: {' '.join(cmd)}")
+        self._log(f"工作目錄: {task_dir}")
+        
+        # 創建結果目錄
+        result_dir = os.path.join(task_dir, 'result')
+        os.makedirs(result_dir, exist_ok=True)
+        
+        try:
+            # 設置環境變數
+            env = os.environ.copy()
+            env['TASK_ID'] = task_id
+            env['TASK_DIR'] = task_dir
+            env['RESULT_DIR'] = result_dir
+            
+            # 執行任務
+            process = subprocess.Popen(
+                cmd,
+                cwd=task_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True,
+                env=env
+            )
+            
+            # 實時讀取輸出
+            output_lines = []
+            start_time = time.time()
+            timeout = 3600  # 1小時超時
+            
+            while True:
+                if process.poll() is not None:
+                    break
+                    
+                if time.time() - start_time > timeout:
+                    process.kill()
+                    self._log(f"任務 {task_id} 執行超時，已終止")
+                    return False, "任務執行超時"
+                
+                try:
+                    line = process.stdout.readline()
+                    if line:
+                        line = line.strip()
+                        output_lines.append(line)
+                        self._log(f"[任務輸出] {line}")
+                except:
+                    break
+            
+            # 等待進程完成
+            return_code = process.wait()
+            
+            # 讀取剩餘輸出
+            remaining_output, _ = process.communicate()
+            if remaining_output:
+                for line in remaining_output.strip().split('\n'):
+                    if line.strip():
+                        output_lines.append(line.strip())
+                        self._log(f"[任務輸出] {line.strip()}")
+            
+            if return_code == 0:
+                self._log(f"任務 {task_id} 執行成功完成")
+                return True, "任務執行成功"
+            else:
+                error_msg = f"任務執行失敗，退出代碼: {return_code}"
+                self._log(f"任務 {task_id} {error_msg}")
+                return False, error_msg
+                
+        except FileNotFoundError as e:
+            error_msg = f"找不到執行檔案: {e}"
+            self._log(f"任務 {task_id} 執行失敗: {error_msg}")
+            return False, error_msg
+        except Exception as e:
+            error_msg = f"任務執行異常: {e}"
+            self._log(f"任務 {task_id} 執行失敗: {error_msg}")
+            return False, error_msg
+
+
 def run_worker_node():
-    """啟動 Worker Node"""
+    """啟動 Worker 節點"""
     try:
+        print("=== HiveMind Worker Node Starting ===")
+        print(f"Node Port: {NODE_PORT}")
+        print(f"Flask Port: {FLASK_PORT}")
+        print(f"Master Address: {MASTER_ADDRESS}")
+        
+        # 創建 Worker 節點實例
         worker = WorkerNode()
         
-        # 啟動 gRPC 服務
-        server = grpc.server(ThreadPoolExecutor(max_workers=10))  # 增加工作線程數
+        # 啟動 gRPC 服務器
+        server = grpc.server(ThreadPoolExecutor(max_workers=10))
         nodepool_pb2_grpc.add_WorkerNodeServiceServicer_to_server(
             WorkerNodeServicer(worker), server
         )
-        
         server.add_insecure_port(f'[::]:{NODE_PORT}')
         server.start()
         
-        worker._log(f"Worker Node started on port {NODE_PORT}")
-        worker._log(f"Flask UI: http://localhost:{FLASK_PORT}")
-        worker._log(f"Docker status: {worker.docker_status}")
-        worker._log(f"Available resources: CPU={worker.available_resources['cpu']}, Memory={worker.available_resources['memory_gb']}GB, GPU={worker.available_resources['gpu']}")
+        print(f"Worker node gRPC server started on port {NODE_PORT}")
+        print(f"Worker node web interface available at http://127.0.0.1:{FLASK_PORT}")
         
-        # 保持運行
+        # 保持服務運行
         try:
             while True:
-                sleep(60)
+                sleep(1)
         except KeyboardInterrupt:
-            worker._log("Shutting down...")
-            worker._stop_status_reporting()
-            worker._stop_all_tasks()
-            server.stop(grace=5)
+            print("\n=== Shutting down Worker Node ===")
+            server.stop(5)
+            print("Worker Node stopped")
             
     except Exception as e:
-        critical(f"Failed to start worker: {e}")
-        exit(1)
-if __name__ == '__main__':
+        print(f"Failed to start Worker Node: {e}")
+        raise
+
+
+if __name__ == "__main__":
     run_worker_node()

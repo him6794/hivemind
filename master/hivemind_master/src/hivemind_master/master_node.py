@@ -18,13 +18,13 @@ import requests  # 新增
 
 
 # --- Configuration ---
-GRPC_SERVER_ADDRESS = os.environ.get('GRPC_SERVER_ADDRESS', '10.0.0.1:50051')
+GRPC_SERVER_ADDRESS = os.environ.get('GRPC_SERVER_ADDRESS', '127.0.0.1:50051')
 FLASK_SECRET_KEY = os.environ.get('FLASK_SECRET_KEY', 'a-default-master-secret-key')
 # 移除預設的用戶名和密碼
 MASTER_USERNAME = os.environ.get('MASTER_USERNAME')  # 不設默認值
 MASTER_PASSWORD = os.environ.get('MASTER_PASSWORD')  # 不設默認值
 UI_HOST = '0.0.0.0'
-UI_PORT = 5001
+UI_PORT = 5002
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(threadName)s] - %(message)s')
 
 class MasterNodeUI:
@@ -676,3 +676,7 @@ def run_master_node():
         if master_ui.channel:
             master_ui.channel.close()
         logging.info("Master node has been shut down")
+
+
+if __name__ == "__main__":
+    run_master_node()

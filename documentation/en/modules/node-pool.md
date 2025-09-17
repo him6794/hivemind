@@ -2,528 +2,559 @@
 
 ## Overview
 
-The Node Pool is the core service of HiveMind, responsible for node management, task scheduling, user authentication, and resource coordination. It acts as the central hub that connects all components of the distributed computing platform.
+The Node Pool is the central resource scheduling system of HiveMind distributed computing platform, featuring a multi-level trust system for intelligent node management, task allocation, user authentication, and dynamic resource coordination. Built on gRPC for high-performance distributed services.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────┐
-│              Node Pool Service           │
-├─────────────────────────────────────────┤
-│ ┌─────────────┐ ┌─────────────────────┐ │
-│ │User Service │ │Node Manager Service │ │
-│ │             │ │                     │ │
-│ │• Auth       │ │• Registration       │ │
-│ │• Sessions   │ │• Status Tracking    │ │
-│ │• Profiles   │ │• Resource Monitor   │ │
-│ └─────────────┘ └─────────────────────┘ │
-│ ┌─────────────────────────────────────┐ │
-│ │     Master Node Service             │ │
-│ │                                     │ │
-│ │• Task Scheduling                    │ │
-│ │• Reward System                      │ │
-│ │• System Monitoring                  │ │
-│ └─────────────────────────────────────┘ │
-├─────────────────────────────────────────┤
-│          Data Storage Layer             │
-│ ┌─────────┐ ┌─────────┐ ┌─────────────┐ │
-│ │ SQLite  │ │  Redis  │ │File Storage │ │
-│ │ Users   │ │ State   │ │   Tasks     │ │
-│ └─────────┘ └─────────┘ └─────────────┘ │
-└─────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                    Node Pool Service                         │
+├─────────────────────────────────────────────────────────────┤
+│  User Service     │  Node Manager   │  Master Node Service │
+├─────────────────────────────────────────────────────────────┤
+│             Multi-Level Trust System & Dynamic Resource     │
+│                          Allocation                         │
+├─────────────────────────────────────────────────────────────┤
+│  SQLite Database │  Redis Cache   │  gRPC Services          │
+└─────────────────────────────────────────────────────────────┘
+        │                    │                    │
+   High Trust Nodes      Normal Trust Nodes   Low Trust Nodes
+   (Credit ≥ 100)        (Credit 50-99)      (Credit < 50)
 ```
 
 ## Core Components
 
-### 1. User Service (`user_service.py`)
+### 1. Node Pool Server (`node_pool_server.py`)
+- **Function**: Main gRPC server with multi-service integration
+- **Port**: 50051 (configurable)
+- **Protocol**: gRPC with Protocol Buffers
+- **Features**: 
+  - Large file transfer support (100MB)
+  - 20 concurrent worker threads
+  - Advanced keep-alive configuration
 
-**Responsibilities**:
-- User registration and authentication
-- Session management
-- User profile management
-- Authorization and permissions
+### 2. Node Manager (`node_manager.py`)
+- **Function**: Intelligent node lifecycle management
+- **Core Features**:
+  - **Multi-Level Trust System**: Node grouping based on credit scores
+  - **Dynamic Resource Tracking**: Real-time monitoring of total and available resources
+  - **Multi-Task Support**: Parallel task execution on single nodes
+  - **Docker Awareness**: Trust level adjustment based on Docker status
+  - **Geographic Awareness**: Location-based node prioritization
+  - **Load Balancing**: Intelligent task distribution algorithm
 
-**Key Features**:
-- Password hashing with salt
-- Session token generation
-- User role management
-- Account validation
+### 3. User Service (`user_service.py`)
+- **Function**: JWT-based user authentication service
+- **Responsibilities**:
+  - User registration and login
+  - JWT Token management
+  - CPT token transfers
+  - Balance queries
 
-**gRPC Methods**:
+### 4. Master Node Service (`master_node_service.py`)
+- **Function**: Task scheduling and management
+- **Responsibilities**:
+  - Task upload and distribution
+  - Execution status monitoring
+  - Result collection
+  - Task termination control
+
+### 5. Configuration (`config.py`)
+- **Function**: Unified configuration management
+- **Support**: Environment variables and .env files
+
+## Trust Level System
+
+### Trust Level Classification
 ```python
-class UserServiceServicer:
-    def RegisterUser(self, request, context)
-    def LoginUser(self, request, context)
-    def LogoutUser(self, request, context)
-    def GetUserInfo(self, request, context)
-    def UpdateUserProfile(self, request, context)
+# High Trust Level
+- Credit Score >= 100
+- Docker Status: enabled
+- Priority: Highest
+
+# Normal Trust Level  
+- Credit Score 50-99
+- Docker Status: enabled
+- Priority: Medium
+
+# Low Trust Level
+- Credit Score < 50 or Docker disabled
+- Restriction: Only accepts tasks from high-trust users
+- Priority: Lowest
 ```
 
-### 2. Node Manager Service (`node_manager_service.py`)
+### Task Allocation Algorithm
+1. **Trust Group Priority**: High Trust → Normal Trust → Low Trust
+2. **Resource Matching**: CPU, Memory, GPU requirement checks
+3. **Load Balancing**: Prioritize nodes with lower load
+4. **Docker Compatibility**: Non-Docker nodes require user trust score > 50
+5. **Geographic Location**: Support for location preferences
 
-**Responsibilities**:
-- Worker node registration and management
-- Node status monitoring
-- Resource tracking
-- Node health checks
+## gRPC Service Definitions
 
-**Key Features**:
-- Dynamic node discovery
-- Resource capacity tracking
-- Node performance metrics
-- Automatic node cleanup
-
-**gRPC Methods**:
-```python
-class NodeManagerServiceServicer:
-    def RegisterNode(self, request, context)
-    def UnregisterNode(self, request, context)
-    def UpdateNodeStatus(self, request, context)
-    def GetNodeInfo(self, request, context)
-    def ListNodes(self, request, context)
+### UserService
+```protobuf
+service UserService {
+    rpc Login(LoginRequest) returns (LoginResponse);
+    rpc Register(RegisterRequest) returns (RegisterResponse);
+    rpc Transfer(TransferRequest) returns (TransferResponse);
+    rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse);
+}
 ```
 
-### 3. Master Node Service (`master_node_service.py`)
+**Key Message Types**:
+```protobuf
+message LoginRequest {
+    string username = 1;
+    string password = 2;
+}
 
-**Responsibilities**:
-- Task scheduling and distribution
-- Reward calculation and distribution
-- System monitoring
-- Performance analytics
+message LoginResponse {
+    bool success = 1;
+    string message = 2;
+    string token = 3;
+}
 
-**Key Features**:
-- Intelligent task scheduling
-- Load balancing
-- Reward system
-- System health monitoring
+message GetBalanceRequest {
+    string username = 1;
+    string token = 2;
+}
 
-**gRPC Methods**:
-```python
-class MasterNodeServiceServicer:
-    def SubmitTask(self, request, context)
-    def GetTaskStatus(self, request, context)
-    def CancelTask(self, request, context)
-    def GetTaskResult(self, request, context)
-    def GetSystemStats(self, request, context)
+message TransferRequest {
+    string token = 1;
+    string receiver_username = 2;
+    int64 amount = 3;
+}
 ```
 
-## Configuration
-
-### Server Configuration (`config.py`)
-
-```python
-class Config:
-    # gRPC Server Settings
-    GRPC_PORT = 50051
-    GRPC_HOST = "0.0.0.0"
-    MAX_WORKERS = 20
-    
-    # Message Size Limits
-    MAX_MESSAGE_SIZE = 100 * 1024 * 1024  # 100MB
-    MAX_FRAME_SIZE = 16 * 1024 * 1024     # 16MB
-    
-    # Storage Paths
-    DATABASE_PATH = "users.db"
-    TASK_STORAGE_PATH = "/mnt/myusb/hivemind/task_storage"
-    
-    # Redis Configuration
-    REDIS_HOST = "localhost"
-    REDIS_PORT = 6379
-    REDIS_DB = 0
-    
-    # Security Settings
-    SESSION_TIMEOUT = 3600  # 1 hour
-    PASSWORD_SALT_LENGTH = 32
+### NodeManagerService
+```protobuf
+service NodeManagerService {
+    rpc RegisterWorkerNode(RegisterWorkerNodeRequest) returns (StatusResponse);
+    rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+    rpc ReportStatus(ReportStatusRequest) returns (StatusResponse);
+    rpc GetNodeList(GetNodeListRequest) returns (GetNodeListResponse);
+}
 ```
 
-### gRPC Server Options
+**Node Registration Messages**:
+```protobuf
+message RegisterWorkerNodeRequest {
+    string node_id = 1;        // Username
+    string hostname = 2;       // IP Address
+    int32 cpu_cores = 3;
+    int32 memory_gb = 4;
+    int32 cpu_score = 5;
+    int32 gpu_score = 6;
+    int32 gpu_memory_gb = 7;
+    string location = 8;
+    int32 port = 9;
+    string gpu_name = 12;
+    string docker_status = 13;
+}
 
-The Node Pool server is configured with optimized gRPC options for high-performance operation:
-
-```python
-options = [
-    ('grpc.keepalive_time_ms', 10000),              # Keepalive every 10s
-    ('grpc.keepalive_timeout_ms', 5000),            # Keepalive timeout 5s
-    ('grpc.keepalive_permit_without_calls', True),  # Allow keepalive without calls
-    ('grpc.http2.max_pings_without_data', 0),       # Unlimited pings
-    ('grpc.http2.min_time_between_pings_ms', 10000), # Min ping interval
-    ('grpc.max_receive_message_length', 100 * 1024 * 1024), # 100MB max receive
-    ('grpc.max_send_message_length', 100 * 1024 * 1024),    # 100MB max send
-    ('grpc.http2.max_frame_size', 16 * 1024 * 1024),        # 16MB max frame
-]
+message WorkerNodeInfo {
+    string node_id = 1;
+    string hostname = 2;
+    int32 cpu_cores = 3;
+    int32 memory_gb = 4;
+    string status = 5;
+    double last_heartbeat = 6;
+    int32 cpu_score = 7;
+    int32 gpu_score = 8;
+    int32 gpu_memory_gb = 9;
+    string location = 10;
+    int32 port = 11;
+    string gpu_name = 12;
+}
 ```
 
-## Data Models
-
-### User Data Model
-
-```python
-@dataclass
-class User:
-    user_id: str
-    username: str
-    email: str
-    password_hash: str
-    salt: str
-    created_at: datetime
-    last_login: datetime
-    role: str = "user"
-    is_active: bool = True
+### MasterNodeService
+```protobuf
+service MasterNodeService {
+    rpc UploadTask(UploadTaskRequest) returns (UploadTaskResponse);
+    rpc PollTaskStatus(PollTaskStatusRequest) returns (PollTaskStatusResponse);
+    rpc StoreOutput(StoreOutputRequest) returns (StatusResponse);
+    rpc StoreResult(StoreResultRequest) returns (StatusResponse);
+    rpc GetTaskResult(GetTaskResultRequest) returns (GetTaskResultResponse);
+    rpc TaskCompleted(TaskCompletedRequest) returns (StatusResponse);
+    rpc StoreLogs(StoreLogsRequest) returns (StatusResponse);
+    rpc GetTaskLogs(GetTaskLogsRequest) returns (GetTaskLogsResponse);
+    rpc GetAllTasks(GetAllTasksRequest) returns (GetAllTasksResponse);
+    rpc StopTask(StopTaskRequest) returns (StopTaskResponse);
+    rpc ReturnTaskResult(ReturnTaskResultRequest) returns (ReturnTaskResultResponse);
+}
 ```
 
-### Node Data Model
+**Task-Related Messages**:
+```protobuf
+message UploadTaskRequest {
+    string task_id = 1;
+    bytes task_zip = 2;
+    int32 memory_gb = 3;
+    int32 cpu_score = 4;
+    int32 gpu_score = 5;
+    int32 gpu_memory_gb = 6;
+    string location = 7;
+    string gpu_name = 8;
+    string user_id = 9;
+}
 
-```python
-@dataclass
-class NodeInfo:
-    node_id: str
-    node_type: str  # "worker" or "master"
-    hostname: str
-    port: int
-    capabilities: Dict[str, Any]
-    status: str     # "online", "offline", "busy"
-    last_heartbeat: datetime
-    resource_usage: Dict[str, float]
+message TaskStatus {
+    string task_id = 1;
+    string status = 2;
+    string created_at = 3;
+    string updated_at = 4;
+    string assigned_node = 5;
+}
+
+message PollTaskStatusResponse {
+    string task_id = 1;
+    string status = 2;
+    repeated string output = 3;
+    string message = 4;
+}
 ```
 
-### Task Data Model
+### WorkerNodeService
+```protobuf
+service WorkerNodeService {
+    rpc ExecuteTask(ExecuteTaskRequest) returns (ExecuteTaskResponse);
+    rpc ReportOutput(ReportOutputRequest) returns (StatusResponse);
+    rpc ReportRunningStatus(RunningStatusRequest) returns (RunningStatusResponse);
+    rpc StopTaskExecution(StopTaskExecutionRequest) returns (StopTaskExecutionResponse);
+}
+```
 
+**Worker Node Messages**:
+```protobuf
+message ExecuteTaskRequest {
+    string node_id = 1;
+    string task_id = 2;
+    bytes task_zip = 3;
+    int32 cpu = 4;
+    int32 gpu = 5;
+    int32 memory_gb = 6;
+    int32 gpu_memory_gb = 7;
+}
+
+message RunningStatusRequest {
+    string node_id = 1;
+    string task_id = 2;
+    int32 cpu_usage = 3;      // CPU usage percentage
+    int32 memory_usage = 4;   // Memory usage percentage
+    int32 gpu_usage = 5;      // GPU usage percentage
+    int32 gpu_memory_usage = 6; // GPU memory usage percentage
+}
+
+message RunningStatusResponse {
+    bool success = 1;
+    string message = 2;
+    int64 cpt_reward = 3;
+}
+```
+
+## Data Storage Architecture
+
+### SQLite User Database
+- **File**: `users.db`
+- **Function**: User authentication, credit scores, token balances
+
+### Redis Node State Cache
+- **Purpose**: Real-time node status, resource tracking
+- **Key-Value Structure**:
+  ```
+  node:{node_id} -> {
+    "hostname": "worker01",
+    "status": "Idle",
+    "cpu_score": "1000",
+    "available_cpu_score": "800",
+    "current_tasks": "2",
+    "trust_level": "high",
+    "docker_status": "enabled",
+    ...
+  }
+  ```
+
+## Resource Management System
+
+### Resource Type Definitions
 ```python
-@dataclass
-class Task:
-    task_id: str
-    user_id: str
-    task_type: str
-    task_data: bytes
-    status: str     # "pending", "running", "completed", "failed"
-    created_at: datetime
-    started_at: Optional[datetime]
-    completed_at: Optional[datetime]
-    assigned_node: Optional[str]
-    result: Optional[bytes]
-    error_message: Optional[str]
+# CPU Score: Processor computing capability score
+# Memory: Memory capacity in GB
+# GPU Score: Graphics processor computing capability score
+# GPU Memory: Graphics memory capacity in GB
+```
+
+### Dynamic Resource Allocation
+```python
+def allocate_node_resources(node_id, task_id, cpu_score, memory_gb, gpu_score, gpu_memory_gb):
+    """Allocate node resources to task"""
+    # Check available resources
+    # Deduct allocated resources
+    # Update task list
+    # Record allocation status
+```
+
+### Resource Release Mechanism
+```python
+def release_node_resources(node_id, task_id, cpu_score, memory_gb, gpu_score, gpu_memory_gb):
+    """Release node resources"""
+    # Return resources to available pool
+    # Remove task record
+    # Update node status
+```
+
+## Deployment and Configuration
+
+### Environment Variables
+```bash
+# gRPC Service Configuration
+GRPC_SERVER_HOST=0.0.0.0
+GRPC_SERVER_PORT=50051
+
+# Redis Configuration
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_DB=0
+
+# JWT Authentication Configuration
+JWT_SECRET_KEY=your-secret-key
+TOKEN_EXPIRATION_HOURS=24
+
+# Storage Configuration
+TASK_STORAGE_PATH=/mnt/myusb/hivemind/task_storage
+MAX_FILE_SIZE=10485760  # 10MB
+
+# Database Configuration
+DB_PATH=./users.db
+```
+
+### Starting the Service
+```bash
+cd node_pool
+pip install -r requirements.txt
+python node_pool_server.py
+```
+
+## Monitoring and Logging
+
+### Key Metrics Monitoring
+- **Node Metrics**: Active nodes, trust level distribution
+- **Task Metrics**: Pending tasks, completion rate, failure rate
+- **Resource Metrics**: Total resources, available resources, utilization rate
+- **System Metrics**: gRPC response time, error rate
+
+### Log Classification
+```python
+# Node management logs
+logging.info(f"Node {node_id} (GPU: {gpu_name}, Docker: {docker_status}) registered successfully")
+
+# Task allocation logs  
+logging.info(f"Task {task_id} assigned to node {node_id}, trust level: {trust_level}")
+
+# Resource management logs
+logging.info(f"Node {node_id} resource allocation: CPU-{cpu_score}, Memory-{memory_gb}GB")
 ```
 
 ## API Usage Examples
 
-### User Registration and Login
-
+### Node Registration Example
 ```python
 import grpc
 import nodepool_pb2
 import nodepool_pb2_grpc
 
-# Connect to Node Pool
 channel = grpc.insecure_channel('localhost:50051')
+stub = nodepool_pb2_grpc.NodeManagerServiceStub(channel)
+
+request = nodepool_pb2.RegisterWorkerNodeRequest(
+    node_id="worker-001",        # Username
+    hostname="192.168.1.100",    # IP Address
+    cpu_cores=8,
+    memory_gb=16,
+    cpu_score=1000,
+    gpu_score=2000,
+    gpu_memory_gb=8,
+    location="Asia/Taipei",
+    port=50052,
+    gpu_name="RTX 4090",
+    docker_status="enabled"
+)
+
+response = stub.RegisterWorkerNode(request)
+print(f"Registration result: {response.message}")
+```
+
+### User Login Example
+```python
 user_stub = nodepool_pb2_grpc.UserServiceStub(channel)
 
-# Register new user
-register_request = nodepool_pb2.RegisterUserRequest(
-    username="john_doe",
-    password="secure_password123",
-    email="john@example.com"
-)
-register_response = user_stub.RegisterUser(register_request)
-
-if register_response.success:
-    print(f"User registered successfully: {register_response.user_id}")
-    
-    # Login user
-    login_request = nodepool_pb2.LoginUserRequest(
-        username="john_doe",
-        password="secure_password123"
-    )
-    login_response = user_stub.LoginUser(login_request)
-    
-    if login_response.success:
-        session_token = login_response.session_token
-        print(f"Login successful, session token: {session_token}")
-```
-
-### Node Registration
-
-```python
-# Connect to Node Pool
-node_stub = nodepool_pb2_grpc.NodeManagerServiceStub(channel)
-
-# Register worker node
-register_node_request = nodepool_pb2.RegisterNodeRequest(
-    node_id="worker-001",
-    node_type="worker",
-    hostname="192.168.1.100",
-    port=50052,
-    capabilities=nodepool_pb2.NodeCapabilities(
-        cpu_cores=8,
-        memory_mb=16384,
-        has_gpu=True,
-        supported_tasks=["python", "docker", "ml_inference"]
-    )
+# User login
+login_request = nodepool_pb2.LoginRequest(
+    username="user123",
+    password="password123"
 )
 
-register_node_response = node_stub.RegisterNode(register_node_request)
-if register_node_response.success:
-    print(f"Node registered: {register_node_response.assigned_id}")
+login_response = user_stub.Login(login_request)
+if login_response.success:
+    token = login_response.token
+    print(f"Login successful, Token: {token}")
+    
+    # Check balance
+    balance_request = nodepool_pb2.GetBalanceRequest(
+        username="user123",
+        token=token
+    )
+    
+    balance_response = user_stub.GetBalance(balance_request)
+    if balance_response.success:
+        print(f"Account balance: {balance_response.balance} CPT")
 ```
 
-### Task Submission
-
+### Task Upload Example
 ```python
-# Connect to Master Node Service
 master_stub = nodepool_pb2_grpc.MasterNodeServiceStub(channel)
 
-# Submit task
-task_request = nodepool_pb2.SubmitTaskRequest(
-    user_id="user_123",
-    task_type="python",
-    task_data=b"print('Hello, HiveMind!')",
-    requirements=nodepool_pb2.TaskRequirements(
-        cpu_cores=2,
-        memory_mb=1024,
-        timeout_seconds=300
-    ),
-    priority=nodepool_pb2.TaskPriority.NORMAL
+with open("task.zip", "rb") as f:
+    task_data = f.read()
+
+request = nodepool_pb2.UploadTaskRequest(
+    task_id="task-001",
+    task_zip=task_data,
+    memory_gb=4,
+    cpu_score=500,
+    gpu_score=1000,
+    gpu_memory_gb=4,
+    location="Any",
+    gpu_name="Any",
+    user_id="user123"
 )
 
-task_response = master_stub.SubmitTask(task_request)
-if task_response.success:
-    task_id = task_response.task_id
-    print(f"Task submitted: {task_id}")
-    
-    # Check task status
-    status_request = nodepool_pb2.GetTaskStatusRequest(
-        task_id=task_id,
-        user_id="user_123"
-    )
-    status_response = master_stub.GetTaskStatus(status_request)
-    print(f"Task status: {status_response.status}")
+response = master_stub.UploadTask(request)
+print(f"Task upload: {response.message}")
+
+# Poll task status
+status_request = nodepool_pb2.PollTaskStatusRequest(task_id="task-001")
+status_response = master_stub.PollTaskStatus(status_request)
+print(f"Task status: {status_response.status}")
+print(f"Output: {status_response.output}")
 ```
 
-## Database Schema
-
-### Users Table (SQLite)
-
-```sql
-CREATE TABLE users (
-    user_id TEXT PRIMARY KEY,
-    username TEXT UNIQUE NOT NULL,
-    email TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL,
-    salt TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    last_login TIMESTAMP,
-    role TEXT DEFAULT 'user',
-    is_active BOOLEAN DEFAULT 1
-);
-```
-
-### Redis Data Structures
-
-```
-# Node information
-worker_nodes:
-  HSET worker:node_id {
-    "status": "online",
-    "last_heartbeat": "2024-01-15T10:30:00Z",
-    "cpu_usage": "45.2",
-    "memory_usage": "60.8",
-    "task_count": "3"
-  }
-
-# Active sessions
-user_sessions:
-  HSET session:token {
-    "user_id": "user_123",
-    "created_at": "2024-01-15T10:00:00Z",
-    "expires_at": "2024-01-15T11:00:00Z"
-  }
-
-# Task queue
-task_queue:
-  LPUSH pending_tasks "task_id_1"
-  LPUSH pending_tasks "task_id_2"
-  
-# Task information
-task_info:
-  HSET task:task_id {
-    "status": "running",
-    "assigned_node": "worker-001",
-    "started_at": "2024-01-15T10:25:00Z"
-  }
-```
-
-## Performance Characteristics
-
-### Throughput Metrics
-
-| Operation | Throughput | Latency |
-|-----------|------------|---------|
-| User Login | 1000/sec | < 10ms |
-| Node Registration | 100/sec | < 50ms |
-| Task Submission | 500/sec | < 20ms |
-| Status Queries | 2000/sec | < 5ms |
-
-### Resource Usage
-
-- **Memory**: 256MB base + 1MB per active node
-- **CPU**: Low overhead, <5% on 4-core system
-- **Network**: Varies by task data size
-- **Storage**: SQLite database + Redis memory
-
-## Monitoring and Metrics
-
-### Health Checks
-
+### Worker Node Status Report Example
 ```python
-# Health check endpoint
-def health_check():
-    checks = {
-        "database": check_database_connection(),
-        "redis": check_redis_connection(),
-        "disk_space": check_disk_space(),
-        "memory_usage": get_memory_usage()
-    }
-    return checks
-```
+worker_stub = nodepool_pb2_grpc.WorkerNodeServiceStub(channel)
 
-### Key Metrics
+# Report running status
+status_request = nodepool_pb2.RunningStatusRequest(
+    node_id="worker-001",
+    task_id="task-001",
+    cpu_usage=75,      # CPU usage 75%
+    memory_usage=60,   # Memory usage 60%
+    gpu_usage=85,      # GPU usage 85%
+    gpu_memory_usage=70  # GPU memory usage 70%
+)
 
-```python
-# Performance metrics
-metrics = {
-    "active_nodes": get_active_node_count(),
-    "pending_tasks": get_pending_task_count(),
-    "completed_tasks_24h": get_completed_tasks_count(24),
-    "average_task_duration": get_average_task_duration(),
-    "system_uptime": get_system_uptime()
-}
-```
-
-## Security Features
-
-### Authentication
-
-- Password hashing using PBKDF2 with salt
-- Session token-based authentication
-- Token expiration and renewal
-- Role-based access control
-
-### Authorization
-
-- User role verification
-- Resource access control
-- API endpoint protection
-- Rate limiting (configurable)
-
-### Data Protection
-
-- Encrypted password storage
-- Secure session management
-- Input validation and sanitization
-- SQL injection prevention
-
-## Deployment Considerations
-
-### Single Instance Deployment
-
-```bash
-# Start Node Pool service
-cd node_pool
-python node_pool_server.py
-```
-
-### High Availability Deployment
-
-```yaml
-# docker-compose.yml
-version: '3.8'
-services:
-  nodepool-primary:
-    build: ./node_pool
-    ports:
-      - "50051:50051"
-    environment:
-      - REDIS_HOST=redis
-      - DB_PATH=/data/users.db
-    volumes:
-      - nodepool_data:/data
-      
-  nodepool-backup:
-    build: ./node_pool
-    ports:
-      - "50052:50051"
-    environment:
-      - REDIS_HOST=redis
-      - DB_PATH=/data/users.db
-    volumes:
-      - nodepool_data:/data
-      
-  redis:
-    image: redis:6.2-alpine
-    volumes:
-      - redis_data:/data
-      
-volumes:
-  nodepool_data:
-  redis_data:
+status_response = worker_stub.ReportRunningStatus(status_request)
+if status_response.success:
+    print(f"Status report successful, CPT reward earned: {status_response.cpt_reward}")
 ```
 
 ## Troubleshooting
 
-### Common Issues
+### 1. gRPC Connection Issues
+```bash
+# Check service status
+netstat -an | grep 50051
 
-1. **Port Already in Use**
-   ```bash
-   # Check what's using port 50051
-   netstat -tlnp | grep :50051
-   # Kill the process or change port
-   ```
+# Test connection
+grpcurl -plaintext localhost:50051 nodepool.NodeManagerService/HealthCheck
+```
 
-2. **Redis Connection Failed**
-   ```bash
-   # Check Redis status
-   redis-cli ping
-   # Restart Redis if needed
-   sudo systemctl restart redis
-   ```
+### 2. Redis Connection Failure
+```bash
+# Check Redis service
+redis-cli ping
 
-3. **Database Lock**
-   ```bash
-   # Check for stale lock files
-   ls -la users.db*
-   # Remove lock files if safe
-   rm users.db-wal users.db-shm
-   ```
+# Restart Redis
+sudo systemctl restart redis-server
+```
 
-### Performance Tuning
+### 3. Node Registration Failure
+```python
+# Check node information
+node_info = node_manager.get_node_info(node_id)
+if not node_info:
+    print(f"Node {node_id} does not exist or is not registered")
+```
 
-1. **Increase Worker Threads**
-   ```python
-   # In node_pool_server.py
-   server = grpc.server(
-       futures.ThreadPoolExecutor(max_workers=50),  # Increase from 20
-       options=options
-   )
-   ```
+### 4. Task Allocation Failure
+```python
+# Check available nodes
+available_nodes = node_manager.get_available_nodes(
+    memory_gb_req=4, cpu_score_req=500, 
+    gpu_score_req=1000, gpu_memory_gb_req=4,
+    location_req="Any", gpu_name_req="Any",
+    user_trust_score=100
+)
+print(f"Available nodes: {len(available_nodes)}")
+```
 
-2. **Optimize Redis Memory**
-   ```conf
-   # In redis.conf
-   maxmemory 2gb
-   maxmemory-policy allkeys-lru
-   ```
+## Performance Optimization
 
-3. **Database Optimization**
-   ```sql
-   -- Add indexes for common queries
-   CREATE INDEX idx_users_username ON users(username);
-   CREATE INDEX idx_users_email ON users(email);
-   ```
+### gRPC Server Optimization
+```python
+options = [
+    ('grpc.keepalive_time_ms', 10000),
+    ('grpc.keepalive_timeout_ms', 5000),
+    ('grpc.max_receive_message_length', 100 * 1024 * 1024),  # 100MB
+    ('grpc.max_send_message_length', 100 * 1024 * 1024),     # 100MB
+]
+
+server = grpc.server(
+    futures.ThreadPoolExecutor(max_workers=20),
+    options=options
+)
+```
+
+### Redis Memory Optimization
+```bash
+# Set Redis memory limit
+maxmemory 2gb
+maxmemory-policy allkeys-lru
+
+# Monitor memory usage
+redis-cli info memory
+```
+
+### Database Index Optimization
+```sql
+-- Create indexes for key fields (if using SQL queries)
+CREATE INDEX idx_user_username ON users(username);
+CREATE INDEX idx_user_credit_score ON users(credit_score);
+```
+
+## Security
+
+### JWT Authentication Mechanism
+- **Key Management**: Secure storage in environment variables
+- **Expiration Time**: Configurable token validity period
+- **Permission Control**: API access based on user identity
+
+### gRPC Security
+- **TLS Encryption**: Support for HTTPS/gRPC-TLS
+- **Message Verification**: Prevent forged requests
+- **Rate Limiting**: DDoS attack prevention
+
+### Data Protection
+- **Password Encryption**: bcrypt hash encryption
+- **Sensitive Data**: Encrypted storage of confidential information
+- **Access Logging**: Record all API calls
 
 ---
 
-**Module Version**: v1.0  
-**Last Updated**: January 2024  
-**Status**: Production Ready
-
-**Dependencies**: grpc, redis, sqlite3, concurrent.futures  
-**Python Version**: 3.8+
+**Related Documentation**:
+- [API Documentation](../api.md)
+- [Deployment Guide](../deployment.md)
+- [Troubleshooting](../troubleshooting.md)
+- [Developer Guide](../developer.md)

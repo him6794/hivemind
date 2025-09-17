@@ -808,3 +808,9 @@ class DatabaseManager:
         except Exception as e:
             logging.error(f"Error occurred while sending password reset email to {email}: {e}")
             return False
+
+
+if __name__=='__main__':
+    db_manager = DatabaseManager()
+    # For testing purposes
+    print(db_manager.add_user_balance("justin", 100))
