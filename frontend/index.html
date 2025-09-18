@@ -65,10 +65,106 @@
             </div>
         </nav>
 
-        <!-- Page Content -->
-        <div id="page-content">
-            <!-- Dynamic content will be loaded here -->
-        </div>
+        <!-- Header - Hero Section -->
+        <header class="bg-dark py-5 position-relative overflow-hidden">
+            <!-- 動畫背景元素 -->
+            <div class="position-absolute top-0 start-0 w-100 h-100">
+                <div class="floating-particles"></div>
+            </div>
+            <div class="container px-5 position-relative">
+                <div class="row gx-5 align-items-center justify-content-center">
+                    <div class="col-lg-12">
+                        <div class="my-5 text-center hero-content">
+                            <h1 class="display-5 fw-bolder text-white mb-2 slide-in-left" data-i18n="welcome">解鎖分散式運算的力量</h1>
+                            <p class="lead fw-normal text-white-50 mb-4 slide-in-left delay-200" data-i18n="subtitle">工作端 + 節點池，打造高效能分布式平台，讓你專注開發、我們處理執行。</p>
+                            <div class="d-grid gap-3 d-sm-flex justify-content-center slide-in-left delay-400">
+                                <a class="btn btn-primary btn-lg px-4 me-sm-3 btn-hover-glow" href="/register.html" data-i18n="register_now">立即註冊</a>
+                                <a class="btn btn-outline-light btn-lg px-4 btn-hover-lift" href="#" id="hero-docs-link" data-i18n="view_docs">查看文檔</a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- 系統資源統計區塊 -->
+        <section class="py-5 bg-primary">
+            <div class="container px-5">
+                <div class="text-center mb-4">
+                    <h3 class="fw-bolder text-white mb-2" data-i18n="system_resources">系統資源</h3>
+                    <p class="text-white-50" data-i18n="resource_subtitle">我們的分布式網路提供強大的運算資源</p>
+                </div>
+                <div class="row gx-5 text-center text-white">
+                    <div class="col-lg-3 col-md-6 mb-4 mb-lg-0">
+                        <div class="stat-item fade-in-up">
+                            <div class="h2 fw-bolder mb-0"><span class="counter" data-target="1000">0</span>+GB</div>
+                            <p class="mb-0" data-i18n="total_ram">總記憶體</p>
+                        </div>
+                    </div>
+                    <div class="col-lg-3 col-md-6 mb-4 mb-lg-0">
+                        <div class="stat-item fade-in-up delay-100">
+                            <div class="h2 fw-bolder mb-0"><span class="counter" data-target="500">0</span>+GB</div>
+                            <p class="mb-0" data-i18n="total_vram">顯示記憶體</p>
+                        </div>
+                    </div>
+                    <div class="col-lg-3 col-md-6 mb-4 mb-lg-0">
+                        <div class="stat-item fade-in-up delay-200">
+                            <div class="h2 fw-bolder mb-0"><span class="counter" data-target="700">0</span>+</div>
+                            <p class="mb-0" data-i18n="cpu_cores">CPU 核心</p>
+                        </div>
+                    </div>
+                    <div class="col-lg-3 col-md-6">
+                        <div class="stat-item fade-in-up delay-300">
+                            <div class="h2 fw-bolder mb-0"><span class="counter" data-target="50">0</span>+</div>
+                            <p class="mb-0" data-i18n="active_nodes">活躍節點</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Features Section -->
+        <section class="py-5" id="features">
+            <div class="container px-5 my-5">
+                <div class="row gx-5">
+                    <div class="col-lg-4 mb-5 mb-lg-0">
+                        <h2 class="fw-bolder mb-0" data-i18n="features_title">為什麼選擇 HiveMind？</h2>
+                    </div>
+                    <div class="col-lg-8">
+                        <div class="row gx-5 row-cols-1 row-cols-md-2">
+                            <div class="col mb-5 h-100">
+                                <div class="feature bg-primary bg-gradient text-white rounded-3 mb-3">
+                                    <i class="bi bi-collection"></i>
+                                </div>
+                                <h2 class="h5" data-i18n="feature1_title">分布式處理</h2>
+                                <p class="mb-0" data-i18n="feature1_desc">利用多節點並行處理，大幅提升運算效率</p>
+                            </div>
+                            <div class="col mb-5 h-100">
+                                <div class="feature bg-primary bg-gradient text-white rounded-3 mb-3">
+                                    <i class="bi bi-building"></i>
+                                </div>
+                                <h2 class="h5" data-i18n="feature2_title">高可用性</h2>
+                                <p class="mb-0" data-i18n="feature2_desc">自動故障轉移，確保任務持續運行</p>
+                            </div>
+                            <div class="col mb-5 mb-md-0 h-100">
+                                <div class="feature bg-primary bg-gradient text-white rounded-3 mb-3">
+                                    <i class="bi bi-toggles2"></i>
+                                </div>
+                                <h2 class="h5" data-i18n="feature3_title">彈性擴展</h2>
+                                <p class="mb-0" data-i18n="feature3_desc">根據需求動態調整計算資源</p>
+                            </div>
+                            <div class="col h-100">
+                                <div class="feature bg-primary bg-gradient text-white rounded-3 mb-3">
+                                    <i class="bi bi-toggles2"></i>
+                                </div>
+                                <h2 class="h5" data-i18n="feature4_title">簡單易用</h2>
+                                <p class="mb-0" data-i18n="feature4_desc">直觀的 Web 界面，快速上手</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
     </main>
 
     <!-- Footer -->
