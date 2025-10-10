@@ -4,6 +4,15 @@ from os import environ, makedirs, chmod, walk, _exit, system
 import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+
+# 修復模塊導入 - 支持直接運行和模塊導入
+try:
+    # 嘗試相對導入 (作為包運行時)
+    from .config import NODE_PORT, FLASK_PORT, MASTER_ADDRESS, NODE_ID
+except ImportError:
+    # 直接導入 (直接運行時)
+    from config import NODE_PORT, FLASK_PORT, MASTER_ADDRESS, NODE_ID
+
 from docker import from_env
 from docker.errors import ImageNotFound, APIError
 import grpc
@@ -176,11 +185,6 @@ from requests import post, get, exceptions
 import venv
 import threading
 basicConfig(level=INFO, format='%(asctime)s - %(levelname)s - [%(threadName)s] - %(message)s')
-
-NODE_PORT = int(environ.get("NODE_PORT", 50053))
-FLASK_PORT = int(environ.get("FLASK_PORT", 5001))
-MASTER_ADDRESS = environ.get("MASTER_ADDRESS", "127.0.0.1:50051")
-NODE_ID = environ.get("NODE_ID", f"worker-{node().split('.')[0]}-{NODE_PORT}")
 
 class WorkerNode:
     def __init__(self):
@@ -571,6 +575,11 @@ class WorkerNode:
             self._log(f"Connected to master at {self.master_address}")
         except Exception as e:
             self._log(f"gRPC connection failed: {e}", ERROR)
+            # 即使連接失敗，也要初始化這些屬性為 None
+            self.channel = None
+            self.user_stub = None
+            self.node_stub = None
+            self.master_stub = None
 
     def _init_flask(self):
         """初始化 Flask 應用"""
@@ -895,6 +904,12 @@ class WorkerNode:
     def _login(self, username, password):
         """登入到節點池"""
         try:
+            # 檢查 gRPC 連接是否可用
+            if not self.user_stub:
+                self._log("gRPC connection not available, cannot login", ERROR)
+                self.status = "Login Failed - No Connection"
+                return False
+                
             response = self.user_stub.Login(
                 nodepool_pb2.LoginRequest(username=username, password=password), 
                 timeout=15
@@ -957,6 +972,12 @@ class WorkerNode:
     def _register(self):
         """註冊節點"""
         if not self.token:
+            return False
+            
+        # 檢查 gRPC 連接是否可用
+        if not self.node_stub:
+            self._log("gRPC connection not available, cannot register", ERROR)
+            self.status = "Registration Failed - No Connection"
             return False
 
         try:
