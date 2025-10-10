@@ -1,50 +1,40 @@
 syntax = "proto3";
 
 package nodepool;
-message LoginRequest {
+message LoginRequest { // 用戶登錄請求
     string username = 1;
     string password = 2;
 }
 
-message LoginResponse {
+message LoginResponse {// 用戶登錄響應
     bool success = 1;
     string message = 2;
     string token = 3;
 }
 
-message RegisterRequest {
-    string username = 1;
-    string password = 2;
-}
-
-message RegisterResponse {
-    bool success = 1;
-    string message = 2;
-}
-
-message TransferRequest {
+message TransferRequest {// 用戶轉賬請求
     string token = 1;
     string receiver_username = 2;
     int64 amount = 3;
 }
 
-message TransferResponse {
+message TransferResponse {// 用戶轉賬響應
     bool success = 1;
     string message = 2;
 }
 
-message GetBalanceRequest {
+message GetBalanceRequest {// 用戶查詢餘額請求
     string username = 1;
-    string token = 2;  // 新增這一行
+    string token = 2;
 }
 
-message GetBalanceResponse {
+message GetBalanceResponse {// 用戶查詢餘額響應
     bool success = 1;
     string message = 2;
     int64 balance = 3;
 }
 
-message RegisterWorkerNodeRequest {
+message RegisterWorkerNodeRequest {// 工作節點註冊請求
     string node_id = 1;//用戶名
     string hostname = 2;//ip
     int32 cpu_cores = 3;
@@ -58,24 +48,20 @@ message RegisterWorkerNodeRequest {
     string docker_status = 13;
 }
 
-message StatusResponse {
-    bool success = 1;
-    string message = 2;
+message StatusResponse {// 狀態回報
+    bool status = 1;
+}
+message RunningStatusResponse {// 狀態回報
+    bool status = 1;
+    int32 cpu_usage = 2; // CPU 使用率
+    int32 memory_usage = 3; //記憶體總使用量
+    int32 gpu_usage = 4; // GPU 使用率
+    int32 gpu_memory_usage = 5; // GPU 記憶體使用量
+    int32 docker_status = 6; // Docker 狀態
 }
 
-message HealthCheckRequest {}
 
-message HealthCheckResponse {
-    bool healthy = 1;
-    string message = 2;
-}
-
-message ReportStatusRequest {
-    string node_id = 1;
-    string status_message = 2;
-}
-
-message UploadTaskRequest {
+message UploadTaskRequest {// 用戶上傳任務請求
     string task_id = 1;
     bytes task_zip = 2;
     int32 memory_gb = 3;
@@ -84,214 +70,150 @@ message UploadTaskRequest {
     int32 gpu_memory_gb = 6;
     string location = 7;
     string gpu_name = 8;
-    string user_id = 9;
+    string token = 9;  // 用戶令牌，用於驗證
 }
 
-message UploadTaskResponse {
+message UploadTaskResponse {// 用戶上傳任務響應
     bool success = 1;
     string message = 2;
 }
 
-message PollTaskStatusRequest {
-    string task_id = 1;
+message GetAllUserTasksRequest {// 用戶查詢所有任務請求
+    string token = 1;  // 用戶令牌，用於驗證
 }
 
-message PollTaskStatusResponse {
+message GetAllTasksResponse {// 用戶查詢所有任務響應
+    repeated TaskInfo tasks = 1;
+}
+
+message TaskInfo {// 任務信息定義
     string task_id = 1;
     string status = 2;
-    repeated string output = 3;
     string message = 4;
+    int32 cpu_usage = 5; // CPU 使用率
+    int32 memory_usage = 6; //記憶體總使用量
+    int32 gpu_usage = 7; // GPU 使用率
+    int32 gpu_memory_usage = 8; // GPU 記憶體使用量
+    string worker_ip = 9; // 工作節點 IP
 }
 
-message StoreOutputRequest {
+message TaskOutputUploadRequest {// 任務輸出上傳請求
     string task_id = 1;
     string output = 2;
+    string token = 3;  // 用戶令牌，用於驗證
 }
-
-message StoreResultRequest {
+message TaskOutputUploadResponse {// 任務輸出上傳響應
+    bool success = 1;
+    string message = 2;
+}
+message TaskResultUploadRequest {// 任務結果上傳請求
     string task_id = 1;
     bytes result_zip = 2;
+    string token = 3;  // 用戶令牌，用於驗證
+}
+message TaskResultUploadResponse {// 任務結果上傳響應
+    bool success = 1;
+    string message = 2;
 }
 
-message GetTaskResultRequest {
+message GetTaskResultRequest {// 用戶獲取任務結果請求
     string task_id = 1;
     string token = 2;  // 用戶令牌，用於驗證
 }
 
-message GetTaskResultResponse {
+message GetTaskResultResponse {// 用戶獲取任務結果響應
     bool success = 1;
     string message = 2;
     bytes result_zip = 3;
 }
 
-message ReturnTaskResultRequest {
+
+message ExecuteTaskRequest {//推送任務給工作節點請求
     string task_id = 1;
-    bytes result_zip = 2;
+    bytes task_zip = 2;
+    int32 cpu_usage = 3;
+    int32 gpu_usage = 4;
+    int32 memory_gb = 5;
+    int32 gpu_memory_gb = 6;
 }
 
-message ReturnTaskResultResponse {
+message ExecuteTaskResponse {//推送任務給工作節點響應
     bool success = 1;
     string message = 2;
 }
 
-message ExecuteTaskRequest {
-    string node_id = 1;
-    string task_id = 2;
-    bytes task_zip = 3;
-    int32 cpu=4;
-    int32 gpu=5;
-    int32 memory_gb = 6;
-    int32 gpu_memory_gb = 7;
-}
-
-message ExecuteTaskResponse {
-    bool success = 1;
-    string message = 2;
-    bytes result = 3;
-}
-
-message ReportOutputRequest {
-    string node_id = 1;
-    string task_id = 2;
-    string output = 3;
-}
-
-message RunningStatusRequest {
-    string node_id = 1;
-    string task_id = 2;
-    int32 cpu_usage = 3; // CPU 使用率
-    int32 memory_usage = 4; //記憶體總使用量
-    int32 gpu_usage = 5; // GPU 使用率
-    int32 gpu_memory_usage = 6; // GPU 記憶體使用量
-
-}
-
-message RunningStatusResponse {
-    bool success = 1;
-    string message = 2;
-    int64 cpt_reward = 3;
-}
-
-message TaskCompletedRequest {
+message TaskOutputRequest {//獲取任務輸出請求
     string task_id = 1;
-    string node_id = 2;
-    bool success = 3;
+    string output = 2;
+    string token = 3;  // 用戶令牌，用於驗證
 }
-
-message StoreLogsRequest {
-    string node_id = 1;
-    string task_id = 2;
-    string logs = 3;  // JSON 格式的日誌數據
-    int64 timestamp = 4;
-}
-
-message GetTaskLogsRequest {
-    string task_id = 1;
-    string token = 2;  // 用戶令牌，用於驗證
-}
-
-message GetTaskLogsResponse {
+message TaskOutputResponse {//獲取任務輸出響應
     bool success = 1;
     string message = 2;
-    string logs = 3;  // JSON 格式的日誌數據
 }
 
-message GetAllTasksRequest {
-    string token = 1;
-}
-
-message TaskStatus {
-    string task_id = 1;
-    string status = 2;
-    string created_at = 3;
-    string updated_at = 4;
-    string assigned_node = 5;
-}
-
-message GetAllTasksResponse {
-    bool success = 1;
-    string message = 2;
-    repeated TaskStatus tasks = 3;
-}
-
-message StopTaskRequest {
+message StopTaskRequest {// master用戶向nodepool停止任務請求
     string task_id = 1;
     string token = 2;
 }
 
-message StopTaskResponse {
+message StopTaskResponse {//nodepool向worker用戶停止任務響應
     bool success = 1;
     string message = 2;
 }
-
-// 工作節點停止任務執行的消息
-message StopTaskExecutionRequest {
+message StopTaskExecutionRequest {// 向工作節點停止任務執行的消息
     string task_id = 1;
-
 }
 
-message StopTaskExecutionResponse {
+message StopTaskExecutionResponse {// 向工作節點停止任務執行的回覆
+    bool success = 1;
+    string message = 2;
+}
+message TaskUsageRequest {// 任務資源使用情況
+    string task_id = 1;
+    int32 cpu_usage = 2; // CPU 使用率
+    int32 memory_usage = 3; //記憶體總使用量
+    int32 gpu_usage = 4; // GPU 使用率
+    int32 gpu_memory_usage = 5; // GPU 記憶體使用量
+    int32 token=6;
+}
+message TaskUsageResponse {// 任務資源使用情況回覆
     bool success = 1;
     string message = 2;
 }
 
-message WorkerNodeInfo {
-    string node_id = 1;
-    string hostname = 2;
-    int32 cpu_cores = 3;
-    int32 memory_gb = 4;
-    string status = 5;
-    double last_heartbeat = 6;
-    int32 cpu_score = 7;
-    int32 gpu_score = 8;
-    int32 gpu_memory_gb = 9;
-    string location = 10;
-    int32 port = 11;
-    string gpu_name = 12;
+message RefreshTokenRequest {// 用戶刷新令牌請求
+    string old_token = 1;
 }
-
-message GetNodeListRequest {
-    // 空請求，獲取所有節點列表
-}
-
-message GetNodeListResponse {
+message RefreshTokenResponse {// 用戶刷新令牌響應
     bool success = 1;
     string message = 2;
-    repeated WorkerNodeInfo nodes = 3;
+    string new_token = 3;
 }
-
 // 服務定義
 service UserService {
     rpc Login(LoginRequest) returns (LoginResponse);
-    rpc Register(RegisterRequest) returns (RegisterResponse);
-    rpc Transfer(TransferRequest) returns (TransferResponse);
+    rpc Transfer(TransferRequest) returns (TransferResponse); 
     rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse); // 新增 GetBalance RPC
+    rpc RefreshToken(RefreshTokenRequest) returns (RefreshTokenResponse);
 }
 
 service NodeManagerService {
     rpc RegisterWorkerNode(RegisterWorkerNodeRequest) returns (StatusResponse);
-    rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
-    rpc ReportStatus(ReportStatusRequest) returns (StatusResponse);
-    rpc GetNodeList(GetNodeListRequest) returns (GetNodeListResponse);
 }
 
 service MasterNodeService {
     rpc UploadTask(UploadTaskRequest) returns (UploadTaskResponse);
-    rpc PollTaskStatus(PollTaskStatusRequest) returns (PollTaskStatusResponse);
-    rpc StoreOutput(StoreOutputRequest) returns (StatusResponse);
-    rpc StoreResult(StoreResultRequest) returns (StatusResponse);
     rpc GetTaskResult(GetTaskResultRequest) returns (GetTaskResultResponse);
-    rpc TaskCompleted(TaskCompletedRequest) returns (StatusResponse);
-    rpc StoreLogs(StoreLogsRequest) returns (StatusResponse);
-    rpc GetTaskLogs(GetTaskLogsRequest) returns (GetTaskLogsResponse);
-    rpc GetAllTasks(GetAllTasksRequest) returns (GetAllTasksResponse);
+    rpc GetAllUserTasks(GetAllUserTasksRequest) returns (GetAllTasksResponse);
     rpc StopTask(StopTaskRequest) returns (StopTaskResponse);
-    rpc ReturnTaskResult(ReturnTaskResultRequest) returns (ReturnTaskResultResponse);
 }
 
 service WorkerNodeService {
     rpc ExecuteTask(ExecuteTaskRequest) returns (ExecuteTaskResponse);
-    rpc ReportOutput(ReportOutputRequest) returns (StatusResponse);
-    rpc ReportRunningStatus(RunningStatusRequest) returns (RunningStatusResponse);
+    rpc TaskOutputUpload(TaskOutputUploadRequest) returns (TaskOutputUploadResponse);
+    rpc TaskResultUpload(TaskResultUploadRequest) returns (TaskResultUploadResponse);
+    rpc TaskOutput(TaskOutputRequest) returns (TaskOutputResponse);
     rpc StopTaskExecution(StopTaskExecutionRequest) returns (StopTaskExecutionResponse);
+    rpc TaskUsage(TaskUsageRequest) returns (TaskUsageResponse);
 }
