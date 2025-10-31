@@ -196,6 +196,16 @@ message RefreshTokenResponse {// 用戶刷新令牌響應
     string message = 2;
     string new_token = 3;
 }
+
+message TasklogRequest {// 獲取任務日誌請求
+    string task_id = 1;
+    string token = 2;  // 用戶令牌，用於驗證
+}
+message TasklogResponse {// 獲取任務日誌響應
+    bool success = 1;
+    string log = 2;
+}
+    
 // 服務定義
 service UserService {
     rpc Login(LoginRequest) returns (LoginResponse);
@@ -214,6 +224,7 @@ service MasterNodeService {
     rpc GetTaskResult(GetTaskResultRequest) returns (GetTaskResultResponse);
     rpc GetAllUserTasks(GetAllUserTasksRequest) returns (GetAllTasksResponse);
     rpc StopTask(StopTaskRequest) returns (StopTaskResponse);
+    rpc GetTasklog(TasklogRequest) returns (TasklogResponse);
 }
 
 service WorkerNodeService {

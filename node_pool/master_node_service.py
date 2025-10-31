@@ -1082,11 +1082,10 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                         
                         # 構建任務請求，包含資源限制參數
                         req = nodepool_pb2.ExecuteTaskRequest(
-                            node_id=node_id,
                             task_id=task_id,
                             task_zip=task_zip,
-                            cpu=requirements.get("cpu_score", 0),
-                            gpu=requirements.get("gpu_score", 0),
+                            cpu_usage=requirements.get("cpu_score", 0),
+                            gpu_usage=requirements.get("gpu_score", 0),
                             memory_gb=requirements.get("memory_gb", 1),
                             gpu_memory_gb=requirements.get("gpu_memory_gb", 0)
                         )
@@ -1654,6 +1653,49 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                     result_zip=b""
                 )
 
+    def GetTasklog(self, request, context):
+        """主控端獲取任務日誌：驗證 token 與任務歸屬，合併 Redis 中 logs 與 output 並返回字串"""
+        try:
+            task_id = request.task_id
+            token = request.token
+
+            # 驗證 token 並獲取用戶名
+            username = self._extract_user_from_token(token)
+            if not username:
+                context.set_code(grpc.StatusCode.UNAUTHENTICATED)
+                context.set_details("Invalid or expired token")
+                return nodepool_pb2.TasklogResponse(success=False, log="")
+
+            # 檢查任務是否存在與歸屬
+            task_info = self.task_manager.get_task_info(task_id, include_zip=False)
+            if not task_info:
+                context.set_code(grpc.StatusCode.NOT_FOUND)
+                context.set_details("Task not found")
+                return nodepool_pb2.TasklogResponse(success=False, log="")
+
+            # 任務保存時 user_id 可能是用戶名，做雙向比對
+            owner = str(task_info.get("user_id", ""))
+            if owner not in (username, str(username)):
+                context.set_code(grpc.StatusCode.PERMISSION_DENIED)
+                context.set_details("Access denied to this task")
+                return nodepool_pb2.TasklogResponse(success=False, log="")
+
+            # 取得日誌內容（含 logs + output）
+            log_bundle = self.task_manager.get_task_logs(task_id)
+            if not log_bundle:
+                # 任務存在但沒有日誌，返回空字串
+                return nodepool_pb2.TasklogResponse(success=True, log="")
+
+            lines = log_bundle.get("logs", []) or []
+            log_text = "\n".join(lines)
+            return nodepool_pb2.TasklogResponse(success=True, log=log_text)
+
+        except Exception as e:
+            logging.error(f"GetTasklog 服務錯誤: {e}", exc_info=True)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(f"Internal server error: {str(e)}")
+            return nodepool_pb2.TasklogResponse(success=False, log="")
+
     def UploadTask(self, request, context):
         """接收任務上傳請求"""
         try:
@@ -1665,9 +1707,18 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
             gpu_memory_gb = request.gpu_memory_gb
             location = request.location or "Any"
             gpu_name = request.gpu_name or "Any"
-            user_id = request.user_id
+            token = request.token
             
-            logging.info(f"收到任務上傳請求: {task_id} (用戶: {user_id}, 大小: {len(task_zip)} bytes)")
+            # 驗證 token 並獲取用戶名
+            username = self._extract_user_from_token(token)
+            if not username:
+                logging.warning("UploadTask: Invalid or expired token")
+                return nodepool_pb2.UploadTaskResponse(
+                    success=False,
+                    message="Authentication failed"
+                )
+            
+            logging.info(f"收到任務上傳請求: {task_id} (用戶: {username}, 大小: {len(task_zip)} bytes)")
             
             # 檢查任務 ID 是否已存在
             if self.task_manager.get_task_info(task_id):
@@ -1703,7 +1754,7 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                 gpu_memory_gb=gpu_memory_gb,
                 location=location,
                 gpu_name=gpu_name,
-                user_id=user_id
+                user_id=username
             )
             
             if success:
@@ -1825,83 +1876,189 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                 message=f"內部錯誤: {str(e)}"
             )
 
-    def StoreLogs(self, request, context):
-        """存儲任務日誌"""
+    def UploadTask(self, request, context):
+        """接收任務上傳請求"""
         try:
             task_id = request.task_id
-            node_id = request.node_id
-            logs = request.logs
-            timestamp = request.timestamp
+            task_zip = request.task_zip
+            memory_gb = request.memory_gb
+            cpu_score = request.cpu_score
+            gpu_score = request.gpu_score
+            gpu_memory_gb = request.gpu_memory_gb
+            location = request.location or "Any"
+            gpu_name = request.gpu_name or "Any"
+            token = request.token
             
-            success = self.task_manager.store_logs(task_id, node_id, logs, timestamp)
+            # 驗證 token 並獲取用戶名
+            username = self._extract_user_from_token(token)
+            if not username:
+                logging.warning("UploadTask: Invalid or expired token")
+                return nodepool_pb2.UploadTaskResponse(
+                    success=False,
+                    message="Authentication failed"
+                )
             
-            if success:
-                return nodepool_pb2.StatusResponse(
+            logging.info(f"收到任務上傳請求: {task_id} (用戶: {username}, 大小: {len(task_zip)} bytes)")
+            
+            # 檢查任務 ID 是否已存在
+            if self.task_manager.get_task_info(task_id):
+                logging.warning(f"任務 {task_id} 已存在")
+                return nodepool_pb2.UploadTaskResponse(
+                    success=False,
+                    message="任務 ID 已存在"
+                )
+            
+            # 創建任務記錄（store_task 會自動處理文件存儲）
+            task_success = self.task_manager.store_task(
+                task_id=task_id,
+                task_zip=task_zip,
+                memory_gb=memory_gb,
+                cpu_score=cpu_score,
+                gpu_score=gpu_score,
+                gpu_memory_gb=gpu_memory_gb,
+                location=location,
+                gpu_name=gpu_name,
+                user_id=username
+            )
+            
+            if task_success:
+                logging.info(f"任務 {task_id} 創建成功")
+                return nodepool_pb2.UploadTaskResponse(
                     success=True,
-                    message="日誌已存儲"
+                    message="任務上傳成功"
                 )
             else:
-                return nodepool_pb2.StatusResponse(
+                logging.error(f"任務 {task_id} 創建失敗")
+                return nodepool_pb2.UploadTaskResponse(
                     success=False,
-                    message="存儲日誌失敗"
+                    message="任務創建失敗"
                 )
                 
         except Exception as e:
-            logging.error(f"StoreLogs 服務錯誤: {e}", exc_info=True)
-            return nodepool_pb2.StatusResponse(
+            logging.error(f"UploadTask 服務錯誤: {e}", exc_info=True)
+            return nodepool_pb2.UploadTaskResponse(
                 success=False,
                 message=f"內部錯誤: {str(e)}"
             )
 
-    def GetTaskLogs(self, request, context):
-        """獲取任務日誌"""
+    def GetTaskResult(self, request, context):
+        """獲取任務結果"""
         try:
             task_id = request.task_id
-            token = getattr(request, 'token', None)
+            token = request.token
             
-            # 驗證 token（如果有提供）
-            if token:
-                username = self._extract_user_from_token(token)
-                if not username:
-                    context.set_code(grpc.StatusCode.UNAUTHENTICATED)
-                    context.set_details("Invalid or expired token")
-                    return nodepool_pb2.GetTaskLogsResponse(
-                        success=False,
-                        message="Authentication failed",
-                        logs=""
-                    )
-                
-                # 檢查任務是否屬於該用戶
-                task_info = self.task_manager.get_task_info(task_id, include_zip=False)
-                if task_info and str(task_info.get("user_id")) != username:
-                    context.set_code(grpc.StatusCode.PERMISSION_DENIED)
-                    context.set_details("Access denied")
-                    return nodepool_pb2.GetTaskLogsResponse(
-                        success=False,
-                        message="Access denied to this task",
-                        logs=""
-                    )
+            # 驗證 token 並獲取用戶名
+            username = self._extract_user_from_token(token)
+            if not username:
+                logging.warning("GetTaskResult: Invalid or expired token")
+                return nodepool_pb2.GetTaskResultResponse(
+                    success=False,
+                    message="Authentication failed",
+                    result_zip=b""
+                )
             
-            logs_result = self.task_manager.get_task_logs(task_id)
+            # 檢查任務是否存在且屬於該用戶
+            task_info = self.task_manager.get_task_info(task_id, include_zip=False)
+            if not task_info:
+                return nodepool_pb2.GetTaskResultResponse(
+                    success=False,
+                    message="任務不存在",
+                    result_zip=b""
+                )
             
-            if logs_result:
-                logs_content = "\n".join(logs_result["logs"])
-                return nodepool_pb2.GetTaskLogsResponse(
+            if str(task_info.get("user_id")) != username:
+                return nodepool_pb2.GetTaskResultResponse(
+                    success=False,
+                    message="無權限訪問此任務",
+                    result_zip=b""
+                )
+            
+            # 獲取任務結果
+            file_storage = FileStorageManager()
+            result_zip = file_storage.get_result_zip(task_id)
+            
+            if result_zip:
+                logging.info(f"返回任務 {task_id} 結果 ({len(result_zip)} bytes)")
+                return nodepool_pb2.GetTaskResultResponse(
                     success=True,
-                    message=f"Found {logs_result['total_logs']} log entries",
-                    logs=logs_content
+                    message="任務結果獲取成功",
+                    result_zip=result_zip
                 )
             else:
-                return nodepool_pb2.GetTaskLogsResponse(
+                return nodepool_pb2.GetTaskResultResponse(
                     success=False,
-                    message="任務不存在或無日誌",
-                    logs=""
+                    message="任務結果不存在或未完成",
+                    result_zip=b""
                 )
                 
         except Exception as e:
-            logging.error(f"GetTaskLogs 服務錯誤: {e}", exc_info=True)
-            return nodepool_pb2.GetTaskLogsResponse(
+            logging.error(f"GetTaskResult 服務錯誤: {e}", exc_info=True)
+            return nodepool_pb2.GetTaskResultResponse(
                 success=False,
                 message=f"內部錯誤: {str(e)}",
-                logs=""
+                result_zip=b""
             )
+
+    def GetAllUserTasks(self, request, context):
+        """獲取用戶的所有任務"""
+        try:
+            token = request.token
+            
+            # 驗證 token 並獲取用戶名
+            username = self._extract_user_from_token(token)
+            if not username:
+                logging.warning("GetAllUserTasks: Invalid or expired token")
+                return nodepool_pb2.GetAllTasksResponse(
+                    tasks=[]
+                )
+            
+            logging.info(f"用戶 {username} 請求獲取所有任務")
+            
+            # 查詢用戶的任務
+            task_list = []
+            try:
+                task_keys = self.task_manager.redis_client.keys("task:*")
+                task_count = 0
+                
+                for key in task_keys:
+                    if task_count >= 100:  # 限制最多返回100個任務
+                        break
+                        
+                    task_id = key.split(":", 1)[1]
+                    task_user_id = self.task_manager.redis_client.hget(key, "user_id")
+                    
+                    # 比較用戶名
+                    if str(task_user_id) == username:
+                        status = self.task_manager.redis_client.hget(key, "status") or "UNKNOWN"
+                        message = self.task_manager.redis_client.hget(key, "message") or ""
+                        cpu_usage = int(self.task_manager.redis_client.hget(key, "cpu_usage") or 0)
+                        memory_usage = int(self.task_manager.redis_client.hget(key, "memory_usage") or 0)
+                        gpu_usage = int(self.task_manager.redis_client.hget(key, "gpu_usage") or 0)
+                        gpu_memory_usage = int(self.task_manager.redis_client.hget(key, "gpu_memory_usage") or 0)
+                        worker_ip = self.task_manager.redis_client.hget(key, "assigned_node") or ""
+                        
+                        task_info = nodepool_pb2.TaskInfo(
+                            task_id=task_id,
+                            status=status,
+                            message=message,
+                            cpu_usage=cpu_usage,
+                            memory_usage=memory_usage,
+                            gpu_usage=gpu_usage,
+                            gpu_memory_usage=gpu_memory_usage,
+                            worker_ip=worker_ip
+                        )
+                        task_list.append(task_info)
+                        task_count += 1
+                
+            except Exception as e:
+                logging.error(f"查詢用戶任務時發生錯誤: {e}")
+            
+            logging.info(f"返回用戶 {username} 的 {len(task_list)} 個任務")
+            return nodepool_pb2.GetAllTasksResponse(tasks=task_list)
+            
+        except Exception as e:
+            logging.error(f"GetAllUserTasks error: {e}", exc_info=True)
+            return nodepool_pb2.GetAllTasksResponse(tasks=[])
+
+    # 注意：StopTask 已在本類較前方實作，包含通知工作端 StopTaskExecution 與狀態處理。
+    # 這裡移除重複且較為簡化的 StopTask 實作，以避免覆蓋正確行為。

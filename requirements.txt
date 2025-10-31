@@ -9,3 +9,4 @@ bcrypt
 pyjwt
 redis==5.0.1
 dotenv
+resend

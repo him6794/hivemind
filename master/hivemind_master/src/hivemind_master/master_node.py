@@ -123,9 +123,9 @@ class MasterNodeUI:
         if not user:
             return []
         try:
-            req = nodepool_pb2.GetAllTasksRequest(token=user['token'])
-            resp = self.master_stub.GetAllTasks(req, timeout=30)
-            if resp.success:
+            req = nodepool_pb2.GetAllUserTasksRequest(token=user['token'])
+            resp = self.master_stub.GetAllUserTasks(req, timeout=30)
+            if resp.tasks:
                 return resp.tasks
             else:
                 return []
@@ -176,7 +176,7 @@ class MasterNodeUI:
                 gpu_memory_gb=int(requirements.get("gpu_memory_gb", 0)),
                 location=requirements.get("location", "Any"),
                 gpu_name=requirements.get("gpu_name", ""),
-                user_id=username
+                token=token
             )
             metadata = [('authorization', f'Bearer {token}')]
             response = self.master_stub.UploadTask(request, metadata=metadata, timeout=60)
@@ -289,24 +289,9 @@ class MasterNodeUI:
             if not self.node_stub:
                 return jsonify({"error": "Not connected to gRPC server", "nodes": []}), 200
             try:
-                grpc_request = nodepool_pb2.GetNodeListRequest()
-                response = self.node_stub.GetNodeList(grpc_request, timeout=30)
-                if response.success:
-                    nodes_list = []
-                    for node in response.nodes:
-                        status = "ONLINE" if node.status else "OFFLINE"
-                        nodes_list.append({
-                            "node_id": node.node_id,
-                            "status": status,
-                            "cpu_cores": node.cpu_cores,
-                            "memory_gb": node.memory_gb,
-                            "cpu_score": node.cpu_score,
-                            "gpu_score": node.gpu_score,
-                            "last_heartbeat": time.strftime('%H:%M:%S', time.localtime(int(node.last_heartbeat))) if node.last_heartbeat else 'N/A',
-                        })
-                    return jsonify({"nodes": nodes_list})
-                else:
-                    return jsonify({"error": f"Failed to get node list: {response.message}", "nodes": []}), 200
+                # TODO: 實現節點列表功能 - 目前 proto 文件中沒有定義 GetNodeList 方法
+                # 暫時返回空節點列表
+                return jsonify({"nodes": []})
             except Exception as e:
                 logging.error(f"API GetNodeList error: {e}")
                 return jsonify({"error": "Failed to get node list", "nodes": []}), 200
@@ -486,34 +471,29 @@ class MasterNodeUI:
                 return jsonify({"error": "User not logged in"}), 401
             
             try:
-                req = nodepool_pb2.GetTaskLogsRequest(task_id=task_id, token=user['token'])
-                response = self.master_stub.GetTaskLogs(req, timeout=10)
-                
-                if response.success:
-                    formatted_logs = []
-                    if response.logs:
-                        for line in response.logs.split('\n'):
-                            if line.strip():
-                                timestamp, content, level = self._parse_log_line(line)
-                                formatted_logs.append({
-                                    "timestamp": timestamp,
-                                    "content": content,
-                                    "level": level
-                                })
-                    
-                    # Get task status
-                    status_request = nodepool_pb2.PollTaskStatusRequest(task_id=task_id)
-                    status_response = self.master_stub.PollTaskStatus(status_request, timeout=10)
-                    
-                    return jsonify({
-                        "task_id": task_id,
-                        "status": status_response.status if status_response else "UNKNOWN",
-                        "message": response.message,
-                        "logs": formatted_logs,
-                        "total_logs": len(formatted_logs)
+                # 呼叫節點池 gRPC 取得日誌
+                req = nodepool_pb2.TasklogRequest(task_id=task_id, token=user['token'])
+                resp = self.master_stub.GetTasklog(req, timeout=30)
+
+                logs_text = getattr(resp, 'log', '') or ''
+                raw_lines = [line for line in logs_text.split('\n') if line.strip()]
+
+                # 將純文字行轉成 {timestamp, content, level} 物件，避免前端出現 [undefined]
+                lines = []
+                for line in raw_lines:
+                    ts, content, level = self._parse_log_line(line)
+                    lines.append({
+                        "timestamp": ts,
+                        "content": content,
+                        "level": level
                     })
-                else:
-                    return jsonify({"error": response.message, "logs": []}), 404
+                return jsonify({
+                    "task_id": task_id,
+                    "status": "OK" if getattr(resp, 'success', False) else "ERROR",
+                    "message": "",
+                    "logs": lines,
+                    "total_logs": len(lines)
+                })
             except Exception as e:
                 logging.error(f"Failed to get task logs: {e}")
                 return jsonify({"error": f"Failed to get logs: {str(e)}"}), 500
@@ -647,16 +627,37 @@ class MasterNodeUI:
             logging.info("User confirmed manual WireGuard connection for master")
 
     def run(self):
-        # Auto-connect VPN first
-        self.auto_join_vpn()
+        # Optional: auto-connect VPN first (disabled by default)
+        try:
+            if os.environ.get("MASTER_AUTO_VPN", "0") == "1":
+                self.auto_join_vpn()
+            else:
+                logging.info("Skipping VPN auto-join (set MASTER_AUTO_VPN=1 to enable)")
+        except Exception as e:
+            logging.warning(f"Auto VPN join skipped due to error: {e}")
+
+        # Try to connect gRPC; even if it fails, still bring up the web UI
         if not self._connect_grpc():
-            logging.error("Cannot connect to node pool, exiting")
-            return
+            logging.warning("Cannot connect to node pool gRPC. Web UI will still start; login/actions may be limited until connection is available.")
 
         # Remove auto-login logic, require manual login
         try:
-            logging.info(f"Master started at http://{UI_HOST}:{UI_PORT}")
-            logging.info("Please login through web interface to use console functions")
+            logging.info(f"Master starting on http://{UI_HOST}:{UI_PORT}")
+            logging.info("Web UI will open shortly. Please login through the browser UI.")
+
+            # Open browser after a short delay
+            try:
+                import threading, webbrowser, time as _time
+                def _open():
+                    _time.sleep(1.5)
+                    try:
+                        webbrowser.open(f"http://127.0.0.1:{UI_PORT}/login")
+                    except Exception:
+                        pass
+                threading.Thread(target=_open, daemon=True).start()
+            except Exception:
+                pass
+
             self.app.run(host=UI_HOST, port=UI_PORT, debug=False)
         except KeyboardInterrupt:
             logging.info("Received interrupt signal, shutting down...")

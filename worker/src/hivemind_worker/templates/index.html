@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hivemind Worker</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="/static/scripts.js" defer></script>
+</head>
+<body>
+    <h1>setting your Performance Limits</h1>
+    <input type='range' id='cpuLimit' min='0' max='100' value='100' step='1' oninput='updateCpuLimitLabel(this.value)'>
+    <label for='cpuLimit' id='cpuLimitLabel'>CPU Limit: 100%</label>
+    <br>
+    <input type='range' id='ramLimit' min='0' max='100' value='100' step='1' oninput='updateRamLimitLabel(this.value)'>
+    <label for='ramLimit' id='ramLimitLabel'>RAM Limit: 100%</label>
+    <br>
+    <input type='range' id='gpuLimit' min='0' max='100' value='100' step='1' oninput='updateGpuLimitLabel(this.value)'>
+    <label for='gpuLimit' id='gpuLimitLabel'>GPU Limit: 100%</label>
+    <input type='range' id='gpuMemoryLimit' min='0' max='100' value='100' step='1' oninput='updateGpuMemoryLimitLabel(this.value)'>
+    <label for='gpuMemoryLimit' id='gpuMemoryLimitLabel'>GPU Memory Limit: 100%</label>
+    <br>
+    <input type='range' id='diskLimit' min='0' max='100' value='100' step='1' oninput='updateDiskLimitLabel(this.value)'>
+    <label for='diskLimit' id='diskLimitLabel'>Disk Limit: 100%</label>
+    <br>
+    <input type='range' id='networkLimit' min='0' max='1000' value='100' step='1' oninput='updateNetworkLimitLabel(this.value)'>
+    <label for='networkLimit' id='networkLimitLabel'>Network Limit: 1000 Mbps</label>
+<body>

@@ -973,3 +973,35 @@ class NodeManager:
         except Exception as e:
             logging.error(f"獲取任務 {task_id} 資源使用失敗: {e}")
             return None
+    def update_node_heartbeat(self, node_id, status, running_tasks, resource_info):
+        """?�新節點�?跳�??��??�?�信??"""
+        try:
+            # 檢查節點是?��???
+            if not self.redis_client.exists(f"node:{node_id}"):
+                logging.warning(f"節�?{node_id} 不�??��??��??�新心跳")
+                return False
+
+            current_time = time.time()
+            
+            # ?�新節點�??��?心跳?��?
+            update_data = {
+                "status": status,
+                "last_heartbeat": str(current_time),
+                "updated_at": str(current_time),
+                "running_tasks": str(running_tasks),
+                "current_cpu_usage": str(resource_info.get('cpu_usage', 0)),
+                "current_memory_usage": str(resource_info.get('memory_usage', 0)),
+                "current_gpu_usage": str(resource_info.get('gpu_usage', 0)),
+                "current_gpu_memory_usage": str(resource_info.get('gpu_memory_usage', 0)),
+                "docker_status": resource_info.get('docker_status', 'unknown')
+            }
+            
+            # ?�新 Redis 中�?節點信??
+            self.redis_client.hset(f"node:{node_id}", mapping=update_data)
+            
+            logging.debug(f"節�?{node_id} ?�?�已?�新: {status}，�?行任?�數: {running_tasks}")
+            return True
+
+        except Exception as e:
+            logging.error(f"?�新節�?{node_id} 心跳失�?: {e}", exc_info=True)
+            return False

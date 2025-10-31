@@ -1,6 +1,5 @@
-from sys import exit, path
-from os.path import join, dirname, abspath, exists, relpath
-from os import environ, makedirs, chmod, walk, _exit, system
+from os.path import join, dirname, abspath, exists
+from os import makedirs
 import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
@@ -9,164 +8,39 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 try:
     # 嘗試相對導入 (作為包運行時)
     from .config import NODE_PORT, FLASK_PORT, MASTER_ADDRESS, NODE_ID
+    from . import nodepool_pb2
+    from . import nodepool_pb2_grpc
 except ImportError:
     # 直接導入 (直接運行時)
     from config import NODE_PORT, FLASK_PORT, MASTER_ADDRESS, NODE_ID
+    import nodepool_pb2
+    import nodepool_pb2_grpc
 
-from docker import from_env
-from docker.errors import ImageNotFound, APIError
-import grpc
-from threading import Thread, Event, Lock
-from logging import basicConfig, info, warning, error, critical, INFO, WARNING, ERROR, getLevelName
-from flask import Flask, jsonify, request, render_template, session, redirect, url_for
-import nodepool_pb2
-import nodepool_pb2_grpc
-from concurrent.futures import ThreadPoolExecutor
-
-# Go-based psutil replacement
-import ctypes
-from collections import namedtuple
-from ctypes import c_int, c_double, c_ulonglong, c_char_p
-
-# Try to load Go DLL for better performance
+# System metrics moved to dedicated module
 try:
-    dll_path = os.path.join(os.path.dirname(__file__), "psutil.dll")
-    if os.path.exists(dll_path):
-        _go_lib = ctypes.CDLL(dll_path)
-        # Setup function signatures
-        _go_lib.get_cpu_count.restype = c_int
-        _go_lib.get_cpu_count.argtypes = []
-        _go_lib.get_memory_total.restype = c_ulonglong
-        _go_lib.get_memory_total.argtypes = []
-        _go_lib.get_memory_available.restype = c_ulonglong
-        _go_lib.get_memory_available.argtypes = []
-        _go_lib.get_memory_percent.restype = c_double
-        _go_lib.get_memory_percent.argtypes = []
-        _go_lib.get_hostname_length.restype = c_int
-        _go_lib.get_hostname_length.argtypes = []
-        _go_lib.get_hostname_data.restype = c_int
-        _go_lib.get_hostname_data.argtypes = [c_char_p, c_int]
-        _go_lib.get_cpu_score.restype = c_int
-        _go_lib.get_cpu_score.argtypes = []
-        _go_lib.get_gpu_name_length.restype = c_int
-        _go_lib.get_gpu_name_length.argtypes = []
-        _go_lib.get_gpu_name_data.restype = c_int
-        _go_lib.get_gpu_name_data.argtypes = [c_char_p, c_int]
-        _go_lib.get_gpu_memory.restype = c_double
-        _go_lib.get_gpu_memory.argtypes = []
-        _go_lib.get_gpu_score.restype = c_int
-        _go_lib.get_gpu_score.argtypes = []
-        _go_lib.get_gpu_available.restype = c_int
-        _go_lib.get_gpu_available.argtypes = []
-        
-        USING_GO_PSUTIL = True
-        print("[Worker] Using Go-based psutil replacement for better performance")
-    else:
-        _go_lib = None
-        USING_GO_PSUTIL = False
-        print(f"[Worker] Go DLL not found at {dll_path}, falling back to Python psutil")
-except Exception as e:
-    _go_lib = None
-    USING_GO_PSUTIL = False
-    print(f"[Worker] Failed to load Go DLL: {e}, falling back to Python psutil")
+    from .system_metrics import (
+        VirtualMemory,
+        cpu_count,
+        virtual_memory,
+        cpu_percent,
+        get_hostname,
+        get_cpu_score,
+        get_gpu_info,
+    )
+except ImportError:
+    from system_metrics import (
+        VirtualMemory,
+        cpu_count,
+        virtual_memory,
+        cpu_percent,
+        get_hostname,
+        get_cpu_score,
+        get_gpu_info,
+    )
 
-# Memory info namedtuple compatible with psutil
-VirtualMemory = namedtuple('VirtualMemory', ['total', 'available', 'percent', 'used', 'free'])
-
-def cpu_count(logical=True):
-    """Get CPU count using Go library or fallback to Python"""
-    if USING_GO_PSUTIL:
-        return _go_lib.get_cpu_count()
-    else:
-        from psutil import cpu_count as psutil_cpu_count
-        return psutil_cpu_count(logical=logical)
-
-def virtual_memory():
-    """Get memory info using Go library or fallback to Python"""
-    if USING_GO_PSUTIL:
-        total = _go_lib.get_memory_total()
-        available = _go_lib.get_memory_available()
-        percent = _go_lib.get_memory_percent()
-        used = total - available
-        free = available
-        return VirtualMemory(total=total, available=available, percent=percent, used=used, free=free)
-    else:
-        from psutil import virtual_memory as psutil_virtual_memory
-        return psutil_virtual_memory()
-
-def cpu_percent():
-    """Get CPU usage percentage - fallback to Python psutil with proper interval handling"""
-    from psutil import cpu_percent as psutil_cpu_percent
-    import time
-    
-    # 首次調用設定基準，然後等待短暫時間並再次調用以獲取準確的 CPU 使用率
-    try:
-        # 非阻塞調用
-        usage = psutil_cpu_percent(interval=0.1)
-        return usage if usage > 0 else 0.1  # 避免返回 0
-    except Exception:
-        # 如果出錯，返回一個合理的默認值
-        return 5.0
-
-def get_hostname():
-    """Get hostname using Go library or fallback"""
-    if USING_GO_PSUTIL:
-        length = _go_lib.get_hostname_length()
-        if length <= 0:
-            return "unknown"
-        buffer = ctypes.create_string_buffer(length + 1)
-        _go_lib.get_hostname_data(buffer, length + 1)
-        return buffer.value.decode('utf-8')
-    else:
-        import socket
-        return socket.gethostname()
-
-def get_cpu_score():
-    """Get CPU benchmark score using Go library or fallback"""
-    if USING_GO_PSUTIL:
-        return _go_lib.get_cpu_score()
-    else:
-        import time
-        start_time = time.time()
-        result = 0
-        for i in range(100000):
-            result += i % 1000
-        duration = time.time() - start_time
-        return int((100000 / duration) / 10) if duration > 0.01 else 1000
-
-def get_gpu_info():
-    """Get GPU info using Go library or fallback"""
-    if USING_GO_PSUTIL:
-        name_length = _go_lib.get_gpu_name_length()
-        if name_length <= 0:
-            name = "Not Detected"
-        else:
-            buffer = ctypes.create_string_buffer(name_length + 1)
-            _go_lib.get_gpu_name_data(buffer, name_length + 1)
-            name = buffer.value.decode('utf-8')
-        
-        memory = _go_lib.get_gpu_memory()
-        score = _go_lib.get_gpu_score()
-        available = _go_lib.get_gpu_available() == 1
-        
-        return {
-            'name': name,
-            'memory_gb': memory,
-            'score': score,
-            'available': available
-        }
-    else:
-        return {
-            'name': 'Not Detected (Python fallback)',
-            'memory_gb': 0.0,
-            'score': 0,
-            'available': False
-        }
-
-from time import time, sleep
+import time
 from zipfile import ZipFile, ZIP_DEFLATED
 from io import BytesIO
-from tempfile import mkdtemp
 from subprocess import run
 from platform import node, system
 # 只在 Windows 匯入 CREATE_NO_WINDOW
@@ -176,15 +50,30 @@ except ImportError:
     CREATE_NO_WINDOW = None
 from datetime import datetime, timedelta
 from secrets import token_hex
-from shutil import copy2, rmtree
-from socket import socket, AF_INET, SOCK_DGRAM
+from shutil import rmtree
 from uuid import uuid4
-from webbrowser import open as web_open
-from netifaces import interfaces, ifaddresses, AF_INET
-from requests import post, get, exceptions
-import venv
-import threading
+import grpc
+from concurrent.futures import ThreadPoolExecutor
+from logging import basicConfig, INFO, ERROR, WARNING, DEBUG, getLevelName
+
 basicConfig(level=INFO, format='%(asctime)s - %(levelname)s - [%(threadName)s] - %(message)s')
+
+# 使用 logging 模組提供的常量與 _log 方法，不再保留全域別名與包裝函式
+
+from threading import Event, Lock, Thread
+from flask import Flask
+
+# Import gRPC servicer from separate module
+try:
+    from .grpc_servicer import WorkerNodeServicer
+except ImportError:
+    from grpc_servicer import WorkerNodeServicer
+
+# Import Flask web setup from separate module
+try:
+    from .webapp import register_routes as register_web_routes, start_flask as start_web_flask
+except ImportError:
+    from webapp import register_routes as register_web_routes, start_flask as start_web_flask
 
 class WorkerNode:
     def __init__(self):
@@ -196,7 +85,7 @@ class WorkerNode:
         # 狀態管理
         self.status = "Initializing"
         # 改為字典以支持多任務
-        self.running_tasks = {}  # {task_id: {"status": status, "resources": {}, "start_time": time()}}
+        self.running_tasks = {}  # {task_id: {"status": status, "resources": {}, "start_time": time.time()}}
         self.task_locks = {}  # {task_id: threading.Lock()}
         self.username = None
         self.token = None
@@ -212,6 +101,9 @@ class WorkerNode:
         self.logs = []
         self.log_lock = Lock()
         self.resources_lock = Lock()  # 添加資源鎖
+        # 供外部模組使用的系統度量函式引用
+        self.cpu_percent = cpu_percent
+        self.virtual_memory = virtual_memory
 
         # 資源管理
         self.available_resources = {
@@ -232,8 +124,7 @@ class WorkerNode:
         self.session_lock = Lock()
         self.task_stop_events = {}  # {task_id: Event()}
 
-        # 先自動連線 VPN
-        #self._auto_join_vpn()
+    # VPN 自動連線已移除，若需要可於未來以選配功能實作
 
         # 硬體信息
         self._init_hardware()
@@ -245,58 +136,7 @@ class WorkerNode:
         self._init_flask()
         self.status = "Waiting for Login"
 
-    def _auto_join_vpn(self):
-        """自動請求主控端 /api/vpn/join 取得 WireGuard 配置並連線 VPN"""
-        try:
-            api_url = "https://hivemind.justin0711.com/api/vpn/join"
-            client_name = self.node_id
-            resp = post(api_url, json={"client_name": client_name}, timeout=15, verify=True)
-            try:
-                resp_json = resp.json()
-            except Exception:
-                resp_json = {}
-            if resp.status_code == 200 and resp_json.get("success"):
-                config_content = resp_json.get("config")
-                config_path = join(dirname(abspath(__file__)), "wg0.conf")
-                try:
-                    with open(config_path, "w") as f:
-                        f.write(config_content)
-                    self._log(f"Automatically obtained WireGuard config and wrote to {config_path}")
-                except Exception as e:
-                    self._log(f"Failed to write WireGuard config: {e}", WARNING)
-                    return
-                # Windows/Linux 都在當前目錄執行 wg-quick，需有權限與路徑
-                from os import system
-                result = system(f"wg-quick down {config_path} 2>/dev/null; wg-quick up {config_path}")
-                if result == 0:
-                    self._log("WireGuard VPN started successfully")
-                else:
-                    self._log("WireGuard VPN failed to start, please check permissions and config", WARNING)
-                    self._prompt_manual_vpn(config_path)
-            else:
-                error_msg = resp_json.get("error") if resp_json else resp.text
-                self._log(f"Failed to automatically obtain WireGuard config: {error_msg}", WARNING)
-                if error_msg and "VPN 服務不可用" in error_msg:
-                    self._log("Please ensure the master Flask started with WireGuardServer initialized and /api/vpn/join is available", WARNING)
-                self._prompt_manual_vpn()
-        except Exception as e:
-            self._log(f"Failed to request /api/vpn/join automatically: {e}", WARNING)
-            self._prompt_manual_vpn()
-
-    def _prompt_manual_vpn(self, config_path=None):
-        """提示用戶手動連線 WireGuard"""
-        msg = (
-            "\n[Notice] Failed to connect to WireGuard automatically. Please connect to VPN manually:\n"
-            "1. Find your config file (wg0.conf).\n"
-            "2. Open your WireGuard client and import the config.\n"
-            "3. If you encounter permission issues, run as administrator/root.\n"
-        )
-        print(msg)
-        print('If you have already connected, please press y')
-        a = input()
-        if a == 'y':
-            # 不記錄任何日誌
-            pass
+    # 移除未使用的 WireGuard 自動連線/提示函式，避免多餘相依與混淆
 
     def _init_hardware(self):
         """初始化硬體信息"""
@@ -358,113 +198,26 @@ class WorkerNode:
             self.available_resources = self.total_resources.copy()
 
     def _auto_detect_location(self):
-        """靜默自動檢測地區"""
+        """靜默自動檢測地區（委派到 network_utils.auto_detect_location）"""
         try:
-            # 使用多個 API 嘗試檢測
-            apis = [
-                'http://ip-api.com/json/',
-                'https://ipapi.co/json/',
-                'http://www.geoplugin.net/json.gp'
-            ]
-            
-            for api_url in apis:
-                try:
-                    response = get(api_url, timeout=5)
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        
-                        # 根據不同 API 的響應格式處理
-                        continent = None
-                        country = None
-                        
-                        if 'continent' in data:
-                            continent = data.get('continent', '')
-                            country = data.get('country', '')
-                        elif 'continent_code' in data:
-                            continent_codes = {
-                                'AS': 'Asia', 'AF': 'Africa', 'NA': 'North America',
-                                'SA': 'South America', 'EU': 'Europe', 'OC': 'Oceania'
-                            }
-                            continent = continent_codes.get(data.get('continent_code', ''))
-                            country = data.get('country_name', '')
-                        elif 'geoplugin_continentName' in data:
-                            continent = data.get('geoplugin_continentName', '')
-                            country = data.get('geoplugin_countryName', '')
-                        
-                        if continent and country:
-                            continent_mapping = {
-                                'Asia': 'Asia', 'Africa': 'Africa', 'North America': 'North America',
-                                'South America': 'South America', 'Europe': 'Europe', 'Oceania': 'Oceania'
-                            }
-                            
-                            detected_region = continent_mapping.get(continent)
-                            if detected_region:
-                                self._log(f"Auto-detected location: {country} -> {detected_region}")
-                                return detected_region
-                        
-                except (exceptions.RequestException, Exception):
-                    continue
-            
-            self._log("Location detection failed, using Unknown")
-            return "Unknown"
-                    
+            try:
+                from .network_utils import auto_detect_location
+            except ImportError:
+                from network_utils import auto_detect_location
+            return auto_detect_location(self)
         except Exception as e:
             self._log(f"Location detection error: {e}")
             return "Unknown"
 
     def _get_local_ip(self):
-        """獲取本機 IP 地址（優先使用 WireGuard 網卡）"""
+        """獲取本機 IP（委派到 network_utils.get_local_ip）"""
         try:
-            # 檢查所有網卡接口
-            interfaces_list = interfaces()
-            self._log(f"Detected network interfaces: {interfaces_list}")
-            
-            # 優先檢查 WireGuard 相關接口
-            wg_interfaces = [iface for iface in interfaces_list if 'wg' in iface.lower() or 'wireguard' in iface.lower()]
-            
-            if wg_interfaces:
-                for wg_iface in wg_interfaces:
-                    try:
-                        addrs = ifaddresses(wg_iface)
-                        if AF_INET in addrs:
-                            wg_ip = addrs[AF_INET][0]['addr']
-                            self._log(f"Detected WireGuard interface {wg_iface}, IP: {wg_ip}")
-                            return wg_ip
-                    except Exception as e:
-                        self._log(f"Failed to check interface {wg_iface}: {e}")
-                        continue
-            
-            # 檢查是否有 10.0.0.x 網段的 IP（VPN 網段）
-            for iface in interfaces_list:
-                try:
-                    addrs = ifaddresses(iface)
-                    if AF_INET in addrs:
-                        for addr_info in addrs[AF_INET]:
-                            ip = addr_info['addr']
-                            # 檢查是否在 VPN 網段
-                            if ip.startswith('10.0.0.') and ip != '10.0.0.1':
-                                self._log(f"Detected VPN subnet IP: {ip} (interface: {iface})")
-                                return ip
-                except Exception as e:
-                    continue
-            
-            # 如果沒有找到 VPN IP，使用預設方法
-            self._log("No WireGuard interface detected, using default interface")
-            
-        except Exception as e:
-            self._log(f"Network interface detection failed: {e}")
-        
-        # 預設方法：連接外部服務獲取本機 IP
-        try:
-            s = socket(AF_INET, SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            self._log(f"Obtained IP using default method: {ip}")
-            return ip
-        except:
-            self._log("All methods failed, using 127.0.0.1")
+            try:
+                from .network_utils import get_local_ip
+            except ImportError:
+                from network_utils import get_local_ip
+            return get_local_ip(self)
+        except Exception:
             return "127.0.0.1"
 
     def update_location(self, new_location):
@@ -487,11 +240,11 @@ class WorkerNode:
     def _benchmark_cpu(self):
         """簡化的 CPU 基準測試"""
         try:
-            start_time = time()
+            start_time = time.time()
             result = 0
             for i in range(10_000_000):
                 result = (result + i * i) % 987654321
-            duration = time() - start_time
+            duration = time.time() - start_time
             return int((10_000_000 / duration) / 1000) if duration > 0.01 else 10000
         except:
             return 1000
@@ -527,55 +280,29 @@ class WorkerNode:
             return 0, "Detection Failed", 0.0
 
     def _init_docker(self):
-        """初始化 Docker"""
+        """初始化 Docker（委派到 docker_utils）"""
         try:
-            print(f"[Worker] Initializing Docker client...")
-            self.docker_client = from_env(timeout=10)
-            print(f"[Worker] Docker client created, testing connection...")
-            self.docker_client.ping()
-            self.docker_available = True
-            self.docker_status = "available"
-            print(f"[Worker] Docker connection successful!")
-            
-            # 檢查或拉取鏡像
             try:
-                self.docker_client.images.get("justin308/hivemind-worker:latest")
-                print(f"[Worker] Docker image 'justin308/hivemind-worker:latest' found")
-                self._log("Docker image found")
-            except ImageNotFound:
-                print(f"[Worker] Docker image not found, pulling 'justin308/hivemind-worker:latest'")
-                self._log("Docker image not found, pulling justin308/hivemind-worker:latest")
-                try:
-                    self.docker_client.images.pull("justin308/hivemind-worker:latest")
-                    print(f"[Worker] Docker image pulled successfully")
-                    self._log("Docker image pulled successfully")
-                except Exception as e:
-                    print(f"[Worker] Failed to pull docker image: {e}")
-                    self._log(f"Failed to pull docker image: {e}", WARNING)
-            
-            print(f"[Worker] Docker initialization completed successfully!")
-                    
+                from .docker_utils import init_docker
+            except ImportError:
+                from docker_utils import init_docker
+            init_docker(self)
         except Exception as e:
-            print(f"[Worker] Docker initialization failed: {e}")
             self._log(f"Docker initialization failed: {e}", WARNING)
             self.docker_available = False
             self.docker_client = None
             self.docker_status = "unavailable"
 
     def _init_grpc(self):
-        """初始化 gRPC 連接"""
+        """初始化 gRPC 連接（委派到 grpc_client）"""
         try:
-            self.channel = grpc.insecure_channel(self.master_address)
-            grpc.channel_ready_future(self.channel).result(timeout=10)
-            
-            self.user_stub = nodepool_pb2_grpc.UserServiceStub(self.channel)
-            self.node_stub = nodepool_pb2_grpc.NodeManagerServiceStub(self.channel)
-            self.master_stub = nodepool_pb2_grpc.MasterNodeServiceStub(self.channel)
-            
-            self._log(f"Connected to master at {self.master_address}")
+            try:
+                from .grpc_client import init_grpc
+            except ImportError:
+                from grpc_client import init_grpc
+            init_grpc(self)
         except Exception as e:
             self._log(f"gRPC connection failed: {e}", ERROR)
-            # 即使連接失敗，也要初始化這些屬性為 None
             self.channel = None
             self.user_stub = None
             self.node_stub = None
@@ -608,307 +335,87 @@ class WorkerNode:
             PERMANENT_SESSION_LIFETIME=timedelta(hours=24),  # 24小時會話
             SESSION_REFRESH_EACH_REQUEST=True  # 每次請求刷新會話
         )
-        
-        self._setup_routes()
-        self._start_flask()
+        # 使用外部模組註冊路由與啟動 Flask
+        register_web_routes(self.app, self)
+        start_web_flask(self.app, self)
 
     def _create_user_session(self, username, token):
-        """創建用戶會話"""
-        session_id = str(uuid4())
-        session_data = {
-            'username': username,
-            'token': token,
-            'login_time': datetime.now(),
-            'cpt_balance': 0,
-            'created_at': time()
-        }
-        
-        with self.session_lock:
-            self.user_sessions[session_id] = session_data
-        
-        return session_id
+        """創建用戶會話（委派到 session_manager.create_user_session）"""
+        try:
+            try:
+                from .session_manager import create_user_session
+            except ImportError:
+                from session_manager import create_user_session
+            return create_user_session(self, username, token)
+        except Exception:
+            session_id = str(uuid4())
+            session_data = {
+                'username': username,
+                'token': token,
+                'login_time': datetime.now(),
+                'cpt_balance': 0,
+                'created_at': time.time()
+            }
+            
+            with self.session_lock:
+                self.user_sessions[session_id] = session_data
+            
+            return session_id
 
     def _get_user_session(self, session_id):
-        """根據會話ID獲取用戶資料"""
-        with self.session_lock:
-            return self.user_sessions.get(session_id)
+        """根據會話ID獲取用戶資料（委派到 session_manager.get_user_session）"""
+        try:
+            try:
+                from .session_manager import get_user_session
+            except ImportError:
+                from session_manager import get_user_session
+            return get_user_session(self, session_id)
+        except Exception:
+            with self.session_lock:
+                return self.user_sessions.get(session_id)
 
     def _update_session_balance(self, session_id, balance):
-        """更新會話中的餘額"""
-        with self.session_lock:
-            if session_id in self.user_sessions:
-                self.user_sessions[session_id]['cpt_balance'] = balance
+        """更新會話中的餘額（委派到 session_manager.update_session_balance）"""
+        try:
+            try:
+                from .session_manager import update_session_balance
+            except ImportError:
+                from session_manager import update_session_balance
+            return update_session_balance(self, session_id, balance)
+        except Exception:
+            with self.session_lock:
+                if session_id in self.user_sessions:
+                    self.user_sessions[session_id]['cpt_balance'] = balance
 
     def _clear_user_session(self, session_id):
-        """清除用戶會話"""
-        with self.session_lock:
-            if session_id in self.user_sessions:
-                del self.user_sessions[session_id]
-
-    def _setup_routes(self):
-        """設置 Flask 路由"""
-        @self.app.route('/')
-        def index():
-            available_locations = ["Asia", "Africa", "North America", "South America", "Europe", "Oceania", "Unknown"]
-            return render_template('login.html', 
-                                 node_id=self.node_id, 
-                                 current_status=self.status,
-                                 current_location=self.location,
-                                 available_locations=available_locations)
-
-        @self.app.route('/monitor')
-        def monitor():
-            session_id = session.get('session_id')
-            user_data = self._get_user_session(session_id) if session_id else None
-            
-            if not user_data:
-                return redirect(url_for('index'))
-            
-            available_locations = ["Asia", "Africa", "North America", "South America", "Europe", "Oceania", "Unknown"]
-            return render_template('monitor.html', 
-                                 username=user_data['username'],
-                                 node_id=self.node_id, 
-                                 initial_status=self.status,
-                                 current_location=self.location,
-                                 available_locations=available_locations)
-
-        @self.app.route('/login', methods=['GET', 'POST'])
-        def login_route():
-            if request.method == 'GET':
-                session_id = session.get('session_id')
-                user_data = self._get_user_session(session_id) if session_id else None
-                
-                if user_data and user_data['username'] == self.username:
-                    return redirect(url_for('monitor'))
-                
-                available_locations = ["Asia", "Africa", "North America", "South America", "Europe", "Oceania", "Unknown"]
-                return render_template('login.html', 
-                                     node_id=self.node_id, 
-                                     current_status=self.status,
-                                     current_location=self.location,
-                                     available_locations=available_locations)
-
-            # POST 登入
-            username = request.form.get('username')
-            password = request.form.get('password')
-            selected_location = request.form.get('location')
-            
-            # 更新地區設定
-            if selected_location:
-                success, message = self.update_location(selected_location)
-                if not success:
-                    available_locations = ["Asia", "Africa", "North America", "South America", "Europe", "Oceania", "Unknown"]
-                    return render_template('login.html', 
-                                         error=f"Location setting error: {message}", 
-                                         node_id=self.node_id, 
-                                         current_status=self.status,
-                                         current_location=self.location,
-                                         available_locations=available_locations)
-            
-            if not username or not password:
-                available_locations = ["Asia", "Africa", "North America", "South America", "Europe", "Oceania", "Unknown"]
-                return render_template('login.html', 
-                                     error="Please enter username and password", 
-                                     node_id=self.node_id, 
-                                     current_status=self.status,
-                                     current_location=self.location,
-                                     available_locations=available_locations)
-
-            if self._login(username, password) and self._register():
-                session_id = self._create_user_session(username, self.token)
-                session['session_id'] = session_id
-                session.permanent = True
-                
-                self._log(f"User '{username}' logged in successfully, location: {self.location}")
-                return redirect(url_for('monitor'))
-            else:
-                available_locations = ["Asia", "Africa", "North America", "South America", "Europe", "Oceania", "Unknown"]
-                return render_template('login.html', 
-                                     error=f"Login failed: {self.status}", 
-                                     node_id=self.node_id, 
-                                     current_status=self.status,
-                                     current_location=self.location,
-                                     available_locations=available_locations)
-
-        @self.app.route('/api/update_location', methods=['POST'])
-        def api_update_location():
-            session_id = session.get('session_id')
-            user_data = self._get_user_session(session_id) if session_id else None
-            
-            if not user_data:
-                return jsonify({'success': False, 'error': 'Unauthorized'}), 401
-            
+        """清除用戶會話（委派到 session_manager.clear_user_session）"""
+        try:
             try:
-                data = request.get_json()
-                new_location = data.get('location')
-                
-                if not new_location:
-                    return jsonify({'success': False, 'error': 'Please select a location'})
-                
-                success, message = self.update_location(new_location)
-                return jsonify({'success': success, 'message': message, 'current_location': self.location})
-                
-            except Exception as e:
-                return jsonify({'success': False, 'error': f'Update failed: {str(e)}'})
+                from .session_manager import clear_user_session
+            except ImportError:
+                from session_manager import clear_user_session
+            return clear_user_session(self, session_id)
+        except Exception:
+            with self.session_lock:
+                if session_id in self.user_sessions:
+                    del self.user_sessions[session_id]
 
-        @self.app.route('/api/status')
-        def api_status():
-            session_id = session.get('session_id')
-            user_data = self._get_user_session(session_id) if session_id else None
-            
-            # 修復：如果沒有有效會話但有登錄用戶，允許訪問
-            if not user_data and self.username:
-                # 創建臨時會話數據用於 API 響應
-                user_data = {
-                    'username': self.username,
-                    'cpt_balance': self.cpt_balance,
-                    'login_time': self.login_time or datetime.now()
-                }
-            
-            if not user_data:
-                return jsonify({'error': 'Unauthorized'}), 401
-            
-            try:
-                cpu_percent_val = cpu_percent()  # 移除不支持的 interval 參數
-                mem = virtual_memory()
-                current_available_gb = round(mem.available / (1024**3), 2)
-            except:
-                cpu_percent_val, mem = 0, None
-                current_available_gb = self.memory_gb
-
-            # 獲取目前執行中的任務
-            with self.resources_lock:
-                task_count = len(self.running_tasks)
-                # 對於前端相容性，如果有任務則使用第一個任務的ID
-                current_task_id = next(iter(self.running_tasks.keys()), None) if task_count > 0 else None
-                
-                # 生成任務列表
-                tasks = []
-                for task_id, task_info in self.running_tasks.items():
-                    tasks.append({
-                        'id': task_id,
-                        'status': task_info.get('status', 'Unknown'),
-                        'start_time': datetime.fromtimestamp(task_info.get('start_time', time())).isoformat(),
-                        'resources': task_info.get('resources', {})
-                    })
-
-            return jsonify({
-                'node_id': self.node_id,
-                'status': self.status,
-                'current_task_id': current_task_id or "None",  # backward compatibility for old frontend
-                'is_registered': self.is_registered,
-                'docker_available': self.docker_available,
-                'docker_status': getattr(self, 'docker_status', 'unknown'),
-                'cpu_percent': round(cpu_percent_val, 1),
-                'cpu_cores': self.cpu_cores,
-                'memory_percent': round(mem.percent, 1) if mem else 0,
-                'memory_used_gb': round(mem.used/(1024**3), 2) if mem else 0,
-                'memory_available_gb': current_available_gb,
-                'memory_total_gb': getattr(self, 'total_memory_gb', self.memory_gb),
-                'cpu_score': self.cpu_score,
-                'gpu_score': self.gpu_score,
-                'gpu_name': self.gpu_name,
-                'gpu_memory_gb': self.gpu_memory_gb,
-                'cpt_balance': user_data['cpt_balance'],
-                'login_time': user_data['login_time'].isoformat() if isinstance(user_data['login_time'], datetime) else str(user_data['login_time']),
-                'ip': getattr(self, 'local_ip', '127.0.0.1'),
-                'task_count': task_count,
-                'tasks': tasks,  # add task list
-                'available_resources': self.available_resources,
-                'total_resources': self.total_resources
-            })
-
-        @self.app.route('/api/logs')
-        def api_logs():
-            session_id = session.get('session_id')
-            user_data = self._get_user_session(session_id) if session_id else None
-            
-            # 修復：如果沒有有效會話但有登錄用戶，允許訪問
-            if not user_data and self.username:
-                user_data = {'username': self.username}
-            
-            if not user_data:
-                return jsonify({'error': 'Unauthorized'}), 401
-                
-            with self.log_lock:
-                return jsonify({'logs': list(self.logs)})
-
-        @self.app.route('/logout')
-        def logout():
-            session_id = session.get('session_id')
-            if session_id:
-                self._clear_user_session(session_id)
-            
-            session.clear()
-            self._logout()
-            return redirect(url_for('index'))
-
-        # 添加任務狀態路由
-        @self.app.route('/api/tasks')
-        def api_tasks():
-            session_id = session.get('session_id')
-            user_data = self._get_user_session(session_id) if session_id else None
-            
-            if not user_data and self.username:
-                user_data = {'username': self.username}
-            
-            if not user_data:
-                return jsonify({'error': 'Unauthorized'}), 401
-                
-            # 返回所有正在運行的任務
-            tasks_info = []
-            with self.resources_lock:
-                for task_id, task_data in self.running_tasks.items():
-                    tasks_info.append({
-                        'task_id': task_id,
-                        'status': task_data.get('status', 'Unknown'),
-                        'start_time': datetime.fromtimestamp(task_data.get('start_time', 0)).isoformat(),
-                        'elapsed': round(time() - task_data.get('start_time', time()), 1),
-                        'resources': task_data.get('resources', {})
-                    })
-            
-            return jsonify({
-                'tasks': tasks_info,
-                'total_resources': self.total_resources,
-                'available_resources': self.available_resources
-            })
-
-    def _start_flask(self):
-        """啟動 Flask 服務"""
-        def run_flask():
-            try:
-                self.app.run(host='0.0.0.0', port=self.flask_port, debug=False, 
-                           use_reloader=False, threaded=True)
-            except Exception as e:
-                self._log(f"Flask failed to start: {e}", ERROR)
-                _exit(1)
-        
-        # 啟動 Flask 服務
-        Thread(target=run_flask, daemon=True).start()
-        self._log(f"Flask started on port {self.flask_port}")
-        
-        # 延遲開啟瀏覽器
-        def open_browser():
-            sleep(2)  # 等待 Flask 完全啟動
-            url = f"http://127.0.0.1:{self.flask_port}"
-            try:
-                web_open(url)
-                self._log(f"瀏覽器已開啟: {url}")
-            except Exception as e:
-                self._log(f"無法開啟瀏覽器: {e}", WARNING)
-                self._log(f"請手動開啟: {url}")
-        
-        # 在獨立線程中開啟瀏覽器
-        Thread(target=open_browser, daemon=True).start()
 
     def _login(self, username, password):
         """登入到節點池"""
         try:
             # 檢查 gRPC 連接是否可用
             if not self.user_stub:
-                self._log("gRPC connection not available, cannot login", ERROR)
-                self.status = "Login Failed - No Connection"
-                return False
+                # 嘗試即時重新建立 gRPC 連線
+                self._log("gRPC not ready, trying to reconnect before login...", WARNING)
+                try:
+                    self._init_grpc()
+                except Exception:
+                    pass
+                if not self.user_stub:
+                    self._log("gRPC connection not available, cannot login", ERROR)
+                    self.status = "Login Failed - No Connection"
+                    return False
                 
             response = self.user_stub.Login(
                 nodepool_pb2.LoginRequest(username=username, password=password), 
@@ -972,15 +479,26 @@ class WorkerNode:
     def _register(self):
         """註冊節點"""
         if not self.token:
+            self._log("Registration failed: No token available", ERROR)
             return False
             
         # 檢查 gRPC 連接是否可用
         if not self.node_stub:
-            self._log("gRPC connection not available, cannot register", ERROR)
-            self.status = "Registration Failed - No Connection"
-            return False
+            # 嘗試即時重新建立 gRPC 連線
+            self._log("gRPC not ready, trying to reconnect before registration...", WARNING)
+            try:
+                self._init_grpc()
+            except Exception:
+                pass
+            if not self.node_stub:
+                self._log("Registration failed: gRPC connection not available", ERROR)
+                self.status = "Registration Failed - No Connection"
+                return False
 
         try:
+            self._log(f"Attempting to register node with master at {self.master_address}")
+            self._log(f"Registration details - IP: {self.local_ip}, Port: {self.port}, User: {self.username}")
+            
             # 添加docker狀態到註冊請求
             request = nodepool_pb2.RegisterWorkerNodeRequest(
                 node_id=self.username,
@@ -1002,6 +520,8 @@ class WorkerNode:
                 timeout=15
             )
             
+            self._log(f"Registration response received - Success: {response.success}, Message: {response.message}")
+            
             if response.success:
                 self.node_id = self.username
                 self.is_registered = True
@@ -1010,12 +530,41 @@ class WorkerNode:
                 self._log(f"節點註冊成功，使用 IP: {self.local_ip}:{self.port}")
                 return True
             else:
-                self.status = f"Registration Failed: {response.message}"
+                self.status = "Registration Failed: Server returned false"
+                self._log(f"Registration failed: Server returned success=false, message: {response.message}", ERROR)
                 return False
                 
         except Exception as e:
-            self._log(f"Registration error: {e}", ERROR)
-            self.status = "Registration Failed"
+            error_msg = str(e)
+            self._log(f"Registration exception: {error_msg}", ERROR)
+            self.status = f"Registration Failed: {error_msg}"
+            return False
+
+    def _refresh_registration(self):
+        """刷新註冊以維持心跳，不會改變狀態只是更新心跳時間"""
+        if not self.is_registered or not self.node_stub:
+            return False
+            
+        try:
+            request = nodepool_pb2.RegisterWorkerNodeRequest(
+                node_id=self.username,
+                hostname=self.local_ip,
+                cpu_cores=int(self.cpu_cores),
+                memory_gb=int(self.memory_gb),
+                cpu_score=self.cpu_score,
+                gpu_score=self.gpu_score,
+                gpu_name=self.gpu_name,
+                gpu_memory_gb=int(self.gpu_memory_gb),
+                location=self.location,
+                port=self.port,
+                docker_status=self.docker_status
+            )
+            
+            response = self.node_stub.RegisterWorkerNode(request, timeout=5)
+            return response.success
+            
+        except Exception as e:
+            self._log(f"Heartbeat refresh failed: {e}", WARNING)
             return False
 
     def _logout(self):
@@ -1047,9 +596,9 @@ class WorkerNode:
         
         # 等待所有任務停止
         timeout = 30
-        start_time = time()
-        while self.running_tasks and time() - start_time < timeout:
-            sleep(0.5)
+        start_time = time.time()
+        while self.running_tasks and time.time() - start_time < timeout:
+            time.sleep(0.5)
         
         # 強制清理
         with self.resources_lock:
@@ -1069,12 +618,20 @@ class WorkerNode:
         return False
 
     def _start_status_reporting(self):
-        """開始狀態報告"""
+        """開始狀態報告（委派到 heartbeat.run_status_reporter）"""
         if self.status_thread and self.status_thread.is_alive():
             return
         
         self._stop_event.clear()
-        self.status_thread = Thread(target=self._status_reporter, daemon=True)
+        try:
+            try:
+                from .heartbeat import run_status_reporter
+            except ImportError:
+                from heartbeat import run_status_reporter
+            self.status_thread = Thread(target=lambda: run_status_reporter(self, self._stop_event), daemon=True)
+        except Exception:
+            # 後備：仍使用本地方法
+            self.status_thread = Thread(target=self._status_reporter, daemon=True)
         self.status_thread.start()
 
     def _stop_status_reporting(self):
@@ -1084,129 +641,56 @@ class WorkerNode:
             self.status_thread.join(timeout=5)
 
     def _status_reporter(self):
-        """狀態報告線程"""
-        while not self._stop_event.is_set():
-            if self.is_registered and self.token:
-                try:
-                    # 決定狀態消息
-                    with self.resources_lock:
-                        task_count = len(self.running_tasks)
-                    
-                    if task_count > 0:
-                        status_msg = f"Running {task_count} tasks"
-                    else:
-                        status_msg = self.status
-                    
-                    # 發送心跳
-                    response = self.node_stub.ReportStatus(
-                        nodepool_pb2.ReportStatusRequest(
-                            node_id=self.node_id,
-                            status_message=status_msg
-                        ),
-                        metadata=[('authorization', f'Bearer {self.token}')],
-                        timeout=10
-                    )
-                    
-                    if not response.success:
-                        self._log(f"狀態報告失敗: {response.message}", WARNING)
-                    else:
-                        # 只在第一次報告或狀態變化時記錄
+        """狀態報告線程（保留作為後備，預設委派到 heartbeat 模組）"""
+        try:
+            try:
+                from .heartbeat import run_status_reporter
+            except ImportError:
+                from heartbeat import run_status_reporter
+            return run_status_reporter(self, self._stop_event)
+        except Exception:
+            # 簡化後備實作
+            while not self._stop_event.is_set():
+                if self.is_registered and self.token:
+                    try:
+                        with self.resources_lock:
+                            task_count = len(self.running_tasks)
+                        status_msg = f"Running {task_count} tasks" if task_count > 0 else self.status
                         if not hasattr(self, '_last_reported_status') or self._last_reported_status != status_msg:
-                            self._log(f"狀態已報告: {status_msg}")
+                            self._log(f"Local status: {status_msg}")
                             self._last_reported_status = status_msg
-                    
-                    # 更新餘額
-                    self._update_balance()
-                    
-                    # 為所有運行中的任務回報資源使用情況
-                    self._report_all_tasks_resource_usage()
-                    
-                except Exception as e:
-                    self._log(f"Status report failed: {e}", WARNING)
-            
-            # 縮短心跳間隔以確保連接穩定
-            self._stop_event.wait(5) 
+                        current_time = time.time()
+                        if not hasattr(self, '_last_heartbeat_time') or current_time - self._last_heartbeat_time >= 30:
+                            try:
+                                self._refresh_registration()
+                                self._last_heartbeat_time = current_time
+                            except Exception as e:
+                                self._log(f"Heartbeat registration failed: {e}", WARNING)
+                        self._update_balance()
+                        self._report_all_tasks_resource_usage()
+                    except Exception as e:
+                        self._log(f"Status monitoring failed: {e}", WARNING)
+                self._stop_event.wait(5)
 
     def _report_all_tasks_resource_usage(self):
-        """回報所有任務的資源使用情況"""
-        if not self.running_tasks:
-            return
-            
+        """回報所有任務的資源使用情況（委派到 resource_monitor）"""
         try:
-            with self.resources_lock:
-                task_ids = list(self.running_tasks.keys())
-            
-            for task_id in task_ids:
-                try:
-                    self._report_task_resource_usage(task_id)
-                except Exception as e:
-                    self._log(f"回報任務 {task_id} 資源使用失敗: {e}", WARNING)
+            try:
+                from .resource_monitor import report_all_tasks_resource_usage
+            except ImportError:
+                from resource_monitor import report_all_tasks_resource_usage
+            return report_all_tasks_resource_usage(self)
         except Exception as e:
             self._log(f"回報任務資源使用發生錯誤: {e}", WARNING)
 
     def _report_task_resource_usage(self, task_id):
-        """回報單個任務的資源使用情況"""
-        if not self.token:
-            return
-            
+        """回報單個任務的資源使用情況（委派到 resource_monitor）"""
         try:
-            # 獲取任務資源使用情況
-            with self.resources_lock:
-                if task_id not in self.running_tasks:
-                    return
-                    
-                task_data = self.running_tasks[task_id]
-                resources = task_data.get('resources', {})
-            
-            # 獲取真實的系統資源使用情況
             try:
-                # 獲取當前系統 CPU 使用率
-                current_cpu_percent = cpu_percent()  # 移除不支持的 interval 參數
-                
-                # 獲取當前內存使用情況
-                memory_info = virtual_memory()
-                memory_used_mb = int((memory_info.total - memory_info.available) / (1024 * 1024))
-                
-                # 對於 GPU，由於複雜性，暫時設為 0（需要 nvidia-ml-py 等庫）
-                gpu_usage_percent = 0
-                gpu_memory_used_mb = 0
-                
-                # 如果有 GPU 資源分配，嘗試獲取 GPU 使用情況
-                if resources.get('gpu', 0) > 0:
-                    # TODO: 實現真實的 GPU 監控
-                    # 目前暫時使用預設值
-                    gpu_usage_percent = 0
-                    gpu_memory_used_mb = 0
-                
-            except Exception as e:
-                self._log(f"獲取系統資源使用失敗: {e}", WARNING)
-                # 如果獲取失敗，使用保守的預設值
-                current_cpu_percent = 50
-                memory_used_mb = int(resources.get('memory_gb', 1) * 512)  # 假設使用一半
-                gpu_usage_percent = 0
-                gpu_memory_used_mb = 0
-            
-            # 發送資源使用報告
-            try:
-                self._log(f"向主節點匯報任務 {task_id} 真實資源使用: CPU={current_cpu_percent:.1f}%, MEM={memory_used_mb}MB, GPU={gpu_usage_percent}%, GPU_MEM={gpu_memory_used_mb}MB")
-                
-                # 使用 StoreOutput 方法傳送資源使用信息
-                usage_info = f"{{\"cpu_percent\":{current_cpu_percent:.1f},\"memory_mb\":{memory_used_mb},\"gpu_percent\":{gpu_usage_percent},\"gpu_memory_mb\":{gpu_memory_used_mb}}}"
-                
-                response = self.master_stub.StoreOutput(
-                    nodepool_pb2.StoreOutputRequest(
-                        task_id=task_id,
-                        output=f"RESOURCE_USAGE: {usage_info}"
-                    ),
-                    metadata=[('authorization', f'Bearer {self.token}')],
-                    timeout=10
-                )
-                
-                if response.success:
-                    self._log(f"成功匯報任務 {task_id} 真實資源使用")
-            except Exception as e:
-                self._log(f"向主節點匯報資源使用失敗: {e}", WARNING)
-            
+                from .resource_monitor import report_task_resource_usage
+            except ImportError:
+                from resource_monitor import report_task_resource_usage
+            return report_task_resource_usage(self, task_id)
         except Exception as e:
             self._log(f"回報任務 {task_id} 資源使用失敗: {e}", WARNING)
 
@@ -1232,997 +716,143 @@ class WorkerNode:
             self._log(f"更新餘額失敗: {e}", WARNING)
 
     def _send_task_logs(self, task_id, logs_content):
-        """發送任務日誌到節點池"""
-        if not self.master_stub or not self.token or not task_id:
+        """發送任務日誌到節點池（WorkerNodeService.TaskOutputUpload）"""
+        if not task_id or not logs_content:
             return False
-            
+
+        # 盡量使用 worker_stub（直連節點池 50051），避免依賴 Master 端 RPC
         try:
-            current_timestamp = int(time())  # 使用秒級時間戳而不是毫秒
-            
-            request = nodepool_pb2.StoreLogsRequest(
-                node_id=self.node_id,
-                task_id=task_id,
-                logs=logs_content,
-                timestamp=current_timestamp
-            )
-            
-            response = self.master_stub.StoreLogs(
-                request,
-                metadata=[('authorization', f'Bearer {self.token}')],
-                timeout=10
-            )
-            
-            if response.success:
-                self._log(f"Successfully sent logs for task {task_id}")
-                return True
+            if getattr(self, 'worker_stub', None):
+                try:
+                    # 延遲導入 pb 以避免循環引用
+                    try:
+                        from . import nodepool_pb2 as pb2
+                    except Exception:
+                        import nodepool_pb2 as pb2
+
+                    req = pb2.TaskOutputUploadRequest(
+                        task_id=task_id,
+                        output=logs_content,
+                        token=self.token or ""
+                    )
+                    metadata = [('authorization', f'Bearer {self.token}')] if self.token else None
+                    if metadata:
+                        self.worker_stub.TaskOutputUpload(req, metadata=metadata, timeout=10)
+                    else:
+                        self.worker_stub.TaskOutputUpload(req, timeout=10)
+                    return True
+                except Exception as e:
+                    # 回退為本地記錄，避免打斷任務
+                    self._log(f"Task {task_id} logs upload failed: {e}", WARNING)
+                    self._log(f"Task {task_id} logs (local fallback): {logs_content[:100]}...")
+                    return False
             else:
-                self._log(f"Failed to send logs for task {task_id}: {response.message}")
+                # 還沒連上 gRPC，先本地記錄
+                self._log(f"worker_stub 未初始化，暫存日誌: {logs_content[:100]}...", WARNING)
                 return False
-                
         except Exception as e:
-            self._log(f"Error sending logs for task {task_id}: {e}", WARNING)
+            self._log(f"Error handling logs for task {task_id}: {e}", WARNING)
             return False
 
     def _check_resources_available(self, required_resources):
-        """檢查是否有足夠資源運行任務"""
-        with self.resources_lock:
-            for resource_type, required_amount in required_resources.items():
-                if resource_type in self.available_resources:
-                    if self.available_resources[resource_type] < required_amount:
-                        return False
-            return True
+        """檢查是否有足夠資源運行任務（委派到 resource_manager）"""
+        try:
+            try:
+                from .resource_manager import check_resources_available
+            except ImportError:
+                from resource_manager import check_resources_available
+            return check_resources_available(self, required_resources)
+        except Exception:
+            with self.resources_lock:
+                for resource_type, required_amount in required_resources.items():
+                    if resource_type in self.available_resources:
+                        if self.available_resources[resource_type] < required_amount:
+                            return False
+                return True
 
     def _allocate_resources(self, task_id, required_resources):
-        """分配資源給任務"""
-        with self.resources_lock:
-            # 檢查資源是否足夠
-            for resource_type, required_amount in required_resources.items():
-                if resource_type in self.available_resources:
-                    if self.available_resources[resource_type] < required_amount:
-                        return False
-            
-            # 扣除資源
-            for resource_type, required_amount in required_resources.items():
-                if resource_type in self.available_resources:
-                    self.available_resources[resource_type] -= required_amount
-            
-            # 記錄任務使用的資源
-            self.running_tasks[task_id] = {
-                "status": "Allocated",
-                "resources": required_resources,
-                "start_time": time()
-            }
-            
-            # 創建任務的鎖和停止事件
-            self.task_locks[task_id] = threading.Lock()
-            self.task_stop_events[task_id] = Event()
-            
-            return True
+        """分配資源給任務（委派到 resource_manager）"""
+        try:
+            try:
+                from .resource_manager import allocate_resources
+            except ImportError:
+                from resource_manager import allocate_resources
+            return allocate_resources(self, task_id, required_resources)
+        except Exception:
+            with self.resources_lock:
+                for resource_type, required_amount in required_resources.items():
+                    if resource_type in self.available_resources:
+                        if self.available_resources[resource_type] < required_amount:
+                            return False
+                for resource_type, required_amount in required_resources.items():
+                    if resource_type in self.available_resources:
+                        self.available_resources[resource_type] -= required_amount
+                self.running_tasks[task_id] = {
+                    "status": "Allocated",
+                    "resources": required_resources,
+                    "start_time": time.time()
+                }
+                self.task_locks[task_id] = Lock()
+                self.task_stop_events[task_id] = Event()
+                return True
 
     def _release_resources(self, task_id):
-        """釋放任務使用的資源"""
-        with self.resources_lock:
-            if task_id not in self.running_tasks:
-                return
-            
-            # 獲取任務使用的資源
-            task_resources = self.running_tasks[task_id].get('resources', {})
-            
-            # 歸還資源
-            for resource_type, amount in task_resources.items():
-                if resource_type in self.available_resources:
-                    self.available_resources[resource_type] += amount
-            
-            # 清理任務數據
-            del self.running_tasks[task_id]
-            
-            # 清理鎖和停止事件
-            if task_id in self.task_locks:
-                del self.task_locks[task_id]
-            if task_id in self.task_stop_events:
-                del self.task_stop_events[task_id]
+        """釋放任務使用的資源（委派到 resource_manager）"""
+        try:
+            try:
+                from .resource_manager import release_resources
+            except ImportError:
+                from resource_manager import release_resources
+            return release_resources(self, task_id)
+        except Exception:
+            with self.resources_lock:
+                if task_id not in self.running_tasks:
+                    return
+                task_resources = self.running_tasks[task_id].get('resources', {})
+                for resource_type, amount in task_resources.items():
+                    if resource_type in self.available_resources:
+                        self.available_resources[resource_type] += amount
+                del self.running_tasks[task_id]
+                if task_id in self.task_locks:
+                    del self.task_locks[task_id]
+                if task_id in self.task_stop_events:
+                    del self.task_stop_events[task_id]
 
     def _execute_task(self, task_id, task_zip_bytes, required_resources=None):
-        """執行任務"""
-        if not required_resources:
-            required_resources = {
-                "cpu": 1,
-                "memory_gb": 1,
-                "gpu": 0,
-                "gpu_memory_gb": 0
-            }
-        
-        # 更新任務狀態
-        with self.resources_lock:
-            if task_id in self.running_tasks:
-                self.running_tasks[task_id]["status"] = "Executing"
-        
-        # 獲取任務的停止事件
-        stop_event = self.task_stop_events.get(task_id)
-        if not stop_event:
-            self._log(f"找不到任務 {task_id} 的停止事件", ERROR)
+        # 委派到模組化執行器
+        try:
+            try:
+                from .task_executor import execute_task
+            except ImportError:
+                from task_executor import execute_task
+            return execute_task(self, task_id, task_zip_bytes, required_resources)
+        except Exception as e:
+            self._log(f"execute_task error: {e}", ERROR)
+            # 確保資源釋放
             self._release_resources(task_id)
             return
-        
-        temp_dir = None
-        container = None
-        success = False
-        task_logs = []
-        stop_requested = False
-        
-        try:
-            # 決定使用Docker還是venv，但優先檢查 Docker 可用性
-            use_docker = self.docker_available and self.docker_client is not None
-            
-            self._log(f"任務 {task_id} 執行模式判斷：docker_available={self.docker_available}, docker_client={'存在' if self.docker_client else '不存在'}, 最終使用={'Docker' if use_docker else 'venv'}")
-            
-            if not use_docker:
-                self._log(f"Docker 不可用，將使用 venv 執行任務 {task_id}，Docker 狀態: {self.docker_status}", WARNING)
-            else:
-                self._log(f"使用 Docker 執行任務 {task_id}")
-            
-            # 創建臨時目錄
-            temp_dir = mkdtemp(prefix=f"task_{task_id}_")
-            workspace = join(temp_dir, "workspace")
-            makedirs(workspace)
 
-            # 解壓任務文件
-            with ZipFile(BytesIO(task_zip_bytes), 'r') as zip_ref:
-                zip_ref.extractall(workspace)
-
-            self._log(f"Task {task_id} files extracted to {workspace}")
-
-            if use_docker:
-                # 使用Docker運行任務
-                container_name = f"task-{task_id}-{token_hex(4)}"
-                
-                # 設置Docker資源限制，確保最小值
-                mem_gb = max(required_resources.get('memory_gb', 1), 0.5)  # 最少 0.5GB
-                mem_limit = f"{int(mem_gb * 1024)}m"
-                
-                cpu_score = max(required_resources.get('cpu', 1), 1)  # 最少 CPU 分數為 1
-                cpu_limit = max(cpu_score / 100, 0.1)  # Docker CPU限制為相對值，最少 0.1
-                
-                self._log(f"Docker 資源配置：memory={mem_limit}, cpu_limit={cpu_limit}")
-                
-                # 設置GPU相關配置
-                device_requests = []
-                if required_resources.get('gpu', 0) > 0:
-                    device_requests.append({
-                        'Driver': 'nvidia',
-                        'Count': -1,  # 使用所有可用GPU
-                        'Capabilities': [['gpu']]
-                    })
-                
-                try:
-                    self._log(f"嘗試啟動 Docker 容器 {container_name}")
-                    print(f"[DEBUG] Docker 容器配置：")
-                    print(f"[DEBUG] - 鏡像：justin308/hivemind-worker:latest")
-                    print(f"[DEBUG] - 容器內執行腳本：/app/run_task.sh (容器內部自帶)")
-                    print(f"[DEBUG] - 工作目錄：/app/task")
-                    print(f"[DEBUG] - 宿主機目錄：{workspace}")
-                    
-                    # 列出工作空間中的任務文件
-                    if exists(workspace):
-                        files_in_workspace = os.listdir(workspace)
-                        print(f"[DEBUG] - 工作空間任務文件：{files_in_workspace}")
-                    
-                    container = self.docker_client.containers.run(
-                        "justin308/hivemind-worker:latest",
-                        # Docker 容器內部沒有 run_task.sh，直接執行任務
-                        # 先查找可執行的 Python 腳本，然後執行
-                        command=["sh", "-c", """
-                        echo "=== HiveMind Docker Task Execution ===" &&
-                        echo "Task ID: ${TASK_ID:-unknown}" &&
-                        echo "Working Directory: $(pwd)" &&
-                        echo "Available files:" &&
-                        ls -la &&
-                        echo "=== Installing Requirements ===" &&
-                        if [ -f requirements.txt ]; then
-                            echo "Installing requirements..." &&
-                            pip install --user -r requirements.txt || echo "Requirements installation failed"
-                        else
-                            echo "No requirements.txt found"
-                        fi &&
-                        echo "=== Finding and executing Python script ===" &&
-                        SCRIPT_FILE="" &&
-                        for script in main.py app.py run.py start.py; do
-                            if [ -f "$script" ]; then
-                                SCRIPT_FILE="$script"
-                                echo "Found script: $SCRIPT_FILE"
-                                break
-                            fi
-                        done &&
-                        if [ -z "$SCRIPT_FILE" ]; then
-                            SCRIPT_FILE=$(find . -name "*.py" -type f | head -n 1)
-                            if [ -n "$SCRIPT_FILE" ]; then
-                                echo "Using first Python file found: $SCRIPT_FILE"
-                            else
-                                echo "ERROR: No Python script found"
-                                exit 1
-                            fi
-                        fi &&
-                        echo "=== Executing $SCRIPT_FILE ===" &&
-                        python "$SCRIPT_FILE" &&
-                        echo "=== Task completed successfully ==="
-                        """],
-                        detach=True,
-                        name=container_name,
-                        volumes={workspace: {'bind': '/app/task', 'mode': 'rw'}},
-                        working_dir="/app/task",
-                        environment={"TASK_ID": task_id, "PYTHONUNBUFFERED": "1"},
-                        mem_limit=mem_limit,
-                        nano_cpus=int(cpu_limit * 1e9),  # 轉換為納秒CPU時間
-                        device_requests=device_requests if device_requests else None,
-                        remove=False
-                    )
-                    
-                    self._log(f"Task {task_id} Docker container started successfully with resources: CPU={cpu_limit}, Memory={mem_limit}")
-                    print(f"[DEBUG] 容器 {container_name} 已啟動，狀態: {container.status}")
-                    print(f"[DEBUG] 容器 ID: {container.id}")
-                    
-                    # 立即檢查容器是否正在運行
-                    container.reload()
-                    print(f"[DEBUG] 容器重新載入後狀態: {container.status}")
-                    
-                    # 獲取初始日誌
-                    try:
-                        initial_logs = container.logs().decode('utf-8', errors='replace')
-                        if initial_logs.strip():
-                            print(f"[DEBUG] 容器初始日誌:\n{initial_logs}")
-                        else:
-                            print(f"[DEBUG] 容器暫無日誌輸出")
-                    except Exception as log_error:
-                        print(f"[DEBUG] 無法獲取容器日誌: {log_error}")
-                except Exception as docker_error:
-                    self._log(f"Docker 容器啟動失敗: {docker_error}", ERROR)
-                    print(f"[ERROR] Docker 容器啟動失敗: {docker_error}")
-                    print(f"[INFO] 錯誤詳情：{str(docker_error)}")
-                    self._log(f"嘗試使用 venv 執行任務 {task_id}", WARNING)
-                    print(f"[INFO] 由於 Docker 失敗，切換到 venv 執行模式")
-                    use_docker = False  # 切換到 venv 執行模式
-                    container = None  # 確保 container 為 None
-                    # 繼續執行 venv 邏輯
-                    
-                if use_docker and container:
-                    # 監控Docker容器
-                    log_buffer = []
-                    log_send_counter = 0
-                    last_log_fetch = time()
-                    
-                    print(f"[DEBUG] 開始監控容器 {container_name}")
-                    
-                    while not stop_event.is_set():
-                        try:
-                            # 檢查容器狀態
-                            container.reload()
-                            print(f"[DEBUG] 容器狀態檢查: {container.status}")
-                            
-                            if container.status != 'running':
-                                self._log(f"Container {container_name} stopped, status: {container.status}")
-                                print(f"[DEBUG] 容器已停止，最終狀態: {container.status}")
-                                
-                                # 獲取退出日誌
-                                try:
-                                    exit_logs = container.logs().decode('utf-8', errors='replace')
-                                    if exit_logs.strip():
-                                        print(f"[DEBUG] 容器退出日誌:\n{exit_logs}")
-                                        # 將退出日誌添加到任務日誌中
-                                        for line in exit_logs.strip().split('\n'):
-                                            if line.strip():
-                                                self._log(f"[Task {task_id}]: {line}")
-                                                task_logs.append(line)
-                                except Exception as e:
-                                    print(f"[DEBUG] 無法獲取退出日誌: {e}")
-                                break
-                            
-                            # 收集日誌
-                            current_time = time()
-                            if current_time - last_log_fetch > 1.0:
-                                logs = container.logs(since=int(last_log_fetch)).decode('utf-8', errors='replace')
-                                if logs.strip():
-                                    log_lines = logs.strip().split('\n')
-                                    for line in log_lines:
-                                        if line.strip():
-                                            self._log(f"[Task {task_id}]: {line}")
-                                            log_buffer.append(line)
-                                            task_logs.append(line)
-                                            log_send_counter += 1
-                                    
-                                    # 每20行或每3秒發送一次日誌
-                                    if log_send_counter >= 20 or len(log_buffer) > 0:
-                                        logs_to_send = "\n".join(log_buffer)
-                                        self._send_task_logs(task_id, logs_to_send)
-                                        log_buffer.clear()
-                                        log_send_counter = 0
-                                
-                                last_log_fetch = current_time
-                        except Exception as e:
-                            self._log(f"Error monitoring container: {e}", WARNING)
-                            break
-                        
-                        # 短暫休眠
-                        sleep(0.1)
-                    
-                    # 處理停止請求
-                    if stop_event.is_set():
-                        stop_requested = True
-                        stop_log = f"收到停止請求，立即終止任務 {task_id}"
-                        self._log(stop_log)
-                        task_logs.append(stop_log)
-                        self._send_task_logs(task_id, stop_log)
-                        
-                        try:
-                            container.kill()
-                        except Exception as e:
-                            self._log(f"強制停止容器失敗: {e}", WARNING)
-                    else:
-                        # 檢查容器退出狀態
-                        try:
-                            result = container.wait(timeout=2)
-                            success = result.get('StatusCode', -1) == 0
-                        except Exception as e:
-                            self._log(f"Failed to get container exit status: {e}", WARNING)
-                            success = False
-            
-            if not use_docker:  # 使用venv執行或Docker失敗後的備用方案
-                print(f"[INFO] 開始執行 venv 模式任務 {task_id}")
-                
-                # 對於 venv 模式，需要複製 run_task.sh 到工作空間
-                worker_root = join(dirname(__file__), "..", "..")  # 向上兩級到 worker 目錄
-                script_src = join(worker_root, "run_task.sh")
-                script_dst = join(workspace, "run_task.sh")
-                
-                if exists(script_src):
-                    copy2(script_src, script_dst)
-                    chmod(script_dst, 0o755)
-                    print(f"[INFO] 成功複製 run_task.sh 到 venv 工作空間")
-                else:
-                    print(f"[WARNING] run_task.sh 不存在於 {script_src}，venv 模式可能無法正常執行")
-                
-                # 使用venv運行任務
-                venv_dir = join(temp_dir, "venv")
-                self._log(f"Creating virtual environment for task {task_id} at {venv_dir}")
-                print(f"[INFO] 創建虛擬環境: {venv_dir}")
-                
-                # 創建虛擬環境
-                import venv
-                venv.create(venv_dir, with_pip=True)
-                
-                # 啟動任務執行進程
-                import subprocess
-                process = None
-                
-                try:
-                    self._log(f"Starting task {task_id} with venv")
-                    
-                    # 確定虛擬環境的Python路徑
-                    if os.name == 'nt':  # Windows
-                        venv_python = join(venv_dir, 'Scripts', 'python.exe')
-                        venv_pip = join(venv_dir, 'Scripts', 'pip.exe')
-                    else:  # Unix/Linux
-                        venv_python = join(venv_dir, 'bin', 'python')
-                        venv_pip = join(venv_dir, 'bin', 'pip')
-                    
-                    # 安裝依賴
-                    requirements_file = join(workspace, 'requirements.txt')
-                    if exists(requirements_file):
-                        self._log(f"Installing requirements for task {task_id}")
-                        pip_process = subprocess.Popen(
-                            [venv_pip, 'install', '-r', 'requirements.txt'],
-                            cwd=workspace,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT,
-                            universal_newlines=True
-                        )
-                        pip_output, _ = pip_process.communicate()
-                        self._log(f"Pip install output: {pip_output}")
-                    
-                    # 尋找要執行的Python腳本
-                    print(f"[INFO] 尋找可執行腳本在目錄: {workspace}")
-                    script_path, cmd = self._find_executable_script(workspace)
-                    print(f"[INFO] 找到的腳本: {script_path}, 命令: {cmd}")
-                    if not script_path:
-                        print(f"[ERROR] 找不到可執行腳本")
-                        raise Exception("找不到可執行的腳本文件")
-                    
-                    # 如果是Python文件，使用虛擬環境的Python
-                    if script_path.endswith('.py'):
-                        # 確保使用虛擬環境的Python執行檔案
-                        cmd = [venv_python, script_path]
-                        print(f"[INFO] 使用 venv Python: {venv_python}")
-                        print(f"[INFO] 最終執行命令: {cmd}")
-                    
-                    # 使用subprocess運行腳本
-                    process = subprocess.Popen(
-                        cmd,
-                        cwd=workspace,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        universal_newlines=True,
-                        bufsize=1
-                    )
-                    
-                    # 設置結果監控
-                    log_buffer = []
-                    log_send_counter = 0
-                    
-                    # 監控輸出
-                    for line in iter(process.stdout.readline, ''):
-                        if stop_event.is_set():
-                            break
-                            
-                        if line.strip():
-                            self._log(f"[Task {task_id}]: {line.strip()}")
-                            log_buffer.append(line.strip())
-                            task_logs.append(line.strip())
-                            log_send_counter += 1
-                            
-                            # 定期發送日誌
-                            if log_send_counter >= 20:
-                                logs_to_send = "\n".join(log_buffer)
-                                self._send_task_logs(task_id, logs_to_send)
-                                log_buffer.clear()
-                                log_send_counter = 0
-                    
-                    # 等待進程完成
-                    process.wait(timeout=1)
-                    success = process.returncode == 0
-                    
-                except subprocess.TimeoutExpired:
-                    self._log(f"Process timed out for task {task_id}", WARNING)
-                    success = False
-                    
-                # 處理停止請求
-                if stop_event.is_set():
-                    stop_requested = True
-                    stop_log = f"收到停止請求，立即終止任務 {task_id}"
-                    self._log(stop_log)
-                    task_logs.append(stop_log)
-                    self._send_task_logs(task_id, stop_log)
-                    
-                    # 終止進程
-                    if process and process.poll() is None:
-                        try:
-                            process.terminate()
-                            sleep(0.5)
-                            if process.poll() is None:
-                                process.kill()
-                        except Exception as e:
-                            self._log(f"終止進程失敗: {e}", WARNING)
-            
-            # 處理任務完成或停止
-            if stop_requested:
-                completion_log = f"任務 {task_id} 被用戶強制停止"
-            else:
-                completion_log = f"任務 {task_id} 執行完成，狀態: {'成功' if success else '失敗'}"
-            
-            self._log(completion_log)
-            task_logs.append(completion_log)
-            self._send_task_logs(task_id, completion_log)
-            
-            # 打包結果
-            result_zip = self._create_result_zip(task_id, workspace, success, stop_requested, task_logs)
-            
-            # 發送結果
-            if result_zip:
-                try:
-                    self.master_stub.ReturnTaskResult(
-                        nodepool_pb2.ReturnTaskResultRequest(
-                            task_id=task_id,
-                            result_zip=result_zip
-                        ),
-                        metadata=[('authorization', f'Bearer {self.token}')],
-                        timeout=30
-                    )
-                    self._log(f"任務 {task_id} 結果已發送")
-                except Exception as e:
-                    self._log(f"發送任務結果失敗: {e}", ERROR)
-                    
-        except Exception as e:
-            error_log = f"任務 {task_id} 執行失敗: {e}"
-            self._log(error_log, ERROR)
-            print(f"[ERROR] {error_log}")  # 添加控制台輸出以便調試
-            print(f"[DEBUG] 執行模式: {'Docker' if use_docker else 'venv'}")  # 添加執行模式調試信息
-            task_logs.append(error_log)
-            self._send_task_logs(task_id, error_log)
-            success = False
-            
-        finally:
-            # 清理容器
-            if container:
-                try:
-                    container.remove(force=True)
-                except:
-                    pass
-                    
-            # 清理臨時目錄
-            if temp_dir and exists(temp_dir):
-                try:
-                    rmtree(temp_dir)
-                except:
-                    pass
-            
-            # 通知任務完成
-            try:
-                self.master_stub.TaskCompleted(
-                    nodepool_pb2.TaskCompletedRequest(
-                        task_id=task_id,
-                        node_id=self.node_id,
-                        success=success and not stop_requested
-                    ),
-                    metadata=[('authorization', f'Bearer {self.token}')],
-                    timeout=10
-                )
-            except Exception as e:
-                self._log(f"Failed to notify task completion: {e}", WARNING)
-            
-            # 釋放資源
-            self._release_resources(task_id)
-            self._log(f"Task {task_id} resources released, status: {'success' if success else 'failed'}")
-
-    def _create_result_zip(self, task_id, workspace, success, stopped=False, task_logs=None):
-        """創建結果 ZIP，包含停止狀態信息和任務日誌"""
-        try:
-            # 創建執行日誌，包含停止信息
-            log_file = join(workspace, "execution_log.txt")
-            with open(log_file, 'w', encoding='utf-8') as f:
-                f.write(f"Task ID: {task_id}\n")
-                if stopped:
-                    f.write(f"Status: Stopped by user\n")
-                    f.write(f"Execution Result: Terminated\n")
-                else:
-                    f.write(f"Status: {'Success' if success else 'Failed'}\n")
-                    f.write(f"Execution Result: {'Completed' if success else 'Error'}\n")
-                f.write(f"Time: {datetime.now()}\n")
-                f.write(f"Node: {self.node_id}\n")
-                
-                if stopped:
-                    f.write(f"\nNote: This task was stopped by user request.\n")
-                    f.write(f"Any partial results or intermediate files are included in this package.\n")
-            
-            # 創建任務完整日誌文件
-            if task_logs:
-                task_log_file = join(workspace, "task_logs.txt")
-                with open(task_log_file, 'w', encoding='utf-8') as f:
-                    f.write(f"=== Task {task_id} Complete Logs ===\n")
-                    f.write(f"Generated at: {datetime.now()}\n")
-                    f.write(f"Status: {'Stopped by user' if stopped else ('Success' if success else 'Failed')}\n")
-                    f.write(f"Node: {self.node_id}\n\n")
-                    
-                    for log_entry in task_logs:
-                        f.write(f"{log_entry}\n")
-                    
-                    f.write(f"\n=== End of Logs ===\n")
-            
-            # 創建停止狀態文件（如果任務被停止）
-            if stopped:
-                stop_file = join(workspace, "task_stopped.txt")
-                with open(stop_file, 'w', encoding='utf-8') as f:
-                    f.write(f"Task {task_id} was stopped by user request at {datetime.now()}\n")
-                    f.write(f"This file indicates that the task did not complete normally.\n")
-                    f.write(f"Check execution_log.txt and task_logs.txt for more details.\n")
-            
-            # 打包整個工作目錄
-            zip_buffer = BytesIO()
-            with ZipFile(zip_buffer, 'w', ZIP_DEFLATED) as zip_file:
-                for root, dirs, files in walk(workspace):
-                    for file in files:
-                        file_path = join(root, file)
-                        arcname = relpath(file_path, workspace)
-                        zip_file.write(file_path, arcname)
-            
-            result_size = len(zip_buffer.getvalue())
-            self._log(f"Created result zip for task {task_id}: {result_size} bytes ({'stopped' if stopped else 'completed'}), logs included")
-            return zip_buffer.getvalue()
-            
-        except Exception as e:
-            self._log(f"Failed to create result zip: {e}", ERROR)
-            
-            # 如果打包失敗，創建一個包含錯誤信息的簡單ZIP
-            try:
-                zip_buffer = BytesIO()
-                with ZipFile(zip_buffer, 'w', ZIP_DEFLATED) as zip_file:
-                    error_content = f"Task {task_id} packaging failed: {str(e)}\n"
-                    error_content += f"Status: {'Stopped' if stopped else 'Failed'}\n"
-                    error_content += f"Time: {datetime.now()}\n"
-                    
-                    # 嘗試包含部分日誌
-                    if task_logs:
-                        error_content += f"\n=== Partial Logs ===\n"
-                        for log_entry in task_logs[-50:]:  # 最後50行日誌
-                            error_content += f"{log_entry}\n"
-                    
-                    zip_file.writestr("error_log.txt", error_content)
-                return zip_buffer.getvalue()
-            except:
-                return None
+    # _create_result_zip 已移至 task_executor 模組
 
     def _log(self, message, level=INFO):
-        """Log only errors in English, except VPN prompt."""
-        if level == ERROR or level == WARNING:
-            # Only print error/warning to console, always in English
-            print(f"[{level}] {message}")
-        # Keep logs in memory for web UI, but only in English
-        if level == INFO:
-            return  # Do not store info logs
+        """Log errors and important info to console"""
+        # Print to console for debugging purposes
+        level_name = getLevelName(level)
+        print(f"[{level_name}] {message}")
+        
+        # Keep logs in memory for web UI
         from datetime import datetime
         with self.log_lock:
             timestamp = datetime.now().strftime('%H:%M:%S')
-            level_name = getLevelName(level)
-            # Only store error/warning logs, always in English
+            # Store all logs for web UI
             self.logs.append(f"{timestamp} - {level_name} - {message}")
             if len(self.logs) > 500:
                 self.logs.pop(0)
 
-    def _find_executable_script(self, task_dir):
-        """查找可執行的腳本文件"""
-        # 按優先級順序檢查腳本
-        script_candidates = [
-            # (檔案名, 執行命令前綴, 描述)
-            ('run.bat', [], 'Windows批次檔') if os.name == 'nt' else ('run.sh', ['bash'], 'Bash腳本'),
-            ('run.cmd', [], 'Windows命令檔'),
-            ('run.py', ['python'], 'Python執行腳本'),
-            ('main.py', ['python'], 'Python主程式'),
-            ('app.py', ['python'], 'Python應用程式'),
-            ('index.py', ['python'], 'Python索引檔'),
-            ('start.py', ['python'], 'Python啟動檔')
-        ]
-        
-        for script_name, cmd_prefix, description in script_candidates:
-            script_path = os.path.join(task_dir, script_name)
-            if os.path.exists(script_path):
-                # 檢查命令是否可用
-                if cmd_prefix:
-                    try:
-                        # 對於python命令，跳過版本檢查，直接使用
-                        if cmd_prefix[0] == 'python':
-                            self._log(f"找到可執行腳本: {script_name} ({description})")
-                            return script_path, [script_name]  # 只返回檔案名，讓調用者決定使用哪個 python 執行檔
-                        
-                        # 檢查其他命令是否存在
-                        import subprocess
-                        result = subprocess.run([cmd_prefix[0], '--version'], 
-                                              capture_output=True, timeout=5)
-                        if result.returncode != 0:
-                            self._log(f"命令 {cmd_prefix[0]} 不可用，跳過 {script_name}")
-                            continue
-                    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-                        self._log(f"命令 {cmd_prefix[0]} 檢查失敗，跳過 {script_name}")
-                        continue
-                
-                self._log(f"找到可執行腳本: {script_name} ({description})")
-                return script_path, cmd_prefix + [script_path] if cmd_prefix else [script_path]
-        
-        # 如果沒有標準腳本，尋找任何 Python 檔案
-        try:
-            python_files = [f for f in os.listdir(task_dir) if f.endswith('.py')]
-            if python_files:
-                # 優先選擇常見的主檔案名稱
-                priority_files = ['main.py', 'app.py', 'run.py', 'start.py']
-                selected_file = None
-                for pf in priority_files:
-                    if pf in python_files:
-                        selected_file = pf
-                        break
-                if not selected_file:
-                    selected_file = python_files[0]
-                
-                script_path = os.path.join(task_dir, selected_file)
-                self._log(f"使用找到的Python檔案: {selected_file}")
-                return script_path, [selected_file]  # 只返回檔案名，讓調用者決定使用哪個 python 執行檔
-        except OSError as e:
-            self._log(f"無法讀取任務目錄: {e}")
-        
-        return None, None
+    # _find_executable_script 已移至 task_executor 模組
 
 # gRPC 服務實現
-class WorkerNodeServicer(nodepool_pb2_grpc.WorkerNodeServiceServicer):
-    def __init__(self, worker_node):
-        self.worker_node = worker_node
-
-    def ExecuteTask(self, request, context):
-        """執行任務 RPC"""
-        task_id = request.task_id
-        task_zip = request.task_zip
-        
-        # 獲取任務所需資源
-        required_resources = {
-            "cpu": request.cpu,
-            "memory_gb": request.memory_gb,
-            "gpu": request.gpu,
-            "gpu_memory_gb": request.gpu_memory_gb
-        }
-        
-        file_size_mb = len(task_zip) / (1024 * 1024)
-        info(f"===== 收到執行任務請求 =====")
-        info(f"任務ID: {task_id}")
-        info(f"檔案大小: {file_size_mb:.1f}MB")
-        info(f"請求資源: CPU={required_resources['cpu']}, RAM={required_resources['memory_gb']}GB, GPU={required_resources['gpu']}, GPU_MEM={required_resources['gpu_memory_gb']}GB")
-        info(f"當前節點狀態: {self.worker_node.status}")
-        
-        # 檢查是否有足夠資源
-        if not self.worker_node._check_resources_available(required_resources):
-            error_msg = f"資源不足，拒絕任務 {task_id}"
-            warning(error_msg)
-            return nodepool_pb2.ExecuteTaskResponse(
-                success=False, 
-                message=error_msg
-            )
-        
-        # 檢查Docker要求
-        if not self.worker_node.docker_available and self.worker_node.trust_score <= 50:
-            error_msg = f"無Docker環境且信任分數低，拒絕任務 {task_id}"
-            warning(error_msg)
-            return nodepool_pb2.ExecuteTaskResponse(
-                success=False, 
-                message="Docker unavailable and trust score too low"
-            )
-        
-        # 檢查任務數據完整性和大小
-        if not task_zip:
-            error_msg = f"任務 {task_id} 數據為空"
-            error(error_msg)
-            return nodepool_pb2.ExecuteTaskResponse(
-                success=False, 
-                message="Task data is empty"
-            )
-        
-        # 檢查檔案大小限制（100MB）
-        if file_size_mb > 100:
-            error_msg = f"任務 {task_id} 檔案太大: {file_size_mb:.1f}MB，超過100MB限制"
-            error(error_msg)
-            return nodepool_pb2.ExecuteTaskResponse(
-                success=False, 
-                message=f"Task file too large: {file_size_mb:.1f}MB (limit: 100MB)"
-            )
-        
-        try:
-            # 驗證ZIP檔案
-            try:
-                with ZipFile(BytesIO(task_zip), 'r') as zip_ref:
-                    zip_ref.testzip()
-                info(f"任務 {task_id} ZIP 檔案驗證成功")
-            except Exception as zip_error:
-                error_msg = f"任務 {task_id} ZIP 檔案損壞: {zip_error}"
-                error(error_msg)
-                return nodepool_pb2.ExecuteTaskResponse(
-                    success=False, 
-                    message=f"Invalid ZIP file: {str(zip_error)}"
-                )
-            
-            # 分配資源
-            if not self.worker_node._allocate_resources(task_id, required_resources):
-                error_msg = f"資源分配失敗，拒絕任務 {task_id}"
-                warning(error_msg)
-                return nodepool_pb2.ExecuteTaskResponse(
-                    success=False, 
-                    message="Failed to allocate resources"
-                )
-            
-            # 啟動執行線程
-            execution_thread = Thread(
-                target=self.worker_node._execute_task,
-                args=(task_id, task_zip, required_resources),
-                daemon=True,
-                name=f"TaskExecution-{task_id}"
-            )
-            execution_thread.start()
-            
-            success_msg = f"任務 {task_id} 已接受並開始準備執行 (檔案大小: {file_size_mb:.1f}MB)"
-            info(success_msg)
-            
-            return nodepool_pb2.ExecuteTaskResponse(
-                success=True, 
-                message=success_msg
-            )
-            
-        except Exception as e:
-            # 如果出錯，釋放資源
-            self.worker_node._release_resources(task_id)
-            error_msg = f"接受任務 {task_id} 時發生錯誤: {e}"
-            error(error_msg)
-            return nodepool_pb2.ExecuteTaskResponse(
-                success=False, 
-                message=f"Failed to accept task: {str(e)}"
-            )
-
-    def ReportOutput(self, request, context):
-        """報告任務輸出"""
-        node_id = request.node_id
-        task_id = request.task_id
-        output = request.output
-        
-        if node_id != self.worker_node.node_id:
-            return nodepool_pb2.StatusResponse(
-                success=False,
-                message=f"Node ID mismatch: {node_id} != {self.worker_node.node_id}"
-            )
-        
-        try:
-            # 檢查任務是否存在
-            with self.worker_node.resources_lock:
-                if task_id not in self.worker_node.running_tasks:
-                    return nodepool_pb2.StatusResponse(
-                        success=False,
-                        message=f"Task {task_id} not found"
-                    )
-            
-            # 發送輸出到主節點
-            self.worker_node._send_task_logs(task_id, output)
-            
-            return nodepool_pb2.StatusResponse(
-                success=True,
-                message=f"Output reported for task {task_id}"
-            )
-        except Exception as e:
-            return nodepool_pb2.StatusResponse(
-                success=False,
-                message=f"Failed to report output: {str(e)}"
-            )
-
-    def ReportRunningStatus(self, request, context):
-        """報告運行狀態"""
-        task_id = request.task_id
-        
-        # 檢查任務是否存在
-        with self.worker_node.resources_lock:
-            if task_id not in self.worker_node.running_tasks:
-                return nodepool_pb2.RunningStatusResponse(
-                    success=False,
-                    message=f"Not running task {task_id}"
-                )
-        
-        # 獲取真實的系統資源使用情況
-        try:
-            cpu_usage = cpu_percent()  # 移除不支持的 interval 參數
-            memory_info = virtual_memory()
-            memory_usage = int((memory_info.total - memory_info.available) / (1024 * 1024))
-            
-            # GPU 使用情況（需要專門的庫來獲取，暫時設為 0）
-            gpu_usage = 0
-            gpu_memory_usage = 0
-        except Exception as e:
-            self.worker_node._log(f"獲取系統資源使用失敗: {e}", WARNING)
-            # 使用請求中的值作為備用
-            cpu_usage = request.cpu_usage
-            memory_usage = request.memory_usage
-            gpu_usage = request.gpu_usage
-            gpu_memory_usage = request.gpu_memory_usage
-        
-        # 發送狀態報告
-        try:
-            self.worker_node._log(f"Reporting real status for task {task_id}: CPU={cpu_usage:.1f}%, MEM={memory_usage}MB, GPU={gpu_usage}%, GPU_MEM={gpu_memory_usage}MB")
-            
-            # 根據真實資源使用情況計算 CPT 獎勵
-            # 基礎獎勵根據資源使用情況動態計算
-            base_reward = 0.1  # 基礎獎勵
-            cpu_reward = (cpu_usage / 100) * 0.5  # CPU 使用率獎勵
-            memory_reward = (memory_usage / 1024) * 0.1  # 每 GB 內存使用獎勵 0.1 CPT
-            
-            cpt_reward = base_reward + cpu_reward + memory_reward
-            
-            return nodepool_pb2.RunningStatusResponse(
-                success=True,
-                message=f"Task {task_id} running - CPU: {cpu_usage:.1f}%, Memory: {memory_usage}MB",
-                cpt_reward=cpt_reward
-            )
-        except Exception as e:
-            self.worker_node._log(f"Failed to report status: {e}", WARNING)
-            return nodepool_pb2.RunningStatusResponse(
-                success=False,
-                message=f"Failed to report status: {str(e)}"
-            )
-
-    def StopTaskExecution(self, request, context):
-        """立即強制停止任務執行並打包結果"""
-        task_id = request.task_id
-        
-        # 檢查任務是否存在
-        with self.worker_node.resources_lock:
-            if task_id not in self.worker_node.running_tasks:
-                return nodepool_pb2.StopTaskExecutionResponse(
-                    success=False,
-                    message=f"Task {task_id} not running"
-                )
-        
-        info(f"收到停止任務 {task_id} 的請求，立即執行強制停止")
-        
-        # 發送停止信號
-        success = self.worker_node._stop_task(task_id)
-        
-        if success:
-            return nodepool_pb2.StopTaskExecutionResponse(
-                success=True,
-                message=f"Stop signal sent to task {task_id}"
-            )
-        else:
-            return nodepool_pb2.StopTaskExecutionResponse(
-                success=False,
-                message=f"Failed to send stop signal to task {task_id}"
-            )
-
-    def _execute_task_safely(self, task_id, task_dir, cmd):
-        """安全地執行任務"""
-        import subprocess
-        import time
-        
-        self._log(f"執行命令: {' '.join(cmd)}")
-        self._log(f"工作目錄: {task_dir}")
-        
-        # 創建結果目錄
-        result_dir = os.path.join(task_dir, 'result')
-        os.makedirs(result_dir, exist_ok=True)
-        
-        try:
-            # 設置環境變數
-            env = os.environ.copy()
-            env['TASK_ID'] = task_id
-            env['TASK_DIR'] = task_dir
-            env['RESULT_DIR'] = result_dir
-            
-            # 執行任務
-            process = subprocess.Popen(
-                cmd,
-                cwd=task_dir,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                universal_newlines=True,
-                env=env
-            )
-            
-            # 實時讀取輸出
-            output_lines = []
-            start_time = time.time()
-            timeout = 3600  # 1小時超時
-            
-            while True:
-                if process.poll() is not None:
-                    break
-                    
-                if time.time() - start_time > timeout:
-                    process.kill()
-                    self._log(f"任務 {task_id} 執行超時，已終止")
-                    return False, "任務執行超時"
-                
-                try:
-                    line = process.stdout.readline()
-                    if line:
-                        line = line.strip()
-                        output_lines.append(line)
-                        self._log(f"[任務輸出] {line}")
-                except:
-                    break
-            
-            # 等待進程完成
-            return_code = process.wait()
-            
-            # 讀取剩餘輸出
-            remaining_output, _ = process.communicate()
-            if remaining_output:
-                for line in remaining_output.strip().split('\n'):
-                    if line.strip():
-                        output_lines.append(line.strip())
-                        self._log(f"[任務輸出] {line.strip()}")
-            
-            if return_code == 0:
-                self._log(f"任務 {task_id} 執行成功完成")
-                return True, "任務執行成功"
-            else:
-                error_msg = f"任務執行失敗，退出代碼: {return_code}"
-                self._log(f"任務 {task_id} {error_msg}")
-                return False, error_msg
-                
-        except FileNotFoundError as e:
-            error_msg = f"找不到執行檔案: {e}"
-            self._log(f"任務 {task_id} 執行失敗: {error_msg}")
-            return False, error_msg
-        except Exception as e:
-            error_msg = f"任務執行異常: {e}"
-            self._log(f"任務 {task_id} 執行失敗: {error_msg}")
-            return False, error_msg
+ 
 
 
 def run_worker_node():
@@ -2250,7 +880,7 @@ def run_worker_node():
         # 保持服務運行
         try:
             while True:
-                sleep(1)
+                time.sleep(1)
         except KeyboardInterrupt:
             print("\n=== Shutting down Worker Node ===")
             server.stop(5)
