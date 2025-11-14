@@ -86,6 +86,12 @@ class Config:
     REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
     REDIS_PORT = int(os.getenv('REDIS_PORT', '6379'))
     REDIS_DB = int(os.getenv('REDIS_DB', '0'))
+
+    # === 心跳與離線判定門檻（秒） ===
+    # 用於面板「線上/離線」判定；建議 >= worker 心跳間隔的 2-3 倍
+    HEARTBEAT_ONLINE_THRESHOLD_SECONDS = int(os.getenv('HEARTBEAT_ONLINE_THRESHOLD_SECONDS', '180'))
+    # 用於自動清理長時間離線節點；建議高於線上判定許多
+    HEARTBEAT_CLEANUP_THRESHOLD_SECONDS = int(os.getenv('HEARTBEAT_CLEANUP_THRESHOLD_SECONDS', '900'))
     
     # === 開發/測試配置 ===
     DEV_MODE = os.getenv('DEV_MODE', 'False').lower() in ('true', '1', 'yes')

@@ -79,16 +79,18 @@ HiveMind employs a sophisticated multi-layered architecture designed for scalabi
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### Core Components
+### Core Components (Based on Actual Codebase)
 
-| Component | Purpose | Technology Stack |
-|-----------|---------|------------------|
-| **Node Pool** | Central resource management, task scheduling, and multi-level trust system | Python, gRPC, Redis, SQLite |
-| **Worker Nodes** | Distributed task execution with containerization support | Docker, Python, Resource Monitoring |
-| **Master Node** | System orchestration and web interface | Flask, WireGuard VPN |
-| **TaskWorker** | Lightweight task execution framework | gRPC, Protocol Buffers |
-| **AI Module** | Intelligent resource optimization | Q-Learning, Model Analysis |
-| **BT Module** | P2P file transfer and distribution | BitTorrent Protocol |
+| Component | Files | Size | Purpose | Technology Stack |
+|-----------|-------|------|---------|------------------|
+| **Node Pool** | 32 files | 0.63MB | Central resource management, gRPC services | Python, gRPC, SQLite, JWT |
+| **Worker Nodes** | 69 files | 12.42MB | Distributed task execution with Docker support | Docker, Python, Flask, VPN |
+| **Web Interface** | 27 files | 1.32MB | Dashboard, documentation, API gateway | Flask, HTML/CSS/JS |
+| **Master Node** | 39 files | 67.97MB | Task coordination and release management | Python, gRPC, Release Tools |
+| **AI Module** | 5 files | 0.68MB | Model splitting and task classification | Python, AST, Q-Learning |
+| **BT Network** | 6 files | 0.21MB | P2P file transfer and distribution | BitTorrent Protocol |
+| **VPN Service** | 8 files | 7.74MB | Secure networking with WireGuard | Go, WireGuard, Network Tools |
+| **TaskWorker** | 7 files | 0.01MB | Lightweight task execution engine | gRPC, Protocol Buffers |
 
 ## Quick Start
 
@@ -107,7 +109,7 @@ HiveMind employs a sophisticated multi-layered architecture designed for scalabi
 git clone https://github.com/him6794/hivemind.git
 cd hivemind
 
-# Install Python dependencies
+# Install Python dependencies (unified)
 pip install -r requirements.txt
 
 # Quick health check
@@ -124,7 +126,7 @@ cd hivemind
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# Install with development dependencies
+# Install unified dependencies
 pip install -r requirements.txt
 ```
 
@@ -217,6 +219,20 @@ cd hivemind && pip install -r requirements.txt
 | **Documentation** | Improve docs | [Documentation Hub](documentation/) |
 
 </div>
+
+## 📁 Project Organization (Updated 2025-11-14)
+
+**Clean & Professional Structure** - HiveMind is now perfectly organized:
+
+- ✅ **Structured Documentation** - All reports and analysis moved to `docs/` directory
+- ✅ **Unified Requirements** - Single `requirements.txt` for all dependencies 
+- ✅ **Architecture Docs** - System design documents in `docs/architecture/`
+- ✅ **Project Reports** - Status and cleanup reports in `docs/reports/`
+- ✅ **Clean Root Directory** - Only essential files in project root
+
+📊 **Current Stats**: Well-organized, 197 files, professional structure  
+📚 **Documentation**: Comprehensive docs in `docs/`, `documentation/`, and web system  
+🔧 **Maintenance**: Use `python scripts/cleanup.py` for regular upkeep
 
 ## What's Next?
 

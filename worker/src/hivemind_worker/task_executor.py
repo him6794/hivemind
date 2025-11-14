@@ -265,6 +265,32 @@ def execute_task(node, task_id: str, task_zip_bytes: bytes, required_resources: 
                         print(f"[DEBUG] 容器初始日誌:\n{initial_logs}")
                 except Exception:
                     pass
+
+                # 記錄容器資訊於 running_tasks，供 resource_monitor 精準抓取單容器用量
+                try:
+                    with node.resources_lock:
+                        if task_id not in node.running_tasks:
+                            node.running_tasks[task_id] = {"status": "Executing", "resources": {}}
+                        # 解析記憶體限制（例如 "1024m" -> 1024）為 MB
+                        mem_limit_mb = None
+                        try:
+                            m = str(mem_limit).lower()
+                            if m.endswith('m'):
+                                mem_limit_mb = int(m[:-1])
+                            elif m.endswith('g'):
+                                mem_limit_mb = int(float(m[:-1]) * 1024)
+                        except Exception:
+                            mem_limit_mb = None
+                        node.running_tasks[task_id].update({
+                            "exec_mode": "docker",
+                            "container_id": getattr(container, 'id', None),
+                            "container_name": getattr(container, 'name', None),
+                            "mem_limit_mb": mem_limit_mb,
+                            "cpu_limit_nano": int(cpu_limit * 1e9) if cpu_limit else None,
+                            "_usage_warmup": False,
+                        })
+                except Exception as e:
+                    node._log(f"無法寫入任務容器資訊到 running_tasks: {e}")
             except Exception as docker_error:
                 node._log(f"Docker 容器啟動失敗: {docker_error}")
                 use_docker = False

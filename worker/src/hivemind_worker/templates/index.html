@@ -3,26 +3,93 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Hivemind Worker</title>
-    <link rel="stylesheet" href="/static/styles.css">
-    <script src="/static/scripts.js" defer></script>
+    <title data-i18n="app.title">Hivemind Worker</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="{{ url_for('static', filename='js/i18n.js') }}" defer></script>
+    <script src="{{ url_for('static', filename='js/settings.js') }}" defer></script>
 </head>
 <body>
-    <h1>setting your Performance Limits</h1>
-    <input type='range' id='cpuLimit' min='0' max='100' value='100' step='1' oninput='updateCpuLimitLabel(this.value)'>
-    <label for='cpuLimit' id='cpuLimitLabel'>CPU Limit: 100%</label>
-    <br>
-    <input type='range' id='ramLimit' min='0' max='100' value='100' step='1' oninput='updateRamLimitLabel(this.value)'>
-    <label for='ramLimit' id='ramLimitLabel'>RAM Limit: 100%</label>
-    <br>
-    <input type='range' id='gpuLimit' min='0' max='100' value='100' step='1' oninput='updateGpuLimitLabel(this.value)'>
-    <label for='gpuLimit' id='gpuLimitLabel'>GPU Limit: 100%</label>
-    <input type='range' id='gpuMemoryLimit' min='0' max='100' value='100' step='1' oninput='updateGpuMemoryLimitLabel(this.value)'>
-    <label for='gpuMemoryLimit' id='gpuMemoryLimitLabel'>GPU Memory Limit: 100%</label>
-    <br>
-    <input type='range' id='diskLimit' min='0' max='100' value='100' step='1' oninput='updateDiskLimitLabel(this.value)'>
-    <label for='diskLimit' id='diskLimitLabel'>Disk Limit: 100%</label>
-    <br>
-    <input type='range' id='networkLimit' min='0' max='1000' value='100' step='1' oninput='updateNetworkLimitLabel(this.value)'>
-    <label for='networkLimit' id='networkLimitLabel'>Network Limit: 1000 Mbps</label>
-<body>
+    <div class="container">
+        <div class="header">
+            <h1 data-i18n="header.settings">HiveMind Worker 設定</h1>
+            <div class="header-right">
+                <nav class="navbar">
+                    <a href="/settings" class="nav-link" data-i18n="section.limits">效能上限</a>
+                    <a href="/login" class="nav-link" data-i18n="login.title">登入</a>
+                    <a href="/monitor" class="nav-link" data-i18n="monitor.header">監控</a>
+                </nav>
+                <div class="lang-switcher">
+                    <select id="lang-select" aria-label="Language"></select>
+                </div>
+            </div>
+        </div>
+
+        <div class="content-grid">
+            <div class="card">
+                <h2 data-i18n="section.limits">效能上限</h2>
+                <div class="form">
+                    <div class="form-row">
+                        <label class="form-label" for='cpuLimit' data-i18n="label.cpu">CPU</label>
+                        <input class="slider" type='range' id='cpuLimit' min='0' max='100' value='100' step='1' oninput='updateCpuLimitLabel(this.value)'>
+                        <div class="form-value" id='cpuLimitLabel'>CPU Limit: 100%</div>
+                    </div>
+                    <div class="form-row">
+                        <label class="form-label" for='ramLimit' data-i18n="label.ram">記憶體</label>
+                        <input class="slider" type='range' id='ramLimit' min='0' max='100' value='100' step='1' oninput='updateRamLimitLabel(this.value)'>
+                        <div class="form-value" id='ramLimitLabel'>RAM Limit: 100%</div>
+                    </div>
+                    <div class="form-row">
+                        <label class="form-label" for='gpuLimit' data-i18n="label.gpu">GPU</label>
+                        <input class="slider" type='range' id='gpuLimit' min='0' max='100' value='100' step='1' oninput='updateGpuLimitLabel(this.value)'>
+                        <div class="form-value" id='gpuLimitLabel'>GPU Limit: 100%</div>
+                    </div>
+                    <div class="form-row">
+                        <label class="form-label" for='gpuMemoryLimit' data-i18n="label.gpu_mem">GPU 記憶體</label>
+                        <input class="slider" type='range' id='gpuMemoryLimit' min='0' max='100' value='100' step='1' oninput='updateGpuMemoryLimitLabel(this.value)'>
+                        <div class="form-value" id='gpuMemoryLimitLabel'>GPU Memory Limit: 100%</div>
+                    </div>
+                    <div class="form-row">
+                        <label class="form-label" for='diskLimit' data-i18n="label.disk">磁碟</label>
+                        <input class="slider" type='range' id='diskLimit' min='0' max='100' value='100' step='1' oninput='updateDiskLimitLabel(this.value)'>
+                        <div class="form-value" id='diskLimitLabel'>Disk Limit: 100%</div>
+                    </div>
+                    <div class="form-row">
+                        <label class="form-label" for='networkLimit' data-i18n="label.network">網路</label>
+                        <input class="slider" type='range' id='networkLimit' min='0' max='1000' value='1000' step='10' oninput='updateNetworkLimitLabel(this.value)'>
+                        <div class="form-value" id='networkLimitLabel'>Network Limit: 1000 Mbps</div>
+                    </div>
+                    <div class="actions">
+                        <button id="saveBtn" class="btn btn-primary" onclick="saveSettings()" data-i18n="btn.save">保存設定</button>
+                        <div id="saveStatus" class="status"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2 data-i18n="section.help">說明</h2>
+                <p class="muted" data-i18n="help.1">這些上限會影響註冊與心跳刷新時對外回報的資源數值，Master/Node Pool 將只看到限制後的能力。</p>
+                <ul class="muted">
+                    <li data-i18n="help.2">CPU/GPU 以百分比限制分數。</li>
+                    <li data-i18n="help.3">記憶體以百分比計算，至少 1GB。</li>
+                    <li data-i18n="help.4">磁碟/網路目前僅本地保存，暫不參與註冊。</li>
+                </ul>
+            </div>
+            
+            <div class="card">
+                <h2 data-i18n="perf.title">效能概覽</h2>
+                <div class="form">
+                    <div class="form-row"><div class="form-label" data-i18n="perf.cpu">CPU 分數</div><div class="form-value" id="detectedCpuScore">-</div></div>
+                    <div class="form-row"><div class="form-label" data-i18n="perf.mem">可用記憶體(GB)</div><div class="form-value" id="detectedMemoryGB">-</div></div>
+                    <div class="form-row"><div class="form-label" data-i18n="perf.gpu">GPU 分數</div><div class="form-value" id="detectedGpuScore">-</div></div>
+                    <div class="form-row"><div class="form-label" data-i18n="perf.gpumem">GPU 記憶體(GB)</div><div class="form-value" id="detectedGpuMemoryGB">-</div></div>
+                    <hr style="margin: 0.5rem 0; border: none; border-top: 1px solid var(--border-light);">
+                    <div class="form-row"><div class="form-label" data-i18n="perf.ad.cpu">廣告 CPU</div><div class="form-value" id="advCpu">-</div></div>
+                    <div class="form-row"><div class="form-label" data-i18n="perf.ad.mem">廣告記憶體(GB)</div><div class="form-value" id="advMem">-</div></div>
+                    <div class="form-row"><div class="form-label" data-i18n="perf.ad.gpu">廣告 GPU</div><div class="form-value" id="advGpu">-</div></div>
+                    <div class="form-row"><div class="form-label" data-i18n="perf.ad.gpumem">廣告 GPU 記憶體(GB)</div><div class="form-value" id="advGpuMem">-</div></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

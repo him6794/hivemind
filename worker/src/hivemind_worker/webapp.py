@@ -13,6 +13,18 @@ from datetime import datetime, timedelta
 from threading import Thread
 from webbrowser import open as web_open
 from flask import render_template, request, jsonify, session, redirect, url_for
+import time as _time
+try:
+    import psutil as _psutil  # type: ignore
+except Exception:  # pragma: no cover
+    _psutil = None  # type: ignore
+try:
+    import pynvml as _pynvml  # type: ignore  # optional GPU metrics
+    _pynvml.nvmlInit()
+    _NVML_READY = True
+except Exception:
+    _pynvml = None
+    _NVML_READY = False
 
 # Support both package-relative and direct module imports
 try:
@@ -104,6 +116,12 @@ def register_routes(app, worker):
         if worker._login(username, password):
             # 登入成功，現在嘗試註冊
             worker._log(f"Login successful for user '{username}', attempting registration...")
+
+            # 註冊前套用效能上限（如果使用者已有設定）
+            try:
+                worker._apply_performance_limits()
+            except Exception:
+                pass
 
             if worker._register():
                 session_id = worker._create_user_session(username, worker.token)
@@ -225,6 +243,87 @@ def register_routes(app, worker):
             'total_resources': worker.total_resources
         })
 
+    @app.route('/api/metrics')
+    def api_metrics():
+        """Realtime local system metrics for charts: CPU, Memory, Network, GPU (optional)."""
+        # CPU and Memory
+        cpu = 0.0
+        mem_used_gb = mem_total_gb = mem_percent = 0.0
+        try:
+            cpu = cpu_percent()
+            mem = virtual_memory()
+            mem_percent = float(getattr(mem, 'percent', 0.0))
+            mem_used_gb = round(float(getattr(mem, 'used', 0.0)) / (1024**3), 2)
+            mem_total_gb = round(float(getattr(mem, 'total', 0.0)) / (1024**3), 2)
+        except Exception:
+            pass
+
+        # Network throughput (Mbps)
+        rx_mbps = tx_mbps = 0.0
+        now = _time.time()
+        if _psutil is not None:
+            try:
+                io = _psutil.net_io_counters()
+                last = getattr(worker, '_net_last', None)
+                if last:
+                    dt = max(1e-3, now - last['ts'])
+                    d_rx = max(0, io.bytes_recv - last['rx'])
+                    d_tx = max(0, io.bytes_sent - last['tx'])
+                    rx_mbps = round((d_rx * 8) / dt / 1_000_000, 2)
+                    tx_mbps = round((d_tx * 8) / dt / 1_000_000, 2)
+                worker._net_last = {'rx': io.bytes_recv, 'tx': io.bytes_sent, 'ts': now}
+            except Exception:
+                pass
+
+        # GPU utilization and memory (if available)
+        gpu_util = None
+        gpu_mem_used_gb = None
+        gpu_mem_total_gb = None
+        gpu_name = getattr(worker, 'gpu_name', None)
+        try:
+            if _NVML_READY:
+                count = _pynvml.nvmlDeviceGetCount()
+                if count > 0:
+                    handle = _pynvml.nvmlDeviceGetHandleByIndex(0)
+                    util = _pynvml.nvmlDeviceGetUtilizationRates(handle)
+                    mem = _pynvml.nvmlDeviceGetMemoryInfo(handle)
+                    gpu_util = float(util.gpu)
+                    gpu_mem_used_gb = round(mem.used / (1024**3), 2)
+                    gpu_mem_total_gb = round(mem.total / (1024**3), 2)
+                    if not gpu_name:
+                        gpu_name = _pynvml.nvmlDeviceGetName(handle).decode('utf-8', errors='ignore')
+        except Exception:
+            pass
+
+        # Tasks snapshot (basic info already from worker)
+        tasks_info = []
+        with worker.resources_lock:
+            for t_id, task_data in worker.running_tasks.items():
+                tasks_info.append({
+                    'task_id': t_id,
+                    'status': task_data.get('status', 'Unknown'),
+                    'start_time': datetime.fromtimestamp(task_data.get('start_time', _time.time())).isoformat(),
+                    'elapsed': round(_time.time() - task_data.get('start_time', _time.time()), 1),
+                    'resources': task_data.get('resources', {})
+                })
+
+        return jsonify({
+            'cpu_percent': round(cpu, 1),
+            'memory': {
+                'percent': round(mem_percent, 1),
+                'used_gb': mem_used_gb,
+                'total_gb': mem_total_gb,
+            },
+            'network': {'rx_mbps': rx_mbps, 'tx_mbps': tx_mbps},
+            'gpu': {
+                'name': gpu_name,
+                'util_percent': gpu_util,
+                'mem_used_gb': gpu_mem_used_gb,
+                'mem_total_gb': gpu_mem_total_gb,
+            },
+            'tasks': tasks_info,
+        })
+
     @app.route('/api/logs')
     def api_logs():
         session_id = session.get('session_id')
@@ -280,6 +379,62 @@ def register_routes(app, worker):
             'available_resources': worker.available_resources
         })
 
+    # 設定頁（WebView）
+    @app.route('/settings', methods=['GET'])
+    def settings_page():
+        return render_template('index.html')
+
+    # 設定 API：讀取與保存效能上限
+    @app.route('/api/settings', methods=['GET', 'POST'])
+    def api_settings():
+        if request.method == 'GET':
+            # 回傳當前設定與偵測到的資源上限，供 UI 顯示
+            limits = getattr(worker, 'performance_limits', {})
+            detected = {
+                'cpu_score': worker.cpu_score,
+                'memory_gb': worker.memory_gb,
+                'gpu_score': worker.gpu_score,
+                'gpu_memory_gb': worker.gpu_memory_gb,
+            }
+            current = {
+                'advertised_cpu_score': getattr(worker, 'advertised_cpu_score', worker.cpu_score),
+                'advertised_memory_gb': getattr(worker, 'advertised_memory_gb', worker.memory_gb),
+                'advertised_gpu_score': getattr(worker, 'advertised_gpu_score', worker.gpu_score),
+                'advertised_gpu_memory_gb': getattr(worker, 'advertised_gpu_memory_gb', worker.gpu_memory_gb),
+            }
+            return jsonify({'success': True, 'limits': limits, 'detected': detected, 'current': current})
+
+        # POST - 保存設定
+        try:
+            data = request.get_json(force=True)
+            limits = getattr(worker, 'performance_limits', {})
+            # 允許的欄位
+            for key in ['cpu_percent', 'memory_percent', 'gpu_percent', 'gpu_memory_percent']:
+                if key in data:
+                    val = int(data[key])
+                    if key == 'cpu_percent' or key == 'memory_percent' or key == 'gpu_percent' or key == 'gpu_memory_percent':
+                        val = max(0, min(100, val))
+                    limits[key] = val
+            # 非關鍵欄位（暫僅保存）
+            if 'disk_percent' in data:
+                limits['disk_percent'] = max(0, min(100, int(data['disk_percent'])))
+            if 'network_mbps' in data:
+                limits['network_mbps'] = max(0, min(1000, int(data['network_mbps'])))
+
+            worker.performance_limits = limits
+            worker._apply_performance_limits()
+
+            # 已註冊則嘗試刷新一次
+            if worker.is_registered:
+                try:
+                    worker._refresh_registration()
+                except Exception:
+                    pass
+
+            return jsonify({'success': True, 'limits': limits})
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 400
+
 
 def start_flask(app, worker):
     """Start Flask app in a background thread and open browser."""
@@ -296,15 +451,27 @@ def start_flask(app, worker):
     Thread(target=run_flask, daemon=True).start()
     worker._log(f"Flask started on port {worker.flask_port}")
 
-    # 延遲開啟瀏覽器
-    def open_browser():
-        time.sleep(2)
-        url = f"http://127.0.0.1:{worker.flask_port}"
-        try:
-            web_open(url)
-            worker._log(f"瀏覽器已開啟: {url}")
-        except Exception as e:
-            worker._log(f"無法開啟瀏覽器: {e}", logging.WARNING)
-            worker._log(f"請手動開啟: {url}")
+    # 移除自動在背景執行 WebView，由主線程顯式呼叫 start_webview(worker)
 
-    Thread(target=open_browser, daemon=True).start()
+
+def start_webview(worker):
+    """在主線程啟動 WebView 視窗（阻塞直到視窗關閉）。"""
+    try:
+        import importlib
+        webview = importlib.import_module('webview')
+        # 尚未註冊時，引導到設定頁；已註冊則進入登入/監控流程
+        start_url = (
+            f"http://127.0.0.1:{worker.flask_port}/settings"
+            if not getattr(worker, 'is_registered', False)
+            else f"http://127.0.0.1:{worker.flask_port}/login"
+        )
+        worker._log(f"WebView 啟動: {start_url}")
+        webview.create_window('HiveMind Worker', start_url, width=1100, height=760, resizable=True)
+        webview.start()
+    except Exception as e:
+        worker._log(f"WebView 啟動失敗: {e}", logging.WARNING)
+        worker._log(
+            f"請手動開啟: http://127.0.0.1:{worker.flask_port}/settings"
+            if not getattr(worker, 'is_registered', False)
+            else f"請手動開啟: http://127.0.0.1:{worker.flask_port}/login"
+        )

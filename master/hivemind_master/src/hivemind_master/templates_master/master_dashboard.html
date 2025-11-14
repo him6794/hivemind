@@ -750,6 +750,9 @@
                 const message = task.message || '';
                 const assignedNode = task.assigned_node || 'Waiting for assignment';
                 const resourceInfo = task.resource_info || '';
+                const cpuUsage = Number.isFinite(task.cpu_usage) ? Math.max(0, Math.min(100, task.cpu_usage)) : 0;
+                const memUsage = Number.isFinite(task.memory_usage) ? Math.max(0, Math.min(100, task.memory_usage)) : 0;
+                const gpuUsage = Number.isFinite(task.gpu_usage) ? Math.max(0, Math.min(100, task.gpu_usage)) : 0;
                 
                 const canStop = ['PENDING', 'RUNNING'].includes(status.toUpperCase());
                 const canDownload = ['COMPLETED', 'STOPPED', 'FAILED'].includes(status.toUpperCase());
@@ -773,6 +776,9 @@
                             ${escapeHtml(message)}
                             ${assignedNode !== 'Waiting for assignment' ? `<br>📍 Node: ${escapeHtml(assignedNode)}` : ''}
                             ${resourceInfo ? `<br>💾 ${escapeHtml(resourceInfo)}` : ''}
+                            <div style="margin-top: 6px; color:#475569; font-size: 12px;">
+                                資源用量：CPU ${cpuUsage.toFixed(2)}% · MEM ${memUsage.toFixed(2)}% · GPU ${gpuUsage.toFixed(2)}%
+                            </div>
                         </div>
                     </td>
                     <td>
@@ -897,8 +903,11 @@
         // Periodic updates - reduced frequency to lessen server load
         setInterval(() => {
             refreshTasks();
+        }, 1000);  // Every 1 second for task resource updates
+
+        setInterval(() => {
             refreshBalance();
-        }, 15000);  // Every 15 seconds
+        }, 10000); // Balance can be less frequent
 
         setInterval(() => {
             refreshNodes();

@@ -13,6 +13,7 @@ from flask import Flask, jsonify, render_template, request
 from flask_cors import CORS
 import redis
 from node_manager import NodeManager
+from config import Config
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -29,6 +30,76 @@ class NodeMonitorService:
         self.redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
         
         self._setup_routes()
+
+    def _get_all_nodes_status(self):
+        """從 Redis 直接取得所有節點狀態（不過濾離線），用於摘要/健康/性能統計"""
+        try:
+            nodes = []
+            now = time.time()
+            threshold = getattr(Config, 'HEARTBEAT_ONLINE_THRESHOLD_SECONDS', 180)
+            keys = self.redis_client.keys("node:*")
+            for key in keys:
+                info = self.redis_client.hgetall(key)
+                node_id = key.split(":", 1)[1]
+                # 轉型並提供預設值
+                def to_int(v, default=0):
+                    try:
+                        return int(v)
+                    except Exception:
+                        return default
+                def to_float(v, default=0.0):
+                    try:
+                        return float(v)
+                    except Exception:
+                        return default
+
+                last_hb = to_float(info.get('last_heartbeat', 0))
+                node = {
+                    'node_id': node_id,
+                    'status': info.get('status', 'Unknown'),
+                    'trust_level': info.get('trust_level', 'unknown'),
+                    'docker_status': info.get('docker_status', 'unknown'),
+                    'current_tasks': to_int(info.get('current_tasks', 0)),
+                    'last_heartbeat': last_hb,
+                    # 即時使用（若 worker 有回報 TaskUsage/ReportStatus）
+                    'current_cpu_usage': to_int(info.get('current_cpu_usage', 0)),
+                    'current_memory_usage': to_int(info.get('current_memory_usage', 0)),
+                    'current_gpu_usage': to_int(info.get('current_gpu_usage', 0)),
+                    'current_gpu_memory_usage': to_int(info.get('current_gpu_memory_usage', 0)),
+                    # 資源欄位
+                    'total_cpu_score': to_int(info.get('total_cpu_score', info.get('cpu_score', 0))),
+                    'total_memory_gb': to_float(info.get('total_memory_gb', info.get('memory_gb', 0))),
+                    'total_gpu_score': to_int(info.get('total_gpu_score', info.get('gpu_score', 0))),
+                    'available_cpu_score': to_int(info.get('available_cpu_score', info.get('cpu_score', 0))),
+                    'available_memory_gb': to_float(info.get('available_memory_gb', info.get('memory_gb', 0))),
+                    'available_gpu_score': to_int(info.get('available_gpu_score', info.get('gpu_score', 0))),
+                }
+                # 夾限: available 不可小於 0 或大於 total，避免前端出現負百分比
+                node['available_cpu_score'] = max(0, min(node['available_cpu_score'], node['total_cpu_score']))
+                node['available_memory_gb'] = max(0.0, min(node['available_memory_gb'], node['total_memory_gb']))
+                node['available_gpu_score'] = max(0, min(node['available_gpu_score'], node['total_gpu_score']))
+                # 推算是否在線
+                node['is_online'] = (now - last_hb) < threshold
+                nodes.append(node)
+            return nodes
+        except Exception as e:
+            logging.error(f"讀取所有節點狀態失敗: {e}", exc_info=True)
+            return []
+
+    def _enhance_node_info(self, node_info: dict) -> dict:
+        """補充節點資訊（在線狀態、時間格式等）"""
+        try:
+            last_hb = float(node_info.get('last_heartbeat', 0))
+            now = time.time()
+            enhanced = dict(node_info)
+            enhanced.update({
+                'is_online': (now - last_hb) < getattr(Config, 'HEARTBEAT_ONLINE_THRESHOLD_SECONDS', 180),
+                'last_seen': datetime.fromtimestamp(last_hb).isoformat() if last_hb else None,
+                'offline_duration': max(0, now - last_hb) if last_hb else None
+            })
+            return enhanced
+        except Exception:
+            return node_info
     
     def _setup_routes(self):
         """設置所有路由"""
@@ -149,7 +220,7 @@ class NodeMonitorService:
                 for node in nodes:
                     last_heartbeat = float(node.get('last_heartbeat', 0))
                     current_time = time.time()
-                    offline_threshold = 60  # 60秒沒有心跳視為離線
+                    offline_threshold = getattr(Config, 'HEARTBEAT_ONLINE_THRESHOLD_SECONDS', 180)
                     
                     health_status = {
                         'node_id': node['node_id'],
@@ -229,21 +300,21 @@ class NodeMonitorService:
                     else:
                         performance_metrics['node_distribution']['docker_disabled'] += 1
                 
-                # 計算利用率
+                # 夾限 available <= total，計算利用率並夾到 [0,100]
                 if performance_metrics['total_cpu_score'] > 0:
-                    performance_metrics['cpu_utilization_percent'] = round(
-                        (1 - performance_metrics['available_cpu_score'] / performance_metrics['total_cpu_score']) * 100, 2
-                    )
+                    avail = min(max(performance_metrics['available_cpu_score'], 0), performance_metrics['total_cpu_score'])
+                    util = (1 - avail / performance_metrics['total_cpu_score']) * 100
+                    performance_metrics['cpu_utilization_percent'] = round(max(0, min(100, util)), 2)
                 
                 if performance_metrics['total_memory_gb'] > 0:
-                    performance_metrics['memory_utilization_percent'] = round(
-                        (1 - performance_metrics['available_memory_gb'] / performance_metrics['total_memory_gb']) * 100, 2
-                    )
+                    avail = min(max(performance_metrics['available_memory_gb'], 0.0), float(performance_metrics['total_memory_gb']))
+                    util = (1 - avail / performance_metrics['total_memory_gb']) * 100
+                    performance_metrics['memory_utilization_percent'] = round(max(0, min(100, util)), 2)
                 
                 if performance_metrics['total_gpu_score'] > 0:
-                    performance_metrics['gpu_utilization_percent'] = round(
-                        (1 - performance_metrics['available_gpu_score'] / performance_metrics['total_gpu_score']) * 100, 2
-                    )
+                    avail = min(max(performance_metrics['available_gpu_score'], 0), performance_metrics['total_gpu_score'])
+                    util = (1 - avail / performance_metrics['total_gpu_score']) * 100
+                    performance_metrics['gpu_utilization_percent'] = round(max(0, min(100, util)), 2)
                 
                 return jsonify({
                     'success': True,
@@ -352,24 +423,24 @@ class NodeMonitorService:
             stats['available_resources']['memory_gb'] += float(node.get('available_memory_gb', 0))
             stats['available_resources']['gpu_score'] += int(node.get('available_gpu_score', 0))
         
-        # 計算利用率
+        # 計算利用率（含夾限，避免 -% 或 >100%）
         total_cpu = stats['total_resources']['cpu_score']
         if total_cpu > 0:
-            stats['resource_utilization']['cpu_percent'] = round(
-                (1 - stats['available_resources']['cpu_score'] / total_cpu) * 100, 2
-            )
+            avail_cpu = min(max(stats['available_resources']['cpu_score'], 0), total_cpu)
+            cpu_util = (1 - avail_cpu / total_cpu) * 100
+            stats['resource_utilization']['cpu_percent'] = round(max(0, min(100, cpu_util)), 2)
         
         total_memory = stats['total_resources']['memory_gb']
         if total_memory > 0:
-            stats['resource_utilization']['memory_percent'] = round(
-                (1 - stats['available_resources']['memory_gb'] / total_memory) * 100, 2
-            )
+            avail_mem = min(max(stats['available_resources']['memory_gb'], 0.0), float(total_memory))
+            mem_util = (1 - avail_mem / total_memory) * 100
+            stats['resource_utilization']['memory_percent'] = round(max(0, min(100, mem_util)), 2)
         
         total_gpu = stats['total_resources']['gpu_score']
         if total_gpu > 0:
-            stats['resource_utilization']['gpu_percent'] = round(
-                (1 - stats['available_resources']['gpu_score'] / total_gpu) * 100, 2
-            )
+            avail_gpu = min(max(stats['available_resources']['gpu_score'], 0), total_gpu)
+            gpu_util = (1 - avail_gpu / total_gpu) * 100
+            stats['resource_utilization']['gpu_percent'] = round(max(0, min(100, gpu_util)), 2)
         
         return stats
     

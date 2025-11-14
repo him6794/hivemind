@@ -71,9 +71,9 @@ except ImportError:
 
 # Import Flask web setup from separate module
 try:
-    from .webapp import register_routes as register_web_routes, start_flask as start_web_flask
+    from .webapp import register_routes as register_web_routes, start_flask as start_web_flask, start_webview as start_webview_ui
 except ImportError:
-    from webapp import register_routes as register_web_routes, start_flask as start_web_flask
+    from webapp import register_routes as register_web_routes, start_flask as start_web_flask, start_webview as start_webview_ui
 
 class WorkerNode:
     def __init__(self):
@@ -104,6 +104,21 @@ class WorkerNode:
         # 供外部模組使用的系統度量函式引用
         self.cpu_percent = cpu_percent
         self.virtual_memory = virtual_memory
+
+        # 效能上限設定（可由 Web 設定頁調整）
+        self.performance_limits = {
+            'cpu_percent': 100,          # 0-100
+            'memory_percent': 100,       # 0-100
+            'gpu_percent': 100,          # 0-100
+            'gpu_memory_percent': 100,   # 0-100
+            'disk_percent': 100,         # 0-100（目前僅作展示，不參與註冊）
+            'network_mbps': 1000,        # 0-1000（目前僅作展示，不參與註冊）
+        }
+        # 對外廣告資源（註冊到 node_pool 使用）
+        self.advertised_cpu_score = 0
+        self.advertised_memory_gb = 0
+        self.advertised_gpu_score = 0
+        self.advertised_gpu_memory_gb = 0
 
         # 資源管理
         self.available_resources = {
@@ -136,7 +151,31 @@ class WorkerNode:
         self._init_flask()
         self.status = "Waiting for Login"
 
+        # 啟動自動服務：VPN + 更新（非阻塞）
+        try:
+            self._init_auto_services()
+        except Exception as e:
+            self._log(f"Auto services init failed: {e}", WARNING)
+
     # 移除未使用的 WireGuard 自動連線/提示函式，避免多餘相依與混淆
+
+    def _init_auto_services(self):
+        """啟動 VPN 連線與自動更新執行緒。若 VPN 已連線則跳過。"""
+        from .vpn_client import connect_vpn_once, default_config_path
+        from .auto_update import start_update_thread
+        # VPN 嘗試
+        cfg_path = default_config_path()
+        ok, msg = connect_vpn_once(cfg_path=cfg_path)
+        if ok:
+            self._log(f"VPN ready: {msg}")
+        else:
+            self._log(f"VPN not connected: {msg}", WARNING)
+        # 啟動更新執行緒
+        if not hasattr(self, '_stop_event'):
+            from threading import Event
+            self._stop_event = Event()
+        self.update_thread = start_update_thread(self._stop_event)
+        self._log("Auto-update thread started")
 
     def _init_hardware(self):
         """初始化硬體信息"""
@@ -169,6 +208,9 @@ class WorkerNode:
             
             # 初始時所有資源都可用
             self.available_resources = self.total_resources.copy()
+
+            # 依照效能上限設定計算對外廣告資源
+            self._apply_performance_limits()
             
             self._log(f"Hardware: CPU={self.cpu_cores} cores, RAM={self.memory_gb:.1f}GB available (Total: {self.total_memory_gb:.1f}GB)")
             self._log(f"Performance: CPU={self.cpu_score}, GPU={self.gpu_score}")
@@ -196,6 +238,35 @@ class WorkerNode:
                 "gpu_memory_gb": 0
             }
             self.available_resources = self.total_resources.copy()
+            # 依照效能上限設定計算對外廣告資源（退化情況）
+            self._apply_performance_limits()
+
+    def _apply_performance_limits(self):
+        """依照 performance_limits 套用上限，計算註冊用的廣告資源，並調整可用資源上限。"""
+        try:
+            cpu_pct = max(0, min(100, int(self.performance_limits.get('cpu_percent', 100))))
+            mem_pct = max(0, min(100, int(self.performance_limits.get('memory_percent', 100))))
+            gpu_pct = max(0, min(100, int(self.performance_limits.get('gpu_percent', 100))))
+            gpum_pct = max(0, min(100, int(self.performance_limits.get('gpu_memory_percent', 100))))
+
+            self.advertised_cpu_score = int(self.cpu_score * cpu_pct / 100)
+            # 記憶體避免為 0，至少 1 GB 以免註冊異常
+            self.advertised_memory_gb = max(1, int(self.memory_gb * mem_pct / 100))
+            self.advertised_gpu_score = int(self.gpu_score * gpu_pct / 100)
+            self.advertised_gpu_memory_gb = int(self.gpu_memory_gb * gpum_pct / 100)
+
+            # 也同步限制在本地資源模型上（若無任務，重置可用資源）
+            with self.resources_lock:
+                self.total_resources.update({
+                    'cpu': self.advertised_cpu_score,
+                    'memory_gb': self.advertised_memory_gb,
+                    'gpu': self.advertised_gpu_score,
+                    'gpu_memory_gb': self.advertised_gpu_memory_gb,
+                })
+                if not self.running_tasks:
+                    self.available_resources = self.total_resources.copy()
+        except Exception as e:
+            self._log(f"Apply performance limits failed: {e}", WARNING)
 
     def _auto_detect_location(self):
         """靜默自動檢測地區（委派到 network_utils.auto_detect_location）"""
@@ -496,17 +567,21 @@ class WorkerNode:
                 return False
 
         try:
+            # 第一次註冊使用「全部效能」上報（總容量），直接回報硬體總量而非限額
             self._log(f"Attempting to register node with master at {self.master_address}")
-            self._log(f"Registration details - IP: {self.local_ip}, Port: {self.port}, User: {self.username}")
-            
-            # 添加docker狀態到註冊請求
+            self._log(
+                f"Registration details - totals: CPUscore={int(self.cpu_score)}, RAM={int(self.total_memory_gb)}GB, "
+                f"GPUscore={int(self.gpu_score)}, GPUMEM={int(self.gpu_memory_gb)}GB; IP: {self.local_ip}, Port: {self.port}, User: {self.username}"
+            )
+
+            # 建立註冊請求（使用總容量值）
             request = nodepool_pb2.RegisterWorkerNodeRequest(
                 node_id=self.username,
                 hostname=self.local_ip,  # 使用本機 IP 而不是 127.0.0.1
                 cpu_cores=int(self.cpu_cores),
-                memory_gb=int(self.memory_gb),
-                cpu_score=self.cpu_score,
-                gpu_score=self.gpu_score,
+                memory_gb=int(self.total_memory_gb),
+                cpu_score=int(self.cpu_score),
+                gpu_score=int(self.gpu_score),
                 gpu_name=self.gpu_name,
                 gpu_memory_gb=int(self.gpu_memory_gb),
                 location=self.location,
@@ -526,6 +601,8 @@ class WorkerNode:
                 self.node_id = self.username
                 self.is_registered = True
                 self.status = "Idle"
+                # 註冊之後才套用使用者配置的效能上限，避免覆蓋首次上報的總容量
+                self._apply_performance_limits()
                 self._start_status_reporting()
                 self._log(f"節點註冊成功，使用 IP: {self.local_ip}:{self.port}")
                 return True
@@ -546,13 +623,14 @@ class WorkerNode:
             return False
             
         try:
+            # 心跳刷新不改變總容量，維持首次註冊的總量值
             request = nodepool_pb2.RegisterWorkerNodeRequest(
                 node_id=self.username,
                 hostname=self.local_ip,
                 cpu_cores=int(self.cpu_cores),
-                memory_gb=int(self.memory_gb),
-                cpu_score=self.cpu_score,
-                gpu_score=self.gpu_score,
+                memory_gb=int(self.total_memory_gb),
+                cpu_score=int(self.cpu_score),
+                gpu_score=int(self.gpu_score),
                 gpu_name=self.gpu_name,
                 gpu_memory_gb=int(self.gpu_memory_gb),
                 location=self.location,
@@ -876,15 +954,24 @@ def run_worker_node():
         
         print(f"Worker node gRPC server started on port {NODE_PORT}")
         print(f"Worker node web interface available at http://127.0.0.1:{FLASK_PORT}")
-        
-        # 保持服務運行
+
+        # 在主線程啟動 WebView（若可用），否則維持舊有阻塞迴圈
         try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            print("\n=== Shutting down Worker Node ===")
+            start_webview_ui(worker)
+            # webview 視窗關閉後到此，關閉 gRPC 服務
+            print("\n=== WebView closed, shutting down Worker Node ===")
             server.stop(5)
             print("Worker Node stopped")
+        except Exception as e:
+            print(f"WebView unavailable or failed: {e}")
+            print("Falling back to headless mode (no embedded UI). Press Ctrl+C to exit.")
+            try:
+                while True:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                print("\n=== Shutting down Worker Node ===")
+                server.stop(5)
+                print("Worker Node stopped")
             
     except Exception as e:
         print(f"Failed to start Worker Node: {e}")

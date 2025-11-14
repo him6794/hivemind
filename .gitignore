@@ -1,8 +1,13 @@
-# Python
+# HiveMind .gitignore
+# 防止不必要的文件進入版本控制
+
+# Python 編譯文件
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
+
+# 發布版本
 .Python
 build/
 develop-eggs/
@@ -16,145 +21,18 @@ parts/
 sdist/
 var/
 wheels/
+pip-wheel-metadata/
 share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
 MANIFEST
-justin/
+
 # PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
 
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
-.pytest_cache/
-cover/
-
-# Translations
-*.mo
-*.pot
-
-# Django stuff:
-*.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
-
-# Flask stuff:
-instance/
-.webassets-cache
-
-# Scrapy stuff:
-.scrapy
-
-# Executable files
-*.exe
-*.msi
-*.dmg
-*.pkg
-*.deb
-*.rpm
-
-# HiveMind specific executables and releases
-HiveMindmasterSetup.exe
-HiveMindWorkerSetup.exe
-*.Setup.exe
-主控端/*.exe
-節點客戶端/*.exe
-**/HiveMind*.exe
-master/HiveMind-Master-Release/
-worker/HiveMind-Worker-Release/
-**/HiveMind-*-Release/
-**/Release/
-
-# Docker installers
-**/Docker*.exe
-Docker*Installer.exe
-
-# Large binary files and icons
-*.ico
-file.ico
-icon.ico
-
-# Nuitka build artifacts
-nuitka-crash-report.xml
-*.crash-report.xml
-
-# Large binary files
-*.zip
-*.tar.gz
-*.rar
-*.7z
-
-# Sphinx documentation
-docs/_build/
-
-# PyBuilder
-.pybuilder/
-target/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# IPython
-profile_default/
-ipython_config.py
-
-# pyenv
-#   For a library or package, you might want to ignore these files since the code is
-#   intended to run in multiple environments; otherwise, check them in:
-# .python-version
-
-# pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if having platform-specific dependencies or dependencies
-#   having no cross-platform support, pipenv may install dependencies that don't work, or not
-#   install all needed dependencies.
-#Pipfile.lock
-
-# poetry
-#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
-#poetry.lock
-
-# pdm
-#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
-#pdm.lock
-#   pdm stores project-wide configurations in .pdm.toml, but it is recommended to not include it
-#   in version control.
-#   https://pdm.fming.dev/#use-with-ide
-.pdm.toml
-
-# PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
-__pypackages__/
-
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
-
-# SageMath parsed files
-*.sage.py
-
-# Environments
+# 環境變數
 .env
 .venv
 env/
@@ -163,92 +41,81 @@ ENV/
 env.bak/
 venv.bak/
 
-# Spyder project settings
-.spyderproject
-.spyproject
-
-# Rope project settings
-.ropeproject
-
-# mkdocs documentation
-/site
-
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
-# Pyre type checker
-.pyre/
-
-# pytype static type analyzer
-.pytype/
-
-# Cython debug symbols
-cython_debug/
-
-# PyCharm
-#  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
-#  be added to the global gitignore or merged into this project gitignore.  For a PyCharm
-#  project, uncomment the following lines:
-#.idea/
-
-# Project specific
-# 任務相關文件
-tasks/
-task_*.zip
-results/
-temp/
-
-# 版本下載文件
-downloads/
-releases/
-*.release.zip
-version_*.zip
-
-# 日誌文件
-*.log
-logs/
-
-# 設定文件（可能包含敏感信息）
-config.ini
-.env
-
-# 環境變數和配置文件
-.env
-.env.local
-.env.development
-.env.production
-.env.test
-節點池/.env
-web/.env
-vpn/.env
-config.ini
-secrets.json
-
-# 開發工具
+# IDE 文件
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
 
 # 系統文件
 .DS_Store
 Thumbs.db
-Desktop.ini
+.Trash-*
+
+# 日誌文件
+*.log
+logs/
+log/
+
+# 資料庫
+*.db
+*.sqlite
+*.sqlite3
+
+# 臨時文件
+*.tmp
+*.temp
+temp/
+tmp/
 
 # 備份文件
 *.bak
 *.backup
+*.orig
 *.old
-*.tmp
 
-# 壓縮文件
-*.zip
-*.tar.gz
-*.rar
-*.7z
+# 編譯產物
+*.exe (除了發布版本)
+*.msi
+*.dmg
+*.deb
+*.rpm
 
-# 數據庫文件
-*.db
-*.sqlite
-*.sqlite3
-*add.txt
+# 快取文件
+.cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 本地配置
+config/local.yaml
+config/secrets.yaml
+
+# 大型二進制文件（發布版本例外）
+*.bin
+*.dat
+
+# 測試產物
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# 文檔生成
+docs/_build/
+docs/build/
+site/
+
+# Node.js (如果有前端開發)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 其他
+*.pid
+*.seed
+*.pid.lock

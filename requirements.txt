@@ -1,12 +1,57 @@
-docker==7.1.0
+# HiveMind 分散式計算平台 - 統一依賴管理
+# 合併所有模組的依賴，統一版本管理
+# 更新時間: 2025-11-14
+
+# === 核心框架 ===
 Flask==3.0.3
+Flask-Cors==4.0.1
+
+# === gRPC 通訊 ===
 grpcio==1.64.1
 grpcio-tools==1.64.1
-netifaces==0.11.0
+protobuf==4.25.1
+
+# === 系統監控 ===
 psutil==5.9.8
+netifaces==0.11.0
+
+# === 網路與請求 ===
 requests==2.32.3
-bcrypt
-pyjwt
+
+# === 資料庫與快取 ===
 redis==5.0.1
-dotenv
+SQLAlchemy==2.0.35
+
+# === 安全認證 ===
+bcrypt==4.1.2
+PyJWT==2.8.0
+
+# === 容器化 ===
+docker==7.1.0
+
+# === 檔案處理 ===
+aiofiles==22.1.0
+
+# === 環境管理 ===
+python-dotenv==1.0.1
+
+# === 開發工具 ===
+# 編譯器 (可選)
+Nuitka
+
+# 桌面應用 (可選)  
+pywebview
+
+# 郵件服務 (可選)
 resend
+
+# === 安裝說明 ===
+# 基礎安裝: pip install -r requirements.txt
+# 開發環境: pip install -r requirements.txt
+# 生產環境: pip install -r requirements.txt
+# 
+# 注意事項:
+# - 建議使用虛擬環境
+# - Python 3.8+ 版本支援
+# - 核心依賴固定版本號確保穩定性
+# - 可選依賴可根據需要安裝

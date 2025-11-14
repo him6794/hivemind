@@ -5,6 +5,7 @@ import redis
 import time
 import nodepool_pb2
 from user_manager import UserManager
+from config import Config
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -17,6 +18,36 @@ class NodeManager:
         except redis.RedisError as e:
             logging.error(f"Redis 連線失敗: {e}")
             raise # 啟動時連不上 Redis 就拋出異常
+
+    def cleanup_offline_nodes(self, offline_threshold: int = 300) -> int:
+        """清理超過 offline_threshold 秒未心跳的節點
+
+        - 掃描 Redis 中所有 node:* keys
+        - 如果 now - last_heartbeat > threshold，則刪除該節點 key
+        - 返回被清理的節點數量
+
+        備註：為安全起見，僅刪除節點主 key（node:<id>）。
+        """
+        try:
+            now = time.time()
+            cleaned = 0
+            keys = self.redis_client.keys("node:*")
+            for key in keys:
+                try:
+                    info = self.redis_client.hgetall(key)
+                    last_hb = float(info.get("last_heartbeat", 0))
+                    if last_hb == 0 or (now - last_hb) > offline_threshold:
+                        node_id = key.split(":", 1)[1]
+                        self.redis_client.delete(key)
+                        cleaned += 1
+                        logging.info(f"清理離線節點 {node_id} (last_heartbeat={last_hb})")
+                except Exception as ie:
+                    logging.warning(f"檢查/清理 {key} 發生例外: {ie}")
+            logging.info(f"離線節點清理完成，共清理 {cleaned} 個")
+            return cleaned
+        except Exception as e:
+            logging.error(f"清理離線節點失敗: {e}", exc_info=True)
+            return 0
 
     def register_worker_node(self, node_id, hostname, cpu_cores, memory_gb, cpu_score, gpu_score, gpu_memory_gb, location, port, gpu_name, docker_status="unknown"):
         """註冊或更新工作節點資訊 - 增加Docker狀態和資源管理"""
@@ -92,6 +123,26 @@ class NodeManager:
             else:
                 node_info["cpt_balance"] = "0"
             
+            # 夾限：確保 available 不超過 total 且不小於 0
+            try:
+                for pair in (
+                    ("available_cpu_score", "total_cpu_score"),
+                    ("available_memory_gb", "total_memory_gb"),
+                    ("available_gpu_score", "total_gpu_score"),
+                    ("available_gpu_memory_gb", "total_gpu_memory_gb"),
+                ):
+                    a_key, t_key = pair
+                    a_val = float(node_info.get(a_key, 0) or 0)
+                    t_val = float(node_info.get(t_key, 0) or 0)
+                    a_val = max(0.0, min(a_val, t_val))
+                    # 寫回為字串（保持整體一致）
+                    if a_key.endswith("_memory_gb"):
+                        node_info[a_key] = str(a_val)
+                    else:
+                        node_info[a_key] = str(int(round(a_val)))
+            except Exception:
+                pass
+
             # 更新节点信息
             for field, value in node_info.items():
                 self.redis_client.hset(node_key, field, value)
@@ -121,7 +172,8 @@ class NodeManager:
         else:
             # 如果是 gRPC 請求對象，按正常方式處理
             node_id = request.node_id
-            status_message = request.status_message
+            # RunningStatusRequest 使用欄位名 'status'
+            status_message = getattr(request, 'status', None) or getattr(request, 'status_message', 'Idle')
             is_grpc_call = True
 
         # 檢查節點是否存在
@@ -160,7 +212,8 @@ class NodeManager:
             logging.debug(f"節點 {node_id} 狀態已更新: {status_message}，心跳時間: {current_time}")
             
             if is_grpc_call:
-                return nodepool_pb2.StatusResponse(success=True, message="狀態報告成功")
+                # 與 proto 對應：ReportStatus 回傳 RunningStatusResponse
+                return nodepool_pb2.RunningStatusResponse(success=True, message="狀態報告成功")
             else:
                 return True, "狀態更新成功"
 
@@ -168,9 +221,55 @@ class NodeManager:
             error_msg = f"更新節點 {node_id} 狀態失敗: {e}"
             logging.error(error_msg, exc_info=True)
             if is_grpc_call:
-                return nodepool_pb2.StatusResponse(success=False, message=error_msg)
+                return nodepool_pb2.RunningStatusResponse(success=False, message=error_msg)
             else:
                 return False, error_msg
+
+    def update_node_usage(self, node_id: str, cpu_usage: int | float = 0, memory_usage: int | float = 0,
+                          gpu_usage: int | float = 0, gpu_memory_usage: int | float = 0) -> tuple[bool, str]:
+        """更新節點即時資源使用狀態
+
+        - 寫入 Redis 欄位：current_cpu_usage、current_memory_usage、current_gpu_usage、current_gpu_memory_usage
+        - 更新 last_heartbeat 與 updated_at
+        - 夾限 CPU/GPU 百分比於 [0,100]，記憶體使用量不為負
+        """
+        try:
+            node_key = f"node:{node_id}"
+            if not self.redis_client.exists(node_key):
+                return False, f"節點 {node_id} 不存在"
+
+            # 數值處理與夾限
+            try:
+                cpu_val = max(0.0, min(100.0, float(cpu_usage)))
+            except Exception:
+                cpu_val = 0.0
+            try:
+                mem_val = max(0.0, float(memory_usage))
+            except Exception:
+                mem_val = 0.0
+            try:
+                gpu_val = max(0.0, min(100.0, float(gpu_usage)))
+            except Exception:
+                gpu_val = 0.0
+            try:
+                gpumem_val = max(0.0, float(gpu_memory_usage))
+            except Exception:
+                gpumem_val = 0.0
+
+            now = time.time()
+            mapping = {
+                "current_cpu_usage": str(int(round(cpu_val))),
+                "current_memory_usage": str(int(round(mem_val))),
+                "current_gpu_usage": str(int(round(gpu_val))),
+                "current_gpu_memory_usage": str(int(round(gpumem_val))),
+                "last_heartbeat": str(now),
+                "updated_at": str(now)
+            }
+            self.redis_client.hset(node_key, mapping=mapping)
+            return True, "節點使用狀態已更新"
+        except Exception as e:
+            logging.error(f"更新節點 {node_id} 使用狀態失敗: {e}", exc_info=True)
+            return False, str(e)
 
     # --- 修改 get_node_list ---
     def get_node_list(self):
@@ -184,6 +283,7 @@ class NodeManager:
                 return nodes
 
             current_time = time.time()
+            offline_threshold = getattr(Config, 'HEARTBEAT_ONLINE_THRESHOLD_SECONDS', 180)
             for key in node_keys:
                 node_info = self.redis_client.hgetall(key) # 得到字串字典
                 node_id_str = key.split(":", 1)[1] # 從 key 獲取 node_id
@@ -196,11 +296,11 @@ class NodeManager:
                     logging.warning(f"節點 {node_id_str} 核心資訊不完整 (缺少或為空: {missing_essentials})，跳過: {node_info}")
                     continue
 
-                # 檢查節點心跳時間，如果超過 30 秒沒有心跳，認為節點不可用
+                # 檢查節點心跳時間，如果超過閾值沒有心跳，認為節點不可用
                 try:
                     last_heartbeat = float(node_info.get("last_heartbeat", 0))
-                    if current_time - last_heartbeat > 30:
-                        logging.warning(f"節點 {node_id_str} 心跳超時，最後心跳時間: {last_heartbeat}")
+                    if current_time - last_heartbeat > offline_threshold:
+                        logging.info(f"節點 {node_id_str} 心跳超時（>{offline_threshold}s），最後心跳時間: {last_heartbeat}")
                         continue
                 except (ValueError, TypeError):
                     logging.warning(f"節點 {node_id_str} 心跳時間格式錯誤: {node_info.get('last_heartbeat')}")
@@ -218,16 +318,38 @@ class NodeManager:
                         'node_id': node_id_str,
                         'hostname': node_info.get("hostname", "N/A"),
                         'cpu_cores': int(node_info.get("cpu_cores", 0)),
-                        'memory_gb': int(node_info.get("memory_gb", 0)),
+                        'memory_gb': float(node_info.get("memory_gb", 0)),
                         'status': node_info.get("status", "Unknown"),
                         'last_heartbeat': float(node_info.get("last_heartbeat", 0.0)),
                         'cpu_score': int(node_info.get("cpu_score", 0)),
                         'gpu_score': int(node_info.get("gpu_score", 0)),
-                        'gpu_memory_gb': int(node_info.get("gpu_memory_gb", 0)),
+                        'gpu_memory_gb': float(node_info.get("gpu_memory_gb", 0)),
                         'location': node_info.get("location", "N/A"),
                         'port': int(node_info.get("port", 0)),
-                        'gpu_name': node_info.get("gpu_name", "N/A")
+                        'gpu_name': node_info.get("gpu_name", "N/A"),
+                        # 前端常用的附加欄位
+                        'is_online': True,  # 走到這裡代表已通過心跳門檻
+                        'docker_status': node_info.get("docker_status", "unknown"),
+                        'trust_level': node_info.get("trust_level", "low"),
+                        'credit_score': int(node_info.get("credit_score", 0)),
+                        'current_tasks': int(node_info.get("current_tasks", 0)),
+                        # 即時使用率（若有由 Worker 回報）
+                        'current_cpu_usage': int(float(node_info.get("current_cpu_usage", 0) or 0)),
+                        'current_memory_usage': int(float(node_info.get("current_memory_usage", 0) or 0)),
+                        'current_gpu_usage': int(float(node_info.get("current_gpu_usage", 0) or 0)),
+                        'current_gpu_memory_usage': int(float(node_info.get("current_gpu_memory_usage", 0) or 0)),
+                        # 資源總量/可用量（若無則以舊欄位回退）
+                        'total_cpu_score': int(node_info.get("total_cpu_score", node_info.get("cpu_score", 0))),
+                        'total_memory_gb': float(node_info.get("total_memory_gb", node_info.get("memory_gb", 0))),
+                        'total_gpu_score': int(node_info.get("total_gpu_score", node_info.get("gpu_score", 0))),
+                        'available_cpu_score': int(node_info.get("available_cpu_score", node_info.get("cpu_score", 0))),
+                        'available_memory_gb': float(node_info.get("available_memory_gb", node_info.get("memory_gb", 0))),
+                        'available_gpu_score': int(node_info.get("available_gpu_score", node_info.get("gpu_score", 0)))
                     }
+                    # 夾限 available <= total，避免前端顯示負百分比
+                    node_data['available_cpu_score'] = max(0, min(node_data['available_cpu_score'], node_data['total_cpu_score']))
+                    node_data['available_memory_gb'] = max(0.0, min(node_data['available_memory_gb'], node_data['total_memory_gb']))
+                    node_data['available_gpu_score'] = max(0, min(node_data['available_gpu_score'], node_data['total_gpu_score']))
                     nodes.append(node_data)
                 except (ValueError, TypeError) as conv_err:
                     logging.warning(f"轉換節點 {node_id_str} 數值時出錯: {conv_err}, data: {node_info}")
@@ -238,6 +360,104 @@ class NodeManager:
         except redis.RedisError as e:
             logging.error(f"Redis 錯誤，獲取節點列表失敗: {e}")
             return []
+
+    def get_cluster_health_status(self, offline_threshold: int | None = None) -> dict:
+        """計算並返回集群健康狀態統計
+
+        回傳內容包含：
+        - online_nodes, offline_nodes, busy_nodes, idle_nodes, total_tasks
+        - total_resources/available_resources（cpu_score/memory_gb/gpu_score）
+        - resource_utilization（百分比）
+        - timestamp
+        """
+        try:
+            # 讀取預設閾值
+            if offline_threshold is None:
+                offline_threshold = getattr(Config, 'HEARTBEAT_ONLINE_THRESHOLD_SECONDS', 180)
+
+            stats = {
+                'online_nodes': 0,
+                'offline_nodes': 0,
+                'busy_nodes': 0,
+                'idle_nodes': 0,
+                'total_tasks': 0,
+                'total_resources': {
+                    'cpu_score': 0,
+                    'memory_gb': 0,
+                    'gpu_score': 0
+                },
+                'available_resources': {
+                    'cpu_score': 0,
+                    'memory_gb': 0,
+                    'gpu_score': 0
+                },
+                'resource_utilization': {
+                    'cpu_percent': 0,
+                    'memory_percent': 0,
+                    'gpu_percent': 0
+                },
+                'timestamp': int(time.time())
+            }
+
+            now = time.time()
+            keys = self.redis_client.keys("node:*")
+            for key in keys:
+                info = self.redis_client.hgetall(key)
+                node_id = key.split(":", 1)[1]
+                try:
+                    last_hb = float(info.get("last_heartbeat", 0))
+                except (TypeError, ValueError):
+                    last_hb = 0.0
+
+                is_online = (now - last_hb) < offline_threshold and info.get("is_registered", "True") == "True"
+
+                if is_online:
+                    stats['online_nodes'] += 1
+                    current_tasks = int(info.get("current_tasks", 0) or 0)
+                    if current_tasks > 0:
+                        stats['busy_nodes'] += 1
+                    else:
+                        stats['idle_nodes'] += 1
+                    stats['total_tasks'] += current_tasks
+                else:
+                    stats['offline_nodes'] += 1
+
+                # 累計資源（若缺少欄位則以0處理）
+                try:
+                    stats['total_resources']['cpu_score'] += int(info.get('total_cpu_score', info.get('cpu_score', 0)) or 0)
+                    stats['total_resources']['memory_gb'] += float(info.get('total_memory_gb', info.get('memory_gb', 0)) or 0)
+                    stats['total_resources']['gpu_score'] += int(info.get('total_gpu_score', info.get('gpu_score', 0)) or 0)
+
+                    stats['available_resources']['cpu_score'] += int(info.get('available_cpu_score', info.get('cpu_score', 0)) or 0)
+                    stats['available_resources']['memory_gb'] += float(info.get('available_memory_gb', info.get('memory_gb', 0)) or 0)
+                    stats['available_resources']['gpu_score'] += int(info.get('available_gpu_score', info.get('gpu_score', 0)) or 0)
+                except Exception:
+                    # 某些欄位轉型失敗不應中斷統計
+                    pass
+
+            # 計算利用率（夾限 available <= total 並將百分比夾到 [0,100]）
+            total_cpu = stats['total_resources']['cpu_score']
+            if total_cpu > 0:
+                avail = min(max(stats['available_resources']['cpu_score'], 0), total_cpu)
+                util = (1 - (avail / total_cpu)) * 100
+                stats['resource_utilization']['cpu_percent'] = round(max(0, min(100, util)), 2)
+
+            total_mem = stats['total_resources']['memory_gb']
+            if total_mem > 0:
+                avail = min(max(stats['available_resources']['memory_gb'], 0.0), float(total_mem))
+                util = (1 - (avail / total_mem)) * 100
+                stats['resource_utilization']['memory_percent'] = round(max(0, min(100, util)), 2)
+
+            total_gpu = stats['total_resources']['gpu_score']
+            if total_gpu > 0:
+                avail = min(max(stats['available_resources']['gpu_score'], 0), total_gpu)
+                util = (1 - (avail / total_gpu)) * 100
+                stats['resource_utilization']['gpu_percent'] = round(max(0, min(100, util)), 2)
+
+            return stats
+        except Exception as e:
+            logging.error(f"計算集群健康狀態失敗: {e}", exc_info=True)
+            return {}
         except Exception as e:
             logging.error(f"獲取節點列表時發生未知錯誤: {e}", exc_info=True)
             return []
@@ -442,10 +662,10 @@ class NodeManager:
                 "status": node_info.get("status", "Unknown"),
                 "last_heartbeat": float(node_info.get("last_heartbeat", 0)),
                 "cpu_cores": int(node_info.get("cpu_cores", 0)),
-                "memory_gb": int(node_info.get("memory_gb", 0)),
+                "memory_gb": float(node_info.get("memory_gb", 0)),
                 "cpu_score": int(node_info.get("cpu_score", 0)),
                 "gpu_score": int(node_info.get("gpu_score", 0)),
-                "gpu_memory_gb": int(node_info.get("gpu_memory_gb", 0)),
+                "gpu_memory_gb": float(node_info.get("gpu_memory_gb", 0)),
                 "location": node_info.get("location", "Unknown"),
                 "gpu_name": node_info.get("gpu_name", "Unknown"),
                 "docker_status": node_info.get("docker_status", "unknown"),
@@ -454,16 +674,21 @@ class NodeManager:
                 "trust_level": node_info.get("trust_level", "low"),
                 "current_tasks": int(node_info.get("current_tasks", 0)),
                 "running_task_ids": node_info.get("running_task_ids", ""),
+                # 即時使用
+                "current_cpu_usage": int(float(node_info.get("current_cpu_usage", 0) or 0)),
+                "current_memory_usage": int(float(node_info.get("current_memory_usage", 0) or 0)),
+                "current_gpu_usage": int(float(node_info.get("current_gpu_usage", 0) or 0)),
+                "current_gpu_memory_usage": int(float(node_info.get("current_gpu_memory_usage", 0) or 0)),
                 # 總資源
                 "total_cpu_score": int(node_info.get("total_cpu_score", 0)),
-                "total_memory_gb": int(node_info.get("total_memory_gb", 0)),
+                "total_memory_gb": float(node_info.get("total_memory_gb", 0)),
                 "total_gpu_score": int(node_info.get("total_gpu_score", 0)),
-                "total_gpu_memory_gb": int(node_info.get("total_gpu_memory_gb", 0)),
+                "total_gpu_memory_gb": float(node_info.get("total_gpu_memory_gb", 0)),
                 # 可用資源
-                "available_cpu_score": int(node_info.get("available_cpu_score", 0)),
-                "available_memory_gb": int(node_info.get("available_memory_gb", 0)),
-                "available_gpu_score": int(node_info.get("available_gpu_score", 0)),
-                "available_gpu_memory_gb": int(node_info.get("available_gpu_memory_gb", 0))
+                "available_cpu_score": max(0, min(int(node_info.get("available_cpu_score", 0)), int(node_info.get("total_cpu_score", 0) or 0))),
+                "available_memory_gb": max(0.0, min(float(node_info.get("available_memory_gb", 0)), float(node_info.get("total_memory_gb", 0) or 0.0))),
+                "available_gpu_score": max(0, min(int(node_info.get("available_gpu_score", 0)), int(node_info.get("total_gpu_score", 0) or 0))),
+                "available_gpu_memory_gb": max(0.0, min(float(node_info.get("available_gpu_memory_gb", 0)), float(node_info.get("total_gpu_memory_gb", 0) or 0.0)))
             }
         except Exception as e:
             logging.error(f"取得節點 {node_id} 資訊失敗: {e}")
@@ -648,21 +873,21 @@ class NodeManager:
             if not node_info:
                 return False, "節點不存在"
             
-            available_cpu = int(node_info.get("available_cpu_score", 0))
-            available_memory = int(node_info.get("available_memory_gb", 0))
-            available_gpu = int(node_info.get("available_gpu_score", 0))
-            available_gpu_memory = int(node_info.get("available_gpu_memory_gb", 0))
+            available_cpu = int(float(node_info.get("available_cpu_score", 0) or 0))
+            available_memory = float(node_info.get("available_memory_gb", 0) or 0)
+            available_gpu = int(float(node_info.get("available_gpu_score", 0) or 0))
+            available_gpu_memory = float(node_info.get("available_gpu_memory_gb", 0) or 0)
             
             # 檢查資源是否足夠
-            if (available_cpu < cpu_score or available_memory < memory_gb or 
-                available_gpu < gpu_score or available_gpu_memory < gpu_memory_gb):
+            if (available_cpu < int(cpu_score) or available_memory < float(memory_gb) or 
+                available_gpu < int(gpu_score) or available_gpu_memory < float(gpu_memory_gb)):
                 return False, f"節點資源不足: 需要 CPU:{cpu_score}, Memory:{memory_gb}GB, GPU:{gpu_score}, GPU Memory:{gpu_memory_gb}GB"
             
             # 扣除資源
-            new_cpu = available_cpu - cpu_score
-            new_memory = available_memory - memory_gb
-            new_gpu = available_gpu - gpu_score
-            new_gpu_memory = available_gpu_memory - gpu_memory_gb
+            new_cpu = available_cpu - int(cpu_score)
+            new_memory = available_memory - float(memory_gb)
+            new_gpu = available_gpu - int(gpu_score)
+            new_gpu_memory = available_gpu_memory - float(gpu_memory_gb)
             
             # 更新任務列表
             current_tasks = int(node_info.get("current_tasks", 0))
@@ -705,21 +930,21 @@ class NodeManager:
                 return False, "節點不存在"
             
             # 歸還資源
-            available_cpu = int(node_info.get("available_cpu_score", 0))
-            available_memory = int(node_info.get("available_memory_gb", 0))
-            available_gpu = int(node_info.get("available_gpu_score", 0))
-            available_gpu_memory = int(node_info.get("available_gpu_memory_gb", 0))
+            available_cpu = int(float(node_info.get("available_cpu_score", 0) or 0))
+            available_memory = float(node_info.get("available_memory_gb", 0) or 0)
+            available_gpu = int(float(node_info.get("available_gpu_score", 0) or 0))
+            available_gpu_memory = float(node_info.get("available_gpu_memory_gb", 0) or 0)
             
             # 不能超過總資源
-            total_cpu = int(node_info.get("total_cpu_score", 0))
-            total_memory = int(node_info.get("total_memory_gb", 0))
-            total_gpu = int(node_info.get("total_gpu_score", 0))
-            total_gpu_memory = int(node_info.get("total_gpu_memory_gb", 0))
+            total_cpu = int(float(node_info.get("total_cpu_score", 0) or 0))
+            total_memory = float(node_info.get("total_memory_gb", 0) or 0)
+            total_gpu = int(float(node_info.get("total_gpu_score", 0) or 0))
+            total_gpu_memory = float(node_info.get("total_gpu_memory_gb", 0) or 0)
             
-            new_cpu = min(available_cpu + cpu_score, total_cpu)
-            new_memory = min(available_memory + memory_gb, total_memory)
-            new_gpu = min(available_gpu + gpu_score, total_gpu)
-            new_gpu_memory = min(available_gpu_memory + gpu_memory_gb, total_gpu_memory)
+            new_cpu = min(available_cpu + int(cpu_score), total_cpu)
+            new_memory = min(available_memory + float(memory_gb), total_memory)
+            new_gpu = min(available_gpu + int(gpu_score), total_gpu)
+            new_gpu_memory = min(available_gpu_memory + float(gpu_memory_gb), total_gpu_memory)
             
             # 更新任務列表
             current_tasks = max(0, int(node_info.get("current_tasks", 0)) - 1)
@@ -769,10 +994,10 @@ class NodeManager:
                 "status": node_info.get("status", "Unknown"),
                 "last_heartbeat": float(node_info.get("last_heartbeat", 0)),
                 "cpu_cores": int(node_info.get("cpu_cores", 0)),
-                "memory_gb": int(node_info.get("memory_gb", 0)),
+                "memory_gb": float(node_info.get("memory_gb", 0)),
                 "cpu_score": int(node_info.get("cpu_score", 0)),
                 "gpu_score": int(node_info.get("gpu_score", 0)),
-                "gpu_memory_gb": int(node_info.get("gpu_memory_gb", 0)),
+                "gpu_memory_gb": float(node_info.get("gpu_memory_gb", 0)),
                 "location": node_info.get("location", "Unknown"),
                 "gpu_name": node_info.get("gpu_name", "Unknown"),
                 "docker_status": node_info.get("docker_status", "unknown"),
@@ -783,14 +1008,14 @@ class NodeManager:
                 "running_task_ids": node_info.get("running_task_ids", ""),
                 # 總資源
                 "total_cpu_score": int(node_info.get("total_cpu_score", 0)),
-                "total_memory_gb": int(node_info.get("total_memory_gb", 0)),
+                "total_memory_gb": float(node_info.get("total_memory_gb", 0)),
                 "total_gpu_score": int(node_info.get("total_gpu_score", 0)),
-                "total_gpu_memory_gb": int(node_info.get("total_gpu_memory_gb", 0)),
+                "total_gpu_memory_gb": float(node_info.get("total_gpu_memory_gb", 0)),
                 # 可用資源
                 "available_cpu_score": int(node_info.get("available_cpu_score", 0)),
-                "available_memory_gb": int(node_info.get("available_memory_gb", 0)),
+                "available_memory_gb": float(node_info.get("available_memory_gb", 0)),
                 "available_gpu_score": int(node_info.get("available_gpu_score", 0)),
-                "available_gpu_memory_gb": int(node_info.get("available_gpu_memory_gb", 0))
+                "available_gpu_memory_gb": float(node_info.get("available_gpu_memory_gb", 0))
             }
         except Exception as e:
             logging.error(f"取得節點 {node_id} 資訊失敗: {e}")

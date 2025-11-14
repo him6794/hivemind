@@ -72,12 +72,13 @@ class WorkerNodeServiceServicer(nodepool_pb2_grpc.WorkerNodeServiceServicer):
             if info:
                 assigned_node = info.get("assigned_node") or ""
                 try:
-                    cpu = int(info.get("cpu_score") or 0)
-                    mem = int(info.get("memory_gb") or 0)
-                    gpu = int(info.get("gpu_score") or 0)
-                    gpumem = int(info.get("gpu_memory_gb") or 0)
+                    cpu = int(float(info.get("cpu_score") or 0))
+                    mem = float(info.get("memory_gb") or 0)
+                    gpu = int(float(info.get("gpu_score") or 0))
+                    gpumem = float(info.get("gpu_memory_gb") or 0)
                 except Exception:
-                    cpu = mem = gpu = gpumem = 0
+                    cpu = gpu = 0
+                    mem = gpumem = 0.0
 
                 if assigned_node:
                     ok, msg = self.node_manager.release_node_resources(assigned_node, task_id, cpu, mem, gpu, gpumem)
@@ -135,10 +136,40 @@ class WorkerNodeServiceServicer(nodepool_pb2_grpc.WorkerNodeServiceServicer):
         """任務資源使用情況"""
         logging.info(f"收到任務使用情況報告: {request.task_id}")
         try:
-            return nodepool_pb2.TaskUsageResponse(
-                success=True,
-                message="使用情況已記錄"
+            task_id_raw = request.task_id
+            # 特殊規則：task_id == "0" 代表節點層級的使用情況
+            if str(task_id_raw) == "0":
+                # 取得 node_id：優先使用 token 作為 node_id（需與 worker 協議）
+                node_id = (request.token or "").strip()
+                if not node_id:
+                    # 若無 token，嘗試從 peer IP 推斷（非精確），僅記錄警告並回覆失敗
+                    logging.warning("TaskUsage(task_id=0) 缺少 node_id（token），無法更新節點使用情況")
+                    return nodepool_pb2.TaskUsageResponse(success=False, message="缺少 node_id(token)")
+
+                # 更新節點即時使用情況
+                ok, msg = self.node_manager.update_node_usage(
+                    node_id=node_id,
+                    cpu_usage=request.cpu_usage,
+                    memory_usage=request.memory_usage,
+                    gpu_usage=request.gpu_usage,
+                    gpu_memory_usage=request.gpu_memory_usage,
+                )
+                if ok:
+                    return nodepool_pb2.TaskUsageResponse(success=True, message="節點狀態已更新")
+                return nodepool_pb2.TaskUsageResponse(success=False, message=msg)
+
+            # 一般任務：寫入任務使用情況
+            ok = self.task_manager.update_task_usage(
+                task_id=str(task_id_raw),
+                cpu_usage=request.cpu_usage,
+                memory_usage=request.memory_usage,
+                gpu_usage=request.gpu_usage,
+                gpu_memory_usage=request.gpu_memory_usage,
             )
+            if ok:
+                return nodepool_pb2.TaskUsageResponse(success=True, message="任務使用情況已記錄")
+            else:
+                return nodepool_pb2.TaskUsageResponse(success=False, message="任務不存在或更新失敗")
         except Exception as e:
             logging.error(f"TaskUsage 錯誤: {e}")
             return nodepool_pb2.TaskUsageResponse(

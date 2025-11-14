@@ -1,6 +1,0 @@
-grpcio>=1.50.0
-grpcio-tools>=1.50.0
-aiofiles>=22.1.0
-protobuf>=4.21.0
-protobuf>=4.21.0
-aiofiles>=22.1.0

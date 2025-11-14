@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Hivemind 招募申請</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <!-- 新增：導覽列 -->
+  <nav class="navbar anim-fade">
+    <div class="nav-inner">
+      <div class="brand">Hivemind</div>
+      <div class="nav-links">
+        <a href="#apply">申請</a>
+        <a href="./admin.html" id="admin-link">管理員</a>
+        <a href="https://github.com/him6794/hivemind" target="_blank" rel="noopener">GitHub</a>
+        <button id="logout-btn" style="display:none">登出</button>
+      </div>
+    </div>
+  </nav>
+
+  <!-- 新增：專案簡介（Hero） -->
+  <section class="hero anim-fade">
+    <div class="hero-card">
+      <h1>加入 Hivemind：一起降低運算成本</h1>
+      <p>我們尋找熱愛系統設計與分散式運算的夥伴。提交表單後，團隊會在後台審核並寄送結果至你的 Email。</p>
+      <div class="actions">
+        <a class="btn primary" href="#apply">開始申請</a>
+        <a class="btn" href="https://github.com/him6794/hivemind" target="_blank" rel="noopener">查看 GitHub</a>
+      </div>
+    </div>
+  </section>
+
+  <div class="container anim-fade" id="apply">
+    <h1>Hivemind 招募申請</h1>
+    <form id="apply-form" class="card">
+      <label>Email（用於接收結果）<span class="req">*</span></label>
+      <input type="email" name="email" required placeholder="you@example.com" />
+
+      <label>GitHub 連結</label>
+      <input type="url" name="github_url" placeholder="https://github.com/yourname" />
+
+      <label>作品連結</label>
+      <input type="url" name="portfolio_url" placeholder="https://your-portfolio" />
+
+      <label>Discord ID</label>
+      <input type="text" name="discord_id" placeholder="name#1234 或使用者ID" />
+
+      <!-- 更新：擴充技能選項 -->
+      <label>開發能力（可複選）</label>
+      <div class="checkboxes">
+        <label class="chip"><input type="checkbox" name="skills" value="go" /><span class="box"></span><span>Go</span></label>
+        <label class="chip"><input type="checkbox" name="skills" value="python" /><span class="box"></span><span>Python</span></label>
+        <label class="chip"><input type="checkbox" name="skills" value="grpc" /><span class="box"></span><span>gRPC</span></label>
+        <label class="chip"><input type="checkbox" name="skills" value="css" /><span class="box"></span><span>CSS</span></label>
+        <label class="chip"><input type="checkbox" name="skills" value="nodejs" /><span class="box"></span><span>Node.js</span></label>
+        <label class="chip"><input type="checkbox" name="skills" value="typescript" /><span class="box"></span><span>TypeScript</span></label>
+        <label class="chip"><input type="checkbox" name="skills" value="rust" /><span class="box"></span><span>Rust</span></label>
+        <label class="chip"><input type="checkbox" name="skills" value="docker" /><span class="box"></span><span>Docker</span></label>
+        <label class="chip"><input type="checkbox" name="skills" value="kubernetes" /><span class="box"></span><span>Kubernetes</span></label>
+        <label class="chip"><input type="checkbox" name="skills" value="sql" /><span class="box"></span><span>SQL</span></label>
+        <label class="chip"><input type="checkbox" name="skills" value="redis" /><span class="box"></span><span>Redis</span></label>
+        <label class="chip"><input type="checkbox" name="skills" value="cloudflare worker" /><span class="box"></span><span>Cloudflare Worker</span></label>
+      </div>
+
+      <label>對分散式運算的理解</label>
+      <textarea name="distributed_understanding" rows="4" placeholder="談談你對分散式/可擴展/一致性的理解……"></textarea>
+
+      <label>想學到的東西</label>
+      <textarea name="learning_goals" rows="3"></textarea>
+
+      <label>簡短自我介紹</label>
+      <textarea name="bio" rows="3"></textarea>
+
+      <button type="submit">送出申請</button>
+      <p id="msg" class="msg"></p>
+    </form>
+  </div>
+
+  <script>
+    const API_BASE = "https://joina.justin0711.com";
+    const ADMIN_TOKEN_KEY = "admin_token";
+
+    const form = document.getElementById("apply-form");
+    const msg = document.getElementById("msg");
+    const adminLink = document.getElementById("admin-link");
+    const logoutBtn = document.getElementById("logout-btn");
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      msg.textContent = "";
+      const fd = new FormData(form);
+      const skills = [...document.querySelectorAll('input[name="skills"]:checked')].map(x => x.value);
+      const payload = {
+        email: fd.get("email"),
+        github_url: fd.get("github_url"),
+        portfolio_url: fd.get("portfolio_url"),
+        discord_id: fd.get("discord_id"),
+        skills,
+        distributed_understanding: fd.get("distributed_understanding"),
+        learning_goals: fd.get("learning_goals"),
+        bio: fd.get("bio"),
+      };
+      try {
+        const res = await fetch(`${API_BASE}/api/applications`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "提交失敗");
+        form.reset();
+        msg.textContent = "已送出！我們會盡快審核，結果會寄到您的 Email。";
+        msg.className = "msg success";
+      } catch (err) {
+        msg.textContent = err.message || "發生錯誤，請稍後再試";
+        msg.className = "msg error";
+      }
+    });
+
+    // 管理員登入/登出控制
+    const getToken = () => localStorage.getItem(ADMIN_TOKEN_KEY);
+    const setAuthed = (authed) => { logoutBtn.style.display = authed ? "inline-block" : "none"; };
+
+    async function checkAuth() {
+      const t = getToken();
+      if (!t) return setAuthed(false);
+      try {
+        const res = await fetch(`${API_BASE}/api/admin/me`, { headers: { Authorization: `Bearer ${t}` } });
+        setAuthed(res.ok);
+      } catch { setAuthed(false); }
+    }
+
+    adminLink.addEventListener("click", async (e) => {
+      if (getToken()) return; // 已登入，直接前往 admin.html
+      e.preventDefault();
+      const pw = prompt("請輸入管理密碼");
+      if (!pw) return;
+      try {
+        const res = await fetch(`${API_BASE}/api/admin/login`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password: pw }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "登入失敗");
+        localStorage.setItem(ADMIN_TOKEN_KEY, data.token);
+        setAuthed(true);
+        location.href = "./admin.html";
+      } catch (err) {
+        alert(err.message || "登入失敗");
+      }
+    });
+
+    logoutBtn.addEventListener("click", async () => {
+      const t = getToken();
+      if (!t) return;
+      try {
+        await fetch(`${API_BASE}/api/admin/logout`, { method: "POST", headers: { Authorization: `Bearer ${t}` } });
+      } catch {}
+      localStorage.removeItem(ADMIN_TOKEN_KEY);
+      setAuthed(false);
+      alert("已登出");
+    });
+
+    window.addEventListener("load", () => {
+      document.querySelectorAll('.anim-fade').forEach((el, i) => {
+        el.style.animationDelay = (0.08 * (i + 1)) + 's';
+        el.classList.add('anim-play');
+      });
+      checkAuth();
+    });
+
+    // 新增：平滑捲動與進場動畫
+    document.querySelectorAll('a[href^="#"]').forEach(a => {
+      a.addEventListener('click', (e) => {
+        const target = document.querySelector(a.getAttribute('href'));
+        if (target) { e.preventDefault(); target.scrollIntoView({ behavior: 'smooth' }); }
+      });
+    });
+  </script>
+</body>
+</html>

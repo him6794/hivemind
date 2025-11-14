@@ -41,6 +41,16 @@ class MasterNodeUI:
 
         self.app = Flask(__name__, template_folder="templates_master", static_folder="static_master")
         self.app.secret_key = FLASK_SECRET_KEY
+        # Log where Flask will load templates/static from to avoid confusion
+        try:
+            root_path = getattr(self.app, 'root_path', os.getcwd())
+            tpl_folder = getattr(self.app, 'template_folder', 'templates') or 'templates'
+            static_folder = getattr(self.app, 'static_folder', 'static') or 'static'
+            logging.info(f"Flask root_path = {root_path}")
+            logging.info(f"Flask templates = {os.path.abspath(os.path.join(root_path, tpl_folder))}")
+            logging.info(f"Flask static = {os.path.abspath(os.path.join(root_path, static_folder))}")
+        except Exception as _e:
+            logging.debug(f"Unable to log Flask paths: {_e}")
         self.setup_flask_routes()
         
         # 用戶會話管理
@@ -71,6 +81,48 @@ class MasterNodeUI:
     def remove_user(self, username):
         with self.user_list_lock:
             self.user_list = [u for u in self.user_list if u['username'] != username]
+
+    # --- Token 相關輔助方法 ---
+    def _refresh_token(self, username):
+        """嘗試刷新指定用戶的 token。成功則更新並返回 True，失敗返回 False。"""
+        user = self.get_user(username)
+        if not user:
+            logging.warning(f"Refresh token skipped, user {username} not found")
+            return False
+        old_token = user.get('token')
+        if not old_token:
+            logging.warning(f"Refresh token skipped, user {username} has no token")
+            return False
+        try:
+            req = nodepool_pb2.RefreshTokenRequest(old_token=old_token)
+            resp = self.user_stub.RefreshToken(req, timeout=15)
+            if resp.success and resp.new_token:
+                self.add_or_update_user(username, resp.new_token)
+                logging.info(f"User {username} token refreshed successfully")
+                return True
+            else:
+                logging.warning(f"User {username} token refresh failed: {resp.message}")
+                return False
+        except Exception as e:
+            logging.error(f"User {username} token refresh error: {e}")
+            return False
+
+    def _maybe_refresh_token(self, username, force=False):
+        """根據 token 使用時間決定是否刷新，或在 force=True 時強制刷新。"""
+        user = self.get_user(username)
+        if not user:
+            return False
+        # token 有效期 60 分鐘，超過 50 分鐘主動刷新
+        login_time = user.get('login_time')
+        if force:
+            return self._refresh_token(username)
+        if not login_time:
+            return False
+        age_minutes = (datetime.datetime.now() - login_time).total_seconds() / 60.0
+        if age_minutes >= 50:  # 主動刷新
+            logging.info(f"User {username} token age {age_minutes:.1f}m exceeds threshold, refreshing...")
+            return self._refresh_token(username)
+        return False
 
     def _connect_grpc(self):
         try:
@@ -108,14 +160,32 @@ class MasterNodeUI:
         if not user:
             return 0
         try:
+            # 可能需要提前刷新 token
+            self._maybe_refresh_token(username)
             req = nodepool_pb2.GetBalanceRequest(username=username, token=user['token'])
             resp = self.user_stub.GetBalance(req, timeout=30)
             if resp.success:
                 user['cpt_balance'] = resp.balance
                 return resp.balance
             else:
+                # 根據錯誤類型處理 TOKEN 過期或無效
+                if resp.message in ("TOKEN_EXPIRED", "INVALID_TOKEN"):
+                    logging.warning(f"GetBalance failed for {username}: {resp.message}, attempting refresh...")
+                    if self._refresh_token(username):
+                        # 重試一次
+                        user = self.get_user(username)
+                        retry_req = nodepool_pb2.GetBalanceRequest(username=username, token=user['token'])
+                        retry_resp = self.user_stub.GetBalance(retry_req, timeout=30)
+                        if retry_resp.success:
+                            user['cpt_balance'] = retry_resp.balance
+                            return retry_resp.balance
+                        else:
+                            logging.error(f"GetBalance retry failed for {username}: {retry_resp.message}")
+                    else:
+                        logging.error(f"Token refresh failed for {username}, balance unavailable")
                 return 0
-        except Exception:
+        except Exception as e:
+            logging.error(f"GetBalance exception for {username}: {e}")
             return 0
 
     def get_tasks(self, username):
@@ -123,13 +193,22 @@ class MasterNodeUI:
         if not user:
             return []
         try:
+            # 主動刷新檢查
+            self._maybe_refresh_token(username)
             req = nodepool_pb2.GetAllUserTasksRequest(token=user['token'])
             resp = self.master_stub.GetAllUserTasks(req, timeout=30)
             if resp.tasks:
                 return resp.tasks
             else:
+                # 如果沒有任務返回，懷疑 token 過期再嘗試刷新一次
+                if self._refresh_token(username):
+                    user = self.get_user(username)
+                    retry_req = nodepool_pb2.GetAllUserTasksRequest(token=user['token'])
+                    retry_resp = self.master_stub.GetAllUserTasks(retry_req, timeout=30)
+                    return list(retry_resp.tasks) if retry_resp.tasks else []
                 return []
-        except Exception:
+        except Exception as e:
+            logging.error(f"get_tasks error for {username}: {e}")
             return []
 
     def upload_task_with_user(self, username, task_id, task_zip_bytes, requirements):
@@ -140,6 +219,9 @@ class MasterNodeUI:
         token = user['token']
 
         try:
+            # 先檢查 token 年齡並必要時刷新
+            self._maybe_refresh_token(username)
+            token = self.get_user(username)['token']
             # Check user balance
             balance_request = nodepool_pb2.GetBalanceRequest(username=username, token=token)
             balance_response = self.user_stub.GetBalance(balance_request, timeout=30)
@@ -164,8 +246,36 @@ class MasterNodeUI:
                     
                 logging.info(f"Task {task_id} cost calculation: base {base_cost} CPT, priority {priority} (x{priority_multiplier}), total {cpt_cost} CPT")
             else:
-                logging.error(f"Cannot get balance for user {username}")
-                return task_id, False
+                logging.error(f"Cannot get balance for user {username} (message={balance_response.message})")
+                # 針對 TOKEN 過期或無效嘗試刷新後重試一次
+                if balance_response.message in ("TOKEN_EXPIRED", "INVALID_TOKEN"):
+                    if self._refresh_token(username):
+                        token = self.get_user(username)['token']
+                        balance_request = nodepool_pb2.GetBalanceRequest(username=username, token=token)
+                        balance_response = self.user_stub.GetBalance(balance_request, timeout=30)
+                        if balance_response.success:
+                            user['cpt_balance'] = balance_response.balance
+                            # 重新計算成本後繼續流程
+                            memory_gb_val = float(requirements.get("memory_gb", 0))
+                            cpu_score_val = float(requirements.get("cpu_score", 0))
+                            gpu_score_val = float(requirements.get("gpu_score", 0))
+                            gpu_memory_gb_val = float(requirements.get("gpu_memory_gb", 0))
+                            base_cost = max(1, int(memory_gb_val + cpu_score_val / 100 + gpu_score_val / 100 + gpu_memory_gb_val))
+                            priority = requirements.get("task_priority", "normal")
+                            priority_multiplier = {"normal": 1.0, "high": 1.2, "urgent": 1.5}.get(priority, 1.0)
+                            cpt_cost = int(base_cost * priority_multiplier)
+                            if balance_response.balance < cpt_cost:
+                                logging.error(f"User {username} insufficient balance after refresh: needs {cpt_cost} CPT, has {balance_response.balance} CPT")
+                                return task_id, False
+                            logging.info(f"[After token refresh] Task {task_id} cost calculation: base {base_cost} CPT, priority {priority} (x{priority_multiplier}), total {cpt_cost} CPT")
+                        else:
+                            logging.error(f"Balance retry failed for user {username}: {balance_response.message}")
+                            return task_id, False
+                    else:
+                        logging.error(f"Token refresh failed for user {username}, aborting upload")
+                        return task_id, False
+                else:
+                    return task_id, False
 
             request = nodepool_pb2.UploadTaskRequest(
                 task_id=task_id,
@@ -257,8 +367,10 @@ class MasterNodeUI:
                 
                 # Get task resource information
                 resource_info = ""
-                if hasattr(task, 'assigned_node') and task.assigned_node:
-                    resource_info = f"Node: {task.assigned_node}"
+                # Prefer worker_ip (present in TaskInfo) if assigned_node is missing
+                assigned_node = getattr(task, 'assigned_node', '') or getattr(task, 'worker_ip', '')
+                if assigned_node:
+                    resource_info = f"Node: {assigned_node}"
                 
                 # Get additional info from cache
                 cache_info = self.task_status_cache.get(task.task_id, {})
@@ -268,16 +380,49 @@ class MasterNodeUI:
                 priority_icons = {"normal": "🔵", "high": "🟡", "urgent": "🔴"}
                 priority_text = f"{priority_icons.get(priority, '🔵')} {priority.title()}"
                 
+                # Usage metrics as float percentages (clamped 0-100 in node_pool)
+                def to_float(v):
+                    try:
+                        return float(v)
+                    except Exception:
+                        return 0.0
+                cpu_usage = to_float(getattr(task, 'cpu_usage', 0))
+                memory_usage = to_float(getattr(task, 'memory_usage', 0))
+                gpu_usage = to_float(getattr(task, 'gpu_usage', 0))
+                gpu_memory_usage = to_float(getattr(task, 'gpu_memory_usage', 0))
+
+                # Compute numeric values when limits are known
+                try:
+                    mem_limit_mb = int(float(getattr(task, 'memory_gb', 0) or 0) * 1024)
+                except Exception:
+                    mem_limit_mb = 0
+                try:
+                    gpu_mem_limit_mb = int(float(getattr(task, 'gpu_memory_gb', 0) or 0) * 1024)
+                except Exception:
+                    gpu_mem_limit_mb = 0
+
+                mem_used_mb = int(round(memory_usage * mem_limit_mb / 100)) if mem_limit_mb else 0
+                gpu_mem_used_mb = int(round(gpu_memory_usage * gpu_mem_limit_mb / 100)) if gpu_mem_limit_mb else 0
+
                 task_list.append({
                     "task_id": task.task_id,
                     "status": task.status,
                     "progress": "100%" if task.status == "COMPLETED" else "75%" if task.status == "RUNNING" else "25%" if task.status == "PENDING" else "0%",
                     "message": f"Status: {task.status} | Priority: {priority_text}",
                     "last_update": created_time,
-                    "assigned_node": getattr(task, 'assigned_node', 'Waiting for assignment'),
+                    "assigned_node": assigned_node or 'Waiting for assignment',
                     "resource_info": resource_info,
                     "priority": priority,
-                    "estimated_cost": estimated_cost
+                    "estimated_cost": estimated_cost,
+                    "cpu_usage": round(cpu_usage, 2),
+                    "memory_usage": round(memory_usage, 2),
+                    "gpu_usage": round(gpu_usage, 2),
+                    "gpu_memory_usage": round(gpu_memory_usage, 2),
+                    # Numeric fields for UI that wants numbers instead of percentage
+                    "mem_limit_mb": mem_limit_mb,
+                    "mem_used_mb": mem_used_mb,
+                    "gpu_mem_limit_mb": gpu_mem_limit_mb,
+                    "gpu_mem_used_mb": gpu_mem_used_mb
                 })
             return jsonify({"tasks": task_list})
 

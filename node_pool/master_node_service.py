@@ -293,6 +293,34 @@ class TaskManager:
             logging.error(f"存儲任務 {task_id} 結果時發生未知錯誤: {e}", exc_info=True)
             return False
 
+    def update_task_usage(self, task_id: str, cpu_usage: int | float = 0, memory_usage: int | float = 0,
+                           gpu_usage: int | float = 0, gpu_memory_usage: int | float = 0) -> bool:
+        """更新任務即時資源使用情況（儲存在 task:<id> 哈希中）"""
+        task_key = f"task:{task_id}"
+        try:
+            if not self.redis_client.exists(task_key):
+                logging.warning(f"更新任務使用失敗：任務 {task_id} 不存在")
+                return False
+            def to_float_clamped(v):
+                try:
+                    val = float(v)
+                except Exception:
+                    val = 0.0
+                return max(0.0, min(100.0, val))
+
+            update_data = {
+                "cpu_usage": f"{to_float_clamped(cpu_usage):.2f}",
+                "memory_usage": f"{to_float_clamped(memory_usage):.2f}",
+                "gpu_usage": f"{to_float_clamped(gpu_usage):.2f}",
+                "gpu_memory_usage": f"{to_float_clamped(gpu_memory_usage):.2f}",
+                "updated_at": str(time.time())
+            }
+            self.redis_client.hset(task_key, mapping=update_data)
+            return True
+        except Exception as e:
+            logging.error(f"更新任務 {task_id} 使用狀態失敗: {e}", exc_info=True)
+            return False
+
     def update_task_status(self, task_id, status, assigned_node=None):
         """更新任務狀態，可選地更新分配節點"""
         task_key = f"task:{task_id}"
@@ -2008,9 +2036,7 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
             username = self._extract_user_from_token(token)
             if not username:
                 logging.warning("GetAllUserTasks: Invalid or expired token")
-                return nodepool_pb2.GetAllTasksResponse(
-                    tasks=[]
-                )
+                return nodepool_pb2.GetAllTasksResponse(tasks=[])
             
             logging.info(f"用戶 {username} 請求獲取所有任務")
             
@@ -2031,10 +2057,16 @@ class MasterNodeServiceServicer(nodepool_pb2_grpc.MasterNodeServiceServicer):
                     if str(task_user_id) == username:
                         status = self.task_manager.redis_client.hget(key, "status") or "UNKNOWN"
                         message = self.task_manager.redis_client.hget(key, "message") or ""
-                        cpu_usage = int(self.task_manager.redis_client.hget(key, "cpu_usage") or 0)
-                        memory_usage = int(self.task_manager.redis_client.hget(key, "memory_usage") or 0)
-                        gpu_usage = int(self.task_manager.redis_client.hget(key, "gpu_usage") or 0)
-                        gpu_memory_usage = int(self.task_manager.redis_client.hget(key, "gpu_memory_usage") or 0)
+                        # 以浮點數解析使用率，兼容字串格式，例如 "7.34"
+                        def _to_float(v):
+                            try:
+                                return float(v)
+                            except Exception:
+                                return 0.0
+                        cpu_usage = _to_float(self.task_manager.redis_client.hget(key, "cpu_usage"))
+                        memory_usage = _to_float(self.task_manager.redis_client.hget(key, "memory_usage"))
+                        gpu_usage = _to_float(self.task_manager.redis_client.hget(key, "gpu_usage"))
+                        gpu_memory_usage = _to_float(self.task_manager.redis_client.hget(key, "gpu_memory_usage"))
                         worker_ip = self.task_manager.redis_client.hget(key, "assigned_node") or ""
                         
                         task_info = nodepool_pb2.TaskInfo(

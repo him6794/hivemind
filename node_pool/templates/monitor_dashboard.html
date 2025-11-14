@@ -559,18 +559,24 @@
                     'low': '低信任'
                 }[node.trust_level] || '未知';
 
-                // 計算資源利用率
+                // 計算資源利用率（優先顯示即時使用率；若無則以配額佔用推算）
                 const cpuTotal = parseInt(node.total_cpu_score) || 0;
                 const cpuAvailable = parseInt(node.available_cpu_score) || 0;
-                const cpuUtilization = cpuTotal > 0 ? Math.round((1 - cpuAvailable / cpuTotal) * 100) : 0;
+                const cpuAllocUtil = cpuTotal > 0 ? Math.round((1 - cpuAvailable / cpuTotal) * 100) : 0;
+                const cpuRealtime = Number.isFinite(parseInt(node.current_cpu_usage)) ? Math.max(0, Math.min(100, parseInt(node.current_cpu_usage))) : 0;
+                const cpuUtilization = cpuRealtime || cpuAllocUtil;
 
                 const memoryTotal = parseFloat(node.total_memory_gb) || 0;
                 const memoryAvailable = parseFloat(node.available_memory_gb) || 0;
-                const memoryUtilization = memoryTotal > 0 ? Math.round((1 - memoryAvailable / memoryTotal) * 100) : 0;
+                const memAllocUtil = memoryTotal > 0 ? Math.round((1 - memoryAvailable / memoryTotal) * 100) : 0;
+                const memRealtime = Number.isFinite(parseInt(node.current_memory_usage)) ? Math.max(0, Math.min(100, parseInt(node.current_memory_usage))) : 0;
+                const memoryUtilization = memRealtime || memAllocUtil;
 
                 const gpuTotal = parseInt(node.total_gpu_score) || 0;
                 const gpuAvailable = parseInt(node.available_gpu_score) || 0;
-                const gpuUtilization = gpuTotal > 0 ? Math.round((1 - gpuAvailable / gpuTotal) * 100) : 0;
+                const gpuAllocUtil = gpuTotal > 0 ? Math.round((1 - gpuAvailable / gpuTotal) * 100) : 0;
+                const gpuRealtime = Number.isFinite(parseInt(node.current_gpu_usage)) ? Math.max(0, Math.min(100, parseInt(node.current_gpu_usage))) : 0;
+                const gpuUtilization = gpuRealtime || gpuAllocUtil;
 
                 // 計算離線時間
                 const offlineTime = node.offline_duration > 0 ? formatDuration(node.offline_duration) : '';

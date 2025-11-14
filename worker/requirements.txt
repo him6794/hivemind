@@ -1,8 +1,0 @@
-docker
-grpcio
-grpcio-tools
-flask
-psutil
-netifaces
-requests
-Nuitka

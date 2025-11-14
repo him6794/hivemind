@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Hivemind 後台審核</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="container admin anim-fade">
+    <h1>Hivemind 後台審核</h1>
+
+    <div id="panel" class="panel hidden">
+      <div class="list card">
+        <div class="list-header">
+          <button id="logout">登出</button>
+          <button id="refresh">重新整理</button>
+        </div>
+        <ul id="apps"></ul>
+      </div>
+
+      <div class="detail card">
+        <div id="detail-empty">選擇左側申請以檢視</div>
+        <div id="detail" class="hidden">
+          <h2>#<span id="d-id"></span> <span id="d-email"></span></h2>
+          <p><b>GitHub:</b> <a id="d-github" href="#" target="_blank"></a></p>
+          <p><b>作品:</b> <a id="d-portfolio" href="#" target="_blank"></a></p>
+          <p><b>Discord:</b> <span id="d-discord"></span></p>
+          <p><b>技能:</b> <span id="d-skills"></span></p>
+          <p><b>分散式理解:</b><br /><span id="d-dist"></span></p>
+          <p><b>想學的東西:</b><br /><span id="d-learn"></span></p>
+          <p><b>自我介紹:</b><br /><span id="d-bio"></span></p>
+          <p><b>建立時間:</b> <span id="d-created"></span></p>
+          <p><b>結果已寄出:</b> <span id="d-sent"></span></p>
+
+          <hr />
+          <label>狀態</label>
+          <select id="d-status">
+            <option value="pending">pending</option>
+            <option value="accepted">accepted</option>
+            <option value="rejected">rejected</option>
+          </select>
+          <label>審核備註／落選原因（會寫入 email）</label>
+          <textarea id="d-notes" rows="4"></textarea>
+
+          <div class="actions">
+            <button id="save">儲存</button>
+            <button id="save-send" class="primary">儲存並寄出結果</button>
+          </div>
+          <p id="detail-msg" class="msg"></p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const qs = new URLSearchParams(location.search);
+    const API_BASE = qs.get("api") || localStorage.getItem("API_BASE") || "https://joina.justin0711.com";
+    if (qs.get("api")) localStorage.setItem("API_BASE", API_BASE);
+
+    const $ = (q) => document.querySelector(q);
+    const appsEl = $("#apps");
+    const panelEl = $("#panel");
+    const token = () => localStorage.getItem("admin_token");
+
+    function showPanel(show) {
+      panelEl.classList.toggle("hidden", !show);
+    }
+
+    async function loadApps() {
+      appsEl.innerHTML = "";
+      try {
+        const res = await fetch(`${API_BASE}/api/admin/applications`, {
+          headers: { Authorization: `Bearer ${token()}` },
+        });
+        if (res.status === 401) throw new Error("UNAUTHORIZED");
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "讀取失敗");
+        data.forEach(a => {
+          const li = document.createElement("li");
+          li.className = "row";
+          li.innerHTML = `
+            <div>
+              <b>#${a.id}</b> ${a.email}
+              <div class="meta">${a.status} • ${new Date(a.created_at).toLocaleString()} • ${a.result_sent ? "已寄信" : "未寄"}</div>
+            </div>
+            <button data-id="${a.id}">檢視</button>
+          `;
+          li.querySelector("button").addEventListener("click", () => loadDetail(a.id));
+          appsEl.appendChild(li);
+        });
+      } catch (e) {
+        // 未授權或無法連線，直接回首頁由 index.html 處理登入
+        localStorage.removeItem("admin_token");
+        location.href = "./index.html";
+      }
+    }
+
+    async function loadDetail(id) {
+      $("#detail-empty").classList.add("hidden");
+      $("#detail").classList.add("hidden");
+      $("#detail-msg").textContent = "";
+      try {
+        const res = await fetch(`${API_BASE}/api/admin/applications/${id}`, {
+          headers: { Authorization: `Bearer ${token()}` },
+        });
+        if (res.status === 401) throw new Error("UNAUTHORIZED");
+        const a = await res.json();
+        if (!res.ok) throw new Error(a.error || "讀取失敗");
+        $("#d-id").textContent = a.id;
+        $("#d-email").textContent = a.email;
+        $("#d-github").textContent = a.github_url || "-";
+        $("#d-github").href = a.github_url || "#";
+        $("#d-portfolio").textContent = a.portfolio_url || "-";
+        $("#d-portfolio").href = a.portfolio_url || "#";
+        $("#d-discord").textContent = a.discord_id || "-";
+        $("#d-skills").textContent = (a.skills || []).join(", ") || "-";
+        $("#d-dist").textContent = a.distributed_understanding || "-";
+        $("#d-learn").textContent = a.learning_goals || "-";
+        $("#d-bio").textContent = a.bio || "-";
+        $("#d-created").textContent = new Date(a.created_at).toLocaleString();
+        $("#d-sent").textContent = a.result_sent ? "是" : "否";
+        $("#d-status").value = a.status || "pending";
+        $("#d-notes").value = a.reviewer_notes || "";
+        $("#detail").classList.remove("hidden");
+      } catch (e) {
+        localStorage.removeItem("admin_token");
+        location.href = "./index.html";
+      }
+    }
+
+    async function save(sendEmail) {
+      const id = $("#d-id").textContent;
+      const status = $("#d-status").value;
+      const reviewer_notes = $("#d-notes").value;
+      $("#detail-msg").textContent = "";
+      try {
+        const res = await fetch(`${API_BASE}/api/admin/applications/${id}/review`, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token()}`,
+          },
+          body: JSON.stringify({ status, reviewer_notes, send_email: !!sendEmail }),
+        });
+        if (res.status === 401) throw new Error("UNAUTHORIZED");
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "儲存失敗");
+        $("#detail-msg").textContent = sendEmail ? "已儲存並寄出結果" : "已儲存";
+        $("#detail-msg").className = "msg success";
+        await loadApps();
+        await loadDetail(id);
+      } catch (e) {
+        if (e.message === "UNAUTHORIZED") {
+          localStorage.removeItem("admin_token");
+          location.href = "./index.html";
+          return;
+        }
+        $("#detail-msg").textContent = e.message || "儲存錯誤";
+        $("#detail-msg").className = "msg error";
+      }
+    }
+
+    async function logout() {
+      const t = token();
+      try {
+        if (t) {
+          await fetch(`${API_BASE}/api/admin/logout`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${t}` },
+          }).catch(() => {});
+        }
+      } finally {
+        localStorage.removeItem("admin_token");
+        location.href = "./index.html";
+      }
+    }
+
+    async function checkAuthOnLoad() {
+      const t = token();
+      if (!t) {
+        // 未登入，導回首頁由 index.html 觸發登入彈窗
+        location.href = "./index.html";
+        return;
+      }
+      try {
+        // 優先檢查 /me，若沒有則以 applications 測試
+        let ok = false;
+        const resMe = await fetch(`${API_BASE}/api/admin/me`, { headers: { Authorization: `Bearer ${t}` } });
+        if (resMe.ok) ok = true;
+        if (!ok) {
+          const resList = await fetch(`${API_BASE}/api/admin/applications`, { headers: { Authorization: `Bearer ${t}` } });
+          ok = resList.ok;
+        }
+        if (ok) {
+          showPanel(true);
+          await loadApps();
+        } else {
+          localStorage.removeItem("admin_token");
+          location.href = "./index.html";
+        }
+      } catch {
+        // 後端不可達，也導回首頁
+        location.href = "./index.html";
+      }
+    }
+
+    $("#refresh").addEventListener("click", loadApps);
+    $("#save").addEventListener("click", () => save(false));
+    $("#save-send").addEventListener("click", () => save(true));
+    $("#logout").addEventListener("click", logout);
+
+    document.addEventListener("DOMContentLoaded", checkAuthOnLoad);
+    document.addEventListener("DOMContentLoaded", () => {
+      const root = document.querySelector('.anim-fade');
+      if (root) { root.classList.add('anim-play'); }
+    });
+  </script>
+</body>
+</html>
