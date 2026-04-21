@@ -1,0 +1,17 @@
+[package]
+name = "executor"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "executor"
+path = "src/lib.rs"
+
+[[bin]]
+name = "executor-cli"
+path = "src/main.rs"
+
+[dependencies]
+sha1 = "0.10"
+hex = "0.4"
+url = "2.5"

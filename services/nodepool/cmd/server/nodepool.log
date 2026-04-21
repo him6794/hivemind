@@ -1,0 +1,100 @@
+2026-03-25T06:27:15Z register worker username=worker1 ip=:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-03-25T06:27:23Z register worker username=worker1 ip=:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-03-25T06:27:32Z register worker username=worker1 ip=:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-03-25T06:27:32Z register worker username=worker1 ip=:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-03-25T06:27:32Z register worker username=worker1 ip=:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-03-25T06:27:32Z register worker username=worker1 ip=:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-03-25T06:27:33Z register worker username=worker1 ip=:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-03-25T06:27:33Z register worker username=worker1 ip=:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-03-25T06:27:33Z register worker username=worker1 ip=:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-03-25T06:27:33Z register worker username=worker1 ip=:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-03-25T06:27:33Z register worker username=worker1 ip=:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-03-25T06:27:33Z register worker username=worker1 ip=:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-03-25T06:29:24Z register worker username=worker1 ip=:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-03-25T06:29:27Z register worker username=worker1 ip=:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-03-25T06:30:40Z register worker username=worker-1 ip=127.0.0.1 cpu_cores=8 memory_gb=32 cpu_score=100 gpu_score=200 gpu_memory=12 location=local result=registered
+2026-03-25T06:30:41Z register worker username=worker1 ip=127.0.0.1:37955 cpu_cores=8 memory_gb=16 cpu_score=100 gpu_score=100 gpu_memory=8 location=local result=registered
+2026-03-25T06:31:50Z register worker username=worker1 ip=:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-03-25T06:33:21Z register worker username=worker1 ip=:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-03-25T06:33:39Z register worker username=worker1 ip=:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-03-25T06:33:39Z register worker username=worker1 ip=:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-03-25T06:33:40Z register worker username=worker1 ip=:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-03-25T06:33:40Z register worker username=worker1 ip=:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-03-25T06:33:40Z register worker username=worker1 ip=:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-03-25T06:33:40Z register worker username=worker1 ip=:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-03-25T06:33:40Z register worker username=worker1 ip=:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-03-25T06:33:40Z register worker username=worker1 ip=:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-03-25T06:33:40Z register worker username=worker1 ip=:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-03-25T06:33:41Z register worker username=worker1 ip=:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-03-25T06:35:05Z register worker username=worker-1 ip=127.0.0.1 cpu_cores=8 memory_gb=32 cpu_score=100 gpu_score=200 gpu_memory=12 location=local result=registered
+2026-03-25T06:35:05Z register worker username=worker1 ip=127.0.0.1:47789 cpu_cores=8 memory_gb=16 cpu_score=100 gpu_score=100 gpu_memory=8 location=local result=registered
+2026-03-25T06:38:16Z register worker username=worker1 ip=:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-03-25T06:43:31Z task_timeout_redispatch task_id=t-timeout worker_id=old-worker worker_addr=127.0.0.1:1 retry=1/2
+2026-03-25T06:43:31Z register worker username=worker-1 ip=127.0.0.1 cpu_cores=8 memory_gb=32 cpu_score=100 gpu_score=200 gpu_memory=12 location=local result=registered
+2026-03-25T06:43:31Z redispatch_success task_id=t-timeout worker_id=w2 worker_addr=127.0.0.1:44715 retry=1/2
+2026-03-25T06:43:32Z register worker username=worker1 ip=127.0.0.1:44718 cpu_cores=8 memory_gb=16 cpu_score=100 gpu_score=100 gpu_memory=8 location=local result=registered
+2026-03-25T06:43:32Z task_dispatch_failed task_id=no-worker-1 reason=[NO_WORKER] no available worker
+2026-03-25T06:43:32Z task_dispatch_success task_id=task-dispatch-1 worker_id=worker1 worker_addr=127.0.0.1:44718
+2026-03-25T06:50:46Z task_timeout_redispatch task_id=t-timeout worker_id=old-worker worker_addr=127.0.0.1:1 retry=1/2
+2026-03-25T06:50:46Z register worker username=worker-1 ip=127.0.0.1 cpu_cores=8 memory_gb=32 cpu_score=100 gpu_score=200 gpu_memory=12 location=local result=registered
+2026-03-25T06:50:46Z redispatch_success task_id=t-timeout worker_id=w2 worker_addr=127.0.0.1:28966 retry=1/2
+2026-03-25T06:50:46Z task_dispatch_failed task_id=no-worker-1 reason=[NO_WORKER] no available worker
+2026-03-25T06:50:46Z register worker username=worker1 ip=127.0.0.1:28969 cpu_cores=8 memory_gb=16 cpu_score=100 gpu_score=100 gpu_memory=8 location=local result=registered
+2026-03-25T06:50:46Z task_dispatch_success task_id=task-dispatch-1 worker_id=worker1 worker_addr=127.0.0.1:28969
+2026-03-25T06:55:06Z register worker username=worker-1 ip=127.0.0.1 cpu_cores=8 memory_gb=32 cpu_score=100 gpu_score=200 gpu_memory=12 location=local result=registered
+2026-03-25T06:55:06Z task_timeout_redispatch task_id=t-timeout worker_id=old-worker worker_addr=127.0.0.1:1 retry=1/2
+2026-03-25T06:55:06Z redispatch_success task_id=t-timeout worker_id=w2 worker_addr=127.0.0.1:2052 retry=1/2
+2026-03-25T06:55:06Z task_dispatch_failed task_id=no-worker-1 reason=[NO_WORKER] no available worker
+2026-03-25T06:55:06Z register worker username=worker1 ip=127.0.0.1:2054 cpu_cores=8 memory_gb=16 cpu_score=100 gpu_score=100 gpu_memory=8 location=local result=registered
+2026-03-25T06:55:06Z task_dispatch_success task_id=task-dispatch-1 worker_id=worker1 worker_addr=127.0.0.1:2054
+2026-03-26T04:50:16Z task_timeout_redispatch task_id=t-timeout worker_id=old-worker worker_addr=127.0.0.1:1 retry=1/2
+2026-03-26T04:50:16Z register worker username=worker-1 ip=127.0.0.1 cpu_cores=8 memory_gb=32 cpu_score=100 gpu_score=200 gpu_memory=12 location=local result=registered
+2026-03-26T04:50:16Z redispatch_success task_id=t-timeout worker_id=w2 worker_addr=127.0.0.1:58145 retry=1/2
+2026-03-26T04:50:16Z task_dispatch_failed task_id=no-worker-1 reason=[NO_WORKER] no available worker
+2026-03-26T04:50:16Z register worker username=worker1 ip=127.0.0.1:58149 cpu_cores=8 memory_gb=16 cpu_score=100 gpu_score=100 gpu_memory=8 location=local result=registered
+2026-03-26T04:50:16Z task_dispatch_success task_id=task-dispatch-1 worker_id=worker1 worker_addr=127.0.0.1:58149
+2026-04-20T04:23:37Z task_timeout_redispatch task_id=t-timeout worker_id=old-worker worker_addr=127.0.0.1:1 retry=1/2
+2026-04-20T04:23:37Z register worker username=worker-1 ip=127.0.0.1 cpu_cores=8 memory_gb=32 cpu_score=100 gpu_score=200 gpu_memory=12 location=local result=registered
+2026-04-20T04:24:09Z register worker username=worker-1 ip=127.0.0.1 cpu_cores=8 memory_gb=32 cpu_score=100 gpu_score=200 gpu_memory=12 location=local result=registered
+2026-04-20T04:24:09Z task_timeout_redispatch task_id=t-timeout worker_id=old-worker worker_addr=127.0.0.1:1 retry=1/2
+2026-04-20T04:24:09Z redispatch_success task_id=t-timeout worker_id=w2 worker_addr=127.0.0.1:49498 retry=1/2
+2026-04-20T04:24:09Z task_dispatch_failed task_id=no-worker-1 reason=[NO_WORKER] no available worker
+2026-04-20T04:24:09Z register worker username=worker1 ip=127.0.0.1:49500 cpu_cores=8 memory_gb=16 cpu_score=100 gpu_score=100 gpu_memory=8 location=local result=registered
+2026-04-20T04:24:09Z task_dispatch_success task_id=task-dispatch-1 worker_id=worker1 worker_addr=127.0.0.1:49500
+2026-04-20T04:24:34Z task_timeout_redispatch task_id=t-timeout worker_id=old-worker worker_addr=127.0.0.1:1 retry=1/2
+2026-04-20T04:24:34Z register worker username=worker-1 ip=127.0.0.1 cpu_cores=8 memory_gb=32 cpu_score=100 gpu_score=200 gpu_memory=12 location=local result=registered
+2026-04-20T04:24:34Z redispatch_success task_id=t-timeout worker_id=w2 worker_addr=127.0.0.1:49622 retry=1/2
+2026-04-20T04:24:35Z register worker username=worker1 ip=127.0.0.1:49627 cpu_cores=8 memory_gb=16 cpu_score=100 gpu_score=100 gpu_memory=8 location=local result=registered
+2026-04-20T04:24:35Z task_dispatch_failed task_id=no-worker-1 reason=[NO_WORKER] no available worker
+2026-04-20T04:24:35Z task_dispatch_success task_id=task-dispatch-1 worker_id=worker1 worker_addr=127.0.0.1:49627
+2026-04-20T04:30:19Z task_timeout_redispatch task_id=t-timeout worker_id=old-worker worker_addr=127.0.0.1:1 retry=1/2
+2026-04-20T04:30:19Z register worker username=worker-1 ip=127.0.0.1 cpu_cores=8 memory_gb=32 cpu_score=100 gpu_score=200 gpu_memory=12 location=local result=registered
+2026-04-20T04:30:19Z redispatch_success task_id=t-timeout worker_id=w2 worker_addr=127.0.0.1:62277 retry=1/2
+2026-04-20T04:30:20Z task_dispatch_failed task_id=no-worker-1 reason=[NO_WORKER] no available worker
+2026-04-20T04:30:20Z register worker username=worker1 ip=127.0.0.1:62281 cpu_cores=8 memory_gb=16 cpu_score=100 gpu_score=100 gpu_memory=8 location=local result=registered
+2026-04-20T04:30:20Z task_dispatch_success task_id=task-dispatch-1 worker_id=worker1 worker_addr=127.0.0.1:62281
+2026-04-20T04:31:12Z register worker username=worker1 ip=127.0.0.1:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-04-20T04:31:46Z register worker username=worker1 ip=127.0.0.1:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-04-20T04:31:46Z task_dispatch_success task_id=it-flow-1267765812 worker_id=worker1 worker_addr=127.0.0.1:50053
+2026-04-20T04:31:48Z worker_removed worker_id=worker1
+2026-04-20T04:32:00Z register worker username=worker1 ip=127.0.0.1:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-04-20T04:32:00Z task_dispatch_success task_id=it-flow-554159674 worker_id=worker1 worker_addr=127.0.0.1:50053
+2026-04-20T04:32:00Z worker_removed worker_id=worker1
+2026-04-20T04:53:59Z register worker username=worker1 ip=127.0.0.1:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-04-20T04:56:02Z user register username=testuser success=true msg=registered
+2026-04-20T04:56:15Z task_timeout_redispatch task_id=t-timeout worker_id=old-worker worker_addr=127.0.0.1:1 retry=1/2
+2026-04-20T04:56:15Z register worker username=worker-1 ip=127.0.0.1 cpu_cores=8 memory_gb=32 cpu_score=100 gpu_score=200 gpu_memory=12 location=local result=registered
+2026-04-20T04:56:15Z redispatch_success task_id=t-timeout worker_id=w2 worker_addr=127.0.0.1:8800 retry=1/2
+2026-04-20T04:56:15Z register worker username=worker1 ip=127.0.0.1:8802 cpu_cores=8 memory_gb=16 cpu_score=100 gpu_score=100 gpu_memory=8 location=local result=registered
+2026-04-20T04:56:15Z task_dispatch_failed task_id=no-worker-1 reason=[NO_WORKER] no available worker
+2026-04-20T04:56:15Z task_dispatch_success task_id=task-dispatch-1 worker_id=worker1 worker_addr=127.0.0.1:8802
+2026-04-20T04:57:24Z task_timeout_redispatch task_id=t-timeout worker_id=old-worker worker_addr=127.0.0.1:1 retry=1/2
+2026-04-20T04:57:24Z register worker username=worker-1 ip=127.0.0.1 cpu_cores=8 memory_gb=32 cpu_score=100 gpu_score=200 gpu_memory=12 location=local result=registered
+2026-04-20T04:57:24Z redispatch_success task_id=t-timeout worker_id=w2 worker_addr=127.0.0.1:9132 retry=1/2
+2026-04-20T04:57:24Z register worker username=worker1 ip=127.0.0.1:9134 cpu_cores=8 memory_gb=16 cpu_score=100 gpu_score=100 gpu_memory=8 location=local result=registered
+2026-04-20T04:57:24Z task_dispatch_failed task_id=no-worker-1 reason=[NO_WORKER] no available worker
+2026-04-20T04:57:24Z task_dispatch_success task_id=task-dispatch-1 worker_id=worker1 worker_addr=127.0.0.1:9134
+2026-04-20T06:01:15Z register worker username=worker1 ip=127.0.0.1:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-04-21T04:32:24Z task_dispatch_success task_id=task-1776745944413345600 worker_id=worker1 worker_addr=127.0.0.1:50053
+2026-04-21T04:32:25Z task_dispatch_success task_id=task-1776745945493223600 worker_id=worker1 worker_addr=127.0.0.1:50053
+2026-04-21T04:32:25Z task_dispatch_success task_id=task-1776745945988838900 worker_id=worker1 worker_addr=127.0.0.1:50053
