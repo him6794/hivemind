@@ -1,0 +1,113 @@
+:root {
+  --bg: #0b1220;
+  --surface: #0f172a;
+  --card: #111827;
+  --text: #e5e7eb;
+  --muted: #94a3b8;
+  --primary: #22d3ee;
+  --ok: #10b981;
+  --danger: #ef4444;
+  --border: #1f2937;
+  --focus: #38bdf8;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, "Noto Sans TC", "PingFang TC", "Microsoft JhengHei"; }
+a { color: var(--primary); text-decoration: none; }
+.container { max-width: 980px; margin: 32px auto; padding: 0 16px; }
+h1 { font-size: 24px; margin: 8px 0 16px; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 16px; }
+hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+
+label { display: block; margin: 12px 0 6px; color: var(--muted); font-size: 14px; }
+input[type="text"], input[type="url"], input[type="email"], input[type="password"], textarea, select {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  outline: none;
+  transition: border-color .15s ease, box-shadow .15s ease, transform .05s ease;
+}
+textarea { resize: vertical; }
+input:focus, textarea:focus, select:focus {
+  border-color: var(--focus);
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, .15);
+}
+button {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 14px;
+  cursor: pointer;
+  transition: transform .12s ease, border-color .15s ease, background .15s ease;
+}
+button:hover { transform: translateY(-1px); border-color: var(--primary); }
+button.primary { background: var(--primary); color: #08222c; border-color: transparent; }
+button.primary:hover { filter: brightness(1.02); }
+
+.msg { margin-top: 10px; color: var(--muted); }
+.msg.error { color: var(--danger); }
+.msg.success { color: var(--ok); }
+.req { color: var(--danger); margin-left: 4px; }
+
+/* Admin layout */
+.admin .panel { display: grid; grid-template-columns: 1fr 2fr; gap: 16px; margin-top: 16px; }
+.list-header { display: flex; gap: 8px; justify-content: flex-end; margin-bottom: 8px; }
+ul { list-style: none; padding: 0; margin: 0; }
+.row { display: flex; justify-content: space-between; align-items: center; padding: 12px; border-bottom: 1px solid var(--border); }
+.row .meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
+.detail h2 { margin: 0 0 8px; }
+.actions { display: flex; gap: 8px; margin-top: 8px; }
+.hidden { display: none; }
+
+/* 導覽列 */
+.navbar { position: sticky; top: 0; background: rgba(15,23,42,.85); backdrop-filter: blur(8px); border-bottom: 1px solid var(--border); z-index: 10; }
+.nav-inner { max-width: 980px; margin: 0 auto; padding: 12px 16px; display: flex; align-items: center; justify-content: space-between; }
+.brand { font-weight: 700; letter-spacing: .3px; }
+.nav-links a, .nav-links button { color: var(--text); margin-left: 12px; opacity: .9; }
+.nav-links a:hover, .nav-links button:hover { opacity: 1; color: var(--primary); }
+.nav-links button { padding: 6px 10px; border-radius: 8px; background: transparent; border: 1px solid var(--border); cursor: pointer; }
+
+/* Hero */
+.hero { max-width: 980px; margin: 24px auto; padding: 0 16px; }
+.hero-card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 20px; }
+.hero h1 { font-size: 28px; margin: 0 0 8px; }
+.hero p { color: var(--muted); margin: 0 0 12px; }
+.hero .actions { display: flex; gap: 10px; }
+.btn { display: inline-block; padding: 10px 14px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface); color: var(--text); }
+.btn.primary { background: var(--primary); color: #08141a; border-color: transparent; }
+.btn:hover { transform: translateY(-1px); }
+
+/* Skills: 自訂 chip 風核取方塊 */
+.checkboxes { display: flex; gap: 10px; flex-wrap: wrap; }
+.checkboxes label { margin: 0; }
+.chip { display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text); cursor: pointer; user-select: none; transition: border-color .15s ease, background .15s ease, transform .12s ease; }
+.chip:hover { border-color: var(--primary); transform: translateY(-1px); }
+.chip input[type="checkbox"] { position: absolute; opacity: 0; pointer-events: none; }
+.chip span { display: inline-flex; align-items: center; gap: 8px; }
+.chip .box { width: 16px; height: 16px; border-radius: 4px; border: 1px solid var(--border); background: #0a1322; display: inline-block; position: relative; transition: all .15s ease; }
+.chip input[type="checkbox"]:checked + .box { background: var(--primary); border-color: var(--primary); }
+.chip input[type="checkbox"]:checked + .box::after { content: ""; position: absolute; inset: 3px; border-right: 2px solid #06202a; border-bottom: 2px solid #06202a; transform: rotate(45deg); }
+
+/* Select 美化（Admin 用） */
+select {
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%), linear-gradient(to right, transparent, transparent);
+  background-position: calc(100% - 16px) calc(50% - 2px), calc(100% - 11px) calc(50% - 2px), 100% 0;
+  background-size: 6px 6px, 6px 6px, 2.5em 2.5em;
+  background-repeat: no-repeat;
+  padding-right: 2.5em;
+}
+
+/* 進場動畫 */
+@keyframes fadeUp { from { opacity: 0; transform: translateY(8px);} to { opacity: 1; transform: none; } }
+.anim-fade { opacity: 0; }
+.anim-play { animation: fadeUp .5s ease forwards; }
+
+/* RWD */
+@media (max-width: 900px) {
+  .admin .panel { grid-template-columns: 1fr; }
+}
