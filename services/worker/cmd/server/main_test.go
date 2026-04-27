@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -148,6 +150,43 @@ func TestParseExecutorResult(t *testing.T) {
 	}
 }
 
+func TestExecutorOutputLines(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{
+			name: "keep print lines and drop control line",
+			in:   "hello\nRESULT_TORRENT=result://task-1?btih=0123456789abcdef0123456789abcdef01234567\nworld\n",
+			want: []string{"hello", "world"},
+		},
+		{
+			name: "trim and skip empty",
+			in:   "\r\n  line-1  \r\n\r\n line-2 \n",
+			want: []string{"line-1", "line-2"},
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := executorOutputLines(tc.in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("executorOutputLines() len=%d, want=%d, got=%v", len(got), len(tc.want), got)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Fatalf("executorOutputLines()[%d]=%q, want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
 func TestClampPercent(t *testing.T) {
 	t.Parallel()
 
@@ -197,8 +236,16 @@ func TestResolveExecutorCommand(t *testing.T) {
 		t.Setenv("WORKER_EXECUTOR_AUTO_RUST", "1")
 		t.Setenv("WORKER_EXECUTOR_RS_BIN", "")
 		got := resolveExecutorCommand()
-		if got != "executor-cli" {
-			t.Fatalf("resolveExecutorCommand()=%q, want executor-cli", got)
+		want := defaultExecutorCommand()
+		if got != want {
+			t.Fatalf("resolveExecutorCommand()=%q, want %q", got, want)
+		}
+	})
+
+	t.Run("default prefers repo monty", func(t *testing.T) {
+		got := defaultExecutorCommand()
+		if _, err := os.Stat(got); err == nil && filepath.Base(got) != "monty.exe" && filepath.Base(got) != "monty" {
+			t.Fatalf("defaultExecutorCommand()=%q, want repo monty when available", got)
 		}
 	})
 
@@ -231,4 +278,68 @@ func TestExecutorProgramFromCommand(t *testing.T) {
 			t.Fatalf("expected error for empty command")
 		}
 	})
+}
+
+func TestMontyResultScript(t *testing.T) {
+	t.Parallel()
+
+	const expected = "0123456789abcdef0123456789abcdef01234567"
+
+	script, result := montyResultScript("task-1", "magnet:?xt=urn:btih:"+expected+"&dn=test")
+	if result == "" || script == "" {
+		t.Fatalf("montyResultScript returned empty values: script=%q result=%q", script, result)
+	}
+	if want := "result://task-1?btih=" + expected; result != want {
+		t.Fatalf("montyResultScript magnet result=%q, want %q", result, want)
+	}
+	if got := parseExecutorResult("log\nRESULT_TORRENT=" + result); got != result {
+		t.Fatalf("parseExecutorResult()=%q, want %q", got, result)
+	}
+
+	_, result = montyResultScript("task-2", "http://localhost:8082/api/torrents/"+expected+".torrent?ih="+expected)
+	if want := "result://task-2?btih=" + expected; result != want {
+		t.Fatalf("montyResultScript torrent URL result=%q, want %q", result, want)
+	}
+
+	_, fallback := montyResultScript("task-3", "http://localhost/test.torrent")
+	if fallback == "" || fallback == "result://task-3?btih="+expected {
+		t.Fatalf("montyResultScript fallback result looks wrong: %q", fallback)
+	}
+}
+
+func TestBTIHFromTorrentSource(t *testing.T) {
+	t.Parallel()
+
+	const expected = "0123456789abcdef0123456789abcdef01234567"
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "magnet", in: "magnet:?xt=urn:btih:" + expected + "&dn=test", want: expected},
+		{name: "torrent url ih", in: "http://localhost/test.torrent?ih=" + expected, want: expected},
+		{name: "torrent url btih", in: "https://example.test/test.torrent?btih=" + expected, want: expected},
+		{name: "invalid", in: "magnet:?xt=urn:btih:nothex", want: ""},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := btihFromTorrentSource(tc.in); got != tc.want {
+				t.Fatalf("btihFromTorrentSource()=%q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsMontyExecutor(t *testing.T) {
+	t.Parallel()
+
+	if !isMontyExecutor(`D:\hivemind\executor-rs\monty.exe`) {
+		t.Fatalf("expected monty.exe path to be detected")
+	}
+	if isMontyExecutor("executor-cli") {
+		t.Fatalf("executor-cli should not be detected as monty")
+	}
 }

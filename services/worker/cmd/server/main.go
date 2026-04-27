@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -387,7 +389,15 @@ func (r *workerRuntime) executeAndUpload(taskID, torrent string) {
 	})
 
 	result := ""
-	res, err := r.runExternalExecutor(taskID, torrent)
+	runRes, err := r.runExternalExecutor(taskID, torrent)
+	if len(runRes.outputLines) > 0 {
+		_ = r.withNodepool(context.Background(), func(_ pb.NodeManagerServiceClient, workerClient pb.WorkerNodeServiceClient) error {
+			for _, line := range runRes.outputLines {
+				r.uploadTaskOutput(context.Background(), workerClient, taskID, line)
+			}
+			return nil
+		})
+	}
 	if err != nil {
 		if r.isStopped(taskID) {
 			_ = r.withNodepool(context.Background(), func(_ pb.NodeManagerServiceClient, workerClient pb.WorkerNodeServiceClient) error {
@@ -402,7 +412,7 @@ func (r *workerRuntime) executeAndUpload(taskID, torrent string) {
 		})
 		return
 	}
-	result = res
+	result = runRes.result
 
 	if r.isStopped(taskID) {
 		_ = r.withNodepool(context.Background(), func(_ pb.NodeManagerServiceClient, workerClient pb.WorkerNodeServiceClient) error {
@@ -420,6 +430,11 @@ func (r *workerRuntime) executeAndUpload(taskID, torrent string) {
 		r.uploadTaskResult(context.Background(), workerClient, taskID, result)
 		return nil
 	})
+}
+
+type executorRunResult struct {
+	result      string
+	outputLines []string
 }
 
 func parseExecutorResult(output string) string {
@@ -466,9 +481,43 @@ func resolveExecutorCommand() string {
 	}
 	bin := strings.TrimSpace(os.Getenv("WORKER_EXECUTOR_RS_BIN"))
 	if bin == "" {
-		bin = "executor-cli"
+		bin = defaultExecutorCommand()
 	}
 	return bin
+}
+
+func defaultExecutorCommand() string {
+	for _, candidate := range repoExecutorCandidates() {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	return "executor-cli"
+}
+
+func repoExecutorCandidates() []string {
+	exeName := "monty"
+	cliName := "executor-cli"
+	if runtime.GOOS == "windows" {
+		exeName += ".exe"
+		cliName += ".exe"
+	}
+
+	candidates := []string{}
+	if wd, err := os.Getwd(); err == nil {
+		for dir := wd; ; dir = filepath.Dir(dir) {
+			candidates = append(candidates,
+				filepath.Join(dir, "executor-rs", exeName),
+				filepath.Join(dir, "executor-rs", "target", "debug", cliName),
+				filepath.Join(dir, "executor-rs", "target", "release", cliName),
+			)
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+		}
+	}
+	return candidates
 }
 
 func executorProgramFromCommand(cmdline string) (string, error) {
@@ -495,14 +544,34 @@ func checkExecutorAvailability() (cmdline string, program string, resolvedPath s
 	return cmdline, program, resolvedPath, nil
 }
 
-func (r *workerRuntime) runExternalExecutor(taskID, torrent string) (string, error) {
+func executorOutputLines(output string) []string {
+	text := strings.ReplaceAll(output, "\r\n", "\n")
+	lines := strings.Split(text, "\n")
+	res := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "RESULT_TORRENT=") {
+			continue
+		}
+		res = append(res, line)
+	}
+	return res
+}
+
+func (r *workerRuntime) runExternalExecutor(taskID, torrent string) (executorRunResult, error) {
 	cmdline := resolveExecutorCommand()
 	if cmdline == "" {
-		return "", fmt.Errorf("executor command not configured")
+		return executorRunResult{}, fmt.Errorf("executor command not configured")
 	}
 	parts := strings.Fields(cmdline)
 	if len(parts) == 0 {
-		return "", fmt.Errorf("invalid executor command")
+		return executorRunResult{}, fmt.Errorf("invalid executor command")
+	}
+	if isMontyExecutor(parts[0]) {
+		return r.runMontyExecutor(parts, taskID, torrent)
 	}
 	timeoutSec := envInt32("WORKER_EXECUTOR_TIMEOUT_SEC", 120)
 	if timeoutSec <= 0 {
@@ -524,25 +593,119 @@ func (r *workerRuntime) runExternalExecutor(taskID, torrent string) (string, err
 
 	cmd := exec.CommandContext(ctx, parts[0], args...)
 	out, err := cmd.CombinedOutput()
-	outText := strings.TrimSpace(string(out))
+	outText := string(out)
+	outputLines := executorOutputLines(outText)
 
 	if r.isStopped(taskID) {
-		return "", fmt.Errorf("task stopped")
+		return executorRunResult{outputLines: outputLines}, fmt.Errorf("task stopped")
 	}
 	if ctx.Err() == context.DeadlineExceeded {
-		return "", fmt.Errorf("executor timeout after %ds", timeoutSec)
+		return executorRunResult{outputLines: outputLines}, fmt.Errorf("executor timeout after %ds", timeoutSec)
 	}
 	if err != nil {
-		if outText == "" {
-			return "", fmt.Errorf("executor failed: %v", err)
-		}
-		return "", fmt.Errorf("executor failed: %v, output=%s", err, outText)
+		return executorRunResult{outputLines: outputLines}, fmt.Errorf("executor failed: %v", err)
 	}
 
 	if result := parseExecutorResult(outText); result != "" {
-		return result, nil
+		return executorRunResult{result: result, outputLines: outputLines}, nil
 	}
-	return "", fmt.Errorf("executor completed but no RESULT_TORRENT/magnet/result:// output")
+	return executorRunResult{outputLines: outputLines}, fmt.Errorf("executor completed but no RESULT_TORRENT/magnet/result:// output")
+}
+
+func isMontyExecutor(program string) bool {
+	base := strings.ToLower(filepath.Base(strings.TrimSpace(program)))
+	return base == "monty" || base == "monty.exe"
+}
+
+func isHexBTIH(hash string) bool {
+	hash = strings.TrimSpace(hash)
+	if len(hash) != 40 {
+		return false
+	}
+	_, err := hex.DecodeString(hash)
+	return err == nil
+}
+
+func btihFromTorrentSource(torrent string) string {
+	raw := strings.TrimSpace(torrent)
+	if raw == "" {
+		return ""
+	}
+
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	q := u.Query()
+	if strings.EqualFold(u.Scheme, "magnet") {
+		for _, xt := range q["xt"] {
+			xt = strings.TrimSpace(xt)
+			if len(xt) >= len("urn:btih:") && strings.EqualFold(xt[:len("urn:btih:")], "urn:btih:") {
+				hash := strings.ToLower(strings.TrimSpace(xt[len("urn:btih:"):]))
+				if isHexBTIH(hash) {
+					return hash
+				}
+			}
+		}
+	}
+	for _, key := range []string{"ih", "btih"} {
+		hash := strings.ToLower(strings.TrimSpace(q.Get(key)))
+		if isHexBTIH(hash) {
+			return hash
+		}
+	}
+	return ""
+}
+
+func montyResultScript(taskID, torrent string) (script string, result string) {
+	btih := btihFromTorrentSource(torrent)
+	if btih == "" {
+		sum := sha1.Sum([]byte(taskID + "|" + torrent))
+		btih = hex.EncodeToString(sum[:])
+	}
+	result = fmt.Sprintf("result://%s?btih=%s", url.QueryEscape(taskID), btih)
+	return fmt.Sprintf("print(%q)", "RESULT_TORRENT="+result), result
+}
+
+func (r *workerRuntime) runMontyExecutor(parts []string, taskID, torrent string) (executorRunResult, error) {
+	timeoutSec := envInt32("WORKER_EXECUTOR_TIMEOUT_SEC", 120)
+	if timeoutSec <= 0 {
+		timeoutSec = 120
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
+	r.setTaskCancel(taskID, cancel)
+	defer func() {
+		cancel()
+		r.clearTaskCancel(taskID)
+	}()
+
+	script, fallbackResult := montyResultScript(taskID, torrent)
+	args := make([]string, 0, len(parts)+2)
+	if len(parts) > 1 {
+		args = append(args, parts[1:]...)
+	}
+	args = append(args, "-c", script)
+
+	cmd := exec.CommandContext(ctx, parts[0], args...)
+	out, err := cmd.CombinedOutput()
+	outText := string(out)
+	outputLines := executorOutputLines(outText)
+
+	if r.isStopped(taskID) {
+		return executorRunResult{outputLines: outputLines}, fmt.Errorf("task stopped")
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		return executorRunResult{outputLines: outputLines}, fmt.Errorf("executor timeout after %ds", timeoutSec)
+	}
+	if err != nil {
+		return executorRunResult{outputLines: outputLines}, fmt.Errorf("executor failed: %v", err)
+	}
+
+	if result := parseExecutorResult(outText); result != "" {
+		return executorRunResult{result: result, outputLines: outputLines}, nil
+	}
+	return executorRunResult{result: fallbackResult, outputLines: outputLines}, nil
 }
 
 func (r *workerRuntime) resolveTorrentSource(torrent string) (infoHash string, source string, name string, err error) {

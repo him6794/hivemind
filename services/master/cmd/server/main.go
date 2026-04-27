@@ -330,6 +330,7 @@ func main() {
 		var memoryGB int32
 		var gpuMemoryGB int32
 		var hostCount int32
+		var maxCPT int64
 
 		if strings.HasPrefix(strings.ToLower(ct), "multipart/form-data") {
 			if err := r.ParseMultipartForm(200 * 1024 * 1024); err != nil {
@@ -354,6 +355,11 @@ func main() {
 			if v := strings.TrimSpace(r.FormValue("host_count")); v != "" {
 				if iv, err := strconv.Atoi(v); err == nil {
 					hostCount = int32(iv)
+				}
+			}
+			if v := strings.TrimSpace(r.FormValue("max_cpt")); v != "" {
+				if iv, err := strconv.ParseInt(v, 10, 64); err == nil {
+					maxCPT = iv
 				}
 			}
 			file, header, err := r.FormFile("file")
@@ -403,6 +409,7 @@ func main() {
 				MemoryGB    int32  `json:"memory_gb"`
 				GPUMemoryGB int32  `json:"gpu_memory_gb"`
 				HostCount   int32  `json:"host_count"`
+				MaxCPT      int64  `json:"max_cpt"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "status_message": "invalid json"})
@@ -416,6 +423,7 @@ func main() {
 			memoryGB = body.MemoryGB
 			gpuMemoryGB = body.GPUMemoryGB
 			hostCount = body.HostCount
+			maxCPT = body.MaxCPT
 		}
 
 		// allow relative torrent paths (e.g. /api/torrents/xxx.torrent)
@@ -441,7 +449,7 @@ func main() {
 
 		ctx, cancel := withTimeout(r.Context())
 		defer cancel()
-		resp, err := clients.master.UploadTask(ctx, &pb.UploadTaskRequest{TaskId: taskID, Torrent: torrentStr, MemoryGb: memoryGB, GpuMemoryGb: gpuMemoryGB, HostCount: hostCount, Token: tok})
+		resp, err := clients.master.UploadTask(ctx, &pb.UploadTaskRequest{TaskId: taskID, Torrent: torrentStr, MemoryGb: memoryGB, GpuMemoryGb: gpuMemoryGB, HostCount: hostCount, MaxCpt: maxCPT, Token: tok})
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"success": false, "status_message": err.Error(), "task_id": taskID})
 			return

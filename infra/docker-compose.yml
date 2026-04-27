@@ -1,0 +1,26 @@
+version: '3.8'
+services:
+  nodepool:
+    build: ./services/nodepool
+    ports:
+      - "50051:50051"
+    depends_on:
+      - redis
+  master:
+    build: ./services/master
+    depends_on:
+      - nodepool
+  worker:
+    build: ./services/worker
+    depends_on:
+      - nodepool
+  redis:
+    image: redis:7
+    restart: unless-stopped
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: hivemind
+      POSTGRES_USER: hivemind
+      POSTGRES_PASSWORD: hivemind
+    restart: unless-stopped

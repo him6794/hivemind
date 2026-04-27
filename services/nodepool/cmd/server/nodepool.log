@@ -98,3 +98,563 @@
 2026-04-21T04:32:24Z task_dispatch_success task_id=task-1776745944413345600 worker_id=worker1 worker_addr=127.0.0.1:50053
 2026-04-21T04:32:25Z task_dispatch_success task_id=task-1776745945493223600 worker_id=worker1 worker_addr=127.0.0.1:50053
 2026-04-21T04:32:25Z task_dispatch_success task_id=task-1776745945988838900 worker_id=worker1 worker_addr=127.0.0.1:50053
+2026-04-23T05:02:39Z register worker username=worker-1 ip=127.0.0.1 cpu_cores=8 memory_gb=32 cpu_score=100 gpu_score=200 gpu_memory=12 location=local result=registered
+2026-04-23T05:02:39Z task_timeout_redispatch task_id=t-timeout worker_id=old-worker worker_addr=127.0.0.1:1 retry=1/2
+2026-04-23T05:02:39Z redispatch_success task_id=t-timeout worker_id=w2 worker_addr=127.0.0.1:42356 retry=1/2
+2026-04-23T05:02:39Z task_dispatch_failed task_id=no-worker-1 reason=[NO_WORKER] no available worker
+2026-04-23T05:02:39Z register worker username=worker1 ip=127.0.0.1:42359 cpu_cores=8 memory_gb=16 cpu_score=100 gpu_score=100 gpu_memory=8 location=local result=registered
+2026-04-23T05:02:39Z task_dispatch_success task_id=task-dispatch-1 worker_id=worker1 worker_addr=127.0.0.1:42359
+2026-04-23T05:04:16Z task_timeout_redispatch task_id=t-timeout worker_id=old-worker worker_addr=127.0.0.1:1 retry=1/2
+2026-04-23T05:04:16Z register worker username=worker-1 ip=127.0.0.1 cpu_cores=8 memory_gb=32 cpu_score=100 gpu_score=200 gpu_memory=12 location=local result=registered
+2026-04-23T05:04:16Z task_dispatch_failed task_id=no-worker-1 reason=[NO_WORKER] no available worker
+2026-04-23T05:04:16Z register worker username=worker1 ip=127.0.0.1:49240 cpu_cores=8 memory_gb=16 cpu_score=100 gpu_score=100 gpu_memory=8 location=local result=registered
+2026-04-23T05:04:16Z redispatch_success task_id=t-timeout worker_id=w2 worker_addr=127.0.0.1:49239 retry=1/2
+2026-04-23T05:04:17Z task_dispatch_success task_id=task-dispatch-1 worker_id=worker1 worker_addr=127.0.0.1:49240
+2026-04-24T01:14:20Z task_timeout_redispatch task_id=t-timeout worker_id=old-worker worker_addr=127.0.0.1:1 retry=1/2
+2026-04-24T01:14:20Z register worker username=worker-1 ip=127.0.0.1 cpu_cores=8 memory_gb=32 cpu_score=100 gpu_score=200 gpu_memory=12 location=local result=registered
+2026-04-24T01:14:20Z redispatch_success task_id=t-timeout worker_id=w2 worker_addr=127.0.0.1:48470 retry=1/2
+2026-04-24T01:14:20Z task_dispatch_failed task_id=no-worker-1 reason=[NO_WORKER] no available worker
+2026-04-24T01:14:20Z register worker username=worker1 ip=127.0.0.1:48473 cpu_cores=8 memory_gb=16 cpu_score=100 gpu_score=100 gpu_memory=8 location=local result=registered
+2026-04-24T01:14:20Z task_dispatch_success task_id=task-dispatch-1 worker_id=worker1 worker_addr=127.0.0.1:48473
+2026-04-24T04:08:58Z register worker username=worker-1 ip=127.0.0.1 cpu_cores=8 memory_gb=32 cpu_score=100 gpu_score=200 gpu_memory=12 location=local result=registered
+2026-04-24T04:08:58Z task_timeout_redispatch task_id=t-timeout worker_id=old-worker worker_addr=127.0.0.1:1 retry=1/2
+2026-04-24T04:08:58Z redispatch_success task_id=t-timeout worker_id=w2 worker_addr=127.0.0.1:58432 retry=1/2
+2026-04-24T04:08:58Z register worker username=worker1 ip=127.0.0.1:58434 cpu_cores=8 memory_gb=16 cpu_score=100 gpu_score=100 gpu_memory=8 location=local result=registered
+2026-04-24T04:08:58Z task_dispatch_success task_id=task-dispatch-1 worker_id=worker1 worker_addr=127.0.0.1:58434
+2026-04-24T04:08:58Z task_dispatch_failed task_id=no-worker-1 reason=[NO_WORKER] no available worker
+2026-04-24T04:23:52Z register worker username=worker1 ip=:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-04-24T04:24:08Z user register username=testuser success=false msg=username already exists
+2026-04-24T04:24:13Z user login username=testuser success=false msg=invalid credentials
+2026-04-24T04:24:28Z user register username=testuser_v2 success=true msg=registered
+2026-04-24T04:24:28Z user login username=testuser_v2 success=true msg=ok
+2026-04-24T04:30:10Z task_dispatch_failed task_id=test-task-1 reason=[NO_WORKER] no available worker
+2026-04-24T04:33:48Z register worker username=worker1 ip=:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-04-24T04:35:45Z task_dispatch_success task_id=test-task-1 worker_id=worker1 worker_addr=:50053
+2026-04-24T13:30:01Z task_timeout_redispatch task_id=t-timeout worker_id=old-worker worker_addr=127.0.0.1:1 retry=1/2
+2026-04-24T13:30:01Z register worker username=worker-1 ip=127.0.0.1 cpu_cores=8 memory_gb=32 cpu_score=100 gpu_score=200 gpu_memory=12 location=local result=registered
+2026-04-24T13:30:01Z redispatch_success task_id=t-timeout worker_id=w2 worker_addr=127.0.0.1:63550 retry=1/2
+2026-04-24T13:30:24Z register worker username=worker-1 ip=127.0.0.1 cpu_cores=8 memory_gb=32 cpu_score=100 gpu_score=200 gpu_memory=12 location=local result=registered
+2026-04-24T13:30:24Z task_timeout_redispatch task_id=t-timeout worker_id=old-worker worker_addr=127.0.0.1:1 retry=1/2
+2026-04-24T13:30:24Z redispatch_success task_id=t-timeout worker_id=w2 worker_addr=127.0.0.1:8033 retry=1/2
+2026-04-26T01:19:32Z task_timeout_redispatch task_id=t-timeout worker_id=old-worker worker_addr=127.0.0.1:1 retry=1/2
+2026-04-26T01:19:32Z register worker username=worker-1 ip=127.0.0.1 cpu_cores=8 memory_gb=32 cpu_score=100 gpu_score=200 gpu_memory=12 location=local result=registered
+2026-04-26T01:19:32Z redispatch_success task_id=t-timeout worker_id=w2 worker_addr=127.0.0.1:32422 retry=1/2
+2026-04-26T01:21:37Z register worker username=worker1 ip=127.0.0.1:1075 cpu_cores=8 memory_gb=32 cpu_score=200 gpu_score=100 gpu_memory=16 location=local result=registered
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-006 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-079 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-003 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-066 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-077 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-007 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-005 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-002 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-070 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-036 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-028 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-048 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-014 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-012 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-062 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-069 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-019 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-053 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-017 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-056 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-010 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-038 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-065 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-024 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-000 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-016 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-018 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-013 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-040 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-004 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-011 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-030 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-031 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-015 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-061 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-041 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-064 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-025 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-039 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-037 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-043 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-033 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-029 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-075 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-001 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-008 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-034 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-021 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-035 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-022 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-027 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-067 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-071 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-051 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-023 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-076 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-078 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-047 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-068 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-057 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-044 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-052 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-042 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-055 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-032 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-058 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-026 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-020 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-009 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-045 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-063 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-072 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-049 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-054 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-050 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-074 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-073 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-059 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-046 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:37Z task_dispatch_success task_id=normal-user-stress-060 worker_id=worker1 worker_addr=127.0.0.1:1075
+2026-04-26T01:21:39Z register worker username=worker1 ip=127.0.0.1:1157 cpu_cores=8 memory_gb=32 cpu_score=200 gpu_score=100 gpu_memory=16 location=local result=registered
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-026 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-076 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-019 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-014 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-023 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-071 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-011 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-025 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-013 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-015 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-040 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-010 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-003 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-008 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-069 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-021 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-000 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-018 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-039 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-005 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-001 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-079 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-072 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-022 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-048 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-058 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-061 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-054 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-049 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-053 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-007 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-074 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-024 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-047 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-073 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-063 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-012 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-055 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-016 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-009 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-052 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-075 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-070 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-057 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-056 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-017 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-059 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-068 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-002 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-035 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-006 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-030 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-067 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-042 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-044 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-028 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-077 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-066 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-043 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-027 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-032 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-062 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-065 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-041 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-078 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-033 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-034 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-037 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-060 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-029 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-045 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-064 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-004 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-020 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-046 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-038 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-031 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-050 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-036 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_dispatch_success task_id=normal-user-stress-051 worker_id=worker1 worker_addr=127.0.0.1:1157
+2026-04-26T01:21:39Z task_timeout_redispatch task_id=t-timeout worker_id=old-worker worker_addr=127.0.0.1:1 retry=1/2
+2026-04-26T01:21:39Z register worker username=worker-1 ip=127.0.0.1 cpu_cores=8 memory_gb=32 cpu_score=100 gpu_score=200 gpu_memory=12 location=local result=registered
+2026-04-26T01:21:39Z redispatch_success task_id=t-timeout worker_id=w2 worker_addr=127.0.0.1:1241 retry=1/2
+2026-04-26T01:22:01Z register worker username=worker1 ip=127.0.0.1:3409 cpu_cores=8 memory_gb=32 cpu_score=200 gpu_score=100 gpu_memory=16 location=local result=registered
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-063 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-026 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-000 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-011 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-074 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-016 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-001 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-015 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-003 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-067 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-058 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-005 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-010 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-069 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-072 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-009 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-049 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-007 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-075 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-064 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-068 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-008 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-002 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-012 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-014 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-023 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-048 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-034 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-004 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-013 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-033 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-047 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-070 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-076 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-073 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-006 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-066 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-019 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-050 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-038 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-017 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-078 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-046 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-037 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-077 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-027 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-071 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-051 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-062 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-079 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-061 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-041 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-035 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-036 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-065 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-040 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-052 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-028 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-039 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-018 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-029 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-055 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-024 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-056 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-021 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-043 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-042 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-044 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-045 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-020 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-025 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-054 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-032 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-022 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-059 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-030 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-053 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-060 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-031 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-26T01:22:01Z task_dispatch_success task_id=normal-user-stress-057 worker_id=worker1 worker_addr=127.0.0.1:3409
+2026-04-27T03:03:51Z register worker username=worker1 ip=127.0.0.1:1272 cpu_cores=8 memory_gb=32 cpu_score=200 gpu_score=100 gpu_memory=16 location=local result=registered
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-044 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-001 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-033 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-038 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-073 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-037 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-004 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-030 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-040 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-028 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-006 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-020 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-027 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-002 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-017 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-071 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-005 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-025 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-012 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-011 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-023 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-043 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-008 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-067 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-069 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-034 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-031 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-039 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-032 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-035 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-015 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-045 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-024 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-036 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-072 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-049 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-065 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-007 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-042 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-050 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-064 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-014 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-047 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-010 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-046 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-029 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-079 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-003 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-070 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-009 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-048 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-018 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-022 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-058 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-054 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-000 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-026 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-063 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-041 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-074 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-076 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-051 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-055 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-021 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-068 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-078 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-052 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-059 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-077 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-057 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-056 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-053 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-016 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-061 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-066 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-060 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-013 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-062 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-019 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_dispatch_success task_id=normal-user-stress-075 worker_id=worker1 worker_addr=127.0.0.1:1272
+2026-04-27T03:03:51Z task_timeout_redispatch task_id=t-timeout worker_id=old-worker worker_addr=127.0.0.1:1 retry=1/2
+2026-04-27T03:03:51Z register worker username=worker-1 ip=127.0.0.1 cpu_cores=8 memory_gb=32 cpu_score=100 gpu_score=200 gpu_memory=12 location=local result=registered
+2026-04-27T03:03:51Z redispatch_success task_id=t-timeout worker_id=w2 worker_addr=127.0.0.1:1356 retry=1/2
+2026-04-27T03:04:47Z register worker username=worker1 ip=127.0.0.1:18440 cpu_cores=8 memory_gb=32 cpu_score=200 gpu_score=100 gpu_memory=16 location=local result=registered
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-079 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-075 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-002 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-023 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-003 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-045 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-026 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-005 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-009 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-065 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-000 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-046 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-068 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-022 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-067 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-064 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-027 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-047 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-016 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-028 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-008 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-006 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-061 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-007 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-004 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-049 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-048 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-015 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-066 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-011 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-010 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-029 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-057 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-037 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-050 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-024 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-035 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-025 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-041 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-069 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-021 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-030 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-070 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-017 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-053 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-051 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-052 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-012 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-032 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-059 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-078 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-071 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-034 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-043 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-039 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-055 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-038 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-063 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-020 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-018 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-076 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-031 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-001 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-042 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-054 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-072 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-058 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-044 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-062 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-073 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-019 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-056 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-077 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-040 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-074 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-033 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-060 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-014 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-036 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_dispatch_success task_id=normal-user-stress-013 worker_id=worker1 worker_addr=127.0.0.1:18440
+2026-04-27T03:04:47Z task_timeout_redispatch task_id=t-timeout worker_id=old-worker worker_addr=127.0.0.1:1 retry=1/2
+2026-04-27T03:04:47Z register worker username=worker-1 ip=127.0.0.1 cpu_cores=8 memory_gb=32 cpu_score=100 gpu_score=200 gpu_memory=12 location=local result=registered
+2026-04-27T03:04:47Z redispatch_success task_id=t-timeout worker_id=w2 worker_addr=127.0.0.1:18527 retry=1/2
+2026-04-27T04:15:52Z register worker username=worker1 ip=localhost:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-04-27T04:18:55Z task_dispatch_success task_id=task-1777263535456668500 worker_id=worker1 worker_addr=localhost:50053
+2026-04-27T04:24:18Z register worker username=worker1 ip=localhost:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-04-27T04:27:12Z register worker username=worker1 ip=localhost:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-04-27T04:28:29Z task_dispatch_success task_id=task-1777264109277095300 worker_id=worker1 worker_addr=localhost:50053
+2026-04-27T04:29:49Z register worker username=worker1 ip=localhost:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-04-27T04:33:46Z user register username=testuser success=true msg=registered
+2026-04-27T04:33:47Z task_dispatch_success task_id=monty-e2e-1777264427 worker_id=worker1 worker_addr=localhost:50053
+2026-04-27T04:36:19Z register worker username=worker1 ip=127.0.0.1:45354 cpu_cores=8 memory_gb=32 cpu_score=200 gpu_score=100 gpu_memory=16 location=local result=registered
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-001 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-073 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-065 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-038 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-009 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-019 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-000 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-070 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-011 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-055 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-079 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-043 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-032 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-046 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-074 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-047 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-034 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-005 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-029 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-057 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-040 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-056 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-042 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-002 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-021 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-020 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-071 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-018 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-054 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-012 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-039 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-058 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-031 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-076 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-013 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-045 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-051 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-006 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-072 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-033 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-007 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-024 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-041 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-063 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-008 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-067 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-022 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-036 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-027 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-066 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-068 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-023 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-050 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-062 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-048 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-030 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-017 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-044 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-037 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-053 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-015 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-075 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-061 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-003 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-052 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-004 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-069 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-060 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-035 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-064 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-078 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-077 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-059 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-016 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-049 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-014 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-028 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-025 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-026 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_dispatch_success task_id=normal-user-stress-010 worker_id=worker1 worker_addr=127.0.0.1:45354
+2026-04-27T04:36:19Z task_timeout_redispatch task_id=t-timeout worker_id=old-worker worker_addr=127.0.0.1:1 retry=1/2
+2026-04-27T04:36:19Z register worker username=worker-1 ip=127.0.0.1 cpu_cores=8 memory_gb=32 cpu_score=100 gpu_score=200 gpu_memory=12 location=local result=registered
+2026-04-27T04:36:19Z redispatch_success task_id=t-timeout worker_id=w2 worker_addr=127.0.0.1:45438 retry=1/2
+2026-04-27T04:36:37Z register worker username=worker1 ip=localhost:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-04-27T04:37:03Z task_dispatch_success task_id=monty-e2e-1777264623 worker_id=worker1 worker_addr=localhost:50053
+2026-04-27T04:37:44Z register worker username=worker1 ip=localhost:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-04-27T04:39:55Z register worker username=worker1 ip=localhost:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-04-27T04:40:30Z task_dispatch_success task_id=task-1777264830794979800 worker_id=worker1 worker_addr=localhost:50053
+2026-04-27T04:45:52Z register worker username=worker1 ip=localhost:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-04-27T04:48:27Z task_dispatch_success task_id=e2e-log-1777265307 worker_id=worker1 worker_addr=localhost:50053
+2026-04-27T04:52:43Z task_dispatch_success task_id=e2e-log-1777265563 worker_id=worker1 worker_addr=localhost:50053
+2026-04-27T04:53:43Z register worker username=worker1 ip=localhost:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-04-27T05:00:43Z register worker username=worker1 ip=localhost:50053 cpu_cores=12 memory_gb=31 cpu_score=240 gpu_score=192 gpu_memory=15 location=Local result=registered
+2026-04-27T05:01:02Z task_dispatch_success task_id=task-1777266062473099300 worker_id=worker1 worker_addr=localhost:50053
+2026-04-27T05:01:09Z task_dispatch_success task_id=task-1777266069738426100 worker_id=worker1 worker_addr=localhost:50053
+2026-04-27T05:01:40Z task_dispatch_success task_id=task-1777266100248343200 worker_id=worker1 worker_addr=localhost:50053

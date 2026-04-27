@@ -53,17 +53,21 @@ if (-not (Test-Path $protocGenGo) -or -not (Test-Path $protocGenGoGrpc)) {
 
 Write-Host "Using protoc: $ProtocPath"
 
-& $ProtocPath \
-  "--plugin=protoc-gen-go=$protocGenGo" \
-  "--plugin=protoc-gen-go-grpc=$protocGenGoGrpc" \
-  "--proto_path=$(Join-Path $repoRoot 'proto')" \
-  "--go_out=$outDir" \
-  "--go-grpc_out=$outDir" \
-  "--go_opt=paths=source_relative" \
-  "--go-grpc_opt=paths=source_relative" \
-  "--go_opt=Mhivemind.proto=hivemind/services/nodepool/pb;pb" \
-  "--go-grpc_opt=Mhivemind.proto=hivemind/services/nodepool/pb;pb" \
+$protoPath = (Join-Path $repoRoot "proto")
+$args = @(
+  "--plugin=protoc-gen-go=$protocGenGo"
+  "--plugin=protoc-gen-go-grpc=$protocGenGoGrpc"
+  "--proto_path=$protoPath"
+  "--go_out=$outDir"
+  "--go-grpc_out=$outDir"
+  "--go_opt=paths=source_relative"
+  "--go-grpc_opt=paths=source_relative"
+  "--go_opt=Mhivemind.proto=hivemind/services/nodepool/pb;pb"
+  "--go-grpc_opt=Mhivemind.proto=hivemind/services/nodepool/pb;pb"
   $protoFile
+)
+
+& $ProtocPath @args
 
 Write-Host "Generated: $(Join-Path $outDir 'hivemind.pb.go')"
 Write-Host "Generated: $(Join-Path $outDir 'hivemind_grpc.pb.go')"

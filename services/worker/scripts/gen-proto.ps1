@@ -37,16 +37,20 @@ $protocGenGoGrpc = Join-Path $gobin "protoc-gen-go-grpc.exe"
 if (-not (Test-Path $protocGenGo)) { go install google.golang.org/protobuf/cmd/protoc-gen-go@latest }
 if (-not (Test-Path $protocGenGoGrpc)) { go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest }
 
-& $ProtocPath \
-  "--plugin=protoc-gen-go=$protocGenGo" \
-  "--plugin=protoc-gen-go-grpc=$protocGenGoGrpc" \
-  "--proto_path=$(Join-Path $repoRoot 'proto')" \
-  "--go_out=$outDir" \
-  "--go-grpc_out=$outDir" \
-  "--go_opt=paths=source_relative" \
-  "--go-grpc_opt=paths=source_relative" \
-  "--go_opt=Mhivemind.proto=hivemind/services/worker/pb;pb" \
-  "--go-grpc_opt=Mhivemind.proto=hivemind/services/worker/pb;pb" \
+$protoPath = (Join-Path $repoRoot "proto")
+$args = @(
+  "--plugin=protoc-gen-go=$protocGenGo"
+  "--plugin=protoc-gen-go-grpc=$protocGenGoGrpc"
+  "--proto_path=$protoPath"
+  "--go_out=$outDir"
+  "--go-grpc_out=$outDir"
+  "--go_opt=paths=source_relative"
+  "--go-grpc_opt=paths=source_relative"
+  "--go_opt=Mhivemind.proto=hivemind/services/worker/pb;pb"
+  "--go-grpc_opt=Mhivemind.proto=hivemind/services/worker/pb;pb"
   $protoFile
+)
+
+& $ProtocPath @args
 
 Write-Host "Generated worker pb files in: $outDir"

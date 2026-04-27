@@ -247,8 +247,8 @@ func (x *GetBalanceResponse) GetBalance() int64 {
 
 type RegisterWorkerNodeRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Username      string                 `protobuf:"bytes,1,opt,name=username,proto3" json:"username,omitempty"` //用戶名
-	Ip            string                 `protobuf:"bytes,2,opt,name=ip,proto3" json:"ip,omitempty"`             //ip
+	Username      string                 `protobuf:"bytes,1,opt,name=username,proto3" json:"username,omitempty"`
+	Ip            string                 `protobuf:"bytes,2,opt,name=ip,proto3" json:"ip,omitempty"`
 	CpuCores      int32                  `protobuf:"varint,3,opt,name=cpu_cores,json=cpuCores,proto3" json:"cpu_cores,omitempty"`
 	MemoryGb      int32                  `protobuf:"varint,4,opt,name=memory_gb,json=memoryGb,proto3" json:"memory_gb,omitempty"`
 	CpuScore      int32                  `protobuf:"varint,5,opt,name=cpu_score,json=cpuScore,proto3" json:"cpu_score,omitempty"`
@@ -399,12 +399,12 @@ func (x *StatusResponse) GetStatusMessage() string {
 
 type RunningStatusRequest struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
-	Username       string                 `protobuf:"bytes,1,opt,name=username,proto3" json:"username,omitempty"`                                       // 用戶名，用於識別報告節點
-	Status         string                 `protobuf:"bytes,2,opt,name=status,proto3" json:"status,omitempty"`                                           // 節點狀態 (Idle, Busy, Error等)
-	CpuUsage       float32                `protobuf:"fixed32,3,opt,name=cpu_usage,json=cpuUsage,proto3" json:"cpu_usage,omitempty"`                     // CPU 使用率 (百分比浮點)
-	MemoryUsage    float32                `protobuf:"fixed32,4,opt,name=memory_usage,json=memoryUsage,proto3" json:"memory_usage,omitempty"`            // 記憶體使用率 (百分比浮點)
-	GpuUsage       float32                `protobuf:"fixed32,5,opt,name=gpu_usage,json=gpuUsage,proto3" json:"gpu_usage,omitempty"`                     // GPU 使用率 (百分比浮點)
-	GpuMemoryUsage float32                `protobuf:"fixed32,6,opt,name=gpu_memory_usage,json=gpuMemoryUsage,proto3" json:"gpu_memory_usage,omitempty"` // GPU 記憶體使用率 (百分比浮點)
+	Username       string                 `protobuf:"bytes,1,opt,name=username,proto3" json:"username,omitempty"`
+	Status         string                 `protobuf:"bytes,2,opt,name=status,proto3" json:"status,omitempty"`
+	CpuUsage       float32                `protobuf:"fixed32,3,opt,name=cpu_usage,json=cpuUsage,proto3" json:"cpu_usage,omitempty"`
+	MemoryUsage    float32                `protobuf:"fixed32,4,opt,name=memory_usage,json=memoryUsage,proto3" json:"memory_usage,omitempty"`
+	GpuUsage       float32                `protobuf:"fixed32,5,opt,name=gpu_usage,json=gpuUsage,proto3" json:"gpu_usage,omitempty"`
+	GpuMemoryUsage float32                `protobuf:"fixed32,6,opt,name=gpu_memory_usage,json=gpuMemoryUsage,proto3" json:"gpu_memory_usage,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -536,14 +536,15 @@ func (x *RunningStatusResponse) GetStatusMessage() string {
 type UploadTaskRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
-	Torrent       string                 `protobuf:"bytes,2,opt,name=torrent,proto3" json:"torrent,omitempty"` // .torrent metadata or magnet URL
+	Torrent       string                 `protobuf:"bytes,2,opt,name=torrent,proto3" json:"torrent,omitempty"`
 	MemoryGb      int32                  `protobuf:"varint,3,opt,name=memory_gb,json=memoryGb,proto3" json:"memory_gb,omitempty"`
 	CpuScore      int32                  `protobuf:"varint,4,opt,name=cpu_score,json=cpuScore,proto3" json:"cpu_score,omitempty"`
 	GpuScore      int32                  `protobuf:"varint,5,opt,name=gpu_score,json=gpuScore,proto3" json:"gpu_score,omitempty"`
 	GpuMemoryGb   int32                  `protobuf:"varint,6,opt,name=gpu_memory_gb,json=gpuMemoryGb,proto3" json:"gpu_memory_gb,omitempty"`
 	Location      string                 `protobuf:"bytes,7,opt,name=location,proto3" json:"location,omitempty"`
-	HostCount     int32                  `protobuf:"varint,8,opt,name=host_count,json=hostCount,proto3" json:"host_count,omitempty"` // 需要的工作節點數量
-	Token         string                 `protobuf:"bytes,9,opt,name=token,proto3" json:"token,omitempty"`                           // 用戶令牌，用於驗證（最後一個欄位）
+	HostCount     int32                  `protobuf:"varint,8,opt,name=host_count,json=hostCount,proto3" json:"host_count,omitempty"`
+	Token         string                 `protobuf:"bytes,9,opt,name=token,proto3" json:"token,omitempty"`
+	MaxCpt        int64                  `protobuf:"varint,10,opt,name=max_cpt,json=maxCpt,proto3" json:"max_cpt,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -641,6 +642,13 @@ func (x *UploadTaskRequest) GetToken() string {
 	return ""
 }
 
+func (x *UploadTaskRequest) GetMaxCpt() int64 {
+	if x != nil {
+		return x.MaxCpt
+	}
+	return 0
+}
+
 type UploadTaskResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
@@ -695,7 +703,7 @@ func (x *UploadTaskResponse) GetStatusMessage() string {
 
 type GetAllUserTasksRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Token         string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"` // 用戶令牌，用於驗證
+	Token         string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -786,11 +794,11 @@ type TaskInfo struct {
 	TaskId         string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
 	Status         string                 `protobuf:"bytes,2,opt,name=status,proto3" json:"status,omitempty"`
 	StatusMessage  string                 `protobuf:"bytes,3,opt,name=status_message,json=statusMessage,proto3" json:"status_message,omitempty"`
-	CpuUsage       float32                `protobuf:"fixed32,4,opt,name=cpu_usage,json=cpuUsage,proto3" json:"cpu_usage,omitempty"`                     // CPU 使用率 (百分比浮點)
-	MemoryUsage    float32                `protobuf:"fixed32,5,opt,name=memory_usage,json=memoryUsage,proto3" json:"memory_usage,omitempty"`            // 記憶體使用率 (百分比浮點)
-	GpuUsage       float32                `protobuf:"fixed32,6,opt,name=gpu_usage,json=gpuUsage,proto3" json:"gpu_usage,omitempty"`                     // GPU 使用率 (百分比浮點)
-	GpuMemoryUsage float32                `protobuf:"fixed32,7,opt,name=gpu_memory_usage,json=gpuMemoryUsage,proto3" json:"gpu_memory_usage,omitempty"` // GPU 記憶體使用率 (百分比浮點)
-	WorkerIp       string                 `protobuf:"bytes,8,opt,name=worker_ip,json=workerIp,proto3" json:"worker_ip,omitempty"`                       // 工作節點 IP
+	CpuUsage       float32                `protobuf:"fixed32,4,opt,name=cpu_usage,json=cpuUsage,proto3" json:"cpu_usage,omitempty"`
+	MemoryUsage    float32                `protobuf:"fixed32,5,opt,name=memory_usage,json=memoryUsage,proto3" json:"memory_usage,omitempty"`
+	GpuUsage       float32                `protobuf:"fixed32,6,opt,name=gpu_usage,json=gpuUsage,proto3" json:"gpu_usage,omitempty"`
+	GpuMemoryUsage float32                `protobuf:"fixed32,7,opt,name=gpu_memory_usage,json=gpuMemoryUsage,proto3" json:"gpu_memory_usage,omitempty"`
+	WorkerIp       string                 `protobuf:"bytes,8,opt,name=worker_ip,json=workerIp,proto3" json:"worker_ip,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -885,7 +893,7 @@ type TaskOutputUploadRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
 	Output        string                 `protobuf:"bytes,2,opt,name=output,proto3" json:"output,omitempty"`
-	Token         string                 `protobuf:"bytes,3,opt,name=token,proto3" json:"token,omitempty"` // 用戶令牌，用於驗證
+	Token         string                 `protobuf:"bytes,3,opt,name=token,proto3" json:"token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -996,8 +1004,8 @@ func (x *TaskOutputUploadResponse) GetStatusMessage() string {
 type TaskResultUploadRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
-	ResultTorrent string                 `protobuf:"bytes,2,opt,name=result_torrent,json=resultTorrent,proto3" json:"result_torrent,omitempty"` // .torrent metadata or magnet URL for result
-	Token         string                 `protobuf:"bytes,3,opt,name=token,proto3" json:"token,omitempty"`                                      // 用戶令牌，用於驗證
+	ResultTorrent string                 `protobuf:"bytes,2,opt,name=result_torrent,json=resultTorrent,proto3" json:"result_torrent,omitempty"`
+	Token         string                 `protobuf:"bytes,3,opt,name=token,proto3" json:"token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1108,7 +1116,7 @@ func (x *TaskResultUploadResponse) GetStatusMessage() string {
 type GetTaskResultRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
-	Token         string                 `protobuf:"bytes,2,opt,name=token,proto3" json:"token,omitempty"` // 用戶令牌，用於驗證
+	Token         string                 `protobuf:"bytes,2,opt,name=token,proto3" json:"token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1220,9 +1228,9 @@ func (x *GetTaskResultResponse) GetResultTorrent() string {
 type ExecuteTaskRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
-	Torrent       string                 `protobuf:"bytes,2,opt,name=torrent,proto3" json:"torrent,omitempty"`                     // .torrent metadata or magnet URL
-	CpuUsage      float32                `protobuf:"fixed32,3,opt,name=cpu_usage,json=cpuUsage,proto3" json:"cpu_usage,omitempty"` // 可選：浮點初始 CPU 配額或使用率
-	GpuUsage      float32                `protobuf:"fixed32,4,opt,name=gpu_usage,json=gpuUsage,proto3" json:"gpu_usage,omitempty"` // 可選：浮點初始 GPU 配額或使用率
+	Torrent       string                 `protobuf:"bytes,2,opt,name=torrent,proto3" json:"torrent,omitempty"`
+	CpuUsage      float32                `protobuf:"fixed32,3,opt,name=cpu_usage,json=cpuUsage,proto3" json:"cpu_usage,omitempty"`
+	GpuUsage      float32                `protobuf:"fixed32,4,opt,name=gpu_usage,json=gpuUsage,proto3" json:"gpu_usage,omitempty"`
 	MemoryGb      int32                  `protobuf:"varint,5,opt,name=memory_gb,json=memoryGb,proto3" json:"memory_gb,omitempty"`
 	GpuMemoryGb   int32                  `protobuf:"varint,6,opt,name=gpu_memory_gb,json=gpuMemoryGb,proto3" json:"gpu_memory_gb,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -1356,7 +1364,7 @@ func (x *ExecuteTaskResponse) GetStatusMessage() string {
 type TaskOutputRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
-	Token         string                 `protobuf:"bytes,2,opt,name=token,proto3" json:"token,omitempty"` // 用戶令牌，用於驗證
+	Token         string                 `protobuf:"bytes,2,opt,name=token,proto3" json:"token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1668,11 +1676,11 @@ func (x *StopTaskExecutionResponse) GetStatusMessage() string {
 type TaskUsageRequest struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	TaskId         string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
-	CpuUsage       float32                `protobuf:"fixed32,2,opt,name=cpu_usage,json=cpuUsage,proto3" json:"cpu_usage,omitempty"`                     // CPU 使用率 (百分比浮點)
-	MemoryUsage    float32                `protobuf:"fixed32,3,opt,name=memory_usage,json=memoryUsage,proto3" json:"memory_usage,omitempty"`            // 記憶體使用率 (百分比浮點)
-	GpuUsage       float32                `protobuf:"fixed32,4,opt,name=gpu_usage,json=gpuUsage,proto3" json:"gpu_usage,omitempty"`                     // GPU 使用率 (百分比浮點)
-	GpuMemoryUsage float32                `protobuf:"fixed32,5,opt,name=gpu_memory_usage,json=gpuMemoryUsage,proto3" json:"gpu_memory_usage,omitempty"` // GPU 記憶體使用率 (百分比浮點)
-	Token          string                 `protobuf:"bytes,6,opt,name=token,proto3" json:"token,omitempty"`                                             // 用戶令牌，用於驗證
+	CpuUsage       float32                `protobuf:"fixed32,2,opt,name=cpu_usage,json=cpuUsage,proto3" json:"cpu_usage,omitempty"`
+	MemoryUsage    float32                `protobuf:"fixed32,3,opt,name=memory_usage,json=memoryUsage,proto3" json:"memory_usage,omitempty"`
+	GpuUsage       float32                `protobuf:"fixed32,4,opt,name=gpu_usage,json=gpuUsage,proto3" json:"gpu_usage,omitempty"`
+	GpuMemoryUsage float32                `protobuf:"fixed32,5,opt,name=gpu_memory_usage,json=gpuMemoryUsage,proto3" json:"gpu_memory_usage,omitempty"`
+	Token          string                 `protobuf:"bytes,6,opt,name=token,proto3" json:"token,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -1908,7 +1916,7 @@ func (x *RefreshTokenResponse) GetNewToken() string {
 type TasklogRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
-	Token         string                 `protobuf:"bytes,2,opt,name=token,proto3" json:"token,omitempty"` // 用戶令牌，用於驗證
+	Token         string                 `protobuf:"bytes,2,opt,name=token,proto3" json:"token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2049,7 +2057,7 @@ const file_hivemind_proto_rawDesc = "" +
 	"\x10gpu_memory_usage\x18\x06 \x01(\x02R\x0egpuMemoryUsage\"X\n" +
 	"\x15RunningStatusResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12%\n" +
-	"\x0estatus_message\x18\x02 \x01(\tR\rstatusMessage\"\x92\x02\n" +
+	"\x0estatus_message\x18\x02 \x01(\tR\rstatusMessage\"\xab\x02\n" +
 	"\x11UploadTaskRequest\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x18\n" +
 	"\atorrent\x18\x02 \x01(\tR\atorrent\x12\x1b\n" +
@@ -2060,7 +2068,9 @@ const file_hivemind_proto_rawDesc = "" +
 	"\blocation\x18\a \x01(\tR\blocation\x12\x1d\n" +
 	"\n" +
 	"host_count\x18\b \x01(\x05R\thostCount\x12\x14\n" +
-	"\x05token\x18\t \x01(\tR\x05token\"U\n" +
+	"\x05token\x18\t \x01(\tR\x05token\x12\x17\n" +
+	"\amax_cpt\x18\n" +
+	" \x01(\x03R\x06maxCpt\"U\n" +
 	"\x12UploadTaskResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12%\n" +
 	"\x0estatus_message\x18\x02 \x01(\tR\rstatusMessage\".\n" +
@@ -2171,7 +2181,7 @@ const file_hivemind_proto_rawDesc = "" +
 	"\n" +
 	"TaskOutput\x12\x1b.nodepool.TaskOutputRequest\x1a\x1c.nodepool.TaskOutputResponse\x12\\\n" +
 	"\x11StopTaskExecution\x12\".nodepool.StopTaskExecutionRequest\x1a#.nodepool.StopTaskExecutionResponse\x12D\n" +
-	"\tTaskUsage\x12\x1a.nodepool.TaskUsageRequest\x1a\x1b.nodepool.TaskUsageResponseb\x06proto3"
+	"\tTaskUsage\x12\x1a.nodepool.TaskUsageRequest\x1a\x1b.nodepool.TaskUsageResponseB\x06Z\x04./pbb\x06proto3"
 
 var (
 	file_hivemind_proto_rawDescOnce sync.Once

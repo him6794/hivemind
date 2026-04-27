@@ -24,10 +24,10 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	_ "modernc.org/sqlite"
 
 	"hivemind/services/nodepool/internal/repository"
 	"hivemind/services/nodepool/internal/service"
+	"hivemind/services/nodepool/internal/storage"
 	"hivemind/services/nodepool/pb"
 )
 
@@ -207,67 +207,11 @@ func formatDispatchReason(reason string) string {
 	return fmt.Sprintf("[%s] %s", classifyDispatchReason(reason), reason)
 }
 
-func initDB(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path)
+func initDB(dsn string) (*sql.DB, error) {
+	db, err := storage.OpenPostgres(dsn)
 	if err != nil {
 		return nil, err
 	}
-	schema := `
-CREATE TABLE IF NOT EXISTS users (
-  username TEXT PRIMARY KEY,
-  password TEXT NOT NULL,
-  balance INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS tasks (
-  task_id TEXT PRIMARY KEY,
-  owner TEXT NOT NULL,
-	worker_id TEXT,
-  worker_ip TEXT,
-  status TEXT,
-  status_message TEXT,
-  output TEXT,
-  result_torrent TEXT,
-	torrent_source TEXT,
-	expected_btih TEXT,
-	cpu_usage REAL,
-	memory_usage REAL,
-	gpu_usage REAL,
-	gpu_memory_usage REAL,
-	req_cpu_score INTEGER,
-	req_gpu_score INTEGER,
-	req_memory_gb INTEGER,
-	req_gpu_memory_gb INTEGER,
-	host_count INTEGER,
-	billing_settled INTEGER NOT NULL DEFAULT 0,
-	billed_amount INTEGER NOT NULL DEFAULT 0,
-  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-CREATE TABLE IF NOT EXISTS cpt_transfers (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	task_id TEXT NOT NULL,
-	payer TEXT NOT NULL,
-	payee TEXT NOT NULL,
-	amount INTEGER NOT NULL,
-	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-`
-	if _, err := db.Exec(schema); err != nil {
-		return nil, err
-	}
-	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN torrent_source TEXT`)
-	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN expected_btih TEXT`)
-	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN cpu_usage REAL`)
-	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN memory_usage REAL`)
-	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN gpu_usage REAL`)
-	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN gpu_memory_usage REAL`)
-	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN worker_id TEXT`)
-	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN req_cpu_score INTEGER`)
-	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN req_gpu_score INTEGER`)
-	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN req_memory_gb INTEGER`)
-	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN req_gpu_memory_gb INTEGER`)
-	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN host_count INTEGER`)
-	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN billing_settled INTEGER NOT NULL DEFAULT 0`)
-	_, _ = db.Exec(`ALTER TABLE tasks ADD COLUMN billed_amount INTEGER NOT NULL DEFAULT 0`)
 	pw1, err := hashPassword("worker123")
 	if err != nil {
 		return nil, err
@@ -276,10 +220,10 @@ CREATE TABLE IF NOT EXISTS cpt_transfers (
 	if err != nil {
 		return nil, err
 	}
-	if _, err := db.Exec("INSERT OR IGNORE INTO users(username,password,balance) VALUES(?,?,1000)", "worker1", pw1); err != nil {
+	if _, err := db.Exec("INSERT INTO users(username,password,balance) VALUES($1,$2,$3) ON CONFLICT (username) DO NOTHING", "worker1", pw1, 1000); err != nil {
 		return nil, err
 	}
-	if _, err := db.Exec("INSERT OR IGNORE INTO users(username,password,balance) VALUES(?,?,800)", "worker2", pw2); err != nil {
+	if _, err := db.Exec("INSERT INTO users(username,password,balance) VALUES($1,$2,$3) ON CONFLICT (username) DO NOTHING", "worker2", pw2, 800); err != nil {
 		return nil, err
 	}
 	return db, nil
@@ -317,13 +261,13 @@ func (u *userAuthServer) Login(ctx context.Context, req *pb.LoginRequest) (*pb.L
 	}
 
 	var pw string
-	err := u.db.QueryRow("SELECT password FROM users WHERE username = ?", username).Scan(&pw)
+	err := u.db.QueryRow("SELECT password FROM users WHERE username = $1", username).Scan(&pw)
 	if err != nil || !verifyPassword(pw, password) {
 		return &pb.LoginResponse{Success: false, StatusMessage: "invalid credentials"}, nil
 	}
 	if !strings.HasPrefix(pw, "$2") {
 		if h, hErr := hashPassword(password); hErr == nil {
-			_, _ = u.db.Exec("UPDATE users SET password=? WHERE username=?", h, username)
+			_, _ = u.db.Exec("UPDATE users SET password=$1 WHERE username=$2", h, username)
 		}
 	}
 	token, err := u.issueToken(username)
@@ -348,7 +292,7 @@ func (u *userAuthServer) registerUser(username, password string) (bool, string) 
 	if err != nil {
 		return false, err.Error()
 	}
-	if _, err := u.db.Exec("INSERT INTO users(username,password,balance) VALUES(?,?,0)", username, hashed); err != nil {
+	if _, err := u.db.Exec("INSERT INTO users(username,password,balance) VALUES($1,$2,0)", username, hashed); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") || strings.Contains(strings.ToLower(err.Error()), "constraint") {
 			return false, "username already exists"
 		}
@@ -370,7 +314,7 @@ func (u *userAuthServer) GetBalance(ctx context.Context, req *pb.GetBalanceReque
 		return &pb.GetBalanceResponse{Success: false, StatusMessage: "token-user mismatch"}, nil
 	}
 	var balance int64
-	if err := u.db.QueryRow("SELECT balance FROM users WHERE username = ?", username).Scan(&balance); err != nil {
+	if err := u.db.QueryRow("SELECT balance FROM users WHERE username = $1", username).Scan(&balance); err != nil {
 		return &pb.GetBalanceResponse{Success: false, StatusMessage: "user not found"}, nil
 	}
 	return &pb.GetBalanceResponse{Success: true, StatusMessage: "ok", Balance: balance}, nil
@@ -466,8 +410,8 @@ func (m *masterNodeServer) saveTaskLocked(t *taskState) {
 		billingSettled = 1
 	}
 	_, _ = m.db.Exec(`INSERT INTO tasks(task_id,owner,worker_id,worker_ip,status,status_message,output,result_torrent,torrent_source,expected_btih,cpu_usage,memory_usage,gpu_usage,gpu_memory_usage,req_cpu_score,req_gpu_score,req_memory_gb,req_gpu_memory_gb,host_count,billing_settled,billed_amount,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
-ON CONFLICT(task_id) DO UPDATE SET owner=excluded.owner,worker_id=excluded.worker_id,worker_ip=excluded.worker_ip,status=excluded.status,status_message=excluded.status_message,output=excluded.output,result_torrent=excluded.result_torrent,torrent_source=excluded.torrent_source,expected_btih=excluded.expected_btih,cpu_usage=excluded.cpu_usage,memory_usage=excluded.memory_usage,gpu_usage=excluded.gpu_usage,gpu_memory_usage=excluded.gpu_memory_usage,req_cpu_score=excluded.req_cpu_score,req_gpu_score=excluded.req_gpu_score,req_memory_gb=excluded.req_memory_gb,req_gpu_memory_gb=excluded.req_gpu_memory_gb,host_count=excluded.host_count,billing_settled=excluded.billing_settled,billed_amount=excluded.billed_amount,updated_at=CURRENT_TIMESTAMP`,
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,NOW())
+ON CONFLICT(task_id) DO UPDATE SET owner=EXCLUDED.owner,worker_id=EXCLUDED.worker_id,worker_ip=EXCLUDED.worker_ip,status=EXCLUDED.status,status_message=EXCLUDED.status_message,output=EXCLUDED.output,result_torrent=EXCLUDED.result_torrent,torrent_source=EXCLUDED.torrent_source,expected_btih=EXCLUDED.expected_btih,cpu_usage=EXCLUDED.cpu_usage,memory_usage=EXCLUDED.memory_usage,gpu_usage=EXCLUDED.gpu_usage,gpu_memory_usage=EXCLUDED.gpu_memory_usage,req_cpu_score=EXCLUDED.req_cpu_score,req_gpu_score=EXCLUDED.req_gpu_score,req_memory_gb=EXCLUDED.req_memory_gb,req_gpu_memory_gb=EXCLUDED.req_gpu_memory_gb,host_count=EXCLUDED.host_count,billing_settled=EXCLUDED.billing_settled,billed_amount=EXCLUDED.billed_amount,updated_at=NOW()`,
 		t.TaskID, t.Owner, t.WorkerID, t.WorkerIP, t.Status, t.StatusMessage, t.Output, t.ResultTorrent, t.TorrentSource, t.ExpectedBTIH, t.CpuUsage, t.MemoryUsage, t.GpuUsage, t.GpuMemoryUsage, t.ReqCPUScore, t.ReqGPUScore, t.ReqMemoryGB, t.ReqGPUMemoryGB, t.HostCount, billingSettled, t.BilledAmount)
 
 	// Also save to Redis for fast access and horizontal scaling
@@ -478,16 +422,14 @@ func (m *masterNodeServer) loadTasksFromDB() {
 	if m.db == nil {
 		return
 	}
-	rows, err := m.db.Query(`SELECT task_id,owner,IFNULL(worker_id,''),IFNULL(worker_ip,''),IFNULL(status,''),IFNULL(status_message,''),IFNULL(output,''),IFNULL(result_torrent,''),IFNULL(torrent_source,''),IFNULL(expected_btih,''),IFNULL(cpu_usage,0),IFNULL(memory_usage,0),IFNULL(gpu_usage,0),IFNULL(gpu_memory_usage,0),IFNULL(req_cpu_score,0),IFNULL(req_gpu_score,0),IFNULL(req_memory_gb,0),IFNULL(req_gpu_memory_gb,0),IFNULL(host_count,0),IFNULL(billing_settled,0),IFNULL(billed_amount,0) FROM tasks`)
+	rows, err := m.db.Query(`SELECT task_id,owner,worker_id,worker_ip,status,status_message,output,result_torrent,torrent_source,expected_btih,cpu_usage,memory_usage,gpu_usage,gpu_memory_usage,req_cpu_score,req_gpu_score,req_memory_gb,req_gpu_memory_gb,host_count,billing_settled,billed_amount FROM tasks`)
 	if err != nil {
 		return
 	}
 	defer rows.Close()
 	for rows.Next() {
 		t := &taskState{}
-		var settled int
-		if err := rows.Scan(&t.TaskID, &t.Owner, &t.WorkerID, &t.WorkerIP, &t.Status, &t.StatusMessage, &t.Output, &t.ResultTorrent, &t.TorrentSource, &t.ExpectedBTIH, &t.CpuUsage, &t.MemoryUsage, &t.GpuUsage, &t.GpuMemoryUsage, &t.ReqCPUScore, &t.ReqGPUScore, &t.ReqMemoryGB, &t.ReqGPUMemoryGB, &t.HostCount, &settled, &t.BilledAmount); err == nil {
-			t.BillingSettled = settled != 0
+		if err := rows.Scan(&t.TaskID, &t.Owner, &t.WorkerID, &t.WorkerIP, &t.Status, &t.StatusMessage, &t.Output, &t.ResultTorrent, &t.TorrentSource, &t.ExpectedBTIH, &t.CpuUsage, &t.MemoryUsage, &t.GpuUsage, &t.GpuMemoryUsage, &t.ReqCPUScore, &t.ReqGPUScore, &t.ReqMemoryGB, &t.ReqGPUMemoryGB, &t.HostCount, &t.BillingSettled, &t.BilledAmount); err == nil {
 			t.LastUpdate = time.Now()
 			if t.BilledAmount > 0 {
 				t.LastSettlementAt = time.Now()
@@ -567,26 +509,25 @@ func (m *masterNodeServer) settleTaskPaymentTickLocked(t *taskState) (bool, stri
 		return false, "settlement db begin failed"
 	}
 	defer tx.Rollback()
-
 	var ownerBalance int64
-	if err := tx.QueryRow("SELECT balance FROM users WHERE username = ?", t.Owner).Scan(&ownerBalance); err != nil {
+	if err := tx.QueryRow("SELECT balance FROM users WHERE username = $1", t.Owner).Scan(&ownerBalance); err != nil {
 		return false, "payer not found"
 	}
 	var payeeExists int
-	if err := tx.QueryRow("SELECT 1 FROM users WHERE username = ?", t.WorkerID).Scan(&payeeExists); err != nil {
+	if err := tx.QueryRow("SELECT 1 FROM users WHERE username = $1", t.WorkerID).Scan(&payeeExists); err != nil {
 		return true, "settlement skipped: payee not found"
 	}
 	if ownerBalance < amount {
 		return false, "insufficient balance"
 	}
 
-	if _, err := tx.Exec("UPDATE users SET balance = balance - ? WHERE username = ?", amount, t.Owner); err != nil {
+	if _, err := tx.Exec("UPDATE users SET balance = balance - $1 WHERE username = $2", amount, t.Owner); err != nil {
 		return false, "payer debit failed"
 	}
-	if _, err := tx.Exec("UPDATE users SET balance = balance + ? WHERE username = ?", amount, t.WorkerID); err != nil {
+	if _, err := tx.Exec("UPDATE users SET balance = balance + $1 WHERE username = $2", amount, t.WorkerID); err != nil {
 		return false, "payee credit failed"
 	}
-	if _, err := tx.Exec("INSERT INTO cpt_transfers(task_id,payer,payee,amount) VALUES(?,?,?,?)", t.TaskID, t.Owner, t.WorkerID, amount); err != nil {
+	if _, err := tx.Exec("INSERT INTO cpt_transfers(task_id,payer,payee,amount) VALUES($1,$2,$3,$4)", t.TaskID, t.Owner, t.WorkerID, amount); err != nil {
 		return false, "transfer log failed"
 	}
 
@@ -1764,7 +1705,7 @@ func startHTTPAuthServer(auth *userAuthServer, master *masterNodeServer) {
 		fromTS := strings.TrimSpace(r.URL.Query().Get("from_ts"))
 		toTS := strings.TrimSpace(r.URL.Query().Get("to_ts"))
 		aggregate := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("aggregate")), "1") || strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("aggregate")), "true")
-		rows, err := auth.db.Query("SELECT id,task_id,payer,payee,amount,created_at FROM cpt_transfers WHERE (payer=? OR payee=?) AND (?='' OR task_id=?) AND (?='' OR created_at >= datetime(?,'unixepoch')) AND (?='' OR created_at <= datetime(?,'unixepoch')) ORDER BY id DESC LIMIT ?", user, user, taskID, taskID, fromTS, fromTS, toTS, toTS, limit)
+		rows, err := auth.db.Query("SELECT id,task_id,payer,payee,amount,created_at FROM cpt_transfers WHERE (payer=$1 OR payee=$2) AND (NULLIF($3,'') IS NULL OR task_id=$4) AND (NULLIF($5,'') IS NULL OR created_at >= to_timestamp(NULLIF($6,'')::bigint)) AND (NULLIF($7,'') IS NULL OR created_at <= to_timestamp(NULLIF($8,'')::bigint)) ORDER BY id DESC LIMIT $9", user, user, taskID, taskID, fromTS, fromTS, toTS, toTS, limit)
 		if err != nil {
 			_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "status_message": err.Error()})
 			return
@@ -2135,11 +2076,11 @@ func startHTTPAuthServer(auth *userAuthServer, master *masterNodeServer) {
 }
 
 func main() {
-	dbPath := os.Getenv("NODEPOOL_DB_PATH")
-	if dbPath == "" {
-		dbPath = "nodepool.db"
+	dsn := strings.TrimSpace(os.Getenv("NODEPOOL_POSTGRES_DSN"))
+	if dsn == "" {
+		dsn = "postgres://hivemind:hivemind@localhost:5432/hivemind?sslmode=disable"
 	}
-	db, err := initDB(dbPath)
+	db, err := initDB(dsn)
 	if err != nil {
 		log.Fatalf("init db failed: %v", err)
 	}

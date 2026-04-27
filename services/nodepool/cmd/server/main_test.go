@@ -2,8 +2,12 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net"
+	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,6 +23,18 @@ import (
 )
 
 const bufSize = 1024 * 1024
+
+func testPostgresDSN(t *testing.T) string {
+	t.Helper()
+	dsn := strings.TrimSpace(os.Getenv("NODEPOOL_TEST_POSTGRES_DSN"))
+	if dsn == "" {
+		dsn = strings.TrimSpace(os.Getenv("NODEPOOL_POSTGRES_DSN"))
+	}
+	if dsn == "" {
+		t.Skip("NODEPOOL_TEST_POSTGRES_DSN (or NODEPOOL_POSTGRES_DSN) is required for PostgreSQL tests")
+	}
+	return dsn
+}
 
 func TestNodeManagerGRPC_RegisterAndReportStatus(t *testing.T) {
 	t.Parallel()
@@ -110,6 +126,155 @@ func (m *mockWorkerServer) TaskOutput(ctx context.Context, req *pb.TaskOutputReq
 	return &pb.TaskOutputResponse{Success: false, StatusMessage: "probe ok"}, nil
 }
 
+type stressWorkerServer struct {
+	pb.UnimplementedWorkerNodeServiceServer
+	executeCalls int64
+	probeCalls   int64
+	stopCalls    int64
+}
+
+func (s *stressWorkerServer) ExecuteTask(ctx context.Context, req *pb.ExecuteTaskRequest) (*pb.ExecuteTaskResponse, error) {
+	_ = ctx
+	if strings.TrimSpace(req.GetTaskId()) == "" {
+		return &pb.ExecuteTaskResponse{Success: false, StatusMessage: "task_id required"}, nil
+	}
+	atomic.AddInt64(&s.executeCalls, 1)
+	return &pb.ExecuteTaskResponse{Success: true, StatusMessage: "accepted"}, nil
+}
+
+func (s *stressWorkerServer) TaskOutput(ctx context.Context, req *pb.TaskOutputRequest) (*pb.TaskOutputResponse, error) {
+	_ = ctx
+	_ = req
+	atomic.AddInt64(&s.probeCalls, 1)
+	return &pb.TaskOutputResponse{Success: false, StatusMessage: "probe ok"}, nil
+}
+
+func (s *stressWorkerServer) StopTaskExecution(ctx context.Context, req *pb.StopTaskExecutionRequest) (*pb.StopTaskExecutionResponse, error) {
+	_ = ctx
+	_ = req
+	atomic.AddInt64(&s.stopCalls, 1)
+	return &pb.StopTaskExecutionResponse{Success: true, StatusMessage: "stopped"}, nil
+}
+
+func TestNormalUserConcurrentLifecycleStress(t *testing.T) {
+	workerLis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("worker listen: %v", err)
+	}
+	workerGRPC := grpc.NewServer()
+	stressWorker := &stressWorkerServer{}
+	pb.RegisterWorkerNodeServiceServer(workerGRPC, stressWorker)
+	go func() { _ = workerGRPC.Serve(workerLis) }()
+	t.Cleanup(func() {
+		workerGRPC.Stop()
+		_ = workerLis.Close()
+	})
+
+	repo := repository.NewWorkerRepository()
+	svc := service.NewWorkerService(repo)
+	authSrv := newUserAuthServer(nil, "stress-secret")
+	masterSrv := &masterNodeServer{svc: svc, auth: authSrv, taskToWorker: make(map[string]string), taskRoutes: make(map[string]map[string]string), tasks: make(map[string]*taskState)}
+	ingress := &workerIngressServer{master: masterSrv}
+	nodeSrv := &nodeManagerServer{svc: svc}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	token, err := authSrv.issueToken("worker1")
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+	regResp, err := nodeSrv.RegisterWorkerNode(ctx, &pb.RegisterWorkerNodeRequest{
+		Username:    "worker1",
+		Ip:          workerLis.Addr().String(),
+		CpuCores:    8,
+		MemoryGb:    32,
+		CpuScore:    200,
+		GpuScore:    100,
+		GpuMemoryGb: 16,
+		Location:    "local",
+	})
+	if err != nil {
+		t.Fatalf("register worker err: %v", err)
+	}
+	if !regResp.GetSuccess() {
+		t.Fatalf("register worker failed: %s", regResp.GetStatusMessage())
+	}
+
+	const taskCount = 80
+	const expectedBTIH = "0123456789abcdef0123456789abcdef01234567"
+	start := time.Now()
+	var wg sync.WaitGroup
+	errs := make(chan string, taskCount)
+	for i := 0; i < taskCount; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			taskID := fmt.Sprintf("normal-user-stress-%03d", i)
+			uploadResp, err := masterSrv.UploadTask(ctx, &pb.UploadTaskRequest{
+				TaskId:      taskID,
+				Torrent:     "magnet:?xt=urn:btih:" + expectedBTIH,
+				MemoryGb:    2,
+				CpuScore:    100,
+				GpuScore:    0,
+				GpuMemoryGb: 0,
+				HostCount:   1,
+				Token:       token,
+			})
+			if err != nil || !uploadResp.GetSuccess() {
+				errs <- fmt.Sprintf("%s upload failed: resp=%v err=%v", taskID, uploadResp, err)
+				return
+			}
+			usageResp, err := ingress.TaskUsage(ctx, &pb.TaskUsageRequest{TaskId: taskID, CpuUsage: 12.5, MemoryUsage: 256, GpuUsage: 0, GpuMemoryUsage: 0, Token: token})
+			if err != nil || !usageResp.GetSuccess() {
+				errs <- fmt.Sprintf("%s usage failed: resp=%v err=%v", taskID, usageResp, err)
+				return
+			}
+			outResp, err := ingress.TaskOutputUpload(ctx, &pb.TaskOutputUploadRequest{TaskId: taskID, Output: "normal progress update", Token: token})
+			if err != nil || !outResp.GetSuccess() {
+				errs <- fmt.Sprintf("%s output failed: resp=%v err=%v", taskID, outResp, err)
+				return
+			}
+			resultResp, err := ingress.TaskResultUpload(ctx, &pb.TaskResultUploadRequest{TaskId: taskID, ResultTorrent: "magnet:?xt=urn:btih:" + expectedBTIH, Token: token})
+			if err != nil || !resultResp.GetSuccess() {
+				errs <- fmt.Sprintf("%s result upload failed: resp=%v err=%v", taskID, resultResp, err)
+				return
+			}
+			getResp, err := masterSrv.GetTaskResult(ctx, &pb.GetTaskResultRequest{TaskId: taskID, Token: token})
+			if err != nil || !getResp.GetSuccess() || !strings.Contains(getResp.GetResultTorrent(), expectedBTIH) {
+				errs <- fmt.Sprintf("%s get result failed: resp=%v err=%v", taskID, getResp, err)
+				return
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for msg := range errs {
+		t.Error(msg)
+	}
+	if t.Failed() {
+		return
+	}
+
+	listResp, err := masterSrv.GetAllUserTasks(ctx, &pb.GetAllUserTasksRequest{Token: token})
+	if err != nil {
+		t.Fatalf("list tasks: %v", err)
+	}
+	if got := len(listResp.GetTasks()); got != taskCount {
+		t.Fatalf("expected %d tasks, got %d", taskCount, got)
+	}
+	for _, task := range listResp.GetTasks() {
+		if task.GetStatus() != "COMPLETED" {
+			t.Fatalf("task %s not completed: %s %s", task.GetTaskId(), task.GetStatus(), task.GetStatusMessage())
+		}
+	}
+	if got := atomic.LoadInt64(&stressWorker.executeCalls); got != taskCount {
+		t.Fatalf("expected %d ExecuteTask calls, got %d", taskCount, got)
+	}
+	t.Logf("normal user lifecycle stress passed: tasks=%d duration=%s execute_calls=%d probe_calls=%d", taskCount, time.Since(start), atomic.LoadInt64(&stressWorker.executeCalls), atomic.LoadInt64(&stressWorker.probeCalls))
+}
+
 type mockProbeFailWorkerServer struct {
 	pb.UnimplementedWorkerNodeServiceServer
 	executeCalls int
@@ -131,7 +296,7 @@ func (m *mockProbeFailWorkerServer) ExecuteTask(ctx context.Context, req *pb.Exe
 func TestMasterNodeGRPC_UploadTask_DispatchesToWorker(t *testing.T) {
 	t.Parallel()
 
-	db, err := initDB(":memory:")
+	db, err := initDB(testPostgresDSN(t))
 	if err != nil {
 		t.Fatalf("init db: %v", err)
 	}
@@ -452,7 +617,7 @@ func TestFormatDispatchReason(t *testing.T) {
 func TestMasterNode_SetTaskResult_SettlesCPT(t *testing.T) {
 	t.Parallel()
 
-	db, err := initDB(":memory:")
+	db, err := initDB(testPostgresDSN(t))
 	if err != nil {
 		t.Fatalf("init db: %v", err)
 	}
@@ -504,7 +669,7 @@ func TestMasterNode_SetTaskResult_SettlesCPT(t *testing.T) {
 func TestMasterNode_SetTaskResult_SettlementInsufficientBalance(t *testing.T) {
 	t.Parallel()
 
-	db, err := initDB(":memory:")
+	db, err := initDB(testPostgresDSN(t))
 	if err != nil {
 		t.Fatalf("init db: %v", err)
 	}
@@ -590,7 +755,7 @@ func TestExtractStrictBTIHFromSource(t *testing.T) {
 func TestMasterNode_UploadTask_StrictRejectsInvalidSource(t *testing.T) {
 	t.Parallel()
 
-	db, err := initDB(":memory:")
+	db, err := initDB(testPostgresDSN(t))
 	if err != nil {
 		t.Fatalf("init db: %v", err)
 	}
@@ -630,7 +795,7 @@ func TestMasterNode_UploadTask_StrictRejectsInvalidSource(t *testing.T) {
 func TestMasterNode_UploadTask_DispatchFailureWritesTaskLog(t *testing.T) {
 	t.Parallel()
 
-	db, err := initDB(":memory:")
+	db, err := initDB(testPostgresDSN(t))
 	if err != nil {
 		t.Fatalf("init db: %v", err)
 	}
@@ -681,7 +846,7 @@ func TestMasterNode_UploadTask_DispatchFailureWritesTaskLog(t *testing.T) {
 func TestMasterNode_ProcessPeriodicSettlements(t *testing.T) {
 	t.Parallel()
 
-	db, err := initDB(":memory:")
+	db, err := initDB(testPostgresDSN(t))
 	if err != nil {
 		t.Fatalf("init db: %v", err)
 	}
@@ -756,7 +921,7 @@ func TestMasterNode_ProcessPeriodicSettlements_InsufficientBalanceFailsTask(t *t
 		_ = workerLis.Close()
 	})
 
-	db, err := initDB(":memory:")
+	db, err := initDB(testPostgresDSN(t))
 	if err != nil {
 		t.Fatalf("init db: %v", err)
 	}
