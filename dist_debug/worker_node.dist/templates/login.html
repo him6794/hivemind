@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title data-i18n="login.title">Worker Node Login</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="{{ url_for('static', filename='js/i18n.js') }}" defer></script>
+</head>
+<body class="login-page">
+    <div class="login-container">
+        <div class="login-actions">
+            <div class="lang-switcher"><select id="lang-select" aria-label="Language"></select></div>
+        </div>
+        <div class="login-header">
+            <div class="icon"></div>
+            <h1 data-i18n="login.title">Worker Node Login</h1>
+            <p data-i18n="login.subtitle">Connect to HiveMind Distributed Computing Network</p>
+        </div>
+
+        {% if current_status %}
+        <div class="status-message {% if 'Error' in current_status %}error-message{% elif 'Idle' in current_status %}success-message{% else %}info-message{% endif %}">
+            <span id="node-status-text" data-status="{{ current_status|e }}">Node Status: {{ current_status }}</span>
+        </div>
+        {% endif %}
+
+        {% if error %}
+        <div class="status-message error-message">
+            {{ error }}
+        </div>
+        {% endif %}
+
+        <form method="post" action="{{ url_for('login_route') }}">
+            <div class="form-group">
+                <label for="username" data-i18n="login.username">Username</label>
+                <div class="input-wrapper">
+                    <span class="prefix"></span>
+                    <input type="text" id="username" name="username" required autocomplete="username" placeholder="Enter your username" data-i18n-ph="login.username_ph">
+                </div>
+            </div>
+            <div class="form-group">
+                <label for="password" data-i18n="login.password">Password</label>
+                <div class="input-wrapper">
+                    <span class="prefix"></span>
+                    <input type="password" id="password" name="password" required autocomplete="current-password" placeholder="Enter your password" data-i18n-ph="login.password_ph">
+                </div>
+            </div>
+            <button type="submit" class="submit-btn">
+                <span data-i18n="login.submit">Login & Register Node</span>
+            </button>
+        </form>
+
+        <div class="footer-text">
+            <span data-i18n="login.footer">After login, this device will be registered as a worker node automatically.</span><br>
+            <small style="color: var(--text-muted); font-size: 0.75rem;" data-i18n="login.location_hint">To change location settings, please restart the node program.</small>
+        </div>
+    </div>
+        <script>
+            function renderLoginStatusI18n(){
+                var el = document.getElementById('node-status-text');
+                if(el && window.i18n){
+                    var s = el.getAttribute('data-status');
+                    if(s){ el.textContent = i18n.t('login.node_status',{status: s}); }
+                }
+            }
+            document.addEventListener('DOMContentLoaded', renderLoginStatusI18n);
+            document.addEventListener('i18n:languageChanged', renderLoginStatusI18n);
+        </script>
+</body>
+</html>
