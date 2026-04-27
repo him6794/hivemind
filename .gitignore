@@ -1,0 +1,139 @@
+# HiveMind .gitignore
+# 防止不必要的文件進入版本控制
+
+# Python 編譯文件
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 發布版本
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# 環境變數
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE 文件
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 系統文件
+.DS_Store
+Thumbs.db
+.Trash-*
+
+# 日誌文件
+*.log
+logs/
+log/
+
+# 資料庫
+*.db
+*.sqlite
+*.sqlite3
+
+# 執行時期產生的認證與狀態
+worker_credentials.json
+*.ndjson
+task_state.json
+job_queue.json
+
+# 臨時文件
+*.tmp
+*.temp
+temp/
+tmp/
+
+# 備份文件
+*.bak
+*.backup
+*.orig
+*.old
+
+# 編譯產物
+*.exe (除了發布版本)
+*.msi
+*.dmg
+*.deb
+*.rpm
+
+# 快取文件
+.cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 本地配置
+config/local.yaml
+config/secrets.yaml
+
+# 大型二進制文件（發布版本例外）
+*.bin
+*.dat
+
+# 測試產物
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# 文檔生成
+docs/_build/
+docs/build/
+site/
+
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 其他
+*.pid
+*.seed
+*.pid.lock
+*.toml
+*.csv
+*.tsv
+*.log.*
+*.zip
+*.dll
+*.exe
+*.so
+*.pem
+*.key
+*.config
+*.txt
+*.sum

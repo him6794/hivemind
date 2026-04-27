@@ -91,10 +91,9 @@
   - `tasks:active` - 活躍任務集 (Set)
 - **配置**: `NODEPOOL_REDIS_ADDR`
 
-### SQLite 數據庫
-- **master.db** - Master 服務數據（用戶、會話）
-- **nodepool.db** - Nodepool 服務數據（Worker、結算）
-- **配置**: `MASTER_DB_PATH`, `NODEPOOL_DB_PATH`
+### PostgreSQL (5432)
+- **用途**: 關聯式持久化資料（使用者、Worker、結算與任務資料）
+- **配置**: `NODEPOOL_POSTGRES_DSN`
 
 ### 磁盤存儲
 - **種子文件**: `api/torrents/` 目錄
@@ -144,7 +143,7 @@ Select-String "task-id-123" nodepool.log
 | 系統可用性 | ✅ 生產就緒 |
 | 單元測試覆蓋 | 16/16 ✅ |
 | 日誌記錄 | 詳細的 Redispatch 日誌 |
-| 存儲層 | Redis + SQLite + 磁盤 |
+| 存儲層 | PostgreSQL + Redis + 磁盤 |
 | UI 應用 | Master + Worker 分離 |
 
 ## 🔄 工作流程
@@ -174,7 +173,7 @@ Select-String "task-id-123" nodepool.log
 ### 後端
 - **語言**: Go 1.20+
 - **通訊**: gRPC + HTTP
-- **數據庫**: SQLite + Redis
+- **數據庫**: PostgreSQL + Redis
 - **認證**: JWT (bcrypt 加密)
 
 ### 前端
@@ -222,4 +221,5 @@ Select-String "task-id-123" nodepool.log
 **最後更新**: 2026-03-25 14:35 UTC  
 **維護者**: Hivemind 開發團隊  
 **許可證**: MIT (待定)
+
 

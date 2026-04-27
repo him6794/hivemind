@@ -11,20 +11,25 @@
 ### Windows PowerShell
 
 ```powershell
-# 1. 啟動 Redis
+# 1. 啟動 PostgreSQL
+docker run -d -p 5432:5432 --name pg-hivemind `
+  -e POSTGRES_USER=hivemind `
+  -e POSTGRES_PASSWORD=hivemind `
+  -e POSTGRES_DB=hivemind postgres:16-alpine
+
+# 2. 啟動 Redis
 docker run -d -p 6379:6379 --name redis-hivemind redis:7-alpine
 
-# 2. 啟動 Master 服務 (端口 8082)
+# 3. 啟動 Master 服務 (端口 8082)
 $Job1 = Start-Job -ScriptBlock {
     cd D:\hivemind\services\master\cmd\server
-    $env:MASTER_DB_PATH = "D:\hivemind\master.db"
     go run .
 }
 
-# 3. 啟動 Nodepool 服務 (端口 50051, gRPC)
+# 4. 啟動 Nodepool 服務 (端口 50051, gRPC)
 $Job2 = Start-Job -ScriptBlock {
     cd D:\hivemind\services\nodepool\cmd\server
-    $env:NODEPOOL_DB_PATH = "D:\hivemind\nodepool.db"
+    $env:NODEPOOL_POSTGRES_DSN = "postgres://hivemind:hivemind@localhost:5432/hivemind?sslmode=disable"
     $env:NODEPOOL_REDIS_ADDR = "localhost:6379"
     $env:NODEPOOL_TASK_TIMEOUT_SEC = "30"
     $env:NODEPOOL_MAX_REDISPATCH = "2"
@@ -89,7 +94,6 @@ redis-cli ping
 #### 終端 1: Master 服務
 ```powershell
 cd D:\hivemind\services\master\cmd\server
-$env:MASTER_DB_PATH = "D:\hivemind\master.db"
 $env:BT_PUBLIC_BASE_URL = ""  # 留空自動生成
 go run .
 
@@ -100,7 +104,7 @@ go run .
 #### 終端 2: Nodepool 服務
 ```powershell
 cd D:\hivemind\services\nodepool\cmd\server
-$env:NODEPOOL_DB_PATH = "D:\hivemind\nodepool.db"
+$env:NODEPOOL_POSTGRES_DSN = "postgres://hivemind:hivemind@localhost:5432/hivemind?sslmode=disable"
 $env:NODEPOOL_REDIS_ADDR = "localhost:6379"
 $env:NODEPOOL_TASK_TIMEOUT_SEC = "30"
 $env:NODEPOOL_MAX_REDISPATCH = "2"
@@ -153,13 +157,12 @@ npm run dev
 ### Master 服務
 | 變量 | 默認值 | 說明 |
 |------|--------|------|
-| `MASTER_DB_PATH` | `master.db` | SQLite 數據庫路徑 |
 | `BT_PUBLIC_BASE_URL` | (自動生成) | 公開 Torrent 下載地址前綴 |
 
 ### Nodepool 服務
 | 變量 | 默認值 | 說明 |
 |------|--------|------|
-| `NODEPOOL_DB_PATH` | `nodepool.db` | SQLite 數據庫路徑 |
+| `NODEPOOL_POSTGRES_DSN` | (必填) | PostgreSQL 連線字串 |
 | `NODEPOOL_REDIS_ADDR` | `localhost:6379` | Redis 服務器地址 |
 | `NODEPOOL_TASK_TIMEOUT_SEC` | `30` | 任務超時時間（秒） |
 | `NODEPOOL_MAX_REDISPATCH` | `2` | 最大重新調度次數 |
@@ -298,6 +301,17 @@ Remove-Item D:\hivemind\nodepool.log
 version: '3.8'
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: hivemind
+      POSTGRES_PASSWORD: hivemind
+      POSTGRES_DB: hivemind
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
   redis:
     image: redis:7-alpine
     ports:
@@ -311,10 +325,8 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8082:8082"
-    environment:
-      MASTER_DB_PATH: /data/master.db
-    volumes:
-      - ./data:/data
+    depends_on:
+      - postgres
 
   nodepool:
     build:
@@ -323,14 +335,13 @@ services:
     ports:
       - "50051:50051"
     depends_on:
+      - postgres
       - redis
     environment:
-      NODEPOOL_DB_PATH: /data/nodepool.db
+      NODEPOOL_POSTGRES_DSN: postgres://hivemind:hivemind@postgres:5432/hivemind?sslmode=disable
       NODEPOOL_REDIS_ADDR: redis:6379
       NODEPOOL_TASK_TIMEOUT_SEC: 30
       NODEPOOL_MAX_REDISPATCH: 2
-    volumes:
-      - ./data:/data
 
   master-ui:
     build:
@@ -351,6 +362,7 @@ services:
       VITE_API_BASE: http://localhost:8082
 
 volumes:
+  postgres_data:
   redis_data:
 ```
 
@@ -400,8 +412,7 @@ Get-Job | Remove-Job
 docker stop redis-hivemind
 docker rm redis-hivemind
 
-# 清除數據庫
-Remove-Item D:\hivemind\*.db
+# 清除本地日誌
 Remove-Item D:\hivemind\nodepool.log
 ```
 
@@ -416,3 +427,71 @@ Remove-Item D:\hivemind\nodepool.log
 
 **部署完成！系統已準備好進行端到端測試。**
 
+---
+
+## PostgreSQL + Kafka Add-on
+The current `nodepool` service uses PostgreSQL for persistent data and Redis for task metadata/cache.
+
+### Quick start
+
+```powershell
+# PostgreSQL
+docker run -d -p 5432:5432 --name pg-hivemind `
+  -e POSTGRES_USER=hivemind `
+  -e POSTGRES_PASSWORD=hivemind `
+  -e POSTGRES_DB=hivemind postgres:16-alpine
+
+# Kafka-compatible broker using Redpanda
+docker run -d -p 9092:9092 --name redpanda-hivemind `
+  docker.redpanda.com/redpandadata/redpanda:v25.1.2 `
+  redpanda start --overprovisioned --smp 1 --memory 512M --reserve-memory 0M --node-id 0 --check=false `
+  --kafka-addr 0.0.0.0:9092 --advertise-kafka-addr localhost:9092
+```
+
+### Nodepool environment variables
+
+```powershell
+$env:NODEPOOL_POSTGRES_DSN = "postgres://hivemind:hivemind@localhost:5432/hivemind?sslmode=disable"
+$env:NODEPOOL_KAFKA_BROKERS = "localhost:9092"
+$env:NODEPOOL_KAFKA_TOPIC = "hivemind.nodepool.events"
+```
+
+### What gets written
+
+- PostgreSQL tables: `users`, `tasks`, `cpt_transfers`
+- Kafka events: task state changes, CPT settlement events, user balance sync events
+
+### Docker Compose snippet
+
+```yaml
+postgres:
+  image: postgres:16-alpine
+  environment:
+    POSTGRES_USER: hivemind
+    POSTGRES_PASSWORD: hivemind
+    POSTGRES_DB: hivemind
+  ports:
+    - "5432:5432"
+
+redpanda:
+  image: docker.redpanda.com/redpandadata/redpanda:v25.1.2
+  command:
+    - redpanda
+    - start
+    - --overprovisioned
+    - --smp=1
+    - --memory=512M
+    - --reserve-memory=0M
+    - --node-id=0
+    - --check=false
+    - --kafka-addr=0.0.0.0:9092
+    - --advertise-kafka-addr=redpanda:9092
+  ports:
+    - "9092:9092"
+
+nodepool:
+  environment:
+    NODEPOOL_POSTGRES_DSN: postgres://hivemind:hivemind@postgres:5432/hivemind?sslmode=disable
+    NODEPOOL_KAFKA_BROKERS: redpanda:9092
+    NODEPOOL_KAFKA_TOPIC: hivemind.nodepool.events
+```
