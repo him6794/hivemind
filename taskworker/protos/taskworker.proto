@@ -1,0 +1,99 @@
+syntax = "proto3";
+
+package taskworker;
+
+// 文件操作服務
+service FileService {
+    rpc Push(PushRequest) returns (PushResponse);
+    rpc Get(GetRequest) returns (GetResponse);
+    rpc Revise(ReviseRequest) returns (ReviseResponse);
+    rpc Synchronous(SynchronousRequest) returns (SynchronousResponse);
+}
+
+// 遠程函數調用服務
+service RPCService {
+    rpc CallFunction(FunctionCallRequest) returns (FunctionCallResponse);
+}
+
+// DNS 代理服務
+service DNSService {
+    rpc ResolveDomain(DNSRequest) returns (DNSResponse);
+}
+
+// 文件推送請求
+message PushRequest {
+    bytes file_data = 1;
+    string filename = 2;
+    string user_id = 3;
+}
+
+message PushResponse {
+    string file_id = 1;
+    bool status = 2;
+    string message = 3;
+}
+
+// 文件獲取請求
+message GetRequest {
+    string file_id = 1;
+    string user_id = 2;
+}
+
+message GetResponse {
+    bytes file_data = 1;
+    bool status = 2;
+    string message = 3;
+}
+
+// 文件修正請求
+message ReviseRequest {
+    string file_id = 1;
+    string sha256 = 2;
+    int64 time = 3;
+    string user_id = 4;
+    bytes difference = 5;
+}
+
+message ReviseResponse {
+    string file_id = 1;
+    bool status = 2;
+    string message = 3;
+}
+
+// 文件同步請求
+message SynchronousRequest {
+    string file_id = 1;
+    bytes difference = 2;
+}
+
+message SynchronousResponse {
+    string file_id = 1;
+    bool status = 2;
+    string message = 3;
+}
+
+// 遠程函數調用請求
+message FunctionCallRequest {
+    string function_name = 1;
+    repeated string args = 2;
+    map<string, string> kwargs = 3;
+    string user_id = 4;
+}
+
+message FunctionCallResponse {
+    string result = 1;
+    bool status = 2;
+    string error = 3;
+}
+
+// DNS 解析請求
+message DNSRequest {
+    string domain = 1;
+    string request_type = 2;
+}
+
+message DNSResponse {
+    string resolved_ip = 1;
+    bool status = 2;
+    string message = 3;
+}

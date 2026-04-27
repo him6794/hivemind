@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>質數計算分散式系統</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0b0f14;
+            color: #e4e4e4;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: #0f1620;
+            border-radius: 16px;
+            padding: 40px;
+            max-width: 800px;
+            width: 100%;
+            box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        h1 {
+            text-align: center;
+            color: #e8f0ff;
+            margin-bottom: 10px;
+            font-size: clamp(1.5rem, 2.6vw, 2.05rem);
+            font-weight: 650;
+            letter-spacing: 0.2px;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: rgba(255, 255, 255, 0.62);
+            margin-bottom: 40px;
+            font-size: 0.95em;
+        }
+
+        .input-section {
+            background: rgba(255, 255, 255, 0.03);
+            padding: 30px;
+            border-radius: 14px;
+            margin-bottom: 30px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .input-group {
+            margin-bottom: 25px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 10px;
+            color: rgba(255, 255, 255, 0.72);
+            font-weight: 500;
+            font-size: 0.95em;
+        }
+
+        .input-wrapper {
+            position: relative;
+            display: flex;
+            align-items: center;
+            min-width: 0;
+        }
+
+        .input-wrapper input,
+        .input-wrapper label,
+        .input-wrapper span {
+            min-width: 0;
+        }
+
+        .input-wrapper label {
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
+
+        .input-wrapper input[type="checkbox"] {
+            margin-right: 8px;
+        }
+
+        input[type="number"] {
+            width: 100%;
+            padding: 15px 20px;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.10);
+            border-radius: 10px;
+            color: #fff;
+            font-size: 1.1em;
+            transition: all 0.3s ease;
+            outline: none;
+            font-variant-numeric: tabular-nums;
+        }
+
+        input[type="number"]:focus {
+            border-color: rgba(232, 240, 255, 0.55);
+            box-shadow: 0 0 0 3px rgba(232, 240, 255, 0.10);
+        }
+
+        .range-display {
+            margin-top: 15px;
+            padding: 15px;
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 8px;
+            border-left: 3px solid rgba(255, 255, 255, 0.22);
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+            color: rgba(255, 255, 255, 0.86);
+            line-height: 1.45;
+            max-width: 100%;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
+
+        .range-display small {
+            display: block;
+            margin-top: 8px;
+            color: rgba(255, 255, 255, 0.55);
+            overflow-wrap: anywhere;
+        }
+
+        button {
+            width: 100%;
+            padding: 18px;
+            background: rgba(232, 240, 255, 0.10);
+            color: white;
+            border: 1px solid rgba(232, 240, 255, 0.18);
+            border-radius: 10px;
+            font-size: 1.1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            box-shadow: none;
+        }
+
+        button:hover:not(:disabled) {
+            background: rgba(232, 240, 255, 0.16);
+        }
+
+        button:active:not(:disabled) {
+            background: rgba(232, 240, 255, 0.20);
+        }
+
+        button:disabled {
+            background: rgba(255, 255, 255, 0.04);
+            cursor: not-allowed;
+            box-shadow: none;
+            opacity: 0.6;
+        }
+
+        .progress-section {
+            display: none;
+            margin-top: 30px;
+        }
+
+        .progress-section.active {
+            display: block;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-bottom: 25px;
+        }
+
+        .stat-card {
+            background: rgba(255, 255, 255, 0.03);
+            padding: 20px;
+            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            text-align: center;
+            min-width: 0;
+        }
+
+        .stat-label {
+            color: rgba(255, 255, 255, 0.55);
+            font-size: 0.85em;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .stat-value {
+            color: rgba(255, 255, 255, 0.92);
+            font-size: clamp(1.25rem, 2.4vw, 1.75rem);
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+            overflow-wrap: anywhere;
+        }
+
+        .progress-bar-container {
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 15px;
+            padding: 25px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .progress-label {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 12px;
+            color: rgba(255, 255, 255, 0.72);
+            font-size: 0.9em;
+            gap: 12px;
+            flex-wrap: wrap;
+            min-width: 0;
+        }
+
+        #progressPercent {
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 35px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 20px;
+            overflow: hidden;
+            position: relative;
+            box-shadow: inset 0 2px 10px rgba(0, 0, 0, 0.3);
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: rgba(232, 240, 255, 0.22);
+            border-radius: 20px;
+            transition: width 0.5s ease;
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            padding-right: 15px;
+            color: white;
+            font-weight: 600;
+            font-size: 0.9em;
+            box-shadow: none;
+            position: relative;
+            overflow: hidden;
+            min-width: 0;
+        }
+
+        .status-message {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 10px;
+            text-align: center;
+            font-weight: 500;
+            max-width: 100%;
+            overflow-wrap: anywhere;
+        }
+
+        .status-running {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            color: rgba(255, 255, 255, 0.86);
+        }
+
+        .status-completed {
+            background: rgba(0, 255, 136, 0.1);
+            border: 1px solid rgba(0, 255, 136, 0.3);
+            color: #00ff88;
+        }
+
+        .error-message {
+            background: rgba(255, 68, 68, 0.1);
+            border: 1px solid rgba(255, 68, 68, 0.3);
+            color: #ff4444;
+            padding: 15px;
+            border-radius: 10px;
+            margin-top: 15px;
+            display: none;
+            max-width: 100%;
+            overflow-wrap: anywhere;
+        }
+
+        .error-message.active {
+            display: block;
+        }
+
+        .divider {
+            height: 1px;
+            background: rgba(255, 255, 255, 0.08);
+            margin: 18px 0;
+        }
+
+        .row {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            align-items: center;
+            min-width: 0;
+        }
+
+        .row > * {
+            min-width: 0;
+        }
+
+        .btn-secondary {
+            margin-top: 12px;
+            background: transparent;
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            color: rgba(255, 255, 255, 0.86);
+            text-transform: none;
+            letter-spacing: 0;
+            padding: 14px;
+        }
+
+        .btn-secondary:hover:not(:disabled) {
+            background: rgba(255, 255, 255, 0.06);
+        }
+
+        .mono-block {
+            margin-top: 14px;
+            padding: 14px;
+            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+            color: rgba(255, 255, 255, 0.86);
+            overflow-wrap: anywhere;
+            white-space: pre-wrap;
+        }
+
+        details.panel {
+            margin-top: 14px;
+            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            overflow: hidden;
+        }
+
+        details.panel > summary {
+            cursor: pointer;
+            padding: 12px 14px;
+            color: rgba(255, 255, 255, 0.90);
+            font-weight: 600;
+            user-select: none;
+            list-style: none;
+        }
+
+        details.panel > summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .panel-summary {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            flex-wrap: wrap;
+            min-width: 0;
+        }
+
+        .panel-summary span {
+            min-width: 0;
+            overflow-wrap: anywhere;
+        }
+
+        .panel-body {
+            border-top: 1px solid rgba(255, 255, 255, 0.06);
+            padding: 0;
+        }
+
+        .panel-body .mono-block {
+            margin-top: 0;
+            border: none;
+            border-radius: 0;
+            background: transparent;
+            max-height: 240px;
+            overflow: auto;
+        }
+
+        @media (max-width: 600px) {
+            .container {
+                padding: 25px;
+            }
+
+            h1 {
+                font-size: 1.8em;
+            }
+
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            * {
+                transition: none !important;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>質數計算分散式系統</h1>
+        <p class="subtitle">使用 10 的冪次方進行大規模質數運算</p>
+
+        <div class="input-section">
+            <button class="btn-secondary" id="refreshAllButton" onclick="refreshAll()">更新狀態</button>
+            <button class="btn-secondary" id="setupExperimentsButton" onclick="setupExperiments()">一鍵生成所有實驗</button>
+
+            <details class="panel" id="queuePanel" open>
+                <summary>
+                    <div class="panel-summary">
+                        <span>隊列/結果</span>
+                        <span id="queueSummary" style="color: rgba(255,255,255,0.62); font-weight: 500;">尚未載入</span>
+                    </div>
+                </summary>
+                <div class="panel-body">
+                    <div class="mono-block" id="queueBlock" style="display:none;"></div>
+                </div>
+            </details>
+
+            <details class="panel" id="nodesPanel">
+                <summary>
+                    <div class="panel-summary">
+                        <span>節點</span>
+                        <span id="nodesSummary" style="color: rgba(255,255,255,0.62); font-weight: 500;">尚未載入</span>
+                    </div>
+                </summary>
+                <div class="panel-body">
+                    <div class="mono-block" id="nodesBlock" style="display:none;"></div>
+                </div>
+            </details>
+
+            <details class="panel" id="experimentPanel">
+                <summary>
+                    <div class="panel-summary">
+                        <span>實驗結果</span>
+                        <span id="experimentSummary" style="color: rgba(255,255,255,0.62); font-weight: 500;">點擊載入</span>
+                    </div>
+                </summary>
+                <div class="panel-body">
+                    <div style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.06);">
+                        <button class="btn-secondary" onclick="loadExperimentResults()" style="margin: 0; padding: 8px 16px; width: auto;">載入所有結果</button>
+                    </div>
+                    <div class="mono-block" id="experimentBlock" style="display:none;"></div>
+                </div>
+            </details>
+
+            <div class="error-message" id="errorMessage"></div>
+        </div>
+
+        <div class="progress-section" id="progressSection">
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-label">總區塊</div>
+                    <div class="stat-value" id="totalChunks">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">已完成</div>
+                    <div class="stat-value" id="completedChunks">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">剩餘</div>
+                    <div class="stat-value" id="remainingChunks">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">已耗時</div>
+                    <div class="stat-value" id="elapsedTime">0s</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">找到質數</div>
+                    <div class="stat-value" id="primesFound">0</div>
+                </div>
+            </div>
+
+            <div class="progress-bar-container">
+                <div class="progress-label">
+                    <span>進度</span>
+                    <span id="progressPercent">0%</span>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressFill" style="width: 0%">
+                        <span id="progressText">0%</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="status-message status-running" id="statusMessage">
+                任務進行中...
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let progressInterval = null;
+        let lastServerState = null;
+        let queueInterval = null;
+        let nodesInterval = null;
+
+        function startQueueMonitoring() {
+            if (queueInterval) {
+                clearInterval(queueInterval);
+            }
+            queueInterval = setInterval(refreshQueueStatus, 3000);
+            refreshQueueStatus();
+
+            if (nodesInterval) {
+                clearInterval(nodesInterval);
+            }
+            nodesInterval = setInterval(refreshNodes, 3000);
+            refreshNodes();
+        }
+
+        function refreshAll() {
+            refreshQueueStatus();
+            refreshNodes();
+            updateProgress();
+        }
+
+        async function setupExperiments() {
+            const btn = document.getElementById('setupExperimentsButton');
+            if (!confirm('將生成完整實驗網格（n=5..12, workers=1/10/20/30/40, chunks=50/100/150/200/250, 各50次），約10,000個任務。確定？')) {
+                return;
+            }
+            
+            btn.disabled = true;
+            btn.textContent = '生成中...';
+            
+            try {
+                const resp = await fetch('/setup_experiments', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        clear_queue: false,
+                    })
+                });
+                
+                const data = await resp.json();
+                if (!resp.ok) {
+                    throw new Error(data.error || '生成失敗');
+                }
+                
+                alert(`成功！組合數=${data.combos}, 加入隊列=${data.enqueued}, 總隊列=${data.total_queue}`);
+                await refreshQueueStatus();
+                await refreshNodes();
+            } catch (e) {
+                alert('失敗: ' + e.message);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '一鍵生成所有實驗';
+            }
+        }
+
+        async function loadExperimentResults() {
+            const block = document.getElementById('experimentBlock');
+            const summary = document.getElementById('experimentSummary');
+            try {
+                const resp = await fetch('/experiment_results?limit=1000');
+                const data = await resp.json();
+                const items = data.items || [];
+                
+                if (summary) {
+                    summary.textContent = `共 ${data.total} 筆結果`;
+                }
+                
+                if (!items.length) {
+                    block.textContent = '目前沒有實驗結果';
+                    block.style.display = 'block';
+                    return;
+                }
+                
+                const lines = [];
+                lines.push('run_id | n | chunks | workers | rep | primes | time(s) | completed');
+                for (const it of items) {
+                    const rid = (it.run_id || '').substring(0, 20);
+                    const n = it.n || '-';
+                    const chunks = it.chunks || '-';
+                    const workers = it.desired_workers || 0;
+                    const rep = (it.rep_index && it.rep_total) ? `${it.rep_index}/${it.rep_total}` : '-';
+                    const primes = (it.total_primes != null) ? Number(it.total_primes).toLocaleString('en-US') : 'n/a';
+                    const time = (it.total_time_sec != null) ? Number(it.total_time_sec).toFixed(3) : 'n/a';
+                    const completed = it.completed_at ? '✓' : '-';
+                    lines.push(`${rid} | ${n} | ${chunks} | ${workers} | ${rep} | ${primes} | ${time} | ${completed}`);
+                }
+                
+                block.textContent = lines.join('\n');
+                block.style.display = 'block';
+            } catch (e) {
+                if (block) {
+                    block.textContent = '載入失敗: ' + e.message;
+                    block.style.display = 'block';
+                }
+            }
+        }
+
+        async function refreshNodes() {
+            const block = document.getElementById('nodesBlock');
+            const summary = document.getElementById('nodesSummary');
+            try {
+                const resp = await fetch('/nodes');
+                const s = await resp.json();
+
+                const nodes = Array.isArray(s.nodes) ? s.nodes : [];
+                const lines = [];
+                const registered = s.registered_nodes || 0;
+                const aliveNodes = s.alive_nodes || 0;
+                const limit = s.max_active_workers || 0;
+                if (summary) {
+                    summary.textContent = `已註冊=${registered} | alive=${aliveNodes} | 限制=${limit}（0=不限）`;
+                }
+
+                lines.push(`節點: 已註冊=${registered} | alive=${aliveNodes} | 限制=${limit}（0=不限）`);
+
+                if (!nodes.length) {
+                    lines.push('目前沒有節點資料');
+                } else {
+                    lines.push('node_id | alive | active | cpu% | mem% | task | progress | 耗時');
+                    for (const n of nodes) {
+                        const load = n.load || {};
+                        const cpu = (load.cpu_percent != null) ? Number(load.cpu_percent).toFixed(1) : '-';
+                        const mem = (load.mem_percent != null) ? Number(load.mem_percent).toFixed(0) : '-';
+                        const alive = n.alive ? 'Y' : 'N';
+                        const active = n.active_in_run ? 'Y' : 'N';
+                        const task = n.current_task_range || '-';
+                        const pct = (n.current_task_progress != null) ? `${Number(n.current_task_progress).toFixed(1)}%` : '-';
+                        const elapsed = (n.current_task_elapsed != null) ? `${Number(n.current_task_elapsed).toFixed(1)}s` : '-';
+                        lines.push(`${n.node_id} | ${alive} | ${active} | ${cpu} | ${mem} | ${task} | ${pct} | ${elapsed}`);
+                    }
+                }
+
+                block.textContent = lines.join('\n');
+                block.style.display = 'block';
+            } catch (e) {
+                // ignore
+            }
+        }
+
+        async function refreshQueueStatus() {
+            const block = document.getElementById('queueBlock');
+            const summary = document.getElementById('queueSummary');
+            try {
+                const sResp = await fetch('/queue_status');
+                const s = await sResp.json();
+                const rResp = await fetch('/results_tail?n=8');
+                const r = await rResp.json();
+
+                const lines = [];
+                const runningText = s.running ? '運行中' : '閒置';
+                lines.push(`隊列狀態: ${runningText}`);
+                if (s.current_run && s.current_run.run_id) {
+                    const cr = s.current_run;
+                    const nVal = cr.n;
+                    const chunks = cr.chunks;
+                    const w = cr.desired_workers || 0;
+                    const rep = (cr.rep_index && cr.rep_total) ? ` | 第 ${cr.rep_index}/${cr.rep_total} 次` : '';
+                    lines.push(`目前組合: 10^${nVal} | 台數=${w}（0=不限） | chunks=${chunks}${rep}`);
+                    lines.push(`run_id: ${cr.run_id}`);
+                }
+                lines.push(`隊列剩餘: ${s.queue_length}`);
+                lines.push(`允許台數: ${s.max_active_workers || 0}（0=不限）`);
+                lines.push(`已參與台數: ${s.active_workers}`);
+
+                if (summary) {
+                    const q = s.queue_length || 0;
+                    const aw = s.active_workers || 0;
+                    summary.textContent = `${runningText} | 剩餘=${q} | 參與=${aw}`;
+                }
+
+                if (Array.isArray(r.items) && r.items.length) {
+                    lines.push('最近結果（最新在後）:');
+                    for (const it of r.items) {
+                        const nVal = it.n;
+                        const tt = (it.total_time_sec != null) ? `${Number(it.total_time_sec).toFixed(3)}s` : 'n/a';
+                        const primes = (it.total_primes != null) ? Number(it.total_primes).toLocaleString('en-US') : 'n/a';
+                        lines.push(`- ${it.run_id || ''} | 10^${nVal} | primes=${primes} | time=${tt}`);
+                    }
+                }
+
+                block.textContent = lines.join('\n');
+                block.style.display = 'block';
+            } catch (e) {
+                // ignore
+            }
+        }
+
+        function startProgressMonitoring() {
+            if (progressInterval) {
+                clearInterval(progressInterval);
+            }
+
+            progressInterval = setInterval(updateProgress, 1000);
+            updateProgress();
+        }
+
+        async function updateProgress() {
+            try {
+                const response = await fetch('/progress');
+                const data = await response.json();
+
+                if (!data.initialized) {
+                    return;
+                }
+
+                document.getElementById('totalChunks').textContent = data.total_chunks;
+                document.getElementById('completedChunks').textContent = data.completed_chunks;
+                document.getElementById('remainingChunks').textContent = data.remaining_chunks;
+                document.getElementById('elapsedTime').textContent = data.elapsed_time + 's';
+                document.getElementById('progressPercent').textContent = data.progress_percent + '%';
+                document.getElementById('progressText').textContent = data.progress_percent + '%';
+                document.getElementById('progressFill').style.width = data.progress_percent + '%';
+                
+                // 顯示找到的質數總數
+                const primesFound = data.total_primes_found || 0;
+                document.getElementById('primesFound').textContent = primesFound.toLocaleString('en-US');
+
+                const statusMsg = document.getElementById('statusMessage');
+                const isComplete = (!data.running && data.completed_chunks === data.total_chunks && data.remaining_chunks === 0);
+                if (isComplete) {
+                    statusMsg.textContent = `任務已完成！共找到 ${primesFound.toLocaleString('en-US')} 個質數`;
+                    statusMsg.className = 'status-message status-completed';
+                    clearInterval(progressInterval);
+                } else {
+                    statusMsg.textContent = `任務進行中... (${data.completed_chunks}/${data.total_chunks} 區塊已完成，已找到 ${primesFound.toLocaleString('en-US')} 個質數)`;
+                    statusMsg.className = 'status-message status-running';
+                }
+
+            } catch (error) {
+                console.error('更新進度時出錯:', error);
+            }
+        }
+
+        // 預設進入監控模式：自動輪詢三個面板
+        (function() {
+            document.getElementById('progressSection').classList.add('active');
+            startProgressMonitoring();
+            startQueueMonitoring();
+        })();
+    </script>
+</body>
+</html>
