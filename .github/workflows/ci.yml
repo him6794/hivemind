@@ -1,0 +1,181 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+jobs:
+  test-backend:
+    name: Test Go Services
+    runs-on: ubuntu-latest
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: hivemind
+          POSTGRES_PASSWORD: hivemind
+          POSTGRES_DB: hivemind
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.25'
+        cache: true
+
+    - name: Install dependencies
+      run: |
+        cd services/nodepool && go mod download
+        cd ../master && go mod download
+        cd ../worker && go mod download
+
+    - name: Run tests - Nodepool
+      env:
+        NODEPOOL_REDIS_ADDR: localhost:6379
+        NODEPOOL_POSTGRES_DSN: postgres://hivemind:hivemind@localhost:5432/hivemind?sslmode=disable
+        NODEPOOL_TASK_TIMEOUT_SEC: 30
+        NODEPOOL_MAX_REDISPATCH: 2
+      run: |
+        cd services/nodepool
+        go test -v -race -coverprofile=coverage.out ./...
+        go tool cover -func=coverage.out
+
+    - name: Run tests - Master
+      run: |
+        cd services/master
+        go test -v -race -coverprofile=coverage.out ./...
+        go tool cover -func=coverage.out
+
+    - name: Run tests - Worker
+      run: |
+        cd services/worker
+        go test -v -race -coverprofile=coverage.out ./...
+        go tool cover -func=coverage.out
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v4
+      with:
+        files: ./services/nodepool/coverage.out,./services/master/coverage.out,./services/worker/coverage.out
+        flags: backend
+        name: backend-coverage
+
+  lint-backend:
+    name: Lint Go Code
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.25'
+
+    - name: Run golangci-lint
+      uses: golangci/golangci-lint-action@v4
+      with:
+        version: latest
+        working-directory: services/nodepool
+
+    - name: Run golangci-lint - Master
+      uses: golangci/golangci-lint-action@v4
+      with:
+        version: latest
+        working-directory: services/master
+
+    - name: Run golangci-lint - Worker
+      uses: golangci/golangci-lint-action@v4
+      with:
+        version: latest
+        working-directory: services/worker
+
+  test-frontend:
+    name: Test Frontend
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: |
+          frontend/master-ui/package-lock.json
+          frontend/worker-ui/package-lock.json
+
+    - name: Install dependencies - Master UI
+      run: |
+        cd frontend/master-ui
+        npm ci
+
+    - name: Build - Master UI
+      run: |
+        cd frontend/master-ui
+        npm run build
+
+    - name: Install dependencies - Worker UI
+      run: |
+        cd frontend/worker-ui
+        npm ci
+
+    - name: Build - Worker UI
+      run: |
+        cd frontend/worker-ui
+        npm run build
+
+  build-docker:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build Nodepool image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./services/nodepool
+        push: false
+        tags: hivemind/nodepool:${{ github.sha }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Build Worker image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./services/worker
+        push: false
+        tags: hivemind/worker:${{ github.sha }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max

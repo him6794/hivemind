@@ -136,4 +136,7 @@ yarn-error.log*
 *.key
 *.config
 *.txt
-*.sum
+
+# Go 依賴管理 - 保留 go.sum 以確保依賴完整性
+# *.sum  # ❌ 已移除：這會排除 go.sum
+!go.sum

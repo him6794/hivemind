@@ -1,0 +1,198 @@
+version: '3.8'
+
+services:
+  # ============================================
+  # 基礎設施服務
+  # ============================================
+
+  redis:
+    image: redis:7-alpine
+    container_name: hivemind-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - hivemind-network
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: hivemind-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-hivemind}
+      POSTGRES_USER: ${POSTGRES_USER:-hivemind}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hivemind}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hivemind"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - hivemind-network
+
+  # ============================================
+  # 後端服務
+  # ============================================
+
+  nodepool:
+    build:
+      context: ../services/nodepool
+      dockerfile: Dockerfile
+    container_name: hivemind-nodepool
+    restart: unless-stopped
+    environment:
+      NODEPOOL_REDIS_ADDR: redis:6379
+      NODEPOOL_POSTGRES_DSN: postgres://${POSTGRES_USER:-hivemind}:${POSTGRES_PASSWORD:-hivemind}@postgres:5432/${POSTGRES_DB:-hivemind}?sslmode=disable
+      NODEPOOL_TASK_TIMEOUT_SEC: ${NODEPOOL_TASK_TIMEOUT_SEC:-30}
+      NODEPOOL_MAX_REDISPATCH: ${NODEPOOL_MAX_REDISPATCH:-2}
+      NODEPOOL_ENABLE_HTTP_AUTH: ${NODEPOOL_ENABLE_HTTP_AUTH:-1}
+      NODEPOOL_GRPC_ADDR: :50051
+      NODEPOOL_HTTP_ADDR: :8080
+      NODEPOOL_JWT_SECRET: ${NODEPOOL_JWT_SECRET:-change-me-in-production}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "50051:50051"  # gRPC
+      - "8080:8080"    # HTTP API
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - hivemind-network
+    volumes:
+      - nodepool-logs:/app/logs
+
+  master:
+    build:
+      context: ../services/master
+      dockerfile: Dockerfile
+    container_name: hivemind-master
+    restart: unless-stopped
+    environment:
+      MASTER_HTTP_PORT: ${MASTER_HTTP_PORT:-8082}
+      MASTER_NODEPOOL_GRPC: nodepool:50051
+      BT_PUBLIC_BASE_URL: ${BT_PUBLIC_BASE_URL:-}
+      MASTER_TORRENT_DIR: /app/torrents
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "8082:8082"
+    depends_on:
+      nodepool:
+        condition: service_healthy
+    networks:
+      - hivemind-network
+    volumes:
+      - master-torrents:/app/torrents
+      - master-logs:/app/logs
+
+  worker:
+    build:
+      context: ../services/worker
+      dockerfile: Dockerfile
+    container_name: hivemind-worker
+    restart: unless-stopped
+    environment:
+      WORKER_ADDR: :50053
+      WORKER_NODEPOOL_ADDR: nodepool:50051
+      WORKER_NAME: ${WORKER_NAME:-worker-docker-1}
+      WORKER_LOCATION: ${WORKER_LOCATION:-docker}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "50053:50053"
+    depends_on:
+      nodepool:
+        condition: service_healthy
+    networks:
+      - hivemind-network
+    volumes:
+      - worker-tasks:/app/tasks
+      - worker-logs:/app/logs
+    # 如果需要 GPU 支援，取消註解以下行
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  # ============================================
+  # 前端服務（可選）
+  # ============================================
+
+  master-ui:
+    build:
+      context: ../frontend/master-ui
+      dockerfile: Dockerfile
+    container_name: hivemind-master-ui
+    restart: unless-stopped
+    environment:
+      VITE_API_BASE: http://localhost:8082
+    ports:
+      - "3000:80"
+    depends_on:
+      - master
+    networks:
+      - hivemind-network
+
+  worker-ui:
+    build:
+      context: ../frontend/worker-ui
+      dockerfile: Dockerfile
+    container_name: hivemind-worker-ui
+    restart: unless-stopped
+    environment:
+      VITE_WORKER_API_BASE: http://localhost:8082
+    ports:
+      - "3001:80"
+    depends_on:
+      - master
+    networks:
+      - hivemind-network
+
+# ============================================
+# 網路配置
+# ============================================
+
+networks:
+  hivemind-network:
+    driver: bridge
+    name: hivemind-network
+
+# ============================================
+# 資料持久化
+# ============================================
+
+volumes:
+  redis-data:
+    name: hivemind-redis-data
+  postgres-data:
+    name: hivemind-postgres-data
+  nodepool-logs:
+    name: hivemind-nodepool-logs
+  master-torrents:
+    name: hivemind-master-torrents
+  master-logs:
+    name: hivemind-master-logs
+  worker-tasks:
+    name: hivemind-worker-tasks
+  worker-logs:
+    name: hivemind-worker-logs
