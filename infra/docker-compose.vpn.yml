@@ -1,0 +1,207 @@
+version: '3.8'
+
+services:
+  # Redis for task queue and caching
+  redis:
+    image: redis:7-alpine
+    container_name: hivemind-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    networks:
+      - hivemind-net
+    restart: unless-stopped
+
+  # PostgreSQL for Headscale and persistent data
+  postgres:
+    image: postgres:15-alpine
+    container_name: hivemind-postgres
+    environment:
+      POSTGRES_DB: headscale
+      POSTGRES_USER: headscale
+      POSTGRES_PASSWORD: headscale_password
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U headscale"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    networks:
+      - hivemind-net
+    restart: unless-stopped
+
+  # Nodepool with embedded Headscale VPN server
+  nodepool:
+    build:
+      context: ../services/nodepool
+      dockerfile: Dockerfile
+    container_name: hivemind-nodepool
+    environment:
+      # Nodepool configuration
+      NODEPOOL_GRPC_PORT: ":50051"
+
+      # VPN/Headscale configuration
+      VPN_ENABLED: "true"
+      VPN_SERVER_URL: "http://nodepool:8080"
+      VPN_LISTEN_ADDR: "0.0.0.0:8080"
+      VPN_GRPC_LISTEN_ADDR: "0.0.0.0:50443"
+      VPN_IP_PREFIX: "100.64.0.0/10"
+      VPN_BASE_DOMAIN: "hivemind.local"
+      VPN_EPHEMERAL_NODES: "true"
+      VPN_NODE_EXPIRY: "24h"
+
+      # Database configuration
+      VPN_DB_TYPE: "postgres"
+      VPN_DB_HOST: "postgres"
+      VPN_DB_PORT: "5432"
+      VPN_DB_NAME: "headscale"
+      VPN_DB_USER: "headscale"
+      VPN_DB_PASSWORD: "headscale_password"
+
+      # DERP configuration (optional)
+      VPN_DERP_AUTO_UPDATE: "true"
+
+      # Redis configuration
+      REDIS_ADDR: "redis:6379"
+    ports:
+      - "50051:50051"  # gRPC
+      - "8080:8080"    # Headscale HTTP
+      - "50443:50443"  # Headscale gRPC
+    volumes:
+      - nodepool-data:/var/lib/headscale
+      - ./config:/etc/hivemind:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - hivemind-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "grpc_health_probe", "-addr=:50051"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # Worker Node 1
+  worker1:
+    build:
+      context: ../services/worker
+      dockerfile: Dockerfile
+    container_name: hivemind-worker1
+    environment:
+      WORKER_ID: "worker-001"
+      NODEPOOL_ADDR: "nodepool:50051"
+      WORKER_GRPC_PORT: ":50052"
+
+      # VPN configuration
+      VPN_ENABLED: "true"
+      VPN_STATE_DIR: "/var/lib/hivemind-vpn"
+      VPN_HOSTNAME: "worker-001"
+    volumes:
+      - worker1-vpn:/var/lib/hivemind-vpn
+      - worker1-data:/var/lib/hivemind
+    depends_on:
+      nodepool:
+        condition: service_healthy
+    networks:
+      - hivemind-net
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+
+  # Worker Node 2
+  worker2:
+    build:
+      context: ../services/worker
+      dockerfile: Dockerfile
+    container_name: hivemind-worker2
+    environment:
+      WORKER_ID: "worker-002"
+      NODEPOOL_ADDR: "nodepool:50051"
+      WORKER_GRPC_PORT: ":50052"
+
+      # VPN configuration
+      VPN_ENABLED: "true"
+      VPN_STATE_DIR: "/var/lib/hivemind-vpn"
+      VPN_HOSTNAME: "worker-002"
+    volumes:
+      - worker2-vpn:/var/lib/hivemind-vpn
+      - worker2-data:/var/lib/hivemind
+    depends_on:
+      nodepool:
+        condition: service_healthy
+    networks:
+      - hivemind-net
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+
+  # Worker Node 3 (optional, can be scaled)
+  worker3:
+    build:
+      context: ../services/worker
+      dockerfile: Dockerfile
+    container_name: hivemind-worker3
+    environment:
+      WORKER_ID: "worker-003"
+      NODEPOOL_ADDR: "nodepool:50051"
+      WORKER_GRPC_PORT: ":50052"
+
+      # VPN configuration
+      VPN_ENABLED: "true"
+      VPN_STATE_DIR: "/var/lib/hivemind-vpn"
+      VPN_HOSTNAME: "worker-003"
+    volumes:
+      - worker3-vpn:/var/lib/hivemind-vpn
+      - worker3-data:/var/lib/hivemind
+    depends_on:
+      nodepool:
+        condition: service_healthy
+    networks:
+      - hivemind-net
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    profiles:
+      - extra-workers
+
+networks:
+  hivemind-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  redis-data:
+  postgres-data:
+  nodepool-data:
+  worker1-vpn:
+  worker1-data:
+  worker2-vpn:
+  worker2-data:
+  worker3-vpn:
+  worker3-data:

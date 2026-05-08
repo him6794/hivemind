@@ -1,0 +1,24 @@
+# Hivemind 專案開發行為準則
+
+## 1. 核心開發流程 (Task Execution)
+- **規劃先行**：在執行任何長任務前，必須先在根目錄建立或更新 `TODO.md`，列出拆解後的子任務。
+- **自動測試**：每完成一個功能模組，必須自動執行該模組的單元測試（如 `pytest`）。若測試失敗，優先修復 Bug 才能進行下一步。
+- **環境感知**：本專案可能運行於 Orange Pi 3B (ARM) 或 Workstation (x86_64)，執行編譯或安裝指令前請先確認架構。
+
+## 2. 代碼規範 (Coding Standards)
+- **語言限制**：主要使用 go。保持代碼異步化（asyncio），特別是涉及 gRPC 與網絡通訊的部分。
+- **通訊協議**：修改 `.proto` 文件後，必須自動執行產出指令（protoc）更新 go代碼。
+
+## 3. Git 管理 (Git Conventions)
+- **分支規範**：新功能開發請主動詢問是否需建立 `feature/` 分支。
+- **提交規範**：Commit message 必須遵循 Conventional Commits（例如：`feat: 增加 gRPC 節點認證機制`）。
+- **小步快跑**：建議每完成一個 `TODO.md` 中的子項並通過測試後，即進行一次 commit。
+
+## 4. 自動化測試與驗證 (Testing & Validation)
+- 執行測試時，應優先檢查 Docker 容器內的服務狀態。
+- 測試完成後，必須讀取日誌（Logs）並摘要錯誤訊息，不可只回報「失敗」。
+
+## 5. 禁忌與安全性
+- 禁止讀取 `.env` 檔案中的私鑰。
+- 禁止在未經確認的情況下執行 `rm -rf` 等具破壞性的指令。
+- 所有的 Docker Compose 變更需確保與 Tailscale 網絡環境相容。
