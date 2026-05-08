@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+package nodepool;
+
+option go_package = "./pb";
+
+// VPN 相關的訊息定義
+
+// Worker 加入 VPN 網路的請求
+message JoinVPNRequest {
+    string worker_id = 1;        // Worker 節點唯一識別碼
+    string hostname = 2;          // Worker 主機名稱
+    string auth_token = 3;        // 認證 Token (JWT)
+}
+
+// Worker 加入 VPN 網路的回應
+message JoinVPNResponse {
+    bool success = 1;
+    string status_message = 2;
+    string virtual_ip = 3;        // 分配的虛擬 IP (100.64.x.x)
+    string auth_key = 4;          // Headscale 認證金鑰
+    string derp_map = 5;          // DERP 伺服器配置 (JSON)
+}
+
+// 取得任務相關 Peer 節點的請求
+message GetTaskPeersRequest {
+    string task_id = 1;           // 任務 ID
+    string worker_id = 2;         // 請求的 Worker ID
+    string auth_token = 3;        // 認證 Token
+}
+
+// Peer 節點資訊
+message PeerInfo {
+    string worker_id = 1;         // Worker ID
+    string virtual_ip = 2;        // 虛擬 IP
+    string hostname = 3;          // 主機名稱
+    bool online = 4;              // 是否在線
+    int64 last_seen = 5;          // 最後上線時間 (Unix timestamp)
+}
+
+// 取得任務相關 Peer 節點的回應
+message GetTaskPeersResponse {
+    bool success = 1;
+    string status_message = 2;
+    repeated PeerInfo peers = 3;  // Peer 節點列表
+}
+
+// Worker 離開 VPN 網路的請求
+message LeaveVPNRequest {
+    string worker_id = 1;         // Worker 節點 ID
+    string auth_token = 2;        // 認證 Token
+}
+
+// Worker 離開 VPN 網路的回應
+message LeaveVPNResponse {
+    bool success = 1;
+    string status_message = 2;
+}
+
+// 更新 Worker VPN 狀態的請求 (心跳)
+message UpdateVPNStatusRequest {
+    string worker_id = 1;         // Worker 節點 ID
+    string virtual_ip = 2;        // 虛擬 IP
+    bool online = 3;              // 是否在線
+    string auth_token = 4;        // 認證 Token
+}
+
+// 更新 Worker VPN 狀態的回應
+message UpdateVPNStatusResponse {
+    bool success = 1;
+    string status_message = 2;
+}
+
+// VPN 服務定義
+service VPNService {
+    // Worker 加入 VPN 網路
+    rpc JoinVPN(JoinVPNRequest) returns (JoinVPNResponse);
+
+    // 取得任務相關的 Peer 節點列表
+    rpc GetTaskPeers(GetTaskPeersRequest) returns (GetTaskPeersResponse);
+
+    // Worker 離開 VPN 網路
+    rpc LeaveVPN(LeaveVPNRequest) returns (LeaveVPNResponse);
+
+    // 更新 Worker VPN 狀態 (心跳)
+    rpc UpdateVPNStatus(UpdateVPNStatusRequest) returns (UpdateVPNStatusResponse);
+}

@@ -877,6 +877,21 @@ func (m *masterNodeServer) setTaskOutput(taskID, output string) bool {
 		return false
 	}
 	appendTaskLogLocked(t, output)
+
+	// 記錄任務輸出到日誌文件
+	outputLen := len(output)
+	if outputLen <= 500 {
+		// 短輸出：完整記錄
+		log.Printf("task_output_received task_id=%s worker_id=%s output=%s", taskID, t.WorkerID, output)
+	} else {
+		// 長輸出：記錄摘要
+		preview := output
+		if outputLen > 200 {
+			preview = output[:200] + "..."
+		}
+		log.Printf("task_output_received task_id=%s worker_id=%s length=%d preview=%s", taskID, t.WorkerID, outputLen, preview)
+	}
+
 	lower := strings.ToLower(strings.TrimSpace(output))
 	if strings.HasPrefix(lower, "task failed") || strings.HasPrefix(lower, "program error") {
 		t.Status = "FAILED"
@@ -885,6 +900,7 @@ func (m *masterNodeServer) setTaskOutput(taskID, output string) bool {
 		delete(m.taskRoutes, taskID)
 		t.LastUpdate = time.Now()
 		m.saveTaskLocked(t)
+		log.Printf("task_failed task_id=%s reason=%s", taskID, output)
 		return true
 	}
 	if t.Status == "" || t.Status == "DISPATCHED" || t.Status == "PENDING" {
@@ -1554,12 +1570,31 @@ func (w *workerIngressServer) TaskUsage(ctx context.Context, req *pb.TaskUsageRe
 }
 
 // generateMagnetFromZip generates a simple magnet link from zip file data
-func generateMagnetFromZip(filename string, fileData []byte) string {
+// generateMagnetFromZipStream generates a magnet link from a zip file using streaming
+// to avoid loading the entire file into memory
+func generateMagnetFromZipStream(filename string, reader io.Reader, maxSize int64) (string, int64, error) {
 	// Use SHA1 hash as info_hash (simplified, not actual torrent)
-	h := sha1.Sum(fileData)
-	hashHex := fmt.Sprintf("%040x", h)
+	hasher := sha1.New()
+
+	// Use LimitReader to enforce size limit while reading
+	limitedReader := io.LimitReader(reader, maxSize+1)
+
+	// Stream the file through the hasher
+	bytesRead, err := io.Copy(hasher, limitedReader)
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to read file: %w", err)
+	}
+
+	// Check if file exceeded the limit
+	if bytesRead > maxSize {
+		return "", 0, fmt.Errorf("file size exceeds maximum allowed size of %d bytes", maxSize)
+	}
+
+	hashHex := fmt.Sprintf("%040x", hasher.Sum(nil))
 	dn := strings.TrimSuffix(filename, ".zip")
-	return fmt.Sprintf("magnet:?xt=urn:btih:%s&dn=%s&xl=%d", hashHex, dn, len(fileData))
+	magnetLink := fmt.Sprintf("magnet:?xt=urn:btih:%s&dn=%s&xl=%d", hashHex, dn, bytesRead)
+
+	return magnetLink, bytesRead, nil
 }
 
 func startHTTPAuthServer(auth *userAuthServer, master *masterNodeServer) {
@@ -1819,20 +1854,33 @@ func startHTTPAuthServer(auth *userAuthServer, master *masterNodeServer) {
 			return
 		}
 
-		fileData, err := io.ReadAll(file)
+		// Use streaming to avoid loading entire file into RAM
+		maxSize := int64(100 * 1024 * 1024) // 100MB
+		magnetLink, bytesRead, err := generateMagnetFromZipStream(header.Filename, file, maxSize)
 		if err != nil {
+			if strings.Contains(err.Error(), "exceeds maximum") {
+				w.WriteHeader(http.StatusRequestEntityTooLarge)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success":        false,
+					"status_message": "file too large (max 100MB)",
+				})
+				return
+			}
 			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "status_message": "failed to read file"})
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success":        false,
+				"status_message": "failed to process file",
+			})
 			return
 		}
 
-		magnetLink := generateMagnetFromZip(header.Filename, fileData)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"success":        true,
 			"status_message": "torrent created",
 			"torrent":        magnetLink,
 			"magnet":         magnetLink,
 			"torrent_name":   strings.TrimSuffix(header.Filename, ".zip"),
+			"file_size":      bytesRead,
 		})
 	})
 	mux.HandleFunc("/api/upload-task", func(w http.ResponseWriter, r *http.Request) {

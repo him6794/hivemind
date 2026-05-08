@@ -3,7 +3,7 @@ package main
 import (
 	"log"
 
-	"github.com/yourorg/hivemind/services/worker/pkg/server"
+	"hivemind/services/worker/pkg/server"
 )
 
 func main() {
