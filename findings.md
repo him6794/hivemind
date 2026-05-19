@@ -18,3 +18,18 @@
 - `go test ./...` in `services/worker`: duplicate declaration failure is gone; remaining failures are separate root causes (`monty.exe` hard-coded path and `examples/vpn_demo.go` using an obsolete `TaskResult.Output` field).
 - `go test ./...` in `services/master`: pass.
 - `go test ./...` in `services/nodepool`: fails in VPN handler packages because generated `pb` does not contain VPN service types.
+
+## Iteration 2 root cause
+- Worker executor tests still failed because `NewMontyRunner` only checked `C:\Users\user\Desktop\monty\dist\monty.exe`.
+- Evidence: `go test ./pkg/executor -run TestExecuteTask_SimpleScript -count=1` failed with `monty.exe not found at C:\Users\user\Desktop\monty\dist\monty.exe`.
+- The repo contains the Rust sandbox binary at `executor-rs\dist\monty.exe` and `executor-rs\target\release\monty.exe`.
+
+## Iteration 2 fix applied
+- `NewMontyRunner` now resolves `MONTY_EXECUTABLE`, then repo-local `executor-rs` candidates, then the legacy path.
+- Added a focused test that proves configured Monty paths are honored.
+- Updated test startup logging to use the same resolver so it reports the actual sandbox binary.
+
+## Iteration 2 verification
+- `go test ./pkg/executor -run TestNewMontyRunnerUsesConfiguredExecutable -count=1`: pass.
+- `go test ./pkg/executor -run TestMontyRunnerBuildArgs -count=1`: pass.
+- `go test ./pkg/executor -run TestExecuteTask_SimpleScript -count=1`: no longer fails because Monty is missing; it finds `D:\hivemind\executor-rs\dist\monty.exe` and now fails with `exit status 2`, a separate CLI argument compatibility root cause.

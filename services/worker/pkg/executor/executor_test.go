@@ -251,11 +251,12 @@ func zipContainsFile(zipData []byte, filename string) bool {
 // TestMain 在測試前檢查 monty.exe
 func TestMain(m *testing.M) {
 	// 檢查 monty.exe 是否存在
-	if _, err := os.Stat(MontyExecutable); err != nil {
-		fmt.Printf("WARNING: monty.exe not found at %s\n", MontyExecutable)
+	montyPath, err := resolveMontyPath()
+	if err != nil {
+		fmt.Printf("WARNING: %v\n", err)
 		fmt.Printf("Some tests may fail. Please ensure monty.exe is available.\n")
 	} else {
-		fmt.Printf("Found monty.exe at %s\n", MontyExecutable)
+		fmt.Printf("Found monty.exe at %s\n", montyPath)
 	}
 
 	os.Exit(m.Run())
