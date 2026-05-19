@@ -72,3 +72,16 @@
 ## Iteration 5 verification
 - `go test ./examples -count=1` in `services/worker`: pass.
 - `go test ./...` in `services/worker`: pass.
+
+## Iteration 6 root cause
+- `services/nodepool/internal/handler` referenced VPN gRPC types and registration functions, but `services/nodepool/pb` did not include generated files for `proto/vpn.proto`.
+- Evidence: `go test ./...` in `services/nodepool` failed with undefined symbols such as `pb.UnimplementedVPNServiceServer`, `pb.JoinVPNRequest`, and `pb.GetTaskPeersRequest`.
+- `proto/vpn.proto` already defined the service and messages; the schema was present but the generated Go files were missing.
+
+## Iteration 6 fix applied
+- Generated `services/nodepool/pb/vpn.pb.go` and `services/nodepool/pb/vpn_grpc.pb.go` from the existing `proto/vpn.proto`.
+- No proto schema changes were made.
+
+## Iteration 6 verification
+- `go test ./...` in `services/nodepool`: VPN pb undefined-symbol failure is gone.
+- Remaining failure: `internal/handler/vpn_handler.go:68` calls `GetDERPMap(context.Context)`, while the manager method accepts no arguments. That is a separate root cause.

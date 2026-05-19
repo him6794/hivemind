@@ -7,7 +7,8 @@
 - [x] Fix Rust sandbox CLI argument compatibility: current args use `--memory-limit`, `--max-stack-depth`, and `--max-allocations`; `monty.exe --help` shows `--max-memory`, `--max-recursion-depth`, and `--max-allocations`.
 - [x] Fix monitored Monty execution stdout/stderr capture; `TestExecuteTask_SimpleScript` now executes successfully but reports empty stdout.
 - [x] Fix `services/worker/examples/vpn_demo.go` build failure from obsolete `TaskResult.Output` usage.
-- [ ] Fix nodepool VPN handler build failure caused by missing generated VPN pb service/types.
+- [x] Fix nodepool VPN handler build failure caused by missing generated VPN pb service/types.
+- [ ] Fix nodepool VPN handler `GetDERPMap` call signature mismatch.
 - [ ] Run the required end-to-end pipeline with 3 workers, 5 task types, crash/delay/reconnect/duplicate submission simulation.
 - [ ] Update `architecture_notes.md` with observations only, no architecture changes.
 - [ ] Append the latest verified test output to `test_logs/latest.log`.
