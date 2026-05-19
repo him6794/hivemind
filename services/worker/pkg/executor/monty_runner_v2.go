@@ -132,12 +132,12 @@ func (r *MontyRunner) buildMontyArgs(scriptPath string, limits ResourceLimits) [
 
 	// 記憶體限制
 	if limits.MemoryMB > 0 {
-		args = append(args, "--memory-limit", fmt.Sprintf("%d", limits.MemoryMB))
+		args = append(args, "--max-memory", fmt.Sprintf("%dMB", limits.MemoryMB))
 	}
 
 	// 堆疊深度限制
 	if limits.MaxStackDepth > 0 {
-		args = append(args, "--max-stack-depth", fmt.Sprintf("%d", limits.MaxStackDepth))
+		args = append(args, "--max-recursion-depth", fmt.Sprintf("%d", limits.MaxStackDepth))
 	}
 
 	// 最大分配次數

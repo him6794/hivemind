@@ -59,8 +59,8 @@ func TestMontyRunnerBuildArgs(t *testing.T) {
 			scriptPath: "test.py",
 			limits:     DefaultResourceLimits(),
 			wantArgs: []string{
-				"--memory-limit", "512",
-				"--max-stack-depth", "1000",
+				"--max-memory", "512MB",
+				"--max-recursion-depth", "1000",
 				"--max-allocations", "1000000",
 				"test.py",
 			},
@@ -74,8 +74,8 @@ func TestMontyRunnerBuildArgs(t *testing.T) {
 				MaxAllocations: 500000,
 			},
 			wantArgs: []string{
-				"--memory-limit", "256",
-				"--max-stack-depth", "500",
+				"--max-memory", "256MB",
+				"--max-recursion-depth", "500",
 				"--max-allocations", "500000",
 				"main.py",
 			},

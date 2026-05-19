@@ -1,34 +1,33 @@
-﻿# latest validation log - 2026-05-19 iteration 2
-
-## command: go test ./pkg/executor -run TestNewMontyRunnerUsesConfiguredExecutable -count=1
-ok  	hivemind/services/worker/pkg/executor	0.105s
+﻿# latest validation log - 2026-05-19 iteration 3
 
 ## command: go test ./pkg/executor -run TestMontyRunnerBuildArgs -count=1
-ok  	hivemind/services/worker/pkg/executor	0.100s
+ok  	hivemind/services/worker/pkg/executor	0.107s
+
+## command: go test ./pkg/executor -run TestExecuteTask_PrimeCalculation -count=1
+ok  	hivemind/services/worker/pkg/executor	0.346s
 
 ## command: go test ./pkg/executor -run TestExecuteTask_SimpleScript -count=1
 Found monty.exe at D:\hivemind\executor-rs\dist\monty.exe
 --- FAIL: TestExecuteTask_SimpleScript (0.03s)
-    executor_test.go:34: Expected success=true, got false. Error: exit status 2
     executor_test.go:38: Expected stdout output, got empty
     executor_test.go:49: Task completed successfully!
     executor_test.go:50: Stdout: 
     executor_test.go:51: Logs: 12 entries
-    executor_test.go:53:   [20:20:58] Created temp dir: C:\Users\user\AppData\Local\Temp\task_test-001_1605806778
-    executor_test.go:53:   [20:20:58] Resource limits: Memory=512MB, Timeout=5m0s
-    executor_test.go:53:   [20:20:58] Downloading task from: http://127.0.0.1:21755
-    executor_test.go:53:   [20:20:58] Downloaded 160 bytes
-    executor_test.go:53:   [20:20:58] Extracting ZIP...
-    executor_test.go:53:   [20:20:58] Extracted to: C:\Users\user\AppData\Local\Temp\task_test-001_1605806778\work
-    executor_test.go:53:   [20:20:58] Found script: main.py
-    executor_test.go:53:   [20:20:58] Executing with monty.exe (with resource monitoring)...
-    executor_test.go:53:   [20:20:58] Resource usage - Avg: CPU=0.00%, Memory=0MB | Peak: CPU=0.00%, Memory=0MB
-    executor_test.go:53:   [20:20:58] Execution failed: exit status 2
-    executor_test.go:53:   [20:20:58] Packaging results...
-    executor_test.go:53:   [20:20:58] Result ZIP created: 672 bytes
+    executor_test.go:53:   [20:23:13] Created temp dir: C:\Users\user\AppData\Local\Temp\task_test-001_2993016587
+    executor_test.go:53:   [20:23:13] Resource limits: Memory=512MB, Timeout=5m0s
+    executor_test.go:53:   [20:23:13] Downloading task from: http://127.0.0.1:25110
+    executor_test.go:53:   [20:23:13] Downloaded 160 bytes
+    executor_test.go:53:   [20:23:13] Extracting ZIP...
+    executor_test.go:53:   [20:23:13] Extracted to: C:\Users\user\AppData\Local\Temp\task_test-001_2993016587\work
+    executor_test.go:53:   [20:23:13] Found script: main.py
+    executor_test.go:53:   [20:23:13] Executing with monty.exe (with resource monitoring)...
+    executor_test.go:53:   [20:23:13] Resource usage - Avg: CPU=0.00%, Memory=0MB | Peak: CPU=0.00%, Memory=0MB
+    executor_test.go:53:   [20:23:13] Execution completed successfully
+    executor_test.go:53:   [20:23:13] Packaging results...
+    executor_test.go:53:   [20:23:13] Result ZIP created: 674 bytes
 FAIL
-FAIL	hivemind/services/worker/pkg/executor	0.143s
+FAIL	hivemind/services/worker/pkg/executor	0.137s
 FAIL
 
 ## exit codes
-path=0 args=0 execute=1
+args=0 prime=0 simple=1
