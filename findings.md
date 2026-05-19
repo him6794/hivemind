@@ -33,3 +33,17 @@
 - `go test ./pkg/executor -run TestNewMontyRunnerUsesConfiguredExecutable -count=1`: pass.
 - `go test ./pkg/executor -run TestMontyRunnerBuildArgs -count=1`: pass.
 - `go test ./pkg/executor -run TestExecuteTask_SimpleScript -count=1`: no longer fails because Monty is missing; it finds `D:\hivemind\executor-rs\dist\monty.exe` and now fails with `exit status 2`, a separate CLI argument compatibility root cause.
+
+## Iteration 3 root cause
+- Go passed stale resource-limit flags to the Rust sandbox.
+- Evidence: `monty.exe --help` shows `--max-memory` and `--max-recursion-depth`, while `buildMontyArgs` emitted `--memory-limit` and `--max-stack-depth`.
+- The mismatch made Monty exit before executing the task (`exit status 2`).
+
+## Iteration 3 fix applied
+- Updated `buildMontyArgs` to emit `--max-memory <N>MB`, `--max-recursion-depth <N>`, and the existing `--max-allocations <N>`.
+- Updated `TestMontyRunnerBuildArgs` expectations to match the current Rust sandbox CLI.
+
+## Iteration 3 verification
+- `go test ./pkg/executor -run TestMontyRunnerBuildArgs -count=1`: pass.
+- `go test ./pkg/executor -run TestExecuteTask_PrimeCalculation -count=1`: pass.
+- `go test ./pkg/executor -run TestExecuteTask_SimpleScript -count=1`: Monty execution succeeds, but the test still fails because stdout is empty. That is a separate stdout capture root cause.
