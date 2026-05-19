@@ -1,84 +1,34 @@
-﻿# latest validation log - 2026-05-19
+﻿# latest validation log - 2026-05-19 iteration 2
 
-## command: go test ./pkg/executor -run TestResourceLimits
-ok  	hivemind/services/worker/pkg/executor	(cached)
+## command: go test ./pkg/executor -run TestNewMontyRunnerUsesConfiguredExecutable -count=1
+ok  	hivemind/services/worker/pkg/executor	0.105s
 
-## command: go test ./... (services/worker)
-# hivemind/services/worker/examples
-examples\vpn_demo.go:173:63: result.Output undefined (type *executor.TaskResult has no field or method Output)
-examples\vpn_demo.go:190:3: unknown field Output in struct literal of type executor.TaskResult
-?   	hivemind/services/worker	[no test files]
-ok  	hivemind/services/worker/cmd/server	(cached)
-FAIL	hivemind/services/worker/examples [build failed]
-?   	hivemind/services/worker/internal/bt	[no test files]
-ok  	hivemind/services/worker/internal/service	(cached)
-?   	hivemind/services/worker/pb	[no test files]
-?   	hivemind/services/worker/pkg/agent	[no test files]
-ok  	hivemind/services/worker/pkg/config	(cached)
-?   	hivemind/services/worker/pkg/credentials	[no test files]
-WARNING: monty.exe not found at C:\Users\user\Desktop\monty\dist\monty.exe
-Some tests may fail. Please ensure monty.exe is available.
---- FAIL: TestExecuteTask_SimpleScript (0.02s)
-    executor_test.go:29: ExecuteTask failed: create monty runner: monty.exe not found at C:\Users\user\Desktop\monty\dist\monty.exe: GetFileAttributesEx C:\Users\user\Desktop\monty\dist\monty.exe: The system cannot find the path specified.
---- FAIL: TestExecuteTask_PrimeCalculation (0.01s)
-    executor_test.go:83: ExecuteTask failed: create monty runner: monty.exe not found at C:\Users\user\Desktop\monty\dist\monty.exe: GetFileAttributesEx C:\Users\user\Desktop\monty\dist\monty.exe: The system cannot find the path specified.
-2026/05/19 20:17:53 [Multinode Executor] Executing task task-1 (type: compute)
-2026/05/19 20:17:53 [Multinode Executor] Executing task task-1 (type: distributed-compute)
-2026/05/19 20:17:53 [Multinode Executor] Found 2 peers for task task-1
-2026/05/19 20:17:53 [Multinode Executor] Failed to connect to peer worker-2 (100.64.0.2): VPN not connected
-2026/05/19 20:17:53 [Multinode Executor] Failed to connect to peer worker-3 (100.64.0.3): VPN not connected
-2026/05/19 20:17:53 [Multinode Executor] Executing task task-1 with 2 peers
-2026/05/19 20:17:53 [Multinode Executor] Available peers:
-2026/05/19 20:17:53   - Worker worker-2 at 100.64.0.2 (hostname: worker-2)
-2026/05/19 20:17:53   - Worker worker-3 at 100.64.0.3 (hostname: worker-3)
-2026/05/19 20:17:53 [Multinode Executor] Task task-1 completed successfully
-2026/05/19 20:17:53 [Multinode Executor] Executing task task-1 (type: distributed-compute)
-2026/05/19 20:17:53 [Multinode Executor] No peers found, executing locally
-2026/05/19 20:17:53 [Multinode Executor] Executing task task-1 (type: compute)
-2026/05/19 20:17:53 [Multinode Executor] Executing task task-1 (type: compute)
+## command: go test ./pkg/executor -run TestMontyRunnerBuildArgs -count=1
+ok  	hivemind/services/worker/pkg/executor	0.100s
+
+## command: go test ./pkg/executor -run TestExecuteTask_SimpleScript -count=1
+Found monty.exe at D:\hivemind\executor-rs\dist\monty.exe
+--- FAIL: TestExecuteTask_SimpleScript (0.03s)
+    executor_test.go:34: Expected success=true, got false. Error: exit status 2
+    executor_test.go:38: Expected stdout output, got empty
+    executor_test.go:49: Task completed successfully!
+    executor_test.go:50: Stdout: 
+    executor_test.go:51: Logs: 12 entries
+    executor_test.go:53:   [20:20:58] Created temp dir: C:\Users\user\AppData\Local\Temp\task_test-001_1605806778
+    executor_test.go:53:   [20:20:58] Resource limits: Memory=512MB, Timeout=5m0s
+    executor_test.go:53:   [20:20:58] Downloading task from: http://127.0.0.1:21755
+    executor_test.go:53:   [20:20:58] Downloaded 160 bytes
+    executor_test.go:53:   [20:20:58] Extracting ZIP...
+    executor_test.go:53:   [20:20:58] Extracted to: C:\Users\user\AppData\Local\Temp\task_test-001_1605806778\work
+    executor_test.go:53:   [20:20:58] Found script: main.py
+    executor_test.go:53:   [20:20:58] Executing with monty.exe (with resource monitoring)...
+    executor_test.go:53:   [20:20:58] Resource usage - Avg: CPU=0.00%, Memory=0MB | Peak: CPU=0.00%, Memory=0MB
+    executor_test.go:53:   [20:20:58] Execution failed: exit status 2
+    executor_test.go:53:   [20:20:58] Packaging results...
+    executor_test.go:53:   [20:20:58] Result ZIP created: 672 bytes
 FAIL
-FAIL	hivemind/services/worker/pkg/executor	2.098s
-ok  	hivemind/services/worker/pkg/handlers	(cached)
-?   	hivemind/services/worker/pkg/models	[no test files]
-?   	hivemind/services/worker/pkg/resource	[no test files]
-?   	hivemind/services/worker/pkg/server	[no test files]
-ok  	hivemind/services/worker/pkg/vpn	(cached)
-FAIL
-
-## command: go test ./... (services/master)
-?   	hivemind/services/master	[no test files]
-?   	hivemind/services/master/cmd/server	[no test files]
-ok  	hivemind/services/master/internal/bt	(cached)
-
-## command: go test ./... (services/nodepool)
-# hivemind/services/nodepool/internal/handler
-internal\handler\vpn_handler.go:14:5: undefined: pb.UnimplementedVPNServiceServer
-internal\handler\vpn_handler.go:26:59: undefined: pb.JoinVPNRequest
-internal\handler\vpn_handler.go:26:80: undefined: pb.JoinVPNResponse
-internal\handler\vpn_handler.go:34:14: undefined: pb.JoinVPNResponse
-internal\handler\vpn_handler.go:92:64: undefined: pb.GetTaskPeersRequest
-internal\handler\vpn_handler.go:92:90: undefined: pb.GetTaskPeersResponse
-internal\handler\vpn_handler.go:160:60: undefined: pb.LeaveVPNRequest
-internal\handler\vpn_handler.go:160:82: undefined: pb.LeaveVPNResponse
-internal\handler\vpn_handler.go:204:67: undefined: pb.UpdateVPNStatusRequest
-internal\handler\vpn_handler.go:204:96: undefined: pb.UpdateVPNStatusResponse
-internal\handler\vpn_handler.go:34:14: too many errors
-FAIL	hivemind/services/nodepool [build failed]
-ok  	hivemind/services/nodepool/cmd/server	0.190s
-?   	hivemind/services/nodepool/internal/events	[no test files]
-FAIL	hivemind/services/nodepool/internal/handler [build failed]
-ok  	hivemind/services/nodepool/internal/repository	(cached)
-ok  	hivemind/services/nodepool/internal/service	(cached)
-?   	hivemind/services/nodepool/internal/storage	[no test files]
-ok  	hivemind/services/nodepool/internal/vpn	(cached)
-?   	hivemind/services/nodepool/pb	[no test files]
-?   	hivemind/services/nodepool/pkg/config	[no test files]
-?   	hivemind/services/nodepool/pkg/handlers	[no test files]
-?   	hivemind/services/nodepool/pkg/models	[no test files]
-?   	hivemind/services/nodepool/pkg/scheduler	[no test files]
-FAIL	hivemind/services/nodepool/pkg/server [build failed]
-?   	hivemind/services/nodepool/pkg/storage	[no test files]
+FAIL	hivemind/services/worker/pkg/executor	0.143s
 FAIL
 
 ## exit codes
-focused=0 worker=1 master=0 nodepool=1
+path=0 args=0 execute=1

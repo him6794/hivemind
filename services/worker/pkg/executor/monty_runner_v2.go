@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -44,11 +45,50 @@ type MontyRunner struct {
 
 // NewMontyRunner 創建新的 Monty 執行器
 func NewMontyRunner() (*MontyRunner, error) {
-	// 檢查 monty.exe 是否存在
-	if _, err := os.Stat(MontyExecutable); err != nil {
-		return nil, fmt.Errorf("monty.exe not found at %s: %w", MontyExecutable, err)
+	montyPath, err := resolveMontyPath()
+	if err != nil {
+		return nil, err
 	}
-	return &MontyRunner{montyPath: MontyExecutable}, nil
+	return &MontyRunner{montyPath: montyPath}, nil
+}
+
+func resolveMontyPath() (string, error) {
+	candidates := []string{}
+	if configured := strings.TrimSpace(os.Getenv("MONTY_EXECUTABLE")); configured != "" {
+		candidates = append(candidates, configured)
+	}
+	candidates = append(candidates, repoMontyCandidates()...)
+	candidates = append(candidates, MontyExecutable)
+
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("monty.exe not found; checked %s", strings.Join(candidates, ", "))
+}
+
+func repoMontyCandidates() []string {
+	exeName := "monty"
+	if runtime.GOOS == "windows" {
+		exeName = "monty.exe"
+	}
+
+	candidates := []string{}
+	if wd, err := os.Getwd(); err == nil {
+		for dir := wd; ; dir = filepath.Dir(dir) {
+			candidates = append(candidates,
+				filepath.Join(dir, "executor-rs", "dist", exeName),
+				filepath.Join(dir, "executor-rs", "target", "release", exeName),
+				filepath.Join(dir, "executor-rs", exeName),
+			)
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+		}
+	}
+	return candidates
 }
 
 // ExecuteScript 執行 Python 腳本（使用預設資源限制）
