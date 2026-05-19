@@ -9,3 +9,4 @@
 - Rust sandbox execution is expected to use a repo-local `executor-rs` binary when available, with `MONTY_EXECUTABLE` as an explicit override.
 - The current sandbox contract is binary/CLI based; no proto schema or service topology change is involved.
 - Go resource-limit fields map to Monty CLI flags rather than proto fields, so this compatibility fix stays inside the worker executor package.
+- Monitored worker execution still uses the same local subprocess model as the non-monitored runner; output capture is local to the worker executor package.
