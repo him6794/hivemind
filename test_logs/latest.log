@@ -1,8 +1,43 @@
-﻿# latest validation log - 2026-05-19 iteration 7
+# latest validation log - 2026-05-20 iteration 8
 
-## command: go test ./... (services/nodepool)
+## Issue
+Duplicate task submission redispatched an existing `task_id`, causing duplicate execution and task state overwrite.
+
+## Pre-fix evidence
+Artifacts: `test_logs/live/submission`
+
+Run id: `20260520073902`
+
+Observed:
+- Duplicate upload response for `e2e-20260520073902-cpu`: `success=true`, `status_message=dispatched`.
+- Nodepool dispatch log contained two dispatches for the same task:
+  - `task_dispatch_success task_id=e2e-20260520073902-cpu worker_id=worker1 worker_addr=127.0.0.1:50053`
+  - `task_dispatch_success task_id=e2e-20260520073902-cpu worker_id=worker1 worker_addr=127.0.0.1:50053`
+- CPU task log contained two `task accepted` and two `task completed` sequences.
+
+## Fix
+Changed `services/nodepool/cmd/server/main.go` so `UploadTask` rejects an existing owned `task_id` before mutating state or dispatching.
+
+Added `services/nodepool/cmd/server/main_test.go::TestMasterNode_UploadTaskRejectsDuplicateTaskIDWithoutRedispatch`.
+
+## Test commands
+Command: `go test ./cmd/server -run TestMasterNode_UploadTaskRejectsDuplicateTaskIDWithoutRedispatch -count=1`
+
+Result before fix: failed as expected with duplicate dispatch.
+
+Result after fix:
+
+```text
+ok  	hivemind/services/nodepool/cmd/server	0.148s
+```
+
+Command: `go test ./...` from `services/nodepool`
+
+Result:
+
+```text
 ?   	hivemind/services/nodepool	[no test files]
-ok  	hivemind/services/nodepool/cmd/server	0.191s
+ok  	hivemind/services/nodepool/cmd/server	0.182s
 ?   	hivemind/services/nodepool/internal/events	[no test files]
 ok  	hivemind/services/nodepool/internal/handler	(cached)
 ok  	hivemind/services/nodepool/internal/repository	(cached)
@@ -16,6 +51,39 @@ ok  	hivemind/services/nodepool/internal/vpn	(cached)
 ?   	hivemind/services/nodepool/pkg/scheduler	[no test files]
 ?   	hivemind/services/nodepool/pkg/server	[no test files]
 ?   	hivemind/services/nodepool/pkg/storage	[no test files]
+```
 
-## exit codes
-nodepool=0
+## Live E2E verification
+Artifacts: `test_logs/live/verification`
+
+Run id: `20260520074442`
+
+Startup:
+- Postgres: `127.0.0.1:25432`
+- Redis: `127.0.0.1:26379`
+- Nodepool gRPC/HTTP: `127.0.0.1:50051`, `127.0.0.1:18081`
+- Master HTTP: `127.0.0.1:18082`
+- Workers: `127.0.0.1:50053`, `127.0.0.1:50054`, `127.0.0.1:50055`
+
+Task results:
+- `e2e-20260520074442-cpu`: `COMPLETED`, result endpoint `success=true`
+- `e2e-20260520074442-io`: `COMPLETED`, result endpoint `success=true`
+- `e2e-20260520074442-failure`: `COMPLETED`, result endpoint `success=true`
+- `e2e-20260520074442-retry`: `COMPLETED`, result endpoint `success=true`
+- `e2e-20260520074442-long`: `COMPLETED`, result endpoint `success=true`
+
+Duplicate submission:
+- Duplicate upload response for `e2e-20260520074442-cpu`: `success=false`, `status_message=duplicate task_id`.
+- Nodepool log showed one dispatch for the CPU task and then:
+  - `task_duplicate_rejected task_id=e2e-20260520074442-cpu owner=worker1 existing_owner=worker1 status=COMPLETED`
+
+Worker failure/reconnect:
+- Worker2 process was killed.
+- After heartbeat timeout, `/api/workers?include_offline=true` reported worker2 `OFFLINE`.
+- Worker2 was restarted with the same identity and reported `ACTIVE` after reconnect.
+
+## Known remaining gaps
+- This was one live verification run, not 10 consecutive full runs.
+- This included one worker failure simulation, not 3 consecutive node failure simulations.
+- The network-delay requirement was not fully satisfied; this run simulated worker outage and reconnect.
+- The live Monty runtime completed the labeled failure and long-running tasks quickly; true failure-injected and long-running workload behavior remains a separate issue.

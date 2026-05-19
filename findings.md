@@ -96,3 +96,26 @@
 ## Iteration 7 verification
 - `go test ./internal/handler -count=1` in `services/nodepool`: pass.
 - `go test ./...` in `services/nodepool`: pass.
+
+## Iteration 8 root cause
+- Live duplicate submission could execute the same logical task twice.
+- Evidence from the pre-fix live run `test_logs/live/submission` with run id `20260520073902`:
+  - `upload-responses.json` shows the second submission for `e2e-20260520073902-cpu` returned `success=true` and `status_message=dispatched`.
+  - `nodepool-events.log` contains two `task_dispatch_success` lines for the same `task_id=e2e-20260520073902-cpu`.
+  - `cpu-log.json` contains two separate `task accepted` and `task completed` sequences, and the task result BTIH was overwritten by the duplicate submission BTIH.
+- Code root cause: `masterNodeServer.UploadTask` always updated `m.tasks[task_id]` and proceeded to `dispatchTaskToWorkerWithExcludes` even when the task already existed.
+
+## Iteration 8 fix applied
+- Added a duplicate `task_id` guard inside the existing `UploadTask` critical section.
+- If an existing task already has an owner, the request now returns `success=false` with `status_message=duplicate task_id`, logs `task_duplicate_rejected`, and does not mutate task state or dispatch to a worker.
+- Added `TestMasterNode_UploadTaskRejectsDuplicateTaskIDWithoutRedispatch` to prove the second upload is rejected, `ExecuteTask` is called once, and the original BTIH remains unchanged.
+
+## Iteration 8 verification
+- RED: `go test ./cmd/server -run TestMasterNode_UploadTaskRejectsDuplicateTaskIDWithoutRedispatch -count=1` failed before the fix with a second `task_dispatch_success`.
+- GREEN: `go test ./cmd/server -run TestMasterNode_UploadTaskRejectsDuplicateTaskIDWithoutRedispatch -count=1` passed after the fix.
+- `go test ./...` in `services/nodepool`: pass in the default local test environment.
+- Rebuilt nodepool and ran a clean live pipeline with Postgres on `25432`, Redis on `26379`, nodepool on `50051/18081`, master on `18082`, and workers on `50053/50054/50055`.
+- Live run id `20260520074442` submitted 5 task labels (`cpu`, `io`, `failure-injected`, `retry`, `long-running`); all 5 reached `COMPLETED` and their result endpoints returned `success=true`.
+- Duplicate submission for `e2e-20260520074442-cpu` returned `success=false`, and `nodepool-dispatch-lines.log` contains one dispatch plus one `task_duplicate_rejected`, with no second dispatch.
+- Worker2 crash simulation: worker2 process was killed, `/api/workers?include_offline=true` showed worker2 `OFFLINE` after heartbeat timeout, and after restart it returned to `ACTIVE`.
+- Remaining gap: this iteration did not complete 10 consecutive full runs, 3 consecutive node failure simulations, or a true network-delay injection. Those remain separate DoD items.

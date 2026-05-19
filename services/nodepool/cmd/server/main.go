@@ -1341,6 +1341,13 @@ func (m *masterNodeServer) UploadTask(ctx context.Context, req *pb.UploadTaskReq
 		expectedHash, _ = extractBTIHFromSource(req.GetTorrent())
 	}
 	m.mu.Lock()
+	if existing := m.tasks[req.GetTaskId()]; existing != nil && strings.TrimSpace(existing.Owner) != "" {
+		existingOwner := existing.Owner
+		existingStatus := existing.Status
+		m.mu.Unlock()
+		nodepoolLog(fmt.Sprintf("task_duplicate_rejected task_id=%s owner=%s existing_owner=%s status=%s", req.GetTaskId(), owner, existingOwner, existingStatus))
+		return &pb.UploadTaskResponse{Success: false, StatusMessage: "duplicate task_id"}, nil
+	}
 	if m.tasks[req.GetTaskId()] == nil {
 		m.tasks[req.GetTaskId()] = &taskState{TaskID: req.GetTaskId()}
 	}
