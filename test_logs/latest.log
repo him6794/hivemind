@@ -1,24 +1,26 @@
-﻿# latest validation log - 2026-05-19 iteration 5
+﻿# latest validation log - 2026-05-19 iteration 6
 
-## command: go test ./examples -count=1 (services/worker)
-?   	hivemind/services/worker/examples	[no test files]
-
-## command: go test ./... (services/worker)
-?   	hivemind/services/worker	[no test files]
-ok  	hivemind/services/worker/cmd/server	(cached)
-?   	hivemind/services/worker/examples	[no test files]
-?   	hivemind/services/worker/internal/bt	[no test files]
-ok  	hivemind/services/worker/internal/service	(cached)
-?   	hivemind/services/worker/pb	[no test files]
-?   	hivemind/services/worker/pkg/agent	[no test files]
-ok  	hivemind/services/worker/pkg/config	(cached)
-?   	hivemind/services/worker/pkg/credentials	[no test files]
-ok  	hivemind/services/worker/pkg/executor	(cached)
-ok  	hivemind/services/worker/pkg/handlers	(cached)
-?   	hivemind/services/worker/pkg/models	[no test files]
-?   	hivemind/services/worker/pkg/resource	[no test files]
-?   	hivemind/services/worker/pkg/server	[no test files]
-ok  	hivemind/services/worker/pkg/vpn	(cached)
+## command: go test ./... (services/nodepool)
+# hivemind/services/nodepool/internal/handler
+internal\handler\vpn_handler.go:68:42: too many arguments in call to h.vpnManager.GetDERPMap
+	have (context.Context)
+	want ()
+FAIL	hivemind/services/nodepool [build failed]
+ok  	hivemind/services/nodepool/cmd/server	0.169s
+?   	hivemind/services/nodepool/internal/events	[no test files]
+FAIL	hivemind/services/nodepool/internal/handler [build failed]
+ok  	hivemind/services/nodepool/internal/repository	(cached)
+ok  	hivemind/services/nodepool/internal/service	(cached)
+?   	hivemind/services/nodepool/internal/storage	[no test files]
+ok  	hivemind/services/nodepool/internal/vpn	(cached)
+?   	hivemind/services/nodepool/pb	[no test files]
+?   	hivemind/services/nodepool/pkg/config	[no test files]
+?   	hivemind/services/nodepool/pkg/handlers	[no test files]
+?   	hivemind/services/nodepool/pkg/models	[no test files]
+?   	hivemind/services/nodepool/pkg/scheduler	[no test files]
+FAIL	hivemind/services/nodepool/pkg/server [build failed]
+?   	hivemind/services/nodepool/pkg/storage	[no test files]
+FAIL
 
 ## exit codes
-examples=0 worker=0
+nodepool=1

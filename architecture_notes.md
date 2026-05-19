@@ -11,3 +11,4 @@
 - Go resource-limit fields map to Monty CLI flags rather than proto fields, so this compatibility fix stays inside the worker executor package.
 - Monitored worker execution still uses the same local subprocess model as the non-monitored runner; output capture is local to the worker executor package.
 - Worker examples compile against the same `TaskResult` API as the production executor package.
+- Nodepool VPN support is already represented in `proto/vpn.proto`; generated Go bindings must be present alongside `hivemind` bindings for the existing handler/server code to compile.
