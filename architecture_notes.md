@@ -13,3 +13,8 @@
 - Worker examples compile against the same `TaskResult` API as the production executor package.
 - Nodepool VPN support is already represented in `proto/vpn.proto`; generated Go bindings must be present alongside `hivemind` bindings for the existing handler/server code to compile.
 - Nodepool VPN handler methods should follow the current `HeadscaleManager` method signatures exactly; the handler is the adapter layer, not the contract owner.
+- `task_id` uniqueness is enforced at the nodepool/master `UploadTask` boundary, without proto schema changes.
+- Duplicate submission handling is an idempotency/state-consistency concern inside the existing task map and persistence flow; it does not require a new service or message shape.
+- Worker crash cleanup is currently lazy: stale workers are marked `OFFLINE` when worker listing or scheduling checks heartbeat age after the fixed 30 second timeout.
+- Worker reconnect is handled by the existing worker auto-registration path; re-registering the same worker id updates status and heartbeat back to `ACTIVE`.
+- Live worker execution with `monty.exe` currently generates a small `-c` script that returns `RESULT_TORRENT` from the task BTIH; task labels such as CPU/IO/failure/long-running do not currently change the executed workload in this path.

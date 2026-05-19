@@ -752,6 +752,89 @@ func TestExtractStrictBTIHFromSource(t *testing.T) {
 	}
 }
 
+func TestMasterNode_UploadTaskRejectsDuplicateTaskIDWithoutRedispatch(t *testing.T) {
+	workerLis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("worker listen: %v", err)
+	}
+	workerGRPC := grpc.NewServer()
+	worker := &stressWorkerServer{}
+	pb.RegisterWorkerNodeServiceServer(workerGRPC, worker)
+	go func() { _ = workerGRPC.Serve(workerLis) }()
+	t.Cleanup(func() {
+		workerGRPC.Stop()
+		_ = workerLis.Close()
+	})
+
+	repo := repository.NewWorkerRepository()
+	svc := service.NewWorkerService(repo)
+	authSrv := newUserAuthServer(nil, "test-secret")
+	m := &masterNodeServer{svc: svc, auth: authSrv, taskToWorker: make(map[string]string), taskRoutes: make(map[string]map[string]string), tasks: make(map[string]*taskState)}
+	nodeSrv := &nodeManagerServer{svc: svc}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err = nodeSrv.RegisterWorkerNode(ctx, &pb.RegisterWorkerNodeRequest{
+		Username:    "worker1",
+		Ip:          workerLis.Addr().String(),
+		CpuCores:    8,
+		MemoryGb:    16,
+		CpuScore:    100,
+		GpuScore:    0,
+		GpuMemoryGb: 0,
+		Location:    "local",
+	})
+	if err != nil {
+		t.Fatalf("register worker: %v", err)
+	}
+	token, err := authSrv.issueToken("testuser")
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+
+	const taskID = "duplicate-task-1"
+	const firstBTIH = "0123456789abcdef0123456789abcdef01234567"
+	const secondBTIH = "89abcdef0123456789abcdef0123456789abcdef"
+	firstResp, err := m.UploadTask(ctx, &pb.UploadTaskRequest{
+		TaskId:    taskID,
+		Torrent:   "magnet:?xt=urn:btih:" + firstBTIH,
+		MemoryGb:  1,
+		HostCount: 1,
+		Token:     token,
+	})
+	if err != nil {
+		t.Fatalf("first UploadTask err: %v", err)
+	}
+	if !firstResp.GetSuccess() {
+		t.Fatalf("first UploadTask failed: %s", firstResp.GetStatusMessage())
+	}
+
+	secondResp, err := m.UploadTask(ctx, &pb.UploadTaskRequest{
+		TaskId:    taskID,
+		Torrent:   "magnet:?xt=urn:btih:" + secondBTIH,
+		MemoryGb:  1,
+		HostCount: 1,
+		Token:     token,
+	})
+	if err != nil {
+		t.Fatalf("second UploadTask err: %v", err)
+	}
+	if secondResp.GetSuccess() {
+		t.Fatalf("expected duplicate task_id to be rejected")
+	}
+	if got := atomic.LoadInt64(&worker.executeCalls); got != 1 {
+		t.Fatalf("expected one ExecuteTask call after duplicate submission, got %d", got)
+	}
+	task, ok := m.getTask(taskID)
+	if !ok {
+		t.Fatalf("expected task state to remain available")
+	}
+	if task.ExpectedBTIH != firstBTIH {
+		t.Fatalf("expected original btih %s to remain, got %s", firstBTIH, task.ExpectedBTIH)
+	}
+}
+
 func TestMasterNode_UploadTask_StrictRejectsInvalidSource(t *testing.T) {
 	t.Parallel()
 

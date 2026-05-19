@@ -9,6 +9,13 @@
 - [x] Fix `services/worker/examples/vpn_demo.go` build failure from obsolete `TaskResult.Output` usage.
 - [x] Fix nodepool VPN handler build failure caused by missing generated VPN pb service/types.
 - [x] Fix nodepool VPN handler `GetDERPMap` call signature mismatch.
-- [ ] Run the required end-to-end pipeline with 3 workers, 5 task types, crash/delay/reconnect/duplicate submission simulation.
-- [ ] Update `architecture_notes.md` with observations only, no architecture changes.
-- [ ] Append the latest verified test output to `test_logs/latest.log`.
+- [x] Fix duplicate `task_id` submission causing redispatch and state overwrite.
+- [x] Run one clean live pipeline with nodepool, master, 3 workers, 5 labeled task submissions, duplicate submission rejection, worker crash cleanup, and reconnect.
+- [x] Update `architecture_notes.md` with iteration 8 observations only, no architecture changes.
+- [x] Append the latest verified test output to `test_logs/latest.log`.
+- [ ] Complete a true network-delay simulation rather than only a worker outage/reconnect simulation.
+- [ ] Exercise a real failure-injected task through the live worker runtime; current live Monty path completed the labeled failure task.
+- [ ] Exercise a real long-running workload through the live worker runtime; current live Monty path completed the labeled long-running task quickly.
+- [ ] Investigate separate live billing/status issue where a newly registered user with zero balance can upload a result but the task list status becomes `FAILED: insufficient balance`.
+- [ ] Investigate separate DB-backed nodepool test isolation issue when multiple parallel tests call `initDB` against the same fresh Postgres database.
+- [ ] Run the full required E2E gate: 10 consecutive pipeline runs and 3 consecutive node failure simulations.
