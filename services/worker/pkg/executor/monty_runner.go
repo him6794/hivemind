@@ -1,3 +1,5 @@
+//go:build legacy_executor
+
 package executor
 
 import (
