@@ -12,3 +12,4 @@
 - Monitored worker execution still uses the same local subprocess model as the non-monitored runner; output capture is local to the worker executor package.
 - Worker examples compile against the same `TaskResult` API as the production executor package.
 - Nodepool VPN support is already represented in `proto/vpn.proto`; generated Go bindings must be present alongside `hivemind` bindings for the existing handler/server code to compile.
+- Nodepool VPN handler methods should follow the current `HeadscaleManager` method signatures exactly; the handler is the adapter layer, not the contract owner.

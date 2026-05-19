@@ -8,7 +8,7 @@
 - [x] Fix monitored Monty execution stdout/stderr capture; `TestExecuteTask_SimpleScript` now executes successfully but reports empty stdout.
 - [x] Fix `services/worker/examples/vpn_demo.go` build failure from obsolete `TaskResult.Output` usage.
 - [x] Fix nodepool VPN handler build failure caused by missing generated VPN pb service/types.
-- [ ] Fix nodepool VPN handler `GetDERPMap` call signature mismatch.
+- [x] Fix nodepool VPN handler `GetDERPMap` call signature mismatch.
 - [ ] Run the required end-to-end pipeline with 3 workers, 5 task types, crash/delay/reconnect/duplicate submission simulation.
 - [ ] Update `architecture_notes.md` with observations only, no architecture changes.
 - [ ] Append the latest verified test output to `test_logs/latest.log`.

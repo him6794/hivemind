@@ -1,14 +1,10 @@
-﻿# latest validation log - 2026-05-19 iteration 6
+﻿# latest validation log - 2026-05-19 iteration 7
 
 ## command: go test ./... (services/nodepool)
-# hivemind/services/nodepool/internal/handler
-internal\handler\vpn_handler.go:68:42: too many arguments in call to h.vpnManager.GetDERPMap
-	have (context.Context)
-	want ()
-FAIL	hivemind/services/nodepool [build failed]
-ok  	hivemind/services/nodepool/cmd/server	0.169s
+?   	hivemind/services/nodepool	[no test files]
+ok  	hivemind/services/nodepool/cmd/server	0.191s
 ?   	hivemind/services/nodepool/internal/events	[no test files]
-FAIL	hivemind/services/nodepool/internal/handler [build failed]
+ok  	hivemind/services/nodepool/internal/handler	(cached)
 ok  	hivemind/services/nodepool/internal/repository	(cached)
 ok  	hivemind/services/nodepool/internal/service	(cached)
 ?   	hivemind/services/nodepool/internal/storage	[no test files]
@@ -18,9 +14,8 @@ ok  	hivemind/services/nodepool/internal/vpn	(cached)
 ?   	hivemind/services/nodepool/pkg/handlers	[no test files]
 ?   	hivemind/services/nodepool/pkg/models	[no test files]
 ?   	hivemind/services/nodepool/pkg/scheduler	[no test files]
-FAIL	hivemind/services/nodepool/pkg/server [build failed]
+?   	hivemind/services/nodepool/pkg/server	[no test files]
 ?   	hivemind/services/nodepool/pkg/storage	[no test files]
-FAIL
 
 ## exit codes
-nodepool=1
+nodepool=0

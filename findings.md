@@ -85,3 +85,14 @@
 ## Iteration 6 verification
 - `go test ./...` in `services/nodepool`: VPN pb undefined-symbol failure is gone.
 - Remaining failure: `internal/handler/vpn_handler.go:68` calls `GetDERPMap(context.Context)`, while the manager method accepts no arguments. That is a separate root cause.
+
+## Iteration 7 root cause
+- `services/nodepool/internal/handler/vpn_handler.go` called `h.vpnManager.GetDERPMap(ctx)` even though `HeadscaleManager.GetDERPMap()` takes no arguments.
+- Evidence: `go test ./...` in `services/nodepool` failed with `too many arguments in call to h.vpnManager.GetDERPMap`.
+
+## Iteration 7 fix applied
+- Changed the handler to call `GetDERPMap()` with no arguments.
+
+## Iteration 7 verification
+- `go test ./internal/handler -count=1` in `services/nodepool`: pass.
+- `go test ./...` in `services/nodepool`: pass.
