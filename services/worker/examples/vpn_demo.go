@@ -170,7 +170,7 @@ func demonstrateTaskExecution(vpnMgr *vpn.Manager) {
 	}
 
 	if result.Success {
-		log.Printf("Task completed successfully: %s", string(result.Output))
+		log.Printf("Task completed successfully: %s", result.Stdout)
 	} else {
 		log.Printf("Task failed: %s", result.Error)
 	}
@@ -187,6 +187,6 @@ func (e *demoExecutor) Execute(ctx context.Context, task *executor.Task) (*execu
 
 	return &executor.TaskResult{
 		Success: true,
-		Output:  []byte("Demo task completed"),
+		Stdout:  "Demo task completed",
 	}, nil
 }

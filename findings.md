@@ -61,3 +61,14 @@
 - `go test ./pkg/executor -run TestExecuteTask_SimpleScript -count=1`: pass.
 - `go test ./pkg/executor -run TestExecuteTask_PrimeCalculation -count=1`: pass.
 - `go test ./pkg/executor -count=1`: pass.
+
+## Iteration 5 root cause
+- `services/worker/examples/vpn_demo.go` still used the removed `TaskResult.Output` field.
+- Evidence: `go test ./...` in `services/worker` failed in `services/worker/examples` with `result.Output undefined` and `unknown field Output in struct literal`.
+
+## Iteration 5 fix applied
+- Updated the example to read and set `TaskResult.Stdout`, matching the current executor result API.
+
+## Iteration 5 verification
+- `go test ./examples -count=1` in `services/worker`: pass.
+- `go test ./...` in `services/worker`: pass.
