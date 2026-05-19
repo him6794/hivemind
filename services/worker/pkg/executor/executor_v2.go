@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net"
@@ -187,6 +188,9 @@ func executeWithMonitoring(
 
 	// 啟動 Monty 進程
 	cmd := runner.buildCommand(scriptPath, workDir, limits)
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
 
 	// 啟動進程
 	if err := cmd.Start(); err != nil {
@@ -237,18 +241,8 @@ func executeWithMonitoring(
 	err = cmd.Wait()
 
 	// 讀取輸出
-	if cmd.Stdout != nil {
-		if buf, ok := cmd.Stdout.(*os.File); ok {
-			data, _ := io.ReadAll(buf)
-			stdout = string(data)
-		}
-	}
-	if cmd.Stderr != nil {
-		if buf, ok := cmd.Stderr.(*os.File); ok {
-			data, _ := io.ReadAll(buf)
-			stderr = string(data)
-		}
-	}
+	stdout = stdoutBuf.String()
+	stderr = stderrBuf.String()
 
 	return stdout, stderr, err, monitor
 }

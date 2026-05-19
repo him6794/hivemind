@@ -47,3 +47,17 @@
 - `go test ./pkg/executor -run TestMontyRunnerBuildArgs -count=1`: pass.
 - `go test ./pkg/executor -run TestExecuteTask_PrimeCalculation -count=1`: pass.
 - `go test ./pkg/executor -run TestExecuteTask_SimpleScript -count=1`: Monty execution succeeds, but the test still fails because stdout is empty. That is a separate stdout capture root cause.
+
+## Iteration 4 root cause
+- The monitored executor path started Monty with `cmd.Start()` and `cmd.Wait()` but did not attach stdout/stderr buffers before starting the process.
+- After `Wait`, it attempted to read `cmd.Stdout` and `cmd.Stderr` as `*os.File`, so successful executions returned empty output.
+- Evidence: `TestExecuteTask_SimpleScript` showed `Execution completed successfully` but failed with `Expected stdout output, got empty`.
+
+## Iteration 4 fix applied
+- Attached `bytes.Buffer` to `cmd.Stdout` and `cmd.Stderr` inside `executeWithMonitoring` before process start.
+- Returned the captured buffer contents after `cmd.Wait()`.
+
+## Iteration 4 verification
+- `go test ./pkg/executor -run TestExecuteTask_SimpleScript -count=1`: pass.
+- `go test ./pkg/executor -run TestExecuteTask_PrimeCalculation -count=1`: pass.
+- `go test ./pkg/executor -count=1`: pass.
