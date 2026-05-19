@@ -65,7 +65,7 @@ func (h *VPNHandler) JoinVPN(ctx context.Context, req *pb.JoinVPNRequest) (*pb.J
 	}
 
 	// 取得 DERP 配置
-	derpMap, err := h.vpnManager.GetDERPMap(ctx)
+	derpMap, err := h.vpnManager.GetDERPMap()
 	if err != nil {
 		log.Warn().
 			Err(err).
