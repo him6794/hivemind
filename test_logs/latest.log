@@ -233,3 +233,63 @@ New blocker: task dispatch remains PENDING with [PROBE_FAIL]
 Observed next issue:
 - `latency-proxy.log` shows `accept_loop_error` shortly after worker proxy startup.
 - Worker proxy shutdown shows `connections=0`, so nodepool-to-worker latency path was not active.
+
+# Iteration 11: Reliability harness DelayProxy accept loop
+
+## Evidence
+Reliability calibration artifact: `test_logs/reliability/20260520-084619`
+
+Run id: `rel-20260520084623-r01`
+
+Observed:
+- `latency-proxy.log` showed `accept_loop_error` shortly after worker proxy startup.
+- Worker proxies shut down with `connections=0`.
+- Task dispatch remained `[PROBE_FAIL]`, invalidating the intended nodepool-to-worker latency path.
+
+## Fix
+Changed `DelayProxy._accept_loop` so `socket.timeout` continues the accept loop instead of being treated as fatal.
+
+Added `scripts/reliability_harness_test.py::DelayProxyTests.test_proxy_accepts_connection_after_idle_timeout`.
+
+## Test commands
+Command: `python -m unittest scripts\reliability_harness_test.py`
+
+Result before fix:
+
+```text
+TimeoutError: timed out
+FAILED (errors=1)
+```
+
+Result after fix:
+
+```text
+.
+----------------------------------------------------------------------
+Ran 1 test in 0.810s
+
+OK
+```
+
+Command: `python -m py_compile scripts\reliability_harness.py scripts\reliability_executor.py scripts\reliability_harness_test.py`
+
+Result:
+
+```text
+ok
+```
+
+## Live calibration after fix
+Command: `python scripts\reliability_harness.py --calibration --stop-on-failure --worker-nodepool-addr 127.0.0.1:50051`
+
+Artifact: `test_logs/reliability/20260520-085706`
+
+Run id: `rel-20260520085710-r01`
+
+Result:
+
+```text
+Overall pass: False
+Worker proxy connections: worker1=6, worker2=1, worker3=1
+New blocker: retry and long-running tasks remain RUNNING
+```

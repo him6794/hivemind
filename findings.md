@@ -162,3 +162,23 @@
 - Reliability calibration rerun: `test_logs/reliability/20260520-084619`, run `rel-20260520084623-r01`.
 - The HTTP 502 deadline failure is gone; upload requests now return HTTP 200 after about 15-16 seconds.
 - Current next blocker: harness `DelayProxy` logs `accept_loop_error` shortly after startup and worker gRPC proxies record `connections=0`, causing task dispatch to remain `[PROBE_FAIL]`.
+
+## Iteration 11 root cause
+- The reliability harness `DelayProxy` used `socket.settimeout(0.5)` on the listening socket, but `_accept_loop` caught the resulting `socket.timeout` as `OSError` and exited.
+- Evidence from `test_logs/reliability/20260520-084619`, run `rel-20260520084623-r01`:
+  - `latency-proxy.log` showed `worker1-grpc accept_loop_error`, `worker2-grpc accept_loop_error`, and `worker3-grpc accept_loop_error` shortly after proxy startup.
+  - The same log ended with all worker proxies at `connections=0`.
+  - All task dispatches stayed `[PROBE_FAIL]`, so the configured nodepool-to-worker latency path was not actually active.
+
+## Iteration 11 fix applied
+- Added `scripts/reliability_harness_test.py`.
+- Fixed `DelayProxy._accept_loop` so `socket.timeout` means idle and continues accepting instead of breaking the loop.
+- No production service code, proto schema, or architecture was changed.
+
+## Iteration 11 verification
+- RED: `python -m unittest scripts\reliability_harness_test.py` failed before the fix because a connection after 0.8s idle never received the proxied echo.
+- GREEN: the same test passed after the fix.
+- `python -m py_compile scripts\reliability_harness.py scripts\reliability_executor.py scripts\reliability_harness_test.py`: pass.
+- Reliability calibration rerun: `test_logs/reliability/20260520-085706`, run `rel-20260520085710-r01`.
+- Worker proxy connections were observed (`worker1=6`, `worker2=1`, `worker3=1`), proving the latency path is active.
+- Current next blocker: retry and long-running tasks remain `RUNNING` after the failure simulation, leaving stuck non-terminal task ownership.
