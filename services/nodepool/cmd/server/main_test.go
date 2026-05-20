@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
@@ -154,6 +155,69 @@ func (s *stressWorkerServer) StopTaskExecution(ctx context.Context, req *pb.Stop
 	_ = req
 	atomic.AddInt64(&s.stopCalls, 1)
 	return &pb.StopTaskExecutionResponse{Success: true, StatusMessage: "stopped"}, nil
+}
+
+func startDelayedTCPProxy(t *testing.T, target string, delay time.Duration) string {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		cancel()
+		t.Fatalf("proxy listen: %v", err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		_ = lis.Close()
+	})
+
+	go func() {
+		for {
+			client, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				upstream, err := net.Dial("tcp", target)
+				if err != nil {
+					_ = client.Close()
+					return
+				}
+				var once sync.Once
+				closeBoth := func() {
+					_ = client.Close()
+					_ = upstream.Close()
+				}
+				copyDelayed := func(dst net.Conn, src net.Conn) {
+					defer once.Do(closeBoth)
+					buf := make([]byte, 32*1024)
+					for {
+						select {
+						case <-ctx.Done():
+							return
+						default:
+						}
+						n, err := src.Read(buf)
+						if n > 0 {
+							time.Sleep(delay)
+							if _, writeErr := dst.Write(buf[:n]); writeErr != nil {
+								return
+							}
+						}
+						if err != nil {
+							if err != io.EOF {
+								return
+							}
+							return
+						}
+					}
+				}
+				go copyDelayed(upstream, client)
+				go copyDelayed(client, upstream)
+			}()
+		}
+	}()
+
+	return lis.Addr().String()
 }
 
 func TestNormalUserConcurrentLifecycleStress(t *testing.T) {
@@ -589,6 +653,46 @@ func TestMasterNode_DispatchTaskToWorker_PreDispatchProbe(t *testing.T) {
 	}
 	if mw.executeCalls == 0 {
 		t.Fatalf("expected ExecuteTask called when probe disabled")
+	}
+}
+
+func TestMasterNode_DispatchTaskToWorker_WithLatencyProxy(t *testing.T) {
+	repo := repository.NewWorkerRepository()
+	svc := service.NewWorkerService(repo)
+	m := &masterNodeServer{svc: svc, taskToWorker: map[string]string{}, tasks: map[string]*taskState{}}
+
+	workerLis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("worker listen: %v", err)
+	}
+	workerGRPC := grpc.NewServer()
+	mw := &mockWorkerServer{}
+	pb.RegisterWorkerNodeServiceServer(workerGRPC, mw)
+	go func() { _ = workerGRPC.Serve(workerLis) }()
+	t.Cleanup(func() {
+		workerGRPC.Stop()
+		_ = workerLis.Close()
+	})
+
+	proxyAddr := startDelayedTCPProxy(t, workerLis.Addr().String(), 300*time.Millisecond)
+	if err := svc.RegisterWorker(context.Background(), &repository.Worker{ID: "w-latency", Addr: proxyAddr}); err != nil {
+		t.Fatalf("register worker: %v", err)
+	}
+
+	task := &taskState{TaskID: "task-latency-1", TorrentSource: "magnet:?xt=urn:btih:demo", ReqMemoryGB: 1, ReqGPUMemoryGB: 1}
+	t.Setenv("NODEPOOL_PRE_DISPATCH_PROBE", "true")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, workerAddr, reason, ok := m.dispatchTaskToWorker(ctx, task, "")
+	if !ok {
+		t.Fatalf("expected dispatch through latency proxy to succeed, reason=%q", reason)
+	}
+	if workerAddr != proxyAddr {
+		t.Fatalf("expected worker addr %q, got %q", proxyAddr, workerAddr)
+	}
+	if mw.lastExecuteReq == nil || mw.lastExecuteReq.GetTaskId() != "task-latency-1" {
+		t.Fatalf("expected ExecuteTask through latency proxy, got %#v", mw.lastExecuteReq)
 	}
 }
 

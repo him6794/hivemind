@@ -119,3 +119,24 @@
 - Duplicate submission for `e2e-20260520074442-cpu` returned `success=false`, and `nodepool-dispatch-lines.log` contains one dispatch plus one `task_duplicate_rejected`, with no second dispatch.
 - Worker2 crash simulation: worker2 process was killed, `/api/workers?include_offline=true` showed worker2 `OFFLINE` after heartbeat timeout, and after restart it returned to `ACTIVE`.
 - Remaining gap: this iteration did not complete 10 consecutive full runs, 3 consecutive node failure simulations, or a true network-delay injection. Those remain separate DoD items.
+
+## Iteration 9 root cause
+- Under real latency/jitter, nodepool's pre-dispatch worker probe used a hard-coded `1*time.Second` timeout.
+- Evidence from reliability calibration `test_logs/reliability/20260520-083100`, run `rel-20260520083101-r01`:
+  - workers registered successfully and `/api/workers?include_offline=true` returned worker1, worker2, and worker3 as `ACTIVE`.
+  - every task upload failed dispatch with `[PROBE_FAIL] worker probe failed at 127.0.0.1:50055`.
+  - `latency-proxy.log` showed worker gRPC proxies were configured with `100ms + 0..250ms` jitter, while no task reached execution.
+- Focused RED evidence: `TestMasterNode_DispatchTaskToWorker_WithLatencyProxy` failed with `reason="worker probe failed ..."` when a 300ms local TCP latency proxy wrapped the worker gRPC server.
+
+## Iteration 9 fix applied
+- Added `envDurationSeconds` in `services/nodepool/cmd/server/main.go`.
+- Changed pre-dispatch probe timeout to `NODEPOOL_WORKER_PROBE_TIMEOUT_SEC`, defaulting to `5s`.
+- Added `TestMasterNode_DispatchTaskToWorker_WithLatencyProxy` to prove dispatch succeeds through a latency proxy with pre-dispatch probe enabled.
+- No proto schema or architecture changes were made.
+
+## Iteration 9 verification
+- RED: `go test ./cmd/server -run TestMasterNode_DispatchTaskToWorker_WithLatencyProxy -count=1` failed before the fix with `worker probe failed`.
+- GREEN: `go test ./cmd/server -run TestMasterNode_DispatchTaskToWorker_WithLatencyProxy -count=1` passed after the fix.
+- `go test ./...` in `services/nodepool`: pass.
+- Reliability calibration rerun with worker registration direct and network latency still enabled on master->nodepool and nodepool->worker paths: `test_logs/reliability/20260520-084035`, run `rel-20260520084038-r01`.
+- Current blocking issue after this fix: first upload now fails at the master HTTP layer with `POST /api/upload-task returned HTTP 502` and `rpc error: code = DeadlineExceeded desc = context deadline exceeded`; worker/task scenarios were not reached in that run.

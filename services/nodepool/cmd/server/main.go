@@ -122,6 +122,14 @@ func envBool(name string, fallback bool) bool {
 	}
 }
 
+func envDurationSeconds(name string, fallback time.Duration) time.Duration {
+	seconds := envInt(name, int(fallback/time.Second))
+	if seconds <= 0 {
+		return fallback
+	}
+	return time.Duration(seconds) * time.Second
+}
+
 type responseStatusRecorder struct {
 	http.ResponseWriter
 	status int
@@ -1025,6 +1033,7 @@ func (m *masterNodeServer) dispatchTaskToWorkerWithExcludes(ctx context.Context,
 		return "", "", "no available worker", false
 	}
 	probeEnabled := envBool("NODEPOOL_PRE_DISPATCH_PROBE", true)
+	probeTimeout := envDurationSeconds("NODEPOOL_WORKER_PROBE_TIMEOUT_SEC", 5*time.Second)
 	lastReason := "no available worker"
 	for _, w := range workers {
 		if w == nil || strings.TrimSpace(w.Addr) == "" {
@@ -1044,7 +1053,7 @@ func (m *masterNodeServer) dispatchTaskToWorkerWithExcludes(ctx context.Context,
 		}
 		client := pb.NewWorkerNodeServiceClient(conn)
 		if probeEnabled {
-			probeCtx, probeCancel := context.WithTimeout(ctx, 1*time.Second)
+			probeCtx, probeCancel := context.WithTimeout(ctx, probeTimeout)
 			_, probeErr := client.TaskOutput(probeCtx, &pb.TaskOutputRequest{TaskId: "__hivemind_probe__"})
 			probeCancel()
 			if probeErr != nil {

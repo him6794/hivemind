@@ -14,6 +14,9 @@
 - [x] Update `architecture_notes.md` with iteration 8 observations only, no architecture changes.
 - [x] Append the latest verified test output to `test_logs/latest.log`.
 - [ ] Complete a true network-delay simulation rather than only a worker outage/reconnect simulation.
+- [x] Add a reliability harness calibration path with latency/jitter proxies and generated `reliability_report.md`, `failure_matrix.md`, and `flaky_behavior.md`.
+- [x] Fix nodepool pre-dispatch worker probe timeout being too short for latency/jitter.
+- [ ] Fix or configure the next evidenced latency failure: master `/api/upload-task` currently times out after 5s under the calibration latency path.
 - [ ] Exercise a real failure-injected task through the live worker runtime; current live Monty path completed the labeled failure task.
 - [ ] Exercise a real long-running workload through the live worker runtime; current live Monty path completed the labeled long-running task quickly.
 - [ ] Investigate separate live billing/status issue where a newly registered user with zero balance can upload a result but the task list status becomes `FAILED: insufficient balance`.

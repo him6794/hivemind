@@ -1,0 +1,24 @@
+# Reliability Report
+
+- Generated: 2026-05-20T00:40:56.371398+00:00
+- Artifacts: `D:\hivemind\test_logs\reliability\20260520-084035`
+- Runs requested: 1
+- Runs completed: 1
+- Long-running seconds configured: 30
+- Network latency/jitter: 100ms + 0..250ms
+- Overall pass: False
+- DoD satisfied: False
+
+## Run Results
+- Run 1 `rel-20260520084038-r01`: passed=False failures=1
+
+## DoD Gate Status
+- [ ] 10 consecutive successful full pipeline runs
+- [ ] 3 consecutive node failure simulations
+- [x] true network delay simulation
+- [ ] long-running workload >= 15 min
+- [ ] failure-injected workload
+- [ ] no task duplication
+- [ ] no leaked workers
+- [ ] no stuck task ownership
+- [ ] no zombie reconnect state
