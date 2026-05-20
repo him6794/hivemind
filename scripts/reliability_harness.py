@@ -131,6 +131,8 @@ class DelayProxy:
         while not self._stop.is_set():
             try:
                 client, addr = self._sock.accept()
+            except socket.timeout:
+                continue
             except OSError:
                 if not self._stop.is_set():
                     self._log("accept_loop_error")

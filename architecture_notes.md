@@ -24,3 +24,5 @@
 - The current live latency path can still exceed the master HTTP upload timeout before task execution begins; that is a separate runtime timeout policy issue, not a schema issue.
 - Master remains an HTTP facade over the existing nodepool gRPC API; making the nodepool call timeout configurable does not alter service boundaries or proto contracts.
 - Reliability harness proxy behavior must be treated as test infrastructure: `DelayProxy` failures can invalidate network-delay evidence without implying a production service architecture issue.
+- The network-delay harness now keeps listener accept loops alive across idle periods, so worker proxy connection counts can be used as evidence that nodepool-to-worker traffic traversed the latency path.
+- Stuck `RUNNING` tasks after a worker kill are a task ownership/recovery issue in the existing lifecycle; they do not require a new proto contract to investigate.
