@@ -1292,7 +1292,6 @@ func (m *masterNodeServer) processPeriodicSettlements(settlementInterval time.Du
 		}
 
 		t.StatusMessage = fmt.Sprintf("running, settled %d CPT", t.BilledAmount)
-		t.LastUpdate = now
 		m.saveTaskLocked(t)
 	}
 

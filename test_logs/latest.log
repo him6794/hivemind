@@ -293,3 +293,75 @@ Overall pass: False
 Worker proxy connections: worker1=6, worker2=1, worker3=1
 New blocker: retry and long-running tasks remain RUNNING
 ```
+
+# Iteration 12: Settlement tick masked task timeout redispatch
+
+## Evidence
+Reliability calibration artifact: `test_logs/reliability/20260520-085706`
+
+Run id: `rel-20260520085710-r01`
+
+Observed:
+- `retry` and `long` tasks were dispatched to worker1.
+- worker1 was killed and then re-registered.
+- Both tasks stayed `RUNNING` with `StatusMessage="running, settled 0 CPT"`.
+- `RetryCount` stayed `0`, so timeout redispatch never took ownership.
+
+## Fix
+Stopped `processPeriodicSettlements` from refreshing `LastUpdate` for normal `RUNNING` settlement ticks. Failure transitions still update task state.
+
+Added `services/nodepool/cmd/server/main_test.go::TestMasterNode_ProcessPeriodicSettlements_DoesNotRefreshTaskActivity`.
+
+## Test commands
+Command: `go test ./cmd/server -run TestMasterNode_ProcessPeriodicSettlements_DoesNotRefreshTaskActivity -count=1`
+
+Result before fix:
+
+```text
+--- FAIL: TestMasterNode_ProcessPeriodicSettlements_DoesNotRefreshTaskActivity (0.02s)
+    main_test.go:1124: periodic settlement refreshed LastUpdate from ... to ...
+FAIL
+```
+
+Result after fix:
+
+```text
+ok  	hivemind/services/nodepool/cmd/server	0.111s
+```
+
+Command: `go test ./...` from `services/nodepool`
+
+Result:
+
+```text
+?   	hivemind/services/nodepool	[no test files]
+ok  	hivemind/services/nodepool/cmd/server	2.584s
+?   	hivemind/services/nodepool/internal/events	[no test files]
+ok  	hivemind/services/nodepool/internal/handler	(cached)
+ok  	hivemind/services/nodepool/internal/repository	(cached)
+ok  	hivemind/services/nodepool/internal/service	(cached)
+?   	hivemind/services/nodepool/internal/storage	[no test files]
+ok  	hivemind/services/nodepool/internal/vpn	(cached)
+?   	hivemind/services/nodepool/pb	[no test files]
+?   	hivemind/services/nodepool/pkg/config	[no test files]
+?   	hivemind/services/nodepool/pkg/handlers	[no test files]
+?   	hivemind/services/nodepool/pkg/models	[no test files]
+?   	hivemind/services/nodepool/pkg/scheduler	[no test files]
+?   	hivemind/services/nodepool/pkg/server	[no test files]
+?   	hivemind/services/nodepool/pkg/storage	[no test files]
+```
+
+## Live calibration after fix
+Command: `python scripts\reliability_harness.py --calibration --stop-on-failure --worker-nodepool-addr 127.0.0.1:50051`
+
+Artifact: `test_logs/reliability/20260520-090709`
+
+Run id: `rel-20260520090714-r01`
+
+Result:
+
+```text
+Overall pass: True
+DoD satisfied: False
+Reason: calibration only; not 10 consecutive runs, not 3 failure simulations, not 15-minute long-running workload
+```

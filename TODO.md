@@ -18,7 +18,8 @@
 - [x] Fix nodepool pre-dispatch worker probe timeout being too short for latency/jitter.
 - [x] Fix or configure the evidenced latency failure where master `/api/upload-task` timed out after 5s under the calibration latency path.
 - [x] Fix the reliability harness `DelayProxy` accept loop treating normal socket timeout as fatal, which leaves worker proxies with `connections=0`.
-- [ ] Fix stuck `RUNNING` retry and long-running tasks after worker failure simulation under latency.
+- [x] Fix stuck `RUNNING` retry and long-running tasks after worker failure simulation under latency.
+- [ ] Run full DoD validation: 10 consecutive runs, 3 failure simulations, and 15-minute long-running workload.
 - [ ] Exercise a real failure-injected task through the live worker runtime; current live Monty path completed the labeled failure task.
 - [ ] Exercise a real long-running workload through the live worker runtime; current live Monty path completed the labeled long-running task quickly.
 - [ ] Investigate separate live billing/status issue where a newly registered user with zero balance can upload a result but the task list status becomes `FAILED: insufficient balance`.

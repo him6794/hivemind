@@ -26,3 +26,5 @@
 - Reliability harness proxy behavior must be treated as test infrastructure: `DelayProxy` failures can invalidate network-delay evidence without implying a production service architecture issue.
 - The network-delay harness now keeps listener accept loops alive across idle periods, so worker proxy connection counts can be used as evidence that nodepool-to-worker traffic traversed the latency path.
 - Stuck `RUNNING` tasks after a worker kill are a task ownership/recovery issue in the existing lifecycle; they do not require a new proto contract to investigate.
+- Task timeout ownership currently uses `LastUpdate` as the activity clock; periodic billing/settlement must not refresh that clock for still-running work, or crashed-worker redispatch is masked.
+- A short calibration pass is now green, but it is not equivalent to DoD because duration and consecutive-run requirements are stricter.
