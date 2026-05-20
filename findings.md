@@ -182,3 +182,25 @@
 - Reliability calibration rerun: `test_logs/reliability/20260520-085706`, run `rel-20260520085710-r01`.
 - Worker proxy connections were observed (`worker1=6`, `worker2=1`, `worker3=1`), proving the latency path is active.
 - Current next blocker: retry and long-running tasks remain `RUNNING` after the failure simulation, leaving stuck non-terminal task ownership.
+
+## Iteration 12 root cause
+- `processPeriodicSettlements` refreshed `LastUpdate` for every `RUNNING` task during settlement ticks.
+- The timeout monitor also uses `LastUpdate` to decide whether `DISPATCHED` or `RUNNING` tasks have timed out.
+- Evidence from `test_logs/reliability/20260520-085706`, run `rel-20260520085710-r01`:
+  - `retry` and `long` were dispatched to worker1.
+  - worker1 was killed and later re-registered.
+  - both tasks remained `RUNNING` with `StatusMessage="running, settled 0 CPT"` and `RetryCount=0`.
+- Because settlement refreshed task activity, crashed-worker ownership never aged out for redispatch.
+
+## Iteration 12 fix applied
+- Removed normal settlement tick updates to `LastUpdate`; failure state transitions still update task state.
+- Added `TestMasterNode_ProcessPeriodicSettlements_DoesNotRefreshTaskActivity`.
+- No proto schema or architecture changes were made.
+
+## Iteration 12 verification
+- RED: `go test ./cmd/server -run TestMasterNode_ProcessPeriodicSettlements_DoesNotRefreshTaskActivity -count=1` failed before the fix because `LastUpdate` was refreshed to current time.
+- GREEN: the focused test passed after removing the refresh.
+- `go test ./...` in `services/nodepool`: pass.
+- Reliability calibration rerun: `test_logs/reliability/20260520-090709`, run `rel-20260520090714-r01`.
+- Calibration passed with 3 workers, latency/jitter, duplicate rejection, one worker kill/reconnect, failure-injected task, retry task, long task, and parallel tasks.
+- DoD is still not satisfied because this was a 1-run calibration with 30s long task, not 10 consecutive runs with a 15-minute long-running workload and 3 failure simulations.

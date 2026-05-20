@@ -1092,6 +1092,39 @@ func TestMasterNode_ProcessPeriodicSettlements(t *testing.T) {
 	}
 }
 
+func TestMasterNode_ProcessPeriodicSettlements_DoesNotRefreshTaskActivity(t *testing.T) {
+	t.Parallel()
+
+	lastActivity := time.Now().Add(-2 * time.Minute)
+	m := &masterNodeServer{
+		taskToWorker: map[string]string{},
+		tasks: map[string]*taskState{
+			"t-activity": {
+				TaskID:         "t-activity",
+				Owner:          "worker1",
+				WorkerID:       "worker2",
+				Status:         "RUNNING",
+				ReqCPUScore:    100,
+				ReqMemoryGB:    1,
+				ReqGPUScore:    0,
+				ReqGPUMemoryGB: 0,
+				HostCount:      1,
+				LastUpdate:     lastActivity,
+			},
+		},
+	}
+
+	m.processPeriodicSettlements(time.Minute)
+
+	st, ok := m.getTask("t-activity")
+	if !ok {
+		t.Fatalf("task not found")
+	}
+	if !st.LastUpdate.Equal(lastActivity) {
+		t.Fatalf("periodic settlement refreshed LastUpdate from %s to %s", lastActivity, st.LastUpdate)
+	}
+}
+
 func TestMasterNode_ProcessPeriodicSettlements_InsufficientBalanceFailsTask(t *testing.T) {
 	t.Parallel()
 
