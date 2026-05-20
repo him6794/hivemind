@@ -22,3 +22,5 @@
 - Worker registration, master-to-nodepool calls, and nodepool-to-worker dispatch are separate gRPC paths; failures must be attributed to the specific path shown in logs.
 - Pre-dispatch worker probing remains inside nodepool scheduling; making its timeout latency-tolerant preserves the existing scheduling architecture and proto contract.
 - The current live latency path can still exceed the master HTTP upload timeout before task execution begins; that is a separate runtime timeout policy issue, not a schema issue.
+- Master remains an HTTP facade over the existing nodepool gRPC API; making the nodepool call timeout configurable does not alter service boundaries or proto contracts.
+- Reliability harness proxy behavior must be treated as test infrastructure: `DelayProxy` failures can invalidate network-delay evidence without implying a production service architecture issue.

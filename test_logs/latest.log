@@ -170,3 +170,66 @@ ok
 go test ./cmd/server -run TestMasterNode_DispatchTaskToWorker_WithLatencyProxy -count=1
 ok  	hivemind/services/nodepool/cmd/server	2.813s
 ```
+
+# Iteration 10: Master nodepool RPC timeout under latency
+
+## Evidence
+Reliability calibration artifact: `test_logs/reliability/20260520-084035`
+
+Run id: `rel-20260520084038-r01`
+
+Observed:
+- `/api/login` succeeded through the nodepool latency proxy.
+- First `/api/upload-task` returned HTTP 502 after 5000ms.
+- Error body: `rpc error: code = DeadlineExceeded desc = context deadline exceeded`.
+
+## Fix
+Changed master nodepool RPC timeout from a hard-coded 5 seconds to `nodepoolCallTimeout()`, defaulting to 30 seconds and configurable via `MASTER_NODEPOOL_TIMEOUT_SEC`.
+
+Added `services/master/cmd/server/main_test.go::TestNodepoolCallTimeoutFromEnv`.
+
+## Test commands
+Command: `go test ./cmd/server -run TestNodepoolCallTimeoutFromEnv -count=1`
+
+Result before fix:
+
+```text
+FAIL	hivemind/services/master/cmd/server [build failed]
+cmd\server\main_test.go:11:13: undefined: nodepoolCallTimeout
+cmd\server\main_test.go:18:13: undefined: nodepoolCallTimeout
+```
+
+Result after fix:
+
+```text
+ok  	hivemind/services/master/cmd/server	1.083s
+```
+
+Command: `go test ./...` from `services/master`
+
+Result:
+
+```text
+?   	hivemind/services/master	[no test files]
+ok  	hivemind/services/master/cmd/server	0.102s
+ok  	hivemind/services/master/internal/bt	(cached)
+```
+
+## Live calibration after fix
+Command: `python scripts\reliability_harness.py --calibration --stop-on-failure --worker-nodepool-addr 127.0.0.1:50051`
+
+Artifact: `test_logs/reliability/20260520-084619`
+
+Run id: `rel-20260520084623-r01`
+
+Result:
+
+```text
+Overall pass: False
+Previous HTTP 502 deadline failure: not observed
+New blocker: task dispatch remains PENDING with [PROBE_FAIL]
+```
+
+Observed next issue:
+- `latency-proxy.log` shows `accept_loop_error` shortly after worker proxy startup.
+- Worker proxy shutdown shows `connections=0`, so nodepool-to-worker latency path was not active.

@@ -140,3 +140,25 @@
 - `go test ./...` in `services/nodepool`: pass.
 - Reliability calibration rerun with worker registration direct and network latency still enabled on master->nodepool and nodepool->worker paths: `test_logs/reliability/20260520-084035`, run `rel-20260520084038-r01`.
 - Current blocking issue after this fix: first upload now fails at the master HTTP layer with `POST /api/upload-task returned HTTP 502` and `rpc error: code = DeadlineExceeded desc = context deadline exceeded`; worker/task scenarios were not reached in that run.
+
+## Iteration 10 root cause
+- Master wrapped nodepool gRPC calls in a hard-coded 5 second timeout.
+- Evidence from `test_logs/reliability/20260520-084035`, run `rel-20260520084038-r01`:
+  - Login succeeded through the latency proxy.
+  - The first `/api/upload-task` failed with HTTP 502 after exactly 5000ms.
+  - The propagated gRPC error was `rpc error: code = DeadlineExceeded desc = context deadline exceeded`.
+- The timeout expired before nodepool could complete latency-tolerant dispatch work, so the pipeline never reached task execution.
+
+## Iteration 10 fix applied
+- Added `nodepoolCallTimeout()` in `services/master/cmd/server/main.go`.
+- Master nodepool RPC timeout now defaults to 30 seconds and can be configured with `MASTER_NODEPOOL_TIMEOUT_SEC`.
+- Updated `withTimeout` to use the helper.
+- Added `TestNodepoolCallTimeoutFromEnv` in `services/master/cmd/server/main_test.go`.
+
+## Iteration 10 verification
+- RED: `go test ./cmd/server -run TestNodepoolCallTimeoutFromEnv -count=1` failed before the fix with `undefined: nodepoolCallTimeout`.
+- GREEN: the same focused test passed after the fix.
+- `go test ./...` in `services/master`: pass.
+- Reliability calibration rerun: `test_logs/reliability/20260520-084619`, run `rel-20260520084623-r01`.
+- The HTTP 502 deadline failure is gone; upload requests now return HTTP 200 after about 15-16 seconds.
+- Current next blocker: harness `DelayProxy` logs `accept_loop_error` shortly after startup and worker gRPC proxies record `connections=0`, causing task dispatch to remain `[PROBE_FAIL]`.
