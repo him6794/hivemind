@@ -47,8 +47,21 @@ func cors(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 }
 
+func nodepoolCallTimeout() time.Duration {
+	const fallback = 30 * time.Second
+	value := strings.TrimSpace(os.Getenv("MASTER_NODEPOOL_TIMEOUT_SEC"))
+	if value == "" {
+		return fallback
+	}
+	seconds, err := strconv.Atoi(value)
+	if err != nil || seconds <= 0 {
+		return fallback
+	}
+	return time.Duration(seconds) * time.Second
+}
+
 func withTimeout(parent context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(parent, 5*time.Second)
+	return context.WithTimeout(parent, nodepoolCallTimeout())
 }
 
 func bearerToken(r *http.Request) (string, error) {
