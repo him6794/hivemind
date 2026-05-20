@@ -18,3 +18,7 @@
 - Worker crash cleanup is currently lazy: stale workers are marked `OFFLINE` when worker listing or scheduling checks heartbeat age after the fixed 30 second timeout.
 - Worker reconnect is handled by the existing worker auto-registration path; re-registering the same worker id updates status and heartbeat back to `ACTIVE`.
 - Live worker execution with `monty.exe` currently generates a small `-c` script that returns `RESULT_TORRENT` from the task BTIH; task labels such as CPU/IO/failure/long-running do not currently change the executed workload in this path.
+- Reliability validation now uses a local harness that starts real Postgres, Redis, nodepool, master, workers, TCP latency proxies, and an external worker executor; this is test infrastructure, not a production topology change.
+- Worker registration, master-to-nodepool calls, and nodepool-to-worker dispatch are separate gRPC paths; failures must be attributed to the specific path shown in logs.
+- Pre-dispatch worker probing remains inside nodepool scheduling; making its timeout latency-tolerant preserves the existing scheduling architecture and proto contract.
+- The current live latency path can still exceed the master HTTP upload timeout before task execution begins; that is a separate runtime timeout policy issue, not a schema issue.

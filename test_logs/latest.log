@@ -87,3 +87,86 @@ Worker failure/reconnect:
 - This included one worker failure simulation, not 3 consecutive node failure simulations.
 - The network-delay requirement was not fully satisfied; this run simulated worker outage and reconnect.
 - The live Monty runtime completed the labeled failure and long-running tasks quickly; true failure-injected and long-running workload behavior remains a separate issue.
+
+# Iteration 9: Latency-tolerant nodepool pre-dispatch probe
+
+## Evidence
+Reliability calibration artifact: `test_logs/reliability/20260520-083100`
+
+Run id: `rel-20260520083101-r01`
+
+Observed:
+- worker1, worker2, and worker3 registered and were later listed as `ACTIVE`.
+- All task uploads failed with `[PROBE_FAIL] worker probe failed at 127.0.0.1:50055`.
+- The configured latency path was `100ms + 0..250ms` jitter.
+
+## Fix
+Changed nodepool pre-dispatch probe timeout from a hard-coded 1 second to `NODEPOOL_WORKER_PROBE_TIMEOUT_SEC`, defaulting to 5 seconds.
+
+Added `services/nodepool/cmd/server/main_test.go::TestMasterNode_DispatchTaskToWorker_WithLatencyProxy`.
+
+## Test commands
+Command: `go test ./cmd/server -run TestMasterNode_DispatchTaskToWorker_WithLatencyProxy -count=1`
+
+Result before fix:
+
+```text
+--- FAIL: TestMasterNode_DispatchTaskToWorker_WithLatencyProxy (1.00s)
+    main_test.go:689: expected dispatch through latency proxy to succeed, reason="worker probe failed at 127.0.0.1:7074"
+FAIL
+FAIL	hivemind/services/nodepool/cmd/server	1.108s
+```
+
+Result after fix:
+
+```text
+ok  	hivemind/services/nodepool/cmd/server	2.812s
+```
+
+Command: `go test ./...` from `services/nodepool`
+
+Result:
+
+```text
+?   	hivemind/services/nodepool	[no test files]
+ok  	hivemind/services/nodepool/cmd/server	2.591s
+?   	hivemind/services/nodepool/internal/events	[no test files]
+ok  	hivemind/services/nodepool/internal/handler	(cached)
+ok  	hivemind/services/nodepool/internal/repository	(cached)
+ok  	hivemind/services/nodepool/internal/service	(cached)
+?   	hivemind/services/nodepool/internal/storage	[no test files]
+ok  	hivemind/services/nodepool/internal/vpn	(cached)
+?   	hivemind/services/nodepool/pb	[no test files]
+?   	hivemind/services/nodepool/pkg/config	[no test files]
+?   	hivemind/services/nodepool/pkg/handlers	[no test files]
+?   	hivemind/services/nodepool/pkg/models	[no test files]
+?   	hivemind/services/nodepool/pkg/scheduler	[no test files]
+?   	hivemind/services/nodepool/pkg/server	[no test files]
+?   	hivemind/services/nodepool/pkg/storage	[no test files]
+```
+
+## Live calibration after fix
+Command: `python scripts\reliability_harness.py --calibration --stop-on-failure --worker-nodepool-addr 127.0.0.1:50051`
+
+Artifact: `test_logs/reliability/20260520-084035`
+
+Run id: `rel-20260520084038-r01`
+
+Result:
+
+```text
+Overall pass: False
+Failure: POST /api/upload-task returned HTTP 502: rpc error: code = DeadlineExceeded desc = context deadline exceeded
+```
+
+Known next root cause candidate:
+- Master upload request timeout is too short for the current latency path after nodepool probe timeout was made latency-tolerant.
+
+Harness validation:
+
+```text
+python -m py_compile scripts\reliability_harness.py scripts\reliability_executor.py
+ok
+go test ./cmd/server -run TestMasterNode_DispatchTaskToWorker_WithLatencyProxy -count=1
+ok  	hivemind/services/nodepool/cmd/server	2.813s
+```
