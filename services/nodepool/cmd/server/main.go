@@ -63,6 +63,25 @@ type taskState struct {
 	RetryCount       int32
 	LastUpdate       time.Time
 	LastSettlementAt time.Time
+
+	MaxRetries    int32
+	Deadline      time.Time
+	Deterministic bool
+	SideEffects   bool
+	Priority      int32
+
+	CPUTimeMS     int64
+	WallTimeMS    int64
+	PeakMemoryMB  int64
+	DownloadBytes int64
+	CacheHits     int64
+}
+
+type batchLease struct {
+	BatchID   string
+	WorkerID  string
+	TaskIDs   []string
+	CreatedAt time.Time
 }
 
 type masterNodeServer struct {
@@ -76,7 +95,9 @@ type masterNodeServer struct {
 	taskToWorker map[string]string
 	taskRoutes   map[string]map[string]string
 	tasks        map[string]*taskState
+	batchLeases  map[string]*batchLease
 	pb.UnimplementedMasterNodeServiceServer
+	pb.UnimplementedBatchRuntimeServiceServer
 }
 
 type workerIngressServer struct {
@@ -213,6 +234,207 @@ func formatDispatchReason(reason string) string {
 		reason = "no available worker"
 	}
 	return fmt.Sprintf("[%s] %s", classifyDispatchReason(reason), reason)
+}
+
+func allowsSpeculativeExecution(node *pb.DAGNode) bool {
+	return node != nil && node.GetDeterministic() && !node.GetSideEffects()
+}
+
+func (m *masterNodeServer) ensureBatchLeasesLocked() {
+	if m.batchLeases == nil {
+		m.batchLeases = make(map[string]*batchLease)
+	}
+}
+
+func (m *masterNodeServer) inflightBatchCountLocked(workerID string) int {
+	m.ensureBatchLeasesLocked()
+	count := 0
+	for _, lease := range m.batchLeases {
+		if lease != nil && lease.WorkerID == workerID {
+			count++
+		}
+	}
+	return count
+}
+
+func taskMemoryGB(t *taskState) int32 {
+	if t == nil || t.ReqMemoryGB <= 0 {
+		return 1
+	}
+	return t.ReqMemoryGB
+}
+
+func makeTaskLease(t *taskState) *pb.TaskLease {
+	deadline := int64(0)
+	if !t.Deadline.IsZero() {
+		deadline = t.Deadline.Unix()
+	}
+	artifactID := strings.TrimSpace(t.TorrentSource)
+	artifacts := []*pb.ArtifactManifest{}
+	if artifactID != "" {
+		artifacts = append(artifacts, &pb.ArtifactManifest{
+			ArtifactId:    artifactID,
+			ContentType:   "application/vnd.hivemind.execution-package",
+			CreatedByTask: t.TaskID,
+			Compression:   "zstd",
+		})
+	}
+	return &pb.TaskLease{
+		TaskId: t.TaskID,
+		ExecutionPackage: &pb.ExecutionPackage{
+			RuntimeVersion: "legacy-go-monty",
+			TaskCodeRef:    artifactID,
+			ArtifactRefs:   []string{artifactID},
+			Constraints: map[string]string{
+				"deterministic": fmt.Sprintf("%t", t.Deterministic),
+				"side_effects":  fmt.Sprintf("%t", t.SideEffects),
+			},
+		},
+		Artifacts: artifacts,
+		ResourceLimits: &pb.ResourceRequirements{
+			MemoryGb:    taskMemoryGB(t),
+			CpuCores:    t.ReqCPUScore,
+			GpuScore:    t.ReqGPUScore,
+			GpuMemoryGb: t.ReqGPUMemoryGB,
+		},
+		DeadlineUnix: deadline,
+		Priority:     t.Priority,
+	}
+}
+
+func (m *masterNodeServer) PullBatch(ctx context.Context, req *pb.PullBatchRequest) (*pb.PullBatchResponse, error) {
+	_ = ctx
+	workerID := strings.TrimSpace(req.GetWorkerId())
+	if workerID == "" {
+		return &pb.PullBatchResponse{Success: false, StatusMessage: "worker_id is required"}, nil
+	}
+	if _, ok := m.svc.GetWorker(context.Background(), workerID); !ok {
+		return &pb.PullBatchResponse{Success: false, StatusMessage: "worker not registered"}, nil
+	}
+	if req.GetMaxInflightBatches() <= 0 || req.GetQueueCapacity() <= 0 || req.GetAvailableMemoryGb() <= 0 {
+		return &pb.PullBatchResponse{Success: true, StatusMessage: "backpressure: no capacity"}, nil
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ensureBatchLeasesLocked()
+	if m.inflightBatchCountLocked(workerID) >= int(req.GetMaxInflightBatches()) {
+		return &pb.PullBatchResponse{Success: true, StatusMessage: "backpressure: inflight limit reached"}, nil
+	}
+
+	candidates := make([]*taskState, 0, len(m.tasks))
+	for _, t := range m.tasks {
+		if t == nil || t.TaskID == "" || t.Status != "PENDING" {
+			continue
+		}
+		candidates = append(candidates, t)
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].Priority == candidates[j].Priority {
+			return candidates[i].TaskID < candidates[j].TaskID
+		}
+		return candidates[i].Priority > candidates[j].Priority
+	})
+
+	remainingMemory := req.GetAvailableMemoryGb()
+	remainingSlots := req.GetQueueCapacity()
+	leases := make([]*pb.TaskLease, 0, remainingSlots)
+	taskIDs := make([]string, 0, remainingSlots)
+	for _, t := range candidates {
+		if remainingSlots <= 0 {
+			break
+		}
+		neededMemory := taskMemoryGB(t)
+		if neededMemory > remainingMemory {
+			continue
+		}
+		t.Status = "DISPATCHED"
+		t.WorkerID = workerID
+		t.StatusMessage = "leased via pull batch"
+		t.LastUpdate = time.Now()
+		leases = append(leases, makeTaskLease(t))
+		taskIDs = append(taskIDs, t.TaskID)
+		remainingMemory -= neededMemory
+		remainingSlots--
+	}
+
+	if len(leases) == 0 {
+		return &pb.PullBatchResponse{Success: true, StatusMessage: "no eligible tasks"}, nil
+	}
+	batchID := fmt.Sprintf("batch-%s-%d", workerID, time.Now().UnixNano())
+	m.batchLeases[batchID] = &batchLease{
+		BatchID:   batchID,
+		WorkerID:  workerID,
+		TaskIDs:   taskIDs,
+		CreatedAt: time.Now(),
+	}
+	return &pb.PullBatchResponse{Success: true, StatusMessage: "leased", BatchId: batchID, Tasks: leases}, nil
+}
+
+func (m *masterNodeServer) CompleteBatch(ctx context.Context, req *pb.CompleteBatchRequest) (*pb.CompleteBatchResponse, error) {
+	_ = ctx
+	workerID := strings.TrimSpace(req.GetWorkerId())
+	batchID := strings.TrimSpace(req.GetBatchId())
+	if workerID == "" || batchID == "" {
+		return &pb.CompleteBatchResponse{Success: false, StatusMessage: "worker_id and batch_id are required"}, nil
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ensureBatchLeasesLocked()
+	lease, ok := m.batchLeases[batchID]
+	if !ok || lease == nil || lease.WorkerID != workerID {
+		return &pb.CompleteBatchResponse{Success: false, StatusMessage: "batch lease not found"}, nil
+	}
+
+	leased := make(map[string]bool, len(lease.TaskIDs))
+	for _, id := range lease.TaskIDs {
+		leased[id] = true
+	}
+	now := time.Now()
+	for _, completed := range req.GetTasks() {
+		taskID := strings.TrimSpace(completed.GetTaskId())
+		if !leased[taskID] {
+			continue
+		}
+		t, ok := m.tasks[taskID]
+		if !ok || t == nil {
+			continue
+		}
+		status := strings.ToUpper(strings.TrimSpace(completed.GetStatus()))
+		if status == "" {
+			status = "COMPLETED"
+		}
+		t.Status = status
+		t.StatusMessage = "completed via pull batch"
+		if status != "COMPLETED" {
+			t.StatusMessage = "failed via pull batch"
+		}
+		t.Output = completed.GetStdoutArtifactRef()
+		if len(completed.GetResultArtifactRefs()) > 0 {
+			t.ResultTorrent = completed.GetResultArtifactRefs()[0]
+		}
+		if metrics := completed.GetMetrics(); metrics != nil {
+			t.CPUTimeMS = metrics.GetCpuTimeMs()
+			t.WallTimeMS = metrics.GetWallTimeMs()
+			t.PeakMemoryMB = metrics.GetPeakMemoryMb()
+			t.DownloadBytes = metrics.GetDownloadBytes()
+			t.CacheHits = metrics.GetCacheHits()
+		}
+		t.LastUpdate = now
+	}
+	delete(m.batchLeases, batchID)
+	return &pb.CompleteBatchResponse{Success: true, StatusMessage: "batch completed"}, nil
+}
+
+func (m *masterNodeServer) Heartbeat(ctx context.Context, req *pb.HeartbeatRequest) (*pb.HeartbeatResponse, error) {
+	if strings.TrimSpace(req.GetWorkerId()) == "" {
+		return &pb.HeartbeatResponse{Success: false, StatusMessage: "worker_id is required"}, nil
+	}
+	if err := m.svc.Heartbeat(ctx, req.GetWorkerId()); err != nil {
+		return &pb.HeartbeatResponse{Success: false, StatusMessage: err.Error()}, nil
+	}
+	return &pb.HeartbeatResponse{Success: true, StatusMessage: "heartbeat recorded"}, nil
 }
 
 func initDB(dsn string) (*sql.DB, error) {
@@ -1025,16 +1247,28 @@ func (m *masterNodeServer) listTasksByOwnerFiltered(owner, status, keyword strin
 }
 
 func (m *masterNodeServer) dispatchTaskToWorkerWithExcludes(ctx context.Context, t *taskState, excludes map[string]bool) (workerID, workerAddr string, reason string, ok bool) {
+	probeEnabled := envBool("NODEPOOL_PRE_DISPATCH_PROBE", true)
 	workers, err := m.svc.ListAvailableWorkers(ctx)
 	if err != nil || len(workers) == 0 {
 		if err != nil {
 			return "", "", fmt.Sprintf("list workers failed: %v", err), false
 		}
-		return "", "", "no available worker", false
+		if !probeEnabled {
+			allWorkers, listErr := m.svc.ListWorkers(ctx, true)
+			if listErr != nil || len(allWorkers) == 0 {
+				if listErr != nil {
+					return "", "", fmt.Sprintf("list workers failed: %v", listErr), false
+				}
+				return "", "", "no available worker", false
+			}
+			workers = allWorkers
+		} else {
+			return "", "", "no available worker", false
+		}
 	}
-	probeEnabled := envBool("NODEPOOL_PRE_DISPATCH_PROBE", true)
 	probeTimeout := envDurationSeconds("NODEPOOL_WORKER_PROBE_TIMEOUT_SEC", 5*time.Second)
 	lastReason := "no available worker"
+	healthyWorkers := make([]*repository.Worker, 0, len(workers))
 	for _, w := range workers {
 		if w == nil || strings.TrimSpace(w.Addr) == "" {
 			lastReason = "worker address missing"
@@ -1044,11 +1278,16 @@ func (m *masterNodeServer) dispatchTaskToWorkerWithExcludes(ctx context.Context,
 			lastReason = "worker excluded"
 			continue
 		}
+		if !probeEnabled {
+			healthyWorkers = append(healthyWorkers, w)
+			continue
+		}
 		dialCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		conn, dialErr := grpc.DialContext(dialCtx, w.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		cancel()
 		if dialErr != nil {
 			lastReason = fmt.Sprintf("dial worker %s failed", w.Addr)
+			_ = m.svc.MarkWorkerOffline(ctx, w.ID)
 			continue
 		}
 		client := pb.NewWorkerNodeServiceClient(conn)
@@ -1058,16 +1297,34 @@ func (m *masterNodeServer) dispatchTaskToWorkerWithExcludes(ctx context.Context,
 			probeCancel()
 			if probeErr != nil {
 				lastReason = fmt.Sprintf("worker probe failed at %s", w.Addr)
+				_ = m.svc.MarkWorkerOffline(ctx, w.ID)
 				_ = conn.Close()
 				continue
 			}
 		}
+		healthyWorkers = append(healthyWorkers, w)
+		_ = conn.Close()
+	}
+	if len(healthyWorkers) == 0 {
+		return "", "", lastReason, false
+	}
+	for _, w := range healthyWorkers {
+		dialCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		conn, dialErr := grpc.DialContext(dialCtx, w.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		cancel()
+		if dialErr != nil {
+			lastReason = fmt.Sprintf("dial worker %s failed", w.Addr)
+			_ = m.svc.MarkWorkerOffline(ctx, w.ID)
+			continue
+		}
+		client := pb.NewWorkerNodeServiceClient(conn)
 		execCtx, execCancel := context.WithTimeout(ctx, 3*time.Second)
 		resp, execErr := client.ExecuteTask(execCtx, &pb.ExecuteTaskRequest{TaskId: t.TaskID, Torrent: t.TorrentSource, CpuUsage: 0, GpuUsage: 0, MemoryGb: t.ReqMemoryGB, GpuMemoryGb: t.ReqGPUMemoryGB})
 		execCancel()
 		_ = conn.Close()
 		if execErr != nil {
 			lastReason = fmt.Sprintf("execute rpc failed at %s", w.Addr)
+			_ = m.svc.MarkWorkerOffline(ctx, w.ID)
 			continue
 		}
 		if resp.GetSuccess() {
@@ -2174,7 +2431,7 @@ func main() {
 	repo := repository.NewWorkerRepository()
 	svc := service.NewWorkerService(repo)
 	authSrv := newUserAuthServer(db, jwtSecret)
-	masterSrv := &masterNodeServer{svc: svc, auth: authSrv, db: db, redis: redisClient, strictBTIH: strictBTIH, taskToWorker: make(map[string]string), taskRoutes: make(map[string]map[string]string), tasks: make(map[string]*taskState)}
+	masterSrv := &masterNodeServer{svc: svc, auth: authSrv, db: db, redis: redisClient, strictBTIH: strictBTIH, taskToWorker: make(map[string]string), taskRoutes: make(map[string]map[string]string), tasks: make(map[string]*taskState), batchLeases: make(map[string]*batchLease)}
 	masterSrv.loadTasksFromDB()
 	taskTimeout := time.Duration(envInt("NODEPOOL_TASK_TIMEOUT_SEC", 30)) * time.Second
 	maxRedispatch := envInt("NODEPOOL_MAX_REDISPATCH", 2)
@@ -2188,6 +2445,7 @@ func main() {
 	grpcServer := grpc.NewServer()
 	pb.RegisterNodeManagerServiceServer(grpcServer, &nodeManagerServer{svc: svc})
 	pb.RegisterMasterNodeServiceServer(grpcServer, masterSrv)
+	pb.RegisterBatchRuntimeServiceServer(grpcServer, masterSrv)
 	pb.RegisterWorkerNodeServiceServer(grpcServer, workerIngress)
 	pb.RegisterUserServiceServer(grpcServer, authSrv)
 	enableHTTPAuth := strings.EqualFold(os.Getenv("NODEPOOL_ENABLE_HTTP_AUTH"), "1") || strings.EqualFold(os.Getenv("NODEPOOL_ENABLE_HTTP_AUTH"), "true")

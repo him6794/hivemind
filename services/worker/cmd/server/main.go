@@ -45,6 +45,8 @@ type workerRuntime struct {
 	taskStopped map[string]bool
 	taskCancel  map[string]context.CancelFunc
 	authToken   string
+
+	dialContext func(context.Context, string) (*grpc.ClientConn, error)
 }
 
 type workerProfile struct {
@@ -140,8 +142,15 @@ func (r *workerRuntime) clearTaskCancel(taskID string) {
 	delete(r.taskCancel, taskID)
 }
 
+func (r *workerRuntime) dialNodepool(ctx context.Context) (*grpc.ClientConn, error) {
+	if r.dialContext != nil {
+		return r.dialContext(ctx, r.nodepoolAddr)
+	}
+	return grpc.DialContext(ctx, r.nodepoolAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+}
+
 func (r *workerRuntime) withNodepool(ctx context.Context, fn func(pb.NodeManagerServiceClient, pb.WorkerNodeServiceClient) error) error {
-	conn, err := grpc.DialContext(ctx, r.nodepoolAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := r.dialNodepool(ctx)
 	if err != nil {
 		return err
 	}
@@ -161,7 +170,7 @@ func (r *workerRuntime) getWorkerAuthToken(ctx context.Context) string {
 	if password == "" {
 		password = "worker123"
 	}
-	conn, err := grpc.DialContext(ctx, r.nodepoolAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := r.dialNodepool(ctx)
 	if err != nil {
 		return ""
 	}
@@ -269,8 +278,8 @@ func (r *workerRuntime) heartbeatLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			hbCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-			_ = r.withNodepool(hbCtx, func(nodeClient pb.NodeManagerServiceClient, _ pb.WorkerNodeServiceClient) error {
-				_, err := nodeClient.ReportStatus(hbCtx, &pb.RunningStatusRequest{
+			err := r.withNodepool(hbCtx, func(nodeClient pb.NodeManagerServiceClient, _ pb.WorkerNodeServiceClient) error {
+				resp, err := nodeClient.ReportStatus(hbCtx, &pb.RunningStatusRequest{
 					Username:       r.workerName,
 					Status:         "Idle",
 					CpuUsage:       10,
@@ -278,9 +287,50 @@ func (r *workerRuntime) heartbeatLoop(ctx context.Context) {
 					GpuUsage:       5,
 					GpuMemoryUsage: 8,
 				})
-				return err
+				if err != nil {
+					return err
+				}
+				if !resp.GetSuccess() {
+					return fmt.Errorf("report status rejected: %s", resp.GetStatusMessage())
+				}
+				return nil
 			})
 			cancel()
+			if err == nil {
+				continue
+			}
+			log.Printf("worker heartbeat failed username=%s err=%v; trying re-register", r.workerName, err)
+
+			regCtx, regCancel := context.WithTimeout(ctx, 3*time.Second)
+			regErr := r.registerOnce(regCtx)
+			regCancel()
+			if regErr != nil {
+				log.Printf("worker re-register failed username=%s err=%v", r.workerName, regErr)
+				continue
+			}
+
+			retryCtx, retryCancel := context.WithTimeout(ctx, 2*time.Second)
+			retryErr := r.withNodepool(retryCtx, func(nodeClient pb.NodeManagerServiceClient, _ pb.WorkerNodeServiceClient) error {
+				resp, err := nodeClient.ReportStatus(retryCtx, &pb.RunningStatusRequest{
+					Username:       r.workerName,
+					Status:         "Idle",
+					CpuUsage:       10,
+					MemoryUsage:    20,
+					GpuUsage:       5,
+					GpuMemoryUsage: 8,
+				})
+				if err != nil {
+					return err
+				}
+				if !resp.GetSuccess() {
+					return fmt.Errorf("report status rejected after re-register: %s", resp.GetStatusMessage())
+				}
+				return nil
+			})
+			retryCancel()
+			if retryErr != nil {
+				log.Printf("worker heartbeat retry failed username=%s err=%v", r.workerName, retryErr)
+			}
 		}
 	}
 }
@@ -708,6 +758,207 @@ func (r *workerRuntime) runMontyExecutor(parts []string, taskID, torrent string)
 	return executorRunResult{result: fallbackResult, outputLines: outputLines}, nil
 }
 
+func (r *workerRuntime) batchPullCapacity() (maxInflight, availableMemory, queueCapacity int32) {
+	maxInflight = envInt32("WORKER_BATCH_MAX_INFLIGHT", 1)
+	if maxInflight <= 0 {
+		maxInflight = 1
+	}
+	queueCapacity = envInt32("WORKER_BATCH_QUEUE_CAPACITY", 1)
+	if queueCapacity <= 0 {
+		queueCapacity = 1
+	}
+	availableMemory = envInt32("WORKER_BATCH_AVAILABLE_MEMORY_GB", 0)
+	if availableMemory <= 0 {
+		availableMemory = r.getProfile().MemoryGb
+	}
+	if availableMemory <= 0 {
+		availableMemory = 1
+	}
+	return maxInflight, availableMemory, queueCapacity
+}
+
+func leaseCodeRef(lease *pb.TaskLease) string {
+	if lease == nil {
+		return ""
+	}
+	if pkg := lease.GetExecutionPackage(); pkg != nil {
+		if ref := strings.TrimSpace(pkg.GetTaskCodeRef()); ref != "" {
+			return ref
+		}
+		for _, ref := range pkg.GetArtifactRefs() {
+			if ref = strings.TrimSpace(ref); ref != "" {
+				return ref
+			}
+		}
+	}
+	for _, manifest := range lease.GetArtifacts() {
+		if ref := strings.TrimSpace(manifest.GetArtifactId()); ref != "" {
+			return ref
+		}
+	}
+	return ""
+}
+
+func leaseDownloadBytes(lease *pb.TaskLease) int64 {
+	if lease == nil {
+		return 0
+	}
+	var total int64
+	if pkg := lease.GetExecutionPackage(); pkg != nil {
+		total += int64(len(pkg.GetTaskCodeRef()))
+		for _, ref := range pkg.GetArtifactRefs() {
+			total += int64(len(ref))
+		}
+	}
+	for _, manifest := range lease.GetArtifacts() {
+		if manifest.GetSize() > 0 {
+			total += manifest.GetSize()
+			continue
+		}
+		total += int64(len(manifest.GetArtifactId()))
+	}
+	return total
+}
+
+func (r *workerRuntime) executeBatchLease(ctx context.Context, lease *pb.TaskLease) *pb.CompletedTask {
+	start := time.Now()
+	taskID := strings.TrimSpace(lease.GetTaskId())
+	codeRef := leaseCodeRef(lease)
+
+	completed := &pb.CompletedTask{
+		TaskId: taskID,
+		Status: "FAILED",
+		Metrics: &pb.ExecutionMetrics{
+			DownloadBytes: leaseDownloadBytes(lease),
+		},
+	}
+	defer func() {
+		wallMS := time.Since(start).Milliseconds()
+		if wallMS <= 0 {
+			wallMS = 1
+		}
+		completed.Metrics.WallTimeMs = wallMS
+		completed.Metrics.CpuTimeMs = wallMS
+		if limits := lease.GetResourceLimits(); limits != nil && limits.GetMemoryGb() > 0 {
+			completed.Metrics.PeakMemoryMb = int64(limits.GetMemoryGb()) * 1024
+		}
+	}()
+
+	if taskID == "" {
+		completed.StderrArtifactRef = "error://missing-task-id"
+		return completed
+	}
+	if err := ctx.Err(); err != nil {
+		completed.StderrArtifactRef = "error://" + url.QueryEscape(err.Error())
+		return completed
+	}
+	if codeRef == "" {
+		completed.StderrArtifactRef = "error://missing-task-code-ref"
+		return completed
+	}
+
+	r.clearStopped(taskID)
+	runRes, err := r.runExternalExecutor(taskID, codeRef)
+	if len(runRes.outputLines) > 0 {
+		completed.StdoutArtifactRef = "artifact://stdout/" + url.QueryEscape(taskID)
+	}
+	if err != nil {
+		completed.Status = "FAILED"
+		completed.StderrArtifactRef = "error://" + url.QueryEscape(err.Error())
+		return completed
+	}
+	completed.Status = "COMPLETED"
+	if runRes.result != "" {
+		completed.ResultArtifactRefs = []string{runRes.result}
+	}
+	return completed
+}
+
+func (r *workerRuntime) pullBatchOnce(ctx context.Context) (bool, error) {
+	maxInflight, availableMemory, queueCapacity := r.batchPullCapacity()
+	conn, err := r.dialNodepool(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer conn.Close()
+
+	client := pb.NewBatchRuntimeServiceClient(conn)
+	rpcTimeoutSec := envInt32("WORKER_BATCH_RPC_TIMEOUT_SEC", 10)
+	if rpcTimeoutSec <= 0 {
+		rpcTimeoutSec = 10
+	}
+	pullCtx, pullCancel := context.WithTimeout(ctx, time.Duration(rpcTimeoutSec)*time.Second)
+	resp, err := client.PullBatch(pullCtx, &pb.PullBatchRequest{
+		WorkerId:           r.workerName,
+		MaxInflightBatches: maxInflight,
+		AvailableMemoryGb:  availableMemory,
+		QueueCapacity:      queueCapacity,
+		CacheSummary:       &pb.CacheSummary{},
+	})
+	pullCancel()
+	if err != nil {
+		return false, err
+	}
+	if !resp.GetSuccess() {
+		return false, fmt.Errorf("pull batch rejected: %s", resp.GetStatusMessage())
+	}
+	if len(resp.GetTasks()) == 0 {
+		return false, nil
+	}
+
+	completed := make([]*pb.CompletedTask, 0, len(resp.GetTasks()))
+	for _, lease := range resp.GetTasks() {
+		completed = append(completed, r.executeBatchLease(ctx, lease))
+	}
+
+	completeCtx, completeCancel := context.WithTimeout(ctx, time.Duration(rpcTimeoutSec)*time.Second)
+	completeResp, err := client.CompleteBatch(completeCtx, &pb.CompleteBatchRequest{
+		WorkerId: r.workerName,
+		BatchId:  resp.GetBatchId(),
+		Tasks:    completed,
+	})
+	completeCancel()
+	if err != nil {
+		return true, err
+	}
+	if !completeResp.GetSuccess() {
+		return true, fmt.Errorf("complete batch rejected: %s", completeResp.GetStatusMessage())
+	}
+	return true, nil
+}
+
+func (r *workerRuntime) pullBatchLoop(ctx context.Context) {
+	intervalSec := envInt32("WORKER_BATCH_POLL_INTERVAL_SEC", 2)
+	if intervalSec <= 0 {
+		intervalSec = 2
+	}
+	interval := time.Duration(intervalSec) * time.Second
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		handled, err := r.pullBatchOnce(ctx)
+		if err != nil {
+			log.Printf("worker batch pull failed username=%s err=%v", r.workerName, err)
+		}
+		if handled && err == nil {
+			continue
+		}
+
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}
+
 func (r *workerRuntime) resolveTorrentSource(torrent string) (infoHash string, source string, name string, err error) {
 	torrent = strings.TrimSpace(torrent)
 	if torrent == "" {
@@ -864,6 +1115,12 @@ func main() {
 	hbCtx, hbCancel := context.WithCancel(context.Background())
 	defer hbCancel()
 	go runtime.heartbeatLoop(hbCtx)
+
+	batchCtx, batchCancel := context.WithCancel(context.Background())
+	defer batchCancel()
+	if parseEnvBool("WORKER_BATCH_PULL_ENABLED", true) {
+		go runtime.pullBatchLoop(batchCtx)
+	}
 
 	s := grpc.NewServer()
 	pb.RegisterWorkerNodeServiceServer(s, &workerServer{svc: service.NewTaskService(), rt: runtime})

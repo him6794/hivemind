@@ -194,6 +194,137 @@ message TasklogResponse {
     bool success = 1;
     string log = 2;
 }
+
+message ResourceRequirements {
+    int32 cpu_cores = 1;
+    int32 memory_gb = 2;
+    int32 gpu_score = 3;
+    int32 gpu_memory_gb = 4;
+}
+
+message DAGNode {
+    string task_id = 1;
+    repeated string artifact_inputs = 2;
+    ResourceRequirements resource_requirements = 3;
+    int32 max_retries = 4;
+    int64 deadline_unix = 5;
+    bool deterministic = 6;
+    bool side_effects = 7;
+    int32 priority = 8;
+    string execution_package_ref = 9;
+}
+
+message DAGEdge {
+    string from_task_id = 1;
+    string to_task_id = 2;
+}
+
+message DAGIR {
+    string job_id = 1;
+    repeated DAGNode nodes = 2;
+    repeated DAGEdge edges = 3;
+}
+
+message ExecutionPackage {
+    string runtime_version = 1;
+    string task_code_ref = 2;
+    repeated string artifact_refs = 3;
+    map<string, string> constraints = 4;
+}
+
+message ArtifactChunk {
+    string chunk_id = 1;
+    string sha256 = 2;
+    int64 offset = 3;
+    int64 size = 4;
+}
+
+message ArtifactManifest {
+    string artifact_id = 1;
+    repeated ArtifactChunk chunks = 2;
+    int64 size = 3;
+    string compression = 4;
+    string content_type = 5;
+    string created_by_task = 6;
+}
+
+message CacheSummary {
+    int64 cache_epoch = 1;
+    bytes bloom_filter = 2;
+    string partial_cache_digest = 3;
+    int64 artifact_count = 4;
+    int64 total_bytes = 5;
+}
+
+message PullBatchRequest {
+    string worker_id = 1;
+    int32 max_inflight_batches = 2;
+    int32 available_memory_gb = 3;
+    int32 queue_capacity = 4;
+    CacheSummary cache_summary = 5;
+}
+
+message TaskLease {
+    string task_id = 1;
+    ExecutionPackage execution_package = 2;
+    repeated ArtifactManifest artifacts = 3;
+    ResourceRequirements resource_limits = 4;
+    int64 deadline_unix = 5;
+    int32 priority = 6;
+}
+
+message PullBatchResponse {
+    bool success = 1;
+    string status_message = 2;
+    string batch_id = 3;
+    repeated TaskLease tasks = 4;
+}
+
+message ExecutionMetrics {
+    int64 cpu_time_ms = 1;
+    int64 wall_time_ms = 2;
+    int64 peak_memory_mb = 3;
+    int64 download_bytes = 4;
+    int64 cache_hits = 5;
+}
+
+message CompletedTask {
+    string task_id = 1;
+    string status = 2;
+    string stdout_artifact_ref = 3;
+    string stderr_artifact_ref = 4;
+    repeated string result_artifact_refs = 5;
+    ExecutionMetrics metrics = 6;
+}
+
+message CompleteBatchRequest {
+    string worker_id = 1;
+    string batch_id = 2;
+    repeated CompletedTask tasks = 3;
+}
+
+message CompleteBatchResponse {
+    bool success = 1;
+    string status_message = 2;
+}
+
+message HeartbeatRequest {
+    string worker_id = 1;
+    string status = 2;
+    int32 available_memory_gb = 3;
+    int32 queue_capacity = 4;
+}
+
+message HeartbeatResponse {
+    bool success = 1;
+    string status_message = 2;
+}
+
+service BatchRuntimeService {
+    rpc PullBatch(PullBatchRequest) returns (PullBatchResponse);
+    rpc CompleteBatch(CompleteBatchRequest) returns (CompleteBatchResponse);
+    rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+}
     
 
 service UserService {
