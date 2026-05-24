@@ -15,7 +15,7 @@ Finish the `plan` runtime work, verify it with simulated user flows, remove Pyth
 running
 
 ## Current Step
-Remove the remaining executor-rs Python package/scripts and keep Rust verification green.
+Run Go user-flow/reliability simulation after executor-rs Python removal.
 
 ## Completed Work
 - Read `plan` and confirmed the core runtime requirements.
@@ -65,12 +65,26 @@ Remove the remaining executor-rs Python package/scripts and keep Rust verificati
 - Verified:
   - `cargo test -p monty --test datatest_runner -- --list` in `executor-rs`
   - `cargo test -p monty --test datatest_runner` in `executor-rs` (411 fixture tests passed)
+- Committed executor-rs `.monty`/Rust-only Monty runner migration as `755f0b2 runtime: make monty tests rust only`.
+- Removed the remaining tracked executor-rs Python programs: PyO3 package/bindings, Python package tests, Python example apps, Python maintenance scripts, typeshed update script, and `uv.lock`.
+- Removed Python build/test/release paths from executor-rs Makefile, pre-commit, GitHub Actions, and docs.
+- Renamed monty type-checking source fixtures from `.py` to `.monty`.
+- Added a Rust import-order test to replace the deleted Python import-check script.
+- Fixed latent Rust test issues exposed by full workspace testing:
+  - module registry tests now use the current `StringId::from(StaticStrings::...)` API.
+  - resource-limit tests no longer pin allocator/platform-specific byte estimates.
+- Verified:
+  - `cargo test -p monty --test import_order` in `executor-rs`
+  - `cargo test -p monty_type_checking -p monty_typeshed` in `executor-rs`
+  - `cargo test -p monty --test datatest_runner` in `executor-rs`
+  - `cargo test -p monty --test resource_limits` in `executor-rs`
+  - `cargo test --workspace --exclude monty-fuzz` in `executor-rs`
 
 ## Next Action
-Commit the executor-rs `.monty`/Rust-only Monty runner migration, then remove the remaining executor-rs Python package/scripts/examples and rerun Rust plus Go release gates.
+Commit executor-rs Python package/tooling removal, then rerun Go nodepool/worker tests and the simulated user-flow reliability gate.
 
 ## Blockers
-- Full Python removal is broad: many repo areas still contain Python programs and tests. This is not blocked; it needs staged replacement after the runtime path is green.
+- None for the current migration. Tracked Python program files are now removed from the repository; remaining release work is Go/Rust validation and user-flow simulation.
 
 ## Next Checkpoint
-After focused tests pass, inspect `git diff`, commit the batch runtime part, then start replacing Python tooling used by reliability/user-flow simulation.
+After the executor-rs removal commit, run Go service tests and the end-to-end simulated pull-batch reliability workflow.

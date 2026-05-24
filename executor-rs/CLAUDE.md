@@ -20,7 +20,7 @@ It's ABSOLUTELY CRITICAL that there's no way for code run in a Monty sandbox to 
 
 **Monty will be used to run untrusted, potentially malicious code.**
 
-Make sure there's no risk of this, either in the implementation, or in the public API that makes it more like that a developer using the pydantic_monty package might make such a mistake.
+Make sure there's no risk of this, either in the implementation, or in the public Rust or JavaScript APIs that might let a developer expose the host by mistake.
 
 Possible security risks to consider:
 * filesystem access
@@ -98,43 +98,30 @@ Avoid manual `drop_with_heap` whenever there are multiple code paths (branching,
 
 ## Dev Commands
 
-DO NOT run `cargo build` or `cargo run`, it will fail because of issues with Python bindings.
-
-Instead use the following `make` commands:
+Use the following `make` commands:
 
 ```bash
-make install-py           Install python dependencies
 make install-js           Install JS package dependencies
-make install              Install the package, dependencies, and pre-commit for local development
-make dev-py               Install the python package for development
+make install              Install dependencies and pre-commit for local development
 make dev-js               Build the JS package (debug)
 make lint-js              Lint JS code with oxlint
 make test-js              Build and test the JS package
-make dev-py-release       Install the python package for development with a release build
 make dev-js-release       Build the JS package (release)
-make dev-py-pgo           Install the python package for development with profile-guided optimization
 make format-rs            Format Rust code with fmt
-make format-py            Format Python code - WARNING be careful about this command as it may modify code and break tests silently!
 make format-js            Format JS code with prettier
-make format               Format Rust code, this does not format Python code as we have to be careful with that
+make format               Format Rust and JS code
 make lint-rs              Lint Rust code with clippy and import checks
 make clippy-fix           Fix Rust code with clippy
-make lint-py              Lint Python code with ruff
-make lint                 Lint the code with ruff and clippy
+make lint                 Lint Rust and JS code
 make format-lint-rs       Format and lint Rust code with fmt and clippy
-make format-lint-py       Format and lint Python code with ruff
 make test-no-features     Run rust tests without any features enabled
 make test-ref-count-panic Run rust tests with ref-count-panic enabled
 make test-ref-count-return Run rust tests with ref-count-return enabled
 make test-cases           Run tests cases only
 make test-type-checking   Run rust tests on monty_type_checking
-make pytest               Run Python tests with pytest
-make test-py              Build the python package (debug profile) and run tests
-make test-docs            Test docs examples only
-make test                 Run rust tests
+make test-docs            Test Rust docs examples only
+make test                 Run Rust tests
 make testcov              Run Rust tests with coverage, print table, and generate HTML report
-make complete-tests       Fill in incomplete test expectations using CPython
-make update-typeshed      Update vendored typeshed from upstream
 make bench                Run benchmarks
 make dev-bench            Run benchmarks to test with dev profile
 make profile              Profile the code with pprof and generate flamegraphs
@@ -142,8 +129,6 @@ make type-sizes           Write type sizes for the crate to ./type-sizes.txt (re
 make main                 run linting and the most important tests
 make help                 Show this help (usage: make help)
 ```
-
-Use the /python-playground skill to check cpython and monty behavior.
 
 ## Releasing
 
@@ -219,8 +204,8 @@ make test-cases
 # Run a specific test
 cargo test -p monty --test datatest_runner --features ref-count-panic str__ops
 
-# Run the interpreter on a Python file
-cargo run -- <file.py>
+# Run the interpreter on a Monty fixture file
+cargo run -- <file.monty>
 ```
 
 See more test commands above.
@@ -229,24 +214,19 @@ See more test commands above.
 
 Read `Makefile` for other useful commands.
 
-DO NOT run `cargo run --`, it will fail because of issues with Python bindings.
-
 You can use the `./playground` directory (excluded from git, create with `mkdir -p playground`) to write files
-when you want to experiment by running a file with cpython or monty, e.g.:
-* `python3 playground/test.py` to run the file with cpython
-* `cargo run -- playground/test.py` to run the file with monty
+when you want to experiment by running a file with monty, e.g.:
+* `cargo run -- playground/test.monty` to run the file with monty
 
 DO NOT use `/tmp` or pipe code to the interpreter as it requires extra permissions and can slow you down!
 
-More details in the "python-playground" skill.
-
 ### Test File Structure
 
-Most functionality should be tested via python files in the `crates/monty/test_cases` directory.
+Most functionality should be tested via `.monty` fixtures in the `crates/monty/test_cases` directory.
 
 **DO NOT create many small test files.** This would be unmaintainable.
 
-ALWAYS consolidate related tests into single files using multiple `assert` statements. Follow `crates/monty/test_cases/fstring__all.py` as the gold standard pattern:
+ALWAYS consolidate related tests into single files using multiple `assert` statements. Follow `crates/monty/test_cases/fstring__all.monty` as the gold standard pattern:
 
 ```python
 # === Section name ===
@@ -261,7 +241,7 @@ assert x == expected, 'test description'
 
 Each `assert` should have a descriptive message.
 
-Do NOT Write tests like `assert 'thing' in msg` it's lazy and inexact unless explicitly told to do so, instead write tests like `assert msg == 'expected message'` to ensure clarity and accuracy and most importantly, to identify differences between Monty and CPython.
+Do NOT Write tests like `assert 'thing' in msg` it's lazy and inexact unless explicitly told to do so, instead write tests like `assert msg == 'expected message'` to ensure clarity and accuracy.
 
 ### When to Create Separate Test Files
 
@@ -277,9 +257,9 @@ For everything else, **add asserts to an existing test file** or create ONE cons
 ### File Naming
 
 Name files by feature, not by micro-variant:
-- ✅ `str__ops.py` - all string operations (add, iadd, len, etc.)
-- ✅ `list__methods.py` - all list method tests
-- ❌ `str__add_basic.py`, `str__add_empty.py`, `str__add_multiple.py` - TOO GRANULAR
+- Good: `str__ops.monty` - all string operations (add, iadd, len, etc.)
+- Good: `list__methods.monty` - all list method tests
+- Too granular: `str__add_basic.monty`, `str__add_empty.monty`, `str__add_multiple.monty`
 
 ### Expectation Formats (use sparingly)
 
@@ -311,10 +291,10 @@ foo()
 """
 TRACEBACK:
 Traceback (most recent call last):
-  File "my_test.py", line 4, in <module>
+  File "my_test.monty", line 4, in <module>
     foo()
     ~~~~~
-  File "my_test.py", line 2, in foo
+  File "my_test.monty", line 2, in foo
     raise ValueError('oops')
 ValueError: oops
 """
@@ -322,22 +302,19 @@ ValueError: oops
 
 Key points:
 - The filename in the traceback should match the test file name (just the basename, not the full path)
-- Use `~` for caret markers (the test runner normalizes CPython's `^` to `~`)
+- Use `~` for caret markers
 - The `<module>` frame name is used for top-level code
-- Tests run against both Monty and CPython, so the traceback must match both
-
 Only use `# Raise=` when you only care about the exception type/message and not the traceback.
 
-### Python fixture markers
+### Monty fixture markers
 
-You may mark python files with:
+You may mark `.monty` files with:
 * `# call-external` to support calling external functions
 * `# run-async` to support running async code
 
 NEVER MARK TESTS AS XFAIL UNDER ANY CIRCUMSTANCES!!! INSTEAD FIX THE BEHAVIOR SO THAT THE TEST PASSES.
 
 Never mark tests as:
-- `# xfail=cpython` - Test is required to fail on CPython
 - `# xfail=monty` - Test is required to fail on Monty
 
 NEVER MARK TESTS AS XFAIL UNDER ANY CIRCUMSTANCES!!! INSTEAD FIX THE BEHAVIOR SO THAT THE TEST PASSES.
@@ -346,69 +323,8 @@ All these markers must be at the start of comment lines to be recognized.
 
 ### Other Notes
 
-- Prefer single quotes for strings in Python tests
-- Do NOT add `# noqa` or  `# pyright: ignore` comments to test code, instead add the failing code to `pyproject.toml`
-- The ONLY exception is `await` expressions outside of async functions, where you should add `# pyright: ignore`
-- Run `make lint-py` after adding tests
-- Use `make complete-tests` to fill in blank expectations
+- Prefer single quotes for strings in Monty fixtures
 - Tests run via `datatest-stable` harness in `tests/datatest_runner.rs`, use `make test-cases` to run them
-
-## Python Package (`pydantic-monty`)
-
-The Python package provides Python bindings for the Monty interpreter, located in `crates/monty-python/`.
-
-### Structure
-
-- `crates/monty-python/src/` - Rust source for PyO3 bindings
-- `crates/monty-python/python/pydantic_monty/_monty.pyi` - Type stubs for the Python module
-- `crates/monty-python/tests/` - Python tests using pytest
-
-### Building and Testing
-
-Dependencies needed for python testing are installed in `crates/monty-python/pyproject.toml`.
-To install these dependencies, use `uv sync --all-packages --only-dev`.
-
-```bash
-# Build the Python package for development (required before running tests)
-make dev-py
-
-# Run Python tests
-make test-py
-
-# Or run pytest directly (after dev-py)
-uv run pytest
-
-# Run a specific test file
-uv run pytest crates/monty-python/tests/test_basic.py
-
-# Run a specific test
-uv run pytest crates/monty-python/tests/test_basic.py::test_simple_expression
-```
-
-### Python Test Guidelines
-
-Check and follow the style of other python tests.
-
-Make sure you put tests in the correct file.
-
-**DO NOT use python/pytest tests for `monty` core functionality!** When testing core functionality, add tests to `crates/monty/test_cases/` or `crates/monty/tests/`. Only use python/pytest tests for `pydantic_monty` functionality testing.
-
-**NEVER use class-based tests.** All tests should be simple functions.
-
-Use `@pytest.mark.parametrize` whenever testing multiple similar cases.
-
-Use `snapshot` from `inline-snapshot` for all test asserts.
-
-NEVER do the lazy `assert '...' in ...` instead always do `assert value == snapshot()`,
-then run the test and inline-snapshot will fill in the missing value in the `snapshot()` call.
-
-Use `pytest.raises` for expected exceptions, like this
-
-```py
-with pytest.raises(ValueError) as exc_info:
-    m.run(print_callback=callback)
-assert exc_info.value.args[0] == snapshot('stopped at 3')
-```
 
 ## Reference Counting
 
@@ -433,11 +349,9 @@ It is important to the long term health of the project and maintainability of th
 
 ALWAYS run `make format-rs` and `make lint-rs` after making changes to rust code and fix all suggestions to maintain code quality.
 
-ALWAYS run `make lint-py` after making changes to python code and fix all suggestions to maintain code quality.
-
 ALWAYS update this file when it is out of date.
 
-NEVER add imports anywhere except at the top of the file, this applies to both python and rust.
+NEVER add imports anywhere except at the top of the file, this applies to both Monty fixtures and Rust.
 
 NEVER write `unsafe` code, if you think you need to write unsafe code, explicitly ask the user or leave a `todo!()` with a suggestion and explanation.
 

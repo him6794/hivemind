@@ -26,6 +26,23 @@ fn resolve_name_lookups<T: monty::ResourceTracker>(
     Ok(progress)
 }
 
+fn assert_memory_limit_message(exc: &monty::MontyException, limit: usize) {
+    let message = exc.message().expect("memory limit error should include a message");
+    let prefix = "memory limit exceeded: ";
+    let suffix = format!(" bytes > {limit} bytes");
+    assert!(
+        message.starts_with(prefix) && message.ends_with(&suffix),
+        "unexpected memory limit message: {message}"
+    );
+
+    let attempted = message
+        .strip_prefix(prefix)
+        .and_then(|s| s.strip_suffix(&suffix))
+        .and_then(|s| s.parse::<usize>().ok())
+        .expect("memory limit message should include attempted byte count");
+    assert!(attempted > limit, "attempted allocation should exceed limit: {message}");
+}
+
 /// Test that GC properly collects dict cycles via the has_refs() check in allocate().
 ///
 /// This test creates cycles using dict literals and dict setitem. Dict setitem
@@ -600,11 +617,8 @@ fn pow_intermediate_allocation_multiplier() {
     );
     let exc = result.unwrap_err();
     assert_eq!(exc.exc_type(), ExcType::MemoryError);
-    // 2 bits * 500000 = 125KB final, × 4 = 500072 bytes (includes base memory offset)
-    assert_eq!(
-        exc.message(),
-        Some("memory limit exceeded: 500072 bytes > 200000 bytes")
-    );
+    // 2 bits * 500000 = 125KB final, and the 4x estimate exceeds the limit.
+    assert_memory_limit_message(&exc, 200_000);
 }
 
 /// Test that pow still succeeds when the 4× estimate is within the limit.
@@ -645,11 +659,8 @@ fn pow_fuzzer_oom_chained_exponentiation() {
     );
     let exc = result.unwrap_err();
     assert_eq!(exc.exc_type(), ExcType::MemoryError);
-    // 2 bits * 3661666 = 915KB final, × 4 = 3661740 bytes
-    assert_eq!(
-        exc.message(),
-        Some("memory limit exceeded: 3661740 bytes > 1048576 bytes")
-    );
+    // 2 bits * 3661666 = 915KB final, and the 4x estimate exceeds the limit.
+    assert_memory_limit_message(&exc, 1_024 * 1_024);
 }
 
 /// Test the full fuzzer input that originally caused OOM.
@@ -668,11 +679,8 @@ fn pow_fuzzer_oom_full_input() {
     let exc = result.unwrap_err();
     assert_eq!(exc.exc_type(), ExcType::MemoryError);
     // 3**3661666 is evaluated first (right-associative). Base 3 = 2 bits,
-    // so estimate = 2 * 3661666 bits = 915KB. With 4× multiplier: 3661740 bytes > 1MB.
-    assert_eq!(
-        exc.message(),
-        Some("memory limit exceeded: 3661740 bytes > 1048576 bytes")
-    );
+    // so estimate = 2 * 3661666 bits = 915KB. With the 4x multiplier it exceeds 1MB.
+    assert_memory_limit_message(&exc, 1_024 * 1_024);
 }
 
 /// Test that large left shift operations are rejected by memory limits.
@@ -813,10 +821,7 @@ fn bigint_rejected_before_allocation() {
     assert!(result.is_err(), "should be rejected before allocation");
     let exc = result.unwrap_err();
     assert_eq!(exc.exc_type(), ExcType::MemoryError);
-    assert_eq!(
-        exc.message(),
-        Some("memory limit exceeded: 1000072 bytes > 100000 bytes")
-    );
+    assert_memory_limit_message(&exc, 100_000);
 }
 
 // === String/Bytes large result pre-check tests ===

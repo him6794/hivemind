@@ -1,0 +1,3 @@
+[codespell]
+ignore-words-list = crate,NotIn,ser
+skip = Cargo.lock,crates/monty-js/package-lock.json,crates/monty-typeshed/vendor/typeshed/stdlib/*,crates/monty/src/types/str.rs

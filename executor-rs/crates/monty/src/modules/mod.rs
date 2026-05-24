@@ -199,7 +199,7 @@ impl ModuleFunctions {
 
 #[cfg(test)]
 mod tests {
-    use crate::intern::StaticStrings;
+    use crate::intern::{StaticStrings, StringId};
 
     use super::{BuiltinModule, BuiltinModuleRegistry};
 
@@ -223,11 +223,11 @@ mod tests {
 
     #[test]
     fn builtin_module_registry_name_lookup() {
-        let sys = StaticStrings::Sys.string_id();
-        let re = StaticStrings::Re.string_id();
-        let time = StaticStrings::Time.string_id();
-        let multiprocessing = StaticStrings::Multiprocessing.string_id();
-        let bool_name = StaticStrings::Bool.string_id();
+        let sys = StringId::from(StaticStrings::Sys);
+        let re = StringId::from(StaticStrings::Re);
+        let time = StringId::from(StaticStrings::Time);
+        let multiprocessing = StringId::from(StaticStrings::Multiprocessing);
+        let append = StringId::from(StaticStrings::Append);
 
         assert_eq!(BuiltinModuleRegistry::from_string_id(sys), Some(BuiltinModule::Sys));
         assert_eq!(BuiltinModuleRegistry::from_string_id(re), Some(BuiltinModule::Re));
@@ -236,6 +236,6 @@ mod tests {
             BuiltinModuleRegistry::from_string_id(multiprocessing),
             Some(BuiltinModule::Multiprocessing)
         );
-        assert_eq!(BuiltinModuleRegistry::from_string_id(bool_name), None);
+        assert_eq!(BuiltinModuleRegistry::from_string_id(append), None);
     }
 }

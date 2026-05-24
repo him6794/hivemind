@@ -25,13 +25,6 @@ jobs:
         with:
           cache-on-failure: true
 
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.14"
-
-      - name: Remove .cargo config to use system Python
-        run: rm .cargo/config.toml
-
       - name: Install cargo-codspeed
         run: cargo install cargo-codspeed
 
