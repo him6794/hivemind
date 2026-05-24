@@ -46,9 +46,13 @@ Complete the Go batch pull runtime and commit it as the first finished part.
 - Verified:
   - `go test ./internal/dag -count=1` in `services/nodepool`
   - `go test ./...` in `services/nodepool`
+- Added Go `services/nodepool/internal/netproxy` delay proxy to replace the Python `DelayProxy` test infrastructure.
+- Removed `scripts/reliability_harness_test.py`.
+- Verified:
+  - `go test ./internal/netproxy -count=1` in `services/nodepool`
 
 ## Next Action
-Commit the Go DAG compiler part, then replace the full Python reliability harness with a Go CLI.
+Commit the Go delay proxy part, then replace the full Python reliability harness with a Go CLI.
 
 ## Blockers
 - Full Python removal is broad: many repo areas still contain Python programs and tests. This is not blocked; it needs staged replacement after the runtime path is green.
