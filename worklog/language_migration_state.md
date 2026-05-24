@@ -58,9 +58,10 @@ Complete the Go batch pull runtime and commit it as the first finished part.
   - Built `test_logs/bin/reliability-harness.exe`
 - Ran Go calibration: `test_logs/reliability-go/20260524-174014`, 1 run passed with latency/jitter and no failures. This is not the full release DoD because it used calibration settings.
 - Removed legacy Python entrypoints in root `scripts`, `task`, `web`, `vpn`, `bt`, `staff`, and `worker/tools` that are superseded by Go/Rust runtime and Go validation paths.
+- Removed the remaining non-executor-rs Python sample/performance files under `test_tasks` and `worker`.
 
 ## Next Action
-Commit the legacy Python entrypoint removal, then handle the remaining executor-rs Python test assets and run the full release DoD with the Go harness.
+Commit the non-executor Python cleanup, then handle the remaining executor-rs Python test assets and run the full release DoD with the Go harness.
 
 ## Blockers
 - Full Python removal is broad: many repo areas still contain Python programs and tests. This is not blocked; it needs staged replacement after the runtime path is green.
