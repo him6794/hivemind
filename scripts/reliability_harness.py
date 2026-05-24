@@ -254,6 +254,7 @@ class ReliabilityHarness:
             ("nodepool", ROOT / "services" / "nodepool", ["go", "build", "-o", str(self.bin_dir / exe_name("nodepool")), ".\\cmd\\server" if os.name == "nt" else "./cmd/server"]),
             ("master", ROOT / "services" / "master", ["go", "build", "-o", str(self.bin_dir / exe_name("master")), ".\\cmd\\server" if os.name == "nt" else "./cmd/server"]),
             ("worker", ROOT / "services" / "worker", ["go", "build", "-o", str(self.bin_dir / exe_name("worker")), ".\\cmd\\server" if os.name == "nt" else "./cmd/server"]),
+            ("reliability-executor", ROOT / "services" / "worker", ["go", "build", "-o", str(self.bin_dir / exe_name("reliability-executor")), ".\\cmd\\reliability-executor" if os.name == "nt" else "./cmd/reliability-executor"]),
         ]
         for name, cwd, cmd in targets:
             cp = run_cmd(cmd, cwd=cwd, timeout=180)
@@ -276,6 +277,7 @@ class ReliabilityHarness:
             "passed": False,
         }
         self.cleanup_runtime()
+        self.cleanup_conflicting_ports(run_dir)
         try:
             self.start_dependencies(run_dir)
             self.start_services(run_dir)
@@ -300,6 +302,40 @@ class ReliabilityHarness:
         finally:
             (run_dir / "run-result.json").write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
             self.cleanup_runtime()
+
+    def cleanup_conflicting_ports(self, run_dir: Path) -> None:
+        if os.name != "nt":
+            return
+        ports = (18081, 18082, 50051, 51053, 51054, 51055, 55051, 50053, 50054, 50055)
+        net = run_cmd(["netstat", "-ano"], timeout=15)
+        if net.returncode != 0:
+            append_log(run_dir / "preclean.log", f"netstat failed: {net.stderr.strip()}")
+            return
+        pids: set[int] = set()
+        for raw in net.stdout.splitlines():
+            line = raw.strip()
+            if "LISTENING" not in line:
+                continue
+            for port in ports:
+                if f":{port}" not in line:
+                    continue
+                parts = line.split()
+                if not parts:
+                    continue
+                try:
+                    pid = int(parts[-1])
+                except ValueError:
+                    continue
+                if pid > 0:
+                    pids.add(pid)
+                break
+        if not pids:
+            append_log(run_dir / "preclean.log", "no conflicting listeners found")
+            return
+        append_log(run_dir / "preclean.log", f"killing conflicting pids: {sorted(pids)}")
+        for pid in sorted(pids):
+            kill = run_cmd(["taskkill", "/PID", str(pid), "/F"], timeout=10)
+            append_log(run_dir / "preclean.log", f"taskkill pid={pid} rc={kill.returncode} out={kill.stdout.strip()} err={kill.stderr.strip()}")
 
     def start_dependencies(self, run_dir: Path) -> None:
         for name in ("hivemind-rel-pg", "hivemind-rel-redis"):
@@ -360,7 +396,7 @@ class ReliabilityHarness:
         self.start_process("master", self.bin_dir / exe_name("master"), ROOT / "services" / "master" / "cmd" / "server", run_dir, master_env)
         wait_port("127.0.0.1", 18082, 30)
 
-        executor = f"{sys.executable} {ROOT / 'scripts' / 'reliability_executor.py'}"
+        executor = str(self.bin_dir / exe_name("reliability-executor"))
         common = {
             "NODEPOOL_ADDR": self.args.worker_nodepool_addr,
             "WORKER_PASSWORD": "worker123",
@@ -480,7 +516,7 @@ class ReliabilityHarness:
         grpc_port = 51052 + worker_index
         public_port = 50052 + worker_index
         control_port = {1: 18080, 2: 18083, 3: 18084}[worker_index]
-        executor = f"{sys.executable} {ROOT / 'scripts' / 'reliability_executor.py'}"
+        executor = str(self.bin_dir / exe_name("reliability-executor"))
         env = {
             "NODEPOOL_ADDR": self.args.worker_nodepool_addr,
             "WORKER_PASSWORD": "worker123",
