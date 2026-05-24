@@ -138,13 +138,13 @@ fn missing_stdlib_datetime() {
     assert!(dbg.starts_with("TypeCheckingDiagnostics:"), "got: {dbg}");
 }
 
-/// Test that good_types.py type-checks without errors.
+/// Test that good_types.monty type-checks without errors.
 ///
 /// This file uses `assert_type` from typing to verify that inferred types match expected types.
 #[test]
 fn type_good_types() {
-    let code = include_str!("good_types.py");
-    let result = type_check(&SourceFile::new(code, "good_types.py"), None).unwrap();
+    let code = include_str!("good_types.monty");
+    let result = type_check(&SourceFile::new(code, "good_types.monty"), None).unwrap();
     assert!(result.is_none(), "Expected no type errors, got: {result:#?}");
 }
 
@@ -175,15 +175,15 @@ fn check_file_content(file_name: &str, mut actual: &str) {
     panic!("Type errors don't match expected.\n\nEXPECTED:\n{expected}\n\nACTUAL:\n{actual}\n\n{status}.");
 }
 
-/// Test that bad_types.py produces the expected type errors.
+/// Test that bad_types.monty produces the expected type errors.
 ///
 /// Set `UPDATE_EXPECT=1` to update the expected errors file.
 #[test]
 fn type_bad_types() {
-    let code = include_str!("bad_types.py");
-    let result = type_check(&SourceFile::new(code, "bad_types.py"), None).unwrap();
+    let code = include_str!("bad_types.monty");
+    let result = type_check(&SourceFile::new(code, "bad_types.monty"), None).unwrap();
 
-    let failure = result.expect("Expected type errors in bad_types.py");
+    let failure = result.expect("Expected type errors in bad_types.monty");
     let actual = failure
         .format(ruff_db::diagnostic::DiagnosticFormat::Concise)
         .to_string();
@@ -193,10 +193,10 @@ fn type_bad_types() {
 
 #[test]
 fn test_reveal_types() {
-    let code = include_str!("reveal_types.py");
-    let result = type_check(&SourceFile::new(code, "reveal_types.py"), None).unwrap();
+    let code = include_str!("reveal_types.monty");
+    let result = type_check(&SourceFile::new(code, "reveal_types.monty"), None).unwrap();
 
-    let failure = result.expect("Expected type errors in reveal_types.py");
+    let failure = result.expect("Expected type errors in reveal_types.monty");
     let actual = failure
         .format(ruff_db::diagnostic::DiagnosticFormat::Concise)
         .to_string();

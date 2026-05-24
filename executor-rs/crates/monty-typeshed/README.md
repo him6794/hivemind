@@ -4,7 +4,7 @@ Copied originally from <https://github.com/astral-sh/ruff/tree/main/crates/ty_ve
 <https://github.com/python/typeshed/blob/main/stdlib/builtins.pyi> are kept, since those are the
 only functions supported from the stdlib.
 
-The `vendor/typeshed` directory is updated by calling `make update-typeshed` which calls the `update.py` script in this directory.
+The `vendor/typeshed` directory is a curated snapshot and should be updated with Rust tooling only.
 
 See <https://github.com/pydantic/monty> for more information on the project.
 

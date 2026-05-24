@@ -8,8 +8,6 @@
   <a href="https://github.com/pydantic/monty/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/pydantic/monty/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://codspeed.io/pydantic/monty?utm_source=badge"><img src="https://img.shields.io/badge/CodSpeed-Performance%20Tracked-blue?logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNiAxNiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cGF0aCBkPSJNOCAwTDAgOEw4IDE2TDE2IDhMOCAwWiIgZmlsbD0id2hpdGUiLz48L3N2Zz4=" alt="Codspeed"></a>
   <a href="https://codecov.io/gh/pydantic/monty"><img src="https://codecov.io/gh/pydantic/monty/graph/badge.svg?token=HX4RDQX5OG" alt="Coverage"></a>
-  <a href="https://pypi.python.org/pypi/pydantic-monty"><img src="https://img.shields.io/pypi/v/pydantic-monty.svg" alt="PyPI"></a>
-  <a href="https://github.com/pydantic/monty"><img src="https://img.shields.io/pypi/pyversions/pydantic-monty.svg" alt="versions"></a>
   <a href="https://github.com/pydantic/monty/blob/main/LICENSE"><img src="https://img.shields.io/github/license/pydantic/monty.svg?v=2" alt="license"></a>
   <a href="https://logfire.pydantic.dev/docs/join-slack/"><img src="https://img.shields.io/badge/Slack-Join%20Slack-4A154B?logo=slack" alt="Join Slack" /></a>
 </div>
@@ -32,7 +30,7 @@ What Monty **can** do:
 - Run typechecking - monty supports full modern python type hints and comes with [ty](https://docs.astral.sh/ty/) included in a single binary to run typechecking
 - Be snapshotted to bytes at external function calls, meaning you can store the interpreter state in a file or database, and resume later
 - Startup extremely fast (<1μs to go from code to execution result), and has runtime performance that is similar to CPython (generally between 5x faster and 5x slower)
-- Be called from Rust, Python, or Javascript - because Monty has no dependencies on cpython, you can use it anywhere you can run Rust
+- Be called from Rust or Javascript - because Monty has no dependencies on cpython, you can use it anywhere you can run Rust
 - Control resource usage - Monty can track memory usage, allocations, stack depth, and execution time and cancel execution if it exceeds preset limits
 - Collect stdout and stderr and return it to the caller
 - Run async or sync code on the host via async or sync code on the host
@@ -64,145 +62,7 @@ In very simple terms, the idea of all the above is that LLMs can work faster, ch
 
 ## Usage
 
-Monty can be called from Python, JavaScript/TypeScript or Rust.
-
-### Python
-
-To install:
-
-```bash
-uv add pydantic-monty
-```
-
-(Or `pip install pydantic-monty` for the boomers)
-
-Usage:
-
-```python
-from typing import Any
-
-import pydantic_monty
-
-code = """
-async def agent(prompt: str, messages: Messages):
-    while True:
-        print(f'messages so far: {messages}')
-        output = await call_llm(prompt, messages)
-        if isinstance(output, str):
-            return output
-        messages.extend(output)
-
-await agent(prompt, [])
-"""
-
-type_definitions = """
-from typing import Any
-
-Messages = list[dict[str, Any]]
-
-async def call_llm(prompt: str, messages: Messages) -> str | Messages:
-    raise NotImplementedError()
-
-prompt: str = ''
-"""
-
-m = pydantic_monty.Monty(
-    code,
-    inputs=['prompt'],
-    script_name='agent.py',
-    type_check=True,
-    type_check_stubs=type_definitions,
-)
-
-
-Messages = list[dict[str, Any]]
-
-
-async def call_llm(prompt: str, messages: Messages) -> str | Messages:
-    if len(messages) < 2:
-        return [{'role': 'system', 'content': 'example response'}]
-    else:
-        return f'example output, message count {len(messages)}'
-
-
-async def main():
-    output = await pydantic_monty.run_monty_async(
-        m,
-        inputs={'prompt': 'testing'},
-        external_functions={'call_llm': call_llm},
-    )
-    print(output)
-    #> example output, message count 2
-
-
-if __name__ == '__main__':
-    import asyncio
-
-    asyncio.run(main())
-```
-
-#### Iterative Execution with External Functions
-
-Use `start()` and `resume()` to handle external function calls iteratively,
-giving you control over each call:
-
-```python
-import pydantic_monty
-
-code = """
-data = fetch(url)
-len(data)
-"""
-
-m = pydantic_monty.Monty(code, inputs=['url'])
-
-# Start execution - pauses when fetch() is called
-result = m.start(inputs={'url': 'https://example.com'})
-
-print(type(result))
-#> <class 'pydantic_monty.FunctionSnapshot'>
-print(result.function_name)  # fetch
-#> fetch
-print(result.args)
-#> ('https://example.com',)
-
-# Perform the actual fetch, then resume with the result
-result = result.resume(return_value='hello world')
-
-print(type(result))
-#> <class 'pydantic_monty.MontyComplete'>
-print(result.output)
-#> 11
-```
-
-#### Serialization
-
-Both `Monty` and snapshot types like `FunctionSnapshot` can be serialized to bytes and restored later.
-This allows caching parsed code or suspending execution across process boundaries:
-
-```python
-import pydantic_monty
-
-# Serialize parsed code to avoid re-parsing
-m = pydantic_monty.Monty('x + 1', inputs=['x'])
-data = m.dump()
-
-# Later, restore and run
-m2 = pydantic_monty.Monty.load(data)
-print(m2.run(inputs={'x': 41}))
-#> 42
-
-# Serialize execution state mid-flight
-m = pydantic_monty.Monty('fetch(url)', inputs=['url'])
-progress = m.start(inputs={'url': 'https://example.com'})
-state = progress.dump()
-
-# Later, restore and resume (e.g., in a different process)
-progress2 = pydantic_monty.FunctionSnapshot.load(state)
-result = progress2.resume(return_value='response data')
-print(result.output)
-#> response data
-```
+Monty can be called from Rust or JavaScript/TypeScript.
 
 ### Rust
 
@@ -240,93 +100,6 @@ let result = runner2.run(vec![MontyObject::Int(41)], NoLimitTracker, &mut PrintW
 assert_eq!(result, MontyObject::Int(42));
 ```
 
-## PydanticAI Integration
-
-Monty will power code-mode in
-[Pydantic AI](https://github.com/pydantic/pydantic-ai). Instead of making
-sequential tool calls, the LLM writes Python code that calls your tools
-as functions and Monty executes it safely.
-
-```python test="skip"
-import asyncio
-import json
-
-import logfire
-from httpx import AsyncClient
-from pydantic_ai import Agent, RunContext
-from pydantic_ai.toolsets.code_mode import CodeModeToolset
-from pydantic_ai.toolsets.function import FunctionToolset
-from typing_extensions import TypedDict
-
-logfire.configure()
-logfire.instrument_pydantic_ai()
-
-
-class LatLng(TypedDict):
-    lat: float
-    lng: float
-
-
-weather_toolset: FunctionToolset[AsyncClient] = FunctionToolset()
-
-
-@weather_toolset.tool
-async def get_lat_lng(
-    ctx: RunContext[AsyncClient], location_description: str
-) -> LatLng:
-    """Get the latitude and longitude of a location."""
-    # NOTE: the response here will be random, and is not related to the location description.
-    r = await ctx.deps.get(
-        'https://demo-endpoints.pydantic.workers.dev/latlng',
-        params={'location': location_description},
-    )
-    r.raise_for_status()
-    return json.loads(r.content)
-
-
-@weather_toolset.tool
-async def get_temp(ctx: RunContext[AsyncClient], lat: float, lng: float) -> float:
-    """Get the temp at a location."""
-    # NOTE: the responses here will be random, and are not related to the lat and lng.
-    r = await ctx.deps.get(
-        'https://demo-endpoints.pydantic.workers.dev/number',
-        params={'min': 10, 'max': 30},
-    )
-    r.raise_for_status()
-    return float(r.text)
-
-
-@weather_toolset.tool
-async def get_weather_description(
-    ctx: RunContext[AsyncClient], lat: float, lng: float
-) -> str:
-    """Get the weather description at a location."""
-    # NOTE: the responses here will be random, and are not related to the lat and lng.
-    r = await ctx.deps.get(
-        'https://demo-endpoints.pydantic.workers.dev/weather',
-        params={'lat': lat, 'lng': lng},
-    )
-    r.raise_for_status()
-    return r.text
-
-
-agent = Agent(
-    'gateway/anthropic:claude-sonnet-4-5',
-    # toolsets=[weather_toolset],
-    toolsets=[CodeModeToolset(weather_toolset)],
-    deps_type=AsyncClient,
-)
-
-
-async def main():
-    async with AsyncClient() as client:
-        await agent.run('Compare the weather of London, Paris, and Tokyo.', deps=client)
-
-
-if __name__ == '__main__':
-    asyncio.run(main())
-```
-
 # Alternatives
 
 There are generally two responses when you show people Monty:
@@ -350,7 +123,7 @@ NOTE: all these technologies are impressive and have widespread uses, this comme
 | sandboxing service | full                  | strict       | 1033ms        | not free   | intermediate     | hard           | intermediate |
 | YOLO Python        | full                  | non-existent | 0.1ms / 30ms  | free / OSS | easy             | easy / scary   | hard         |
 
-See [./scripts/startup_performance.py](scripts/startup_performance.py) for the script used to calculate the startup performance numbers.
+Startup numbers are tracked by Rust benchmarks and CodSpeed.
 
 Details on each row below:
 
@@ -359,7 +132,7 @@ Details on each row below:
 - **Language completeness**: No classes (yet), limited stdlib, no third-party libraries
 - **Security**: Explicitly controlled filesystem, network, and env access, strict limits on execution time and memory usage
 - **Start latency**: Starts in microseconds
-- **Setup complexity**: just `pip install pydantic-monty` or `npm install @pydantic/monty`, ~4.5MB download
+- **Setup complexity**: link the Rust crate or install the JavaScript package with `npm install @pydantic/monty`
 - **File mounting**: Strictly controlled, see [#85](https://github.com/pydantic/monty/pull/85)
 - **Snapshotting**: Monty's pause and resume functionality with `dump()` and `load()` makes it trivial to pause, resume and fork execution
 
