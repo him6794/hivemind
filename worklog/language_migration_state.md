@@ -37,9 +37,13 @@ Complete the Go batch pull runtime and commit it as the first finished part.
   - `go test ./cmd/reliability-executor -count=1` in `services/worker`
   - `go test ./...` in `services/worker`
   - Built and ran `test_logs/bin/reliability-executor.exe` for a CPU smoke workload.
+- Added Go `failover-check` to replace the Python one-click failover check entrypoint.
+- Removed `scripts/one_click_failover_check.py` from the migration path.
+- Verified:
+  - `go test ./cmd/failover-check -count=1` in `services/nodepool`
 
 ## Next Action
-Commit the Go reliability executor part, then replace the Python reliability/failover harnesses themselves with Go CLIs.
+Commit the Go failover-check part, then replace the full Python reliability harness with a Go CLI.
 
 ## Blockers
 - Full Python removal is broad: many repo areas still contain Python programs and tests. This is not blocked; it needs staged replacement after the runtime path is green.
