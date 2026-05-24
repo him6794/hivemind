@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +20,62 @@ import (
 )
 
 const bufSize = 1024 * 1024
+
+type batchRuntimeRecorder struct {
+	pb.UnimplementedBatchRuntimeServiceServer
+
+	mu          sync.Mutex
+	pullReq     *pb.PullBatchRequest
+	completeReq *pb.CompleteBatchRequest
+}
+
+func (s *batchRuntimeRecorder) PullBatch(_ context.Context, req *pb.PullBatchRequest) (*pb.PullBatchResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pullReq = req
+	return &pb.PullBatchResponse{
+		Success:       true,
+		StatusMessage: "leased",
+		BatchId:       "batch-worker-1",
+		Tasks: []*pb.TaskLease{
+			{
+				TaskId: "batch-task-1",
+				ExecutionPackage: &pb.ExecutionPackage{
+					RuntimeVersion: "test-runtime",
+					TaskCodeRef:    "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=batch",
+				},
+				ResourceLimits: &pb.ResourceRequirements{MemoryGb: 1},
+			},
+		},
+	}, nil
+}
+
+func (s *batchRuntimeRecorder) CompleteBatch(_ context.Context, req *pb.CompleteBatchRequest) (*pb.CompleteBatchResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.completeReq = req
+	return &pb.CompleteBatchResponse{Success: true, StatusMessage: "ok"}, nil
+}
+
+func (s *batchRuntimeRecorder) snapshot() (*pb.PullBatchRequest, *pb.CompleteBatchRequest) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pullReq, s.completeReq
+}
+
+func TestBatchExecutorHelperProcess(t *testing.T) {
+	if os.Getenv("HIVEMIND_BATCH_EXECUTOR_HELPER") != "1" {
+		return
+	}
+	args := os.Args
+	taskID := ""
+	if len(args) >= 2 {
+		taskID = args[len(args)-2]
+	}
+	fmt.Println("batch executor ran for " + taskID)
+	fmt.Println("RESULT_TORRENT=result://" + taskID + "?btih=0123456789abcdef0123456789abcdef01234567")
+	os.Exit(0)
+}
 
 func TestWorkerNodeGRPC_BasicFlow(t *testing.T) {
 	t.Parallel()
@@ -110,6 +169,82 @@ func TestWorkerNodeGRPC_BasicFlow(t *testing.T) {
 	}
 	if missingResp.GetSuccess() {
 		t.Fatalf("expected TaskOutput missing task to fail")
+	}
+}
+
+func TestWorkerRuntimePullBatchExecutesLeaseAndCompletesBatch(t *testing.T) {
+	lis := bufconn.Listen(bufSize)
+	grpcServer := grpc.NewServer()
+	recorder := &batchRuntimeRecorder{}
+	pb.RegisterBatchRuntimeServiceServer(grpcServer, recorder)
+
+	go func() {
+		_ = grpcServer.Serve(lis)
+	}()
+	t.Cleanup(func() {
+		grpcServer.Stop()
+		_ = lis.Close()
+	})
+
+	t.Setenv("HIVEMIND_BATCH_EXECUTOR_HELPER", "1")
+	t.Setenv("WORKER_EXECUTOR_CMD", os.Args[0]+" -test.run=TestBatchExecutorHelperProcess --")
+	t.Setenv("WORKER_BATCH_QUEUE_CAPACITY", "1")
+	t.Setenv("WORKER_BATCH_MAX_INFLIGHT", "1")
+
+	rt := newWorkerRuntime("bufnet", "worker-batch", "127.0.0.1:50053")
+	rt.dialContext = func(ctx context.Context, target string) (*grpc.ClientConn, error) {
+		return grpc.DialContext(
+			ctx,
+			target,
+			grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
+				return lis.Dial()
+			}),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+	}
+	rt.profile.MemoryGb = 8
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	handled, err := rt.pullBatchOnce(ctx)
+	if err != nil {
+		t.Fatalf("pullBatchOnce err: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected pullBatchOnce to execute a leased task")
+	}
+
+	pullReq, completeReq := recorder.snapshot()
+	if pullReq == nil {
+		t.Fatal("PullBatch was not called")
+	}
+	if pullReq.GetWorkerId() != "worker-batch" {
+		t.Fatalf("worker_id=%q, want worker-batch", pullReq.GetWorkerId())
+	}
+	if pullReq.GetQueueCapacity() != 1 {
+		t.Fatalf("queue_capacity=%d, want 1", pullReq.GetQueueCapacity())
+	}
+	if pullReq.GetAvailableMemoryGb() != 8 {
+		t.Fatalf("available_memory_gb=%d, want 8", pullReq.GetAvailableMemoryGb())
+	}
+	if completeReq == nil {
+		t.Fatal("CompleteBatch was not called")
+	}
+	if completeReq.GetWorkerId() != "worker-batch" || completeReq.GetBatchId() != "batch-worker-1" {
+		t.Fatalf("unexpected complete identity: worker=%q batch=%q", completeReq.GetWorkerId(), completeReq.GetBatchId())
+	}
+	if len(completeReq.GetTasks()) != 1 {
+		t.Fatalf("completed tasks=%d, want 1", len(completeReq.GetTasks()))
+	}
+	completed := completeReq.GetTasks()[0]
+	if completed.GetStatus() != "COMPLETED" {
+		t.Fatalf("completed status=%q, want COMPLETED", completed.GetStatus())
+	}
+	if got := completed.GetResultArtifactRefs(); len(got) != 1 || !strings.HasPrefix(got[0], "result://batch-task-1?btih=") {
+		t.Fatalf("result refs=%v, want result://batch-task-1?btih=...", got)
+	}
+	if completed.GetMetrics().GetWallTimeMs() <= 0 {
+		t.Fatalf("wall_time_ms=%d, want >0", completed.GetMetrics().GetWallTimeMs())
 	}
 }
 
