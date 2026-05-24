@@ -29,9 +29,17 @@ Complete the Go batch pull runtime and commit it as the first finished part.
   - `go test ./cmd/server -run TestPullBatchAppliesBackpressureAndDoesNotPersistFullCacheState -count=1` in `services/nodepool`
   - `go test ./...` in `services/worker`
   - `go test ./...` in `services/nodepool`
+- Committed first completed part as `ef8f75a runtime: add batch pull execution path`.
+- Added Go `reliability-executor` to replace `scripts/reliability_executor.py`.
+- Updated reliability startup paths to use the Go executor binary instead of `python scripts/reliability_executor.py`.
+- Removed `scripts/reliability_executor.py`.
+- Verified:
+  - `go test ./cmd/reliability-executor -count=1` in `services/worker`
+  - `go test ./...` in `services/worker`
+  - Built and ran `test_logs/bin/reliability-executor.exe` for a CPU smoke workload.
 
 ## Next Action
-Commit the completed batch runtime part, then start replacing Python tooling used by reliability/user-flow simulation.
+Commit the Go reliability executor part, then replace the Python reliability/failover harnesses themselves with Go CLIs.
 
 ## Blockers
 - Full Python removal is broad: many repo areas still contain Python programs and tests. This is not blocked; it needs staged replacement after the runtime path is green.
