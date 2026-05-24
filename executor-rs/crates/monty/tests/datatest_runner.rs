@@ -2,14 +2,10 @@ use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
     error::Error,
-    ffi::CString,
     fs,
     panic::{self, AssertUnwindSafe},
     path::Path,
-    sync::{
-        OnceLock,
-        mpsc::{self, RecvTimeoutError},
-    },
+    sync::mpsc::{self, RecvTimeoutError},
     thread,
     time::Duration,
 };
@@ -19,40 +15,29 @@ use monty::{
     ExcType, ExtFunctionResult, LimitedTracker, MontyException, MontyObject, MontyRun, NameLookupResult, OsFunction,
     PrintWriter, ResourceLimits, RunProgress, dir_stat, file_stat,
 };
-use pyo3::{prelude::*, types::PyDict};
 use similar::TextDiff;
 
 /// Recursion limit for test execution.
 ///
-/// Used for both Monty and CPython tests. CPython needs ~5 extra frames
-/// for runpy overhead, which is added in run_file_and_get_traceback.
-///
 /// NOTE this value is chosen to avoid both:
-/// * other recursion errors in python (if it's too low)
-/// * and, stack overflows in debug rust (if it's too high)
+/// * fixture recursion errors if it's too low
+/// * stack overflows in debug Rust if it's too high
 const TEST_RECURSION_LIMIT: usize = 50;
 
 /// Test configuration parsed from directive comments.
 ///
-/// Parsed from an optional first-line comment like `# xfail=monty,cpython` or `# call-external`.
-/// If not present, defaults to running on both interpreters in standard mode.
+/// Parsed from an optional first-line comment like `# xfail=monty` or `# call-external`.
+/// If not present, defaults to running Monty in standard mode.
 ///
 /// ## Xfail Semantics (Strict)
 /// - `xfail=monty` - Test is expected to fail on Monty; if it passes, that's an error
-/// - `xfail=cpython` - Test is expected to fail on CPython; if it passes, that's an error
-/// - `xfail=monty,cpython` - Expected to fail on both interpreters
 #[derive(Debug, Clone, Default)]
 #[expect(clippy::struct_excessive_bools)]
 struct TestConfig {
     /// When true, test is expected to fail on Monty (strict xfail).
     xfail_monty: bool,
-    /// When true, test is expected to fail on CPython (strict xfail).
-    xfail_cpython: bool,
     /// When true, use MontyRun with external function support instead of MontyRun.
     iter_mode: bool,
-    /// When true, wrap code in async context for CPython execution.
-    /// Used for tests with top-level await which Monty supports but CPython doesn't.
-    async_mode: bool,
 }
 
 /// Represents the expected outcome of a test fixture
@@ -70,28 +55,17 @@ enum Expectation {
     /// Only used when `ref-count-return` feature is enabled; skipped otherwise.
     RefCounts(#[cfg_attr(not(feature = "ref-count-return"), expect(dead_code))] AHashMap<String, usize>),
     /// Expect exception with full traceback comparison.
-    /// The expected traceback string should match exactly between Monty and CPython.
+    /// The expected traceback string should match exactly with Monty's output.
     Traceback(String),
     /// Expect successful execution without raising an exception (no return value check).
     /// Used for tests that rely on asserts or just verify code runs.
     NoException,
 }
 
-impl Expectation {
-    /// Returns the expected value string
-    fn expected_value(&self) -> &str {
-        match self {
-            Self::Raise(s) | Self::ReturnStr(s) | Self::Return(s) | Self::ReturnType(s) | Self::Traceback(s) => s,
-            Self::RefCounts(_) | Self::NoException => "",
-        }
-    }
-}
-
 /// Parse a Python fixture file into code, expected outcome, and test configuration.
 ///
-/// The file may optionally contain a `# xfail=monty,cpython` comment to specify
-/// which interpreters the test is expected to fail on. If not present, defaults to
-/// running on both and expecting success.
+/// The file may optionally contain a `# xfail=monty` comment to specify that
+/// Monty is expected to fail. If not present, the fixture is expected to pass.
 ///
 /// The file may have an expectation comment as the LAST line:
 /// - `# Raise=ExceptionType('message')` - Exception (parse-time or runtime)
@@ -104,7 +78,7 @@ impl Expectation {
 /// ```text
 /// """TRACEBACK:
 /// Traceback (most recent call last):
-///   File "my_test.py", line 4, in <module>
+///   File "my_test.monty", line 4, in <module>
 ///     foo()
 /// ValueError: message
 /// """
@@ -112,6 +86,8 @@ impl Expectation {
 ///
 /// If no expectation comment is present, the test just verifies the code runs without exception.
 fn parse_fixture(content: &str) -> (String, Expectation, TestConfig) {
+    let normalized_content = content.replace("\r\n", "\n");
+    let content = normalized_content.as_str();
     let lines: Vec<&str> = content.lines().collect();
 
     assert!(!lines.is_empty(), "Empty fixture file");
@@ -125,7 +101,6 @@ fn parse_fixture(content: &str) -> (String, Expectation, TestConfig) {
 
     let mut config = TestConfig {
         iter_mode: comment_lines.iter().any(|line| line.starts_with("call-external")),
-        async_mode: comment_lines.iter().any(|line| line.starts_with("run-async")),
         ..Default::default()
     };
     // Check for "xfail=" directive
@@ -134,7 +109,6 @@ fn parse_fixture(content: &str) -> (String, Expectation, TestConfig) {
         let xfail_end = xfail_line.find(|c: char| c.is_whitespace()).unwrap_or(xfail_line.len());
         let xfail_str = &xfail_line[..xfail_end];
         config.xfail_monty = xfail_str.contains("monty");
-        config.xfail_cpython = xfail_str.contains("cpython");
     }
 
     // Check for TRACEBACK expectation (triple-quoted string at end of file)
@@ -226,45 +200,6 @@ fn parse_ref_counts(s: &str) -> AHashMap<String, usize> {
         counts.insert(name.to_string(), count);
     }
     counts
-}
-
-/// Python implementations of external functions for running iter mode tests in CPython.
-///
-/// These implementations mirror the behavior of `dispatch_external_call` so that
-/// iter mode tests produce identical results in both Monty and CPython.
-///
-/// This is loaded from `scripts/iter_test_methods.py` which is also imported by
-/// `scripts/run_traceback.py` to ensure consistency.
-const ITER_EXT_FUNCTIONS_PYTHON: &str = include_str!("../../../scripts/iter_test_methods.py");
-
-/// Pre-imports Python modules that can cause race conditions during parallel test execution.
-///
-/// Python's import machinery isn't fully thread-safe during module initialization.
-/// When multiple tests try to import modules like `typing` or `dataclasses` simultaneously,
-/// one thread may see a partially initialized module, causing `AttributeError`.
-///
-/// This function must be called once before any parallel test execution to ensure
-/// all relevant modules are fully initialized.
-fn ensure_python_modules_imported() {
-    static INIT: OnceLock<()> = OnceLock::new();
-    INIT.get_or_init(|| {
-        Python::attach(|py| {
-            // Import modules that are used by iter_test_methods.py and can cause race conditions.
-            // The order matters: import dependencies first.
-            py.import("typing").expect("Failed to import typing");
-            py.import("dataclasses").expect("Failed to import dataclasses");
-            py.import("pathlib").expect("Failed to import pathlib");
-            py.import("stat").expect("Failed to import stat");
-            py.import("asyncio").expect("Failed to import asyncio");
-            py.import("traceback").expect("Failed to import traceback");
-
-            // Also pre-execute the iter_test_methods code once to ensure all its
-            // module-level code (dataclass definitions, monkey-patches) is initialized
-            let ext_funcs_cstr = CString::new(ITER_EXT_FUNCTIONS_PYTHON).expect("Invalid C string");
-            py.run(&ext_funcs_cstr, None, None)
-                .expect("Failed to pre-initialize iter_test_methods");
-        });
-    });
 }
 
 /// Result from dispatching an external function call.
@@ -410,7 +345,7 @@ fn dispatch_external_call(name: &str, args: Vec<MontyObject>) -> DispatchResult 
 /// Dispatches a dataclass method call to the appropriate test implementation.
 ///
 /// The first argument is always the dataclass instance (`self`). Known methods
-/// are implemented to mirror the Python dataclass methods in `iter_test_methods.py`.
+/// are implemented to mirror the dataclass methods used by the fixture suite.
 /// Unknown methods return `AttributeError`.
 fn dispatch_method_call(
     method_name: &str,
@@ -1518,369 +1453,6 @@ fn run_iter_loop(exec: MontyRun) -> Result<MontyObject, MontyException> {
     }
 }
 
-/// Split Python code into statements and a final expression to evaluate.
-///
-/// For Return expectations, the last non-empty line is the expression to evaluate.
-/// For Raise/NoException, the entire code is statements (returns None for expression).
-///
-/// Returns (statements_code, optional_final_expression).
-fn split_code_for_module(code: &str, need_return_value: bool) -> (String, Option<String>) {
-    let lines: Vec<&str> = code.lines().collect();
-
-    // Find the last non-empty line
-    let last_idx = lines
-        .iter()
-        .rposition(|line| !line.trim().is_empty())
-        .expect("Empty code");
-
-    if need_return_value {
-        let last_line = lines[last_idx].trim();
-
-        // Check if the last line is a statement (can't be evaluated as an expression)
-        // Matches both `assert expr` and `assert(expr)` forms
-        if last_line.starts_with("assert ") || last_line.starts_with("assert(") {
-            // All code is statements, no expression to evaluate
-            (lines[..=last_idx].join("\n"), None)
-        } else {
-            // Everything except last line is statements, last line is the expression
-            let statements = lines[..last_idx].join("\n");
-            let expr = last_line.to_string();
-            (statements, Some(expr))
-        }
-    } else {
-        // All code is statements (for exception tests or NoException)
-        (lines[..=last_idx].join("\n"), None)
-    }
-}
-
-/// Wraps code in an async context for CPython execution.
-///
-/// Monty supports top-level `await`, but CPython does not. This function transforms code
-/// like:
-///
-/// ```python
-/// async def foo():
-///     return 1
-/// result = await foo()
-/// ```
-///
-/// Into:
-///
-/// ```python
-/// import asyncio
-/// async def __test_main():
-///     async def foo():
-///         return 1
-///     result = await foo()
-///     return result  # if need_return_value
-/// __test_result__ = asyncio.run(__test_main())
-/// ```
-fn wrap_code_for_async(code: &str, need_return_value: bool) -> (String, Option<String>) {
-    let lines: Vec<&str> = code.lines().collect();
-
-    // Find the last non-empty, non-comment line
-    let last_idx = lines
-        .iter()
-        .rposition(|line| {
-            let trimmed = line.trim();
-            !trimmed.is_empty() && !trimmed.starts_with('#')
-        })
-        .expect("Empty code");
-
-    // Indent all code by 4 spaces for the function body
-    let indented: String = lines
-        .iter()
-        .map(|line| {
-            if line.is_empty() {
-                String::new()
-            } else {
-                format!("    {line}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let return_stmt = if need_return_value {
-        // The last non-empty, non-comment line is the expression to return
-        let last_line = lines[last_idx].trim();
-        format!("\n    return {last_line}")
-    } else {
-        String::new()
-    };
-
-    let wrapped = format!(
-        "import asyncio\nasync def __test_main():\n{indented}{return_stmt}\n__test_result__ = asyncio.run(__test_main())"
-    );
-
-    if need_return_value {
-        (wrapped, Some("__test_result__".to_string()))
-    } else {
-        (wrapped, None)
-    }
-}
-
-/// Run the traceback script to get CPython's traceback output for a test file.
-///
-/// This imports scripts/run_traceback.py via pyo3 and calls `run_file_and_get_traceback()`
-/// which executes the file via runpy.run_path() to ensure full traceback information
-/// (including caret lines) is preserved.
-///
-/// When `iter_mode` is true, external function implementations are injected into the
-/// file's globals before execution.
-///
-/// When `async_mode` is true, code is wrapped in an async context before execution.
-fn run_traceback_script(path: &Path, iter_mode: bool, async_mode: bool) -> String {
-    Python::attach(|py| {
-        let run_traceback = import_run_traceback(py);
-
-        // Get absolute path for the test file
-        let abs_path = path.canonicalize().expect("Failed to get absolute path");
-        let path_str = abs_path.to_str().expect("Invalid UTF-8 in path");
-
-        // Call run_file_and_get_traceback with the recursion limit, iter_mode, and async_mode flags
-        let result = run_traceback
-            .call_method1(
-                "run_file_and_get_traceback",
-                (path_str, TEST_RECURSION_LIMIT, iter_mode, async_mode),
-            )
-            .expect("Failed to call run_file_and_get_traceback");
-
-        // Handle None return (no exception raised)
-        if result.is_none() {
-            String::new()
-        } else {
-            result
-                .extract()
-                .expect("Failed to extract string from return value of run_file_and_get_traceback")
-        }
-    })
-}
-
-fn format_traceback(py: Python<'_>, exc: &PyErr) -> String {
-    let run_traceback = import_run_traceback(py);
-    let exc_value = exc.value(py);
-    let return_value = run_traceback
-        .call_method1("format_full_traceback", (exc_value,))
-        .expect("Failed to call format_full_traceback");
-    return_value
-        .extract()
-        .expect("failed to extract string from return value of format_full_traceback")
-}
-
-/// Import the run_traceback module
-fn import_run_traceback(py: Python<'_>) -> Bound<'_, PyModule> {
-    // Add scripts directory to sys.path (tests run from crates/monty/)
-    let sys = py.import("sys").expect("Failed to import sys");
-    let sys_path = sys.getattr("path").expect("Failed to get sys.path");
-    sys_path
-        .call_method1("insert", (0, "../../scripts"))
-        .expect("Failed to add scripts to sys.path");
-
-    // Import the run_traceback module
-    py.import("run_traceback").expect("Failed to import run_traceback")
-}
-
-/// Result from CPython execution - either a value to compare, or an early return.
-enum CpythonResult {
-    /// Value to compare against expectation
-    Value(String),
-    /// No value to compare (NoException test succeeded)
-    NoValue,
-    /// Test failed with this error
-    Failed(TestFailure),
-}
-
-/// Try to run a test through CPython, returning Ok(()) on success or Err with failure details.
-///
-/// This function executes the same Python code via CPython (using pyo3) and
-/// compares the result with the expected value. This ensures Monty behaves
-/// identically to CPython.
-///
-/// Code is executed at module level (not wrapped in a function) so that
-/// `global` keyword semantics work correctly.
-///
-/// RefCounts tests are skipped as they're Monty-specific.
-/// Traceback tests use scripts/run_traceback.py for reliable caret line support.
-fn try_run_cpython_test(
-    path: &Path,
-    code: &str,
-    expectation: &Expectation,
-    iter_mode: bool,
-    async_mode: bool,
-) -> Result<(), TestFailure> {
-    // Ensure Python modules are imported before parallel tests access them.
-    // This prevents race conditions during module initialization.
-    ensure_python_modules_imported();
-
-    // Skip RefCounts tests - only relevant for Monty
-    if matches!(expectation, Expectation::RefCounts(_)) {
-        return Ok(());
-    }
-
-    let test_name = path.strip_prefix("test_cases/").unwrap_or(path).display().to_string();
-
-    // Traceback tests use the external script for reliable caret line support
-    if let Expectation::Traceback(expected) = expectation {
-        let result = run_traceback_script(path, iter_mode, async_mode);
-        if result != *expected {
-            return Err(TestFailure {
-                test_name,
-                kind: "CPython traceback".to_string(),
-                expected: expected.clone(),
-                actual: result,
-            });
-        }
-        return Ok(());
-    }
-
-    let need_return_value = matches!(
-        expectation,
-        Expectation::Return(_) | Expectation::ReturnStr(_) | Expectation::ReturnType(_)
-    );
-
-    // Use async wrapper for tests with top-level await
-    let (statements, maybe_expr) = if async_mode {
-        wrap_code_for_async(code, need_return_value)
-    } else {
-        split_code_for_module(code, need_return_value)
-    };
-
-    let result: CpythonResult = Python::attach(|py| {
-        // Execute statements at module level
-        let globals = PyDict::new(py);
-
-        // For iter mode tests, inject external function implementations into globals
-        if iter_mode {
-            let ext_funcs_cstr = CString::new(ITER_EXT_FUNCTIONS_PYTHON).expect("Invalid C string in ext funcs");
-            py.run(&ext_funcs_cstr, Some(&globals), None)
-                .expect("Failed to define external functions for iter mode");
-        }
-
-        // Run the statements
-        let statements_cstr = CString::new(statements.as_str()).expect("Invalid C string in statements");
-        let stmt_result = py.run(&statements_cstr, Some(&globals), None);
-
-        // Handle exception during statement execution
-        if let Err(e) = stmt_result {
-            if matches!(expectation, Expectation::NoException) {
-                return CpythonResult::Failed(TestFailure {
-                    test_name: test_name.clone(),
-                    kind: "CPython unexpected exception".to_string(),
-                    expected: "no exception".to_string(),
-                    actual: format_traceback(py, &e),
-                });
-            }
-            if matches!(expectation, Expectation::Raise(_)) {
-                return CpythonResult::Value(format_cpython_exception(py, &e));
-            }
-            return CpythonResult::Failed(TestFailure {
-                test_name: test_name.clone(),
-                kind: "CPython unexpected exception".to_string(),
-                expected: "success".to_string(),
-                actual: format_traceback(py, &e),
-            });
-        }
-
-        // If we have an expression to evaluate, evaluate it
-        if let Some(expr) = maybe_expr {
-            let expr_cstr = CString::new(expr.as_str()).expect("Invalid C string in expr");
-            match py.eval(&expr_cstr, Some(&globals), None) {
-                Ok(result) => {
-                    // Code returned successfully - format based on expectation type
-                    match expectation {
-                        Expectation::Return(_) => CpythonResult::Value(result.repr().unwrap().to_string()),
-                        Expectation::ReturnStr(_) => CpythonResult::Value(result.str().unwrap().to_string()),
-                        Expectation::ReturnType(_) => {
-                            CpythonResult::Value(result.get_type().name().unwrap().to_string())
-                        }
-                        Expectation::Raise(expected) => CpythonResult::Failed(TestFailure {
-                            test_name: test_name.clone(),
-                            kind: "CPython exception".to_string(),
-                            expected: expected.clone(),
-                            actual: "no exception raised".to_string(),
-                        }),
-                        // Traceback tests are handled by run_traceback_script above
-                        Expectation::Traceback(_) | Expectation::NoException | Expectation::RefCounts(_) => {
-                            unreachable!()
-                        }
-                    }
-                }
-                Err(e) => {
-                    // Expression raised an exception
-                    if matches!(expectation, Expectation::NoException) {
-                        return CpythonResult::Failed(TestFailure {
-                            test_name: test_name.clone(),
-                            kind: "CPython unexpected exception".to_string(),
-                            expected: "no exception".to_string(),
-                            actual: format_traceback(py, &e),
-                        });
-                    }
-                    if matches!(expectation, Expectation::Raise(_)) {
-                        return CpythonResult::Value(format_cpython_exception(py, &e));
-                    }
-                    // Traceback tests are handled by run_traceback_script above
-                    CpythonResult::Failed(TestFailure {
-                        test_name: test_name.clone(),
-                        kind: "CPython unexpected exception".to_string(),
-                        expected: "success".to_string(),
-                        actual: format_traceback(py, &e),
-                    })
-                }
-            }
-        } else {
-            // No expression to evaluate
-            // Traceback tests are handled by run_traceback_script above
-            if let Expectation::Raise(expected) = expectation {
-                return CpythonResult::Failed(TestFailure {
-                    test_name: test_name.clone(),
-                    kind: "CPython exception".to_string(),
-                    expected: expected.clone(),
-                    actual: "no exception raised".to_string(),
-                });
-            }
-            CpythonResult::NoValue // NoException expectation - success
-        }
-    });
-
-    match result {
-        CpythonResult::Value(actual) => {
-            let expected = expectation.expected_value();
-            if actual != expected {
-                return Err(TestFailure {
-                    test_name,
-                    kind: "CPython result".to_string(),
-                    expected: expected.to_string(),
-                    actual,
-                });
-            }
-            Ok(())
-        }
-        CpythonResult::NoValue => Ok(()),
-        CpythonResult::Failed(failure) => Err(failure),
-    }
-}
-
-/// Format a CPython exception into the expected format.
-fn format_cpython_exception(py: Python<'_>, e: &PyErr) -> String {
-    let exc_type = e.get_type(py).name().unwrap();
-    let exc_message: String = e
-        .value(py)
-        .getattr("args")
-        .and_then(|args| args.get_item(0))
-        .and_then(|item| item.extract())
-        .unwrap_or_default();
-
-    if exc_message.is_empty() {
-        format!("{exc_type}()")
-    } else if exc_message.contains('\'') {
-        // Use double quotes when message contains single quotes (like Python's repr)
-        format!("{exc_type}(\"{exc_message}\")")
-    } else {
-        // Use single quotes (default Python repr format)
-        format!("{exc_type}('{exc_message}')")
-    }
-}
-
 /// Timeout duration for Monty tests.
 ///
 /// Tests that exceed this duration are considered to be hanging (infinite loop)
@@ -1995,35 +1567,5 @@ fn run_test_cases_monty(path: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Test function that runs each fixture through CPython.
-///
-/// Handles xfail with strict semantics: if a test is marked `xfail=cpython`, it must fail.
-/// If an xfail test passes unexpectedly, that's an error.
-fn run_test_cases_cpython(path: &Path) -> Result<(), Box<dyn Error>> {
-    let content = fs::read_to_string(path)?;
-    let (code, expectation, config) = parse_fixture(&content);
-    let test_name = path.strip_prefix("test_cases/").unwrap_or(path).display().to_string();
-
-    let result = try_run_cpython_test(path, &code, &expectation, config.iter_mode, config.async_mode);
-
-    if config.xfail_cpython {
-        // Strict xfail: test must fail; if it passed, xfail should be removed
-        assert!(
-            result.is_err(),
-            "[{test_name}] Test marked xfail=cpython passed unexpectedly. Remove xfail if the test is now fixed."
-        );
-    } else if let Err(failure) = result {
-        panic!("{failure}");
-    }
-    Ok(())
-}
-
 // Generate tests for all fixture files using datatest-stable harness macro
-datatest_stable::harness!(
-    run_test_cases_monty,
-    "test_cases",
-    r"^.*\.py$",
-    run_test_cases_cpython,
-    "test_cases",
-    r"^.*\.py$",
-);
+datatest_stable::harness!(run_test_cases_monty, "test_cases", r"^.*\.monty$",);
