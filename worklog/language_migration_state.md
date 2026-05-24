@@ -15,7 +15,7 @@ Finish the `plan` runtime work, verify it with simulated user flows, remove Pyth
 running
 
 ## Current Step
-Complete the Go batch pull runtime and commit it as the first finished part.
+Remove the remaining executor-rs Python package/scripts and keep Rust verification green.
 
 ## Completed Work
 - Read `plan` and confirmed the core runtime requirements.
@@ -59,9 +59,15 @@ Complete the Go batch pull runtime and commit it as the first finished part.
 - Ran Go calibration: `test_logs/reliability-go/20260524-174014`, 1 run passed with latency/jitter and no failures. This is not the full release DoD because it used calibration settings.
 - Removed legacy Python entrypoints in root `scripts`, `task`, `web`, `vpn`, `bt`, `staff`, and `worker/tools` that are superseded by Go/Rust runtime and Go validation paths.
 - Removed the remaining non-executor-rs Python sample/performance files under `test_tasks` and `worker`.
+- Renamed executor-rs `monty/test_cases/*.py` fixtures to `.monty` and updated the Rust datatest/bench references.
+- Removed Monty's CPython/PyO3 datatest comparison path, including the PyO3 build hook, local CPython benchmarks, and the Python traceback/external-function helper scripts.
+- Updated `.monty` traceback expectations to use `.monty` filenames and normalized CRLF parsing in the Rust fixture parser.
+- Verified:
+  - `cargo test -p monty --test datatest_runner -- --list` in `executor-rs`
+  - `cargo test -p monty --test datatest_runner` in `executor-rs` (411 fixture tests passed)
 
 ## Next Action
-Commit the non-executor Python cleanup, then handle the remaining executor-rs Python test assets and run the full release DoD with the Go harness.
+Commit the executor-rs `.monty`/Rust-only Monty runner migration, then remove the remaining executor-rs Python package/scripts/examples and rerun Rust plus Go release gates.
 
 ## Blockers
 - Full Python removal is broad: many repo areas still contain Python programs and tests. This is not blocked; it needs staged replacement after the runtime path is green.

@@ -1,7 +1,3 @@
-// Use codspeed-criterion-compat when running on CodSpeed (CI), real criterion otherwise (for flamegraphs)
-#[cfg(not(codspeed))]
-use std::ffi::CString;
-
 #[cfg(codspeed)]
 use codspeed_criterion_compat::{Bencher, Criterion, black_box, criterion_group, criterion_main};
 #[cfg(not(codspeed))]
@@ -9,9 +5,6 @@ use criterion::{Bencher, Criterion, black_box, criterion_group, criterion_main};
 use monty::MontyRun;
 #[cfg(not(codspeed))]
 use pprof::criterion::{Output, PProfProfiler};
-// CPython benchmarks are only run locally, not on CodSpeed CI (requires Python + pyo3 setup)
-#[cfg(not(codspeed))]
-use pyo3::prelude::*;
 
 /// Runs a benchmark using the Monty interpreter.
 /// Parses once, then benchmarks repeated execution.
@@ -26,59 +19,6 @@ fn run_monty(bench: &mut Bencher, code: &str, expected: i64) {
         let int_value: i64 = r.as_ref().try_into().unwrap();
         black_box(int_value);
     });
-}
-
-/// Runs a benchmark using CPython.
-/// Wraps code in main(), parses once, then benchmarks repeated execution.
-#[cfg(not(codspeed))]
-fn run_cpython(bench: &mut Bencher, code: &str, expected: i64) {
-    Python::attach(|py| {
-        let wrapped = wrap_for_cpython(code);
-        let code_cstr = CString::new(wrapped).expect("Invalid C string in code");
-        let fun: Py<PyAny> = PyModule::from_code(py, &code_cstr, c"test.py", c"main")
-            .unwrap()
-            .getattr("main")
-            .unwrap()
-            .into();
-
-        let r_py = fun.call0(py).unwrap();
-        let r: i64 = r_py.extract(py).unwrap();
-        assert_eq!(r, expected);
-
-        bench.iter(|| {
-            let r_py = fun.call0(py).unwrap();
-            let r: i64 = r_py.extract(py).unwrap();
-            black_box(r);
-        });
-    });
-}
-
-/// Wraps code in a main() function for CPython execution.
-/// Indents each line and converts the last expression to a return statement.
-#[cfg(not(codspeed))]
-fn wrap_for_cpython(code: &str) -> String {
-    let mut lines: Vec<String> = Vec::new();
-    let mut last_expr = String::new();
-
-    for line in code.lines() {
-        // Skip test metadata comments
-        if line.starts_with("# Return=") || line.starts_with("# Raise=") || line.starts_with("# skip=") {
-            continue;
-        }
-        // Track the last non-empty, non-comment line as potential return expression
-        let trimmed = line.trim();
-        if !trimmed.is_empty() && !trimmed.starts_with('#') {
-            last_expr = line.to_string();
-        }
-        lines.push(format!("    {line}"));
-    }
-
-    // Replace last expression with return statement
-    if let Some(last) = lines.iter().rposition(|l| l.trim() == last_expr.trim()) {
-        lines[last] = format!("    return {}", last_expr.trim());
-    }
-
-    format!("def main():\n{}", lines.join("\n"))
 }
 
 const ADD_TWO: &str = "1 + 2";
@@ -98,8 +38,8 @@ len(v)
 ";
 
 /// Comprehensive benchmark exercising most supported Python features.
-/// Code is shared with test_cases/bench__kitchen_sink.py
-const KITCHEN_SINK: &str = include_str!("../test_cases/bench__kitchen_sink.py");
+/// Code is shared with test_cases/bench__kitchen_sink.monty
+const KITCHEN_SINK: &str = include_str!("../test_cases/bench__kitchen_sink.monty");
 
 const FUNC_CALL_KWARGS: &str = "
 def add(a, b=2):
@@ -154,82 +94,35 @@ fn end_to_end_monty(bench: &mut Bencher) {
     });
 }
 
-/// Benchmarks end-to-end execution (parsing + running) using CPython.
-/// This is different from other benchmarks as it includes parsing in the loop.
-#[cfg(not(codspeed))]
-fn end_to_end_cpython(bench: &mut Bencher) {
-    Python::attach(|py| {
-        bench.iter(|| {
-            let fun: Py<PyAny> =
-                PyModule::from_code(py, black_box(c"def main():\n  return 1 + 2"), c"test.py", c"main")
-                    .unwrap()
-                    .getattr("main")
-                    .unwrap()
-                    .into();
-            let r_py = fun.call0(py).unwrap();
-            let r: i64 = r_py.extract(py).unwrap();
-            black_box(r);
-        });
-    });
-}
-
 /// Configures all benchmarks in a single group.
 fn criterion_benchmark(c: &mut Criterion) {
     c.bench_function("add_two__monty", |b| run_monty(b, ADD_TWO, 3));
-    #[cfg(not(codspeed))]
-    c.bench_function("add_two__cpython", |b| run_cpython(b, ADD_TWO, 3));
 
     c.bench_function("list_append__monty", |b| run_monty(b, LIST_APPEND, 42));
-    #[cfg(not(codspeed))]
-    c.bench_function("list_append__cpython", |b| run_cpython(b, LIST_APPEND, 42));
 
     c.bench_function("loop_mod_13__monty", |b| run_monty(b, LOOP_MOD_13, 77));
-    #[cfg(not(codspeed))]
-    c.bench_function("loop_mod_13__cpython", |b| run_cpython(b, LOOP_MOD_13, 77));
 
     c.bench_function("end_to_end__monty", end_to_end_monty);
-    #[cfg(not(codspeed))]
-    c.bench_function("end_to_end__cpython", end_to_end_cpython);
 
     c.bench_function("kitchen_sink__monty", |b| run_monty(b, KITCHEN_SINK, 373));
-    #[cfg(not(codspeed))]
-    c.bench_function("kitchen_sink__cpython", |b| run_cpython(b, KITCHEN_SINK, 373));
 
     c.bench_function("func_call_kwargs__monty", |b| run_monty(b, FUNC_CALL_KWARGS, 3));
-    #[cfg(not(codspeed))]
-    c.bench_function("func_call_kwargs__cpython", |b| run_cpython(b, FUNC_CALL_KWARGS, 3));
 
     c.bench_function("list_append_str__monty", |b| run_monty(b, LIST_APPEND_STR, 100_000));
-    #[cfg(not(codspeed))]
-    c.bench_function("list_append_str__cpython", |b| run_cpython(b, LIST_APPEND_STR, 100_000));
 
     c.bench_function("list_append_int__monty", |b| {
         run_monty(b, LIST_APPEND_INT, 4_999_950_000);
     });
-    #[cfg(not(codspeed))]
-    c.bench_function("list_append_int__cpython", |b| {
-        run_cpython(b, LIST_APPEND_INT, 4_999_950_000);
-    });
 
     c.bench_function("fib__monty", |b| run_monty(b, FIB_25, 75_025));
-    #[cfg(not(codspeed))]
-    c.bench_function("fib__cpython", |b| run_cpython(b, FIB_25, 75_025));
 
     c.bench_function("list_comp__monty", |b| run_monty(b, LIST_COMP, 1000));
-    #[cfg(not(codspeed))]
-    c.bench_function("list_comp__cpython", |b| run_cpython(b, LIST_COMP, 1000));
 
     c.bench_function("dict_comp__monty", |b| run_monty(b, DICT_COMP, 500));
-    #[cfg(not(codspeed))]
-    c.bench_function("dict_comp__cpython", |b| run_cpython(b, DICT_COMP, 500));
 
     c.bench_function("empty_tuples__monty", |b| run_monty(b, EMPTY_TUPLES, 100_000));
-    #[cfg(not(codspeed))]
-    c.bench_function("empty_tuples__cpython", |b| run_cpython(b, EMPTY_TUPLES, 100_000));
 
     c.bench_function("pair_tuples__monty", |b| run_monty(b, PAIR_TUPLES, 100_000));
-    #[cfg(not(codspeed))]
-    c.bench_function("pair_tuples__cpython", |b| run_cpython(b, PAIR_TUPLES, 100_000));
 }
 
 // Use pprof flamegraph profiler when running locally (not on CodSpeed)

@@ -1,0 +1,31 @@
+# call-external
+def inner():
+    raise_error('TypeError', 'nested error')
+
+
+def middle():
+    inner()
+
+
+def outer():
+    middle()
+
+
+outer()
+"""
+TRACEBACK:
+Traceback (most recent call last):
+  File "ext_call__exc_nested_functions.monty", line 14, in <module>
+    outer()
+    ~~~~~~~
+  File "ext_call__exc_nested_functions.monty", line 11, in outer
+    middle()
+    ~~~~~~~~
+  File "ext_call__exc_nested_functions.monty", line 7, in middle
+    inner()
+    ~~~~~~~
+  File "ext_call__exc_nested_functions.monty", line 3, in inner
+    raise_error('TypeError', 'nested error')
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+TypeError: nested error
+"""

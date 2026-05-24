@@ -1,7 +1,7 @@
 /// Tests for regex-specific behavior that differs from CPython.
 ///
-/// These tests verify Monty-specific regex behavior that cannot be tested via
-/// the datatest runner (which runs tests against both CPython and Monty).
+/// These tests verify Monty-specific regex behavior that should stay separate
+/// from the shared fixture suite.
 /// In particular, `fancy_regex` enforces a backtrack limit that CPython lacks,
 /// so pathological patterns raise `PatternError` in Monty instead of hanging.
 ///

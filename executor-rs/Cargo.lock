@@ -1634,8 +1634,6 @@ dependencies = [
  "num-traits",
  "postcard",
  "pprof",
- "pyo3",
- "pyo3-build-config",
  "ruff_python_ast",
  "ruff_python_parser",
  "ruff_text_size",
