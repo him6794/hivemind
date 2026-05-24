@@ -41,9 +41,14 @@ Complete the Go batch pull runtime and commit it as the first finished part.
 - Removed `scripts/one_click_failover_check.py` from the migration path.
 - Verified:
   - `go test ./cmd/failover-check -count=1` in `services/nodepool`
+- Added Go DAG builder/compiler in `services/nodepool/internal/dag` to replace the temporary Python DSL direction.
+- Updated architecture notes to point at the Go DAG compiler.
+- Verified:
+  - `go test ./internal/dag -count=1` in `services/nodepool`
+  - `go test ./...` in `services/nodepool`
 
 ## Next Action
-Commit the Go failover-check part, then replace the full Python reliability harness with a Go CLI.
+Commit the Go DAG compiler part, then replace the full Python reliability harness with a Go CLI.
 
 ## Blockers
 - Full Python removal is broad: many repo areas still contain Python programs and tests. This is not blocked; it needs staged replacement after the runtime path is green.
