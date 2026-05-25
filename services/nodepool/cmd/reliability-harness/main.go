@@ -348,6 +348,13 @@ func (h *harness) startDependencies(runDir string) error {
 }
 
 func (h *harness) startServices(runDir string) error {
+	// Wait for service ports from any prior run to fully release.
+	waitPortFree("127.0.0.1", 50051, 15*time.Second)
+	waitPortFree("127.0.0.1", 18081, 15*time.Second)
+	waitPortFree("127.0.0.1", 18082, 15*time.Second)
+	waitPortFree("127.0.0.1", 51053, 15*time.Second)
+	waitPortFree("127.0.0.1", 51054, 15*time.Second)
+	waitPortFree("127.0.0.1", 51055, 15*time.Second)
 	nodepoolEnv := map[string]string{
 		"NODEPOOL_POSTGRES_DSN":             "postgres://hivemind:hivemind@127.0.0.1:25432/hivemind?sslmode=disable",
 		"NODEPOOL_REDIS_ADDR":               "127.0.0.1:26379",
