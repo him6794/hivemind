@@ -204,3 +204,106 @@
 - Reliability calibration rerun: `test_logs/reliability/20260520-090709`, run `rel-20260520090714-r01`.
 - Calibration passed with 3 workers, latency/jitter, duplicate rejection, one worker kill/reconnect, failure-injected task, retry task, long task, and parallel tasks.
 - DoD is still not satisfied because this was a 1-run calibration with 30s long task, not 10 consecutive runs with a 15-minute long-running workload and 3 failure simulations.
+
+## Iteration 13 completion verification (no new code fix)
+- Full reliability harness run completed with artifacts at `test_logs/reliability/20260520-091358`.
+- `summary.json` evidence:
+  - `"passed": true`
+  - `"dod_satisfied": true`
+  - 10 run directories exist (`r01`..`r10`), all `passed=true`.
+  - network delay/jitter active: `latency_ms=100`, `jitter_ms=250`.
+  - failure simulations configured and observed: `failure_simulations=3` with kill/restart events in runs.
+  - long-running workload validated: `long_seconds=900` and completion logs show ~902s execution.
+  - failure-injected workload validated: failure task ends in `FAILED` with injected executor exit status.
+  - duplicate submission protection validated: duplicate submission rejected across runs.
+  - reconnect consistency validated: workers return to `ACTIVE` at run end snapshots.
+- No new regression was found in this completion run.
+
+## Iteration 14 root cause
+- `ListWorkers(includeOffline=true)` in nodepool service automatically changed `OFFLINE` workers back to `ACTIVE` whenever heartbeat age was fresh.
+- This conflicted with probe-based offline marking (`MarkWorkerOffline`) and caused failed nodes to reappear as ACTIVE in UI and API worker list.
+- Evidence:
+  - Reproduced by `python scripts/one_click_failover_check.py --mode failover ...`
+  - Victim worker address was overwritten to `127.0.0.1:59999` and probe failure path was triggered, but the worker did not stay OFFLINE.
+
+## Iteration 14 fix applied
+- Updated `services/nodepool/internal/service/worker_service.go`:
+  - `ListWorkers` now only auto-activates workers when status is empty.
+  - Workers explicitly marked `OFFLINE` are no longer auto-reactivated by heartbeat freshness alone.
+- No proto schema or architecture changes were made.
+
+## Iteration 14 verification
+- Rebuilt binaries and restarted full stack.
+- Command:
+  - `python scripts/one_click_failover_check.py --mode failover --admin-user worker1 --admin-pass worker123 --task-user worker1 --task-pass worker123 --timeout-sec 60`
+- Result:
+  - victim worker transitioned to `OFFLINE` after bad address injection.
+  - follow-up task dispatch succeeded on another worker.
+  - script output ended with `[ok] failover check passed`.
+- Additional smoke:
+  - `python scripts/one_click_failover_check.py --mode single ...` succeeded with task dispatched and running state visible.
+
+## Iteration 15 root cause
+- `dispatchTaskToWorkerWithExcludes` only considered `ListAvailableWorkers` (ACTIVE set).
+- In the probe regression path, a worker could be marked `OFFLINE` first, then probe disabled; dispatch still failed because OFFLINE workers were never considered.
+- Evidence:
+  - `go test ./cmd/server -run TestMasterNode_DispatchTaskToWorker_PreDispatchProbe -count=1`
+  - Failure: `expected dispatch to succeed when pre-dispatch probe is disabled`.
+
+## Iteration 15 fix applied
+- Updated `services/nodepool/cmd/server/main.go`:
+  - Determine `probeEnabled` before worker listing.
+  - When probe is disabled and ACTIVE list is empty, fallback to `ListWorkers(includeOffline=true)` for dispatch candidates.
+- No proto schema or architecture changes were made.
+
+## Iteration 15 verification
+- Unit test:
+  - `go test ./cmd/server -run TestMasterNode_DispatchTaskToWorker_PreDispatchProbe -count=1`
+  - Result: PASS.
+- Runtime verification after rebuilding and restart:
+  - `python scripts/one_click_failover_check.py --mode single ...` PASS.
+  - `python scripts/one_click_failover_check.py --mode failover --timeout-sec 60 ...` PASS, including victim OFFLINE transition and step2 redispatch.
+
+## Iteration 16 root cause
+- Reliability harness runs were polluted by pre-existing local services occupying nodepool/master/worker ports.
+- Harness started with stale listeners and stale worker registry state, causing false failures such as:
+  - `no live worker available to kill`
+  - stuck long-running task
+  - zombie OFFLINE worker from previous bad-address injection.
+- Evidence:
+  - Failed calibration summary at `test_logs/reliability/20260521-110421/summary.json` with those regressions.
+
+## Iteration 16 fix applied
+- Updated `scripts/reliability_harness.py`:
+  - Added run-local `cleanup_conflicting_ports(run_dir)` before starting dependencies/services.
+  - On Windows, it parses `netstat -ano` and force-terminates listeners on harness-critical ports:
+    `18081, 18082, 50051, 51053-51055, 55051, 50053-50055`.
+  - Writes evidence to `preclean.log`.
+- No proto schema or architecture changes were made.
+
+## Iteration 16 verification
+- Command:
+  - `python scripts/reliability_harness.py --calibration --stop-on-failure --worker-nodepool-addr 127.0.0.1:50051`
+- Result:
+  - PASS (`exit 0`) with artifacts at `test_logs/reliability/20260521-111012`.
+  - `summary.json`: `"passed": true`.
+  - workload statuses correct: CPU/IO/retry/long/parallel completed; failure task failed as expected.
+  - worker failure simulation observed: `worker_killed` + `worker_restarted` events present.
+  - final workers all `ACTIVE` with no zombie/offline state.
+
+## Iteration 17 completion-gate verification (full objective)
+- Full command executed:
+  - `python scripts/reliability_harness.py --runs 10 --failure-simulations 3 --long-seconds 900 --stop-on-failure --worker-nodepool-addr 127.0.0.1:50051`
+- Artifact root:
+  - `test_logs/reliability/20260521-122819`
+- Summary evidence:
+  - `summary.json` contains `"passed": true` and `"dod_satisfied": true`.
+  - Exactly 10 run directories exist: `r01`..`r10`.
+  - Each run result reports `passed=True`, `failures=0`.
+  - Each run includes 6 failure events (`worker_killed`/`worker_restarted` x3), matching 3 failure simulations.
+  - Long-running workload completes in all runs with ~902 seconds execution logs.
+  - Failure-injected workload reaches expected `FAILED` terminal state.
+  - Retry workload reaches `COMPLETED`.
+  - Final workers in each run are all `ACTIVE`, no zombie/offline residual state.
+- Completion conclusion:
+  - The requested objective is satisfied with direct runtime evidence under simulated user flows (task submission, node registration/management, execution, failure/reconnect handling, and consistency checks).
