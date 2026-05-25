@@ -326,6 +326,8 @@ func (h *harness) runOnce(index int) runResult {
 
 func (h *harness) startDependencies(runDir string) error {
 	_ = exec.Command("docker", "rm", "-f", "hivemind-rel-pg", "hivemind-rel-redis").Run()
+	waitPortFree("127.0.0.1", 25432, 30*time.Second)
+	waitPortFree("127.0.0.1", 26379, 30*time.Second)
 	if out, err := exec.Command("docker", "run", "-d", "--name", "hivemind-rel-pg", "-e", "POSTGRES_USER=hivemind", "-e", "POSTGRES_PASSWORD=hivemind", "-e", "POSTGRES_DB=hivemind", "-p", "25432:5432", "postgres:16-alpine").CombinedOutput(); err != nil {
 		return fmt.Errorf("postgres start: %w: %s", err, string(out))
 	}
@@ -335,7 +337,9 @@ func (h *harness) startDependencies(runDir string) error {
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		if exec.Command("docker", "exec", "hivemind-rel-pg", "pg_isready", "-U", "hivemind", "-d", "hivemind").Run() == nil &&
-			exec.Command("docker", "exec", "hivemind-rel-redis", "redis-cli", "ping").Run() == nil {
+			exec.Command("docker", "exec", "hivemind-rel-redis", "redis-cli", "ping").Run() == nil &&
+			tcpPortOpen("127.0.0.1", 25432) &&
+			tcpPortOpen("127.0.0.1", 26379) {
 			return nil
 		}
 		time.Sleep(time.Second)
@@ -467,6 +471,25 @@ func (h *harness) startProcess(name, exe, cwd, runDir string, extra map[string]s
 	}
 	h.processes[name] = &managedProcess{name: name, cmd: cmd, stdout: stdout, stderr: stderr}
 	return nil
+}
+
+func waitPortFree(host string, port int, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !tcpPortOpen(host, port) {
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+func tcpPortOpen(host string, port int) bool {
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", host, port), 2*time.Second)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
 }
 
 func waitPort(host string, port int, timeout time.Duration) error {

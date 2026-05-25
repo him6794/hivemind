@@ -106,7 +106,7 @@ func (s *WorkerService) ListWorkers(ctx context.Context, includeOffline bool) ([
 				w.Status = "OFFLINE"
 				_ = s.repo.SaveWorker(w)
 			}
-		} else if w.Status == "" || w.Status == "OFFLINE" {
+		} else if w.Status == "" {
 			w.Status = "ACTIVE"
 			_ = s.repo.SaveWorker(w)
 		}
@@ -119,6 +119,17 @@ func (s *WorkerService) ListWorkers(ctx context.Context, includeOffline bool) ([
 	return out, nil
 }
 
+// GetWorker returns a copy of a worker by id without mutating worker state.
+func (s *WorkerService) GetWorker(ctx context.Context, id string) (*repository.Worker, bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if id == "" {
+		return nil, false
+	}
+	return s.repo.GetWorker(id)
+}
+
 // RemoveWorker deletes a worker from repository.
 func (s *WorkerService) RemoveWorker(ctx context.Context, id string) error {
 	if ctx == nil {
@@ -128,4 +139,24 @@ func (s *WorkerService) RemoveWorker(ctx context.Context, id string) error {
 		return ErrInvalidWorker
 	}
 	return s.repo.DeleteWorker(id)
+}
+
+// MarkWorkerOffline marks an existing worker as OFFLINE.
+// This is used when active health probes fail even if heartbeat is still fresh.
+func (s *WorkerService) MarkWorkerOffline(ctx context.Context, id string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if id == "" {
+		return ErrInvalidWorker
+	}
+	w, ok := s.repo.GetWorker(id)
+	if !ok || w == nil {
+		return repository.ErrWorkerNotFound
+	}
+	if w.Status == "OFFLINE" {
+		return nil
+	}
+	w.Status = "OFFLINE"
+	return s.repo.SaveWorker(w)
 }

@@ -459,6 +459,23 @@ func initDB(dsn string) (*sql.DB, error) {
 	return db, nil
 }
 
+
+// retryInitDB calls initDB with retries to handle transient
+// PostgreSQL connection failures during container (re)start.
+func retryInitDB(dsn string) (*sql.DB, error) {
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		db, err := initDB(dsn)
+		if err == nil {
+			return db, nil
+		}
+		lastErr = err
+		log.Printf("init db attempt %d failed: %v", attempt+1, err)
+		time.Sleep(time.Duration(attempt+1) * time.Second)
+	}
+	return nil, fmt.Errorf("init db failed after 5 attempts: %w", lastErr)
+}
+
 func newUserAuthServer(db *sql.DB, secret string) *userAuthServer {
 	return &userAuthServer{db: db, jwtSecret: []byte(secret)}
 }
@@ -2400,7 +2417,7 @@ func main() {
 	if dsn == "" {
 		dsn = "postgres://hivemind:hivemind@localhost:5432/hivemind?sslmode=disable"
 	}
-	db, err := initDB(dsn)
+	db, err := retryInitDB(dsn)
 	if err != nil {
 		log.Fatalf("init db failed: %v", err)
 	}
