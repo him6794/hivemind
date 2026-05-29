@@ -3,7 +3,7 @@ use hivemind_models::{Task, TaskStatus};
 use sqlx::PgPool;
 
 pub struct TaskRepository {
-    pool: PgPool,
+    pub pool: PgPool,
 }
 
 impl TaskRepository {
@@ -183,6 +183,41 @@ impl TaskRepository {
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected())
+    }
+
+    pub async fn find_stale_dispatched(&self, timeout_secs: u64) -> Result<Vec<Task>> {
+        let tasks = sqlx::query_as::<_, Task>(
+            r#"
+            SELECT * FROM tasks
+            WHERE status = 'ASSIGNED'
+            AND last_update < NOW() - make_interval(secs => $1::double precision)
+            ORDER BY priority DESC, created_at ASC
+            "#,
+        )
+        .bind(timeout_secs as f64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(tasks)
+    }
+
+    pub async fn reset_to_pending(&self, task_id: &str) -> Result<Task> {
+        let updated = sqlx::query_as::<_, Task>(
+            r#"
+            UPDATE tasks SET
+                status = 'PENDING',
+                status_message = 'Redispatched',
+                worker_id = NULL,
+                worker_ip = NULL,
+                retry_count = retry_count + 1,
+                last_update = NOW()
+            WHERE task_id = $1
+            RETURNING *
+            "#,
+        )
+        .bind(task_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(updated)
     }
 
     pub async fn update_resource_usage(
