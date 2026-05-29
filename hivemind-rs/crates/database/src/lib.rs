@@ -33,3 +33,4 @@ impl Drop for DatabaseManager {
 }
 
 pub mod postgres;
+pub mod redis_store;
