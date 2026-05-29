@@ -1,5 +1,6 @@
 ﻿pub mod worker_repository;
 pub mod service;
+pub mod heartbeat;
 
 use anyhow::Result;
 use hivemind_config::HivemindConfig;
