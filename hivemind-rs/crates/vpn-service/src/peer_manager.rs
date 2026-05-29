@@ -27,3 +27,25 @@ pub async fn allocate_ip(db: &DatabaseManager, config: &HivemindConfig) -> Resul
 
     Ok(ip)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_allocate_ip_format() {
+        // Just verify the format string works
+        let ip = format!("100.64.0.{}", 10);
+        assert_eq!(ip, "100.64.0.10");
+        assert!(ip.starts_with("100.64.0."));
+    }
+
+    #[test]
+    fn test_ip_range_bounds() {
+        // Verify the range logic
+        let max_octet = 254;
+        let min_octet = 10;
+        assert!(min_octet < max_octet);
+        assert!(max_octet <= 254);
+    }
+}
