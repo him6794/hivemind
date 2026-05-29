@@ -1091,6 +1091,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "sysinfo",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tonic",
