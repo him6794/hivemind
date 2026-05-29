@@ -41,3 +41,6 @@ impl MasterApiServer {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;
