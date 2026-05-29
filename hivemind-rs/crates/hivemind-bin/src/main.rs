@@ -2,11 +2,12 @@ use anyhow::Result;
 use hivemind_config::HivemindConfig;
 use hivemind_database::DatabaseManager;
 use hivemind_auth::AuthManager;
-use hivemind_node_manager::NodeManager;
-use hivemind_task_scheduler::TaskScheduler;
+use hivemind_node_manager::{NodeManager, heartbeat::HeartbeatHandler};
+use hivemind_task_scheduler::{TaskScheduler, dispatcher::Dispatcher};
 use hivemind_master_api::MasterApiServer;
 use hivemind_worker_executor::WorkerExecutor;
 use hivemind_vpn_service::VpnService;
+use std::sync::Arc;
 use tracing::info;
 
 #[tokio::main]
@@ -33,6 +34,8 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
 
+    let mut _shutdown_handles: Vec<tokio::sync::watch::Sender<bool>> = Vec::new();
+
     if run_master {
         let nodepool_grpc = config.server.nodepool_grpc_addr.clone();
         let api = MasterApiServer::new(
@@ -52,24 +55,30 @@ async fn main() -> Result<()> {
     }
 
     if run_nodepool {
-        let node_mgr = NodeManager::new(&config, db.clone());
+        let node_mgr = Arc::new(NodeManager::new(&config, db.clone()));
         let _vpn = VpnService::new(config.clone(), db.clone());
 
-        let node_mgr_clone = node_mgr;
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                match node_mgr_clone.mark_offline_stale().await {
-                    Ok(count) if count > 0 => {
-                        tracing::info!("Marked {} stale workers offline", count);
-                    }
-                    Err(e) => tracing::error!("Stale worker cleanup error: {}", e),
-                    _ => {}
-                }
-            }
-        });
+        // Start heartbeat cleanup
+        let heartbeat_handler = Arc::new(HeartbeatHandler::new(node_mgr.clone(), 30));
+        let hb_shutdown = heartbeat_handler.start_cleanup_loop(std::time::Duration::from_secs(10));
+        _shutdown_handles.push(hb_shutdown);
 
-        info!("Nodepool services started");
+        // Start task dispatch loop
+        let task_timeout = 30u64;
+        let max_redispatch = 2i32;
+        let dispatcher = Arc::new(Dispatcher::new(db.clone(), task_timeout, max_redispatch));
+        let (workers_tx, workers_rx) = tokio::sync::watch::channel(Vec::new());
+        let dispatch_shutdown = dispatcher.clone().start_dispatch_loop(
+            workers_rx,
+            std::time::Duration::from_secs(5),
+        );
+        _shutdown_handles.push(dispatch_shutdown);
+
+        // Start timeout monitor
+        let timeout_shutdown = dispatcher.start_timeout_loop(std::time::Duration::from_secs(10));
+        _shutdown_handles.push(timeout_shutdown);
+
+        info!("Nodepool services started (heartbeat cleanup, dispatch loop, timeout monitor)");
     }
 
     if run_worker {
@@ -83,7 +92,12 @@ async fn main() -> Result<()> {
 
     info!("Hivemind running. Press Ctrl+C to stop.");
     tokio::signal::ctrl_c().await?;
-    info!("Shutting down...");
 
+    // Graceful shutdown: signal all background loops to stop
+    for handle in _shutdown_handles {
+        let _ = handle.send(true);
+    }
+
+    info!("Shutting down...");
     Ok(())
 }
