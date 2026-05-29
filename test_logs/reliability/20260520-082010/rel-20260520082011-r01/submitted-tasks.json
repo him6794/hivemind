@@ -1,0 +1,90 @@
+[
+  {
+    "kind": "cpu",
+    "task_id": "rel-20260520082011-r01-cpu",
+    "btih": "11002c1835b60d70098d733e4e685f97aa743729",
+    "upload": {
+      "status_message": "[NO_WORKER] no available worker",
+      "success": false,
+      "task_id": "rel-20260520082011-r01-cpu"
+    },
+    "expected_status": "COMPLETED"
+  },
+  {
+    "kind": "io",
+    "task_id": "rel-20260520082011-r01-io",
+    "btih": "712c6ac75c52875f07dd504498174d65b3dba79d",
+    "upload": {
+      "status_message": "[NO_WORKER] no available worker",
+      "success": false,
+      "task_id": "rel-20260520082011-r01-io"
+    },
+    "expected_status": "COMPLETED"
+  },
+  {
+    "kind": "failure",
+    "task_id": "rel-20260520082011-r01-failure",
+    "btih": "08cd864feaf6c5e0370f6c1cb7cb94b18c91394b",
+    "upload": {
+      "status_message": "[NO_WORKER] no available worker",
+      "success": false,
+      "task_id": "rel-20260520082011-r01-failure"
+    },
+    "expected_status": "FAILED"
+  },
+  {
+    "kind": "retry",
+    "task_id": "rel-20260520082011-r01-retry",
+    "btih": "a6b99d9dac9806687ceaa5cd7625295309724486",
+    "upload": {
+      "status_message": "[NO_WORKER] no available worker",
+      "success": false,
+      "task_id": "rel-20260520082011-r01-retry"
+    },
+    "expected_status": "COMPLETED"
+  },
+  {
+    "kind": "long",
+    "task_id": "rel-20260520082011-r01-long",
+    "btih": "2b6b16e9b63cfa7c9fc47499656eb232e5cbbc97",
+    "upload": {
+      "status_message": "[NO_WORKER] no available worker",
+      "success": false,
+      "task_id": "rel-20260520082011-r01-long"
+    },
+    "expected_status": "COMPLETED"
+  },
+  {
+    "kind": "parallel-0",
+    "task_id": "rel-20260520082011-r01-parallel-0",
+    "btih": "c817d4a080a36f83ea1a5f9228690a231733e885",
+    "upload": {
+      "status_message": "[NO_WORKER] no available worker",
+      "success": false,
+      "task_id": "rel-20260520082011-r01-parallel-0"
+    },
+    "expected_status": "COMPLETED"
+  },
+  {
+    "kind": "parallel-1",
+    "task_id": "rel-20260520082011-r01-parallel-1",
+    "btih": "201151f2c41bb0f900e388965ea6377cb2b694a9",
+    "upload": {
+      "status_message": "[NO_WORKER] no available worker",
+      "success": false,
+      "task_id": "rel-20260520082011-r01-parallel-1"
+    },
+    "expected_status": "COMPLETED"
+  },
+  {
+    "kind": "parallel-2",
+    "task_id": "rel-20260520082011-r01-parallel-2",
+    "btih": "8409109a6b7ab074798de020da346feea5722e97",
+    "upload": {
+      "status_message": "[NO_WORKER] no available worker",
+      "success": false,
+      "task_id": "rel-20260520082011-r01-parallel-2"
+    },
+    "expected_status": "COMPLETED"
+  }
+]

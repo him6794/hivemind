@@ -1,0 +1,42 @@
+﻿[
+    {
+        "name":  "nodepool",
+        "pid":  24440,
+        "exe":  "D:\\hivemind\\test_logs\\bin\\nodepool.exe",
+        "cwd":  "D:\\hivemind\\services\\nodepool\\cmd\\server",
+        "stdout":  "D:\\hivemind\\test_logs\\live\\nodepool.out.log",
+        "stderr":  "D:\\hivemind\\test_logs\\live\\nodepool.err.log"
+    },
+    {
+        "name":  "master",
+        "pid":  23756,
+        "exe":  "D:\\hivemind\\test_logs\\bin\\master.exe",
+        "cwd":  "D:\\hivemind\\services\\master\\cmd\\server",
+        "stdout":  "D:\\hivemind\\test_logs\\live\\master.out.log",
+        "stderr":  "D:\\hivemind\\test_logs\\live\\master.err.log"
+    },
+    {
+        "name":  "worker1",
+        "pid":  9372,
+        "exe":  "D:\\hivemind\\test_logs\\bin\\worker.exe",
+        "cwd":  "D:\\hivemind\\services\\worker\\cmd\\server",
+        "stdout":  "D:\\hivemind\\test_logs\\live\\worker1.out.log",
+        "stderr":  "D:\\hivemind\\test_logs\\live\\worker1.err.log"
+    },
+    {
+        "name":  "worker3",
+        "pid":  23600,
+        "exe":  "D:\\hivemind\\test_logs\\bin\\worker.exe",
+        "cwd":  "D:\\hivemind\\services\\worker\\cmd\\server",
+        "stdout":  "D:\\hivemind\\test_logs\\live\\worker3.out.log",
+        "stderr":  "D:\\hivemind\\test_logs\\live\\worker3.err.log"
+    },
+    {
+        "name":  "worker2",
+        "pid":  24704,
+        "exe":  "D:\\hivemind\\test_logs\\bin\\worker.exe",
+        "cwd":  "D:\\hivemind\\services\\worker\\cmd\\server",
+        "stdout":  "D:\\hivemind\\test_logs\\live\\worker2-reconnect.out.log",
+        "stderr":  "D:\\hivemind\\test_logs\\live\\worker2-reconnect.err.log"
+    }
+]

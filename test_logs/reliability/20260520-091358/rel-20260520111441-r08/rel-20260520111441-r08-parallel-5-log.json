@@ -1,0 +1,4 @@
+{
+  "log": "task accepted (magnet, btih=c2920501f180d168b05897ca1b7a9ec572b8e458, name=parallel-5)\nexecutor_start task_id=rel-20260520111441-r08-parallel-5 kind=parallel\nexecutor_progress kind=parallel elapsed_sec=1 target_sec=10\nexecutor_complete task_id=rel-20260520111441-r08-parallel-5 kind=parallel elapsed_sec=11.000 work_hash=68d389ecb874533c36a8e073c30fe75bec6d6e0c\ntask completed",
+  "success": true
+}

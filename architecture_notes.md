@@ -28,3 +28,9 @@
 - Stuck `RUNNING` tasks after a worker kill are a task ownership/recovery issue in the existing lifecycle; they do not require a new proto contract to investigate.
 - Task timeout ownership currently uses `LastUpdate` as the activity clock; periodic billing/settlement must not refresh that clock for still-running work, or crashed-worker redispatch is masked.
 - A short calibration pass is now green, but it is not equivalent to DoD because duration and consecutive-run requirements are stricter.
+- Final DoD validation completed via the same existing harness/service topology with no schema or architecture changes; evidence confirms 10 consecutive green runs, 3 failure simulations, active latency/jitter path, and stable reconnect/ownership behavior.
+- `OFFLINE` worker state is lifecycle-critical metadata; list/read paths must not silently reactivate nodes that were explicitly marked offline by probe or dispatch failure.
+- Worker reactivation remains tied to explicit registration updates (`RegisterWorker`), preserving existing architecture while preventing stale/bad nodes from re-entering scheduling unexpectedly.
+- Scheduling behavior is now mode-aware: when pre-dispatch probe is disabled, dispatch candidate sourcing can include OFFLINE-known workers, matching existing probe-off test semantics without altering service boundaries.
+- Reliability validation is sensitive to local process ownership on fixed ports; pre-run port hygiene is part of test harness control-plane behavior, not production architecture.
+- Full-gate verification continues to use the existing architecture (master HTTP facade, nodepool gRPC scheduler, worker execution runtime) with no proto/schema changes and no topology refactor.

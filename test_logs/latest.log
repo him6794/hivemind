@@ -1,367 +1,97 @@
-# latest validation log - 2026-05-20 iteration 8
+Iteration 14 - worker lifecycle / failover validation
+Date: 2026-05-21 (Asia/Taipei)
 
-## Issue
-Duplicate task submission redispatched an existing `task_id`, causing duplicate execution and task state overwrite.
+Root cause fixed:
+- services/nodepool/internal/service/worker_service.go
+- ListWorkers(includeOffline=true) was auto-reactivating OFFLINE workers when heartbeat age was fresh.
+- This caused failed nodes to remain/return ACTIVE in UI/API even after probe-based offline marking.
 
-## Pre-fix evidence
-Artifacts: `test_logs/live/submission`
+Fix:
+- Preserve explicit OFFLINE state in ListWorkers; only empty status is normalized to ACTIVE.
 
-Run id: `20260520073902`
+Build and restart:
+- go build -o services/nodepool/nodepool.exe ./services/nodepool/cmd/server
+- go build -o services/worker/worker.exe ./services/worker/cmd/server
+- powershell -ExecutionPolicy Bypass -File scripts/start_stable_stack.ps1
 
-Observed:
-- Duplicate upload response for `e2e-20260520073902-cpu`: `success=true`, `status_message=dispatched`.
-- Nodepool dispatch log contained two dispatches for the same task:
-  - `task_dispatch_success task_id=e2e-20260520073902-cpu worker_id=worker1 worker_addr=127.0.0.1:50053`
-  - `task_dispatch_success task_id=e2e-20260520073902-cpu worker_id=worker1 worker_addr=127.0.0.1:50053`
-- CPU task log contained two `task accepted` and two `task completed` sequences.
+Validation commands:
+1) python scripts/one_click_failover_check.py --mode failover --admin-user worker1 --admin-pass worker123 --task-user worker1 --task-pass worker123 --timeout-sec 60
+2) python scripts/one_click_failover_check.py --mode single --admin-user worker1 --admin-pass worker123 --task-user worker1 --task-pass worker123
 
-## Fix
-Changed `services/nodepool/cmd/server/main.go` so `UploadTask` rejects an existing owned `task_id` before mutating state or dispatching.
+Validation result:
+- Failover mode: PASS
+  - victim worker address overwritten to 127.0.0.1:59999
+  - victim transitioned to OFFLINE
+  - step2 task dispatched to another worker
+  - script ended with "[ok] failover check passed"
+- Single mode: PASS
+  - task accepted and dispatched
+  - task visible in RUNNING state with worker assignment
 
-Added `services/nodepool/cmd/server/main_test.go::TestMasterNode_UploadTaskRejectsDuplicateTaskIDWithoutRedispatch`.
+Notes:
+- Existing nodepool unit test `TestMasterNode_DispatchTaskToWorker_PreDispatchProbe` is currently failing in this branch and needs a follow-up test adjustment or behavior reconciliation (tracked in TODO.md).
 
-## Test commands
-Command: `go test ./cmd/server -run TestMasterNode_UploadTaskRejectsDuplicateTaskIDWithoutRedispatch -count=1`
+Iteration 15 - probe-disabled dispatch regression closure
+Date: 2026-05-21 (Asia/Taipei)
 
-Result before fix: failed as expected with duplicate dispatch.
+Root cause fixed:
+- services/nodepool/cmd/server/main.go
+- dispatch only used ACTIVE worker list even when probe was disabled.
+- In regression path (probe fail then probe disabled), no candidate remained and dispatch failed.
 
-Result after fix:
+Fix:
+- when `NODEPOOL_PRE_DISPATCH_PROBE=false` and ACTIVE list is empty, fallback to `ListWorkers(includeOffline=true)`.
 
-```text
-ok  	hivemind/services/nodepool/cmd/server	0.148s
-```
+Verification:
+1) go test ./cmd/server -run TestMasterNode_DispatchTaskToWorker_PreDispatchProbe -count=1
+   - PASS
+2) python scripts/one_click_failover_check.py --mode single --admin-user worker1 --admin-pass worker123 --task-user worker1 --task-pass worker123
+   - PASS
+3) python scripts/one_click_failover_check.py --mode failover --admin-user worker1 --admin-pass worker123 --task-user worker1 --task-pass worker123 --timeout-sec 60
+   - PASS
+   - victim transitioned to OFFLINE after bad-address injection
+   - step2 dispatched to alternate worker
 
-Command: `go test ./...` from `services/nodepool`
+Iteration 16 - reliability harness pre-clean for stable simulated user flow
+Date: 2026-05-21 (Asia/Taipei)
 
-Result:
+Root cause fixed:
+- scripts/reliability_harness.py
+- Previous calibration run could inherit stale local listeners and stale worker registry state from earlier manual stacks.
+- This produced false negatives (`no live worker available to kill`, stuck long task, zombie offline worker).
 
-```text
-?   	hivemind/services/nodepool	[no test files]
-ok  	hivemind/services/nodepool/cmd/server	0.182s
-?   	hivemind/services/nodepool/internal/events	[no test files]
-ok  	hivemind/services/nodepool/internal/handler	(cached)
-ok  	hivemind/services/nodepool/internal/repository	(cached)
-ok  	hivemind/services/nodepool/internal/service	(cached)
-?   	hivemind/services/nodepool/internal/storage	[no test files]
-ok  	hivemind/services/nodepool/internal/vpn	(cached)
-?   	hivemind/services/nodepool/pb	[no test files]
-?   	hivemind/services/nodepool/pkg/config	[no test files]
-?   	hivemind/services/nodepool/pkg/handlers	[no test files]
-?   	hivemind/services/nodepool/pkg/models	[no test files]
-?   	hivemind/services/nodepool/pkg/scheduler	[no test files]
-?   	hivemind/services/nodepool/pkg/server	[no test files]
-?   	hivemind/services/nodepool/pkg/storage	[no test files]
-```
+Fix:
+- Added `cleanup_conflicting_ports(run_dir)` before harness dependencies/services startup.
+- Windows path: parse `netstat -ano` and `taskkill /PID /F` listeners on harness-critical ports.
+- Evidence recorded in run-local `preclean.log`.
 
-## Live E2E verification
-Artifacts: `test_logs/live/verification`
+Verification:
+1) python scripts/reliability_harness.py --calibration --stop-on-failure --worker-nodepool-addr 127.0.0.1:50051
+   - PASS (exit 0)
+   - artifacts: test_logs/reliability/20260521-111012
+   - summary: passed=true
+   - worker kill/restart event observed
+   - CPU/IO/retry/long/parallel tasks completed
+   - failure-injected task reached FAILED as expected
+   - workers_final all ACTIVE, no zombie/offline
 
-Run id: `20260520074442`
+Iteration 17 - full completion gate
+Date: 2026-05-21 (Asia/Taipei)
 
-Startup:
-- Postgres: `127.0.0.1:25432`
-- Redis: `127.0.0.1:26379`
-- Nodepool gRPC/HTTP: `127.0.0.1:50051`, `127.0.0.1:18081`
-- Master HTTP: `127.0.0.1:18082`
-- Workers: `127.0.0.1:50053`, `127.0.0.1:50054`, `127.0.0.1:50055`
-
-Task results:
-- `e2e-20260520074442-cpu`: `COMPLETED`, result endpoint `success=true`
-- `e2e-20260520074442-io`: `COMPLETED`, result endpoint `success=true`
-- `e2e-20260520074442-failure`: `COMPLETED`, result endpoint `success=true`
-- `e2e-20260520074442-retry`: `COMPLETED`, result endpoint `success=true`
-- `e2e-20260520074442-long`: `COMPLETED`, result endpoint `success=true`
-
-Duplicate submission:
-- Duplicate upload response for `e2e-20260520074442-cpu`: `success=false`, `status_message=duplicate task_id`.
-- Nodepool log showed one dispatch for the CPU task and then:
-  - `task_duplicate_rejected task_id=e2e-20260520074442-cpu owner=worker1 existing_owner=worker1 status=COMPLETED`
-
-Worker failure/reconnect:
-- Worker2 process was killed.
-- After heartbeat timeout, `/api/workers?include_offline=true` reported worker2 `OFFLINE`.
-- Worker2 was restarted with the same identity and reported `ACTIVE` after reconnect.
-
-## Known remaining gaps
-- This was one live verification run, not 10 consecutive full runs.
-- This included one worker failure simulation, not 3 consecutive node failure simulations.
-- The network-delay requirement was not fully satisfied; this run simulated worker outage and reconnect.
-- The live Monty runtime completed the labeled failure and long-running tasks quickly; true failure-injected and long-running workload behavior remains a separate issue.
-
-# Iteration 9: Latency-tolerant nodepool pre-dispatch probe
-
-## Evidence
-Reliability calibration artifact: `test_logs/reliability/20260520-083100`
-
-Run id: `rel-20260520083101-r01`
-
-Observed:
-- worker1, worker2, and worker3 registered and were later listed as `ACTIVE`.
-- All task uploads failed with `[PROBE_FAIL] worker probe failed at 127.0.0.1:50055`.
-- The configured latency path was `100ms + 0..250ms` jitter.
-
-## Fix
-Changed nodepool pre-dispatch probe timeout from a hard-coded 1 second to `NODEPOOL_WORKER_PROBE_TIMEOUT_SEC`, defaulting to 5 seconds.
-
-Added `services/nodepool/cmd/server/main_test.go::TestMasterNode_DispatchTaskToWorker_WithLatencyProxy`.
-
-## Test commands
-Command: `go test ./cmd/server -run TestMasterNode_DispatchTaskToWorker_WithLatencyProxy -count=1`
-
-Result before fix:
-
-```text
---- FAIL: TestMasterNode_DispatchTaskToWorker_WithLatencyProxy (1.00s)
-    main_test.go:689: expected dispatch through latency proxy to succeed, reason="worker probe failed at 127.0.0.1:7074"
-FAIL
-FAIL	hivemind/services/nodepool/cmd/server	1.108s
-```
-
-Result after fix:
-
-```text
-ok  	hivemind/services/nodepool/cmd/server	2.812s
-```
-
-Command: `go test ./...` from `services/nodepool`
+Command:
+- python scripts/reliability_harness.py --runs 10 --failure-simulations 3 --long-seconds 900 --stop-on-failure --worker-nodepool-addr 127.0.0.1:50051
 
 Result:
-
-```text
-?   	hivemind/services/nodepool	[no test files]
-ok  	hivemind/services/nodepool/cmd/server	2.591s
-?   	hivemind/services/nodepool/internal/events	[no test files]
-ok  	hivemind/services/nodepool/internal/handler	(cached)
-ok  	hivemind/services/nodepool/internal/repository	(cached)
-ok  	hivemind/services/nodepool/internal/service	(cached)
-?   	hivemind/services/nodepool/internal/storage	[no test files]
-ok  	hivemind/services/nodepool/internal/vpn	(cached)
-?   	hivemind/services/nodepool/pb	[no test files]
-?   	hivemind/services/nodepool/pkg/config	[no test files]
-?   	hivemind/services/nodepool/pkg/handlers	[no test files]
-?   	hivemind/services/nodepool/pkg/models	[no test files]
-?   	hivemind/services/nodepool/pkg/scheduler	[no test files]
-?   	hivemind/services/nodepool/pkg/server	[no test files]
-?   	hivemind/services/nodepool/pkg/storage	[no test files]
-```
-
-## Live calibration after fix
-Command: `python scripts\reliability_harness.py --calibration --stop-on-failure --worker-nodepool-addr 127.0.0.1:50051`
-
-Artifact: `test_logs/reliability/20260520-084035`
-
-Run id: `rel-20260520084038-r01`
-
-Result:
-
-```text
-Overall pass: False
-Failure: POST /api/upload-task returned HTTP 502: rpc error: code = DeadlineExceeded desc = context deadline exceeded
-```
-
-Known next root cause candidate:
-- Master upload request timeout is too short for the current latency path after nodepool probe timeout was made latency-tolerant.
-
-Harness validation:
-
-```text
-python -m py_compile scripts\reliability_harness.py scripts\reliability_executor.py
-ok
-go test ./cmd/server -run TestMasterNode_DispatchTaskToWorker_WithLatencyProxy -count=1
-ok  	hivemind/services/nodepool/cmd/server	2.813s
-```
-
-# Iteration 10: Master nodepool RPC timeout under latency
-
-## Evidence
-Reliability calibration artifact: `test_logs/reliability/20260520-084035`
-
-Run id: `rel-20260520084038-r01`
-
-Observed:
-- `/api/login` succeeded through the nodepool latency proxy.
-- First `/api/upload-task` returned HTTP 502 after 5000ms.
-- Error body: `rpc error: code = DeadlineExceeded desc = context deadline exceeded`.
-
-## Fix
-Changed master nodepool RPC timeout from a hard-coded 5 seconds to `nodepoolCallTimeout()`, defaulting to 30 seconds and configurable via `MASTER_NODEPOOL_TIMEOUT_SEC`.
-
-Added `services/master/cmd/server/main_test.go::TestNodepoolCallTimeoutFromEnv`.
-
-## Test commands
-Command: `go test ./cmd/server -run TestNodepoolCallTimeoutFromEnv -count=1`
-
-Result before fix:
-
-```text
-FAIL	hivemind/services/master/cmd/server [build failed]
-cmd\server\main_test.go:11:13: undefined: nodepoolCallTimeout
-cmd\server\main_test.go:18:13: undefined: nodepoolCallTimeout
-```
-
-Result after fix:
-
-```text
-ok  	hivemind/services/master/cmd/server	1.083s
-```
-
-Command: `go test ./...` from `services/master`
-
-Result:
-
-```text
-?   	hivemind/services/master	[no test files]
-ok  	hivemind/services/master/cmd/server	0.102s
-ok  	hivemind/services/master/internal/bt	(cached)
-```
-
-## Live calibration after fix
-Command: `python scripts\reliability_harness.py --calibration --stop-on-failure --worker-nodepool-addr 127.0.0.1:50051`
-
-Artifact: `test_logs/reliability/20260520-084619`
-
-Run id: `rel-20260520084623-r01`
-
-Result:
-
-```text
-Overall pass: False
-Previous HTTP 502 deadline failure: not observed
-New blocker: task dispatch remains PENDING with [PROBE_FAIL]
-```
-
-Observed next issue:
-- `latency-proxy.log` shows `accept_loop_error` shortly after worker proxy startup.
-- Worker proxy shutdown shows `connections=0`, so nodepool-to-worker latency path was not active.
-
-# Iteration 11: Reliability harness DelayProxy accept loop
-
-## Evidence
-Reliability calibration artifact: `test_logs/reliability/20260520-084619`
-
-Run id: `rel-20260520084623-r01`
-
-Observed:
-- `latency-proxy.log` showed `accept_loop_error` shortly after worker proxy startup.
-- Worker proxies shut down with `connections=0`.
-- Task dispatch remained `[PROBE_FAIL]`, invalidating the intended nodepool-to-worker latency path.
-
-## Fix
-Changed `DelayProxy._accept_loop` so `socket.timeout` continues the accept loop instead of being treated as fatal.
-
-Added `scripts/reliability_harness_test.py::DelayProxyTests.test_proxy_accepts_connection_after_idle_timeout`.
-
-## Test commands
-Command: `python -m unittest scripts\reliability_harness_test.py`
-
-Result before fix:
-
-```text
-TimeoutError: timed out
-FAILED (errors=1)
-```
-
-Result after fix:
-
-```text
-.
-----------------------------------------------------------------------
-Ran 1 test in 0.810s
-
-OK
-```
-
-Command: `python -m py_compile scripts\reliability_harness.py scripts\reliability_executor.py scripts\reliability_harness_test.py`
-
-Result:
-
-```text
-ok
-```
-
-## Live calibration after fix
-Command: `python scripts\reliability_harness.py --calibration --stop-on-failure --worker-nodepool-addr 127.0.0.1:50051`
-
-Artifact: `test_logs/reliability/20260520-085706`
-
-Run id: `rel-20260520085710-r01`
-
-Result:
-
-```text
-Overall pass: False
-Worker proxy connections: worker1=6, worker2=1, worker3=1
-New blocker: retry and long-running tasks remain RUNNING
-```
-
-# Iteration 12: Settlement tick masked task timeout redispatch
-
-## Evidence
-Reliability calibration artifact: `test_logs/reliability/20260520-085706`
-
-Run id: `rel-20260520085710-r01`
-
-Observed:
-- `retry` and `long` tasks were dispatched to worker1.
-- worker1 was killed and then re-registered.
-- Both tasks stayed `RUNNING` with `StatusMessage="running, settled 0 CPT"`.
-- `RetryCount` stayed `0`, so timeout redispatch never took ownership.
-
-## Fix
-Stopped `processPeriodicSettlements` from refreshing `LastUpdate` for normal `RUNNING` settlement ticks. Failure transitions still update task state.
-
-Added `services/nodepool/cmd/server/main_test.go::TestMasterNode_ProcessPeriodicSettlements_DoesNotRefreshTaskActivity`.
-
-## Test commands
-Command: `go test ./cmd/server -run TestMasterNode_ProcessPeriodicSettlements_DoesNotRefreshTaskActivity -count=1`
-
-Result before fix:
-
-```text
---- FAIL: TestMasterNode_ProcessPeriodicSettlements_DoesNotRefreshTaskActivity (0.02s)
-    main_test.go:1124: periodic settlement refreshed LastUpdate from ... to ...
-FAIL
-```
-
-Result after fix:
-
-```text
-ok  	hivemind/services/nodepool/cmd/server	0.111s
-```
-
-Command: `go test ./...` from `services/nodepool`
-
-Result:
-
-```text
-?   	hivemind/services/nodepool	[no test files]
-ok  	hivemind/services/nodepool/cmd/server	2.584s
-?   	hivemind/services/nodepool/internal/events	[no test files]
-ok  	hivemind/services/nodepool/internal/handler	(cached)
-ok  	hivemind/services/nodepool/internal/repository	(cached)
-ok  	hivemind/services/nodepool/internal/service	(cached)
-?   	hivemind/services/nodepool/internal/storage	[no test files]
-ok  	hivemind/services/nodepool/internal/vpn	(cached)
-?   	hivemind/services/nodepool/pb	[no test files]
-?   	hivemind/services/nodepool/pkg/config	[no test files]
-?   	hivemind/services/nodepool/pkg/handlers	[no test files]
-?   	hivemind/services/nodepool/pkg/models	[no test files]
-?   	hivemind/services/nodepool/pkg/scheduler	[no test files]
-?   	hivemind/services/nodepool/pkg/server	[no test files]
-?   	hivemind/services/nodepool/pkg/storage	[no test files]
-```
-
-## Live calibration after fix
-Command: `python scripts\reliability_harness.py --calibration --stop-on-failure --worker-nodepool-addr 127.0.0.1:50051`
-
-Artifact: `test_logs/reliability/20260520-090709`
-
-Run id: `rel-20260520090714-r01`
-
-Result:
-
-```text
-Overall pass: True
-DoD satisfied: False
-Reason: calibration only; not 10 consecutive runs, not 3 failure simulations, not 15-minute long-running workload
-```
+- PASS (exit 0)
+- artifact root: test_logs/reliability/20260521-122819
+- summary.json:
+  - passed=true
+  - dod_satisfied=true
+  - runs=10/10
+  - failure_simulations=3
+  - long_seconds=900
+- per-run check:
+  - r01..r10 all passed=True, failures=0
+  - each run has 6 failure events (kill/restart x3)
+  - long task completion logs show ~902s elapsed
+  - final worker states all ACTIVE

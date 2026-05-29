@@ -1,0 +1,4 @@
+{
+  "log": "task accepted (magnet, btih=b966207c7bca29a845593e33a58a2328cd5ed612, name=cpu)\nexecutor_start task_id=rel-20260521150418-r10-cpu kind=cpu\nexecutor_complete task_id=rel-20260521150418-r10-cpu kind=cpu elapsed_sec=5.000 work_hash=e9bd611bd2daedb9e0a3bea28e3b053170f8bcc4\ntask completed",
+  "success": true
+}

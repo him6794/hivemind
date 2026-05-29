@@ -1,0 +1,12 @@
+{
+  "events": [],
+  "failures": [
+    "harness exception: POST /api/upload-task returned HTTP 502: {'status_message': 'rpc error: code = DeadlineExceeded desc = context deadline exceeded', 'success': False, 'task_id': 'rel-20260520084038-r01-cpu'}"
+  ],
+  "finished_at": "2026-05-20T00:40:55.648275+00:00",
+  "passed": false,
+  "run": 1,
+  "run_id": "rel-20260520084038-r01",
+  "started_at": "2026-05-20T00:40:38.753332+00:00",
+  "tasks": {}
+}

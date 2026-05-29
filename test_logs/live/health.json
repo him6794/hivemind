@@ -1,0 +1,19 @@
+﻿{
+    "master":  {
+                   "success":  true,
+                   "service":  "master",
+                   "upstream_grpc":  "127.0.0.1:50051"
+               },
+    "worker1":  {
+                    "service":  "worker-control",
+                    "success":  true
+                },
+    "worker2":  {
+                    "service":  "worker-control",
+                    "success":  true
+                },
+    "worker3":  {
+                    "service":  "worker-control",
+                    "success":  true
+                }
+}

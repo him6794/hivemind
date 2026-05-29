@@ -13,15 +13,20 @@
 - [x] Run one clean live pipeline with nodepool, master, 3 workers, 5 labeled task submissions, duplicate submission rejection, worker crash cleanup, and reconnect.
 - [x] Update `architecture_notes.md` with iteration 8 observations only, no architecture changes.
 - [x] Append the latest verified test output to `test_logs/latest.log`.
-- [ ] Complete a true network-delay simulation rather than only a worker outage/reconnect simulation.
+- [x] Complete a true network-delay simulation rather than only a worker outage/reconnect simulation.
 - [x] Add a reliability harness calibration path with latency/jitter proxies and generated `reliability_report.md`, `failure_matrix.md`, and `flaky_behavior.md`.
 - [x] Fix nodepool pre-dispatch worker probe timeout being too short for latency/jitter.
 - [x] Fix or configure the evidenced latency failure where master `/api/upload-task` timed out after 5s under the calibration latency path.
 - [x] Fix the reliability harness `DelayProxy` accept loop treating normal socket timeout as fatal, which leaves worker proxies with `connections=0`.
 - [x] Fix stuck `RUNNING` retry and long-running tasks after worker failure simulation under latency.
-- [ ] Run full DoD validation: 10 consecutive runs, 3 failure simulations, and 15-minute long-running workload.
-- [ ] Exercise a real failure-injected task through the live worker runtime; current live Monty path completed the labeled failure task.
-- [ ] Exercise a real long-running workload through the live worker runtime; current live Monty path completed the labeled long-running task quickly.
+- [x] Run full DoD validation: 10 consecutive runs, 3 failure simulations, and 15-minute long-running workload.
+- [x] Exercise a real failure-injected task through the live worker runtime.
+- [x] Exercise a real long-running workload through the live worker runtime.
 - [ ] Investigate separate live billing/status issue where a newly registered user with zero balance can upload a result but the task list status becomes `FAILED: insufficient balance`.
 - [ ] Investigate separate DB-backed nodepool test isolation issue when multiple parallel tests call `initDB` against the same fresh Postgres database.
-- [ ] Run the full required E2E gate: 10 consecutive pipeline runs and 3 consecutive node failure simulations.
+- [x] Run the full required E2E gate: 10 consecutive pipeline runs and 3 consecutive node failure simulations.
+- [x] Fix nodepool worker list/state regression where probe-marked `OFFLINE` workers were auto-reactivated to `ACTIVE` by heartbeat freshness.
+- [x] Add/adjust dispatch behavior so probe-disabled mode can still dispatch when only OFFLINE candidates remain after a prior probe-fail marking.
+- [ ] Add focused nodepool unit test for `ListWorkers(includeOffline=true)` to explicitly verify OFFLINE persistence semantics.
+- [x] Stabilize reliability calibration startup by cleaning conflicting local listeners before harness service boot.
+- [x] Run full completion gate: 10 consecutive runs + 3 failure simulations + 900s long-running workload (artifact: `test_logs/reliability/20260521-122819`).

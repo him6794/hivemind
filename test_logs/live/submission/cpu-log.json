@@ -1,0 +1,4 @@
+﻿{
+    "log":  "task accepted (magnet, btih=70141fb8ea88ccb760091871eb94f5ae41bd8973, name=cpu)\n\u001b[2m75.200Î¼s\u001b[0m \u001b[1m\u001b[36mâ¯\u001b[0m None\ntask completed\ntask accepted (magnet, btih=f86abc07ee47c7a6299a36fee53483bf9ecc7c35, name=cpu-duplicate-submission)\n\u001b[2m54.000Î¼s\u001b[0m \u001b[1m\u001b[36mâ¯\u001b[0m None\ntask completed",
+    "success":  true
+}

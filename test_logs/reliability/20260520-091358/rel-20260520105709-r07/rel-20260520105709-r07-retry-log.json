@@ -1,0 +1,4 @@
+{
+  "log": "task accepted (magnet, btih=c4aca58091d686d0d0fc44222b96013220b3bff6, name=retry)\ntask accepted (magnet, btih=c4aca58091d686d0d0fc44222b96013220b3bff6, name=retry)\nexecutor_start task_id=rel-20260520105709-r07-retry kind=retry\nexecutor_progress kind=retry elapsed_sec=1 target_sec=90\nexecutor_progress kind=retry elapsed_sec=31 target_sec=90\nexecutor_progress kind=retry elapsed_sec=61 target_sec=90\nexecutor_complete task_id=rel-20260520105709-r07-retry kind=retry elapsed_sec=92.001 work_hash=a9724800e4465e4b671e54463a2791e5c51aa3ed\ntask completed",
+  "success": true
+}

@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+這個檔案為 Claude Code (claude.ai/code) 提供在此程式碼庫中工作的指引。
 
 ## 專案概述
 
@@ -19,14 +19,14 @@ Hivemind 是一個分散式任務調度系統，由 Go 後端服務和 React 前
 **必須按順序啟動**：
 
 ```powershell
-# 1. 啟動 Redis
-docker run -d -p 6379:6379 --name redis-hivemind redis:7-alpine
-
-# 2. 啟動 PostgreSQL
+# 1. 啟動 PostgreSQL
 docker run -d -p 5432:5432 --name pg-hivemind `
   -e POSTGRES_USER=hivemind `
   -e POSTGRES_PASSWORD=hivemind `
   -e POSTGRES_DB=hivemind postgres:16-alpine
+
+# 2. 啟動 Redis
+docker run -d -p 6379:6379 --name redis-hivemind redis:7-alpine
 
 # 3. 啟動 Nodepool (必須先於 Master 和 Worker)
 cd services/nodepool/cmd/server

@@ -1,0 +1,53 @@
+{
+  "artifacts": "D:\\hivemind\\test_logs\\reliability\\20260520-084035",
+  "dod_satisfied": false,
+  "finished_at": "2026-05-20T00:40:56.311717+00:00",
+  "parameters": {
+    "calibration": true,
+    "cpu_seconds": 5,
+    "failure_seconds": 3,
+    "failure_simulations": 1,
+    "io_seconds": 5,
+    "jitter_ms": 250,
+    "kill_max_seconds": 30,
+    "kill_min_seconds": 5,
+    "latency_ms": 100,
+    "long_seconds": 30,
+    "parallel_seconds": 10,
+    "parallel_tasks": 3,
+    "reconnect_max_seconds": 30,
+    "reconnect_min_seconds": 5,
+    "retry_seconds": 35,
+    "runs": 1,
+    "seed": 20260520,
+    "stop_on_failure": true,
+    "task_timeout_seconds": 10,
+    "task_wait_timeout_seconds": 240,
+    "worker_nodepool_addr": "127.0.0.1:50051"
+  },
+  "passed": false,
+  "regressions": [
+    {
+      "failures": [
+        "harness exception: POST /api/upload-task returned HTTP 502: {'status_message': 'rpc error: code = DeadlineExceeded desc = context deadline exceeded', 'success': False, 'task_id': 'rel-20260520084038-r01-cpu'}"
+      ],
+      "run": 1
+    }
+  ],
+  "runs": [
+    {
+      "events": [],
+      "failures": [
+        "harness exception: POST /api/upload-task returned HTTP 502: {'status_message': 'rpc error: code = DeadlineExceeded desc = context deadline exceeded', 'success': False, 'task_id': 'rel-20260520084038-r01-cpu'}"
+      ],
+      "finished_at": "2026-05-20T00:40:55.648275+00:00",
+      "passed": false,
+      "run": 1,
+      "run_id": "rel-20260520084038-r01",
+      "started_at": "2026-05-20T00:40:38.753332+00:00",
+      "tasks": {}
+    }
+  ],
+  "seed": 20260520,
+  "started_at": "2026-05-20T00:40:35.025661+00:00"
+}
