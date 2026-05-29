@@ -1,0 +1,90 @@
+[
+  {
+    "kind": "cpu",
+    "task_id": "rel-20260520090714-r01-cpu",
+    "btih": "e19c90f21e86cd585c73a5c53c20e85c7e6732dc",
+    "upload": {
+      "status_message": "dispatched",
+      "success": true,
+      "task_id": "rel-20260520090714-r01-cpu"
+    },
+    "expected_status": "COMPLETED"
+  },
+  {
+    "kind": "io",
+    "task_id": "rel-20260520090714-r01-io",
+    "btih": "fb3c8f3725def8a7a4d97d485458174a26d8f0ab",
+    "upload": {
+      "status_message": "dispatched",
+      "success": true,
+      "task_id": "rel-20260520090714-r01-io"
+    },
+    "expected_status": "COMPLETED"
+  },
+  {
+    "kind": "failure",
+    "task_id": "rel-20260520090714-r01-failure",
+    "btih": "a9582ba422d399e4005eadc96a64c6ce18a0318f",
+    "upload": {
+      "status_message": "dispatched",
+      "success": true,
+      "task_id": "rel-20260520090714-r01-failure"
+    },
+    "expected_status": "FAILED"
+  },
+  {
+    "kind": "retry",
+    "task_id": "rel-20260520090714-r01-retry",
+    "btih": "ec2a1aa4783d52f6169eaac9cd5a3d93a849dbe3",
+    "upload": {
+      "status_message": "dispatched",
+      "success": true,
+      "task_id": "rel-20260520090714-r01-retry"
+    },
+    "expected_status": "COMPLETED"
+  },
+  {
+    "kind": "long",
+    "task_id": "rel-20260520090714-r01-long",
+    "btih": "95b4201b4c20d183e8c4776a1f796a5bf1579cec",
+    "upload": {
+      "status_message": "dispatched",
+      "success": true,
+      "task_id": "rel-20260520090714-r01-long"
+    },
+    "expected_status": "COMPLETED"
+  },
+  {
+    "kind": "parallel-0",
+    "task_id": "rel-20260520090714-r01-parallel-0",
+    "btih": "e0ad423945fee126040dcf8f5e4e2e6843591162",
+    "upload": {
+      "status_message": "dispatched",
+      "success": true,
+      "task_id": "rel-20260520090714-r01-parallel-0"
+    },
+    "expected_status": "COMPLETED"
+  },
+  {
+    "kind": "parallel-1",
+    "task_id": "rel-20260520090714-r01-parallel-1",
+    "btih": "e410f088ea7f428d1647a2d0e596cfe82f3cb6aa",
+    "upload": {
+      "status_message": "dispatched",
+      "success": true,
+      "task_id": "rel-20260520090714-r01-parallel-1"
+    },
+    "expected_status": "COMPLETED"
+  },
+  {
+    "kind": "parallel-2",
+    "task_id": "rel-20260520090714-r01-parallel-2",
+    "btih": "a1bf3dbfc42aec10ca65d426465a07480db7f194",
+    "upload": {
+      "status_message": "dispatched",
+      "success": true,
+      "task_id": "rel-20260520090714-r01-parallel-2"
+    },
+    "expected_status": "COMPLETED"
+  }
+]

@@ -1,0 +1,47 @@
+{
+  "success": true,
+  "workers": [
+    {
+      "addr": "127.0.0.1:50053",
+      "id": "worker1",
+      "last_heartbeat": "2026-05-20T09:16:28.0176015+08:00",
+      "meta": {
+        "cpu_cores": "12",
+        "cpu_score": "240",
+        "gpu_memory": "15",
+        "gpu_score": "192",
+        "location": "Local",
+        "memory_gb": "31"
+      },
+      "status": "ACTIVE"
+    },
+    {
+      "addr": "127.0.0.1:50054",
+      "id": "worker2",
+      "last_heartbeat": "2026-05-20T09:16:27.7933247+08:00",
+      "meta": {
+        "cpu_cores": "12",
+        "cpu_score": "240",
+        "gpu_memory": "15",
+        "gpu_score": "192",
+        "location": "Local",
+        "memory_gb": "31"
+      },
+      "status": "ACTIVE"
+    },
+    {
+      "addr": "127.0.0.1:50055",
+      "id": "worker3",
+      "last_heartbeat": "2026-05-20T09:16:28.4879329+08:00",
+      "meta": {
+        "cpu_cores": "12",
+        "cpu_score": "240",
+        "gpu_memory": "15",
+        "gpu_score": "192",
+        "location": "Local",
+        "memory_gb": "31"
+      },
+      "status": "ACTIVE"
+    }
+  ]
+}

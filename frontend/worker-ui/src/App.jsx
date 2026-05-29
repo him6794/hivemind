@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react';
 
 export default function WorkerApp() {
-  const apiBase = (import.meta.env.VITE_API_BASE || 'http://localhost:8082').replace(/\/$/, '');
-  const workerControlBase = (import.meta.env.VITE_WORKER_CONTROL_BASE || 'http://localhost:18080').replace(/\/$/, '');
+  const apiBase = String(import.meta.env.VITE_API_BASE || 'http://localhost:8082').trim().replace(/\/$/, '');
+  const workerControlBase = String(import.meta.env.VITE_WORKER_CONTROL_BASE || 'http://localhost:18080').trim().replace(/\/$/, '');
 
   const [username, setUsername] = useState('worker1');
   const [password, setPassword] = useState('worker123');

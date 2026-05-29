@@ -1,0 +1,12 @@
+{
+  "events": [],
+  "failures": [
+    "harness exception: port did not open: 127.0.0.1:50051"
+  ],
+  "finished_at": "2026-05-20T00:10:52.910893+00:00",
+  "passed": false,
+  "run": 1,
+  "run_id": "rel-20260520081020-r01",
+  "started_at": "2026-05-20T00:10:20.240967+00:00",
+  "tasks": {}
+}

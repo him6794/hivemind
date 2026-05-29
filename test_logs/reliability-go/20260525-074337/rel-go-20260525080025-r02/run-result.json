@@ -1,0 +1,14 @@
+{
+  "run": 2,
+  "run_id": "rel-go-20260525080025-r02",
+  "started_at": "2026-05-25T00:00:25.7065807Z",
+  "finished_at": "2026-05-25T00:00:58.1472457Z",
+  "tasks": null,
+  "observed_tasks": {},
+  "workers_final": null,
+  "events": [],
+  "failures": [
+    "services: port did not open: 127.0.0.1:50051"
+  ],
+  "passed": false
+}

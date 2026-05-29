@@ -1,0 +1,306 @@
+{
+  "run": 1,
+  "run_id": "rel-go-20260524183856-r01",
+  "started_at": "2026-05-24T10:38:56.8971249Z",
+  "finished_at": "2026-05-24T10:56:04.3943589Z",
+  "tasks": [
+    {
+      "kind": "cpu",
+      "task_id": "rel-go-20260524183856-r01-cpu",
+      "btih": "eb5e30ef8880d865ab243e8a5f57fe722313814f",
+      "expected_status": "COMPLETED",
+      "upload": {
+        "status_message": "dispatched",
+        "success": true,
+        "task_id": "rel-go-20260524183856-r01-cpu"
+      }
+    },
+    {
+      "kind": "io",
+      "task_id": "rel-go-20260524183856-r01-io",
+      "btih": "2d197b225de1ebf7eff27246a108f625c47aaea8",
+      "expected_status": "COMPLETED",
+      "upload": {
+        "status_message": "dispatched",
+        "success": true,
+        "task_id": "rel-go-20260524183856-r01-io"
+      }
+    },
+    {
+      "kind": "failure",
+      "task_id": "rel-go-20260524183856-r01-failure",
+      "btih": "9a4af0fb610de0772901222523c972c59cfca54f",
+      "expected_status": "FAILED",
+      "upload": {
+        "status_message": "dispatched",
+        "success": true,
+        "task_id": "rel-go-20260524183856-r01-failure"
+      }
+    },
+    {
+      "kind": "retry",
+      "task_id": "rel-go-20260524183856-r01-retry",
+      "btih": "86d0a580e16e3ef9ad5cb4bdf56d0596a846a383",
+      "expected_status": "COMPLETED",
+      "upload": {
+        "status_message": "dispatched",
+        "success": true,
+        "task_id": "rel-go-20260524183856-r01-retry"
+      }
+    },
+    {
+      "kind": "long",
+      "task_id": "rel-go-20260524183856-r01-long",
+      "btih": "743c95c9f66b7489d7be4705acd4530dc0ae1476",
+      "expected_status": "COMPLETED",
+      "upload": {
+        "status_message": "dispatched",
+        "success": true,
+        "task_id": "rel-go-20260524183856-r01-long"
+      }
+    },
+    {
+      "kind": "parallel-0",
+      "task_id": "rel-go-20260524183856-r01-parallel-0",
+      "btih": "5e5f6c9860431f3d218200a4df306e42c3a4451e",
+      "expected_status": "COMPLETED",
+      "upload": {
+        "status_message": "dispatched",
+        "success": true,
+        "task_id": "rel-go-20260524183856-r01-parallel-0"
+      }
+    },
+    {
+      "kind": "parallel-1",
+      "task_id": "rel-go-20260524183856-r01-parallel-1",
+      "btih": "1c8db64e98b43651d2e61ce96b6baf36f30159b6",
+      "expected_status": "COMPLETED",
+      "upload": {
+        "status_message": "dispatched",
+        "success": true,
+        "task_id": "rel-go-20260524183856-r01-parallel-1"
+      }
+    },
+    {
+      "kind": "parallel-2",
+      "task_id": "rel-go-20260524183856-r01-parallel-2",
+      "btih": "c53694c8102f17b484699276e08e670066a455ae",
+      "expected_status": "COMPLETED",
+      "upload": {
+        "status_message": "dispatched",
+        "success": true,
+        "task_id": "rel-go-20260524183856-r01-parallel-2"
+      }
+    },
+    {
+      "kind": "parallel-3",
+      "task_id": "rel-go-20260524183856-r01-parallel-3",
+      "btih": "6814951327d817fe37e674d19ebd25aca8cb84a3",
+      "expected_status": "COMPLETED",
+      "upload": {
+        "status_message": "dispatched",
+        "success": true,
+        "task_id": "rel-go-20260524183856-r01-parallel-3"
+      }
+    },
+    {
+      "kind": "parallel-4",
+      "task_id": "rel-go-20260524183856-r01-parallel-4",
+      "btih": "2c45700ae04d81ab43ef6228b74e4b03d5602783",
+      "expected_status": "COMPLETED",
+      "upload": {
+        "status_message": "dispatched",
+        "success": true,
+        "task_id": "rel-go-20260524183856-r01-parallel-4"
+      }
+    },
+    {
+      "kind": "parallel-5",
+      "task_id": "rel-go-20260524183856-r01-parallel-5",
+      "btih": "395af9999081405e194b5dd4e076c7f7f9cc0335",
+      "expected_status": "COMPLETED",
+      "upload": {
+        "status_message": "dispatched",
+        "success": true,
+        "task_id": "rel-go-20260524183856-r01-parallel-5"
+      }
+    }
+  ],
+  "observed_tasks": {
+    "rel-go-20260524183856-r01-cpu": {
+      "TaskID": "rel-go-20260524183856-r01-cpu",
+      "Status": "COMPLETED",
+      "StatusMessage": "result uploaded",
+      "ResultTorrent": "result://rel-go-20260524183856-r01-cpu?btih=eb5e30ef8880d865ab243e8a5f57fe722313814f",
+      "WorkerID": "worker1",
+      "WorkerIP": "127.0.0.1:50053"
+    },
+    "rel-go-20260524183856-r01-failure": {
+      "TaskID": "rel-go-20260524183856-r01-failure",
+      "Status": "FAILED",
+      "StatusMessage": "task failed: executor failed: exit status 42",
+      "ResultTorrent": "",
+      "WorkerID": "worker1",
+      "WorkerIP": "127.0.0.1:50053"
+    },
+    "rel-go-20260524183856-r01-io": {
+      "TaskID": "rel-go-20260524183856-r01-io",
+      "Status": "COMPLETED",
+      "StatusMessage": "result uploaded",
+      "ResultTorrent": "result://rel-go-20260524183856-r01-io?btih=2d197b225de1ebf7eff27246a108f625c47aaea8",
+      "WorkerID": "worker2",
+      "WorkerIP": "127.0.0.1:50054"
+    },
+    "rel-go-20260524183856-r01-long": {
+      "TaskID": "rel-go-20260524183856-r01-long",
+      "Status": "COMPLETED",
+      "StatusMessage": "completed via pull batch",
+      "ResultTorrent": "result://rel-go-20260524183856-r01-long?btih=743c95c9f66b7489d7be4705acd4530dc0ae1476",
+      "WorkerID": "worker3",
+      "WorkerIP": "127.0.0.1:50055"
+    },
+    "rel-go-20260524183856-r01-parallel-0": {
+      "TaskID": "rel-go-20260524183856-r01-parallel-0",
+      "Status": "COMPLETED",
+      "StatusMessage": "result uploaded",
+      "ResultTorrent": "result://rel-go-20260524183856-r01-parallel-0?btih=5e5f6c9860431f3d218200a4df306e42c3a4451e",
+      "WorkerID": "worker3",
+      "WorkerIP": "127.0.0.1:50055"
+    },
+    "rel-go-20260524183856-r01-parallel-1": {
+      "TaskID": "rel-go-20260524183856-r01-parallel-1",
+      "Status": "COMPLETED",
+      "StatusMessage": "result uploaded",
+      "ResultTorrent": "result://rel-go-20260524183856-r01-parallel-1?btih=1c8db64e98b43651d2e61ce96b6baf36f30159b6",
+      "WorkerID": "worker1",
+      "WorkerIP": "127.0.0.1:50053"
+    },
+    "rel-go-20260524183856-r01-parallel-2": {
+      "TaskID": "rel-go-20260524183856-r01-parallel-2",
+      "Status": "COMPLETED",
+      "StatusMessage": "result uploaded",
+      "ResultTorrent": "result://rel-go-20260524183856-r01-parallel-2?btih=c53694c8102f17b484699276e08e670066a455ae",
+      "WorkerID": "worker3",
+      "WorkerIP": "127.0.0.1:50055"
+    },
+    "rel-go-20260524183856-r01-parallel-3": {
+      "TaskID": "rel-go-20260524183856-r01-parallel-3",
+      "Status": "COMPLETED",
+      "StatusMessage": "result uploaded",
+      "ResultTorrent": "result://rel-go-20260524183856-r01-parallel-3?btih=6814951327d817fe37e674d19ebd25aca8cb84a3",
+      "WorkerID": "worker1",
+      "WorkerIP": "127.0.0.1:50053"
+    },
+    "rel-go-20260524183856-r01-parallel-4": {
+      "TaskID": "rel-go-20260524183856-r01-parallel-4",
+      "Status": "COMPLETED",
+      "StatusMessage": "result uploaded",
+      "ResultTorrent": "result://rel-go-20260524183856-r01-parallel-4?btih=2c45700ae04d81ab43ef6228b74e4b03d5602783",
+      "WorkerID": "worker1",
+      "WorkerIP": "127.0.0.1:50053"
+    },
+    "rel-go-20260524183856-r01-parallel-5": {
+      "TaskID": "rel-go-20260524183856-r01-parallel-5",
+      "Status": "COMPLETED",
+      "StatusMessage": "result uploaded",
+      "ResultTorrent": "result://rel-go-20260524183856-r01-parallel-5?btih=395af9999081405e194b5dd4e076c7f7f9cc0335",
+      "WorkerID": "worker3",
+      "WorkerIP": "127.0.0.1:50055"
+    },
+    "rel-go-20260524183856-r01-retry": {
+      "TaskID": "rel-go-20260524183856-r01-retry",
+      "Status": "COMPLETED",
+      "StatusMessage": "result uploaded",
+      "ResultTorrent": "result://rel-go-20260524183856-r01-retry?btih=86d0a580e16e3ef9ad5cb4bdf56d0596a846a383",
+      "WorkerID": "worker3",
+      "WorkerIP": "127.0.0.1:50055"
+    }
+  },
+  "workers_final": [
+    {
+      "id": "worker3",
+      "addr": "127.0.0.1:50055",
+      "status": "ACTIVE",
+      "meta": {
+        "cpu_cores": "12",
+        "cpu_score": "240",
+        "gpu_memory": "15",
+        "gpu_score": "192",
+        "location": "Local",
+        "memory_gb": "31"
+      }
+    },
+    {
+      "id": "worker1",
+      "addr": "127.0.0.1:50053",
+      "status": "ACTIVE",
+      "meta": {
+        "cpu_cores": "12",
+        "cpu_score": "240",
+        "gpu_memory": "15",
+        "gpu_score": "192",
+        "location": "Local",
+        "memory_gb": "31"
+      }
+    },
+    {
+      "id": "worker2",
+      "addr": "127.0.0.1:50054",
+      "status": "ACTIVE",
+      "meta": {
+        "cpu_cores": "12",
+        "cpu_score": "240",
+        "gpu_memory": "15",
+        "gpu_score": "192",
+        "location": "Local",
+        "memory_gb": "31"
+      }
+    }
+  ],
+  "events": [
+    {
+      "event": "worker_killed",
+      "worker": "worker2",
+      "pid": 40240,
+      "at": "2026-05-24T10:40:20.1024693Z",
+      "delay_sec": 28
+    },
+    {
+      "event": "worker_restarted",
+      "worker": "worker2",
+      "pid": 17172,
+      "at": "2026-05-24T10:40:25.3632555Z",
+      "delay_sec": 5
+    },
+    {
+      "event": "worker_killed",
+      "worker": "worker1",
+      "pid": 39616,
+      "at": "2026-05-24T10:40:41.3638177Z",
+      "delay_sec": 14
+    },
+    {
+      "event": "worker_restarted",
+      "worker": "worker1",
+      "pid": 37544,
+      "at": "2026-05-24T10:40:54.6232129Z",
+      "delay_sec": 13
+    },
+    {
+      "event": "worker_killed",
+      "worker": "worker1",
+      "pid": 37544,
+      "at": "2026-05-24T10:41:06.6237588Z",
+      "delay_sec": 10
+    },
+    {
+      "event": "worker_restarted",
+      "worker": "worker1",
+      "pid": 14744,
+      "at": "2026-05-24T10:41:11.8845557Z",
+      "delay_sec": 5
+    }
+  ],
+  "failures": [],
+  "passed": true
+}

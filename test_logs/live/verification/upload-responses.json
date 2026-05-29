@@ -1,0 +1,63 @@
+﻿[
+    {
+        "kind":  "cpu",
+        "task_id":  "e2e-20260520074442-cpu",
+        "btih":  "0d5c15528dfaaf1a919362fd6034b6beb80f703e",
+        "response":  {
+                         "status_message":  "dispatched",
+                         "success":  true,
+                         "task_id":  "e2e-20260520074442-cpu"
+                     }
+    },
+    {
+        "kind":  "io",
+        "task_id":  "e2e-20260520074442-io",
+        "btih":  "31bcfa47d3ceedc7c2d7084a55f5dd46830fb206",
+        "response":  {
+                         "status_message":  "dispatched",
+                         "success":  true,
+                         "task_id":  "e2e-20260520074442-io"
+                     }
+    },
+    {
+        "kind":  "failure-injected",
+        "task_id":  "e2e-20260520074442-failure",
+        "btih":  "7189405aea091e025588a8024ff0415ede944e6e",
+        "response":  {
+                         "status_message":  "dispatched",
+                         "success":  true,
+                         "task_id":  "e2e-20260520074442-failure"
+                     }
+    },
+    {
+        "kind":  "retry",
+        "task_id":  "e2e-20260520074442-retry",
+        "btih":  "2827562ad6467dfd03f26877e67c696aac4f20a2",
+        "response":  {
+                         "status_message":  "dispatched",
+                         "success":  true,
+                         "task_id":  "e2e-20260520074442-retry"
+                     }
+    },
+    {
+        "kind":  "long-running",
+        "task_id":  "e2e-20260520074442-long",
+        "btih":  "0662058bb658864447edd746787dbc9ae43ca95e",
+        "response":  {
+                         "status_message":  "dispatched",
+                         "success":  true,
+                         "task_id":  "e2e-20260520074442-long"
+                     }
+    },
+    {
+        "duplicate":  true,
+        "kind":  "cpu-duplicate-submission",
+        "task_id":  "e2e-20260520074442-cpu",
+        "btih":  "9fd41d3856caa4057bd79d195e4f17baa61dd4bd",
+        "response":  {
+                         "status_message":  "duplicate task_id",
+                         "success":  false,
+                         "task_id":  "e2e-20260520074442-cpu"
+                     }
+    }
+]

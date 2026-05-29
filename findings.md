@@ -307,3 +307,24 @@
   - Final workers in each run are all `ACTIVE`, no zombie/offline residual state.
 - Completion conclusion:
   - The requested objective is satisfied with direct runtime evidence under simulated user flows (task submission, node registration/management, execution, failure/reconnect handling, and consistency checks).
+## Go reliability harness DB connection race (2026-05-25)
+
+### Root cause
+- startDependencies in eliability-harness called docker rm -f then immediately docker run for PostgreSQL. Docker's port mapping can linger briefly after container removal, causing the new container's first few TCP connections to receive unexpected EOF.
+- Evidence: runs 1-5 passed but run 6 consistently failed with init db failed: unexpected EOF on 127.0.0.1:25432 across two separate 6-run attempts.
+
+### Fix 1: retryInitDB
+- Added etryInitDB in services/nodepool/cmd/server/main.go that wraps initDB with 5 retries at 1s/2s/3s/4s/5s intervals.
+- main() now calls etryInitDB(dsn) instead of initDB(dsn).  
+
+### Fix 2: waitPortFree
+- Added waitPortFree function to eliability-harness/main.go that polls until a host port is no longer TCP-reachable (up to 30s timeout).
+- startDependencies now calls waitPortFree for ports 25432 and 26379 after docker rm -f, before docker run.
+
+### Fix 3: tcpPortOpen in startDependencies ready-check
+- The ready-check loop in startDependencies now additionally calls 	cpPortOpen for both 25432 and 26379 after pg_isready/edis-cli ping succeed internally, ensuring the port mapping is actually accepting from the host.
+
+### Verification
+- go test ./... in services/nodepool: pass (all packages).
+- go build of both nodepool and reliability-harness: pass.
+- Full 10-run gate: pending (running).

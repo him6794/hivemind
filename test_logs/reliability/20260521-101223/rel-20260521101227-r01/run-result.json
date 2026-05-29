@@ -1,0 +1,12 @@
+{
+  "events": [],
+  "failures": [
+    "harness exception: docker dependency start failed"
+  ],
+  "finished_at": "2026-05-21T02:12:27.421634+00:00",
+  "passed": false,
+  "run": 1,
+  "run_id": "rel-20260521101227-r01",
+  "started_at": "2026-05-21T02:12:27.238067+00:00",
+  "tasks": {}
+}

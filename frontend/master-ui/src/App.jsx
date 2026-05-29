@@ -1,110 +1,87 @@
-import React, { useEffect, useState } from 'react';
+﻿import React, { useEffect, useState } from 'react';
 
 export default function MasterApp() {
-  const apiBase = (import.meta.env.VITE_API_BASE || 'http://localhost:8082').replace(/\/$/, '');
+  const apiBase = String(import.meta.env.VITE_API_BASE || 'http://localhost:8082').trim().replace(/\/$/, '');
 
   const [username, setUsername] = useState('testuser');
   const [password, setPassword] = useState('testpass123');
-  const [status, setStatus] = useState('尚未登入');
   const [token, setToken] = useState('');
+  const [status, setStatus] = useState('請先登入');
   const [loading, setLoading] = useState(false);
+
   const [balance, setBalance] = useState(null);
   const [tasks, setTasks] = useState([]);
+  const [taskTotal, setTaskTotal] = useState(0);
+
   const [taskId, setTaskId] = useState('');
   const [torrent, setTorrent] = useState('magnet:?xt=urn:btih:demo');
-  const [memoryGb, setMemoryGb] = useState(4);
-  const [gpuMemoryGb, setGpuMemoryGb] = useState(2);
-  const [hostCount, setHostCount] = useState(1);
   const [creatingTorrent, setCreatingTorrent] = useState(false);
   const [lastTorrentFilePath, setLastTorrentFilePath] = useState('');
-  const [transfers, setTransfers] = useState([]);
-  const [transferSummary, setTransferSummary] = useState(null);
-  const [selectedTask, setSelectedTask] = useState(null);
+  const [memoryGb, setMemoryGb] = useState(1);
+  const [gpuMemoryGb, setGpuMemoryGb] = useState(0);
+  const [hostCount, setHostCount] = useState(1);
+
+  const [selectedTask, setSelectedTask] = useState('');
   const [taskLog, setTaskLog] = useState('');
   const [taskResult, setTaskResult] = useState('');
-  const [showTaskDetail, setShowTaskDetail] = useState(false);
-  const [taskFilterStatus, setTaskFilterStatus] = useState('');
-  const [taskQuery, setTaskQuery] = useState('');
-  const [taskLimit, setTaskLimit] = useState(20);
-  const [taskOffset, setTaskOffset] = useState(0);
-  const [taskTotal, setTaskTotal] = useState(0);
-  const [selectedTaskIds, setSelectedTaskIds] = useState([]);
 
-  const parseDispatchCode = (msg) => {
-    const m = String(msg || '').match(/^\[([A-Z_]+)\]\s*/);
-    return m ? m[1] : '';
-  };
+  async function api(method, path, body, tk = token) {
+    const headers = {};
+    if (tk) headers.Authorization = `Bearer ${tk}`;
+    if (body !== undefined) headers['Content-Type'] = 'application/json';
 
-  const stripDispatchCode = (msg) => String(msg || '').replace(/^\[[A-Z_]+\]\s*/, '');
-
-  const refreshDashboard = async (tk) => {
-    const q = new URLSearchParams();
-    if (taskFilterStatus) q.set('status', taskFilterStatus);
-    if (taskQuery.trim()) q.set('q', taskQuery.trim());
-    q.set('limit', String(Number(taskLimit) || 20));
-    q.set('offset', String(Number(taskOffset) || 0));
-    const [bRes, tRes] = await Promise.all([
-      fetch(`${apiBase}/api/balance`, {
-        headers: { Authorization: `Bearer ${tk}` },
-      }),
-      fetch(`${apiBase}/api/tasks?${q.toString()}`, {
-        headers: { Authorization: `Bearer ${tk}` },
-      }),
-    ]);
-    const b = await bRes.json();
-    const t = await tRes.json();
-    if (b.success) setBalance(b.balance);
-    if (t.success) {
-      setTasks(t.tasks || []);
-      setTaskTotal(Number(t.total || 0));
-    }
-  };
-
-  const refreshTransfers = async (tk) => {
-    const res = await fetch(`${apiBase}/api/transfers?limit=20&aggregate=1`, {
-      headers: { Authorization: `Bearer ${tk}` },
+    const res = await fetch(`${apiBase}${path}`, {
+      method,
+      headers,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
     });
-    const data = await res.json();
-    if (data.success) {
-      setTransfers(data.transfers || []);
-      setTransferSummary(data.summary || null);
+
+    let data = {};
+    try {
+      data = await res.json();
+    } catch {
+      data = { success: false, status_message: `HTTP ${res.status}` };
     }
-  };
+    return { ok: res.ok, data };
+  }
+
+  async function refreshDashboard(tk = token) {
+    if (!tk) return;
+    const [b, t] = await Promise.all([
+      api('GET', '/api/balance', undefined, tk),
+      api('GET', '/api/tasks?limit=20&offset=0', undefined, tk),
+    ]);
+
+    if (b.data.success) setBalance(b.data.balance);
+    if (t.data.success) {
+      setTasks(t.data.tasks || []);
+      setTaskTotal(Number(t.data.total || 0));
+    }
+  }
 
   useEffect(() => {
-    if (!token) return undefined;
+    if (!token) return;
     const id = setInterval(() => {
-      refreshDashboard(token).catch(() => {});
+      refreshDashboard().catch(() => {});
     }, 5000);
     return () => clearInterval(id);
-  }, [token, taskFilterStatus, taskQuery, taskLimit, taskOffset]);
+  }, [token]);
 
-  const onSubmit = async (e) => {
+  const login = async (e) => {
     e.preventDefault();
     setLoading(true);
     setStatus('登入中...');
-    setToken('');
-
     try {
-      const res = await fetch(`${apiBase}/api/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
-      });
-      const data = await res.json();
-      if (data.success) {
+      const { data } = await api('POST', '/api/login', { username, password }, '');
+      if (data.success && data.token) {
+        setToken(data.token);
         setStatus('登入成功');
-        setToken(data.token || '');
-        const tk = data.token || '';
-        if (tk) {
-          await refreshDashboard(tk);
-          await refreshTransfers(tk);
-        }
+        await refreshDashboard(data.token);
       } else {
-        setStatus(`登入失敗：${data.status_message || '未知錯誤'}`);
+        setStatus(`登入失敗: ${data.status_message || 'unknown error'}`);
       }
     } catch (err) {
-      setStatus(`連線失敗：${err.message}`);
+      setStatus(`連線失敗: ${err.message}`);
     } finally {
       setLoading(false);
     }
@@ -112,40 +89,31 @@ export default function MasterApp() {
 
   const createTask = async () => {
     if (!token) return;
-    setStatus('建立任務中...');
+    setStatus('提交任務中...');
     try {
-      const res = await fetch(`${apiBase}/api/upload-task`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          task_id: taskId,
-          torrent,
-          memory_gb: Number(memoryGb),
-          gpu_memory_gb: Number(gpuMemoryGb),
-          host_count: Number(hostCount),
-        }),
-      });
-      const data = await res.json();
+      const payload = {
+        task_id: taskId,
+        torrent,
+        memory_gb: Number(memoryGb),
+        gpu_memory_gb: Number(gpuMemoryGb),
+        host_count: Number(hostCount),
+      };
+      const { data } = await api('POST', '/api/upload-task', payload);
       if (data.success) {
-        setStatus(`任務建立成功：${data.task_id}`);
-        setTaskId('');
-        await refreshDashboard(token);
-        await refreshTransfers(token);
+        setStatus(`任務已提交: ${data.task_id}`);
       } else {
-        setStatus(`任務建立失敗：${data.status_message || '未知錯誤'}`);
+        setStatus(`提交失敗: ${data.status_message || 'unknown error'}`);
       }
+      await refreshDashboard();
     } catch (err) {
-      setStatus(`任務建立失敗：${err.message}`);
+      setStatus(`提交失敗: ${err.message}`);
     }
   };
 
   const handleZipUpload = async (file) => {
-    if (!file || !token) return;
+    if (!token || !file) return;
     setCreatingTorrent(true);
-    setStatus('正在生成種子...');
+    setStatus('上傳 ZIP 並建立 torrent 中...');
     try {
       const formData = new FormData();
       formData.append('file', file);
@@ -159,78 +127,62 @@ export default function MasterApp() {
         const preferredSource = data.torrent_url || data.torrent || data.magnet || '';
         setTorrent(preferredSource);
         setLastTorrentFilePath(data.torrent_file || '');
-        setStatus(`種子已生成：${data.torrent_name || 'torrent'}（來源：${data.torrent_url ? 'torrent url' : 'magnet'}）`);
+        setStatus(`已建立 torrent: ${data.torrent_name || 'torrent'}`);
       } else {
-        setStatus(`種子生成失敗：${data.status_message || '未知錯誤'}`);
+        setStatus(`建立 torrent 失敗: ${data.status_message || 'unknown error'}`);
       }
     } catch (err) {
-      setStatus(`種子生成失敗：${err.message}`);
+      setStatus(`建立 torrent 失敗: ${err.message}`);
     } finally {
       setCreatingTorrent(false);
     }
   };
 
-  const viewTaskLog = async (taskId) => {
+  const viewTaskLog = async (task) => {
     if (!token) return;
+    const id = task?.TaskID || task?.task_id || '';
+    const fallback = task?.Output || task?.output || task?.StatusMessage || task?.status_message || '(無日誌)';
+    if (!id) {
+      setTaskLog(fallback);
+      setSelectedTask('');
+      return;
+    }
     try {
-      const res = await fetch(`${apiBase}/api/task/${taskId}/log`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const data = await res.json();
-      if (data.success) {
-        setTaskLog(data.log || '(暫無日誌)');
-        setSelectedTask(taskId);
-        setShowTaskDetail(true);
-        setStatus(`任務日誌已載入：${taskId}`);
-      } else {
-        setStatus(`載入日誌失敗：${data.status_message || '未知錯誤'}`);
-      }
+      const { data } = await api('GET', `/api/task/${id}/log`);
+      setTaskLog(data.success ? (data.log || fallback) : fallback);
+      setSelectedTask(id);
+      setStatus(data.success ? `任務日誌已載入: ${id}` : `查看日誌失敗: ${data.status_message || 'unknown error'}`);
     } catch (err) {
-      setStatus(`載入日誌失敗：${err.message}`);
+      setTaskLog(fallback);
+      setSelectedTask(id);
+      setStatus(`查看日誌失敗: ${err.message}`);
     }
   };
 
-  const viewTaskResult = async (taskId) => {
+  const viewTaskResult = async (task) => {
     if (!token) return;
+    const id = task?.TaskID || task?.task_id || '';
+    if (!id) return;
     try {
-      const res = await fetch(`${apiBase}/api/task/${taskId}/result`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const data = await res.json();
-      if (data.success) {
-        setTaskResult(data.result_torrent || '(暫無結果)');
-        setSelectedTask(taskId);
-        setShowTaskDetail(true);
-        setStatus(`任務結果已載入：${taskId}`);
-      } else {
-        setStatus(`載入結果失敗：${data.status_message || '未知錯誤'}`);
-      }
+      const { data } = await api('GET', `/api/task/${id}/result`);
+      setTaskResult(data.result_torrent || '(無結果)');
+      setSelectedTask(id);
+      setStatus(data.success ? `任務結果已載入: ${id}` : `查看結果失敗: ${data.status_message || 'unknown error'}`);
     } catch (err) {
-      setStatus(`載入結果失敗：${err.message}`);
+      setStatus(`查看結果失敗: ${err.message}`);
     }
   };
 
-  const stopTask = async (taskId) => {
+  const stopTask = async (task) => {
     if (!token) return;
+    const id = task?.TaskID || task?.task_id || '';
+    if (!id) return;
     try {
-      const res = await fetch(`${apiBase}/api/stop-task`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ task_id: taskId }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        setStatus(`任務已停止：${taskId}`);
-        await refreshDashboard(token);
-        setSelectedTaskIds((prev) => prev.filter((id) => id !== taskId));
-      } else {
-        setStatus(`停止失敗：${data.status_message || '未知錯誤'}`);
-      }
+      const { data } = await api('POST', '/api/stop-task', { task_id: id });
+      setStatus(data.success ? `任務已停止: ${id}` : `停止失敗: ${data.status_message || 'unknown error'}`);
+      await refreshDashboard();
     } catch (err) {
-      setStatus(`停止失敗：${err.message}`);
+      setStatus(`停止失敗: ${err.message}`);
     }
   };
 
@@ -238,338 +190,103 @@ export default function MasterApp() {
     setToken('');
     setBalance(null);
     setTasks([]);
-    setTransfers([]);
-    setTransferSummary(null);
-    setStatus('已登出');
-    setUsername('testuser');
-    setPassword('testpass123');
-    setShowTaskDetail(false);
+    setTaskTotal(0);
+    setSelectedTask('');
+    setTaskLog('');
     setTaskResult('');
-    setSelectedTaskIds([]);
-  };
-
-  const toggleTaskSelection = (id) => {
-    setSelectedTaskIds((prev) => {
-      if (prev.includes(id)) return prev.filter((x) => x !== id);
-      return [...prev, id];
-    });
-  };
-
-  const stopSelectedTasks = async () => {
-    if (!token || selectedTaskIds.length === 0) return;
-    try {
-      const res = await fetch(`${apiBase}/api/stop-tasks`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ task_ids: selectedTaskIds }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        setStatus(`批次停止完成：${data.stopped}/${data.total}`);
-      } else {
-        setStatus(`批次停止失敗：${data.status_message || '未知錯誤'}`);
-      }
-      await refreshDashboard(token);
-      setSelectedTaskIds([]);
-    } catch (err) {
-      setStatus(`批次停止失敗：${err.message}`);
-    }
-  };
-
-  const downloadLastTorrent = async () => {
-    if (!token || !lastTorrentFilePath) return;
-    try {
-      const res = await fetch(`${apiBase}${lastTorrentFilePath}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) {
-        const txt = await res.text();
-        setStatus(`下載 torrent 失敗：${txt || res.status}`);
-        return;
-      }
-      const blob = await res.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${Date.now()}.torrent`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.URL.revokeObjectURL(url);
-      setStatus('torrent 檔下載成功');
-    } catch (err) {
-      setStatus(`下載 torrent 失敗：${err.message}`);
-    }
+    setStatus('已登出');
   };
 
   return (
-    <div style={{ maxWidth: 600, margin: '40px auto', fontFamily: 'Arial, sans-serif', padding: '0 20px' }}>
-      <h1>Hivemind - 任務管理中心</h1>
-      <p style={{ color: '#666' }}>提交和管理分佈式任務</p>
+    <div style={{ maxWidth: 900, margin: '24px auto', fontFamily: 'Arial, sans-serif', padding: '0 16px' }}>
+      <h1>Hivemind Master UI</h1>
+      <p>API Base: {apiBase}</p>
 
-      <form onSubmit={onSubmit} style={{ display: 'grid', gap: 12, background: '#f9f9f9', padding: 16, borderRadius: 8 }}>
-        <label>
-          使用者名稱
-          <input
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            style={{ width: '100%', padding: 8, marginTop: 4, boxSizing: 'border-box' }}
-          />
-        </label>
+      {!token && (
+        <form onSubmit={login} style={{ display: 'grid', gap: 8, maxWidth: 360, background: '#f5f5f5', padding: 12, borderRadius: 8 }}>
+          <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="username" />
+          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="password" />
+          <button type="submit" disabled={loading}>{loading ? '登入中...' : '登入'}</button>
+        </form>
+      )}
 
-        <label>
-          密碼
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            style={{ width: '100%', padding: 8, marginTop: 4, boxSizing: 'border-box' }}
-          />
-        </label>
+      <div style={{ marginTop: 12, padding: 10, background: '#eef3ff', borderRadius: 8 }}>{status}</div>
 
-        <button type="submit" disabled={loading} style={{ padding: 10, background: loading ? '#ccc' : '#007bff', color: 'white', border: 'none', borderRadius: 4, cursor: 'pointer' }}>
-          {loading ? '登入中...' : '登入'}
-        </button>
-      </form>
-
-      <div style={{ marginTop: 16, padding: 12, background: '#e8f4f8', borderRadius: 4 }}>
-        <strong>狀態：</strong> {status}
-      </div>
-
-      {token ? (
+      {token && (
         <>
-          <div style={{ marginTop: 10, display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: 8, background: '#f0f0f0', borderRadius: 4 }}>
-            <div>
-              <strong>已登入</strong> ({username}) / 餘額: {balance ?? '-'} 
-            </div>
-            <button onClick={logout} style={{ padding: '5px 10px', background: '#ff6b6b', color: 'white', border: 'none', cursor: 'pointer', borderRadius: 4 }}>
-              登出
-            </button>
+          <div style={{ marginTop: 12, display: 'flex', gap: 12, alignItems: 'center' }}>
+            <strong>Balance: {balance ?? '-'}</strong>
+            <strong>Total tasks: {taskTotal}</strong>
+            <button onClick={logout}>登出</button>
+            <button onClick={() => refreshDashboard()}>刷新</button>
           </div>
 
-          <div style={{ marginTop: 20 }}>
-            <h2>任務管理</h2>
-            <div style={{ padding: '12px', background: '#f5f5f5', borderRadius: 8 }}>
-              <label style={{ display: 'block', marginBottom: 12 }}>
-                <strong>上傳 ZIP 文件（自動生成 Torrent）</strong>
-                <input
-                  type="file"
-                  accept=".zip"
-                  disabled={creatingTorrent}
-                  onChange={(e) => {
-                    if (e.target.files?.[0]) {
-                      handleZipUpload(e.target.files[0]);
-                    }
-                  }}
-                  style={{ width: '100%', padding: 8, marginTop: 4, boxSizing: 'border-box' }}
-                />
-              </label>
-
+          <div style={{ marginTop: 16, padding: 12, background: '#f7f7f7', borderRadius: 8 }}>
+            <h3>提交任務</h3>
+            <div style={{ display: 'grid', gap: 8 }}>
+              <input
+                type="file"
+                accept=".zip"
+                disabled={creatingTorrent}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) handleZipUpload(file);
+                }}
+              />
               {lastTorrentFilePath ? (
-                <button type="button" onClick={downloadLastTorrent} style={{ width: '100%', padding: 8, marginBottom: 12, background: '#4CAF50', color: 'white', border: 'none', borderRadius: 4, cursor: 'pointer' }}>
-                  下載最近生成的 .torrent
-                </button>
+                <div style={{ fontSize: 12, color: '#555' }}>
+                  已生成 torrent 檔案：{lastTorrentFilePath}
+                </div>
               ) : null}
-
-              <div style={{ display: 'grid', gap: 8 }}>
-                <input
-                  placeholder="任務 ID（留空自動生成）"
-                  value={taskId}
-                  onChange={(e) => setTaskId(e.target.value)}
-                  style={{ padding: 8, borderRadius: 4, border: '1px solid #ddd' }}
-                />
-                <input
-                  placeholder="Torrent / Magnet URI"
-                  value={torrent}
-                  onChange={(e) => setTorrent(e.target.value)}
-                  style={{ padding: 8, borderRadius: 4, border: '1px solid #ddd' }}
-                />
-                <input
-                  type="number"
-                  placeholder="所需內存 (GB)"
-                  value={memoryGb}
-                  onChange={(e) => setMemoryGb(e.target.value)}
-                  style={{ padding: 8, borderRadius: 4, border: '1px solid #ddd' }}
-                />
-                <input
-                  type="number"
-                  placeholder="所需 GPU 內存 (GB)"
-                  value={gpuMemoryGb}
-                  onChange={(e) => setGpuMemoryGb(e.target.value)}
-                  style={{ padding: 8, borderRadius: 4, border: '1px solid #ddd' }}
-                />
-                <input
-                  type="number"
-                  min="1"
-                  placeholder="需要 worker 數量 (host_count)"
-                  value={hostCount}
-                  onChange={(e) => setHostCount(e.target.value)}
-                  style={{ padding: 8, borderRadius: 4, border: '1px solid #ddd' }}
-                />
-                <button type="button" onClick={createTask} style={{ padding: 8, background: '#007bff', color: 'white', border: 'none', borderRadius: 4, cursor: 'pointer' }}>
-                  建立任務
-                </button>
-              </div>
+              <input value={taskId} onChange={(e) => setTaskId(e.target.value)} placeholder="task_id (可空白自動生成)" />
+              <input value={torrent} onChange={(e) => setTorrent(e.target.value)} placeholder="torrent/magnet" />
+              <input type="number" value={memoryGb} onChange={(e) => setMemoryGb(e.target.value)} placeholder="memory_gb" />
+              <input type="number" value={gpuMemoryGb} onChange={(e) => setGpuMemoryGb(e.target.value)} placeholder="gpu_memory_gb" />
+              <input type="number" value={hostCount} onChange={(e) => setHostCount(e.target.value)} placeholder="host_count" />
+              <button onClick={createTask}>提交</button>
             </div>
+          </div>
 
-            <h3 style={{ marginTop: 20 }}>轉帳概況（最近 20 筆）</h3>
-            <div style={{ padding: 12, background: '#f7f7f7', borderRadius: 8, border: '1px solid #eee' }}>
-              <button
-                type="button"
-                onClick={() => refreshTransfers(token)}
-                style={{ padding: '6px 10px', background: '#4c6ef5', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer' }}
-              >
-                重新整理轉帳
-              </button>
-              <div style={{ marginTop: 8, fontSize: 13, color: '#333' }}>
-                收入: {transferSummary?.total_in ?? 0} / 支出: {transferSummary?.total_out ?? 0} / 淨額: {transferSummary?.net ?? 0} / 筆數: {transferSummary?.count ?? 0}
-              </div>
-              {transfers.length === 0 ? (
-                <p style={{ color: '#999', marginTop: 8 }}>暫無轉帳資料</p>
-              ) : (
-                <ul style={{ listStyle: 'none', padding: 0, marginTop: 8 }}>
-                  {transfers.slice(0, 5).map((tr) => (
-                    <li key={tr.id} style={{ padding: '6px 0', borderBottom: '1px dashed #ddd', fontSize: 12 }}>
-                      #{tr.id} task={tr.task_id} {tr.payer} -&gt; {tr.payee} amount={tr.amount}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-
-            <h3 style={{ marginTop: 20 }}>我的任務</h3>
-            <div style={{ display: 'grid', gap: 8, marginBottom: 10, background: '#f6f6f6', padding: 10, borderRadius: 6 }}>
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                <select value={taskFilterStatus} onChange={(e) => { setTaskOffset(0); setTaskFilterStatus(e.target.value); }} style={{ padding: 6 }}>
-                  <option value="">全部狀態</option>
-                  <option value="PENDING">PENDING</option>
-                  <option value="DISPATCHED">DISPATCHED</option>
-                  <option value="RUNNING">RUNNING</option>
-                  <option value="COMPLETED">COMPLETED</option>
-                  <option value="FAILED">FAILED</option>
-                  <option value="STOPPED">STOPPED</option>
-                </select>
-                <input
-                  value={taskQuery}
-                  onChange={(e) => { setTaskOffset(0); setTaskQuery(e.target.value); }}
-                  placeholder="搜尋 task_id/worker/訊息"
-                  style={{ padding: 6, flex: 1, minWidth: 180 }}
-                />
-                <input
-                  type="number"
-                  min="1"
-                  max="100"
-                  value={taskLimit}
-                  onChange={(e) => { setTaskOffset(0); setTaskLimit(Number(e.target.value || 20)); }}
-                  style={{ width: 90, padding: 6 }}
-                />
-              </div>
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                <button type="button" onClick={() => refreshDashboard(token)} style={{ padding: '6px 10px', border: '1px solid #ccc', background: '#fff', borderRadius: 4, cursor: 'pointer' }}>
-                  套用篩選
-                </button>
-                <button type="button" onClick={stopSelectedTasks} disabled={selectedTaskIds.length === 0} style={{ padding: '6px 10px', border: 'none', background: selectedTaskIds.length === 0 ? '#ccc' : '#e53935', color: '#fff', borderRadius: 4, cursor: selectedTaskIds.length === 0 ? 'not-allowed' : 'pointer' }}>
-                  批次停止 ({selectedTaskIds.length})
-                </button>
-                <button type="button" onClick={() => setTaskOffset(Math.max(0, Number(taskOffset) - Number(taskLimit)))} disabled={taskOffset <= 0} style={{ padding: '6px 10px' }}>
-                  上一頁
-                </button>
-                <button type="button" onClick={() => setTaskOffset(Number(taskOffset) + Number(taskLimit))} disabled={Number(taskOffset) + Number(taskLimit) >= Number(taskTotal)} style={{ padding: '6px 10px' }}>
-                  下一頁
-                </button>
-                <span style={{ alignSelf: 'center', fontSize: 12, color: '#555' }}>目前 {tasks.length} / 總數 {taskTotal}</span>
-              </div>
-            </div>
+          <div style={{ marginTop: 16 }}>
+            <h3>任務列表</h3>
             {tasks.length === 0 ? (
-              <p style={{ color: '#999' }}>無任務</p>
+              <p>目前沒有任務</p>
             ) : (
-              <ul style={{ listStyle: 'none', padding: 0 }}>
-                {tasks.map((t) => (
-                  <li key={t.TaskID || t.task_id} style={{ marginBottom: '12px', padding: '12px', background: '#f9f9f9', borderRadius: '4px', border: '1px solid #eee' }}>
-                    <div>
-                      <input
-                        type="checkbox"
-                        checked={selectedTaskIds.includes(t.TaskID || t.task_id)}
-                        onChange={() => toggleTaskSelection(t.TaskID || t.task_id)}
-                      />
-                    </div>
-                    <div style={{ fontWeight: 'bold' }}>{t.TaskID || t.task_id}</div>
-                    <div style={{ marginTop: '4px', fontSize: '14px', color: '#333' }}>
-                      <strong>狀態：</strong> {(t.Status || t.status)}
-                    </div>
-                    <div style={{ marginTop: '4px', fontSize: '12px', color: '#666', display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                      {parseDispatchCode(t.StatusMessage || t.status_message) ? (
-                        <span style={{ background: '#e9ecff', color: '#334', borderRadius: 10, padding: '1px 8px', fontWeight: 700 }}>
-                          {parseDispatchCode(t.StatusMessage || t.status_message)}
-                        </span>
-                      ) : null}
-                      <span>{stripDispatchCode(t.StatusMessage || t.status_message || '-')}</span>
-                    </div>
-                    <div style={{ marginTop: '4px', fontSize: '12px', color: '#555' }}>
-                      CPU {Number(t.CpuUsage ?? t.cpu_usage ?? 0).toFixed(1)}% / 
-                      MEM {Number(t.MemoryUsage ?? t.memory_usage ?? 0).toFixed(1)}% / 
-                      GPU {Number(t.GpuUsage ?? t.gpu_usage ?? 0).toFixed(1)}% / 
-                      GPU-MEM {Number(t.GpuMemoryUsage ?? t.gpu_memory_usage ?? 0).toFixed(1)}%
-                    </div>
-                    <div style={{ marginTop: '8px', display: 'flex', gap: '4px' }}>
-                      <button
-                        type="button"
-                        onClick={() => viewTaskLog(t.TaskID || t.task_id)}
-                        style={{ padding: '4px 8px', fontSize: '12px', cursor: 'pointer', background: '#e3f2fd', border: '1px solid #90caf9', borderRadius: 4 }}
-                      >
-                        查看日誌
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => viewTaskResult(t.TaskID || t.task_id)}
-                        style={{ padding: '4px 8px', fontSize: '12px', cursor: 'pointer', background: '#e8f5e9', border: '1px solid #81c784', borderRadius: 4 }}
-                      >
-                        查看結果
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => stopTask(t.TaskID || t.task_id)}
-                        style={{ padding: '4px 8px', fontSize: '12px', cursor: 'pointer', background: '#ffebee', color: '#c62828', border: '1px solid #ef5350', borderRadius: 4 }}
-                      >
-                        停止
-                      </button>
-                    </div>
-                  </li>
-                ))}
+              <ul style={{ listStyle: 'none', padding: 0, display: 'grid', gap: 10 }}>
+                {tasks.map((t) => {
+                  const id = t.TaskID || t.task_id;
+                  const st = t.Status || t.status;
+                  const msg = t.StatusMessage || t.status_message || '';
+                  return (
+                    <li key={id} style={{ border: '1px solid #ddd', borderRadius: 8, padding: 10 }}>
+                      <div><strong>{id}</strong></div>
+                      <div>Status: {st}</div>
+                      <div style={{ fontSize: 12, color: '#555' }}>{msg}</div>
+                      <div style={{ marginTop: 6, display: 'flex', gap: 8 }}>
+                        <button onClick={() => viewTaskLog(t)}>查看日誌</button>
+                        <button onClick={() => viewTaskResult(t)}>查看結果</button>
+                        <button onClick={() => stopTask(t)}>停止</button>
+                      </div>
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </div>
 
-          {showTaskDetail && (
-            <div style={{ marginTop: 20, padding: '12px', background: '#f9f9f9', borderRadius: '4px', border: '1px solid #eee' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <strong>任務詳情 ({selectedTask}):</strong>
-                <button
-                  onClick={() => setShowTaskDetail(false)}
-                  style={{ padding: '4px 8px', cursor: 'pointer', background: '#f0f0f0', border: '1px solid #ccc', borderRadius: 4 }}
-                >
-                  關閉
-                </button>
-              </div>
-              <div style={{ marginTop: '8px' }}>
-                <strong>日誌：</strong>
-                <div style={{ marginTop: '4px', padding: '8px', background: 'white', borderRadius: '4px', minHeight: '100px', maxHeight: '300px', overflow: 'auto', whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '12px', border: '1px solid #ddd' }}>
-                  {taskLog}
-                </div>
-              </div>
-              <div style={{ marginTop: '12px' }}>
-                <strong>結果：</strong>
-                <div style={{ marginTop: '4px', padding: '8px', background: 'white', borderRadius: '4px', minHeight: '40px', maxHeight: '180px', overflow: 'auto', whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '12px', border: '1px solid #ddd' }}>
-                  {taskResult || '(尚未查詢)'}
-                </div>
-              </div>
+          <div style={{ marginTop: 16, padding: 12, background: '#fafafa', borderRadius: 8, border: '1px solid #ddd' }}>
+            <h3>任務詳情 {selectedTask ? `(${selectedTask})` : ''}</h3>
+            <div>
+              <strong>日誌:</strong>
+              <pre style={{ whiteSpace: 'pre-wrap', background: '#fff', padding: 8, border: '1px solid #eee' }}>{taskLog || '(空)'}</pre>
             </div>
-          )}
+            <div>
+              <strong>結果:</strong>
+              <pre style={{ whiteSpace: 'pre-wrap', background: '#fff', padding: 8, border: '1px solid #eee' }}>{taskResult || '(空)'}</pre>
+            </div>
+          </div>
         </>
-      ) : null}
+      )}
     </div>
   );
 }

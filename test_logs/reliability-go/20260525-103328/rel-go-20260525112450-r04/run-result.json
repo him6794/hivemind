@@ -1,0 +1,14 @@
+{
+  "run": 4,
+  "run_id": "rel-go-20260525112450-r04",
+  "started_at": "2026-05-25T03:24:50.1444854Z",
+  "finished_at": "2026-05-25T03:25:51.80381Z",
+  "tasks": null,
+  "observed_tasks": {},
+  "workers_final": null,
+  "events": [],
+  "failures": [
+    "dependencies: docker dependencies did not become ready"
+  ],
+  "passed": false
+}

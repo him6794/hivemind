@@ -1,0 +1,371 @@
+{
+  "events": [
+    {
+      "at": "2026-05-20T01:12:12.338436+00:00",
+      "delay_sec": 14.2786893163102,
+      "event": "worker_killed",
+      "pid": 18464,
+      "worker": "worker1"
+    },
+    {
+      "at": "2026-05-20T01:12:34.768509+00:00",
+      "delay_sec": 21.659800057125697,
+      "event": "worker_restarted",
+      "pid": 23276,
+      "worker": "worker1"
+    }
+  ],
+  "failures": [],
+  "finished_at": "2026-05-20T01:13:26.005535+00:00",
+  "observed_tasks": {
+    "rel-20260520091126-r01-cpu": {
+      "BilledAmount": 0,
+      "BillingSettled": true,
+      "CpuUsage": 41,
+      "ExpectedBTIH": "8e21cc56197296d4f766d03d824a37398339b787",
+      "GpuMemoryUsage": 42.2,
+      "GpuUsage": 29.6,
+      "HostCount": 1,
+      "LastSettlementAt": "0001-01-01T00:00:00Z",
+      "LastUpdate": "2026-05-20T09:11:50.9861244+08:00",
+      "MemoryUsage": 59.8,
+      "Output": "task accepted (magnet, btih=8e21cc56197296d4f766d03d824a37398339b787, name=cpu)\nexecutor_start task_id=rel-20260520091126-r01-cpu kind=cpu\nexecutor_complete task_id=rel-20260520091126-r01-cpu kind=cpu elapsed_sec=5.000 work_hash=d51c49450e8b6fc83e54e57500cad670792585c6\ntask completed",
+      "Owner": "worker1",
+      "ReqCPUScore": 0,
+      "ReqGPUMemoryGB": 0,
+      "ReqGPUScore": 0,
+      "ReqMemoryGB": 1,
+      "ResultTorrent": "result://rel-20260520091126-r01-cpu?btih=8e21cc56197296d4f766d03d824a37398339b787",
+      "RetryCount": 0,
+      "Status": "COMPLETED",
+      "StatusMessage": "result uploaded",
+      "TaskID": "rel-20260520091126-r01-cpu",
+      "TorrentSource": "magnet:?xt=urn:btih:8e21cc56197296d4f766d03d824a37398339b787&dn=cpu",
+      "WorkerID": "worker1",
+      "WorkerIP": "127.0.0.1:50053"
+    },
+    "rel-20260520091126-r01-failure": {
+      "BilledAmount": 0,
+      "BillingSettled": false,
+      "CpuUsage": 37,
+      "ExpectedBTIH": "9f158167b82693856d6ab1fddf1c1696f3a5a2cf",
+      "GpuMemoryUsage": 41.5,
+      "GpuUsage": 29,
+      "HostCount": 1,
+      "LastSettlementAt": "0001-01-01T00:00:00Z",
+      "LastUpdate": "2026-05-20T09:11:51.4238189+08:00",
+      "MemoryUsage": 59,
+      "Output": "task accepted (magnet, btih=9f158167b82693856d6ab1fddf1c1696f3a5a2cf, name=failure)\nexecutor_start task_id=rel-20260520091126-r01-failure kind=failure\nexecutor_progress kind=failure elapsed_sec=1 target_sec=3\nexecutor_failure_injected kind=failure\ntask failed: executor failed: exit status 42",
+      "Owner": "worker1",
+      "ReqCPUScore": 0,
+      "ReqGPUMemoryGB": 0,
+      "ReqGPUScore": 0,
+      "ReqMemoryGB": 1,
+      "ResultTorrent": "",
+      "RetryCount": 0,
+      "Status": "FAILED",
+      "StatusMessage": "task failed: executor failed: exit status 42",
+      "TaskID": "rel-20260520091126-r01-failure",
+      "TorrentSource": "magnet:?xt=urn:btih:9f158167b82693856d6ab1fddf1c1696f3a5a2cf&dn=failure",
+      "WorkerID": "worker1",
+      "WorkerIP": "127.0.0.1:50053"
+    },
+    "rel-20260520091126-r01-io": {
+      "BilledAmount": 0,
+      "BillingSettled": true,
+      "CpuUsage": 49,
+      "ExpectedBTIH": "5dae0d0d42ff32257ae5b7d9b825a91810e87c79",
+      "GpuMemoryUsage": 48.5,
+      "GpuUsage": 35,
+      "HostCount": 1,
+      "LastSettlementAt": "0001-01-01T00:00:00Z",
+      "LastUpdate": "2026-05-20T09:11:56.9981999+08:00",
+      "MemoryUsage": 67,
+      "Output": "task accepted (magnet, btih=5dae0d0d42ff32257ae5b7d9b825a91810e87c79, name=io)\nexecutor_start task_id=rel-20260520091126-r01-io kind=io\nexecutor_complete task_id=rel-20260520091126-r01-io kind=io elapsed_sec=9.294 work_hash=2375d1a07c087aa3fc7427b392ec08bb0f5a0ccc\ntask completed",
+      "Owner": "worker1",
+      "ReqCPUScore": 0,
+      "ReqGPUMemoryGB": 0,
+      "ReqGPUScore": 0,
+      "ReqMemoryGB": 1,
+      "ResultTorrent": "result://rel-20260520091126-r01-io?btih=5dae0d0d42ff32257ae5b7d9b825a91810e87c79",
+      "RetryCount": 0,
+      "Status": "COMPLETED",
+      "StatusMessage": "result uploaded",
+      "TaskID": "rel-20260520091126-r01-io",
+      "TorrentSource": "magnet:?xt=urn:btih:5dae0d0d42ff32257ae5b7d9b825a91810e87c79&dn=io",
+      "WorkerID": "worker1",
+      "WorkerIP": "127.0.0.1:50053"
+    },
+    "rel-20260520091126-r01-long": {
+      "BilledAmount": 2,
+      "BillingSettled": true,
+      "CpuUsage": 54,
+      "ExpectedBTIH": "a204849fcef156b332fba64d141e2931f716d7f2",
+      "GpuMemoryUsage": 50.6,
+      "GpuUsage": 36.8,
+      "HostCount": 1,
+      "LastSettlementAt": "2026-05-20T09:12:28.6043236+08:00",
+      "LastUpdate": "2026-05-20T09:13:06.1115796+08:00",
+      "MemoryUsage": 69.4,
+      "Output": "task accepted (magnet, btih=a204849fcef156b332fba64d141e2931f716d7f2, name=long)\ntask accepted (magnet, btih=a204849fcef156b332fba64d141e2931f716d7f2, name=long)\nexecutor_start task_id=rel-20260520091126-r01-long kind=long\nexecutor_progress kind=long elapsed_sec=1 target_sec=30\nexecutor_complete task_id=rel-20260520091126-r01-long kind=long elapsed_sec=32.001 work_hash=9916fb31b28c956689ab7ff4078c8a987ce5ebd6\ntask completed",
+      "Owner": "worker1",
+      "ReqCPUScore": 0,
+      "ReqGPUMemoryGB": 0,
+      "ReqGPUScore": 0,
+      "ReqMemoryGB": 1,
+      "ResultTorrent": "result://rel-20260520091126-r01-long?btih=a204849fcef156b332fba64d141e2931f716d7f2",
+      "RetryCount": 1,
+      "Status": "COMPLETED",
+      "StatusMessage": "result uploaded",
+      "TaskID": "rel-20260520091126-r01-long",
+      "TorrentSource": "magnet:?xt=urn:btih:a204849fcef156b332fba64d141e2931f716d7f2&dn=long",
+      "WorkerID": "worker2",
+      "WorkerIP": "127.0.0.1:50054"
+    },
+    "rel-20260520091126-r01-parallel-0": {
+      "BilledAmount": 0,
+      "BillingSettled": true,
+      "CpuUsage": 58,
+      "ExpectedBTIH": "628e83e25bd9d4b7b52ffc1491d517926a11a525",
+      "GpuMemoryUsage": 54.1,
+      "GpuUsage": 39.8,
+      "HostCount": 1,
+      "LastSettlementAt": "0001-01-01T00:00:00Z",
+      "LastUpdate": "2026-05-20T09:12:08.092587+08:00",
+      "MemoryUsage": 73.4,
+      "Output": "task accepted (magnet, btih=628e83e25bd9d4b7b52ffc1491d517926a11a525, name=parallel-0)\nexecutor_start task_id=rel-20260520091126-r01-parallel-0 kind=parallel\nexecutor_progress kind=parallel elapsed_sec=1 target_sec=10\nexecutor_complete task_id=rel-20260520091126-r01-parallel-0 kind=parallel elapsed_sec=11.001 work_hash=8da14c3d961e3984e793cd24769df0fa5b711177\ntask completed",
+      "Owner": "worker1",
+      "ReqCPUScore": 0,
+      "ReqGPUMemoryGB": 0,
+      "ReqGPUScore": 0,
+      "ReqMemoryGB": 1,
+      "ResultTorrent": "result://rel-20260520091126-r01-parallel-0?btih=628e83e25bd9d4b7b52ffc1491d517926a11a525",
+      "RetryCount": 0,
+      "Status": "COMPLETED",
+      "StatusMessage": "result uploaded",
+      "TaskID": "rel-20260520091126-r01-parallel-0",
+      "TorrentSource": "magnet:?xt=urn:btih:628e83e25bd9d4b7b52ffc1491d517926a11a525&dn=parallel-0",
+      "WorkerID": "worker1",
+      "WorkerIP": "127.0.0.1:50053"
+    },
+    "rel-20260520091126-r01-parallel-1": {
+      "BilledAmount": 0,
+      "BillingSettled": true,
+      "CpuUsage": 40,
+      "ExpectedBTIH": "c6b972d5413bf5ef6dc16bc1de9469481cc901e7",
+      "GpuMemoryUsage": 41.5,
+      "GpuUsage": 29,
+      "HostCount": 1,
+      "LastSettlementAt": "0001-01-01T00:00:00Z",
+      "LastUpdate": "2026-05-20T09:12:10.4984105+08:00",
+      "MemoryUsage": 59,
+      "Output": "task accepted (magnet, btih=c6b972d5413bf5ef6dc16bc1de9469481cc901e7, name=parallel-1)\nexecutor_start task_id=rel-20260520091126-r01-parallel-1 kind=parallel\nexecutor_progress kind=parallel elapsed_sec=1 target_sec=10\nexecutor_complete task_id=rel-20260520091126-r01-parallel-1 kind=parallel elapsed_sec=11.001 work_hash=f3ecd3772dffbd0e11df0e31fd23d554c3a9a106\ntask completed",
+      "Owner": "worker1",
+      "ReqCPUScore": 0,
+      "ReqGPUMemoryGB": 0,
+      "ReqGPUScore": 0,
+      "ReqMemoryGB": 1,
+      "ResultTorrent": "result://rel-20260520091126-r01-parallel-1?btih=c6b972d5413bf5ef6dc16bc1de9469481cc901e7",
+      "RetryCount": 0,
+      "Status": "COMPLETED",
+      "StatusMessage": "result uploaded",
+      "TaskID": "rel-20260520091126-r01-parallel-1",
+      "TorrentSource": "magnet:?xt=urn:btih:c6b972d5413bf5ef6dc16bc1de9469481cc901e7&dn=parallel-1",
+      "WorkerID": "worker1",
+      "WorkerIP": "127.0.0.1:50053"
+    },
+    "rel-20260520091126-r01-parallel-2": {
+      "BilledAmount": 2,
+      "BillingSettled": true,
+      "CpuUsage": 36,
+      "ExpectedBTIH": "4cb9973fe4c856e6cf23663bfdbcb190fe049299",
+      "GpuMemoryUsage": 38.7,
+      "GpuUsage": 26.6,
+      "HostCount": 1,
+      "LastSettlementAt": "2026-05-20T09:12:26.6184759+08:00",
+      "LastUpdate": "2026-05-20T09:12:42.8689741+08:00",
+      "MemoryUsage": 55.8,
+      "Output": "task accepted (magnet, btih=4cb9973fe4c856e6cf23663bfdbcb190fe049299, name=parallel-2)\nexecutor_start task_id=rel-20260520091126-r01-parallel-2 kind=parallel\nexecutor_progress kind=parallel elapsed_sec=1 target_sec=10\nexecutor_complete task_id=rel-20260520091126-r01-parallel-2 kind=parallel elapsed_sec=11.000 work_hash=cfae59a3c50307211815f23492966ed6764e5f2e\ntask completed\ntask accepted (magnet, btih=4cb9973fe4c856e6cf23663bfdbcb190fe049299, name=parallel-2)\nexecutor_start task_id=rel-20260520091126-r01-parallel-2 kind=parallel\nexecutor_progress kind=parallel elapsed_sec=1 target_sec=10\nexecutor_complete task_id=rel-20260520091126-r01-parallel-2 kind=parallel elapsed_sec=11.000 work_hash=14485c6c68528a119fd09c1429d04a4b32570049\ntask completed",
+      "Owner": "worker1",
+      "ReqCPUScore": 0,
+      "ReqGPUMemoryGB": 0,
+      "ReqGPUScore": 0,
+      "ReqMemoryGB": 1,
+      "ResultTorrent": "result://rel-20260520091126-r01-parallel-2?btih=4cb9973fe4c856e6cf23663bfdbcb190fe049299",
+      "RetryCount": 1,
+      "Status": "COMPLETED",
+      "StatusMessage": "result uploaded",
+      "TaskID": "rel-20260520091126-r01-parallel-2",
+      "TorrentSource": "magnet:?xt=urn:btih:4cb9973fe4c856e6cf23663bfdbcb190fe049299&dn=parallel-2",
+      "WorkerID": "worker2",
+      "WorkerIP": "127.0.0.1:50054"
+    },
+    "rel-20260520091126-r01-retry": {
+      "BilledAmount": 2,
+      "BillingSettled": true,
+      "CpuUsage": 41,
+      "ExpectedBTIH": "2107a71e9881dfc312ab373c16d46b3a52209ed4",
+      "GpuMemoryUsage": 45.7,
+      "GpuUsage": 32.6,
+      "HostCount": 1,
+      "LastSettlementAt": "2026-05-20T09:12:26.6304616+08:00",
+      "LastUpdate": "2026-05-20T09:13:09.4819389+08:00",
+      "MemoryUsage": 63.8,
+      "Output": "task accepted (magnet, btih=2107a71e9881dfc312ab373c16d46b3a52209ed4, name=retry)\ntask accepted (magnet, btih=2107a71e9881dfc312ab373c16d46b3a52209ed4, name=retry)\nexecutor_start task_id=rel-20260520091126-r01-retry kind=retry\nexecutor_progress kind=retry elapsed_sec=1 target_sec=35\nexecutor_progress kind=retry elapsed_sec=31 target_sec=35\nexecutor_complete task_id=rel-20260520091126-r01-retry kind=retry elapsed_sec=37.001 work_hash=aa6fefcbcd3087e81db9bd692b6d1314f2de55e0\ntask completed",
+      "Owner": "worker1",
+      "ReqCPUScore": 0,
+      "ReqGPUMemoryGB": 0,
+      "ReqGPUScore": 0,
+      "ReqMemoryGB": 1,
+      "ResultTorrent": "result://rel-20260520091126-r01-retry?btih=2107a71e9881dfc312ab373c16d46b3a52209ed4",
+      "RetryCount": 1,
+      "Status": "COMPLETED",
+      "StatusMessage": "result uploaded",
+      "TaskID": "rel-20260520091126-r01-retry",
+      "TorrentSource": "magnet:?xt=urn:btih:2107a71e9881dfc312ab373c16d46b3a52209ed4&dn=retry",
+      "WorkerID": "worker2",
+      "WorkerIP": "127.0.0.1:50054"
+    }
+  },
+  "passed": true,
+  "run": 1,
+  "run_id": "rel-20260520091126-r01",
+  "started_at": "2026-05-20T01:11:26.642566+00:00",
+  "tasks": {
+    "rel-20260520091126-r01-cpu": {
+      "btih": "8e21cc56197296d4f766d03d824a37398339b787",
+      "expected_status": "COMPLETED",
+      "kind": "cpu",
+      "task_id": "rel-20260520091126-r01-cpu",
+      "upload": {
+        "status_message": "dispatched",
+        "success": true,
+        "task_id": "rel-20260520091126-r01-cpu"
+      }
+    },
+    "rel-20260520091126-r01-failure": {
+      "btih": "9f158167b82693856d6ab1fddf1c1696f3a5a2cf",
+      "expected_status": "FAILED",
+      "kind": "failure",
+      "task_id": "rel-20260520091126-r01-failure",
+      "upload": {
+        "status_message": "dispatched",
+        "success": true,
+        "task_id": "rel-20260520091126-r01-failure"
+      }
+    },
+    "rel-20260520091126-r01-io": {
+      "btih": "5dae0d0d42ff32257ae5b7d9b825a91810e87c79",
+      "expected_status": "COMPLETED",
+      "kind": "io",
+      "task_id": "rel-20260520091126-r01-io",
+      "upload": {
+        "status_message": "dispatched",
+        "success": true,
+        "task_id": "rel-20260520091126-r01-io"
+      }
+    },
+    "rel-20260520091126-r01-long": {
+      "btih": "a204849fcef156b332fba64d141e2931f716d7f2",
+      "expected_status": "COMPLETED",
+      "kind": "long",
+      "task_id": "rel-20260520091126-r01-long",
+      "upload": {
+        "status_message": "dispatched",
+        "success": true,
+        "task_id": "rel-20260520091126-r01-long"
+      }
+    },
+    "rel-20260520091126-r01-parallel-0": {
+      "btih": "628e83e25bd9d4b7b52ffc1491d517926a11a525",
+      "expected_status": "COMPLETED",
+      "kind": "parallel-0",
+      "task_id": "rel-20260520091126-r01-parallel-0",
+      "upload": {
+        "status_message": "dispatched",
+        "success": true,
+        "task_id": "rel-20260520091126-r01-parallel-0"
+      }
+    },
+    "rel-20260520091126-r01-parallel-1": {
+      "btih": "c6b972d5413bf5ef6dc16bc1de9469481cc901e7",
+      "expected_status": "COMPLETED",
+      "kind": "parallel-1",
+      "task_id": "rel-20260520091126-r01-parallel-1",
+      "upload": {
+        "status_message": "dispatched",
+        "success": true,
+        "task_id": "rel-20260520091126-r01-parallel-1"
+      }
+    },
+    "rel-20260520091126-r01-parallel-2": {
+      "btih": "4cb9973fe4c856e6cf23663bfdbcb190fe049299",
+      "expected_status": "COMPLETED",
+      "kind": "parallel-2",
+      "task_id": "rel-20260520091126-r01-parallel-2",
+      "upload": {
+        "status_message": "dispatched",
+        "success": true,
+        "task_id": "rel-20260520091126-r01-parallel-2"
+      }
+    },
+    "rel-20260520091126-r01-retry": {
+      "btih": "2107a71e9881dfc312ab373c16d46b3a52209ed4",
+      "expected_status": "COMPLETED",
+      "kind": "retry",
+      "task_id": "rel-20260520091126-r01-retry",
+      "upload": {
+        "status_message": "dispatched",
+        "success": true,
+        "task_id": "rel-20260520091126-r01-retry"
+      }
+    }
+  },
+  "workers_final": {
+    "success": true,
+    "workers": [
+      {
+        "addr": "127.0.0.1:50054",
+        "id": "worker2",
+        "last_heartbeat": "2026-05-20T09:13:24.4623879+08:00",
+        "meta": {
+          "cpu_cores": "12",
+          "cpu_score": "240",
+          "gpu_memory": "15",
+          "gpu_score": "192",
+          "location": "Local",
+          "memory_gb": "31"
+        },
+        "status": "ACTIVE"
+      },
+      {
+        "addr": "127.0.0.1:50055",
+        "id": "worker3",
+        "last_heartbeat": "2026-05-20T09:13:25.3484504+08:00",
+        "meta": {
+          "cpu_cores": "12",
+          "cpu_score": "240",
+          "gpu_memory": "15",
+          "gpu_score": "192",
+          "location": "Local",
+          "memory_gb": "31"
+        },
+        "status": "ACTIVE"
+      },
+      {
+        "addr": "127.0.0.1:50053",
+        "id": "worker1",
+        "last_heartbeat": "2026-05-20T09:13:25.6594305+08:00",
+        "meta": {
+          "cpu_cores": "12",
+          "cpu_score": "240",
+          "gpu_memory": "15",
+          "gpu_score": "192",
+          "location": "Local",
+          "memory_gb": "31"
+        },
+        "status": "ACTIVE"
+      }
+    ]
+  }
+}

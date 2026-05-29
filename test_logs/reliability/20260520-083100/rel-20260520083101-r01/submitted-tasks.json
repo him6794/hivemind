@@ -1,0 +1,90 @@
+[
+  {
+    "kind": "cpu",
+    "task_id": "rel-20260520083101-r01-cpu",
+    "btih": "2e190ac35ae5ea72f6617f151b990590950fc6e7",
+    "upload": {
+      "status_message": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+      "success": false,
+      "task_id": "rel-20260520083101-r01-cpu"
+    },
+    "expected_status": "COMPLETED"
+  },
+  {
+    "kind": "io",
+    "task_id": "rel-20260520083101-r01-io",
+    "btih": "4da2ebaba3225b3fc8743e9f48b348629fc31374",
+    "upload": {
+      "status_message": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+      "success": false,
+      "task_id": "rel-20260520083101-r01-io"
+    },
+    "expected_status": "COMPLETED"
+  },
+  {
+    "kind": "failure",
+    "task_id": "rel-20260520083101-r01-failure",
+    "btih": "459cfd0a6e3f6937cbda52ef1bfdfd6e31724778",
+    "upload": {
+      "status_message": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+      "success": false,
+      "task_id": "rel-20260520083101-r01-failure"
+    },
+    "expected_status": "FAILED"
+  },
+  {
+    "kind": "retry",
+    "task_id": "rel-20260520083101-r01-retry",
+    "btih": "497399055faa6783de18796d97e6de745679770b",
+    "upload": {
+      "status_message": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+      "success": false,
+      "task_id": "rel-20260520083101-r01-retry"
+    },
+    "expected_status": "COMPLETED"
+  },
+  {
+    "kind": "long",
+    "task_id": "rel-20260520083101-r01-long",
+    "btih": "155d068e3d675d02e8c4e837fbedf485f62c7a18",
+    "upload": {
+      "status_message": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+      "success": false,
+      "task_id": "rel-20260520083101-r01-long"
+    },
+    "expected_status": "COMPLETED"
+  },
+  {
+    "kind": "parallel-0",
+    "task_id": "rel-20260520083101-r01-parallel-0",
+    "btih": "3639964aec12d71c060f70d720101945b9056e46",
+    "upload": {
+      "status_message": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+      "success": false,
+      "task_id": "rel-20260520083101-r01-parallel-0"
+    },
+    "expected_status": "COMPLETED"
+  },
+  {
+    "kind": "parallel-1",
+    "task_id": "rel-20260520083101-r01-parallel-1",
+    "btih": "23eeca91cfe1c36a1761e3c47a627e9df93cdb82",
+    "upload": {
+      "status_message": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+      "success": false,
+      "task_id": "rel-20260520083101-r01-parallel-1"
+    },
+    "expected_status": "COMPLETED"
+  },
+  {
+    "kind": "parallel-2",
+    "task_id": "rel-20260520083101-r01-parallel-2",
+    "btih": "5c7fab7bae947ea9ce08e8d4111fc7c0da3ff68e",
+    "upload": {
+      "status_message": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+      "success": false,
+      "task_id": "rel-20260520083101-r01-parallel-2"
+    },
+    "expected_status": "COMPLETED"
+  }
+]

@@ -1,0 +1,13 @@
+﻿{
+    "run_id":  "20260520074442",
+    "task_ids":  [
+                     "e2e-20260520074442-cpu",
+                     "e2e-20260520074442-io",
+                     "e2e-20260520074442-failure",
+                     "e2e-20260520074442-retry",
+                     "e2e-20260520074442-long"
+                 ],
+    "duplicate_task_id":  "e2e-20260520074442-cpu",
+    "duplicate_success":  false,
+    "reconnected_worker2_pid":  24704
+}

@@ -1,0 +1,111 @@
+﻿[
+    {
+        "kind":  "cpu",
+        "task_id":  "e2e-20260520073902-cpu",
+        "btih":  "70141fb8ea88ccb760091871eb94f5ae41bd8973",
+        "request":  {
+                        "task_id":  "e2e-20260520073902-cpu",
+                        "torrent":  "magnet:?xt=urn:btih:70141fb8ea88ccb760091871eb94f5ae41bd8973\u0026dn=cpu",
+                        "memory_gb":  1,
+                        "gpu_memory_gb":  0,
+                        "host_count":  1,
+                        "max_cpt":  0
+                    },
+        "response":  {
+                         "status_message":  "dispatched",
+                         "success":  true,
+                         "task_id":  "e2e-20260520073902-cpu"
+                     }
+    },
+    {
+        "kind":  "io",
+        "task_id":  "e2e-20260520073902-io",
+        "btih":  "c2b8d9393cf8219e39a695113e6235685a909b1e",
+        "request":  {
+                        "task_id":  "e2e-20260520073902-io",
+                        "torrent":  "magnet:?xt=urn:btih:c2b8d9393cf8219e39a695113e6235685a909b1e\u0026dn=io",
+                        "memory_gb":  1,
+                        "gpu_memory_gb":  0,
+                        "host_count":  1,
+                        "max_cpt":  0
+                    },
+        "response":  {
+                         "status_message":  "dispatched",
+                         "success":  true,
+                         "task_id":  "e2e-20260520073902-io"
+                     }
+    },
+    {
+        "kind":  "failure-injected",
+        "task_id":  "e2e-20260520073902-failure",
+        "btih":  "6e98f2c0b58209e4108e6c84fdc257ecd26f44f4",
+        "request":  {
+                        "task_id":  "e2e-20260520073902-failure",
+                        "torrent":  "magnet:?xt=urn:btih:6e98f2c0b58209e4108e6c84fdc257ecd26f44f4\u0026dn=failure-injected",
+                        "memory_gb":  1,
+                        "gpu_memory_gb":  0,
+                        "host_count":  1,
+                        "max_cpt":  0
+                    },
+        "response":  {
+                         "status_message":  "dispatched",
+                         "success":  true,
+                         "task_id":  "e2e-20260520073902-failure"
+                     }
+    },
+    {
+        "kind":  "retry",
+        "task_id":  "e2e-20260520073902-retry",
+        "btih":  "9f8f8164293b4c65541ae791d48845a9a61a2d88",
+        "request":  {
+                        "task_id":  "e2e-20260520073902-retry",
+                        "torrent":  "magnet:?xt=urn:btih:9f8f8164293b4c65541ae791d48845a9a61a2d88\u0026dn=retry",
+                        "memory_gb":  1,
+                        "gpu_memory_gb":  0,
+                        "host_count":  1,
+                        "max_cpt":  0
+                    },
+        "response":  {
+                         "status_message":  "dispatched",
+                         "success":  true,
+                         "task_id":  "e2e-20260520073902-retry"
+                     }
+    },
+    {
+        "kind":  "long-running",
+        "task_id":  "e2e-20260520073902-long",
+        "btih":  "5aeea0aca9fa6f08a44f6ff9643802df0df962fd",
+        "request":  {
+                        "task_id":  "e2e-20260520073902-long",
+                        "torrent":  "magnet:?xt=urn:btih:5aeea0aca9fa6f08a44f6ff9643802df0df962fd\u0026dn=long-running",
+                        "memory_gb":  1,
+                        "gpu_memory_gb":  0,
+                        "host_count":  1,
+                        "max_cpt":  0
+                    },
+        "response":  {
+                         "status_message":  "dispatched",
+                         "success":  true,
+                         "task_id":  "e2e-20260520073902-long"
+                     }
+    },
+    {
+        "duplicate":  true,
+        "kind":  "cpu-duplicate-submission",
+        "task_id":  "e2e-20260520073902-cpu",
+        "btih":  "f86abc07ee47c7a6299a36fee53483bf9ecc7c35",
+        "request":  {
+                        "task_id":  "e2e-20260520073902-cpu",
+                        "torrent":  "magnet:?xt=urn:btih:f86abc07ee47c7a6299a36fee53483bf9ecc7c35\u0026dn=cpu-duplicate-submission",
+                        "memory_gb":  1,
+                        "gpu_memory_gb":  0,
+                        "host_count":  1,
+                        "max_cpt":  0
+                    },
+        "response":  {
+                         "status_message":  "dispatched",
+                         "success":  true,
+                         "task_id":  "e2e-20260520073902-cpu"
+                     }
+    }
+]

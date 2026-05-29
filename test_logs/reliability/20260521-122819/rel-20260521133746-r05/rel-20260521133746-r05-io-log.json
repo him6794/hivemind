@@ -1,0 +1,4 @@
+{
+  "log": "task accepted (magnet, btih=7cebf12b4a2c93ef64e5361185314326bd424738, name=io)\nexecutor_start task_id=rel-20260521133746-r05-io kind=io\nexecutor_complete task_id=rel-20260521133746-r05-io kind=io elapsed_sec=7.755 work_hash=9b60fcf85223a008f1b873d71b7ee846ff7150dd\ntask completed",
+  "success": true
+}

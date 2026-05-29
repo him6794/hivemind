@@ -1,0 +1,388 @@
+{
+  "events": [
+    {
+      "at": "2026-05-20T00:48:56.521162+00:00",
+      "delay_sec": 14.2786893163102,
+      "event": "worker_killed",
+      "pid": 20068,
+      "worker": "worker1"
+    },
+    {
+      "at": "2026-05-20T00:49:18.962933+00:00",
+      "delay_sec": 21.659800057125697,
+      "event": "worker_restarted",
+      "pid": 2556,
+      "worker": "worker1"
+    }
+  ],
+  "failures": [
+    "task rel-20260520084623-r01-cpu expected COMPLETED got PENDING: [PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+    "task rel-20260520084623-r01-cpu result btih mismatch",
+    "task rel-20260520084623-r01-io expected COMPLETED got PENDING: [PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+    "task rel-20260520084623-r01-io result btih mismatch",
+    "task rel-20260520084623-r01-failure expected FAILED got PENDING: [PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+    "task rel-20260520084623-r01-retry expected COMPLETED got PENDING: [PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+    "task rel-20260520084623-r01-retry result btih mismatch",
+    "task rel-20260520084623-r01-long expected COMPLETED got PENDING: [PROBE_FAIL] worker probe failed at 127.0.0.1:50054",
+    "task rel-20260520084623-r01-long result btih mismatch",
+    "task rel-20260520084623-r01-parallel-0 expected COMPLETED got PENDING: [PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+    "task rel-20260520084623-r01-parallel-0 result btih mismatch",
+    "task rel-20260520084623-r01-parallel-1 expected COMPLETED got PENDING: [PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+    "task rel-20260520084623-r01-parallel-1 result btih mismatch",
+    "task rel-20260520084623-r01-parallel-2 expected COMPLETED got PENDING: [PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+    "task rel-20260520084623-r01-parallel-2 result btih mismatch",
+    "stuck non-terminal tasks: ['rel-20260520084623-r01-parallel-2', 'rel-20260520084623-r01-parallel-1', 'rel-20260520084623-r01-parallel-0', 'rel-20260520084623-r01-long', 'rel-20260520084623-r01-retry', 'rel-20260520084623-r01-failure', 'rel-20260520084623-r01-io', 'rel-20260520084623-r01-cpu']"
+  ],
+  "finished_at": "2026-05-20T00:53:35.306285+00:00",
+  "observed_tasks": {
+    "rel-20260520084623-r01-cpu": {
+      "BilledAmount": 0,
+      "BillingSettled": false,
+      "CpuUsage": 0,
+      "ExpectedBTIH": "8315c7a6f76709a624ab9cbf586e0494b8f99c62",
+      "GpuMemoryUsage": 0,
+      "GpuUsage": 0,
+      "HostCount": 1,
+      "LastSettlementAt": "0001-01-01T00:00:00Z",
+      "LastUpdate": "2026-05-20T08:46:51.0634826+08:00",
+      "MemoryUsage": 0,
+      "Output": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+      "Owner": "worker1",
+      "ReqCPUScore": 0,
+      "ReqGPUMemoryGB": 0,
+      "ReqGPUScore": 0,
+      "ReqMemoryGB": 1,
+      "ResultTorrent": "",
+      "RetryCount": 0,
+      "Status": "PENDING",
+      "StatusMessage": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+      "TaskID": "rel-20260520084623-r01-cpu",
+      "TorrentSource": "magnet:?xt=urn:btih:8315c7a6f76709a624ab9cbf586e0494b8f99c62&dn=cpu",
+      "WorkerID": "",
+      "WorkerIP": ""
+    },
+    "rel-20260520084623-r01-failure": {
+      "BilledAmount": 0,
+      "BillingSettled": false,
+      "CpuUsage": 0,
+      "ExpectedBTIH": "9d590b9a7d7d521c3afc2e7cb9f007fc55034a5f",
+      "GpuMemoryUsage": 0,
+      "GpuUsage": 0,
+      "HostCount": 1,
+      "LastSettlementAt": "0001-01-01T00:00:00Z",
+      "LastUpdate": "2026-05-20T08:47:22.4118952+08:00",
+      "MemoryUsage": 0,
+      "Output": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+      "Owner": "worker1",
+      "ReqCPUScore": 0,
+      "ReqGPUMemoryGB": 0,
+      "ReqGPUScore": 0,
+      "ReqMemoryGB": 1,
+      "ResultTorrent": "",
+      "RetryCount": 0,
+      "Status": "PENDING",
+      "StatusMessage": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+      "TaskID": "rel-20260520084623-r01-failure",
+      "TorrentSource": "magnet:?xt=urn:btih:9d590b9a7d7d521c3afc2e7cb9f007fc55034a5f&dn=failure",
+      "WorkerID": "",
+      "WorkerIP": ""
+    },
+    "rel-20260520084623-r01-io": {
+      "BilledAmount": 0,
+      "BillingSettled": false,
+      "CpuUsage": 0,
+      "ExpectedBTIH": "361ab6c0519ce1abf0b4cda7f2a94948b0e3d002",
+      "GpuMemoryUsage": 0,
+      "GpuUsage": 0,
+      "HostCount": 1,
+      "LastSettlementAt": "0001-01-01T00:00:00Z",
+      "LastUpdate": "2026-05-20T08:47:06.5789924+08:00",
+      "MemoryUsage": 0,
+      "Output": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+      "Owner": "worker1",
+      "ReqCPUScore": 0,
+      "ReqGPUMemoryGB": 0,
+      "ReqGPUScore": 0,
+      "ReqMemoryGB": 1,
+      "ResultTorrent": "",
+      "RetryCount": 0,
+      "Status": "PENDING",
+      "StatusMessage": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+      "TaskID": "rel-20260520084623-r01-io",
+      "TorrentSource": "magnet:?xt=urn:btih:361ab6c0519ce1abf0b4cda7f2a94948b0e3d002&dn=io",
+      "WorkerID": "",
+      "WorkerIP": ""
+    },
+    "rel-20260520084623-r01-long": {
+      "BilledAmount": 0,
+      "BillingSettled": false,
+      "CpuUsage": 0,
+      "ExpectedBTIH": "0f00ed421962f63a196049c8f8d4d85b55f7dad8",
+      "GpuMemoryUsage": 0,
+      "GpuUsage": 0,
+      "HostCount": 1,
+      "LastSettlementAt": "0001-01-01T00:00:00Z",
+      "LastUpdate": "2026-05-20T08:47:54.2899658+08:00",
+      "MemoryUsage": 0,
+      "Output": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50054",
+      "Owner": "worker1",
+      "ReqCPUScore": 0,
+      "ReqGPUMemoryGB": 0,
+      "ReqGPUScore": 0,
+      "ReqMemoryGB": 1,
+      "ResultTorrent": "",
+      "RetryCount": 0,
+      "Status": "PENDING",
+      "StatusMessage": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50054",
+      "TaskID": "rel-20260520084623-r01-long",
+      "TorrentSource": "magnet:?xt=urn:btih:0f00ed421962f63a196049c8f8d4d85b55f7dad8&dn=long",
+      "WorkerID": "",
+      "WorkerIP": ""
+    },
+    "rel-20260520084623-r01-parallel-0": {
+      "BilledAmount": 0,
+      "BillingSettled": false,
+      "CpuUsage": 0,
+      "ExpectedBTIH": "25e84cc48fd114f9e726b615f8e9befc026a7141",
+      "GpuMemoryUsage": 0,
+      "GpuUsage": 0,
+      "HostCount": 1,
+      "LastSettlementAt": "0001-01-01T00:00:00Z",
+      "LastUpdate": "2026-05-20T08:48:09.9114707+08:00",
+      "MemoryUsage": 0,
+      "Output": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+      "Owner": "worker1",
+      "ReqCPUScore": 0,
+      "ReqGPUMemoryGB": 0,
+      "ReqGPUScore": 0,
+      "ReqMemoryGB": 1,
+      "ResultTorrent": "",
+      "RetryCount": 0,
+      "Status": "PENDING",
+      "StatusMessage": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+      "TaskID": "rel-20260520084623-r01-parallel-0",
+      "TorrentSource": "magnet:?xt=urn:btih:25e84cc48fd114f9e726b615f8e9befc026a7141&dn=parallel-0",
+      "WorkerID": "",
+      "WorkerIP": ""
+    },
+    "rel-20260520084623-r01-parallel-1": {
+      "BilledAmount": 0,
+      "BillingSettled": false,
+      "CpuUsage": 0,
+      "ExpectedBTIH": "6b5ae27965d7a03ff6d4307d01951b2d3ed996b4",
+      "GpuMemoryUsage": 0,
+      "GpuUsage": 0,
+      "HostCount": 1,
+      "LastSettlementAt": "0001-01-01T00:00:00Z",
+      "LastUpdate": "2026-05-20T08:48:25.4914778+08:00",
+      "MemoryUsage": 0,
+      "Output": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+      "Owner": "worker1",
+      "ReqCPUScore": 0,
+      "ReqGPUMemoryGB": 0,
+      "ReqGPUScore": 0,
+      "ReqMemoryGB": 1,
+      "ResultTorrent": "",
+      "RetryCount": 0,
+      "Status": "PENDING",
+      "StatusMessage": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+      "TaskID": "rel-20260520084623-r01-parallel-1",
+      "TorrentSource": "magnet:?xt=urn:btih:6b5ae27965d7a03ff6d4307d01951b2d3ed996b4&dn=parallel-1",
+      "WorkerID": "",
+      "WorkerIP": ""
+    },
+    "rel-20260520084623-r01-parallel-2": {
+      "BilledAmount": 0,
+      "BillingSettled": false,
+      "CpuUsage": 0,
+      "ExpectedBTIH": "3f9c6f11b0e153da9e10b7b216dec92261bce5da",
+      "GpuMemoryUsage": 0,
+      "GpuUsage": 0,
+      "HostCount": 1,
+      "LastSettlementAt": "0001-01-01T00:00:00Z",
+      "LastUpdate": "2026-05-20T08:48:41.067739+08:00",
+      "MemoryUsage": 0,
+      "Output": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+      "Owner": "worker1",
+      "ReqCPUScore": 0,
+      "ReqGPUMemoryGB": 0,
+      "ReqGPUScore": 0,
+      "ReqMemoryGB": 1,
+      "ResultTorrent": "",
+      "RetryCount": 0,
+      "Status": "PENDING",
+      "StatusMessage": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+      "TaskID": "rel-20260520084623-r01-parallel-2",
+      "TorrentSource": "magnet:?xt=urn:btih:3f9c6f11b0e153da9e10b7b216dec92261bce5da&dn=parallel-2",
+      "WorkerID": "",
+      "WorkerIP": ""
+    },
+    "rel-20260520084623-r01-retry": {
+      "BilledAmount": 0,
+      "BillingSettled": false,
+      "CpuUsage": 0,
+      "ExpectedBTIH": "4da0cbee851b586833fc78cd4dcbadd5bb8fa5fb",
+      "GpuMemoryUsage": 0,
+      "GpuUsage": 0,
+      "HostCount": 1,
+      "LastSettlementAt": "0001-01-01T00:00:00Z",
+      "LastUpdate": "2026-05-20T08:47:38.4144353+08:00",
+      "MemoryUsage": 0,
+      "Output": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+      "Owner": "worker1",
+      "ReqCPUScore": 0,
+      "ReqGPUMemoryGB": 0,
+      "ReqGPUScore": 0,
+      "ReqMemoryGB": 1,
+      "ResultTorrent": "",
+      "RetryCount": 0,
+      "Status": "PENDING",
+      "StatusMessage": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+      "TaskID": "rel-20260520084623-r01-retry",
+      "TorrentSource": "magnet:?xt=urn:btih:4da0cbee851b586833fc78cd4dcbadd5bb8fa5fb&dn=retry",
+      "WorkerID": "",
+      "WorkerIP": ""
+    }
+  },
+  "passed": false,
+  "run": 1,
+  "run_id": "rel-20260520084623-r01",
+  "started_at": "2026-05-20T00:46:23.658320+00:00",
+  "tasks": {
+    "rel-20260520084623-r01-cpu": {
+      "btih": "8315c7a6f76709a624ab9cbf586e0494b8f99c62",
+      "expected_status": "COMPLETED",
+      "kind": "cpu",
+      "task_id": "rel-20260520084623-r01-cpu",
+      "upload": {
+        "status_message": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+        "success": false,
+        "task_id": "rel-20260520084623-r01-cpu"
+      }
+    },
+    "rel-20260520084623-r01-failure": {
+      "btih": "9d590b9a7d7d521c3afc2e7cb9f007fc55034a5f",
+      "expected_status": "FAILED",
+      "kind": "failure",
+      "task_id": "rel-20260520084623-r01-failure",
+      "upload": {
+        "status_message": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+        "success": false,
+        "task_id": "rel-20260520084623-r01-failure"
+      }
+    },
+    "rel-20260520084623-r01-io": {
+      "btih": "361ab6c0519ce1abf0b4cda7f2a94948b0e3d002",
+      "expected_status": "COMPLETED",
+      "kind": "io",
+      "task_id": "rel-20260520084623-r01-io",
+      "upload": {
+        "status_message": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+        "success": false,
+        "task_id": "rel-20260520084623-r01-io"
+      }
+    },
+    "rel-20260520084623-r01-long": {
+      "btih": "0f00ed421962f63a196049c8f8d4d85b55f7dad8",
+      "expected_status": "COMPLETED",
+      "kind": "long",
+      "task_id": "rel-20260520084623-r01-long",
+      "upload": {
+        "status_message": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50054",
+        "success": false,
+        "task_id": "rel-20260520084623-r01-long"
+      }
+    },
+    "rel-20260520084623-r01-parallel-0": {
+      "btih": "25e84cc48fd114f9e726b615f8e9befc026a7141",
+      "expected_status": "COMPLETED",
+      "kind": "parallel-0",
+      "task_id": "rel-20260520084623-r01-parallel-0",
+      "upload": {
+        "status_message": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+        "success": false,
+        "task_id": "rel-20260520084623-r01-parallel-0"
+      }
+    },
+    "rel-20260520084623-r01-parallel-1": {
+      "btih": "6b5ae27965d7a03ff6d4307d01951b2d3ed996b4",
+      "expected_status": "COMPLETED",
+      "kind": "parallel-1",
+      "task_id": "rel-20260520084623-r01-parallel-1",
+      "upload": {
+        "status_message": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+        "success": false,
+        "task_id": "rel-20260520084623-r01-parallel-1"
+      }
+    },
+    "rel-20260520084623-r01-parallel-2": {
+      "btih": "3f9c6f11b0e153da9e10b7b216dec92261bce5da",
+      "expected_status": "COMPLETED",
+      "kind": "parallel-2",
+      "task_id": "rel-20260520084623-r01-parallel-2",
+      "upload": {
+        "status_message": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+        "success": false,
+        "task_id": "rel-20260520084623-r01-parallel-2"
+      }
+    },
+    "rel-20260520084623-r01-retry": {
+      "btih": "4da0cbee851b586833fc78cd4dcbadd5bb8fa5fb",
+      "expected_status": "COMPLETED",
+      "kind": "retry",
+      "task_id": "rel-20260520084623-r01-retry",
+      "upload": {
+        "status_message": "[PROBE_FAIL] worker probe failed at 127.0.0.1:50055",
+        "success": false,
+        "task_id": "rel-20260520084623-r01-retry"
+      }
+    }
+  },
+  "workers_final": {
+    "success": true,
+    "workers": [
+      {
+        "addr": "127.0.0.1:50053",
+        "id": "worker1",
+        "last_heartbeat": "2026-05-20T08:53:33.2307665+08:00",
+        "meta": {
+          "cpu_cores": "12",
+          "cpu_score": "240",
+          "gpu_memory": "15",
+          "gpu_score": "192",
+          "location": "Local",
+          "memory_gb": "31"
+        },
+        "status": "ACTIVE"
+      },
+      {
+        "addr": "127.0.0.1:50054",
+        "id": "worker2",
+        "last_heartbeat": "2026-05-20T08:53:34.9733173+08:00",
+        "meta": {
+          "cpu_cores": "12",
+          "cpu_score": "240",
+          "gpu_memory": "15",
+          "gpu_score": "192",
+          "location": "Local",
+          "memory_gb": "31"
+        },
+        "status": "ACTIVE"
+      },
+      {
+        "addr": "127.0.0.1:50055",
+        "id": "worker3",
+        "last_heartbeat": "2026-05-20T08:53:30.7695226+08:00",
+        "meta": {
+          "cpu_cores": "12",
+          "cpu_score": "240",
+          "gpu_memory": "15",
+          "gpu_score": "192",
+          "location": "Local",
+          "memory_gb": "31"
+        },
+        "status": "ACTIVE"
+      }
+    ]
+  }
+}

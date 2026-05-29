@@ -1,0 +1,4 @@
+{
+  "log": "task accepted (magnet, btih=d27b028b999e09d531d414addc0e6d078295d902, name=failure)\nexecutor_start task_id=rel-20260520085710-r01-failure kind=failure\nexecutor_progress kind=failure elapsed_sec=1 target_sec=3\nexecutor_failure_injected kind=failure\ntask failed: executor failed: exit status 42",
+  "success": true
+}

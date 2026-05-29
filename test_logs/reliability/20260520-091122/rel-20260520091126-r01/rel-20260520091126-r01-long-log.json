@@ -1,0 +1,4 @@
+{
+  "log": "task accepted (magnet, btih=a204849fcef156b332fba64d141e2931f716d7f2, name=long)\ntask accepted (magnet, btih=a204849fcef156b332fba64d141e2931f716d7f2, name=long)\nexecutor_start task_id=rel-20260520091126-r01-long kind=long\nexecutor_progress kind=long elapsed_sec=1 target_sec=30\nexecutor_complete task_id=rel-20260520091126-r01-long kind=long elapsed_sec=32.001 work_hash=9916fb31b28c956689ab7ff4078c8a987ce5ebd6\ntask completed",
+  "success": true
+}

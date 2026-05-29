@@ -1,0 +1,12 @@
+{
+  "events": [],
+  "failures": [
+    "harness exception: POST /api/login returned HTTP 502: {'status_message': 'rpc error: code = DeadlineExceeded desc = received context error while waiting for new LB policy update: context deadline exceeded', 'success': False}"
+  ],
+  "finished_at": "2026-05-19T23:59:46.539627+00:00",
+  "passed": false,
+  "run": 1,
+  "run_id": "rel-20260520075929-r01",
+  "started_at": "2026-05-19T23:59:29.534444+00:00",
+  "tasks": {}
+}
