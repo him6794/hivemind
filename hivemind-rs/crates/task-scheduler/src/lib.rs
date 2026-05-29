@@ -1,5 +1,6 @@
 ﻿pub mod task_repository;
 pub mod scheduler;
+pub mod dispatcher;
 
 use anyhow::Result;
 use hivemind_auth::AuthManager;
