@@ -67,7 +67,7 @@ async fn main() -> Result<()> {
         let task_timeout = 30u64;
         let max_redispatch = 2i32;
         let dispatcher = Arc::new(Dispatcher::new(db.clone(), task_timeout, max_redispatch));
-        let (workers_tx, workers_rx) = tokio::sync::watch::channel(Vec::new());
+        let (_workers_tx, workers_rx) = tokio::sync::watch::channel(Vec::new());
         let dispatch_shutdown = dispatcher.clone().start_dispatch_loop(
             workers_rx,
             std::time::Duration::from_secs(5),

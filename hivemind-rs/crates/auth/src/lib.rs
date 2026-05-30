@@ -1,4 +1,4 @@
-﻿pub mod jwt_service;
+pub mod jwt_service;
 pub mod user_repository;
 
 use anyhow::Result;
@@ -84,11 +84,12 @@ mod tests {
     use super::*;
     use hivemind_config::HivemindConfig;
     use hivemind_database::DatabaseManager;
-    use sqlx::postgres::PgPoolOptions;
 
     async fn setup_test_db() -> Option<DatabaseManager> {
         let config = HivemindConfig::default();
-        DatabaseManager::new(&config).await.ok()
+        let db = DatabaseManager::new(&config).await.ok()?;
+        db.run_migrations().await.ok()?;
+        Some(db)
     }
 
     #[tokio::test]

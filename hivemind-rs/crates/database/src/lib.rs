@@ -25,12 +25,5 @@ impl Clone for DatabaseManager {
     }
 }
 
-#[allow(unused_must_use)]
-impl Drop for DatabaseManager {
-    fn drop(&mut self) {
-        self.pool.close();
-    }
-}
-
 pub mod postgres;
 pub mod redis_store;

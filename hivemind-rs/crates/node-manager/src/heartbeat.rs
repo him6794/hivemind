@@ -1,5 +1,4 @@
 use anyhow::Result;
-use hivemind_models::WorkerStatus;
 use tracing::{info, warn, error};
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -8,6 +7,7 @@ use crate::NodeManager;
 
 pub struct HeartbeatHandler {
     manager: Arc<NodeManager>,
+    #[allow(dead_code)]
     stale_threshold_secs: u64,
 }
 
@@ -97,10 +97,17 @@ impl HeartbeatHandler {
 mod tests {
     use super::*;
     use hivemind_models::WorkerNode;
+    use hivemind_models::WorkerStatus;
+
+    async fn setup_db() -> Option<(hivemind_config::HivemindConfig, hivemind_database::DatabaseManager)> {
+        let config = hivemind_config::HivemindConfig::default();
+        let db = hivemind_database::DatabaseManager::new(&config).await.ok()?;
+        db.run_migrations().await.ok()?;
+        Some((config, db))
+    }
 
     #[test]
     fn test_heartbeat_validation_empty_worker_id() {
-        // Validation is in process_heartbeat which is async, test the logic
         let worker_id = "";
         assert!(worker_id.trim().is_empty(), "Empty worker_id should be detected");
     }
@@ -124,7 +131,6 @@ mod tests {
             assert_eq!(&normalized, s);
         }
 
-        // Unknown status should default to ACTIVE
         let unknown = "unknown_status";
         let normalized = match unknown.to_uppercase().as_str() {
             "ACTIVE" | "IDLE" | "BUSY" => unknown.to_uppercase(),
@@ -136,10 +142,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_heartbeat_invalid_worker_id() {
-        let config = hivemind_config::HivemindConfig::default();
-        let db = match hivemind_database::DatabaseManager::new(&config).await {
-            Ok(db) => db,
-            Err(_) => return,
+        let (config, db) = match setup_db().await {
+            Some(v) => v,
+            None => return,
         };
         let manager = Arc::new(NodeManager::new(&config, db));
         let handler = HeartbeatHandler::new(manager, 30);
@@ -150,10 +155,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_heartbeat_invalid_cpu() {
-        let config = hivemind_config::HivemindConfig::default();
-        let db = match hivemind_database::DatabaseManager::new(&config).await {
-            Ok(db) => db,
-            Err(_) => return,
+        let (config, db) = match setup_db().await {
+            Some(v) => v,
+            None => return,
         };
         let manager = Arc::new(NodeManager::new(&config, db));
         let handler = HeartbeatHandler::new(manager, 30);
@@ -164,17 +168,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_heartbeat_valid() {
-        let config = hivemind_config::HivemindConfig::default();
-        let db = match hivemind_database::DatabaseManager::new(&config).await {
-            Ok(db) => db,
-            Err(_) => return,
+        let (config, db) = match setup_db().await {
+            Some(v) => v,
+            None => return,
         };
-        db.run_migrations().await.ok();
 
         let manager = Arc::new(NodeManager::new(&config, db.clone()));
         let handler = HeartbeatHandler::new(manager.clone(), 30);
 
-        // Register a worker first
         let worker = WorkerNode {
             id: uuid::Uuid::new_v4(),
             worker_id: "heartbeat-test-w1".into(),
@@ -201,15 +202,12 @@ mod tests {
         };
         manager.register_worker(&worker).await.ok();
 
-        // Send heartbeat
         let result = handler.process_heartbeat("heartbeat-test-w1", "ACTIVE", 45.5, 60.0, 0.0, 0.0).await;
         assert!(result.is_ok(), "Valid heartbeat should succeed: {:?}", result.err());
 
-        // Verify updated
         let updated = manager.get_worker("heartbeat-test-w1").await.unwrap().unwrap();
         assert!((updated.cpu_usage - 45.5).abs() < 0.1, "CPU usage should be updated");
 
-        // Cleanup
         sqlx::query("DELETE FROM worker_nodes WHERE worker_id = 'heartbeat-test-w1'")
             .execute(&db.pool).await.ok();
     }
