@@ -1,23 +1,15 @@
 use axum::{extract::State, http::StatusCode, Json};
-use hivemind_auth::AuthManager;
-use hivemind_database::DatabaseManager;
-use hivemind_models::{
-    LoginRequest, LoginResponse, Task, TaskInfo, TaskStatus,
-};
-use hivemind_task_scheduler::TaskScheduler;
-use serde::{Deserialize, Serialize};
+use hivemind_models::{LoginRequest, LoginResponse, Task, TaskInfo, TaskStatus};
 
 #[derive(Clone)]
 pub struct AppState {
-    pub db: DatabaseManager,
-    pub auth: AuthManager,
-    pub scheduler: TaskScheduler,
+    pub db: hivemind_database::DatabaseManager,
+    pub auth: hivemind_auth::AuthManager,
+    pub scheduler: hivemind_task_scheduler::TaskScheduler,
     pub nodepool_grpc_addr: String,
 }
 
-// --- User Endpoints ---
-
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 pub struct LoginPayload {
     pub username: String,
     pub password: String,
@@ -27,20 +19,11 @@ pub async fn login_handler(
     State(state): State<AppState>,
     Json(payload): Json<LoginPayload>,
 ) -> Result<Json<LoginResponse>, StatusCode> {
-    let req = LoginRequest {
-        username: payload.username,
-        password: payload.password,
-    };
-
-    state
-        .auth
-        .login(&req)
-        .await
-        .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    let req = LoginRequest { username: payload.username, password: payload.password };
+    state.auth.login(&req).await.map(Json).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-#[derive(Serialize)]
+#[derive(serde::Serialize)]
 pub struct BalanceResponse {
     pub success: bool,
     pub balance: i64,
@@ -51,25 +34,16 @@ pub async fn get_balance_handler(
     headers: axum::http::HeaderMap,
 ) -> Result<Json<BalanceResponse>, StatusCode> {
     let token = extract_token(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
-    let claims = state.auth.validate_token(&token).map_err(|_| StatusCode::UNAUTHORIZED)?;
-
-    let balance: Option<i64> = sqlx::query_scalar(
-        "SELECT balance FROM users WHERE username = $1",
-    )
-    .bind(&claims.sub)
-    .fetch_optional(&state.db.pool)
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(BalanceResponse {
-        success: true,
-        balance: balance.unwrap_or(0),
-    }))
+    let claims = state.auth.validate_token(token).map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let balance: Option<i64> = sqlx::query_scalar("SELECT balance FROM users WHERE username = $1")
+        .bind(&claims.sub)
+        .fetch_optional(&state.db.pool)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(BalanceResponse { success: true, balance: balance.unwrap_or(0) }))
 }
 
-// --- Task Endpoints ---
-
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 pub struct UploadTaskPayload {
     pub task_id: Option<String>,
     pub torrent: String,
@@ -82,7 +56,7 @@ pub struct UploadTaskPayload {
     pub max_cpt: Option<i64>,
 }
 
-#[derive(Serialize)]
+#[derive(serde::Serialize)]
 pub struct UploadTaskResponse {
     pub success: bool,
     pub task_id: String,
@@ -95,20 +69,11 @@ pub async fn upload_task_handler(
     Json(payload): Json<UploadTaskPayload>,
 ) -> Result<Json<UploadTaskResponse>, StatusCode> {
     let token = extract_token(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
-    let claims = state.auth.validate_token(&token).map_err(|_| StatusCode::UNAUTHORIZED)?;
-
-    let task_id = payload
-        .task_id
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
+    let claims = state.auth.validate_token(token).map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let task_id = payload.task_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     if let Ok(Some(_)) = state.scheduler.get_task(&task_id).await {
-        return Ok(Json(UploadTaskResponse {
-            success: false,
-            task_id,
-            status_message: "Task with this ID already exists".into(),
-        }));
+        return Ok(Json(UploadTaskResponse { success: false, task_id, status_message: "Task already exists".into() }));
     }
-
     let task = Task {
         id: uuid::Uuid::new_v4(),
         task_id: task_id.clone(),
@@ -148,48 +113,29 @@ pub async fn upload_task_handler(
         last_update: chrono::Utc::now(),
         completed_at: None,
     };
-
     match state.scheduler.create_task(&task).await {
-        Ok(_) => Ok(Json(UploadTaskResponse {
-            success: true,
-            task_id: task_id.clone(),
-            status_message: "Task created successfully".into(),
-        })),
-        Err(e) => Ok(Json(UploadTaskResponse {
-            success: false,
-            task_id,
-            status_message: format!("Failed to create task: {}", e),
-        })),
+        Ok(_) => Ok(Json(UploadTaskResponse { success: true, task_id, status_message: "Task created successfully".into() })),
+        Err(e) => Ok(Json(UploadTaskResponse { success: false, task_id, status_message: format!("Failed: {}", e) })),
     }
 }
 
-#[derive(Serialize)]
-pub struct TaskListResponse {
-    pub tasks: Vec<TaskInfo>,
-}
+#[derive(serde::Serialize)]
+pub struct TaskListResponse { pub tasks: Vec<TaskInfo> }
 
 pub async fn list_tasks_handler(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<TaskListResponse>, StatusCode> {
     let token = extract_token(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
-    let claims = state.auth.validate_token(&token).map_err(|_| StatusCode::UNAUTHORIZED)?;
-
-    let tasks = state
-        .scheduler
-        .list_user_tasks(&claims.sub)
-        .await
+    let claims = state.auth.validate_token(token).map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let tasks = state.scheduler.list_user_tasks(&claims.sub).await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
     let task_infos: Vec<TaskInfo> = tasks.into_iter().map(TaskInfo::from).collect();
-
     Ok(Json(TaskListResponse { tasks: task_infos }))
 }
 
-#[derive(Deserialize)]
-pub struct TaskIdParam {
-    pub task_id: String,
-}
+#[derive(serde::Deserialize)]
+pub struct TaskIdParam { pub task_id: String }
 
 pub async fn get_task_result_handler(
     State(state): State<AppState>,
@@ -197,29 +143,17 @@ pub async fn get_task_result_handler(
     axum::extract::Path(params): axum::extract::Path<TaskIdParam>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let token = extract_token(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
-    let claims = state.auth.validate_token(&token).map_err(|_| StatusCode::UNAUTHORIZED)?;
-
-    let task = state
-        .scheduler
-        .get_task(&params.task_id)
-        .await
+    let claims = state.auth.validate_token(token).map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let task = state.scheduler.get_task(&params.task_id).await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
     match task {
-        Some(t) if t.owner == claims.sub => {
-            Ok(Json(serde_json::json!({
-                "success": true,
-                "status_message": t.status_message.unwrap_or_default(),
-                "result_torrent": t.result_torrent,
-                "status": t.status.as_str(),
-            })))
-        }
+        Some(t) if t.owner == claims.sub => Ok(Json(serde_json::json!({
+            "success": true, "status_message": t.status_message.unwrap_or_default(),
+            "result_torrent": t.result_torrent, "status": t.status.as_str(),
+        }))),
         Some(_) => Err(StatusCode::FORBIDDEN),
         None => Ok(Json(serde_json::json!({
-            "success": false,
-            "status_message": "Task not found",
-            "result_torrent": null,
-            "status": "UNKNOWN",
+            "success": false, "status_message": "Task not found", "result_torrent": null, "status": "UNKNOWN",
         }))),
     }
 }
@@ -230,49 +164,23 @@ pub async fn stop_task_handler(
     axum::extract::Path(params): axum::extract::Path<TaskIdParam>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let token = extract_token(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
-    let claims = state.auth.validate_token(&token).map_err(|_| StatusCode::UNAUTHORIZED)?;
-
-    let task = state
-        .scheduler
-        .get_task(&params.task_id)
-        .await
+    let claims = state.auth.validate_token(token).map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let task = state.scheduler.get_task(&params.task_id).await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
     match task {
         Some(t) if t.owner == claims.sub && t.status.is_active() => {
-            state
-                .scheduler
-                .cancel_task(&params.task_id)
-                .await
+            state.scheduler.cancel_task(&params.task_id).await
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            Ok(Json(serde_json::json!({
-                "success": true,
-                "status_message": "Task cancelled",
-            })))
+            Ok(Json(serde_json::json!({"success": true, "status_message": "Task cancelled"})))
         }
         Some(t) if t.owner != claims.sub => Err(StatusCode::FORBIDDEN),
-        _ => Ok(Json(serde_json::json!({
-            "success": false,
-            "status_message": "Task not found or already completed",
-        }))),
+        _ => Ok(Json(serde_json::json!({"success": false, "status_message": "Task not found or already completed"}))),
     }
 }
 
-// --- Health ---
-
-pub async fn health_handler() -> &'static str {
-    "OK"
-}
-
-// --- Helpers ---
+pub async fn health_handler() -> &'static str { "OK" }
 
 fn extract_token(headers: &axum::http::HeaderMap) -> Option<&str> {
     let auth_header = headers.get(axum::http::header::AUTHORIZATION)?;
-    let auth_str = auth_header.to_str().ok()?;
-
-    if auth_str.starts_with("Bearer ") {
-        Some(&auth_str[7..])
-    } else {
-        None
-    }
+    auth_header.to_str().ok()?.strip_prefix("Bearer ")
 }

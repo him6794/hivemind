@@ -16,6 +16,10 @@ async fn setup_app() -> Option<(axum::Router, DatabaseManager)> {
     let config = hivemind_config::HivemindConfig::default();
     let db = DatabaseManager::new(&config).await.ok()?;
     db.run_migrations().await.ok()?;
+    hivemind_database::postgres::seed_default_user(&db.pool).await.ok()?;
+    // Clean up stale integration test data
+    sqlx::query("DELETE FROM tasks WHERE task_id LIKE 'integration-%'")
+        .execute(&db.pool).await.ok();
 
     let auth = AuthManager::new(&db, "integration-test-secret", 24);
     let scheduler = TaskScheduler::new(db.clone(), auth.clone());
@@ -52,14 +56,6 @@ async fn login(app: &axum::Router, username: &str, password: &str) -> Option<Str
     json["token"].as_str().map(|s| s.to_string())
 }
 
-/// Simulates a complete user journey:
-/// 1. Register (seeded default user)
-/// 2. Login
-/// 3. Check balance
-/// 4. Upload task
-/// 5. List tasks
-/// 6. Get task result
-/// 7. Stop task
 #[tokio::test]
 async fn test_full_user_journey() {
     let (app, db) = match setup_app().await {
@@ -115,7 +111,7 @@ async fn test_full_user_journey() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["success"], true);
+    assert_eq!(json["success"], true, "Task upload should succeed: {:?}", json);
     assert_eq!(json["task_id"], "integration-task-1");
 
     // Step 4: List tasks

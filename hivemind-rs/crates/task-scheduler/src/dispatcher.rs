@@ -1,6 +1,6 @@
 use anyhow::Result;
 use hivemind_database::DatabaseManager;
-use hivemind_models::{Task, TaskStatus, WorkerNode, WorkerStatus};
+use hivemind_models::{Task, WorkerNode};
 use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::{info, warn, error};
@@ -10,7 +10,7 @@ use crate::task_repository::TaskRepository;
 
 pub struct Dispatcher {
     repo: Arc<TaskRepository>,
-    db: DatabaseManager,
+    #[allow(dead_code)] db: DatabaseManager,
     task_timeout_secs: u64,
     max_redispatch: i32,
 }
@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn test_dispatcher_creation() {
         let config = hivemind_config::HivemindConfig::default();
-        let db_fut = hivemind_database::DatabaseManager::new(&config);
+        let _db_fut = hivemind_database::DatabaseManager::new(&config);
         // Can't async in sync test, just verify struct layout
         assert_eq!(30u64, 30); // Placeholder to verify test infra works
     }

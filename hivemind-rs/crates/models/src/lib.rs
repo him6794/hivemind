@@ -78,28 +78,34 @@ impl WorkerStatus {
             Self::Error => "ERROR",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Self {
-        match s.to_uppercase().as_str() {
+impl std::str::FromStr for WorkerStatus {
+    type Err = std::convert::Infallible;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s.to_uppercase().as_str() {
             "ACTIVE" => Self::Active,
             "IDLE" => Self::Idle,
             "BUSY" => Self::Busy,
             "OFFLINE" => Self::Offline,
             _ => Self::Error,
-        }
+        })
     }
 }
 
 impl sqlx::Type<sqlx::Postgres> for WorkerStatus {
     fn type_info() -> sqlx::postgres::PgTypeInfo {
-        <String as sqlx::Type<sqlx::Postgres>>::type_info()
+        sqlx::postgres::PgTypeInfo::with_name("VARCHAR")
+    }
+    fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
+        *ty == Self::type_info() || <String as sqlx::Type<sqlx::Postgres>>::compatible(ty)
     }
 }
 
 impl<'r> sqlx::Decode<'r, sqlx::Postgres> for WorkerStatus {
     fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
         let s = <String as sqlx::Decode<'r, sqlx::Postgres>>::decode(value)?;
-        Ok(WorkerStatus::from_str(&s))
+        Ok(s.parse().unwrap())
     }
 }
 
@@ -179,20 +185,6 @@ impl TaskStatus {
         }
     }
 
-    pub fn from_str(s: &str) -> Self {
-        match s.to_uppercase().as_str() {
-            "PENDING" => Self::Pending,
-            "QUEUED" => Self::Queued,
-            "ASSIGNED" => Self::Assigned,
-            "RUNNING" => Self::Running,
-            "COMPLETED" => Self::Completed,
-            "FAILED" => Self::Failed,
-            "CANCELLED" => Self::Cancelled,
-            "TIMED_OUT" => Self::TimedOut,
-            _ => Self::Pending,
-        }
-    }
-
     pub fn is_terminal(&self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled | Self::TimedOut)
     }
@@ -202,16 +194,36 @@ impl TaskStatus {
     }
 }
 
+impl std::str::FromStr for TaskStatus {
+    type Err = std::convert::Infallible;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s.to_uppercase().as_str() {
+            "PENDING" => Self::Pending,
+            "QUEUED" => Self::Queued,
+            "ASSIGNED" => Self::Assigned,
+            "RUNNING" => Self::Running,
+            "COMPLETED" => Self::Completed,
+            "FAILED" => Self::Failed,
+            "CANCELLED" => Self::Cancelled,
+            "TIMED_OUT" => Self::TimedOut,
+            _ => Self::Pending,
+        })
+    }
+}
+
 impl sqlx::Type<sqlx::Postgres> for TaskStatus {
     fn type_info() -> sqlx::postgres::PgTypeInfo {
-        <String as sqlx::Type<sqlx::Postgres>>::type_info()
+        sqlx::postgres::PgTypeInfo::with_name("VARCHAR")
+    }
+    fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
+        *ty == Self::type_info() || <String as sqlx::Type<sqlx::Postgres>>::compatible(ty)
     }
 }
 
 impl<'r> sqlx::Decode<'r, sqlx::Postgres> for TaskStatus {
     fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
         let s = <String as sqlx::Decode<'r, sqlx::Postgres>>::decode(value)?;
-        Ok(TaskStatus::from_str(&s))
+        Ok(s.parse().unwrap())
     }
 }
 

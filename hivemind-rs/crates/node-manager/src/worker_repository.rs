@@ -134,7 +134,9 @@ mod tests {
     async fn pool() -> Option<PgPool> {
         let url = std::env::var("HIVEMIND_TEST_DATABASE_URL")
             .unwrap_or_else(|_| "postgres://hivemind:hivemind@localhost:5432/hivemind_test".into());
-        PgPoolOptions::new().max_connections(1).connect(&url).await.ok()
+        let p = PgPoolOptions::new().max_connections(1).connect(&url).await.ok()?;
+        hivemind_database::postgres::run_migrations(&p).await.ok()?;
+        Some(p)
     }
 
     #[tokio::test]

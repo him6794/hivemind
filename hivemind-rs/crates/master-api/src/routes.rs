@@ -1,4 +1,4 @@
-﻿use axum::{
+use axum::{
     routing::{get, post},
     Router,
 };
@@ -19,8 +19,8 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/balance", get(handlers::get_balance_handler))
         .route("/api/tasks", post(handlers::upload_task_handler))
         .route("/api/tasks", get(handlers::list_tasks_handler))
-        .route("/api/tasks/{task_id}/result", get(handlers::get_task_result_handler))
-        .route("/api/tasks/{task_id}/stop", post(handlers::stop_task_handler))
+        .route("/api/tasks/:task_id/result", get(handlers::get_task_result_handler))
+        .route("/api/tasks/:task_id/stop", post(handlers::stop_task_handler))
         .layer(cors)
         .with_state(state)
 }

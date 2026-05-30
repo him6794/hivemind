@@ -1,4 +1,4 @@
-﻿use hivemind_models::{Task, WorkerNode, WorkerStatus};
+use hivemind_models::{Task, WorkerNode, WorkerStatus};
 
 /// Find the best worker for a given task based on resource requirements and availability
 pub async fn find_best_worker(
@@ -149,7 +149,7 @@ mod tests {
             make_worker("w1", 1, 2, 0.0, WorkerStatus::Active),
         ];
 
-        let mut task = Task {
+        let task = Task {
             id: uuid::Uuid::new_v4(),
             task_id: "t2".into(),
             owner: "u1".into(),

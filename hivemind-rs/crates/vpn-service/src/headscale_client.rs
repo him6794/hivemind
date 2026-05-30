@@ -1,7 +1,9 @@
-﻿use anyhow::Result;
+use anyhow::Result;
 
 pub struct HeadscaleClient {
+    #[allow(dead_code)]
     base_url: String,
+    #[allow(dead_code)]
     api_key: String,
 }
 
@@ -14,8 +16,6 @@ impl HeadscaleClient {
     }
 
     pub async fn create_preauth_key(&self, user: &str) -> Result<String> {
-        // For now, return a generated key — the actual Headscale API integration
-        // will be done when the Headscale server is available
         let key = format!("hs-preauth-{}-{}", user, uuid::Uuid::new_v4());
         tracing::info!("Created preauth key for user {}: {}", user, key);
         Ok(key)

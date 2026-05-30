@@ -30,7 +30,7 @@ pub async fn allocate_ip(db: &DatabaseManager, config: &HivemindConfig) -> Resul
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+
 
     #[test]
     fn test_allocate_ip_format() {
