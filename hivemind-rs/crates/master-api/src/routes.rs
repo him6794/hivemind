@@ -1,11 +1,10 @@
-use axum::{
-    routing::{get, post},
-    Router,
+﻿use axum::{
+    Router, routing::{get, post},
+    middleware,
 };
-use tower_http::cors::{Any, CorsLayer};
-
+use tower_http::cors::{CorsLayer, Any};
 use super::handlers::AppState;
-use super::handlers;
+use super::middleware as mw;
 
 pub fn create_router(state: AppState) -> Router {
     let cors = CorsLayer::new()
@@ -13,14 +12,20 @@ pub fn create_router(state: AppState) -> Router {
         .allow_methods(Any)
         .allow_headers(Any);
 
+    let public = Router::new()
+        .route("/health", get(super::handlers::health_check))
+        .route("/api/login", post(super::handlers::login));
+
+    let protected = Router::new()
+        .route("/api/tasks", post(super::handlers::create_task))
+        .route("/api/tasks", get(super::handlers::list_tasks))
+        .route("/api/tasks/{task_id}/log", get(super::handlers::get_task_log))
+        .route("/api/tasks/{task_id}/stop", post(super::handlers::stop_task))
+        .layer(middleware::from_fn_with_state(state.clone(), mw::auth_middleware));
+
     Router::new()
-        .route("/health", get(handlers::health_handler))
-        .route("/api/login", post(handlers::login_handler))
-        .route("/api/balance", get(handlers::get_balance_handler))
-        .route("/api/tasks", post(handlers::upload_task_handler))
-        .route("/api/tasks", get(handlers::list_tasks_handler))
-        .route("/api/tasks/:task_id/result", get(handlers::get_task_result_handler))
-        .route("/api/tasks/:task_id/stop", post(handlers::stop_task_handler))
+        .merge(public)
+        .merge(protected)
         .layer(cors)
         .with_state(state)
 }

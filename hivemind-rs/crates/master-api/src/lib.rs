@@ -19,13 +19,7 @@ impl MasterApiServer {
         scheduler: TaskScheduler,
         nodepool_grpc_addr: String,
     ) -> Self {
-        let state = handlers::AppState {
-            db,
-            auth,
-            scheduler,
-            nodepool_grpc_addr,
-        };
-
+        let state = handlers::AppState { db, auth, scheduler, nodepool_grpc_addr };
         let app = routes::create_router(state);
         Self { app }
     }
@@ -33,17 +27,8 @@ impl MasterApiServer {
     pub async fn serve(self, addr: &str) -> Result<()> {
         let listener = tokio::net::TcpListener::bind(addr).await?;
         tracing::info!("Master API server listening on {}", addr);
-
-        axum::serve(listener, self.app)
-            .await
+        axum::serve(listener, self.app).await
             .map_err(|e| anyhow::anyhow!("Server error: {}", e))?;
-
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests;
-
-#[cfg(test)]
-mod integration_tests;

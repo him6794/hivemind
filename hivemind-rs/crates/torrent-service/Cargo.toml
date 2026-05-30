@@ -1,0 +1,22 @@
+﻿[package]
+name = "hivemind-torrent-service"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+sha1.workspace = true
+hex.workspace = true
+bendy = { version = "0.4", features = ["serde"] }
+tracing.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+hivemind-common = { path = "../common" }
+hivemind-config = { path = "../config" }
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -4,7 +4,11 @@ package nodepool;
 
 option go_package = "./pb";
 
-message LoginRequest { 
+// ============================================================
+// Auth & User
+// ============================================================
+
+message LoginRequest {
     string username = 1;
     string password = 2;
 }
@@ -14,7 +18,6 @@ message LoginResponse {
     string status_message = 2;
     string token = 3;
 }
-
 
 message GetBalanceRequest {
     string username = 1;
@@ -27,45 +30,78 @@ message GetBalanceResponse {
     int64 balance = 3;
 }
 
+message RefreshTokenRequest {
+    string old_token = 1;
+}
+message RefreshTokenResponse {
+    bool success = 1;
+    string status_message = 2;
+    string new_token = 3;
+}
+
+// ============================================================
+// Resource Model: CPU / GPU / RAM / VRAM / Storage
+// ============================================================
+
+message ResourceSpec {
+    int32 cpu_cores = 1;
+    int64 memory_mb = 2;        // RAM in MB
+    int32 gpu_count = 3;
+    string gpu_name = 4;
+    int64 vram_mb = 5;          // VRAM in MB
+    int32 cpu_score = 6;
+    int32 gpu_score = 7;
+    int64 storage_total_gb = 8;
+    int64 storage_available_gb = 9;
+}
+
+message ResourceUsage {
+    float cpu_percent = 1;
+    float memory_percent = 2;
+    float gpu_percent = 3;
+    float vram_percent = 4;
+    float storage_percent = 5;
+}
+
+// ============================================================
+// Worker Registration & Status
+// ============================================================
+
 message RegisterWorkerNodeRequest {
-    string username = 1; 
-    string ip = 2; 
-    int32 cpu_cores = 3;
-    int32 memory_gb = 4;
-    int32 cpu_score = 5;
-    int32 gpu_score = 6;
-    int32 gpu_memory_gb = 7;
-    string location = 8;
+    string username = 1;
+    string ip = 2;
+    ResourceSpec resources = 3;
+    string location = 4;
 }
 
 message StatusResponse {
     bool success = 1;
     string status_message = 2;
 }
+
 message RunningStatusRequest {
-    string username = 1; 
-    string status = 2; 
-    float cpu_usage = 3; 
-    float memory_usage = 4; 
-    float gpu_usage = 5; 
-    float gpu_memory_usage = 6; 
+    string username = 1;
+    string status = 2;
+    ResourceUsage usage = 3;
 }
+
 message RunningStatusResponse {
     bool success = 1;
     string status_message = 2;
 }
 
+// ============================================================
+// Master → Nodepool: Task Submission / Query / Stop
+// ============================================================
+
 message UploadTaskRequest {
     string task_id = 1;
-    string torrent = 2; 
-    int32 memory_gb = 3;
-    int32 cpu_score = 4;
-    int32 gpu_score = 5;
-    int32 gpu_memory_gb = 6;
-    string location = 7;
-    int32 host_count = 8; 
-    string token = 9; 
-    int64 max_cpt = 10; 
+    string torrent = 2;        // BT info-hash or magnet URI
+    ResourceSpec requirements = 3;
+    string location = 4;
+    int32 host_count = 5;
+    string token = 6;
+    int64 max_cpt = 7;
 }
 
 message UploadTaskResponse {
@@ -74,7 +110,7 @@ message UploadTaskResponse {
 }
 
 message GetAllUserTasksRequest {
-    string token = 1; 
+    string token = 1;
 }
 
 message GetAllUserTasksResponse {
@@ -85,66 +121,19 @@ message TaskInfo {
     string task_id = 1;
     string status = 2;
     string status_message = 3;
-    float cpu_usage = 4; 
-    float memory_usage = 5; 
-    float gpu_usage = 6; 
-    float gpu_memory_usage = 7; 
-    string worker_ip = 8; 
-}
-
-message TaskOutputUploadRequest {
-    string task_id = 1;
-    string output = 2;
-    string token = 3; 
-}
-message TaskOutputUploadResponse {
-    bool success = 1;
-    string status_message = 2;
-}
-message TaskResultUploadRequest {
-    string task_id = 1;
-    string result_torrent = 2; 
-    string token = 3; 
-}
-message TaskResultUploadResponse {
-    bool success = 1;
-    string status_message = 2;
+    ResourceUsage usage = 4;
+    string worker_ip = 5;
 }
 
 message GetTaskResultRequest {
     string task_id = 1;
-    string token = 2; 
+    string token = 2;
 }
 
 message GetTaskResultResponse {
     bool success = 1;
     string status_message = 2;
     string result_torrent = 3;
-}
-
-
-message ExecuteTaskRequest {
-    string task_id = 1;
-    string torrent = 2; 
-    float cpu_usage = 3; 
-    float gpu_usage = 4; 
-    int32 memory_gb = 5;
-    int32 gpu_memory_gb = 6;
-}
-
-message ExecuteTaskResponse {
-    bool success = 1;
-    string status_message = 2;
-}
-
-message TaskOutputRequest {
-    string task_id = 1;
-    string token = 2; 
-}
-message TaskOutputResponse {
-    bool success = 1;
-    string status_message = 2;
-    string output = 3;
 }
 
 message StopTaskRequest {
@@ -156,6 +145,62 @@ message StopTaskResponse {
     bool success = 1;
     string status_message = 2;
 }
+
+message TasklogRequest {
+    string task_id = 1;
+    string token = 2;
+}
+
+message TasklogResponse {
+    bool success = 1;
+    string log = 2;
+}
+
+// ============================================================
+// Nodepool → Worker: Task Dispatch & Reporting
+// ============================================================
+
+message ExecuteTaskRequest {
+    string task_id = 1;
+    string torrent = 2;        // BT info-hash for P2P download
+    ResourceSpec resource_limits = 3;
+}
+
+message ExecuteTaskResponse {
+    bool success = 1;
+    string status_message = 2;
+}
+
+message TaskOutputUploadRequest {
+    string task_id = 1;
+    string output = 2;
+    string token = 3;
+}
+message TaskOutputUploadResponse {
+    bool success = 1;
+    string status_message = 2;
+}
+
+message TaskResultUploadRequest {
+    string task_id = 1;
+    string result_torrent = 2;
+    string token = 3;
+}
+message TaskResultUploadResponse {
+    bool success = 1;
+    string status_message = 2;
+}
+
+message TaskOutputRequest {
+    string task_id = 1;
+    string token = 2;
+}
+message TaskOutputResponse {
+    bool success = 1;
+    string status_message = 2;
+    string output = 3;
+}
+
 message StopTaskExecutionRequest {
     string task_id = 1;
 }
@@ -164,48 +209,25 @@ message StopTaskExecutionResponse {
     bool success = 1;
     string status_message = 2;
 }
+
 message TaskUsageRequest {
     string task_id = 1;
-    float cpu_usage = 2; 
-    float memory_usage = 3; 
-    float gpu_usage = 4; 
-    float gpu_memory_usage = 5; 
-    string token = 6; 
+    ResourceUsage usage = 2;
+    string token = 3;
 }
 message TaskUsageResponse {
     bool success = 1;
     string status_message = 2;
 }
 
-message RefreshTokenRequest {
-    string old_token = 1;
-}
-message RefreshTokenResponse {
-    bool success = 1;
-    string status_message = 2;
-    string new_token = 3;
-}
-
-message TasklogRequest {
-    string task_id = 1;
-    string token = 2; 
-}
-message TasklogResponse {
-    bool success = 1;
-    string log = 2;
-}
-
-message ResourceRequirements {
-    int32 cpu_cores = 1;
-    int32 memory_gb = 2;
-    int32 gpu_score = 3;
-    int32 gpu_memory_gb = 4;
-}
+// ============================================================
+// Batch Runtime (pull-based, future path)
+// ============================================================
 
 message DAGNode {
     string task_id = 1;
     repeated string artifact_inputs = 2;
-    ResourceRequirements resource_requirements = 3;
+    ResourceSpec resource_requirements = 3;
     int32 max_retries = 4;
     int64 deadline_unix = 5;
     bool deterministic = 6;
@@ -268,7 +290,7 @@ message TaskLease {
     string task_id = 1;
     ExecutionPackage execution_package = 2;
     repeated ArtifactManifest artifacts = 3;
-    ResourceRequirements resource_limits = 4;
+    ResourceSpec resource_limits = 4;
     int64 deadline_unix = 5;
     int32 priority = 6;
 }
@@ -320,16 +342,13 @@ message HeartbeatResponse {
     string status_message = 2;
 }
 
-service BatchRuntimeService {
-    rpc PullBatch(PullBatchRequest) returns (PullBatchResponse);
-    rpc CompleteBatch(CompleteBatchRequest) returns (CompleteBatchResponse);
-    rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
-}
-    
+// ============================================================
+// Services
+// ============================================================
 
 service UserService {
     rpc Login(LoginRequest) returns (LoginResponse);
-    rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse); 
+    rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse);
     rpc RefreshToken(RefreshTokenRequest) returns (RefreshTokenResponse);
 }
 
@@ -353,4 +372,10 @@ service WorkerNodeService {
     rpc TaskOutput(TaskOutputRequest) returns (TaskOutputResponse);
     rpc StopTaskExecution(StopTaskExecutionRequest) returns (StopTaskExecutionResponse);
     rpc TaskUsage(TaskUsageRequest) returns (TaskUsageResponse);
+}
+
+service BatchRuntimeService {
+    rpc PullBatch(PullBatchRequest) returns (PullBatchResponse);
+    rpc CompleteBatch(CompleteBatchRequest) returns (CompleteBatchResponse);
+    rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
 }

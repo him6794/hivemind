@@ -1,9 +1,8 @@
-pub mod jwt_service;
+﻿pub mod jwt_service;
 pub mod user_repository;
 
 use anyhow::Result;
 use hivemind_database::DatabaseManager;
-use hivemind_models::{LoginRequest, LoginResponse};
 use jwt_service::JwtService;
 use user_repository::UserRepository;
 use std::sync::Arc;
@@ -15,10 +14,7 @@ pub struct AuthManager {
 
 impl Clone for AuthManager {
     fn clone(&self) -> Self {
-        Self {
-            jwt: self.jwt.clone(),
-            users: self.users.clone(),
-        }
+        Self { jwt: self.jwt.clone(), users: self.users.clone() }
     }
 }
 
@@ -30,60 +26,34 @@ impl AuthManager {
         }
     }
 
-    pub async fn login(&self, req: &LoginRequest) -> Result<LoginResponse> {
-        let user = match self.users.find_by_username(&req.username).await? {
+    /// Authenticate username/password, return JWT token on success
+    pub async fn authenticate(&self, username: &str, password: &str) -> Result<Option<String>> {
+        let user = match self.users.find_by_username(username).await? {
             Some(u) => u,
-            None => {
-                return Ok(LoginResponse {
-                    success: false,
-                    status_message: "Invalid username or password".into(),
-                    token: None,
-                });
-            }
+            None => return Ok(None),
         };
 
-        let valid = bcrypt::verify(&req.password, &user.password_hash)
-            .unwrap_or(false);
-
-        if !valid {
-            return Ok(LoginResponse {
-                success: false,
-                status_message: "Invalid username or password".into(),
-                token: None,
-            });
-        }
-
-        if !user.is_active {
-            return Ok(LoginResponse {
-                success: false,
-                status_message: "Account is deactivated".into(),
-                token: None,
-            });
+        let valid = bcrypt::verify(password, &user.password_hash).unwrap_or(false);
+        if !valid || !user.is_active {
+            return Ok(None);
         }
 
         let token_response = self.jwt.generate_token(&user)?;
-
-        Ok(LoginResponse {
-            success: true,
-            status_message: "Login successful".into(),
-            token: Some(token_response.token),
-        })
+        Ok(Some(token_response.token))
     }
 
+    /// Validate a JWT token and extract claims
     pub fn validate_token(&self, token: &str) -> Result<hivemind_models::Claims> {
         self.jwt.validate(token)
     }
 
-    pub fn jwt_service(&self) -> &JwtService {
-        &self.jwt
-    }
+    pub fn jwt_service(&self) -> &JwtService { &self.jwt }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use hivemind_config::HivemindConfig;
-    use hivemind_database::DatabaseManager;
 
     async fn setup_test_db() -> Option<DatabaseManager> {
         let config = HivemindConfig::default();
@@ -93,25 +63,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_login_invalid_user() {
-        let db = setup_test_db().await;
-        if db.is_none() {
-            eprintln!("Skipping: no database available");
-            return;
-        }
-        let db = db.unwrap();
-
+    async fn test_authenticate_invalid_user() {
+        let db = match setup_test_db().await { Some(d) => d, None => return };
         let auth = AuthManager::new(&db, "test-secret", 24);
-        let resp = auth
-            .login(&LoginRequest {
-                username: "nonexistent_user".into(),
-                password: "pass".into(),
-            })
-            .await
-            .unwrap();
-
-        assert!(!resp.success);
-        assert!(resp.token.is_none());
+        let token = auth.authenticate("nonexistent", "pass").await.unwrap();
+        assert!(token.is_none());
     }
 
     #[tokio::test]
