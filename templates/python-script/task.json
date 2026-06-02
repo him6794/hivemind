@@ -1,0 +1,11 @@
+﻿{
+  "name": "python-script",
+  "version": "1.0",
+  "description": "Run any Python script with dependencies",
+  "entrypoint": "run.py",
+  "requirements": {
+    "cpu_score": 100,
+    "memory_gb": 2,
+    "storage_gb": 1
+  }
+}

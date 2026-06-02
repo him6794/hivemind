@@ -1,0 +1,11 @@
+﻿{
+  "name": "docker-job",
+  "version": "1.0",
+  "description": "Run a Docker container as a task",
+  "entrypoint": "run.sh",
+  "requirements": {
+    "cpu_score": 100,
+    "memory_gb": 2,
+    "storage_gb": 5
+  }
+}

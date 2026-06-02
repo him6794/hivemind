@@ -1,4 +1,4 @@
-﻿use anyhow::{Context, Result};
+use anyhow::{Context, Result};
 use hivemind_models::{Claims, User};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 
@@ -28,10 +28,7 @@ impl JwtService {
 
         let token = self.encode_claims(&claims)?;
 
-        Ok(hivemind_models::TokenResponse {
-            token,
-            expires_at,
-        })
+        Ok(hivemind_models::TokenResponse { token, expires_at })
     }
 
     pub fn validate(&self, token: &str) -> Result<Claims> {

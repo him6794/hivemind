@@ -1,10 +1,10 @@
-﻿use axum::{
+use super::handlers::AppState;
+use axum::{
     extract::{Request, State},
+    http::{header, StatusCode},
     middleware::Next,
     response::Response,
-    http::{StatusCode, header},
 };
-use super::handlers::AppState;
 use hivemind_models::Claims;
 
 pub async fn auth_middleware(
@@ -50,7 +50,9 @@ where
         parts: &mut axum::http::request::Parts,
         _state: &S,
     ) -> Result<Self, Self::Rejection> {
-        parts.extensions.get::<Claims>()
+        parts
+            .extensions
+            .get::<Claims>()
             .cloned()
             .map(AuthClaims)
             .ok_or(StatusCode::UNAUTHORIZED)

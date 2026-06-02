@@ -14,12 +14,11 @@ pub async fn allocate_ip(db: &DatabaseManager, config: &HivemindConfig) -> Resul
 
     let ip = format!("100.64.0.{}", octet);
 
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM vpn_peers WHERE virtual_ip = $1)",
-    )
-    .bind(&ip)
-    .fetch_one(&db.pool)
-    .await?;
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM vpn_peers WHERE virtual_ip = $1)")
+            .bind(&ip)
+            .fetch_one(&db.pool)
+            .await?;
 
     if exists {
         return Box::pin(allocate_ip(db, config)).await;
@@ -30,7 +29,6 @@ pub async fn allocate_ip(db: &DatabaseManager, config: &HivemindConfig) -> Resul
 
 #[cfg(test)]
 mod tests {
-
 
     #[test]
     fn test_allocate_ip_format() {

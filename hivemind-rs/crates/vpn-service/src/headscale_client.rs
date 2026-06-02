@@ -1,4 +1,4 @@
-﻿//! Headscale client: communicates with a self-hosted Tailscale coordination server.
+//! Headscale client: communicates with a self-hosted Tailscale coordination server.
 //!
 //! Headscale is an open-source implementation of the Tailscale control server.
 //! This client creates pre-auth keys for workers and manages node lifecycle.
@@ -13,14 +13,21 @@ pub struct HeadscaleClient {
 
 impl HeadscaleClient {
     pub fn new(base_url: &str, api_key: &str) -> Self {
-        Self { base_url: base_url.to_string(), api_key: api_key.to_string() }
+        Self {
+            base_url: base_url.to_string(),
+            api_key: api_key.to_string(),
+        }
     }
 
     /// Create a pre-authentication key for a worker node.
     /// In production, this calls POST /api/v1/preauthkey on the Headscale API.
     pub async fn create_preauth_key(&self, user: &str) -> Result<String> {
         let key = format!("hs-preauth-{}-{}", user, uuid::Uuid::new_v4());
-        tracing::info!("Headscale: created preauth key for user {} (truncated: {}...)", user, &key[..24]);
+        tracing::info!(
+            "Headscale: created preauth key for user {} (truncated: {}...)",
+            user,
+            &key[..24]
+        );
         Ok(key)
     }
 

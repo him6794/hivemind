@@ -1,4 +1,4 @@
-﻿//! BitTorrent tracker: lightweight HTTP announce tracker for the P2P swarm.
+//! BitTorrent tracker: lightweight HTTP announce tracker for the P2P swarm.
 //! Workers announce themselves to get peer lists for torrent distribution.
 
 use serde::{Deserialize, Serialize};
@@ -27,12 +27,19 @@ pub struct Tracker {
 
 impl Tracker {
     pub fn new(peer_timeout_secs: i64) -> Self {
-        Self { swarms: Arc::new(RwLock::new(HashMap::new())), peer_timeout_secs }
+        Self {
+            swarms: Arc::new(RwLock::new(HashMap::new())),
+            peer_timeout_secs,
+        }
     }
 
     /// Register or update a peer in a torrent swarm.
     /// Returns all OTHER peers in the swarm.
-    pub async fn announce(&self, info_hash: &str, peer: PeerEntry) -> Result<Vec<PeerEntry>, String> {
+    pub async fn announce(
+        &self,
+        info_hash: &str,
+        peer: PeerEntry,
+    ) -> Result<Vec<PeerEntry>, String> {
         let peer_id = peer.peer_id.clone(); // capture before moving
         let mut swarms = self.swarms.write().await;
         let now = chrono::Utc::now().timestamp();
@@ -60,19 +67,35 @@ impl Tracker {
             swarm.push(new_peer);
         }
 
-        info!("Tracker announce: {} peers for info_hash {}...", swarm.len(), &info_hash[..usize::min(8, info_hash.len())]);
+        info!(
+            "Tracker announce: {} peers for info_hash {}...",
+            swarm.len(),
+            &info_hash[..usize::min(8, info_hash.len())]
+        );
 
         // Return all peers EXCEPT the announcing peer
-        Ok(swarm.iter().filter(|p| p.peer_id != peer_id).cloned().collect())
+        Ok(swarm
+            .iter()
+            .filter(|p| p.peer_id != peer_id)
+            .cloned()
+            .collect())
     }
 
     pub async fn swarm_size(&self, info_hash: &str) -> usize {
-        self.swarms.read().await.get(info_hash).map(|s| s.len()).unwrap_or(0)
+        self.swarms
+            .read()
+            .await
+            .get(info_hash)
+            .map(|s| s.len())
+            .unwrap_or(0)
     }
 
     pub async fn remove_swarm(&self, info_hash: &str) {
         self.swarms.write().await.remove(info_hash);
-        info!("Tracker swarm removed for {}...", &info_hash[..usize::min(8, info_hash.len())]);
+        info!(
+            "Tracker swarm removed for {}...",
+            &info_hash[..usize::min(8, info_hash.len())]
+        );
     }
 
     pub async fn cleanup_stale(&self) {
@@ -84,7 +107,13 @@ impl Tracker {
         }
         swarms.retain(|_, s| !s.is_empty());
         let after: usize = swarms.values().map(|s| s.len()).sum();
-        if before != after { info!("Tracker cleanup: {} peers removed ({} remaining)", before - after, after); }
+        if before != after {
+            info!(
+                "Tracker cleanup: {} peers removed ({} remaining)",
+                before - after,
+                after
+            );
+        }
     }
 }
 
@@ -93,7 +122,15 @@ mod tests {
     use super::*;
 
     fn peer(id: &str) -> PeerEntry {
-        PeerEntry { peer_id: id.into(), ip: "10.0.0.1".into(), port: 6881, uploaded: 0, downloaded: 0, left: 4096, last_announce: 0 }
+        PeerEntry {
+            peer_id: id.into(),
+            ip: "10.0.0.1".into(),
+            port: 6881,
+            uploaded: 0,
+            downloaded: 0,
+            left: 4096,
+            last_announce: 0,
+        }
     }
 
     #[tokio::test]

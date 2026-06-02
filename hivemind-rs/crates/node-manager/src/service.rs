@@ -1,6 +1,6 @@
-﻿use anyhow::Result;
-use hivemind_models::{WorkerNode, WorkerStatus, ResourceSpec};
 use crate::NodeManager;
+use anyhow::Result;
+use hivemind_models::{ResourceSpec, WorkerNode, WorkerStatus};
 
 pub struct WorkerRegistration {
     pub worker_id: String,
@@ -33,10 +33,20 @@ impl NodeManagerService {
             cpu_score: reg.resources.cpu_score,
             gpu_score: reg.resources.gpu_score,
             gpu_memory_gb: (reg.resources.vram_mb / 1024) as i32,
-            gpu_name: if gpu_count > 0 { Some(reg.resources.gpu_name.clone()) } else { None },
+            gpu_name: if gpu_count > 0 {
+                Some(reg.resources.gpu_name.clone())
+            } else {
+                None
+            },
             vram_mb: reg.resources.vram_mb,
             storage_total_gb: reg.resources.storage_total_gb,
             storage_available_gb: reg.resources.storage_available_gb,
+            provider_enabled: true,
+            cpu_cores_limit: 0,
+            memory_gb_limit: 0,
+            gpu_memory_gb_limit: 0,
+            storage_gb_limit: 0,
+            min_cpt_per_hour: 0,
             location: reg.location.clone(),
             status: WorkerStatus::Active,
             cpu_usage: 0.0,

@@ -1,5 +1,70 @@
-﻿use std::fs;
+use std::fs;
+use std::net::IpAddr;
 use std::path::PathBuf;
+use std::str::FromStr;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EgressMode {
+    Allowlist,
+    Denylist,
+}
+
+#[derive(Debug, Clone)]
+pub struct SandboxEgressPolicy {
+    pub enabled: bool,
+    pub mode: EgressMode,
+    pub targets: Vec<String>,
+}
+
+impl SandboxEgressPolicy {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+
+        for target in &self.targets {
+            if target.ends_with('/') {
+                anyhow::bail!("Invalid CIDR target '{}': trailing slash", target);
+            }
+            if target.contains('/') {
+                ipnet::IpNet::from_str(target)?;
+            } else {
+                IpAddr::from_str(target)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn from_config(config: &hivemind_config::ExecutorConfig) -> anyhow::Result<Self> {
+        let mode = match config.network_egress_mode.to_ascii_lowercase().as_str() {
+            "allowlist" => EgressMode::Allowlist,
+            "denylist" => EgressMode::Denylist,
+            other => {
+                anyhow::bail!(
+                    "invalid EXECUTOR_NETWORK_EGRESS_MODE '{}', expected 'allowlist' or 'denylist'",
+                    other
+                )
+            }
+        };
+        let policy = Self {
+            enabled: config.network_egress_enabled,
+            mode,
+            targets: config.network_egress_targets.clone(),
+        };
+        policy.validate()?;
+        Ok(policy)
+    }
+
+    pub fn is_release_safe(&self) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        match self.mode {
+            EgressMode::Allowlist => true,
+            EgressMode::Denylist => !self.targets.is_empty(),
+        }
+    }
+}
 
 /// Sandbox resource limits for Rust-based task execution
 #[derive(Debug, Clone)]
@@ -17,7 +82,7 @@ impl Default for SandboxLimits {
         Self {
             max_cpu_percent: 80.0,
             max_memory_mb: 4096,
-            max_storage_mb: 10240,  // 10 GB
+            max_storage_mb: 10240, // 10 GB
             max_wall_time_secs: 3600,
             gpu_required: false,
             vram_required_mb: 0,
@@ -42,7 +107,9 @@ pub fn check_storage(sandbox_dir: &str, required_mb: u64) -> bool {
 
     // Find the disk that contains the sandbox directory
     let sandbox_path = std::path::Path::new(sandbox_dir);
-    let canonical = sandbox_path.canonicalize().unwrap_or_else(|_| sandbox_path.to_path_buf());
+    let canonical = sandbox_path
+        .canonicalize()
+        .unwrap_or_else(|_| sandbox_path.to_path_buf());
 
     for disk in disks.iter() {
         if canonical.starts_with(disk.mount_point()) {
@@ -92,6 +159,7 @@ fn dir_size(path: &std::path::Path) -> std::io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hivemind_config::HivemindConfig;
     use tempfile::TempDir;
 
     #[test]
@@ -166,5 +234,35 @@ mod tests {
         assert!(path.join("output.dat").exists());
         cleanup_sandbox("lifecycle-task", base).unwrap();
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn test_egress_policy_from_config_allowlist() {
+        let mut config = HivemindConfig::default();
+        config.executor.network_egress_enabled = true;
+        config.executor.network_egress_mode = "allowlist".into();
+        config.executor.network_egress_targets = vec!["8.8.8.8".into(), "10.0.0.0/8".into()];
+        let policy = SandboxEgressPolicy::from_config(&config.executor).unwrap();
+        assert_eq!(policy.mode, EgressMode::Allowlist);
+        assert!(policy.is_release_safe());
+    }
+
+    #[test]
+    fn test_egress_policy_rejects_invalid_mode() {
+        let mut config = HivemindConfig::default();
+        config.executor.network_egress_enabled = true;
+        config.executor.network_egress_mode = "invalid".into();
+        let result = SandboxEgressPolicy::from_config(&config.executor);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_egress_policy_rejects_invalid_target() {
+        let mut config = HivemindConfig::default();
+        config.executor.network_egress_enabled = true;
+        config.executor.network_egress_mode = "allowlist".into();
+        config.executor.network_egress_targets = vec!["not-an-ip".into()];
+        let result = SandboxEgressPolicy::from_config(&config.executor);
+        assert!(result.is_err());
     }
 }

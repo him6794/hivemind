@@ -1,11 +1,11 @@
-﻿pub mod jwt_service;
+pub mod jwt_service;
 pub mod user_repository;
 
 use anyhow::Result;
 use hivemind_database::DatabaseManager;
 use jwt_service::JwtService;
-use user_repository::UserRepository;
 use std::sync::Arc;
+use user_repository::UserRepository;
 
 pub struct AuthManager {
     jwt: Arc<JwtService>,
@@ -14,7 +14,10 @@ pub struct AuthManager {
 
 impl Clone for AuthManager {
     fn clone(&self) -> Self {
-        Self { jwt: self.jwt.clone(), users: self.users.clone() }
+        Self {
+            jwt: self.jwt.clone(),
+            users: self.users.clone(),
+        }
     }
 }
 
@@ -47,7 +50,9 @@ impl AuthManager {
         self.jwt.validate(token)
     }
 
-    pub fn jwt_service(&self) -> &JwtService { &self.jwt }
+    pub fn jwt_service(&self) -> &JwtService {
+        &self.jwt
+    }
 }
 
 #[cfg(test)]
@@ -64,7 +69,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_authenticate_invalid_user() {
-        let db = match setup_test_db().await { Some(d) => d, None => return };
+        let db = match setup_test_db().await {
+            Some(d) => d,
+            None => return,
+        };
         let auth = AuthManager::new(&db, "test-secret", 24);
         let token = auth.authenticate("nonexistent", "pass").await.unwrap();
         assert!(token.is_none());

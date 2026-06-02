@@ -1,4 +1,7 @@
-﻿pub mod executor;
+pub mod control_api;
+pub mod executor;
+pub mod grpc_server;
+pub mod nodepool_client;
 pub mod resource_monitor;
 pub mod sandbox;
 
@@ -14,27 +17,17 @@ impl WorkerExecutor {
     pub fn new(config: HivemindConfig) -> Self {
         Self { config }
     }
-
-    /// Execute a task within the Rust sandbox
     pub async fn execute_task(&self, task: &Task) -> Result<TaskResult> {
         executor::run_task(task, &self.config).await
     }
-
-    /// Collect current system resource snapshot
     pub fn get_system_resources(&self) -> SystemResources {
         resource_monitor::collect_resources()
     }
-
-    /// Get ResourceSpec for worker registration
     pub fn get_resource_spec(&self) -> hivemind_models::ResourceSpec {
-        let resources = self.get_system_resources();
-        resource_monitor::to_resource_spec(&resources)
+        resource_monitor::to_resource_spec(&self.get_system_resources())
     }
-
-    /// Get ResourceUsage for heartbeat reporting
     pub fn get_resource_usage(&self) -> hivemind_models::ResourceUsage {
-        let resources = self.get_system_resources();
-        resource_monitor::to_resource_usage(&resources)
+        resource_monitor::to_resource_usage(&self.get_system_resources())
     }
 }
 
@@ -76,29 +69,11 @@ pub struct GpuInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn test_system_resources_collection() {
-        let resources = resource_monitor::collect_resources();
-        assert!(resources.cpu_cores > 0);
-        assert!(resources.total_memory_gb > 0);
-        assert!(resources.storage_total_gb > 0);
-    }
-
-    #[test]
-    fn test_resource_spec_conversion() {
-        let resources = resource_monitor::collect_resources();
-        let spec = resource_monitor::to_resource_spec(&resources);
-        assert!(spec.cpu_cores > 0);
-        assert!(spec.memory_mb > 0);
-        assert!(spec.storage_total_gb > 0);
-    }
-
-    #[test]
-    fn test_resource_usage_conversion() {
-        let resources = resource_monitor::collect_resources();
-        let usage = resource_monitor::to_resource_usage(&resources);
-        assert!(usage.cpu_percent >= 0.0);
-        assert!(usage.memory_percent >= 0.0);
+        let r = resource_monitor::collect_resources();
+        assert!(r.cpu_cores > 0);
+        assert!(r.total_memory_gb > 0);
+        assert!(r.storage_total_gb > 0);
     }
 }

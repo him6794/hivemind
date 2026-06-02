@@ -1,5 +1,5 @@
-﻿use hivemind_models::{ResourceSpec, ResourceUsage};
-use super::{SystemResources, GpuInfo};
+use super::{GpuInfo, SystemResources};
+use hivemind_models::{ResourceSpec, ResourceUsage};
 use std::process::Command;
 
 pub fn collect_resources() -> SystemResources {
@@ -14,7 +14,9 @@ pub fn collect_resources() -> SystemResources {
     let total_memory_gb = (total_memory_kb / (1024 * 1024)) as i32;
     let available_memory_gb = (available_memory_kb / (1024 * 1024)) as i32;
 
-    let cpu_usage = sys.cpus().iter()
+    let cpu_usage = sys
+        .cpus()
+        .iter()
         .map(|cpu| cpu.cpu_usage() as f64)
         .sum::<f64>()
         / cpu_cores.max(1) as f64;
@@ -44,10 +46,14 @@ pub fn collect_resources() -> SystemResources {
 
 /// Derive a ResourceSpec from collected system resources
 pub fn to_resource_spec(resources: &SystemResources) -> ResourceSpec {
-    let gpu_name = resources.gpu_infos.first()
+    let gpu_name = resources
+        .gpu_infos
+        .first()
         .map(|g| g.name.clone())
         .unwrap_or_default();
-    let vram_mb = resources.gpu_infos.first()
+    let vram_mb = resources
+        .gpu_infos
+        .first()
         .map(|g| g.vram_total_mb)
         .unwrap_or(0);
     let gpu_count = resources.gpu_count;
@@ -59,7 +65,11 @@ pub fn to_resource_spec(resources: &SystemResources) -> ResourceSpec {
         gpu_name,
         vram_mb,
         cpu_score: resources.cpu_cores * 100,
-        gpu_score: if gpu_count > 0 { (vram_mb / 1024) as i32 * 100 } else { 0 },
+        gpu_score: if gpu_count > 0 {
+            (vram_mb / 1024) as i32 * 100
+        } else {
+            0
+        },
         storage_total_gb: resources.storage_total_gb,
         storage_available_gb: resources.storage_available_gb,
     }
@@ -67,22 +77,31 @@ pub fn to_resource_spec(resources: &SystemResources) -> ResourceSpec {
 
 /// Derive a ResourceUsage from collected system resources
 pub fn to_resource_usage(resources: &SystemResources) -> ResourceUsage {
-    let gpu_util = resources.gpu_infos.iter()
+    let gpu_util = resources
+        .gpu_infos
+        .iter()
         .map(|g| g.gpu_utilization_percent)
         .fold(0.0_f64, |a, b| a.max(b));
 
-    let vram_percent = resources.gpu_infos.first()
+    let vram_percent = resources
+        .gpu_infos
+        .first()
         .map(|g| {
             if g.vram_total_mb > 0 {
                 (g.vram_used_mb as f64 / g.vram_total_mb as f64) * 100.0
-            } else { 0.0 }
+            } else {
+                0.0
+            }
         })
         .unwrap_or(0.0);
 
     let storage_percent = if resources.storage_total_gb > 0 {
         ((resources.storage_total_gb - resources.storage_available_gb) as f64
-            / resources.storage_total_gb as f64) * 100.0
-    } else { 0.0 };
+            / resources.storage_total_gb as f64)
+            * 100.0
+    } else {
+        0.0
+    };
 
     ResourceUsage {
         cpu_percent: resources.cpu_usage_percent,
@@ -96,30 +115,41 @@ pub fn to_resource_usage(resources: &SystemResources) -> ResourceUsage {
 /// Detect NVIDIA GPUs via nvidia-smi
 fn detect_gpus() -> Vec<GpuInfo> {
     let output = Command::new("nvidia-smi")
-        .args(["--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu", "--format=csv,noheader,nounits"])
+        .args([
+            "--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu",
+            "--format=csv,noheader,nounits",
+        ])
         .output();
 
     match output {
         Ok(out) if out.status.success() => {
             let stdout = String::from_utf8_lossy(&out.stdout);
-            stdout.lines().filter_map(|line| {
-                let parts: Vec<&str> = line.split(", ").map(|s| s.trim()).collect();
-                if parts.len() >= 6 {
-                    Some(GpuInfo {
-                        index: parts[0].parse().unwrap_or(0),
-                        name: parts[1].to_string(),
-                        vram_total_mb: parts[2].parse().unwrap_or(0),
-                        vram_used_mb: parts[3].parse().unwrap_or(0),
-                        vram_available_mb: parts[4].parse().unwrap_or(0),
-                        gpu_utilization_percent: parts[5].parse().unwrap_or(0.0),
-                    })
-                } else { None }
-            }).collect()
+            stdout
+                .lines()
+                .filter_map(|line| {
+                    let parts: Vec<&str> = line.split(", ").map(|s| s.trim()).collect();
+                    if parts.len() >= 6 {
+                        Some(GpuInfo {
+                            index: parts[0].parse().unwrap_or(0),
+                            name: parts[1].to_string(),
+                            vram_total_mb: parts[2].parse().unwrap_or(0),
+                            vram_used_mb: parts[3].parse().unwrap_or(0),
+                            vram_available_mb: parts[4].parse().unwrap_or(0),
+                            gpu_utilization_percent: parts[5].parse().unwrap_or(0.0),
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect()
         }
         _ => {
             // Try AMD/Intel GPU via lspci or dxgi as fallback (platform-dependent)
-            if cfg!(windows) { detect_gpus_windows() }
-            else { Vec::new() }
+            if cfg!(windows) {
+                detect_gpus_windows()
+            } else {
+                Vec::new()
+            }
         }
     }
 }
@@ -135,23 +165,30 @@ fn detect_gpus_windows() -> Vec<GpuInfo> {
     match output {
         Ok(out) if out.status.success() => {
             let stdout = String::from_utf8_lossy(&out.stdout);
-            stdout.lines().skip(1).filter_map(|line| {
-                let line = line.trim_matches('"');
-                let parts: Vec<&str> = line.split("\",\"").collect();
-                if parts.len() >= 2 {
-                    let vram_total = parts.get(1)
-                        .and_then(|s| s.parse::<i64>().ok())
-                        .unwrap_or(0);
-                    Some(GpuInfo {
-                        index: 0,
-                        name: parts.get(0).unwrap_or(&"Unknown GPU").to_string(),
-                        vram_total_mb: vram_total / (1024 * 1024),
-                        vram_used_mb: 0,
-                        vram_available_mb: vram_total / (1024 * 1024),
-                        gpu_utilization_percent: 0.0,
-                    })
-                } else { None }
-            }).collect()
+            stdout
+                .lines()
+                .skip(1)
+                .filter_map(|line| {
+                    let line = line.trim_matches('"');
+                    let parts: Vec<&str> = line.split("\",\"").collect();
+                    if parts.len() >= 2 {
+                        let vram_total = parts
+                            .get(1)
+                            .and_then(|s| s.parse::<i64>().ok())
+                            .unwrap_or(0);
+                        Some(GpuInfo {
+                            index: 0,
+                            name: parts.get(0).unwrap_or(&"Unknown GPU").to_string(),
+                            vram_total_mb: vram_total / (1024 * 1024),
+                            vram_used_mb: 0,
+                            vram_available_mb: vram_total / (1024 * 1024),
+                            gpu_utilization_percent: 0.0,
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect()
         }
         _ => {
             tracing::info!("No GPU detected via WMI");
@@ -172,7 +209,10 @@ fn detect_storage() -> (i64, i64) {
     let disks = Disks::new_with_refreshed_list();
     let total: u64 = disks.iter().map(|d| d.total_space()).sum();
     let available: u64 = disks.iter().map(|d| d.available_space()).sum();
-    ((total / (1024 * 1024 * 1024)) as i64, (available / (1024 * 1024 * 1024)) as i64)
+    (
+        (total / (1024 * 1024 * 1024)) as i64,
+        (available / (1024 * 1024 * 1024)) as i64,
+    )
 }
 
 #[cfg(test)]

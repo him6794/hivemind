@@ -31,12 +31,11 @@ impl UserRepository {
     }
 
     pub async fn get_balance(&self, username: &str) -> Result<i64> {
-        let balance: Option<i64> = sqlx::query_scalar(
-            "SELECT balance FROM users WHERE username = $1",
-        )
-        .bind(username)
-        .fetch_optional(&self.pool)
-        .await?;
+        let balance: Option<i64> =
+            sqlx::query_scalar("SELECT balance FROM users WHERE username = $1")
+                .bind(username)
+                .fetch_optional(&self.pool)
+                .await?;
         Ok(balance.unwrap_or(0))
     }
 

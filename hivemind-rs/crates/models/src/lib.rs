@@ -26,7 +26,122 @@ pub struct UserInfo {
 
 impl From<User> for UserInfo {
     fn from(u: User) -> Self {
-        Self { id: u.id, username: u.username, balance: u.balance }
+        Self {
+            id: u.id,
+            username: u.username,
+            balance: u.balance,
+        }
+    }
+}
+
+// --- Ledger Models ---
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct LedgerEntry {
+    pub id: Uuid,
+    pub task_id: String,
+    pub payer_user: String,
+    pub provider_worker_id: Option<String>,
+    pub provider_user: Option<String>,
+    pub kind: LedgerEntryKind,
+    pub amount_cpt: i64,
+    pub currency: String,
+    pub status: LedgerEntryStatus,
+    pub idempotency_key: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LedgerEntryKind {
+    PayerDebit,
+    ProviderCredit,
+    PlatformFee,
+}
+
+impl LedgerEntryKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PayerDebit => "payer_debit",
+            Self::ProviderCredit => "provider_credit",
+            Self::PlatformFee => "platform_fee",
+        }
+    }
+}
+
+impl std::str::FromStr for LedgerEntryKind {
+    type Err = std::convert::Infallible;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "provider_credit" => Self::ProviderCredit,
+            "platform_fee" => Self::PlatformFee,
+            _ => Self::PayerDebit,
+        })
+    }
+}
+
+impl sqlx::Type<sqlx::Postgres> for LedgerEntryKind {
+    fn type_info() -> sqlx::postgres::PgTypeInfo {
+        sqlx::postgres::PgTypeInfo::with_name("VARCHAR")
+    }
+    fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
+        *ty == Self::type_info() || <String as sqlx::Type<sqlx::Postgres>>::compatible(ty)
+    }
+}
+
+impl<'r> sqlx::Decode<'r, sqlx::Postgres> for LedgerEntryKind {
+    fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        let s = <String as sqlx::Decode<'r, sqlx::Postgres>>::decode(value)?;
+        Ok(s.parse().unwrap())
+    }
+}
+
+impl<'q> sqlx::Encode<'q, sqlx::Postgres> for LedgerEntryKind {
+    fn encode_by_ref(&self, buf: &mut sqlx::postgres::PgArgumentBuffer) -> sqlx::encode::IsNull {
+        <String as sqlx::Encode<'q, sqlx::Postgres>>::encode(self.as_str().to_string(), buf)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LedgerEntryStatus {
+    Settled,
+}
+
+impl LedgerEntryStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Settled => "settled",
+        }
+    }
+}
+
+impl std::str::FromStr for LedgerEntryStatus {
+    type Err = std::convert::Infallible;
+    fn from_str(_s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::Settled)
+    }
+}
+
+impl sqlx::Type<sqlx::Postgres> for LedgerEntryStatus {
+    fn type_info() -> sqlx::postgres::PgTypeInfo {
+        sqlx::postgres::PgTypeInfo::with_name("VARCHAR")
+    }
+    fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
+        *ty == Self::type_info() || <String as sqlx::Type<sqlx::Postgres>>::compatible(ty)
+    }
+}
+
+impl<'r> sqlx::Decode<'r, sqlx::Postgres> for LedgerEntryStatus {
+    fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        let s = <String as sqlx::Decode<'r, sqlx::Postgres>>::decode(value)?;
+        Ok(s.parse().unwrap())
+    }
+}
+
+impl<'q> sqlx::Encode<'q, sqlx::Postgres> for LedgerEntryStatus {
+    fn encode_by_ref(&self, buf: &mut sqlx::postgres::PgArgumentBuffer) -> sqlx::encode::IsNull {
+        <String as sqlx::Encode<'q, sqlx::Postgres>>::encode(self.as_str().to_string(), buf)
     }
 }
 
@@ -36,10 +151,10 @@ impl From<User> for UserInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceSpec {
     pub cpu_cores: i32,
-    pub memory_mb: i64,            // RAM in MB
+    pub memory_mb: i64, // RAM in MB
     pub gpu_count: i32,
     pub gpu_name: String,
-    pub vram_mb: i64,              // VRAM in MB
+    pub vram_mb: i64, // VRAM in MB
     pub cpu_score: i32,
     pub gpu_score: i32,
     pub storage_total_gb: i64,
@@ -78,6 +193,12 @@ pub struct WorkerNode {
     pub vram_mb: i64,
     pub storage_total_gb: i64,
     pub storage_available_gb: i64,
+    pub provider_enabled: bool,
+    pub cpu_cores_limit: i32,
+    pub memory_gb_limit: i32,
+    pub gpu_memory_gb_limit: i32,
+    pub storage_gb_limit: i64,
+    pub min_cpt_per_hour: i64,
     pub location: String,
     pub status: WorkerStatus,
     pub cpu_usage: f64,
@@ -306,6 +427,7 @@ impl<'q> sqlx::Encode<'q, sqlx::Postgres> for TaskStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskInfo {
     pub task_id: String,
+    pub owner: String,
     pub status: String,
     pub status_message: String,
     pub cpu_usage: f64,
@@ -313,12 +435,18 @@ pub struct TaskInfo {
     pub gpu_usage: f64,
     pub gpu_memory_usage: f64,
     pub worker_ip: String,
-}
+    pub retry_count: i32,
+    pub wall_time_ms: i64,
+    pub peak_memory_mb: i64,
+    pub billed_amount: i64,
+    pub billing_settled: bool,
+    pub deterministic: bool,
 
 impl From<Task> for TaskInfo {
     fn from(t: Task) -> Self {
         Self {
             task_id: t.task_id,
+            owner: t.owner,
             status: t.status.as_str().into(),
             status_message: t.status_message.unwrap_or_default(),
             cpu_usage: t.cpu_usage,
@@ -326,9 +454,16 @@ impl From<Task> for TaskInfo {
             gpu_usage: t.gpu_usage,
             gpu_memory_usage: t.gpu_memory_usage,
             worker_ip: t.worker_ip.unwrap_or_default(),
+            retry_count: t.retry_count,
+            wall_time_ms: t.wall_time_ms,
+            peak_memory_mb: t.peak_memory_mb,
+            billed_amount: t.billed_amount,
+            billing_settled: t.billing_settled,
+            deterministic: t.deterministic,
         }
     }
 }
+
 
 // --- VPN Models ---
 
@@ -436,4 +571,26 @@ pub struct LoginResponse {
 pub struct TokenResponse {
     pub token: String,
     pub expires_at: DateTime<Utc>,
+}
+
+impl From<Task> for TaskInfo {
+    fn from(t: Task) -> Self {
+        Self {
+            task_id: t.task_id,
+            owner: t.owner,
+            status: t.status.as_str().into(),
+            status_message: t.status_message.unwrap_or_default(),
+            cpu_usage: t.cpu_usage,
+            memory_usage: t.memory_usage,
+            gpu_usage: t.gpu_usage,
+            gpu_memory_usage: t.gpu_memory_usage,
+            worker_ip: t.worker_ip.unwrap_or_default(),
+            retry_count: t.retry_count,
+            wall_time_ms: t.wall_time_ms,
+            peak_memory_mb: t.peak_memory_mb,
+            billed_amount: t.billed_amount,
+            billing_settled: t.billing_settled,
+            deterministic: t.deterministic,
+        }
+    }
 }

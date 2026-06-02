@@ -1,9 +1,9 @@
-﻿//! Torrent Service: converts task ZIPs into BitTorrent metainfo files
+//! Torrent Service: converts task ZIPs into BitTorrent metainfo files
 //! for P2P distribution among workers, then tracks P2P swarm state.
 
 pub mod metainfo;
-pub mod tracker;
 pub mod p2p_swarm;
+pub mod tracker;
 
 use anyhow::Result;
 use hivemind_config::HivemindConfig;
@@ -28,8 +28,8 @@ impl TorrentService {
     pub async fn zip_to_torrent(&self, zip_path: &Path, announce: &str) -> Result<TorrentInfo> {
         std::fs::create_dir_all(&self.bt_dir)?;
 
-        let data = std::fs::read(zip_path)
-            .map_err(|e| anyhow::anyhow!("Failed to read ZIP: {}", e))?;
+        let data =
+            std::fs::read(zip_path).map_err(|e| anyhow::anyhow!("Failed to read ZIP: {}", e))?;
 
         let meta = metainfo::create_metainfo(&data, zip_path, announce)?;
 
@@ -41,7 +41,9 @@ impl TorrentService {
 
         // Also copy the data to the seed directory
         let seed_path = self.api_dir.join(
-            zip_path.file_name().unwrap_or_else(|| std::ffi::OsStr::new("task.zip"))
+            zip_path
+                .file_name()
+                .unwrap_or_else(|| std::ffi::OsStr::new("task.zip")),
         );
         std::fs::create_dir_all(&self.api_dir)?;
         std::fs::copy(zip_path, &seed_path)
@@ -65,13 +67,20 @@ impl TorrentService {
 
     /// Generate a magnet URI for a torrent info-hash
     pub fn magnet_uri(&self, info_hash: &str, name: &str) -> String {
-        format!("magnet:?xt=urn:btih:{}&dn={}&tr=", info_hash, urlencoding(name))
+        format!(
+            "magnet:?xt=urn:btih:{}&dn={}&tr=",
+            info_hash,
+            urlencoding(name)
+        )
     }
 }
 
 fn urlencoding(s: &str) -> String {
-    s.replace(' ', "%20").replace('&', "%26").replace('=', "%3D")
-        .replace('+', "%2B").replace('#', "%23")
+    s.replace(' ', "%20")
+        .replace('&', "%26")
+        .replace('=', "%3D")
+        .replace('+', "%2B")
+        .replace('#', "%23")
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -98,12 +107,12 @@ mod tests {
         let bt_dir = tmp.path().join("bt");
         std::fs::create_dir_all(&bt_dir).unwrap();
 
-        let svc = TorrentService {
-            api_dir,
-            bt_dir,
-        };
+        let svc = TorrentService { api_dir, bt_dir };
 
-        let info = svc.zip_to_torrent(&zip_path, "http://tracker:6969/announce").await.unwrap();
+        let info = svc
+            .zip_to_torrent(&zip_path, "http://tracker:6969/announce")
+            .await
+            .unwrap();
         assert!(!info.info_hash.is_empty(), "info_hash should be non-empty");
         assert!(info.torrent_path.exists(), "torrent file should exist");
         assert!(info.data_size > 0);
