@@ -40,13 +40,8 @@ mod tests {
 
     #[test]
     fn test_generate_config_contains_virtual_ip() {
-        let config = generate_wireguard_config(
-            "worker-1",
-            "100.64.0.50",
-            "key1",
-            "key2",
-            "endpoint:51820",
-        );
+        let config =
+            generate_wireguard_config("worker-1", "100.64.0.50", "key1", "key2", "endpoint:51820");
         assert!(config.contains("100.64.0.50/32"));
     }
 
@@ -65,13 +60,8 @@ mod tests {
 
     #[test]
     fn test_generate_config_contains_endpoint() {
-        let config = generate_wireguard_config(
-            "w1",
-            "100.64.0.1",
-            "pk",
-            "pubk",
-            "vpn.example.com:51820",
-        );
+        let config =
+            generate_wireguard_config("w1", "100.64.0.1", "pk", "pubk", "vpn.example.com:51820");
         assert!(config.contains("Endpoint = vpn.example.com:51820"));
     }
 

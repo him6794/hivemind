@@ -1,0 +1,11 @@
+﻿{
+  "name": "data-processing",
+  "version": "1.0",
+  "description": "Process input data and produce transformed output",
+  "entrypoint": "run.py",
+  "requirements": {
+    "cpu_score": 200,
+    "memory_gb": 4,
+    "storage_gb": 10
+  }
+}

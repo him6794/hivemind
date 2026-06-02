@@ -3,8 +3,8 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use tower::ServiceExt;
 use serde_json::json;
+use tower::ServiceExt;
 
 use crate::handlers::AppState;
 use crate::routes::create_router;
@@ -16,10 +16,14 @@ async fn setup_app() -> Option<(axum::Router, DatabaseManager)> {
     let config = hivemind_config::HivemindConfig::default();
     let db = DatabaseManager::new(&config).await.ok()?;
     db.run_migrations().await.ok()?;
-    hivemind_database::postgres::seed_default_user(&db.pool).await.ok()?;
+    hivemind_database::postgres::seed_default_user(&db.pool)
+        .await
+        .ok()?;
     // Clean up stale integration test data
     sqlx::query("DELETE FROM tasks WHERE task_id LIKE 'integration-%'")
-        .execute(&db.pool).await.ok();
+        .execute(&db.pool)
+        .await
+        .ok();
 
     let auth = AuthManager::new(&db, "integration-test-secret", 24);
     let scheduler = TaskScheduler::new(db.clone(), auth.clone());
@@ -29,6 +33,7 @@ async fn setup_app() -> Option<(axum::Router, DatabaseManager)> {
         auth,
         scheduler,
         nodepool_grpc_addr: "localhost:50051".into(),
+        config,
     };
 
     Some((create_router(state), db))
@@ -42,16 +47,21 @@ async fn login(app: &axum::Router, username: &str, password: &str) -> Option<Str
                 .method("POST")
                 .uri("/api/login")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_string(&json!({
-                    "username": username,
-                    "password": password
-                })).unwrap()))
+                .body(Body::from(
+                    serde_json::to_string(&json!({
+                        "username": username,
+                        "password": password
+                    }))
+                    .unwrap(),
+                ))
                 .unwrap(),
         )
         .await
         .unwrap();
 
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     json["token"].as_str().map(|s| s.to_string())
 }
@@ -84,10 +94,15 @@ async fn test_full_user_journey() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["success"], true);
-    assert!(json["balance"].as_i64().unwrap() > 0, "Should have positive balance");
+    assert!(
+        json["balance"].as_i64().unwrap() > 0,
+        "Should have positive balance"
+    );
 
     // Step 3: Upload a task
     let resp = app
@@ -98,21 +113,30 @@ async fn test_full_user_journey() {
                 .uri("/api/tasks")
                 .header("Authorization", format!("Bearer {}", token))
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_string(&json!({
-                    "task_id": "integration-task-1",
-                    "torrent": "magnet:?xt=urn:btih:integration-test",
-                    "memory_gb": 4,
-                    "cpu_score": 100,
-                })).unwrap()))
+                .body(Body::from(
+                    serde_json::to_string(&json!({
+                        "task_id": "integration-task-1",
+                        "torrent": "magnet:?xt=urn:btih:integration-test",
+                        "memory_gb": 4,
+                        "cpu_score": 100,
+                    }))
+                    .unwrap(),
+                ))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["success"], true, "Task upload should succeed: {:?}", json);
-    assert_eq!(json["task_id"], "integration-task-1");
+    assert_eq!(
+        json["success"], true,
+        "Task upload should succeed: {:?}",
+        json
+    );
+    assert_eq!(json["task"]["task_id"], "integration-task-1");
 
     // Step 4: List tasks
     let resp = app
@@ -127,7 +151,9 @@ async fn test_full_user_journey() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let tasks = json["tasks"].as_array().unwrap();
     assert!(tasks.len() >= 1, "Should have at least 1 task");
@@ -147,7 +173,9 @@ async fn test_full_user_journey() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["success"], true);
     assert_eq!(json["status"], "PENDING");
@@ -166,7 +194,9 @@ async fn test_full_user_journey() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["success"], true);
 
@@ -179,22 +209,29 @@ async fn test_full_user_journey() {
                 .uri("/api/tasks")
                 .header("Authorization", format!("Bearer {}", token))
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_string(&json!({
-                    "task_id": "integration-task-1",
-                    "torrent": "magnet:?xt=urn:btih:duplicate",
-                })).unwrap()))
+                .body(Body::from(
+                    serde_json::to_string(&json!({
+                        "task_id": "integration-task-1",
+                        "torrent": "magnet:?xt=urn:btih:duplicate",
+                    }))
+                    .unwrap(),
+                ))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["success"], false, "Duplicate task should be rejected");
 
     // Cleanup
     sqlx::query("DELETE FROM tasks WHERE owner = 'testuser' AND task_id LIKE 'integration-%'")
-        .execute(&db.pool).await.ok();
+        .execute(&db.pool)
+        .await
+        .ok();
 
     println!("=== Full user journey test PASSED ===");
 }

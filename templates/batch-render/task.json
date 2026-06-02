@@ -1,0 +1,13 @@
+﻿{
+  "name": "batch-render",
+  "version": "1.0",
+  "description": "Batch rendering job (Blender, FFmpeg, etc.)",
+  "entrypoint": "run.py",
+  "requirements": {
+    "cpu_score": 500,
+    "memory_gb": 8,
+    "gpu_score": 200,
+    "gpu_memory_gb": 4,
+    "storage_gb": 50
+  }
+}

@@ -1,5 +1,3 @@
-﻿version: '3.8'
-
 services:
   # ============================================
   # Infrastructure
@@ -47,19 +45,29 @@ services:
 
   hivemind:
     build:
-      context: ./hivemind-rs
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: hivemind-rs/Dockerfile
     container_name: hivemind
     restart: unless-stopped
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-hivemind}:${POSTGRES_PASSWORD:-hivemind}@postgres:5432/${POSTGRES_DB:-hivemind}
       REDIS_URL: redis://redis:6379
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      MASTER_HTTP_ADDR: 0.0.0.0:8082
+      NODEPOOL_GRPC_ADDR: 0.0.0.0:50051
+      WORKER_GRPC_ADDR: 0.0.0.0:50053
+      WORKER_CONTROL_HTTP_ADDR: 0.0.0.0:18080
+      WORKER_ADVERTISE_ADDR: hivemind:50053
+      TORRENT_API_DIR: /app/api/torrents
+      TORRENT_BT_DIR: /app/bt_torrents
+      TORRENT_ANNOUNCE_URL: ${TORRENT_ANNOUNCE_URL:-http://localhost:6969/announce}
+      EXECUTOR_SANDBOX_DIR: /app/sandbox
       LOG_LEVEL: ${LOG_LEVEL:-info}
     ports:
       - "50051:50051"  # gRPC (nodepool)
       - "8082:8082"    # HTTP API (master)
       - "50053:50053"  # gRPC (worker)
+      - "18080:18080"  # HTTP API (local worker control)
     depends_on:
       redis:
         condition: service_healthy
@@ -75,6 +83,8 @@ services:
       - hivemind-network
     volumes:
       - hivemind-data:/app/data
+      - hivemind-torrents:/app/bt_torrents
+      - hivemind-task-packages:/app/api/torrents
 
   # ============================================
   # Frontend (optional)
@@ -84,10 +94,10 @@ services:
     build:
       context: ./frontend/master-ui
       dockerfile: Dockerfile
+      args:
+        VITE_API_BASE: ${VITE_API_BASE:-http://localhost:8082}
     container_name: hivemind-master-ui
     restart: unless-stopped
-    environment:
-      VITE_API_BASE: http://localhost:8082
     ports:
       - "3000:80"
     depends_on:
@@ -99,10 +109,11 @@ services:
     build:
       context: ./frontend/worker-ui
       dockerfile: Dockerfile
+      args:
+        VITE_API_BASE: ${VITE_API_BASE:-http://localhost:8082}
+        VITE_WORKER_CONTROL_BASE: ${VITE_WORKER_CONTROL_BASE:-http://localhost:18080}
     container_name: hivemind-worker-ui
     restart: unless-stopped
-    environment:
-      VITE_WORKER_API_BASE: http://localhost:8082
     ports:
       - "3001:80"
     depends_on:
@@ -130,3 +141,7 @@ volumes:
     name: hivemind-postgres-data
   hivemind-data:
     name: hivemind-data
+  hivemind-torrents:
+    name: hivemind-torrents
+  hivemind-task-packages:
+    name: hivemind-task-packages

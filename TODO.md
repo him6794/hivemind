@@ -22,11 +22,11 @@
 - [x] Run full DoD validation: 10 consecutive runs, 3 failure simulations, and 15-minute long-running workload.
 - [x] Exercise a real failure-injected task through the live worker runtime.
 - [x] Exercise a real long-running workload through the live worker runtime.
-- [ ] Investigate separate live billing/status issue where a newly registered user with zero balance can upload a result but the task list status becomes `FAILED: insufficient balance`.
-- [ ] Investigate separate DB-backed nodepool test isolation issue when multiple parallel tests call `initDB` against the same fresh Postgres database.
+- [x] Investigate separate live billing/status issue where a newly registered user with zero balance can upload a result but the task list status becomes `FAILED: insufficient balance`. Rust completion now settles billing when balance is sufficient and leaves completed tasks COMPLETED with billing pending when balance is insufficient.
+- [x] Investigate separate DB-backed nodepool test isolation issue when multiple parallel tests call `initDB` against the same fresh Postgres database. Rust DB-backed tests now clean scoped test IDs and the master-api test module is wired into `cargo test`.
 - [x] Run the full required E2E gate: 10 consecutive pipeline runs and 3 consecutive node failure simulations.
 - [x] Fix nodepool worker list/state regression where probe-marked `OFFLINE` workers were auto-reactivated to `ACTIVE` by heartbeat freshness.
 - [x] Add/adjust dispatch behavior so probe-disabled mode can still dispatch when only OFFLINE candidates remain after a prior probe-fail marking.
-- [ ] Add focused nodepool unit test for `ListWorkers(includeOffline=true)` to explicitly verify OFFLINE persistence semantics.
+- [x] Add focused nodepool unit test for `ListWorkers(includeOffline=true)` to explicitly verify OFFLINE persistence semantics.
 - [x] Stabilize reliability calibration startup by cleaning conflicting local listeners before harness service boot.
 - [x] Run full completion gate: 10 consecutive runs + 3 failure simulations + 900s long-running workload (artifact: `test_logs/reliability/20260521-122819`).

@@ -48,6 +48,7 @@ hivemind-rs/
 │   ├── node-manager/   - Worker management
 │   ├── proto/          - gRPC protobuf definitions
 │   ├── task-scheduler/ - Task dispatch & scheduling
+│   ├── torrent-service/- ZIP to BitTorrent metainfo conversion and swarm helpers
 │   ├── vpn-service/    - VPN management
 │   └── worker-executor/- Task execution engine
 ```
@@ -133,6 +134,16 @@ Configuration is via environment variables:
 | `DATABASE_URL` | - | PostgreSQL connection string |
 | `REDIS_URL` | - | Redis connection string |
 | `JWT_SECRET` | - | JWT signing secret |
+| `HIVEMIND_ADMIN_USERS` | `testuser` | Comma-separated usernames allowed to access `/api/admin/*` endpoints |
+| `HIVEMIND_TASK_SUBMIT_LIMIT_PER_MINUTE` | `60` | Per-user task submission rate limit for a rolling 1-minute window (`0` disables limiting) |
+| `MASTER_HTTP_ADDR` | `0.0.0.0:8082` | Master HTTP listen address |
+| `NODEPOOL_GRPC_ADDR` | `0.0.0.0:50051` | Nodepool gRPC listen/connect address |
+| `WORKER_GRPC_ADDR` | `0.0.0.0:50053` | Worker gRPC listen address |
+| `WORKER_ADVERTISE_ADDR` | - | Worker address registered with nodepool |
+| `TORRENT_API_DIR` | `./api/torrents` | Seed directory for uploaded task packages |
+| `TORRENT_BT_DIR` | `./bt_torrents` | Generated `.torrent` output directory |
+| `TORRENT_ANNOUNCE_URL` | `http://localhost:6969/announce` | Tracker announce URL embedded in torrents |
+| `EXECUTOR_SANDBOX_DIR` | `./sandbox` | Per-task sandbox root |
 | `LOG_LEVEL` | `info` | Log level (debug, info, warn, error) |
 
 ## API Reference
@@ -153,11 +164,47 @@ curl -X POST http://localhost:8082/api/login \
 curl -X POST http://localhost:8082/api/tasks \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
-  -d '{"task_id": "task-1", "payload": "..."}'
+  -d '{
+    "task_id": "task-1",
+    "torrent": "magnet:?xt=urn:btih:<info-hash>",
+    "memory_gb": 4,
+    "cpu_score": 100,
+    "storage_gb": 10,
+    "max_cpt": 25
+  }'
+
+# Create task from a local ZIP path on the master host
+curl -X POST http://localhost:8082/api/tasks \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "task_id": "task-zip-1",
+    "zip_path": "./task/windows_dist/out/task.zip",
+    "memory_gb": 4,
+    "cpu_score": 100,
+    "storage_gb": 10,
+    "max_cpt": 25
+  }'
 
 # List tasks
 curl http://localhost:8082/api/tasks \
   -H "Authorization: Bearer <token>"
+```
+
+### Admin Observability
+
+```bash
+# Cache alert (with thresholds)
+curl "http://localhost:8082/api/admin/scheduling/cache-alert?low=0.5&high=2.0" \
+  -H "Authorization: Bearer <admin-token>"
+
+# Cache anomaly history (persisted low/high alerts)
+curl "http://localhost:8082/api/admin/scheduling/cache-anomalies?limit=100" \
+  -H "Authorization: Bearer <admin-token>"
+
+# Admin audit logs (trust-control / artifact cleanup / etc.)
+curl "http://localhost:8082/api/admin/audit/logs?limit=100" \
+  -H "Authorization: Bearer <admin-token>"
 ```
 
 ### Health Check

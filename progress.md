@@ -1,0 +1,175 @@
+# Progress
+
+## 2026-05-31
+- Created planning scope for a centralized, no-crypto compute marketplace MVP.
+- Started three read-only subagent audits:
+  - Backend/data/API gaps.
+  - Frontend/provider onboarding/requestor DevEx gaps.
+  - Billing/security/marketplace gaps.
+- Collected all three audit results.
+- Selected Phase 1 first slice: marketplace ledger foundation and idempotent atomic settlement.
+- Dispatched implementation worker `019e7d40-f91f-75b1-9cca-4a9335ea7044` with a disjoint Rust data/scheduler write scope.
+- Ledger worker completed append-only `ledger_entries`, ledger models, and idempotent `TaskRepository::complete` settlement.
+- Verified ledger locally:
+  - `cargo test -p hivemind-task-scheduler task_repository::tests::test_complete -- --nocapture`: pass.
+  - `cargo test -p hivemind-database postgres::tests::test_migration_idempotent -- --nocapture`: pass.
+  - `cargo test -p hivemind-task-scheduler -- --test-threads=1`: pass.
+- Dispatched requestor upload worker `019e7d48-bc07-7750-a10f-14240fa7a79c`.
+- ZIP upload worker completed authenticated `POST /api/tasks/upload` multipart support and tests.
+- Verified upload locally:
+  - `cargo test -p hivemind-master-api multipart_upload -- --nocapture`: pass.
+  - `cargo test -p hivemind-master-api -- --test-threads=1`: pass.
+  - `cargo fmt --check`: pass.
+- Current status: complete for this planning/implementation round.
+- Next checkpoint: provider onboarding worker-control service or worker ownership hardening.
+- Resumed the goal and selected provider onboarding as the next slice.
+- Dispatched worker-control implementation worker `019e7d50-74c7-7381-bd37-d4ab40746c2e`.
+- Worker-control slice completed:
+  - Rust worker/all mode now starts a local HTTP control API.
+  - `GET /api/worker-info` returns Worker UI-compatible resource profile fields.
+  - `WORKER_CONTROL_HTTP_ADDR` defaults to `127.0.0.1:18080`.
+  - Docker compose exposes `18080` and passes Vite build args for Worker UI control/API base.
+- Verified provider onboarding slice:
+  - `cargo test -p hivemind-worker-executor control_api --no-default-features`: pass.
+  - `cargo test -p hivemind-worker-executor --no-default-features`: pass.
+  - `cargo test -p hivemind-bin --no-default-features`: pass.
+  - `cargo fmt --check`: pass.
+  - `npm run build` in `frontend/worker-ui`: pass.
+  - `npm run build` in `frontend/master-ui`: pass.
+  - `docker compose config`: pass.
+- Build artifact changes under `frontend/*/dist` were removed after verification.
+- Dispatched worker ownership hardening worker `019e7d59-a832-75b3-bbf7-ad6300c871d5`.
+- Worker ownership hardening completed:
+  - `POST /api/register-worker` now uses JWT subject as owner.
+  - Non-empty `username` that differs from the authenticated subject returns `403`.
+  - `worker_nodes.username` and `worker_id` are written from the authenticated subject, not a spoofable body field.
+- Verified ownership hardening:
+  - `cargo test -p hivemind-master-api test_register_worker_ -- --nocapture`: pass.
+  - `cargo test -p hivemind-master-api -- --test-threads=1`: pass.
+  - `cargo fmt --check`: pass.
+- Dispatched pricing quote/budget guardrail worker `019e7de1-4e84-7a80-a4ac-8f604ebdacc9`.
+- Pricing quote/budget guardrails completed:
+  - Added authenticated `POST /api/tasks/quote`.
+  - Added deterministic MVP CPT formula with CPU/GPU/memory/GPU memory/storage/host-count breakdown.
+  - `POST /api/tasks` and `POST /api/tasks/upload` reject `max_cpt` below quote with `402 Payment Required`.
+  - Accepted tasks store the quote as `task.max_cpt`; oversized requestor caps no longer become the charge amount.
+- Verified pricing slice:
+  - `cargo test -p hivemind-master-api quote -- --nocapture`: pass.
+  - `cargo test -p hivemind-master-api -- --test-threads=1`: pass, including multipart low-budget rejection.
+  - `cargo fmt --check`: pass.
+- Provider earnings API completed:
+  - Added authenticated `GET /api/provider/earnings`.
+  - Lists only the authenticated provider's `provider_credit` ledger entries.
+  - Returns total earned CPT across all matching entries while applying `limit` only to the entry list.
+  - Hides other providers' credits and the provider's own payer-debit ledger rows.
+- Verified provider earnings slice:
+  - `cargo test -p hivemind-master-api provider_earnings -- --nocapture`: pass.
+  - `cargo test -p hivemind-master-api -- --test-threads=1`: pass.
+  - `cargo fmt --check`: pass after rustfmt.
+- Dispatched provider resource caps/settings explorer `019e7e03-45e0-7353-86a5-cb3b49f9594a`.
+- Provider resource caps/settings API completed:
+  - Added provider settings columns to `worker_nodes`.
+  - Added `WorkerNode` fields and `WorkerInfo` response fields for provider caps and minimum CPT/hour.
+  - Added authenticated `GET /api/provider/workers/:worker_id/settings`.
+  - Added authenticated `PUT /api/provider/workers/:worker_id/settings`.
+  - Enforces worker ownership against JWT subject.
+  - Validates non-negative caps and prevents caps above registered CPU/RAM/GPU memory/storage when known.
+  - HTTP worker re-registration keeps existing provider settings on conflict.
+  - Node-manager and scheduler worker builders were updated for the new model fields.
+- Verified provider settings slice:
+  - `cargo test -p hivemind-master-api provider_can_update -- --nocapture`: failed first with `404`, then passed after implementation.
+  - `cargo test -p hivemind-database`: pass.
+  - `cargo test -p hivemind-node-manager --no-default-features`: pass.
+  - `cargo test -p hivemind-task-scheduler --no-default-features -- --test-threads=1`: pass.
+  - `cargo test -p hivemind-master-api -- --test-threads=1`: pass.
+  - `cargo fmt --check`: pass.
+- Dispatched scheduler provider settings explorer `019e7e0f-e3ac-7182-9c87-e91c867eff17`.
+- Scheduler effective caps/price filtering completed:
+  - `find_best_worker` now excludes disabled providers.
+  - Applies `cpu_cores_limit` by scaling effective CPU score.
+  - Applies `memory_gb_limit`, `gpu_memory_gb_limit`, and `storage_gb_limit` with `0` meaning use hardware/available capacity.
+  - Uses `available_memory_gb` and effective storage for both eligibility and sorting.
+  - Filters workers whose `min_cpt_per_hour` exceeds `task.max_cpt`.
+  - Fixed node-manager worker upsert to persist `available_memory_gb` and `queue_capacity`, so registered workers remain schedulable under availability-aware filtering.
+- Verified scheduler settings slice:
+  - `cargo test -p hivemind-task-scheduler scheduler::tests::test_provider_settings_filter -- --nocapture`: failed first by selecting a disabled/capped worker, then passed.
+  - `cargo test -p hivemind-task-scheduler scheduler::tests::test_provider_settings_use_available -- --nocapture`: failed first by sorting on raw storage, then passed.
+  - `cargo test -p hivemind-task-scheduler --no-default-features -- --test-threads=1`: pass.
+  - `cargo test -p hivemind-node-manager --no-default-features`: pass.
+  - `cargo fmt --check`: pass.
+- Dispatched Worker UI provider controls explorer `019e7e14-d5d9-7951-8b1a-80aae238c9b1`.
+- Worker UI provider controls completed:
+  - Replaced the mojibake-heavy Worker UI with a clean provider control panel.
+  - Preserved login, local worker profile collection, worker registration, worker removal, and cluster worker listing.
+  - Added provider earnings summary via `GET /api/provider/earnings`.
+  - Added provider settings form via `GET/PUT /api/provider/workers/:worker_id/settings`.
+  - Settings UI supports accept-tasks toggle, CPU/RAM/GPU memory/storage caps, and minimum CPT/hour.
+  - Registered worker list displays status and provider minimum price.
+- Verified Worker UI slice:
+  - `npm run build` in `frontend/worker-ui`: pass.
+  - `npm run build -- --outDir .tmp-build --emptyOutDir` in `frontend/worker-ui`: pass after a `D:\tmp` permissions failure unrelated to app compilation.
+  - Removed `.tmp-build` after verification.
+- Dispatched requestor CLI submit explorer `019e803d-9359-7332-a060-bd3b39c187f2`.
+- Requestor CLI submit completed:
+  - Added `hivemind submit <job.zip>` parsing before config/DB startup, so requestor submission does not require a local database.
+  - Added flags for `--api`, `--username`, `--password`, `--task-id`, CPU/RAM/GPU/storage requirements, `--host-count`, and `--max-cpt`.
+  - Added safe task-id validation and `.zip` package validation.
+  - Added multipart body generation compatible with `POST /api/tasks/upload`.
+  - Added HTTP login and authenticated upload flow using `reqwest`.
+  - Kept existing `master|nodepool|worker|all` service modes intact.
+- Verified requestor CLI slice:
+  - `cargo test -p hivemind-bin cli::tests:: --no-default-features -- --nocapture`: pass.
+  - `cargo test -p hivemind-bin --no-default-features`: pass.
+  - `cargo fmt --check`: pass.
+  - First test run failed due restricted network while fetching the new `reqwest` dependency; rerun with approval completed dependency resolution.
+- Dispatched requestor CLI status/result explorer `019e8067-d12a-73c2-ba4d-7abd6a1ca069`.
+- Requestor CLI status/result completed:
+  - Added `hivemind status <task-id>` with `--api`, `--username`, and `--password`.
+  - Added `hivemind result <task-id>` with the same auth flags.
+  - Both commands log in first, then call protected task endpoints without requiring local config/DB startup.
+  - Status prints task status, message, output, wall time, and peak memory.
+  - Result prints task status, result torrent reference, and message.
+  - Added response formatting tests for status/result output.
+  - Added parser/error coverage for missing auth flags, unsafe task ids, missing flag values, unsuccessful responses, and partial pending result responses.
+- Verified requestor CLI status/result slice:
+  - `cargo test -p hivemind-bin cli::tests:: --no-default-features -- --nocapture`: failed first for missing parser/formatter/main coverage, then passed with six CLI tests.
+  - `cargo test -p hivemind-bin --no-default-features`: pass.
+  - `cargo fmt --check`: pass.
+- Dispatched atomic assignment explorer `019e806d-6eb1-7482-9100-2563358672e9`.
+- Guarded task assignment completed:
+  - `TaskRepository::assign_to_worker` now performs a single guarded `UPDATE ... WHERE task_id = $3 AND status IN ('PENDING', 'QUEUED') RETURNING *`.
+  - A second assignment attempt for an already assigned task fails instead of overwriting `worker_id` / `worker_ip`.
+  - `Dispatcher::dispatch_one` now inherits that guard, so stale pending snapshots cannot overwrite an assignment made by another dispatcher.
+  - No schema changes were required for this minimum correctness fix.
+- Verified guarded assignment slice:
+  - `cargo test -p hivemind-task-scheduler task_repository::tests::test_assign_to_worker_does_not_overwrite -- --nocapture`: failed first because the second assignment overwrote the first, then passed.
+  - `cargo test -p hivemind-task-scheduler dispatcher::tests::test_dispatch_one_does_not_overwrite_stale_assignment -- --nocapture`: pass.
+  - `cargo test -p hivemind-task-scheduler --no-default-features -- --test-threads=1`: pass with 17 tests.
+  - `cargo fmt --check`: pass.
+- Batch claim with row locking completed:
+  - Added `TaskRepository::claim_pending_for_worker` using a `FOR UPDATE SKIP LOCKED` CTE and a guarded `UPDATE ... RETURNING`.
+  - Added `TaskScheduler::claim_pending_for_worker`.
+  - Updated node-manager gRPC `pull_batch` to atomically claim work instead of reading pending tasks and assigning one by one.
+  - Added a concurrent repository test proving two claimers do not receive overlapping tasks.
+- Verified batch claim slice:
+  - `cargo test -p hivemind-task-scheduler task_repository::tests::test_claim_pending_for_worker -- --nocapture`: pass.
+  - `cargo test -p hivemind-task-scheduler --no-default-features -- --test-threads=1`: pass with 18 tests.
+  - `cargo test -p hivemind-node-manager --no-default-features`: pass.
+  - `cargo fmt --check`: pass.
+- Stale worker result fencing completed:
+  - Added `TaskRepository::complete_for_worker`, `fail_for_worker`, and `reset_to_pending_for_worker`.
+  - Worker-scoped mutations now require the task's current `worker_id` to match the reporting worker.
+  - Dispatcher execution callbacks and send-failure reset now use worker-scoped repository methods.
+  - Timeout redispatch/failure uses worker-scoped guards from the stale task snapshot.
+  - Batch runtime `CompleteBatchRequest.worker_id` is now passed through to worker-scoped complete/fail methods.
+  - Kept existing task-id-only methods for platform-owned operations such as admin/task-owner flows.
+- Verified stale fencing slice:
+  - `cargo test -p hivemind-task-scheduler task_repository::tests::test_complete_for_worker_rejects_stale_worker_after_redispatch --no-default-features -- --nocapture`: failed first because worker-scoped methods were missing, then passed.
+  - `cargo test -p hivemind-task-scheduler --no-default-features -- --test-threads=1`: pass with 21 tests.
+  - `cargo test -p hivemind-node-manager --no-default-features`: pass.
+  - `cargo fmt --check`: pass.
+
+## Notes
+- Existing repo has many modified files. Do not revert unrelated changes.
+- Existing root `findings.md` contains prior reliability work; marketplace findings should be recorded separately or appended carefully.
+- A parallel `cargo test -p hivemind-task-scheduler` run had one transient dispatcher DB-state failure; the same test passed alone and the crate passed with `--test-threads=1`.

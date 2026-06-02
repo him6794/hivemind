@@ -1,6 +1,6 @@
-﻿pub mod task_repository;
+﻿pub mod dispatcher;
 pub mod scheduler;
-pub mod dispatcher;
+pub mod task_repository;
 
 use anyhow::Result;
 use hivemind_auth::AuthManager;
@@ -60,7 +60,20 @@ impl TaskScheduler {
         worker_id: &str,
         worker_ip: &str,
     ) -> Result<Task> {
-        self.repo.assign_to_worker(task_id, worker_id, worker_ip).await
+        self.repo
+            .assign_to_worker(task_id, worker_id, worker_ip)
+            .await
+    }
+
+    pub async fn claim_pending_for_worker(
+        &self,
+        worker_id: &str,
+        worker_ip: &str,
+        limit: i64,
+    ) -> Result<Vec<Task>> {
+        self.repo
+            .claim_pending_for_worker(worker_id, worker_ip, limit)
+            .await
     }
 
     pub async fn complete_task(
@@ -74,6 +87,27 @@ impl TaskScheduler {
 
     pub async fn fail_task(&self, task_id: &str, reason: &str) -> Result<Task> {
         self.repo.fail(task_id, reason).await
+    }
+
+    pub async fn complete_task_for_worker(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        result_torrent: Option<&str>,
+        output: Option<&str>,
+    ) -> Result<Task> {
+        self.repo
+            .complete_for_worker(task_id, worker_id, result_torrent, output)
+            .await
+    }
+
+    pub async fn fail_task_for_worker(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        reason: &str,
+    ) -> Result<Task> {
+        self.repo.fail_for_worker(task_id, worker_id, reason).await
     }
 
     pub async fn cancel_task(&self, task_id: &str) -> Result<Task> {

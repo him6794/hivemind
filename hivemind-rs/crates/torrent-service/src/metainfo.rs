@@ -1,4 +1,4 @@
-﻿//! BitTorrent metainfo (.torrent) file creation.
+//! BitTorrent metainfo (.torrent) file creation.
 //! Produces Bencode-encoded metainfo with SHA-1 piece hashing
 //! following the BitTorrent v1 specification.
 
@@ -39,7 +39,11 @@ pub struct TorrentMetainfo {
 }
 
 /// Create a BitTorrent metainfo from raw data.
-pub fn create_metainfo(data: &[u8], file_path: &std::path::Path, announce: &str) -> Result<TorrentMetainfo> {
+pub fn create_metainfo(
+    data: &[u8],
+    file_path: &std::path::Path,
+    announce: &str,
+) -> Result<TorrentMetainfo> {
     let piece_size = DEFAULT_PIECE_SIZE as u64;
     let file_name = file_path
         .file_name()
@@ -82,11 +86,13 @@ pub fn create_metainfo(data: &[u8], file_path: &std::path::Path, announce: &str)
 
 /// Compute SHA-1 hashes for each piece of data
 fn compute_pieces(data: &[u8], piece_size: usize) -> Vec<[u8; 20]> {
-    data.chunks(piece_size).map(|chunk| {
-        let mut hasher = Sha1::new();
-        hasher.update(chunk);
-        hasher.finalize().into()
-    }).collect()
+    data.chunks(piece_size)
+        .map(|chunk| {
+            let mut hasher = Sha1::new();
+            hasher.update(chunk);
+            hasher.finalize().into()
+        })
+        .collect()
 }
 
 /// Verify a piece against its expected SHA-1 hash
@@ -113,7 +119,10 @@ mod tests {
     fn test_compute_pieces_multiple() {
         let data = vec![0u8; 600_000]; // > 512 KiB
         let pieces = compute_pieces(&data, DEFAULT_PIECE_SIZE);
-        assert!(pieces.len() >= 2, "data larger than piece_size should span multiple pieces");
+        assert!(
+            pieces.len() >= 2,
+            "data larger than piece_size should span multiple pieces"
+        );
     }
 
     #[test]

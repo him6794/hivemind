@@ -58,6 +58,9 @@ mod tests {
     fn test_create_pool_default_config() {
         let config = HivemindConfig::default();
         let pool = create_pool(&config);
-        assert!(pool.is_ok(), "Redis pool creation should succeed with default config");
+        assert!(
+            pool.is_ok(),
+            "Redis pool creation should succeed with default config"
+        );
     }
 }

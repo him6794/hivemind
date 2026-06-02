@@ -1,4 +1,4 @@
-﻿//! P2P Swarm coordinator: manages the lifecycle of P2P task distribution.
+//! P2P Swarm coordinator: manages the lifecycle of P2P task distribution.
 //! Uses the BitTorrent tracker to coordinate peer discovery,
 //! then workers exchange data via the VPN overlay.
 
@@ -35,7 +35,10 @@ impl P2PSwarm {
             last_announce: 0,
         };
 
-        let _ = self.tracker.announce(info_hash, seeder).await
+        let _ = self
+            .tracker
+            .announce(info_hash, seeder)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to register seeder: {}", e))?;
 
         info!(
@@ -67,7 +70,10 @@ impl P2PSwarm {
             last_announce: 0,
         };
 
-        let peers = self.tracker.announce(info_hash, peer).await
+        let peers = self
+            .tracker
+            .announce(info_hash, peer)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to join swarm: {}", e))?;
 
         info!(
@@ -99,10 +105,17 @@ impl P2PSwarm {
             last_announce: 0,
         };
 
-        let _ = self.tracker.announce(info_hash, peer).await
+        let _ = self
+            .tracker
+            .announce(info_hash, peer)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to report completion: {}", e))?;
 
-        info!("Worker {} completed download for {}", worker_id, &info_hash[..8]);
+        info!(
+            "Worker {} completed download for {}",
+            worker_id,
+            &info_hash[..8]
+        );
         Ok(())
     }
 
@@ -129,16 +142,28 @@ mod tests {
         let info_hash = "deadbeefcafebabe000000000000000000000000";
 
         // Master starts seeding
-        swarm.start_seeding(info_hash, "10.0.0.1", 6881, 1024 * 1024).await.unwrap();
+        swarm
+            .start_seeding(info_hash, "10.0.0.1", 6881, 1024 * 1024)
+            .await
+            .unwrap();
         assert_eq!(swarm.peer_count(info_hash).await, 1);
 
         // Worker joins
-        let peers = swarm.worker_join(info_hash, "worker-1", "100.64.0.2", 6881, 1024 * 1024).await.unwrap();
+        let peers = swarm
+            .worker_join(info_hash, "worker-1", "100.64.0.2", 6881, 1024 * 1024)
+            .await
+            .unwrap();
         assert!(!peers.is_empty(), "should get master seeder as peer");
-        assert_eq!(peers[0].peer_id, format!("master-seeder-{}", &info_hash[..8]));
+        assert_eq!(
+            peers[0].peer_id,
+            format!("master-seeder-{}", &info_hash[..8])
+        );
 
         // Worker completes
-        swarm.worker_completed(info_hash, "worker-1", "100.64.0.2", 6881, 1024 * 1024).await.unwrap();
+        swarm
+            .worker_completed(info_hash, "worker-1", "100.64.0.2", 6881, 1024 * 1024)
+            .await
+            .unwrap();
 
         // Remove swarm
         swarm.remove_swarm(info_hash).await;

@@ -6,8 +6,12 @@ pub async fn create_pool(config: &HivemindConfig) -> Result<PgPool> {
     let pool = PgPoolOptions::new()
         .max_connections(config.database.max_connections)
         .min_connections(config.database.min_connections)
-        .idle_timeout(std::time::Duration::from_secs(config.database.idle_timeout_secs))
-        .acquire_timeout(std::time::Duration::from_secs(config.database.connect_timeout_secs))
+        .idle_timeout(std::time::Duration::from_secs(
+            config.database.idle_timeout_secs,
+        ))
+        .acquire_timeout(std::time::Duration::from_secs(
+            config.database.connect_timeout_secs,
+        ))
         .connect(&config.database.url)
         .await
         .context("Failed to connect to PostgreSQL")?;
@@ -26,7 +30,9 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );",
-    ).execute(pool).await?;
+    )
+    .execute(pool)
+    .await?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS worker_nodes (
@@ -45,6 +51,12 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
             vram_mb BIGINT NOT NULL DEFAULT 0,
             storage_total_gb BIGINT NOT NULL DEFAULT 0,
             storage_available_gb BIGINT NOT NULL DEFAULT 0,
+            provider_enabled BOOLEAN NOT NULL DEFAULT true,
+            cpu_cores_limit INTEGER NOT NULL DEFAULT 0,
+            memory_gb_limit INTEGER NOT NULL DEFAULT 0,
+            gpu_memory_gb_limit INTEGER NOT NULL DEFAULT 0,
+            storage_gb_limit BIGINT NOT NULL DEFAULT 0,
+            min_cpt_per_hour BIGINT NOT NULL DEFAULT 0,
             location VARCHAR(255) NOT NULL DEFAULT '',
             status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
             cpu_usage DOUBLE PRECISION NOT NULL DEFAULT 0,
@@ -57,7 +69,9 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
             registered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );",
-    ).execute(pool).await?;
+    )
+    .execute(pool)
+    .await?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS tasks (
@@ -100,7 +114,9 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
             last_update TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             completed_at TIMESTAMPTZ
         );",
-    ).execute(pool).await?;
+    )
+    .execute(pool)
+    .await?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS vpn_peers (
@@ -113,43 +129,209 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
             last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );",
-    ).execute(pool).await?;
+    )
+    .execute(pool)
+    .await?;
 
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_tasks_owner ON tasks(owner);").execute(pool).await?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);").execute(pool).await?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_tasks_worker_id ON tasks(worker_id);").execute(pool).await?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_worker_nodes_status ON worker_nodes(status);").execute(pool).await?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_worker_nodes_username ON worker_nodes(username);").execute(pool).await?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_vpn_peers_worker_id ON vpn_peers(worker_id);").execute(pool).await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS ledger_entries (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            task_id VARCHAR(255) NOT NULL,
+            payer_user VARCHAR(255) NOT NULL,
+            provider_worker_id VARCHAR(255),
+            provider_user VARCHAR(255),
+            kind VARCHAR(64) NOT NULL,
+            amount_cpt BIGINT NOT NULL,
+            currency VARCHAR(16) NOT NULL DEFAULT 'CPT',
+            status VARCHAR(32) NOT NULL,
+            idempotency_key VARCHAR(255) NOT NULL UNIQUE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );",
+    )
+    .execute(pool)
+    .await?;
 
-    let _ = sqlx::query("ALTER TABLE worker_nodes ADD COLUMN IF NOT EXISTS gpu_name VARCHAR(255);").execute(pool).await;
-    let _ = sqlx::query("ALTER TABLE worker_nodes ADD COLUMN IF NOT EXISTS vram_mb BIGINT NOT NULL DEFAULT 0;").execute(pool).await;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS worker_reputation (
+            worker_id VARCHAR(255) PRIMARY KEY,
+            successful_tasks BIGINT NOT NULL DEFAULT 0,
+            failed_tasks BIGINT NOT NULL DEFAULT 0,
+            score INTEGER NOT NULL DEFAULT 100,
+            banned BOOLEAN NOT NULL DEFAULT false,
+            last_attested_at TIMESTAMPTZ,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS task_attestations (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            task_id VARCHAR(255) NOT NULL,
+            worker_id VARCHAR(255) NOT NULL,
+            verifier_worker_id VARCHAR(255),
+            verdict VARCHAR(32) NOT NULL,
+            confidence INTEGER NOT NULL DEFAULT 0,
+            details TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS artifacts (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            task_id VARCHAR(255) NOT NULL,
+            artifact_key VARCHAR(255) NOT NULL UNIQUE,
+            checksum_sha1 VARCHAR(64) NOT NULL,
+            size_bytes BIGINT NOT NULL DEFAULT 0,
+            storage_path TEXT NOT NULL,
+            status VARCHAR(32) NOT NULL DEFAULT 'ready',
+            resume_supported BOOLEAN NOT NULL DEFAULT true,
+            dedup_hit BOOLEAN NOT NULL DEFAULT false,
+            expires_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS admin_audit_logs (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            admin_user VARCHAR(255) NOT NULL,
+            action VARCHAR(64) NOT NULL,
+            target_type VARCHAR(64) NOT NULL,
+            target_id VARCHAR(255) NOT NULL DEFAULT '',
+            detail JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS cache_alert_anomalies (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            severity VARCHAR(16) NOT NULL,
+            cache_hit_rate DOUBLE PRECISION NOT NULL DEFAULT 0,
+            low_threshold DOUBLE PRECISION NOT NULL DEFAULT 0,
+            high_threshold DOUBLE PRECISION NOT NULL DEFAULT 0,
+            message TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_tasks_owner ON tasks(owner);")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_tasks_worker_id ON tasks(worker_id);")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_worker_nodes_status ON worker_nodes(status);")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_worker_nodes_username ON worker_nodes(username);")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_vpn_peers_worker_id ON vpn_peers(worker_id);")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_ledger_entries_task_id ON ledger_entries(task_id);",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_task_attestations_task_id ON task_attestations(task_id);",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_artifacts_task_id ON artifacts(task_id);")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_admin_audit_logs_created_at ON admin_audit_logs(created_at DESC);",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_cache_alert_anomalies_created_at ON cache_alert_anomalies(created_at DESC);",
+    )
+    .execute(pool)
+    .await?;
+
+    let _ = sqlx::query("ALTER TABLE worker_nodes ADD COLUMN IF NOT EXISTS gpu_name VARCHAR(255);")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query(
+        "ALTER TABLE worker_nodes ADD COLUMN IF NOT EXISTS vram_mb BIGINT NOT NULL DEFAULT 0;",
+    )
+    .execute(pool)
+    .await;
     let _ = sqlx::query("ALTER TABLE worker_nodes ADD COLUMN IF NOT EXISTS storage_total_gb BIGINT NOT NULL DEFAULT 0;").execute(pool).await;
     let _ = sqlx::query("ALTER TABLE worker_nodes ADD COLUMN IF NOT EXISTS storage_available_gb BIGINT NOT NULL DEFAULT 0;").execute(pool).await;
-    let _ = sqlx::query("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS req_storage_gb BIGINT NOT NULL DEFAULT 0;").execute(pool).await;
+    let _ = sqlx::query(
+        "ALTER TABLE worker_nodes ADD COLUMN IF NOT EXISTS provider_enabled BOOLEAN NOT NULL DEFAULT true;",
+    )
+    .execute(pool)
+    .await;
+    let _ = sqlx::query(
+        "ALTER TABLE worker_nodes ADD COLUMN IF NOT EXISTS cpu_cores_limit INTEGER NOT NULL DEFAULT 0;",
+    )
+    .execute(pool)
+    .await;
+    let _ = sqlx::query(
+        "ALTER TABLE worker_nodes ADD COLUMN IF NOT EXISTS memory_gb_limit INTEGER NOT NULL DEFAULT 0;",
+    )
+    .execute(pool)
+    .await;
+    let _ = sqlx::query(
+        "ALTER TABLE worker_nodes ADD COLUMN IF NOT EXISTS gpu_memory_gb_limit INTEGER NOT NULL DEFAULT 0;",
+    )
+    .execute(pool)
+    .await;
+    let _ = sqlx::query(
+        "ALTER TABLE worker_nodes ADD COLUMN IF NOT EXISTS storage_gb_limit BIGINT NOT NULL DEFAULT 0;",
+    )
+    .execute(pool)
+    .await;
+    let _ = sqlx::query(
+        "ALTER TABLE worker_nodes ADD COLUMN IF NOT EXISTS min_cpt_per_hour BIGINT NOT NULL DEFAULT 0;",
+    )
+    .execute(pool)
+    .await;
+    let _ = sqlx::query(
+        "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS req_storage_gb BIGINT NOT NULL DEFAULT 0;",
+    )
+    .execute(pool)
+    .await;
 
     tracing::info!("Database migrations completed successfully");
     Ok(())
 }
 
 pub async fn seed_default_user(pool: &PgPool) -> Result<()> {
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM users WHERE username = $1)",
-    )
-    .bind("testuser")
-    .fetch_one(pool)
-    .await?;
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE username = $1)")
+        .bind("testuser")
+        .fetch_one(pool)
+        .await?;
 
     if !exists {
         let hash = bcrypt::hash("testpass123", 12)?;
-        sqlx::query(
-            "INSERT INTO users (username, password_hash, balance) VALUES ($1, $2, $3)",
-        )
-        .bind("testuser")
-        .bind(&hash)
-        .bind(1000i64)
-        .execute(pool)
-        .await?;
+        sqlx::query("INSERT INTO users (username, password_hash, balance) VALUES ($1, $2, $3)")
+            .bind("testuser")
+            .bind(&hash)
+            .bind(1000i64)
+            .execute(pool)
+            .await?;
         tracing::info!("Seeded default test user: testuser / testpass123");
     }
 
@@ -164,9 +346,16 @@ mod tests {
     async fn test_migration_idempotent() {
         let db_url = std::env::var("HIVEMIND_TEST_DATABASE_URL")
             .unwrap_or_else(|_| "postgres://hivemind:hivemind@localhost:5432/hivemind_test".into());
-        let pool = match PgPoolOptions::new().max_connections(1).connect(&db_url).await {
+        let pool = match PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&db_url)
+            .await
+        {
             Ok(p) => p,
-            Err(_) => { tracing::warn!("Skipping DB test"); return; }
+            Err(_) => {
+                tracing::warn!("Skipping DB test");
+                return;
+            }
         };
         run_migrations(&pool).await.unwrap();
         run_migrations(&pool).await.unwrap();
