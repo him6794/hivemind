@@ -128,6 +128,14 @@ impl WorkerRepository {
         Ok(())
     }
 
+    pub async fn delete(&self, worker_id: &str) -> Result<u64> {
+        let result = sqlx::query("DELETE FROM worker_nodes WHERE worker_id = $1")
+            .bind(worker_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
     pub async fn mark_offline_stale(&self) -> Result<u64> {
         let result = sqlx::query(
             "UPDATE worker_nodes SET status = 'OFFLINE', updated_at = NOW()

@@ -441,7 +441,9 @@ pub struct TaskInfo {
     pub billed_amount: i64,
     pub billing_settled: bool,
     pub deterministic: bool,
+}
 
+/// Conversion from Task to TaskInfo
 impl From<Task> for TaskInfo {
     fn from(t: Task) -> Self {
         Self {
@@ -571,26 +573,4 @@ pub struct LoginResponse {
 pub struct TokenResponse {
     pub token: String,
     pub expires_at: DateTime<Utc>,
-}
-
-impl From<Task> for TaskInfo {
-    fn from(t: Task) -> Self {
-        Self {
-            task_id: t.task_id,
-            owner: t.owner,
-            status: t.status.as_str().into(),
-            status_message: t.status_message.unwrap_or_default(),
-            cpu_usage: t.cpu_usage,
-            memory_usage: t.memory_usage,
-            gpu_usage: t.gpu_usage,
-            gpu_memory_usage: t.gpu_memory_usage,
-            worker_ip: t.worker_ip.unwrap_or_default(),
-            retry_count: t.retry_count,
-            wall_time_ms: t.wall_time_ms,
-            peak_memory_mb: t.peak_memory_mb,
-            billed_amount: t.billed_amount,
-            billing_settled: t.billing_settled,
-            deterministic: t.deterministic,
-        }
-    }
 }

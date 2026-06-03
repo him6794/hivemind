@@ -31,6 +31,13 @@ impl NodeManager {
     pub async fn list_active_workers(&self) -> Result<Vec<WorkerNode>> {
         self.repo.find_active().await
     }
+    pub async fn list_workers(&self, include_offline: bool) -> Result<Vec<WorkerNode>> {
+        self.repo.list(include_offline).await
+    }
+    pub async fn remove_worker(&self, worker_id: &str) -> Result<bool> {
+        let count = self.repo.delete(worker_id).await?;
+        Ok(count > 0)
+    }
 
     pub async fn update_heartbeat(
         &self,

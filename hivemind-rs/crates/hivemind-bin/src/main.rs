@@ -23,6 +23,7 @@ use hivemind_worker_executor::nodepool_client;
 use hivemind_worker_executor::WorkerExecutor;
 use std::sync::Arc;
 use tracing::info;
+use tokio::sync::watch;
 
 mod cli;
 
@@ -64,12 +65,6 @@ async fn main() -> Result<()> {
     };
 
     let config = HivemindConfig::load()?;
-    let db = DatabaseManager::new(&config).await?;
-    db.run_migrations().await?;
-    hivemind_database::postgres::seed_default_user(&db.pool).await?;
-
-    let auth = AuthManager::new(&db, &config.auth.jwt_secret, config.auth.token_expiry_hours);
-    let scheduler = TaskScheduler::new(db.clone(), auth.clone());
 
     let run_master = service == "master" || service == "all";
     let run_nodepool = service == "nodepool" || service == "all";
@@ -83,76 +78,37 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    let mut shutdown_handles: Vec<tokio::sync::watch::Sender<bool>> = Vec::new();
+    let mut shutdown_handles: Vec<watch::Sender<bool>> = Vec::new();
 
-    // ── Master HTTP API ────────────────────────────────
+
+    // ---- Master (HTTP-to-gRPC proxy, no DB) ----
     if run_master {
         let nodepool_grpc = config.server.nodepool_grpc_addr.clone();
+        let jwt_secret = config.auth.jwt_secret.clone();
+        let token_expiry = config.auth.token_expiry_hours;
         let api = MasterApiServer::new(
-            db.clone(),
-            auth.clone(),
-            scheduler.clone(),
+            jwt_secret,
+            token_expiry,
             nodepool_grpc,
             config.clone(),
-        );
+        ).await?;
         let addr = config.server.master_http_addr.clone();
         tokio::spawn(async move {
             if let Err(e) = api.serve(&addr).await {
                 tracing::error!("Master API error: {}", e);
             }
         });
-        info!(
-            "Master HTTP API started on {}",
-            config.server.master_http_addr
-        );
-
-        let cleanup_enabled = parse_env_bool("ARTIFACT_CLEANUP_ENABLED", true);
-        if cleanup_enabled {
-            let cleanup_interval_secs = parse_env_u64("ARTIFACT_CLEANUP_INTERVAL_SECS", 60).max(5);
-            let pool = db.pool.clone();
-            let (cleanup_shutdown, mut cleanup_rx) = tokio::sync::watch::channel(false);
-            shutdown_handles.push(cleanup_shutdown);
-            tokio::spawn(async move {
-                let mut tick = tokio::time::interval(std::time::Duration::from_secs(
-                    cleanup_interval_secs,
-                ));
-                loop {
-                    tokio::select! {
-                        _ = tick.tick() => {
-                            match hivemind_master_api::handlers::cleanup_expired_artifacts(&pool, false).await {
-                                Ok(summary) => {
-                                    if summary.deleted_rows > 0 || summary.deleted_files > 0 {
-                                        tracing::info!(
-                                            "Artifact cleanup: deleted_rows={}, deleted_files={}, file_delete_errors={}",
-                                            summary.deleted_rows,
-                                            summary.deleted_files,
-                                            summary.file_delete_errors
-                                        );
-                                    }
-                                }
-                                Err(e) => tracing::error!("Artifact cleanup loop error: {}", e),
-                            }
-                        }
-                        _ = cleanup_rx.changed() => {
-                            if *cleanup_rx.borrow() {
-                                tracing::info!("Artifact cleanup loop shutting down");
-                                break;
-                            }
-                        }
-                    }
-                }
-            });
-            info!(
-                "Artifact cleanup loop started (interval={}s)",
-                cleanup_interval_secs
-            );
-        } else {
-            info!("Artifact cleanup loop disabled by ARTIFACT_CLEANUP_ENABLED");
-        }
+        info!("Master HTTP API started on {}", config.server.master_http_addr);
     }
 
-    // ── Nodepool gRPC Server ───────────────────────────
+    // ---- Nodepool (DB-backed gRPC server) ----
     if run_nodepool {
+        let db = DatabaseManager::new(&config).await?;
+        db.run_migrations().await?;
+        hivemind_database::postgres::seed_default_user(&db.pool).await?;
+        let auth = AuthManager::new(&db, &config.auth.jwt_secret, config.auth.token_expiry_hours);
+        let scheduler = TaskScheduler::new(db.clone(), auth.clone());
+
         let node_mgr = Arc::new(NodeManager::new(&config, db.clone()));
         let vpn = Arc::new(VpnService::new(config.clone(), db.clone()));
 
@@ -206,7 +162,7 @@ async fn main() -> Result<()> {
         );
     }
 
-    // ── Worker gRPC Server ─────────────────────────────
+    // ---- Worker gRPC Server ----────────────────────────────
     if run_worker {
         let executor = Arc::new(WorkerExecutor::new(config.clone()));
         let resources = executor.get_system_resources();

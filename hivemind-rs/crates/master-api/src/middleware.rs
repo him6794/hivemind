@@ -1,11 +1,16 @@
-use super::handlers::AppState;
+﻿use super::handlers::AppState;
 use axum::{
     extract::{Request, State},
     http::{header, StatusCode},
     middleware::Next,
     response::Response,
 };
+use jsonwebtoken::{decode, DecodingKey, Validation};
 use hivemind_models::Claims;
+
+/// Wraps the raw JWT token so handlers can forward it via gRPC.
+#[derive(Clone)]
+pub struct RawToken(pub String);
 
 pub async fn auth_middleware(
     State(state): State<AppState>,
@@ -15,19 +20,25 @@ pub async fn auth_middleware(
     let auth_header = request
         .headers()
         .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
 
     match auth_header {
         Some(h) if h.starts_with("Bearer ") => {
-            let token = &h[7..];
-            match state.auth.validate_token(token) {
-                Ok(claims) => {
-                    // Inject claims into request extensions for handlers to extract
-                    request.extensions_mut().insert(claims);
+            let token = h[7..].to_string();
+
+            match decode::<Claims>(
+                &token,
+                &DecodingKey::from_secret(state.jwt_secret.as_bytes()),
+                &Validation::default(),
+            ) {
+                Ok(token_data) => {
+                    request.extensions_mut().insert(token_data.claims);
+                    request.extensions_mut().insert(RawToken(token));
                     Ok(next.run(request).await)
                 }
                 Err(e) => {
-                    tracing::warn!("Auth failed: {}", e);
+                    tracing::warn!("JWT validation failed: {}", e);
                     Err(StatusCode::UNAUTHORIZED)
                 }
             }
@@ -36,11 +47,14 @@ pub async fn auth_middleware(
     }
 }
 
-/// Extractor that pulls Claims from request extensions
-pub struct AuthClaims(pub Claims);
+/// Combined extractor: both JWT claims and raw token for gRPC forwarding.
+pub struct AuthUser {
+    pub claims: Claims,
+    pub token: String,
+}
 
 #[axum::async_trait]
-impl<S> axum::extract::FromRequestParts<S> for AuthClaims
+impl<S> axum::extract::FromRequestParts<S> for AuthUser
 where
     S: Send + Sync,
 {
@@ -50,11 +64,12 @@ where
         parts: &mut axum::http::request::Parts,
         _state: &S,
     ) -> Result<Self, Self::Rejection> {
-        parts
-            .extensions
-            .get::<Claims>()
-            .cloned()
-            .map(AuthClaims)
-            .ok_or(StatusCode::UNAUTHORIZED)
+        let claims = parts.extensions.get::<Claims>().cloned();
+        let token = parts.extensions.get::<RawToken>().map(|t| t.0.clone());
+        
+        match (claims, token) {
+            (Some(claims), Some(token)) => Ok(AuthUser { claims, token }),
+            _ => Err(StatusCode::UNAUTHORIZED),
+        }
     }
 }

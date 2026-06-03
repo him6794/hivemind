@@ -6,9 +6,26 @@ use hivemind_proto::{
     GetBalanceResponse, GetTaskResultRequest, GetTaskResultResponse, HeartbeatRequest,
     HeartbeatResponse, LoginRequest, LoginResponse, PullBatchRequest, PullBatchResponse,
     RefreshTokenRequest, RefreshTokenResponse, RegisterWorkerNodeRequest,
-    ResourceSpec as ProtoResourceSpec, ResourceUsage as ProtoResourceUsage, RunningStatusRequest,
-    RunningStatusResponse, StatusResponse, StopTaskRequest, StopTaskResponse, TaskInfo, TaskLease,
+    ResourceSpec as ProtoResourceSpec, RunningStatusRequest,
+    RunningStatusResponse, StatusResponse, StopTaskRequest,
+    ListWorkersRequest, ListWorkersResponse, RemoveWorkerRequest,
+    QuoteTaskRequest, QuoteTaskResponse, GetProviderEarningsRequest, GetProviderEarningsResponse,
+    GetProviderWorkerSettingsRequest, GetProviderWorkerSettingsResponse,
+    UpdateProviderWorkerSettingsRequest, UpdateProviderWorkerSettingsResponse, StopTaskResponse, TaskInfo, TaskLease,
     TasklogRequest, TasklogResponse, UploadTaskRequest, UploadTaskResponse,
+    // Admin RPC types
+    GetAdminBillingOverviewRequest, GetAdminBillingOverviewResponse,
+    GetAdminArtifactOverviewRequest, GetAdminArtifactOverviewResponse,
+    CleanupAdminArtifactsRequest, CleanupAdminArtifactsResponse,
+    GetAdminSchedulingCacheMetricsRequest, GetAdminSchedulingCacheMetricsResponse,
+    WorkerCacheAffinityMetric,
+    GetAdminSchedulingCacheAlertRequest, GetAdminSchedulingCacheAlertResponse,
+    ListAdminSchedulingCacheAnomaliesRequest, ListAdminSchedulingCacheAnomaliesResponse,
+    CacheAnomalyEntry,
+    GetWorkerTrustProfileRequest, GetWorkerTrustProfileResponse, WorkerTrustProfile,
+    UpdateWorkerTrustControlRequest, UpdateWorkerTrustControlResponse,
+    ListAdminWorkerTrustRequest, ListAdminWorkerTrustResponse, AdminWorkerTrustEntry,
+    ListAdminAuditLogsRequest, ListAdminAuditLogsResponse, AdminAuditLogEntry,
 };
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
@@ -172,6 +189,20 @@ impl NodeManagerService for GrpcNodeManagerService {
             })),
         }
     }
+
+    async fn list_workers(
+        &self,
+        _request: Request<ListWorkersRequest>,
+    ) -> Result<Response<ListWorkersResponse>, Status> {
+        Err(Status::unimplemented("list_workers not implemented"))
+    }
+
+    async fn remove_worker(
+        &self,
+        _request: Request<RemoveWorkerRequest>,
+    ) -> Result<Response<StatusResponse>, Status> {
+        Err(Status::unimplemented("remove_worker not implemented"))
+    }
 }
 
 // ── MasterNodeService ──
@@ -279,13 +310,20 @@ impl MasterNodeService for GrpcMasterNodeService {
                         task_id: t.task_id,
                         status: t.status.as_str().into(),
                         status_message: t.status_message.unwrap_or_default(),
-                        usage: Some(ProtoResourceUsage {
-                            cpu_percent: t.cpu_usage as f32,
-                            memory_percent: t.memory_usage as f32,
-                            gpu_percent: t.gpu_usage as f32,
-                            vram_percent: t.gpu_memory_usage as f32,
-                            storage_percent: 0.0,
-                        }),
+                        // usage: removed
+                        owner: String::new(),
+                        output: String::new(),
+                        result_torrent: String::new(),
+                        billed_amount: 0,
+                        billing_settled: false,
+                        retry_count: 0,
+                        wall_time_ms: 0,
+                        peak_memory_mb: 0,
+                        cpu_usage: 0.0,
+                        memory_usage: 0.0,
+                        gpu_usage: 0.0,
+                        gpu_memory_usage: 0.0,
+                        deterministic: false,
                         worker_ip: t.worker_ip.unwrap_or_default(),
                     })
                     .collect(),
@@ -396,6 +434,177 @@ impl MasterNodeService for GrpcMasterNodeService {
             Err(e) => Err(Status::internal(e.to_string())),
         }
     }
+
+
+
+    // ============================================================
+    // Admin RPCs
+    // ============================================================
+
+    async fn get_admin_billing_overview(
+        &self,
+        request: Request<GetAdminBillingOverviewRequest>,
+    ) -> Result<Response<GetAdminBillingOverviewResponse>, Status> {
+        let req = request.into_inner();
+        let claims = self.state.auth.validate_token(&req.token).map_err(|_| Status::unauthenticated("Invalid token"))?;
+        if !is_admin(&claims.sub) { return Ok(admin_billing_default(false, "Forbidden")); }
+        let r: (i64, i64, i64) = sqlx::query_as(
+            "SELECT COALESCE(SUM(CASE WHEN kind='task_debit' THEN amount_cpt ELSE 0 END),0), COALESCE(SUM(CASE WHEN kind='provider_credit' THEN amount_cpt ELSE 0 END),0), COALESCE(SUM(CASE WHEN kind='platform_fee' THEN amount_cpt ELSE 0 END),0) FROM ledger_entries WHERE status='settled'"
+        ).fetch_one(&self.state.scheduler.database().pool).await.map_err(|e| Status::internal(e.to_string()))?;
+        let pending: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM tasks WHERE billing_settled=false AND status IN ('COMPLETED','FAILING')"
+        ).fetch_one(&self.state.scheduler.database().pool).await.map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(GetAdminBillingOverviewResponse { success: true, status_message: "OK".into(), total_payer_debit_cpt: r.0, total_provider_credit_cpt: r.1, total_platform_fee_cpt: r.2, pending_billing_tasks: pending.0, currency: "CPT".into() }))
+    }
+
+    async fn get_admin_artifact_overview(
+        &self,
+        request: Request<GetAdminArtifactOverviewRequest>,
+    ) -> Result<Response<GetAdminArtifactOverviewResponse>, Status> {
+        let req = request.into_inner();
+        let claims = self.state.auth.validate_token(&req.token).map_err(|_| Status::unauthenticated("Invalid token"))?;
+        if !is_admin(&claims.sub) { return Ok(artifact_default(false)); }
+        let r: (i64, i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint, COALESCE(SUM(size_bytes),0)::bigint, COALESCE(SUM(CASE WHEN dedup_hit THEN 1 ELSE 0 END),0)::bigint, COALESCE(SUM(CASE WHEN resume_supported THEN 1 ELSE 0 END),0)::bigint, COALESCE(SUM(CASE WHEN expires_at IS NOT NULL AND expires_at <= NOW() + INTERVAL '24 hours' THEN 1 ELSE 0 END),0)::bigint FROM artifacts WHERE status='ready'"
+        ).fetch_one(&self.state.scheduler.database().pool).await.map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(GetAdminArtifactOverviewResponse { success: true, status_message: "OK".into(), total_artifacts: r.0, total_size_bytes: r.1, dedup_hits: r.2, resumable_artifacts: r.3, expiring_in_24h: r.4 }))
+    }
+
+    async fn cleanup_admin_artifacts(
+        &self,
+        request: Request<CleanupAdminArtifactsRequest>,
+    ) -> Result<Response<CleanupAdminArtifactsResponse>, Status> {
+        let req = request.into_inner();
+        let claims = self.state.auth.validate_token(&req.token).map_err(|_| Status::unauthenticated("Invalid token"))?;
+        if !is_admin(&claims.sub) { return Ok(Response::new(CleanupAdminArtifactsResponse { success: false, status_message: "Forbidden".into(), dry_run: req.dry_run, expired_candidates:0, deleted_rows:0, deleted_files:0, file_delete_errors:0 })); }
+        let expired: (i64,) = sqlx::query_as("SELECT COUNT(*)::bigint FROM artifacts WHERE expires_at IS NOT NULL AND expires_at <= NOW()").fetch_one(&self.state.scheduler.database().pool).await.map_err(|e| Status::internal(e.to_string()))?;
+        if req.dry_run { return Ok(Response::new(CleanupAdminArtifactsResponse { success: true, status_message: "Dry run".into(), dry_run: true, expired_candidates: expired.0, deleted_rows: 0, deleted_files: 0, file_delete_errors: 0 })); }
+        let deleted: u64 = sqlx::query("DELETE FROM artifacts WHERE expires_at IS NOT NULL AND expires_at <= NOW()").execute(&self.state.scheduler.database().pool).await.map_err(|e| Status::internal(e.to_string()))?.rows_affected();
+        Ok(Response::new(CleanupAdminArtifactsResponse { success: true, status_message: "OK".into(), dry_run: false, expired_candidates: expired.0, deleted_rows: deleted as i64, deleted_files: 0, file_delete_errors: 0 }))
+    }
+
+    async fn get_admin_scheduling_cache_metrics(
+        &self,
+        request: Request<GetAdminSchedulingCacheMetricsRequest>,
+    ) -> Result<Response<GetAdminSchedulingCacheMetricsResponse>, Status> {
+        let req = request.into_inner();
+        let claims = self.state.auth.validate_token(&req.token).map_err(|_| Status::unauthenticated("Invalid token"))?;
+        if !is_admin(&claims.sub) { return Ok(cache_metrics_default()); }
+        let total: (i64, i64) = sqlx::query_as("SELECT COUNT(*)::bigint, COALESCE(SUM(cache_hits),0)::bigint FROM tasks WHERE status='COMPLETED'").fetch_one(&self.state.scheduler.database().pool).await.map_err(|e| Status::internal(e.to_string()))?;
+        let hit_rate = if total.0 > 0 { total.1 as f64 / total.0 as f64 * 100.0 } else { 0.0 };
+        #[derive(sqlx::FromRow)] struct CacheW { worker_id: String, completed_tasks: i64, cache_hits: i64, recent_completed_tasks_7d: i64 }
+        let top: Vec<CacheW> = sqlx::query_as("SELECT w.worker_id, COUNT(*) FILTER(WHERE t.status='COMPLETED')::bigint as completed_tasks, COALESCE(SUM(t.cache_hits),0)::bigint as cache_hits, COUNT(*) FILTER(WHERE t.status='COMPLETED' AND t.completed_at >= NOW() - INTERVAL '7 days')::bigint as recent_completed_tasks_7d FROM worker_nodes w INNER JOIN tasks t ON t.worker_id = w.worker_id GROUP BY w.worker_id ORDER BY completed_tasks DESC LIMIT 10").fetch_all(&self.state.scheduler.database().pool).await.map_err(|e| Status::internal(e.to_string()))?;
+        let workers = top.into_iter().map(|w| WorkerCacheAffinityMetric { worker_id: w.worker_id, completed_tasks: w.completed_tasks, cache_hits: w.cache_hits, recent_completed_tasks_7d: w.recent_completed_tasks_7d }).collect();
+        Ok(Response::new(GetAdminSchedulingCacheMetricsResponse { success: true, status_message: "OK".into(), total_completed_tasks: total.0, total_cache_hits: total.1, cache_hit_rate: hit_rate, top_workers: workers }))
+    }
+
+    async fn get_admin_scheduling_cache_alert(
+        &self,
+        request: Request<GetAdminSchedulingCacheAlertRequest>,
+    ) -> Result<Response<GetAdminSchedulingCacheAlertResponse>, Status> {
+        let req = request.into_inner();
+        let claims = self.state.auth.validate_token(&req.token).map_err(|_| Status::unauthenticated("Invalid token"))?;
+        if !is_admin(&claims.sub) { return Ok(Response::new(GetAdminSchedulingCacheAlertResponse { success: false, status_message: "Forbidden".into(), low_threshold: 0.0, high_threshold: 0.0, cache_hit_rate: 0.0, severity: "unknown".into(), message: "Forbidden".into() })); }
+        let total: (i64, i64) = sqlx::query_as("SELECT COUNT(*)::bigint, COALESCE(SUM(cache_hits),0)::bigint FROM tasks WHERE status='COMPLETED'").fetch_one(&self.state.scheduler.database().pool).await.map_err(|e| Status::internal(e.to_string()))?;
+        let hit_rate = if total.0 > 0 { total.1 as f64 / total.0 as f64 * 100.0 } else { 0.0 };
+        let low = if req.low_threshold > 0.0 { req.low_threshold } else { 5.0 };
+        let high = if req.high_threshold > 0.0 { req.high_threshold } else { 80.0 };
+        let (severity, msg) = if hit_rate < low { ("critical", format!("Cache hit rate {:.1}% below low threshold {:.1}%", hit_rate, low)) } else if hit_rate > high { ("warning", format!("Cache hit rate {:.1}% above high threshold {:.1}%", hit_rate, high)) } else { ("normal", format!("Cache hit rate {:.1}% within range", hit_rate)) };
+        Ok(Response::new(GetAdminSchedulingCacheAlertResponse { success: true, status_message: "OK".into(), low_threshold: low, high_threshold: high, cache_hit_rate: hit_rate, severity: severity.into(), message: msg }))
+    }
+
+    async fn list_admin_scheduling_cache_anomalies(
+        &self,
+        request: Request<ListAdminSchedulingCacheAnomaliesRequest>,
+    ) -> Result<Response<ListAdminSchedulingCacheAnomaliesResponse>, Status> {
+        let req = request.into_inner();
+        let claims = self.state.auth.validate_token(&req.token).map_err(|_| Status::unauthenticated("Invalid token"))?;
+        if !is_admin(&claims.sub) { return Ok(Response::new(ListAdminSchedulingCacheAnomaliesResponse { success: false, status_message: "Forbidden".into(), entries: vec![] })); }
+        let limit = req.limit.max(1).min(100);
+        #[derive(sqlx::FromRow)] struct A { severity: String, cache_hit_rate: f64, low_threshold: f64, high_threshold: f64, message: String, created_at: chrono::DateTime<chrono::Utc> }
+        let rows: Vec<A> = sqlx::query_as("SELECT severity, cache_hit_rate, low_threshold, high_threshold, message, created_at FROM cache_alert_anomalies ORDER BY created_at DESC LIMIT $1").bind(limit).fetch_all(&self.state.scheduler.database().pool).await.map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(ListAdminSchedulingCacheAnomaliesResponse { success: true, status_message: "OK".into(), entries: rows.into_iter().map(|r| CacheAnomalyEntry { severity: r.severity, cache_hit_rate: r.cache_hit_rate, low_threshold: r.low_threshold, high_threshold: r.high_threshold, message: r.message, created_at: r.created_at.to_rfc3339() }).collect() }))
+    }
+
+    async fn get_worker_trust_profile(
+        &self,
+        request: Request<GetWorkerTrustProfileRequest>,
+    ) -> Result<Response<GetWorkerTrustProfileResponse>, Status> {
+        let req = request.into_inner();
+        let _claims = self.state.auth.validate_token(&req.token).map_err(|_| Status::unauthenticated("Invalid token"))?;
+        #[derive(sqlx::FromRow)] struct TrustR { worker_id: String, successful_tasks: i64, failed_tasks: i64, score: i32, banned: bool, last_attested_at: Option<chrono::DateTime<chrono::Utc>> }
+        let row: TrustR = sqlx::query_as("SELECT worker_id, successful_tasks, failed_tasks, score, banned, last_attested_at FROM worker_reputation WHERE worker_id = $1").bind(&req.worker_id).fetch_optional(&self.state.scheduler.database().pool).await.map_err(|e| Status::internal(e.to_string()))?.unwrap_or(TrustR { worker_id: req.worker_id.clone(), successful_tasks: 0, failed_tasks: 0, score: 100, banned: false, last_attested_at: None });
+        Ok(Response::new(GetWorkerTrustProfileResponse { success: true, status_message: "OK".into(), trust: Some(WorkerTrustProfile { worker_id: row.worker_id, successful_tasks: row.successful_tasks, failed_tasks: row.failed_tasks, score: row.score, banned: row.banned, last_attested_at: row.last_attested_at.map(|t| t.to_rfc3339()).unwrap_or_default() }) }))
+    }
+
+    async fn update_worker_trust_control(
+        &self,
+        request: Request<UpdateWorkerTrustControlRequest>,
+    ) -> Result<Response<UpdateWorkerTrustControlResponse>, Status> {
+        let req = request.into_inner();
+        let claims = self.state.auth.validate_token(&req.token).map_err(|_| Status::unauthenticated("Invalid token"))?;
+        if !is_admin(&claims.sub) { return Ok(Response::new(UpdateWorkerTrustControlResponse { success: false, status_message: "Forbidden".into(), worker_id: req.worker_id.clone(), banned: false, score: 0 })); }
+        let exists: (bool,) = sqlx::query_as("SELECT EXISTS(SELECT 1 FROM worker_reputation WHERE worker_id=$1)").bind(&req.worker_id).fetch_one(&self.state.scheduler.database().pool).await.map_err(|e| Status::internal(e.to_string()))?;
+        if exists.0 {
+            sqlx::query("UPDATE worker_reputation SET banned=$1, score=$2, updated_at=NOW() WHERE worker_id=$3").bind(req.banned).bind(req.score).bind(&req.worker_id).execute(&self.state.scheduler.database().pool).await.map_err(|e| Status::internal(e.to_string()))?;
+        } else {
+            sqlx::query("INSERT INTO worker_reputation (worker_id, banned, score, successful_tasks, failed_tasks) VALUES ($1, $2, $3, 0, 0)").bind(&req.worker_id).bind(req.banned).bind(req.score).execute(&self.state.scheduler.database().pool).await.map_err(|e| Status::internal(e.to_string()))?;
+        }
+        Ok(Response::new(UpdateWorkerTrustControlResponse { success: true, status_message: "OK".into(), worker_id: req.worker_id, banned: req.banned, score: req.score }))
+    }
+
+    async fn list_admin_worker_trust(
+        &self,
+        request: Request<ListAdminWorkerTrustRequest>,
+    ) -> Result<Response<ListAdminWorkerTrustResponse>, Status> {
+        let req = request.into_inner();
+        let claims = self.state.auth.validate_token(&req.token).map_err(|_| Status::unauthenticated("Invalid token"))?;
+        if !is_admin(&claims.sub) { return Ok(Response::new(ListAdminWorkerTrustResponse { success: false, status_message: "Forbidden".into(), entries: vec![] })); }
+        #[derive(sqlx::FromRow)] struct TrustLR { worker_id: String, username: String, worker_status: String, score: i32, banned: bool, successful_tasks: i64, failed_tasks: i64, last_attested_at: Option<chrono::DateTime<chrono::Utc>> }
+        let rows: Vec<TrustLR> = sqlx::query_as("SELECT w.worker_id, w.username, w.status as worker_status, COALESCE(r.score, 100) as score, COALESCE(r.banned, false) as banned, COALESCE(r.successful_tasks, 0) as successful_tasks, COALESCE(r.failed_tasks, 0) as failed_tasks, r.last_attested_at FROM worker_nodes w LEFT JOIN worker_reputation r ON r.worker_id = w.worker_id ORDER BY r.score DESC").fetch_all(&self.state.scheduler.database().pool).await.map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(ListAdminWorkerTrustResponse { success: true, status_message: "OK".into(), entries: rows.into_iter().map(|r| AdminWorkerTrustEntry { worker_id: r.worker_id, username: r.username, worker_status: r.worker_status, score: r.score, banned: r.banned, successful_tasks: r.successful_tasks, failed_tasks: r.failed_tasks, last_attested_at: r.last_attested_at.map(|t| t.to_rfc3339()).unwrap_or_default() }).collect() }))
+    }
+
+    async fn list_admin_audit_logs(
+        &self,
+        request: Request<ListAdminAuditLogsRequest>,
+    ) -> Result<Response<ListAdminAuditLogsResponse>, Status> {
+        let req = request.into_inner();
+        let claims = self.state.auth.validate_token(&req.token).map_err(|_| Status::unauthenticated("Invalid token"))?;
+        if !is_admin(&claims.sub) { return Ok(Response::new(ListAdminAuditLogsResponse { success: false, status_message: "Forbidden".into(), entries: vec![] })); }
+        let limit = req.limit.max(1).min(500);
+        #[derive(sqlx::FromRow)] struct AuditR { id: uuid::Uuid, admin_user: String, action: String, target_type: String, target_id: String, detail: sqlx::types::Json<serde_json::Value>, created_at: chrono::DateTime<chrono::Utc> }
+        let rows: Vec<AuditR> = sqlx::query_as("SELECT id, admin_user, action, target_type, target_id, detail, created_at FROM admin_audit_logs ORDER BY created_at DESC LIMIT $1").bind(limit).fetch_all(&self.state.scheduler.database().pool).await.map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(ListAdminAuditLogsResponse { success: true, status_message: "OK".into(), entries: rows.into_iter().map(|r| AdminAuditLogEntry { id: r.id.to_string(), username: r.admin_user, action: r.action, resource: format!("{}:{}", r.target_type, r.target_id), details: r.detail.to_string(), created_at: r.created_at.to_rfc3339() }).collect() }))
+    }
+    async fn quote_task(
+        &self,
+        _request: Request<QuoteTaskRequest>,
+    ) -> Result<Response<QuoteTaskResponse>, Status> {
+        Err(Status::unimplemented("quote_task not implemented"))
+    }
+
+    async fn get_provider_earnings(
+        &self,
+        _request: Request<GetProviderEarningsRequest>,
+    ) -> Result<Response<GetProviderEarningsResponse>, Status> {
+        Err(Status::unimplemented("get_provider_earnings not implemented"))
+    }
+
+    async fn get_provider_worker_settings(
+        &self,
+        _request: Request<GetProviderWorkerSettingsRequest>,
+    ) -> Result<Response<GetProviderWorkerSettingsResponse>, Status> {
+        Err(Status::unimplemented("get_provider_worker_settings not implemented"))
+    }
+
+    async fn update_provider_worker_settings(
+        &self,
+        _request: Request<UpdateProviderWorkerSettingsRequest>,
+    ) -> Result<Response<UpdateProviderWorkerSettingsResponse>, Status> {
+        Err(Status::unimplemented("update_provider_worker_settings not implemented"))
+    }
+
 }
 
 #[tonic::async_trait]
@@ -540,6 +749,49 @@ fn proto_resource_spec_to_model(r: hivemind_proto::ResourceSpec) -> hivemind_mod
     }
 }
 
+
+// Admin helpers
+fn is_admin(sub: &str) -> bool {
+    std::env::var("HIVEMIND_ADMIN_USERS")
+        .unwrap_or_else(|_| "testuser".into())
+        .split(',')
+        .any(|s| s.trim() == sub)
+}
+
+fn admin_billing_default(success: bool, status_message: &str) -> tonic::Response<hivemind_proto::GetAdminBillingOverviewResponse> {
+    tonic::Response::new(hivemind_proto::GetAdminBillingOverviewResponse {
+        success,
+        status_message: status_message.into(),
+        total_payer_debit_cpt: 0,
+        total_provider_credit_cpt: 0,
+        total_platform_fee_cpt: 0,
+        pending_billing_tasks: 0,
+        currency: "CPT".into(),
+    })
+}
+
+fn artifact_default(success: bool) -> tonic::Response<hivemind_proto::GetAdminArtifactOverviewResponse> {
+    tonic::Response::new(hivemind_proto::GetAdminArtifactOverviewResponse {
+        success,
+        status_message: if success { "OK".into() } else { "Forbidden".into() },
+        total_artifacts: 0,
+        total_size_bytes: 0,
+        dedup_hits: 0,
+        resumable_artifacts: 0,
+        expiring_in_24h: 0,
+    })
+}
+
+fn cache_metrics_default() -> tonic::Response<hivemind_proto::GetAdminSchedulingCacheMetricsResponse> {
+    tonic::Response::new(hivemind_proto::GetAdminSchedulingCacheMetricsResponse {
+        success: false,
+        status_message: "Forbidden".into(),
+        total_completed_tasks: 0,
+        total_cache_hits: 0,
+        cache_hit_rate: 0.0,
+        top_workers: vec![],
+    })
+}
 #[cfg(test)]
 mod tests {
     use super::*;
