@@ -1,3 +1,4 @@
+﻿pub mod grpc_client;
 pub mod handlers;
 pub mod middleware;
 pub mod routes;
@@ -9,32 +10,34 @@ mod tests;
 
 use anyhow::Result;
 use axum::Router;
-use hivemind_auth::AuthManager;
 use hivemind_config::HivemindConfig;
-use hivemind_database::DatabaseManager;
-use hivemind_task_scheduler::TaskScheduler;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+use crate::grpc_client::GrpcClient;
 
 pub struct MasterApiServer {
     app: Router,
 }
 
 impl MasterApiServer {
-    pub fn new(
-        db: DatabaseManager,
-        auth: AuthManager,
-        scheduler: TaskScheduler,
+    pub async fn new(
+        jwt_secret: String,
+        token_expiry_hours: i64,
         nodepool_grpc_addr: String,
         config: HivemindConfig,
-    ) -> Self {
+    ) -> Result<Self> {
+        let grpc = GrpcClient::connect(&nodepool_grpc_addr)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to nodepool gRPC at {}: {}", nodepool_grpc_addr, e))?;
         let state = handlers::AppState {
-            db,
-            auth,
-            scheduler,
-            nodepool_grpc_addr,
+            jwt_secret,
+            token_expiry_hours,
+            grpc_client: Arc::new(Mutex::new(grpc)),
             config,
         };
         let app = routes::create_router(state);
-        Self { app }
+        Ok(Self { app })
     }
 
     pub async fn serve(self, addr: &str) -> Result<()> {

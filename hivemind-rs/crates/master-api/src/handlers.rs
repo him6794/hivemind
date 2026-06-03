@@ -1,31 +1,30 @@
-﻿use axum::{
+use axum::{
     body::Body,
     extract::{Multipart, Path as AxumPath, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
-use hivemind_auth::AuthManager;
 use hivemind_config::HivemindConfig;
-use hivemind_database::DatabaseManager;
-use hivemind_models::{Task, TaskInfo, TaskStatus};
-use hivemind_task_scheduler::TaskScheduler;
-use sqlx::PgPool;
+use hivemind_proto::ResourceSpec as ProtoResourceSpec;
 use hivemind_torrent_service::TorrentService;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use tokio_util::io::ReaderStream;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
-use crate::middleware::AuthClaims;
+use crate::grpc_client::GrpcClient;
+use crate::middleware::AuthUser;
 
-/// Shared application state
+// ---- Shared App State ----
+
+/// Shared application state - Master is now a pure HTTP-to-gRPC proxy (no DB access).
 #[derive(Clone)]
 pub struct AppState {
-    pub db: DatabaseManager,
-    pub auth: AuthManager,
-    pub scheduler: TaskScheduler,
-    pub nodepool_grpc_addr: String,
+    pub jwt_secret: String,
+    pub token_expiry_hours: i64,
+    pub grpc_client: Arc<Mutex<GrpcClient>>,
     pub config: HivemindConfig,
 }
 
@@ -76,7 +75,7 @@ pub struct PricingBreakdown {
 pub struct QuoteResponse {
     pub success: bool,
     pub quoted_cpt: i64,
-    pub currency: &'static str,
+    pub currency: String,
     pub breakdown: PricingBreakdown,
 }
 
@@ -240,52 +239,6 @@ async fn resolve_task_distribution(
     })
 }
 
-#[cfg(test)]
-mod torrent_pipeline_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn zip_path_is_converted_to_magnet_and_btih() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let zip_path = tmp.path().join("task.zip");
-        std::fs::write(&zip_path, b"task-package").unwrap();
-
-        let mut config = hivemind_config::HivemindConfig::default();
-        config.torrent.api_dir = tmp.path().join("api").display().to_string();
-        config.torrent.bt_dir = tmp.path().join("bt").display().to_string();
-
-        let body = CreateTaskBody {
-            task_id: "task-with-zip".into(),
-            torrent: None,
-            zip_path: Some(zip_path.display().to_string()),
-            memory_gb: None,
-            cpu_score: None,
-            gpu_score: None,
-            gpu_memory_gb: None,
-            storage_gb: None,
-            location: None,
-            host_count: None,
-            max_cpt: None,
-        };
-
-        let payload = resolve_task_distribution(&body, &config)
-            .await
-            .expect("zip should be converted to torrent");
-
-        assert!(payload
-            .torrent_source
-            .as_deref()
-            .unwrap_or_default()
-            .starts_with("magnet:?xt=urn:btih:"));
-        assert!(payload.expected_btih.is_some());
-        assert!(tmp.path().join("api").join("task.zip").exists());
-        assert!(std::fs::read_dir(tmp.path().join("bt"))
-            .unwrap()
-            .next()
-            .is_some());
-    }
-}
-
 #[derive(Debug, Serialize)]
 pub struct TaskResponse {
     pub success: bool,
@@ -317,24 +270,14 @@ pub struct ProviderEarningsEntry {
     pub provider_worker_id: Option<String>,
     pub amount_cpt: i64,
     pub status: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct ProviderEarningsEntryRow {
-    task_id: String,
-    payer_user: String,
-    provider_worker_id: Option<String>,
-    amount_cpt: i64,
-    status: String,
-    created_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ProviderEarningsResponse {
     pub success: bool,
     pub total_earned_cpt: i64,
-    pub currency: &'static str,
+    pub currency: String,
     pub entries: Vec<ProviderEarningsEntry>,
 }
 
@@ -345,7 +288,7 @@ pub struct AdminBillingOverviewResponse {
     pub total_provider_credit_cpt: i64,
     pub total_platform_fee_cpt: i64,
     pub pending_billing_tasks: i64,
-    pub currency: &'static str,
+    pub currency: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -421,144 +364,7 @@ pub struct AdminSchedulingCacheAnomalyEntry {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct AdminSchedulingCacheAnomalyListResponse {
-    pub success: bool,
-    pub entries: Vec<AdminSchedulingCacheAnomalyEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AdminAuditLogQuery {
-    pub limit: Option<i64>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct AdminAuditLogEntry {
-    pub admin_user: String,
-    pub action: String,
-    pub target_type: String,
-    pub target_id: String,
-    pub detail: serde_json::Value,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct AdminAuditLogListResponse {
-    pub success: bool,
-    pub entries: Vec<AdminAuditLogEntry>,
-}
-
-async fn record_admin_audit_log(
-    pool: &PgPool,
-    admin_user: &str,
-    action: &str,
-    target_type: &str,
-    target_id: &str,
-    detail: serde_json::Value,
-) {
-    if let Err(e) = sqlx::query(
-        "INSERT INTO admin_audit_logs (admin_user, action, target_type, target_id, detail)
-         VALUES ($1, $2, $3, $4, $5)",
-    )
-    .bind(admin_user)
-    .bind(action)
-    .bind(target_type)
-    .bind(target_id)
-    .bind(detail)
-    .execute(pool)
-    .await
-    {
-        tracing::warn!("Failed to record admin audit log: {}", e);
-    }
-}
-
-async fn record_cache_alert_anomaly(
-    pool: &PgPool,
-    severity: &str,
-    cache_hit_rate: f64,
-    low_threshold: f64,
-    high_threshold: f64,
-    message: &str,
-) {
-    if let Err(e) = sqlx::query(
-        "INSERT INTO cache_alert_anomalies
-         (severity, cache_hit_rate, low_threshold, high_threshold, message)
-         VALUES ($1, $2, $3, $4, $5)",
-    )
-    .bind(severity)
-    .bind(cache_hit_rate)
-    .bind(low_threshold)
-    .bind(high_threshold)
-    .bind(message)
-    .execute(pool)
-    .await
-    {
-        tracing::warn!("Failed to record cache alert anomaly: {}", e);
-    }
-}
-
-pub async fn cleanup_expired_artifacts(
-    pool: &PgPool,
-    dry_run: bool,
-) -> anyhow::Result<AdminArtifactCleanupResponse> {
-    let expired: Vec<(String, String)> = sqlx::query_as(
-        "SELECT artifact_key, storage_path
-         FROM artifacts
-         WHERE expires_at IS NOT NULL AND expires_at <= NOW()",
-    )
-    .fetch_all(pool)
-    .await?;
-
-    let expired_candidates = expired.len() as i64;
-    if dry_run {
-        return Ok(AdminArtifactCleanupResponse {
-            success: true,
-            dry_run: true,
-            expired_candidates,
-            deleted_rows: 0,
-            deleted_files: 0,
-            file_delete_errors: 0,
-        });
-    }
-
-    let mut deleted_files = 0i64;
-    let mut file_delete_errors = 0i64;
-    for (_, storage_path) in &expired {
-        let path = std::path::Path::new(storage_path);
-        if !path.exists() {
-            continue;
-        }
-        match std::fs::remove_file(path) {
-            Ok(_) => deleted_files += 1,
-            Err(e) => {
-                tracing::warn!("Failed to delete artifact file {}: {}", storage_path, e);
-                file_delete_errors += 1;
-            }
-        }
-    }
-
-    let keys: Vec<String> = expired.into_iter().map(|(key, _)| key).collect();
-    let deleted_rows = if keys.is_empty() {
-        0
-    } else {
-        sqlx::query("DELETE FROM artifacts WHERE artifact_key = ANY($1)")
-            .bind(&keys)
-            .execute(pool)
-            .await?
-            .rows_affected() as i64
-    };
-
-    Ok(AdminArtifactCleanupResponse {
-        success: true,
-        dry_run: false,
-        expired_candidates,
-        deleted_rows,
-        deleted_files,
-        file_delete_errors,
-    })
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ProviderWorkerSettingsBody {
     pub enabled: bool,
     pub cpu_cores_limit: i32,
@@ -673,1684 +479,593 @@ pub struct WorkerInfo {
     pub gpu_memory_usage: f64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskInfo {
+    pub task_id: String,
+    pub owner: String,
+    pub status: String,
+    pub status_message: String,
+    pub worker_ip: String,
+    pub output: String,
+    pub result_torrent: String,
+    pub billed_amount: i64,
+    pub billing_settled: bool,
+    pub retry_count: i32,
+    pub wall_time_ms: i64,
+    pub peak_memory_mb: i64,
+    pub cpu_usage: f64,
+    pub memory_usage: f64,
+    pub gpu_usage: f64,
+    pub gpu_memory_usage: f64,
+    pub deterministic: bool,
+}
+
+impl From<hivemind_proto::PricingBreakdown> for PricingBreakdown {
+    fn from(pb: hivemind_proto::PricingBreakdown) -> Self {
+        Self {
+            base: pb.base, cpu: pb.cpu, gpu: pb.gpu, memory: pb.memory,
+            gpu_memory: pb.gpu_memory, storage: pb.storage,
+            host_count: pb.host_count, per_host_total: pb.per_host_total, total: pb.total,
+        }
+    }
+}
+
+impl From<hivemind_proto::ProviderWorkerSettings> for ProviderWorkerSettings {
+    fn from(s: hivemind_proto::ProviderWorkerSettings) -> Self {
+        Self {
+            enabled: s.enabled, cpu_cores_limit: s.cpu_cores_limit,
+            memory_gb_limit: s.memory_gb_limit, gpu_memory_gb_limit: s.gpu_memory_gb_limit,
+            storage_gb_limit: s.storage_gb_limit, min_cpt_per_hour: s.min_cpt_per_hour,
+        }
+    }
+}
+
+impl From<hivemind_proto::WorkerInfo> for WorkerInfo {
+    fn from(w: hivemind_proto::WorkerInfo) -> Self {
+        Self {
+            id: w.worker_id.clone(), worker_id: w.worker_id.clone(),
+            addr: w.ip.clone(), ip: w.ip,
+            status: w.status, cpu_cores: w.cpu_cores, memory_gb: w.memory_gb,
+            cpu_score: w.cpu_score, gpu_score: w.gpu_score,
+            gpu_memory_gb: w.gpu_memory_gb,
+            provider_enabled: w.provider_enabled,
+            cpu_cores_limit: w.cpu_cores_limit,
+            memory_gb_limit: w.memory_gb_limit,
+            gpu_memory_gb_limit: w.gpu_memory_gb_limit,
+            storage_gb_limit: w.storage_gb_limit,
+            min_cpt_per_hour: w.min_cpt_per_hour,
+            location: w.location, cpu_usage: w.cpu_usage,
+            memory_usage: w.memory_usage, gpu_usage: w.gpu_usage,
+            gpu_memory_usage: w.gpu_memory_usage,
+        }
+    }
+}
+
+// Remove old From<hivemind_models::WorkerNode> impl - not needed
+
+// ---- Handlers ----
+
+/// GET /health
+pub async fn health_check() -> &'static str { "OK" }
+
 /// POST /api/login
 pub async fn login(
     State(state): State<AppState>,
     Json(body): Json<LoginBody>,
 ) -> (StatusCode, Json<LoginResponse>) {
-    match state
-        .auth
-        .authenticate(&body.username, &body.password)
-        .await
-    {
-        Ok(Some(token)) => (
+    let mut grpc = state.grpc_client.lock().await;
+    match grpc.login(&body.username, &body.password).await {
+        Ok(resp) if resp.success => (
             StatusCode::OK,
-            Json(LoginResponse {
-                success: true,
-                message: "Login successful".into(),
-                token: Some(token),
-            }),
+            Json(LoginResponse { success: true, message: "Login successful".into(), token: Some(resp.token) }),
         ),
-        Ok(None) => (
+        Ok(resp) => (
             StatusCode::UNAUTHORIZED,
-            Json(LoginResponse {
-                success: false,
-                message: "Invalid credentials".into(),
-                token: None,
-            }),
+            Json(LoginResponse { success: false, message: resp.status_message, token: None }),
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(LoginResponse {
-                success: false,
-                message: format!("Error: {}", e),
-                token: None,
-            }),
+            Json(LoginResponse { success: false, message: format!("gRPC error: {}", e), token: None }),
         ),
     }
 }
 
-/// POST /api/tasks — Master submits a task to the nodepool
-pub async fn create_task(
-    State(state): State<AppState>,
-    AuthClaims(claims): AuthClaims,
-    Json(body): Json<CreateTaskBody>,
-) -> (StatusCode, Json<TaskResponse>) {
-    create_task_from_body(state, claims.sub, body).await
-}
-
-/// POST /api/tasks/quote - Return deterministic MVP pricing before task submission.
+/// POST /api/tasks/quote
 pub async fn quote_task(
-    AuthClaims(_claims): AuthClaims,
+    State(state): State<AppState>,
+    AuthUser { token, .. }: AuthUser,
     Json(body): Json<CreateTaskBody>,
 ) -> (StatusCode, Json<QuoteResponse>) {
-    let breakdown = task_pricing_quote(&body);
-    (
-        StatusCode::OK,
-        Json(QuoteResponse {
-            success: true,
-            quoted_cpt: breakdown.total,
-            currency: "CPT",
-            breakdown,
-        }),
-    )
+    let mut grpc = state.grpc_client.lock().await;
+    match grpc.quote_task(&token, body.cpu_score.unwrap_or(0), body.gpu_score.unwrap_or(0),
+        body.memory_gb.unwrap_or(0), body.gpu_memory_gb.unwrap_or(0),
+        body.storage_gb.unwrap_or(0), body.host_count.unwrap_or(1)).await
+    {
+        Ok(resp) => {
+            let b: PricingBreakdown = resp.breakdown.unwrap_or_default().into();
+            (StatusCode::OK, Json(QuoteResponse { success: resp.success, quoted_cpt: resp.quoted_cpt, currency: resp.currency, breakdown: b }))
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(QuoteResponse { success: false, quoted_cpt: 0, currency: String::from("CPT"),
+                breakdown: PricingBreakdown { base:0,cpu:0,gpu:0,memory:0,gpu_memory:0,storage:0,host_count:0,per_host_total:0,total:0 } }),
+        ),
+    }
+}
+
+/// POST /api/tasks
+pub async fn create_task(
+    State(state): State<AppState>,
+    AuthUser { claims, token }: AuthUser,
+    Json(body): Json<CreateTaskBody>,
+) -> (StatusCode, Json<TaskResponse>) {
+    create_task_from_body(state, claims.sub, token, body).await
 }
 
 async fn create_task_from_body(
-    state: AppState,
-    owner: String,
-    body: CreateTaskBody,
+    state: AppState, _owner: String, token: String, body: CreateTaskBody,
 ) -> (StatusCode, Json<TaskResponse>) {
-    let per_minute_limit = task_submit_limit_per_minute();
-    if per_minute_limit > 0 {
-        let recent_submit_count = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::BIGINT
-             FROM tasks
-             WHERE owner = $1
-               AND created_at >= NOW() - INTERVAL '1 minute'",
-        )
-        .bind(&owner)
-        .fetch_one(&state.db.pool)
-        .await
-        .unwrap_or(0);
-
-        if recent_submit_count >= per_minute_limit {
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(TaskResponse {
-                    success: false,
-                    message: format!(
-                        "submission rate limit exceeded: {} tasks/min",
-                        per_minute_limit
-                    ),
-                    task: None,
-                }),
-            );
-        }
-    }
-
-    let quote = task_pricing_quote(&body).total;
-    if let Some(max_cpt) = body.max_cpt {
-        if max_cpt < quote {
-            return budget_guard_response(quote, max_cpt);
-        }
-    }
-
-    let distribution = match resolve_task_distribution(&body, &state.config).await {
-        Ok(distribution) => distribution,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(TaskResponse {
-                    success: false,
-                    message: format!("Failed to prepare task package: {}", e),
-                    task: None,
-                }),
-            );
-        }
-    };
-
-    let task = Task {
-        id: uuid::Uuid::new_v4(),
-        task_id: body.task_id,
-        owner: owner.clone(),
-        worker_id: None,
-        worker_ip: None,
-        status: TaskStatus::Pending,
-        status_message: None,
-        output: None,
-        result_torrent: None,
-        torrent_source: distribution.torrent_source,
-        expected_btih: distribution.expected_btih,
-        cpu_usage: 0.0,
-        memory_usage: 0.0,
-        gpu_usage: 0.0,
-        gpu_memory_usage: 0.0,
-        req_cpu_score: body.cpu_score.unwrap_or(0),
-        req_gpu_score: body.gpu_score.unwrap_or(0),
-        req_memory_gb: body.memory_gb.unwrap_or(0),
-        req_gpu_memory_gb: body.gpu_memory_gb.unwrap_or(0),
-        req_storage_gb: body.storage_gb.unwrap_or(0),
-        host_count: body.host_count.unwrap_or(1),
-        max_cpt: quote,
-        billing_settled: false,
-        billed_amount: 0,
-        retry_count: 0,
-        max_retries: 3,
-        deadline: None,
-        deterministic: false,
-        side_effects: false,
-        priority: 0,
-        cpu_time_ms: 0,
-        wall_time_ms: 0,
-        peak_memory_mb: 0,
-        download_bytes: 0,
-        cache_hits: 0,
-        created_at: chrono::Utc::now(),
-        last_update: chrono::Utc::now(),
-        completed_at: None,
-    };
-
-    match state.scheduler.create_task(&task).await {
-        Ok(t) => {
-            tracing::info!("Master submitted task {} for user {}", t.task_id, owner);
-            (
-                StatusCode::CREATED,
-                Json(TaskResponse {
-                    success: true,
-                    message: format!("Task {} created", t.task_id),
-                    task: Some(t.into()),
-                }),
-            )
-        }
-        Err(e) => {
-            let message = e.to_string();
-            let status = if message.contains("duplicate key")
-                || message.contains("unique constraint")
-                || message.contains("tasks_task_id_key")
-            {
-                StatusCode::CONFLICT
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
-            };
-            (
-                status,
-                Json(TaskResponse {
-                    success: false,
-                    message: format!("Failed: {}", e),
-                    task: None,
-                }),
-            )
-        }
-    }
-}
-
-/// POST /api/tasks/upload - Browser-friendly ZIP task upload.
-pub async fn upload_task(
-    State(state): State<AppState>,
-    AuthClaims(claims): AuthClaims,
-    mut multipart: Multipart,
-) -> (StatusCode, Json<TaskResponse>) {
-    let mut body = CreateTaskBody {
-        task_id: String::new(),
-        torrent: None,
-        zip_path: None,
-        memory_gb: None,
-        cpu_score: None,
-        gpu_score: None,
-        gpu_memory_gb: None,
-        storage_gb: None,
-        location: None,
-        host_count: None,
-        max_cpt: None,
-    };
-    let mut file_bytes = None;
-    let mut file_name = None;
-
-    loop {
-        let field = match multipart.next_field().await {
-            Ok(Some(field)) => field,
-            Ok(None) => break,
-            Err(e) => return bad_task_response(format!("Invalid multipart payload: {}", e)),
-        };
-
-        let name = field.name().unwrap_or_default().to_string();
-        if name == "file" {
-            file_name = field.file_name().map(|value| value.to_string());
-            match field.bytes().await {
-                Ok(bytes) if !bytes.is_empty() => file_bytes = Some(bytes),
-                Ok(_) => return bad_task_response("file is required"),
-                Err(e) => return bad_task_response(format!("Failed to read file: {}", e)),
-            }
-        } else {
-            match field.text().await {
-                Ok(value) => {
-                    if let Err(e) = set_upload_text_field(&mut body, &name, &value) {
-                        return bad_task_response(e.to_string());
-                    }
-                }
-                Err(e) => {
-                    return bad_task_response(format!("Failed to read field {}: {}", name, e))
-                }
-            }
-        }
-    }
-
     if !is_safe_task_id(&body.task_id) {
         return bad_task_response("task_id is required and must be a safe file name");
     }
-
-    if let Some(name) = file_name.as_deref() {
-        if !name.to_ascii_lowercase().ends_with(".zip") {
-            return bad_task_response("file must be a .zip");
-        }
-    }
-
-    let Some(file_bytes) = file_bytes else {
-        return bad_task_response("file is required");
+    let mut grpc = state.grpc_client.lock().await;
+    let qr = grpc.quote_task(&token, body.cpu_score.unwrap_or(0), body.gpu_score.unwrap_or(0),
+        body.memory_gb.unwrap_or(0), body.gpu_memory_gb.unwrap_or(0),
+        body.storage_gb.unwrap_or(0), body.host_count.unwrap_or(1)).await;
+    let quoted_cpt = match qr { Ok(ref r) => r.quoted_cpt, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR,
+        Json(TaskResponse { success: false, message: format!("Quote failed: {}", e), task: None })) };
+    if let Some(mc) = body.max_cpt { if mc < quoted_cpt { return budget_guard_response(quoted_cpt, mc); } }
+    let ts = match resolve_task_distribution(&body, &state.config).await {
+        Ok(m) => m.torrent_source.unwrap_or_default(),
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(TaskResponse { success: false, message: format!("Failed to prepare task package: {}", e), task: None })),
     };
-
-    let zip_path = task_upload_path(&state.config, &body.task_id);
-    if let Some(parent) = zip_path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            return bad_task_response(format!("Failed to create upload directory: {}", e));
-        }
-    }
-    if let Err(e) = std::fs::write(&zip_path, &file_bytes) {
-        return bad_task_response(format!("Failed to save uploaded file: {}", e));
-    }
-    body.zip_path = Some(zip_path.display().to_string());
-
-    create_task_from_body(state, claims.sub, body).await
-}
-
-/// GET /api/tasks — List all tasks for the authenticated user
-pub async fn list_tasks(
-    State(state): State<AppState>,
-    AuthClaims(claims): AuthClaims,
-) -> (StatusCode, Json<TaskListResponse>) {
-    match state.scheduler.list_user_tasks(&claims.sub).await {
-        Ok(tasks) => {
-            let infos: Vec<TaskInfo> = tasks.into_iter().map(TaskInfo::from).collect();
-            (
-                StatusCode::OK,
-                Json(TaskListResponse {
-                    success: true,
-                    tasks: infos,
-                }),
-            )
-        }
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(TaskListResponse {
-                success: false,
-                tasks: vec![],
-            }),
-        ),
-    }
-}
-
-pub async fn get_balance(
-    State(state): State<AppState>,
-    AuthClaims(claims): AuthClaims,
-) -> (StatusCode, Json<BalanceResponse>) {
-    match sqlx::query_scalar::<_, i64>("SELECT balance FROM users WHERE username = $1")
-        .bind(&claims.sub)
-        .fetch_optional(&state.db.pool)
-        .await
+    let req = ProtoResourceSpec { cpu_cores:0, memory_mb:body.memory_gb.unwrap_or(0) as i64*1024, gpu_count:0,
+        gpu_name:String::new(), vram_mb:body.gpu_memory_gb.unwrap_or(0) as i64*1024,
+        cpu_score:body.cpu_score.unwrap_or(0), gpu_score:body.gpu_score.unwrap_or(0),
+        storage_total_gb:body.storage_gb.unwrap_or(0), storage_available_gb:0 };
+    match grpc.upload_task(&body.task_id, &ts, req, &body.location.unwrap_or_else(|| "local".into()),
+        body.host_count.unwrap_or(1), &token, body.max_cpt.unwrap_or(quoted_cpt)).await
     {
-        Ok(balance) => (
-            StatusCode::OK,
-            Json(BalanceResponse {
-                success: true,
-                balance: balance.unwrap_or(0),
-            }),
-        ),
-        Err(e) => {
-            tracing::error!("Failed to get balance: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(BalanceResponse {
-                    success: false,
-                    balance: 0,
-                }),
-            )
+        Ok(resp) => {
+            let s = if resp.success { StatusCode::CREATED } else { StatusCode::BAD_REQUEST };
+            (s, Json(TaskResponse { success: resp.success, message: resp.status_message, task: None }))
         }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(TaskResponse { success: false, message: format!("gRPC error: {}", e), task: None })),
     }
 }
 
-pub async fn get_provider_earnings(
+/// POST /api/tasks/upload
+pub async fn upload_task(
     State(state): State<AppState>,
-    AuthClaims(claims): AuthClaims,
-    Query(query): Query<ProviderEarningsQuery>,
+    AuthUser { claims, token }: AuthUser,
+    mut multipart: Multipart,
+) -> (StatusCode, Json<TaskResponse>) {
+    let mut body = CreateTaskBody { task_id:String::new(),torrent:None,zip_path:None,memory_gb:None,
+        cpu_score:None,gpu_score:None,gpu_memory_gb:None,storage_gb:None,location:None,host_count:None,max_cpt:None };
+    let mut fb = None;
+    loop {
+        let field = match multipart.next_field().await { Ok(Some(f)) => f, Ok(None) => break, Err(e) => return bad_task_response(format!("Invalid multipart payload: {}", e)) };
+        let name = field.name().unwrap_or_default().to_string();
+        if name == "file" {
+            match field.bytes().await { Ok(b) if !b.is_empty() => fb = Some(b), Ok(_) => return bad_task_response("file is required"), Err(e) => return bad_task_response(format!("Failed to read file: {}", e)) }
+        } else {
+            match field.text().await { Ok(v) => { if let Err(e) = set_upload_text_field(&mut body, &name, &v) { return bad_task_response(e.to_string()); } }, Err(e) => return bad_task_response(format!("Failed to read field {}: {}", name, e)) }
+        }
+    }
+    if !is_safe_task_id(&body.task_id) { return bad_task_response("task_id is required and must be a safe file name"); }
+    let Some(fb) = fb else { return bad_task_response("file is required"); };
+    let zp = task_upload_path(&state.config, &body.task_id);
+    if let Some(p) = zp.parent() { if let Err(e) = std::fs::create_dir_all(p) { return bad_task_response(format!("Failed to create upload directory: {}", e)); } }
+    if let Err(e) = std::fs::write(&zp, &fb) { return bad_task_response(format!("Failed to save uploaded file: {}", e)); }
+    body.zip_path = Some(zp.display().to_string());
+    create_task_from_body(state, claims.sub, token, body).await
+}
+
+/// GET /api/tasks
+pub async fn list_tasks(
+    State(state): State<AppState>, AuthUser { token, .. }: AuthUser,
+) -> (StatusCode, Json<TaskListResponse>) {
+    let mut grpc = state.grpc_client.lock().await;
+    match grpc.get_all_user_tasks(&token).await {
+        Ok(resp) => {
+            let tasks: Vec<TaskInfo> = resp.tasks.into_iter().map(|t| TaskInfo {
+                task_id:t.task_id,owner:t.owner,status:t.status,status_message:t.status_message,
+                worker_ip:t.worker_ip,output:t.output,result_torrent:t.result_torrent,
+                billed_amount:t.billed_amount,billing_settled:t.billing_settled,
+                retry_count:t.retry_count,wall_time_ms:t.wall_time_ms,peak_memory_mb:t.peak_memory_mb,
+                cpu_usage:t.cpu_usage,memory_usage:t.memory_usage,gpu_usage:t.gpu_usage,
+                gpu_memory_usage:t.gpu_memory_usage,deterministic:t.deterministic,
+            }).collect();
+            (StatusCode::OK, Json(TaskListResponse { success: true, tasks }))
+        }
+        Err(_e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(TaskListResponse { success: false, tasks: vec![] })),
+    }
+}
+
+/// GET /api/balance
+pub async fn get_balance(
+    State(state): State<AppState>, AuthUser { claims, token }: AuthUser,
+) -> (StatusCode, Json<BalanceResponse>) {
+    let mut grpc = state.grpc_client.lock().await;
+    match grpc.get_balance(&claims.sub, &token).await {
+        Ok(resp) => (StatusCode::OK, Json(BalanceResponse { success: resp.success, balance: resp.balance })),
+        Err(_e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(BalanceResponse { success: false, balance: 0 })),
+    }
+}
+
+/// GET /api/workers
+pub async fn list_workers(
+    State(state): State<AppState>, AuthUser { .. }: AuthUser, Query(query): Query<HashMap<String, String>>,
+) -> (StatusCode, Json<WorkerListResponse>) {
+    let io = query.get("include_offline").or_else(|| query.get("includeOffline"))
+        .map(|v| matches!(v.as_str(), "1"|"true"|"TRUE"|"yes"|"YES")).unwrap_or(false);
+    let mut grpc = state.grpc_client.lock().await;
+    match grpc.list_workers(io).await {
+        Ok(resp) => (StatusCode::OK, Json(WorkerListResponse { success: resp.success, workers: resp.workers.into_iter().map(WorkerInfo::from).collect() })),
+        Err(_e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(WorkerListResponse { success: false, workers: vec![] })),
+    }
+}
+
+/// POST /api/register-worker
+pub async fn register_worker(
+    State(state): State<AppState>, AuthUser { claims, .. }: AuthUser, Json(body): Json<RegisterWorkerBody>,
+) -> (StatusCode, Json<StatusResponse>) {
+    if body.ip.trim().is_empty() { return (StatusCode::BAD_REQUEST, Json(StatusResponse { success: false, status_message: "ip is required".into() })); }
+    let owner = claims.sub;
+    if let Some(u) = body.username.as_deref().map(str::trim) { if !u.is_empty() && u != owner { return (StatusCode::FORBIDDEN, Json(StatusResponse { success: false, status_message: "username does not match authenticated subject".into() })); } }
+    let r = ProtoResourceSpec { cpu_cores:body.cpu_cores, memory_mb:body.memory_gb as i64*1024, gpu_count:0, gpu_name:String::new(), vram_mb:body.gpu_memory_gb.unwrap_or(0) as i64*1024, cpu_score:body.cpu_score, gpu_score:body.gpu_score.unwrap_or(0), storage_total_gb:0, storage_available_gb:0 };
+    let mut grpc = state.grpc_client.lock().await;
+    match grpc.register_worker_node(&owner, &body.ip, r, &body.location.unwrap_or_else(|| "local".into())).await {
+        Ok(resp) => (StatusCode::OK, Json(StatusResponse { success: resp.success, status_message: resp.status_message })),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(StatusResponse { success: false, status_message: e.to_string() })),
+    }
+}
+
+/// POST /api/remove-worker
+pub async fn remove_worker(
+    State(state): State<AppState>, AuthUser { token, .. }: AuthUser, Json(body): Json<RemoveWorkerBody>,
+) -> (StatusCode, Json<StatusResponse>) {
+    let mut grpc = state.grpc_client.lock().await;
+    match grpc.remove_worker(&body.worker_id, &token).await {
+        Ok(resp) => (StatusCode::OK, Json(StatusResponse { success: resp.success, status_message: resp.status_message })),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(StatusResponse { success: false, status_message: e.to_string() })),
+    }
+}
+
+/// GET /api/tasks/:task_id/log
+pub async fn get_task_log(
+    State(state): State<AppState>, AuthUser { token, .. }: AuthUser, AxumPath(task_id): AxumPath<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let mut grpc = state.grpc_client.lock().await;
+    match grpc.get_tasklog(&task_id, &token).await {
+        Ok(resp) => (StatusCode::OK, Json(serde_json::json!({"success":resp.success,"task_id":task_id,"log":resp.log}))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success":false,"message":format!("gRPC error: {}",e)}))),
+    }
+}
+
+/// GET /api/tasks/:task_id/result
+pub async fn get_task_result(
+    State(state): State<AppState>, AuthUser { token, .. }: AuthUser, AxumPath(task_id): AxumPath<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let mut grpc = state.grpc_client.lock().await;
+    match grpc.get_task_result(&task_id, &token).await {
+        Ok(resp) => (StatusCode::OK, Json(serde_json::json!({"success":resp.success,"task_id":task_id,"result_torrent":resp.result_torrent,"status_message":resp.status_message}))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success":false,"message":format!("gRPC error: {}",e)}))),
+    }
+}
+
+/// POST /api/tasks/:task_id/stop
+pub async fn stop_task(
+    State(state): State<AppState>, AuthUser { token, .. }: AuthUser, AxumPath(task_id): AxumPath<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let mut grpc = state.grpc_client.lock().await;
+    match grpc.stop_task(&task_id, &token).await {
+        Ok(resp) if resp.success => (StatusCode::OK, Json(serde_json::json!({"success":true,"message":"Task stopped"}))),
+        Ok(resp) => (StatusCode::CONFLICT, Json(serde_json::json!({"success":false,"message":resp.status_message}))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success":false,"message":format!("gRPC error: {}",e)}))),
+    }
+}
+
+/// GET /api/provider/earnings
+pub async fn get_provider_earnings(
+    State(state): State<AppState>, AuthUser { token, .. }: AuthUser, Query(query): Query<ProviderEarningsQuery>,
 ) -> (StatusCode, Json<ProviderEarningsResponse>) {
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
-
-    let total_result = sqlx::query_scalar::<_, i64>(
-        "SELECT COALESCE(SUM(amount_cpt), 0)::BIGINT
-         FROM ledger_entries
-         WHERE provider_user = $1 AND kind = 'provider_credit'",
-    )
-    .bind(&claims.sub)
-    .fetch_one(&state.db.pool)
-    .await;
-
-    let total_earned_cpt = match total_result {
-        Ok(total) => total,
-        Err(e) => {
-            tracing::error!("Failed to calculate provider earnings total: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ProviderEarningsResponse {
-                    success: false,
-                    total_earned_cpt: 0,
-                    currency: "CPT",
-                    entries: vec![],
-                }),
-            );
-        }
-    };
-
-    match sqlx::query_as::<_, ProviderEarningsEntryRow>(
-        "SELECT task_id, payer_user, provider_worker_id, amount_cpt, status, created_at
-         FROM ledger_entries
-         WHERE provider_user = $1 AND kind = 'provider_credit'
-         ORDER BY created_at DESC
-         LIMIT $2",
-    )
-    .bind(&claims.sub)
-    .bind(limit)
-    .fetch_all(&state.db.pool)
-    .await
-    {
-        Ok(entries) => (
-            StatusCode::OK,
-            Json(ProviderEarningsResponse {
-                success: true,
-                total_earned_cpt,
-                currency: "CPT",
-                entries: entries
-                    .into_iter()
-                    .map(|entry| ProviderEarningsEntry {
-                        task_id: entry.task_id,
-                        payer_user: entry.payer_user,
-                        provider_worker_id: entry.provider_worker_id,
-                        amount_cpt: entry.amount_cpt,
-                        status: entry.status,
-                        created_at: entry.created_at,
-                    })
-                    .collect(),
-            }),
-        ),
-        Err(e) => {
-            tracing::error!("Failed to list provider earnings: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ProviderEarningsResponse {
-                    success: false,
-                    total_earned_cpt: 0,
-                    currency: "CPT",
-                    entries: vec![],
-                }),
-            )
-        }
+    let mut grpc = state.grpc_client.lock().await;
+    match grpc.get_provider_earnings(&token, limit).await {
+        Ok(resp) => (StatusCode::OK, Json(ProviderEarningsResponse { success:resp.success, total_earned_cpt:resp.total_earned_cpt, currency:resp.currency,
+            entries:resp.entries.into_iter().map(|e| ProviderEarningsEntry { task_id:e.task_id, payer_user:e.payer_user,
+                provider_worker_id:if e.provider_worker_id.is_empty(){None}else{Some(e.provider_worker_id)},
+                amount_cpt:e.amount_cpt, status:e.status, created_at:e.created_at }).collect() })),
+        Err(_e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ProviderEarningsResponse { success:false,total_earned_cpt:0,currency:String::from("CPT"),entries:vec![] })),
     }
 }
 
-pub async fn get_admin_billing_overview(
-    State(state): State<AppState>,
-    AuthClaims(claims): AuthClaims,
-) -> (StatusCode, Json<AdminBillingOverviewResponse>) {
-    if !is_admin_user(&claims.sub) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(AdminBillingOverviewResponse {
-                success: false,
-                total_payer_debit_cpt: 0,
-                total_provider_credit_cpt: 0,
-                total_platform_fee_cpt: 0,
-                pending_billing_tasks: 0,
-                currency: "CPT",
-            }),
-        );
-    }
-
-    let totals = sqlx::query_as::<_, (i64, i64, i64)>(
-        "SELECT
-            COALESCE(SUM(CASE WHEN kind = 'payer_debit' THEN amount_cpt ELSE 0 END), 0)::BIGINT,
-            COALESCE(SUM(CASE WHEN kind = 'provider_credit' THEN amount_cpt ELSE 0 END), 0)::BIGINT,
-            COALESCE(SUM(CASE WHEN kind = 'platform_fee' THEN amount_cpt ELSE 0 END), 0)::BIGINT
-         FROM ledger_entries
-         WHERE status = 'settled'",
-    )
-    .fetch_one(&state.db.pool)
-    .await;
-
-    let pending = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::BIGINT FROM tasks WHERE status = 'COMPLETED' AND billing_settled = false",
-    )
-    .fetch_one(&state.db.pool)
-    .await;
-
-    match (totals, pending) {
-        (Ok((payer, provider, platform_fee)), Ok(pending_billing_tasks)) => (
-            StatusCode::OK,
-            Json(AdminBillingOverviewResponse {
-                success: true,
-                total_payer_debit_cpt: payer,
-                total_provider_credit_cpt: provider,
-                total_platform_fee_cpt: platform_fee,
-                pending_billing_tasks,
-                currency: "CPT",
-            }),
-        ),
-        (Err(e), _) | (_, Err(e)) => {
-            tracing::error!("Failed to load admin billing overview: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(AdminBillingOverviewResponse {
-                    success: false,
-                    total_payer_debit_cpt: 0,
-                    total_provider_credit_cpt: 0,
-                    total_platform_fee_cpt: 0,
-                    pending_billing_tasks: 0,
-                    currency: "CPT",
-                }),
-            )
-        }
-    }
-}
-
-pub async fn get_admin_artifact_overview(
-    State(state): State<AppState>,
-    AuthClaims(claims): AuthClaims,
-) -> (StatusCode, Json<AdminArtifactOverviewResponse>) {
-    if !is_admin_user(&claims.sub) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(AdminArtifactOverviewResponse {
-                success: false,
-                total_artifacts: 0,
-                total_size_bytes: 0,
-                dedup_hits: 0,
-                resumable_artifacts: 0,
-                expiring_in_24h: 0,
-            }),
-        );
-    }
-
-    match sqlx::query_as::<_, (i64, i64, i64, i64, i64)>(
-        "SELECT
-            COUNT(*)::BIGINT,
-            COALESCE(SUM(size_bytes), 0)::BIGINT,
-            COALESCE(SUM(CASE WHEN dedup_hit THEN 1 ELSE 0 END), 0)::BIGINT,
-            COALESCE(SUM(CASE WHEN resume_supported THEN 1 ELSE 0 END), 0)::BIGINT,
-            COALESCE(SUM(CASE
-                WHEN expires_at IS NOT NULL AND expires_at <= NOW() + INTERVAL '24 hours' THEN 1
-                ELSE 0
-            END), 0)::BIGINT
-         FROM artifacts",
-    )
-    .fetch_one(&state.db.pool)
-    .await
-    {
-        Ok((total_artifacts, total_size_bytes, dedup_hits, resumable_artifacts, expiring_in_24h)) => (
-            StatusCode::OK,
-            Json(AdminArtifactOverviewResponse {
-                success: true,
-                total_artifacts,
-                total_size_bytes,
-                dedup_hits,
-                resumable_artifacts,
-                expiring_in_24h,
-            }),
-        ),
-        Err(e) => {
-            tracing::error!("Failed to load admin artifact overview: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(AdminArtifactOverviewResponse {
-                    success: false,
-                    total_artifacts: 0,
-                    total_size_bytes: 0,
-                    dedup_hits: 0,
-                    resumable_artifacts: 0,
-                    expiring_in_24h: 0,
-                }),
-            )
-        }
-    }
-}
-
-pub async fn get_admin_scheduling_cache_metrics(
-    State(state): State<AppState>,
-    AuthClaims(claims): AuthClaims,
-) -> (StatusCode, Json<AdminSchedulingCacheMetricsResponse>) {
-    if !is_admin_user(&claims.sub) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(AdminSchedulingCacheMetricsResponse {
-                success: false,
-                total_completed_tasks: 0,
-                total_cache_hits: 0,
-                cache_hit_rate: 0.0,
-                top_workers: vec![],
-            }),
-        );
-    }
-
-    let totals = sqlx::query_as::<_, (i64, i64)>(
-        "SELECT
-            COUNT(*)::BIGINT AS total_completed_tasks,
-            COALESCE(SUM(cache_hits), 0)::BIGINT AS total_cache_hits
-         FROM tasks
-         WHERE status = 'COMPLETED'",
-    )
-    .fetch_one(&state.db.pool)
-    .await;
-
-    let top_workers = sqlx::query_as::<_, (String, i64, i64, i64)>(
-        "SELECT
-            worker_id,
-            COUNT(*)::BIGINT AS completed_tasks,
-            COALESCE(SUM(cache_hits), 0)::BIGINT AS cache_hits,
-            COALESCE(SUM(CASE
-                WHEN completed_at IS NOT NULL AND completed_at >= NOW() - INTERVAL '7 days' THEN 1
-                ELSE 0
-            END), 0)::BIGINT AS recent_completed_tasks_7d
-         FROM tasks
-         WHERE status = 'COMPLETED'
-           AND worker_id IS NOT NULL
-         GROUP BY worker_id
-         ORDER BY cache_hits DESC, completed_tasks DESC, worker_id ASC
-         LIMIT 20",
-    )
-    .fetch_all(&state.db.pool)
-    .await;
-
-    match (totals, top_workers) {
-        (Ok((total_completed_tasks, total_cache_hits)), Ok(rows)) => {
-            let cache_hit_rate = if total_completed_tasks > 0 {
-                total_cache_hits as f64 / total_completed_tasks as f64
-            } else {
-                0.0
-            };
-            (
-                StatusCode::OK,
-                Json(AdminSchedulingCacheMetricsResponse {
-                    success: true,
-                    total_completed_tasks,
-                    total_cache_hits,
-                    cache_hit_rate,
-                    top_workers: rows
-                        .into_iter()
-                        .map(
-                            |(worker_id, completed_tasks, cache_hits, recent_completed_tasks_7d)| {
-                                WorkerCacheAffinityMetric {
-                                    worker_id,
-                                    completed_tasks,
-                                    cache_hits,
-                                    recent_completed_tasks_7d,
-                                }
-                            },
-                        )
-                        .collect(),
-                }),
-            )
-        }
-        (Err(e), _) | (_, Err(e)) => {
-            tracing::error!("Failed to load scheduling cache metrics: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(AdminSchedulingCacheMetricsResponse {
-                    success: false,
-                    total_completed_tasks: 0,
-                    total_cache_hits: 0,
-                    cache_hit_rate: 0.0,
-                    top_workers: vec![],
-                }),
-            )
-        }
-    }
-}
-
-pub async fn get_admin_scheduling_cache_alert(
-    State(state): State<AppState>,
-    AuthClaims(claims): AuthClaims,
-    Query(query): Query<AdminSchedulingCacheAlertQuery>,
-) -> (StatusCode, Json<AdminSchedulingCacheAlertResponse>) {
-    if !is_admin_user(&claims.sub) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(AdminSchedulingCacheAlertResponse {
-                success: false,
-                low_threshold: query.low.unwrap_or(0.3),
-                high_threshold: query.high.unwrap_or(3.0),
-                cache_hit_rate: 0.0,
-                severity: "forbidden".into(),
-                message: "admin access required".into(),
-            }),
-        );
-    }
-
-    let low_threshold = query.low.unwrap_or(0.3);
-    let high_threshold = query.high.unwrap_or(3.0);
-    if !(low_threshold.is_finite() && high_threshold.is_finite()) || low_threshold >= high_threshold {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(AdminSchedulingCacheAlertResponse {
-                success: false,
-                low_threshold,
-                high_threshold,
-                cache_hit_rate: 0.0,
-                severity: "invalid_threshold".into(),
-                message: "invalid threshold range; require finite values and low < high".into(),
-            }),
-        );
-    }
-
-    let totals = sqlx::query_as::<_, (i64, i64)>(
-        "SELECT
-            COUNT(*)::BIGINT AS total_completed_tasks,
-            COALESCE(SUM(cache_hits), 0)::BIGINT AS total_cache_hits
-         FROM tasks
-         WHERE status = 'COMPLETED'",
-    )
-    .fetch_one(&state.db.pool)
-    .await;
-
-    match totals {
-        Ok((total_completed_tasks, total_cache_hits)) => {
-            let cache_hit_rate = if total_completed_tasks > 0 {
-                total_cache_hits as f64 / total_completed_tasks as f64
-            } else {
-                0.0
-            };
-
-            let (severity, message) = if cache_hit_rate < low_threshold {
-                (
-                    "low".to_string(),
-                    "cache hit rate is below the configured low threshold".to_string(),
-                )
-            } else if cache_hit_rate > high_threshold {
-                (
-                    "high".to_string(),
-                    "cache hit rate is above the configured high threshold".to_string(),
-                )
-            } else {
-                (
-                    "normal".to_string(),
-                    "cache hit rate is within configured thresholds".to_string(),
-                )
-            };
-
-            if severity == "low" || severity == "high" {
-                record_cache_alert_anomaly(
-                    &state.db.pool,
-                    &severity,
-                    cache_hit_rate,
-                    low_threshold,
-                    high_threshold,
-                    &message,
-                )
-                .await;
-            }
-
-            (
-                StatusCode::OK,
-                Json(AdminSchedulingCacheAlertResponse {
-                    success: true,
-                    low_threshold,
-                    high_threshold,
-                    cache_hit_rate,
-                    severity,
-                    message,
-                }),
-            )
-        }
-        Err(e) => {
-            tracing::error!("Failed to calculate scheduling cache alert: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(AdminSchedulingCacheAlertResponse {
-                    success: false,
-                    low_threshold,
-                    high_threshold,
-                    cache_hit_rate: 0.0,
-                    severity: "error".into(),
-                    message: e.to_string(),
-                }),
-            )
-        }
-    }
-}
-
-pub async fn list_admin_scheduling_cache_anomalies(
-    State(state): State<AppState>,
-    AuthClaims(claims): AuthClaims,
-    Query(query): Query<AdminSchedulingCacheAnomalyQuery>,
-) -> (StatusCode, Json<AdminSchedulingCacheAnomalyListResponse>) {
-    if !is_admin_user(&claims.sub) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(AdminSchedulingCacheAnomalyListResponse {
-                success: false,
-                entries: vec![],
-            }),
-        );
-    }
-
-    let limit = query.limit.unwrap_or(100).clamp(1, 500);
-    match sqlx::query_as::<_, (String, f64, f64, f64, String, chrono::DateTime<chrono::Utc>)>(
-        "SELECT severity, cache_hit_rate, low_threshold, high_threshold, message, created_at
-         FROM cache_alert_anomalies
-         ORDER BY created_at DESC
-         LIMIT $1",
-    )
-    .bind(limit)
-    .fetch_all(&state.db.pool)
-    .await
-    {
-        Ok(rows) => (
-            StatusCode::OK,
-            Json(AdminSchedulingCacheAnomalyListResponse {
-                success: true,
-                entries: rows
-                    .into_iter()
-                    .map(
-                        |(
-                            severity,
-                            cache_hit_rate,
-                            low_threshold,
-                            high_threshold,
-                            message,
-                            created_at,
-                        )| AdminSchedulingCacheAnomalyEntry {
-                            severity,
-                            cache_hit_rate,
-                            low_threshold,
-                            high_threshold,
-                            message,
-                            created_at,
-                        },
-                    )
-                    .collect(),
-            }),
-        ),
-        Err(e) => {
-            tracing::error!("Failed to list scheduling cache anomalies: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(AdminSchedulingCacheAnomalyListResponse {
-                    success: false,
-                    entries: vec![],
-                }),
-            )
-        }
-    }
-}
-
-pub async fn cleanup_admin_artifacts(
-    State(state): State<AppState>,
-    AuthClaims(claims): AuthClaims,
-    Json(body): Json<AdminArtifactCleanupBody>,
-) -> (StatusCode, Json<AdminArtifactCleanupResponse>) {
-    if !is_admin_user(&claims.sub) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(AdminArtifactCleanupResponse {
-                success: false,
-                dry_run: body.dry_run.unwrap_or(true),
-                expired_candidates: 0,
-                deleted_rows: 0,
-                deleted_files: 0,
-                file_delete_errors: 0,
-            }),
-        );
-    }
-
-    let dry_run = body.dry_run.unwrap_or(true);
-    match cleanup_expired_artifacts(&state.db.pool, dry_run).await {
-        Ok(summary) => {
-            let detail = serde_json::json!({
-                "dry_run": summary.dry_run,
-                "expired_candidates": summary.expired_candidates,
-                "deleted_rows": summary.deleted_rows,
-                "deleted_files": summary.deleted_files,
-                "file_delete_errors": summary.file_delete_errors,
-            });
-            record_admin_audit_log(
-                &state.db.pool,
-                &claims.sub,
-                "artifact_cleanup",
-                "artifact",
-                "",
-                detail,
-            )
-            .await;
-            (StatusCode::OK, Json(summary))
-        }
-        Err(e) => {
-            tracing::error!("Artifact cleanup failed: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(AdminArtifactCleanupResponse {
-                    success: false,
-                    dry_run,
-                    expired_candidates: 0,
-                    deleted_rows: 0,
-                    deleted_files: 0,
-                    file_delete_errors: 0,
-                }),
-            )
-        }
-    }
-}
-
-fn settings_from_worker(worker: &hivemind_models::WorkerNode) -> ProviderWorkerSettings {
-    ProviderWorkerSettings {
-        enabled: worker.provider_enabled,
-        cpu_cores_limit: worker.cpu_cores_limit,
-        memory_gb_limit: worker.memory_gb_limit,
-        gpu_memory_gb_limit: worker.gpu_memory_gb_limit,
-        storage_gb_limit: worker.storage_gb_limit,
-        min_cpt_per_hour: worker.min_cpt_per_hour,
-    }
-}
-
-async fn provider_owned_worker(
-    state: &AppState,
-    username: &str,
-    worker_id: &str,
-) -> Result<hivemind_models::WorkerNode, (StatusCode, Json<ProviderWorkerSettingsResponse>)> {
-    match sqlx::query_as::<_, hivemind_models::WorkerNode>(
-        "SELECT * FROM worker_nodes WHERE worker_id = $1",
-    )
-    .bind(worker_id)
-    .fetch_optional(&state.db.pool)
-    .await
-    {
-        Ok(Some(worker)) if worker.username == username => Ok(worker),
-        Ok(Some(_)) => Err((
-            StatusCode::FORBIDDEN,
-            Json(ProviderWorkerSettingsResponse {
-                success: false,
-                worker_id: worker_id.into(),
-                message: "worker does not belong to authenticated provider".into(),
-                settings: None,
-            }),
-        )),
-        Ok(None) => Err((
-            StatusCode::NOT_FOUND,
-            Json(ProviderWorkerSettingsResponse {
-                success: false,
-                worker_id: worker_id.into(),
-                message: "worker not found".into(),
-                settings: None,
-            }),
-        )),
-        Err(e) => {
-            tracing::error!("Failed to load provider worker settings: {}", e);
-            Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ProviderWorkerSettingsResponse {
-                    success: false,
-                    worker_id: worker_id.into(),
-                    message: e.to_string(),
-                    settings: None,
-                }),
-            ))
-        }
-    }
-}
-
-fn validate_provider_settings(
-    worker: &hivemind_models::WorkerNode,
-    body: &ProviderWorkerSettingsBody,
-) -> Option<String> {
-    if body.cpu_cores_limit < 0
-        || body.memory_gb_limit < 0
-        || body.gpu_memory_gb_limit < 0
-        || body.storage_gb_limit < 0
-        || body.min_cpt_per_hour < 0
-    {
-        return Some("limits and minimum price must be non-negative".into());
-    }
-    if body.cpu_cores_limit > worker.cpu_cores {
-        return Some("cpu_cores_limit exceeds registered CPU cores".into());
-    }
-    if body.memory_gb_limit > worker.memory_gb {
-        return Some("memory_gb_limit exceeds registered memory".into());
-    }
-    if body.gpu_memory_gb_limit > worker.gpu_memory_gb {
-        return Some("gpu_memory_gb_limit exceeds registered GPU memory".into());
-    }
-    if worker.storage_total_gb > 0 && body.storage_gb_limit > worker.storage_total_gb {
-        return Some("storage_gb_limit exceeds registered storage".into());
-    }
-    None
-}
-
+/// GET /api/provider/workers/:worker_id/settings
 pub async fn get_provider_worker_settings(
-    State(state): State<AppState>,
-    AuthClaims(claims): AuthClaims,
-    AxumPath(worker_id): AxumPath<String>,
+    State(state): State<AppState>, AuthUser { token, .. }: AuthUser, AxumPath(worker_id): AxumPath<String>,
 ) -> (StatusCode, Json<ProviderWorkerSettingsResponse>) {
-    let worker = match provider_owned_worker(&state, &claims.sub, &worker_id).await {
-        Ok(worker) => worker,
-        Err(response) => return response,
-    };
-
-    (
-        StatusCode::OK,
-        Json(ProviderWorkerSettingsResponse {
-            success: true,
-            worker_id,
-            message: "OK".into(),
-            settings: Some(settings_from_worker(&worker)),
-        }),
-    )
+    let mut grpc = state.grpc_client.lock().await;
+    match grpc.get_provider_worker_settings(&token, &worker_id).await {
+        Ok(resp) => (StatusCode::OK, Json(ProviderWorkerSettingsResponse { success:resp.success, worker_id:resp.worker_id, message:resp.message, settings:resp.settings.map(|s|s.into()) })),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ProviderWorkerSettingsResponse { success:false, worker_id, message:e.to_string(), settings:None })),
+    }
 }
 
+/// PUT /api/provider/workers/:worker_id/settings
 pub async fn update_provider_worker_settings(
-    State(state): State<AppState>,
-    AuthClaims(claims): AuthClaims,
-    AxumPath(worker_id): AxumPath<String>,
+    State(state): State<AppState>, AuthUser { token, .. }: AuthUser, AxumPath(worker_id): AxumPath<String>,
     Json(body): Json<ProviderWorkerSettingsBody>,
 ) -> (StatusCode, Json<ProviderWorkerSettingsResponse>) {
-    let worker = match provider_owned_worker(&state, &claims.sub, &worker_id).await {
-        Ok(worker) => worker,
-        Err(response) => return response,
-    };
-
-    if let Some(message) = validate_provider_settings(&worker, &body) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ProviderWorkerSettingsResponse {
-                success: false,
-                worker_id,
-                message,
-                settings: None,
-            }),
-        );
-    }
-
-    match sqlx::query_as::<_, hivemind_models::WorkerNode>(
-        "UPDATE worker_nodes SET
-            provider_enabled = $1,
-            cpu_cores_limit = $2,
-            memory_gb_limit = $3,
-            gpu_memory_gb_limit = $4,
-            storage_gb_limit = $5,
-            min_cpt_per_hour = $6,
-            updated_at = NOW()
-         WHERE worker_id = $7 AND username = $8
-         RETURNING *",
-    )
-    .bind(body.enabled)
-    .bind(body.cpu_cores_limit)
-    .bind(body.memory_gb_limit)
-    .bind(body.gpu_memory_gb_limit)
-    .bind(body.storage_gb_limit)
-    .bind(body.min_cpt_per_hour)
-    .bind(&worker_id)
-    .bind(&claims.sub)
-    .fetch_one(&state.db.pool)
-    .await
+    let mut grpc = state.grpc_client.lock().await;
+    match grpc.update_provider_worker_settings(&token, &worker_id, body.enabled, body.cpu_cores_limit,
+        body.memory_gb_limit, body.gpu_memory_gb_limit, body.storage_gb_limit, body.min_cpt_per_hour).await
     {
-        Ok(worker) => (
-            StatusCode::OK,
-            Json(ProviderWorkerSettingsResponse {
-                success: true,
-                worker_id,
-                message: "OK".into(),
-                settings: Some(settings_from_worker(&worker)),
-            }),
-        ),
-        Err(e) => {
-            tracing::error!("Failed to update provider worker settings: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ProviderWorkerSettingsResponse {
-                    success: false,
-                    worker_id,
-                    message: e.to_string(),
-                    settings: None,
-                }),
-            )
-        }
+        Ok(resp) => (StatusCode::OK, Json(ProviderWorkerSettingsResponse { success:resp.success, worker_id:resp.worker_id, message:resp.message, settings:resp.settings.map(|s|s.into()) })),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ProviderWorkerSettingsResponse { success:false, worker_id, message:e.to_string(), settings:None })),
     }
 }
 
+#[derive(Debug, Serialize)]
+pub struct AdminSchedulingCacheAnomalyListResponse {
+    pub success: bool,
+    pub entries: Vec<AdminSchedulingCacheAnomalyEntry>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdminAuditLogEntry {
+    pub id: String,
+    pub username: String,
+    pub action: String,
+    pub resource: String,
+    pub details: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdminAuditLogListResponse {
+    pub success: bool,
+    pub entries: Vec<AdminAuditLogEntry>,
+}
+
+/// GET /api/admin/billing/overview
+pub async fn get_admin_billing_overview(
+    State(state): State<AppState>, AuthUser { token, .. }: AuthUser,
+) -> (StatusCode, Json<AdminBillingOverviewResponse>) {
+    let mut grpc = state.grpc_client.lock().await;
+    match grpc.get_admin_billing_overview(&token).await {
+        Ok(resp) => (StatusCode::OK, Json(AdminBillingOverviewResponse {
+            success: resp.success,
+            total_payer_debit_cpt: resp.total_payer_debit_cpt,
+            total_provider_credit_cpt: resp.total_provider_credit_cpt,
+            total_platform_fee_cpt: resp.total_platform_fee_cpt,
+            pending_billing_tasks: resp.pending_billing_tasks,
+            currency: resp.currency,
+        })),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(AdminBillingOverviewResponse {
+            success: false, total_payer_debit_cpt: 0, total_provider_credit_cpt: 0,
+            total_platform_fee_cpt: 0, pending_billing_tasks: 0,
+            currency: "CPT".into(),
+        })),
+    }
+}
+
+/// GET /api/admin/artifacts/overview
+pub async fn get_admin_artifact_overview(
+    State(state): State<AppState>, AuthUser { token, .. }: AuthUser,
+) -> (StatusCode, Json<AdminArtifactOverviewResponse>) {
+    let mut grpc = state.grpc_client.lock().await;
+    match grpc.get_admin_artifact_overview(&token).await {
+        Ok(resp) => (StatusCode::OK, Json(AdminArtifactOverviewResponse {
+            success: resp.success,
+            total_artifacts: resp.total_artifacts,
+            total_size_bytes: resp.total_size_bytes,
+            dedup_hits: resp.dedup_hits,
+            resumable_artifacts: resp.resumable_artifacts,
+            expiring_in_24h: resp.expiring_in_24h,
+        })),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(AdminArtifactOverviewResponse {
+            success: false, total_artifacts: 0, total_size_bytes: 0,
+            dedup_hits: 0, resumable_artifacts: 0, expiring_in_24h: 0,
+        })),
+    }
+}
+
+/// POST /api/admin/artifacts/cleanup
+pub async fn cleanup_admin_artifacts(
+    State(state): State<AppState>, AuthUser { token, .. }: AuthUser,
+    Json(body): Json<AdminArtifactCleanupBody>,
+) -> (StatusCode, Json<AdminArtifactCleanupResponse>) {
+    let dry_run = body.dry_run.unwrap_or(true);
+    let mut grpc = state.grpc_client.lock().await;
+    match grpc.cleanup_admin_artifacts(&token, dry_run).await {
+        Ok(resp) => (StatusCode::OK, Json(AdminArtifactCleanupResponse {
+            success: resp.success,
+            dry_run: resp.dry_run,
+            expired_candidates: resp.expired_candidates,
+            deleted_rows: resp.deleted_rows,
+            deleted_files: resp.deleted_files,
+            file_delete_errors: resp.file_delete_errors,
+        })),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(AdminArtifactCleanupResponse {
+            success: false, dry_run, expired_candidates: 0,
+            deleted_rows: 0, deleted_files: 0, file_delete_errors: 0,
+        })),
+    }
+}
+
+/// GET /api/admin/scheduling/cache-metrics
+pub async fn get_admin_scheduling_cache_metrics(
+    State(state): State<AppState>, AuthUser { token, .. }: AuthUser,
+) -> (StatusCode, Json<AdminSchedulingCacheMetricsResponse>) {
+    let mut grpc = state.grpc_client.lock().await;
+    match grpc.get_admin_scheduling_cache_metrics(&token).await {
+        Ok(resp) => (StatusCode::OK, Json(AdminSchedulingCacheMetricsResponse {
+            success: resp.success,
+            total_completed_tasks: resp.total_completed_tasks,
+            total_cache_hits: resp.total_cache_hits,
+            cache_hit_rate: resp.cache_hit_rate,
+            top_workers: resp.top_workers.into_iter().map(|w| WorkerCacheAffinityMetric {
+                worker_id: w.worker_id,
+                completed_tasks: w.completed_tasks,
+                cache_hits: w.cache_hits,
+                recent_completed_tasks_7d: w.recent_completed_tasks_7d,
+            }).collect(),
+        })),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(AdminSchedulingCacheMetricsResponse {
+            success: false, total_completed_tasks: 0, total_cache_hits: 0,
+            cache_hit_rate: 0.0, top_workers: vec![],
+        })),
+    }
+}
+
+/// GET /api/admin/scheduling/cache-alert
+pub async fn get_admin_scheduling_cache_alert(
+    State(state): State<AppState>, AuthUser { token, .. }: AuthUser,
+    Query(query): Query<AdminSchedulingCacheAlertQuery>,
+) -> (StatusCode, Json<AdminSchedulingCacheAlertResponse>) {
+    let low = query.low.unwrap_or(40.0);
+    let high = query.high.unwrap_or(70.0);
+    let mut grpc = state.grpc_client.lock().await;
+    match grpc.get_admin_scheduling_cache_alert(&token, low, high).await {
+        Ok(resp) => (StatusCode::OK, Json(AdminSchedulingCacheAlertResponse {
+            success: resp.success,
+            low_threshold: resp.low_threshold,
+            high_threshold: resp.high_threshold,
+            cache_hit_rate: resp.cache_hit_rate,
+            severity: resp.severity,
+            message: resp.status_message,
+        })),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(AdminSchedulingCacheAlertResponse {
+            success: false, low_threshold: low, high_threshold: high,
+            cache_hit_rate: 0.0, severity: "unknown".into(),
+            message: e.to_string(),
+        })),
+    }
+}
+
+/// GET /api/admin/scheduling/cache-anomalies
+pub async fn list_admin_scheduling_cache_anomalies(
+    State(state): State<AppState>, AuthUser { token, .. }: AuthUser,
+    Query(query): Query<AdminSchedulingCacheAnomalyQuery>,
+) -> (StatusCode, Json<AdminSchedulingCacheAnomalyListResponse>) {
+    let limit = query.limit.unwrap_or(50).clamp(1, 500);
+    let mut grpc = state.grpc_client.lock().await;
+    match grpc.list_admin_scheduling_cache_anomalies(&token, limit).await {
+        Ok(resp) => (StatusCode::OK, Json(AdminSchedulingCacheAnomalyListResponse {
+            success: resp.success,
+            entries: resp.entries.into_iter().map(|e| AdminSchedulingCacheAnomalyEntry {
+                severity: e.severity,
+                cache_hit_rate: e.cache_hit_rate,
+                low_threshold: e.low_threshold,
+                high_threshold: e.high_threshold,
+                message: e.message,
+                created_at: e.created_at.parse().unwrap_or_default(),
+            }).collect(),
+        })),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(AdminSchedulingCacheAnomalyListResponse {
+            success: false, entries: vec![],
+        })),
+    }
+}
+
+/// GET /api/provider/workers/:worker_id/trust
 pub async fn get_provider_worker_trust_profile(
-    State(state): State<AppState>,
-    AuthClaims(claims): AuthClaims,
+    State(state): State<AppState>, AuthUser { token, .. }: AuthUser,
     AxumPath(worker_id): AxumPath<String>,
 ) -> (StatusCode, Json<WorkerTrustProfileResponse>) {
-    if let Err(response) = provider_owned_worker(&state, &claims.sub, &worker_id).await {
-        let (status, body) = response;
-        return (
-            status,
-            Json(WorkerTrustProfileResponse {
-                success: false,
-                message: body.message.clone(),
-                trust: None,
+    let mut grpc = state.grpc_client.lock().await;
+    match grpc.get_worker_trust_profile(&token, &worker_id).await {
+        Ok(resp) => (StatusCode::OK, Json(WorkerTrustProfileResponse {
+            success: resp.success,
+            message: resp.status_message,
+            trust: resp.trust.map(|t| WorkerTrustProfile {
+                worker_id: t.worker_id,
+                successful_tasks: t.successful_tasks,
+                failed_tasks: t.failed_tasks,
+                score: t.score,
+                banned: t.banned,
+                last_attested_at: t.last_attested_at.parse().ok(),
             }),
-        );
-    }
-
-    match sqlx::query_as::<_, (i64, i64, i32, bool, Option<chrono::DateTime<chrono::Utc>>)>(
-        "SELECT successful_tasks, failed_tasks, score, banned, last_attested_at
-         FROM worker_reputation
-         WHERE worker_id = $1",
-    )
-    .bind(&worker_id)
-    .fetch_optional(&state.db.pool)
-    .await
-    {
-        Ok(row) => {
-            let (successful_tasks, failed_tasks, score, banned, last_attested_at) =
-                row.unwrap_or((0, 0, 100, false, None));
-            (
-                StatusCode::OK,
-                Json(WorkerTrustProfileResponse {
-                    success: true,
-                    message: "OK".into(),
-                    trust: Some(WorkerTrustProfile {
-                        worker_id,
-                        successful_tasks,
-                        failed_tasks,
-                        score,
-                        banned,
-                        last_attested_at,
-                    }),
-                }),
-            )
-        }
-        Err(e) => {
-            tracing::error!("Failed to load worker trust profile: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(WorkerTrustProfileResponse {
-                    success: false,
-                    message: e.to_string(),
-                    trust: None,
-                }),
-            )
-        }
+        })),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(WorkerTrustProfileResponse {
+            success: false, message: e.to_string(), trust: None,
+        })),
     }
 }
 
+/// PUT /api/admin/workers/:worker_id/trust-control
 pub async fn update_worker_trust_control(
-    State(state): State<AppState>,
-    AuthClaims(claims): AuthClaims,
+    State(state): State<AppState>, AuthUser { token, .. }: AuthUser,
     AxumPath(worker_id): AxumPath<String>,
     Json(body): Json<WorkerTrustControlBody>,
 ) -> (StatusCode, Json<WorkerTrustControlResponse>) {
-    if !is_admin_user(&claims.sub) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(WorkerTrustControlResponse {
-                success: false,
-                worker_id,
-                banned: body.banned,
-                score: body.score.unwrap_or(100).clamp(0, 1000),
-                message: "admin access required".into(),
-            }),
-        );
-    }
-
-    let requested_score = body.score.unwrap_or(100).clamp(0, 1000);
-    match sqlx::query_as::<_, (bool, i32)>(
-        "INSERT INTO worker_reputation (worker_id, score, banned, updated_at)
-         VALUES ($1, $2, $3, NOW())
-         ON CONFLICT (worker_id) DO UPDATE SET
-            score = $2,
-            banned = $3,
-            updated_at = NOW()
-         RETURNING banned, score",
-    )
-    .bind(&worker_id)
-    .bind(requested_score)
-    .bind(body.banned)
-    .fetch_one(&state.db.pool)
-    .await
-    {
-        Ok((banned, score)) => {
-            let detail = serde_json::json!({
-                "banned": banned,
-                "score": score,
-            });
-            record_admin_audit_log(
-                &state.db.pool,
-                &claims.sub,
-                "worker_trust_control",
-                "worker",
-                &worker_id,
-                detail,
-            )
-            .await;
-            (
-                StatusCode::OK,
-                Json(WorkerTrustControlResponse {
-                    success: true,
-                    worker_id,
-                    banned,
-                    score,
-                    message: "OK".into(),
-                }),
-            )
-        }
-        Err(e) => {
-            tracing::error!("Failed to update worker trust control: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(WorkerTrustControlResponse {
-                    success: false,
-                    worker_id,
-                    banned: body.banned,
-                    score: requested_score,
-                    message: e.to_string(),
-                }),
-            )
-        }
+    let score = body.score.unwrap_or(0);
+    let mut grpc = state.grpc_client.lock().await;
+    match grpc.update_worker_trust_control(&token, &worker_id, body.banned, score).await {
+        Ok(resp) => (StatusCode::OK, Json(WorkerTrustControlResponse {
+            success: resp.success,
+            worker_id: resp.worker_id,
+            banned: resp.banned,
+            score: resp.score,
+            message: resp.status_message,
+        })),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(WorkerTrustControlResponse {
+            success: false, worker_id, banned: false, score: 0, message: e.to_string(),
+        })),
     }
 }
 
-pub async fn list_admin_audit_logs(
-    State(state): State<AppState>,
-    AuthClaims(claims): AuthClaims,
-    Query(query): Query<AdminAuditLogQuery>,
-) -> (StatusCode, Json<AdminAuditLogListResponse>) {
-    if !is_admin_user(&claims.sub) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(AdminAuditLogListResponse {
-                success: false,
-                entries: vec![],
-            }),
-        );
-    }
-
-    let limit = query.limit.unwrap_or(100).clamp(1, 500);
-    match sqlx::query_as::<_, (String, String, String, String, serde_json::Value, chrono::DateTime<chrono::Utc>)>(
-        "SELECT admin_user, action, target_type, target_id, detail, created_at
-         FROM admin_audit_logs
-         ORDER BY created_at DESC
-         LIMIT $1",
-    )
-    .bind(limit)
-    .fetch_all(&state.db.pool)
-    .await
-    {
-        Ok(rows) => (
-            StatusCode::OK,
-            Json(AdminAuditLogListResponse {
-                success: true,
-                entries: rows
-                    .into_iter()
-                    .map(
-                        |(admin_user, action, target_type, target_id, detail, created_at)| {
-                            AdminAuditLogEntry {
-                                admin_user,
-                                action,
-                                target_type,
-                                target_id,
-                                detail,
-                                created_at,
-                            }
-                        },
-                    )
-                    .collect(),
-            }),
-        ),
-        Err(e) => {
-            tracing::error!("Failed to list admin audit logs: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(AdminAuditLogListResponse {
-                    success: false,
-                    entries: vec![],
-                }),
-            )
-        }
-    }
-}
-
+/// GET /api/admin/workers/trust
 pub async fn list_admin_worker_trust(
-    State(state): State<AppState>,
-    AuthClaims(claims): AuthClaims,
+    State(state): State<AppState>, AuthUser { token, .. }: AuthUser,
 ) -> (StatusCode, Json<AdminWorkerTrustListResponse>) {
-    if !is_admin_user(&claims.sub) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(AdminWorkerTrustListResponse {
-                success: false,
-                entries: vec![],
-            }),
-        );
-    }
-
-    match sqlx::query_as::<_, (String, String, String, i32, bool, i64, i64, Option<chrono::DateTime<chrono::Utc>>)>(
-        "SELECT
-            wn.worker_id,
-            wn.username,
-            wn.status,
-            COALESCE(wr.score, 100) AS score,
-            COALESCE(wr.banned, false) AS banned,
-            COALESCE(wr.successful_tasks, 0) AS successful_tasks,
-            COALESCE(wr.failed_tasks, 0) AS failed_tasks,
-            wr.last_attested_at
-         FROM worker_nodes wn
-         LEFT JOIN worker_reputation wr ON wr.worker_id = wn.worker_id
-         ORDER BY COALESCE(wr.banned, false) DESC, COALESCE(wr.score, 100) ASC, wn.worker_id ASC",
-    )
-    .fetch_all(&state.db.pool)
-    .await
-    {
-        Ok(rows) => (
-            StatusCode::OK,
-            Json(AdminWorkerTrustListResponse {
-                success: true,
-                entries: rows
-                    .into_iter()
-                    .map(
-                        |(
-                            worker_id,
-                            username,
-                            worker_status,
-                            score,
-                            banned,
-                            successful_tasks,
-                            failed_tasks,
-                            last_attested_at,
-                        )| AdminWorkerTrustEntry {
-                            worker_id,
-                            username,
-                            worker_status,
-                            score,
-                            banned,
-                            successful_tasks,
-                            failed_tasks,
-                            last_attested_at,
-                        },
-                    )
-                    .collect(),
-            }),
-        ),
-        Err(e) => {
-            tracing::error!("Failed to list admin worker trust entries: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(AdminWorkerTrustListResponse {
-                    success: false,
-                    entries: vec![],
-                }),
-            )
-        }
+    let mut grpc = state.grpc_client.lock().await;
+    match grpc.list_admin_worker_trust(&token).await {
+        Ok(resp) => (StatusCode::OK, Json(AdminWorkerTrustListResponse {
+            success: resp.success,
+            entries: resp.entries.into_iter().map(|e| AdminWorkerTrustEntry {
+                worker_id: e.worker_id,
+                username: e.username,
+                worker_status: e.worker_status,
+                score: e.score,
+                banned: e.banned,
+                successful_tasks: e.successful_tasks,
+                failed_tasks: e.failed_tasks,
+                last_attested_at: e.last_attested_at.parse().ok(),
+            }).collect(),
+        })),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(AdminWorkerTrustListResponse {
+            success: false, entries: vec![],
+        })),
     }
 }
 
-pub async fn list_workers(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-) -> (StatusCode, Json<WorkerListResponse>) {
-    let include_offline = query
-        .get("include_offline")
-        .or_else(|| query.get("includeOffline"))
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false);
-
-    let sql = if include_offline {
-        "SELECT * FROM worker_nodes ORDER BY registered_at DESC"
-    } else {
-        "SELECT * FROM worker_nodes WHERE status IN ('ACTIVE', 'IDLE', 'BUSY') ORDER BY registered_at DESC"
-    };
-
-    match sqlx::query_as::<_, hivemind_models::WorkerNode>(sql)
-        .fetch_all(&state.db.pool)
-        .await
-    {
-        Ok(workers) => (
-            StatusCode::OK,
-            Json(WorkerListResponse {
-                success: true,
-                workers: workers.into_iter().map(WorkerInfo::from).collect(),
-            }),
-        ),
-        Err(e) => {
-            tracing::error!("Failed to list workers: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(WorkerListResponse {
-                    success: false,
-                    workers: vec![],
-                }),
-            )
-        }
+/// GET /api/admin/audit/logs
+pub async fn list_admin_audit_logs(
+    State(state): State<AppState>, AuthUser { token, .. }: AuthUser,
+    Query(query): Query<AdminSchedulingCacheAnomalyQuery>,
+) -> (StatusCode, Json<AdminAuditLogListResponse>) {
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let mut grpc = state.grpc_client.lock().await;
+    match grpc.list_admin_audit_logs(&token, limit).await {
+        Ok(resp) => (StatusCode::OK, Json(AdminAuditLogListResponse {
+            success: resp.success,
+            entries: resp.entries.into_iter().map(|e| AdminAuditLogEntry {
+                id: e.id,
+                username: e.username,
+                action: e.action,
+                resource: e.resource,
+                details: e.details,
+                created_at: e.created_at.parse().unwrap_or_default(),
+            }).collect(),
+        })),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(AdminAuditLogListResponse {
+            success: false, entries: vec![],
+        })),
     }
 }
 
-pub async fn register_worker(
-    State(state): State<AppState>,
-    AuthClaims(claims): AuthClaims,
-    Json(body): Json<RegisterWorkerBody>,
-) -> (StatusCode, Json<StatusResponse>) {
-    if body.ip.trim().is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(StatusResponse {
-                success: false,
-                status_message: "ip is required".into(),
-            }),
-        );
-    }
-
-    let owner = claims.sub;
-    if let Some(username) = body.username.as_deref().map(str::trim) {
-        if !username.is_empty() && username != owner {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(StatusResponse {
-                    success: false,
-                    status_message: "username does not match authenticated subject".into(),
-                }),
-            );
-        }
-    }
-
-    let gpu_memory_gb = body.gpu_memory_gb.unwrap_or(0);
-    let result = sqlx::query(
-        "INSERT INTO worker_nodes (
-            worker_id, username, ip, cpu_cores, memory_gb, cpu_score, gpu_score,
-            gpu_memory_gb, gpu_name, vram_mb, storage_total_gb, storage_available_gb,
-            provider_enabled, cpu_cores_limit, memory_gb_limit, gpu_memory_gb_limit,
-            storage_gb_limit, min_cpt_per_hour,
-            location, status, available_memory_gb, queue_capacity
-         )
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULL,$9,0,0,true,$4,$5,$8,0,0,$10,'IDLE',$11,$12)
-         ON CONFLICT (worker_id) DO UPDATE SET
-            username = EXCLUDED.username,
-            ip = EXCLUDED.ip,
-            cpu_cores = EXCLUDED.cpu_cores,
-            memory_gb = EXCLUDED.memory_gb,
-            cpu_score = EXCLUDED.cpu_score,
-            gpu_score = EXCLUDED.gpu_score,
-            gpu_memory_gb = EXCLUDED.gpu_memory_gb,
-            vram_mb = EXCLUDED.vram_mb,
-            location = EXCLUDED.location,
-            status = 'IDLE',
-            available_memory_gb = EXCLUDED.available_memory_gb,
-            queue_capacity = EXCLUDED.queue_capacity,
-            last_heartbeat = NOW(),
-            updated_at = NOW()",
-    )
-    .bind(&owner)
-    .bind(&owner)
-    .bind(&body.ip)
-    .bind(body.cpu_cores)
-    .bind(body.memory_gb)
-    .bind(body.cpu_score)
-    .bind(body.gpu_score.unwrap_or(0))
-    .bind(gpu_memory_gb)
-    .bind(gpu_memory_gb as i64 * 1024)
-    .bind(body.location.unwrap_or_else(|| "local".into()))
-    .bind(body.memory_gb)
-    .bind(body.cpu_cores)
-    .execute(&state.db.pool)
-    .await;
-
-    match result {
-        Ok(_) => (
-            StatusCode::OK,
-            Json(StatusResponse {
-                success: true,
-                status_message: "OK".into(),
-            }),
-        ),
-        Err(e) => {
-            tracing::error!("Failed to register worker: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(StatusResponse {
-                    success: false,
-                    status_message: e.to_string(),
-                }),
-            )
-        }
-    }
-}
-
-pub async fn remove_worker(
-    State(state): State<AppState>,
-    Json(body): Json<RemoveWorkerBody>,
-) -> (StatusCode, Json<StatusResponse>) {
-    let result = sqlx::query("DELETE FROM worker_nodes WHERE worker_id = $1")
-        .bind(&body.worker_id)
-        .execute(&state.db.pool)
-        .await;
-
-    match result {
-        Ok(result) if result.rows_affected() > 0 => (
-            StatusCode::OK,
-            Json(StatusResponse {
-                success: true,
-                status_message: "OK".into(),
-            }),
-        ),
-        Ok(_) => (
-            StatusCode::NOT_FOUND,
-            Json(StatusResponse {
-                success: false,
-                status_message: "worker not found".into(),
-            }),
-        ),
-        Err(e) => {
-            tracing::error!("Failed to remove worker: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(StatusResponse {
-                    success: false,
-                    status_message: e.to_string(),
-                }),
-            )
-        }
-    }
-}
-
-impl From<hivemind_models::WorkerNode> for WorkerInfo {
-    fn from(worker: hivemind_models::WorkerNode) -> Self {
-        Self {
-            id: worker.worker_id.clone(),
-            worker_id: worker.worker_id,
-            addr: worker.ip.clone(),
-            ip: worker.ip,
-            status: worker.status.as_str().into(),
-            cpu_cores: worker.cpu_cores,
-            memory_gb: worker.memory_gb,
-            cpu_score: worker.cpu_score,
-            gpu_score: worker.gpu_score,
-            gpu_memory_gb: worker.gpu_memory_gb,
-            provider_enabled: worker.provider_enabled,
-            cpu_cores_limit: worker.cpu_cores_limit,
-            memory_gb_limit: worker.memory_gb_limit,
-            gpu_memory_gb_limit: worker.gpu_memory_gb_limit,
-            storage_gb_limit: worker.storage_gb_limit,
-            min_cpt_per_hour: worker.min_cpt_per_hour,
-            location: worker.location,
-            cpu_usage: worker.cpu_usage,
-            memory_usage: worker.memory_usage,
-            gpu_usage: worker.gpu_usage,
-            gpu_memory_usage: worker.gpu_memory_usage,
-        }
-    }
-}
-
-/// GET /api/tasks/:task_id/log — Get task execution log
-pub async fn get_task_log(
-    State(state): State<AppState>,
-    AuthClaims(claims): AuthClaims,
-    axum::extract::Path(task_id): axum::extract::Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    match state.scheduler.get_task(&task_id).await {
-        Ok(Some(task)) => {
-            if task.owner != claims.sub {
-                return (
-                    StatusCode::FORBIDDEN,
-                    Json(serde_json::json!({"success": false, "message": "Not authorized"})),
-                );
-            }
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "success": true, "task_id": task.task_id,
-                    "status": task.status.as_str(), "output": task.output,
-                    "status_message": task.status_message,
-                    "cpu_usage": task.cpu_usage, "memory_usage": task.memory_usage,
-                    "gpu_usage": task.gpu_usage,
-                    "wall_time_ms": task.wall_time_ms, "peak_memory_mb": task.peak_memory_mb,
-                })),
-            )
-        }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"success": false, "message": "Task not found"})),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"success": false, "message": format!("Error: {}", e)})),
-        ),
-    }
-}
-
-pub async fn get_task_result(
-    State(state): State<AppState>,
-    AuthClaims(claims): AuthClaims,
-    axum::extract::Path(task_id): axum::extract::Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    match state.scheduler.get_task(&task_id).await {
-        Ok(Some(task)) => {
-            if task.owner != claims.sub {
-                return (
-                    StatusCode::FORBIDDEN,
-                    Json(serde_json::json!({"success": false, "message": "Not authorized"})),
-                );
-            }
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "success": true,
-                    "task_id": task.task_id,
-                    "status": task.status.as_str(),
-                    "result_torrent": task.result_torrent,
-                    "status_message": task.status_message,
-                })),
-            )
-        }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"success": false, "message": "Task not found"})),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"success": false, "message": format!("Error: {}", e)})),
-        ),
-    }
-}
-
-/// POST /api/tasks/:task_id/stop — Stop a running task
-/// GET /api/tasks/:task_id/artifact/download ??Download task artifact file
-pub async fn download_task_artifact(
-    State(state): State<AppState>,
-    AuthClaims(claims): AuthClaims,
-    axum::extract::Path(task_id): axum::extract::Path<String>,
-) -> Response {
-    let task = match state.scheduler.get_task(&task_id).await {
-        Ok(Some(task)) => task,
-        Ok(None) => {
-            return (StatusCode::NOT_FOUND, Json(serde_json::json!({"success":false,"message":"Task not found"}))).into_response();
-        }
-        Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success":false,"message":e.to_string()}))).into_response();
-        }
-    };
-
-    if task.owner != claims.sub && !is_admin_user(&claims.sub) {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"success":false,"message":"Not authorized"}))).into_response();
-    }
-
-    let row: (String, String) = match sqlx::query_as(
-        "SELECT storage_path, artifact_key FROM artifacts WHERE task_id = $1 ORDER BY created_at ASC LIMIT 1",
-    )
-    .bind(&task_id)
-    .fetch_optional(&state.db.pool)
-    .await
-    {
-        Ok(Some(row)) => row,
-        Ok(None) => {
-            return (StatusCode::NOT_FOUND, Json(serde_json::json!({"success":false,"message":"No artifact for task"}))).into_response();
-        }
-        Err(e) => {
-            tracing::error!("artifact lookup failed for {}: {}", task_id, e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success":false,"message":e.to_string()}))).into_response();
-        }
-    };
-
-    let (storage_path, artifact_key) = row;
-    let path = Path::new(&storage_path);
-    if !path.exists() {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"success":false,"message":"artifact file missing on disk"}))).into_response();
-    }
-
-    let file = match tokio::fs::File::open(path).await {
-        Ok(f) => f,
-        Err(e) => {
-            tracing::error!("artifact open failed {}: {}", storage_path, e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success":false,"message":e.to_string()}))).into_response();
-        }
-    };
-
-    let filename = format!("{}.artifact", artifact_key);
-    let stream = ReaderStream::new(file);
-    let body = Body::from_stream(stream);
-
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", "application/octet-stream")
-        .header("Content-Disposition", format!("attachment; filename=\"{}\"", filename))
-        .body(body)
-        .unwrap()
-}
-
-pub async fn stop_task(
-    State(state): State<AppState>,
-    AuthClaims(claims): AuthClaims,
-    axum::extract::Path(task_id): axum::extract::Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    match state.scheduler.get_task(&task_id).await {
-        Ok(Some(task)) => {
-            if task.owner != claims.sub {
-                return (
-                    StatusCode::FORBIDDEN,
-                    Json(serde_json::json!({"success": false, "message": "Not authorized"})),
-                );
-            }
-            match task.status {
-                TaskStatus::Pending
-                | TaskStatus::Queued
-                | TaskStatus::Assigned
-                | TaskStatus::Running => match state.scheduler.cancel_task(&task_id).await {
-                    Ok(_) => (
-                        StatusCode::OK,
-                        Json(serde_json::json!({"success": true, "message": "Task stopped"})),
-                    ),
-                    Err(e) => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(
-                            serde_json::json!({"success": false, "message": format!("Failed: {}", e)}),
-                        ),
-                    ),
-                },
-                _ => (
-                    StatusCode::CONFLICT,
-                    Json(
-                        serde_json::json!({"success": false, "message": format!("Already in terminal state: {}", task.status.as_str())}),
-                    ),
-                ),
-            }
-        }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"success": false, "message": "Task not found"})),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"success": false, "message": format!("Error: {}", e)})),
-        ),
-    }
-}
-
-/// GET /health
-pub async fn health_check() -> &'static str {
-    "OK"
+pub async fn download_task_artifact(AxumPath(_task_id): AxumPath<String>) -> Response {
+    (StatusCode::NOT_IMPLEMENTED, Json(serde_json::json!({"success":false,"message":"Artifact download not yet implemented via gRPC. Artifacts live on the nodepool server."}))).into_response()
 }

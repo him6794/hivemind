@@ -1,4 +1,4 @@
-﻿syntax = "proto3";
+syntax = "proto3";
 
 package nodepool;
 
@@ -91,7 +91,7 @@ message RunningStatusResponse {
 }
 
 // ============================================================
-// Master → Nodepool: Task Submission / Query / Stop
+// Master �� Nodepool: Task Submission / Query / Stop
 // ============================================================
 
 message UploadTaskRequest {
@@ -119,12 +119,151 @@ message GetAllUserTasksResponse {
 
 message TaskInfo {
     string task_id = 1;
-    string status = 2;
-    string status_message = 3;
-    ResourceUsage usage = 4;
+    string owner = 2;
+    string status = 3;
+    string status_message = 4;
     string worker_ip = 5;
+    string output = 6;
+    string result_torrent = 7;
+    int64 billed_amount = 8;
+    bool billing_settled = 9;
+    int32 retry_count = 10;
+    int64 wall_time_ms = 11;
+    int64 peak_memory_mb = 12;
+    double cpu_usage = 13;
+    double memory_usage = 14;
+    double gpu_usage = 15;
+    double gpu_memory_usage = 16;
+    bool deterministic = 17;
 }
 
+
+message ListWorkersRequest {
+    bool include_offline = 1;
+}
+
+message WorkerInfo {
+    string worker_id = 1;
+    string username = 2;
+    string ip = 3;
+    string status = 4;
+    int32 cpu_cores = 5;
+    int32 memory_gb = 6;
+    int32 cpu_score = 7;
+    int32 gpu_score = 8;
+    int32 gpu_memory_gb = 9;
+    string gpu_name = 10;
+    int64 vram_mb = 11;
+    int64 storage_total_gb = 12;
+    int64 storage_available_gb = 13;
+    bool provider_enabled = 14;
+    int32 cpu_cores_limit = 15;
+    int32 memory_gb_limit = 16;
+    int32 gpu_memory_gb_limit = 17;
+    int64 storage_gb_limit = 18;
+    int64 min_cpt_per_hour = 19;
+    string location = 20;
+    double cpu_usage = 21;
+    double memory_usage = 22;
+    double gpu_usage = 23;
+    double gpu_memory_usage = 24;
+}
+
+message ListWorkersResponse {
+    bool success = 1;
+    string status_message = 2;
+    repeated WorkerInfo workers = 3;
+}
+
+message RemoveWorkerRequest {
+    string worker_id = 1;
+    string token = 2;
+}
+
+message QuoteTaskRequest {
+    string token = 1;
+    int32 cpu_score = 2;
+    int32 gpu_score = 3;
+    int32 memory_gb = 4;
+    int32 gpu_memory_gb = 5;
+    int64 storage_gb = 6;
+    int32 host_count = 7;
+}
+
+message PricingBreakdown {
+    int64 base = 1;
+    int64 cpu = 2;
+    int64 gpu = 3;
+    int64 memory = 4;
+    int64 gpu_memory = 5;
+    int64 storage = 6;
+    int64 host_count = 7;
+    int64 per_host_total = 8;
+    int64 total = 9;
+}
+
+message QuoteTaskResponse {
+    bool success = 1;
+    int64 quoted_cpt = 2;
+    string currency = 3;
+    PricingBreakdown breakdown = 4;
+}
+
+message GetProviderEarningsRequest {
+    string token = 1;
+    int64 limit = 2;
+}
+
+message ProviderEarningsEntry {
+    string task_id = 1;
+    string payer_user = 2;
+    string provider_worker_id = 3;
+    int64 amount_cpt = 4;
+    string status = 5;
+    string created_at = 6;
+}
+
+message GetProviderEarningsResponse {
+    bool success = 1;
+    string status_message = 2;
+    int64 total_earned_cpt = 3;
+    string currency = 4;
+    repeated ProviderEarningsEntry entries = 5;
+}
+
+message GetProviderWorkerSettingsRequest {
+    string token = 1;
+    string worker_id = 2;
+}
+
+message ProviderWorkerSettings {
+    bool enabled = 1;
+    int32 cpu_cores_limit = 2;
+    int32 memory_gb_limit = 3;
+    int32 gpu_memory_gb_limit = 4;
+    int64 storage_gb_limit = 5;
+    int64 min_cpt_per_hour = 6;
+}
+
+message GetProviderWorkerSettingsResponse {
+    bool success = 1;
+    string message = 2;
+    string worker_id = 3;
+    ProviderWorkerSettings settings = 4;
+}
+
+message UpdateProviderWorkerSettingsRequest {
+    string token = 1;
+    string worker_id = 2;
+    ProviderWorkerSettings settings = 3;
+}
+
+message UpdateProviderWorkerSettingsResponse {
+    bool success = 1;
+    string message = 2;
+    string worker_id = 3;
+    ProviderWorkerSettings settings = 4;
+}
 message GetTaskResultRequest {
     string task_id = 1;
     string token = 2;
@@ -157,7 +296,7 @@ message TasklogResponse {
 }
 
 // ============================================================
-// Nodepool → Worker: Task Dispatch & Reporting
+// Nodepool �� Worker: Task Dispatch & Reporting
 // ============================================================
 
 message ExecuteTaskRequest {
@@ -342,6 +481,201 @@ message HeartbeatResponse {
     string status_message = 2;
 }
 
+
+// ============================================================
+// Admin Billing
+// ============================================================
+
+message GetAdminBillingOverviewRequest {
+    string token = 1;
+}
+
+message GetAdminBillingOverviewResponse {
+    bool success = 1;
+    string status_message = 2;
+    int64 total_payer_debit_cpt = 3;
+    int64 total_provider_credit_cpt = 4;
+    int64 total_platform_fee_cpt = 5;
+    int64 pending_billing_tasks = 6;
+    string currency = 7;
+}
+
+// ============================================================
+// Admin Artifacts
+// ============================================================
+
+message GetAdminArtifactOverviewRequest {
+    string token = 1;
+}
+
+message GetAdminArtifactOverviewResponse {
+    bool success = 1;
+    string status_message = 2;
+    int64 total_artifacts = 3;
+    int64 total_size_bytes = 4;
+    int64 dedup_hits = 5;
+    int64 resumable_artifacts = 6;
+    int64 expiring_in_24h = 7;
+}
+
+message CleanupAdminArtifactsRequest {
+    string token = 1;
+    bool dry_run = 2;
+}
+
+message CleanupAdminArtifactsResponse {
+    bool success = 1;
+    string status_message = 2;
+    bool dry_run = 3;
+    int64 expired_candidates = 4;
+    int64 deleted_rows = 5;
+    int64 deleted_files = 6;
+    int64 file_delete_errors = 7;
+}
+
+// ============================================================
+// Admin Scheduling Cache
+// ============================================================
+
+message WorkerCacheAffinityMetric {
+    string worker_id = 1;
+    int64 completed_tasks = 2;
+    int64 cache_hits = 3;
+    int64 recent_completed_tasks_7d = 4;
+}
+
+message GetAdminSchedulingCacheMetricsRequest {
+    string token = 1;
+}
+
+message GetAdminSchedulingCacheMetricsResponse {
+    bool success = 1;
+    string status_message = 2;
+    int64 total_completed_tasks = 3;
+    int64 total_cache_hits = 4;
+    double cache_hit_rate = 5;
+    repeated WorkerCacheAffinityMetric top_workers = 6;
+}
+
+message GetAdminSchedulingCacheAlertRequest {
+    string token = 1;
+    double low_threshold = 2;
+    double high_threshold = 3;
+}
+
+message GetAdminSchedulingCacheAlertResponse {
+    bool success = 1;
+    string status_message = 2;
+    double low_threshold = 3;
+    double high_threshold = 4;
+    double cache_hit_rate = 5;
+    string severity = 6;
+    string message = 7;
+}
+
+message CacheAnomalyEntry {
+    string severity = 1;
+    double cache_hit_rate = 2;
+    double low_threshold = 3;
+    double high_threshold = 4;
+    string message = 5;
+    string created_at = 6;
+}
+
+message ListAdminSchedulingCacheAnomaliesRequest {
+    string token = 1;
+    int64 limit = 2;
+}
+
+message ListAdminSchedulingCacheAnomaliesResponse {
+    bool success = 1;
+    string status_message = 2;
+    repeated CacheAnomalyEntry entries = 3;
+}
+
+// ============================================================
+// Worker Trust & Reputation
+// ============================================================
+
+message WorkerTrustProfile {
+    string worker_id = 1;
+    int64 successful_tasks = 2;
+    int64 failed_tasks = 3;
+    int32 score = 4;
+    bool banned = 5;
+    string last_attested_at = 6;
+}
+
+message GetWorkerTrustProfileRequest {
+    string token = 1;
+    string worker_id = 2;
+}
+
+message GetWorkerTrustProfileResponse {
+    bool success = 1;
+    string status_message = 2;
+    WorkerTrustProfile trust = 3;
+}
+
+message UpdateWorkerTrustControlRequest {
+    string token = 1;
+    string worker_id = 2;
+    bool banned = 3;
+    int32 score = 4;
+}
+
+message UpdateWorkerTrustControlResponse {
+    bool success = 1;
+    string status_message = 2;
+    string worker_id = 3;
+    bool banned = 4;
+    int32 score = 5;
+}
+
+message AdminWorkerTrustEntry {
+    string worker_id = 1;
+    string username = 2;
+    string worker_status = 3;
+    int32 score = 4;
+    bool banned = 5;
+    int64 successful_tasks = 6;
+    int64 failed_tasks = 7;
+    string last_attested_at = 8;
+}
+
+message ListAdminWorkerTrustRequest {
+    string token = 1;
+}
+
+message ListAdminWorkerTrustResponse {
+    bool success = 1;
+    string status_message = 2;
+    repeated AdminWorkerTrustEntry entries = 3;
+}
+
+// ============================================================
+// Admin Audit Logs
+// ============================================================
+
+message AdminAuditLogEntry {
+    string id = 1;
+    string username = 2;
+    string action = 3;
+    string resource = 4;
+    string details = 5;
+    string created_at = 6;
+}
+
+message ListAdminAuditLogsRequest {
+    string token = 1;
+    int64 limit = 2;
+}
+
+message ListAdminAuditLogsResponse {
+    bool success = 1;
+    string status_message = 2;
+    repeated AdminAuditLogEntry entries = 3;
+}
 // ============================================================
 // Services
 // ============================================================
@@ -355,6 +689,8 @@ service UserService {
 service NodeManagerService {
     rpc RegisterWorkerNode(RegisterWorkerNodeRequest) returns (StatusResponse);
     rpc ReportStatus(RunningStatusRequest) returns (RunningStatusResponse);
+    rpc ListWorkers(ListWorkersRequest) returns (ListWorkersResponse);
+    rpc RemoveWorker(RemoveWorkerRequest) returns (StatusResponse);
 }
 
 service MasterNodeService {
@@ -363,6 +699,20 @@ service MasterNodeService {
     rpc GetAllUserTasks(GetAllUserTasksRequest) returns (GetAllUserTasksResponse);
     rpc StopTask(StopTaskRequest) returns (StopTaskResponse);
     rpc GetTasklog(TasklogRequest) returns (TasklogResponse);
+    rpc QuoteTask(QuoteTaskRequest) returns (QuoteTaskResponse);
+    rpc GetProviderEarnings(GetProviderEarningsRequest) returns (GetProviderEarningsResponse);
+    rpc GetProviderWorkerSettings(GetProviderWorkerSettingsRequest) returns (GetProviderWorkerSettingsResponse);
+    rpc UpdateProviderWorkerSettings(UpdateProviderWorkerSettingsRequest) returns (UpdateProviderWorkerSettingsResponse);
+    rpc GetAdminBillingOverview(GetAdminBillingOverviewRequest) returns (GetAdminBillingOverviewResponse);
+    rpc GetAdminArtifactOverview(GetAdminArtifactOverviewRequest) returns (GetAdminArtifactOverviewResponse);
+    rpc CleanupAdminArtifacts(CleanupAdminArtifactsRequest) returns (CleanupAdminArtifactsResponse);
+    rpc GetAdminSchedulingCacheMetrics(GetAdminSchedulingCacheMetricsRequest) returns (GetAdminSchedulingCacheMetricsResponse);
+    rpc GetAdminSchedulingCacheAlert(GetAdminSchedulingCacheAlertRequest) returns (GetAdminSchedulingCacheAlertResponse);
+    rpc ListAdminSchedulingCacheAnomalies(ListAdminSchedulingCacheAnomaliesRequest) returns (ListAdminSchedulingCacheAnomaliesResponse);
+    rpc GetWorkerTrustProfile(GetWorkerTrustProfileRequest) returns (GetWorkerTrustProfileResponse);
+    rpc UpdateWorkerTrustControl(UpdateWorkerTrustControlRequest) returns (UpdateWorkerTrustControlResponse);
+    rpc ListAdminWorkerTrust(ListAdminWorkerTrustRequest) returns (ListAdminWorkerTrustResponse);
+    rpc ListAdminAuditLogs(ListAdminAuditLogsRequest) returns (ListAdminAuditLogsResponse);
 }
 
 service WorkerNodeService {

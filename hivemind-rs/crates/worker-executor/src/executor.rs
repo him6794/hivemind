@@ -1,14 +1,25 @@
-use super::sandbox::{SandboxEgressPolicy, SandboxLimits};
+﻿use super::sandbox::{SandboxEgressPolicy, SandboxLimits};
 use anyhow::{Context, Result};
 use hivemind_config::HivemindConfig;
 use hivemind_models::Task;
 use std::process::Command;
 use std::time::Instant;
 
+/// Extract a safe identifier from a magnet URI or raw btih.
+/// Magnet URIs contain `&` chars that break cmd.exe / shell parsing.
+fn sanitize_btih(raw: &str) -> &str {
+    if let Some(pos) = raw.find("btih:") {
+        let after = &raw[pos + 5..];
+        after.split(['&', ')']).next().unwrap_or(raw)
+    } else {
+        raw
+    }
+}
+
 pub async fn run_task(task: &Task, config: &HivemindConfig) -> Result<super::TaskResult> {
     let start = Instant::now();
 
-    let btih = task.torrent_source.as_deref().unwrap_or("unknown");
+    let btih = sanitize_btih(task.torrent_source.as_deref().unwrap_or("unknown"));
     tracing::info!(
         "Executing task {} (BTIH: {}, requires GPU: {}, storage: {}GB)",
         task.task_id,
@@ -59,7 +70,7 @@ async fn execute_sandboxed(
     config: &HivemindConfig,
     limits: &SandboxLimits,
 ) -> Result<std::process::Output> {
-    let btih = task.torrent_source.as_deref().unwrap_or("dummy-btih");
+    let btih = sanitize_btih(task.torrent_source.as_deref().unwrap_or("dummy-btih"));
     let policy = SandboxEgressPolicy::from_config(&config.executor)?;
     if config.executor.sandbox_mode.eq_ignore_ascii_case("production") && !policy.is_release_safe() {
         return Err(anyhow::anyhow!(
