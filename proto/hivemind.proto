@@ -295,6 +295,19 @@ message TasklogResponse {
     string log = 2;
 }
 
+message DownloadTaskArtifactRequest {
+    string task_id = 1;
+    string token = 2;
+}
+
+message DownloadTaskArtifactResponse {
+    bool success = 1;
+    string status_message = 2;
+    string filename = 3;
+    string content_type = 4;
+    bytes data = 5;
+}
+
 // ============================================================
 // Nodepool �� Worker: Task Dispatch & Reporting
 // ============================================================
@@ -699,6 +712,7 @@ service MasterNodeService {
     rpc GetAllUserTasks(GetAllUserTasksRequest) returns (GetAllUserTasksResponse);
     rpc StopTask(StopTaskRequest) returns (StopTaskResponse);
     rpc GetTasklog(TasklogRequest) returns (TasklogResponse);
+    rpc DownloadTaskArtifact(DownloadTaskArtifactRequest) returns (DownloadTaskArtifactResponse);
     rpc QuoteTask(QuoteTaskRequest) returns (QuoteTaskResponse);
     rpc GetProviderEarnings(GetProviderEarningsRequest) returns (GetProviderEarningsResponse);
     rpc GetProviderWorkerSettings(GetProviderWorkerSettingsRequest) returns (GetProviderWorkerSettingsResponse);

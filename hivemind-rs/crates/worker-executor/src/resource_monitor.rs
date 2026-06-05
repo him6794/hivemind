@@ -178,7 +178,7 @@ fn detect_gpus_windows() -> Vec<GpuInfo> {
                             .unwrap_or(0);
                         Some(GpuInfo {
                             index: 0,
-                            name: parts.get(0).unwrap_or(&"Unknown GPU").to_string(),
+                            name: parts.first().unwrap_or(&"Unknown GPU").to_string(),
                             vram_total_mb: vram_total / (1024 * 1024),
                             vram_used_mb: 0,
                             vram_available_mb: vram_total / (1024 * 1024),

@@ -1,4 +1,4 @@
-﻿use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -34,11 +34,6 @@ pub struct TaskLookupCommand {
     pub task_id: String,
     pub download: bool,
 }
-
-
-
-
-
 
 pub fn parse_cli_args(args: &[String]) -> Result<CliCommand> {
     let command = args.get(1).map(String::as_str).unwrap_or("all");
@@ -421,7 +416,10 @@ async fn download_task_artifact(command: &TaskLookupCommand) -> Result<()> {
         &command.password,
     )
     .await?;
-    let url = format!("{}/api/tasks/{}/artifact/download", command.api_base, command.task_id);
+    let url = format!(
+        "{}/api/tasks/{}/artifact/download",
+        command.api_base, command.task_id
+    );
     let response = client
         .get(&url)
         .bearer_auth(token)
@@ -434,7 +432,9 @@ async fn download_task_artifact(command: &TaskLookupCommand) -> Result<()> {
         let body: serde_json::Value = response.json().await.unwrap_or_default();
         return Err(anyhow!(
             "artifact download failed: {}",
-            body.get("message").and_then(|v| v.as_str()).unwrap_or_else(|| status.as_str())
+            body.get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| status.as_str())
         ));
     }
     let filename = headers
@@ -444,9 +444,14 @@ async fn download_task_artifact(command: &TaskLookupCommand) -> Result<()> {
         .map(|s| s.trim().trim_matches('"'))
         .unwrap_or("artifact.bin")
         .to_string();
-    let bytes = response.bytes().await.map_err(|e| anyhow!("download read failed: {}", e))?;
-    let mut file = std::fs::File::create(&filename).map_err(|e| anyhow!("cannot create {}: {}", filename, e))?;
-    file.write_all(&bytes).map_err(|e| anyhow!("cannot write {}: {}", filename, e))?;
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| anyhow!("download read failed: {}", e))?;
+    let mut file = std::fs::File::create(&filename)
+        .map_err(|e| anyhow!("cannot create {}: {}", filename, e))?;
+    file.write_all(&bytes)
+        .map_err(|e| anyhow!("cannot write {}: {}", filename, e))?;
     println!("Downloaded {} ({} bytes)", filename, bytes.len());
     Ok(())
 }

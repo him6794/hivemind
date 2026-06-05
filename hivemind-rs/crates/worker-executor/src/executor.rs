@@ -1,4 +1,4 @@
-﻿use super::sandbox::{SandboxEgressPolicy, SandboxLimits};
+use super::sandbox::{SandboxEgressPolicy, SandboxLimits};
 use anyhow::{Context, Result};
 use hivemind_config::HivemindConfig;
 use hivemind_models::Task;
@@ -72,10 +72,24 @@ async fn execute_sandboxed(
 ) -> Result<std::process::Output> {
     let btih = sanitize_btih(task.torrent_source.as_deref().unwrap_or("dummy-btih"));
     let policy = SandboxEgressPolicy::from_config(&config.executor)?;
-    if config.executor.sandbox_mode.eq_ignore_ascii_case("production") && !policy.is_release_safe() {
-        return Err(anyhow::anyhow!(
-            "production mode requires network egress policy (enable egress and configure allowlist/denylist targets)"
-        ));
+    if config
+        .executor
+        .sandbox_mode
+        .eq_ignore_ascii_case("production")
+    {
+        if config.auth.jwt_secret.trim().is_empty()
+            || config.auth.jwt_secret == "CHANGE_ME_IN_PRODUCTION"
+            || config.auth.jwt_secret == "change-me-in-production"
+        {
+            return Err(anyhow::anyhow!(
+                "production mode requires a non-default JWT_SECRET"
+            ));
+        }
+        if !policy.is_release_safe() {
+            return Err(anyhow::anyhow!(
+                "production mode requires network egress policy (enable egress and configure allowlist/denylist targets)"
+            ));
+        }
     }
 
     // Use the executor-rs monty binary if available (Rust sandbox)
@@ -227,9 +241,33 @@ mod tests {
             .contains("production mode requires network egress policy"));
     }
 
+    #[tokio::test]
+    async fn production_mode_rejects_default_jwt_secret() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = test_config(tmp.path().to_str().unwrap());
+        config.executor.sandbox_mode = "production".into();
+        config.executor.network_egress_enabled = true;
+        config.executor.network_egress_mode = "allowlist".into();
+        config.executor.network_egress_targets = vec!["8.8.8.8".into()];
+        config.auth.jwt_secret = "CHANGE_ME_IN_PRODUCTION".into();
+        config.executor.monty_executable = tmp
+            .path()
+            .join("missing-monty")
+            .to_string_lossy()
+            .to_string();
+
+        let result = run_task(&test_task(), &config).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("production mode requires a non-default JWT_SECRET"));
+    }
+
     fn test_config(sandbox_dir: &str) -> HivemindConfig {
         let mut config = HivemindConfig::default();
         config.executor.sandbox_dir = sandbox_dir.into();
+        config.auth.jwt_secret = "test-production-secret".into();
         config
     }
 

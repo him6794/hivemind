@@ -1,4 +1,4 @@
-﻿use chrono::{DateTime, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
@@ -465,7 +465,6 @@ impl From<Task> for TaskInfo {
         }
     }
 }
-
 
 // --- VPN Models ---
 

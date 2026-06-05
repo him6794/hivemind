@@ -22,8 +22,8 @@ use hivemind_worker_executor::grpc_server::{GrpcWorkerNodeService, WorkerGrpcSta
 use hivemind_worker_executor::nodepool_client;
 use hivemind_worker_executor::WorkerExecutor;
 use std::sync::Arc;
-use tracing::info;
 use tokio::sync::watch;
+use tracing::info;
 
 mod cli;
 
@@ -80,25 +80,23 @@ async fn main() -> Result<()> {
 
     let mut shutdown_handles: Vec<watch::Sender<bool>> = Vec::new();
 
-
     // ---- Master (HTTP-to-gRPC proxy, no DB) ----
     if run_master {
         let nodepool_grpc = config.server.nodepool_grpc_addr.clone();
         let jwt_secret = config.auth.jwt_secret.clone();
         let token_expiry = config.auth.token_expiry_hours;
-        let api = MasterApiServer::new(
-            jwt_secret,
-            token_expiry,
-            nodepool_grpc,
-            config.clone(),
-        ).await?;
+        let api =
+            MasterApiServer::new(jwt_secret, token_expiry, nodepool_grpc, config.clone()).await?;
         let addr = config.server.master_http_addr.clone();
         tokio::spawn(async move {
             if let Err(e) = api.serve(&addr).await {
                 tracing::error!("Master API error: {}", e);
             }
         });
-        info!("Master HTTP API started on {}", config.server.master_http_addr);
+        info!(
+            "Master HTTP API started on {}",
+            config.server.master_http_addr
+        );
     }
 
     // ---- Nodepool (DB-backed gRPC server) ----
