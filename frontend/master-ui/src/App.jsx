@@ -174,7 +174,7 @@ export default function MasterApp() {
     try {
       const { data } = await api("GET", `/api/tasks/${encodeURIComponent(id)}/log`);
       if (data.success) {
-        setTaskLog(data.output || data.status_message || "(無日誌)");
+        setTaskLog(data.log || "(無日誌)");
       } else {
         setTaskLog(fallback);
       }
@@ -213,6 +213,42 @@ export default function MasterApp() {
       await refreshDashboard();
     } catch (err) {
       setStatus(`停止失敗: ${err.message}`);
+    }
+  };
+
+  const downloadArtifact = async (task) => {
+    if (!token) return;
+    const id = task?.TaskID || task?.task_id || selectedTask || "";
+    if (!id) return;
+    try {
+      const res = await fetch(`${apiBase}/api/tasks/${encodeURIComponent(id)}/artifact/download`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        let message = `HTTP ${res.status}`;
+        try {
+          const data = await res.json();
+          message = data.message || data.status_message || message;
+        } catch {
+          // Keep the HTTP status when the response is not JSON.
+        }
+        setStatus(`下載 artifact 失敗: ${message}`);
+        return;
+      }
+      const blob = await res.blob();
+      const disposition = res.headers.get("content-disposition") || "";
+      const filename = disposition.match(/filename="([^"]+)"/)?.[1] || `${id}-artifact.bin`;
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      setStatus(`artifact 已下載: ${filename}`);
+    } catch (err) {
+      setStatus(`下載 artifact 失敗: ${err.message}`);
     }
   };
 
@@ -284,7 +320,7 @@ export default function MasterApp() {
     try {
       const { data } = await api("GET", `/api/admin/scheduling/cache-anomalies?limit=${Number(anomalyLimit)}`);
       if (data.success) {
-        setCacheAnomalies(data.anomalies || []);
+        setCacheAnomalies(data.entries || []);
       }
     } catch (err) {
       setStatus(`cache anomalies 讀取失敗: ${err.message}`);
@@ -430,9 +466,9 @@ export default function MasterApp() {
                   {auditLogs.map((entry, i) => (
                     <tr key={i}>
                       <td style={{ borderBottom: "1px solid #eee", padding: 6, fontSize: 12 }}>{entry.created_at || ""}</td>
-                      <td style={{ borderBottom: "1px solid #eee", padding: 6 }}>{entry.admin_user || ""}</td>
+                      <td style={{ borderBottom: "1px solid #eee", padding: 6 }}>{entry.username || ""}</td>
                       <td style={{ borderBottom: "1px solid #eee", padding: 6 }}>{entry.action || ""}</td>
-                      <td style={{ borderBottom: "1px solid #eee", padding: 6, fontSize: 12 }}>{entry.target_type}/{entry.target_id}</td>
+                      <td style={{ borderBottom: "1px solid #eee", padding: 6, fontSize: 12 }}>{entry.resource || ""}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -555,6 +591,7 @@ export default function MasterApp() {
                       <div style={{ marginTop: 6, display: "flex", gap: 8 }}>
                         <button onClick={() => viewTaskLog(t)}>日誌</button>
                         <button onClick={() => viewTaskResult(t)}>結果</button>
+                        <button onClick={() => downloadArtifact(t)}>下載 artifact</button>
                         <button onClick={() => stopTask(t)}>停止</button>
                       </div>
                     </li>

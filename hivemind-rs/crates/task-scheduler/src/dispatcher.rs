@@ -98,7 +98,8 @@ impl Dispatcher {
         let pending = self.repo.find_pending().await?;
         let mut dispatched = 0u64;
         for task in &pending {
-            if let Some((worker_id, worker_addr)) = self.dispatch_one(task, &trusted_workers).await {
+            if let Some((worker_id, worker_addr)) = self.dispatch_one(task, &trusted_workers).await
+            {
                 dispatched += 1;
                 let repo = self.repo.clone();
                 let task = task.clone();
@@ -193,13 +194,17 @@ impl Dispatcher {
         ranked.sort_by(|a, b| {
             let a_score = *score_map.get(&a.worker_id).unwrap_or(&0);
             let b_score = *score_map.get(&b.worker_id).unwrap_or(&0);
-            b_score
-                .cmp(&a_score)
-                .then_with(|| {
-                    let a_idx = original_index.get(&a.worker_id).copied().unwrap_or(usize::MAX);
-                    let b_idx = original_index.get(&b.worker_id).copied().unwrap_or(usize::MAX);
-                    a_idx.cmp(&b_idx)
-                })
+            b_score.cmp(&a_score).then_with(|| {
+                let a_idx = original_index
+                    .get(&a.worker_id)
+                    .copied()
+                    .unwrap_or(usize::MAX);
+                let b_idx = original_index
+                    .get(&b.worker_id)
+                    .copied()
+                    .unwrap_or(usize::MAX);
+                a_idx.cmp(&b_idx)
+            })
         });
         Ok(ranked)
     }
@@ -396,6 +401,13 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use hivemind_models::{TaskStatus, WorkerStatus};
+    use std::sync::{Arc, OnceLock};
+
+    fn dispatcher_db_lock() -> Arc<tokio::sync::Mutex<()>> {
+        static LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
+        LOCK.get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
 
     fn make_task(id: &str, status: TaskStatus, retry_count: i32) -> Task {
         Task {
@@ -525,6 +537,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_dispatch_one_with_worker() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
         let config = hivemind_config::HivemindConfig::default();
         let db = match hivemind_database::DatabaseManager::new(&config).await {
             Ok(db) => db,
@@ -555,6 +569,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_dispatch_one_does_not_overwrite_stale_assignment() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
         let config = hivemind_config::HivemindConfig::default();
         let db = match hivemind_database::DatabaseManager::new(&config).await {
             Ok(db) => db,
@@ -599,6 +615,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_dispatch_pending_from_registered_workers() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
         let config = hivemind_config::HivemindConfig::default();
         let db = match hivemind_database::DatabaseManager::new(&config).await {
             Ok(db) => db,
@@ -610,15 +628,18 @@ mod tests {
         let task_id = format!("dispatch-registered-{}", unique);
         let worker_id = format!("dispatch-registered-w-{}", unique);
 
-        sqlx::query("DELETE FROM tasks WHERE task_id LIKE 'dispatch-%'")
+        sqlx::query("DELETE FROM tasks WHERE task_id = $1")
+            .bind(&task_id)
             .execute(&db.pool)
             .await
             .ok();
-        sqlx::query("DELETE FROM worker_nodes WHERE worker_id LIKE 'dispatch-%'")
+        sqlx::query("DELETE FROM worker_nodes WHERE worker_id = $1")
+            .bind(&worker_id)
             .execute(&db.pool)
             .await
             .ok();
-        sqlx::query("DELETE FROM worker_reputation WHERE worker_id LIKE 'dispatch-%'")
+        sqlx::query("DELETE FROM worker_reputation WHERE worker_id = $1")
+            .bind(&worker_id)
             .execute(&db.pool)
             .await
             .ok();
@@ -670,6 +691,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_dispatch_pending_multiple() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
         let config = hivemind_config::HivemindConfig::default();
         let db = match hivemind_database::DatabaseManager::new(&config).await {
             Ok(db) => db,
@@ -702,6 +725,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_dispatch_pending_excludes_banned_worker_by_trust() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
         let config = hivemind_config::HivemindConfig::default();
         let db = match hivemind_database::DatabaseManager::new(&config).await {
             Ok(db) => db,
@@ -714,15 +739,20 @@ mod tests {
         let banned_worker_id = format!("dispatch-trust-banned-w-{}", unique);
         let trusted_worker_id = format!("dispatch-trust-ok-w-{}", unique);
 
-        sqlx::query("DELETE FROM tasks WHERE task_id LIKE 'dispatch-%'")
+        sqlx::query("DELETE FROM tasks WHERE task_id = $1")
+            .bind(&task_id)
             .execute(&db.pool)
             .await
             .ok();
-        sqlx::query("DELETE FROM worker_nodes WHERE worker_id LIKE 'dispatch-%'")
+        sqlx::query("DELETE FROM worker_nodes WHERE worker_id IN ($1, $2)")
+            .bind(&banned_worker_id)
+            .bind(&trusted_worker_id)
             .execute(&db.pool)
             .await
             .ok();
-        sqlx::query("DELETE FROM worker_reputation WHERE worker_id LIKE 'dispatch-%'")
+        sqlx::query("DELETE FROM worker_reputation WHERE worker_id IN ($1, $2)")
+            .bind(&banned_worker_id)
+            .bind(&trusted_worker_id)
             .execute(&db.pool)
             .await
             .ok();
@@ -769,7 +799,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(updated.status, TaskStatus::Assigned);
-        assert_eq!(updated.worker_id.as_deref(), Some(trusted_worker_id.as_str()));
+        assert_eq!(
+            updated.worker_id.as_deref(),
+            Some(trusted_worker_id.as_str())
+        );
 
         sqlx::query("DELETE FROM tasks WHERE task_id = $1")
             .bind(&task_id)
@@ -792,6 +825,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_rank_workers_prefers_worker_with_cache_affinity() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
         let config = hivemind_config::HivemindConfig::default();
         let db = match hivemind_database::DatabaseManager::new(&config).await {
             Ok(db) => db,

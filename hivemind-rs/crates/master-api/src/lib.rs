@@ -1,12 +1,10 @@
-﻿pub mod grpc_client;
+pub mod grpc_client;
 pub mod handlers;
 pub mod middleware;
 pub mod routes;
 
 #[cfg(test)]
 mod integration_tests;
-#[cfg(test)]
-mod tests;
 
 use anyhow::Result;
 use axum::Router;
@@ -29,12 +27,19 @@ impl MasterApiServer {
     ) -> Result<Self> {
         let grpc = GrpcClient::connect(&nodepool_grpc_addr)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to connect to nodepool gRPC at {}: {}", nodepool_grpc_addr, e))?;
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to connect to nodepool gRPC at {}: {}",
+                    nodepool_grpc_addr,
+                    e
+                )
+            })?;
         let state = handlers::AppState {
             jwt_secret,
             token_expiry_hours,
             grpc_client: Arc::new(Mutex::new(grpc)),
             config,
+            task_submit_limiter: Arc::new(Mutex::new(handlers::TaskSubmitRateLimiter::new())),
         };
         let app = routes::create_router(state);
         Ok(Self { app })

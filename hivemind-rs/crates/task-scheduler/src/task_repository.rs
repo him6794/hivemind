@@ -1,5 +1,6 @@
 use anyhow::Result;
 use hivemind_models::{Task, TaskStatus};
+use sha1::{Digest, Sha1};
 use sqlx::PgPool;
 
 pub struct TaskRepository {
@@ -165,6 +166,19 @@ impl TaskRepository {
         output: Option<&str>,
     ) -> Result<Task> {
         let mut tx = self.pool.begin().await?;
+        let deterministic: bool =
+            sqlx::query_scalar("SELECT deterministic FROM tasks WHERE task_id = $1")
+                .bind(task_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        if deterministic
+            && result_torrent
+                .map(|value| value.trim().is_empty())
+                .unwrap_or(true)
+        {
+            anyhow::bail!("deterministic task completion requires a result reference");
+        }
+
         let completed = if let Some(worker_id) = worker_id {
             sqlx::query_as::<_, Task>(
                 "UPDATE tasks
@@ -194,8 +208,21 @@ impl TaskRepository {
 
         if let Some(worker_id) = completed.worker_id.as_deref() {
             increment_worker_success(&mut tx, worker_id).await?;
-            insert_task_attestation(&mut tx, task_id, worker_id, "accepted", 100, "primary execution")
-                .await?;
+            insert_task_attestation(
+                &mut tx,
+                task_id,
+                worker_id,
+                "accepted",
+                100,
+                "primary execution",
+            )
+            .await?;
+            if completed.deterministic {
+                let proof =
+                    checksum_proof_details(completed.result_torrent.as_deref().unwrap_or(""));
+                insert_task_attestation(&mut tx, task_id, worker_id, "checksum_proof", 80, &proof)
+                    .await?;
+            }
         }
 
         if completed.max_cpt <= 0 || completed.billing_settled {
@@ -305,15 +332,8 @@ impl TaskRepository {
         .await?;
 
         increment_worker_failure(&self.pool, worker_id).await?;
-        insert_task_attestation_pool(
-            &self.pool,
-            task_id,
-            worker_id,
-            "rejected",
-            100,
-            reason,
-        )
-        .await?;
+        insert_task_attestation_pool(&self.pool, task_id, worker_id, "rejected", 100, reason)
+            .await?;
         Ok(failed)
     }
 
@@ -459,6 +479,16 @@ async fn insert_task_attestation(
     .execute(&mut **tx)
     .await?;
     Ok(())
+}
+
+fn checksum_proof_details(result_ref: &str) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(result_ref.as_bytes());
+    format!(
+        "result_ref_sha1={:x};result_ref={}",
+        hasher.finalize(),
+        result_ref
+    )
 }
 
 async fn insert_task_attestation_pool(
@@ -1223,6 +1253,101 @@ mod tests {
         .await
         .unwrap_or((0, 0, 100));
         assert_eq!(failure_rep, (1, 0, 101));
+
+        cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
+    }
+
+    #[tokio::test]
+    async fn test_deterministic_complete_requires_result_reference() {
+        let p = match pool().await {
+            Some(p) => p,
+            None => return,
+        };
+        hivemind_database::postgres::run_migrations(&p).await.ok();
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("verify-missing-owner-{unique}");
+        let worker_id = format!("verify-missing-worker-{unique}");
+        let task_id = format!("verify-missing-task-{unique}");
+
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        )
+        .bind(&username)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        insert_worker(&repo.pool, &worker_id, "verify-provider").await;
+
+        let mut task = make_task(&task_id, &username);
+        task.deterministic = true;
+        repo.create(&task).await.unwrap();
+        repo.assign_to_worker(&task_id, &worker_id, "10.0.0.13")
+            .await
+            .unwrap();
+
+        let result = repo
+            .complete_for_worker(&task_id, &worker_id, None, Some("done"))
+            .await;
+        assert!(result.is_err());
+
+        let stored = repo.find_by_task_id(&task_id).await.unwrap().unwrap();
+        assert_eq!(stored.status, TaskStatus::Assigned);
+        assert!(stored.result_torrent.is_none());
+
+        cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
+    }
+
+    #[tokio::test]
+    async fn test_deterministic_complete_records_checksum_proof() {
+        let p = match pool().await {
+            Some(p) => p,
+            None => return,
+        };
+        hivemind_database::postgres::run_migrations(&p).await.ok();
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("verify-proof-owner-{unique}");
+        let worker_id = format!("verify-proof-worker-{unique}");
+        let task_id = format!("verify-proof-task-{unique}");
+
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        )
+        .bind(&username)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        insert_worker(&repo.pool, &worker_id, "verify-provider").await;
+
+        let mut task = make_task(&task_id, &username);
+        task.deterministic = true;
+        repo.create(&task).await.unwrap();
+        repo.assign_to_worker(&task_id, &worker_id, "10.0.0.14")
+            .await
+            .unwrap();
+
+        let completed = repo
+            .complete_for_worker(
+                &task_id,
+                &worker_id,
+                Some("sha1:result-reference"),
+                Some("done"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(completed.status, TaskStatus::Completed);
+
+        let proof_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM task_attestations
+             WHERE task_id = $1 AND worker_id = $2 AND verdict = 'checksum_proof'",
+        )
+        .bind(&task_id)
+        .bind(&worker_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(proof_count, 1);
 
         cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
     }

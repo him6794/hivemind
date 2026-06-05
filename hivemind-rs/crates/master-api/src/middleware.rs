@@ -1,12 +1,12 @@
-﻿use super::handlers::AppState;
+use super::handlers::AppState;
 use axum::{
     extract::{Request, State},
     http::{header, StatusCode},
     middleware::Next,
     response::Response,
 };
-use jsonwebtoken::{decode, DecodingKey, Validation};
 use hivemind_models::Claims;
+use jsonwebtoken::{decode, DecodingKey, Validation};
 
 /// Wraps the raw JWT token so handlers can forward it via gRPC.
 #[derive(Clone)]
@@ -66,7 +66,7 @@ where
     ) -> Result<Self, Self::Rejection> {
         let claims = parts.extensions.get::<Claims>().cloned();
         let token = parts.extensions.get::<RawToken>().map(|t| t.0.clone());
-        
+
         match (claims, token) {
             (Some(claims), Some(token)) => Ok(AuthUser { claims, token }),
             _ => Err(StatusCode::UNAUTHORIZED),
