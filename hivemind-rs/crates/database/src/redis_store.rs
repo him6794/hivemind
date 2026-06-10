@@ -41,7 +41,7 @@ mod tests {
 
     #[test]
     fn test_user_tasks_key_format() {
-        assert_eq!(user_tasks_key("testuser"), "tasks:owner:testuser");
+        assert_eq!(user_tasks_key("example-user"), "tasks:owner:example-user");
     }
 
     #[test]

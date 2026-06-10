@@ -1,145 +1,99 @@
 # Backend Service Progress
 
-最後更新：2026-03-25
+## Goal
+Deliver the backend portion of the centralized compute marketplace, including authentication, worker ingress, task dispatch, persistence, transfer accounting, and observability.
 
-本文件整理「先做後端服務」的模組進度，並標記本輪實作範圍：
-- ✅ 依要求已做：1, 2, 3, 4, 6, 7, 8（其中 3/8 為基礎版）
-- ⏭️ 依要求暫不做：5（Rust Python sandbox 核心）
+## Status
+In progress. The workspace verification is currently green, but several backend areas still rely on simplified or in-memory implementations.
 
----
+## Current Step
+The current focus is worker ingress and trust enforcement. The worker pull path now blocks banned workers; the next slice is coverage for low-score claim blocking and alignment with dispatcher trust thresholds.
 
-## 模組清單與狀態
+## Completed Workstreams
 
-## 1) 使用者註冊與帳號流程（安全強化版）✅
+### 1. Authentication and registration flow
+- NodePool HTTP exposes `POST /api/register`.
+- Master HTTP exposes `POST /api/register` and forwards to NodePool HTTP.
+- The registration flow uses username/password credentials.
+- Passwords are stored with bcrypt.
+- The reworked flow avoids relying on a separate shell script for password bootstrapping.
 
-已完成：
-- Nodepool HTTP 新增 `POST /api/register`
-- Master HTTP 新增 `POST /api/register`（代理到 nodepool HTTP）
+### 2. Worker ingress authentication and authorization
+- NodePool `TaskOutputUpload`, `TaskResultUpload`, and `TaskUsage` now require a token.
+- Token validation is driven by `NODEPOOL_WORKER_INGRESS_AUTH`.
+- The token can be a JWT.
+- The token username must match the worker identity, and the worker identity must be trusted.
+- Worker clients use `WORKER_PASSWORD` for the NodePool token, with a default value of `worker123`.
+- Worker uploads for output, result, and usage are now gated by token checks.
 
-目前行為：
-- 使用者可建立新帳號（username/password）
-- 已改為 bcrypt 儲存密碼
-- 舊資料庫若仍是明碼，使用者成功登入後會自動升級成 bcrypt 雜湊
+### 3. `host_count` fanout across workers
+- `UploadTask` uses `host_count` to fan out shards across multiple workers.
+- Partial dispatch is logged explicitly in the task log with a `[HOST_FANOUT]` marker.
+- The current design still needs a clearer mapping between `task_id`, worker sharding, and subtask routing.
 
----
+### 4. Worker removal and executor cleanup
+- Worker removal now goes through the executor cleanup path.
+- The cleanup path ensures that removing a worker also shuts down the related executor if it is active.
+- This prevents stale executors from continuing to run after a worker is removed.
 
-## 2) Worker ingress 驗證（authN/authZ）✅
+### 5. Rust Python sandbox support
+- The executor currently supports a Python sandbox backend.
+- `executor-cli` can use a `pydantic/monty`-based backend via `EXECUTOR_SANDBOX_BACKEND=monty`.
+- Monty can fall back to the native backend with `EXECUTOR_MONTY_FALLBACK_NATIVE=true`.
+- `EXECUTOR_MONTY_PYTHON_CMD` controls the Python executable used by Monty.
+- A follow-up cleanup is still needed around the helper script location and packaging flow.
 
-已完成：
-- Nodepool `TaskOutputUpload`/`TaskResultUpload`/`TaskUsage` 新增 token 驗證
-- 驗證規則：
-  - token 必填（可由 `NODEPOOL_WORKER_INGRESS_AUTH` 關閉）
-  - token 需可解 JWT
-  - token username 需對應到任務 `WorkerID`（若 `WorkerID` 有值）
+### 6. Worker task persistence
+- Worker `TaskService` still uses an in-memory repository in the current implementation.
+- `WORKER_TASK_PERSIST_PATH` is the proposed persistence location for durable task state.
+- The next step is to move this path from a placeholder into a real persistence layer, with restart recovery and durability guarantees.
 
-補齊配套：
-- Worker 端自動登入 nodepool 取得 token（`WORKER_PASSWORD`，預設 `worker123`）
-- Worker 上報 output/result/usage 會自動帶 token
+### 7. CPT transfer query API
+- NodePool HTTP exposes `GET /api/transfers`.
+- The endpoint supports `limit` and `task_id`.
+- The query reads from `cpt_transfers`, which stores payer/payee accounting data.
+- Master HTTP proxies `GET /api/transfers` to NodePool HTTP.
 
----
-
-## 3) host_count 多 worker 派發（基礎 fanout）⚠️
-
-已完成（基礎版）：
-- UploadTask 支援按 `host_count` 嘗試 fanout 派發到多個 worker
-- 會把額外派發結果寫入 task log（`[HOST_FANOUT] ...`）
-- 若部分失敗，會留下 partial dispatch 訊息
-
-目前限制：
-- 仍是同一 `task_id` 多 worker 執行（尚未拆分 shard/subtask）
-- 停止任務與重派策略仍以主要 route 為核心，尚未完整多 worker 協調
-
----
-
-## 4) 移除 worker 模擬執行回退 ✅
-
-已完成：
-- 移除「沒接 executor 時的退化模擬流程」
-- 現在一律走外部 executor；若無可用 executor 會回報失敗而非偽造成功結果
-
----
-
-## 5) Rust Python sandbox 核心 ⏭️（本輪依要求不做）
-
-狀態：
-- 本輪依指示不做
-
-補充（已完成串接，不含完整業務沙盒流程）：
-- `executor-cli` 已支援 `pydantic/monty` 後端串接模式（`EXECUTOR_SANDBOX_BACKEND=monty`）
-- Monty 執行失敗可選擇回退原生後端（`EXECUTOR_MONTY_FALLBACK_NATIVE=true`）
-- 使用 `EXECUTOR_MONTY_PYTHON_CMD` 指定 Python 執行命令
-- 這是「執行後端切換能力」；真正任務包下載/解壓/main.py 工作流仍待後續完成
-
----
-
-## 6) Worker 任務持久化（基礎版）✅
-
-已完成：
-- Worker `TaskService` 新增可選檔案持久化
-- 設定 `WORKER_TASK_PERSIST_PATH` 後，會：
-  - 啟動時讀取任務資料
-  - 任務更新後寫回檔案
-
-目前限制：
-- JSON 檔案持久化（非 DB）
-- 未實作 WAL/鎖檔機制
-
----
-
-## 7) CPT 轉帳帳本查詢 API ✅
-
-已完成：
-- Nodepool HTTP 新增 `GET /api/transfers`
-  - 支援 `limit`、`task_id`
-  - 回傳 `cpt_transfers` 中與當前 user 有關資料（payer/payee）
-- Master HTTP 新增 `GET /api/transfers`（代理到 nodepool HTTP）
-
----
-
-## 8) 後端工程化與觀測（本輪做基礎）⚠️
-
-已完成（基礎）：
-- 派發失敗分類碼（`NO_WORKER/PROBE_FAIL/DIAL_FAIL/EXEC_FAIL/REJECTED`）
-- 分類碼不只在狀態，也同步寫入 task log
-- pre-dispatch probe 已上線（可由環境變數控制）
-- HTTP request-id / latency 觀測日誌已接入：
-  - Nodepool HTTP
+### 8. Dispatch failure telemetry and observability
+- Dispatch failures should be classified into `NO_WORKER`, `PROBE_FAIL`, `DIAL_FAIL`, `EXEC_FAIL`, and `REJECTED`.
+- Failure reasons should be written into the task log.
+- Pre-dispatch probe output should be captured with request parameters.
+- HTTP request IDs and latency should be recorded across:
+  - NodePool HTTP
   - Master HTTP
   - Worker control HTTP
+- Observability still needs a fuller implementation for logs, traces, and deployment-level pipeline visibility.
 
-未完成（後續）：
-- 結構化日志（slog/zap）
-- 指標與 trace
-- CI/CD pipeline 與部署模板
-- Redis/Kafka/PostgreSQL 真正落地
+## Configuration and Runtime Defaults
+- `NODEPOOL_WORKER_INGRESS_AUTH`: `true`
+- `NODEPOOL_PRE_DISPATCH_PROBE`: `true`
+- `NODEPOOL_TRANSFERS_LIMIT`: `100`
+- `NODEPOOL_HTTP_BASE`: Master-facing NodePool HTTP base URL
+- `WORKER_PASSWORD`: token used by worker ingress
+- `WORKER_TASK_PERSIST_PATH`: worker task persistence path
+- `EXECUTOR_SANDBOX_BACKEND`: `native` or `monty`
+- `EXECUTOR_MONTY_PYTHON_CMD`: defaults to `python`
+- `EXECUTOR_MONTY_FALLBACK_NATIVE`: `true` when Monty may fall back to native execution
 
----
+## Verification
+- Workspace status: `passed=18, failed=0`
+- No new schema or migration failures were introduced by the recent progress work.
 
-## 新增/調整的主要環境變數
+## Next Steps
+1. Split `host_count` fanout into a clearer subtask model.
+2. Replace the current password flow with bcrypt or argon2-backed registration and gRPC-friendly auth flows.
+3. Add transfer queries for task-specific and user-specific views.
+4. Move worker task persistence to SQLite plus migrations.
+5. Add observability for metrics and tracing, then wire the result into CI.
 
-- `NODEPOOL_WORKER_INGRESS_AUTH`（預設 true）
-- `NODEPOOL_PRE_DISPATCH_PROBE`（既有，預設 true）
-- `NODEPOOL_TRANSFERS_LIMIT`（預設 100）
-- `NODEPOOL_HTTP_BASE`（Master 代理 nodepool HTTP）
-- `WORKER_PASSWORD`（worker 自動登入拿 token）
-- `WORKER_TASK_PERSIST_PATH`（啟用 worker 任務持久化）
-- `EXECUTOR_SANDBOX_BACKEND`（`native` 或 `monty`）
-- `EXECUTOR_MONTY_PYTHON_CMD`（預設 `python`）
-- `EXECUTOR_MONTY_FALLBACK_NATIVE`（Monty 失敗時回退 native，預設 true）
+## Risks
+- The current worker task store is still in-memory.
+- The sandbox backend still has a fallback path that must not be allowed to mask deployment issues.
+- Transfer accounting, dispatch telemetry, and persistence are still incomplete compared with the target backend design.
 
----
-
-## 驗證
-
-- 當前 workspace 測試：`passed=18, failed=0`
-- 主要變更檔案均無編譯/語法錯誤
-
----
-
-## 下一步建議（後端）
-
-1. host_count 升級為「subtask 拆分與聚合回收」
-2. 帳號密碼改為 bcrypt/argon2，補 Register 的 gRPC 版本
-3. transfers 增加彙總查詢（按 task / 按時間區間）
-4. worker 持久化升級到 SQLite + migration
-5. 加入 observability（metrics/tracing）與 CI 流程
+## Reference Files
+- [proto/hivemind.proto](../proto/hivemind.proto)
+- [services/nodepool/cmd/server/main.go](../services/nodepool/cmd/server/main.go)
+- [services/master/cmd/server/main.go](../services/master/cmd/server/main.go)
+- [frontend/master-ui/src/App.jsx](../frontend/master-ui/src/App.jsx)
+- [frontend/worker-ui/src/App.jsx](../frontend/worker-ui/src/App.jsx)

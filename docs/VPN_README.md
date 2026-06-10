@@ -45,7 +45,7 @@
 - `../scripts/generate_vpn_proto.sh` - Protocol Buffers 生成腳本
 
 ### 程式碼範例
-- `../services/worker/examples/vpn_demo.go` - VPN 功能示範程式
+- `../services/worker/examples/vpn_demo.go` - VPN 功能範例程式
 
 ## 快速導航
 

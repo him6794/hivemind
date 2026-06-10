@@ -7,7 +7,6 @@ use crate::NodeManager;
 
 pub struct HeartbeatHandler {
     manager: Arc<NodeManager>,
-    #[allow(dead_code)]
     stale_threshold_secs: u64,
 }
 
@@ -72,7 +71,7 @@ impl HeartbeatHandler {
             loop {
                 tokio::select! {
                     _ = ticker.tick() => {
-                        match manager.mark_offline_stale().await {
+                        match manager.mark_offline_stale(self.stale_threshold_secs).await {
                             Ok(count) if count > 0 => info!("Marked {} stale workers offline", count),
                             Err(e) => error!("Stale worker cleanup error: {}", e),
                             _ => {}
@@ -94,13 +93,20 @@ mod tests {
     async fn setup_db() -> Option<(
         hivemind_config::HivemindConfig,
         hivemind_database::DatabaseManager,
+        hivemind_database::postgres::IsolatedTestPool,
     )> {
-        let config = hivemind_config::HivemindConfig::default();
-        let db = hivemind_database::DatabaseManager::new(&config)
+        let config = hivemind_config::HivemindConfig::for_test();
+        let fixture =
+            hivemind_database::postgres::create_isolated_test_pool("node_manager_heartbeat")
+                .await
+                .ok()?;
+        hivemind_database::postgres::run_migrations(&fixture.pool)
             .await
             .ok()?;
-        db.run_migrations().await.ok()?;
-        Some((config, db))
+        let db = hivemind_database::DatabaseManager {
+            pool: fixture.pool.clone(),
+        };
+        Some((config, db, fixture))
     }
 
     #[test]
@@ -121,7 +127,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_heartbeat_invalid() {
-        let (config, db) = match setup_db().await {
+        let (config, db, fixture) = match setup_db().await {
             Some(v) => v,
             None => return,
         };
@@ -135,14 +141,23 @@ mod tests {
             .process_heartbeat("w1", "ACTIVE", 150.0, 50.0, 0.0, 0.0)
             .await
             .is_err());
+        fixture.cleanup().await.ok();
     }
 
     #[tokio::test]
     async fn test_process_heartbeat_valid() {
-        let (config, db) = match setup_db().await {
+        let (config, db, fixture) = match setup_db().await {
             Some(v) => v,
             None => return,
         };
+        let schema: String = sqlx::query_scalar("SELECT current_schema()")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert!(
+            schema.starts_with("hm_test_"),
+            "expected isolated test schema, got {schema}"
+        );
         let manager = Arc::new(NodeManager::new(&config, db.clone()));
         let handler = HeartbeatHandler::new(manager.clone(), 30);
 
@@ -202,5 +217,6 @@ mod tests {
             .execute(&db.pool)
             .await
             .ok();
+        fixture.cleanup().await.ok();
     }
 }

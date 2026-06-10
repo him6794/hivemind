@@ -1,4 +1,4 @@
-﻿use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HivemindConfig {
@@ -37,6 +37,10 @@ pub struct ServerConfig {
     pub worker_control_http_addr: String,
     #[serde(default)]
     pub worker_advertise_addr: Option<String>,
+    #[serde(default = "default_master_cors_allowed_origins")]
+    pub master_cors_allowed_origins: Vec<String>,
+    #[serde(default = "default_worker_control_cors_allowed_origins")]
+    pub worker_control_cors_allowed_origins: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +49,20 @@ pub struct AuthConfig {
     pub token_expiry_hours: i64,
     pub refresh_expiry_hours: i64,
     pub bcrypt_cost: u32,
+}
+
+impl AuthConfig {
+    pub fn validate_jwt_secret(&self) -> anyhow::Result<()> {
+        let secret = self.jwt_secret.trim();
+        if secret.is_empty()
+            || secret.eq_ignore_ascii_case("CHANGE_ME_IN_PRODUCTION")
+            || secret.eq_ignore_ascii_case("change-me-in-production")
+        {
+            anyhow::bail!("JWT_SECRET must be set to a non-default value");
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +121,8 @@ impl Default for HivemindConfig {
                 worker_grpc_port: 50053,
                 worker_control_http_addr: default_worker_control_http_addr(),
                 worker_advertise_addr: None,
+                master_cors_allowed_origins: default_master_cors_allowed_origins(),
+                worker_control_cors_allowed_origins: default_worker_control_cors_allowed_origins(),
             },
             auth: AuthConfig {
                 jwt_secret: "CHANGE_ME_IN_PRODUCTION".into(),
@@ -138,6 +158,13 @@ impl Default for HivemindConfig {
 }
 
 impl HivemindConfig {
+    pub fn for_test() -> Self {
+        let mut config = Self::default();
+        config.database.url = std::env::var("HIVEMIND_TEST_DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://hivemind:hivemind@localhost:5432/hivemind_test".into());
+        config
+    }
+
     pub fn load() -> anyhow::Result<Self> {
         dotenvy::dotenv().ok();
         let config = match std::env::var("HIVEMIND_CONFIG") {
@@ -152,6 +179,7 @@ impl HivemindConfig {
 
     fn load_from_env() -> Self {
         let mut config = Self::default();
+        config.executor.sandbox_mode = "production".into();
         if let Ok(url) = std::env::var("DATABASE_URL") {
             config.database.url = url;
         }
@@ -172,6 +200,12 @@ impl HivemindConfig {
         }
         if let Ok(addr) = std::env::var("WORKER_ADVERTISE_ADDR") {
             config.server.worker_advertise_addr = Some(addr);
+        }
+        if let Ok(origins) = std::env::var("MASTER_CORS_ALLOWED_ORIGINS") {
+            config.server.master_cors_allowed_origins = parse_csv(&origins);
+        }
+        if let Ok(origins) = std::env::var("WORKER_CONTROL_CORS_ALLOWED_ORIGINS") {
+            config.server.worker_control_cors_allowed_origins = parse_csv(&origins);
         }
         if let Ok(secret) = std::env::var("JWT_SECRET") {
             config.auth.jwt_secret = secret;
@@ -246,6 +280,21 @@ impl HivemindConfig {
     }
 }
 
+#[cfg(test)]
+mod test_config_tests {
+    use super::*;
+
+    #[test]
+    fn test_config_uses_dedicated_test_database_url() {
+        let config = HivemindConfig::for_test();
+        assert!(
+            config.database.url.ends_with("/hivemind_test"),
+            "test database URL should not default to the production/dev database: {}",
+            config.database.url
+        );
+    }
+}
+
 fn default_torrent_announce_url() -> String {
     "http://localhost:6969/announce".into()
 }
@@ -264,4 +313,196 @@ fn default_network_egress_mode() -> String {
 
 fn default_worker_control_http_addr() -> String {
     "127.0.0.1:18080".into()
+}
+
+fn default_master_cors_allowed_origins() -> Vec<String> {
+    local_ui_origins(&[5173, 3000, 3001])
+}
+
+fn default_worker_control_cors_allowed_origins() -> Vec<String> {
+    local_ui_origins(&[5173, 3000, 3001])
+}
+
+fn local_ui_origins(ports: &[u16]) -> Vec<String> {
+    ports
+        .iter()
+        .flat_map(|port| {
+            [
+                format!("http://localhost:{port}"),
+                format!("http://127.0.0.1:{port}"),
+            ]
+        })
+        .collect()
+}
+
+fn parse_csv(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn omitted_optional_fields_keep_sensible_defaults() {
+        let config: HivemindConfig = serde_json::from_value(serde_json::json!({
+            "database": {
+                "url": "postgres://example",
+                "max_connections": 10,
+                "min_connections": 1,
+                "idle_timeout_secs": 30,
+                "connect_timeout_secs": 5
+            },
+            "redis": {
+                "url": "redis://example",
+                "pool_size": 4,
+                "connect_timeout_secs": 5
+            },
+            "server": {
+                "nodepool_grpc_addr": "0.0.0.0:50051",
+                "master_http_addr": "0.0.0.0:8082",
+                "worker_grpc_addr": "0.0.0.0:50053",
+                "worker_grpc_port": 50053
+            },
+            "auth": {
+                "jwt_secret": "secret",
+                "token_expiry_hours": 24,
+                "refresh_expiry_hours": 168,
+                "bcrypt_cost": 12
+            },
+            "torrent": {
+                "api_dir": "./api/torrents",
+                "bt_dir": "./bt_torrents"
+            },
+            "vpn": {
+                "headscale_url": "http://localhost:8080",
+                "headscale_api_key": "",
+                "base_virtual_ip": "100.64.0.0",
+                "vpn_network": "100.64.0.0/10"
+            },
+            "executor": {
+                "monty_executable": "monty.exe",
+                "sandbox_dir": "./sandbox",
+                "max_cpu_percent": 80.0,
+                "max_memory_mb": 4096,
+                "task_timeout_secs": 3600,
+                "max_concurrent_tasks": 4
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(config.server.worker_control_http_addr, "127.0.0.1:18080");
+        assert!(config
+            .server
+            .master_cors_allowed_origins
+            .contains(&"http://localhost:5173".to_string()));
+        assert!(config
+            .server
+            .worker_control_cors_allowed_origins
+            .contains(&"http://localhost:3001".to_string()));
+        assert_eq!(
+            config.torrent.announce_url,
+            "http://localhost:6969/announce"
+        );
+    }
+
+    #[test]
+    fn env_loading_keeps_defaults_for_unspecified_values() {
+        let old_config = std::env::var_os("HIVEMIND_CONFIG");
+        let old_database_url = std::env::var_os("DATABASE_URL");
+        let old_redis_url = std::env::var_os("REDIS_URL");
+        let old_jwt_secret = std::env::var_os("JWT_SECRET");
+        let old_master_cors = std::env::var_os("MASTER_CORS_ALLOWED_ORIGINS");
+        std::env::remove_var("HIVEMIND_CONFIG");
+        std::env::set_var("DATABASE_URL", "postgres://example");
+        std::env::remove_var("REDIS_URL");
+        std::env::remove_var("JWT_SECRET");
+        std::env::set_var(
+            "MASTER_CORS_ALLOWED_ORIGINS",
+            "http://app.example, http://admin.example",
+        );
+
+        let loaded = HivemindConfig::load_from_env();
+
+        match old_database_url {
+            Some(value) => std::env::set_var("DATABASE_URL", value),
+            None => std::env::remove_var("DATABASE_URL"),
+        }
+        match old_redis_url {
+            Some(value) => std::env::set_var("REDIS_URL", value),
+            None => std::env::remove_var("REDIS_URL"),
+        }
+        match old_jwt_secret {
+            Some(value) => std::env::set_var("JWT_SECRET", value),
+            None => std::env::remove_var("JWT_SECRET"),
+        }
+        match old_master_cors {
+            Some(value) => std::env::set_var("MASTER_CORS_ALLOWED_ORIGINS", value),
+            None => std::env::remove_var("MASTER_CORS_ALLOWED_ORIGINS"),
+        }
+        match old_config {
+            Some(value) => std::env::set_var("HIVEMIND_CONFIG", value),
+            None => std::env::remove_var("HIVEMIND_CONFIG"),
+        }
+
+        assert_eq!(loaded.database.url, "postgres://example");
+        assert_eq!(loaded.redis.url, "redis://localhost:6379");
+        assert_eq!(loaded.auth.jwt_secret, "CHANGE_ME_IN_PRODUCTION");
+        assert_eq!(
+            loaded.torrent.announce_url,
+            "http://localhost:6969/announce"
+        );
+        assert_eq!(loaded.server.worker_control_http_addr, "127.0.0.1:18080");
+        assert_eq!(
+            loaded.server.master_cors_allowed_origins,
+            vec![
+                "http://app.example".to_string(),
+                "http://admin.example".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn jwt_secret_validation_rejects_missing_or_known_placeholders() {
+        for secret in [
+            "",
+            "   ",
+            "CHANGE_ME_IN_PRODUCTION",
+            "change-me-in-production",
+        ] {
+            let mut auth = AuthConfig {
+                jwt_secret: secret.into(),
+                token_expiry_hours: 24,
+                refresh_expiry_hours: 168,
+                bcrypt_cost: 12,
+            };
+
+            let error = auth.validate_jwt_secret().unwrap_err().to_string();
+
+            assert!(
+                error.contains("JWT_SECRET"),
+                "unexpected validation error for {secret:?}: {error}"
+            );
+
+            auth.jwt_secret = "unit-test-secret".into();
+            auth.validate_jwt_secret().unwrap();
+        }
+    }
+
+    #[test]
+    fn jwt_secret_validation_accepts_non_default_secret() {
+        let auth = AuthConfig {
+            jwt_secret: "unit-test-secret".into(),
+            token_expiry_hours: 24,
+            refresh_expiry_hours: 168,
+            bcrypt_cost: 12,
+        };
+
+        auth.validate_jwt_secret().unwrap();
+    }
 }

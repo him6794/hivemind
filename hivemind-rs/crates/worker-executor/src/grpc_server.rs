@@ -1,20 +1,44 @@
+use hivemind_models::Claims;
 use hivemind_proto::{
     worker_node_service_server::WorkerNodeService, ExecuteTaskRequest, ExecuteTaskResponse,
     StopTaskExecutionRequest, StopTaskExecutionResponse, TaskOutputRequest, TaskOutputResponse,
     TaskOutputUploadRequest, TaskOutputUploadResponse, TaskResultUploadRequest,
     TaskResultUploadResponse, TaskUsageRequest, TaskUsageResponse,
 };
-use std::sync::Arc;
+use jsonwebtoken::{decode, DecodingKey, Validation};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use tonic::{Request, Response, Status};
 
-use crate::WorkerExecutor;
+use crate::{StopTaskOutcome, WorkerExecutor};
 use hivemind_config::HivemindConfig;
 use hivemind_models::{Task, TaskStatus};
 
 pub struct WorkerGrpcState {
     pub config: HivemindConfig,
     pub executor: Arc<WorkerExecutor>,
+    reports: Mutex<HashMap<String, WorkerTaskReport>>,
 }
+
+#[derive(Default, Clone)]
+struct WorkerTaskReport {
+    output: Option<String>,
+    result_torrent: Option<String>,
+    usage: Option<hivemind_proto::ResourceUsage>,
+}
+
+impl WorkerGrpcState {
+    pub fn new(config: HivemindConfig, executor: Arc<WorkerExecutor>) -> Self {
+        Self {
+            config,
+            executor,
+            reports: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+const MAX_TASK_OUTPUT_BYTES: usize = 1024 * 1024;
+const MAX_RESULT_REFERENCE_BYTES: usize = 4096;
 
 pub struct GrpcWorkerNodeService {
     state: Arc<WorkerGrpcState>,
@@ -23,6 +47,38 @@ pub struct GrpcWorkerNodeService {
 impl GrpcWorkerNodeService {
     pub fn new(state: Arc<WorkerGrpcState>) -> Self {
         Self { state }
+    }
+
+    fn validate_rpc_token(&self, token: &str) -> Result<Claims, Box<Status>> {
+        decode::<Claims>(
+            token,
+            &DecodingKey::from_secret(self.state.config.auth.jwt_secret.as_bytes()),
+            &Validation::default(),
+        )
+        .map(|token| token.claims)
+        .map_err(|_| Box::new(Status::unauthenticated("Invalid token")))
+    }
+
+    fn report_for_update<F>(&self, task_id: &str, update: F) -> Result<(), Box<Status>>
+    where
+        F: FnOnce(&mut WorkerTaskReport),
+    {
+        let mut reports = self
+            .state
+            .reports
+            .lock()
+            .map_err(|_| Box::new(Status::internal("task report store poisoned")))?;
+        let report = reports.entry(task_id.to_string()).or_default();
+        update(report);
+        Ok(())
+    }
+
+    fn report_for_task(&self, task_id: &str) -> Result<Option<WorkerTaskReport>, Box<Status>> {
+        self.state
+            .reports
+            .lock()
+            .map_err(|_| Box::new(Status::internal("task report store poisoned")))
+            .map(|reports| reports.get(task_id).cloned())
     }
 }
 
@@ -101,11 +157,29 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         request: Request<TaskOutputUploadRequest>,
     ) -> Result<Response<TaskOutputUploadResponse>, Status> {
         let req = request.into_inner();
+        self.validate_rpc_token(&req.token)
+            .map_err(|status| *status)?;
+        if req.task_id.trim().is_empty() {
+            return Ok(Response::new(TaskOutputUploadResponse {
+                success: false,
+                status_message: "Task id is required".into(),
+            }));
+        }
+        if req.output.len() > MAX_TASK_OUTPUT_BYTES {
+            return Ok(Response::new(TaskOutputUploadResponse {
+                success: false,
+                status_message: format!("Task output exceeds {} byte limit", MAX_TASK_OUTPUT_BYTES),
+            }));
+        }
         tracing::info!(
             "Output upload task {} ({} bytes)",
             req.task_id,
             req.output.len()
         );
+        self.report_for_update(&req.task_id, |report| {
+            report.output = Some(req.output);
+        })
+        .map_err(|status| *status)?;
         Ok(Response::new(TaskOutputUploadResponse {
             success: true,
             status_message: "OK".into(),
@@ -117,11 +191,38 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         request: Request<TaskResultUploadRequest>,
     ) -> Result<Response<TaskResultUploadResponse>, Status> {
         let req = request.into_inner();
+        self.validate_rpc_token(&req.token)
+            .map_err(|status| *status)?;
+        if req.task_id.trim().is_empty() {
+            return Ok(Response::new(TaskResultUploadResponse {
+                success: false,
+                status_message: "Task id is required".into(),
+            }));
+        }
+        if req.result_torrent.trim().is_empty() {
+            return Ok(Response::new(TaskResultUploadResponse {
+                success: false,
+                status_message: "Result reference is required".into(),
+            }));
+        }
+        if req.result_torrent.len() > MAX_RESULT_REFERENCE_BYTES {
+            return Ok(Response::new(TaskResultUploadResponse {
+                success: false,
+                status_message: format!(
+                    "Result reference exceeds {} byte limit",
+                    MAX_RESULT_REFERENCE_BYTES
+                ),
+            }));
+        }
         tracing::info!(
             "Result upload task {} torrent={}",
             req.task_id,
             req.result_torrent
         );
+        self.report_for_update(&req.task_id, |report| {
+            report.result_torrent = Some(req.result_torrent);
+        })
+        .map_err(|status| *status)?;
         Ok(Response::new(TaskResultUploadResponse {
             success: true,
             status_message: "OK".into(),
@@ -132,11 +233,30 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         &self,
         request: Request<TaskOutputRequest>,
     ) -> Result<Response<TaskOutputResponse>, Status> {
-        let _req = request.into_inner();
+        let req = request.into_inner();
+        self.validate_rpc_token(&req.token)
+            .map_err(|status| *status)?;
+        let Some(report) = self
+            .report_for_task(&req.task_id)
+            .map_err(|status| *status)?
+        else {
+            return Ok(Response::new(TaskOutputResponse {
+                success: false,
+                status_message: "Task output not found".into(),
+                output: String::new(),
+            }));
+        };
+        let Some(output) = report.output else {
+            return Ok(Response::new(TaskOutputResponse {
+                success: false,
+                status_message: "Task output not found".into(),
+                output: String::new(),
+            }));
+        };
         Ok(Response::new(TaskOutputResponse {
             success: true,
             status_message: "OK".into(),
-            output: String::new(),
+            output,
         }))
     }
 
@@ -146,9 +266,15 @@ impl WorkerNodeService for GrpcWorkerNodeService {
     ) -> Result<Response<StopTaskExecutionResponse>, Status> {
         let req = request.into_inner();
         tracing::info!("Stop task {}", req.task_id);
+        let (success, status_message) = match self.state.executor.stop_task_execution(&req.task_id)
+        {
+            StopTaskOutcome::StopRequested => (true, "Stop requested"),
+            StopTaskOutcome::AlreadyStopping => (true, "Stop already requested"),
+            StopTaskOutcome::NotRunning => (false, "Task not running"),
+        };
         Ok(Response::new(StopTaskExecutionResponse {
-            success: true,
-            status_message: "Stopped".into(),
+            success,
+            status_message: status_message.into(),
         }))
     }
 
@@ -157,16 +283,353 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         request: Request<TaskUsageRequest>,
     ) -> Result<Response<TaskUsageResponse>, Status> {
         let req = request.into_inner();
-        let usage = req.usage.unwrap_or_default();
+        self.validate_rpc_token(&req.token)
+            .map_err(|status| *status)?;
+        if req.task_id.trim().is_empty() {
+            return Ok(Response::new(TaskUsageResponse {
+                success: false,
+                status_message: "Task id is required".into(),
+            }));
+        }
+        let Some(usage) = req.usage else {
+            return Ok(Response::new(TaskUsageResponse {
+                success: false,
+                status_message: "Usage payload is required".into(),
+            }));
+        };
+        if !resource_usage_is_finite(&usage) {
+            return Ok(Response::new(TaskUsageResponse {
+                success: false,
+                status_message: "Task usage contains non-finite values".into(),
+            }));
+        }
         tracing::debug!(
             "Task {} usage: cpu={:.1}% mem={:.1}%",
             req.task_id,
             usage.cpu_percent,
             usage.memory_percent
         );
+        self.report_for_update(&req.task_id, |report| {
+            report.usage = Some(usage);
+        })
+        .map_err(|status| *status)?;
         Ok(Response::new(TaskUsageResponse {
             success: true,
             status_message: "OK".into(),
         }))
+    }
+}
+
+fn resource_usage_is_finite(usage: &hivemind_proto::ResourceUsage) -> bool {
+    usage.cpu_percent.is_finite()
+        && usage.memory_percent.is_finite()
+        && usage.gpu_percent.is_finite()
+        && usage.vram_percent.is_finite()
+        && usage.storage_percent.is_finite()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use hivemind_models::Claims;
+    use hivemind_proto::ResourceSpec;
+    use jsonwebtoken::{encode, EncodingKey, Header};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tempfile::TempDir;
+    use tonic::Request;
+
+    #[tokio::test]
+    async fn stop_task_execution_reports_not_running_for_unknown_task() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+
+        let response = service
+            .stop_task_execution(Request::new(StopTaskExecutionRequest {
+                task_id: "missing-task".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!response.success);
+        assert_eq!(response.status_message, "Task not running");
+    }
+
+    #[tokio::test]
+    async fn task_output_rpc_requires_valid_token() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+
+        let response = service
+            .task_output(Request::new(TaskOutputRequest {
+                task_id: "task-with-output".into(),
+                token: "not-a-token".into(),
+            }))
+            .await;
+
+        assert!(response.is_err());
+        assert_eq!(response.unwrap_err().code(), tonic::Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn task_output_upload_and_retrieval_round_trip() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let token = test_token("unit-test-jwt-secret", "worker-owner");
+
+        let uploaded = service
+            .task_output_upload(Request::new(TaskOutputUploadRequest {
+                task_id: "task-with-output".into(),
+                worker_id: "worker-owner".into(),
+                output: "stdout body".into(),
+                token: token.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(uploaded.success, "{}", uploaded.status_message);
+
+        let response = service
+            .task_output(Request::new(TaskOutputRequest {
+                task_id: "task-with-output".into(),
+                token,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(response.success, "{}", response.status_message);
+        assert_eq!(response.output, "stdout body");
+    }
+
+    #[tokio::test]
+    async fn result_upload_and_usage_reporting_accept_valid_token() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let token = test_token("unit-test-jwt-secret", "worker-owner");
+
+        let result = service
+            .task_result_upload(Request::new(TaskResultUploadRequest {
+                task_id: "task-with-result".into(),
+                worker_id: "worker-owner".into(),
+                result_torrent: "btih:result-ref".into(),
+                token: token.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(result.success, "{}", result.status_message);
+
+        let usage = service
+            .task_usage(Request::new(TaskUsageRequest {
+                task_id: "task-with-result".into(),
+                worker_id: "worker-owner".into(),
+                usage: Some(hivemind_proto::ResourceUsage {
+                    cpu_percent: 12.5,
+                    memory_percent: 34.5,
+                    gpu_percent: 0.0,
+                    vram_percent: 0.0,
+                    storage_percent: 1.0,
+                }),
+                token,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(usage.success, "{}", usage.status_message);
+    }
+
+    #[tokio::test]
+    async fn task_output_upload_rejects_oversized_output() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let token = test_token("unit-test-jwt-secret", "worker-owner");
+
+        let uploaded = service
+            .task_output_upload(Request::new(TaskOutputUploadRequest {
+                task_id: "oversized-output".into(),
+                worker_id: "worker-owner".into(),
+                output: "x".repeat(MAX_TASK_OUTPUT_BYTES + 1),
+                token,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!uploaded.success);
+        assert!(uploaded.status_message.contains("byte limit"));
+    }
+
+    #[tokio::test]
+    async fn task_usage_rejects_non_finite_values() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let token = test_token("unit-test-jwt-secret", "worker-owner");
+
+        let usage = service
+            .task_usage(Request::new(TaskUsageRequest {
+                task_id: "bad-usage".into(),
+                worker_id: "worker-owner".into(),
+                usage: Some(hivemind_proto::ResourceUsage {
+                    cpu_percent: f32::NAN,
+                    memory_percent: 0.0,
+                    gpu_percent: 0.0,
+                    vram_percent: 0.0,
+                    storage_percent: 0.0,
+                }),
+                token,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!usage.success);
+        assert!(usage.status_message.contains("non-finite"));
+    }
+
+    #[tokio::test]
+    async fn task_usage_rejects_missing_usage_payload() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let token = test_token("unit-test-jwt-secret", "worker-owner");
+
+        let usage = service
+            .task_usage(Request::new(TaskUsageRequest {
+                task_id: "missing-usage".into(),
+                worker_id: "worker-owner".into(),
+                usage: None,
+                token,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!usage.success);
+        assert!(usage.status_message.contains("Usage payload is required"));
+    }
+
+    #[tokio::test]
+    async fn stop_task_execution_rpc_kills_running_execute_task() {
+        let tmp = TempDir::new().unwrap();
+        let marker = tmp.path().join("started.marker");
+        let service = Arc::new(test_service(tmp.path(), &marker));
+        let task_path = tmp.path().join("api").join("main.py");
+        let task_id = "grpc-stop-long-running".to_string();
+        let execute_service = service.clone();
+        let execute_task_id = task_id.clone();
+        let execute = tokio::spawn(async move {
+            execute_service
+                .execute_task(Request::new(ExecuteTaskRequest {
+                    task_id: execute_task_id,
+                    torrent: task_path.to_string_lossy().to_string(),
+                    resource_limits: Some(ResourceSpec {
+                        cpu_cores: 1,
+                        memory_mb: 1024,
+                        gpu_count: 0,
+                        gpu_name: String::new(),
+                        vram_mb: 0,
+                        cpu_score: 1,
+                        gpu_score: 0,
+                        storage_total_gb: 1,
+                        storage_available_gb: 1,
+                    }),
+                }))
+                .await
+                .unwrap()
+                .into_inner()
+        });
+        wait_for_file(&marker).await;
+
+        let stop = service
+            .stop_task_execution(Request::new(StopTaskExecutionRequest {
+                task_id: task_id.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(stop.success);
+        assert_eq!(stop.status_message, "Stop requested");
+        let execute_response = tokio::time::timeout(Duration::from_secs(5), execute)
+            .await
+            .expect("execute_task should return after stop")
+            .expect("execute_task join should succeed");
+        assert!(!execute_response.success);
+        assert!(execute_response
+            .status_message
+            .contains("Task execution stopped"));
+    }
+
+    fn test_service(base: &std::path::Path, marker: &std::path::Path) -> GrpcWorkerNodeService {
+        let api_dir = base.join("api");
+        std::fs::create_dir_all(&api_dir).unwrap();
+        std::fs::write(api_dir.join("main.py"), "print('long task')\n").unwrap();
+        let mut config = HivemindConfig::default();
+        config.executor.sandbox_dir = base.join("sandbox").to_string_lossy().to_string();
+        config.torrent.api_dir = api_dir.to_string_lossy().to_string();
+        config.auth.jwt_secret = "unit-test-jwt-secret".into();
+        config.executor.monty_executable = write_long_running_executor_script(base, marker)
+            .to_string_lossy()
+            .to_string();
+        let executor = Arc::new(WorkerExecutor::new(config.clone()));
+        GrpcWorkerNodeService::new(Arc::new(WorkerGrpcState::new(config, executor)))
+    }
+
+    fn test_token(secret: &str, subject: &str) -> String {
+        encode(
+            &Header::default(),
+            &Claims {
+                sub: subject.into(),
+                user_id: uuid::Uuid::new_v4().to_string(),
+                exp: (Utc::now().timestamp() + 3600) as usize,
+                iat: Utc::now().timestamp() as usize,
+            },
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap()
+    }
+
+    async fn wait_for_file(path: &std::path::Path) {
+        for _ in 0..50 {
+            if path.exists() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("timed out waiting for {}", path.display());
+    }
+
+    fn write_long_running_executor_script(
+        dir: &std::path::Path,
+        marker: &std::path::Path,
+    ) -> std::path::PathBuf {
+        let path = if cfg!(windows) {
+            dir.join("grpc-long-running-executor.cmd")
+        } else {
+            dir.join("grpc-long-running-executor.sh")
+        };
+        let script = if cfg!(windows) {
+            format!(
+                "@echo off\r\necho started > \"{}\"\r\n:loop\r\nping -n 2 127.0.0.1 >nul\r\ngoto loop\r\n",
+                marker.display()
+            )
+        } else {
+            format!(
+                "#!/bin/sh\nprintf '%s' started > '{}'\nwhile true; do :; done\n",
+                marker.display()
+            )
+        };
+        std::fs::write(&path, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
+        path
     }
 }

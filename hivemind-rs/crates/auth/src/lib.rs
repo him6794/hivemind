@@ -58,37 +58,66 @@ impl AuthManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hivemind_config::HivemindConfig;
 
-    async fn setup_test_db() -> Option<DatabaseManager> {
-        let config = HivemindConfig::default();
-        let db = DatabaseManager::new(&config).await.ok()?;
-        db.run_migrations().await.ok()?;
-        Some(db)
+    async fn setup_test_db(
+        test_name: &str,
+    ) -> Option<(
+        DatabaseManager,
+        hivemind_database::postgres::IsolatedTestPool,
+    )> {
+        let fixture = hivemind_database::postgres::create_isolated_test_pool(test_name)
+            .await
+            .ok()?;
+        hivemind_database::postgres::run_migrations(&fixture.pool)
+            .await
+            .ok()?;
+        let db = DatabaseManager {
+            pool: fixture.pool.clone(),
+        };
+        Some((db, fixture))
+    }
+
+    #[tokio::test]
+    async fn setup_test_db_uses_isolated_schema() {
+        let (db, fixture) = match setup_test_db("auth_setup_schema").await {
+            Some(parts) => parts,
+            None => return,
+        };
+
+        let schema: String = sqlx::query_scalar("SELECT current_schema()")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert!(
+            schema.starts_with("hm_test_"),
+            "expected isolated test schema, got {schema}"
+        );
+        fixture.cleanup().await.ok();
     }
 
     #[tokio::test]
     async fn test_authenticate_invalid_user() {
-        let db = match setup_test_db().await {
-            Some(d) => d,
+        let (db, fixture) = match setup_test_db("auth_invalid_user").await {
+            Some(parts) => parts,
             None => return,
         };
         let auth = AuthManager::new(&db, "test-secret", 24);
         let token = auth.authenticate("nonexistent", "pass").await.unwrap();
         assert!(token.is_none());
+        fixture.cleanup().await.ok();
     }
 
     #[tokio::test]
     async fn test_jwt_token_roundtrip() {
         let jwt = JwtService::new("test-secret", 24);
         let claims = hivemind_models::Claims {
-            sub: "testuser".into(),
+            sub: "example-user".into(),
             user_id: uuid::Uuid::new_v4().to_string(),
             exp: (chrono::Utc::now().timestamp() + 3600) as usize,
             iat: chrono::Utc::now().timestamp() as usize,
         };
         let token = jwt.encode_claims(&claims).unwrap();
         let decoded = jwt.decode(&token).unwrap();
-        assert_eq!(decoded.sub, "testuser");
+        assert_eq!(decoded.sub, "example-user");
     }
 }

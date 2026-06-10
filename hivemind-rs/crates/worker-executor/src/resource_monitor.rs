@@ -9,10 +9,10 @@ pub fn collect_resources() -> SystemResources {
     sys.refresh_all();
 
     let cpu_cores = sys.cpus().len() as i32;
-    let total_memory_kb = sys.total_memory();
-    let available_memory_kb = sys.available_memory();
-    let total_memory_gb = (total_memory_kb / (1024 * 1024)) as i32;
-    let available_memory_gb = (available_memory_kb / (1024 * 1024)) as i32;
+    let total_memory_bytes = sys.total_memory();
+    let available_memory_bytes = sys.available_memory();
+    let total_memory_gb = (total_memory_bytes / (1024 * 1024 * 1024)) as i32;
+    let available_memory_gb = (available_memory_bytes / (1024 * 1024 * 1024)) as i32;
 
     let cpu_usage = sys
         .cpus()
@@ -21,8 +21,8 @@ pub fn collect_resources() -> SystemResources {
         .sum::<f64>()
         / cpu_cores.max(1) as f64;
 
-    let memory_usage_percent = if total_memory_kb > 0 {
-        ((total_memory_kb - available_memory_kb) as f64 / total_memory_kb as f64) * 100.0
+    let memory_usage_percent = if total_memory_bytes > 0 {
+        ((total_memory_bytes - available_memory_bytes) as f64 / total_memory_bytes as f64) * 100.0
     } else {
         0.0
     };
@@ -51,12 +51,14 @@ pub fn to_resource_spec(resources: &SystemResources) -> ResourceSpec {
         .first()
         .map(|g| g.name.clone())
         .unwrap_or_default();
+    let gpu_count = resources.gpu_count;
+    let cpu_score = calculate_cpu_score(resources.cpu_cores, resources.cpu_usage_percent);
+    let gpu_score = calculate_gpu_score(&resources.gpu_infos);
     let vram_mb = resources
         .gpu_infos
         .first()
         .map(|g| g.vram_total_mb)
         .unwrap_or(0);
-    let gpu_count = resources.gpu_count;
 
     ResourceSpec {
         cpu_cores: resources.cpu_cores,
@@ -64,12 +66,8 @@ pub fn to_resource_spec(resources: &SystemResources) -> ResourceSpec {
         gpu_count,
         gpu_name,
         vram_mb,
-        cpu_score: resources.cpu_cores * 100,
-        gpu_score: if gpu_count > 0 {
-            (vram_mb / 1024) as i32 * 100
-        } else {
-            0
-        },
+        cpu_score,
+        gpu_score,
         storage_total_gb: resources.storage_total_gb,
         storage_available_gb: resources.storage_available_gb,
     }
@@ -112,6 +110,22 @@ pub fn to_resource_usage(resources: &SystemResources) -> ResourceUsage {
     }
 }
 
+fn calculate_cpu_score(cpu_cores: i32, cpu_usage_percent: f64) -> i32 {
+    let cores = cpu_cores.max(0) as f64;
+    let available_ratio = (100.0 - cpu_usage_percent.clamp(0.0, 100.0)) / 100.0;
+    let score = cores * available_ratio * 100.0;
+    score.round().clamp(0.0, i32::MAX as f64) as i32
+}
+
+fn calculate_gpu_score(gpu_infos: &[GpuInfo]) -> i32 {
+    let score = gpu_infos.iter().fold(0.0_f64, |acc, gpu| {
+        let total_gb = gpu.vram_total_mb.max(0) as f64 / 1024.0;
+        let available_ratio = (100.0 - gpu.gpu_utilization_percent.clamp(0.0, 100.0)) / 100.0;
+        acc + total_gb * available_ratio * 100.0
+    });
+    score.round().clamp(0.0, i32::MAX as f64) as i32
+}
+
 /// Detect NVIDIA GPUs via nvidia-smi
 fn detect_gpus() -> Vec<GpuInfo> {
     let output = Command::new("nvidia-smi")
@@ -144,10 +158,12 @@ fn detect_gpus() -> Vec<GpuInfo> {
                 .collect()
         }
         _ => {
-            // Try AMD/Intel GPU via lspci or dxgi as fallback (platform-dependent)
-            if cfg!(windows) {
+            #[cfg(windows)]
+            {
                 detect_gpus_windows()
-            } else {
+            }
+            #[cfg(not(windows))]
+            {
                 Vec::new()
             }
         }
@@ -198,7 +214,7 @@ fn detect_gpus_windows() -> Vec<GpuInfo> {
 }
 
 #[cfg(not(windows))]
-fn detect_gpus_linux() -> Vec<GpuInfo> {
+fn detect_gpus_windows() -> Vec<GpuInfo> {
     tracing::info!("GPU detection: nvidia-smi not found, no other backend available");
     Vec::new()
 }
@@ -235,6 +251,34 @@ mod tests {
         assert_eq!(spec.cpu_cores, r.cpu_cores);
         assert!(spec.memory_mb > 0);
         assert!(spec.storage_total_gb > 0);
+    }
+
+    #[test]
+    fn test_score_calculation_uses_floats() {
+        let cpu_score = calculate_cpu_score(12, 25.0);
+        assert_eq!(cpu_score, 900);
+
+        let gpus = vec![
+            GpuInfo {
+                index: 0,
+                name: "GPU-0".into(),
+                vram_total_mb: 8192,
+                vram_used_mb: 2048,
+                vram_available_mb: 6144,
+                gpu_utilization_percent: 25.0,
+            },
+            GpuInfo {
+                index: 1,
+                name: "GPU-1".into(),
+                vram_total_mb: 4096,
+                vram_used_mb: 1024,
+                vram_available_mb: 3072,
+                gpu_utilization_percent: 50.0,
+            },
+        ];
+        let gpu_score = calculate_gpu_score(&gpus);
+        assert!(gpu_score > 0);
+        assert!(gpu_score < 2000);
     }
 
     #[test]

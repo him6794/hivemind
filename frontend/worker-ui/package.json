@@ -9,10 +9,11 @@
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.1",
-    "vite": "^5.4.8"
+    "vite": "^6.4.2"
   },
   "scripts": {
     "dev": "vite --port 3001",
+    "test": "node --test src/*.test.mjs",
     "build": "vite build"
   }
 }

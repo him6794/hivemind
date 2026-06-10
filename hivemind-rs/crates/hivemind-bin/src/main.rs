@@ -27,18 +27,17 @@ use tracing::info;
 
 mod cli;
 
-fn parse_env_u64(name: &str, default: u64) -> u64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(default)
+fn should_seed_default_user(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim),
+        Some(value) if value.eq_ignore_ascii_case("true")
+            || value == "1"
+            || value.eq_ignore_ascii_case("yes")
+    )
 }
 
-fn parse_env_bool(name: &str, default: bool) -> bool {
-    std::env::var(name)
-        .ok()
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(default)
+fn validate_auth_service_config(config: &HivemindConfig) -> Result<()> {
+    config.auth.validate_jwt_secret()
 }
 
 #[tokio::main]
@@ -78,32 +77,20 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    let mut shutdown_handles: Vec<watch::Sender<bool>> = Vec::new();
-
-    // ---- Master (HTTP-to-gRPC proxy, no DB) ----
-    if run_master {
-        let nodepool_grpc = config.server.nodepool_grpc_addr.clone();
-        let jwt_secret = config.auth.jwt_secret.clone();
-        let token_expiry = config.auth.token_expiry_hours;
-        let api =
-            MasterApiServer::new(jwt_secret, token_expiry, nodepool_grpc, config.clone()).await?;
-        let addr = config.server.master_http_addr.clone();
-        tokio::spawn(async move {
-            if let Err(e) = api.serve(&addr).await {
-                tracing::error!("Master API error: {}", e);
-            }
-        });
-        info!(
-            "Master HTTP API started on {}",
-            config.server.master_http_addr
-        );
+    if run_master || run_nodepool {
+        validate_auth_service_config(&config)?;
     }
+
+    let mut shutdown_handles: Vec<watch::Sender<bool>> = Vec::new();
 
     // ---- Nodepool (DB-backed gRPC server) ----
     if run_nodepool {
         let db = DatabaseManager::new(&config).await?;
         db.run_migrations().await?;
-        hivemind_database::postgres::seed_default_user(&db.pool).await?;
+        let seed_default_user = std::env::var("HIVEMIND_SEED_DEFAULT_USER").ok();
+        if should_seed_default_user(seed_default_user.as_deref()) {
+            hivemind_database::postgres::seed_default_user(&db.pool).await?;
+        }
         let auth = AuthManager::new(&db, &config.auth.jwt_secret, config.auth.token_expiry_hours);
         let scheduler = TaskScheduler::new(db.clone(), auth.clone());
 
@@ -132,6 +119,7 @@ async fn main() -> Result<()> {
             auth: auth.clone(),
             node_manager: node_mgr.clone(),
             scheduler: scheduler.clone(),
+            artifact_root: hivemind_node_manager::grpc::artifact_root_for_config(&config),
         });
 
         let user_svc = UserServiceServer::new(GrpcUserService::new(np_state.clone()));
@@ -160,6 +148,25 @@ async fn main() -> Result<()> {
         );
     }
 
+    // ---- Master (HTTP-to-gRPC proxy, no DB) ----
+    if run_master {
+        let nodepool_grpc = config.server.nodepool_grpc_addr.clone();
+        let jwt_secret = config.auth.jwt_secret.clone();
+        let token_expiry = config.auth.token_expiry_hours;
+        let api =
+            MasterApiServer::new(jwt_secret, token_expiry, nodepool_grpc, config.clone()).await?;
+        let addr = config.server.master_http_addr.clone();
+        tokio::spawn(async move {
+            if let Err(e) = api.serve(&addr).await {
+                tracing::error!("Master API error: {}", e);
+            }
+        });
+        info!(
+            "Master HTTP API started on {}",
+            config.server.master_http_addr
+        );
+    }
+
     // ---- Worker gRPC Server ----────────────────────────────
     if run_worker {
         let executor = Arc::new(WorkerExecutor::new(config.clone()));
@@ -169,10 +176,7 @@ async fn main() -> Result<()> {
             resources.cpu_cores, resources.total_memory_gb
         );
 
-        let wk_state = Arc::new(WorkerGrpcState {
-            config: config.clone(),
-            executor: executor.clone(),
-        });
+        let wk_state = Arc::new(WorkerGrpcState::new(config.clone(), executor.clone()));
         let wk_svc = WorkerNodeServiceServer::new(GrpcWorkerNodeService::new(wk_state));
 
         let wk_addr = config.server.worker_grpc_addr.clone();
@@ -191,9 +195,15 @@ async fn main() -> Result<()> {
             executor.get_resource_spec(),
         );
         let control_addr = config.server.worker_control_http_addr.clone();
+        let worker_control_allowed_origins =
+            config.server.worker_control_cors_allowed_origins.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                hivemind_worker_executor::control_api::serve(&control_addr, control_profile).await
+            if let Err(e) = hivemind_worker_executor::control_api::serve_with_allowed_origins(
+                &control_addr,
+                control_profile,
+                &worker_control_allowed_origins,
+            )
+            .await
             {
                 tracing::error!("Worker control HTTP API error: {}", e);
             }
@@ -236,4 +246,32 @@ async fn main() -> Result<()> {
     }
     info!("Shutting down...");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_user_seed_requires_explicit_truthy_env_value() {
+        assert!(!should_seed_default_user(None));
+        assert!(!should_seed_default_user(Some("")));
+        assert!(!should_seed_default_user(Some("false")));
+        assert!(!should_seed_default_user(Some("0")));
+        assert!(should_seed_default_user(Some("true")));
+        assert!(should_seed_default_user(Some("1")));
+        assert!(should_seed_default_user(Some("yes")));
+    }
+
+    #[test]
+    fn auth_service_startup_rejects_default_jwt_secret() {
+        let mut config = HivemindConfig::default();
+        config.auth.jwt_secret = "CHANGE_ME_IN_PRODUCTION".into();
+
+        let error = validate_auth_service_config(&config)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("JWT_SECRET"));
+    }
 }

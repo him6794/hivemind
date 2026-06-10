@@ -26,14 +26,14 @@ authors = ["Hivemind Team"]
 [workspace.dependencies]
 tokio = { version = "1.35", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io"] }
-tonic = { version = "0.11", features = ["transport", "codegen", "prost", "tls", "tls-roots"] }
-prost = "0.12"
-prost-types = "0.12"
-tower = { version = "0.4", features = ["timeout", "limit"] }
+tonic = { version = "0.13", features = ["transport", "codegen", "prost", "tls-ring", "tls-native-roots"] }
+prost = "0.13"
+prost-types = "0.13"
+tower = { version = "0.5", features = ["timeout", "limit", "util"] }
 axum = { version = "0.7", features = ["macros", "json", "multipart"] }
 tower-http = { version = "0.5", features = ["cors", "trace", "auth"] }
 hyper = { version = "1", features = ["server"] }
-sqlx = { version = "0.7", features = ["runtime-tokio", "postgres", "chrono", "uuid", "migrate"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-native-roots", "postgres", "derive", "chrono", "uuid", "json", "migrate"] }
 redis = { version = "0.24", features = ["tokio-comp", "connection-manager"] }
 deadpool-redis = "0.14"
 serde = { version = "1", features = ["derive"] }

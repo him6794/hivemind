@@ -1,8 +1,23 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+MAIN_TGZ=""
+PLATFORM_TGZ=""
+
+cleanup() {
+    cd "$ROOT_DIR"
+    if [ -n "$MAIN_TGZ" ]; then
+        rm -f "$ROOT_DIR/$MAIN_TGZ"
+    fi
+    if [ -n "$PLATFORM_TGZ" ]; then
+        rm -f "$ROOT_DIR/$PLATFORM_TGZ"
+    fi
+    rm -rf npm/
+    npm pkg delete optionalDependencies 2>/dev/null || true
+}
+trap cleanup EXIT
 
 cd "$ROOT_DIR"
 
@@ -50,20 +65,13 @@ cd "$ROOT_DIR/smoke-test"
 rm -rf node_modules package-lock.json
 
 # Install platform package first, then main package
-npm install "../$PLATFORM_TGZ" --force
-npm install "../$MAIN_TGZ" --force
+npm install "../$PLATFORM_TGZ" --force --no-save
+npm install "../$MAIN_TGZ" --force --no-save
 
 echo "=== Type checking ==="
 npm run type-check
 
 echo "=== Running smoke tests ==="
 npm test
-
-echo "=== Cleaning up ==="
-cd "$ROOT_DIR"
-rm -f "$MAIN_TGZ" "$PLATFORM_TGZ"
-rm -rf npm/
-# Remove optionalDependencies added by napi prepublish (keeps other package.json changes)
-npm pkg delete optionalDependencies 2>/dev/null || true
 
 echo "=== Smoke test passed! ==="

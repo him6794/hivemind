@@ -14,7 +14,7 @@ Turn Hivemind into a centralized compute marketplace: requestors buy compute wit
 running
 
 ## Current Step
-Worker pull path now enforces trust bans; next slice is full low-score claim blocking test coverage.
+Worker pull path now enforces trust bans and low-score claim blocking; next slice is aligning trust thresholds and policy docs with dispatcher behavior.
 
 ## Completed Work
 - Loaded planning and long-task coordination instructions.
@@ -57,7 +57,7 @@ Worker pull path now enforces trust bans; next slice is full low-score claim blo
 - Added admin scheduling cache metrics endpoint with global totals, hit rate, and top-worker breakdown.
 - Added admin scheduling cache alert endpoint with configurable thresholds (`low`, `high`) and server-side severity classification.
 - Added admin worker trust-control endpoint for `banned` and `score` updates on `worker_reputation`.
-- Added admin authorization check (`HIVEMIND_ADMIN_USERS`, default `testuser`) for all `/api/admin/*` handlers.
+- Added admin authorization check controlled by `HIVEMIND_ADMIN_USERS` for all `/api/admin/*` handlers.
 - Added explicit integration test proving non-admin users are forbidden from admin read/write endpoints.
 - Added `HIVEMIND_ADMIN_USERS` to `.env.example` and README configuration table.
 - Added per-user task submission rate limit in `create_task`/`upload_task` path (`HIVEMIND_TASK_SUBMIT_LIMIT_PER_MINUTE`).
@@ -195,9 +195,105 @@ Marketplace ledger foundation:
 - Pricing quote API: deterministic requestor quote and max-CPT budget guardrails are done.
 - Provider earnings API: done for backend; Worker UI display remains.
 - Atomic lease: use DB transaction or `FOR UPDATE SKIP LOCKED` for pull/assign to prevent duplicate assignment.
-- Sandbox release gate: production must not fall back to shell simulation, must enforce cwd, timeout, and network policy.
+- Sandbox release gate: production must not fall back to shell fallback, must enforce cwd, timeout, and network policy.
 
 ## Audit Summary
 - Backend: Rust has centralized master/nodepool/worker skeleton, but missing marketplace ledger, worker trust/auth, real artifact execution, and lifecycle close-loop.
 - Frontend/DevEx: Master UI can submit by magnet/master-host zip path, but lacks browser upload; Worker UI assumes a missing local worker-control HTTP service.
 - Billing/security: Current billing deducts `max_cpt` after completion, lacks provider payout ledger, lacks atomic/idempotent settlement, and has sandbox/auth gates before public release.
+
+## Improvement Backlog
+
+Priority is based on user impact, regression risk, and how often the issue is likely to confuse future work.
+
+### P0: Make state and progress readable
+- Fix the encoding/garbling in the progress docs so they are human-readable and searchable.
+- Target files:
+  - [docs/DEVELOPMENT_PROGRESS.md](../docs/DEVELOPMENT_PROGRESS.md)
+  - [docs/BACKEND_SERVICE_PROGRESS.md](../docs/BACKEND_SERVICE_PROGRESS.md)
+  - [worklog/centralized-compute-marketplace-state.md](centralized-compute-marketplace-state.md)
+- Why it matters:
+  - Current status text is hard to trust because the same file mixes readable English with corrupted text.
+  - This makes handoff, review, and later maintenance slower than the code changes themselves.
+- Next step:
+  - Normalize these files to UTF-8 and rewrite the top sections into a consistent structure: `Goal`, `Status`, `Current Step`, `Completed`, `Next`, `Risks`.
+
+### P0: Consolidate trust policy
+- Keep worker trust rules aligned through the shared `is_worker_trusted()` helper instead of letting dispatcher and pull-path logic drift independently.
+- Target files:
+  - `hivemind-rs/crates/task-scheduler/src/dispatcher.rs`
+  - `hivemind-rs/crates/task-scheduler/src/task_repository.rs`
+  - `hivemind-rs/crates/master-api/src/handlers.rs`
+- Why it matters:
+  - The current code already has both dispatcher-side exclusion and pull-path trust gating.
+  - The remaining risk is policy drift if thresholds, comments, or docs stop matching the helper behavior.
+- Next step:
+  - Add a short policy note or shared doc comment that states the trust threshold and the banned-worker rule once, then reference it from both dispatch and claim paths.
+
+### P1: Add cross-service flow tests
+- Add a small number of end-to-end tests that cover the full requestor -> scheduler -> worker -> settlement path.
+- Target files:
+  - `hivemind-rs/crates/master-api/src/integration_tests.rs`
+  - `hivemind-rs/crates/task-scheduler/src/dispatcher.rs`
+  - `hivemind-rs/crates/worker-executor/src/executor.rs`
+- Why it matters:
+  - Current verification is strong at crate level, but the marketplace behavior depends on interactions between services.
+  - Billing, trust bans, and redispatch are exactly the kind of rules that pass unit tests and fail in integration.
+- Next step:
+  - Add one happy-path job flow test and one trust/redispatch regression test.
+
+### P1: Separate test helpers from product code
+- Keep mock executors, fixtures, and example payloads clearly labeled and isolated from runtime paths.
+- Target files:
+  - `hivemind-rs/crates/worker-executor/src/executor.rs`
+  - `hivemind-rs/crates/master-api/src/integration_tests.rs`
+  - `docs/VPN_QUICKSTART.md`
+- Why it matters:
+  - The repo already uses test-only helpers like `write_mock_executor()` and fixture usernames/passwords.
+  - That is fine, but the naming and placement should make it impossible to confuse test scaffolding with production inputs.
+- Next step:
+  - Move repeated helpers into a dedicated test module or `tests/` helper file and standardize naming like `test_*` or `fixture_*`.
+
+### P2: Tighten production config safety
+- Make production-sensitive settings fail fast if defaults are still present.
+- Target files:
+  - `scripts/package-worker-windows.ps1`
+  - `README.md`
+  - `hivemind-rs/crates/config/src/lib.rs`
+- Why it matters:
+  - Templates and defaults are useful, but they are also easy to forget to replace.
+  - `change-me-in-production` style values should be treated as deployment blockers, not just documentation hints.
+- Next step:
+  - Add explicit startup validation and document which variables must be set before release.
+
+### P2: Clean workspace hygiene
+- Keep generated build output and local scratch files out of the working tree.
+- Target items:
+  - `hivemind-rs/target-local/`
+  - `hivemind-rs/target-alt/`
+  - `fix`
+  - `docker-compose.test.yml`
+  - `scripts/build_local.py`
+- Why it matters:
+  - A dirty tree makes it hard to review real changes and increases the risk of accidental commits.
+  - Generated artifacts should be reproducible, not hand-managed.
+- Next step:
+  - Decide which of these are intentional tooling artifacts and which should be ignored, documented, or deleted.
+
+## Redundancy Cleanup Result
+
+- Wired heartbeat stale cleanup to the configured threshold instead of a fixed 30-second literal.
+  - `HeartbeatHandler` now passes its configured threshold through `NodeManager` and `WorkerRepository`.
+  - Added a focused repository test to prove stale workers are marked offline when they exceed the threshold.
+- Removed the unused `Dispatcher::start_dispatch_loop` entry point.
+  - Runtime now relies on the registered-worker dispatch loop and timeout loop only.
+- Consolidated VPN online-peer reads behind a single helper.
+  - `get_task_peers` and `list_online_peers` now share the same database query path instead of duplicating it.
+- Tightened the `HeadscaleClient` shim so its configuration is validated and no longer looks like a no-op wrapper.
+  - The client now validates `base_url` and `api_key` before use and logs the configured endpoint.
+
+## Verification
+- `cargo fmt`: pass.
+- `cargo test -p hivemind-node-manager --lib`: pass.
+- `cargo test -p hivemind-task-scheduler --lib`: pass.
+- `cargo test -p hivemind-vpn-service --lib`: pass.

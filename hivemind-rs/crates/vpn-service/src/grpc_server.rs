@@ -52,7 +52,11 @@ impl VpnService for GrpcVpnService {
         request: Request<GetTaskPeersRequest>,
     ) -> Result<Response<GetTaskPeersResponse>, Status> {
         let req = request.into_inner();
-        match self.vpn.get_task_peers(&req.task_id).await {
+        match self
+            .vpn
+            .get_task_peers(&req.task_id, &req.worker_id, &req.auth_token)
+            .await
+        {
             Ok(peers) => {
                 let infos: Vec<ProtoPeerInfo> = peers
                     .into_iter()
@@ -79,7 +83,7 @@ impl VpnService for GrpcVpnService {
         request: Request<LeaveVpnRequest>,
     ) -> Result<Response<LeaveVpnResponse>, Status> {
         let req = request.into_inner();
-        match self.vpn.leave_vpn(&req.worker_id).await {
+        match self.vpn.leave_vpn(&req.worker_id, &req.auth_token).await {
             Ok(_) => Ok(Response::new(LeaveVpnResponse {
                 success: true,
                 status_message: "Left VPN".into(),
@@ -98,7 +102,7 @@ impl VpnService for GrpcVpnService {
         let req = request.into_inner();
         match self
             .vpn
-            .update_vpn_status(&req.worker_id, &req.virtual_ip, req.online)
+            .update_vpn_status(&req.worker_id, &req.virtual_ip, req.online, &req.auth_token)
             .await
         {
             Ok(_) => Ok(Response::new(UpdateVpnStatusResponse {

@@ -1,20 +1,19 @@
 use super::handlers::AppState;
 use super::middleware as mw;
 use axum::{
+    http::{header, HeaderValue, Method},
     middleware,
     routing::{get, post, put},
     Router,
 };
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 pub fn create_router(state: AppState) -> Router {
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    let cors = build_cors_layer(&state.config.server.master_cors_allowed_origins);
 
     let public = Router::new()
         .route("/health", get(super::handlers::health_check))
+        .route("/api/register", post(super::handlers::register))
         .route("/api/login", post(super::handlers::login));
 
     let protected = Router::new()
@@ -101,4 +100,66 @@ pub fn create_router(state: AppState) -> Router {
         .merge(protected)
         .layer(cors)
         .with_state(state)
+}
+
+pub fn build_cors_layer(allowed_origins: &[String]) -> CorsLayer {
+    let origins = allowed_origins
+        .iter()
+        .filter_map(|origin| origin.parse::<HeaderValue>().ok())
+        .collect::<Vec<_>>();
+
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::OPTIONS])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Body;
+    use axum::http::{header, Request, StatusCode};
+    use axum::{routing::get, Router};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn cors_allows_only_configured_origins_without_wildcard() {
+        let app = Router::new()
+            .route("/health", get(|| async { StatusCode::OK }))
+            .layer(super::build_cors_layer(&[
+                "http://localhost:5173".to_string()
+            ]));
+
+        let allowed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .header(header::ORIGIN, "http://localhost:5173")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(allowed.status(), StatusCode::OK);
+        assert_eq!(
+            allowed.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            Some(&"http://localhost:5173".parse().unwrap())
+        );
+
+        let rejected = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .header(header::ORIGIN, "http://evil.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::OK);
+        assert!(rejected
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none());
+    }
 }

@@ -1,0 +1,63 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: hivemind_test
+      POSTGRES_USER: hivemind
+      POSTGRES_PASSWORD: hivemind
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hivemind -d hivemind_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - hivemind-test-postgres:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - hivemind-test-redis:/data
+
+  tests:
+    build:
+      context: .
+      dockerfile: hivemind-rs/Dockerfile.test
+    environment:
+      DATABASE_URL: postgres://hivemind:hivemind@postgres:5432/hivemind_test
+      HIVEMIND_TEST_DATABASE_URL: postgres://hivemind:hivemind@postgres:5432/hivemind_test
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: test-only-secret
+      HIVEMIND_ADMIN_USERS: testuser
+      CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_JOBS: "1"
+      RUSTFLAGS: -C debuginfo=0
+    volumes:
+      - .:/workspace
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - cargo-target:/workspace/hivemind-rs/target
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    working_dir: /workspace/hivemind-rs
+    command:
+      [
+        "sh",
+        "-lc",
+        "set -e; /usr/local/cargo/bin/cargo test -p hivemind-auth -- --test-threads=1; /usr/local/cargo/bin/cargo test -p hivemind-config -- --test-threads=1; /usr/local/cargo/bin/cargo test -p hivemind-database -- --test-threads=1; /usr/local/cargo/bin/cargo test -p hivemind-worker-executor -- --test-threads=1; /usr/local/cargo/bin/cargo test -p hivemind-node-manager -- --test-threads=1; /usr/local/cargo/bin/cargo test -p hivemind-master-api -- --test-threads=1; /usr/local/cargo/bin/cargo test -p hivemind-bin -- --test-threads=1",
+      ]
+    restart: "no"
+
+volumes:
+  hivemind-test-postgres:
+  hivemind-test-redis:
+  cargo-registry:
+  cargo-git:
+  cargo-target:

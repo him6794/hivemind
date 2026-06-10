@@ -14,6 +14,15 @@ pub struct TaskScheduler {
     db: DatabaseManager,
 }
 
+pub struct BatchTaskReport<'a> {
+    pub output: Option<&'a str>,
+    pub cpu_time_ms: i64,
+    pub wall_time_ms: i64,
+    pub peak_memory_mb: i64,
+    pub download_bytes: i64,
+    pub cache_hits: i64,
+}
+
 impl Clone for TaskScheduler {
     fn clone(&self) -> Self {
         Self {
@@ -98,6 +107,53 @@ impl TaskScheduler {
     ) -> Result<Task> {
         self.repo
             .complete_for_worker(task_id, worker_id, result_torrent, output)
+            .await
+    }
+
+    pub async fn complete_task_result_for_worker(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        result_torrent: &str,
+    ) -> Result<Task> {
+        self.repo
+            .complete_result_for_worker(task_id, worker_id, result_torrent)
+            .await
+    }
+
+    pub async fn record_task_output_for_worker(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        output: &str,
+    ) -> Result<Task> {
+        self.repo
+            .record_output_for_worker(task_id, worker_id, output)
+            .await
+    }
+
+    pub async fn update_task_resource_usage_for_worker(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        cpu: f64,
+        memory: f64,
+        gpu: f64,
+        gpu_mem: f64,
+    ) -> Result<()> {
+        self.repo
+            .update_resource_usage_for_worker(task_id, worker_id, cpu, memory, gpu, gpu_mem)
+            .await
+    }
+
+    pub async fn record_batch_task_report_for_worker(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        report: BatchTaskReport<'_>,
+    ) -> Result<Task> {
+        self.repo
+            .record_batch_report_for_worker(task_id, worker_id, report)
             .await
     }
 

@@ -15,6 +15,12 @@ make test
 make dev
 ```
 
+## User Guide
+
+If you want to upload a task and write the task program, start here:
+
+- [docs/user-task-guide.md](docs/user-task-guide.md)
+
 ## Architecture
 
 Hivemind is a batch-oriented distributed compute runtime. The system consists of:
@@ -134,7 +140,7 @@ Configuration is via environment variables:
 | `DATABASE_URL` | - | PostgreSQL connection string |
 | `REDIS_URL` | - | Redis connection string |
 | `JWT_SECRET` | - | JWT signing secret |
-| `HIVEMIND_ADMIN_USERS` | `testuser` | Comma-separated usernames allowed to access `/api/admin/*` endpoints |
+| `HIVEMIND_ADMIN_USERS` | unset | Comma-separated usernames allowed to access `/api/admin/*` endpoints |
 | `HIVEMIND_TASK_SUBMIT_LIMIT_PER_MINUTE` | `60` | Per-user task submission rate limit for a rolling 1-minute window (`0` disables limiting) |
 | `MASTER_HTTP_ADDR` | `0.0.0.0:8082` | Master HTTP listen address |
 | `NODEPOOL_GRPC_ADDR` | `0.0.0.0:50051` | Nodepool gRPC listen/connect address |
@@ -154,7 +160,7 @@ Configuration is via environment variables:
 # Login
 curl -X POST http://localhost:8082/api/login \
   -H "Content-Type: application/json" \
-  -d '{"username": "testuser", "password": "testpass123"}'
+  -d '{"username": "<username>", "password": "<password>"}'
 ```
 
 ### Tasks
