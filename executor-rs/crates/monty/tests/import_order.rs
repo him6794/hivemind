@@ -36,7 +36,7 @@ fn check_file(path: &Path) -> Vec<String> {
     let content = fs::read_to_string(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     let mut errors = Vec::new();
     let mut past_imports = false;
-    let mut brace_depth = 0i32;
+    let mut brace_depth = 0usize;
 
     for (index, line) in content.lines().enumerate() {
         let line_number = index + 1;
@@ -89,8 +89,7 @@ fn is_module_declaration(stripped: &str) -> bool {
     declaration.starts_with("mod ") && declaration.ends_with(';')
 }
 
-fn update_brace_depth(stripped: &str, brace_depth: &mut i32) {
-    *brace_depth += stripped.matches('{').count() as i32;
-    *brace_depth -= stripped.matches('}').count() as i32;
-    *brace_depth = (*brace_depth).max(0);
+fn update_brace_depth(stripped: &str, brace_depth: &mut usize) {
+    *brace_depth += stripped.matches('{').count();
+    *brace_depth = brace_depth.saturating_sub(stripped.matches('}').count());
 }

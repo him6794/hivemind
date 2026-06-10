@@ -19,6 +19,16 @@ message LoginResponse {
     string token = 3;
 }
 
+message RegisterUserRequest {
+    string username = 1;
+    string password = 2;
+}
+
+message RegisterUserResponse {
+    bool success = 1;
+    string status_message = 2;
+}
+
 message GetBalanceRequest {
     string username = 1;
     string token = 2;
@@ -72,6 +82,7 @@ message RegisterWorkerNodeRequest {
     string ip = 2;
     ResourceSpec resources = 3;
     string location = 4;
+    string worker_id = 5;
 }
 
 message StatusResponse {
@@ -298,6 +309,7 @@ message TasklogResponse {
 message DownloadTaskArtifactRequest {
     string task_id = 1;
     string token = 2;
+    string artifact_key = 3;
 }
 
 message DownloadTaskArtifactResponse {
@@ -327,6 +339,7 @@ message TaskOutputUploadRequest {
     string task_id = 1;
     string output = 2;
     string token = 3;
+    string worker_id = 4;
 }
 message TaskOutputUploadResponse {
     bool success = 1;
@@ -337,6 +350,7 @@ message TaskResultUploadRequest {
     string task_id = 1;
     string result_torrent = 2;
     string token = 3;
+    string worker_id = 4;
 }
 message TaskResultUploadResponse {
     bool success = 1;
@@ -366,6 +380,7 @@ message TaskUsageRequest {
     string task_id = 1;
     ResourceUsage usage = 2;
     string token = 3;
+    string worker_id = 4;
 }
 message TaskUsageResponse {
     bool success = 1;
@@ -436,6 +451,7 @@ message PullBatchRequest {
     int32 available_memory_gb = 3;
     int32 queue_capacity = 4;
     CacheSummary cache_summary = 5;
+    string token = 6;
 }
 
 message TaskLease {
@@ -475,6 +491,7 @@ message CompleteBatchRequest {
     string worker_id = 1;
     string batch_id = 2;
     repeated CompletedTask tasks = 3;
+    string token = 4;
 }
 
 message CompleteBatchResponse {
@@ -487,6 +504,7 @@ message HeartbeatRequest {
     string status = 2;
     int32 available_memory_gb = 3;
     int32 queue_capacity = 4;
+    string token = 5;
 }
 
 message HeartbeatResponse {
@@ -694,6 +712,7 @@ message ListAdminAuditLogsResponse {
 // ============================================================
 
 service UserService {
+    rpc RegisterUser(RegisterUserRequest) returns (RegisterUserResponse);
     rpc Login(LoginRequest) returns (LoginResponse);
     rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse);
     rpc RefreshToken(RefreshTokenRequest) returns (RefreshTokenResponse);
@@ -702,6 +721,9 @@ service UserService {
 service NodeManagerService {
     rpc RegisterWorkerNode(RegisterWorkerNodeRequest) returns (StatusResponse);
     rpc ReportStatus(RunningStatusRequest) returns (RunningStatusResponse);
+    rpc TaskOutputUpload(TaskOutputUploadRequest) returns (TaskOutputUploadResponse);
+    rpc TaskResultUpload(TaskResultUploadRequest) returns (TaskResultUploadResponse);
+    rpc TaskUsage(TaskUsageRequest) returns (TaskUsageResponse);
     rpc ListWorkers(ListWorkersRequest) returns (ListWorkersResponse);
     rpc RemoveWorker(RemoveWorkerRequest) returns (StatusResponse);
 }

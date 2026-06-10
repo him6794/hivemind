@@ -39,6 +39,8 @@ use hivemind_proto::{
     LoginResponse,
     QuoteTaskRequest,
     QuoteTaskResponse,
+    RegisterUserRequest,
+    RegisterUserResponse,
     RegisterWorkerNodeRequest,
     RemoveWorkerRequest,
     ResourceSpec as ProtoResourceSpec,
@@ -54,6 +56,7 @@ use hivemind_proto::{
     UploadTaskRequest,
     UploadTaskResponse,
 };
+use tokio::time::{sleep, Duration};
 use tonic::transport::{Channel, Endpoint};
 use tonic::Request;
 
@@ -75,7 +78,39 @@ impl GrpcClient {
         })
     }
 
+    pub async fn connect_with_retry(
+        addr: &str,
+        attempts: usize,
+        delay: Duration,
+    ) -> Result<Self, tonic::transport::Error> {
+        let mut last_err = None;
+        for _ in 0..attempts.max(1) {
+            match Self::connect(addr).await {
+                Ok(client) => return Ok(client),
+                Err(err) => {
+                    last_err = Some(err);
+                    sleep(delay).await;
+                }
+            }
+        }
+        Err(last_err.expect("attempts.max(1) ensures at least one error"))
+    }
+
     // ---- UserService ----
+    pub async fn register_user(
+        &mut self,
+        username: &str,
+        password: &str,
+    ) -> Result<RegisterUserResponse, tonic::Status> {
+        self.user
+            .register_user(Request::new(RegisterUserRequest {
+                username: username.to_string(),
+                password: password.to_string(),
+            }))
+            .await
+            .map(|r| r.into_inner())
+    }
+
     pub async fn login(
         &mut self,
         username: &str,
@@ -182,11 +217,13 @@ impl GrpcClient {
         &mut self,
         task_id: &str,
         token: &str,
+        artifact_key: Option<&str>,
     ) -> Result<DownloadTaskArtifactResponse, tonic::Status> {
         self.master
             .download_task_artifact(Request::new(DownloadTaskArtifactRequest {
                 task_id: task_id.to_string(),
                 token: token.to_string(),
+                artifact_key: artifact_key.unwrap_or_default().to_string(),
             }))
             .await
             .map(|r| r.into_inner())
@@ -417,6 +454,7 @@ impl GrpcClient {
     pub async fn register_worker_node(
         &mut self,
         username: &str,
+        worker_id: &str,
         ip: &str,
         resources: ProtoResourceSpec,
         location: &str,
@@ -424,6 +462,7 @@ impl GrpcClient {
         self.node_mgr
             .register_worker_node(Request::new(RegisterWorkerNodeRequest {
                 username: username.to_string(),
+                worker_id: worker_id.to_string(),
                 ip: ip.to_string(),
                 resources: Some(resources),
                 location: location.to_string(),

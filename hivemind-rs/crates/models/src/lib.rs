@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
 
+type SqlxEncodeResult = Result<sqlx::encode::IsNull, sqlx::error::BoxDynError>;
+
 // --- User Models ---
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -97,7 +99,7 @@ impl<'r> sqlx::Decode<'r, sqlx::Postgres> for LedgerEntryKind {
 }
 
 impl<'q> sqlx::Encode<'q, sqlx::Postgres> for LedgerEntryKind {
-    fn encode_by_ref(&self, buf: &mut sqlx::postgres::PgArgumentBuffer) -> sqlx::encode::IsNull {
+    fn encode_by_ref(&self, buf: &mut sqlx::postgres::PgArgumentBuffer) -> SqlxEncodeResult {
         <String as sqlx::Encode<'q, sqlx::Postgres>>::encode(self.as_str().to_string(), buf)
     }
 }
@@ -140,7 +142,7 @@ impl<'r> sqlx::Decode<'r, sqlx::Postgres> for LedgerEntryStatus {
 }
 
 impl<'q> sqlx::Encode<'q, sqlx::Postgres> for LedgerEntryStatus {
-    fn encode_by_ref(&self, buf: &mut sqlx::postgres::PgArgumentBuffer) -> sqlx::encode::IsNull {
+    fn encode_by_ref(&self, buf: &mut sqlx::postgres::PgArgumentBuffer) -> SqlxEncodeResult {
         <String as sqlx::Encode<'q, sqlx::Postgres>>::encode(self.as_str().to_string(), buf)
     }
 }
@@ -291,7 +293,7 @@ impl<'r> sqlx::Decode<'r, sqlx::Postgres> for WorkerStatus {
 }
 
 impl<'q> sqlx::Encode<'q, sqlx::Postgres> for WorkerStatus {
-    fn encode_by_ref(&self, buf: &mut sqlx::postgres::PgArgumentBuffer) -> sqlx::encode::IsNull {
+    fn encode_by_ref(&self, buf: &mut sqlx::postgres::PgArgumentBuffer) -> SqlxEncodeResult {
         <String as sqlx::Encode<'q, sqlx::Postgres>>::encode(self.as_str().to_string(), buf)
     }
 }
@@ -419,7 +421,7 @@ impl<'r> sqlx::Decode<'r, sqlx::Postgres> for TaskStatus {
 }
 
 impl<'q> sqlx::Encode<'q, sqlx::Postgres> for TaskStatus {
-    fn encode_by_ref(&self, buf: &mut sqlx::postgres::PgArgumentBuffer) -> sqlx::encode::IsNull {
+    fn encode_by_ref(&self, buf: &mut sqlx::postgres::PgArgumentBuffer) -> SqlxEncodeResult {
         <String as sqlx::Encode<'q, sqlx::Postgres>>::encode(self.as_str().to_string(), buf)
     }
 }

@@ -52,7 +52,7 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-hivemind}:${POSTGRES_PASSWORD:-hivemind}@postgres:5432/${POSTGRES_DB:-hivemind}
       REDIS_URL: redis://redis:6379
-      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set to a non-default value}
       MASTER_HTTP_ADDR: 0.0.0.0:8082
       NODEPOOL_GRPC_ADDR: 0.0.0.0:50051
       WORKER_GRPC_ADDR: 0.0.0.0:50053

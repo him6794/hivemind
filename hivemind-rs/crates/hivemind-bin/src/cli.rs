@@ -33,6 +33,7 @@ pub struct TaskLookupCommand {
     pub password: String,
     pub task_id: String,
     pub download: bool,
+    pub artifact_key: Option<String>,
 }
 
 pub fn parse_cli_args(args: &[String]) -> Result<CliCommand> {
@@ -89,7 +90,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliCommand> {
             "--api" => submit.api_base = normalize_api_base(value),
             "--username" => submit.username = value.clone(),
             "--password" => submit.password = value.clone(),
-            "--task-id" => submit.task_id = value.clone(),
+            "--task-id" => submit.task_id = parse_task_id_flag(value)?,
             "--cpu-score" => submit.cpu_score = Some(parse_i32_flag(flag, value)?),
             "--memory-gb" => submit.memory_gb = Some(parse_i32_flag(flag, value)?),
             "--gpu-score" => submit.gpu_score = Some(parse_i32_flag(flag, value)?),
@@ -126,6 +127,7 @@ fn parse_task_lookup_args(args: &[String], command: &str) -> Result<TaskLookupCo
         password: String::new(),
         task_id,
         download: false,
+        artifact_key: None,
     };
     let mut i = 3;
     while i < args.len() {
@@ -142,6 +144,7 @@ fn parse_task_lookup_args(args: &[String], command: &str) -> Result<TaskLookupCo
             "--api" => lookup.api_base = normalize_api_base(value),
             "--username" => lookup.username = value.clone(),
             "--password" => lookup.password = value.clone(),
+            "--artifact-key" => lookup.artifact_key = Some(value.trim().to_string()),
             _ => return Err(anyhow!("unknown {} flag {}", command, flag)),
         }
         i += 2;
@@ -171,6 +174,16 @@ fn parse_i64_flag(flag: &str, value: &str) -> Result<i64> {
         .map_err(|e| anyhow!("invalid {}: {}", flag, e))
 }
 
+fn parse_task_id_flag(value: &str) -> Result<String> {
+    if is_safe_task_id(value) {
+        Ok(value.to_string())
+    } else {
+        Err(anyhow!(
+            "task id must be non-empty ASCII alphanumeric, '.', '-', or '_'"
+        ))
+    }
+}
+
 fn derive_task_id(zip_path: &str) -> Result<String> {
     let stem = Path::new(zip_path)
         .file_stem()
@@ -185,6 +198,9 @@ fn derive_task_id(zip_path: &str) -> Result<String> {
 }
 
 fn is_safe_task_id(task_id: &str) -> bool {
+    if task_id.len() == 1 && task_id.as_bytes()[0] == b'.' {
+        return false;
+    }
     !task_id.trim().is_empty()
         && task_id
             .chars()
@@ -346,7 +362,7 @@ pub async fn run_status(command: TaskLookupCommand) -> Result<()> {
         &command.password,
     )
     .await?;
-    let url = format!("{}/api/tasks/{}/log", command.api_base, command.task_id);
+    let url = format!("{}/api/tasks", command.api_base);
     let response = client
         .get(&url)
         .bearer_auth(token)
@@ -366,7 +382,27 @@ pub async fn run_status(command: TaskLookupCommand) -> Result<()> {
                 .unwrap_or_else(|| status.as_str())
         ));
     }
-    println!("{}", format_task_status(&body)?);
+    let task = body
+        .get("tasks")
+        .and_then(|value| value.as_array())
+        .and_then(|tasks| {
+            tasks.iter().find(|task| {
+                task.get("task_id")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|id| id == command.task_id)
+            })
+        })
+        .ok_or_else(|| anyhow!("task {} not found", command.task_id))?;
+    let task_status = serde_json::json!({
+        "success": true,
+        "task_id": task.get("task_id").cloned().unwrap_or(serde_json::Value::String(String::new())),
+        "status": task.get("status").cloned().unwrap_or(serde_json::Value::String(String::new())),
+        "status_message": task.get("status_message").cloned().unwrap_or(serde_json::Value::String(String::new())),
+        "output": task.get("output").cloned().unwrap_or(serde_json::Value::String(String::new())),
+        "wall_time_ms": task.get("wall_time_ms").cloned().unwrap_or(serde_json::Value::from(0)),
+        "peak_memory_mb": task.get("peak_memory_mb").cloned().unwrap_or(serde_json::Value::from(0)),
+    });
+    println!("{}", format_task_status(&task_status)?);
     Ok(())
 }
 
@@ -382,7 +418,7 @@ pub async fn run_result(command: TaskLookupCommand) -> Result<()> {
         &command.password,
     )
     .await?;
-    let url = format!("{}/api/tasks/{}/result", command.api_base, command.task_id);
+    let url = format!("{}/api/tasks", command.api_base);
     let response = client
         .get(&url)
         .bearer_auth(token)
@@ -402,7 +438,25 @@ pub async fn run_result(command: TaskLookupCommand) -> Result<()> {
                 .unwrap_or_else(|| status.as_str())
         ));
     }
-    println!("{}", format_task_result(&body)?);
+    let task = body
+        .get("tasks")
+        .and_then(|value| value.as_array())
+        .and_then(|tasks| {
+            tasks.iter().find(|task| {
+                task.get("task_id")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|id| id == command.task_id)
+            })
+        })
+        .ok_or_else(|| anyhow!("task {} not found", command.task_id))?;
+    let task_result = serde_json::json!({
+        "success": true,
+        "task_id": task.get("task_id").cloned().unwrap_or(serde_json::Value::String(String::new())),
+        "status": task.get("status").cloned().unwrap_or(serde_json::Value::String(String::new())),
+        "result_torrent": task.get("result_torrent").cloned().unwrap_or(serde_json::Value::String(String::new())),
+        "status_message": task.get("status_message").cloned().unwrap_or(serde_json::Value::String(String::new())),
+    });
+    println!("{}", format_task_result(&task_result)?);
     Ok(())
 }
 
@@ -416,10 +470,7 @@ async fn download_task_artifact(command: &TaskLookupCommand) -> Result<()> {
         &command.password,
     )
     .await?;
-    let url = format!(
-        "{}/api/tasks/{}/artifact/download",
-        command.api_base, command.task_id
-    );
+    let url = artifact_download_url(command);
     let response = client
         .get(&url)
         .bearer_auth(token)
@@ -437,13 +488,11 @@ async fn download_task_artifact(command: &TaskLookupCommand) -> Result<()> {
                 .unwrap_or_else(|| status.as_str())
         ));
     }
-    let filename = headers
-        .get("content-disposition")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|d| d.split("filename=").nth(1))
-        .map(|s| s.trim().trim_matches('"'))
-        .unwrap_or("artifact.bin")
-        .to_string();
+    let filename = artifact_filename_from_content_disposition(
+        headers
+            .get("content-disposition")
+            .and_then(|v| v.to_str().ok()),
+    )?;
     let bytes = response
         .bytes()
         .await
@@ -454,6 +503,118 @@ async fn download_task_artifact(command: &TaskLookupCommand) -> Result<()> {
         .map_err(|e| anyhow!("cannot write {}: {}", filename, e))?;
     println!("Downloaded {} ({} bytes)", filename, bytes.len());
     Ok(())
+}
+
+fn artifact_filename_from_content_disposition(header: Option<&str>) -> Result<String> {
+    let Some(header) = header else {
+        return Ok("artifact.bin".to_string());
+    };
+    let Some(raw_filename) = content_disposition_parameter(header, "filename") else {
+        return Ok("artifact.bin".to_string());
+    };
+    let filename = raw_filename
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(raw_filename)
+        .trim();
+    if is_safe_artifact_filename(filename) {
+        Ok(filename.to_string())
+    } else {
+        Err(anyhow!("unsafe artifact download filename"))
+    }
+}
+
+fn content_disposition_parameter<'a>(header: &'a str, parameter_name: &str) -> Option<&'a str> {
+    let mut start = 0;
+    let mut in_quote = false;
+    for (idx, ch) in header.char_indices() {
+        match ch {
+            '"' => in_quote = !in_quote,
+            ';' if !in_quote => {
+                if let Some(value) =
+                    matching_content_disposition_parameter(&header[start..idx], parameter_name)
+                {
+                    return Some(value);
+                }
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    matching_content_disposition_parameter(&header[start..], parameter_name)
+}
+
+fn matching_content_disposition_parameter<'a>(
+    part: &'a str,
+    parameter_name: &str,
+) -> Option<&'a str> {
+    let (name, value) = part.trim().split_once('=')?;
+    name.trim()
+        .eq_ignore_ascii_case(parameter_name)
+        .then_some(value.trim())
+}
+
+fn is_safe_artifact_filename(filename: &str) -> bool {
+    if filename.is_empty() || matches!(filename, "." | "..") {
+        return false;
+    }
+    if filename.chars().any(|c| {
+        c.is_control() || matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
+    }) {
+        return false;
+    }
+    let stem = filename.split('.').next().unwrap_or(filename);
+    !matches!(
+        stem.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
+}
+
+fn artifact_download_url(command: &TaskLookupCommand) -> String {
+    let mut url = format!(
+        "{}/api/tasks/{}/artifact/download",
+        command.api_base, command.task_id
+    );
+    if let Some(artifact_key) = command.artifact_key.as_deref() {
+        if !artifact_key.trim().is_empty() {
+            url.push_str("?artifact_key=");
+            url.push_str(&url_encode_query_value(artifact_key));
+        }
+    }
+    url
+}
+
+fn url_encode_query_value(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 pub fn format_task_status(body: &serde_json::Value) -> Result<String> {
@@ -604,6 +765,24 @@ mod tests {
     }
 
     #[test]
+    fn submit_rejects_unsafe_explicit_task_id() {
+        let args = vec![
+            "hivemind".to_string(),
+            "submit".to_string(),
+            "job.zip".to_string(),
+            "--task-id".to_string(),
+            "../bad".to_string(),
+            "--username".to_string(),
+            "alice".to_string(),
+            "--password".to_string(),
+            "secret".to_string(),
+        ];
+
+        let err = parse_cli_args(&args).expect_err("unsafe submit task id should be rejected");
+        assert!(err.to_string().contains("task id"));
+    }
+
+    #[test]
     fn multipart_upload_body_contains_zip_file_and_optional_fields() {
         let submit = SubmitCommand {
             api_base: "http://localhost:8082".into(),
@@ -672,6 +851,89 @@ mod tests {
         };
         assert_eq!(result.api_base, "http://localhost:8082");
         assert_eq!(result.task_id, "task-123");
+        assert_eq!(result.artifact_key, None);
+
+        let download_args = vec![
+            "hivemind".to_string(),
+            "result".to_string(),
+            "task-123".to_string(),
+            "--download".to_string(),
+            "--artifact-key".to_string(),
+            "stdout artifact".to_string(),
+            "--username".to_string(),
+            "alice".to_string(),
+            "--password".to_string(),
+            "secret".to_string(),
+        ];
+        let download = match parse_cli_args(&download_args).expect("download args should parse") {
+            CliCommand::Result(command) => command,
+            _ => panic!("expected result command"),
+        };
+        assert!(download.download);
+        assert_eq!(download.artifact_key.as_deref(), Some("stdout artifact"));
+        assert_eq!(
+            artifact_download_url(&download),
+            "http://localhost:8082/api/tasks/task-123/artifact/download?artifact_key=stdout%20artifact"
+        );
+    }
+
+    #[test]
+    fn result_download_rejects_dot_task_id() {
+        let args = vec![
+            "hivemind".to_string(),
+            "result".to_string(),
+            ".".to_string(),
+            "--download".to_string(),
+            "--username".to_string(),
+            "alice".to_string(),
+            "--password".to_string(),
+            "secret".to_string(),
+        ];
+
+        let err = parse_cli_args(&args).expect_err("dot task id should be rejected");
+        assert!(err.to_string().contains("task id"));
+    }
+
+    #[test]
+    fn artifact_download_filename_rejects_paths_from_content_disposition() {
+        assert_eq!(
+            artifact_filename_from_content_disposition(Some("attachment; filename=\"result.zip\""))
+                .expect("plain filenames should be accepted"),
+            "result.zip"
+        );
+        assert_eq!(
+            artifact_filename_from_content_disposition(None)
+                .expect("missing header should fall back to default filename"),
+            "artifact.bin"
+        );
+
+        assert!(artifact_filename_from_content_disposition(Some(
+            "attachment; filename=\"../secrets.txt\""
+        ))
+        .is_err());
+        assert!(artifact_filename_from_content_disposition(Some(
+            "attachment; filename=\"..\\secrets.txt\""
+        ))
+        .is_err());
+        assert!(artifact_filename_from_content_disposition(Some(
+            "attachment; filename=\"C:\\Users\\user\\secrets.txt\""
+        ))
+        .is_err());
+        assert!(
+            artifact_filename_from_content_disposition(Some("attachment; filename=\"..\""))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn artifact_download_filename_accepts_quoted_semicolon() {
+        assert_eq!(
+            artifact_filename_from_content_disposition(Some(
+                "attachment; filename=\"report;final.zip\""
+            ))
+            .expect("quoted semicolon filenames should parse"),
+            "report;final.zip"
+        );
     }
 
     #[test]

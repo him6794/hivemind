@@ -1,36 +1,47 @@
 #!/usr/bin/env pwsh
-# 打包所有測試任務
 
-Write-Host "正在打包測試任務..." -ForegroundColor Cyan
-Write-Host ""
+$ErrorActionPreference = "Stop"
 
+$taskRoot = $PSScriptRoot
 $tasks = @(
     "01_hello_world",
     "02_math_compute",
     "03_text_processing"
 )
 
-foreach ($task in $tasks) {
-    $sourcePath = "test_tasks/$task"
-    $zipPath = "test_tasks/$task.zip"
+Write-Host "Packaging sample test tasks..." -ForegroundColor Cyan
+Write-Host ""
 
-    if (Test-Path $sourcePath) {
-        Write-Host "打包 $task..." -ForegroundColor Yellow
-        Compress-Archive -Path "$sourcePath/*" -DestinationPath $zipPath -Force
-        Write-Host "✓ 已建立: $zipPath" -ForegroundColor Green
+$packaged = 0
+$missing = @()
+
+foreach ($task in $tasks) {
+    $sourcePath = Join-Path -Path $taskRoot -ChildPath $task
+    $zipPath = Join-Path -Path $taskRoot -ChildPath "$task.zip"
+
+    if (Test-Path -LiteralPath $sourcePath -PathType Container) {
+        Write-Host "Packaging $task..." -ForegroundColor Yellow
+        $sourceItems = Get-ChildItem -LiteralPath $sourcePath -Force
+        if ($sourceItems.Count -eq 0) {
+            Write-Host "Source directory is empty: $sourcePath" -ForegroundColor Red
+            $missing += $sourcePath
+            continue
+        }
+        Compress-Archive -LiteralPath $sourceItems.FullName -DestinationPath $zipPath -Force
+        Write-Host "Created $zipPath" -ForegroundColor Green
+        $packaged += 1
     } else {
-        Write-Host "✗ 找不到: $sourcePath" -ForegroundColor Red
+        Write-Host "Missing source directory: $sourcePath" -ForegroundColor Red
+        $missing += $sourcePath
     }
 }
 
 Write-Host ""
-Write-Host "所有測試任務已打包完成！" -ForegroundColor Green
-Write-Host ""
-Write-Host "可用的測試任務:" -ForegroundColor Yellow
-Write-Host "  1. 01_hello_world.zip      - 簡單的 Hello World 任務" -ForegroundColor White
-Write-Host "  2. 02_math_compute.zip     - 數學計算任務（質數、費波那契）" -ForegroundColor White
-Write-Host "  3. 03_text_processing.zip  - 文字處理任務" -ForegroundColor White
-Write-Host ""
-Write-Host "使用方式:" -ForegroundColor Yellow
-Write-Host "  在 Web UI 中上傳這些 ZIP 檔案即可測試" -ForegroundColor White
-Write-Host ""
+
+if ($missing.Count -gt 0) {
+    Write-Host "Sample task packaging incomplete. Missing $($missing.Count) source director$(if ($missing.Count -eq 1) { 'y' } else { 'ies' })." -ForegroundColor Red
+    exit 1
+}
+
+Write-Host "Packaged $packaged sample task archive$(if ($packaged -eq 1) { '' } else { 's' })." -ForegroundColor Green
+Write-Host "Upload the generated ZIP files through the Web UI or CLI." -ForegroundColor White

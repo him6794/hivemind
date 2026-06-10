@@ -136,11 +136,12 @@ impl WorkerRepository {
         Ok(result.rows_affected())
     }
 
-    pub async fn mark_offline_stale(&self) -> Result<u64> {
+    pub async fn mark_offline_stale(&self, stale_threshold_secs: u64) -> Result<u64> {
         let result = sqlx::query(
             "UPDATE worker_nodes SET status = 'OFFLINE', updated_at = NOW()
-             WHERE status != 'OFFLINE' AND last_heartbeat < NOW() - INTERVAL '30 seconds'",
+             WHERE status != 'OFFLINE' AND last_heartbeat < NOW() - ($1 * INTERVAL '1 second')",
         )
+        .bind(stale_threshold_secs as i64)
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected())
@@ -151,36 +152,33 @@ impl WorkerRepository {
 mod tests {
     use super::*;
     use hivemind_models::WorkerStatus;
-    use sqlx::postgres::PgPoolOptions;
 
-    async fn pool() -> Option<PgPool> {
-        let url = std::env::var("HIVEMIND_TEST_DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://hivemind:hivemind@localhost:5432/hivemind_test".into());
-        let p = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&url)
+    async fn pool(test_name: &str) -> Option<hivemind_database::postgres::IsolatedTestPool> {
+        let fixture = hivemind_database::postgres::create_isolated_test_pool(test_name)
             .await
             .ok()?;
-        hivemind_database::postgres::run_migrations(&p).await.ok()?;
-        Some(p)
+        hivemind_database::postgres::run_migrations(&fixture.pool)
+            .await
+            .ok()?;
+        Some(fixture)
     }
 
     #[tokio::test]
     async fn test_upsert_worker() {
-        let p = match pool().await {
-            Some(p) => p,
+        let fixture = match pool("worker_repository_upsert").await {
+            Some(fixture) => fixture,
             None => return,
         };
-        let repo = WorkerRepository::new(p);
-        sqlx::query("DELETE FROM worker_nodes WHERE worker_id = 'test-upsert-1'")
+        let repo = WorkerRepository::new(fixture.pool.clone());
+        sqlx::query("DELETE FROM worker_nodes WHERE worker_id = 'example-upsert-1'")
             .execute(&repo.pool)
             .await
             .ok();
 
         let worker = WorkerNode {
             id: uuid::Uuid::new_v4(),
-            worker_id: "test-upsert-1".into(),
-            username: "testuser".into(),
+            worker_id: "example-upsert-1".into(),
+            username: "example-user".into(),
             ip: "192.168.1.1".into(),
             virtual_ip: None,
             hostname: Some("test-host".into()),
@@ -213,23 +211,24 @@ mod tests {
         };
 
         let created = repo.upsert(&worker).await.unwrap();
-        assert_eq!(created.worker_id, "test-upsert-1");
+        assert_eq!(created.worker_id, "example-upsert-1");
         assert_eq!(created.cpu_cores, 4);
         assert_eq!(created.storage_total_gb, 500);
 
-        sqlx::query("DELETE FROM worker_nodes WHERE worker_id = 'test-upsert-1'")
+        sqlx::query("DELETE FROM worker_nodes WHERE worker_id = 'example-upsert-1'")
             .execute(&repo.pool)
             .await
             .ok();
+        fixture.cleanup().await.ok();
     }
 
     #[tokio::test]
     async fn test_list_include_offline_preserves_offline_workers() {
-        let p = match pool().await {
-            Some(p) => p,
+        let fixture = match pool("worker_repository_list_offline").await {
+            Some(fixture) => fixture,
             None => return,
         };
-        let repo = WorkerRepository::new(p);
+        let repo = WorkerRepository::new(fixture.pool.clone());
         sqlx::query("DELETE FROM worker_nodes WHERE worker_id LIKE 'test-list-%'")
             .execute(&repo.pool)
             .await
@@ -259,13 +258,52 @@ mod tests {
             .execute(&repo.pool)
             .await
             .ok();
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_mark_offline_stale_respects_threshold() {
+        let fixture = match pool("worker_repository_stale_offline").await {
+            Some(fixture) => fixture,
+            None => return,
+        };
+        let repo = WorkerRepository::new(fixture.pool.clone());
+        let worker_id = "test-stale-threshold";
+        sqlx::query("DELETE FROM worker_nodes WHERE worker_id = $1")
+            .bind(worker_id)
+            .execute(&repo.pool)
+            .await
+            .ok();
+
+        let worker = test_worker(worker_id, WorkerStatus::Active);
+        repo.upsert(&worker).await.unwrap();
+        sqlx::query(
+            "UPDATE worker_nodes SET last_heartbeat = NOW() - INTERVAL '2 minutes' WHERE worker_id = $1",
+        )
+        .bind(worker_id)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+
+        let changed = repo.mark_offline_stale(30).await.unwrap();
+        assert!(changed >= 1);
+
+        let stored = repo.find_by_worker_id(worker_id).await.unwrap().unwrap();
+        assert_eq!(stored.status, WorkerStatus::Offline);
+
+        sqlx::query("DELETE FROM worker_nodes WHERE worker_id = $1")
+            .bind(worker_id)
+            .execute(&repo.pool)
+            .await
+            .ok();
+        fixture.cleanup().await.ok();
     }
 
     fn test_worker(worker_id: &str, status: WorkerStatus) -> WorkerNode {
         WorkerNode {
             id: uuid::Uuid::new_v4(),
             worker_id: worker_id.into(),
-            username: "testuser".into(),
+            username: "example-user".into(),
             ip: "192.168.1.1".into(),
             virtual_ip: None,
             hostname: Some(format!("{worker_id}-host")),

@@ -1,18 +1,54 @@
 use anyhow::Result;
-use hivemind_models::{Task, TaskStatus};
+use hivemind_models::{Task, TaskStatus, WorkerNode};
 use sha1::{Digest, Sha1};
 use sqlx::PgPool;
+
+use crate::BatchTaskReport;
 
 pub struct TaskRepository {
     pub pool: PgPool,
 }
 
 const PLATFORM_FEE_BPS: i64 = 1000; // 10%
-const MIN_WORKER_REPUTATION_SCORE: i32 = 20;
+pub(crate) const MIN_WORKER_REPUTATION_SCORE: i32 = 20;
 
 impl TaskRepository {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    pub(crate) fn is_worker_trusted(score: i32, banned: bool) -> bool {
+        !banned && score >= MIN_WORKER_REPUTATION_SCORE
+    }
+
+    pub(crate) async fn trusted_workers(&self, workers: &[WorkerNode]) -> Result<Vec<WorkerNode>> {
+        if workers.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let ids: Vec<String> = workers.iter().map(|w| w.worker_id.clone()).collect();
+        let rows: Vec<(String, i32, bool)> = sqlx::query_as(
+            "SELECT worker_id, score, banned
+             FROM worker_reputation
+             WHERE worker_id = ANY($1)",
+        )
+        .bind(&ids)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let trust_map: std::collections::HashMap<String, (i32, bool)> = rows
+            .into_iter()
+            .map(|(worker_id, score, banned)| (worker_id, (score, banned)))
+            .collect();
+
+        Ok(workers
+            .iter()
+            .filter(|worker| match trust_map.get(&worker.worker_id) {
+                Some((score, banned)) => Self::is_worker_trusted(*score, *banned),
+                None => false,
+            })
+            .cloned()
+            .collect())
     }
 
     pub async fn create(&self, task: &Task) -> Result<Task> {
@@ -101,13 +137,21 @@ impl TaskRepository {
         .bind(worker_id)
         .fetch_optional(&self.pool)
         .await?;
-        if let Some((score, banned)) = trust {
-            if banned || score < MIN_WORKER_REPUTATION_SCORE {
+        match trust {
+            Some((score, banned)) if Self::is_worker_trusted(score, banned) => {}
+            Some((score, banned)) => {
                 tracing::warn!(
                     "Worker {} blocked from claiming tasks (banned={}, score={})",
                     worker_id,
                     banned,
                     score
+                );
+                return Ok(vec![]);
+            }
+            None => {
+                tracing::warn!(
+                    "Worker {} blocked from claiming tasks because reputation row is missing",
+                    worker_id
                 );
                 return Ok(vec![]);
             }
@@ -158,6 +202,37 @@ impl TaskRepository {
             .await
     }
 
+    pub async fn complete_result_for_worker(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        result_torrent: &str,
+    ) -> Result<Task> {
+        self.complete_for_worker(task_id, worker_id, Some(result_torrent), None)
+            .await
+    }
+
+    pub async fn record_output_for_worker(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        output: &str,
+    ) -> Result<Task> {
+        sqlx::query_as::<_, Task>(
+            "UPDATE tasks
+             SET output = $1, last_update = NOW()
+             WHERE task_id = $2 AND worker_id = $3
+               AND (status IN ('ASSIGNED', 'RUNNING') OR (status = 'COMPLETED' AND output IS NULL))
+             RETURNING *",
+        )
+        .bind(output)
+        .bind(task_id)
+        .bind(worker_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
     async fn complete_guarded(
         &self,
         task_id: &str,
@@ -182,8 +257,8 @@ impl TaskRepository {
         let completed = if let Some(worker_id) = worker_id {
             sqlx::query_as::<_, Task>(
                 "UPDATE tasks
-                 SET status = 'COMPLETED', result_torrent = $1, output = $2, last_update = NOW(), completed_at = NOW()
-                 WHERE task_id = $3 AND worker_id = $4
+                 SET status = 'COMPLETED', result_torrent = $1, output = COALESCE($2, output), last_update = NOW(), completed_at = NOW()
+                 WHERE task_id = $3 AND worker_id = $4 AND status IN ('ASSIGNED', 'RUNNING')
                  RETURNING *",
             )
             .bind(result_torrent)
@@ -195,7 +270,7 @@ impl TaskRepository {
         } else {
             sqlx::query_as::<_, Task>(
                 "UPDATE tasks
-                 SET status = 'COMPLETED', result_torrent = $1, output = $2, last_update = NOW(), completed_at = NOW()
+                 SET status = 'COMPLETED', result_torrent = $1, output = COALESCE($2, output), last_update = NOW(), completed_at = NOW()
                  WHERE task_id = $3
                  RETURNING *",
             )
@@ -339,8 +414,15 @@ impl TaskRepository {
 
     pub async fn cancel(&self, task_id: &str) -> Result<Task> {
         sqlx::query_as::<_, Task>(
-            "UPDATE tasks SET status = 'CANCELLED', last_update = NOW(), completed_at = NOW() WHERE task_id = $1 RETURNING *"
-        ).bind(task_id).fetch_one(&self.pool).await.map_err(Into::into)
+            "UPDATE tasks
+             SET status = 'CANCELLED', last_update = NOW(), completed_at = NOW()
+             WHERE task_id = $1 AND status IN ('PENDING', 'QUEUED', 'ASSIGNED', 'RUNNING')
+             RETURNING *",
+        )
+        .bind(task_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Into::into)
     }
 
     pub async fn mark_stale_running(&self) -> Result<u64> {
@@ -393,6 +475,75 @@ impl TaskRepository {
         sqlx::query("UPDATE tasks SET cpu_usage = $1, memory_usage = $2, gpu_usage = $3, gpu_memory_usage = $4, last_update = NOW() WHERE task_id = $5")
             .bind(cpu).bind(memory).bind(gpu).bind(gpu_mem).bind(task_id).execute(&self.pool).await?;
         Ok(())
+    }
+
+    pub async fn update_resource_usage_for_worker(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        cpu: f64,
+        memory: f64,
+        gpu: f64,
+        gpu_mem: f64,
+    ) -> Result<()> {
+        let result = sqlx::query(
+            "UPDATE tasks
+             SET cpu_usage = $1, memory_usage = $2, gpu_usage = $3, gpu_memory_usage = $4, last_update = NOW()
+             WHERE task_id = $5 AND worker_id = $6
+               AND (
+                   status IN ('ASSIGNED', 'RUNNING')
+                   OR (
+                       status = 'COMPLETED'
+                       AND cpu_usage = 0
+                       AND memory_usage = 0
+                       AND gpu_usage = 0
+                       AND gpu_memory_usage = 0
+                   )
+               )",
+        )
+        .bind(cpu)
+        .bind(memory)
+        .bind(gpu)
+        .bind(gpu_mem)
+        .bind(task_id)
+        .bind(worker_id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            anyhow::bail!("task is not assigned to this worker or is no longer active");
+        }
+        Ok(())
+    }
+
+    pub async fn record_batch_report_for_worker(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        report: BatchTaskReport<'_>,
+    ) -> Result<Task> {
+        sqlx::query_as::<_, Task>(
+            "UPDATE tasks
+             SET output = COALESCE($1, output),
+                 cpu_time_ms = $2,
+                 wall_time_ms = $3,
+                 peak_memory_mb = $4,
+                 download_bytes = $5,
+                 cache_hits = $6,
+                 last_update = NOW()
+             WHERE task_id = $7 AND worker_id = $8 AND status IN ('COMPLETED', 'FAILED')
+             RETURNING *",
+        )
+        .bind(report.output)
+        .bind(report.cpu_time_ms)
+        .bind(report.wall_time_ms)
+        .bind(report.peak_memory_mb)
+        .bind(report.download_bytes)
+        .bind(report.cache_hits)
+        .bind(task_id)
+        .bind(worker_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Into::into)
     }
 }
 
@@ -517,37 +668,63 @@ async fn insert_task_attestation_pool(
 mod tests {
     use super::*;
     use chrono::Utc;
-    use sqlx::postgres::PgPoolOptions;
+    use hivemind_database::postgres::IsolatedTestPool;
 
-    async fn pool() -> Option<PgPool> {
-        let url = std::env::var("HIVEMIND_TEST_DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://hivemind:hivemind@localhost:5432/hivemind_test".into());
-        PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&url)
+    // Ledger row shape: (kind, payer_user, provider_worker_id, provider_user, amount_cpt, status)
+    type LedgerRow = (String, String, Option<String>, Option<String>, i64, String);
+
+    async fn pool(test_name: &str) -> Option<(PgPool, IsolatedTestPool)> {
+        let fixture = hivemind_database::postgres::create_isolated_test_pool(test_name)
             .await
-            .ok()
+            .ok()?;
+        if hivemind_database::postgres::run_migrations(&fixture.pool)
+            .await
+            .is_err()
+        {
+            fixture.cleanup().await.ok();
+            return None;
+        }
+        Some((fixture.pool.clone(), fixture))
+    }
+
+    #[tokio::test]
+    async fn task_repository_pool_uses_isolated_schema() {
+        let (p, fixture) = match pool("task_repository_pool_uses_isolated_schema").await {
+            Some(parts) => parts,
+            None => return,
+        };
+
+        let schema: String = sqlx::query_scalar("SELECT current_schema()")
+            .fetch_one(&p)
+            .await
+            .unwrap();
+
+        assert!(
+            schema.starts_with("hm_test_"),
+            "task repository DB tests must use an isolated schema, got {schema}"
+        );
+        fixture.cleanup().await.ok();
     }
 
     #[tokio::test]
     async fn test_create_and_find_task() {
-        let p = match pool().await {
-            Some(p) => p,
+        let (p, fixture) = match pool("task_repository_create_and_find_task").await {
+            Some(parts) => parts,
             None => return,
         };
         let repo = TaskRepository::new(p);
 
         let task = Task {
             id: uuid::Uuid::new_v4(),
-            task_id: "test-task-create-1".into(),
-            owner: "testuser".into(),
+            task_id: "example-task-create-1".into(),
+            owner: "example-user".into(),
             worker_id: None,
             worker_ip: None,
             status: TaskStatus::Pending,
             status_message: Some("test task".into()),
             output: None,
             result_torrent: None,
-            torrent_source: Some("fake-btih".into()),
+            torrent_source: Some("example-btih".into()),
             expected_btih: None,
             cpu_usage: 0.0,
             memory_usage: 0.0,
@@ -579,26 +756,26 @@ mod tests {
         };
 
         let created = repo.create(&task).await.unwrap();
-        assert_eq!(created.task_id, "test-task-create-1");
+        assert_eq!(created.task_id, "example-task-create-1");
         assert_eq!(created.status, TaskStatus::Pending);
         assert_eq!(created.req_storage_gb, 10);
 
-        let found = repo.find_by_task_id("test-task-create-1").await.unwrap();
+        let found = repo.find_by_task_id("example-task-create-1").await.unwrap();
         assert!(found.is_some());
 
-        sqlx::query("DELETE FROM tasks WHERE task_id = 'test-task-create-1'")
+        sqlx::query("DELETE FROM tasks WHERE task_id = 'example-task-create-1'")
             .execute(&repo.pool)
             .await
             .ok();
+        fixture.cleanup().await.ok();
     }
 
     #[tokio::test]
     async fn test_complete_settles_billing_when_balance_is_sufficient() {
-        let p = match pool().await {
-            Some(p) => p,
+        let (p, fixture) = match pool("task_repository_complete_settles_billing").await {
+            Some(parts) => parts,
             None => return,
         };
-        hivemind_database::postgres::run_migrations(&p).await.ok();
         let repo = TaskRepository::new(p);
         let unique = uuid::Uuid::new_v4().to_string();
         let username = format!("billing-ok-user-{unique}");
@@ -637,15 +814,14 @@ mod tests {
             .unwrap();
         assert_eq!(balance, 75);
 
-        let rows: Vec<(String, String, Option<String>, Option<String>, i64, String)> =
-            sqlx::query_as(
-                "SELECT kind, payer_user, provider_worker_id, provider_user, amount_cpt, status
+        let rows: Vec<LedgerRow> = sqlx::query_as(
+            "SELECT kind, payer_user, provider_worker_id, provider_user, amount_cpt, status
              FROM ledger_entries WHERE task_id = $1 ORDER BY kind",
-            )
-            .bind(&task_id)
-            .fetch_all(&repo.pool)
-            .await
-            .unwrap();
+        )
+        .bind(&task_id)
+        .fetch_all(&repo.pool)
+        .await
+        .unwrap();
         assert_eq!(
             rows,
             vec![
@@ -696,15 +872,15 @@ mod tests {
         assert_eq!(attestation_count, 1);
 
         cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
+        fixture.cleanup().await.ok();
     }
 
     #[tokio::test]
     async fn test_assign_to_worker_does_not_overwrite_existing_assignment() {
-        let p = match pool().await {
-            Some(p) => p,
+        let (p, fixture) = match pool("task_repository_assign_no_overwrite").await {
+            Some(parts) => parts,
             None => return,
         };
-        hivemind_database::postgres::run_migrations(&p).await.ok();
         let repo = TaskRepository::new(p);
         let unique = uuid::Uuid::new_v4().to_string();
         let username = format!("assign-owner-{unique}");
@@ -746,17 +922,43 @@ mod tests {
             .execute(&repo.pool)
             .await
             .ok();
+        fixture.cleanup().await.ok();
     }
 
     #[tokio::test]
     async fn test_claim_pending_for_worker_does_not_overlap_between_repositories() {
-        let url = std::env::var("HIVEMIND_TEST_DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://hivemind:hivemind@localhost:5432/hivemind_test".into());
-        let p = match PgPoolOptions::new().max_connections(5).connect(&url).await {
-            Ok(pool) => pool,
+        let fixture = match hivemind_database::postgres::create_isolated_test_pool(
+            "task_repository_claim_overlap",
+        )
+        .await
+        {
+            Ok(fixture) => fixture,
             Err(_) => return,
         };
+        let p = fixture.pool.clone();
         hivemind_database::postgres::run_migrations(&p).await.ok();
+        sqlx::query("DELETE FROM tasks WHERE task_id LIKE 'claim-task-%'")
+            .execute(&p)
+            .await
+            .ok();
+        sqlx::query(
+            "DELETE FROM worker_reputation
+             WHERE worker_id LIKE 'claim-worker-a-%' OR worker_id LIKE 'claim-worker-b-%'",
+        )
+        .execute(&p)
+        .await
+        .ok();
+        sqlx::query(
+            "DELETE FROM worker_nodes
+             WHERE worker_id LIKE 'claim-worker-a-%' OR worker_id LIKE 'claim-worker-b-%'",
+        )
+        .execute(&p)
+        .await
+        .ok();
+        sqlx::query("DELETE FROM users WHERE username LIKE 'claim-owner-%'")
+            .execute(&p)
+            .await
+            .ok();
         let repo_a = TaskRepository::new(p.clone());
         let repo_b = TaskRepository::new(p.clone());
         let unique = uuid::Uuid::new_v4().to_string();
@@ -773,18 +975,28 @@ mod tests {
         .unwrap();
         insert_worker(&p, &worker_a, "claim-provider-a").await;
         insert_worker(&p, &worker_b, "claim-provider-b").await;
+        sqlx::query(
+            "INSERT INTO worker_reputation (worker_id, successful_tasks, failed_tasks, score, banned)
+             VALUES ($1, 10, 0, 100, false), ($2, 10, 0, 100, false)",
+        )
+        .bind(&worker_a)
+        .bind(&worker_b)
+        .execute(&p)
+        .await
+        .unwrap();
 
         let mut task_ids = Vec::new();
         for index in 0..4 {
             let task_id = format!("claim-task-{index}-{unique}");
             task_ids.push(task_id.clone());
-            let task = make_task(&task_id, &username);
+            let mut task = make_task(&task_id, &username);
+            task.priority = 10_000 - index;
             repo_a.create(&task).await.unwrap();
         }
 
         let (claimed_a, claimed_b) = tokio::join!(
-            repo_a.claim_pending_for_worker(&worker_a, "10.0.0.31", 3),
-            repo_b.claim_pending_for_worker(&worker_b, "10.0.0.32", 3),
+            repo_a.claim_pending_for_worker(&worker_a, "10.0.0.31", 2),
+            repo_b.claim_pending_for_worker(&worker_b, "10.0.0.32", 2),
         );
         let claimed_a = claimed_a.unwrap();
         let claimed_b = claimed_b.unwrap();
@@ -824,20 +1036,26 @@ mod tests {
             .execute(&p)
             .await
             .ok();
+        sqlx::query("DELETE FROM worker_reputation WHERE worker_id IN ($1, $2)")
+            .bind(&worker_a)
+            .bind(&worker_b)
+            .execute(&p)
+            .await
+            .ok();
         sqlx::query("DELETE FROM users WHERE username = $1")
             .bind(&username)
             .execute(&p)
             .await
             .ok();
+        fixture.cleanup().await.ok();
     }
 
     #[tokio::test]
     async fn test_claim_pending_for_worker_blocks_banned_worker() {
-        let p = match pool().await {
-            Some(p) => p,
+        let (p, fixture) = match pool("task_repository_claim_blocks_banned_worker").await {
+            Some(parts) => parts,
             None => return,
         };
-        hivemind_database::postgres::run_migrations(&p).await.ok();
         let repo = TaskRepository::new(p.clone());
         let unique = uuid::Uuid::new_v4().to_string();
         let username = format!("claim-ban-owner-{unique}");
@@ -895,15 +1113,15 @@ mod tests {
             .execute(&p)
             .await
             .ok();
+        fixture.cleanup().await.ok();
     }
 
     #[tokio::test]
     async fn test_claim_pending_for_worker_blocks_low_score_worker() {
-        let p = match pool().await {
-            Some(p) => p,
+        let (p, fixture) = match pool("task_repository_claim_blocks_low_score_worker").await {
+            Some(parts) => parts,
             None => return,
         };
-        hivemind_database::postgres::run_migrations(&p).await.ok();
         let repo = TaskRepository::new(p.clone());
         let unique = uuid::Uuid::new_v4().to_string();
         let username = format!("claim-score-owner-{unique}");
@@ -961,15 +1179,99 @@ mod tests {
             .execute(&p)
             .await
             .ok();
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_trusted_workers_excludes_missing_reputation_rows() {
+        let (p, fixture) = match pool("task_repository_trusted_workers_missing_reputation").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p.clone());
+        let unique = uuid::Uuid::new_v4().to_string();
+        let trusted_worker = format!("trust-present-worker-{unique}");
+        let missing_worker = format!("trust-missing-worker-{unique}");
+
+        insert_worker(&p, &trusted_worker, "trust-present-provider").await;
+        insert_worker(&p, &missing_worker, "trust-missing-provider").await;
+        sqlx::query(
+            "INSERT INTO worker_reputation (worker_id, successful_tasks, failed_tasks, score, banned)
+             VALUES ($1, 10, 0, 100, false)",
+        )
+        .bind(&trusted_worker)
+        .execute(&p)
+        .await
+        .unwrap();
+
+        let workers = vec![
+            make_worker_node(&trusted_worker, "10.0.0.41"),
+            make_worker_node(&missing_worker, "10.0.0.42"),
+        ];
+        let trusted = repo.trusted_workers(&workers).await.unwrap();
+
+        assert_eq!(trusted.len(), 1);
+        assert_eq!(trusted[0].worker_id, trusted_worker);
+
+        sqlx::query("DELETE FROM worker_reputation WHERE worker_id IN ($1, $2)")
+            .bind(&trusted_worker)
+            .bind(&missing_worker)
+            .execute(&p)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM worker_nodes WHERE worker_id IN ($1, $2)")
+            .bind(&trusted_worker)
+            .bind(&missing_worker)
+            .execute(&p)
+            .await
+            .ok();
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_claim_pending_for_worker_blocks_missing_reputation_row() {
+        let (p, fixture) = match pool("task_repository_claim_blocks_missing_reputation").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p.clone());
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("claim-missing-rep-owner-{unique}");
+        let worker_id = format!("claim-missing-rep-worker-{unique}");
+        let task_id = format!("claim-missing-rep-task-{unique}");
+
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        )
+        .bind(&username)
+        .execute(&p)
+        .await
+        .unwrap();
+        insert_worker(&p, &worker_id, "claim-missing-rep-provider").await;
+
+        let task = make_task(&task_id, &username);
+        repo.create(&task).await.unwrap();
+
+        let claimed = repo
+            .claim_pending_for_worker(&worker_id, "10.0.0.43", 5)
+            .await
+            .unwrap();
+        assert!(claimed.is_empty());
+
+        let stored = repo.find_by_task_id(&task_id).await.unwrap().unwrap();
+        assert_eq!(stored.status, TaskStatus::Pending);
+        assert!(stored.worker_id.is_none());
+
+        cleanup_task_case(&p, &task_id, &username, Some(&worker_id)).await;
+        fixture.cleanup().await.ok();
     }
 
     #[tokio::test]
     async fn test_complete_for_worker_rejects_stale_worker_after_redispatch() {
-        let p = match pool().await {
-            Some(p) => p,
+        let (p, fixture) = match pool("task_repository_complete_rejects_stale_worker").await {
+            Some(parts) => parts,
             None => return,
         };
-        hivemind_database::postgres::run_migrations(&p).await.ok();
         let repo = TaskRepository::new(p);
         let unique = uuid::Uuid::new_v4().to_string();
         let username = format!("stale-complete-owner-{unique}");
@@ -1021,15 +1323,330 @@ mod tests {
             .execute(&repo.pool)
             .await
             .ok();
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_complete_for_worker_does_not_overwrite_cancelled_task() {
+        let (p, fixture) = match pool("task_repository_complete_does_not_overwrite_cancelled").await
+        {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("cancel-complete-owner-{unique}");
+        let worker_id = format!("cancel-complete-worker-{unique}");
+        let task_id = format!("cancel-complete-task-{unique}");
+
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        )
+        .bind(&username)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        insert_worker(&repo.pool, &worker_id, "cancel-complete-provider").await;
+
+        let task = make_task(&task_id, &username);
+        repo.create(&task).await.unwrap();
+        repo.assign_to_worker(&task_id, &worker_id, "10.0.0.44")
+            .await
+            .unwrap();
+        repo.cancel(&task_id).await.unwrap();
+
+        let late_complete = repo
+            .complete_for_worker(
+                &task_id,
+                &worker_id,
+                Some("late-result"),
+                Some("late output"),
+            )
+            .await;
+        assert!(late_complete.is_err());
+
+        let stored = repo.find_by_task_id(&task_id).await.unwrap().unwrap();
+        assert_eq!(stored.status, TaskStatus::Cancelled);
+        assert_eq!(stored.result_torrent, None);
+        assert_eq!(stored.output, None);
+
+        cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_report_output_for_worker_rejects_stale_worker_after_redispatch() {
+        let (p, fixture) = match pool("task_repository_report_output_rejects_stale_worker").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("report-output-owner-{unique}");
+        let stale_worker = format!("report-output-old-{unique}");
+        let current_worker = format!("report-output-current-{unique}");
+        let task_id = format!("report-output-task-{unique}");
+
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        )
+        .bind(&username)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        insert_worker(&repo.pool, &stale_worker, "report-output-provider-old").await;
+        insert_worker(
+            &repo.pool,
+            &current_worker,
+            "report-output-provider-current",
+        )
+        .await;
+
+        let task = make_task(&task_id, &username);
+        repo.create(&task).await.unwrap();
+        repo.assign_to_worker(&task_id, &stale_worker, "10.0.0.47")
+            .await
+            .unwrap();
+        repo.reset_to_pending_for_worker(&task_id, &stale_worker)
+            .await
+            .unwrap();
+        repo.assign_to_worker(&task_id, &current_worker, "10.0.0.48")
+            .await
+            .unwrap();
+
+        let stale_output = repo
+            .record_output_for_worker(&task_id, &stale_worker, "old worker output")
+            .await;
+        assert!(stale_output.is_err());
+
+        let stored = repo.find_by_task_id(&task_id).await.unwrap().unwrap();
+        assert_eq!(stored.status, TaskStatus::Assigned);
+        assert_eq!(stored.worker_id.as_deref(), Some(current_worker.as_str()));
+        assert_eq!(stored.output, None);
+
+        cleanup_task_case(&repo.pool, &task_id, &username, Some(&stale_worker)).await;
+        sqlx::query("DELETE FROM worker_nodes WHERE worker_id = $1")
+            .bind(&current_worker)
+            .execute(&repo.pool)
+            .await
+            .ok();
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_update_resource_usage_for_worker_rejects_stale_worker_after_redispatch() {
+        let (p, fixture) = match pool("task_repository_usage_rejects_stale_worker").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("report-usage-owner-{unique}");
+        let stale_worker = format!("report-usage-old-{unique}");
+        let current_worker = format!("report-usage-current-{unique}");
+        let task_id = format!("report-usage-task-{unique}");
+
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        )
+        .bind(&username)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        insert_worker(&repo.pool, &stale_worker, "report-usage-provider-old").await;
+        insert_worker(&repo.pool, &current_worker, "report-usage-provider-current").await;
+
+        let task = make_task(&task_id, &username);
+        repo.create(&task).await.unwrap();
+        repo.assign_to_worker(&task_id, &stale_worker, "10.0.0.49")
+            .await
+            .unwrap();
+        repo.reset_to_pending_for_worker(&task_id, &stale_worker)
+            .await
+            .unwrap();
+        repo.assign_to_worker(&task_id, &current_worker, "10.0.0.50")
+            .await
+            .unwrap();
+
+        let stale_usage = repo
+            .update_resource_usage_for_worker(&task_id, &stale_worker, 11.0, 22.0, 33.0, 44.0)
+            .await;
+        assert!(stale_usage.is_err());
+
+        let stored = repo.find_by_task_id(&task_id).await.unwrap().unwrap();
+        assert_eq!(stored.status, TaskStatus::Assigned);
+        assert_eq!(stored.worker_id.as_deref(), Some(current_worker.as_str()));
+        assert_eq!(stored.cpu_usage, 0.0);
+        assert_eq!(stored.memory_usage, 0.0);
+        assert_eq!(stored.gpu_usage, 0.0);
+        assert_eq!(stored.gpu_memory_usage, 0.0);
+
+        cleanup_task_case(&repo.pool, &task_id, &username, Some(&stale_worker)).await;
+        sqlx::query("DELETE FROM worker_nodes WHERE worker_id = $1")
+            .bind(&current_worker)
+            .execute(&repo.pool)
+            .await
+            .ok();
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_complete_result_for_worker_preserves_reported_output() {
+        let (p, fixture) = match pool("task_repository_result_preserves_output").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("report-result-owner-{unique}");
+        let worker_id = format!("report-result-worker-{unique}");
+        let task_id = format!("report-result-task-{unique}");
+
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        )
+        .bind(&username)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        insert_worker(&repo.pool, &worker_id, "report-result-provider").await;
+
+        let task = make_task(&task_id, &username);
+        repo.create(&task).await.unwrap();
+        repo.assign_to_worker(&task_id, &worker_id, "10.0.0.51")
+            .await
+            .unwrap();
+        repo.record_output_for_worker(&task_id, &worker_id, "stdout before result")
+            .await
+            .unwrap();
+
+        let completed = repo
+            .complete_result_for_worker(&task_id, &worker_id, "btih:reported-result")
+            .await
+            .unwrap();
+
+        assert_eq!(completed.status, TaskStatus::Completed);
+        assert_eq!(completed.output.as_deref(), Some("stdout before result"));
+        assert_eq!(
+            completed.result_torrent.as_deref(),
+            Some("btih:reported-result")
+        );
+
+        cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_record_batch_report_for_worker_rejects_wrong_worker() {
+        let (p, fixture) = match pool("task_repository_batch_report_rejects_wrong_worker").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("batch-report-owner-{unique}");
+        let worker_id = format!("batch-report-worker-{unique}");
+        let wrong_worker = format!("batch-report-wrong-worker-{unique}");
+        let task_id = format!("batch-report-task-{unique}");
+
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        )
+        .bind(&username)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        insert_worker(&repo.pool, &worker_id, "batch-report-provider").await;
+        insert_worker(&repo.pool, &wrong_worker, "batch-report-provider").await;
+
+        let task = make_task(&task_id, &username);
+        repo.create(&task).await.unwrap();
+        repo.assign_to_worker(&task_id, &worker_id, "10.0.0.52")
+            .await
+            .unwrap();
+        repo.complete_for_worker(&task_id, &worker_id, Some("result"), None)
+            .await
+            .unwrap();
+
+        let wrong_report = repo
+            .record_batch_report_for_worker(
+                &task_id,
+                &wrong_worker,
+                BatchTaskReport {
+                    output: Some("wrong worker log"),
+                    cpu_time_ms: 10,
+                    wall_time_ms: 20,
+                    peak_memory_mb: 30,
+                    download_bytes: 40,
+                    cache_hits: 50,
+                },
+            )
+            .await;
+        assert!(wrong_report.is_err());
+
+        let stored = repo.find_by_task_id(&task_id).await.unwrap().unwrap();
+        assert_eq!(stored.worker_id.as_deref(), Some(worker_id.as_str()));
+        assert_eq!(stored.output, None);
+        assert_eq!(stored.cpu_time_ms, 0);
+        assert_eq!(stored.cache_hits, 0);
+
+        cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
+        sqlx::query("DELETE FROM worker_nodes WHERE worker_id = $1")
+            .bind(&wrong_worker)
+            .execute(&repo.pool)
+            .await
+            .ok();
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_cancel_does_not_overwrite_completed_task() {
+        let (p, fixture) = match pool("task_repository_cancel_does_not_overwrite_completed").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("cancel-completed-owner-{unique}");
+        let worker_id = format!("cancel-completed-worker-{unique}");
+        let task_id = format!("cancel-completed-task-{unique}");
+
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        )
+        .bind(&username)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        insert_worker(&repo.pool, &worker_id, "cancel-completed-provider").await;
+
+        let task = make_task(&task_id, &username);
+        repo.create(&task).await.unwrap();
+        repo.assign_to_worker(&task_id, &worker_id, "10.0.0.45")
+            .await
+            .unwrap();
+        repo.complete_for_worker(&task_id, &worker_id, Some("result"), Some("output"))
+            .await
+            .unwrap();
+
+        let late_cancel = repo.cancel(&task_id).await;
+        assert!(late_cancel.is_err());
+
+        let stored = repo.find_by_task_id(&task_id).await.unwrap().unwrap();
+        assert_eq!(stored.status, TaskStatus::Completed);
+        assert_eq!(stored.result_torrent.as_deref(), Some("result"));
+        assert_eq!(stored.output.as_deref(), Some("output"));
+
+        cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
+        fixture.cleanup().await.ok();
     }
 
     #[tokio::test]
     async fn test_fail_for_worker_rejects_stale_worker_after_redispatch() {
-        let p = match pool().await {
-            Some(p) => p,
+        let (p, fixture) = match pool("task_repository_fail_rejects_stale_worker").await {
+            Some(parts) => parts,
             None => return,
         };
-        hivemind_database::postgres::run_migrations(&p).await.ok();
         let repo = TaskRepository::new(p);
         let unique = uuid::Uuid::new_v4().to_string();
         let username = format!("stale-fail-owner-{unique}");
@@ -1075,15 +1692,15 @@ mod tests {
             .execute(&repo.pool)
             .await
             .ok();
+        fixture.cleanup().await.ok();
     }
 
     #[tokio::test]
     async fn test_reset_to_pending_for_worker_rejects_stale_worker_after_redispatch() {
-        let p = match pool().await {
-            Some(p) => p,
+        let (p, fixture) = match pool("task_repository_reset_rejects_stale_worker").await {
+            Some(parts) => parts,
             None => return,
         };
-        hivemind_database::postgres::run_migrations(&p).await.ok();
         let repo = TaskRepository::new(p);
         let unique = uuid::Uuid::new_v4().to_string();
         let username = format!("stale-reset-owner-{unique}");
@@ -1128,15 +1745,15 @@ mod tests {
             .execute(&repo.pool)
             .await
             .ok();
+        fixture.cleanup().await.ok();
     }
 
     #[tokio::test]
     async fn test_complete_is_idempotent_for_settled_billing_and_ledger() {
-        let p = match pool().await {
-            Some(p) => p,
+        let (p, fixture) = match pool("task_repository_complete_idempotent_billing").await {
+            Some(parts) => parts,
             None => return,
         };
-        hivemind_database::postgres::run_migrations(&p).await.ok();
         let repo = TaskRepository::new(p);
         let unique = uuid::Uuid::new_v4().to_string();
         let username = format!("billing-repeat-user-{unique}");
@@ -1188,15 +1805,15 @@ mod tests {
         assert_eq!(ledger_count, 3);
 
         cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
+        fixture.cleanup().await.ok();
     }
 
     #[tokio::test]
     async fn test_complete_does_not_fail_task_when_billing_balance_is_insufficient() {
-        let p = match pool().await {
-            Some(p) => p,
+        let (p, fixture) = match pool("task_repository_complete_insufficient_balance").await {
+            Some(parts) => parts,
             None => return,
         };
-        hivemind_database::postgres::run_migrations(&p).await.ok();
         let repo = TaskRepository::new(p);
         let unique = uuid::Uuid::new_v4().to_string();
         let username = format!("billing-zero-user-{unique}");
@@ -1255,15 +1872,15 @@ mod tests {
         assert_eq!(failure_rep, (1, 0, 101));
 
         cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
+        fixture.cleanup().await.ok();
     }
 
     #[tokio::test]
     async fn test_deterministic_complete_requires_result_reference() {
-        let p = match pool().await {
-            Some(p) => p,
+        let (p, fixture) = match pool("task_repository_deterministic_requires_result").await {
+            Some(parts) => parts,
             None => return,
         };
-        hivemind_database::postgres::run_migrations(&p).await.ok();
         let repo = TaskRepository::new(p);
         let unique = uuid::Uuid::new_v4().to_string();
         let username = format!("verify-missing-owner-{unique}");
@@ -1296,15 +1913,15 @@ mod tests {
         assert!(stored.result_torrent.is_none());
 
         cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
+        fixture.cleanup().await.ok();
     }
 
     #[tokio::test]
     async fn test_deterministic_complete_records_checksum_proof() {
-        let p = match pool().await {
-            Some(p) => p,
+        let (p, fixture) = match pool("task_repository_deterministic_checksum_proof").await {
+            Some(parts) => parts,
             None => return,
         };
-        hivemind_database::postgres::run_migrations(&p).await.ok();
         let repo = TaskRepository::new(p);
         let unique = uuid::Uuid::new_v4().to_string();
         let username = format!("verify-proof-owner-{unique}");
@@ -1350,6 +1967,7 @@ mod tests {
         assert_eq!(proof_count, 1);
 
         cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
+        fixture.cleanup().await.ok();
     }
 
     async fn insert_worker(pool: &PgPool, worker_id: &str, username: &str) {
@@ -1362,6 +1980,43 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    fn make_worker_node(worker_id: &str, ip: &str) -> WorkerNode {
+        WorkerNode {
+            id: uuid::Uuid::new_v4(),
+            worker_id: worker_id.into(),
+            username: "test".into(),
+            ip: ip.into(),
+            virtual_ip: None,
+            hostname: None,
+            cpu_cores: 4,
+            memory_gb: 16,
+            cpu_score: 400,
+            gpu_score: 0,
+            gpu_memory_gb: 0,
+            gpu_name: None,
+            vram_mb: 0,
+            storage_total_gb: 500,
+            storage_available_gb: 200,
+            provider_enabled: true,
+            cpu_cores_limit: 0,
+            memory_gb_limit: 0,
+            gpu_memory_gb_limit: 0,
+            storage_gb_limit: 0,
+            min_cpt_per_hour: 0,
+            location: "local".into(),
+            status: hivemind_models::WorkerStatus::Idle,
+            cpu_usage: 0.0,
+            memory_usage: 0.0,
+            gpu_usage: 0.0,
+            gpu_memory_usage: 0.0,
+            available_memory_gb: 16,
+            queue_capacity: 4,
+            last_heartbeat: Utc::now(),
+            registered_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
     }
 
     async fn cleanup_task_case(
@@ -1415,7 +2070,7 @@ mod tests {
             status_message: Some("test task".into()),
             output: None,
             result_torrent: None,
-            torrent_source: Some("fake-btih".into()),
+            torrent_source: Some("example-btih".into()),
             expected_btih: None,
             cpu_usage: 0.0,
             memory_usage: 0.0,

@@ -40,6 +40,11 @@ pub struct TaskSubmitRateLimiter {
     windows: HashMap<String, RateWindow>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct ArtifactDownloadQuery {
+    pub artifact_key: Option<String>,
+}
+
 impl TaskSubmitRateLimiter {
     pub fn new() -> Self {
         Self::default()
@@ -88,6 +93,18 @@ pub struct LoginResponse {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct RegisterBody {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RegisterResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct CreateTaskBody {
     pub task_id: String,
     pub torrent: Option<String>,
@@ -126,12 +143,16 @@ pub struct QuoteResponse {
 #[derive(Debug, Deserialize)]
 pub struct RegisterWorkerBody {
     pub username: Option<String>,
+    pub worker_id: Option<String>,
     pub ip: String,
     pub cpu_cores: i32,
     pub memory_gb: i32,
     pub cpu_score: i32,
     pub gpu_score: Option<i32>,
     pub gpu_memory_gb: Option<i32>,
+    pub gpu_name: Option<String>,
+    pub storage_total_gb: Option<i64>,
+    pub storage_available_gb: Option<i64>,
     pub location: Option<String>,
 }
 
@@ -177,12 +198,55 @@ fn budget_guard_response(quoted_cpt: i64, max_cpt: i64) -> (StatusCode, Json<Tas
     )
 }
 
+fn validate_task_resources(body: &CreateTaskBody) -> Result<(), &'static str> {
+    if body.cpu_score.unwrap_or(0) < 0
+        || body.gpu_score.unwrap_or(0) < 0
+        || body.memory_gb.unwrap_or(0) < 0
+        || body.gpu_memory_gb.unwrap_or(0) < 0
+        || body.storage_gb.unwrap_or(0) < 0
+    {
+        return Err("task resource values must be non-negative");
+    }
+    if body.host_count.unwrap_or(1) < 1 {
+        return Err("host_count must be at least 1");
+    }
+    if body.max_cpt.unwrap_or(0) < 0 {
+        return Err("max_cpt must be non-negative");
+    }
+    Ok(())
+}
+
 fn is_safe_task_id(task_id: &str) -> bool {
+    if task_id.len() == 1 && task_id.as_bytes()[0] == b'.' {
+        return false;
+    }
     !task_id.trim().is_empty()
         && task_id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
         && !task_id.contains("..")
+}
+
+fn normalized_task_id(task_id: &str) -> Option<String> {
+    let task_id = task_id.trim();
+    if is_safe_task_id(task_id) {
+        Some(task_id.to_string())
+    } else {
+        None
+    }
+}
+
+fn is_safe_worker_id(worker_id: &str) -> bool {
+    is_safe_task_id(worker_id)
+}
+
+fn normalized_worker_id(worker_id: &str) -> Option<String> {
+    let worker_id = worker_id.trim();
+    if is_safe_worker_id(worker_id) {
+        Some(worker_id.to_string())
+    } else {
+        None
+    }
 }
 
 fn task_submit_limit_per_minute() -> i64 {
@@ -610,6 +674,30 @@ impl From<hivemind_proto::WorkerInfo> for WorkerInfo {
 
 // Remove old From<hivemind_models::WorkerNode> impl - not needed
 
+fn worker_registration_resources(body: &RegisterWorkerBody) -> ProtoResourceSpec {
+    let gpu_score = body.gpu_score.unwrap_or(0);
+    let gpu_memory_gb = body.gpu_memory_gb.unwrap_or(0);
+    let gpu_name = body
+        .gpu_name
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    let has_gpu = gpu_score > 0 || gpu_memory_gb > 0 || !gpu_name.is_empty();
+
+    ProtoResourceSpec {
+        cpu_cores: body.cpu_cores,
+        memory_mb: i64::from(body.memory_gb) * 1024,
+        gpu_count: if has_gpu { 1 } else { 0 },
+        gpu_name,
+        vram_mb: i64::from(gpu_memory_gb) * 1024,
+        cpu_score: body.cpu_score,
+        gpu_score,
+        storage_total_gb: body.storage_total_gb.unwrap_or(0),
+        storage_available_gb: body.storage_available_gb.unwrap_or(0),
+    }
+}
+
 // ---- Handlers ----
 
 /// GET /health
@@ -651,12 +739,84 @@ pub async fn login(
     }
 }
 
+/// POST /api/register
+pub async fn register(
+    State(state): State<AppState>,
+    Json(body): Json<RegisterBody>,
+) -> (StatusCode, Json<RegisterResponse>) {
+    let username = body.username.trim();
+    if username.len() < 3 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(RegisterResponse {
+                success: false,
+                message: "Username must be at least 3 characters".into(),
+            }),
+        );
+    }
+    if body.password.len() < 8 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(RegisterResponse {
+                success: false,
+                message: "Password must be at least 8 characters".into(),
+            }),
+        );
+    }
+
+    let mut grpc = state.grpc_client.lock().await;
+    match grpc.register_user(username, &body.password).await {
+        Ok(resp) if resp.success => (
+            StatusCode::CREATED,
+            Json(RegisterResponse {
+                success: true,
+                message: resp.status_message,
+            }),
+        ),
+        Ok(resp) => (
+            StatusCode::BAD_REQUEST,
+            Json(RegisterResponse {
+                success: false,
+                message: resp.status_message,
+            }),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(RegisterResponse {
+                success: false,
+                message: format!("gRPC error: {}", e),
+            }),
+        ),
+    }
+}
+
 /// POST /api/tasks/quote
 pub async fn quote_task(
     State(state): State<AppState>,
     AuthUser { token, .. }: AuthUser,
     Json(body): Json<CreateTaskBody>,
 ) -> (StatusCode, Json<QuoteResponse>) {
+    if validate_task_resources(&body).is_err() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(QuoteResponse {
+                success: false,
+                quoted_cpt: 0,
+                currency: String::from("CPT"),
+                breakdown: PricingBreakdown {
+                    base: 0,
+                    cpu: 0,
+                    gpu: 0,
+                    memory: 0,
+                    gpu_memory: 0,
+                    storage: 0,
+                    host_count: 0,
+                    per_host_total: 0,
+                    total: 0,
+                },
+            }),
+        );
+    }
     let mut grpc = state.grpc_client.lock().await;
     match grpc
         .quote_task(
@@ -682,7 +842,7 @@ pub async fn quote_task(
                 }),
             )
         }
-        Err(e) => (
+        Err(_e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(QuoteResponse {
                 success: false,
@@ -725,6 +885,9 @@ async fn create_task_from_body(
 ) -> (StatusCode, Json<TaskResponse>) {
     if !is_safe_task_id(&body.task_id) {
         return bad_task_response("task_id is required and must be a safe file name");
+    }
+    if let Err(message) = validate_task_resources(&body) {
+        return bad_task_response(message);
     }
     let mut grpc = state.grpc_client.lock().await;
     let qr = grpc
@@ -807,7 +970,7 @@ async fn create_task_from_body(
                 }),
             )
         }
-        Err(_e) => (
+        Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(TaskResponse {
                 success: false,
@@ -1021,21 +1184,28 @@ pub async fn register_worker(
             );
         }
     }
-    let r = ProtoResourceSpec {
-        cpu_cores: body.cpu_cores,
-        memory_mb: body.memory_gb as i64 * 1024,
-        gpu_count: 0,
-        gpu_name: String::new(),
-        vram_mb: body.gpu_memory_gb.unwrap_or(0) as i64 * 1024,
-        cpu_score: body.cpu_score,
-        gpu_score: body.gpu_score.unwrap_or(0),
-        storage_total_gb: 0,
-        storage_available_gb: 0,
-    };
+    let r = worker_registration_resources(&body);
+    let worker_id = body
+        .worker_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&owner)
+        .to_string();
+    if !is_safe_worker_id(&worker_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(StatusResponse {
+                success: false,
+                status_message: "Invalid worker_id".into(),
+            }),
+        );
+    }
     let mut grpc = state.grpc_client.lock().await;
     match grpc
         .register_worker_node(
             &owner,
+            &worker_id,
             &body.ip,
             r,
             &body.location.unwrap_or_else(|| "local".into()),
@@ -1049,7 +1219,7 @@ pub async fn register_worker(
                 status_message: resp.status_message,
             }),
         ),
-        Err(_e) => (
+        Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(StatusResponse {
                 success: false,
@@ -1065,8 +1235,18 @@ pub async fn remove_worker(
     AuthUser { token, .. }: AuthUser,
     Json(body): Json<RemoveWorkerBody>,
 ) -> (StatusCode, Json<StatusResponse>) {
+    let worker_id = body.worker_id.trim();
+    if !is_safe_worker_id(worker_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(StatusResponse {
+                success: false,
+                status_message: "Invalid worker_id".into(),
+            }),
+        );
+    }
     let mut grpc = state.grpc_client.lock().await;
-    match grpc.remove_worker(&body.worker_id, &token).await {
+    match grpc.remove_worker(worker_id, &token).await {
         Ok(resp) => (
             StatusCode::OK,
             Json(StatusResponse {
@@ -1074,7 +1254,7 @@ pub async fn remove_worker(
                 status_message: resp.status_message,
             }),
         ),
-        Err(_e) => (
+        Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(StatusResponse {
                 success: false,
@@ -1090,13 +1270,19 @@ pub async fn get_task_log(
     AuthUser { token, .. }: AuthUser,
     AxumPath(task_id): AxumPath<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(task_id) = normalized_task_id(&task_id) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"success":false,"message":"Invalid task_id"})),
+        );
+    };
     let mut grpc = state.grpc_client.lock().await;
     match grpc.get_tasklog(&task_id, &token).await {
         Ok(resp) => (
             StatusCode::OK,
             Json(serde_json::json!({"success":resp.success,"task_id":task_id,"log":resp.log})),
         ),
-        Err(_e) => (
+        Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"success":false,"message":format!("gRPC error: {}",e)})),
         ),
@@ -1109,6 +1295,12 @@ pub async fn get_task_result(
     AuthUser { token, .. }: AuthUser,
     AxumPath(task_id): AxumPath<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(task_id) = normalized_task_id(&task_id) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"success":false,"message":"Invalid task_id"})),
+        );
+    };
     let mut grpc = state.grpc_client.lock().await;
     match grpc.get_task_result(&task_id, &token).await {
         Ok(resp) => (
@@ -1117,7 +1309,7 @@ pub async fn get_task_result(
                 serde_json::json!({"success":resp.success,"task_id":task_id,"result_torrent":resp.result_torrent,"status_message":resp.status_message}),
             ),
         ),
-        Err(_e) => (
+        Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"success":false,"message":format!("gRPC error: {}",e)})),
         ),
@@ -1130,17 +1322,23 @@ pub async fn stop_task(
     AuthUser { token, .. }: AuthUser,
     AxumPath(task_id): AxumPath<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(task_id) = normalized_task_id(&task_id) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"success":false,"message":"Invalid task_id"})),
+        );
+    };
     let mut grpc = state.grpc_client.lock().await;
     match grpc.stop_task(&task_id, &token).await {
         Ok(resp) if resp.success => (
             StatusCode::OK,
-            Json(serde_json::json!({"success":true,"message":"Task stopped"})),
+            Json(serde_json::json!({"success":true,"message":resp.status_message})),
         ),
         Ok(resp) => (
             StatusCode::CONFLICT,
             Json(serde_json::json!({"success":false,"message":resp.status_message})),
         ),
-        Err(_e) => (
+        Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"success":false,"message":format!("gRPC error: {}",e)})),
         ),
@@ -1198,6 +1396,17 @@ pub async fn get_provider_worker_settings(
     AuthUser { token, .. }: AuthUser,
     AxumPath(worker_id): AxumPath<String>,
 ) -> (StatusCode, Json<ProviderWorkerSettingsResponse>) {
+    let Some(worker_id) = normalized_worker_id(&worker_id) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ProviderWorkerSettingsResponse {
+                success: false,
+                worker_id: String::new(),
+                message: "Invalid worker_id".into(),
+                settings: None,
+            }),
+        );
+    };
     let mut grpc = state.grpc_client.lock().await;
     match grpc.get_provider_worker_settings(&token, &worker_id).await {
         Ok(resp) => (
@@ -1228,6 +1437,17 @@ pub async fn update_provider_worker_settings(
     AxumPath(worker_id): AxumPath<String>,
     Json(body): Json<ProviderWorkerSettingsBody>,
 ) -> (StatusCode, Json<ProviderWorkerSettingsResponse>) {
+    let Some(worker_id) = normalized_worker_id(&worker_id) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ProviderWorkerSettingsResponse {
+                success: false,
+                worker_id: String::new(),
+                message: "Invalid worker_id".into(),
+                settings: None,
+            }),
+        );
+    };
     let mut grpc = state.grpc_client.lock().await;
     match grpc
         .update_provider_worker_settings(
@@ -1303,7 +1523,7 @@ pub async fn get_admin_billing_overview(
                 currency: resp.currency,
             }),
         ),
-        Err(e) => (
+        Err(_e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(AdminBillingOverviewResponse {
                 success: false,
@@ -1335,7 +1555,7 @@ pub async fn get_admin_artifact_overview(
                 expiring_in_24h: resp.expiring_in_24h,
             }),
         ),
-        Err(e) => (
+        Err(_e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(AdminArtifactOverviewResponse {
                 success: false,
@@ -1369,7 +1589,7 @@ pub async fn cleanup_admin_artifacts(
                 file_delete_errors: resp.file_delete_errors,
             }),
         ),
-        Err(e) => (
+        Err(_e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(AdminArtifactCleanupResponse {
                 success: false,
@@ -1409,7 +1629,7 @@ pub async fn get_admin_scheduling_cache_metrics(
                     .collect(),
             }),
         ),
-        Err(e) => (
+        Err(_e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(AdminSchedulingCacheMetricsResponse {
                 success: false,
@@ -1490,7 +1710,7 @@ pub async fn list_admin_scheduling_cache_anomalies(
                     .collect(),
             }),
         ),
-        Err(e) => (
+        Err(_e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(AdminSchedulingCacheAnomalyListResponse {
                 success: false,
@@ -1506,6 +1726,16 @@ pub async fn get_provider_worker_trust_profile(
     AuthUser { token, .. }: AuthUser,
     AxumPath(worker_id): AxumPath<String>,
 ) -> (StatusCode, Json<WorkerTrustProfileResponse>) {
+    let Some(worker_id) = normalized_worker_id(&worker_id) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(WorkerTrustProfileResponse {
+                success: false,
+                message: "Invalid worker_id".into(),
+                trust: None,
+            }),
+        );
+    };
     let mut grpc = state.grpc_client.lock().await;
     match grpc.get_worker_trust_profile(&token, &worker_id).await {
         Ok(resp) => (
@@ -1541,6 +1771,18 @@ pub async fn update_worker_trust_control(
     AxumPath(worker_id): AxumPath<String>,
     Json(body): Json<WorkerTrustControlBody>,
 ) -> (StatusCode, Json<WorkerTrustControlResponse>) {
+    let Some(worker_id) = normalized_worker_id(&worker_id) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(WorkerTrustControlResponse {
+                success: false,
+                worker_id: String::new(),
+                banned: false,
+                score: 0,
+                message: "Invalid worker_id".into(),
+            }),
+        );
+    };
     let score = body.score.unwrap_or(0);
     let mut grpc = state.grpc_client.lock().await;
     match grpc
@@ -1597,7 +1839,7 @@ pub async fn list_admin_worker_trust(
                     .collect(),
             }),
         ),
-        Err(e) => (
+        Err(_e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(AdminWorkerTrustListResponse {
                 success: false,
@@ -1634,7 +1876,7 @@ pub async fn list_admin_audit_logs(
                     .collect(),
             }),
         ),
-        Err(e) => (
+        Err(_e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(AdminAuditLogListResponse {
                 success: false,
@@ -1648,9 +1890,38 @@ pub async fn download_task_artifact(
     State(state): State<AppState>,
     AuthUser { token, .. }: AuthUser,
     AxumPath(task_id): AxumPath<String>,
+    Query(query): Query<ArtifactDownloadQuery>,
 ) -> Response {
+    let Some(task_id) = normalized_task_id(&task_id) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"success":false,"message":"Invalid task_id"})),
+        )
+            .into_response();
+    };
+    let artifact_key = match normalized_artifact_key(query.artifact_key.as_deref()) {
+        Ok(artifact_key) => artifact_key,
+        Err(()) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"success":false,"message":"Invalid artifact key"})),
+            )
+                .into_response();
+        }
+    };
+    if artifact_key.is_some_and(|value| value.len() > 255) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"success":false,"message":"Invalid artifact key"})),
+        )
+            .into_response();
+    }
+
     let mut grpc = state.grpc_client.lock().await;
-    match grpc.download_task_artifact(&task_id, &token).await {
+    match grpc
+        .download_task_artifact(&task_id, &token, artifact_key)
+        .await
+    {
         Ok(resp) if resp.success => {
             let filename = safe_download_filename(&resp.filename);
             let content_type = if resp.content_type.trim().is_empty() {
@@ -1677,10 +1948,35 @@ pub async fn download_task_artifact(
         )
             .into_response(),
         Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            artifact_grpc_error_status(&e),
             Json(serde_json::json!({"success":false,"message":e.to_string()})),
         )
             .into_response(),
+    }
+}
+
+fn normalized_artifact_key(value: Option<&str>) -> Result<Option<&str>, ()> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(());
+    }
+    Ok(Some(trimmed))
+}
+
+fn artifact_grpc_error_status(error: &tonic::Status) -> StatusCode {
+    match error.code() {
+        tonic::Code::NotFound => StatusCode::NOT_FOUND,
+        tonic::Code::Unauthenticated => StatusCode::UNAUTHORIZED,
+        tonic::Code::PermissionDenied => StatusCode::FORBIDDEN,
+        tonic::Code::InvalidArgument => StatusCode::BAD_REQUEST,
+        tonic::Code::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 
@@ -1689,7 +1985,7 @@ fn safe_download_filename(filename: &str) -> String {
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
         .collect();
-    if sanitized.is_empty() {
+    if sanitized.is_empty() || sanitized.chars().all(|c| c == '.') {
         "artifact.bin".into()
     } else {
         sanitized
@@ -1724,5 +2020,96 @@ mod tests {
         assert!(uploaded_file_size_error(1025, 1024)
             .unwrap()
             .contains("too large"));
+    }
+
+    #[test]
+    fn task_id_safety_rejects_single_dot_segment() {
+        assert!(is_safe_task_id("task-123"));
+        assert!(!is_safe_task_id("."));
+    }
+
+    #[test]
+    fn worker_id_safety_rejects_path_normalizing_values() {
+        assert!(is_safe_worker_id("worker-123"));
+        assert!(!is_safe_worker_id("."));
+        assert!(!is_safe_worker_id("../worker"));
+        assert!(!is_safe_worker_id("worker/child"));
+    }
+
+    #[test]
+    fn artifact_download_grpc_errors_map_to_http_statuses() {
+        assert_eq!(
+            artifact_grpc_error_status(&tonic::Status::not_found("missing artifact")),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            artifact_grpc_error_status(&tonic::Status::unauthenticated("invalid token")),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            artifact_grpc_error_status(&tonic::Status::permission_denied("forbidden")),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            artifact_grpc_error_status(&tonic::Status::invalid_argument("bad key")),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            artifact_grpc_error_status(&tonic::Status::unavailable("nodepool down")),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            artifact_grpc_error_status(&tonic::Status::internal("backend error")),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn artifact_key_normalization_rejects_blank_explicit_selector() {
+        assert_eq!(normalized_artifact_key(None).unwrap(), None);
+        assert_eq!(normalized_artifact_key(Some("")).unwrap(), None);
+        assert_eq!(
+            normalized_artifact_key(Some(" stdout ")).unwrap(),
+            Some("stdout")
+        );
+        assert!(normalized_artifact_key(Some("   ")).is_err());
+    }
+
+    #[test]
+    fn safe_download_filename_falls_back_for_dot_only_names() {
+        assert_eq!(safe_download_filename("."), "artifact.bin");
+        assert_eq!(safe_download_filename(".."), "artifact.bin");
+        assert_eq!(safe_download_filename("../.."), "artifact.bin");
+        assert_eq!(safe_download_filename("..\\.."), "artifact.bin");
+    }
+
+    #[test]
+    fn worker_registration_resources_preserve_ui_capacity_fields() {
+        let body = RegisterWorkerBody {
+            username: Some("provider".into()),
+            worker_id: Some("worker-42".into()),
+            ip: "127.0.0.1:50053".into(),
+            cpu_cores: 8,
+            memory_gb: 32,
+            cpu_score: 900,
+            gpu_score: Some(1200),
+            gpu_memory_gb: Some(16),
+            gpu_name: Some("RTX Test".into()),
+            storage_total_gb: Some(1000),
+            storage_available_gb: Some(750),
+            location: Some("taipei".into()),
+        };
+
+        let resources = worker_registration_resources(&body);
+
+        assert_eq!(resources.cpu_cores, 8);
+        assert_eq!(resources.memory_mb, 32 * 1024);
+        assert_eq!(resources.gpu_count, 1);
+        assert_eq!(resources.gpu_name, "RTX Test");
+        assert_eq!(resources.vram_mb, 16 * 1024);
+        assert_eq!(resources.cpu_score, 900);
+        assert_eq!(resources.gpu_score, 1200);
+        assert_eq!(resources.storage_total_gb, 1000);
+        assert_eq!(resources.storage_available_gb, 750);
     }
 }

@@ -60,8 +60,8 @@ impl NodeManager {
             .await
     }
 
-    pub async fn mark_offline_stale(&self) -> Result<u64> {
-        self.repo.mark_offline_stale().await
+    pub async fn mark_offline_stale(&self, stale_threshold_secs: u64) -> Result<u64> {
+        self.repo.mark_offline_stale(stale_threshold_secs).await
     }
     pub fn database(&self) -> &DatabaseManager {
         &self.db

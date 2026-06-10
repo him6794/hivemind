@@ -1,6 +1,7 @@
 # HiveMind VPN 快速開始指南
 
 5 分鐘快速體驗 HiveMind 的 VPN 多節點功能。
+> Note: the commands, task IDs, and helper scripts in this guide are illustrative examples only. They are not shipped runtime assets unless you add them yourself.
 
 ## 快速啟動
 
@@ -93,7 +94,7 @@ func main() {
 
     // 創建多節點任務
     task := &Task{
-        ID:       "demo-task-001",
+        ID:       "example-task-001",
         Type:     "distributed-compute",
         Workers:  []string{"worker-001", "worker-002"},
         Payload:  []byte("compute: sum(1..1000000)"),
@@ -128,7 +129,7 @@ go build -o test_multinode test_multinode.go
 
 預期輸出：
 ```
-Submitting multinode task: demo-task-001
+Submitting multinode task: example-task-001
 Task assigned to workers: [worker-001 worker-002]
 Workers communicating via VPN...
 Task completed!
@@ -136,33 +137,33 @@ Result: sum = 500000500000
 Execution time: 1.234s
 ```
 
-### 範例 2: 使用 VPN Demo
+### 範例 2: 使用 VPN Example
 
 使用內建的 VPN 示範程式：
 
 ```bash
-# 在 Worker 1 上運行 demo
-docker exec hivemind-worker1 /app/vpn_demo --worker-id=worker-001
+# 在 Worker 1 上運行 example
+docker exec hivemind-worker1 /app/vpn_example --worker-id=worker-001
 
-# 在另一個終端，在 Worker 2 上運行 demo
-docker exec hivemind-worker2 /app/vpn_demo --worker-id=worker-002
+# 在另一個終端，在 Worker 2 上運行 example
+docker exec hivemind-worker2 /app/vpn_example --worker-id=worker-002
 ```
 
 你會看到：
 ```
-=== VPN Features Demo ===
+=== VPN Features Example ===
 Local VPN IP: 100.64.0.1
 VPN Status: Connected
 Connected peers: 1
   - worker-002: 100.64.0.2
 
-=== Task Execution Demo ===
-Set task ID: demo-task-001
+=== Task Execution Example ===
+Set task ID: example-task-001
 Task peers: 2
   - Worker worker-001 (worker-001) at 100.64.0.1
   - Worker worker-002 (worker-002) at 100.64.0.2
-Executing task demo-task-001...
-Task completed successfully: Demo task completed
+Executing task example-task-001...
+Task completed successfully: Example task completed
 ```
 
 ### 範例 3: 監控 VPN 狀態

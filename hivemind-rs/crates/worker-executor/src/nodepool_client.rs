@@ -5,6 +5,7 @@ use hivemind_models::{ResourceSpec, ResourceUsage};
 use hivemind_proto::{
     node_manager_service_client::NodeManagerServiceClient, RegisterWorkerNodeRequest,
     ResourceSpec as ProtoResourceSpec, ResourceUsage as ProtoResourceUsage, RunningStatusRequest,
+    TaskOutputUploadRequest, TaskResultUploadRequest, TaskUsageRequest,
 };
 use tokio::sync::watch;
 use tonic::transport::Channel;
@@ -35,6 +36,7 @@ pub fn build_register_request(
 ) -> RegisterWorkerNodeRequest {
     RegisterWorkerNodeRequest {
         username: worker_id.to_string(),
+        worker_id: worker_id.to_string(),
         ip: worker_addr.to_string(),
         resources: Some(resource_spec_to_proto(resources)),
         location: location.to_string(),
@@ -68,6 +70,75 @@ pub async fn register_once(
             resources,
             location,
         ))
+        .await?
+        .into_inner();
+    if !response.success {
+        anyhow::bail!(response.status_message);
+    }
+    Ok(())
+}
+
+pub async fn report_task_output_once(
+    endpoint: &str,
+    worker_id: &str,
+    token: &str,
+    task_id: &str,
+    output: &str,
+) -> anyhow::Result<()> {
+    let mut client = NodeManagerServiceClient::connect(nodepool_endpoint(endpoint)).await?;
+    let response = client
+        .task_output_upload(TaskOutputUploadRequest {
+            task_id: task_id.to_string(),
+            output: output.to_string(),
+            token: token.to_string(),
+            worker_id: worker_id.to_string(),
+        })
+        .await?
+        .into_inner();
+    if !response.success {
+        anyhow::bail!(response.status_message);
+    }
+    Ok(())
+}
+
+pub async fn report_task_result_once(
+    endpoint: &str,
+    worker_id: &str,
+    token: &str,
+    task_id: &str,
+    result_torrent: &str,
+) -> anyhow::Result<()> {
+    let mut client = NodeManagerServiceClient::connect(nodepool_endpoint(endpoint)).await?;
+    let response = client
+        .task_result_upload(TaskResultUploadRequest {
+            task_id: task_id.to_string(),
+            result_torrent: result_torrent.to_string(),
+            token: token.to_string(),
+            worker_id: worker_id.to_string(),
+        })
+        .await?
+        .into_inner();
+    if !response.success {
+        anyhow::bail!(response.status_message);
+    }
+    Ok(())
+}
+
+pub async fn report_task_usage_once(
+    endpoint: &str,
+    worker_id: &str,
+    token: &str,
+    task_id: &str,
+    usage: ResourceUsage,
+) -> anyhow::Result<()> {
+    let mut client = NodeManagerServiceClient::connect(nodepool_endpoint(endpoint)).await?;
+    let response = client
+        .task_usage(TaskUsageRequest {
+            task_id: task_id.to_string(),
+            usage: Some(resource_usage_to_proto(usage)),
+            token: token.to_string(),
+            worker_id: worker_id.to_string(),
+        })
         .await?
         .into_inner();
     if !response.success {
@@ -168,6 +239,16 @@ fn resource_usage_to_proto(usage: ResourceUsage) -> ProtoResourceUsage {
 #[cfg(test)]
 mod tests {
     use hivemind_models::{ResourceSpec, ResourceUsage};
+    use hivemind_proto::{
+        node_manager_service_server::{NodeManagerService, NodeManagerServiceServer},
+        ListWorkersRequest, ListWorkersResponse, RemoveWorkerRequest, RunningStatusResponse,
+        StatusResponse, TaskOutputUploadRequest, TaskOutputUploadResponse, TaskResultUploadRequest,
+        TaskResultUploadResponse, TaskUsageRequest, TaskUsageResponse,
+    };
+    use std::net::SocketAddr;
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+    use tonic::{Request, Response, Status};
 
     #[test]
     fn nodepool_endpoint_adds_http_scheme_and_replaces_unspecified_host() {
@@ -214,6 +295,7 @@ mod tests {
         let request = super::build_register_request("worker-1", "127.0.0.1:50053", spec, "local");
         let resources = request.resources.unwrap();
 
+        assert_eq!(request.worker_id, "worker-1");
         assert_eq!(request.username, "worker-1");
         assert_eq!(request.ip, "127.0.0.1:50053");
         assert_eq!(resources.cpu_cores, 8);
@@ -238,5 +320,237 @@ mod tests {
         assert_eq!(request.status, "IDLE");
         assert_eq!(usage.cpu_percent, 10.5);
         assert_eq!(usage.storage_percent, 60.0);
+    }
+
+    #[tokio::test]
+    async fn report_task_output_once_sends_worker_scoped_rpc() {
+        let (addr, mut reports) = match fake_node_manager_report_server().await {
+            Some(parts) => parts,
+            None => return,
+        };
+
+        super::report_task_output_once(
+            &addr.to_string(),
+            "worker-report-1",
+            "worker-token-1",
+            "task-report-1",
+            "stdout payload",
+        )
+        .await
+        .unwrap();
+
+        let request = tokio::time::timeout(Duration::from_secs(2), reports.output_rx.recv())
+            .await
+            .expect("node manager should receive output report")
+            .expect("report channel should stay open");
+        assert_eq!(request.worker_id, "worker-report-1");
+        assert_eq!(request.task_id, "task-report-1");
+        assert_eq!(request.token, "worker-token-1");
+        assert_eq!(request.output, "stdout payload");
+    }
+
+    #[tokio::test]
+    async fn report_task_result_once_sends_worker_scoped_rpc() {
+        let (addr, mut reports) = match fake_node_manager_report_server().await {
+            Some(parts) => parts,
+            None => return,
+        };
+
+        super::report_task_result_once(
+            &addr.to_string(),
+            "worker-report-2",
+            "worker-token-2",
+            "task-report-2",
+            "btih:result-ref",
+        )
+        .await
+        .unwrap();
+
+        let request = tokio::time::timeout(Duration::from_secs(2), reports.result_rx.recv())
+            .await
+            .expect("node manager should receive result report")
+            .expect("report channel should stay open");
+        assert_eq!(request.worker_id, "worker-report-2");
+        assert_eq!(request.task_id, "task-report-2");
+        assert_eq!(request.token, "worker-token-2");
+        assert_eq!(request.result_torrent, "btih:result-ref");
+    }
+
+    #[tokio::test]
+    async fn report_task_usage_once_sends_worker_scoped_rpc() {
+        let (addr, mut reports) = match fake_node_manager_report_server().await {
+            Some(parts) => parts,
+            None => return,
+        };
+
+        super::report_task_usage_once(
+            &addr.to_string(),
+            "worker-report-3",
+            "worker-token-3",
+            "task-report-3",
+            ResourceUsage {
+                cpu_percent: 11.0,
+                memory_percent: 22.0,
+                gpu_percent: 33.0,
+                vram_percent: 44.0,
+                storage_percent: 55.0,
+            },
+        )
+        .await
+        .unwrap();
+
+        let request = tokio::time::timeout(Duration::from_secs(2), reports.usage_rx.recv())
+            .await
+            .expect("node manager should receive usage report")
+            .expect("report channel should stay open");
+        let usage = request.usage.unwrap();
+        assert_eq!(request.worker_id, "worker-report-3");
+        assert_eq!(request.task_id, "task-report-3");
+        assert_eq!(request.token, "worker-token-3");
+        assert_eq!(usage.cpu_percent, 11.0);
+        assert_eq!(usage.vram_percent, 44.0);
+    }
+
+    async fn fake_node_manager_report_server() -> Option<(SocketAddr, CapturedReports)> {
+        let addr = reserve_loopback_addr()?;
+        let (output_tx, output_rx) = mpsc::channel(1);
+        let (result_tx, result_rx) = mpsc::channel(1);
+        let (usage_tx, usage_rx) = mpsc::channel(1);
+        let service = NodeManagerServiceServer::new(FakeNodeManagerReportService {
+            output_tx,
+            result_tx,
+            usage_tx,
+        });
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(service)
+                .serve(addr)
+                .await;
+        });
+
+        for _ in 0..30 {
+            if hivemind_proto::node_manager_service_client::NodeManagerServiceClient::connect(
+                format!("http://{addr}"),
+            )
+            .await
+            .is_ok()
+            {
+                return Some((
+                    addr,
+                    CapturedReports {
+                        output_rx,
+                        result_rx,
+                        usage_rx,
+                    },
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        None
+    }
+
+    fn reserve_loopback_addr() -> Option<SocketAddr> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
+        let addr = listener.local_addr().ok()?;
+        drop(listener);
+        Some(addr)
+    }
+
+    struct CapturedReports {
+        output_rx: mpsc::Receiver<TaskOutputUploadRequest>,
+        result_rx: mpsc::Receiver<TaskResultUploadRequest>,
+        usage_rx: mpsc::Receiver<TaskUsageRequest>,
+    }
+
+    struct FakeNodeManagerReportService {
+        output_tx: mpsc::Sender<TaskOutputUploadRequest>,
+        result_tx: mpsc::Sender<TaskResultUploadRequest>,
+        usage_tx: mpsc::Sender<TaskUsageRequest>,
+    }
+
+    #[tonic::async_trait]
+    impl NodeManagerService for FakeNodeManagerReportService {
+        async fn register_worker_node(
+            &self,
+            _request: Request<hivemind_proto::RegisterWorkerNodeRequest>,
+        ) -> Result<Response<StatusResponse>, Status> {
+            Ok(Response::new(StatusResponse {
+                success: true,
+                status_message: "OK".into(),
+            }))
+        }
+
+        async fn report_status(
+            &self,
+            _request: Request<hivemind_proto::RunningStatusRequest>,
+        ) -> Result<Response<RunningStatusResponse>, Status> {
+            Ok(Response::new(RunningStatusResponse {
+                success: true,
+                status_message: "OK".into(),
+            }))
+        }
+
+        async fn task_output_upload(
+            &self,
+            request: Request<TaskOutputUploadRequest>,
+        ) -> Result<Response<TaskOutputUploadResponse>, Status> {
+            self.output_tx
+                .send(request.into_inner())
+                .await
+                .map_err(|_| Status::internal("report receiver dropped"))?;
+            Ok(Response::new(TaskOutputUploadResponse {
+                success: true,
+                status_message: "OK".into(),
+            }))
+        }
+
+        async fn task_result_upload(
+            &self,
+            request: Request<TaskResultUploadRequest>,
+        ) -> Result<Response<TaskResultUploadResponse>, Status> {
+            self.result_tx
+                .send(request.into_inner())
+                .await
+                .map_err(|_| Status::internal("report receiver dropped"))?;
+            Ok(Response::new(TaskResultUploadResponse {
+                success: true,
+                status_message: "OK".into(),
+            }))
+        }
+
+        async fn task_usage(
+            &self,
+            request: Request<TaskUsageRequest>,
+        ) -> Result<Response<TaskUsageResponse>, Status> {
+            self.usage_tx
+                .send(request.into_inner())
+                .await
+                .map_err(|_| Status::internal("report receiver dropped"))?;
+            Ok(Response::new(TaskUsageResponse {
+                success: true,
+                status_message: "OK".into(),
+            }))
+        }
+
+        async fn list_workers(
+            &self,
+            _request: Request<ListWorkersRequest>,
+        ) -> Result<Response<ListWorkersResponse>, Status> {
+            Ok(Response::new(ListWorkersResponse {
+                success: true,
+                status_message: "OK".into(),
+                workers: vec![],
+            }))
+        }
+
+        async fn remove_worker(
+            &self,
+            _request: Request<RemoveWorkerRequest>,
+        ) -> Result<Response<StatusResponse>, Status> {
+            Ok(Response::new(StatusResponse {
+                success: true,
+                status_message: "OK".into(),
+            }))
+        }
     }
 }

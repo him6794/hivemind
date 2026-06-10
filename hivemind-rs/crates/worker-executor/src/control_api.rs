@@ -1,8 +1,13 @@
 use anyhow::Result;
-use axum::{routing::get, Json, Router};
+use axum::{
+    http::{header, HeaderValue, Method},
+    routing::get,
+    Json, Router,
+};
+use hivemind_config::HivemindConfig;
 use hivemind_models::ResourceSpec;
 use serde::{Deserialize, Serialize};
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerProfile {
@@ -49,10 +54,12 @@ struct WorkerInfoResponse {
 }
 
 pub fn router(profile: WorkerProfile) -> Router {
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    let config = HivemindConfig::default();
+    router_with_allowed_origins(profile, &config.server.worker_control_cors_allowed_origins)
+}
+
+pub fn router_with_allowed_origins(profile: WorkerProfile, allowed_origins: &[String]) -> Router {
+    let cors = build_cors_layer(allowed_origins);
 
     Router::new()
         .route(
@@ -62,9 +69,39 @@ pub fn router(profile: WorkerProfile) -> Router {
         .layer(cors)
 }
 
+fn build_cors_layer(allowed_origins: &[String]) -> CorsLayer {
+    let origins = allowed_origins
+        .iter()
+        .filter_map(|origin| origin.parse::<HeaderValue>().ok())
+        .collect::<Vec<_>>();
+
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods([Method::GET, Method::OPTIONS])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+}
+
 pub async fn serve(addr: &str, profile: WorkerProfile) -> Result<()> {
+    let config = HivemindConfig::default();
+    serve_with_allowed_origins(
+        addr,
+        profile,
+        &config.server.worker_control_cors_allowed_origins,
+    )
+    .await
+}
+
+pub async fn serve_with_allowed_origins(
+    addr: &str,
+    profile: WorkerProfile,
+    allowed_origins: &[String],
+) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, router(profile)).await?;
+    axum::serve(
+        listener,
+        router_with_allowed_origins(profile, allowed_origins),
+    )
+    .await?;
     Ok(())
 }
 
@@ -162,6 +199,62 @@ mod tests {
         assert_eq!(json["profile"]["memory_gb"], 16);
         assert_eq!(json["profile"]["gpu_memory_gb"], 0);
         assert_eq!(json["profile"]["storage_available_gb"], 256);
+    }
+
+    #[tokio::test]
+    async fn worker_info_cors_allows_only_configured_origins_without_wildcard() {
+        let spec = ResourceSpec {
+            cpu_cores: 8,
+            memory_mb: 16 * 1024,
+            gpu_count: 0,
+            gpu_name: String::new(),
+            vram_mb: 0,
+            cpu_score: 800,
+            gpu_score: 0,
+            storage_total_gb: 512,
+            storage_available_gb: 256,
+        };
+        let profile = super::WorkerProfile::from_resource_spec(
+            "worker-1".into(),
+            "127.0.0.1:50053".into(),
+            "local".into(),
+            spec,
+        );
+        let app =
+            super::router_with_allowed_origins(profile, &["http://localhost:5174".to_string()]);
+
+        let allowed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/worker-info")
+                    .header(axum::http::header::ORIGIN, "http://localhost:5174")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            allowed
+                .headers()
+                .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            Some(&"http://localhost:5174".parse().unwrap())
+        );
+
+        let rejected = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/worker-info")
+                    .header(axum::http::header::ORIGIN, "http://evil.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(rejected
+            .headers()
+            .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none());
     }
 
     #[test]

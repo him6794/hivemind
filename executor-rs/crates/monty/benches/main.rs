@@ -3,7 +3,7 @@ use codspeed_criterion_compat::{Bencher, Criterion, black_box, criterion_group, 
 #[cfg(not(codspeed))]
 use criterion::{Bencher, Criterion, black_box, criterion_group, criterion_main};
 use monty::MontyRun;
-#[cfg(not(codspeed))]
+#[cfg(all(not(codspeed), not(windows)))]
 use pprof::criterion::{Output, PProfProfiler};
 
 /// Runs a benchmark using the Monty interpreter.
@@ -125,16 +125,16 @@ fn criterion_benchmark(c: &mut Criterion) {
     c.bench_function("pair_tuples__monty", |b| run_monty(b, PAIR_TUPLES, 100_000));
 }
 
-// Use pprof flamegraph profiler when running locally (not on CodSpeed)
-#[cfg(not(codspeed))]
+// Use pprof flamegraph profiler for local non-Windows runs.
+#[cfg(all(not(codspeed), not(windows)))]
 criterion_group!(
     name = benches;
     config = Criterion::default().with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
     targets = criterion_benchmark
 );
 
-// Use default config when running on CodSpeed (pprof's Profiler trait is incompatible)
-#[cfg(codspeed)]
+// Use default config when running on CodSpeed or Windows.
+#[cfg(any(codspeed, windows))]
 criterion_group!(benches, criterion_benchmark);
 
 criterion_main!(benches);

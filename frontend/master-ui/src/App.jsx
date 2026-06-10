@@ -1,245 +1,267 @@
-﻿import React, { useEffect, useState } from "react";
+import React, { useEffect, useState } from 'react';
+import { artifactFilenameFromContentDisposition } from './artifactDownloadPolicy.mjs';
+import { taskIdFromFileName, validateTaskId } from './taskIdPolicy.mjs';
+
+const panelStyle = {
+  border: '1px solid #d8e0e8',
+  borderRadius: 14,
+  background: '#fff',
+  padding: 18,
+  boxShadow: '0 12px 32px rgba(15, 23, 42, 0.06)',
+};
+
+const fieldStyle = {
+  width: '100%',
+  boxSizing: 'border-box',
+  padding: '10px 12px',
+  marginTop: 6,
+  border: '1px solid #cad5df',
+  borderRadius: 10,
+  background: '#fff',
+};
+
+const buttonStyle = {
+  padding: '10px 14px',
+  border: 'none',
+  borderRadius: 10,
+  cursor: 'pointer',
+  fontWeight: 700,
+};
+
+function toNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
 
 export default function MasterApp() {
-  const apiBase = String(import.meta.env.VITE_API_BASE || "http://localhost:8082").trim().replace(/\/$/, "");
+  const apiBase = String(import.meta.env.VITE_API_BASE || 'http://localhost:8082').trim().replace(/\/$/, '');
 
-  const [username, setUsername] = useState("testuser");
-  const [password, setPassword] = useState("testpass123");
-  const [token, setToken] = useState("");
-  const [status, setStatus] = useState("請先登入");
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [token, setToken] = useState('');
+  const [status, setStatus] = useState('請先登入');
   const [loading, setLoading] = useState(false);
 
-  const [tasks, setTasks] = useState([]);
-  const [taskTotal, setTaskTotal] = useState(0);
-  const [cacheMetrics, setCacheMetrics] = useState({
-    total_completed_tasks: 0,
-    total_cache_hits: 0,
-    cache_hit_rate: 0,
-    top_workers: [],
-  });
-  const [cacheAlert, setCacheAlert] = useState({
-    severity: "normal",
-    message: "Cache Hit Rate 在可接受範圍。",
-    cache_hit_rate: 0,
-  });
-  const [lowHitRateThreshold, setLowHitRateThreshold] = useState(0.3);
-  const [highHitRateThreshold, setHighHitRateThreshold] = useState(3.0);
-
-  const [taskId, setTaskId] = useState("");
-  const [torrent, setTorrent] = useState("magnet:?xt=urn:btih:demo");
-  const [zipPath, setZipPath] = useState("");
-  const [memoryGb, setMemoryGb] = useState(1);
+  const [taskId, setTaskId] = useState('');
+  const [zipFile, setZipFile] = useState(null);
+  const [cpuScore, setCpuScore] = useState(0);
+  const [gpuScore, setGpuScore] = useState(0);
+  const [memoryGb, setMemoryGb] = useState(0);
   const [gpuMemoryGb, setGpuMemoryGb] = useState(0);
+  const [storageGb, setStorageGb] = useState(0);
   const [hostCount, setHostCount] = useState(1);
   const [maxCpt, setMaxCpt] = useState(0);
 
-  const [selectedTask, setSelectedTask] = useState("");
-  const [taskLog, setTaskLog] = useState("");
-  const [taskResult, setTaskResult] = useState("");
-  const [trustWorkerId, setTrustWorkerId] = useState("");
-  const [trustScore, setTrustScore] = useState(100);
-  const [trustBanned, setTrustBanned] = useState(false);
-  const [trustProfile, setTrustProfile] = useState(null);
-  const [trustEntries, setTrustEntries] = useState([]);
-  const [auditLogs, setAuditLogs] = useState([]);
-  const [auditLimit, setAuditLimit] = useState(20);
-  const [cacheAnomalies, setCacheAnomalies] = useState([]);
-  const [anomalyLimit, setAnomalyLimit] = useState(20);
+  const [tasks, setTasks] = useState([]);
+  const [selectedTask, setSelectedTask] = useState('');
+  const [taskLog, setTaskLog] = useState('');
+  const [taskResult, setTaskResult] = useState('');
 
-  async function api(method, path, body, tk = token) {
+  async function readJson(res) {
+    const text = await res.text();
+    if (!text) return {};
+    try {
+      return JSON.parse(text);
+    } catch {
+      return {};
+    }
+  }
+
+  async function api(method, path, body, authToken = token) {
     const headers = {};
-    if (tk) headers.Authorization = `Bearer ${tk}`;
-    if (body !== undefined) headers["Content-Type"] = "application/json";
+    if (authToken) headers.Authorization = `Bearer ${authToken}`;
+    if (body !== undefined && !(body instanceof FormData)) {
+      headers['Content-Type'] = 'application/json';
+    }
 
     const res = await fetch(`${apiBase}${path}`, {
       method,
       headers,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
+      body: body instanceof FormData ? body : body !== undefined ? JSON.stringify(body) : undefined,
     });
 
-    let data = {};
-    try {
-      data = await res.json();
-    } catch {
-      data = { success: false, status_message: `HTTP ${res.status}` };
-    }
+    const data = await readJson(res);
     return { ok: res.ok, data };
   }
 
-  async function refreshDashboard(tk = token) {
-    if (!tk) return;
-    const t = await api("GET", "/api/tasks", undefined, tk);
-    const cm = await api("GET", "/api/admin/scheduling/cache-metrics", undefined, tk);
-    const alert = await api(
-      "GET",
-      `/api/admin/scheduling/cache-alert?low=${encodeURIComponent(lowHitRateThreshold)}&high=${encodeURIComponent(highHitRateThreshold)}`,
-      undefined,
-      tk,
-    );
-
-    if (t.data.success) {
-      setTasks(t.data.tasks || []);
-      setTaskTotal(Number(t.data.total || (t.data.tasks || []).length));
-    }
-    if (cm.data.success) {
-      setCacheMetrics({
-        total_completed_tasks: Number(cm.data.total_completed_tasks || 0),
-        total_cache_hits: Number(cm.data.total_cache_hits || 0),
-        cache_hit_rate: Number(cm.data.cache_hit_rate || 0),
-        top_workers: Array.isArray(cm.data.top_workers) ? cm.data.top_workers : [],
-      });
-    }
-    if (alert.data && alert.data.success) {
-      setCacheAlert({
-        severity: String(alert.data.severity || "normal"),
-        message: String(alert.data.message || "Cache hit alert unavailable"),
-        cache_hit_rate: Number(alert.data.cache_hit_rate || 0),
-      });
+  async function refreshTasks(authToken = token) {
+    if (!authToken) return;
+    const { data } = await api('GET', '/api/tasks', undefined, authToken);
+    if (data.success) {
+      setTasks(data.tasks || []);
     } else {
-      setCacheAlert({
-        severity: String(alert?.data?.severity || "error"),
-        message: String(alert?.data?.message || "Cache alert API failed"),
-        cache_hit_rate: Number(cacheMetrics.cache_hit_rate || 0),
-      });
+      throw new Error(data.message || data.status_message || 'Failed to load tasks');
     }
   }
 
   useEffect(() => {
-    if (!token) return;
+    if (!token) return undefined;
+    refreshTasks().catch((err) => setStatus(`任務列表更新失敗: ${err.message}`));
     const id = setInterval(() => {
-      refreshDashboard().catch(() => {});
+      refreshTasks().catch(() => {});
     }, 5000);
     return () => clearInterval(id);
   }, [token]);
 
-  useEffect(() => {
-    if (!token) return;
-    refreshDashboard().catch(() => {});
-  }, [token, lowHitRateThreshold, highHitRateThreshold]);
-
-  const login = async (e) => {
+  async function handleLogin(e) {
     e.preventDefault();
     setLoading(true);
-    setStatus("登入中...");
+    setStatus('登入中...');
+    setToken('');
+
     try {
-      const { data } = await api("POST", "/api/login", { username, password }, "");
-      if (data.success && data.token) {
-        setToken(data.token);
-        setStatus("登入成功");
-        await refreshDashboard(data.token);
-      } else {
-        setStatus(`登入失敗: ${data.status_message || "unknown error"}`);
+      const { data } = await api('POST', '/api/login', { username, password }, '');
+      if (!data.success || !data.token) {
+        throw new Error(data.message || data.status_message || 'Login failed');
       }
+
+      setToken(data.token);
+      setStatus('登入成功');
+      await refreshTasks(data.token);
     } catch (err) {
-      setStatus(`連線失敗: ${err.message}`);
+      setStatus(`登入失敗: ${err.message}`);
     } finally {
       setLoading(false);
     }
-  };
+  }
 
-  const createTask = async () => {
-    if (!token) return;
-    setStatus("提交任務中...");
+  async function submitTask() {
+    if (!token || !zipFile) return;
+    setLoading(true);
+    setStatus('上傳 ZIP 任務中...');
+
     try {
-      const payload = {
-        task_id: taskId,
-        torrent: zipPath.trim() ? undefined : torrent,
-        zip_path: zipPath.trim() || undefined,
-        memory_gb: Number(memoryGb),
-        gpu_memory_gb: Number(gpuMemoryGb),
-        host_count: Number(hostCount),
-        max_cpt: Number(maxCpt),
-      };
-      const { data } = await api("POST", "/api/tasks", payload);
-      if (data.success) {
-        setStatus(`任務已提交: ${data.task?.task_id || taskId}`);
-      } else {
-        setStatus(`提交失敗: ${data.message || data.status_message || "unknown error"}`);
+      const form = new FormData();
+      const effectiveTaskId = taskId.trim() || taskIdFromFileName(zipFile.name);
+      if (!effectiveTaskId) {
+        throw new Error('task_id is required');
       }
-      await refreshDashboard();
+      const validatedTaskId = validateTaskId(effectiveTaskId);
+      if (!validatedTaskId.ok) {
+        throw new Error(validatedTaskId.message);
+      }
+
+      form.append('task_id', validatedTaskId.taskId);
+      form.append('file', zipFile);
+
+      if (cpuScore > 0) form.append('cpu_score', String(toNumber(cpuScore)));
+      if (gpuScore > 0) form.append('gpu_score', String(toNumber(gpuScore)));
+      if (memoryGb > 0) form.append('memory_gb', String(toNumber(memoryGb)));
+      if (gpuMemoryGb > 0) form.append('gpu_memory_gb', String(toNumber(gpuMemoryGb)));
+      if (storageGb > 0) form.append('storage_gb', String(toNumber(storageGb)));
+      if (hostCount > 0) form.append('host_count', String(toNumber(hostCount)));
+      if (maxCpt > 0) form.append('max_cpt', String(toNumber(maxCpt)));
+
+      const { data } = await api('POST', '/api/tasks/upload', form);
+      if (!data.success) {
+        throw new Error(data.message || data.status_message || 'Task upload failed');
+      }
+
+      setTaskId('');
+      setZipFile(null);
+      setStatus(`任務已提交: ${effectiveTaskId}`);
+      await refreshTasks();
     } catch (err) {
       setStatus(`提交失敗: ${err.message}`);
+    } finally {
+      setLoading(false);
     }
-  };
+  }
 
-  const viewTaskLog = async (task) => {
+  async function viewTaskLog(task) {
     if (!token) return;
-    const id = task?.TaskID || task?.task_id || "";
-    const fallback = task?.Output || task?.output || task?.StatusMessage || task?.status_message || "(無日誌)";
-    if (!id) {
-      setTaskLog(fallback);
-      setSelectedTask(id);
+    const rawId = task?.task_id || task?.TaskID || '';
+    if (!String(rawId).trim()) return;
+    const validatedTaskId = validateTaskId(rawId);
+    if (!validatedTaskId.ok) {
+      setTaskLog(validatedTaskId.message);
       return;
     }
+    const id = validatedTaskId.taskId;
+
     try {
-      const { data } = await api("GET", `/api/tasks/${encodeURIComponent(id)}/log`);
+      const { data } = await api('GET', `/api/tasks/${encodeURIComponent(id)}/log`);
       if (data.success) {
-        setTaskLog(data.log || "(無日誌)");
+        setTaskLog(data.log || task?.output || task?.status_message || '(無日誌)');
       } else {
-        setTaskLog(fallback);
+        setTaskLog(task?.output || task?.status_message || '(無日誌)');
       }
     } catch {
-      setTaskLog(fallback);
+      setTaskLog(task?.output || task?.status_message || '(無日誌)');
     }
     setSelectedTask(id);
-  };
+  }
 
-  const viewTaskResult = async (task) => {
+  async function viewTaskResult(task) {
     if (!token) return;
-    const id = task?.TaskID || task?.task_id || "";
-    if (!id) {
-      setTaskResult("(無結果)");
+    const rawId = task?.task_id || task?.TaskID || '';
+    if (!String(rawId).trim()) return;
+    const validatedTaskId = validateTaskId(rawId);
+    if (!validatedTaskId.ok) {
+      setTaskResult(validatedTaskId.message);
       return;
     }
+    const id = validatedTaskId.taskId;
+
     try {
-      const { data } = await api("GET", `/api/tasks/${encodeURIComponent(id)}/result`);
+      const { data } = await api('GET', `/api/tasks/${encodeURIComponent(id)}/result`);
       if (data.success) {
         setTaskResult(JSON.stringify(data, null, 2));
       } else {
-        setTaskResult(data.message || data.status_message || "(無結果)");
+        setTaskResult(data.message || data.status_message || '(無結果)');
       }
     } catch {
-      setTaskResult("(無結果)");
+      setTaskResult('(無結果)');
     }
     setSelectedTask(id);
-  };
+  }
 
-  const stopTask = async (task) => {
+  async function cancelTask(task) {
     if (!token) return;
-    const id = task?.TaskID || task?.task_id || "";
-    if (!id) return;
-    try {
-      await api("POST", `/api/tasks/${encodeURIComponent(id)}/stop`);
-      await refreshDashboard();
-    } catch (err) {
-      setStatus(`停止失敗: ${err.message}`);
+    const rawId = task?.task_id || task?.TaskID || '';
+    if (!String(rawId).trim()) return;
+    const validatedTaskId = validateTaskId(rawId);
+    if (!validatedTaskId.ok) {
+      setStatus(validatedTaskId.message);
+      return;
     }
-  };
+    const id = validatedTaskId.taskId;
 
-  const downloadArtifact = async (task) => {
+    try {
+      await api('POST', `/api/tasks/${encodeURIComponent(id)}/stop`);
+      await refreshTasks();
+      setStatus(`已送出取消請求: ${id}`);
+    } catch (err) {
+      setStatus(`取消失敗: ${err.message}`);
+    }
+  }
+
+  async function downloadArtifact(task) {
     if (!token) return;
-    const id = task?.TaskID || task?.task_id || selectedTask || "";
-    if (!id) return;
+    const rawId = task?.task_id || task?.TaskID || selectedTask || '';
+    if (!String(rawId).trim()) return;
+    const validatedTaskId = validateTaskId(rawId);
+    if (!validatedTaskId.ok) {
+      setStatus(validatedTaskId.message);
+      return;
+    }
+    const id = validatedTaskId.taskId;
+
     try {
       const res = await fetch(`${apiBase}/api/tasks/${encodeURIComponent(id)}/artifact/download`, {
         headers: { Authorization: `Bearer ${token}` },
       });
+
       if (!res.ok) {
-        let message = `HTTP ${res.status}`;
-        try {
-          const data = await res.json();
-          message = data.message || data.status_message || message;
-        } catch {
-          // Keep the HTTP status when the response is not JSON.
-        }
-        setStatus(`下載 artifact 失敗: ${message}`);
-        return;
+        const data = await readJson(res);
+        throw new Error(data.message || data.status_message || `HTTP ${res.status}`);
       }
+
       const blob = await res.blob();
-      const disposition = res.headers.get("content-disposition") || "";
-      const filename = disposition.match(/filename="([^"]+)"/)?.[1] || `${id}-artifact.bin`;
+      const disposition = res.headers.get('content-disposition') || '';
+      const filename = artifactFilenameFromContentDisposition(disposition, id);
       const url = window.URL.createObjectURL(blob);
-      const a = document.createElement("a");
+      const a = document.createElement('a');
       a.href = url;
       a.download = filename;
       document.body.appendChild(a);
@@ -248,372 +270,216 @@ export default function MasterApp() {
       window.URL.revokeObjectURL(url);
       setStatus(`artifact 已下載: ${filename}`);
     } catch (err) {
-      setStatus(`下載 artifact 失敗: ${err.message}`);
+      setStatus(`下載失敗: ${err.message}`);
     }
-  };
+  }
 
-  const loadWorkerTrust = async () => {
-    if (!token || !trustWorkerId.trim()) return;
-    try {
-      const { data } = await api("GET", `/api/provider/workers/${encodeURIComponent(trustWorkerId.trim())}/trust`);
-      if (data.success && data.trust) {
-        setTrustProfile(data.trust);
-        setTrustScore(Number(data.trust.score || 0));
-        setTrustBanned(Boolean(data.trust.banned));
-        setStatus(`已載入 worker trust: ${trustWorkerId.trim()}`);
-      } else {
-        setStatus(`讀取 trust 失敗: ${data.message || data.status_message || "unknown error"}`);
-      }
-    } catch (err) {
-      setStatus(`讀取 trust 失敗: ${err.message}`);
-    }
-  };
-
-  const loadWorkerTrustList = async () => {
-    if (!token) return;
-    try {
-      const { data } = await api("GET", "/api/admin/workers/trust");
-      if (data.success) {
-        setTrustEntries(data.entries || []);
-      } else {
-        setStatus(`讀取 trust 列表失敗: ${data.message || data.status_message || "unknown error"}`);
-      }
-    } catch (err) {
-      setStatus(`讀取 trust 列表失敗: ${err.message}`);
-    }
-  };
-
-  const applyWorkerTrustControl = async () => {
-    if (!token || !trustWorkerId.trim()) return;
-    try {
-      const payload = { banned: trustBanned, score: Number(trustScore) };
-      const { data } = await api(
-        "PUT",
-        `/api/admin/workers/${encodeURIComponent(trustWorkerId.trim())}/trust-control`,
-        payload,
-      );
-      if (data.success) {
-        setStatus(`已更新 worker trust: ${trustWorkerId.trim()} (banned=${String(data.banned)}, score=${data.score})`);
-        await loadWorkerTrust();
-      } else {
-        setStatus(`更新 trust 失敗: ${data.message || data.status_message || "unknown error"}`);
-      }
-    } catch (err) {
-      setStatus(`更新 trust 失敗: ${err.message}`);
-    }
-  };
-
-  const loadAuditLogs = async () => {
-    if (!token) return;
-    try {
-      const { data } = await api("GET", `/api/admin/audit/logs?limit=${Number(auditLimit)}`);
-      if (data.success) {
-        setAuditLogs(data.entries || []);
-      }
-    } catch (err) {
-      setStatus(`audit logs 讀取失敗: ${err.message}`);
-    }
-  };
-
-  const loadCacheAnomalies = async () => {
-    if (!token) return;
-    try {
-      const { data } = await api("GET", `/api/admin/scheduling/cache-anomalies?limit=${Number(anomalyLimit)}`);
-      if (data.success) {
-        setCacheAnomalies(data.entries || []);
-      }
-    } catch (err) {
-      setStatus(`cache anomalies 讀取失敗: ${err.message}`);
-    }
-  };
-
-  const resetDashboard = () => {
+  function logout() {
+    setToken('');
     setTasks([]);
-    setTaskTotal(0);
-    setCacheMetrics({ total_completed_tasks: 0, total_cache_hits: 0, cache_hit_rate: 0, top_workers: [] });
-    setCacheAlert({ severity: "normal", message: "Cache Hit Rate 在可接受範圍。", cache_hit_rate: 0 });
-  };
-
-  const alertStyle = cacheAlert.severity === "low"
-    ? { padding: 8, background: "#fff3e0", borderLeft: "4px solid #e65100", borderRadius: 4 }
-    : cacheAlert.severity === "high"
-    ? { padding: 8, background: "#e8f5e9", borderLeft: "4px solid #2e7d32", borderRadius: 4 }
-    : cacheAlert.severity === "normal"
-    ? { padding: 8, background: "#e3f2fd", borderLeft: "4px solid #1565c0", borderRadius: 4 }
-    : { padding: 8, background: "#ffebee", borderLeft: "4px solid #c62828", borderRadius: 4 };
+    setSelectedTask('');
+    setTaskLog('');
+    setTaskResult('');
+    setStatus('請先登入');
+    setZipFile(null);
+  }
 
   return (
-    <div style={{ maxWidth: 960, margin: "0 auto", padding: 24, fontFamily: "system-ui, sans-serif" }}>
-      <h1 style={{ margin: 0 }}>Hivemind Master</h1>
-
-      {!token ? (
-        <form onSubmit={login} style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 10, maxWidth: 320 }}>
-          <input placeholder="username" value={username} onChange={(e) => setUsername(e.target.value)} />
-          <input type="password" placeholder="password" value={password} onChange={(e) => setPassword(e.target.value)} />
-          <button type="submit" disabled={loading}>{loading ? "登入中..." : "登入"}</button>
-          <div style={{ fontSize: 13, color: "#666" }}>{status}</div>
-        </form>
-      ) : (
-        <>
-          <div style={{ marginTop: 8, fontSize: 13, color: "#888" }}>{status}</div>
-
-          <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 10, maxWidth: 480 }}>
-            <h3>建立任務</h3>
-            <input placeholder="task_id" value={taskId} onChange={(e) => setTaskId(e.target.value)} />
-            <input placeholder="magnet / btih" value={torrent} onChange={(e) => setTorrent(e.target.value)} />
-            <input placeholder="zip_path (optional)" value={zipPath} onChange={(e) => setZipPath(e.target.value)} />
-            <div style={{ display: "flex", gap: 8 }}>
-              <input type="number" placeholder="記憶體 GB" value={memoryGb} onChange={(e) => setMemoryGb(e.target.value)} style={{ width: 100 }} />
-              <input type="number" placeholder="GPU 記憶體 GB" value={gpuMemoryGb} onChange={(e) => setGpuMemoryGb(e.target.value)} style={{ width: 120 }} />
-              <input type="number" placeholder="host count" value={hostCount} onChange={(e) => setHostCount(e.target.value)} style={{ width: 100 }} />
-              <input type="number" placeholder="max CPT" value={maxCpt} onChange={(e) => setMaxCpt(e.target.value)} style={{ width: 100 }} />
-            </div>
-            <button onClick={createTask}>提交任務</button>
+    <main
+      style={{
+        minHeight: '100vh',
+        padding: '32px 20px 40px',
+        fontFamily: 'Inter, system-ui, sans-serif',
+        color: '#16202a',
+        background: 'linear-gradient(180deg, #f4f7fb 0%, #fafcff 100%)',
+      }}
+    >
+      <div style={{ maxWidth: 1120, margin: '0 auto' }}>
+        <header style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+          <div>
+            <h1 style={{ margin: 0, fontSize: 30 }}>Hivemind Master</h1>
+            <p style={{ margin: '6px 0 0', color: '#5e6c7a' }}>Submit ZIP tasks and follow your own queue</p>
           </div>
+          {token ? (
+            <button type="button" onClick={logout} style={{ ...buttonStyle, background: '#eef2f6', color: '#24313f' }}>
+              Sign out
+            </button>
+          ) : null}
+        </header>
 
-          <div style={{ marginTop: 16 }}>
-            <h3>排程觀測</h3>
-            <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
-              <div>Completed: <strong>{cacheMetrics.total_completed_tasks}</strong></div>
-              <div>Cache Hits: <strong>{cacheMetrics.total_cache_hits}</strong></div>
-              <div>Hit Rate: <strong>{cacheMetrics.cache_hit_rate.toFixed(2)}</strong></div>
-            </div>
-            <div style={alertStyle}>
-              <strong>告警:</strong> {cacheAlert.message}（rate={cacheAlert.cache_hit_rate.toFixed(2)}）
-            </div>
-            <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center" }}>
-              <span>low threshold:</span>
-              <input type="number" step="0.1" value={lowHitRateThreshold} onChange={(e) => setLowHitRateThreshold(e.target.value)} style={{ width: 80 }} />
-              <span>high threshold:</span>
-              <input type="number" step="0.1" value={highHitRateThreshold} onChange={(e) => setHighHitRateThreshold(e.target.value)} style={{ width: 80 }} />
-            </div>
-            <div style={{ marginTop: 8 }}>
-              <strong>Top Workers by Cache Hits</strong>
-              {cacheMetrics.top_workers.length === 0 ? (
-                <p style={{ marginTop: 6 }}>尚無 cache 資料</p>
-              ) : (
-                <table style={{ borderCollapse: "collapse", width: "100%", marginTop: 6, background: "#fff" }}>
-                  <thead>
-                    <tr>
-                      <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>Worker</th>
-                      <th style={{ textAlign: "right", borderBottom: "1px solid #ddd", padding: 6 }}>Cache Hits</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {cacheMetrics.top_workers.map((w) => (
-                      <tr key={w.worker_id}>
-                        <td style={{ borderBottom: "1px solid #eee", padding: 6 }}>{w.worker_id}</td>
-                        <td style={{ textAlign: "right", borderBottom: "1px solid #eee", padding: 6 }}>{w.cache_hits}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
+        <section style={{ ...panelStyle, marginTop: 20 }}>
+          <form onSubmit={handleLogin} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+            <label>
+              Username
+              <input value={username} onChange={(e) => setUsername(e.target.value)} style={fieldStyle} />
+            </label>
+            <label>
+              Password
+              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} style={fieldStyle} />
+            </label>
+            <button
+              type="submit"
+              disabled={loading}
+              style={{ ...buttonStyle, alignSelf: 'end', background: '#1769aa', color: '#fff' }}
+            >
+              {loading ? 'Working...' : 'Login'}
+            </button>
+          </form>
+          <div style={{ marginTop: 12, padding: '10px 12px', borderRadius: 10, background: '#edf4fa', color: '#27465d' }}>
+            {status}
           </div>
+        </section>
 
-          <div style={{ marginTop: 16 }}>
-            <h3>Cache Anomalies</h3>
-            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
-              <span>limit:</span>
-              <input type="number" value={anomalyLimit} onChange={(e) => setAnomalyLimit(e.target.value)} style={{ width: 70 }} />
-              <button onClick={loadCacheAnomalies}>刷新</button>
-            </div>
-            {cacheAnomalies.length === 0 ? (
-              <p>尚無 anomalies</p>
-            ) : (
-              <table style={{ borderCollapse: "collapse", width: "100%", background: "#fff" }}>
-                <thead>
-                  <tr>
-                    <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>Time</th>
-                    <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>Severity</th>
-                    <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>Message</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {cacheAnomalies.map((a, i) => (
-                    <tr key={i}>
-                      <td style={{ borderBottom: "1px solid #eee", padding: 6, fontSize: 12 }}>{a.created_at || ""}</td>
-                      <td style={{ borderBottom: "1px solid #eee", padding: 6 }}>{a.severity || ""}</td>
-                      <td style={{ borderBottom: "1px solid #eee", padding: 6, fontSize: 12 }}>{a.message || ""}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-
-          <div style={{ marginTop: 16 }}>
-            <h3>Admin Audit Logs</h3>
-            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
-              <span>limit:</span>
-              <input type="number" value={auditLimit} onChange={(e) => setAuditLimit(e.target.value)} style={{ width: 70 }} />
-              <button onClick={loadAuditLogs}>刷新</button>
-            </div>
-            {auditLogs.length === 0 ? (
-              <p>尚無 audit logs</p>
-            ) : (
-              <table style={{ borderCollapse: "collapse", width: "100%", background: "#fff" }}>
-                <thead>
-                  <tr>
-                    <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>Time</th>
-                    <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>Admin</th>
-                    <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>Action</th>
-                    <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>Target</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {auditLogs.map((entry, i) => (
-                    <tr key={i}>
-                      <td style={{ borderBottom: "1px solid #eee", padding: 6, fontSize: 12 }}>{entry.created_at || ""}</td>
-                      <td style={{ borderBottom: "1px solid #eee", padding: 6 }}>{entry.username || ""}</td>
-                      <td style={{ borderBottom: "1px solid #eee", padding: 6 }}>{entry.action || ""}</td>
-                      <td style={{ borderBottom: "1px solid #eee", padding: 6, fontSize: 12 }}>{entry.resource || ""}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-
-          <div style={{ marginTop: 16 }}>
-            <h3>Worker Trust 管理</h3>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-              <input
-                value={trustWorkerId}
-                onChange={(e) => setTrustWorkerId(e.target.value)}
-                placeholder="worker_id"
-                style={{ minWidth: 240 }}
-              />
-              <input
-                type="number"
-                value={trustScore}
-                onChange={(e) => setTrustScore(e.target.value)}
-                placeholder="score"
-                style={{ width: 100 }}
-              />
-              <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+        {token ? (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 18, marginTop: 18 }}>
+            <section style={panelStyle}>
+              <h2 style={{ margin: '0 0 12px', fontSize: 20 }}>Upload ZIP Task</h2>
+              <label>
+                Task ID
                 <input
-                  type="checkbox"
-                  checked={trustBanned}
-                  onChange={(e) => setTrustBanned(e.target.checked)}
+                  value={taskId}
+                  onChange={(e) => setTaskId(e.target.value)}
+                  placeholder="optional, defaults to zip file name"
+                  style={fieldStyle}
                 />
-                banned
               </label>
-              <button onClick={loadWorkerTrust}>讀取</button>
-              <button onClick={loadWorkerTrustList}>列表</button>
-              <button onClick={applyWorkerTrustControl}>套用</button>
-            </div>
-            <div style={{ marginTop: 10 }}>
-              {trustProfile ? (
-                <div style={{ fontSize: 13 }}>
-                  <div>worker_id: <strong>{trustProfile.worker_id}</strong></div>
-                  <div>score: <strong>{trustProfile.score}</strong></div>
-                  <div>banned: <strong>{String(trustProfile.banned)}</strong></div>
-                  <div>successful: <strong>{trustProfile.successful_tasks}</strong> / failed: <strong>{trustProfile.failed_tasks}</strong></div>
-                </div>
-              ) : (
-                <div style={{ fontSize: 13, color: "#666" }}>尚未載入 worker trust</div>
-              )}
-            </div>
-            <div style={{ marginTop: 12 }}>
-              <strong>Worker Trust 列表</strong>
-              {trustEntries.length === 0 ? (
-                <p style={{ marginTop: 6 }}>目前沒有 trust 列表資料</p>
-              ) : (
-                <div style={{ overflowX: "auto", marginTop: 6 }}>
-                  <table style={{ borderCollapse: "collapse", width: "100%", background: "#fff" }}>
-                    <thead>
-                      <tr>
-                        <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>Worker</th>
-                        <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>Owner</th>
-                        <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>Status</th>
-                        <th style={{ textAlign: "right", borderBottom: "1px solid #ddd", padding: 6 }}>Score</th>
-                        <th style={{ textAlign: "center", borderBottom: "1px solid #ddd", padding: 6 }}>Banned</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {trustEntries.map((entry) => (
-                        <tr
-                          key={entry.worker_id}
-                          onClick={() => {
-                            setTrustWorkerId(entry.worker_id || "");
-                            setTrustScore(Number(entry.score || 0));
-                            setTrustBanned(Boolean(entry.banned));
-                          }}
-                          style={{ cursor: "pointer" }}
-                        >
-                          <td style={{ borderBottom: "1px solid #eee", padding: 6 }}>{entry.worker_id}</td>
-                          <td style={{ borderBottom: "1px solid #eee", padding: 6 }}>{entry.username}</td>
-                          <td style={{ borderBottom: "1px solid #eee", padding: 6 }}>{entry.worker_status}</td>
-                          <td style={{ textAlign: "right", borderBottom: "1px solid #eee", padding: 6 }}>{entry.score}</td>
-                          <td style={{ textAlign: "center", borderBottom: "1px solid #eee", padding: 6 }}>{String(entry.banned)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          </div>
+              <label style={{ display: 'block', marginTop: 12 }}>
+                ZIP file
+                <input
+                  type="file"
+                  accept=".zip,application/zip"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0] || null;
+                    setZipFile(file);
+                    if (file && !taskId.trim()) {
+                      setTaskId(taskIdFromFileName(file.name));
+                    }
+                  }}
+                  style={{ ...fieldStyle, paddingTop: 9 }}
+                />
+              </label>
+              <div style={{ marginTop: 12, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12 }}>
+                <label>
+                  CPU score
+                  <input type="number" min="0" value={cpuScore} onChange={(e) => setCpuScore(e.target.value)} style={fieldStyle} />
+                </label>
+                <label>
+                  GPU score
+                  <input type="number" min="0" value={gpuScore} onChange={(e) => setGpuScore(e.target.value)} style={fieldStyle} />
+                </label>
+                <label>
+                  Memory GB
+                  <input type="number" min="0" value={memoryGb} onChange={(e) => setMemoryGb(e.target.value)} style={fieldStyle} />
+                </label>
+                <label>
+                  GPU memory GB
+                  <input type="number" min="0" value={gpuMemoryGb} onChange={(e) => setGpuMemoryGb(e.target.value)} style={fieldStyle} />
+                </label>
+                <label>
+                  Storage GB
+                  <input type="number" min="0" value={storageGb} onChange={(e) => setStorageGb(e.target.value)} style={fieldStyle} />
+                </label>
+                <label>
+                  Host count
+                  <input type="number" min="1" value={hostCount} onChange={(e) => setHostCount(e.target.value)} style={fieldStyle} />
+                </label>
+                <label>
+                  Max CPT
+                  <input type="number" min="0" value={maxCpt} onChange={(e) => setMaxCpt(e.target.value)} style={fieldStyle} />
+                </label>
+              </div>
+              <div style={{ marginTop: 14, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  onClick={submitTask}
+                  disabled={loading || !zipFile}
+                  style={{ ...buttonStyle, background: '#1f7a4d', color: '#fff' }}
+                >
+                  {loading ? 'Uploading...' : 'Upload ZIP'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => refreshTasks().then(() => setStatus('任務列表已更新')).catch((err) => setStatus(`更新失敗: ${err.message}`))}
+                  style={{ ...buttonStyle, background: '#e7edf3', color: '#22313f' }}
+                >
+                  Refresh tasks
+                </button>
+              </div>
+            </section>
 
-          <div style={{ marginTop: 16 }}>
-            <h3>任務列表</h3>
-            {tasks.length === 0 ? (
-              <p>目前沒有任務</p>
-            ) : (
-              <ul style={{ listStyle: "none", padding: 0, display: "grid", gap: 10 }}>
-                {tasks.map((t) => {
-                  const id = t.TaskID || t.task_id;
-                  const st = t.Status || t.status;
-                  const msg = t.StatusMessage || t.status_message || "";
-                  const rt = Number(t.retry_count || 0);
-                  const wt = Number(t.wall_time_ms || 0);
-                  const pm = Number(t.peak_memory_mb || 0);
-                  const ba = Number(t.billed_amount || 0);
-                  const bs = t.billing_settled;
-                  const dt = t.deterministic;
-                  const statusColor = st === "COMPLETED" ? "#2e7d32" : st === "FAILED" ? "#c62828" : st === "RUNNING" ? "#1565c0" : "#666";
-                  return (
-                    <li key={id} style={{ border: "1px solid #ddd", borderRadius: 8, padding: 10 }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                        <strong>{id}</strong>
-                        <span style={{ fontSize: 12, color: statusColor, fontWeight: 600 }}>{st}</span>
-                      </div>
-                      <div style={{ fontSize: 12, color: "#555", marginTop: 4 }}>{msg}</div>
-                      <div style={{ fontSize: 11, color: "#888", marginTop: 4, display: "flex", gap: 12 }}>
-                        <span>wall: {(wt / 1000).toFixed(1)}s</span>
-                        <span>mem: {pm}MB</span>
-                        <span>billed: {ba} CPT {bs ? "(settled)" : "(pending)"}</span>
-                        {rt > 0 && <span>retries: {rt}</span>}
-                        {dt && <span style={{ color: "#7b1fa2" }}>deterministic</span>}
-                      </div>
-                      <div style={{ marginTop: 6, display: "flex", gap: 8 }}>
-                        <button onClick={() => viewTaskLog(t)}>日誌</button>
-                        <button onClick={() => viewTaskResult(t)}>結果</button>
-                        <button onClick={() => downloadArtifact(t)}>下載 artifact</button>
-                        <button onClick={() => stopTask(t)}>停止</button>
-                      </div>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </div>
+            <section style={panelStyle}>
+              <h2 style={{ margin: '0 0 12px', fontSize: 20 }}>Your Tasks</h2>
+              {tasks.length === 0 ? (
+                <p style={{ color: '#5e6c7a' }}>沒有任務。</p>
+              ) : (
+                <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'grid', gap: 12 }}>
+                  {tasks.map((task) => {
+                    const id = task.task_id || task.TaskID || '';
+                    const statusText = task.status || task.Status || '';
+                    const message = task.status_message || task.StatusMessage || '';
+                    const wallTimeMs = Number(task.wall_time_ms || 0);
+                    const billedAmount = Number(task.billed_amount || 0);
+                    const statusColor =
+                      statusText === 'COMPLETED' ? '#2e7d32'
+                        : statusText === 'FAILED' ? '#c62828'
+                          : statusText === 'RUNNING' ? '#1565c0'
+                            : '#666';
 
-          <div style={{ marginTop: 16, padding: 12, background: "#fafafa", borderRadius: 8, border: "1px solid #ddd" }}>
-            <h3>任務詳情 {selectedTask ? `(${selectedTask})` : ""}</h3>
-            <div>
-              <strong>日誌:</strong>
-              <pre style={{ whiteSpace: "pre-wrap", background: "#fff", padding: 8, border: "1px solid #eee" }}>{taskLog || "(空)"}</pre>
-            </div>
-            <div>
-              <strong>結果:</strong>
-              <pre style={{ whiteSpace: "pre-wrap", background: "#fff", padding: 8, border: "1px solid #eee" }}>{taskResult || "(空)"}</pre>
-            </div>
+                    return (
+                      <li key={id} style={{ border: '1px solid #dfe5ec', borderRadius: 12, padding: 12 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center' }}>
+                          <strong>{id}</strong>
+                          <span style={{ color: statusColor, fontWeight: 700, fontSize: 12 }}>{statusText}</span>
+                        </div>
+                        <div style={{ fontSize: 12, color: '#5e6c7a', marginTop: 4 }}>{message}</div>
+                        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 6, fontSize: 12, color: '#66717d' }}>
+                          <span>wall: {(wallTimeMs / 1000).toFixed(1)}s</span>
+                          <span>billed: {billedAmount} CPT</span>
+                          {task.retry_count ? <span>retries: {task.retry_count}</span> : null}
+                        </div>
+                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
+                          <button type="button" onClick={() => viewTaskLog(task)} style={{ ...buttonStyle, background: '#eef2f6', color: '#24313f' }}>
+                            Log
+                          </button>
+                          <button type="button" onClick={() => viewTaskResult(task)} style={{ ...buttonStyle, background: '#eef2f6', color: '#24313f' }}>
+                            Result
+                          </button>
+                          <button type="button" onClick={() => downloadArtifact(task)} style={{ ...buttonStyle, background: '#eef2f6', color: '#24313f' }}>
+                            Download
+                          </button>
+                          <button type="button" onClick={() => cancelTask(task)} style={{ ...buttonStyle, background: '#f4d7d7', color: '#8d1d1d' }}>
+                            Cancel
+                          </button>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </section>
+
+            <section style={{ ...panelStyle, gridColumn: '1 / -1' }}>
+              <h2 style={{ margin: '0 0 12px', fontSize: 20 }}>
+                Task Detail {selectedTask ? `(${selectedTask})` : ''}
+              </h2>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 16 }}>
+                <div>
+                  <strong>Log</strong>
+                  <pre style={{ whiteSpace: 'pre-wrap', background: '#fafcff', border: '1px solid #e3e8ef', padding: 12, borderRadius: 10, minHeight: 160 }}>
+                    {taskLog || '(empty)'}
+                  </pre>
+                </div>
+                <div>
+                  <strong>Result</strong>
+                  <pre style={{ whiteSpace: 'pre-wrap', background: '#fafcff', border: '1px solid #e3e8ef', padding: 12, borderRadius: 10, minHeight: 160 }}>
+                    {taskResult || '(empty)'}
+                  </pre>
+                </div>
+              </div>
+            </section>
           </div>
-        </>
-      )}
-    </div>
+        ) : null}
+      </div>
+    </main>
   );
 }

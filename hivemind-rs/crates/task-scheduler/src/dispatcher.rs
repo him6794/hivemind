@@ -1,6 +1,6 @@
-use anyhow::Result;
+﻿use anyhow::Result;
 use hivemind_database::DatabaseManager;
-use hivemind_models::{Task, WorkerNode};
+use hivemind_models::{Task, TaskStatus, WorkerNode};
 use hivemind_proto::{ExecuteTaskRequest, ResourceSpec as ProtoResourceSpec};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -10,11 +10,8 @@ use tracing::{error, info, warn};
 use crate::scheduler;
 use crate::task_repository::TaskRepository;
 
-const MIN_REPUTATION_SCORE: i32 = 20;
-
 pub struct Dispatcher {
     repo: Arc<TaskRepository>,
-    #[allow(dead_code)]
     db: DatabaseManager,
     task_timeout_secs: u64,
     max_redispatch: i32,
@@ -64,7 +61,7 @@ impl Dispatcher {
     }
 
     pub async fn dispatch_pending(&self, workers: &[WorkerNode]) -> Result<u64> {
-        let trusted_workers = self.filter_workers_by_trust(workers).await?;
+        let trusted_workers = self.repo.trusted_workers(workers).await?;
         let pending = self.repo.find_pending().await?;
         let mut dispatched = 0u64;
         for task in &pending {
@@ -94,7 +91,7 @@ impl Dispatcher {
 
     pub async fn dispatch_pending_from_registered_workers_and_execute(&self) -> Result<u64> {
         let workers = self.registered_workers().await?;
-        let trusted_workers = self.filter_workers_by_trust(&workers).await?;
+        let trusted_workers = self.repo.trusted_workers(&workers).await?;
         let pending = self.repo.find_pending().await?;
         let mut dispatched = 0u64;
         for task in &pending {
@@ -114,35 +111,6 @@ impl Dispatcher {
             info!("Dispatched {} pending tasks", dispatched);
         }
         Ok(dispatched)
-    }
-
-    async fn filter_workers_by_trust(&self, workers: &[WorkerNode]) -> Result<Vec<WorkerNode>> {
-        if workers.is_empty() {
-            return Ok(vec![]);
-        }
-        let ids: Vec<String> = workers.iter().map(|w| w.worker_id.clone()).collect();
-        let rows: Vec<(String, i32, bool)> = sqlx::query_as(
-            "SELECT worker_id, score, banned
-             FROM worker_reputation
-             WHERE worker_id = ANY($1)",
-        )
-        .bind(&ids)
-        .fetch_all(&self.db.pool)
-        .await?;
-
-        let trust_map: HashMap<String, (i32, bool)> = rows
-            .into_iter()
-            .map(|(worker_id, score, banned)| (worker_id, (score, banned)))
-            .collect();
-
-        Ok(workers
-            .iter()
-            .filter(|worker| match trust_map.get(&worker.worker_id) {
-                Some((score, banned)) => !*banned && *score >= MIN_REPUTATION_SCORE,
-                None => true,
-            })
-            .cloned()
-            .collect())
     }
 
     async fn rank_workers_by_cache_affinity(
@@ -264,27 +232,6 @@ impl Dispatcher {
         Ok((redispatched, failed))
     }
 
-    pub fn start_dispatch_loop(
-        self: Arc<Self>,
-        workers_rx: watch::Receiver<Vec<WorkerNode>>,
-        interval: std::time::Duration,
-    ) -> watch::Sender<bool> {
-        let (tx, mut rx) = watch::channel(false);
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(interval);
-            loop {
-                tokio::select! {
-                    _ = tick.tick() => {
-                        let workers = workers_rx.borrow().clone();
-                        if let Err(e) = self.dispatch_pending(&workers).await { error!("Dispatch loop error: {}", e); }
-                    }
-                    _ = rx.changed() => { if *rx.borrow() { info!("Dispatch loop shutting down"); break; } }
-                }
-            }
-        });
-        tx
-    }
-
     pub fn start_registered_dispatch_loop(
         self: Arc<Self>,
         interval: std::time::Duration,
@@ -359,11 +306,31 @@ async fn execute_on_worker(
     worker_id: String,
     worker_addr: String,
 ) -> Result<()> {
+    let Some(current_task) = repo.find_by_task_id(&task.task_id).await? else {
+        warn!("Task {} disappeared before worker execution", task.task_id);
+        return Ok(());
+    };
+    if current_task.worker_id.as_deref() != Some(worker_id.as_str())
+        || !matches!(
+            current_task.status,
+            TaskStatus::Assigned | TaskStatus::Running
+        )
+    {
+        info!(
+            "Skipping worker execution for task {} because it is no longer assigned to worker {}",
+            task.task_id, worker_id
+        );
+        return Ok(());
+    }
+
     let mut client = hivemind_proto::worker_node_service_client::WorkerNodeServiceClient::connect(
         worker_endpoint(&worker_addr),
     )
     .await?;
-    match client.execute_task(build_execute_task_request(&task)).await {
+    match client
+        .execute_task(build_execute_task_request(&current_task))
+        .await
+    {
         Ok(response) => {
             let response = response.into_inner();
             if response.success {
@@ -401,7 +368,17 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use hivemind_models::{TaskStatus, WorkerStatus};
+    use hivemind_proto::{
+        worker_node_service_server::{WorkerNodeService, WorkerNodeServiceServer},
+        ExecuteTaskRequest, ExecuteTaskResponse, StopTaskExecutionRequest,
+        StopTaskExecutionResponse, TaskOutputRequest, TaskOutputResponse, TaskOutputUploadRequest,
+        TaskOutputUploadResponse, TaskResultUploadRequest, TaskResultUploadResponse,
+        TaskUsageRequest, TaskUsageResponse,
+    };
+    use std::net::SocketAddr;
     use std::sync::{Arc, OnceLock};
+    use std::time::Duration;
+    use tonic::{Request, Response, Status};
 
     fn dispatcher_db_lock() -> Arc<tokio::sync::Mutex<()>> {
         static LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
@@ -409,18 +386,40 @@ mod tests {
             .clone()
     }
 
+    async fn test_db(
+        test_name: &str,
+    ) -> Option<(
+        hivemind_database::DatabaseManager,
+        hivemind_database::postgres::IsolatedTestPool,
+    )> {
+        let fixture = hivemind_database::postgres::create_isolated_test_pool(test_name)
+            .await
+            .ok()?;
+        if hivemind_database::postgres::run_migrations(&fixture.pool)
+            .await
+            .is_err()
+        {
+            fixture.cleanup().await.ok();
+            return None;
+        }
+        let db = hivemind_database::DatabaseManager {
+            pool: fixture.pool.clone(),
+        };
+        Some((db, fixture))
+    }
+
     fn make_task(id: &str, status: TaskStatus, retry_count: i32) -> Task {
         Task {
             id: uuid::Uuid::new_v4(),
             task_id: id.into(),
-            owner: "testuser".into(),
+            owner: "example-user".into(),
             worker_id: None,
             worker_ip: None,
             status,
             status_message: None,
             output: None,
             result_torrent: None,
-            torrent_source: Some("test-btih".into()),
+            torrent_source: Some("example-btih".into()),
             expected_btih: None,
             cpu_usage: 0.0,
             memory_usage: 0.0,
@@ -511,20 +510,37 @@ mod tests {
         let limits = request.resource_limits.unwrap();
 
         assert_eq!(request.task_id, "execute-request-1");
-        assert_eq!(request.torrent, "test-btih");
+        assert_eq!(request.torrent, "example-btih");
         assert_eq!(limits.cpu_score, 100);
         assert_eq!(limits.memory_mb, 4096);
         assert_eq!(limits.storage_total_gb, 10);
     }
 
     #[tokio::test]
-    async fn test_dispatch_one_no_workers() {
-        let config = hivemind_config::HivemindConfig::default();
-        let db = match hivemind_database::DatabaseManager::new(&config).await {
-            Ok(db) => db,
-            Err(_) => return,
+    async fn dispatcher_db_tests_use_isolated_schema() {
+        let (db, fixture) = match test_db("dispatcher_schema_canary").await {
+            Some(parts) => parts,
+            None => return,
         };
-        db.run_migrations().await.ok();
+
+        let schema: String = sqlx::query_scalar("SELECT current_schema()")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+
+        assert!(
+            schema.starts_with("hm_test_"),
+            "dispatcher DB tests must use an isolated schema, got {schema}"
+        );
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_one_no_workers() {
+        let (db, fixture) = match test_db("dispatcher_no_workers").await {
+            Some(parts) => parts,
+            None => return,
+        };
         let dispatcher = Dispatcher::new(db, 30, 2);
         let task = make_task("dispatch-test-1", TaskStatus::Pending, 0);
         let result = dispatcher.dispatch_one(&task, &[]).await;
@@ -533,18 +549,17 @@ mod tests {
             .execute(&dispatcher.db.pool)
             .await
             .ok();
+        fixture.cleanup().await.ok();
     }
 
     #[tokio::test]
     async fn test_dispatch_one_with_worker() {
         let lock = dispatcher_db_lock();
         let _guard = lock.lock().await;
-        let config = hivemind_config::HivemindConfig::default();
-        let db = match hivemind_database::DatabaseManager::new(&config).await {
-            Ok(db) => db,
-            Err(_) => return,
+        let (db, fixture) = match test_db("dispatcher_with_worker").await {
+            Some(parts) => parts,
+            None => return,
         };
-        db.run_migrations().await.ok();
         let dispatcher = Dispatcher::new(db.clone(), 30, 2);
         let task = make_task("dispatch-test-2", TaskStatus::Pending, 0);
         dispatcher.repo.create(&task).await.ok();
@@ -565,18 +580,17 @@ mod tests {
             .execute(&db.pool)
             .await
             .ok();
+        fixture.cleanup().await.ok();
     }
 
     #[tokio::test]
     async fn test_dispatch_one_does_not_overwrite_stale_assignment() {
         let lock = dispatcher_db_lock();
         let _guard = lock.lock().await;
-        let config = hivemind_config::HivemindConfig::default();
-        let db = match hivemind_database::DatabaseManager::new(&config).await {
-            Ok(db) => db,
-            Err(_) => return,
+        let (db, fixture) = match test_db("dispatcher_stale_assignment").await {
+            Some(parts) => parts,
+            None => return,
         };
-        db.run_migrations().await.ok();
         let dispatcher = Dispatcher::new(db.clone(), 30, 2);
         let task_id = "dispatch-stale-assignment";
         sqlx::query("DELETE FROM tasks WHERE task_id = $1")
@@ -611,18 +625,77 @@ mod tests {
             .execute(&db.pool)
             .await
             .ok();
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_execute_on_worker_skips_task_cancelled_after_assignment() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let (db, fixture) = match test_db("dispatcher_cancelled_after_assignment").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let dispatcher = Dispatcher::new(db.clone(), 30, 2);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let task_id = format!("dispatch-cancel-race-{unique}");
+        let worker_id = format!("dispatch-cancel-race-w-{unique}");
+        let (worker_addr, mut execute_rx) = match fake_worker_execute_server().await {
+            Some(parts) => parts,
+            None => return,
+        };
+
+        let task = make_task(&task_id, TaskStatus::Pending, 0);
+        dispatcher.repo.create(&task).await.unwrap();
+        dispatcher
+            .repo
+            .assign_to_worker(&task_id, &worker_id, &worker_addr.to_string())
+            .await
+            .unwrap();
+        dispatcher.repo.cancel(&task_id).await.unwrap();
+
+        let result = execute_on_worker(
+            dispatcher.repo.clone(),
+            task,
+            worker_id.clone(),
+            worker_addr.to_string(),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "execution skip should not be an error: {result:?}"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), execute_rx.recv())
+                .await
+                .is_err(),
+            "cancelled task should not be sent to worker"
+        );
+        let stored = dispatcher
+            .repo
+            .find_by_task_id(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, TaskStatus::Cancelled);
+
+        sqlx::query("DELETE FROM tasks WHERE task_id = $1")
+            .bind(&task_id)
+            .execute(&db.pool)
+            .await
+            .ok();
+        fixture.cleanup().await.ok();
     }
 
     #[tokio::test]
     async fn test_dispatch_pending_from_registered_workers() {
         let lock = dispatcher_db_lock();
         let _guard = lock.lock().await;
-        let config = hivemind_config::HivemindConfig::default();
-        let db = match hivemind_database::DatabaseManager::new(&config).await {
-            Ok(db) => db,
-            Err(_) => return,
+        let (db, fixture) = match test_db("dispatcher_registered_workers").await {
+            Some(parts) => parts,
+            None => return,
         };
-        db.run_migrations().await.ok();
         let dispatcher = Dispatcher::new(db.clone(), 30, 2);
         let unique = uuid::Uuid::new_v4().to_string();
         let task_id = format!("dispatch-registered-{}", unique);
@@ -651,6 +724,14 @@ mod tests {
              cpu_score, gpu_score, gpu_memory_gb, gpu_name, vram_mb,
              storage_total_gb, storage_available_gb, location, status, available_memory_gb, queue_capacity)
              VALUES ($1,'test','127.0.0.1:50053',4,16,400,0,0,NULL,0,500,200,'local','IDLE',16,4)",
+        )
+        .bind(&worker_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO worker_reputation (worker_id, successful_tasks, failed_tasks, score, banned)
+             VALUES ($1, 10, 0, 100, false)",
         )
         .bind(&worker_id)
         .execute(&db.pool)
@@ -687,18 +768,17 @@ mod tests {
             .execute(&db.pool)
             .await
             .ok();
+        fixture.cleanup().await.ok();
     }
 
     #[tokio::test]
     async fn test_dispatch_pending_multiple() {
         let lock = dispatcher_db_lock();
         let _guard = lock.lock().await;
-        let config = hivemind_config::HivemindConfig::default();
-        let db = match hivemind_database::DatabaseManager::new(&config).await {
-            Ok(db) => db,
-            Err(_) => return,
+        let (db, fixture) = match test_db("dispatcher_pending_multiple").await {
+            Some(parts) => parts,
+            None => return,
         };
-        db.run_migrations().await.ok();
         let dispatcher = Dispatcher::new(db.clone(), 30, 2);
         sqlx::query("DELETE FROM tasks WHERE task_id LIKE 'dispatch-multi-%'")
             .execute(&db.pool)
@@ -712,6 +792,14 @@ mod tests {
             make_worker("wm1", 8, 32, WorkerStatus::Idle),
             make_worker("wm2", 8, 32, WorkerStatus::Idle),
         ];
+        sqlx::query(
+            "INSERT INTO worker_reputation (worker_id, successful_tasks, failed_tasks, score, banned)
+             VALUES ('wm1', 10, 0, 100, false), ('wm2', 10, 0, 100, false)
+             ON CONFLICT (worker_id) DO UPDATE SET score = EXCLUDED.score, banned = EXCLUDED.banned",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
         let count = dispatcher.dispatch_pending(&workers).await.unwrap();
         assert!(count >= 1);
         for i in 0..3 {
@@ -721,18 +809,21 @@ mod tests {
                 .await
                 .ok();
         }
+        sqlx::query("DELETE FROM worker_reputation WHERE worker_id IN ('wm1', 'wm2')")
+            .execute(&db.pool)
+            .await
+            .ok();
+        fixture.cleanup().await.ok();
     }
 
     #[tokio::test]
     async fn test_dispatch_pending_excludes_banned_worker_by_trust() {
         let lock = dispatcher_db_lock();
         let _guard = lock.lock().await;
-        let config = hivemind_config::HivemindConfig::default();
-        let db = match hivemind_database::DatabaseManager::new(&config).await {
-            Ok(db) => db,
-            Err(_) => return,
+        let (db, fixture) = match test_db("dispatcher_excludes_banned_worker").await {
+            Some(parts) => parts,
+            None => return,
         };
-        db.run_migrations().await.ok();
         let dispatcher = Dispatcher::new(db.clone(), 30, 2);
         let unique = uuid::Uuid::new_v4().to_string();
         let task_id = format!("dispatch-trust-banned-{}", unique);
@@ -821,18 +912,17 @@ mod tests {
             .execute(&db.pool)
             .await
             .ok();
+        fixture.cleanup().await.ok();
     }
 
     #[tokio::test]
     async fn test_rank_workers_prefers_worker_with_cache_affinity() {
         let lock = dispatcher_db_lock();
         let _guard = lock.lock().await;
-        let config = hivemind_config::HivemindConfig::default();
-        let db = match hivemind_database::DatabaseManager::new(&config).await {
-            Ok(db) => db,
-            Err(_) => return,
+        let (db, fixture) = match test_db("dispatcher_cache_affinity").await {
+            Some(parts) => parts,
+            None => return,
         };
-        db.run_migrations().await.ok();
         let dispatcher = Dispatcher::new(db.clone(), 30, 2);
 
         let task_id = format!("dispatch-cache-target-{}", uuid::Uuid::new_v4());
@@ -859,7 +949,7 @@ mod tests {
                 host_count, max_cpt, billing_settled, billed_amount, max_retries,
                 deterministic, side_effects, priority, cache_hits, created_at, last_update, completed_at
              ) VALUES (
-                $1, 'testuser', $2, '127.0.0.1', 'COMPLETED', $3,
+                $1, 'example-user', $2, '127.0.0.1', 'COMPLETED', $3,
                 100, 0, 4, 0, 10,
                 1, 1000, true, 1000, 3,
                 false, false, 0, 0, NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days'
@@ -880,7 +970,7 @@ mod tests {
                 host_count, max_cpt, billing_settled, billed_amount, max_retries,
                 deterministic, side_effects, priority, cache_hits, created_at, last_update, completed_at
              ) VALUES (
-                $1, 'testuser', $2, '127.0.0.1', 'COMPLETED', $3,
+                $1, 'example-user', $2, '127.0.0.1', 'COMPLETED', $3,
                 100, 0, 4, 0, 10,
                 1, 1000, true, 1000, 3,
                 false, false, 0, 1, NOW(), NOW(), NOW()
@@ -914,5 +1004,96 @@ mod tests {
             .execute(&db.pool)
             .await
             .ok();
+        fixture.cleanup().await.ok();
+    }
+
+    async fn fake_worker_execute_server(
+    ) -> Option<(SocketAddr, tokio::sync::mpsc::Receiver<String>)> {
+        let addr = reserve_loopback_addr()?;
+        let (execute_tx, execute_rx) = tokio::sync::mpsc::channel(1);
+        let service = WorkerNodeServiceServer::new(FakeWorkerExecuteService { execute_tx });
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(service)
+                .serve(addr)
+                .await;
+        });
+
+        for _ in 0..30 {
+            if hivemind_proto::worker_node_service_client::WorkerNodeServiceClient::connect(
+                format!("http://{addr}"),
+            )
+            .await
+            .is_ok()
+            {
+                return Some((addr, execute_rx));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        None
+    }
+
+    fn reserve_loopback_addr() -> Option<SocketAddr> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
+        let addr = listener.local_addr().ok()?;
+        drop(listener);
+        Some(addr)
+    }
+
+    struct FakeWorkerExecuteService {
+        execute_tx: tokio::sync::mpsc::Sender<String>,
+    }
+
+    #[tonic::async_trait]
+    impl WorkerNodeService for FakeWorkerExecuteService {
+        async fn execute_task(
+            &self,
+            request: Request<ExecuteTaskRequest>,
+        ) -> Result<Response<ExecuteTaskResponse>, Status> {
+            let task_id = request.into_inner().task_id;
+            let _ = self.execute_tx.send(task_id).await;
+            Ok(Response::new(ExecuteTaskResponse {
+                success: true,
+                status_message: "executed".into(),
+            }))
+        }
+
+        async fn task_output_upload(
+            &self,
+            _request: Request<TaskOutputUploadRequest>,
+        ) -> Result<Response<TaskOutputUploadResponse>, Status> {
+            Err(Status::unimplemented("fake worker does not upload output"))
+        }
+
+        async fn task_result_upload(
+            &self,
+            _request: Request<TaskResultUploadRequest>,
+        ) -> Result<Response<TaskResultUploadResponse>, Status> {
+            Err(Status::unimplemented("fake worker does not upload results"))
+        }
+
+        async fn task_output(
+            &self,
+            _request: Request<TaskOutputRequest>,
+        ) -> Result<Response<TaskOutputResponse>, Status> {
+            Err(Status::unimplemented("fake worker has no output"))
+        }
+
+        async fn stop_task_execution(
+            &self,
+            _request: Request<StopTaskExecutionRequest>,
+        ) -> Result<Response<StopTaskExecutionResponse>, Status> {
+            Ok(Response::new(StopTaskExecutionResponse {
+                success: true,
+                status_message: "Stop requested".into(),
+            }))
+        }
+
+        async fn task_usage(
+            &self,
+            _request: Request<TaskUsageRequest>,
+        ) -> Result<Response<TaskUsageResponse>, Status> {
+            Err(Status::unimplemented("fake worker does not report usage"))
+        }
     }
 }

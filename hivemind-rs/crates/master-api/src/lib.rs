@@ -11,6 +11,7 @@ use axum::Router;
 use hivemind_config::HivemindConfig;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio::time::Duration;
 
 use crate::grpc_client::GrpcClient;
 
@@ -25,15 +26,16 @@ impl MasterApiServer {
         nodepool_grpc_addr: String,
         config: HivemindConfig,
     ) -> Result<Self> {
-        let grpc = GrpcClient::connect(&nodepool_grpc_addr)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to connect to nodepool gRPC at {}: {}",
-                    nodepool_grpc_addr,
-                    e
-                )
-            })?;
+        let grpc =
+            GrpcClient::connect_with_retry(&nodepool_grpc_addr, 50, Duration::from_millis(200))
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to connect to nodepool gRPC at {}: {}",
+                        nodepool_grpc_addr,
+                        e
+                    )
+                })?;
         let state = handlers::AppState {
             jwt_secret,
             token_expiry_hours,

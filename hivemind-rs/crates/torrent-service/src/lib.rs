@@ -101,7 +101,7 @@ mod tests {
     async fn test_zip_to_torrent_creates_torrent_file() {
         let tmp = TempDir::new().unwrap();
         let zip_path = tmp.path().join("task.zip");
-        std::fs::write(&zip_path, b"fake-task-data-for-torrent-generation").unwrap();
+        std::fs::write(&zip_path, b"example-task-data-for-torrent-generation").unwrap();
 
         let api_dir = tmp.path().join("api");
         let bt_dir = tmp.path().join("bt");

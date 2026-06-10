@@ -1,4 +1,4 @@
-import { Monty, MontySyntaxError, MontyRuntimeError, MontySnapshot, MontyComplete } from '@pydantic/monty'
+import { Monty, MontySyntaxError, MontyRuntimeError, MontySnapshot, MontyNameLookup, MontyComplete } from '@pydantic/monty'
 
 let passed = 0
 let failed = 0
@@ -116,7 +116,7 @@ result10.resume({ returnValue: null })
 console.log('\n=== Multiple External Calls ===')
 
 const m11 = new Monty('a = get_a()\nb = get_b()\na + b')
-let state: MontySnapshot | MontyComplete = m11.start()
+let state: MontySnapshot | MontyNameLookup | MontyComplete = m11.start()
 
 assert(state instanceof MontySnapshot, 'first call returns snapshot')
 assert((state as MontySnapshot).functionName === 'get_a', 'first function is get_a')

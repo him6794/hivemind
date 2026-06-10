@@ -1,3 +1,4 @@
+use hivemind_config::HivemindConfig;
 use hivemind_proto::{
     batch_runtime_service_server::BatchRuntimeService,
     master_node_service_server::MasterNodeService,
@@ -55,16 +56,25 @@ use hivemind_proto::{
     QuoteTaskResponse,
     RefreshTokenRequest,
     RefreshTokenResponse,
+    RegisterUserRequest,
+    RegisterUserResponse,
     RegisterWorkerNodeRequest,
     RemoveWorkerRequest,
     ResourceSpec as ProtoResourceSpec,
     RunningStatusRequest,
     RunningStatusResponse,
     StatusResponse,
+    StopTaskExecutionRequest,
     StopTaskRequest,
     StopTaskResponse,
     TaskInfo,
     TaskLease,
+    TaskOutputUploadRequest,
+    TaskOutputUploadResponse,
+    TaskResultUploadRequest,
+    TaskResultUploadResponse,
+    TaskUsageRequest,
+    TaskUsageResponse,
     TasklogRequest,
     TasklogResponse,
     UpdateProviderWorkerSettingsRequest,
@@ -75,24 +85,43 @@ use hivemind_proto::{
     UploadTaskResponse,
     WorkerCacheAffinityMetric,
     WorkerInfo,
+    WorkerNodeServiceClient,
     WorkerTrustProfile,
 };
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 use crate::service::{NodeManagerService as NmSvc, WorkerRegistration};
 use crate::NodeManager;
 use hivemind_auth::AuthManager;
+use hivemind_database::postgres;
 use hivemind_models::{Task, TaskStatus, WorkerNode};
-use hivemind_task_scheduler::TaskScheduler;
+use hivemind_task_scheduler::{dispatcher::worker_endpoint, BatchTaskReport, TaskScheduler};
+
+const MAX_TASK_OUTPUT_BYTES: usize = 1024 * 1024;
+const MAX_RESULT_REFERENCE_BYTES: usize = 4096;
+const MAX_DOWNLOAD_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 
 pub struct NodepoolState {
     pub auth: AuthManager,
     pub node_manager: Arc<NodeManager>,
     pub scheduler: TaskScheduler,
+    pub artifact_root: PathBuf,
 }
 
-// ── UserService ──
+pub fn artifact_root_for_config(config: &HivemindConfig) -> PathBuf {
+    std::env::var("HIVEMIND_ARTIFACT_ROOT")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(&config.torrent.api_dir).join("artifacts"))
+}
+
+// UserService
 pub struct GrpcUserService {
     state: Arc<NodepoolState>,
 }
@@ -104,6 +133,49 @@ impl GrpcUserService {
 
 #[tonic::async_trait]
 impl UserService for GrpcUserService {
+    async fn register_user(
+        &self,
+        request: Request<RegisterUserRequest>,
+    ) -> Result<Response<RegisterUserResponse>, Status> {
+        let req = request.into_inner();
+        let username = req.username.trim();
+        let password = req.password;
+        if username.len() < 3 {
+            return Ok(Response::new(RegisterUserResponse {
+                success: false,
+                status_message: "Username must be at least 3 characters".into(),
+            }));
+        }
+        if password.len() < 8 {
+            return Ok(Response::new(RegisterUserResponse {
+                success: false,
+                status_message: "Password must be at least 8 characters".into(),
+            }));
+        }
+
+        match postgres::create_user(
+            &self.state.scheduler.database().pool,
+            username,
+            &password,
+            1000,
+        )
+        .await
+        {
+            Ok(()) => Ok(Response::new(RegisterUserResponse {
+                success: true,
+                status_message: "Account created".into(),
+            })),
+            Err(e) => Ok(Response::new(RegisterUserResponse {
+                success: false,
+                status_message: if e.to_string().contains("already exists") {
+                    "Username already exists".into()
+                } else {
+                    e.to_string()
+                },
+            })),
+        }
+    }
+
     async fn login(
         &self,
         request: Request<LoginRequest>,
@@ -134,12 +206,31 @@ impl UserService for GrpcUserService {
     }
     async fn get_balance(
         &self,
-        _: Request<GetBalanceRequest>,
+        request: Request<GetBalanceRequest>,
     ) -> Result<Response<GetBalanceResponse>, Status> {
+        let req = request.into_inner();
+        let claims = self
+            .state
+            .auth
+            .validate_token(&req.token)
+            .map_err(|_| Status::unauthenticated("Invalid token"))?;
+        if !req.username.is_empty() && req.username != claims.sub {
+            return Err(Status::permission_denied("Forbidden"));
+        }
+        let balance: Option<i64> = sqlx::query_scalar(
+            "SELECT balance FROM users WHERE username = $1 AND is_active = true",
+        )
+        .bind(&claims.sub)
+        .fetch_optional(&self.state.scheduler.database().pool)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+        let Some(balance) = balance else {
+            return Err(Status::not_found("User not found"));
+        };
         Ok(Response::new(GetBalanceResponse {
             success: true,
             status_message: "OK".into(),
-            balance: 1000,
+            balance,
         }))
     }
     async fn refresh_token(
@@ -170,7 +261,7 @@ impl UserService for GrpcUserService {
     }
 }
 
-// ── NodeManagerService ──
+// NodeManagerService
 pub struct GrpcNodeManagerService {
     state: Arc<NodepoolState>,
 }
@@ -178,6 +269,258 @@ impl GrpcNodeManagerService {
     pub fn new(state: Arc<NodepoolState>) -> Self {
         Self { state }
     }
+
+    async fn authorize_worker_report(
+        &self,
+        token: &str,
+        worker_id: &str,
+    ) -> Result<ReportAuthorization, Status> {
+        authorize_worker_identity(&self.state, token, worker_id).await
+    }
+
+    async fn register_reported_artifact_ref(
+        &self,
+        task_id: &str,
+        artifact_ref: &str,
+    ) -> Result<(), Status> {
+        register_reported_artifact_ref(
+            &self.state.scheduler.database().pool,
+            &self.state.artifact_root,
+            task_id,
+            artifact_ref,
+        )
+        .await
+    }
+}
+
+enum ReportAuthorization {
+    Authorized,
+    Denied(String),
+}
+
+async fn authorize_worker_identity(
+    state: &NodepoolState,
+    token: &str,
+    worker_id: &str,
+) -> Result<ReportAuthorization, Status> {
+    if worker_id.trim().is_empty() {
+        return Ok(ReportAuthorization::Denied("worker_id is required".into()));
+    }
+    let claims = state
+        .auth
+        .validate_token(token)
+        .map_err(|_| Status::unauthenticated("Invalid token"))?;
+    let worker = state
+        .node_manager
+        .get_worker(worker_id)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+    let Some(worker) = worker else {
+        return Ok(ReportAuthorization::Denied("Worker not found".into()));
+    };
+    if claims.sub != worker.worker_id && claims.sub != worker.username && !is_admin(&claims.sub) {
+        return Ok(ReportAuthorization::Denied("Not authorized".into()));
+    }
+    Ok(ReportAuthorization::Authorized)
+}
+
+fn is_safe_task_id(task_id: &str) -> bool {
+    if task_id.len() == 1 && task_id.as_bytes()[0] == b'.' {
+        return false;
+    }
+    !task_id.trim().is_empty()
+        && task_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        && !task_id.contains("..")
+}
+
+fn is_safe_worker_id(worker_id: &str) -> bool {
+    is_safe_task_id(worker_id)
+}
+
+fn worker_authorization_response(status_message: String) -> Status {
+    match status_message.as_str() {
+        "worker_id is required" => Status::invalid_argument(status_message),
+        "Worker not found" => Status::not_found(status_message),
+        _ => Status::permission_denied(status_message),
+    }
+}
+
+async fn register_reported_artifact_ref(
+    pool: &sqlx::PgPool,
+    artifact_root: &Path,
+    task_id: &str,
+    artifact_ref: &str,
+) -> Result<(), Status> {
+    let artifact_ref = artifact_ref.trim();
+    if artifact_ref.is_empty() {
+        return Ok(());
+    }
+    let path = match resolve_reported_artifact_ref(artifact_root, artifact_ref).await {
+        Ok(Some(path)) => path,
+        Ok(None) => return Ok(()),
+        Err(status) => {
+            tracing::warn!(
+                task_id,
+                artifact_ref,
+                reason = status.message(),
+                "Reported artifact reference was not registered for download"
+            );
+            return Ok(());
+        }
+    };
+    let metadata = match artifact_file_metadata(task_id, artifact_ref, &path).await {
+        Ok(metadata) => metadata,
+        Err(status) => {
+            tracing::warn!(
+                task_id,
+                artifact_ref,
+                reason = status.message(),
+                "Reported artifact file was not registered for download"
+            );
+            return Ok(());
+        }
+    };
+    let artifact_key = artifact_key_for_ref(task_id, artifact_ref);
+    sqlx::query(
+        "INSERT INTO artifacts (task_id, artifact_key, checksum_sha1, size_bytes, storage_path, status)
+         VALUES ($1, $2, $3, $4, $5, 'ready')
+         ON CONFLICT (artifact_key) DO UPDATE SET
+             checksum_sha1 = EXCLUDED.checksum_sha1,
+             size_bytes = EXCLUDED.size_bytes,
+             storage_path = EXCLUDED.storage_path,
+             status = 'ready',
+             created_at = NOW()",
+    )
+    .bind(task_id)
+    .bind(artifact_key)
+    .bind(metadata.sha1)
+    .bind(metadata.size_bytes)
+    .bind(path.to_string_lossy().as_ref())
+    .execute(pool)
+    .await
+    .map_err(|e| Status::internal(e.to_string()))?;
+    Ok(())
+}
+
+struct ArtifactFileMetadata {
+    sha1: String,
+    size_bytes: i64,
+}
+
+async fn artifact_file_metadata(
+    task_id: &str,
+    artifact_ref: &str,
+    path: &Path,
+) -> Result<ArtifactFileMetadata, Status> {
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .map_err(|e| Status::internal(format!("Failed to read artifact metadata: {e}")))?;
+    if !metadata.is_file() {
+        return Err(Status::invalid_argument("Artifact path is not a file"));
+    }
+    if metadata.len() > MAX_DOWNLOAD_ARTIFACT_BYTES as u64 {
+        return Err(Status::resource_exhausted(format!(
+            "Artifact is too large: {} bytes > {} bytes",
+            metadata.len(),
+            MAX_DOWNLOAD_ARTIFACT_BYTES
+        )));
+    }
+    Ok(ArtifactFileMetadata {
+        sha1: artifact_metadata_checksum(task_id, artifact_ref, path, metadata.len()),
+        size_bytes: metadata.len() as i64,
+    })
+}
+
+async fn resolve_reported_artifact_ref(
+    artifact_root: &Path,
+    artifact_ref: &str,
+) -> Result<Option<PathBuf>, Status> {
+    let candidate = if let Some(relative) = artifact_ref.strip_prefix("artifact://") {
+        if relative.trim().is_empty() {
+            return Ok(None);
+        }
+        artifact_root.join(safe_artifact_relative_path(relative).map_err(Status::invalid_argument)?)
+    } else {
+        let path = PathBuf::from(artifact_ref);
+        if !path.is_absolute() {
+            return Ok(None);
+        }
+        path
+    };
+    Ok(Some(
+        canonical_artifact_path(artifact_root, &candidate).await?,
+    ))
+}
+
+fn safe_artifact_relative_path(value: &str) -> Result<PathBuf, &'static str> {
+    let path = Path::new(value);
+    if path.is_absolute() {
+        return Err("Artifact reference must be relative");
+    }
+    let mut clean = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => clean.push(part),
+            Component::CurDir => {}
+            _ => return Err("Artifact reference contains unsafe path components"),
+        }
+    }
+    if clean.as_os_str().is_empty() {
+        return Err("Artifact reference is empty");
+    }
+    Ok(clean)
+}
+
+async fn canonical_artifact_path(artifact_root: &Path, path: &Path) -> Result<PathBuf, Status> {
+    let root = ensure_artifact_root(artifact_root).await?;
+    let canonical = tokio::fs::canonicalize(path)
+        .await
+        .map_err(|e| Status::not_found(format!("Artifact file not found: {e}")))?;
+    if !canonical.starts_with(&root) {
+        return Err(Status::permission_denied(
+            "Artifact storage path is outside the configured artifact root",
+        ));
+    }
+    Ok(canonical)
+}
+
+async fn ensure_artifact_root(artifact_root: &Path) -> Result<PathBuf, Status> {
+    tokio::fs::create_dir_all(artifact_root)
+        .await
+        .map_err(|e| Status::internal(format!("Failed to create artifact root: {e}")))?;
+    tokio::fs::canonicalize(artifact_root)
+        .await
+        .map_err(|e| Status::internal(format!("Failed to resolve artifact root: {e}")))
+}
+
+fn artifact_key_for_ref(task_id: &str, artifact_ref: &str) -> String {
+    format!(
+        "task-artifact:{:016x}",
+        artifact_ref_hash(task_id, artifact_ref)
+    )
+}
+
+fn artifact_metadata_checksum(
+    task_id: &str,
+    artifact_ref: &str,
+    path: &Path,
+    size_bytes: u64,
+) -> String {
+    let mut hasher = DefaultHasher::new();
+    task_id.hash(&mut hasher);
+    artifact_ref.hash(&mut hasher);
+    path.hash(&mut hasher);
+    size_bytes.hash(&mut hasher);
+    format!("metadata:{:016x}", hasher.finish())
+}
+
+fn artifact_ref_hash(task_id: &str, artifact_ref: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    task_id.hash(&mut hasher);
+    artifact_ref.hash(&mut hasher);
+    hasher.finish()
 }
 
 #[tonic::async_trait]
@@ -188,16 +531,41 @@ impl NodeManagerService for GrpcNodeManagerService {
     ) -> Result<Response<StatusResponse>, Status> {
         let req = request.into_inner();
         let r = req.resources.unwrap_or_default();
+        let username = req.username.trim().to_string();
+        let worker_id = if req.worker_id.trim().is_empty() {
+            username.clone()
+        } else {
+            req.worker_id.trim().to_string()
+        };
+        if !is_safe_worker_id(&worker_id) {
+            return Ok(Response::new(StatusResponse {
+                success: false,
+                status_message: "Invalid worker_id".into(),
+            }));
+        }
+        if let Err(message) = validate_worker_registration_resources(&r) {
+            return Ok(Response::new(StatusResponse {
+                success: false,
+                status_message: message.into(),
+            }));
+        }
         let svc = NmSvc::new((*self.state.node_manager).clone());
         let reg = WorkerRegistration {
-            worker_id: req.username.clone(),
-            username: req.username,
+            worker_id,
+            username,
             ip: req.ip,
             resources: proto_resource_spec_to_model(r),
             location: req.location,
         };
         match svc.register_worker(&reg).await {
             Ok(w) => {
+                sqlx::query(
+                    "INSERT INTO worker_reputation (worker_id) VALUES ($1) ON CONFLICT (worker_id) DO NOTHING",
+                )
+                .bind(&w.worker_id)
+                .execute(&self.state.scheduler.database().pool)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
                 tracing::info!("Worker registered: {}", w.worker_id);
                 Ok(Response::new(StatusResponse {
                     success: true,
@@ -240,6 +608,180 @@ impl NodeManagerService for GrpcNodeManagerService {
         }
     }
 
+    async fn task_output_upload(
+        &self,
+        request: Request<TaskOutputUploadRequest>,
+    ) -> Result<Response<TaskOutputUploadResponse>, Status> {
+        let req = request.into_inner();
+        if req.task_id.trim().is_empty() {
+            return Ok(Response::new(TaskOutputUploadResponse {
+                success: false,
+                status_message: "Task id is required".into(),
+            }));
+        }
+        if req.output.len() > MAX_TASK_OUTPUT_BYTES {
+            return Ok(Response::new(TaskOutputUploadResponse {
+                success: false,
+                status_message: format!("Task output exceeds {} byte limit", MAX_TASK_OUTPUT_BYTES),
+            }));
+        }
+        match self
+            .authorize_worker_report(&req.token, &req.worker_id)
+            .await?
+        {
+            ReportAuthorization::Authorized => {}
+            ReportAuthorization::Denied(status_message) => {
+                return Ok(Response::new(TaskOutputUploadResponse {
+                    success: false,
+                    status_message,
+                }));
+            }
+        }
+
+        match self
+            .state
+            .scheduler
+            .record_task_output_for_worker(&req.task_id, &req.worker_id, &req.output)
+            .await
+        {
+            Ok(_) => Ok(Response::new(TaskOutputUploadResponse {
+                success: true,
+                status_message: "OK".into(),
+            })),
+            Err(e) => Ok(Response::new(TaskOutputUploadResponse {
+                success: false,
+                status_message: e.to_string(),
+            })),
+        }
+    }
+
+    async fn task_result_upload(
+        &self,
+        request: Request<TaskResultUploadRequest>,
+    ) -> Result<Response<TaskResultUploadResponse>, Status> {
+        let req = request.into_inner();
+        if req.task_id.trim().is_empty() {
+            return Ok(Response::new(TaskResultUploadResponse {
+                success: false,
+                status_message: "Task id is required".into(),
+            }));
+        }
+        if req.result_torrent.trim().is_empty() {
+            return Ok(Response::new(TaskResultUploadResponse {
+                success: false,
+                status_message: "Result reference is required".into(),
+            }));
+        }
+        if req.result_torrent.len() > MAX_RESULT_REFERENCE_BYTES {
+            return Ok(Response::new(TaskResultUploadResponse {
+                success: false,
+                status_message: format!(
+                    "Result reference exceeds {} byte limit",
+                    MAX_RESULT_REFERENCE_BYTES
+                ),
+            }));
+        }
+        match self
+            .authorize_worker_report(&req.token, &req.worker_id)
+            .await?
+        {
+            ReportAuthorization::Authorized => {}
+            ReportAuthorization::Denied(status_message) => {
+                return Ok(Response::new(TaskResultUploadResponse {
+                    success: false,
+                    status_message,
+                }));
+            }
+        }
+
+        match self
+            .state
+            .scheduler
+            .complete_task_result_for_worker(&req.task_id, &req.worker_id, &req.result_torrent)
+            .await
+        {
+            Ok(_) => {
+                if let Err(status) = self
+                    .register_reported_artifact_ref(&req.task_id, &req.result_torrent)
+                    .await
+                {
+                    return Ok(Response::new(TaskResultUploadResponse {
+                        success: false,
+                        status_message: status.message().to_string(),
+                    }));
+                }
+                Ok(Response::new(TaskResultUploadResponse {
+                    success: true,
+                    status_message: "OK".into(),
+                }))
+            }
+            Err(e) => Ok(Response::new(TaskResultUploadResponse {
+                success: false,
+                status_message: e.to_string(),
+            })),
+        }
+    }
+
+    async fn task_usage(
+        &self,
+        request: Request<TaskUsageRequest>,
+    ) -> Result<Response<TaskUsageResponse>, Status> {
+        let req = request.into_inner();
+        if req.task_id.trim().is_empty() {
+            return Ok(Response::new(TaskUsageResponse {
+                success: false,
+                status_message: "Task id is required".into(),
+            }));
+        }
+        let Some(usage) = req.usage else {
+            return Ok(Response::new(TaskUsageResponse {
+                success: false,
+                status_message: "Usage payload is required".into(),
+            }));
+        };
+        if !resource_usage_is_finite(&usage) {
+            return Ok(Response::new(TaskUsageResponse {
+                success: false,
+                status_message: "Task usage contains non-finite values".into(),
+            }));
+        }
+        match self
+            .authorize_worker_report(&req.token, &req.worker_id)
+            .await?
+        {
+            ReportAuthorization::Authorized => {}
+            ReportAuthorization::Denied(status_message) => {
+                return Ok(Response::new(TaskUsageResponse {
+                    success: false,
+                    status_message,
+                }));
+            }
+        }
+
+        match self
+            .state
+            .scheduler
+            .update_task_resource_usage_for_worker(
+                &req.task_id,
+                &req.worker_id,
+                usage.cpu_percent as f64,
+                usage.memory_percent as f64,
+                usage.gpu_percent as f64,
+                usage.vram_percent as f64,
+            )
+            .await
+        {
+            Ok(_) => Ok(Response::new(TaskUsageResponse {
+                success: true,
+                status_message: "OK".into(),
+            })),
+            Err(e) => Ok(Response::new(TaskUsageResponse {
+                success: false,
+                status_message: e.to_string(),
+            })),
+        }
+    }
+
     async fn list_workers(
         &self,
         request: Request<ListWorkersRequest>,
@@ -263,6 +805,13 @@ impl NodeManagerService for GrpcNodeManagerService {
         request: Request<RemoveWorkerRequest>,
     ) -> Result<Response<StatusResponse>, Status> {
         let req = request.into_inner();
+        let worker_id = req.worker_id.trim();
+        if !is_safe_worker_id(worker_id) {
+            return Ok(Response::new(StatusResponse {
+                success: false,
+                status_message: "Invalid worker_id".into(),
+            }));
+        }
         let claims = self
             .state
             .auth
@@ -271,7 +820,7 @@ impl NodeManagerService for GrpcNodeManagerService {
         let worker = self
             .state
             .node_manager
-            .get_worker(&req.worker_id)
+            .get_worker(worker_id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
         let Some(worker) = worker else {
@@ -289,7 +838,7 @@ impl NodeManagerService for GrpcNodeManagerService {
         let removed = self
             .state
             .node_manager
-            .remove_worker(&req.worker_id)
+            .remove_worker(worker_id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(StatusResponse {
@@ -299,7 +848,7 @@ impl NodeManagerService for GrpcNodeManagerService {
     }
 }
 
-// ── MasterNodeService ──
+// MasterNodeService
 pub struct GrpcMasterNodeService {
     state: Arc<NodepoolState>,
 }
@@ -330,7 +879,19 @@ impl MasterNodeService for GrpcMasterNodeService {
             .auth
             .validate_token(&req.token)
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
+        if !is_safe_task_id(&req.task_id) {
+            return Ok(Response::new(UploadTaskResponse {
+                success: false,
+                status_message: "task_id is required and must be a safe file name".into(),
+            }));
+        }
         let r = req.requirements.unwrap_or_default();
+        if let Err(message) = validate_task_submission_resources(&r, req.host_count, req.max_cpt) {
+            return Ok(Response::new(UploadTaskResponse {
+                success: false,
+                status_message: message.into(),
+            }));
+        }
         let task = Task {
             id: uuid::Uuid::new_v4(),
             task_id: req.task_id,
@@ -398,29 +959,7 @@ impl MasterNodeService for GrpcMasterNodeService {
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         match self.state.scheduler.list_user_tasks(&claims.sub).await {
             Ok(tasks) => Ok(Response::new(GetAllUserTasksResponse {
-                tasks: tasks
-                    .into_iter()
-                    .map(|t| TaskInfo {
-                        task_id: t.task_id,
-                        status: t.status.as_str().into(),
-                        status_message: t.status_message.unwrap_or_default(),
-                        // usage: removed
-                        owner: String::new(),
-                        output: String::new(),
-                        result_torrent: String::new(),
-                        billed_amount: 0,
-                        billing_settled: false,
-                        retry_count: 0,
-                        wall_time_ms: 0,
-                        peak_memory_mb: 0,
-                        cpu_usage: 0.0,
-                        memory_usage: 0.0,
-                        gpu_usage: 0.0,
-                        gpu_memory_usage: 0.0,
-                        deterministic: false,
-                        worker_ip: t.worker_ip.unwrap_or_default(),
-                    })
-                    .collect(),
+                tasks: tasks.into_iter().map(task_info_from_task).collect(),
             })),
             Err(e) => Err(Status::internal(e.to_string())),
         }
@@ -487,10 +1026,21 @@ impl MasterNodeService for GrpcMasterNodeService {
             Err(e) => return Err(Status::internal(e.to_string())),
         }
         match self.state.scheduler.cancel_task(&req.task_id).await {
-            Ok(_) => Ok(Response::new(StopTaskResponse {
-                success: true,
-                status_message: "Task stopped".into(),
-            })),
+            Ok(task) => {
+                let status_message = match request_worker_stop(&task).await {
+                    WorkerStopDispatch::NotAssigned => "Task cancellation recorded".to_string(),
+                    WorkerStopDispatch::Requested => {
+                        "Task cancellation recorded; worker stop requested".to_string()
+                    }
+                    WorkerStopDispatch::NotConfirmed(message) => {
+                        format!("Task cancellation recorded; worker stop not confirmed: {message}")
+                    }
+                };
+                Ok(Response::new(StopTaskResponse {
+                    success: true,
+                    status_message,
+                }))
+            }
             Err(e) => Ok(Response::new(StopTaskResponse {
                 success: false,
                 status_message: e.to_string(),
@@ -569,17 +1119,43 @@ impl MasterNodeService for GrpcMasterNodeService {
             artifact_key: String,
             storage_path: String,
         }
-        let artifact: Option<ArtifactRow> = sqlx::query_as(
-            "SELECT artifact_key, storage_path
-             FROM artifacts
-             WHERE task_id = $1 AND status = 'ready'
-             ORDER BY created_at DESC
-             LIMIT 1",
-        )
-        .bind(&req.task_id)
-        .fetch_optional(&self.state.scheduler.database().pool)
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+        let requested_artifact_key = req.artifact_key.trim();
+        if (!req.artifact_key.is_empty() && requested_artifact_key.is_empty())
+            || requested_artifact_key.len() > 255
+        {
+            return Ok(Response::new(DownloadTaskArtifactResponse {
+                success: false,
+                status_message: "Invalid artifact key".into(),
+                filename: String::new(),
+                content_type: String::new(),
+                data: vec![],
+            }));
+        }
+        let artifact: Option<ArtifactRow> = if requested_artifact_key.is_empty() {
+            sqlx::query_as(
+                "SELECT artifact_key, storage_path
+                 FROM artifacts
+                 WHERE task_id = $1 AND status = 'ready'
+                 ORDER BY created_at DESC
+                 LIMIT 1",
+            )
+            .bind(&req.task_id)
+            .fetch_optional(&self.state.scheduler.database().pool)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+        } else {
+            sqlx::query_as(
+                "SELECT artifact_key, storage_path
+                 FROM artifacts
+                 WHERE task_id = $1 AND artifact_key = $2 AND status = 'ready'
+                 LIMIT 1",
+            )
+            .bind(&req.task_id)
+            .bind(requested_artifact_key)
+            .fetch_optional(&self.state.scheduler.database().pool)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+        };
         let Some(artifact) = artifact else {
             return Ok(Response::new(DownloadTaskArtifactResponse {
                 success: false,
@@ -589,7 +1165,57 @@ impl MasterNodeService for GrpcMasterNodeService {
                 data: vec![],
             }));
         };
-        let path = std::path::PathBuf::from(&artifact.storage_path);
+        let path = match canonical_artifact_path(
+            &self.state.artifact_root,
+            &PathBuf::from(&artifact.storage_path),
+        )
+        .await
+        {
+            Ok(path) => path,
+            Err(status) => {
+                return Ok(Response::new(DownloadTaskArtifactResponse {
+                    success: false,
+                    status_message: status.message().to_string(),
+                    filename: String::new(),
+                    content_type: String::new(),
+                    data: vec![],
+                }));
+            }
+        };
+        let metadata = match tokio::fs::metadata(&path).await {
+            Ok(metadata) => metadata,
+            Err(e) => {
+                return Ok(Response::new(DownloadTaskArtifactResponse {
+                    success: false,
+                    status_message: format!("Failed to read artifact metadata: {e}"),
+                    filename: String::new(),
+                    content_type: String::new(),
+                    data: vec![],
+                }));
+            }
+        };
+        if !metadata.is_file() {
+            return Ok(Response::new(DownloadTaskArtifactResponse {
+                success: false,
+                status_message: "artifact storage path is not a file".into(),
+                filename: String::new(),
+                content_type: String::new(),
+                data: vec![],
+            }));
+        }
+        if metadata.len() > MAX_DOWNLOAD_ARTIFACT_BYTES as u64 {
+            return Ok(Response::new(DownloadTaskArtifactResponse {
+                success: false,
+                status_message: format!(
+                    "artifact is too large: {} bytes > {} bytes",
+                    metadata.len(),
+                    MAX_DOWNLOAD_ARTIFACT_BYTES
+                ),
+                filename: String::new(),
+                content_type: String::new(),
+                data: vec![],
+            }));
+        }
         let data = tokio::fs::read(&path)
             .await
             .map_err(|e| Status::internal(format!("Failed to read artifact: {}", e)))?;
@@ -622,13 +1248,21 @@ impl MasterNodeService for GrpcMasterNodeService {
             .validate_token(&req.token)
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         if !is_admin(&claims.sub) {
-            return Ok(admin_billing_default(false, "Forbidden"));
+            return Ok(Response::new(GetAdminBillingOverviewResponse {
+                success: false,
+                status_message: "Forbidden".into(),
+                total_payer_debit_cpt: 0,
+                total_provider_credit_cpt: 0,
+                total_platform_fee_cpt: 0,
+                pending_billing_tasks: 0,
+                currency: "CPT".into(),
+            }));
         }
         let r: (i64, i64, i64) = sqlx::query_as(
-            "SELECT COALESCE(SUM(CASE WHEN kind='task_debit' THEN amount_cpt ELSE 0 END),0), COALESCE(SUM(CASE WHEN kind='provider_credit' THEN amount_cpt ELSE 0 END),0), COALESCE(SUM(CASE WHEN kind='platform_fee' THEN amount_cpt ELSE 0 END),0) FROM ledger_entries WHERE status='settled'"
+            "SELECT COALESCE(SUM(CASE WHEN kind='payer_debit' THEN amount_cpt ELSE 0 END),0)::BIGINT, COALESCE(SUM(CASE WHEN kind='provider_credit' THEN amount_cpt ELSE 0 END),0)::BIGINT, COALESCE(SUM(CASE WHEN kind='platform_fee' THEN amount_cpt ELSE 0 END),0)::BIGINT FROM ledger_entries WHERE status='settled'"
         ).fetch_one(&self.state.scheduler.database().pool).await.map_err(|e| Status::internal(e.to_string()))?;
         let pending: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*)::bigint FROM tasks WHERE billing_settled=false AND status IN ('COMPLETED','FAILING')"
+            "SELECT COUNT(*)::bigint FROM tasks WHERE billing_settled=false AND status IN ('COMPLETED','FAILED')"
         ).fetch_one(&self.state.scheduler.database().pool).await.map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(GetAdminBillingOverviewResponse {
             success: true,
@@ -652,7 +1286,15 @@ impl MasterNodeService for GrpcMasterNodeService {
             .validate_token(&req.token)
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         if !is_admin(&claims.sub) {
-            return Ok(artifact_default(false));
+            return Ok(Response::new(GetAdminArtifactOverviewResponse {
+                success: false,
+                status_message: "Forbidden".into(),
+                total_artifacts: 0,
+                total_size_bytes: 0,
+                dedup_hits: 0,
+                resumable_artifacts: 0,
+                expiring_in_24h: 0,
+            }));
         }
         let r: (i64, i64, i64, i64, i64) = sqlx::query_as(
             "SELECT COUNT(*)::bigint, COALESCE(SUM(size_bytes),0)::bigint, COALESCE(SUM(CASE WHEN dedup_hit THEN 1 ELSE 0 END),0)::bigint, COALESCE(SUM(CASE WHEN resume_supported THEN 1 ELSE 0 END),0)::bigint, COALESCE(SUM(CASE WHEN expires_at IS NOT NULL AND expires_at <= NOW() + INTERVAL '24 hours' THEN 1 ELSE 0 END),0)::bigint FROM artifacts WHERE status='ready'"
@@ -730,7 +1372,14 @@ impl MasterNodeService for GrpcMasterNodeService {
             .validate_token(&req.token)
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         if !is_admin(&claims.sub) {
-            return Ok(cache_metrics_default());
+            return Ok(Response::new(GetAdminSchedulingCacheMetricsResponse {
+                success: false,
+                status_message: "Forbidden".into(),
+                total_completed_tasks: 0,
+                total_cache_hits: 0,
+                cache_hit_rate: 0.0,
+                top_workers: vec![],
+            }));
         }
         let total: (i64, i64) = sqlx::query_as("SELECT COUNT(*)::bigint, COALESCE(SUM(cache_hits),0)::bigint FROM tasks WHERE status='COMPLETED'").fetch_one(&self.state.scheduler.database().pool).await.map_err(|e| Status::internal(e.to_string()))?;
         let hit_rate = if total.0 > 0 {
@@ -890,6 +1539,27 @@ impl MasterNodeService for GrpcMasterNodeService {
             .auth
             .validate_token(&req.token)
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
+        let pool = &self.state.scheduler.database().pool;
+        let worker_exists: (bool,) =
+            sqlx::query_as("SELECT EXISTS(SELECT 1 FROM worker_nodes WHERE worker_id = $1)")
+                .bind(&req.worker_id)
+                .fetch_one(pool)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+        if !worker_exists.0 {
+            return Ok(Response::new(GetWorkerTrustProfileResponse {
+                success: false,
+                status_message: "Worker not found".into(),
+                trust: None,
+            }));
+        }
+        sqlx::query(
+            "INSERT INTO worker_reputation (worker_id) VALUES ($1) ON CONFLICT (worker_id) DO NOTHING",
+        )
+        .bind(&req.worker_id)
+        .execute(pool)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
         #[derive(sqlx::FromRow)]
         struct TrustR {
             worker_id: String,
@@ -899,7 +1569,7 @@ impl MasterNodeService for GrpcMasterNodeService {
             banned: bool,
             last_attested_at: Option<chrono::DateTime<chrono::Utc>>,
         }
-        let row: TrustR = sqlx::query_as("SELECT worker_id, successful_tasks, failed_tasks, score, banned, last_attested_at FROM worker_reputation WHERE worker_id = $1").bind(&req.worker_id).fetch_optional(&self.state.scheduler.database().pool).await.map_err(|e| Status::internal(e.to_string()))?.unwrap_or(TrustR { worker_id: req.worker_id.clone(), successful_tasks: 0, failed_tasks: 0, score: 100, banned: false, last_attested_at: None });
+        let row: TrustR = sqlx::query_as("SELECT worker_id, successful_tasks, failed_tasks, score, banned, last_attested_at FROM worker_reputation WHERE worker_id = $1").bind(&req.worker_id).fetch_one(pool).await.map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(GetWorkerTrustProfileResponse {
             success: true,
             status_message: "OK".into(),
@@ -936,21 +1606,31 @@ impl MasterNodeService for GrpcMasterNodeService {
                 score: 0,
             }));
         }
+        let worker_id = req.worker_id.trim().to_string();
+        if !is_safe_worker_id(&worker_id) {
+            return Ok(Response::new(UpdateWorkerTrustControlResponse {
+                success: false,
+                status_message: "Invalid worker_id".into(),
+                worker_id: String::new(),
+                banned: false,
+                score: 0,
+            }));
+        }
         let exists: (bool,) =
             sqlx::query_as("SELECT EXISTS(SELECT 1 FROM worker_reputation WHERE worker_id=$1)")
-                .bind(&req.worker_id)
+                .bind(&worker_id)
                 .fetch_one(&self.state.scheduler.database().pool)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
         if exists.0 {
-            sqlx::query("UPDATE worker_reputation SET banned=$1, score=$2, updated_at=NOW() WHERE worker_id=$3").bind(req.banned).bind(req.score).bind(&req.worker_id).execute(&self.state.scheduler.database().pool).await.map_err(|e| Status::internal(e.to_string()))?;
+            sqlx::query("UPDATE worker_reputation SET banned=$1, score=$2, updated_at=NOW() WHERE worker_id=$3").bind(req.banned).bind(req.score).bind(&worker_id).execute(&self.state.scheduler.database().pool).await.map_err(|e| Status::internal(e.to_string()))?;
         } else {
-            sqlx::query("INSERT INTO worker_reputation (worker_id, banned, score, successful_tasks, failed_tasks) VALUES ($1, $2, $3, 0, 0)").bind(&req.worker_id).bind(req.banned).bind(req.score).execute(&self.state.scheduler.database().pool).await.map_err(|e| Status::internal(e.to_string()))?;
+            sqlx::query("INSERT INTO worker_reputation (worker_id, banned, score, successful_tasks, failed_tasks) VALUES ($1, $2, $3, 0, 0)").bind(&worker_id).bind(req.banned).bind(req.score).execute(&self.state.scheduler.database().pool).await.map_err(|e| Status::internal(e.to_string()))?;
         }
         Ok(Response::new(UpdateWorkerTrustControlResponse {
             success: true,
             status_message: "OK".into(),
-            worker_id: req.worker_id,
+            worker_id,
             banned: req.banned,
             score: req.score,
         }))
@@ -984,7 +1664,16 @@ impl MasterNodeService for GrpcMasterNodeService {
             failed_tasks: i64,
             last_attested_at: Option<chrono::DateTime<chrono::Utc>>,
         }
-        let rows: Vec<TrustLR> = sqlx::query_as("SELECT w.worker_id, w.username, w.status as worker_status, COALESCE(r.score, 100) as score, COALESCE(r.banned, false) as banned, COALESCE(r.successful_tasks, 0) as successful_tasks, COALESCE(r.failed_tasks, 0) as failed_tasks, r.last_attested_at FROM worker_nodes w LEFT JOIN worker_reputation r ON r.worker_id = w.worker_id ORDER BY r.score DESC").fetch_all(&self.state.scheduler.database().pool).await.map_err(|e| Status::internal(e.to_string()))?;
+        let pool = &self.state.scheduler.database().pool;
+        sqlx::query(
+            "INSERT INTO worker_reputation (worker_id)
+             SELECT worker_id FROM worker_nodes
+             ON CONFLICT (worker_id) DO NOTHING",
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+        let rows: Vec<TrustLR> = sqlx::query_as("SELECT w.worker_id, w.username, w.status as worker_status, r.score, r.banned, r.successful_tasks, r.failed_tasks, r.last_attested_at FROM worker_nodes w INNER JOIN worker_reputation r ON r.worker_id = w.worker_id ORDER BY r.score DESC").fetch_all(pool).await.map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(ListAdminWorkerTrustResponse {
             success: true,
             status_message: "OK".into(),
@@ -1061,6 +1750,23 @@ impl MasterNodeService for GrpcMasterNodeService {
             .auth
             .validate_token(&req.token)
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
+        if validate_quote_resources(
+            req.cpu_score,
+            req.gpu_score,
+            req.memory_gb,
+            req.gpu_memory_gb,
+            req.storage_gb,
+            req.host_count,
+        )
+        .is_err()
+        {
+            return Ok(Response::new(QuoteTaskResponse {
+                success: false,
+                quoted_cpt: 0,
+                currency: "CPT".into(),
+                breakdown: None,
+            }));
+        }
         let breakdown = quote_breakdown(
             req.cpu_score,
             req.gpu_score,
@@ -1262,25 +1968,16 @@ impl BatchRuntimeService for GrpcBatchRuntimeService {
         request: Request<PullBatchRequest>,
     ) -> Result<Response<PullBatchResponse>, Status> {
         let req = request.into_inner();
-        if req.worker_id.trim().is_empty() {
-            return Ok(Response::new(PullBatchResponse {
-                success: false,
-                status_message: "worker_id is required".into(),
-                batch_id: String::new(),
-                tasks: vec![],
-            }));
+        match authorize_worker_identity(&self.state, &req.token, &req.worker_id).await? {
+            ReportAuthorization::Authorized => {}
+            ReportAuthorization::Denied(status_message) => {
+                return Err(worker_authorization_response(status_message));
+            }
         }
 
         let worker = match self.state.node_manager.get_worker(&req.worker_id).await {
             Ok(Some(worker)) => worker,
-            Ok(None) => {
-                return Ok(Response::new(PullBatchResponse {
-                    success: false,
-                    status_message: "worker not registered".into(),
-                    batch_id: String::new(),
-                    tasks: vec![],
-                }));
-            }
+            Ok(None) => return Err(Status::not_found("Worker not found")),
             Err(e) => return Err(Status::internal(e.to_string())),
         };
 
@@ -1306,7 +2003,27 @@ impl BatchRuntimeService for GrpcBatchRuntimeService {
         request: Request<CompleteBatchRequest>,
     ) -> Result<Response<CompleteBatchResponse>, Status> {
         let req = request.into_inner();
+        match authorize_worker_identity(&self.state, &req.token, &req.worker_id).await? {
+            ReportAuthorization::Authorized => {}
+            ReportAuthorization::Denied(status_message) => {
+                return Err(worker_authorization_response(status_message));
+            }
+        }
+        if req.tasks.iter().any(|task| !is_safe_task_id(&task.task_id)) {
+            return Err(Status::invalid_argument("Invalid task_id"));
+        }
         for task in req.tasks {
+            let artifact_refs: Vec<String> = task
+                .result_artifact_refs
+                .iter()
+                .chain(std::iter::once(&task.stdout_artifact_ref))
+                .chain(std::iter::once(&task.stderr_artifact_ref))
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .collect();
+            let report_output = batch_task_output_refs(&task);
+            let metrics = task.metrics.as_ref();
             if task.status.eq_ignore_ascii_case("COMPLETED") {
                 self.state
                     .scheduler
@@ -1329,6 +2046,32 @@ impl BatchRuntimeService for GrpcBatchRuntimeService {
                     .await
                     .map_err(|e| Status::internal(e.to_string()))?;
             }
+            self.state
+                .scheduler
+                .record_batch_task_report_for_worker(
+                    &task.task_id,
+                    &req.worker_id,
+                    BatchTaskReport {
+                        output: report_output.as_deref(),
+                        cpu_time_ms: metrics.map(|m| m.cpu_time_ms).unwrap_or(0),
+                        wall_time_ms: metrics.map(|m| m.wall_time_ms).unwrap_or(0),
+                        peak_memory_mb: metrics.map(|m| m.peak_memory_mb).unwrap_or(0),
+                        download_bytes: metrics.map(|m| m.download_bytes).unwrap_or(0),
+                        cache_hits: metrics.map(|m| m.cache_hits).unwrap_or(0),
+                    },
+                )
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+
+            for artifact_ref in artifact_refs {
+                register_reported_artifact_ref(
+                    &self.state.scheduler.database().pool,
+                    &self.state.artifact_root,
+                    &task.task_id,
+                    &artifact_ref,
+                )
+                .await?;
+            }
         }
 
         Ok(Response::new(CompleteBatchResponse {
@@ -1342,6 +2085,12 @@ impl BatchRuntimeService for GrpcBatchRuntimeService {
         request: Request<HeartbeatRequest>,
     ) -> Result<Response<HeartbeatResponse>, Status> {
         let req = request.into_inner();
+        match authorize_worker_identity(&self.state, &req.token, &req.worker_id).await? {
+            ReportAuthorization::Authorized => {}
+            ReportAuthorization::Denied(status_message) => {
+                return Err(worker_authorization_response(status_message));
+            }
+        }
         self.state
             .node_manager
             .update_heartbeat(&req.worker_id, &req.status, 0.0, 0.0, 0.0, 0.0)
@@ -1351,6 +2100,27 @@ impl BatchRuntimeService for GrpcBatchRuntimeService {
             success: true,
             status_message: "OK".into(),
         }))
+    }
+}
+
+fn batch_task_output_refs(task: &hivemind_proto::CompletedTask) -> Option<String> {
+    let mut refs = Vec::new();
+    if !task.stdout_artifact_ref.trim().is_empty() {
+        refs.push(format!(
+            "stdout_artifact_ref={}",
+            task.stdout_artifact_ref.trim()
+        ));
+    }
+    if !task.stderr_artifact_ref.trim().is_empty() {
+        refs.push(format!(
+            "stderr_artifact_ref={}",
+            task.stderr_artifact_ref.trim()
+        ));
+    }
+    if refs.is_empty() {
+        None
+    } else {
+        Some(refs.join("\n"))
     }
 }
 
@@ -1383,6 +2153,28 @@ fn task_lease_from_task(task: &Task) -> TaskLease {
     }
 }
 
+fn task_info_from_task(task: Task) -> TaskInfo {
+    TaskInfo {
+        task_id: task.task_id,
+        owner: task.owner,
+        status: task.status.as_str().into(),
+        status_message: task.status_message.unwrap_or_default(),
+        worker_ip: task.worker_ip.unwrap_or_default(),
+        output: task.output.unwrap_or_default(),
+        result_torrent: task.result_torrent.unwrap_or_default(),
+        billed_amount: task.billed_amount,
+        billing_settled: task.billing_settled,
+        retry_count: task.retry_count,
+        wall_time_ms: task.wall_time_ms,
+        peak_memory_mb: task.peak_memory_mb,
+        cpu_usage: task.cpu_usage,
+        memory_usage: task.memory_usage,
+        gpu_usage: task.gpu_usage,
+        gpu_memory_usage: task.gpu_memory_usage,
+        deterministic: task.deterministic,
+    }
+}
+
 fn proto_resource_spec_to_model(r: hivemind_proto::ResourceSpec) -> hivemind_models::ResourceSpec {
     hivemind_models::ResourceSpec {
         cpu_cores: r.cpu_cores,
@@ -1395,6 +2187,26 @@ fn proto_resource_spec_to_model(r: hivemind_proto::ResourceSpec) -> hivemind_mod
         storage_total_gb: r.storage_total_gb,
         storage_available_gb: r.storage_available_gb,
     }
+}
+
+fn validate_worker_registration_resources(
+    resources: &ProtoResourceSpec,
+) -> Result<(), &'static str> {
+    if resources.cpu_cores < 0
+        || resources.memory_mb < 0
+        || resources.gpu_count < 0
+        || resources.vram_mb < 0
+        || resources.cpu_score < 0
+        || resources.gpu_score < 0
+        || resources.storage_total_gb < 0
+        || resources.storage_available_gb < 0
+    {
+        return Err("worker capacity values must be non-negative");
+    }
+    if resources.storage_available_gb > resources.storage_total_gb {
+        return Err("worker storage_available_gb cannot exceed storage_total_gb");
+    }
+    Ok(())
 }
 
 fn worker_info_from_model(worker: WorkerNode) -> WorkerInfo {
@@ -1437,6 +2249,46 @@ fn provider_settings_from_worker(worker: &WorkerNode) -> ProviderWorkerSettings 
     }
 }
 
+fn validate_quote_resources(
+    cpu_score: i32,
+    gpu_score: i32,
+    memory_gb: i32,
+    gpu_memory_gb: i32,
+    storage_gb: i64,
+    host_count: i32,
+) -> Result<(), &'static str> {
+    if cpu_score < 0 || gpu_score < 0 || memory_gb < 0 || gpu_memory_gb < 0 || storage_gb < 0 {
+        return Err("task resource values must be non-negative");
+    }
+    if host_count < 1 {
+        return Err("host_count must be at least 1");
+    }
+    Ok(())
+}
+
+fn validate_task_submission_resources(
+    resources: &ProtoResourceSpec,
+    host_count: i32,
+    max_cpt: i64,
+) -> Result<(), &'static str> {
+    if resources.cpu_score < 0
+        || resources.gpu_score < 0
+        || resources.memory_mb < 0
+        || resources.vram_mb < 0
+        || resources.storage_total_gb < 0
+        || resources.storage_available_gb < 0
+    {
+        return Err("task resource values must be non-negative");
+    }
+    if host_count < 1 {
+        return Err("host_count must be at least 1");
+    }
+    if max_cpt < 0 {
+        return Err("max_cpt must be non-negative");
+    }
+    Ok(())
+}
+
 fn quote_breakdown(
     cpu_score: i32,
     gpu_score: i32,
@@ -1469,54 +2321,86 @@ fn quote_breakdown(
 // Admin helpers
 fn is_admin(sub: &str) -> bool {
     std::env::var("HIVEMIND_ADMIN_USERS")
-        .unwrap_or_else(|_| "testuser".into())
-        .split(',')
-        .any(|s| s.trim() == sub)
+        .ok()
+        .map(|users| {
+            users
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .any(|s| s == sub)
+        })
+        .unwrap_or(false)
 }
 
-fn admin_billing_default(
-    success: bool,
-    status_message: &str,
-) -> tonic::Response<hivemind_proto::GetAdminBillingOverviewResponse> {
-    tonic::Response::new(hivemind_proto::GetAdminBillingOverviewResponse {
-        success,
-        status_message: status_message.into(),
-        total_payer_debit_cpt: 0,
-        total_provider_credit_cpt: 0,
-        total_platform_fee_cpt: 0,
-        pending_billing_tasks: 0,
-        currency: "CPT".into(),
-    })
+fn resource_usage_is_finite(usage: &hivemind_proto::ResourceUsage) -> bool {
+    usage.cpu_percent.is_finite()
+        && usage.memory_percent.is_finite()
+        && usage.gpu_percent.is_finite()
+        && usage.vram_percent.is_finite()
+        && usage.storage_percent.is_finite()
 }
 
-fn artifact_default(
-    success: bool,
-) -> tonic::Response<hivemind_proto::GetAdminArtifactOverviewResponse> {
-    tonic::Response::new(hivemind_proto::GetAdminArtifactOverviewResponse {
-        success,
-        status_message: if success {
-            "OK".into()
-        } else {
-            "Forbidden".into()
-        },
-        total_artifacts: 0,
-        total_size_bytes: 0,
-        dedup_hits: 0,
-        resumable_artifacts: 0,
-        expiring_in_24h: 0,
-    })
+enum WorkerStopDispatch {
+    NotAssigned,
+    Requested,
+    NotConfirmed(String),
 }
 
-fn cache_metrics_default() -> tonic::Response<hivemind_proto::GetAdminSchedulingCacheMetricsResponse>
-{
-    tonic::Response::new(hivemind_proto::GetAdminSchedulingCacheMetricsResponse {
-        success: false,
-        status_message: "Forbidden".into(),
-        total_completed_tasks: 0,
-        total_cache_hits: 0,
-        cache_hit_rate: 0.0,
-        top_workers: vec![],
-    })
+async fn request_worker_stop(task: &Task) -> WorkerStopDispatch {
+    let Some(worker_ip) = task
+        .worker_ip
+        .as_deref()
+        .map(str::trim)
+        .filter(|ip| !ip.is_empty())
+    else {
+        return WorkerStopDispatch::NotAssigned;
+    };
+    let endpoint = worker_endpoint(worker_ip);
+    let mut client = match WorkerNodeServiceClient::connect(endpoint.clone()).await {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::warn!(
+                "Task {} cancellation recorded but worker stop connect failed at {}: {}",
+                task.task_id,
+                endpoint,
+                error
+            );
+            return WorkerStopDispatch::NotConfirmed(format!("connect failed at {endpoint}"));
+        }
+    };
+    match client
+        .stop_task_execution(StopTaskExecutionRequest {
+            task_id: task.task_id.clone(),
+        })
+        .await
+    {
+        Ok(response) => {
+            let response = response.into_inner();
+            if response.success {
+                WorkerStopDispatch::Requested
+            } else {
+                let message = if response.status_message.trim().is_empty() {
+                    "worker returned an unsuccessful stop response".to_string()
+                } else {
+                    response.status_message
+                };
+                tracing::warn!(
+                    "Task {} cancellation recorded but worker stop was not confirmed: {}",
+                    task.task_id,
+                    message
+                );
+                WorkerStopDispatch::NotConfirmed(message)
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                "Task {} cancellation recorded but worker stop RPC failed: {}",
+                task.task_id,
+                error
+            );
+            WorkerStopDispatch::NotConfirmed("RPC failed".into())
+        }
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -1524,13 +2408,41 @@ mod tests {
     use chrono::Utc;
     use hivemind_config::HivemindConfig;
     use hivemind_models::Claims;
+    use hivemind_proto::{
+        worker_node_service_server::{WorkerNodeService, WorkerNodeServiceServer},
+        ExecuteTaskRequest, ExecuteTaskResponse, StopTaskExecutionRequest,
+        StopTaskExecutionResponse, TaskOutputRequest, TaskOutputResponse, TaskOutputUploadRequest,
+        TaskOutputUploadResponse, TaskResultUploadRequest, TaskResultUploadResponse,
+        TaskUsageRequest, TaskUsageResponse,
+    };
+    use std::net::SocketAddr;
+    use std::sync::{Arc, OnceLock};
+    use std::time::Duration;
+
+    fn grpc_db_lock() -> Arc<tokio::sync::Mutex<()>> {
+        static LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
+        LOCK.get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
 
     async fn test_service() -> Option<(GrpcMasterNodeService, String, String, String)> {
-        let config = HivemindConfig::default();
-        let db = hivemind_database::DatabaseManager::new(&config)
+        let config = HivemindConfig::for_test();
+        let fixture = hivemind_database::postgres::create_isolated_test_pool_with_config(
+            &config,
+            "node_manager_grpc",
+        )
+        .await
+        .ok()?;
+        if hivemind_database::postgres::run_migrations(&fixture.pool)
             .await
-            .ok()?;
-        db.run_migrations().await.ok()?;
+            .is_err()
+        {
+            fixture.cleanup().await.ok();
+            return None;
+        }
+        let db = hivemind_database::DatabaseManager {
+            pool: fixture.pool.clone(),
+        };
         let auth = AuthManager::new(&db, "grpc-owner-test-secret", 24);
         let scheduler = TaskScheduler::new(db.clone(), auth.clone());
         let node_manager = Arc::new(NodeManager::new(&config, db.clone()));
@@ -1538,6 +2450,7 @@ mod tests {
             auth: auth.clone(),
             node_manager,
             scheduler: scheduler.clone(),
+            artifact_root: artifact_root_for_config(&config),
         });
         let service = GrpcMasterNodeService::new(state);
         let unique = uuid::Uuid::new_v4().to_string();
@@ -1545,9 +2458,271 @@ mod tests {
         let owner = format!("grpc-owner-{unique}");
         let other = format!("grpc-other-{unique}");
         let task = make_task(&task_id, &owner);
-        scheduler.create_task(&task).await.ok()?;
+        if scheduler.create_task(&task).await.is_err() {
+            fixture.cleanup().await.ok();
+            return None;
+        }
         let other_token = token_for(&auth, &other);
         Some((service, task_id, other_token, owner))
+    }
+
+    #[tokio::test]
+    async fn test_service_uses_isolated_schema() {
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+
+        let schema: String = sqlx::query_scalar("SELECT current_schema()")
+            .fetch_one(&service.state.scheduler.database().pool)
+            .await
+            .unwrap();
+
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+
+        assert!(
+            schema.starts_with("hm_test_"),
+            "node-manager gRPC tests must use an isolated schema, got {schema}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_upload_task_rejects_single_dot_task_id() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let owner_token = token_for(&service.state.auth, &owner);
+
+        let response = service
+            .upload_task(Request::new(UploadTaskRequest {
+                task_id: ".".into(),
+                torrent: "btih:test-input".into(),
+                requirements: Some(ProtoResourceSpec {
+                    cpu_cores: 1,
+                    memory_mb: 1024,
+                    gpu_count: 0,
+                    gpu_name: String::new(),
+                    vram_mb: 0,
+                    cpu_score: 100,
+                    gpu_score: 0,
+                    storage_total_gb: 1,
+                    storage_available_gb: 1,
+                }),
+                location: String::new(),
+                host_count: 1,
+                token: owner_token,
+                max_cpt: 10,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let dot_task = service.state.scheduler.get_task(".").await.unwrap();
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+
+        assert!(!response.success);
+        assert!(response.status_message.contains("task_id"));
+        assert!(dot_task.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_quote_task_rejects_invalid_resource_values() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let owner_token = token_for(&service.state.auth, &owner);
+
+        let response = service
+            .quote_task(Request::new(QuoteTaskRequest {
+                token: owner_token,
+                cpu_score: -10,
+                gpu_score: 0,
+                memory_gb: -1,
+                gpu_memory_gb: 0,
+                storage_gb: 1,
+                host_count: 1,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+
+        assert!(!response.success);
+        assert_eq!(response.quoted_cpt, 0);
+    }
+
+    #[tokio::test]
+    async fn test_upload_task_rejects_invalid_resource_values_before_insert() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let owner_token = token_for(&service.state.auth, &owner);
+        let invalid_task_id = format!("grpc-invalid-resources-{task_id}");
+
+        let response = service
+            .upload_task(Request::new(UploadTaskRequest {
+                task_id: invalid_task_id.clone(),
+                torrent: "btih:test-input".into(),
+                requirements: Some(ProtoResourceSpec {
+                    cpu_cores: 1,
+                    memory_mb: -1024,
+                    gpu_count: 0,
+                    gpu_name: String::new(),
+                    vram_mb: 0,
+                    cpu_score: -100,
+                    gpu_score: 0,
+                    storage_total_gb: 1,
+                    storage_available_gb: 1,
+                }),
+                location: String::new(),
+                host_count: 0,
+                token: owner_token,
+                max_cpt: -1,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let stored = service
+            .state
+            .scheduler
+            .get_task(&invalid_task_id)
+            .await
+            .unwrap();
+        cleanup(&service.state.scheduler, &invalid_task_id, &owner).await;
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+
+        assert!(!response.success);
+        assert!(response.status_message.contains("resource"));
+        assert!(stored.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_register_worker_node_rejects_single_dot_worker_id() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (master_service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(master_service.state.clone());
+
+        let response = node_service
+            .register_worker_node(Request::new(RegisterWorkerNodeRequest {
+                username: owner.clone(),
+                worker_id: ".".into(),
+                ip: "10.77.9.10:50053".into(),
+                resources: Some(ProtoResourceSpec {
+                    cpu_cores: 4,
+                    memory_mb: 16 * 1024,
+                    gpu_count: 0,
+                    gpu_name: String::new(),
+                    vram_mb: 0,
+                    cpu_score: 400,
+                    gpu_score: 0,
+                    storage_total_gb: 500,
+                    storage_available_gb: 250,
+                }),
+                location: "local".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let dot_worker = master_service
+            .state
+            .node_manager
+            .get_worker(".")
+            .await
+            .unwrap();
+        cleanup(&master_service.state.scheduler, &task_id, &owner).await;
+
+        assert!(!response.success);
+        assert!(response.status_message.contains("worker_id"));
+        assert!(dot_worker.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_register_worker_node_rejects_invalid_capacity_before_insert() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (master_service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(master_service.state.clone());
+        let worker_id = format!("grpc-invalid-capacity-{task_id}");
+
+        let response = node_service
+            .register_worker_node(Request::new(RegisterWorkerNodeRequest {
+                username: owner.clone(),
+                worker_id: worker_id.clone(),
+                ip: "10.77.9.10:50053".into(),
+                resources: Some(ProtoResourceSpec {
+                    cpu_cores: -1,
+                    memory_mb: -1024,
+                    gpu_count: -1,
+                    gpu_name: String::new(),
+                    vram_mb: -1024,
+                    cpu_score: -10,
+                    gpu_score: -10,
+                    storage_total_gb: 100,
+                    storage_available_gb: 200,
+                }),
+                location: "local".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let stored = master_service
+            .state
+            .node_manager
+            .get_worker(&worker_id)
+            .await
+            .unwrap();
+        cleanup_report_worker(&master_service, &worker_id).await;
+        cleanup(&master_service.state.scheduler, &task_id, &owner).await;
+
+        assert!(!response.success);
+        assert!(response.status_message.contains("capacity"));
+        assert!(stored.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_remove_worker_rejects_single_dot_worker_id() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(service.state.clone());
+        let owner_token = token_for(&service.state.auth, &owner);
+
+        let response = node_service
+            .remove_worker(Request::new(RemoveWorkerRequest {
+                worker_id: ".".into(),
+                token: owner_token,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+
+        assert!(!response.success);
+        assert!(response.status_message.contains("worker_id"));
     }
 
     #[tokio::test]
@@ -1594,6 +2769,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_stop_task_rejects_non_owner() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
         let (service, task_id, other_token, owner) = match test_service().await {
             Some(parts) => parts,
             None => return,
@@ -1621,6 +2798,1882 @@ mod tests {
         cleanup(&service.state.scheduler, &task_id, &owner).await;
     }
 
+    #[tokio::test]
+    async fn test_stop_task_reports_cancellation_recorded() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let owner_token = token_for(&service.state.auth, &owner);
+
+        let response = service
+            .stop_task(Request::new(StopTaskRequest {
+                token: owner_token,
+                task_id: task_id.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(response.success);
+        assert_eq!(response.status_message, "Task cancellation recorded");
+        let stored = service
+            .state
+            .scheduler
+            .get_task(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, TaskStatus::Cancelled);
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+    }
+
+    #[tokio::test]
+    async fn test_stop_task_sends_stop_execution_to_assigned_worker() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let owner_token = token_for(&service.state.auth, &owner);
+        let (worker_addr, mut stop_rx) = match fake_worker_stop_server().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let worker_id = format!("grpc-stop-worker-{task_id}");
+        service
+            .state
+            .scheduler
+            .assign_task_to_worker(&task_id, &worker_id, &worker_addr.to_string())
+            .await
+            .unwrap();
+
+        let response = service
+            .stop_task(Request::new(StopTaskRequest {
+                token: owner_token,
+                task_id: task_id.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(response.success, "{}", response.status_message);
+        let stopped_task_id = tokio::time::timeout(Duration::from_secs(2), stop_rx.recv())
+            .await
+            .expect("worker should receive StopTaskExecution")
+            .expect("fake worker stop channel should stay open");
+        assert_eq!(stopped_task_id, task_id);
+        let stored = service
+            .state
+            .scheduler
+            .get_task(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, TaskStatus::Cancelled);
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+    }
+
+    #[tokio::test]
+    async fn test_stop_task_keeps_cancellation_when_worker_stop_fails() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let owner_token = token_for(&service.state.auth, &owner);
+        let unused_worker_addr = match reserve_loopback_addr() {
+            Some(addr) => addr,
+            None => return,
+        };
+        let worker_id = format!("grpc-stop-offline-worker-{task_id}");
+        service
+            .state
+            .scheduler
+            .assign_task_to_worker(&task_id, &worker_id, &unused_worker_addr.to_string())
+            .await
+            .unwrap();
+
+        let response = service
+            .stop_task(Request::new(StopTaskRequest {
+                token: owner_token,
+                task_id: task_id.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(response.success, "{}", response.status_message);
+        assert!(
+            response
+                .status_message
+                .contains("worker stop not confirmed"),
+            "{}",
+            response.status_message
+        );
+        let stored = service
+            .state
+            .scheduler
+            .get_task(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, TaskStatus::Cancelled);
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+    }
+
+    #[tokio::test]
+    async fn test_download_task_artifact_rejects_storage_path_outside_artifact_root() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let owner_token = token_for(&service.state.auth, &owner);
+        let outside_path = std::env::temp_dir().join(format!(
+            "hivemind-outside-artifact-{}.txt",
+            uuid::Uuid::new_v4()
+        ));
+        tokio::fs::write(&outside_path, b"private outside artifact")
+            .await
+            .unwrap();
+
+        sqlx::query(
+            "INSERT INTO artifacts (task_id, artifact_key, checksum_sha1, size_bytes, storage_path, status)
+             VALUES ($1, $2, $3, $4, $5, 'ready')",
+        )
+        .bind(&task_id)
+        .bind(format!("outside-artifact-{task_id}"))
+        .bind("not-checked")
+        .bind(24i64)
+        .bind(outside_path.to_string_lossy().as_ref())
+        .execute(&service.state.scheduler.database().pool)
+        .await
+        .unwrap();
+
+        let response = service
+            .download_task_artifact(Request::new(DownloadTaskArtifactRequest {
+                task_id: task_id.clone(),
+                token: owner_token,
+                artifact_key: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        sqlx::query("DELETE FROM artifacts WHERE task_id = $1")
+            .bind(&task_id)
+            .execute(&service.state.scheduler.database().pool)
+            .await
+            .ok();
+        tokio::fs::remove_file(&outside_path).await.ok();
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+
+        assert!(!response.success);
+        assert!(response
+            .status_message
+            .to_ascii_lowercase()
+            .contains("artifact storage"));
+        assert!(response.data.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_download_task_artifact_rejects_oversized_file_before_reading() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let owner_token = token_for(&service.state.auth, &owner);
+        let max_download_bytes = 16 * 1024 * 1024usize;
+        let artifact_root = service.state.artifact_root.clone();
+        tokio::fs::create_dir_all(&artifact_root).await.unwrap();
+        let big_path = artifact_root.join(format!("big-{}.bin", uuid::Uuid::new_v4()));
+        std::fs::File::create(&big_path)
+            .unwrap()
+            .set_len((max_download_bytes + 1) as u64)
+            .unwrap();
+
+        sqlx::query(
+            "INSERT INTO artifacts (task_id, artifact_key, checksum_sha1, size_bytes, storage_path, status)
+             VALUES ($1, $2, $3, $4, $5, 'ready')",
+        )
+        .bind(&task_id)
+        .bind(format!("big-artifact-{task_id}"))
+        .bind("not-checked")
+        .bind((max_download_bytes + 1) as i64)
+        .bind(big_path.to_string_lossy().as_ref())
+        .execute(&service.state.scheduler.database().pool)
+        .await
+        .unwrap();
+
+        let response = service
+            .download_task_artifact(Request::new(DownloadTaskArtifactRequest {
+                task_id: task_id.clone(),
+                token: owner_token,
+                artifact_key: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        sqlx::query("DELETE FROM artifacts WHERE task_id = $1")
+            .bind(&task_id)
+            .execute(&service.state.scheduler.database().pool)
+            .await
+            .ok();
+        tokio::fs::remove_file(&big_path).await.ok();
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+
+        assert!(!response.success);
+        assert!(response.status_message.contains("too large"));
+        assert!(response.data.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_worker_report_rpc_persists_output_result_and_usage_for_provider_worker() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (master_service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(master_service.state.clone());
+        let worker_id = format!("grpc-report-worker-{task_id}");
+        let owner_token = token_for(&master_service.state.auth, &owner);
+
+        node_service
+            .register_worker_node(Request::new(RegisterWorkerNodeRequest {
+                username: owner.clone(),
+                worker_id: worker_id.clone(),
+                ip: "10.77.1.10:50053".into(),
+                resources: Some(ProtoResourceSpec {
+                    cpu_cores: 4,
+                    memory_mb: 16 * 1024,
+                    gpu_count: 0,
+                    gpu_name: String::new(),
+                    vram_mb: 0,
+                    cpu_score: 400,
+                    gpu_score: 0,
+                    storage_total_gb: 500,
+                    storage_available_gb: 250,
+                }),
+                location: "local".into(),
+            }))
+            .await
+            .unwrap();
+        master_service
+            .state
+            .scheduler
+            .assign_task_to_worker(&task_id, &worker_id, "10.77.1.10:50053")
+            .await
+            .unwrap();
+
+        let output_response = node_service
+            .task_output_upload(Request::new(TaskOutputUploadRequest {
+                task_id: task_id.clone(),
+                worker_id: worker_id.clone(),
+                output: "persisted stdout".into(),
+                token: owner_token.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(
+            output_response.success,
+            "{}",
+            output_response.status_message
+        );
+
+        let usage_response = node_service
+            .task_usage(Request::new(TaskUsageRequest {
+                task_id: task_id.clone(),
+                worker_id: worker_id.clone(),
+                usage: Some(hivemind_proto::ResourceUsage {
+                    cpu_percent: 12.5,
+                    memory_percent: 23.5,
+                    gpu_percent: 34.5,
+                    vram_percent: 45.5,
+                    storage_percent: 56.5,
+                }),
+                token: owner_token.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(usage_response.success, "{}", usage_response.status_message);
+
+        let result_response = node_service
+            .task_result_upload(Request::new(TaskResultUploadRequest {
+                task_id: task_id.clone(),
+                worker_id: worker_id.clone(),
+                result_torrent: "btih:reported-result".into(),
+                token: owner_token.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(
+            result_response.success,
+            "{}",
+            result_response.status_message
+        );
+
+        let task_log = master_service
+            .get_tasklog(Request::new(TasklogRequest {
+                token: owner_token.clone(),
+                task_id: task_id.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let task_result = master_service
+            .get_task_result(Request::new(GetTaskResultRequest {
+                token: owner_token,
+                task_id: task_id.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let stored = master_service
+            .state
+            .scheduler
+            .get_task(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        sqlx::query("DELETE FROM worker_reputation WHERE worker_id = $1")
+            .bind(&worker_id)
+            .execute(&master_service.state.scheduler.database().pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM worker_nodes WHERE worker_id = $1")
+            .bind(&worker_id)
+            .execute(&master_service.state.scheduler.database().pool)
+            .await
+            .ok();
+        cleanup(&master_service.state.scheduler, &task_id, &owner).await;
+
+        assert!(task_log.success);
+        assert_eq!(task_log.log, "persisted stdout");
+        assert!(task_result.success);
+        assert_eq!(task_result.result_torrent, "btih:reported-result");
+        assert_eq!(stored.status, TaskStatus::Completed);
+        assert_eq!(stored.cpu_usage, 12.5);
+        assert_eq!(stored.memory_usage, 23.5);
+        assert_eq!(stored.gpu_usage, 34.5);
+        assert_eq!(stored.gpu_memory_usage, 45.5);
+    }
+
+    #[tokio::test]
+    async fn test_worker_report_rpc_rejects_non_owner_for_assigned_worker() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (master_service, task_id, other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(master_service.state.clone());
+        let worker_id = format!("grpc-report-deny-worker-{task_id}");
+
+        node_service
+            .register_worker_node(Request::new(RegisterWorkerNodeRequest {
+                username: owner.clone(),
+                worker_id: worker_id.clone(),
+                ip: "10.77.2.10:50053".into(),
+                resources: Some(ProtoResourceSpec {
+                    cpu_cores: 4,
+                    memory_mb: 16 * 1024,
+                    gpu_count: 0,
+                    gpu_name: String::new(),
+                    vram_mb: 0,
+                    cpu_score: 400,
+                    gpu_score: 0,
+                    storage_total_gb: 500,
+                    storage_available_gb: 250,
+                }),
+                location: "local".into(),
+            }))
+            .await
+            .unwrap();
+        master_service
+            .state
+            .scheduler
+            .assign_task_to_worker(&task_id, &worker_id, "10.77.2.10:50053")
+            .await
+            .unwrap();
+
+        let response = node_service
+            .task_output_upload(Request::new(TaskOutputUploadRequest {
+                task_id: task_id.clone(),
+                worker_id: worker_id.clone(),
+                output: "unauthorized output".into(),
+                token: other_token,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let stored = master_service
+            .state
+            .scheduler
+            .get_task(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        sqlx::query("DELETE FROM worker_reputation WHERE worker_id = $1")
+            .bind(&worker_id)
+            .execute(&master_service.state.scheduler.database().pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM worker_nodes WHERE worker_id = $1")
+            .bind(&worker_id)
+            .execute(&master_service.state.scheduler.database().pool)
+            .await
+            .ok();
+        cleanup(&master_service.state.scheduler, &task_id, &owner).await;
+
+        assert!(!response.success);
+        assert_eq!(response.status_message, "Not authorized");
+        assert_eq!(stored.status, TaskStatus::Assigned);
+        assert_eq!(stored.output, None);
+    }
+
+    #[tokio::test]
+    async fn test_worker_report_rpc_accepts_worker_self_token() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (master_service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(master_service.state.clone());
+        let worker_id = format!("grpc-report-self-worker-{task_id}");
+        let worker_token = token_for(&master_service.state.auth, &worker_id);
+        register_report_worker(&node_service, &owner, &worker_id).await;
+        master_service
+            .state
+            .scheduler
+            .assign_task_to_worker(&task_id, &worker_id, "10.77.5.10:50053")
+            .await
+            .unwrap();
+
+        let response = node_service
+            .task_output_upload(Request::new(TaskOutputUploadRequest {
+                task_id: task_id.clone(),
+                worker_id: worker_id.clone(),
+                output: "self token output".into(),
+                token: worker_token,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let stored = master_service
+            .state
+            .scheduler
+            .get_task(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        cleanup_report_worker(&master_service, &worker_id).await;
+        cleanup(&master_service.state.scheduler, &task_id, &owner).await;
+
+        assert!(response.success, "{}", response.status_message);
+        assert_eq!(stored.output.as_deref(), Some("self token output"));
+    }
+
+    #[tokio::test]
+    async fn test_worker_report_rpc_accepts_output_and_usage_after_result_completion() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (master_service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(master_service.state.clone());
+        let worker_id = format!("grpc-report-result-first-worker-{task_id}");
+        let owner_token = token_for(&master_service.state.auth, &owner);
+        register_report_worker(&node_service, &owner, &worker_id).await;
+        master_service
+            .state
+            .scheduler
+            .assign_task_to_worker(&task_id, &worker_id, "10.77.7.10:50053")
+            .await
+            .unwrap();
+
+        let result_response = node_service
+            .task_result_upload(Request::new(TaskResultUploadRequest {
+                task_id: task_id.clone(),
+                worker_id: worker_id.clone(),
+                result_torrent: "btih:result-first".into(),
+                token: owner_token.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(
+            result_response.success,
+            "{}",
+            result_response.status_message
+        );
+
+        let output_response = node_service
+            .task_output_upload(Request::new(TaskOutputUploadRequest {
+                task_id: task_id.clone(),
+                worker_id: worker_id.clone(),
+                output: "stdout after result".into(),
+                token: owner_token.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let usage_response = node_service
+            .task_usage(Request::new(TaskUsageRequest {
+                task_id: task_id.clone(),
+                worker_id: worker_id.clone(),
+                usage: Some(hivemind_proto::ResourceUsage {
+                    cpu_percent: 21.0,
+                    memory_percent: 22.0,
+                    gpu_percent: 23.0,
+                    vram_percent: 24.0,
+                    storage_percent: 25.0,
+                }),
+                token: owner_token,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let stored = master_service
+            .state
+            .scheduler
+            .get_task(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        cleanup_report_worker(&master_service, &worker_id).await;
+        cleanup(&master_service.state.scheduler, &task_id, &owner).await;
+
+        assert!(
+            output_response.success,
+            "{}",
+            output_response.status_message
+        );
+        assert!(usage_response.success, "{}", usage_response.status_message);
+        assert_eq!(stored.status, TaskStatus::Completed);
+        assert_eq!(stored.result_torrent.as_deref(), Some("btih:result-first"));
+        assert_eq!(stored.output.as_deref(), Some("stdout after result"));
+        assert_eq!(stored.cpu_usage, 21.0);
+        assert_eq!(stored.gpu_memory_usage, 24.0);
+    }
+
+    #[tokio::test]
+    async fn test_worker_report_rpc_rejects_same_provider_wrong_assigned_worker() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (master_service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(master_service.state.clone());
+        let assigned_worker = format!("grpc-report-assigned-worker-{task_id}");
+        let wrong_worker = format!("grpc-report-wrong-worker-{task_id}");
+        let owner_token = token_for(&master_service.state.auth, &owner);
+        register_report_worker(&node_service, &owner, &assigned_worker).await;
+        register_report_worker(&node_service, &owner, &wrong_worker).await;
+        master_service
+            .state
+            .scheduler
+            .assign_task_to_worker(&task_id, &assigned_worker, "10.77.6.10:50053")
+            .await
+            .unwrap();
+
+        let response = node_service
+            .task_output_upload(Request::new(TaskOutputUploadRequest {
+                task_id: task_id.clone(),
+                worker_id: wrong_worker.clone(),
+                output: "wrong worker output".into(),
+                token: owner_token,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let stored = master_service
+            .state
+            .scheduler
+            .get_task(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        cleanup_report_worker(&master_service, &assigned_worker).await;
+        cleanup_report_worker(&master_service, &wrong_worker).await;
+        cleanup(&master_service.state.scheduler, &task_id, &owner).await;
+
+        assert!(!response.success);
+        assert_eq!(stored.status, TaskStatus::Assigned);
+        assert_eq!(stored.worker_id.as_deref(), Some(assigned_worker.as_str()));
+        assert_eq!(stored.output, None);
+    }
+
+    #[tokio::test]
+    async fn test_worker_report_rpc_rejects_oversized_output_before_persisting() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (master_service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(master_service.state.clone());
+        let worker_id = format!("grpc-report-big-output-worker-{task_id}");
+        let owner_token = token_for(&master_service.state.auth, &owner);
+        register_report_worker(&node_service, &owner, &worker_id).await;
+        master_service
+            .state
+            .scheduler
+            .assign_task_to_worker(&task_id, &worker_id, "10.77.3.10:50053")
+            .await
+            .unwrap();
+
+        let response = node_service
+            .task_output_upload(Request::new(TaskOutputUploadRequest {
+                task_id: task_id.clone(),
+                worker_id: worker_id.clone(),
+                output: "x".repeat(1024 * 1024 + 1),
+                token: owner_token,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let stored = master_service
+            .state
+            .scheduler
+            .get_task(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        cleanup_report_worker(&master_service, &worker_id).await;
+        cleanup(&master_service.state.scheduler, &task_id, &owner).await;
+
+        assert!(!response.success);
+        assert!(response.status_message.contains("byte limit"));
+        assert_eq!(stored.output, None);
+    }
+
+    #[tokio::test]
+    async fn test_worker_report_rpc_rejects_oversized_result_before_completing() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (master_service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(master_service.state.clone());
+        let worker_id = format!("grpc-report-big-result-worker-{task_id}");
+        let owner_token = token_for(&master_service.state.auth, &owner);
+        register_report_worker(&node_service, &owner, &worker_id).await;
+        master_service
+            .state
+            .scheduler
+            .assign_task_to_worker(&task_id, &worker_id, "10.77.4.10:50053")
+            .await
+            .unwrap();
+
+        let response = node_service
+            .task_result_upload(Request::new(TaskResultUploadRequest {
+                task_id: task_id.clone(),
+                worker_id: worker_id.clone(),
+                result_torrent: "x".repeat(4097),
+                token: owner_token,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let stored = master_service
+            .state
+            .scheduler
+            .get_task(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        cleanup_report_worker(&master_service, &worker_id).await;
+        cleanup(&master_service.state.scheduler, &task_id, &owner).await;
+
+        assert!(!response.success);
+        assert!(response.status_message.contains("byte limit"));
+        assert_eq!(stored.status, TaskStatus::Assigned);
+        assert_eq!(stored.result_torrent, None);
+    }
+
+    #[tokio::test]
+    async fn test_get_balance_reads_database_value() {
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let user_service = GrpcUserService::new(service.state.clone());
+        let username = format!("grpc-balance-{}", uuid::Uuid::new_v4());
+        sqlx::query("INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', $2)")
+            .bind(&username)
+            .bind(4321i64)
+            .execute(&service.state.scheduler.database().pool)
+            .await
+            .unwrap();
+        let token = token_for(&service.state.auth, &username);
+        let response = user_service
+            .get_balance(Request::new(GetBalanceRequest {
+                username: username.clone(),
+                token,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(response.success);
+        assert_eq!(response.balance, 4321);
+        sqlx::query("DELETE FROM users WHERE username = $1")
+            .bind(&username)
+            .execute(&service.state.scheduler.database().pool)
+            .await
+            .ok();
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+    }
+
+    #[tokio::test]
+    async fn test_get_worker_trust_profile_missing_worker_returns_not_found() {
+        let (service, task_id, other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+
+        let response = service
+            .get_worker_trust_profile(Request::new(GetWorkerTrustProfileRequest {
+                token: other_token,
+                worker_id: "missing-worker".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!response.success);
+        assert_eq!(response.status_message, "Worker not found");
+        assert!(response.trust.is_none());
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+    }
+
+    #[tokio::test]
+    async fn test_provider_can_manage_worker_registered_with_distinct_worker_id() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (master_service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(master_service.state.clone());
+        let worker_id = format!("provider-owned-worker-{task_id}");
+        let owner_token = token_for(&master_service.state.auth, &owner);
+
+        let registered = node_service
+            .register_worker_node(Request::new(RegisterWorkerNodeRequest {
+                username: owner.clone(),
+                worker_id: worker_id.clone(),
+                ip: "10.77.0.10:50053".into(),
+                resources: Some(ProtoResourceSpec {
+                    cpu_cores: 4,
+                    memory_mb: 16 * 1024,
+                    gpu_count: 0,
+                    gpu_name: String::new(),
+                    vram_mb: 0,
+                    cpu_score: 400,
+                    gpu_score: 0,
+                    storage_total_gb: 500,
+                    storage_available_gb: 250,
+                }),
+                location: "local".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(registered.success, "{}", registered.status_message);
+
+        let response = master_service
+            .get_provider_worker_settings(Request::new(GetProviderWorkerSettingsRequest {
+                token: owner_token,
+                worker_id: worker_id.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        sqlx::query("DELETE FROM worker_reputation WHERE worker_id = $1")
+            .bind(&worker_id)
+            .execute(&master_service.state.scheduler.database().pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM worker_nodes WHERE worker_id = $1")
+            .bind(&worker_id)
+            .execute(&master_service.state.scheduler.database().pool)
+            .await
+            .ok();
+        cleanup(&master_service.state.scheduler, &task_id, &owner).await;
+
+        assert!(response.success, "{}", response.message);
+        assert_eq!(response.worker_id, worker_id);
+        assert!(response.settings.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_get_all_user_tasks_preserves_persisted_task_fields() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let owner_token = token_for(&service.state.auth, &owner);
+
+        sqlx::query(
+            "UPDATE tasks SET
+                worker_ip = '10.42.0.9',
+                status = 'COMPLETED',
+                status_message = 'finished',
+                output = 'stdout body',
+                result_torrent = 'btih:result',
+                billed_amount = 37,
+                billing_settled = true,
+                retry_count = 2,
+                wall_time_ms = 1234,
+                peak_memory_mb = 256,
+                cpu_usage = 12.5,
+                memory_usage = 34.5,
+                gpu_usage = 56.5,
+                gpu_memory_usage = 78.5,
+                deterministic = true
+             WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .execute(&service.state.scheduler.database().pool)
+        .await
+        .unwrap();
+
+        let response = service
+            .get_all_user_tasks(Request::new(GetAllUserTasksRequest { token: owner_token }))
+            .await
+            .unwrap()
+            .into_inner();
+        let task = response
+            .tasks
+            .iter()
+            .find(|task| task.task_id == task_id)
+            .expect("expected owner task in task list");
+        let actual = task.clone();
+
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+
+        assert_eq!(actual.owner, owner);
+        assert_eq!(actual.status, "COMPLETED");
+        assert_eq!(actual.status_message, "finished");
+        assert_eq!(actual.worker_ip, "10.42.0.9");
+        assert_eq!(actual.output, "stdout body");
+        assert_eq!(actual.result_torrent, "btih:result");
+        assert_eq!(actual.billed_amount, 37);
+        assert!(actual.billing_settled);
+        assert_eq!(actual.retry_count, 2);
+        assert_eq!(actual.wall_time_ms, 1234);
+        assert_eq!(actual.peak_memory_mb, 256);
+        assert_eq!(actual.cpu_usage, 12.5);
+        assert_eq!(actual.memory_usage, 34.5);
+        assert_eq!(actual.gpu_usage, 56.5);
+        assert_eq!(actual.gpu_memory_usage, 78.5);
+        assert!(actual.deterministic);
+    }
+
+    #[tokio::test]
+    async fn test_admin_billing_overview_rejects_non_admin() {
+        let (service, task_id, other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+
+        let response = service
+            .get_admin_billing_overview(Request::new(GetAdminBillingOverviewRequest {
+                token: other_token,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!response.success);
+        assert_eq!(response.status_message, "Forbidden");
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+    }
+
+    #[tokio::test]
+    async fn test_admin_billing_overview_uses_payer_debit_and_failed_pending_tasks() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let admin = format!("grpc-admin-{}", uuid::Uuid::new_v4());
+        let previous_admins = std::env::var("HIVEMIND_ADMIN_USERS").ok();
+        std::env::set_var("HIVEMIND_ADMIN_USERS", &admin);
+        let admin_token = token_for(&service.state.auth, &admin);
+        let ledger_task_id = format!("grpc-ledger-{task_id}");
+        let pending_failed_task_id = format!("grpc-failed-{task_id}");
+        let pool = &service.state.scheduler.database().pool;
+
+        sqlx::query("DELETE FROM ledger_entries WHERE task_id = $1")
+            .bind(&ledger_task_id)
+            .execute(pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM tasks WHERE task_id = $1")
+            .bind(&pending_failed_task_id)
+            .execute(pool)
+            .await
+            .ok();
+        sqlx::query(
+            "INSERT INTO ledger_entries (
+                task_id, payer_user, provider_worker_id, provider_user,
+                kind, amount_cpt, currency, status, idempotency_key
+             ) VALUES
+                ($1, $2, NULL, NULL, 'payer_debit', 70, 'CPT', 'settled', $3),
+                ($1, $2, NULL, NULL, 'provider_credit', 50, 'CPT', 'settled', $4),
+                ($1, $2, NULL, NULL, 'platform_fee', 20, 'CPT', 'settled', $5),
+                ($1, $2, NULL, NULL, 'task_debit', 999, 'CPT', 'settled', $6)",
+        )
+        .bind(&ledger_task_id)
+        .bind(&owner)
+        .bind(format!("{ledger_task_id}:payer_debit"))
+        .bind(format!("{ledger_task_id}:provider_credit"))
+        .bind(format!("{ledger_task_id}:platform_fee"))
+        .bind(format!("{ledger_task_id}:task_debit"))
+        .execute(pool)
+        .await
+        .unwrap();
+
+        let mut failed_task = make_task(&pending_failed_task_id, &owner);
+        failed_task.status = TaskStatus::Failed;
+        failed_task.billing_settled = false;
+        service
+            .state
+            .scheduler
+            .create_task(&failed_task)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE tasks SET status = 'FAILED', billing_settled = false WHERE task_id = $1",
+        )
+        .bind(&pending_failed_task_id)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        let expected_pending: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tasks WHERE billing_settled=false AND status IN ('COMPLETED','FAILED')",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let expected_totals: (i64, i64, i64) = sqlx::query_as(
+            "SELECT
+                COALESCE(SUM(CASE WHEN kind='payer_debit' THEN amount_cpt ELSE 0 END),0)::BIGINT,
+                COALESCE(SUM(CASE WHEN kind='provider_credit' THEN amount_cpt ELSE 0 END),0)::BIGINT,
+                COALESCE(SUM(CASE WHEN kind='platform_fee' THEN amount_cpt ELSE 0 END),0)::BIGINT
+             FROM ledger_entries WHERE status='settled'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+
+        let response = service
+            .get_admin_billing_overview(Request::new(GetAdminBillingOverviewRequest {
+                token: admin_token,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        match previous_admins {
+            Some(value) => std::env::set_var("HIVEMIND_ADMIN_USERS", value),
+            None => std::env::remove_var("HIVEMIND_ADMIN_USERS"),
+        }
+        sqlx::query("DELETE FROM ledger_entries WHERE task_id = $1")
+            .bind(&ledger_task_id)
+            .execute(pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM tasks WHERE task_id = $1")
+            .bind(&pending_failed_task_id)
+            .execute(pool)
+            .await
+            .ok();
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+
+        assert!(response.success);
+        assert_eq!(response.total_payer_debit_cpt, expected_totals.0);
+        assert_eq!(response.total_provider_credit_cpt, expected_totals.1);
+        assert_eq!(response.total_platform_fee_cpt, expected_totals.2);
+        assert_eq!(response.pending_billing_tasks, expected_pending);
+    }
+
+    #[tokio::test]
+    async fn test_update_worker_trust_control_rejects_unsafe_worker_id_before_insert() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let admin = format!("grpc-admin-{}", uuid::Uuid::new_v4());
+        let previous_admins = std::env::var("HIVEMIND_ADMIN_USERS").ok();
+        std::env::set_var("HIVEMIND_ADMIN_USERS", &admin);
+        let admin_token = token_for(&service.state.auth, &admin);
+        let unsafe_worker_id = ".";
+        let pool = &service.state.scheduler.database().pool;
+        sqlx::query("DELETE FROM worker_reputation WHERE worker_id = $1")
+            .bind(unsafe_worker_id)
+            .execute(pool)
+            .await
+            .ok();
+
+        let response = service
+            .update_worker_trust_control(Request::new(UpdateWorkerTrustControlRequest {
+                token: admin_token,
+                worker_id: unsafe_worker_id.into(),
+                banned: true,
+                score: 1,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let inserted_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM worker_reputation WHERE worker_id = $1")
+                .bind(unsafe_worker_id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+
+        sqlx::query("DELETE FROM worker_reputation WHERE worker_id = $1")
+            .bind(unsafe_worker_id)
+            .execute(pool)
+            .await
+            .ok();
+        match previous_admins {
+            Some(value) => std::env::set_var("HIVEMIND_ADMIN_USERS", value),
+            None => std::env::remove_var("HIVEMIND_ADMIN_USERS"),
+        }
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+
+        assert!(!response.success);
+        assert_eq!(response.status_message, "Invalid worker_id");
+        assert_eq!(inserted_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_batch_runtime_pull_batch_rejects_missing_token() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (master_service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(master_service.state.clone());
+        let batch_service = GrpcBatchRuntimeService::new(master_service.state.clone());
+        let worker_id = format!("grpc-batch-pull-worker-{task_id}");
+        register_report_worker(&node_service, &owner, &worker_id).await;
+
+        let response = batch_service
+            .pull_batch(Request::new(PullBatchRequest {
+                worker_id: worker_id.clone(),
+                max_inflight_batches: 1,
+                available_memory_gb: 8,
+                queue_capacity: 1,
+                cache_summary: None,
+                ..Default::default()
+            }))
+            .await;
+
+        let stored = master_service
+            .state
+            .scheduler
+            .get_task(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        cleanup_report_worker(&master_service, &worker_id).await;
+        cleanup(&master_service.state.scheduler, &task_id, &owner).await;
+
+        assert!(matches!(response, Err(status) if status.code() == tonic::Code::Unauthenticated));
+        assert_eq!(stored.status, TaskStatus::Pending);
+        assert_eq!(stored.worker_id, None);
+    }
+
+    #[tokio::test]
+    async fn test_batch_runtime_complete_batch_rejects_missing_token() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (master_service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(master_service.state.clone());
+        let batch_service = GrpcBatchRuntimeService::new(master_service.state.clone());
+        let worker_id = format!("grpc-batch-complete-worker-{task_id}");
+        register_report_worker(&node_service, &owner, &worker_id).await;
+        master_service
+            .state
+            .scheduler
+            .assign_task_to_worker(&task_id, &worker_id, "10.88.1.10:50053")
+            .await
+            .unwrap();
+
+        let response = batch_service
+            .complete_batch(Request::new(CompleteBatchRequest {
+                worker_id: worker_id.clone(),
+                batch_id: "batch-without-token".into(),
+                tasks: vec![hivemind_proto::CompletedTask {
+                    task_id: task_id.clone(),
+                    status: "COMPLETED".into(),
+                    stdout_artifact_ref: String::new(),
+                    stderr_artifact_ref: String::new(),
+                    result_artifact_refs: vec!["btih:batch-result".into()],
+                    metrics: None,
+                }],
+                ..Default::default()
+            }))
+            .await;
+
+        let stored = master_service
+            .state
+            .scheduler
+            .get_task(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        cleanup_report_worker(&master_service, &worker_id).await;
+        cleanup(&master_service.state.scheduler, &task_id, &owner).await;
+
+        assert!(matches!(response, Err(status) if status.code() == tonic::Code::Unauthenticated));
+        assert_eq!(stored.status, TaskStatus::Assigned);
+        assert_eq!(stored.result_torrent, None);
+    }
+
+    #[tokio::test]
+    async fn test_batch_runtime_heartbeat_rejects_missing_token() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (master_service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(master_service.state.clone());
+        let batch_service = GrpcBatchRuntimeService::new(master_service.state.clone());
+        let worker_id = format!("grpc-batch-heartbeat-worker-{task_id}");
+        register_report_worker(&node_service, &owner, &worker_id).await;
+
+        let response = batch_service
+            .heartbeat(Request::new(HeartbeatRequest {
+                worker_id: worker_id.clone(),
+                status: "BUSY".into(),
+                available_memory_gb: 7,
+                queue_capacity: 2,
+                ..Default::default()
+            }))
+            .await;
+
+        let worker = master_service
+            .state
+            .node_manager
+            .get_worker(&worker_id)
+            .await
+            .unwrap()
+            .unwrap();
+        cleanup_report_worker(&master_service, &worker_id).await;
+        cleanup(&master_service.state.scheduler, &task_id, &owner).await;
+
+        assert!(matches!(response, Err(status) if status.code() == tonic::Code::Unauthenticated));
+        assert_eq!(worker.status, hivemind_models::WorkerStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn test_batch_runtime_pull_batch_authorizes_registered_worker_owner_only() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (master_service, task_id, other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(master_service.state.clone());
+        let batch_service = GrpcBatchRuntimeService::new(master_service.state.clone());
+        let worker_id = format!("grpc-batch-pull-owner-worker-{task_id}");
+        let owner_token = token_for(&master_service.state.auth, &owner);
+        register_report_worker(&node_service, &owner, &worker_id).await;
+
+        let denied = batch_service
+            .pull_batch(Request::new(PullBatchRequest {
+                worker_id: worker_id.clone(),
+                max_inflight_batches: 1,
+                available_memory_gb: 8,
+                queue_capacity: 1,
+                cache_summary: None,
+                token: other_token,
+            }))
+            .await;
+        let stored_after_denied = master_service
+            .state
+            .scheduler
+            .get_task(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let allowed = batch_service
+            .pull_batch(Request::new(PullBatchRequest {
+                worker_id: worker_id.clone(),
+                max_inflight_batches: 1,
+                available_memory_gb: 8,
+                queue_capacity: 1,
+                cache_summary: None,
+                token: owner_token,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let stored_after_allowed = master_service
+            .state
+            .scheduler
+            .get_task(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        cleanup_report_worker(&master_service, &worker_id).await;
+        cleanup(&master_service.state.scheduler, &task_id, &owner).await;
+
+        assert!(matches!(denied, Err(status) if status.code() == tonic::Code::PermissionDenied));
+        assert_eq!(stored_after_denied.status, TaskStatus::Pending);
+        assert_eq!(stored_after_denied.worker_id, None);
+        assert!(allowed.success, "{}", allowed.status_message);
+        assert_eq!(allowed.tasks.len(), 1);
+        assert_eq!(allowed.tasks[0].task_id, task_id);
+        assert_eq!(stored_after_allowed.status, TaskStatus::Assigned);
+        assert_eq!(
+            stored_after_allowed.worker_id.as_deref(),
+            Some(worker_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_batch_runtime_complete_batch_authorizes_registered_worker_owner_only() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (master_service, task_id, other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(master_service.state.clone());
+        let batch_service = GrpcBatchRuntimeService::new(master_service.state.clone());
+        let worker_id = format!("grpc-batch-complete-owner-worker-{task_id}");
+        let owner_token = token_for(&master_service.state.auth, &owner);
+        register_report_worker(&node_service, &owner, &worker_id).await;
+        master_service
+            .state
+            .scheduler
+            .assign_task_to_worker(&task_id, &worker_id, "10.88.2.10:50053")
+            .await
+            .unwrap();
+
+        let denied = batch_service
+            .complete_batch(Request::new(batch_complete_request(
+                &worker_id,
+                &task_id,
+                other_token,
+            )))
+            .await;
+        let stored_after_denied = master_service
+            .state
+            .scheduler
+            .get_task(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let allowed = batch_service
+            .complete_batch(Request::new(batch_complete_request(
+                &worker_id,
+                &task_id,
+                owner_token,
+            )))
+            .await
+            .unwrap()
+            .into_inner();
+        let stored_after_allowed = master_service
+            .state
+            .scheduler
+            .get_task(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        cleanup_report_worker(&master_service, &worker_id).await;
+        cleanup(&master_service.state.scheduler, &task_id, &owner).await;
+
+        assert!(matches!(denied, Err(status) if status.code() == tonic::Code::PermissionDenied));
+        assert_eq!(stored_after_denied.status, TaskStatus::Assigned);
+        assert_eq!(stored_after_denied.result_torrent, None);
+        assert!(allowed.success, "{}", allowed.status_message);
+        assert_eq!(stored_after_allowed.status, TaskStatus::Completed);
+        assert_eq!(
+            stored_after_allowed.result_torrent.as_deref(),
+            Some("btih:batch-result")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_batch_runtime_complete_batch_rejects_bad_task_id_before_mutating_any_task() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (master_service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(master_service.state.clone());
+        let batch_service = GrpcBatchRuntimeService::new(master_service.state.clone());
+        let worker_id = format!("grpc-batch-prevalidate-worker-{task_id}");
+        let owner_token = token_for(&master_service.state.auth, &owner);
+        let second_task_id = format!("grpc-batch-prevalidate-second-{task_id}");
+        let second_task = make_task(&second_task_id, &owner);
+        master_service
+            .state
+            .scheduler
+            .create_task(&second_task)
+            .await
+            .unwrap();
+        register_report_worker(&node_service, &owner, &worker_id).await;
+        master_service
+            .state
+            .scheduler
+            .assign_task_to_worker(&task_id, &worker_id, "10.88.7.10:50053")
+            .await
+            .unwrap();
+        master_service
+            .state
+            .scheduler
+            .assign_task_to_worker(&second_task_id, &worker_id, "10.88.7.10:50053")
+            .await
+            .unwrap();
+
+        let mut request = batch_complete_request(&worker_id, &task_id, owner_token);
+        request.tasks.push(hivemind_proto::CompletedTask {
+            task_id: ".".into(),
+            status: "COMPLETED".into(),
+            stdout_artifact_ref: String::new(),
+            stderr_artifact_ref: String::new(),
+            result_artifact_refs: vec!["btih:bad-task-id-result".into()],
+            metrics: None,
+        });
+        let response = batch_service.complete_batch(Request::new(request)).await;
+        let first_after = master_service
+            .state
+            .scheduler
+            .get_task(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let second_after = master_service
+            .state
+            .scheduler
+            .get_task(&second_task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        cleanup_report_worker(&master_service, &worker_id).await;
+        cleanup(&master_service.state.scheduler, &second_task_id, &owner).await;
+        cleanup(&master_service.state.scheduler, &task_id, &owner).await;
+
+        assert!(matches!(response, Err(status) if status.code() == tonic::Code::InvalidArgument));
+        assert_eq!(first_after.status, TaskStatus::Assigned);
+        assert_eq!(second_after.status, TaskStatus::Assigned);
+    }
+
+    #[tokio::test]
+    async fn test_batch_runtime_complete_batch_persists_artifact_refs_and_metrics() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (master_service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(master_service.state.clone());
+        let batch_service = GrpcBatchRuntimeService::new(master_service.state.clone());
+        let worker_id = format!("grpc-batch-metrics-worker-{task_id}");
+        let owner_token = token_for(&master_service.state.auth, &owner);
+        register_report_worker(&node_service, &owner, &worker_id).await;
+        master_service
+            .state
+            .scheduler
+            .assign_task_to_worker(&task_id, &worker_id, "10.88.3.10:50053")
+            .await
+            .unwrap();
+
+        let response = batch_service
+            .complete_batch(Request::new(batch_complete_request_with_report(
+                &worker_id,
+                &task_id,
+                owner_token,
+                "artifact://stdout.log",
+                "artifact://stderr.log",
+                Some(hivemind_proto::ExecutionMetrics {
+                    cpu_time_ms: 101,
+                    wall_time_ms: 202,
+                    peak_memory_mb: 303,
+                    download_bytes: 404,
+                    cache_hits: 5,
+                }),
+            )))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let stored = master_service
+            .state
+            .scheduler
+            .get_task(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let task_log = master_service
+            .get_tasklog(Request::new(TasklogRequest {
+                token: token_for(&master_service.state.auth, &owner),
+                task_id: task_id.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        cleanup_report_worker(&master_service, &worker_id).await;
+        cleanup(&master_service.state.scheduler, &task_id, &owner).await;
+
+        assert!(response.success, "{}", response.status_message);
+        assert_eq!(stored.status, TaskStatus::Completed);
+        assert_eq!(stored.result_torrent.as_deref(), Some("btih:batch-result"));
+        assert_eq!(stored.cpu_time_ms, 101);
+        assert_eq!(stored.wall_time_ms, 202);
+        assert_eq!(stored.peak_memory_mb, 303);
+        assert_eq!(stored.download_bytes, 404);
+        assert_eq!(stored.cache_hits, 5);
+        assert!(task_log.success);
+        assert_eq!(
+            task_log.log,
+            "stdout_artifact_ref=artifact://stdout.log\nstderr_artifact_ref=artifact://stderr.log"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_batch_runtime_complete_batch_registers_local_stdout_artifact_for_download() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (master_service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(master_service.state.clone());
+        let batch_service = GrpcBatchRuntimeService::new(master_service.state.clone());
+        let worker_id = format!("grpc-batch-artifact-worker-{task_id}");
+        let owner_token = token_for(&master_service.state.auth, &owner);
+        let artifact_root = master_service.state.artifact_root.clone();
+        tokio::fs::create_dir_all(&artifact_root).await.unwrap();
+        let stdout_path = artifact_root.join("stdout.log");
+        tokio::fs::write(&stdout_path, b"batch stdout bytes")
+            .await
+            .unwrap();
+
+        register_report_worker(&node_service, &owner, &worker_id).await;
+        master_service
+            .state
+            .scheduler
+            .assign_task_to_worker(&task_id, &worker_id, "10.88.4.10:50053")
+            .await
+            .unwrap();
+
+        let response = batch_service
+            .complete_batch(Request::new(batch_complete_request_with_report(
+                &worker_id,
+                &task_id,
+                owner_token.clone(),
+                "artifact://stdout.log",
+                "",
+                None,
+            )))
+            .await
+            .unwrap()
+            .into_inner();
+        let artifact_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM artifacts WHERE task_id = $1")
+                .bind(&task_id)
+                .fetch_one(&master_service.state.scheduler.database().pool)
+                .await
+                .unwrap();
+        let download = master_service
+            .download_task_artifact(Request::new(DownloadTaskArtifactRequest {
+                task_id: task_id.clone(),
+                token: owner_token,
+                artifact_key: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        sqlx::query("DELETE FROM artifacts WHERE task_id = $1")
+            .bind(&task_id)
+            .execute(&master_service.state.scheduler.database().pool)
+            .await
+            .ok();
+        cleanup_report_worker(&master_service, &worker_id).await;
+        cleanup(&master_service.state.scheduler, &task_id, &owner).await;
+        tokio::fs::remove_file(&stdout_path).await.ok();
+
+        assert!(response.success, "{}", response.status_message);
+        assert_eq!(artifact_count, 1);
+        assert!(download.success, "{}", download.status_message);
+        assert_eq!(download.data, b"batch stdout bytes");
+    }
+
+    #[tokio::test]
+    async fn test_download_task_artifact_can_select_specific_artifact_key() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let owner_token = token_for(&service.state.auth, &owner);
+        let artifact_root = service.state.artifact_root.clone();
+        tokio::fs::create_dir_all(&artifact_root).await.unwrap();
+        let first_path = artifact_root.join(format!("first-{}.log", uuid::Uuid::new_v4()));
+        let second_path = artifact_root.join(format!("second-{}.log", uuid::Uuid::new_v4()));
+        tokio::fs::write(&first_path, b"first artifact bytes")
+            .await
+            .unwrap();
+        tokio::fs::write(&second_path, b"second artifact bytes")
+            .await
+            .unwrap();
+        let first_key = format!("stdout-{task_id}");
+        let second_key = format!("stderr-{task_id}");
+
+        sqlx::query(
+            "INSERT INTO artifacts (task_id, artifact_key, checksum_sha1, size_bytes, storage_path, status, created_at)
+             VALUES ($1, $2, $3, $4, $5, 'ready', NOW() - INTERVAL '1 minute'),
+                    ($1, $6, $7, $8, $9, 'ready', NOW())",
+        )
+        .bind(&task_id)
+        .bind(&first_key)
+        .bind("first-checksum")
+        .bind(20i64)
+        .bind(first_path.to_string_lossy().as_ref())
+        .bind(&second_key)
+        .bind("second-checksum")
+        .bind(21i64)
+        .bind(second_path.to_string_lossy().as_ref())
+        .execute(&service.state.scheduler.database().pool)
+        .await
+        .unwrap();
+
+        let selected = service
+            .download_task_artifact(Request::new(DownloadTaskArtifactRequest {
+                task_id: task_id.clone(),
+                token: owner_token.clone(),
+                artifact_key: first_key.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let missing = service
+            .download_task_artifact(Request::new(DownloadTaskArtifactRequest {
+                task_id: task_id.clone(),
+                token: owner_token.clone(),
+                artifact_key: format!("missing-{task_id}"),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let latest = service
+            .download_task_artifact(Request::new(DownloadTaskArtifactRequest {
+                task_id: task_id.clone(),
+                token: owner_token.clone(),
+                artifact_key: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let whitespace_key = service
+            .download_task_artifact(Request::new(DownloadTaskArtifactRequest {
+                task_id: task_id.clone(),
+                token: owner_token,
+                artifact_key: "   ".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        sqlx::query("DELETE FROM artifacts WHERE task_id = $1")
+            .bind(&task_id)
+            .execute(&service.state.scheduler.database().pool)
+            .await
+            .ok();
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+        tokio::fs::remove_file(&first_path).await.ok();
+        tokio::fs::remove_file(&second_path).await.ok();
+
+        assert!(selected.success, "{}", selected.status_message);
+        assert_eq!(
+            selected.filename,
+            first_path.file_name().unwrap().to_string_lossy()
+        );
+        assert_eq!(selected.data, b"first artifact bytes");
+        assert!(!missing.success);
+        assert_eq!(missing.status_message, "Artifact not found");
+        assert!(missing.data.is_empty());
+        assert!(latest.success, "{}", latest.status_message);
+        assert_eq!(latest.data, b"second artifact bytes");
+        assert!(!whitespace_key.success);
+        assert_eq!(whitespace_key.status_message, "Invalid artifact key");
+        assert!(whitespace_key.data.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_batch_runtime_heartbeat_authorizes_registered_worker_owner_only() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (master_service, task_id, other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(master_service.state.clone());
+        let batch_service = GrpcBatchRuntimeService::new(master_service.state.clone());
+        let worker_id = format!("grpc-batch-heartbeat-owner-worker-{task_id}");
+        let owner_token = token_for(&master_service.state.auth, &owner);
+        register_report_worker(&node_service, &owner, &worker_id).await;
+
+        let denied = batch_service
+            .heartbeat(Request::new(HeartbeatRequest {
+                worker_id: worker_id.clone(),
+                status: "BUSY".into(),
+                available_memory_gb: 7,
+                queue_capacity: 2,
+                token: other_token,
+            }))
+            .await;
+        let worker_after_denied = master_service
+            .state
+            .node_manager
+            .get_worker(&worker_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let allowed = batch_service
+            .heartbeat(Request::new(HeartbeatRequest {
+                worker_id: worker_id.clone(),
+                status: "BUSY".into(),
+                available_memory_gb: 7,
+                queue_capacity: 2,
+                token: owner_token,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let worker_after_allowed = master_service
+            .state
+            .node_manager
+            .get_worker(&worker_id)
+            .await
+            .unwrap()
+            .unwrap();
+        cleanup_report_worker(&master_service, &worker_id).await;
+        cleanup(&master_service.state.scheduler, &task_id, &owner).await;
+
+        assert!(matches!(denied, Err(status) if status.code() == tonic::Code::PermissionDenied));
+        assert_eq!(
+            worker_after_denied.status,
+            hivemind_models::WorkerStatus::Active
+        );
+        assert!(allowed.success, "{}", allowed.status_message);
+        assert_eq!(
+            worker_after_allowed.status,
+            hivemind_models::WorkerStatus::Busy
+        );
+    }
+
+    async fn fake_worker_stop_server() -> Option<(SocketAddr, tokio::sync::mpsc::Receiver<String>)>
+    {
+        let addr = reserve_loopback_addr()?;
+        let (stop_tx, stop_rx) = tokio::sync::mpsc::channel(1);
+        let service = WorkerNodeServiceServer::new(FakeWorkerStopService { stop_tx });
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(service)
+                .serve(addr)
+                .await;
+        });
+
+        for _ in 0..30 {
+            if hivemind_proto::worker_node_service_client::WorkerNodeServiceClient::connect(
+                format!("http://{addr}"),
+            )
+            .await
+            .is_ok()
+            {
+                return Some((addr, stop_rx));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        None
+    }
+
+    async fn register_report_worker(
+        node_service: &GrpcNodeManagerService,
+        owner: &str,
+        worker_id: &str,
+    ) {
+        let registered = node_service
+            .register_worker_node(Request::new(RegisterWorkerNodeRequest {
+                username: owner.to_string(),
+                worker_id: worker_id.to_string(),
+                ip: "10.77.99.10:50053".into(),
+                resources: Some(ProtoResourceSpec {
+                    cpu_cores: 4,
+                    memory_mb: 16 * 1024,
+                    gpu_count: 0,
+                    gpu_name: String::new(),
+                    vram_mb: 0,
+                    cpu_score: 400,
+                    gpu_score: 0,
+                    storage_total_gb: 500,
+                    storage_available_gb: 250,
+                }),
+                location: "local".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(registered.success, "{}", registered.status_message);
+    }
+
+    async fn cleanup_report_worker(master_service: &GrpcMasterNodeService, worker_id: &str) {
+        sqlx::query("DELETE FROM worker_reputation WHERE worker_id = $1")
+            .bind(worker_id)
+            .execute(&master_service.state.scheduler.database().pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM worker_nodes WHERE worker_id = $1")
+            .bind(worker_id)
+            .execute(&master_service.state.scheduler.database().pool)
+            .await
+            .ok();
+    }
+
+    fn batch_complete_request(
+        worker_id: &str,
+        task_id: &str,
+        token: String,
+    ) -> CompleteBatchRequest {
+        batch_complete_request_with_report(worker_id, task_id, token, "", "", None)
+    }
+
+    fn batch_complete_request_with_report(
+        worker_id: &str,
+        task_id: &str,
+        token: String,
+        stdout_artifact_ref: &str,
+        stderr_artifact_ref: &str,
+        metrics: Option<hivemind_proto::ExecutionMetrics>,
+    ) -> CompleteBatchRequest {
+        CompleteBatchRequest {
+            worker_id: worker_id.to_string(),
+            batch_id: "batch-auth-test".into(),
+            tasks: vec![hivemind_proto::CompletedTask {
+                task_id: task_id.to_string(),
+                status: "COMPLETED".into(),
+                stdout_artifact_ref: stdout_artifact_ref.to_string(),
+                stderr_artifact_ref: stderr_artifact_ref.to_string(),
+                result_artifact_refs: vec!["btih:batch-result".into()],
+                metrics,
+            }],
+            token,
+        }
+    }
+
+    fn reserve_loopback_addr() -> Option<SocketAddr> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
+        let addr = listener.local_addr().ok()?;
+        drop(listener);
+        Some(addr)
+    }
+
+    struct FakeWorkerStopService {
+        stop_tx: tokio::sync::mpsc::Sender<String>,
+    }
+
+    #[tonic::async_trait]
+    impl WorkerNodeService for FakeWorkerStopService {
+        async fn execute_task(
+            &self,
+            _request: Request<ExecuteTaskRequest>,
+        ) -> Result<Response<ExecuteTaskResponse>, Status> {
+            Err(Status::unimplemented("fake worker does not execute tasks"))
+        }
+
+        async fn task_output_upload(
+            &self,
+            _request: Request<TaskOutputUploadRequest>,
+        ) -> Result<Response<TaskOutputUploadResponse>, Status> {
+            Err(Status::unimplemented("fake worker does not upload output"))
+        }
+
+        async fn task_result_upload(
+            &self,
+            _request: Request<TaskResultUploadRequest>,
+        ) -> Result<Response<TaskResultUploadResponse>, Status> {
+            Err(Status::unimplemented("fake worker does not upload results"))
+        }
+
+        async fn task_output(
+            &self,
+            _request: Request<TaskOutputRequest>,
+        ) -> Result<Response<TaskOutputResponse>, Status> {
+            Err(Status::unimplemented("fake worker has no output"))
+        }
+
+        async fn stop_task_execution(
+            &self,
+            request: Request<StopTaskExecutionRequest>,
+        ) -> Result<Response<StopTaskExecutionResponse>, Status> {
+            let task_id = request.into_inner().task_id;
+            let _ = self.stop_tx.send(task_id).await;
+            Ok(Response::new(StopTaskExecutionResponse {
+                success: true,
+                status_message: "Stop requested".into(),
+            }))
+        }
+
+        async fn task_usage(
+            &self,
+            _request: Request<TaskUsageRequest>,
+        ) -> Result<Response<TaskUsageResponse>, Status> {
+            Err(Status::unimplemented("fake worker does not report usage"))
+        }
+    }
+
     fn token_for(auth: &AuthManager, username: &str) -> String {
         auth.jwt_service()
             .encode_claims(&Claims {
@@ -1633,6 +4686,11 @@ mod tests {
     }
 
     async fn cleanup(scheduler: &TaskScheduler, task_id: &str, owner: &str) {
+        let schema: Option<String> = sqlx::query_scalar("SELECT current_schema()")
+            .fetch_optional(&scheduler.database().pool)
+            .await
+            .ok()
+            .flatten();
         sqlx::query("DELETE FROM tasks WHERE task_id = $1")
             .bind(task_id)
             .execute(&scheduler.database().pool)
@@ -1643,6 +4701,18 @@ mod tests {
             .execute(&scheduler.database().pool)
             .await
             .ok();
+        if let Some(schema) = schema.filter(|name| name.starts_with("hm_test_")) {
+            scheduler.database().pool.close().await;
+            let config = HivemindConfig::for_test();
+            if let Ok(admin_pool) = hivemind_database::postgres::create_pool(&config).await {
+                let sql = format!("DROP SCHEMA IF EXISTS {schema} CASCADE");
+                sqlx::query(sqlx::AssertSqlSafe(sql))
+                    .execute(&admin_pool)
+                    .await
+                    .ok();
+                admin_pool.close().await;
+            }
+        }
     }
 
     fn make_task(task_id: &str, owner: &str) -> Task {

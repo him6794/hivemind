@@ -119,8 +119,7 @@ fn number_to_duration_secs(value: Value, heap: &mut Heap<impl ResourceTracker>) 
             let type_name = other.py_type(heap);
             other.drop_with_heap(heap);
             return Err(ExcType::type_error(format!(
-                "'{}' object cannot be interpreted as a float",
-                type_name
+                "'{type_name}' object cannot be interpreted as a float"
             )));
         }
     };

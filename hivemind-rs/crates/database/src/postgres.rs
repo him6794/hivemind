@@ -1,9 +1,26 @@
-﻿use anyhow::{Context, Result};
+use anyhow::{Context, Result};
 use hivemind_config::HivemindConfig;
+#[cfg(any(test, debug_assertions))]
+use sqlx::postgres::PgConnectOptions;
 use sqlx::postgres::{PgPool, PgPoolOptions};
+#[cfg(any(test, debug_assertions))]
+use sqlx::AssertSqlSafe;
+#[cfg(any(test, debug_assertions))]
+use std::str::FromStr;
+#[cfg(any(test, debug_assertions))]
+use uuid::Uuid;
 
 pub async fn create_pool(config: &HivemindConfig) -> Result<PgPool> {
-    let pool = PgPoolOptions::new()
+    let pool = pool_options(config)
+        .connect(&config.database.url)
+        .await
+        .context("Failed to connect to PostgreSQL")?;
+    tracing::info!("Connected to PostgreSQL at {}", config.database.url);
+    Ok(pool)
+}
+
+fn pool_options(config: &HivemindConfig) -> PgPoolOptions {
+    PgPoolOptions::new()
         .max_connections(config.database.max_connections)
         .min_connections(config.database.min_connections)
         .idle_timeout(std::time::Duration::from_secs(
@@ -12,11 +29,89 @@ pub async fn create_pool(config: &HivemindConfig) -> Result<PgPool> {
         .acquire_timeout(std::time::Duration::from_secs(
             config.database.connect_timeout_secs,
         ))
+}
+
+#[cfg(any(test, debug_assertions))]
+pub struct IsolatedTestPool {
+    pub pool: PgPool,
+    admin_pool: PgPool,
+    schema_name: String,
+}
+
+#[cfg(any(test, debug_assertions))]
+impl IsolatedTestPool {
+    pub fn schema_name(&self) -> &str {
+        &self.schema_name
+    }
+
+    pub async fn cleanup(self) -> Result<()> {
+        self.pool.close().await;
+        let sql = format!("DROP SCHEMA IF EXISTS {} CASCADE", self.schema_name);
+        sqlx::query(AssertSqlSafe(sql))
+            .execute(&self.admin_pool)
+            .await?;
+        self.admin_pool.close().await;
+        Ok(())
+    }
+}
+
+#[cfg(any(test, debug_assertions))]
+pub async fn create_isolated_test_pool(test_name: &str) -> Result<IsolatedTestPool> {
+    let config = HivemindConfig::for_test();
+    create_isolated_test_pool_with_config(&config, test_name).await
+}
+
+#[cfg(any(test, debug_assertions))]
+pub async fn create_isolated_test_pool_with_config(
+    config: &HivemindConfig,
+    test_name: &str,
+) -> Result<IsolatedTestPool> {
+    let schema_name = unique_test_schema_name(test_name);
+    let admin_pool = pool_options(config)
+        .max_connections(1)
+        .min_connections(0)
         .connect(&config.database.url)
         .await
-        .context("Failed to connect to PostgreSQL")?;
-    tracing::info!("Connected to PostgreSQL at {}", config.database.url);
-    Ok(pool)
+        .context("Failed to connect to PostgreSQL test database")?;
+
+    let create_schema_sql = format!("CREATE SCHEMA {}", schema_name);
+    sqlx::query(AssertSqlSafe(create_schema_sql))
+        .execute(&admin_pool)
+        .await?;
+
+    let connect_options = PgConnectOptions::from_str(&config.database.url)?
+        .options([("search_path", format!("{schema_name},public"))]);
+    let pool = pool_options(config)
+        .max_connections(config.database.max_connections.clamp(1, 5))
+        .min_connections(0)
+        .connect_with(connect_options)
+        .await
+        .context("Failed to connect to isolated PostgreSQL test schema")?;
+
+    Ok(IsolatedTestPool {
+        pool,
+        admin_pool,
+        schema_name,
+    })
+}
+
+#[cfg(any(test, debug_assertions))]
+fn unique_test_schema_name(test_name: &str) -> String {
+    let label: String = test_name
+        .chars()
+        .filter_map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                Some(ch.to_ascii_lowercase())
+            } else if ch == '_' || ch == '-' {
+                Some('_')
+            } else {
+                None
+            }
+        })
+        .take(18)
+        .collect();
+    let label = if label.is_empty() { "case" } else { &label };
+    format!("hm_test_{}_{}", label, Uuid::new_v4().simple())
 }
 
 pub async fn run_migrations(pool: &PgPool) -> Result<()> {
@@ -325,16 +420,34 @@ pub async fn seed_default_user(pool: &PgPool) -> Result<()> {
         .await?;
 
     if !exists {
-        let hash = bcrypt::hash("testpass123", 12)?;
-        sqlx::query("INSERT INTO users (username, password_hash, balance) VALUES ($1, $2, $3)")
-            .bind("testuser")
-            .bind(&hash)
-            .bind(1000i64)
-            .execute(pool)
-            .await?;
-        tracing::info!("Seeded default test user: testuser / testpass123");
+        create_user(pool, "testuser", "testpass123", 1000).await?;
+        tracing::info!("Seeded default test user: testuser");
     }
 
+    Ok(())
+}
+
+pub async fn create_user(
+    pool: &PgPool,
+    username: &str,
+    password: &str,
+    balance: i64,
+) -> Result<()> {
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE username = $1)")
+        .bind(username)
+        .fetch_one(pool)
+        .await?;
+    if exists {
+        anyhow::bail!("username already exists");
+    }
+
+    let hash = bcrypt::hash(password, 12)?;
+    sqlx::query("INSERT INTO users (username, password_hash, balance) VALUES ($1, $2, $3)")
+        .bind(username)
+        .bind(&hash)
+        .bind(balance)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -359,6 +472,112 @@ mod tests {
         };
         run_migrations(&pool).await.unwrap();
         run_migrations(&pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn isolated_test_pool_runs_migrations_in_unique_schema() {
+        let fixture = match create_isolated_test_pool("database_schema_fixture").await {
+            Ok(fixture) => fixture,
+            Err(_) => {
+                tracing::warn!("Skipping DB test");
+                return;
+            }
+        };
+
+        run_migrations(&fixture.pool).await.unwrap();
+
+        let users_schema: String = sqlx::query_scalar("SELECT table_schema FROM information_schema.tables WHERE table_name = 'users' AND table_schema = $1")
+            .bind(fixture.schema_name())
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+        assert_eq!(users_schema, fixture.schema_name());
+
+        let public_fixture_users_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = 'public'
+                  AND table_name = 'database_schema_fixture_public_probe'
+            )",
+        )
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert!(!public_fixture_users_exists);
+
+        sqlx::query("CREATE TABLE database_schema_fixture_public_probe (id INTEGER)")
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+        let probe_schema: String = sqlx::query_scalar(
+            "SELECT table_schema
+             FROM information_schema.tables
+             WHERE table_schema = $1
+               AND table_name = 'database_schema_fixture_public_probe'",
+        )
+        .bind(fixture.schema_name())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert_eq!(probe_schema, fixture.schema_name());
+
+        let schema_name = fixture.schema_name().to_string();
+        fixture.cleanup().await.unwrap();
+
+        let db_url = std::env::var("HIVEMIND_TEST_DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://hivemind:hivemind@localhost:5432/hivemind_test".into());
+        let admin_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&db_url)
+            .await
+            .unwrap();
+        let schema_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = $1)",
+        )
+        .bind(&schema_name)
+        .fetch_one(&admin_pool)
+        .await
+        .unwrap();
+        assert!(!schema_exists);
+    }
+
+    #[tokio::test]
+    async fn test_seed_default_user_inserts_bootstrap_account() {
+        let db_url = std::env::var("HIVEMIND_TEST_DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://hivemind:hivemind@localhost:5432/hivemind_test".into());
+        let pool = match PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&db_url)
+            .await
+        {
+            Ok(p) => p,
+            Err(_) => {
+                tracing::warn!("Skipping DB test");
+                return;
+            }
+        };
+
+        sqlx::query("DELETE FROM users WHERE username = $1")
+            .bind("testuser")
+            .execute(&pool)
+            .await
+            .unwrap();
+
         seed_default_user(&pool).await.unwrap();
+
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE username = $1)")
+                .bind("testuser")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(exists);
+
+        sqlx::query("DELETE FROM users WHERE username = $1")
+            .bind("testuser")
+            .execute(&pool)
+            .await
+            .ok();
     }
 }

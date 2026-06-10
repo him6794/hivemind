@@ -32,7 +32,6 @@ const TEST_RECURSION_LIMIT: usize = 50;
 /// ## Xfail Semantics (Strict)
 /// - `xfail=monty` - Test is expected to fail on Monty; if it passes, that's an error
 #[derive(Debug, Clone, Default)]
-#[expect(clippy::struct_excessive_bools)]
 struct TestConfig {
     /// When true, test is expected to fail on Monty (strict xfail).
     xfail_monty: bool,
