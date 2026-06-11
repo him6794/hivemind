@@ -1,0 +1,30 @@
+﻿[package]
+name = "hivemind-worker-executor"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio.workspace = true
+tonic.workspace = true
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+jsonwebtoken.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+sysinfo.workspace = true
+sha1.workspace = true
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+hivemind-proto = { path = "../proto" }
+hivemind-models = { path = "../models" }
+hivemind-database = { path = "../database" }
+hivemind-config = { path = "../config" }
+hivemind-torrent-service = { path = "../torrent-service" }
+tempfile.workspace = true
+ipnet = "2"
+zip = { version = "2.4.2", default-features = false, features = ["deflate-flate2", "flate2"] }

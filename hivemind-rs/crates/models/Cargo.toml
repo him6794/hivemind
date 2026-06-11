@@ -1,0 +1,12 @@
+﻿[package]
+name = "hivemind-models"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+sqlx.workspace = true
+hivemind-common = { path = "../common" }
