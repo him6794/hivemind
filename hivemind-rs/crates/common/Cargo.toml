@@ -1,0 +1,10 @@
+﻿[package]
+name = "hivemind-common"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tracing.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+tracing-subscriber.workspace = true

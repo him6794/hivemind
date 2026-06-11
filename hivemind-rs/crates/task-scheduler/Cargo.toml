@@ -1,0 +1,22 @@
+[package]
+name = "hivemind-task-scheduler"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio.workspace = true
+tonic.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+sha1.workspace = true
+sqlx.workspace = true
+hivemind-proto = { path = "../proto" }
+hivemind-models = { path = "../models" }
+hivemind-database = { path = "../database" }
+hivemind-config = { path = "../config" }
+hivemind-auth = { path = "../auth" }
