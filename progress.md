@@ -1,5 +1,35 @@
 # Full Test And Review Progress
 
+## Current Snapshot
+
+- Date: 2026-06-17
+- Documentation has been updated to match the current Rust workspace layout
+  and the real developer entry points.
+- Verified this turn:
+  - `cd hivemind-rs; cargo test --workspace --all-targets --all-features -- --nocapture`
+  - `cd frontend/master-ui; npm test`
+  - `cd frontend/worker-ui; npm test`
+- Also verified this turn:
+  - `cd hivemind-rs; cargo clippy --workspace --all-targets --all-features -- -D warnings`
+  - `cd hivemind-rs; cargo fmt --check`
+  - `cd hivemind-rs; cargo build --release`
+  - `cd frontend/master-ui; npm run build`
+  - `cd frontend/worker-ui; npm run build`
+- Wrapper note:
+  - `make` is not installed in this shell, so the equivalent direct commands
+    were run instead.
+- Blocked gate:
+  - `docker compose -f docker-compose.test.yml up --build --abort-on-container-exit tests`
+    could not connect to the Docker Desktop Linux engine pipe in this
+    environment.
+
+## Current Focus
+
+- Keep the workspace docs aligned with the Rust implementation.
+- Finish the remaining build, lint, and compose verification gates.
+- Preserve the archived Python-era notes under `docs_backup_20260611_202024/`
+  as reference material only.
+
 # 2026-06-10 Repair42 With Master API Task Resource Validation
 
 - Continued after repair42 read-only subagents timed out without markdown reports by doing a narrower direct boundary review.
