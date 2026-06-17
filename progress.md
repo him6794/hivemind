@@ -15,18 +15,15 @@
   - `cd hivemind-rs; cargo build --release`
   - `cd frontend/master-ui; npm run build`
   - `cd frontend/worker-ui; npm run build`
+  - `docker compose -f docker-compose.test.yml up --build --abort-on-container-exit tests`
 - Wrapper note:
   - `make` is not installed in this shell, so the equivalent direct commands
     were run instead.
-- Blocked gate:
-  - `docker compose -f docker-compose.test.yml up --build --abort-on-container-exit tests`
-    could not connect to the Docker Desktop Linux engine pipe in this
-    environment.
 
 ## Current Focus
 
 - Keep the workspace docs aligned with the Rust implementation.
-- Finish the remaining build, lint, and compose verification gates.
+- Keep the verification record current when new gates are run.
 - Preserve the archived Python-era notes under `docs_backup_20260611_202024/`
   as reference material only.
 
