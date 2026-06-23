@@ -1,0 +1,41 @@
+reveal_types.monty:4:13: info[revealed-type] Revealed type: `None`
+reveal_types.monty:5:13: info[revealed-type] Revealed type: `object`
+reveal_types.monty:6:13: info[revealed-type] Revealed type: `<class 'int'>`
+reveal_types.monty:9:13: info[revealed-type] Revealed type: `Literal[True]`
+reveal_types.monty:10:13: info[revealed-type] Revealed type: `int`
+reveal_types.monty:11:13: info[revealed-type] Revealed type: `float`
+reveal_types.monty:14:13: info[revealed-type] Revealed type: `Literal["hello"]`
+reveal_types.monty:15:13: info[revealed-type] Revealed type: `Literal[b"foobar"]`
+reveal_types.monty:18:13: info[revealed-type] Revealed type: `list[Unknown | int]`
+reveal_types.monty:19:13: info[revealed-type] Revealed type: `tuple[Literal[1], Literal[2]]`
+reveal_types.monty:20:13: info[revealed-type] Revealed type: `dict[Unknown | int, Unknown | int]`
+reveal_types.monty:21:13: info[revealed-type] Revealed type: `set[Unknown | int]`
+reveal_types.monty:22:13: info[revealed-type] Revealed type: `frozenset[int]`
+reveal_types.monty:23:13: info[revealed-type] Revealed type: `range`
+reveal_types.monty:26:13: info[revealed-type] Revealed type: `enumerate[int]`
+reveal_types.monty:27:13: info[revealed-type] Revealed type: `reversed[int]`
+reveal_types.monty:28:13: info[revealed-type] Revealed type: `zip[Unknown]`
+reveal_types.monty:31:13: info[revealed-type] Revealed type: `slice[Any, Any, Any]`
+reveal_types.monty:34:13: info[revealed-type] Revealed type: `BaseException`
+reveal_types.monty:35:13: info[revealed-type] Revealed type: `Exception`
+reveal_types.monty:36:13: info[revealed-type] Revealed type: `SystemExit`
+reveal_types.monty:37:13: info[revealed-type] Revealed type: `KeyboardInterrupt`
+reveal_types.monty:38:13: info[revealed-type] Revealed type: `ArithmeticError`
+reveal_types.monty:39:13: info[revealed-type] Revealed type: `OverflowError`
+reveal_types.monty:40:13: info[revealed-type] Revealed type: `ZeroDivisionError`
+reveal_types.monty:41:13: info[revealed-type] Revealed type: `LookupError`
+reveal_types.monty:42:13: info[revealed-type] Revealed type: `IndexError`
+reveal_types.monty:43:13: info[revealed-type] Revealed type: `KeyError`
+reveal_types.monty:44:13: info[revealed-type] Revealed type: `RuntimeError`
+reveal_types.monty:45:13: info[revealed-type] Revealed type: `NotImplementedError`
+reveal_types.monty:46:13: info[revealed-type] Revealed type: `RecursionError`
+reveal_types.monty:47:13: info[revealed-type] Revealed type: `AttributeError`
+reveal_types.monty:48:13: info[revealed-type] Revealed type: `AssertionError`
+reveal_types.monty:49:13: info[revealed-type] Revealed type: `MemoryError`
+reveal_types.monty:50:13: info[revealed-type] Revealed type: `NameError`
+reveal_types.monty:51:13: info[revealed-type] Revealed type: `SyntaxError`
+reveal_types.monty:52:13: info[revealed-type] Revealed type: `OSError`
+reveal_types.monty:53:13: info[revealed-type] Revealed type: `TimeoutError`
+reveal_types.monty:54:13: info[revealed-type] Revealed type: `TypeError`
+reveal_types.monty:55:13: info[revealed-type] Revealed type: `ValueError`
+reveal_types.monty:56:13: info[revealed-type] Revealed type: `StopIteration`
