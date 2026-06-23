@@ -445,9 +445,13 @@ impl GrpcClient {
     pub async fn list_workers(
         &mut self,
         include_offline: bool,
+        token: &str,
     ) -> Result<ListWorkersResponse, tonic::Status> {
         self.node_mgr
-            .list_workers(Request::new(ListWorkersRequest { include_offline }))
+            .list_workers(Request::new(ListWorkersRequest {
+                include_offline,
+                token: token.to_string(),
+            }))
             .await
             .map(|r| r.into_inner())
     }
