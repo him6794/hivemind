@@ -1,4 +1,4 @@
-﻿use anyhow::Result;
+use anyhow::Result;
 use hivemind_database::DatabaseManager;
 use hivemind_models::{Task, TaskStatus, WorkerNode};
 use hivemind_proto::{ExecuteTaskRequest, ResourceSpec as ProtoResourceSpec};
@@ -271,14 +271,16 @@ impl Dispatcher {
     }
 }
 
-pub fn worker_endpoint(addr: &str) -> String {
+pub fn worker_endpoint(addr: &str) -> Result<String> {
     let addr = addr.trim();
     if addr.starts_with("http://") || addr.starts_with("https://") {
-        addr.to_string()
-    } else if let Some(port) = addr.strip_prefix("0.0.0.0:") {
-        format!("http://127.0.0.1:{port}")
+        Ok(addr.to_string())
+    } else if addr.strip_prefix("0.0.0.0:").is_some() || addr.strip_prefix("[::]:").is_some() {
+        anyhow::bail!(
+            "worker address {addr} is a bind address, not a routable endpoint; set WORKER_ADVERTISE_ADDR on the worker"
+        );
     } else {
-        format!("http://{addr}")
+        Ok(format!("http://{addr}"))
     }
 }
 
@@ -324,7 +326,7 @@ async fn execute_on_worker(
     }
 
     let mut client = hivemind_proto::worker_node_service_client::WorkerNodeServiceClient::connect(
-        worker_endpoint(&worker_addr),
+        worker_endpoint(&worker_addr)?,
     )
     .await?;
     match client
@@ -494,11 +496,15 @@ mod tests {
     }
 
     #[test]
-    fn test_worker_endpoint_adds_scheme_and_replaces_unspecified_host() {
-        assert_eq!(worker_endpoint("0.0.0.0:50053"), "http://127.0.0.1:50053");
-        assert_eq!(worker_endpoint("127.0.0.1:50053"), "http://127.0.0.1:50053");
+    fn test_worker_endpoint_adds_scheme_and_rejects_unspecified_host() {
+        let error = worker_endpoint("0.0.0.0:50053").unwrap_err().to_string();
+        assert!(error.contains("WORKER_ADVERTISE_ADDR"));
         assert_eq!(
-            worker_endpoint("http://worker:50053"),
+            worker_endpoint("127.0.0.1:50053").unwrap(),
+            "http://127.0.0.1:50053"
+        );
+        assert_eq!(
+            worker_endpoint("http://worker:50053").unwrap(),
             "http://worker:50053"
         );
     }

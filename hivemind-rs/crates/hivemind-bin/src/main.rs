@@ -40,6 +40,41 @@ fn validate_auth_service_config(config: &HivemindConfig) -> Result<()> {
     config.auth.validate_jwt_secret()
 }
 
+fn nodepool_client_addr(config: &HivemindConfig, run_nodepool: bool) -> Result<String> {
+    if let Some(endpoint) = config
+        .server
+        .nodepool_grpc_endpoint
+        .as_ref()
+        .filter(|endpoint| !endpoint.trim().is_empty())
+    {
+        return Ok(endpoint.clone());
+    }
+
+    if !run_nodepool && config.server.nodepool_grpc_addr.starts_with("0.0.0.0:") {
+        anyhow::bail!(
+            "NODEPOOL_GRPC_ENDPOINT must be set when this process does not run nodepool and NODEPOOL_GRPC_ADDR is a bind address ({})",
+            config.server.nodepool_grpc_addr
+        );
+    }
+
+    Ok(config.server.nodepool_grpc_addr.clone())
+}
+
+fn worker_nodepool_token(config: &HivemindConfig) -> Result<String> {
+    config
+        .server
+        .worker_nodepool_token
+        .as_ref()
+        .map(|token| token.trim())
+        .filter(|token| !token.is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "WORKER_NODEPOOL_TOKEN must be set when running worker; use a token whose subject matches WORKER_ID or an admin token"
+            )
+        })
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     hivemind_common::init_tracing("hivemind");
@@ -150,7 +185,7 @@ async fn main() -> Result<()> {
 
     // ---- Master (HTTP-to-gRPC proxy, no DB) ----
     if run_master {
-        let nodepool_grpc = config.server.nodepool_grpc_addr.clone();
+        let nodepool_grpc = nodepool_client_addr(&config, run_nodepool)?;
         let jwt_secret = config.auth.jwt_secret.clone();
         let token_expiry = config.auth.token_expiry_hours;
         let api =
@@ -184,10 +219,11 @@ async fn main() -> Result<()> {
             .or_else(|_| std::env::var("COMPUTERNAME"))
             .or_else(|_| std::env::var("HOSTNAME"))
             .unwrap_or_else(|_| format!("worker-{}", uuid::Uuid::new_v4()));
+        let worker_nodepool_token = worker_nodepool_token(&config)?;
         let worker_advertise_addr = nodepool_client::advertise_addr(
             &config.server.worker_grpc_addr,
             config.server.worker_advertise_addr.clone(),
-        );
+        )?;
         let control_profile = WorkerProfile::from_resource_spec(
             worker_id.clone(),
             worker_advertise_addr.clone(),
@@ -215,10 +251,11 @@ async fn main() -> Result<()> {
 
         let reg_shutdown = nodepool_client::start_registration_loop(
             executor.clone(),
-            config.server.nodepool_grpc_addr.clone(),
+            nodepool_client_addr(&config, run_nodepool)?,
             worker_id,
             worker_advertise_addr,
             std::env::var("WORKER_LOCATION").unwrap_or_else(|_| "local".into()),
+            worker_nodepool_token,
             std::time::Duration::from_secs(10),
         );
         shutdown_handles.push(reg_shutdown);
@@ -273,5 +310,47 @@ mod tests {
             .to_string();
 
         assert!(error.contains("JWT_SECRET"));
+    }
+
+    #[test]
+    fn remote_master_or_worker_requires_nodepool_endpoint_for_bind_addr() {
+        let mut config = HivemindConfig::default();
+        config.server.nodepool_grpc_addr = "0.0.0.0:50051".into();
+        config.server.nodepool_grpc_endpoint = None;
+
+        let error = nodepool_client_addr(&config, false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("NODEPOOL_GRPC_ENDPOINT"));
+
+        config.server.nodepool_grpc_endpoint = Some("nodepool.internal:50051".into());
+        assert_eq!(
+            nodepool_client_addr(&config, false).unwrap(),
+            "nodepool.internal:50051"
+        );
+    }
+
+    #[test]
+    fn colocated_all_mode_can_use_nodepool_bind_addr() {
+        let mut config = HivemindConfig::default();
+        config.server.nodepool_grpc_addr = "0.0.0.0:50051".into();
+        config.server.nodepool_grpc_endpoint = None;
+
+        assert_eq!(
+            nodepool_client_addr(&config, true).unwrap(),
+            "0.0.0.0:50051"
+        );
+    }
+
+    #[test]
+    fn worker_requires_nodepool_token() {
+        let mut config = HivemindConfig::default();
+        config.server.worker_nodepool_token = None;
+
+        let error = worker_nodepool_token(&config).unwrap_err().to_string();
+        assert!(error.contains("WORKER_NODEPOOL_TOKEN"));
+
+        config.server.worker_nodepool_token = Some(" worker-token ".into());
+        assert_eq!(worker_nodepool_token(&config).unwrap(), "worker-token");
     }
 }

@@ -537,10 +537,21 @@ impl NodeManagerService for GrpcNodeManagerService {
         } else {
             req.worker_id.trim().to_string()
         };
+        let claims = self
+            .state
+            .auth
+            .validate_token(&req.token)
+            .map_err(|_| Status::unauthenticated("Invalid token"))?;
         if !is_safe_worker_id(&worker_id) {
             return Ok(Response::new(StatusResponse {
                 success: false,
                 status_message: "Invalid worker_id".into(),
+            }));
+        }
+        if claims.sub != worker_id && claims.sub != username && !is_admin(&claims.sub) {
+            return Ok(Response::new(StatusResponse {
+                success: false,
+                status_message: "Not authorized".into(),
             }));
         }
         if let Err(message) = validate_worker_registration_resources(&r) {
@@ -584,11 +595,25 @@ impl NodeManagerService for GrpcNodeManagerService {
     ) -> Result<Response<RunningStatusResponse>, Status> {
         let req = request.into_inner();
         let u = req.usage.unwrap_or_default();
+        let worker_id = if req.worker_id.trim().is_empty() {
+            req.username.trim().to_string()
+        } else {
+            req.worker_id.trim().to_string()
+        };
+        match self.authorize_worker_report(&req.token, &worker_id).await? {
+            ReportAuthorization::Authorized => {}
+            ReportAuthorization::Denied(status_message) => {
+                return Ok(Response::new(RunningStatusResponse {
+                    success: false,
+                    status_message,
+                }));
+            }
+        }
         match self
             .state
             .node_manager
             .update_heartbeat(
-                &req.username,
+                &worker_id,
                 &req.status,
                 u.cpu_percent as f64,
                 u.memory_percent as f64,
@@ -2355,7 +2380,18 @@ async fn request_worker_stop(task: &Task) -> WorkerStopDispatch {
     else {
         return WorkerStopDispatch::NotAssigned;
     };
-    let endpoint = worker_endpoint(worker_ip);
+    let endpoint = match worker_endpoint(worker_ip) {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            tracing::warn!(
+                "Task {} cancellation recorded but worker stop endpoint is invalid for {}: {}",
+                task.task_id,
+                worker_ip,
+                error
+            );
+            return WorkerStopDispatch::NotConfirmed(format!("invalid worker endpoint: {error}"));
+        }
+    };
     let mut client = match WorkerNodeServiceClient::connect(endpoint.clone()).await {
         Ok(client) => client,
         Err(error) => {
@@ -2616,6 +2652,7 @@ mod tests {
             None => return,
         };
         let node_service = GrpcNodeManagerService::new(master_service.state.clone());
+        let owner_token = token_for(&master_service.state.auth, &owner);
 
         let response = node_service
             .register_worker_node(Request::new(RegisterWorkerNodeRequest {
@@ -2634,6 +2671,7 @@ mod tests {
                     storage_available_gb: 250,
                 }),
                 location: "local".into(),
+                token: owner_token,
             }))
             .await
             .unwrap()
@@ -2662,6 +2700,7 @@ mod tests {
         };
         let node_service = GrpcNodeManagerService::new(master_service.state.clone());
         let worker_id = format!("grpc-invalid-capacity-{task_id}");
+        let owner_token = token_for(&master_service.state.auth, &owner);
 
         let response = node_service
             .register_worker_node(Request::new(RegisterWorkerNodeRequest {
@@ -2680,6 +2719,7 @@ mod tests {
                     storage_available_gb: 200,
                 }),
                 location: "local".into(),
+                token: owner_token,
             }))
             .await
             .unwrap()
@@ -2696,6 +2736,54 @@ mod tests {
 
         assert!(!response.success);
         assert!(response.status_message.contains("capacity"));
+        assert!(stored.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_register_worker_node_rejects_mismatched_token_subject() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (master_service, task_id, other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(master_service.state.clone());
+        let worker_id = format!("grpc-register-spoof-{task_id}");
+
+        let response = node_service
+            .register_worker_node(Request::new(RegisterWorkerNodeRequest {
+                username: owner.clone(),
+                worker_id: worker_id.clone(),
+                ip: "10.77.9.10:50053".into(),
+                resources: Some(ProtoResourceSpec {
+                    cpu_cores: 4,
+                    memory_mb: 16 * 1024,
+                    gpu_count: 0,
+                    gpu_name: String::new(),
+                    vram_mb: 0,
+                    cpu_score: 400,
+                    gpu_score: 0,
+                    storage_total_gb: 500,
+                    storage_available_gb: 250,
+                }),
+                location: "local".into(),
+                token: other_token,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let stored = master_service
+            .state
+            .node_manager
+            .get_worker(&worker_id)
+            .await
+            .unwrap();
+        cleanup_report_worker(&master_service, &worker_id).await;
+        cleanup(&master_service.state.scheduler, &task_id, &owner).await;
+
+        assert!(!response.success);
+        assert_eq!(response.status_message, "Not authorized");
         assert!(stored.is_none());
     }
 
@@ -3065,6 +3153,7 @@ mod tests {
                     storage_available_gb: 250,
                 }),
                 location: "local".into(),
+                token: owner_token.clone(),
             }))
             .await
             .unwrap();
@@ -3182,6 +3271,7 @@ mod tests {
         };
         let node_service = GrpcNodeManagerService::new(master_service.state.clone());
         let worker_id = format!("grpc-report-deny-worker-{task_id}");
+        let owner_token = token_for(&master_service.state.auth, &owner);
 
         node_service
             .register_worker_node(Request::new(RegisterWorkerNodeRequest {
@@ -3200,6 +3290,7 @@ mod tests {
                     storage_available_gb: 250,
                 }),
                 location: "local".into(),
+                token: owner_token,
             }))
             .await
             .unwrap();
@@ -3599,6 +3690,7 @@ mod tests {
                     storage_available_gb: 250,
                 }),
                 location: "local".into(),
+                token: owner_token.clone(),
             }))
             .await
             .unwrap()
@@ -4562,6 +4654,7 @@ mod tests {
                     storage_available_gb: 250,
                 }),
                 location: "local".into(),
+                token: token_for(&node_service.state.auth, owner),
             }))
             .await
             .unwrap()

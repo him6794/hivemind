@@ -458,6 +458,7 @@ impl GrpcClient {
         ip: &str,
         resources: ProtoResourceSpec,
         location: &str,
+        token: &str,
     ) -> Result<StatusResponse, tonic::Status> {
         self.node_mgr
             .register_worker_node(Request::new(RegisterWorkerNodeRequest {
@@ -466,6 +467,7 @@ impl GrpcClient {
                 ip: ip.to_string(),
                 resources: Some(resources),
                 location: location.to_string(),
+                token: token.to_string(),
             }))
             .await
             .map(|r| r.into_inner())

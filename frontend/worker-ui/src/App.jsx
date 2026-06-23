@@ -28,8 +28,8 @@ const buttonStyle = {
 };
 
 export default function WorkerApp() {
-  const apiBase = String(import.meta.env.VITE_API_BASE || 'http://localhost:8082').trim().replace(/\/$/, '');
-  const workerControlBase = String(import.meta.env.VITE_WORKER_CONTROL_BASE || 'http://localhost:18080')
+  const apiBase = String(import.meta.env.VITE_API_BASE || '').trim().replace(/\/$/, '');
+  const workerControlBase = String(import.meta.env.VITE_WORKER_CONTROL_BASE || '')
     .trim()
     .replace(/\/$/, '');
 

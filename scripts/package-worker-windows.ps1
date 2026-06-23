@@ -43,6 +43,7 @@ NODEPOOL_GRPC_ADDR=$NodepoolGrpcAddr
 WORKER_GRPC_ADDR=$WorkerGrpcAddr
 WORKER_CONTROL_HTTP_ADDR=$WorkerControlHttpAddr
 WORKER_ADVERTISE_ADDR=
+WORKER_NODEPOOL_TOKEN=
 WORKER_ID=$env:COMPUTERNAME
 WORKER_LOCATION=windows
 
@@ -57,6 +58,7 @@ EXECUTOR_SANDBOX_MODE=production
 EXECUTOR_NETWORK_EGRESS_ENABLED=true
 EXECUTOR_NETWORK_EGRESS_MODE=allowlist
 EXECUTOR_NETWORK_EGRESS_TARGETS=127.0.0.1
+TORRENT_ALLOW_LOCAL_TASK_ARTIFACTS=false
 "@
 $envTemplate | Set-Content -Encoding ASCII (Join-Path $out ".env.worker.example")
 
@@ -115,15 +117,78 @@ function Assert-RequiredEnv {
     }
 }
 
+function New-RandomJwtSecret {
+    $bytes = New-Object byte[] 32
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $rng.GetBytes($bytes)
+    } finally {
+        $rng.Dispose()
+    }
+    return -join ($bytes | ForEach-Object { $_.ToString("x2") })
+}
+
+function Ensure-JwtSecret {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $jwtSecret = [Environment]::GetEnvironmentVariable("JWT_SECRET", "Process")
+    if (-not [string]::IsNullOrWhiteSpace($jwtSecret) -and
+        -not $jwtSecret.Trim().Equals("CHANGE_ME_IN_PRODUCTION", [StringComparison]::OrdinalIgnoreCase) -and
+        -not $jwtSecret.Trim().Equals("change-me-in-production", [StringComparison]::OrdinalIgnoreCase)) {
+        return
+    }
+
+    $jwtSecret = New-RandomJwtSecret
+    [Environment]::SetEnvironmentVariable("JWT_SECRET", $jwtSecret, "Process")
+
+    $contents = Get-Content -LiteralPath $Path -Raw
+    if ($contents -match '(?m)^JWT_SECRET=.*$') {
+        $contents = [regex]::Replace($contents, '(?m)^JWT_SECRET=.*$', "JWT_SECRET=$jwtSecret")
+    } else {
+        if ($contents.Length -gt 0 -and -not $contents.EndsWith("`n")) {
+            $contents += "`r`n"
+        }
+        $contents += "JWT_SECRET=$jwtSecret`r`n"
+    }
+
+    Set-Content -LiteralPath $Path -Value $contents -Encoding ASCII
+    Write-Host "Generated a local JWT_SECRET and stored it in .env.worker."
+}
+
+function Reset-CmdConsoleOpacity {
+    $consoleRoot = "HKCU:\Console"
+    if (!(Test-Path $consoleRoot)) {
+        return
+    }
+
+    $keys = @($consoleRoot)
+    $keys += Get-ChildItem -LiteralPath $consoleRoot -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.PSChildName -eq "cmd.exe" -or
+            $_.PSChildName -like "*cmd.exe*" -or
+            $_.PSChildName -like "*system32_cmd.exe*"
+        } |
+        ForEach-Object { $_.PSPath }
+
+    foreach ($key in $keys) {
+        try {
+            Remove-ItemProperty -LiteralPath $key -Name "WindowAlpha" -ErrorAction SilentlyContinue
+        } catch {
+            Write-Warning "Could not reset console opacity at ${key}: $($_.Exception.Message)"
+        }
+    }
+}
+
 $envFile = Join-Path $PSScriptRoot ".env.worker"
 if (!(Test-Path $envFile)) {
     Copy-Item (Join-Path $PSScriptRoot ".env.worker.example") $envFile
-    Write-Host "Created .env.worker from template. Edit NODEPOOL_GRPC_ADDR, WORKER_ADVERTISE_ADDR, and JWT_SECRET, then rerun."
-    exit 1
+    Write-Host "Created .env.worker from template."
 }
 
 Import-DotEnv -Path $envFile
-Assert-RequiredEnv -Names @("NODEPOOL_GRPC_ADDR", "WORKER_GRPC_ADDR", "WORKER_CONTROL_HTTP_ADDR", "WORKER_ADVERTISE_ADDR", "JWT_SECRET")
+Ensure-JwtSecret -Path $envFile
+Assert-RequiredEnv -Names @("NODEPOOL_GRPC_ADDR", "WORKER_GRPC_ADDR", "WORKER_CONTROL_HTTP_ADDR", "WORKER_NODEPOOL_TOKEN")
+Reset-CmdConsoleOpacity
 
 & (Join-Path $PSScriptRoot "hivemind-bin.exe") worker
 '@
@@ -134,10 +199,11 @@ $readme = @"
 
 1. Copy `.env.worker.example` to `.env.worker`.
 2. Set `NODEPOOL_GRPC_ADDR` to the reachable nodepool gRPC address.
-3. Set `WORKER_ADVERTISE_ADDR` to the address other machines can use to reach this worker, for example `203.0.113.10:50053` or a Tailscale address.
-4. Set `JWT_SECRET` to the deployment secret issued by the operator. Do not use a default or public placeholder value.
-5. Put `monty.exe` next to `hivemind-bin.exe` or update `MONTY_EXECUTABLE`.
-6. Run PowerShell as the provider user and execute:
+3. Set `WORKER_NODEPOOL_TOKEN` to a nodepool JWT whose subject matches `WORKER_ID`, or to an admin token that is allowed to register this worker.
+4. Optionally set `WORKER_ADVERTISE_ADDR` to the address other machines can use to reach this worker, for example `203.0.113.10:50053` or a Tailscale address. If you leave it blank, the worker will derive it from `WORKER_GRPC_ADDR`.
+5. `JWT_SECRET` will be generated automatically on first launch if it is blank. Set it explicitly if you need a fixed deployment secret.
+6. Put `monty.exe` next to `hivemind-bin.exe` or update `MONTY_EXECUTABLE`.
+7. Run PowerShell as the provider user and execute:
 
 ```powershell
 .\start-worker.ps1

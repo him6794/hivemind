@@ -30,6 +30,8 @@ pub struct RedisConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
     pub nodepool_grpc_addr: String,
+    #[serde(default)]
+    pub nodepool_grpc_endpoint: Option<String>,
     pub master_http_addr: String,
     pub worker_grpc_addr: String,
     pub worker_grpc_port: u16,
@@ -37,6 +39,8 @@ pub struct ServerConfig {
     pub worker_control_http_addr: String,
     #[serde(default)]
     pub worker_advertise_addr: Option<String>,
+    #[serde(default)]
+    pub worker_nodepool_token: Option<String>,
     #[serde(default = "default_master_cors_allowed_origins")]
     pub master_cors_allowed_origins: Vec<String>,
     #[serde(default = "default_worker_control_cors_allowed_origins")]
@@ -71,6 +75,8 @@ pub struct TorrentConfig {
     pub bt_dir: String,
     #[serde(default = "default_torrent_announce_url")]
     pub announce_url: String,
+    #[serde(default)]
+    pub allow_local_task_artifacts: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,11 +122,13 @@ impl Default for HivemindConfig {
             },
             server: ServerConfig {
                 nodepool_grpc_addr: "0.0.0.0:50051".into(),
+                nodepool_grpc_endpoint: None,
                 master_http_addr: "0.0.0.0:8082".into(),
                 worker_grpc_addr: "0.0.0.0:50053".into(),
                 worker_grpc_port: 50053,
                 worker_control_http_addr: default_worker_control_http_addr(),
                 worker_advertise_addr: None,
+                worker_nodepool_token: None,
                 master_cors_allowed_origins: default_master_cors_allowed_origins(),
                 worker_control_cors_allowed_origins: default_worker_control_cors_allowed_origins(),
             },
@@ -134,6 +142,7 @@ impl Default for HivemindConfig {
                 api_dir: "./api/torrents".into(),
                 bt_dir: "./bt_torrents".into(),
                 announce_url: "http://localhost:6969/announce".into(),
+                allow_local_task_artifacts: false,
             },
             vpn: VpnConfig {
                 headscale_url: "http://localhost:8080".into(),
@@ -160,6 +169,7 @@ impl Default for HivemindConfig {
 impl HivemindConfig {
     pub fn for_test() -> Self {
         let mut config = Self::default();
+        config.torrent.allow_local_task_artifacts = true;
         config.database.url = std::env::var("HIVEMIND_TEST_DATABASE_URL")
             .unwrap_or_else(|_| "postgres://hivemind:hivemind@localhost:5432/hivemind_test".into());
         config
@@ -189,6 +199,9 @@ impl HivemindConfig {
         if let Ok(addr) = std::env::var("NODEPOOL_GRPC_ADDR") {
             config.server.nodepool_grpc_addr = addr;
         }
+        if let Ok(endpoint) = std::env::var("NODEPOOL_GRPC_ENDPOINT") {
+            config.server.nodepool_grpc_endpoint = Some(endpoint);
+        }
         if let Ok(addr) = std::env::var("MASTER_HTTP_ADDR") {
             config.server.master_http_addr = addr;
         }
@@ -200,6 +213,9 @@ impl HivemindConfig {
         }
         if let Ok(addr) = std::env::var("WORKER_ADVERTISE_ADDR") {
             config.server.worker_advertise_addr = Some(addr);
+        }
+        if let Ok(token) = std::env::var("WORKER_NODEPOOL_TOKEN") {
+            config.server.worker_nodepool_token = Some(token);
         }
         if let Ok(origins) = std::env::var("MASTER_CORS_ALLOWED_ORIGINS") {
             config.server.master_cors_allowed_origins = parse_csv(&origins);
@@ -263,6 +279,11 @@ impl HivemindConfig {
         }
         if let Ok(url) = std::env::var("TORRENT_ANNOUNCE_URL") {
             config.torrent.announce_url = url;
+        }
+        if let Ok(enabled) = std::env::var("TORRENT_ALLOW_LOCAL_TASK_ARTIFACTS") {
+            if let Ok(parsed) = enabled.parse() {
+                config.torrent.allow_local_task_artifacts = parsed;
+            }
         }
         if let Ok(url) = std::env::var("HEADSCALE_URL") {
             config.vpn.headscale_url = url;
@@ -365,6 +386,7 @@ mod tests {
             },
             "server": {
                 "nodepool_grpc_addr": "0.0.0.0:50051",
+                "nodepool_grpc_endpoint": "nodepool.example:50051",
                 "master_http_addr": "0.0.0.0:8082",
                 "worker_grpc_addr": "0.0.0.0:50053",
                 "worker_grpc_port": 50053
@@ -409,6 +431,11 @@ mod tests {
             config.torrent.announce_url,
             "http://localhost:6969/announce"
         );
+        assert!(!config.torrent.allow_local_task_artifacts);
+        assert_eq!(
+            config.server.nodepool_grpc_endpoint.as_deref(),
+            Some("nodepool.example:50051")
+        );
     }
 
     #[test]
@@ -418,10 +445,14 @@ mod tests {
         let old_redis_url = std::env::var_os("REDIS_URL");
         let old_jwt_secret = std::env::var_os("JWT_SECRET");
         let old_master_cors = std::env::var_os("MASTER_CORS_ALLOWED_ORIGINS");
+        let old_nodepool_endpoint = std::env::var_os("NODEPOOL_GRPC_ENDPOINT");
+        let old_local_artifacts = std::env::var_os("TORRENT_ALLOW_LOCAL_TASK_ARTIFACTS");
         std::env::remove_var("HIVEMIND_CONFIG");
         std::env::set_var("DATABASE_URL", "postgres://example");
         std::env::remove_var("REDIS_URL");
         std::env::remove_var("JWT_SECRET");
+        std::env::set_var("NODEPOOL_GRPC_ENDPOINT", "nodepool.internal:50051");
+        std::env::set_var("TORRENT_ALLOW_LOCAL_TASK_ARTIFACTS", "true");
         std::env::set_var(
             "MASTER_CORS_ALLOWED_ORIGINS",
             "http://app.example, http://admin.example",
@@ -445,6 +476,14 @@ mod tests {
             Some(value) => std::env::set_var("MASTER_CORS_ALLOWED_ORIGINS", value),
             None => std::env::remove_var("MASTER_CORS_ALLOWED_ORIGINS"),
         }
+        match old_nodepool_endpoint {
+            Some(value) => std::env::set_var("NODEPOOL_GRPC_ENDPOINT", value),
+            None => std::env::remove_var("NODEPOOL_GRPC_ENDPOINT"),
+        }
+        match old_local_artifacts {
+            Some(value) => std::env::set_var("TORRENT_ALLOW_LOCAL_TASK_ARTIFACTS", value),
+            None => std::env::remove_var("TORRENT_ALLOW_LOCAL_TASK_ARTIFACTS"),
+        }
         match old_config {
             Some(value) => std::env::set_var("HIVEMIND_CONFIG", value),
             None => std::env::remove_var("HIVEMIND_CONFIG"),
@@ -457,7 +496,12 @@ mod tests {
             loaded.torrent.announce_url,
             "http://localhost:6969/announce"
         );
+        assert!(loaded.torrent.allow_local_task_artifacts);
         assert_eq!(loaded.server.worker_control_http_addr, "127.0.0.1:18080");
+        assert_eq!(
+            loaded.server.nodepool_grpc_endpoint.as_deref(),
+            Some("nodepool.internal:50051")
+        );
         assert_eq!(
             loaded.server.master_cors_allowed_origins,
             vec![
