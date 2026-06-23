@@ -154,6 +154,7 @@ message TaskInfo {
 
 message ListWorkersRequest {
     bool include_offline = 1;
+    string token = 2;
 }
 
 message WorkerInfo {

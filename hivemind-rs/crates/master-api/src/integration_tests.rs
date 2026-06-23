@@ -179,7 +179,7 @@ async fn grpc_client_talks_to_nodepool_test_fixture_for_provider_flow() {
         .unwrap();
     assert!(registered.success);
 
-    let workers = client.list_workers(true).await.unwrap();
+    let workers = client.list_workers(true, &token).await.unwrap();
     assert!(workers
         .workers
         .iter()

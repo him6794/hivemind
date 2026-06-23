@@ -812,12 +812,25 @@ impl NodeManagerService for GrpcNodeManagerService {
         request: Request<ListWorkersRequest>,
     ) -> Result<Response<ListWorkersResponse>, Status> {
         let req = request.into_inner();
+        let claims = self
+            .state
+            .auth
+            .validate_token(&req.token)
+            .map_err(|_| Status::unauthenticated("Invalid token"))?;
         let workers = self
             .state
             .node_manager
             .list_workers(req.include_offline)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
+        let workers = if is_admin(&claims.sub) {
+            workers
+        } else {
+            workers
+                .into_iter()
+                .filter(|worker| worker.username == claims.sub)
+                .collect()
+        };
         Ok(Response::new(ListWorkersResponse {
             success: true,
             status_message: "OK".into(),
@@ -1559,25 +1572,32 @@ impl MasterNodeService for GrpcMasterNodeService {
         request: Request<GetWorkerTrustProfileRequest>,
     ) -> Result<Response<GetWorkerTrustProfileResponse>, Status> {
         let req = request.into_inner();
-        let _claims = self
+        let claims = self
             .state
             .auth
             .validate_token(&req.token)
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
-        let pool = &self.state.scheduler.database().pool;
-        let worker_exists: (bool,) =
-            sqlx::query_as("SELECT EXISTS(SELECT 1 FROM worker_nodes WHERE worker_id = $1)")
-                .bind(&req.worker_id)
-                .fetch_one(pool)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
-        if !worker_exists.0 {
+        let worker = self
+            .state
+            .node_manager
+            .get_worker(&req.worker_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let Some(worker) = worker else {
             return Ok(Response::new(GetWorkerTrustProfileResponse {
                 success: false,
                 status_message: "Worker not found".into(),
                 trust: None,
             }));
+        };
+        if worker.username != claims.sub && !is_admin(&claims.sub) {
+            return Ok(Response::new(GetWorkerTrustProfileResponse {
+                success: false,
+                status_message: "Not authorized".into(),
+                trust: None,
+            }));
         }
+        let pool = &self.state.scheduler.database().pool;
         sqlx::query(
             "INSERT INTO worker_reputation (worker_id) VALUES ($1) ON CONFLICT (worker_id) DO NOTHING",
         )
@@ -3662,6 +3682,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_worker_trust_profile_rejects_non_owner() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (service, task_id, other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(service.state.clone());
+        let worker_id = format!("grpc-trust-profile-worker-{task_id}");
+        let owner_token = token_for(&service.state.auth, &owner);
+
+        register_report_worker(&node_service, &owner, &worker_id).await;
+
+        let denied = service
+            .get_worker_trust_profile(Request::new(GetWorkerTrustProfileRequest {
+                token: other_token,
+                worker_id: worker_id.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let allowed = service
+            .get_worker_trust_profile(Request::new(GetWorkerTrustProfileRequest {
+                token: owner_token,
+                worker_id: worker_id.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        cleanup_report_worker(&service, &worker_id).await;
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+
+        assert!(!denied.success);
+        assert_eq!(denied.status_message, "Not authorized");
+        assert!(denied.trust.is_none());
+        assert!(allowed.success);
+        assert_eq!(
+            allowed.trust.as_ref().map(|trust| trust.worker_id.as_str()),
+            Some(worker_id.as_str())
+        );
+    }
+
+    #[tokio::test]
     async fn test_provider_can_manage_worker_registered_with_distinct_worker_id() {
         let lock = grpc_db_lock();
         let _guard = lock.lock().await;
@@ -3721,6 +3785,89 @@ mod tests {
         assert!(response.success, "{}", response.message);
         assert_eq!(response.worker_id, worker_id);
         assert!(response.settings.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_list_workers_scopes_to_owner_and_admin() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(service.state.clone());
+        let owner_worker_id = format!("grpc-list-workers-owner-{task_id}");
+        let other_user = format!("grpc-list-workers-other-{task_id}");
+        let other_worker_id = format!("grpc-list-workers-other-worker-{task_id}");
+        let other_token = token_for(&service.state.auth, &other_user);
+        let admin = format!("grpc-admin-{}", uuid::Uuid::new_v4());
+        let previous_admins = std::env::var("HIVEMIND_ADMIN_USERS").ok();
+        std::env::set_var("HIVEMIND_ADMIN_USERS", &admin);
+        let admin_token = token_for(&service.state.auth, &admin);
+
+        register_report_worker(&node_service, &owner, &owner_worker_id).await;
+        node_service
+            .register_worker_node(Request::new(RegisterWorkerNodeRequest {
+                username: other_user.clone(),
+                worker_id: other_worker_id.clone(),
+                ip: "10.77.0.11:50053".into(),
+                resources: Some(ProtoResourceSpec {
+                    cpu_cores: 4,
+                    memory_mb: 16 * 1024,
+                    gpu_count: 0,
+                    gpu_name: String::new(),
+                    vram_mb: 0,
+                    cpu_score: 400,
+                    gpu_score: 0,
+                    storage_total_gb: 500,
+                    storage_available_gb: 250,
+                }),
+                location: "local".into(),
+                token: other_token,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let owner_view = node_service
+            .list_workers(Request::new(ListWorkersRequest {
+                include_offline: false,
+                token: token_for(&service.state.auth, &owner),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let allowed = node_service
+            .list_workers(Request::new(ListWorkersRequest {
+                include_offline: false,
+                token: admin_token,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        match previous_admins {
+            Some(value) => std::env::set_var("HIVEMIND_ADMIN_USERS", value),
+            None => std::env::remove_var("HIVEMIND_ADMIN_USERS"),
+        }
+        cleanup_report_worker(&service, &owner_worker_id).await;
+        cleanup_report_worker(&service, &other_worker_id).await;
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+
+        assert!(owner_view.success);
+        assert_eq!(owner_view.workers.len(), 1);
+        assert_eq!(owner_view.workers[0].worker_id, owner_worker_id);
+        assert_eq!(owner_view.workers[0].username, owner);
+        assert!(allowed.success);
+        assert_eq!(allowed.workers.len(), 2);
+        assert!(allowed
+            .workers
+            .iter()
+            .any(|worker| worker.worker_id == owner_worker_id));
+        assert!(allowed
+            .workers
+            .iter()
+            .any(|worker| worker.worker_id == other_worker_id));
     }
 
     #[tokio::test]

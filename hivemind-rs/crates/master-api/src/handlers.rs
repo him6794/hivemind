@@ -1135,7 +1135,7 @@ pub async fn get_balance(
 /// GET /api/workers
 pub async fn list_workers(
     State(state): State<AppState>,
-    AuthUser { .. }: AuthUser,
+    AuthUser { token, .. }: AuthUser,
     Query(query): Query<HashMap<String, String>>,
 ) -> (StatusCode, Json<WorkerListResponse>) {
     let io = query
@@ -1144,7 +1144,7 @@ pub async fn list_workers(
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false);
     let mut grpc = state.grpc_client.lock().await;
-    match grpc.list_workers(io).await {
+    match grpc.list_workers(io, &token).await {
         Ok(resp) => (
             StatusCode::OK,
             Json(WorkerListResponse {
