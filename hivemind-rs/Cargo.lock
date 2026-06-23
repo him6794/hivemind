@@ -1146,6 +1146,7 @@ dependencies = [
  "hivemind-database",
  "hivemind-models",
  "hivemind-proto",
+ "reqwest",
  "serde",
  "serde_json",
  "sqlx",

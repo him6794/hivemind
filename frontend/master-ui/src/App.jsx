@@ -34,7 +34,7 @@ function toNumber(value) {
 }
 
 export default function MasterApp() {
-  const apiBase = String(import.meta.env.VITE_API_BASE || 'http://localhost:8082').trim().replace(/\/$/, '');
+  const apiBase = String(import.meta.env.VITE_API_BASE || '').trim().replace(/\/$/, '');
 
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');

@@ -336,6 +336,11 @@ async fn resolve_task_distribution(
         .as_deref()
         .filter(|path| !path.trim().is_empty())
     {
+        if !config.torrent.allow_local_task_artifacts {
+            anyhow::bail!(
+                "ZIP upload uses local task artifacts and is disabled for distributed deployments; set TORRENT_ALLOW_LOCAL_TASK_ARTIFACTS=true only when workers share the configured artifact directory, or submit a remote task reference"
+            );
+        }
         let torrent = TorrentService::new(config);
         let info = torrent
             .zip_to_torrent(Path::new(zip_path), &config.torrent.announce_url)
@@ -1160,7 +1165,7 @@ pub async fn list_workers(
 /// POST /api/register-worker
 pub async fn register_worker(
     State(state): State<AppState>,
-    AuthUser { claims, .. }: AuthUser,
+    AuthUser { claims, token }: AuthUser,
     Json(body): Json<RegisterWorkerBody>,
 ) -> (StatusCode, Json<StatusResponse>) {
     if body.ip.trim().is_empty() {
@@ -1209,6 +1214,7 @@ pub async fn register_worker(
             &body.ip,
             r,
             &body.location.unwrap_or_else(|| "local".into()),
+            &token,
         )
         .await
     {
@@ -2111,5 +2117,30 @@ mod tests {
         assert_eq!(resources.gpu_score, 1200);
         assert_eq!(resources.storage_total_gb, 1000);
         assert_eq!(resources.storage_available_gb, 750);
+    }
+
+    #[tokio::test]
+    async fn zip_distribution_requires_explicit_local_artifact_opt_in() {
+        let config = HivemindConfig::default();
+        let body = CreateTaskBody {
+            task_id: "zip-local-only".into(),
+            torrent: None,
+            zip_path: Some("task.zip".into()),
+            memory_gb: None,
+            cpu_score: None,
+            gpu_score: None,
+            gpu_memory_gb: None,
+            storage_gb: None,
+            location: None,
+            host_count: None,
+            max_cpt: None,
+        };
+
+        let error = match resolve_task_distribution(&body, &config).await {
+            Ok(_) => panic!("local ZIP distribution should require explicit opt-in"),
+            Err(error) => error.to_string(),
+        };
+
+        assert!(error.contains("TORRENT_ALLOW_LOCAL_TASK_ARTIFACTS"));
     }
 }

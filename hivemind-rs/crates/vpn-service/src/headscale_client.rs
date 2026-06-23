@@ -4,17 +4,21 @@
 //! This client creates pre-auth keys for workers and manages node lifecycle.
 
 use anyhow::Result;
+use reqwest::{Client, Method, Url};
+use serde_json::Value;
 
 pub struct HeadscaleClient {
     base_url: String,
     api_key: String,
+    http: Client,
 }
 
 impl HeadscaleClient {
     pub fn new(base_url: &str, api_key: &str) -> Self {
         Self {
-            base_url: base_url.to_string(),
+            base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
+            http: Client::new(),
         }
     }
 
@@ -28,16 +32,85 @@ impl HeadscaleClient {
         Ok(())
     }
 
+    fn api_url(&self, path: &str) -> Result<Url> {
+        let base = if self.base_url.ends_with("/api/v1") {
+            self.base_url.clone()
+        } else {
+            format!("{}/api/v1", self.base_url)
+        };
+        Ok(Url::parse(&format!(
+            "{}/{}",
+            base,
+            path.trim_start_matches('/')
+        ))?)
+    }
+
+    fn public_url(&self, path: &str) -> Result<Url> {
+        Ok(Url::parse(&format!(
+            "{}/{}",
+            self.base_url,
+            path.trim_start_matches('/')
+        ))?)
+    }
+
+    async fn request_json(&self, method: Method, url: Url, body: Option<Value>) -> Result<Value> {
+        self.ensure_configured()?;
+        let mut request = self
+            .http
+            .request(method, url)
+            .bearer_auth(self.api_key.trim());
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        let response = request.send().await?;
+        let status = response.status();
+        let text = response.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("Headscale request failed with {status}: {text}");
+        }
+        if text.trim().is_empty() {
+            return Ok(Value::Null);
+        }
+        Ok(serde_json::from_str(&text)?)
+    }
+
+    fn extract_preauth_key(response: &Value) -> Option<String> {
+        response
+            .pointer("/preAuthKey/key")
+            .or_else(|| response.pointer("/pre_auth_key/key"))
+            .or_else(|| response.pointer("/key"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .map(ToString::to_string)
+    }
+
     /// Create a pre-authentication key for a worker node.
-    /// This is a lightweight local adapter for the configured Headscale endpoint.
     pub async fn create_preauth_key(&self, user: &str) -> Result<String> {
         self.ensure_configured()?;
-        let key = format!("hs-preauth-{}-{}", user, uuid::Uuid::new_v4());
+        let user = user.trim();
+        if user.is_empty() {
+            anyhow::bail!("Headscale preauth key user is required");
+        }
+        let response = self
+            .request_json(
+                Method::POST,
+                self.api_url("preauthkey")?,
+                Some(serde_json::json!({
+                    "user": user,
+                    "reusable": false,
+                    "ephemeral": true,
+                    "expiration": (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+                })),
+            )
+            .await?;
+        let key = Self::extract_preauth_key(&response).ok_or_else(|| {
+            anyhow::anyhow!("Headscale preauth key response did not contain a key")
+        })?;
         tracing::info!(
-            "Headscale {}: created preauth key for user {} (truncated: {}...)",
+            "Headscale {}: created preauth key for user {}",
             self.base_url,
             user,
-            &key[..24]
         );
         Ok(key)
     }
@@ -45,6 +118,16 @@ impl HeadscaleClient {
     /// Delete/expire a node from the Tailscale network
     pub async fn delete_node(&self, node_id: &str) -> Result<()> {
         self.ensure_configured()?;
+        let node_id = node_id.trim();
+        if node_id.is_empty() {
+            anyhow::bail!("Headscale node_id is required");
+        }
+        self.request_json(
+            Method::DELETE,
+            self.api_url(&format!("node/{node_id}"))?,
+            None,
+        )
+        .await?;
         tracing::info!("Headscale {}: deleted node {}", self.base_url, node_id);
         Ok(())
     }
@@ -52,13 +135,18 @@ impl HeadscaleClient {
     /// Get the DERP map (relay servers for NAT traversal)
     pub async fn get_derp_map(&self) -> Result<String> {
         self.ensure_configured()?;
-        let derp_map = serde_json::json!({
-            "Regions": { "1": { "RegionID": 1, "Nodes": [{
-                "Name": "1", "RegionID": 1, "HostName": "derp.example.com",
-                "IPv4": "10.0.0.1", "DERPPort": 3478
-            }]}}
-        });
-        Ok(derp_map.to_string())
+        let response = self
+            .http
+            .get(self.public_url("derpmap")?)
+            .bearer_auth(self.api_key.trim())
+            .send()
+            .await?;
+        let status = response.status();
+        let text = response.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("Headscale DERP map request failed with {status}: {text}");
+        }
+        Ok(text)
     }
 }
 
@@ -66,25 +154,33 @@ impl HeadscaleClient {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_create_preauth_key_format() {
-        let client = HeadscaleClient::new("http://localhost:8080", "test-key");
-        let key = client.create_preauth_key("worker-test-1").await.unwrap();
-        assert!(key.starts_with("hs-preauth-"));
-        assert!(key.len() > 20);
+    #[test]
+    fn test_extract_preauth_key_accepts_headscale_shapes() {
+        let response = serde_json::json!({
+            "preAuthKey": {
+                "key": "hs-preauth-real"
+            }
+        });
+        assert_eq!(
+            HeadscaleClient::extract_preauth_key(&response).as_deref(),
+            Some("hs-preauth-real")
+        );
+
+        let response = serde_json::json!({ "key": "direct-key" });
+        assert_eq!(
+            HeadscaleClient::extract_preauth_key(&response).as_deref(),
+            Some("direct-key")
+        );
     }
 
     #[tokio::test]
-    async fn test_delete_node() {
-        let client = HeadscaleClient::new("http://localhost:8080", "test-key");
-        assert!(client.delete_node("nonexistent-node").await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_get_derp_map() {
-        let client = HeadscaleClient::new("http://localhost:8080", "test-key");
-        let derp = client.get_derp_map().await.unwrap();
-        assert!(derp.contains("Regions"));
-        assert!(derp.contains("DERPPort"));
+    async fn test_create_preauth_key_requires_configuration() {
+        let client = HeadscaleClient::new("", "");
+        let error = client
+            .create_preauth_key("worker-test-1")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("base_url"));
     }
 }

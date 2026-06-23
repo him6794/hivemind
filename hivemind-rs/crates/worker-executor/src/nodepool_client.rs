@@ -18,14 +18,22 @@ pub fn nodepool_endpoint(addr: &str) -> String {
     if addr.starts_with("http://") || addr.starts_with("https://") {
         addr.to_string()
     } else {
-        format!("http://{}", replace_unspecified_host(addr))
+        format!("http://{}", replace_unspecified_host_for_local_client(addr))
     }
 }
 
-pub fn advertise_addr(listen_addr: &str, configured: Option<String>) -> String {
-    configured
-        .filter(|addr| !addr.trim().is_empty())
-        .unwrap_or_else(|| replace_unspecified_host(listen_addr))
+pub fn advertise_addr(listen_addr: &str, configured: Option<String>) -> anyhow::Result<String> {
+    if let Some(addr) = configured.filter(|addr| !addr.trim().is_empty()) {
+        return Ok(addr);
+    }
+
+    if has_unspecified_host(listen_addr) {
+        anyhow::bail!(
+            "WORKER_ADVERTISE_ADDR must be set when WORKER_GRPC_ADDR listens on an unspecified host ({listen_addr}); use an address reachable by the nodepool"
+        );
+    }
+
+    Ok(listen_addr.to_string())
 }
 
 pub fn build_register_request(
@@ -33,6 +41,7 @@ pub fn build_register_request(
     worker_addr: &str,
     resources: ResourceSpec,
     location: &str,
+    token: &str,
 ) -> RegisterWorkerNodeRequest {
     RegisterWorkerNodeRequest {
         username: worker_id.to_string(),
@@ -40,6 +49,7 @@ pub fn build_register_request(
         ip: worker_addr.to_string(),
         resources: Some(resource_spec_to_proto(resources)),
         location: location.to_string(),
+        token: token.to_string(),
     }
 }
 
@@ -47,11 +57,14 @@ pub fn build_status_request(
     worker_id: &str,
     status: &str,
     usage: ResourceUsage,
+    token: &str,
 ) -> RunningStatusRequest {
     RunningStatusRequest {
         username: worker_id.to_string(),
+        worker_id: worker_id.to_string(),
         status: status.to_string(),
         usage: Some(resource_usage_to_proto(usage)),
+        token: token.to_string(),
     }
 }
 
@@ -61,6 +74,7 @@ pub async fn register_once(
     worker_addr: &str,
     resources: ResourceSpec,
     location: &str,
+    token: &str,
 ) -> anyhow::Result<()> {
     let mut client = NodeManagerServiceClient::connect(nodepool_endpoint(endpoint)).await?;
     let response = client
@@ -69,6 +83,7 @@ pub async fn register_once(
             worker_addr,
             resources,
             location,
+            token,
         ))
         .await?
         .into_inner();
@@ -153,6 +168,7 @@ pub fn start_registration_loop(
     worker_id: String,
     worker_addr: String,
     location: String,
+    token: String,
     interval: Duration,
 ) -> watch::Sender<bool> {
     let (tx, mut rx) = watch::channel(false);
@@ -172,6 +188,7 @@ pub fn start_registration_loop(
                                     &worker_addr,
                                     executor.get_resource_spec(),
                                     &location,
+                                    &token,
                                 );
                                 match connected.register_worker_node(request).await {
                                     Ok(response) if response.get_ref().success => {
@@ -187,10 +204,17 @@ pub fn start_registration_loop(
                     }
 
                     if let Some(connected) = client.as_mut() {
-                        let request = build_status_request(&worker_id, "IDLE", executor.get_resource_usage());
-                        if let Err(e) = connected.report_status(request).await {
-                            warn!("Worker heartbeat failed: {}", e);
-                            client = None;
+                        let request = build_status_request(&worker_id, "IDLE", executor.get_resource_usage(), &token);
+                        match connected.report_status(request).await {
+                            Ok(response) if response.get_ref().success => {}
+                            Ok(response) => {
+                                warn!("Worker heartbeat rejected: {}", response.get_ref().status_message);
+                                client = None;
+                            }
+                            Err(e) => {
+                                warn!("Worker heartbeat failed: {}", e);
+                                client = None;
+                            }
                         }
                     }
                 }
@@ -206,10 +230,14 @@ pub fn start_registration_loop(
     tx
 }
 
-fn replace_unspecified_host(addr: &str) -> String {
+fn replace_unspecified_host_for_local_client(addr: &str) -> String {
     addr.strip_prefix("0.0.0.0:")
         .map(|port| format!("127.0.0.1:{port}"))
         .unwrap_or_else(|| addr.to_string())
+}
+
+fn has_unspecified_host(addr: &str) -> bool {
+    addr.strip_prefix("0.0.0.0:").is_some() || addr.strip_prefix("[::]:").is_some()
 }
 
 fn resource_spec_to_proto(spec: ResourceSpec) -> ProtoResourceSpec {
@@ -267,13 +295,17 @@ mod tests {
     }
 
     #[test]
-    fn advertise_addr_replaces_unspecified_host() {
+    fn advertise_addr_requires_reachable_address_for_unspecified_listener() {
+        let error = super::advertise_addr("0.0.0.0:50053", None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("WORKER_ADVERTISE_ADDR"));
         assert_eq!(
-            super::advertise_addr("0.0.0.0:50053", None),
-            "127.0.0.1:50053"
+            super::advertise_addr("192.0.2.10:50053", None).unwrap(),
+            "192.0.2.10:50053"
         );
         assert_eq!(
-            super::advertise_addr("0.0.0.0:50053", Some("worker.local:50053".to_string())),
+            super::advertise_addr("0.0.0.0:50053", Some("worker.local:50053".to_string())).unwrap(),
             "worker.local:50053"
         );
     }
@@ -292,12 +324,14 @@ mod tests {
             storage_available_gb: 500,
         };
 
-        let request = super::build_register_request("worker-1", "127.0.0.1:50053", spec, "local");
+        let request =
+            super::build_register_request("worker-1", "127.0.0.1:50053", spec, "local", "token");
         let resources = request.resources.unwrap();
 
         assert_eq!(request.worker_id, "worker-1");
         assert_eq!(request.username, "worker-1");
         assert_eq!(request.ip, "127.0.0.1:50053");
+        assert_eq!(request.token, "token");
         assert_eq!(resources.cpu_cores, 8);
         assert_eq!(resources.memory_mb, 32768);
         assert_eq!(resources.vram_mb, 12288);
@@ -313,11 +347,13 @@ mod tests {
             storage_percent: 60.0,
         };
 
-        let request = super::build_status_request("worker-1", "IDLE", usage);
+        let request = super::build_status_request("worker-1", "IDLE", usage, "token");
         let usage = request.usage.unwrap();
 
         assert_eq!(request.username, "worker-1");
+        assert_eq!(request.worker_id, "worker-1");
         assert_eq!(request.status, "IDLE");
+        assert_eq!(request.token, "token");
         assert_eq!(usage.cpu_percent, 10.5);
         assert_eq!(usage.storage_percent, 60.0);
     }

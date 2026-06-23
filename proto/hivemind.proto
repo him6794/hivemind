@@ -83,6 +83,7 @@ message RegisterWorkerNodeRequest {
     ResourceSpec resources = 3;
     string location = 4;
     string worker_id = 5;
+    string token = 6;
 }
 
 message StatusResponse {
@@ -94,6 +95,8 @@ message RunningStatusRequest {
     string username = 1;
     string status = 2;
     ResourceUsage usage = 3;
+    string token = 4;
+    string worker_id = 5;
 }
 
 message RunningStatusResponse {

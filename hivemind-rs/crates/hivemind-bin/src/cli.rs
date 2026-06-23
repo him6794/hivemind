@@ -62,7 +62,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliCommand> {
     }
 
     let mut submit = SubmitCommand {
-        api_base: "http://localhost:8082".into(),
+        api_base: default_api_base(),
         username: String::new(),
         password: String::new(),
         task_id: derive_task_id(&zip_path)?,
@@ -122,7 +122,7 @@ fn parse_task_lookup_args(args: &[String], command: &str) -> Result<TaskLookupCo
     }
 
     let mut lookup = TaskLookupCommand {
-        api_base: "http://localhost:8082".into(),
+        api_base: default_api_base(),
         username: String::new(),
         password: String::new(),
         task_id,
@@ -160,6 +160,14 @@ fn parse_task_lookup_args(args: &[String], command: &str) -> Result<TaskLookupCo
 
 fn normalize_api_base(value: &str) -> String {
     value.trim().trim_end_matches('/').to_string()
+}
+
+fn default_api_base() -> String {
+    std::env::var("HIVEMIND_API_BASE")
+        .ok()
+        .map(|value| normalize_api_base(&value))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "http://localhost:8082".into())
 }
 
 fn parse_i32_flag(flag: &str, value: &str) -> Result<i32> {
