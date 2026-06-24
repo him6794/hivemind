@@ -324,9 +324,28 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_tasks_owner ON tasks(owner);")
         .execute(pool)
         .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_owner_created_at ON tasks(owner, created_at DESC);",
+    )
+    .execute(pool)
+    .await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);")
         .execute(pool)
         .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_pending_priority_created_at
+         ON tasks(priority DESC, created_at ASC)
+         WHERE status IN ('PENDING', 'QUEUED');",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_assigned_timeout
+         ON tasks(last_update, priority DESC, created_at ASC)
+         WHERE status = 'ASSIGNED';",
+    )
+    .execute(pool)
+    .await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_tasks_worker_id ON tasks(worker_id);")
         .execute(pool)
         .await?;
@@ -540,6 +559,36 @@ mod tests {
         .await
         .unwrap();
         assert!(!schema_exists);
+    }
+
+    #[tokio::test]
+    async fn task_migrations_create_hot_path_indexes() {
+        let fixture = match create_isolated_test_pool("database_task_indexes").await {
+            Ok(fixture) => fixture,
+            Err(_) => {
+                tracing::warn!("Skipping DB test");
+                return;
+            }
+        };
+
+        run_migrations(&fixture.pool).await.unwrap();
+
+        let indexes: Vec<String> = sqlx::query_scalar(
+            "SELECT indexname
+             FROM pg_indexes
+             WHERE schemaname = $1
+               AND tablename = 'tasks'",
+        )
+        .bind(fixture.schema_name())
+        .fetch_all(&fixture.pool)
+        .await
+        .unwrap();
+
+        assert!(indexes.contains(&"idx_tasks_owner_created_at".to_string()));
+        assert!(indexes.contains(&"idx_tasks_pending_priority_created_at".to_string()));
+        assert!(indexes.contains(&"idx_tasks_assigned_timeout".to_string()));
+
+        fixture.cleanup().await.unwrap();
     }
 
     #[tokio::test]
