@@ -27,6 +27,16 @@ Assert-Contains `
 
 Assert-Contains `
     -Haystack $scriptText `
+    -Needle "WindowTransparency" `
+    -Message "start-worker launcher must remove persisted Console WindowTransparency values."
+
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle 'Get-ChildItem -LiteralPath $consoleRoot -Recurse' `
+    -Message "start-worker launcher must inspect all Console subkeys, including path-encoded cmd.exe keys."
+
+Assert-Contains `
+    -Haystack $scriptText `
     -Needle 'Reset-CmdConsoleOpacity' `
     -Message "start-worker launcher must call the opacity reset function."
 
