@@ -27,8 +27,28 @@ Assert-Contains `
 
 Assert-Contains `
     -Haystack $scriptText `
+    -Needle 'New-ItemProperty -LiteralPath $key -Name "WindowAlpha" -Value 255 -PropertyType DWord -Force' `
+    -Message "start-worker launcher must explicitly persist fully opaque cmd.exe console alpha."
+
+Assert-Contains `
+    -Haystack $scriptText `
     -Needle "WindowTransparency" `
     -Message "start-worker launcher must remove persisted Console WindowTransparency values."
+
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle "function Reset-CurrentConsoleOpacity" `
+    -Message "start-worker launcher must reset the already-created console window, not only persisted registry values."
+
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle "GetConsoleWindow" `
+    -Message "start-worker launcher must locate the current console window handle."
+
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle "SetLayeredWindowAttributes(`$consoleWindow, 0, 255, 0x2)" `
+    -Message "start-worker launcher must force the current console window alpha to fully opaque."
 
 Assert-Contains `
     -Haystack $scriptText `

@@ -155,6 +155,27 @@ function Ensure-JwtSecret {
     Write-Host "Generated a local JWT_SECRET and stored it in .env.worker."
 }
 
+function Reset-CurrentConsoleOpacity {
+    $source = @(
+        "using System;",
+        "using System.Runtime.InteropServices;",
+        "public static class ConsoleOpacityReset {",
+        "  [DllImport(""kernel32.dll"")] public static extern IntPtr GetConsoleWindow();",
+        "  [DllImport(""user32.dll"", SetLastError = true)] public static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint crKey, byte bAlpha, uint dwFlags);",
+        "}"
+    ) -join "`r`n"
+
+    try {
+        Add-Type -TypeDefinition $source -ErrorAction Stop
+        $consoleWindow = [ConsoleOpacityReset]::GetConsoleWindow()
+        if ($consoleWindow -ne [IntPtr]::Zero) {
+            [ConsoleOpacityReset]::SetLayeredWindowAttributes($consoleWindow, 0, 255, 0x2) | Out-Null
+        }
+    } catch {
+        Write-Warning "Could not reset current console opacity: $($_.Exception.Message)"
+    }
+}
+
 function Reset-CmdConsoleOpacity {
     $consoleRoot = "HKCU:\Console"
     if (!(Test-Path $consoleRoot)) {
@@ -169,6 +190,7 @@ function Reset-CmdConsoleOpacity {
         try {
             Remove-ItemProperty -LiteralPath $key -Name "WindowAlpha" -ErrorAction SilentlyContinue
             Remove-ItemProperty -LiteralPath $key -Name "WindowTransparency" -ErrorAction SilentlyContinue
+            New-ItemProperty -LiteralPath $key -Name "WindowAlpha" -Value 255 -PropertyType DWord -Force | Out-Null
         } catch {
             Write-Warning "Could not reset console opacity at ${key}: $($_.Exception.Message)"
         }
@@ -185,6 +207,7 @@ Import-DotEnv -Path $envFile
 Ensure-JwtSecret -Path $envFile
 Assert-RequiredEnv -Names @("NODEPOOL_GRPC_ADDR", "WORKER_GRPC_ADDR", "WORKER_CONTROL_HTTP_ADDR", "WORKER_NODEPOOL_TOKEN")
 Reset-CmdConsoleOpacity
+Reset-CurrentConsoleOpacity
 
 & (Join-Path $PSScriptRoot "hivemind-bin.exe") worker
 '@
