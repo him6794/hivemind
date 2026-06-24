@@ -162,17 +162,13 @@ function Reset-CmdConsoleOpacity {
     }
 
     $keys = @($consoleRoot)
-    $keys += Get-ChildItem -LiteralPath $consoleRoot -ErrorAction SilentlyContinue |
-        Where-Object {
-            $_.PSChildName -eq "cmd.exe" -or
-            $_.PSChildName -like "*cmd.exe*" -or
-            $_.PSChildName -like "*system32_cmd.exe*"
-        } |
+    $keys += Get-ChildItem -LiteralPath $consoleRoot -Recurse -ErrorAction SilentlyContinue |
         ForEach-Object { $_.PSPath }
 
     foreach ($key in $keys) {
         try {
             Remove-ItemProperty -LiteralPath $key -Name "WindowAlpha" -ErrorAction SilentlyContinue
+            Remove-ItemProperty -LiteralPath $key -Name "WindowTransparency" -ErrorAction SilentlyContinue
         } catch {
             Write-Warning "Could not reset console opacity at ${key}: $($_.Exception.Message)"
         }
