@@ -12,7 +12,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
 
 use crate::grpc_client::GrpcClient;
 use crate::middleware::AuthUser;
@@ -24,9 +23,9 @@ use crate::middleware::AuthUser;
 pub struct AppState {
     pub jwt_secret: String,
     pub token_expiry_hours: i64,
-    pub grpc_client: Arc<Mutex<GrpcClient>>,
+    pub grpc_client: GrpcClient,
     pub config: HivemindConfig,
-    pub task_submit_limiter: Arc<Mutex<TaskSubmitRateLimiter>>,
+    pub task_submit_limiter: Arc<tokio::sync::Mutex<TaskSubmitRateLimiter>>,
 }
 
 #[derive(Clone, Debug)]
@@ -715,7 +714,7 @@ pub async fn login(
     State(state): State<AppState>,
     Json(body): Json<LoginBody>,
 ) -> (StatusCode, Json<LoginResponse>) {
-    let mut grpc = state.grpc_client.lock().await;
+    let mut grpc = state.grpc_client.clone();
     match grpc.login(&body.username, &body.password).await {
         Ok(resp) if resp.success => (
             StatusCode::OK,
@@ -769,7 +768,7 @@ pub async fn register(
         );
     }
 
-    let mut grpc = state.grpc_client.lock().await;
+    let mut grpc = state.grpc_client.clone();
     match grpc.register_user(username, &body.password).await {
         Ok(resp) if resp.success => (
             StatusCode::CREATED,
@@ -822,7 +821,7 @@ pub async fn quote_task(
             }),
         );
     }
-    let mut grpc = state.grpc_client.lock().await;
+    let mut grpc = state.grpc_client.clone();
     match grpc
         .quote_task(
             &token,
@@ -894,7 +893,7 @@ async fn create_task_from_body(
     if let Err(message) = validate_task_resources(&body) {
         return bad_task_response(message);
     }
-    let mut grpc = state.grpc_client.lock().await;
+    let mut grpc = state.grpc_client.clone();
     let qr = grpc
         .quote_task(
             &token,
@@ -1064,7 +1063,7 @@ pub async fn list_tasks(
     State(state): State<AppState>,
     AuthUser { token, .. }: AuthUser,
 ) -> (StatusCode, Json<TaskListResponse>) {
-    let mut grpc = state.grpc_client.lock().await;
+    let mut grpc = state.grpc_client.clone();
     match grpc.get_all_user_tasks(&token).await {
         Ok(resp) => {
             let tasks: Vec<TaskInfo> = resp
@@ -1113,7 +1112,7 @@ pub async fn get_balance(
     State(state): State<AppState>,
     AuthUser { claims, token }: AuthUser,
 ) -> (StatusCode, Json<BalanceResponse>) {
-    let mut grpc = state.grpc_client.lock().await;
+    let mut grpc = state.grpc_client.clone();
     match grpc.get_balance(&claims.sub, &token).await {
         Ok(resp) => (
             StatusCode::OK,
@@ -1143,7 +1142,7 @@ pub async fn list_workers(
         .or_else(|| query.get("includeOffline"))
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false);
-    let mut grpc = state.grpc_client.lock().await;
+    let mut grpc = state.grpc_client.clone();
     match grpc.list_workers(io, &token).await {
         Ok(resp) => (
             StatusCode::OK,
@@ -1206,7 +1205,7 @@ pub async fn register_worker(
             }),
         );
     }
-    let mut grpc = state.grpc_client.lock().await;
+    let mut grpc = state.grpc_client.clone();
     match grpc
         .register_worker_node(
             &owner,
@@ -1251,7 +1250,7 @@ pub async fn remove_worker(
             }),
         );
     }
-    let mut grpc = state.grpc_client.lock().await;
+    let mut grpc = state.grpc_client.clone();
     match grpc.remove_worker(worker_id, &token).await {
         Ok(resp) => (
             StatusCode::OK,
@@ -1282,7 +1281,7 @@ pub async fn get_task_log(
             Json(serde_json::json!({"success":false,"message":"Invalid task_id"})),
         );
     };
-    let mut grpc = state.grpc_client.lock().await;
+    let mut grpc = state.grpc_client.clone();
     match grpc.get_tasklog(&task_id, &token).await {
         Ok(resp) => (
             StatusCode::OK,
@@ -1307,7 +1306,7 @@ pub async fn get_task_result(
             Json(serde_json::json!({"success":false,"message":"Invalid task_id"})),
         );
     };
-    let mut grpc = state.grpc_client.lock().await;
+    let mut grpc = state.grpc_client.clone();
     match grpc.get_task_result(&task_id, &token).await {
         Ok(resp) => (
             StatusCode::OK,
@@ -1334,7 +1333,7 @@ pub async fn stop_task(
             Json(serde_json::json!({"success":false,"message":"Invalid task_id"})),
         );
     };
-    let mut grpc = state.grpc_client.lock().await;
+    let mut grpc = state.grpc_client.clone();
     match grpc.stop_task(&task_id, &token).await {
         Ok(resp) if resp.success => (
             StatusCode::OK,
@@ -1358,7 +1357,7 @@ pub async fn get_provider_earnings(
     Query(query): Query<ProviderEarningsQuery>,
 ) -> (StatusCode, Json<ProviderEarningsResponse>) {
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
-    let mut grpc = state.grpc_client.lock().await;
+    let mut grpc = state.grpc_client.clone();
     match grpc.get_provider_earnings(&token, limit).await {
         Ok(resp) => (
             StatusCode::OK,
@@ -1413,7 +1412,7 @@ pub async fn get_provider_worker_settings(
             }),
         );
     };
-    let mut grpc = state.grpc_client.lock().await;
+    let mut grpc = state.grpc_client.clone();
     match grpc.get_provider_worker_settings(&token, &worker_id).await {
         Ok(resp) => (
             StatusCode::OK,
@@ -1454,7 +1453,7 @@ pub async fn update_provider_worker_settings(
             }),
         );
     };
-    let mut grpc = state.grpc_client.lock().await;
+    let mut grpc = state.grpc_client.clone();
     match grpc
         .update_provider_worker_settings(
             &token,
@@ -1516,7 +1515,7 @@ pub async fn get_admin_billing_overview(
     State(state): State<AppState>,
     AuthUser { token, .. }: AuthUser,
 ) -> (StatusCode, Json<AdminBillingOverviewResponse>) {
-    let mut grpc = state.grpc_client.lock().await;
+    let mut grpc = state.grpc_client.clone();
     match grpc.get_admin_billing_overview(&token).await {
         Ok(resp) => (
             StatusCode::OK,
@@ -1548,7 +1547,7 @@ pub async fn get_admin_artifact_overview(
     State(state): State<AppState>,
     AuthUser { token, .. }: AuthUser,
 ) -> (StatusCode, Json<AdminArtifactOverviewResponse>) {
-    let mut grpc = state.grpc_client.lock().await;
+    let mut grpc = state.grpc_client.clone();
     match grpc.get_admin_artifact_overview(&token).await {
         Ok(resp) => (
             StatusCode::OK,
@@ -1582,7 +1581,7 @@ pub async fn cleanup_admin_artifacts(
     Json(body): Json<AdminArtifactCleanupBody>,
 ) -> (StatusCode, Json<AdminArtifactCleanupResponse>) {
     let dry_run = body.dry_run.unwrap_or(true);
-    let mut grpc = state.grpc_client.lock().await;
+    let mut grpc = state.grpc_client.clone();
     match grpc.cleanup_admin_artifacts(&token, dry_run).await {
         Ok(resp) => (
             StatusCode::OK,
@@ -1614,7 +1613,7 @@ pub async fn get_admin_scheduling_cache_metrics(
     State(state): State<AppState>,
     AuthUser { token, .. }: AuthUser,
 ) -> (StatusCode, Json<AdminSchedulingCacheMetricsResponse>) {
-    let mut grpc = state.grpc_client.lock().await;
+    let mut grpc = state.grpc_client.clone();
     match grpc.get_admin_scheduling_cache_metrics(&token).await {
         Ok(resp) => (
             StatusCode::OK,
@@ -1656,7 +1655,7 @@ pub async fn get_admin_scheduling_cache_alert(
 ) -> (StatusCode, Json<AdminSchedulingCacheAlertResponse>) {
     let low = query.low.unwrap_or(40.0);
     let high = query.high.unwrap_or(70.0);
-    let mut grpc = state.grpc_client.lock().await;
+    let mut grpc = state.grpc_client.clone();
     match grpc
         .get_admin_scheduling_cache_alert(&token, low, high)
         .await
@@ -1693,7 +1692,7 @@ pub async fn list_admin_scheduling_cache_anomalies(
     Query(query): Query<AdminSchedulingCacheAnomalyQuery>,
 ) -> (StatusCode, Json<AdminSchedulingCacheAnomalyListResponse>) {
     let limit = query.limit.unwrap_or(50).clamp(1, 500);
-    let mut grpc = state.grpc_client.lock().await;
+    let mut grpc = state.grpc_client.clone();
     match grpc
         .list_admin_scheduling_cache_anomalies(&token, limit)
         .await
@@ -1742,7 +1741,7 @@ pub async fn get_provider_worker_trust_profile(
             }),
         );
     };
-    let mut grpc = state.grpc_client.lock().await;
+    let mut grpc = state.grpc_client.clone();
     match grpc.get_worker_trust_profile(&token, &worker_id).await {
         Ok(resp) => (
             StatusCode::OK,
@@ -1790,7 +1789,7 @@ pub async fn update_worker_trust_control(
         );
     };
     let score = body.score.unwrap_or(0);
-    let mut grpc = state.grpc_client.lock().await;
+    let mut grpc = state.grpc_client.clone();
     match grpc
         .update_worker_trust_control(&token, &worker_id, body.banned, score)
         .await
@@ -1823,7 +1822,7 @@ pub async fn list_admin_worker_trust(
     State(state): State<AppState>,
     AuthUser { token, .. }: AuthUser,
 ) -> (StatusCode, Json<AdminWorkerTrustListResponse>) {
-    let mut grpc = state.grpc_client.lock().await;
+    let mut grpc = state.grpc_client.clone();
     match grpc.list_admin_worker_trust(&token).await {
         Ok(resp) => (
             StatusCode::OK,
@@ -1862,7 +1861,7 @@ pub async fn list_admin_audit_logs(
     Query(query): Query<AdminSchedulingCacheAnomalyQuery>,
 ) -> (StatusCode, Json<AdminAuditLogListResponse>) {
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
-    let mut grpc = state.grpc_client.lock().await;
+    let mut grpc = state.grpc_client.clone();
     match grpc.list_admin_audit_logs(&token, limit).await {
         Ok(resp) => (
             StatusCode::OK,
@@ -1923,7 +1922,7 @@ pub async fn download_task_artifact(
             .into_response();
     }
 
-    let mut grpc = state.grpc_client.lock().await;
+    let mut grpc = state.grpc_client.clone();
     match grpc
         .download_task_artifact(&task_id, &token, artifact_key)
         .await

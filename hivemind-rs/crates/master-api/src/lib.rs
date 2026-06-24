@@ -10,7 +10,6 @@ use anyhow::Result;
 use axum::Router;
 use hivemind_config::HivemindConfig;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tokio::time::Duration;
 
 use crate::grpc_client::GrpcClient;
@@ -39,9 +38,11 @@ impl MasterApiServer {
         let state = handlers::AppState {
             jwt_secret,
             token_expiry_hours,
-            grpc_client: Arc::new(Mutex::new(grpc)),
+            grpc_client: grpc,
             config,
-            task_submit_limiter: Arc::new(Mutex::new(handlers::TaskSubmitRateLimiter::new())),
+            task_submit_limiter: Arc::new(tokio::sync::Mutex::new(
+                handlers::TaskSubmitRateLimiter::new(),
+            )),
         };
         let app = routes::create_router(state);
         Ok(Self { app })
