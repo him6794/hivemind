@@ -1,0 +1,21 @@
+[package]
+name = "managed-function-runtime"
+version = { workspace = true }
+license = { workspace = true }
+rust-version = { workspace = true }
+edition = { workspace = true }
+authors = { workspace = true }
+description = "Metered managed function runtime for Hivemind tasks."
+keywords = { workspace = true }
+categories = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+
+[lib]
+name = "managed_function_runtime"
+path = "src/lib.rs"
+
+[dependencies]
+
+[lints]
+workspace = true

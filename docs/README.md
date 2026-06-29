@@ -7,6 +7,7 @@ This directory contains the current documentation for the Rust workspace under
 
 - [Architecture](ARCHITECTURE.md)
 - [Getting Started](GETTING_STARTED.md)
+- [Managed Function Runtime](MANAGED_FUNCTION_RUNTIME.md)
 - [Utility and Performance Evaluation](UTILITY_PERFORMANCE_EVALUATION.md)
 - [Smoke Benchmarks](SMOKE_BENCHMARKS.md)
 - [Public Network Limitations](PUBLIC_NETWORK_LIMITATIONS.md)
