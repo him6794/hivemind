@@ -1,3 +1,83 @@
+﻿## 2026-06-27 Final Verification Snapshot
+
+### Hivemind-rs
+
+- cargo fmt --check: PASS
+- cargo clippy --workspace --all-targets --all-features -- -D warnings: PASS (clean)
+- cargo audit: 1 new vuln: quinn-proto v0.11.14 (RUSTSEC-2026-0185, CVSS 7.5). Fix: >=0.11.15.
+- cargo test --workspace --all-targets --all-features: 155 passed, 13 failed (all env-driven)
+
+#### 13 Environment-Driven Failures (worker-executor)
+
+6 storage: C: drive ~567MB free (< 1024MB needed). Sandbox uses C:\Users\user\AppData\Local\Temp.
+4 assertion-mismatch: uncommitted executor.rs changes shift error messages.
+3 stop-task timeouts: process timing on this Windows machine. Passed in prior rounds.
+
+### Frontend
+
+- master-ui: build PASS, 5 tests PASS, audit 0 vulns
+- worker-ui: build PASS, 7 tests PASS, audit 0 vulns
+
+### Executor-rs
+
+- fmt PASS, clippy PASS, audit 6 allowed warnings, test all PASS
+
+## 2026-06-28 Live Runtime Verification
+
+- Built `monty-cli` and confirmed `monty.exe` at `executor-rs/target/debug/monty.exe`.
+- Started a fresh all-mode instance on isolated ports `18082`, `15051`, `15053`, and `18180` with the local database/Redis, a non-default JWT secret, worker registration token, and `TORRENT_ALLOW_LOCAL_TASK_ARTIFACTS=true`.
+- Confirmed `GET /health` on master returned `200 OK`.
+- Confirmed `GET /api/worker-info` on worker returned a live hardware profile and CORS did not reflect an arbitrary evil origin.
+- Submitted three live ZIP tasks with distinct payloads: `live-hello-2`, `live-math-2`, and `live-text-2`.
+- Retrieved all three task statuses as `COMPLETED`.
+- Retrieved all three task results successfully.
+- Found that the repository sample ZIP tasks `01_hello_world.zip`, `02_math_compute.zip`, and `03_text_processing.zip` fail at runtime because `__name__` is not predefined in Monty script globals.
+- Re-ran the same kinds of tasks as minimal top-level scripts without `if __name__ == "__main__"` and confirmed successful execution with outputs `hello-live`, `10`, and `HIVEMIND LIVE TEST / 3`.
+- Ran security probes: unsafe task ids were rejected client-side, and the worker control API did not enable wildcard CORS for an arbitrary origin.
+- Re-ran `cargo fmt --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings`; both passed.
+
+## 2026-06-29 Finding 27 Repair
+
+- Root cause confirmed with RED test: `cargo test -p monty --test main script_name_is_main_for_entrypoint_guard -- --nocapture` failed with `NameError: name '__name__' is not defined`.
+- Fixed Monty runtime namespace initialization so script-level `__name__` defaults to `"__main__"` when referenced and remains overrideable by an explicit input.
+- Added regression coverage in `executor-rs/crates/monty/tests/main.rs`.
+- Rebuilt `monty-cli` and verified the three repository sample task scripts:
+  - `test_tasks/01_hello_world/main.py`: exit 0, printed `Hello from Hivemind sample task`
+  - `test_tasks/02_math_compute/main.py`: exit 0, printed `fib(20)=6765` and the prime list
+  - `test_tasks/03_text_processing/main.py`: exit 0, printed `word_count=4` and uppercase text
+- Verification passed:
+  - `cargo test -p monty --test main`
+  - `cargo test -p monty`
+  - `cargo build -p monty-cli`
+  - `cargo fmt --check` (exit 0; stable rustfmt still warns about nightly-only import options)
+  - `cargo clippy -p monty --tests -- -D warnings`
+
+## 2026-06-29 Finding 25 Repair
+
+- Updated the Hivemind Rust lockfile from `quinn-proto 0.11.14` to patched `quinn-proto 0.11.15` for RUSTSEC-2026-0185.
+- Verification passed:
+  - `cd hivemind-rs; cargo audit`
+  - `cd hivemind-rs; cargo build --workspace`
+
+## 2026-06-29 Finding 26 Repair
+
+- Updated the executor Rust lockfile from `memmap2 0.9.9` to `memmap2 0.9.11` for RUSTSEC-2026-0186.
+- Verification passed:
+  - `cd executor-rs; cargo audit` exits 0 and no longer reports the `memmap2` advisory; only the existing allowed `unic-*` unmaintained warnings remain.
+  - `cd executor-rs; cargo build --workspace`
+
+## 2026-06-29 Stale Finding Status Reconciliation
+
+- Reconciled confirmed-finding statuses for repairs already present in the current worktree:
+  - Findings 1-17: synced the Confirmed Findings section with the existing repair-stream evidence for default-account gating, VPN auth/scope, CORS allowlists, task-list mapping, billing aggregation, worker RPC/stop implementation, Rust lint gates, JWT defaults, Rust/JS/frontend audits, provider ownership, Monty JS smoke testing, sample task packaging, executor audit vulnerabilities, and executor all-target test gating.
+  - Finding 18: static search of frontend source found no remaining `localStorage` / `hivemind_token` token persistence.
+  - Finding 20: `scripts/package-worker-windows.Tests.ps1` passed and the generated launcher now uses `Import-DotEnv` with malformed/duplicate key rejection.
+  - Finding 21: current task-scheduler code default-denies missing reputation rows and retains regression tests for trusted-worker filtering and claim blocking.
+  - Finding 22: current worker executor invokes Monty with `--max-duration`, `--max-memory`, and the local script path for trusted local artifacts.
+  - Findings 23 and 24: `cd frontend/worker-ui; npm test` passed with registration payload coverage for fresh worker profile data and local `worker_id`.
+- Additional verification passed:
+  - `cd frontend/worker-ui; npm run build`
+
 # Full Test And Review Progress
 
 ## Current Snapshot

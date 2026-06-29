@@ -27,6 +27,21 @@ fn test_get_interned_string() {
     assert_eq!(int_value, "foobar");
 }
 
+#[test]
+fn script_name_is_main_for_entrypoint_guard() {
+    let code = r#"
+ran = "no"
+if __name__ == "__main__":
+    ran = "yes"
+ran
+"#;
+    let ex = MontyRun::new(code.to_owned(), "task.py", vec![]).unwrap();
+
+    let r = ex.run_no_limits(vec![]).unwrap();
+    let value: String = r.as_ref().try_into().unwrap();
+    assert_eq!(value, "yes");
+}
+
 /// Test that calling a method on a dataclass in standard execution mode
 /// (without iter/external function support) returns a NotImplementedError.
 /// This exercises the `FrameExit::MethodCall` path in `frame_exit_to_object`.
