@@ -1,4 +1,4 @@
-# Full Test And Review Findings
+﻿# Full Test And Review Findings
 
 ## Fixed In Current Repair Stream
 
@@ -771,6 +771,8 @@ Verification run after these fixes:
 
 ### 1. Production startup seeds a public default account
 
+Status: Fixed. Default user seeding now requires explicit `HIVEMIND_SEED_DEFAULT_USER=true`, the password is no longer logged, and the root frontend no longer advertises the public test account.
+
 - Severity: High
 - Files: `hivemind-rs/crates/hivemind-bin/src/main.rs:73`, `hivemind-rs/crates/database/src/postgres.rs:321`, `hivemind-rs/crates/database/src/postgres.rs:328`, `hivemind-rs/crates/database/src/postgres.rs:329`, `frontend/src/App.jsx:579`
 - Evidence: `seed_default_user` is called on nodepool startup and creates `testuser` / `testpass123` with balance 1000 if absent. Runtime API verification against local `hivemind-bin all` confirmed `POST /api/login` with `testuser` / `testpass123` returns `success=true` and issues a token.
@@ -778,6 +780,8 @@ Verification run after these fixes:
 - Recommendation: Gate bootstrap account creation behind an explicit dev/test environment variable, remove it from normal startup, and remove public UI text that advertises the credential.
 
 ### 2. VPN RPC auth tokens and task scoping are ignored
+
+Status: Fixed for the current single-worker task model. VPN RPCs validate JWT auth tokens, bind worker operations to the authenticated worker id or owner, and `GetTaskPeers` returns only the authorized assigned peer.
 
 - Severity: High
 - Files: `proto/vpn.proto:14`, `proto/vpn.proto:29`, `proto/vpn.proto:49`, `proto/vpn.proto:62`, `hivemind-rs/crates/vpn-service/src/grpc_server.rs:30`, `hivemind-rs/crates/vpn-service/src/grpc_server.rs:55`, `hivemind-rs/crates/vpn-service/src/lib.rs:40`, `hivemind-rs/crates/vpn-service/src/lib.rs:75`, `hivemind-rs/crates/vpn-service/src/lib.rs:85`, `hivemind-rs/crates/vpn-service/src/lib.rs:99`
@@ -787,6 +791,8 @@ Verification run after these fixes:
 
 ### 3. API CORS is open to arbitrary origins, including worker hardware profile
 
+Status: Fixed. Master API and worker control API CORS now use configured exact origin allowlists instead of wildcard origins.
+
 - Severity: Medium
 - Files: `hivemind-rs/crates/master-api/src/routes.rs:12`, `hivemind-rs/crates/master-api/src/routes.rs:13`, `hivemind-rs/crates/master-api/src/routes.rs:14`, `hivemind-rs/crates/worker-executor/src/control_api.rs:53`, `hivemind-rs/crates/worker-executor/src/control_api.rs:54`, `hivemind-rs/crates/worker-executor/src/control_api.rs:55`
 - Evidence: Both routers use `allow_origin(Any).allow_methods(Any).allow_headers(Any)`. Runtime verification with `Origin: http://evil.example` returned `Access-Control-Allow-Origin: *` for `GET /health` and for `GET http://127.0.0.1:18080/api/worker-info`; the worker endpoint returned worker id, address, CPU, memory, GPU name, GPU score, and storage.
@@ -794,6 +800,8 @@ Verification run after these fixes:
 - Recommendation: Restrict CORS to configured UI origins and restrict worker control API binding/exposure. Keep unauthenticated worker info local-only or require a token if exposed beyond localhost.
 
 ### 4. User task list drops real owner, billing, runtime, and deterministic fields
+
+Status: Fixed. `GetAllUserTasks` now maps persisted task owner, output/result references, billing fields, runtime metrics, and deterministic state through the task-to-proto helper.
 
 - Severity: Medium
 - Files: `hivemind-rs/crates/node-manager/src/grpc.rs:480`, `hivemind-rs/crates/node-manager/src/grpc.rs:483`, `hivemind-rs/crates/node-manager/src/grpc.rs:484`, `hivemind-rs/crates/node-manager/src/grpc.rs:486`, `hivemind-rs/crates/node-manager/src/grpc.rs:487`, `hivemind-rs/crates/node-manager/src/grpc.rs:492`
@@ -803,6 +811,8 @@ Verification run after these fixes:
 
 ### 5. Admin billing overview undercounts payer debits and pending billing
 
+Status: Fixed. Admin billing overview now sums `payer_debit` ledger rows and counts `FAILED` pending-billing tasks.
+
 - Severity: Medium
 - Files: `hivemind-rs/crates/task-scheduler/src/task_repository.rs:297`, `hivemind-rs/crates/node-manager/src/grpc.rs:708`, `hivemind-rs/crates/node-manager/src/grpc.rs:711`
 - Evidence: Billing settlement writes ledger entries with kind `payer_debit`, but admin overview sums payer debit with `kind='task_debit'`. The pending billing query also checks status `FAILING`, which is not a modeled `TaskStatus` variant; the model uses `FAILED`.
@@ -810,6 +820,8 @@ Verification run after these fixes:
 - Recommendation: Use the same ledger kind constants for writes and reporting, change `FAILING` to the intended status, and add tests covering admin billing totals after settlement and pending-billing scenarios.
 
 ### 6. Worker execution control RPCs are declared but not implemented
+
+Status: Fixed for the worker-service boundary and active stop path. Worker gRPC now implements bounded output/result/usage reporting, validates JWTs, and wires `StopTaskExecution` to the active task registry; process-tree stop handling is implemented for Unix process groups and Windows `taskkill`.
 
 - Severity: Medium
 - Files: `proto/hivemind.proto:744`, `proto/hivemind.proto:745`, `proto/hivemind.proto:746`, `proto/hivemind.proto:747`, `proto/hivemind.proto:748`, `proto/hivemind.proto:749`, `hivemind-rs/crates/worker-executor/src/grpc_server.rs:109`, `hivemind-rs/crates/worker-executor/src/grpc_server.rs:124`, `hivemind-rs/crates/worker-executor/src/grpc_server.rs:134`, `hivemind-rs/crates/worker-executor/src/grpc_server.rs:145`, `hivemind-rs/crates/worker-executor/src/grpc_server.rs:162`
@@ -819,6 +831,8 @@ Verification run after these fixes:
 
 ### 7. Rust lint gate fails under repository lint command
 
+Status: Fixed. The Hivemind Rust lint gate was repaired and `cd hivemind-rs; cargo clippy -- -D warnings` passes in the recorded repair evidence.
+
 - Severity: Low
 - Files: `hivemind-rs/crates/worker-executor/src/resource_monitor.rs:164`
 - Evidence: `cargo clippy -- -D warnings` fails with `clippy::needless_return` at `return detect_gpus_windows();`. `cargo fmt --check` passes.
@@ -826,6 +840,8 @@ Verification run after these fixes:
 - Recommendation: Remove the needless `return` or allow the lint intentionally with a narrowly scoped reason.
 
 ### 8. Docker compose and worker packaging defaults keep a weak JWT secret
+
+Status: Fixed. Master/nodepool startup rejects empty/default JWT secrets, `docker-compose.yml` requires `JWT_SECRET`, and the Windows worker package no longer writes `change-me-in-production`.
 
 - Severity: Low to Medium
 - Files: `docker-compose.yml:55`, `scripts/package-worker-windows.ps1:48`, `hivemind-rs/crates/config/src/lib.rs:177`, `hivemind-rs/crates/worker-executor/src/executor.rs:33`
@@ -835,6 +851,8 @@ Verification run after these fixes:
 
 ### 9. Rust dependency audit reports vulnerable crates
 
+Status: Fixed. The Hivemind Rust workspace dependency stack was updated, and the current `cargo audit` run exits successfully with `quinn-proto` also patched to `0.11.15`.
+
 - Severity: Medium
 - Files: `hivemind-rs/Cargo.lock`
 - Evidence: `cargo audit` reported 6 vulnerabilities: `rsa 0.9.10` RUSTSEC-2023-0071, `rustls-webpki 0.102.8` RUSTSEC-2026-0049 / 0098 / 0099 / 0104, and `sqlx 0.7.4` RUSTSEC-2024-0363. It also reported unmaintained warnings for `paste 1.0.15` and `rustls-pemfile 2.2.0`.
@@ -842,6 +860,8 @@ Verification run after these fixes:
 - Recommendation: Upgrade `sqlx` to at least `0.8.1`, update TLS dependencies so `rustls-webpki` is at least `0.103.13`, and review whether `rsa` is reachable in production paths or can be replaced/isolated.
 
 ### 10. Provider worker settings cannot be managed by the provider account for self-registered workers
+
+Status: Fixed for authenticated provider registration. Registration now carries a distinct `worker_id` while preserving the authenticated provider owner, and provider settings coverage verifies the owner can manage the separately identified worker.
 
 - Severity: Medium
 - Files: `hivemind-rs/crates/node-manager/src/grpc.rs:274`, `hivemind-rs/crates/node-manager/src/grpc.rs:1280`, `hivemind-rs/crates/node-manager/src/grpc.rs:1296`
@@ -851,6 +871,8 @@ Verification run after these fixes:
 
 ### 11. Executor Rust lint gate fails under workspace test command
 
+Status: Fixed. Monty runtime/test-target clippy issues were repaired, and the recorded executor gate `cd executor-rs; cargo clippy --workspace --tests --all-features -- -D warnings` passes.
+
 - Severity: Low
 - Files: `executor-rs/crates/monty/src/modules/time.rs:121`
 - Evidence: `cargo clippy --workspace --tests --all-features -- -D warnings` from `executor-rs/` fails with `clippy::uninlined_format_args` at the `format!` call that builds the float conversion type error. `cargo test --workspace` passed, and `cargo fmt --check` returned exit 0 with warnings that stable rustfmt ignores nightly-only options.
@@ -858,6 +880,8 @@ Verification run after these fixes:
 - Recommendation: Use inline format arguments or allow the lint intentionally with a narrow justification, then rerun the executor clippy command.
 
 ### 12. Executor JavaScript dependency audit reports vulnerable packages
+
+Status: Fixed. `executor-rs/crates/monty-js/package-lock.json` was updated by a controlled audit fix and the package build, lint, unit, and smoke-test gates passed in the recorded repair evidence.
 
 - Severity: Medium
 - Files: `executor-rs/crates/monty-js/package-lock.json`
@@ -867,6 +891,8 @@ Verification run after these fixes:
 
 ### 13. Monty JS package smoke test is not runnable from the current Windows/bash environment
 
+Status: Fixed. The smoke-test script is LF-normalized via `.gitattributes`, uses `/usr/bin/env bash`, runs with strict shell options, and the recorded `npm run smoke-test` gate passes.
+
 - Severity: Low to Medium
 - Files: `executor-rs/crates/monty-js/package.json:62`, `executor-rs/crates/monty-js/scripts/smoke-test.sh:2`, `executor-rs/crates/monty-js/scripts/smoke-test.sh:10`
 - Evidence: `npm run smoke-test` failed immediately under bash with CRLF parsing symptoms: `set: -\r: invalid option`, `cd: ...scripts\r/..: No such file or directory`, and `npm error Missing script: build\r`. The script itself uses bash and starts with `set -e`, then calls `npm run build`.
@@ -874,6 +900,8 @@ Verification run after these fixes:
 - Recommendation: Normalize this shell script to LF in source control and add a cross-platform invocation path or CI check that proves the smoke test runs on Windows-hosted development machines.
 
 ### 14. Test task packaging script is syntactically broken
+
+Status: Fixed. `test_tasks/package_tasks.ps1` was restored as valid PowerShell with `$PSScriptRoot`-based paths and verified to generate the three sample task ZIP archives.
 
 - Severity: Low to Medium
 - Files: `test_tasks/package_tasks.ps1:34`
@@ -883,6 +911,8 @@ Verification run after these fixes:
 
 ### 15. Frontend development dependencies have known vulnerabilities
 
+Status: Fixed. Root, master UI, and worker UI frontend lockfiles were updated so full `npm audit --audit-level=moderate` passes for all three packages, not only production-only audits.
+
 - Severity: Low to Medium
 - Files: `frontend/package-lock.json:1274`, `frontend/package-lock.json:1442`, `frontend/package-lock.json:1612`, `frontend/master-ui/package-lock.json:1274`, `frontend/master-ui/package-lock.json:1612`, `frontend/worker-ui/package-lock.json:1274`, `frontend/worker-ui/package-lock.json:1612`
 - Evidence: Full `npm audit --audit-level=moderate` failed for all three frontend packages. Root `frontend/` reports vulnerable `esbuild <=0.24.2`, `postcss <8.5.10`, and Vite depending on vulnerable esbuild. `frontend/master-ui/` and `frontend/worker-ui/` report vulnerable esbuild/Vite. Production-only `npm audit --omit=dev` still passes, so this is dev-tooling exposure rather than a production dependency issue.
@@ -890,6 +920,8 @@ Verification run after these fixes:
 - Recommendation: Upgrade Vite/plugin lockfiles in all frontend packages, run `npm audit` without `--omit=dev`, and rerun all three `npm run build` commands.
 
 ### 16. Executor Rust dependency audit reports vulnerable and unmaintained crates
+
+Status: Vulnerabilities fixed; residual unmaintained dependency warnings remain documented. The executor Rust audit no longer reports vulnerable `thin-vec`, `time`, or unsound `rand` paths, but still allows `unic-*` warnings through the pinned Ruff/Ty dependency stack.
 
 - Severity: Medium
 - Files: `executor-rs/Cargo.lock:165`, `executor-rs/Cargo.lock:2184`, `executor-rs/Cargo.lock:2195`, `executor-rs/Cargo.lock:2958`, `executor-rs/Cargo.lock:2984`, `executor-rs/Cargo.lock:3170`, `executor-rs/Cargo.lock:3179`, `executor-rs/Cargo.lock:3185`, `executor-rs/Cargo.lock:3191`, `executor-rs/Cargo.lock:3203`
@@ -899,6 +931,8 @@ Verification run after these fixes:
 
 ### 17. Executor all-target/all-feature test gate fails on bench and fuzz targets
 
+Status: Fixed. Monty benchmark profiler usage is gated away from Windows local all-target runs, the cargo-fuzz crate is excluded from normal executor workspace target selection, and the recorded executor all-target/all-feature gate passes.
+
 - Severity: Low to Medium
 - Files: `executor-rs/crates/monty/benches/main.rs:6`, `executor-rs/crates/monty/benches/main.rs:7`, `executor-rs/crates/monty/Cargo.toml:53`, `executor-rs/crates/monty/Cargo.toml:54`, `executor-rs/crates/fuzz/Cargo.toml:15`, `executor-rs/crates/fuzz/Cargo.toml:22`
 - Evidence: `cargo test --workspace --all-targets --all-features` from `executor-rs/` failed. The benchmark imports `pprof` under `cfg(not(codspeed))`, but `pprof` is only declared for `cfg(not(windows))`, so Windows all-target builds cannot resolve it. The same command also tries to link fuzz binaries and fails with `LINK : fatal error LNK1561: entry point must be defined` for `string_input_panic` and `tokens_input_panic`.
@@ -906,6 +940,8 @@ Verification run after these fixes:
 - Recommendation: Gate the benchmark profiler import on both `not(codspeed)` and `not(windows)` or provide a Windows-compatible dependency path; exclude cargo-fuzz targets from normal all-target tests or configure them for cargo-fuzz only.
 
 ### 18. Root frontend stores bearer tokens in localStorage
+
+Status: Fixed. The root frontend now keeps bearer tokens in React memory state only; static search of frontend source found no remaining `localStorage` or `hivemind_token` token persistence.
 
 - Severity: Low to Medium
 - Files: `frontend/src/App.jsx:144`, `frontend/src/App.jsx:161`, `frontend/src/App.jsx:264`, `frontend/src/App.jsx:276`
@@ -925,6 +961,8 @@ Status: Fixed across the eleventh and sixteenth repair batches. Install/update s
 
 ### 20. Windows worker launcher uses a fragile dotenv parser
 
+Status: Fixed for the generated Windows worker launcher. The package script now emits `Import-DotEnv`, rejects malformed and duplicate keys, validates required worker settings, and rejects empty/default `JWT_SECRET`; `scripts/package-worker-windows.Tests.ps1` passes.
+
 - Severity: Low
 - Files: `scripts/package-worker-windows.ps1:71`, `scripts/package-worker-windows.ps1:74`, `scripts/package-worker-windows.ps1:76`
 - Evidence: A Codex packaging subagent and local review both confirmed the generated launcher loads `.env.worker` by trimming each line and splitting on the first equals sign. It does not handle quoted values, inline comments, escapes, or surrounding whitespace the way common dotenv parsers do.
@@ -932,6 +970,8 @@ Status: Fixed across the eleventh and sixteenth repair batches. Install/update s
 - Recommendation: Use a small dotenv parser or document/enforce a strict `KEY=value` format and reject unsupported syntax instead of silently accepting it.
 
 ### 21. Missing worker reputation rows bypass trust filtering
+
+Status: Fixed. Missing reputation rows are now default-denied in scheduler claim and trusted-worker filtering paths, with regression tests `test_trusted_workers_excludes_missing_reputation_rows` and `test_claim_pending_for_worker_blocks_missing_reputation_row`.
 
 - Severity: Low to Medium
 - Files: `hivemind-rs/crates/task-scheduler/src/task_repository.rs:132`, `hivemind-rs/crates/task-scheduler/src/task_repository.rs:138`, `hivemind-rs/crates/node-manager/src/grpc.rs:266`, `hivemind-rs/crates/database/src/postgres.rs:155`
@@ -941,6 +981,8 @@ Status: Fixed across the eleventh and sixteenth repair batches. Install/update s
 
 ### 22. Worker executor calls Monty CLI with unsupported task flags
 
+Status: Fixed for trusted local task artifacts. The worker executor now materializes local `.py` and `.zip` packages from the configured task artifact directory and invokes Monty with its supported file contract: `--max-duration`, `--max-memory`, and the script path. Remote torrent/artifact download remains explicitly unimplemented when no trusted local artifact is available.
+
 - Severity: High
 - Files: `hivemind-rs/crates/worker-executor/src/executor.rs:123`, `executor-rs/crates/monty-cli/src/main.rs:39`, `scripts/package-worker-windows.ps1:49`, `hivemind-rs/crates/config/src/lib.rs:145`
 - Evidence: The worker executor invokes the configured Monty executable with flags such as `--task-id`, `--torrent-source`, `--btih`, `--max-cpu-percent`, `--max-memory-mb`, `--max-storage-mb`, `--max-wall-time-secs`, `--gpu-required`, and `--vram-required-mb`. The Monty CLI definition accepts interactive/type-check/code/file options and resource flags such as `--max-allocations`, `--max-duration`, and `--max-memory`, but not those worker task flags. The Windows worker package and default config point providers at `monty.exe`.
@@ -948,6 +990,8 @@ Status: Fixed across the eleventh and sixteenth repair batches. Install/update s
 - Recommendation: Add a worker-executor integration test using the real Monty CLI argument contract, then either adapt worker execution to the supported CLI/API or provide a Hivemind-specific executor wrapper that accepts the worker task flags.
 
 ### 23. Worker UI first login can register stale or zero local capacity
+
+Status: Fixed. First-login registration now passes the freshly fetched `/api/worker-info` profile and endpoint directly into registration, and Worker UI tests cover normalized local worker info before React state updates.
 
 - Severity: Medium
 - Files: `frontend/worker-ui/src/App.jsx:88`, `frontend/worker-ui/src/App.jsx:113`, `frontend/worker-ui/src/App.jsx:173`
@@ -957,11 +1001,47 @@ Status: Fixed across the eleventh and sixteenth repair batches. Install/update s
 
 ### 24. Worker UI does not send the local worker id during provider registration
 
+Status: Fixed. Worker UI registration now includes the local `worker_id` from `/api/worker-info` while keeping the authenticated username as the provider owner; Worker UI tests verify the registration payload.
+
 - Severity: Medium
 - Files: `frontend/worker-ui/src/App.jsx:122`, `frontend/worker-ui/src/App.jsx:141`, `hivemind-rs/crates/master-api/src/handlers.rs:1099`, `hivemind-rs/crates/hivemind-bin/src/main.rs:185`
 - Evidence: The worker UI registration body sends provider username and resource fields, but no `worker_id`; master API defaults missing `worker_id` to the authenticated owner. The actual worker process derives its local identity from `WORKER_ID`, `COMPUTERNAME`, `HOSTNAME`, or UUID.
 - Impact: Provider UI registration can target a row keyed by the login name while the real worker registration loop uses a different machine/worker id, leaving settings and resource data split across rows.
 - Recommendation: Include the local worker id from `/api/worker-info` in the worker UI registration request and keep the authenticated username as owner only.
+
+
+### 25. New quinn-proto remote memory exhaustion vulnerability (RUSTSEC-2026-0185)
+
+Status: Fixed. `hivemind-rs/Cargo.lock` now resolves `quinn-proto` to `0.11.15`, and `cargo audit` passes for the Hivemind Rust workspace.
+
+- Severity: High
+- Date: 2026-06-27 (advisory published 2026-06-22)
+- ID: RUSTSEC-2026-0185 (CVSS 7.5)
+- Crate: quinn-proto v0.11.15
+- Evidence: cargo audit previously found this advisory against `quinn-proto v0.11.14` after earlier rounds passed clean. Remote memory exhaustion in quinn-proto came from unbounded out-of-stream order reassembly and affected Hivemind's QUIC transport layer when using the default transport stack. The lockfile has been updated to the patched `0.11.15` release.
+- Fix: Upgraded `quinn-proto` to `0.11.15`. The patched version limits the amount of memory consumed by buffering out-of-order stream data.
+- Recommendation: Keep `cargo audit` in the Hivemind Rust verification gate so newly published transport advisories are caught quickly.
+
+### 26. New memmap2 unsound advisory in executor-rs (RUSTSEC-2026-0186)
+
+Status: Fixed. `executor-rs/Cargo.lock` now resolves `memmap2` to `0.9.11`; `cargo audit` for the executor workspace no longer reports RUSTSEC-2026-0186 and exits successfully with only the existing allowed `unic-*` unmaintained warnings.
+
+- Severity: Warning (allowed)
+- Date: 2026-06-27 (advisory published 2026-06-20)
+- ID: RUSTSEC-2026-0186
+- Crate: memmap2 v0.9.11
+- Evidence: executor-rs cargo audit previously reported an allowed warning for unchecked pointer offset in `memmap2 v0.9.9`. After `cargo update -p memmap2`, the lockfile uses `0.9.11` and the warning is no longer present.
+- Recommendation: Keep executor `cargo audit` in the verification gate and continue tracking the separate allowed `unic-*` unmaintained warnings.
+
+### 27. Monty runtime does not predefine `__name__` for script-style task entry points
+
+Status: Fixed. Added a regression test for `if __name__ == "__main__"` script guards, seeded script-level `__name__` to `"__main__"` when referenced, rebuilt `monty.exe`, and confirmed all three repository sample task scripts now exit 0 and print the expected output.
+
+- Severity: Medium
+- Files: `test_tasks/01_hello_world/main.py`, `test_tasks/02_math_compute/main.py`, `test_tasks/03_text_processing/main.py`, `executor-rs/crates/monty/src/run.rs`, `executor-rs/crates/monty/tests/main.rs`
+- Evidence: When I submitted the repository sample ZIP tasks to a live all-mode instance, all three failed with `NameError: name '__name__' is not defined` at the usual `if __name__ == "__main__"` guard. Re-running with equivalent top-level scripts succeeded. The runtime already has internal `__name__` handling for functions and type introspection, but script-level task execution does not seed a module `__name__` value.
+- Impact: Common Python entry-point patterns in sample tasks and real user uploads fail even though the same code would run under CPython and in most task runners.
+- Recommendation: Completed for the Monty execution path; keep the regression test in place so script-style task entry points remain supported.
 
 ## Tooling / Coverage Notes
 

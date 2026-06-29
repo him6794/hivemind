@@ -8,7 +8,7 @@ use crate::{
     heap::{DropWithHeap, Heap},
     intern::Interns,
     io::PrintWriter,
-    namespace::Namespaces,
+    namespace::{NamespaceId, Namespaces},
     object::MontyObject,
     parse::parse,
     prepare::prepare,
@@ -175,6 +175,9 @@ pub(crate) struct Executor {
     name_map: ahash::AHashMap<String, crate::namespace::NamespaceId>,
     /// Compiled bytecode for the module.
     pub(crate) module_code: Code,
+    /// Namespace slot for the script-level `__name__` global, when referenced.
+    #[serde(default)]
+    main_name_slot: Option<NamespaceId>,
     /// Interned strings used for looking up names and filenames during execution.
     pub(crate) interns: Interns,
     /// Source code for error reporting (extracting preview lines for tracebacks).
@@ -191,6 +194,7 @@ impl Clone for Executor {
             #[cfg(feature = "ref-count-return")]
             name_map: self.name_map.clone(),
             module_code: self.module_code.clone(),
+            main_name_slot: self.main_name_slot,
             interns: self.interns.clone(),
             code: self.code.clone(),
             heap_capacity: AtomicUsize::new(self.heap_capacity.load(Ordering::Relaxed)),
@@ -220,6 +224,7 @@ impl Executor {
             #[cfg(feature = "ref-count-return")]
             name_map: prepared.name_map,
             module_code: compile_result.code,
+            main_name_slot: prepared.name_map.get("__name__").copied(),
             interns,
             code,
             heap_capacity: AtomicUsize::new(prepared.namespace_size),
@@ -380,6 +385,16 @@ impl Executor {
         }
         if extra > 0 {
             namespace.extend((0..extra).map(|_| Value::Undefined));
+        }
+        if let Some(slot) = self.main_name_slot {
+            let value = namespace
+                .get_mut(slot.index())
+                .ok_or_else(|| MontyException::runtime_error("__name__ namespace slot is out of bounds"))?;
+            if matches!(value, Value::Undefined) {
+                *value = MontyObject::String("__main__".to_string())
+                    .to_value(heap, &self.interns)
+                    .map_err(|e| MontyException::runtime_error(format!("invalid __name__ value: {e}")))?;
+            }
         }
         Ok(Namespaces::new(namespace))
     }
