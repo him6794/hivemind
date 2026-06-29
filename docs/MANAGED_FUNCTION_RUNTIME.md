@@ -45,6 +45,7 @@ Statements:
 ```text
 let name = expression;
 fn name(arg1, arg2) { return expression; }
+for item in expression { statements... }
 return expression;
 print(expression);
 expression;
@@ -57,6 +58,8 @@ integer
 true
 false
 "string"
+[1, 2, 3]
+{"key": value}
 name
 name(arg1, arg2)
 if condition { expression } else { expression }
@@ -85,6 +88,10 @@ Rules:
 - `print` appends to the receipt output and is bounded by `max_output_bytes`.
 - The last expression statement becomes the final value unless an earlier
   `return` exits the program.
+- `input` is available when the caller provides JSON input.
+- `for` only iterates lists and is bounded by `max_loop_iterations`.
+- Built-in functions currently include `len(value)`, `get(target, key)`, and
+  `contains(target, value)`.
 
 Forbidden in v0:
 
@@ -97,10 +104,7 @@ Forbidden in v0:
 - reflection
 - arbitrary host functions
 - unbounded recursion
-- loops
-
-Loops are intentionally excluded from v0. They can be added later with explicit
-iteration budgets once the operation metering and receipt path are proven.
+- unbounded loops
 
 ## Metering v0
 
@@ -118,6 +122,7 @@ Initial cost table:
 | selected `if` branch | child costs |
 | function call overhead | 5 + argument costs |
 | `print` overhead | 5 + argument costs |
+| `for` iteration | bounded by `max_loop_iterations` |
 | return | 1 + expression cost |
 
 Execution stops with `op_limit_exceeded` before an operation would exceed the

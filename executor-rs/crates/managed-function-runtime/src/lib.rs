@@ -1,6 +1,6 @@
 //! Metered managed function runtime.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
@@ -9,6 +9,8 @@ pub enum Value {
     Int(i64),
     Bool(bool),
     String(String),
+    List(Vec<Self>),
+    Dict(BTreeMap<String, Self>),
     Null,
 }
 
@@ -22,6 +24,7 @@ pub struct ExecutionLimits {
     pub max_ops: u64,
     pub max_call_depth: usize,
     pub max_output_bytes: usize,
+    pub max_loop_iterations: u64,
 }
 
 impl Default for ExecutionLimits {
@@ -30,6 +33,7 @@ impl Default for ExecutionLimits {
             max_ops: 1_000_000,
             max_call_depth: 64,
             max_output_bytes: 1_048_576,
+            max_loop_iterations: 100_000,
         }
     }
 }
@@ -57,6 +61,8 @@ pub struct ExecutionResult {
 pub struct RuntimeError {
     code: &'static str,
     message: String,
+    line: Option<usize>,
+    column: Option<usize>,
 }
 
 impl RuntimeError {
@@ -65,11 +71,29 @@ impl RuntimeError {
         self.code
     }
 
+    #[must_use]
+    pub fn line(&self) -> Option<usize> {
+        self.line
+    }
+
+    #[must_use]
+    pub fn column(&self) -> Option<usize> {
+        self.column
+    }
+
     fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
+            line: None,
+            column: None,
         }
+    }
+
+    fn at(mut self, span: Span) -> Self {
+        self.line = Some(span.line);
+        self.column = Some(span.column);
+        self
     }
 }
 
@@ -90,6 +114,50 @@ impl ManagedExecutor {
         let program = Parser::new(tokens).parse_program()?;
         Evaluator::new(limits).eval_program(&program)
     }
+
+    pub fn execute_json_input(
+        &self,
+        source: &str,
+        limits: ExecutionLimits,
+        input_json: &str,
+    ) -> Result<ExecutionResult, RuntimeError> {
+        let input = Value::from_json_str(input_json)?;
+        let tokens = Lexer::new(source).tokenize()?;
+        let program = Parser::new(tokens).parse_program()?;
+        let mut evaluator = Evaluator::new(limits);
+        evaluator.current_scope().insert("input".to_string(), input);
+        evaluator.eval_program(&program)
+    }
+}
+
+impl Value {
+    pub fn from_json_str(input: &str) -> Result<Self, RuntimeError> {
+        let value = serde_json::from_str::<serde_json::Value>(input)
+            .map_err(|e| RuntimeError::new("input_error", format!("invalid JSON input: {e}")))?;
+        Self::from_json_value(&value)
+    }
+
+    fn from_json_value(value: &serde_json::Value) -> Result<Self, RuntimeError> {
+        match value {
+            serde_json::Value::Null => Ok(Self::Null),
+            serde_json::Value::Bool(value) => Ok(Self::Bool(*value)),
+            serde_json::Value::Number(value) => value
+                .as_i64()
+                .map(Self::Int)
+                .ok_or_else(|| RuntimeError::new("input_error", "only signed 64-bit JSON integers are supported")),
+            serde_json::Value::String(value) => Ok(Self::String(value.clone())),
+            serde_json::Value::Array(values) => values
+                .iter()
+                .map(Self::from_json_value)
+                .collect::<Result<Vec<_>, _>>()
+                .map(Self::List),
+            serde_json::Value::Object(values) => values
+                .iter()
+                .map(|(key, value)| Ok((key.clone(), Self::from_json_value(value)?)))
+                .collect::<Result<BTreeMap<_, _>, _>>()
+                .map(Self::Dict),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,6 +170,8 @@ enum Token {
     Let,
     Fn,
     Return,
+    For,
+    In,
     If,
     Else,
     Plus,
@@ -119,14 +189,31 @@ enum Token {
     RParen,
     LBrace,
     RBrace,
+    LBracket,
+    RBracket,
+    Colon,
     Comma,
     Semi,
     Eof,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Span {
+    line: usize,
+    column: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpannedToken {
+    token: Token,
+    span: Span,
+}
+
 struct Lexer<'a> {
     bytes: &'a [u8],
     pos: usize,
+    line: usize,
+    column: usize,
 }
 
 impl<'a> Lexer<'a> {
@@ -134,15 +221,21 @@ impl<'a> Lexer<'a> {
         Self {
             bytes: source.as_bytes(),
             pos: 0,
+            line: 1,
+            column: 1,
         }
     }
 
-    fn tokenize(mut self) -> Result<Vec<Token>, RuntimeError> {
+    fn tokenize(mut self) -> Result<Vec<SpannedToken>, RuntimeError> {
         let mut tokens = Vec::new();
         loop {
             self.skip_whitespace();
+            let span = self.span();
             let Some(byte) = self.peek() else {
-                tokens.push(Token::Eof);
+                tokens.push(SpannedToken {
+                    token: Token::Eof,
+                    span,
+                });
                 return Ok(tokens);
             };
             let token = match byte {
@@ -150,23 +243,23 @@ impl<'a> Lexer<'a> {
                 b'0'..=b'9' => self.integer()?,
                 b'"' => self.string()?,
                 b'+' => {
-                    self.pos += 1;
+                    self.bump();
                     Token::Plus
                 }
                 b'-' => {
-                    self.pos += 1;
+                    self.bump();
                     Token::Minus
                 }
                 b'*' => {
-                    self.pos += 1;
+                    self.bump();
                     Token::Star
                 }
                 b'/' => {
-                    self.pos += 1;
+                    self.bump();
                     Token::Slash
                 }
                 b'=' => {
-                    self.pos += 1;
+                    self.bump();
                     if self.consume_byte(b'=') {
                         Token::EqEq
                     } else {
@@ -174,7 +267,7 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 b'!' => {
-                    self.pos += 1;
+                    self.bump();
                     if self.consume_byte(b'=') {
                         Token::BangEq
                     } else {
@@ -182,7 +275,7 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 b'<' => {
-                    self.pos += 1;
+                    self.bump();
                     if self.consume_byte(b'=') {
                         Token::LtEq
                     } else {
@@ -190,7 +283,7 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 b'>' => {
-                    self.pos += 1;
+                    self.bump();
                     if self.consume_byte(b'=') {
                         Token::GtEq
                     } else {
@@ -198,27 +291,39 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 b'(' => {
-                    self.pos += 1;
+                    self.bump();
                     Token::LParen
                 }
                 b')' => {
-                    self.pos += 1;
+                    self.bump();
                     Token::RParen
                 }
                 b'{' => {
-                    self.pos += 1;
+                    self.bump();
                     Token::LBrace
                 }
                 b'}' => {
-                    self.pos += 1;
+                    self.bump();
                     Token::RBrace
                 }
+                b'[' => {
+                    self.bump();
+                    Token::LBracket
+                }
+                b']' => {
+                    self.bump();
+                    Token::RBracket
+                }
+                b':' => {
+                    self.bump();
+                    Token::Colon
+                }
                 b',' => {
-                    self.pos += 1;
+                    self.bump();
                     Token::Comma
                 }
                 b';' => {
-                    self.pos += 1;
+                    self.bump();
                     Token::Semi
                 }
                 _ => {
@@ -228,13 +333,31 @@ impl<'a> Lexer<'a> {
                     ));
                 }
             };
-            tokens.push(token);
+            tokens.push(SpannedToken { token, span });
         }
     }
 
     fn skip_whitespace(&mut self) {
         while matches!(self.peek(), Some(b' ' | b'\t' | b'\r' | b'\n')) {
-            self.pos += 1;
+            self.bump();
+        }
+    }
+
+    fn span(&self) -> Span {
+        Span {
+            line: self.line,
+            column: self.column,
+        }
+    }
+
+    fn bump(&mut self) {
+        let byte = self.bytes[self.pos];
+        self.pos += 1;
+        if byte == b'\n' {
+            self.line += 1;
+            self.column = 1;
+        } else {
+            self.column += 1;
         }
     }
 
@@ -244,7 +367,7 @@ impl<'a> Lexer<'a> {
 
     fn consume_byte(&mut self, byte: u8) -> bool {
         if self.peek() == Some(byte) {
-            self.pos += 1;
+            self.bump();
             true
         } else {
             false
@@ -254,13 +377,15 @@ impl<'a> Lexer<'a> {
     fn identifier(&mut self) -> Token {
         let start = self.pos;
         while matches!(self.peek(), Some(b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_')) {
-            self.pos += 1;
+            self.bump();
         }
         let text = String::from_utf8_lossy(&self.bytes[start..self.pos]);
         match text.as_ref() {
             "let" => Token::Let,
             "fn" => Token::Fn,
             "return" => Token::Return,
+            "for" => Token::For,
+            "in" => Token::In,
             "if" => Token::If,
             "else" => Token::Else,
             "true" => Token::True,
@@ -272,7 +397,7 @@ impl<'a> Lexer<'a> {
     fn integer(&mut self) -> Result<Token, RuntimeError> {
         let start = self.pos;
         while matches!(self.peek(), Some(b'0'..=b'9')) {
-            self.pos += 1;
+            self.bump();
         }
         let text = std::str::from_utf8(&self.bytes[start..self.pos])
             .map_err(|_| RuntimeError::new("parse_error", "invalid integer"))?;
@@ -283,20 +408,20 @@ impl<'a> Lexer<'a> {
     }
 
     fn string(&mut self) -> Result<Token, RuntimeError> {
-        self.pos += 1;
+        self.bump();
         let mut value = String::new();
         loop {
             let Some(byte) = self.peek() else {
                 return Err(RuntimeError::new("parse_error", "unterminated string"));
             };
-            self.pos += 1;
+            self.bump();
             match byte {
                 b'"' => return Ok(Token::String(value)),
                 b'\\' => {
                     let Some(escaped) = self.peek() else {
                         return Err(RuntimeError::new("parse_error", "unterminated string escape"));
                     };
-                    self.pos += 1;
+                    self.bump();
                     let ch = match escaped {
                         b'"' => '"',
                         b'\\' => '\\',
@@ -325,6 +450,11 @@ enum Stmt {
     Let(String, Expr),
     Fn(Function),
     Return(Expr),
+    For {
+        item: String,
+        iterable: Expr,
+        body: Vec<Self>,
+    },
     Print(Expr),
     Expr(Expr),
 }
@@ -349,6 +479,8 @@ enum Expr {
         name: String,
         args: Vec<Self>,
     },
+    List(Vec<Self>),
+    Dict(Vec<(String, Self)>),
     Binary {
         left: Box<Self>,
         op: BinaryOp,
@@ -371,12 +503,12 @@ enum BinaryOp {
 }
 
 struct Parser {
-    tokens: Vec<Token>,
+    tokens: Vec<SpannedToken>,
     pos: usize,
 }
 
 impl Parser {
-    fn new(tokens: Vec<Token>) -> Self {
+    fn new(tokens: Vec<SpannedToken>) -> Self {
         Self { tokens, pos: 0 }
     }
 
@@ -405,6 +537,7 @@ impl Parser {
                 self.expect(&Token::Semi)?;
                 Ok(Stmt::Return(expr))
             }
+            Token::For => self.for_statement(),
             Token::Ident(name) if name == "print" => {
                 self.advance();
                 self.expect(&Token::LParen)?;
@@ -419,6 +552,20 @@ impl Parser {
                 Ok(Stmt::Expr(expr))
             }
         }
+    }
+
+    fn for_statement(&mut self) -> Result<Stmt, RuntimeError> {
+        self.expect(&Token::For)?;
+        let item = self.ident()?;
+        self.expect(&Token::In)?;
+        let iterable = self.expression()?;
+        self.expect(&Token::LBrace)?;
+        let mut body = Vec::new();
+        while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+            body.push(self.statement()?);
+        }
+        self.expect(&Token::RBrace)?;
+        Ok(Stmt::For { item, iterable, body })
     }
 
     fn function(&mut self) -> Result<Function, RuntimeError> {
@@ -546,6 +693,8 @@ impl Parser {
                 Ok(Expr::Value(Value::Bool(false)))
             }
             Token::If => self.if_expr(),
+            Token::LBracket => self.list_expr(),
+            Token::LBrace => self.dict_expr(),
             Token::Ident(name) => {
                 self.advance();
                 if matches!(self.peek(), Token::LParen) {
@@ -573,11 +722,58 @@ impl Parser {
                 self.expect(&Token::RParen)?;
                 Ok(expr)
             }
-            token => Err(RuntimeError::new(
-                "parse_error",
-                format!("expected expression, found {token:?}"),
-            )),
+            token => {
+                Err(RuntimeError::new("parse_error", format!("expected expression, found {token:?}")).at(self.span()))
+            }
         }
+    }
+
+    fn list_expr(&mut self) -> Result<Expr, RuntimeError> {
+        self.expect(&Token::LBracket)?;
+        let mut values = Vec::new();
+        if !matches!(self.peek(), Token::RBracket) {
+            loop {
+                values.push(self.expression()?);
+                if matches!(self.peek(), Token::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(&Token::RBracket)?;
+        Ok(Expr::List(values))
+    }
+
+    fn dict_expr(&mut self) -> Result<Expr, RuntimeError> {
+        self.expect(&Token::LBrace)?;
+        let mut values = Vec::new();
+        if !matches!(self.peek(), Token::RBrace) {
+            loop {
+                let key = match self.peek().clone() {
+                    Token::String(key) => {
+                        self.advance();
+                        key
+                    }
+                    token => {
+                        return Err(RuntimeError::new(
+                            "parse_error",
+                            format!("dict keys must be strings, found {token:?}"),
+                        )
+                        .at(self.span()));
+                    }
+                };
+                self.expect(&Token::Colon)?;
+                values.push((key, self.expression()?));
+                if matches!(self.peek(), Token::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(&Token::RBrace)?;
+        Ok(Expr::Dict(values))
     }
 
     fn if_expr(&mut self) -> Result<Expr, RuntimeError> {
@@ -603,10 +799,9 @@ impl Parser {
                 self.advance();
                 Ok(name)
             }
-            token => Err(RuntimeError::new(
-                "parse_error",
-                format!("expected identifier, found {token:?}"),
-            )),
+            token => {
+                Err(RuntimeError::new("parse_error", format!("expected identifier, found {token:?}")).at(self.span()))
+            }
         }
     }
 
@@ -616,15 +811,16 @@ impl Parser {
             self.advance();
             Ok(())
         } else {
-            Err(RuntimeError::new(
-                "parse_error",
-                format!("expected {expected:?}, found {actual:?}"),
-            ))
+            Err(RuntimeError::new("parse_error", format!("expected {expected:?}, found {actual:?}")).at(self.span()))
         }
     }
 
     fn peek(&self) -> &Token {
-        &self.tokens[self.pos]
+        &self.tokens[self.pos].token
+    }
+
+    fn span(&self) -> Span {
+        self.tokens[self.pos].span
     }
 
     fn advance(&mut self) {
@@ -695,6 +891,30 @@ impl Evaluator {
                 let value = self.eval_expr(expr)?;
                 Ok(Control::Return(value))
             }
+            Stmt::For { item, iterable, body } => {
+                let iterable = self.eval_expr(iterable)?;
+                let Value::List(values) = iterable else {
+                    return Err(RuntimeError::new("type_error", "for expects a list"));
+                };
+                let mut last = Value::Null;
+                for value in values {
+                    if self.receipt.loop_iterations + 1 > self.limits.max_loop_iterations {
+                        return Err(RuntimeError::new(
+                            "loop_limit_exceeded",
+                            "loop iteration limit exceeded",
+                        ));
+                    }
+                    self.receipt.loop_iterations += 1;
+                    self.current_scope().insert(item.clone(), value);
+                    for statement in body {
+                        match self.eval_stmt(statement)? {
+                            Control::Continue(value) => last = value,
+                            Control::Return(value) => return Ok(Control::Return(value)),
+                        }
+                    }
+                }
+                Ok(Control::Continue(last))
+            }
             Stmt::Print(expr) => {
                 self.charge(5)?;
                 let value = self.eval_expr(expr)?;
@@ -729,6 +949,16 @@ impl Evaluator {
                 }
             }
             Expr::Call { name, args } => self.call(name, args),
+            Expr::List(values) => values
+                .iter()
+                .map(|expr| self.eval_expr(expr))
+                .collect::<Result<Vec<_>, _>>()
+                .map(Value::List),
+            Expr::Dict(values) => values
+                .iter()
+                .map(|(key, expr)| Ok((key.clone(), self.eval_expr(expr)?)))
+                .collect::<Result<BTreeMap<_, _>, _>>()
+                .map(Value::Dict),
             Expr::Binary { left, op, right } => {
                 let left = self.eval_expr(left)?;
                 let right = self.eval_expr(right)?;
@@ -739,6 +969,9 @@ impl Evaluator {
 
     fn call(&mut self, name: &str, args: &[Expr]) -> Result<Value, RuntimeError> {
         self.charge(5)?;
+        if let Some(value) = self.builtin_call(name, args)? {
+            return Ok(value);
+        }
         let function = self
             .functions
             .get(name)
@@ -774,6 +1007,70 @@ impl Evaluator {
         self.scopes.pop();
         self.call_depth -= 1;
         result
+    }
+
+    fn builtin_call(&mut self, name: &str, args: &[Expr]) -> Result<Option<Value>, RuntimeError> {
+        match name {
+            "len" => {
+                let [arg] = args else {
+                    return Err(RuntimeError::new("arity_error", "len expects 1 argument"));
+                };
+                let value = self.eval_expr(arg)?;
+                let len = match value {
+                    Value::String(value) => value.len(),
+                    Value::List(value) => value.len(),
+                    Value::Dict(value) => value.len(),
+                    _ => return Err(RuntimeError::new("type_error", "len expects string, list, or dict")),
+                };
+                Ok(Some(Value::Int(i64::try_from(len).map_err(|_| {
+                    RuntimeError::new("runtime_error", "length is out of range")
+                })?)))
+            }
+            "get" => {
+                let [target, key] = args else {
+                    return Err(RuntimeError::new("arity_error", "get expects 2 arguments"));
+                };
+                let target = self.eval_expr(target)?;
+                let key = self.eval_expr(key)?;
+                let value = match (target, key) {
+                    (Value::Dict(values), Value::String(key)) => values.get(&key).cloned().unwrap_or(Value::Null),
+                    (Value::List(values), Value::Int(index)) if index >= 0 => values
+                        .get(
+                            usize::try_from(index)
+                                .map_err(|_| RuntimeError::new("runtime_error", "list index is out of range"))?,
+                        )
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                    _ => {
+                        return Err(RuntimeError::new(
+                            "type_error",
+                            "get expects dict/string key or list/int index",
+                        ));
+                    }
+                };
+                Ok(Some(value))
+            }
+            "contains" => {
+                let [target, key] = args else {
+                    return Err(RuntimeError::new("arity_error", "contains expects 2 arguments"));
+                };
+                let target = self.eval_expr(target)?;
+                let key = self.eval_expr(key)?;
+                let value = match (target, key) {
+                    (Value::Dict(values), Value::String(key)) => values.contains_key(&key),
+                    (Value::String(value), Value::String(needle)) => value.contains(&needle),
+                    (Value::List(values), needle) => values.iter().any(|value| value == &needle),
+                    _ => {
+                        return Err(RuntimeError::new(
+                            "type_error",
+                            "contains expects dict, string, or list",
+                        ));
+                    }
+                };
+                Ok(Some(Value::Bool(value)))
+            }
+            _ => Ok(None),
+        }
     }
 
     fn lookup(&self, name: &str) -> Result<Value, RuntimeError> {
@@ -856,6 +1153,8 @@ fn display_value(value: &Value) -> String {
         Value::Int(value) => value.to_string(),
         Value::Bool(value) => value.to_string(),
         Value::String(value) => value.clone(),
+        Value::List(values) => format!("{values:?}"),
+        Value::Dict(values) => format!("{values:?}"),
         Value::Null => "null".to_string(),
     }
 }
