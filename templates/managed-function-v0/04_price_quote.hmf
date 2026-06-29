@@ -1,0 +1,16 @@
+let req = get(input, "requirements");
+let cpu = get(req, "cpu_score");
+let gpu = get(req, "gpu_score");
+let memory = get(req, "memory_gb");
+let storage = get(req, "storage_gb");
+let host_count = get(input, "host_count");
+let budget = get(input, "max_cpt");
+
+let per_host = 10 + cpu * 2 + gpu * 5 + memory + storage;
+let total = per_host * host_count;
+
+{
+    "per_host_cpt": per_host,
+    "total_cpt": total,
+    "within_budget": total <= budget
+};

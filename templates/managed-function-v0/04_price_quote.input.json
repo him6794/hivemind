@@ -1,0 +1,10 @@
+{
+  "requirements": {
+    "cpu_score": 4,
+    "gpu_score": 0,
+    "memory_gb": 8,
+    "storage_gb": 3
+  },
+  "host_count": 2,
+  "max_cpt": 60
+}
