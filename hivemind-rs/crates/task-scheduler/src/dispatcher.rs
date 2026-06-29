@@ -299,6 +299,8 @@ pub fn build_execute_task_request(task: &Task) -> ExecuteTaskRequest {
             storage_total_gb: task.req_storage_gb,
             storage_available_gb: task.req_storage_gb,
         }),
+        runtime: task.runtime.clone().unwrap_or_default(),
+        task_source: task.task_source.clone().unwrap_or_default(),
     }
 }
 
@@ -336,13 +338,27 @@ async fn execute_on_worker(
         Ok(response) => {
             let response = response.into_inner();
             if response.success {
-                repo.complete_for_worker(
-                    &task.task_id,
-                    &worker_id,
-                    None,
-                    Some(&response.status_message),
-                )
-                .await?;
+                if current_task.runtime.as_deref() == Some("managed-function-v0")
+                    && !response.managed_receipt_json.trim().is_empty()
+                {
+                    repo.complete_for_worker_with_managed_receipt(
+                        &task.task_id,
+                        &worker_id,
+                        Some(&response.status_message),
+                        response.managed_executed_ops,
+                        response.managed_output_bytes,
+                        &response.managed_receipt_json,
+                    )
+                    .await?;
+                } else {
+                    repo.complete_for_worker(
+                        &task.task_id,
+                        &worker_id,
+                        None,
+                        Some(&response.status_message),
+                    )
+                    .await?;
+                }
                 info!("Task {} completed by worker {}", task.task_id, worker_id);
             } else {
                 repo.fail_for_worker(&task.task_id, &worker_id, &response.status_message)
@@ -422,6 +438,8 @@ mod tests {
             output: None,
             result_torrent: None,
             torrent_source: Some("example-btih".into()),
+            runtime: None,
+            task_source: None,
             expected_btih: None,
             cpu_usage: 0.0,
             memory_usage: 0.0,
@@ -436,6 +454,9 @@ mod tests {
             max_cpt: 1000,
             billing_settled: false,
             billed_amount: 0,
+            managed_executed_ops: 0,
+            managed_output_bytes: 0,
+            managed_receipt_json: None,
             retry_count,
             max_retries: 3,
             deadline: None,
@@ -451,6 +472,20 @@ mod tests {
             last_update: Utc::now(),
             completed_at: None,
         }
+    }
+
+    #[test]
+    fn build_execute_task_request_forwards_managed_runtime_source() {
+        let mut task = make_task("managed-dispatch", TaskStatus::Pending, 0);
+        task.runtime = Some("managed-function-v0".into());
+        task.task_source = Some("return get(input, \"value\") + 1;".into());
+        task.torrent_source = Some("{\"value\": 41}".into());
+
+        let request = build_execute_task_request(&task);
+
+        assert_eq!(request.runtime, "managed-function-v0");
+        assert_eq!(request.task_source, "return get(input, \"value\") + 1;");
+        assert_eq!(request.torrent, "{\"value\": 41}");
     }
 
     fn make_worker(id: &str, cpu: i32, mem: i32, status: WorkerStatus) -> WorkerNode {
@@ -688,6 +723,126 @@ mod tests {
 
         sqlx::query("DELETE FROM tasks WHERE task_id = $1")
             .bind(&task_id)
+            .execute(&db.pool)
+            .await
+            .ok();
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_execute_on_worker_settles_managed_task_from_worker_receipt() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let (db, fixture) = match test_db("dispatcher_managed_worker_receipt").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let dispatcher = Dispatcher::new(db.clone(), 30, 2);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("dispatch-managed-owner-{unique}");
+        let worker_id = format!("dispatch-managed-worker-{unique}");
+        let task_id = format!("dispatch-managed-task-{unique}");
+        let receipt_json = "{\"executed_ops\":2500,\"output_bytes\":2049}".to_string();
+        let response = ExecuteTaskResponse {
+            success: true,
+            status_message: "7".into(),
+            managed_executed_ops: 2_500,
+            managed_output_bytes: 2_049,
+            managed_receipt_json: receipt_json.clone(),
+        };
+        let (worker_addr, mut execute_rx) =
+            match fake_worker_execute_server_with_response(response).await {
+                Some(parts) => parts,
+                None => return,
+            };
+
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        )
+        .bind(&username)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO worker_nodes (worker_id, username, ip, cpu_cores, memory_gb)
+             VALUES ($1, $2, '10.0.0.2', 4, 16)",
+        )
+        .bind(&worker_id)
+        .bind(format!("provider-{unique}"))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let mut task = make_task(&task_id, TaskStatus::Pending, 0);
+        task.owner = username.clone();
+        task.runtime = Some("managed-function-v0".into());
+        task.task_source = Some("return 7;".into());
+        task.max_cpt = 25;
+        dispatcher.repo.create(&task).await.unwrap();
+        dispatcher
+            .repo
+            .assign_to_worker(&task_id, &worker_id, &worker_addr.to_string())
+            .await
+            .unwrap();
+
+        execute_on_worker(
+            dispatcher.repo.clone(),
+            task,
+            worker_id.clone(),
+            worker_addr.to_string(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), execute_rx.recv())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(task_id.as_str())
+        );
+        let stored = dispatcher
+            .repo
+            .find_by_task_id(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, TaskStatus::Completed);
+        assert_eq!(stored.billed_amount, 7);
+        assert_eq!(stored.managed_executed_ops, 2_500);
+        assert_eq!(stored.managed_output_bytes, 2_049);
+        assert_eq!(
+            stored.managed_receipt_json.as_deref(),
+            Some(receipt_json.as_str())
+        );
+
+        sqlx::query("DELETE FROM ledger_entries WHERE task_id = $1")
+            .bind(&task_id)
+            .execute(&db.pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM task_attestations WHERE task_id = $1")
+            .bind(&task_id)
+            .execute(&db.pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM tasks WHERE task_id = $1")
+            .bind(&task_id)
+            .execute(&db.pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM worker_reputation WHERE worker_id = $1")
+            .bind(&worker_id)
+            .execute(&db.pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM worker_nodes WHERE worker_id = $1")
+            .bind(&worker_id)
+            .execute(&db.pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM users WHERE username = $1")
+            .bind(&username)
             .execute(&db.pool)
             .await
             .ok();
@@ -1015,9 +1170,25 @@ mod tests {
 
     async fn fake_worker_execute_server(
     ) -> Option<(SocketAddr, tokio::sync::mpsc::Receiver<String>)> {
+        fake_worker_execute_server_with_response(ExecuteTaskResponse {
+            success: true,
+            status_message: "executed".into(),
+            managed_executed_ops: 0,
+            managed_output_bytes: 0,
+            managed_receipt_json: String::new(),
+        })
+        .await
+    }
+
+    async fn fake_worker_execute_server_with_response(
+        response: ExecuteTaskResponse,
+    ) -> Option<(SocketAddr, tokio::sync::mpsc::Receiver<String>)> {
         let addr = reserve_loopback_addr()?;
         let (execute_tx, execute_rx) = tokio::sync::mpsc::channel(1);
-        let service = WorkerNodeServiceServer::new(FakeWorkerExecuteService { execute_tx });
+        let service = WorkerNodeServiceServer::new(FakeWorkerExecuteService {
+            execute_tx,
+            response,
+        });
         tokio::spawn(async move {
             let _ = tonic::transport::Server::builder()
                 .add_service(service)
@@ -1048,6 +1219,7 @@ mod tests {
 
     struct FakeWorkerExecuteService {
         execute_tx: tokio::sync::mpsc::Sender<String>,
+        response: ExecuteTaskResponse,
     }
 
     #[tonic::async_trait]
@@ -1058,10 +1230,7 @@ mod tests {
         ) -> Result<Response<ExecuteTaskResponse>, Status> {
             let task_id = request.into_inner().task_id;
             let _ = self.execute_tx.send(task_id).await;
-            Ok(Response::new(ExecuteTaskResponse {
-                success: true,
-                status_message: "executed".into(),
-            }))
+            Ok(Response::new(self.response.clone()))
         }
 
         async fn task_output_upload(

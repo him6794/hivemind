@@ -941,6 +941,16 @@ impl MasterNodeService for GrpcMasterNodeService {
             output: None,
             result_torrent: None,
             torrent_source: Some(req.torrent),
+            runtime: if req.runtime.trim().is_empty() {
+                None
+            } else {
+                Some(req.runtime)
+            },
+            task_source: if req.task_source.trim().is_empty() {
+                None
+            } else {
+                Some(req.task_source)
+            },
             expected_btih: None,
             cpu_usage: 0.0,
             memory_usage: 0.0,
@@ -955,6 +965,9 @@ impl MasterNodeService for GrpcMasterNodeService {
             max_cpt: req.max_cpt,
             billing_settled: false,
             billed_amount: 0,
+            managed_executed_ops: 0,
+            managed_output_bytes: 0,
+            managed_receipt_json: None,
             retry_count: 0,
             max_retries: 3,
             deadline: None,
@@ -2571,6 +2584,8 @@ mod tests {
                 host_count: 1,
                 token: owner_token,
                 max_cpt: 10,
+                runtime: String::new(),
+                task_source: String::new(),
             }))
             .await
             .unwrap()
@@ -2644,6 +2659,8 @@ mod tests {
                 host_count: 0,
                 token: owner_token,
                 max_cpt: -1,
+                runtime: String::new(),
+                task_source: String::new(),
             }))
             .await
             .unwrap()
@@ -4967,6 +4984,8 @@ mod tests {
             output: Some("private log".into()),
             result_torrent: Some("private-result".into()),
             torrent_source: Some("input".into()),
+            runtime: None,
+            task_source: None,
             expected_btih: None,
             cpu_usage: 0.0,
             memory_usage: 0.0,
@@ -4981,6 +5000,9 @@ mod tests {
             max_cpt: 10,
             billing_settled: false,
             billed_amount: 0,
+            managed_executed_ops: 0,
+            managed_output_bytes: 0,
+            managed_receipt_json: None,
             retry_count: 0,
             max_retries: 3,
             deadline: None,

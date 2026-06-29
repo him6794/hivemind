@@ -116,6 +116,8 @@ message UploadTaskRequest {
     int32 host_count = 5;
     string token = 6;
     int64 max_cpt = 7;
+    string runtime = 8;
+    string task_source = 9;
 }
 
 message UploadTaskResponse {
@@ -332,11 +334,16 @@ message ExecuteTaskRequest {
     string task_id = 1;
     string torrent = 2;        // BT info-hash for P2P download
     ResourceSpec resource_limits = 3;
+    string runtime = 4;
+    string task_source = 5;
 }
 
 message ExecuteTaskResponse {
     bool success = 1;
     string status_message = 2;
+    int64 managed_executed_ops = 3;
+    int64 managed_output_bytes = 4;
+    string managed_receipt_json = 5;
 }
 
 message TaskOutputUploadRequest {

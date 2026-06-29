@@ -97,6 +97,9 @@ pub struct TaskResult {
     pub cpu_time_ms: i64,
     pub wall_time_ms: i64,
     pub peak_memory_mb: i64,
+    pub managed_executed_ops: i64,
+    pub managed_output_bytes: i64,
+    pub managed_receipt_json: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -329,6 +332,8 @@ mod tests {
             output: None,
             result_torrent: None,
             torrent_source: Some(source.into()),
+            runtime: None,
+            task_source: None,
             expected_btih: None,
             cpu_usage: 0.0,
             memory_usage: 0.0,
@@ -343,6 +348,9 @@ mod tests {
             max_cpt: 1,
             billing_settled: false,
             billed_amount: 0,
+            managed_executed_ops: 0,
+            managed_output_bytes: 0,
+            managed_receipt_json: None,
             retry_count: 0,
             max_retries: 3,
             deadline: None,

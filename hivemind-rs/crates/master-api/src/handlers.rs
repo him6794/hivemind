@@ -108,6 +108,8 @@ pub struct CreateTaskBody {
     pub task_id: String,
     pub torrent: Option<String>,
     pub zip_path: Option<String>,
+    pub runtime: Option<String>,
+    pub task_source: Option<String>,
     pub memory_gb: Option<i32>,
     pub cpu_score: Option<i32>,
     pub gpu_score: Option<i32>,
@@ -308,6 +310,8 @@ fn parse_optional_i64(name: &str, value: &str) -> anyhow::Result<i64> {
 fn set_upload_text_field(body: &mut CreateTaskBody, name: &str, value: &str) -> anyhow::Result<()> {
     match name {
         "task_id" => body.task_id = value.trim().to_string(),
+        "runtime" => body.runtime = Some(value.trim().to_string()),
+        "task_source" => body.task_source = Some(value.to_string()),
         "memory_gb" => body.memory_gb = Some(parse_optional_i32(name, value)?),
         "cpu_score" => body.cpu_score = Some(parse_optional_i32(name, value)?),
         "gpu_score" => body.gpu_score = Some(parse_optional_i32(name, value)?),
@@ -971,6 +975,8 @@ async fn create_task_from_body(
             body.host_count.unwrap_or(1),
             &token,
             body.max_cpt.unwrap_or(quoted_cpt),
+            body.runtime.as_deref().unwrap_or(""),
+            body.task_source.as_deref().unwrap_or(""),
         )
         .await
     {
@@ -1015,6 +1021,8 @@ pub async fn upload_task(
         task_id: String::new(),
         torrent: None,
         zip_path: None,
+        runtime: None,
+        task_source: None,
         memory_gb: None,
         cpu_score: None,
         gpu_score: None,
@@ -2140,6 +2148,8 @@ mod tests {
             task_id: "zip-local-only".into(),
             torrent: None,
             zip_path: Some("task.zip".into()),
+            runtime: None,
+            task_source: None,
             memory_gb: None,
             cpu_score: None,
             gpu_score: None,
@@ -2166,6 +2176,8 @@ mod tests {
             task_id: "zip-remote".into(),
             torrent: None,
             zip_path: Some("D:\\hivemind\\api\\torrents\\uploads\\zip-remote.zip".into()),
+            runtime: None,
+            task_source: None,
             memory_gb: None,
             cpu_score: None,
             gpu_score: None,

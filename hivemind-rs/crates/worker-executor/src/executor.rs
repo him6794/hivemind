@@ -2,6 +2,8 @@ use super::sandbox::{SandboxEgressPolicy, SandboxLimits};
 use anyhow::{Context, Result};
 use hivemind_config::HivemindConfig;
 use hivemind_models::Task;
+use managed_function_runtime::{ExecutionLimits, ManagedExecutor, Value};
+use serde_json::json;
 use std::collections::HashSet;
 use std::fs;
 use std::io;
@@ -73,7 +75,88 @@ fn task_result_from_output(
         cpu_time_ms: 0,
         wall_time_ms: elapsed_ms,
         peak_memory_mb: 0,
+        managed_executed_ops: 0,
+        managed_output_bytes: 0,
+        managed_receipt_json: None,
     }
+}
+
+fn is_managed_function_task(task: &Task) -> bool {
+    task.runtime.as_deref() == Some("managed-function-v0")
+}
+
+fn render_managed_value(value: &Value) -> serde_json::Value {
+    match value {
+        Value::Int(value) => json!(value),
+        Value::Bool(value) => json!(value),
+        Value::String(value) => json!(value),
+        Value::List(values) => {
+            serde_json::Value::Array(values.iter().map(render_managed_value).collect())
+        }
+        Value::Dict(values) => serde_json::Value::Object(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), render_managed_value(value)))
+                .collect(),
+        ),
+        Value::Null => serde_json::Value::Null,
+    }
+}
+
+fn render_managed_output(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        Value::Int(value) => value.to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Null => "null".to_string(),
+        Value::List(_) | Value::Dict(_) => render_managed_value(value).to_string(),
+    }
+}
+
+fn execute_managed_function_task(task: &Task, elapsed_ms: i64) -> Result<super::TaskResult> {
+    let source = task
+        .task_source
+        .as_deref()
+        .filter(|source| !source.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("managed-function-v0 task_source is required"))?;
+    let input = task
+        .torrent_source
+        .as_deref()
+        .filter(|input| !input.trim().is_empty())
+        .unwrap_or("null");
+    let execution =
+        ManagedExecutor.execute_json_input(source, ExecutionLimits::default(), input)?;
+    let output = if execution.output.is_empty() {
+        render_managed_output(&execution.value)
+    } else {
+        execution.output
+    };
+    let output_bytes = output.len() as i64;
+    let receipt = json!({
+        "runtime": "managed-function-v0",
+        "status": "completed",
+        "executed_ops": execution.receipt.executed_ops,
+        "function_calls": execution.receipt.function_calls,
+        "loop_iterations": execution.receipt.loop_iterations,
+        "max_call_depth": execution.receipt.max_call_depth,
+        "output_bytes": output_bytes,
+        "failure_code": execution.receipt.failure_code,
+        "failure_message": execution.receipt.failure_message,
+    });
+
+    Ok(super::TaskResult {
+        task_id: task.task_id.clone(),
+        success: true,
+        output: Some(output),
+        error: None,
+        exit_code: 0,
+        cpu_time_ms: 0,
+        wall_time_ms: elapsed_ms,
+        peak_memory_mb: 0,
+        managed_executed_ops: execution.receipt.executed_ops.min(i64::MAX as u64) as i64,
+        managed_output_bytes: output_bytes,
+        managed_receipt_json: Some(receipt.to_string()),
+    })
 }
 
 fn decode_magnet_display_name(source: &str) -> Option<String> {
@@ -604,6 +687,10 @@ pub async fn run_task_with_cancel(
         task.req_storage_gb
     );
 
+    if is_managed_function_task(task) {
+        return execute_managed_function_task(task, start.elapsed().as_millis() as i64);
+    }
+
     let limits = SandboxLimits {
         max_cpu_percent: config.executor.max_cpu_percent,
         max_memory_mb: effective_memory_limit_mb(task, config),
@@ -646,6 +733,9 @@ pub async fn run_task_with_cancel(
             cpu_time_ms: 0,
             wall_time_ms: elapsed.as_millis() as i64,
             peak_memory_mb: 0,
+            managed_executed_ops: 0,
+            managed_output_bytes: 0,
+            managed_receipt_json: None,
         }),
     }
 }
@@ -1216,6 +1306,34 @@ mod tests {
         assert_eq!(result.exit_code, 7);
     }
 
+    #[tokio::test]
+    async fn managed_function_task_executes_without_host_artifact_or_process() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = test_config(tmp.path().join("sandbox").to_str().unwrap());
+        config.torrent.api_dir = tmp.path().join("api").to_string_lossy().to_string();
+        std::fs::create_dir_all(&config.torrent.api_dir).unwrap();
+        config.executor.monty_executable = tmp
+            .path()
+            .join("must-not-be-called")
+            .to_string_lossy()
+            .to_string();
+        let mut task = test_task_with_source("{\"items\":[1,2,3]}");
+        task.runtime = Some("managed-function-v0".into());
+        task.task_source = Some(
+            "let total = 0; for item in get(input, \"items\") { let total = total + item; } return total;"
+                .into(),
+        );
+
+        let result = run_task(&task, &config).await.unwrap();
+
+        assert!(result.success);
+        assert_eq!(result.output.as_deref(), Some("6"));
+        assert_eq!(result.exit_code, 0);
+        assert!(result.managed_receipt_json.is_some());
+        assert!(result.managed_executed_ops > 0);
+        assert_eq!(result.managed_output_bytes, 1);
+    }
+
     fn test_config(sandbox_dir: &str) -> HivemindConfig {
         let mut config = HivemindConfig::default();
         config.executor.sandbox_dir = sandbox_dir.into();
@@ -1240,6 +1358,8 @@ mod tests {
             output: None,
             result_torrent: None,
             torrent_source: Some(source.into()),
+            runtime: None,
+            task_source: None,
             expected_btih: None,
             cpu_usage: 0.0,
             memory_usage: 0.0,
@@ -1254,6 +1374,9 @@ mod tests {
             max_cpt: 1,
             billing_settled: false,
             billed_amount: 0,
+            managed_executed_ops: 0,
+            managed_output_bytes: 0,
+            managed_receipt_json: None,
             retry_count: 0,
             max_retries: 3,
             deadline: None,

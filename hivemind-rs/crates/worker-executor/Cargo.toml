@@ -25,6 +25,7 @@ hivemind-models = { path = "../models" }
 hivemind-database = { path = "../database" }
 hivemind-config = { path = "../config" }
 hivemind-torrent-service = { path = "../torrent-service" }
+managed-function-runtime = { path = "../../../executor-rs/crates/managed-function-runtime" }
 tempfile.workspace = true
 ipnet = "2"
 zip = { version = "2.4.2", default-features = false, features = ["deflate-flate2", "flate2"] }

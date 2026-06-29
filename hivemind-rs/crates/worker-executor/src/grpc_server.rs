@@ -101,6 +101,16 @@ impl WorkerNodeService for GrpcWorkerNodeService {
             output: None,
             result_torrent: None,
             torrent_source: Some(req.torrent),
+            runtime: if req.runtime.trim().is_empty() {
+                None
+            } else {
+                Some(req.runtime)
+            },
+            task_source: if req.task_source.trim().is_empty() {
+                None
+            } else {
+                Some(req.task_source)
+            },
             expected_btih: None,
             cpu_usage: 0.0,
             memory_usage: 0.0,
@@ -115,6 +125,9 @@ impl WorkerNodeService for GrpcWorkerNodeService {
             max_cpt: 0,
             billing_settled: false,
             billed_amount: 0,
+            managed_executed_ops: 0,
+            managed_output_bytes: 0,
+            managed_receipt_json: None,
             retry_count: 0,
             max_retries: 3,
             deadline: None,
@@ -137,17 +150,26 @@ impl WorkerNodeService for GrpcWorkerNodeService {
                     Ok(Response::new(ExecuteTaskResponse {
                         success: true,
                         status_message: result.output.unwrap_or_default(),
+                        managed_executed_ops: result.managed_executed_ops,
+                        managed_output_bytes: result.managed_output_bytes,
+                        managed_receipt_json: result.managed_receipt_json.unwrap_or_default(),
                     }))
                 } else {
                     Ok(Response::new(ExecuteTaskResponse {
                         success: false,
                         status_message: result.error.unwrap_or_default(),
+                        managed_executed_ops: result.managed_executed_ops,
+                        managed_output_bytes: result.managed_output_bytes,
+                        managed_receipt_json: result.managed_receipt_json.unwrap_or_default(),
                     }))
                 }
             }
             Err(e) => Ok(Response::new(ExecuteTaskResponse {
                 success: false,
                 status_message: e.to_string(),
+                managed_executed_ops: 0,
+                managed_output_bytes: 0,
+                managed_receipt_json: String::new(),
             })),
         }
     }
@@ -536,6 +558,8 @@ mod tests {
                         storage_total_gb: 1,
                         storage_available_gb: 1,
                     }),
+                    runtime: String::new(),
+                    task_source: String::new(),
                 }))
                 .await
                 .unwrap()

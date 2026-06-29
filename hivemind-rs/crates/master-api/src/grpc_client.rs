@@ -149,6 +149,8 @@ impl GrpcClient {
         host_count: i32,
         token: &str,
         max_cpt: i64,
+        runtime: &str,
+        task_source: &str,
     ) -> Result<UploadTaskResponse, tonic::Status> {
         self.master
             .upload_task(Request::new(UploadTaskRequest {
@@ -159,6 +161,8 @@ impl GrpcClient {
                 host_count,
                 token: token.to_string(),
                 max_cpt,
+                runtime: runtime.to_string(),
+                task_source: task_source.to_string(),
             }))
             .await
             .map(|r| r.into_inner())

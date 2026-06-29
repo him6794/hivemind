@@ -10,7 +10,16 @@ pub struct TaskRepository {
 }
 
 const PLATFORM_FEE_BPS: i64 = 1000; // 10%
+const MANAGED_BASE_INVOCATION_CPT: i64 = 1;
+const MANAGED_OP_BLOCK_CPT: i64 = 1;
+const MANAGED_OUTPUT_KIB_CPT: i64 = 1;
 pub(crate) const MIN_WORKER_REPUTATION_SCORE: i32 = 20;
+
+struct ManagedCompletionReceipt<'a> {
+    executed_ops: i64,
+    output_bytes: i64,
+    receipt_json: &'a str,
+}
 
 impl TaskRepository {
     pub fn new(pool: PgPool) -> Self {
@@ -53,15 +62,15 @@ impl TaskRepository {
 
     pub async fn create(&self, task: &Task) -> Result<Task> {
         sqlx::query_as::<_, Task>(
-            "INSERT INTO tasks (task_id, owner, status, status_message, torrent_source, expected_btih,
+            "INSERT INTO tasks (task_id, owner, status, status_message, torrent_source, runtime, task_source, expected_btih,
              req_cpu_score, req_gpu_score, req_memory_gb, req_gpu_memory_gb, req_storage_gb,
              host_count, max_cpt, max_retries, deadline,
              deterministic, side_effects, priority, created_at, last_update)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,NOW(),NOW()) RETURNING *",
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,NOW(),NOW()) RETURNING *",
         )
         .bind(&task.task_id).bind(&task.owner)
         .bind(task.status.as_str()).bind(&task.status_message)
-        .bind(&task.torrent_source).bind(&task.expected_btih)
+        .bind(&task.torrent_source).bind(&task.runtime).bind(&task.task_source).bind(&task.expected_btih)
         .bind(task.req_cpu_score).bind(task.req_gpu_score)
         .bind(task.req_memory_gb).bind(task.req_gpu_memory_gb)
         .bind(task.req_storage_gb)
@@ -187,7 +196,7 @@ impl TaskRepository {
         result_torrent: Option<&str>,
         output: Option<&str>,
     ) -> Result<Task> {
-        self.complete_guarded(task_id, None, result_torrent, output)
+        self.complete_guarded(task_id, None, result_torrent, output, None)
             .await
     }
 
@@ -198,8 +207,31 @@ impl TaskRepository {
         result_torrent: Option<&str>,
         output: Option<&str>,
     ) -> Result<Task> {
-        self.complete_guarded(task_id, Some(worker_id), result_torrent, output)
+        self.complete_guarded(task_id, Some(worker_id), result_torrent, output, None)
             .await
+    }
+
+    pub async fn complete_for_worker_with_managed_receipt(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        output: Option<&str>,
+        executed_ops: i64,
+        output_bytes: i64,
+        receipt_json: &str,
+    ) -> Result<Task> {
+        self.complete_guarded(
+            task_id,
+            Some(worker_id),
+            None,
+            output,
+            Some(ManagedCompletionReceipt {
+                executed_ops,
+                output_bytes,
+                receipt_json,
+            }),
+        )
+        .await
     }
 
     pub async fn complete_result_for_worker(
@@ -239,6 +271,7 @@ impl TaskRepository {
         worker_id: Option<&str>,
         result_torrent: Option<&str>,
         output: Option<&str>,
+        managed_receipt: Option<ManagedCompletionReceipt<'_>>,
     ) -> Result<Task> {
         let mut tx = self.pool.begin().await?;
         let deterministic: bool =
@@ -254,7 +287,7 @@ impl TaskRepository {
             anyhow::bail!("deterministic task completion requires a result reference");
         }
 
-        let completed = if let Some(worker_id) = worker_id {
+        let mut completed = if let Some(worker_id) = worker_id {
             sqlx::query_as::<_, Task>(
                 "UPDATE tasks
                  SET status = 'COMPLETED', result_torrent = $1, output = COALESCE($2, output), last_update = NOW(), completed_at = NOW()
@@ -281,6 +314,24 @@ impl TaskRepository {
             .await?
         };
 
+        if let Some(receipt) = managed_receipt {
+            completed = sqlx::query_as::<_, Task>(
+                "UPDATE tasks
+                 SET managed_executed_ops = $1,
+                     managed_output_bytes = $2,
+                     managed_receipt_json = $3,
+                     last_update = NOW()
+                 WHERE task_id = $4
+                 RETURNING *",
+            )
+            .bind(receipt.executed_ops.max(0))
+            .bind(receipt.output_bytes.max(0))
+            .bind(receipt.receipt_json)
+            .bind(task_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        }
+
         if let Some(worker_id) = completed.worker_id.as_deref() {
             increment_worker_success(&mut tx, worker_id).await?;
             insert_task_attestation(
@@ -305,11 +356,13 @@ impl TaskRepository {
             return Ok(completed);
         }
 
+        let billable_cpt = billable_amount_cpt(&completed);
+
         let charged = sqlx::query(
             "UPDATE users SET balance = balance - $1, updated_at = NOW()
              WHERE username = $2 AND balance >= $1",
         )
-        .bind(completed.max_cpt)
+        .bind(billable_cpt)
         .bind(&completed.owner)
         .execute(&mut *tx)
         .await?
@@ -317,8 +370,8 @@ impl TaskRepository {
             > 0;
 
         if charged {
-            let platform_fee_cpt = (completed.max_cpt * PLATFORM_FEE_BPS) / 10_000;
-            let provider_credit_cpt = (completed.max_cpt - platform_fee_cpt).max(0);
+            let platform_fee_cpt = (billable_cpt * PLATFORM_FEE_BPS) / 10_000;
+            let provider_credit_cpt = (billable_cpt - platform_fee_cpt).max(0);
             let provider_user: Option<String> = match completed.worker_id.as_deref() {
                 Some(worker_id) => {
                     sqlx::query_scalar("SELECT username FROM worker_nodes WHERE worker_id = $1")
@@ -336,7 +389,7 @@ impl TaskRepository {
                 completed.worker_id.as_deref(),
                 provider_user.as_deref(),
                 "payer_debit",
-                completed.max_cpt,
+                billable_cpt,
             )
             .await?;
             insert_ledger_entry(
@@ -364,7 +417,7 @@ impl TaskRepository {
                 "UPDATE tasks SET billing_settled = true, billed_amount = $1, last_update = NOW()
                  WHERE task_id = $2 RETURNING *",
             )
-            .bind(completed.max_cpt)
+            .bind(billable_cpt)
             .bind(task_id)
             .fetch_one(&mut *tx)
             .await?;
@@ -375,7 +428,7 @@ impl TaskRepository {
                 "Task {} completed but billing is pending: owner {} has insufficient balance for {}",
                 task_id,
                 completed.owner,
-                completed.max_cpt
+                billable_cpt
             );
             tx.commit().await?;
             Ok(completed)
@@ -576,6 +629,29 @@ async fn insert_ledger_entry(
     Ok(())
 }
 
+fn ceil_div_i64(value: i64, divisor: i64) -> i64 {
+    if value <= 0 {
+        0
+    } else {
+        ((value - 1) / divisor) + 1
+    }
+}
+
+fn managed_receipt_amount_cpt(task: &Task) -> i64 {
+    MANAGED_BASE_INVOCATION_CPT
+        + ceil_div_i64(task.managed_executed_ops, 1_000) * MANAGED_OP_BLOCK_CPT
+        + ceil_div_i64(task.managed_output_bytes, 1_024) * MANAGED_OUTPUT_KIB_CPT
+}
+
+fn billable_amount_cpt(task: &Task) -> i64 {
+    if task.runtime.as_deref() == Some("managed-function-v0") && task.managed_receipt_json.is_some()
+    {
+        managed_receipt_amount_cpt(task).min(task.max_cpt).max(0)
+    } else {
+        task.max_cpt.max(0)
+    }
+}
+
 async fn increment_worker_success(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     worker_id: &str,
@@ -725,6 +801,8 @@ mod tests {
             output: None,
             result_torrent: None,
             torrent_source: Some("example-btih".into()),
+            runtime: None,
+            task_source: None,
             expected_btih: None,
             cpu_usage: 0.0,
             memory_usage: 0.0,
@@ -739,6 +817,9 @@ mod tests {
             max_cpt: 1000,
             billing_settled: false,
             billed_amount: 0,
+            managed_executed_ops: 0,
+            managed_output_bytes: 0,
+            managed_receipt_json: None,
             retry_count: 0,
             max_retries: 3,
             deadline: None,
@@ -1876,6 +1957,124 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_managed_complete_settles_billing_from_receipt() {
+        let (p, fixture) = match pool("task_repository_managed_receipt_billing").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("managed-billing-user-{unique}");
+        let provider = format!("managed-billing-provider-{unique}");
+        let worker_id = format!("managed-billing-worker-{unique}");
+        let task_id = format!("managed-billing-task-{unique}");
+
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        )
+        .bind(&username)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        insert_worker(&repo.pool, &worker_id, &provider).await;
+
+        let mut task = make_task(&task_id, &username);
+        task.runtime = Some("managed-function-v0".into());
+        task.max_cpt = 25;
+        repo.create(&task).await.unwrap();
+        repo.assign_to_worker(&task_id, &worker_id, "10.0.0.15")
+            .await
+            .unwrap();
+
+        let completed = repo
+            .complete_for_worker_with_managed_receipt(
+                &task_id,
+                &worker_id,
+                Some("7"),
+                2_500,
+                2_049,
+                "{\"executed_ops\":2500,\"output_bytes\":2049}",
+            )
+            .await
+            .unwrap();
+
+        assert!(completed.billing_settled);
+        assert_eq!(completed.billed_amount, 7);
+        assert_eq!(completed.managed_executed_ops, 2_500);
+        assert_eq!(completed.managed_output_bytes, 2_049);
+        assert_eq!(
+            completed.managed_receipt_json.as_deref(),
+            Some("{\"executed_ops\":2500,\"output_bytes\":2049}")
+        );
+
+        let balance: i64 = sqlx::query_scalar("SELECT balance FROM users WHERE username = $1")
+            .bind(&username)
+            .fetch_one(&repo.pool)
+            .await
+            .unwrap();
+        assert_eq!(balance, 93);
+
+        cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_managed_receipt_billing_is_capped_by_max_cpt() {
+        let (p, fixture) = match pool("task_repository_managed_receipt_billing_cap").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("managed-cap-user-{unique}");
+        let provider = format!("managed-cap-provider-{unique}");
+        let worker_id = format!("managed-cap-worker-{unique}");
+        let task_id = format!("managed-cap-task-{unique}");
+
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        )
+        .bind(&username)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        insert_worker(&repo.pool, &worker_id, &provider).await;
+
+        let mut task = make_task(&task_id, &username);
+        task.runtime = Some("managed-function-v0".into());
+        task.max_cpt = 5;
+        repo.create(&task).await.unwrap();
+        repo.assign_to_worker(&task_id, &worker_id, "10.0.0.16")
+            .await
+            .unwrap();
+
+        let completed = repo
+            .complete_for_worker_with_managed_receipt(
+                &task_id,
+                &worker_id,
+                Some("large"),
+                10_000,
+                8_192,
+                "{\"executed_ops\":10000,\"output_bytes\":8192}",
+            )
+            .await
+            .unwrap();
+
+        assert!(completed.billing_settled);
+        assert_eq!(completed.billed_amount, 5);
+
+        let balance: i64 = sqlx::query_scalar("SELECT balance FROM users WHERE username = $1")
+            .bind(&username)
+            .fetch_one(&repo.pool)
+            .await
+            .unwrap();
+        assert_eq!(balance, 95);
+
+        cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
     async fn test_deterministic_complete_requires_result_reference() {
         let (p, fixture) = match pool("task_repository_deterministic_requires_result").await {
             Some(parts) => parts,
@@ -2071,6 +2270,8 @@ mod tests {
             output: None,
             result_torrent: None,
             torrent_source: Some("example-btih".into()),
+            runtime: None,
+            task_source: None,
             expected_btih: None,
             cpu_usage: 0.0,
             memory_usage: 0.0,
@@ -2085,6 +2286,9 @@ mod tests {
             max_cpt: 1000,
             billing_settled: false,
             billed_amount: 0,
+            managed_executed_ops: 0,
+            managed_output_bytes: 0,
+            managed_receipt_json: None,
             retry_count: 0,
             max_retries: 3,
             deadline: None,

@@ -180,6 +180,8 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
             output TEXT,
             result_torrent TEXT,
             torrent_source TEXT,
+            runtime TEXT,
+            task_source TEXT,
             expected_btih VARCHAR(64),
             cpu_usage DOUBLE PRECISION NOT NULL DEFAULT 0,
             memory_usage DOUBLE PRECISION NOT NULL DEFAULT 0,
@@ -194,6 +196,9 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
             max_cpt BIGINT NOT NULL DEFAULT 0,
             billing_settled BOOLEAN NOT NULL DEFAULT false,
             billed_amount BIGINT NOT NULL DEFAULT 0,
+            managed_executed_ops BIGINT NOT NULL DEFAULT 0,
+            managed_output_bytes BIGINT NOT NULL DEFAULT 0,
+            managed_receipt_json TEXT,
             retry_count INTEGER NOT NULL DEFAULT 0,
             max_retries INTEGER NOT NULL DEFAULT 3,
             deadline TIMESTAMPTZ,
@@ -434,6 +439,25 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     )
     .execute(pool)
     .await;
+    let _ = sqlx::query("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS runtime TEXT;")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS task_source TEXT;")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query(
+        "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS managed_executed_ops BIGINT NOT NULL DEFAULT 0;",
+    )
+    .execute(pool)
+    .await;
+    let _ = sqlx::query(
+        "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS managed_output_bytes BIGINT NOT NULL DEFAULT 0;",
+    )
+    .execute(pool)
+    .await;
+    let _ = sqlx::query("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS managed_receipt_json TEXT;")
+        .execute(pool)
+        .await;
 
     tracing::info!("Database migrations completed successfully");
     Ok(())
