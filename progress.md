@@ -85,6 +85,21 @@
   - `cd executor-rs; cargo clippy -p managed-function-runtime --all-targets -- -D warnings`
   - `cd executor-rs; cargo fmt` (exit 0; stable rustfmt still warns about nightly-only import options)
 
+## 2026-06-29 Managed Runtime Expansion And Transpiler
+
+- Continued the managed runtime delivery goal with `worklog/managed-function-runtime-state.md` as durable state.
+- Used subagents for parallel work:
+  - Mencius completed a read-only task-pipeline integration survey.
+  - Boyle completed a read-only receipt-billing integration survey.
+  - Carver produced a converter prototype; the main agent re-created and verified it in the real `D:\hivemind` workspace.
+- Extended `managed-function-runtime` with JSON input, list/dict values, bounded `for`, stdlib functions `len/get/contains`, and source-location access on parse errors.
+- Added `managed-function-transpiler` with conservative Python/C++ subset conversion and explicit unsupported-construct errors.
+- Verification passed:
+  - `cd executor-rs; cargo test -p managed-function-runtime -- --nocapture`
+  - `cd executor-rs; cargo clippy -p managed-function-runtime --all-targets -- -D warnings`
+  - `cd executor-rs; cargo test -p managed-function-transpiler -- --nocapture`
+  - `cd executor-rs; cargo clippy -p managed-function-transpiler --all-targets -- -D warnings`
+
 ## 2026-06-29 Stale Finding Status Reconciliation
 
 - Reconciled confirmed-finding statuses for repairs already present in the current worktree:
