@@ -62,6 +62,37 @@ Assert-Contains `
 
 Assert-Contains `
     -Haystack $scriptText `
+    -Needle "function Reset-WindowsTerminalCmdOpacity" `
+    -Message "start-worker launcher must reset Windows Terminal cmd.exe profile opacity, not only legacy conhost settings."
+
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle "Microsoft.WindowsTerminal_8wekyb3d8bbwe" `
+    -Message "start-worker launcher must inspect packaged Windows Terminal settings."
+
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle "useAcrylic" `
+    -Message "start-worker launcher must disable Windows Terminal acrylic transparency."
+
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle "useAcrylicInTabRow" `
+    -Message "start-worker launcher must disable Windows Terminal tab row acrylic transparency."
+
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle "opacity" `
+    -Message "start-worker launcher must force Windows Terminal profile opacity to 100."
+
+$importCall = $scriptText.IndexOf("Import-DotEnv -Path `$envFile")
+$resetCall = if ($importCall -ge 0) { $scriptText.LastIndexOf("Reset-WindowsTerminalCmdOpacity", $importCall) } else { -1 }
+if ($resetCall -lt 0 -or $importCall -lt 0) {
+    throw "start-worker launcher must reset console opacity before .env import or validation can abort startup."
+}
+
+Assert-Contains `
+    -Haystack $scriptText `
     -Needle 'function Ensure-JwtSecret' `
     -Message "start-worker launcher must auto-generate a JWT secret when it is blank."
 
@@ -74,5 +105,10 @@ Assert-Contains `
     -Haystack $scriptText `
     -Needle 'Ensure-JwtSecret -Path $envFile' `
     -Message "start-worker launcher must call the JWT secret initializer."
+
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle 'TORRENT_TASK_ARTIFACT_BASE_URL=' `
+    -Message "worker package template must expose the remote task artifact base URL setting."
 
 Write-Host "package-worker-windows launcher tests passed"

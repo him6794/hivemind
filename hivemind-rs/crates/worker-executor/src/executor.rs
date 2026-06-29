@@ -5,6 +5,8 @@ use hivemind_models::Task;
 use std::collections::HashSet;
 use std::fs;
 use std::io;
+use std::io::{Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -126,7 +128,7 @@ fn hex_value(byte: u8) -> Option<u8> {
 fn candidate_task_paths(source: &str, config: &HivemindConfig) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     let trimmed = source.trim();
-    if !trimmed.is_empty() && !trimmed.starts_with("magnet:?") {
+    if !trimmed.is_empty() && !trimmed.starts_with("magnet:?") && !trimmed.starts_with("http://") {
         candidates.push(PathBuf::from(trimmed));
     }
 
@@ -159,10 +161,151 @@ fn resolve_task_source(task: &Task, config: &HivemindConfig) -> Result<PathBuf> 
         }
     }
 
+    if source.trim().starts_with("http://") {
+        let path = download_http_task_artifact(task, source.trim(), config)?;
+        let path = canonicalize_task_artifact(&path, config)?;
+        if let Some(expected_btih) = expected_btih.as_deref() {
+            verify_task_artifact_btih(&path, expected_btih, config)?;
+        }
+        return Ok(path);
+    }
+
     anyhow::bail!(
         "task source '{}' is not available locally; remote torrent/artifact fetch is not implemented for worker-executor",
         source
     )
+}
+
+fn download_http_task_artifact(
+    task: &Task,
+    source: &str,
+    config: &HivemindConfig,
+) -> Result<PathBuf> {
+    let url = parse_http_url(source)?;
+    let file_name = safe_remote_artifact_filename(&url.path, &task.task_id);
+    let download_dir = PathBuf::from(&config.torrent.api_dir).join("downloads");
+    fs::create_dir_all(&download_dir).with_context(|| {
+        format!(
+            "failed to create task artifact download directory '{}'",
+            download_dir.display()
+        )
+    })?;
+    let destination = download_dir.join(file_name);
+    let max_bytes = task_download_limit_bytes(task);
+    let bytes = http_get_bytes(&url, max_bytes)
+        .with_context(|| format!("failed to download task artifact from {source}"))?;
+    fs::write(&destination, &bytes).with_context(|| {
+        format!(
+            "failed to store downloaded task artifact at '{}'",
+            destination.display()
+        )
+    })?;
+    Ok(destination)
+}
+
+#[derive(Debug)]
+struct ParsedHttpUrl {
+    host: String,
+    port: u16,
+    path: String,
+}
+
+fn parse_http_url(source: &str) -> Result<ParsedHttpUrl> {
+    let rest = source
+        .strip_prefix("http://")
+        .ok_or_else(|| anyhow::anyhow!("only http:// task artifact URLs are supported"))?;
+    let (authority, path) = match rest.split_once('/') {
+        Some((authority, path)) => (authority, format!("/{path}")),
+        None => (rest, "/".to_string()),
+    };
+    if authority.is_empty() || authority.contains('@') {
+        anyhow::bail!("invalid task artifact URL authority");
+    }
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() => {
+            let port = port
+                .parse::<u16>()
+                .map_err(|_| anyhow::anyhow!("invalid task artifact URL port"))?;
+            (host.to_string(), port)
+        }
+        _ => (authority.to_string(), 80),
+    };
+    if host.trim().is_empty() || path.contains('\0') {
+        anyhow::bail!("invalid task artifact URL");
+    }
+    Ok(ParsedHttpUrl { host, port, path })
+}
+
+fn safe_remote_artifact_filename(path: &str, task_id: &str) -> String {
+    let raw_name = path
+        .split('?')
+        .next()
+        .unwrap_or(path)
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(task_id);
+    let decoded = percent_decode(raw_name);
+    let file_name = Path::new(&decoded)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(task_id)
+        .trim();
+    if file_name.is_empty() || file_name == "." || file_name == ".." || file_name.contains("..") {
+        format!("{task_id}.zip")
+    } else {
+        file_name.to_string()
+    }
+}
+
+fn task_download_limit_bytes(task: &Task) -> u64 {
+    if task.req_storage_gb > 0 {
+        (task.req_storage_gb as u64).saturating_mul(1024 * 1024 * 1024)
+    } else {
+        1024 * 1024 * 1024
+    }
+}
+
+fn http_get_bytes(url: &ParsedHttpUrl, max_bytes: u64) -> Result<Vec<u8>> {
+    let addr = (url.host.as_str(), url.port)
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("task artifact host did not resolve"))?;
+    let mut stream = TcpStream::connect(addr)?;
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: hivemind-worker-executor\r\nConnection: close\r\n\r\n",
+        url.path, url.host
+    );
+    stream.write_all(request.as_bytes())?;
+
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response)?;
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| anyhow::anyhow!("task artifact response is missing HTTP headers"))?;
+    let body_start = header_end + 4;
+    let headers = String::from_utf8_lossy(&response[..header_end]);
+    let status_line = headers
+        .lines()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("task artifact response is missing status line"))?;
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| anyhow::anyhow!("task artifact response has invalid status line"))?;
+    if !(200..300).contains(&status) {
+        anyhow::bail!("task artifact download returned HTTP {status}");
+    }
+    let body = &response[body_start..];
+    if body.len() as u64 > max_bytes {
+        anyhow::bail!(
+            "task artifact download exceeds task storage limit of {} bytes",
+            max_bytes
+        );
+    }
+    Ok(body.to_vec())
 }
 
 fn canonicalize_task_artifact(path: &Path, config: &HivemindConfig) -> Result<PathBuf> {
@@ -932,6 +1075,25 @@ mod tests {
     }
 
     #[test]
+    fn resolve_task_source_downloads_http_artifact_into_api_dir() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = test_config(tmp.path().join("sandbox").to_str().unwrap());
+        let api_dir = tmp.path().join("api");
+        std::fs::create_dir_all(&api_dir).unwrap();
+        config.torrent.api_dir = api_dir.to_string_lossy().to_string();
+        let package = write_task_zip(tmp.path(), "remote-task.zip");
+        let package_bytes = std::fs::read(&package).unwrap();
+        let url = serve_one_http_artifact("remote-task.zip", package_bytes.clone());
+
+        let resolved = resolve_task_source(&test_task_with_source(url), &config).unwrap();
+
+        let downloads_dir = std::fs::canonicalize(api_dir.join("downloads")).unwrap();
+        assert!(resolved.starts_with(downloads_dir));
+        assert_eq!(resolved.file_name().unwrap(), "remote-task.zip");
+        assert_eq!(std::fs::read(resolved).unwrap(), package_bytes);
+    }
+
+    #[test]
     fn zip_extraction_rejects_uncompressed_size_over_limit() {
         let tmp = TempDir::new().unwrap();
         let package = write_task_zip_with_large_file(tmp.path(), "oversized.zip", 64);
@@ -1229,6 +1391,28 @@ mod tests {
         zip.write_all(b"print('child')\n").unwrap();
         zip.finish().unwrap();
         path
+    }
+
+    fn serve_one_http_artifact(file_name: &str, body: Vec<u8>) -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let file_name = file_name.to_string();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/zip\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.write_all(&body).unwrap();
+        });
+        format!("http://{addr}/{file_name}")
     }
 
     // Test-only shim that writes a temporary executor script for deterministic assertions.

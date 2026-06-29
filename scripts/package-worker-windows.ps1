@@ -59,6 +59,7 @@ EXECUTOR_NETWORK_EGRESS_ENABLED=true
 EXECUTOR_NETWORK_EGRESS_MODE=allowlist
 EXECUTOR_NETWORK_EGRESS_TARGETS=127.0.0.1
 TORRENT_ALLOW_LOCAL_TASK_ARTIFACTS=false
+TORRENT_TASK_ARTIFACT_BASE_URL=
 "@
 $envTemplate | Set-Content -Encoding ASCII (Join-Path $out ".env.worker.example")
 
@@ -197,6 +198,84 @@ function Reset-CmdConsoleOpacity {
     }
 }
 
+function Set-JsonProperty {
+    param(
+        [Parameter(Mandatory = $true)]$Object,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)]$Value
+    )
+
+    if ($Object.PSObject.Properties.Name -contains $Name) {
+        $Object.$Name = $Value
+    } else {
+        Add-Member -InputObject $Object -NotePropertyName $Name -NotePropertyValue $Value
+    }
+}
+
+function Set-WindowsTerminalProfileOpaque {
+    param([Parameter(Mandatory = $true)]$Profile)
+
+    Set-JsonProperty -Object $Profile -Name "useAcrylic" -Value $false
+    Set-JsonProperty -Object $Profile -Name "opacity" -Value 100
+    Set-JsonProperty -Object $Profile -Name "acrylicOpacity" -Value 1.0
+}
+
+function Test-WindowsTerminalCmdProfile {
+    param([Parameter(Mandatory = $true)]$Profile)
+
+    $name = [string]$Profile.name
+    $commandLine = [string]$Profile.commandline
+    if ([string]::IsNullOrWhiteSpace($commandLine)) {
+        $commandLine = [string]$Profile.commandLine
+    }
+
+    return $commandLine -match '(?i)(^|\\)cmd\.exe($|\s)' -or
+        $name.Equals("Command Prompt", [StringComparison]::OrdinalIgnoreCase) -or
+        $name.Equals("命令提示字元", [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Reset-WindowsTerminalCmdOpacity {
+    $settingsPaths = @(
+        (Join-Path $env:LOCALAPPDATA "Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json"),
+        (Join-Path $env:LOCALAPPDATA "Packages\Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe\LocalState\settings.json"),
+        (Join-Path $env:LOCALAPPDATA "Microsoft\Windows Terminal\settings.json")
+    )
+
+    foreach ($settingsPath in $settingsPaths) {
+        if (!(Test-Path -LiteralPath $settingsPath)) {
+            continue
+        }
+
+        try {
+            $settings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
+            if ($null -eq $settings.profiles) {
+                continue
+            }
+
+            if ($null -eq $settings.profiles.defaults) {
+                Set-JsonProperty -Object $settings.profiles -Name "defaults" -Value ([pscustomobject]@{})
+            }
+
+            Set-JsonProperty -Object $settings -Name "useAcrylicInTabRow" -Value $false
+            Set-WindowsTerminalProfileOpaque -Profile $settings.profiles.defaults
+
+            foreach ($profile in @($settings.profiles.list)) {
+                if ($null -ne $profile -and (Test-WindowsTerminalCmdProfile -Profile $profile)) {
+                    Set-WindowsTerminalProfileOpaque -Profile $profile
+                }
+            }
+
+            $settings | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $settingsPath -Encoding UTF8
+        } catch {
+            Write-Warning "Could not reset Windows Terminal opacity at ${settingsPath}: $($_.Exception.Message)"
+        }
+    }
+}
+
+Reset-CmdConsoleOpacity
+Reset-WindowsTerminalCmdOpacity
+Reset-CurrentConsoleOpacity
+
 $envFile = Join-Path $PSScriptRoot ".env.worker"
 if (!(Test-Path $envFile)) {
     Copy-Item (Join-Path $PSScriptRoot ".env.worker.example") $envFile
@@ -206,8 +285,6 @@ if (!(Test-Path $envFile)) {
 Import-DotEnv -Path $envFile
 Ensure-JwtSecret -Path $envFile
 Assert-RequiredEnv -Names @("NODEPOOL_GRPC_ADDR", "WORKER_GRPC_ADDR", "WORKER_CONTROL_HTTP_ADDR", "WORKER_NODEPOOL_TOKEN")
-Reset-CmdConsoleOpacity
-Reset-CurrentConsoleOpacity
 
 & (Join-Path $PSScriptRoot "hivemind-bin.exe") worker
 '@

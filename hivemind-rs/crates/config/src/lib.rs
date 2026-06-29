@@ -77,6 +77,8 @@ pub struct TorrentConfig {
     pub announce_url: String,
     #[serde(default)]
     pub allow_local_task_artifacts: bool,
+    #[serde(default)]
+    pub task_artifact_base_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,6 +145,7 @@ impl Default for HivemindConfig {
                 bt_dir: "./bt_torrents".into(),
                 announce_url: "http://localhost:6969/announce".into(),
                 allow_local_task_artifacts: false,
+                task_artifact_base_url: None,
             },
             vpn: VpnConfig {
                 headscale_url: "http://localhost:8080".into(),
@@ -283,6 +286,12 @@ impl HivemindConfig {
         if let Ok(enabled) = std::env::var("TORRENT_ALLOW_LOCAL_TASK_ARTIFACTS") {
             if let Ok(parsed) = enabled.parse() {
                 config.torrent.allow_local_task_artifacts = parsed;
+            }
+        }
+        if let Ok(url) = std::env::var("TORRENT_TASK_ARTIFACT_BASE_URL") {
+            let url = url.trim().trim_end_matches('/').to_string();
+            if !url.is_empty() {
+                config.torrent.task_artifact_base_url = Some(url);
             }
         }
         if let Ok(url) = std::env::var("HEADSCALE_URL") {
