@@ -1,0 +1,14 @@
+let total = 0;
+let paid_count = 0;
+
+for item in get(input, "items") {
+    let paid = get(item, "status") == "paid";
+    let total = if paid { total + get(item, "amount") } else { total };
+    let paid_count = if paid { paid_count + 1 } else { paid_count };
+}
+
+{
+    "paid_count": paid_count,
+    "paid_total": total,
+    "input_count": len(get(input, "items"))
+};
