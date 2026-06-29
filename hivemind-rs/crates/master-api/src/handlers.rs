@@ -335,6 +335,11 @@ async fn resolve_task_distribution(
         .as_deref()
         .filter(|path| !path.trim().is_empty())
     {
+        if let Some(url) = remote_task_artifact_url(config, zip_path) {
+            return Ok(TaskDistribution {
+                torrent_source: Some(url),
+            });
+        }
         if !config.torrent.allow_local_task_artifacts {
             anyhow::bail!(
                 "ZIP upload uses local task artifacts and is disabled for distributed deployments; set TORRENT_ALLOW_LOCAL_TASK_ARTIFACTS=true only when workers share the configured artifact directory, or submit a remote task reference"
@@ -356,6 +361,16 @@ async fn resolve_task_distribution(
     Ok(TaskDistribution {
         torrent_source: body.torrent.clone(),
     })
+}
+
+fn remote_task_artifact_url(config: &HivemindConfig, zip_path: &str) -> Option<String> {
+    let base = config.torrent.task_artifact_base_url.as_deref()?;
+    let filename = Path::new(zip_path).file_name()?.to_str()?;
+    Some(format!(
+        "{}/uploads/{}",
+        base.trim_end_matches('/'),
+        filename
+    ))
 }
 
 #[derive(Debug, Serialize)]
@@ -2141,5 +2156,31 @@ mod tests {
         };
 
         assert!(error.contains("TORRENT_ALLOW_LOCAL_TASK_ARTIFACTS"));
+    }
+
+    #[tokio::test]
+    async fn zip_distribution_uses_remote_artifact_base_url_without_local_opt_in() {
+        let mut config = HivemindConfig::default();
+        config.torrent.task_artifact_base_url = Some("http://artifacts.example/tasks".into());
+        let body = CreateTaskBody {
+            task_id: "zip-remote".into(),
+            torrent: None,
+            zip_path: Some("D:\\hivemind\\api\\torrents\\uploads\\zip-remote.zip".into()),
+            memory_gb: None,
+            cpu_score: None,
+            gpu_score: None,
+            gpu_memory_gb: None,
+            storage_gb: None,
+            location: None,
+            host_count: None,
+            max_cpt: None,
+        };
+
+        let distribution = resolve_task_distribution(&body, &config).await.unwrap();
+
+        assert_eq!(
+            distribution.torrent_source.as_deref(),
+            Some("http://artifacts.example/tasks/uploads/zip-remote.zip")
+        );
     }
 }

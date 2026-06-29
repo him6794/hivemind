@@ -349,6 +349,13 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_tasks_worker_id ON tasks(worker_id);")
         .execute(pool)
         .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_torrent_source_worker_completed
+         ON tasks(torrent_source, worker_id, completed_at DESC)
+         WHERE status = 'COMPLETED' AND torrent_source IS NOT NULL AND worker_id IS NOT NULL;",
+    )
+    .execute(pool)
+    .await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_worker_nodes_status ON worker_nodes(status);")
         .execute(pool)
         .await?;
@@ -587,6 +594,7 @@ mod tests {
         assert!(indexes.contains(&"idx_tasks_owner_created_at".to_string()));
         assert!(indexes.contains(&"idx_tasks_pending_priority_created_at".to_string()));
         assert!(indexes.contains(&"idx_tasks_assigned_timeout".to_string()));
+        assert!(indexes.contains(&"idx_tasks_torrent_source_worker_completed".to_string()));
 
         fixture.cleanup().await.unwrap();
     }

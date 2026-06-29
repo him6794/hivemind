@@ -149,6 +149,7 @@ Configuration is via environment variables:
 | `TORRENT_API_DIR` | `./api/torrents` | Seed directory for uploaded task packages |
 | `TORRENT_BT_DIR` | `./bt_torrents` | Generated `.torrent` output directory |
 | `TORRENT_ANNOUNCE_URL` | `http://localhost:6969/announce` | Tracker announce URL embedded in torrents |
+| `TORRENT_TASK_ARTIFACT_BASE_URL` | unset | Optional HTTP base URL that exposes `TORRENT_API_DIR`; when set, ZIP uploads can be distributed to workers as downloadable `uploads/<task>.zip` URLs without requiring shared local storage |
 | `EXECUTOR_SANDBOX_DIR` | `./sandbox` | Per-task sandbox root |
 | `LOG_LEVEL` | `info` | Log level (debug, info, warn, error) |
 

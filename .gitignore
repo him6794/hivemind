@@ -6,12 +6,15 @@
 
 # Dependency caches
 node_modules/
+.cargo/
+.rustup/
 
 # Build outputs and compiler caches
 target/
 subagents/sandbox-egress/target/
 hivemind-rs/target-alt/
 hivemind-rs/target-local/
+tmp/
 
 # Python caches
 __pycache__/
