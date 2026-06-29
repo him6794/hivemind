@@ -27,6 +27,14 @@ Output:
 - structured failure when parsing, validation, metering, or runtime evaluation
   fails
 
+Hivemind task integration:
+
+- set `runtime = "managed-function-v0"`
+- set `task_source` to the managed function source text
+- set `torrent` / `torrent_source` to the JSON input payload when input is
+  needed
+- legacy ZIP/Python task execution is unchanged when `runtime` is empty
+
 Receipt fields:
 
 - `status`
@@ -37,6 +45,14 @@ Receipt fields:
 - `output_bytes`
 - `failure_code`
 - `failure_message`
+
+Worker `ExecuteTaskResponse` forwards the receipt summary back to the scheduler:
+
+- `managed_executed_ops`
+- `managed_output_bytes`
+- `managed_receipt_json`
+
+The scheduler stores these fields on the task before billing settlement.
 
 ## Supported Syntax v0
 
@@ -144,6 +160,17 @@ total_cpt =
 
 The runtime should persist the receipt before settlement so billing can be
 recomputed from source, limits, pricing config, and receipt data.
+
+The first integrated billing constants are:
+
+| Component | CPT |
+| --- | ---: |
+| base invocation | 1 |
+| each started 1,000-op block | 1 |
+| each started output KiB | 1 |
+
+The computed amount is capped by `max_cpt`. Legacy tasks without a managed
+receipt continue to settle at `max_cpt`.
 
 ## Implementation Plan
 

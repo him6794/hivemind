@@ -1222,6 +1222,27 @@
 
 - Confirmed findings are recorded in `findings.md`: default public account, unauthenticated/unscoped VPN RPC behavior, permissive CORS and worker info exposure, task list data loss, admin billing aggregation mismatch, unimplemented worker control RPCs, Hivemind and executor lint failures, weak JWT defaults, Rust and JS dependency audit failures, provider worker ownership mismatch, and broken package helper scripts.
 
+## 2026-06-29 Managed Function Runtime
+
+- Added and locally committed the expanded managed runtime and conservative
+  Python/C++ transpiler milestone in commit `bec9b01`.
+- Integrated `runtime = managed-function-v0` and `task_source` through proto,
+  master API, node-manager upload, task model/database persistence, dispatcher,
+  worker gRPC, and worker execution.
+- Worker executor now runs managed function tasks directly from source with JSON
+  input, bypassing host artifacts and external sandbox process execution.
+- Added managed receipt fields to task persistence and worker execution results:
+  `managed_executed_ops`, `managed_output_bytes`, and `managed_receipt_json`.
+- Billing now settles managed tasks from persisted receipt data using
+  `1 + ceil(executed_ops / 1000) + ceil(output_bytes / 1024)`, capped by
+  `max_cpt`; legacy tasks continue to settle at `max_cpt`.
+- Verification passed:
+  - `cargo test -p managed-function-runtime -p managed-function-transpiler -- --nocapture`
+  - `cargo test -p hivemind-worker-executor -p hivemind-task-scheduler -- --nocapture`
+  - `cargo test --workspace --no-run` from `hivemind-rs/`
+  - `cargo clippy -p hivemind-task-scheduler -p hivemind-worker-executor -p hivemind-node-manager -p hivemind-master-api --all-targets -- -D warnings`
+  - `cargo clippy -p managed-function-runtime -p managed-function-transpiler --all-targets -- -D warnings`
+
 ## 2026-06-08
 
 - Started full test and review pass.
