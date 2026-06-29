@@ -66,6 +66,13 @@
   - `cd executor-rs; cargo audit` exits 0 and no longer reports the `memmap2` advisory; only the existing allowed `unic-*` unmaintained warnings remain.
   - `cd executor-rs; cargo build --workspace`
 
+## 2026-06-29 Post-Commit Focused Cargo Verification
+
+- Re-ran the focused Cargo tests that previously timed out while the disk was busy.
+- Verification passed:
+  - `cd hivemind-rs; cargo test -p hivemind-master-api zip_distribution_uses_remote_artifact_base_url_without_local_opt_in -- --nocapture`
+  - `cd hivemind-rs; cargo test -p hivemind-worker-executor resolve_task_source_downloads_http_artifact -- --nocapture`
+
 ## 2026-06-29 Stale Finding Status Reconciliation
 
 - Reconciled confirmed-finding statuses for repairs already present in the current worktree:
