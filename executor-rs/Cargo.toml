@@ -4,6 +4,7 @@ members = [
     "crates/monty",
     "crates/monty-cli",
     "crates/monty-js",
+    "crates/managed-function-runtime",
     "crates/monty-type-checking",
     "crates/monty-typeshed"
 ]

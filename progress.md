@@ -73,6 +73,18 @@
   - `cd hivemind-rs; cargo test -p hivemind-master-api zip_distribution_uses_remote_artifact_base_url_without_local_opt_in -- --nocapture`
   - `cd hivemind-rs; cargo test -p hivemind-worker-executor resolve_task_source_downloads_http_artifact -- --nocapture`
 
+## 2026-06-29 Managed Function Runtime Planning And MVP
+
+- Added `docs/MANAGED_FUNCTION_RUNTIME.md` with the initial managed serverless-style executor plan, supported syntax v0, metering table, and billing direction.
+- Added a new Rust crate `executor-rs/crates/managed-function-runtime` to the executor workspace.
+- Followed RED/GREEN for the runtime API:
+  - RED: `cargo test -p managed-function-runtime --test runtime` failed because `ExecutionLimits`, `ManagedExecutor`, `Status`, and `Value` did not exist.
+  - GREEN: implemented a restricted Rust lexer/parser/evaluator with integer, boolean, string, `let`, `fn`, `return`, `print`, `if/else`, function calls, arithmetic, comparison, operation metering, output limits, and execution receipts.
+- Verification passed:
+  - `cd executor-rs; cargo test -p managed-function-runtime -- --nocapture`
+  - `cd executor-rs; cargo clippy -p managed-function-runtime --all-targets -- -D warnings`
+  - `cd executor-rs; cargo fmt` (exit 0; stable rustfmt still warns about nightly-only import options)
+
 ## 2026-06-29 Stale Finding Status Reconciliation
 
 - Reconciled confirmed-finding statuses for repairs already present in the current worktree:
