@@ -32,6 +32,7 @@ New-Item -ItemType Directory -Force -Path $output | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $output "bin") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $output "ui\master") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $output "ui\worker") | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $output "ui\root") | Out-Null
 
 Push-Location $rustRoot
 try {
@@ -41,7 +42,11 @@ try {
     }
 } finally { Pop-Location }
 
-foreach ($ui in @(@{ Name = "master"; Path = "frontend\master-ui" }, @{ Name = "worker"; Path = "frontend\worker-ui" })) {
+foreach ($ui in @(
+    @{ Name = "root"; Path = "frontend" },
+    @{ Name = "master"; Path = "frontend\master-ui" },
+    @{ Name = "worker"; Path = "frontend\worker-ui" }
+)) {
     Push-Location (Join-Path $repoRoot $ui.Path)
     try {
         npm ci --ignore-scripts
@@ -56,7 +61,7 @@ $manifest = [ordered]@{
     version = $Version
     generated_at_utc = (Get-Date).ToUniversalTime().ToString("o")
     binaries = $roles.Name
-    ui = @("master", "worker")
+    ui = @("root", "master", "worker")
     worker_runtime = (Split-Path -Leaf $MontyExecutable)
     protocol_source = "proto/hivemind.proto"
 }
