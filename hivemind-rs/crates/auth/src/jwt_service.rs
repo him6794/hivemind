@@ -22,6 +22,7 @@ impl JwtService {
         let claims = Claims {
             sub: user.username.clone(),
             user_id: user.id.to_string(),
+            role: None,
             exp: expires_at.timestamp() as usize,
             iat: now.timestamp() as usize,
         };

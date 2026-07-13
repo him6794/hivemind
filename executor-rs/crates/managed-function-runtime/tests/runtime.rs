@@ -159,10 +159,7 @@ fn managed_function_templates_execute_successfully() {
         (
             include_str!("../../../../templates/managed-function-v0/05_route_task.hmf"),
             include_str!("../../../../templates/managed-function-v0/05_route_task.input.json"),
-            dict([
-                ("pool", Value::String("cpu_pool".into())),
-                ("priority", Value::Int(10)),
-            ]),
+            dict([("pool", Value::String("cpu_pool".into())), ("priority", Value::Int(10))]),
         ),
     ];
 

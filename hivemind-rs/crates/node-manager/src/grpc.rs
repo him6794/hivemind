@@ -1187,6 +1187,7 @@ impl MasterNodeService for GrpcMasterNodeService {
                     .encode_claims(&Claims {
                         sub: task.owner.clone(),
                         user_id: task.owner.clone(),
+                        role: Some("worker-execution".into()),
                         exp: now + 300,
                         iat: now,
                     })
@@ -5055,6 +5056,7 @@ mod tests {
             .encode_claims(&Claims {
                 sub: username.into(),
                 user_id: uuid::Uuid::new_v4().to_string(),
+                role: None,
                 exp: (Utc::now().timestamp() + 3600) as usize,
                 iat: Utc::now().timestamp() as usize,
             })

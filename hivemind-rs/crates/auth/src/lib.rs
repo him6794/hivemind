@@ -113,6 +113,7 @@ mod tests {
         let claims = hivemind_models::Claims {
             sub: "example-user".into(),
             user_id: uuid::Uuid::new_v4().to_string(),
+            role: None,
             exp: (chrono::Utc::now().timestamp() + 3600) as usize,
             iat: chrono::Utc::now().timestamp() as usize,
         };

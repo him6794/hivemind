@@ -558,6 +558,8 @@ pub struct ExecutionMetrics {
 pub struct Claims {
     pub sub: String,
     pub user_id: String,
+    #[serde(default)]
+    pub role: Option<String>,
     pub exp: usize,
     pub iat: usize,
 }
