@@ -48,6 +48,7 @@ build-debug:
 
 build-frontend:
 	@echo "Building frontend..."
+	@cd frontend && npm run build
 	@cd frontend/master-ui && npm run build
 	@cd frontend/worker-ui && npm run build
 	@echo "Frontend build complete"
@@ -142,6 +143,7 @@ clean:
 	@cd hivemind-rs && cargo clean
 	@rm -rf frontend/master-ui/dist
 	@rm -rf frontend/worker-ui/dist
+	@rm -rf frontend/dist
 	@echo "Clean complete"
 
 clean-all: clean docker-clean
