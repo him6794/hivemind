@@ -21,3 +21,6 @@ hivemind-models = { path = "../models" }
 hivemind-database = { path = "../database" }
 hivemind-config = { path = "../config" }
 hivemind-auth = { path = "../auth" }
+
+[dev-dependencies]
+tokio-stream.workspace = true
