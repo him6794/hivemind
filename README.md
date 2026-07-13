@@ -101,6 +101,11 @@ make fmt
 
 ### Docker Compose
 
+Copy `.env.example` to `.env`, replace every `replace-me` value, and provision
+the worker registration account before starting the worker. The worker image
+contains the pinned Monty runtime and serves its UI from the same process; the
+master image likewise serves the master UI.
+
 ```bash
 # Start all services
 make docker-up
@@ -111,6 +116,12 @@ make docker-logs
 # Stop all services
 make docker-down
 ```
+
+For a multi-host deployment, set `NODEPOOL_GRPC_ENDPOINT`,
+`WORKER_ADVERTISE_ADDR`, `TORRENT_ANNOUNCE_URL`, and
+`TORRENT_SEED_ADVERTISE_HOST` to routable addresses. Keep nodepool/worker
+traffic on a private network or VPN; public Internet TLS/mTLS termination is
+still an operator responsibility.
 
 ### Manual
 

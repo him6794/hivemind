@@ -1,4 +1,4 @@
-FROM rust:1-bookworm AS builder
+FROM rust:1.90-bookworm AS builder
 
 WORKDIR /app
 
@@ -13,7 +13,9 @@ COPY executor-rs ./executor-rs
 WORKDIR /app/hivemind-rs
 ARG HIVEMIND_BIN=hivemind-bin
 ARG HIVEMIND_FEATURES=master,nodepool,worker,cli
-RUN cargo build --release --bin ${HIVEMIND_BIN} --no-default-features --features ${HIVEMIND_FEATURES}
+RUN cargo build --locked --release --bin ${HIVEMIND_BIN} --no-default-features --features ${HIVEMIND_FEATURES}
+WORKDIR /app/executor-rs
+RUN cargo build --locked --release --bin monty
 
 FROM node:20-alpine AS master-ui
 WORKDIR /ui
@@ -39,6 +41,7 @@ RUN apt-get update \
 
 ARG HIVEMIND_BIN=hivemind-bin
 COPY --from=builder /app/hivemind-rs/target/release/${HIVEMIND_BIN} /app/hivemind
+COPY --from=builder /app/executor-rs/target/release/monty /app/monty
 COPY --from=master-ui /ui/dist /app/frontend/master-ui/dist
 COPY --from=worker-ui /ui/dist /app/frontend/worker-ui/dist
 
@@ -48,6 +51,7 @@ RUN groupadd --system --gid 10001 hivemind \
     && chown -R 10001:10001 /app
 
 USER 10001:10001
+ENV MONTY_EXECUTABLE=/app/monty
 
 EXPOSE 8082 50051 50053 18080 6969 6881
 
