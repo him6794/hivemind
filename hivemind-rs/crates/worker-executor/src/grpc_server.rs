@@ -59,6 +59,16 @@ impl GrpcWorkerNodeService {
         .map_err(|_| Box::new(Status::unauthenticated("Invalid token")))
     }
 
+    fn validate_worker_execution_token(&self, token: &str) -> Result<(), Box<Status>> {
+        let claims = self.validate_rpc_token(token)?;
+        if claims.role.as_deref() != Some("worker-execution") {
+            return Err(Box::new(Status::permission_denied(
+                "Worker execution token required",
+            )));
+        }
+        Ok(())
+    }
+
     fn report_for_update<F>(&self, task_id: &str, update: F) -> Result<(), Box<Status>>
     where
         F: FnOnce(&mut WorkerTaskReport),
@@ -89,7 +99,7 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         request: Request<ExecuteTaskRequest>,
     ) -> Result<Response<ExecuteTaskResponse>, Status> {
         let req = request.into_inner();
-        self.validate_rpc_token(&req.token)
+        self.validate_worker_execution_token(&req.token)
             .map_err(|status| *status)?;
         if !crate::sandbox::is_safe_task_id(&req.task_id) {
             return Err(Status::invalid_argument("unsafe task id"));
@@ -184,7 +194,7 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         request: Request<TaskOutputUploadRequest>,
     ) -> Result<Response<TaskOutputUploadResponse>, Status> {
         let req = request.into_inner();
-        self.validate_rpc_token(&req.token)
+        self.validate_worker_execution_token(&req.token)
             .map_err(|status| *status)?;
         if req.task_id.trim().is_empty() {
             return Ok(Response::new(TaskOutputUploadResponse {
@@ -426,6 +436,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_task_rejects_a_regular_user_token() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+
+        let response = service
+            .execute_task(Request::new(ExecuteTaskRequest {
+                task_id: "user-token-task".into(),
+                torrent: String::new(),
+                resource_limits: None,
+                runtime: String::new(),
+                task_source: String::new(),
+                token: test_user_token("unit-test-jwt-secret", "regular-user"),
+            }))
+            .await;
+
+        assert_eq!(response.unwrap_err().code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
     async fn execute_task_rejects_unsafe_task_id_before_running_code() {
         let tmp = TempDir::new().unwrap();
         let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
@@ -654,11 +683,20 @@ mod tests {
     }
 
     fn test_token(secret: &str, subject: &str) -> String {
+        test_token_with_role(secret, subject, Some("worker-execution"))
+    }
+
+    fn test_user_token(secret: &str, subject: &str) -> String {
+        test_token_with_role(secret, subject, None)
+    }
+
+    fn test_token_with_role(secret: &str, subject: &str, role: Option<&str>) -> String {
         encode(
             &Header::default(),
             &Claims {
                 sub: subject.into(),
                 user_id: uuid::Uuid::new_v4().to_string(),
+                role: role.map(str::to_owned),
                 exp: (Utc::now().timestamp() + 3600) as usize,
                 iat: Utc::now().timestamp() as usize,
             },

@@ -334,6 +334,7 @@ fn worker_execution_token(secret: &str, task: &Task) -> anyhow::Result<String> {
     let claims = Claims {
         sub: task.owner.clone(),
         user_id: task.owner.clone(),
+        role: Some("worker-execution".into()),
         exp: (now + 300) as usize,
         iat: now as usize,
     };

@@ -204,6 +204,7 @@ mod tests {
             .encode_claims(&Claims {
                 sub: subject.into(),
                 user_id: uuid::Uuid::new_v4().to_string(),
+                role: None,
                 exp: (Utc::now().timestamp() + 3600) as usize,
                 iat: Utc::now().timestamp() as usize,
             })
