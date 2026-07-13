@@ -1,4 +1,4 @@
-﻿[workspace]
+[workspace]
 members = [
     "crates/common",
     "crates/proto",
@@ -31,7 +31,7 @@ prost = "0.13"
 prost-types = "0.13"
 tower = { version = "0.5", features = ["timeout", "limit", "util"] }
 axum = { version = "0.7", features = ["macros", "json", "multipart"] }
-tower-http = { version = "0.5", features = ["cors", "trace", "auth"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "auth", "fs"] }
 hyper = { version = "1", features = ["server"] }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-native-roots", "postgres", "derive", "chrono", "uuid", "json", "migrate"] }
 redis = { version = "0.24", features = ["tokio-comp", "connection-manager"] }

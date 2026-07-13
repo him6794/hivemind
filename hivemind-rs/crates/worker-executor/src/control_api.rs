@@ -8,6 +8,7 @@ use hivemind_config::HivemindConfig;
 use hivemind_models::ResourceSpec;
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::services::ServeDir;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerProfile {
@@ -59,14 +60,28 @@ pub fn router(profile: WorkerProfile) -> Router {
 }
 
 pub fn router_with_allowed_origins(profile: WorkerProfile, allowed_origins: &[String]) -> Router {
+    router_with_ui_dir(profile, allowed_origins, None)
+}
+
+pub fn router_with_ui_dir(
+    profile: WorkerProfile,
+    allowed_origins: &[String],
+    ui_dir: Option<&str>,
+) -> Router {
     let cors = build_cors_layer(allowed_origins);
 
-    Router::new()
+    let app = Router::new()
         .route(
             "/api/worker-info",
             get(move || worker_info(profile.clone())),
         )
-        .layer(cors)
+        .layer(cors);
+    match ui_dir.filter(|dir| std::path::Path::new(dir).is_dir()) {
+        Some(dir) => {
+            app.fallback_service(ServeDir::new(dir).append_index_html_on_directories(true))
+        }
+        None => app,
+    }
 }
 
 fn build_cors_layer(allowed_origins: &[String]) -> CorsLayer {
@@ -87,6 +102,7 @@ pub async fn serve(addr: &str, profile: WorkerProfile) -> Result<()> {
         addr,
         profile,
         &config.server.worker_control_cors_allowed_origins,
+        Some(&config.server.worker_ui_dir),
     )
     .await
 }
@@ -95,11 +111,12 @@ pub async fn serve_with_allowed_origins(
     addr: &str,
     profile: WorkerProfile,
     allowed_origins: &[String],
+    ui_dir: Option<&str>,
 ) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(
         listener,
-        router_with_allowed_origins(profile, allowed_origins),
+        router_with_ui_dir(profile, allowed_origins, ui_dir),
     )
     .await?;
     Ok(())
@@ -119,7 +136,42 @@ mod tests {
     use hivemind_config::HivemindConfig;
     use hivemind_models::ResourceSpec;
     use serde_json::Value;
+    use std::fs;
+    use tempfile::tempdir;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn worker_ui_fallback_serves_index_without_shadowing_api() {
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("index.html"), "worker-ui").unwrap();
+        let profile = super::WorkerProfile {
+            worker_id: "worker-1".into(),
+            ip: "127.0.0.1:50053".into(),
+            location: "local".into(),
+            cpu_cores: 1,
+            memory_gb: 1,
+            cpu_score: 1,
+            gpu_score: 0,
+            gpu_memory_gb: 0,
+            storage_total_gb: 1,
+            storage_available_gb: 1,
+            gpu_name: String::new(),
+        };
+        let app = super::router_with_ui_dir(
+            profile,
+            &["http://localhost:3000".into()],
+            directory.path().to_str(),
+        );
+
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(&body[..], b"worker-ui");
+    }
 
     #[test]
     fn worker_profile_converts_resource_spec_to_worker_ui_shape() {

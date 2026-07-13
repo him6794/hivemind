@@ -3,9 +3,10 @@ use std::time::Duration;
 
 use hivemind_models::{ResourceSpec, ResourceUsage};
 use hivemind_proto::{
-    node_manager_service_client::NodeManagerServiceClient, RegisterWorkerNodeRequest,
-    ResourceSpec as ProtoResourceSpec, ResourceUsage as ProtoResourceUsage, RunningStatusRequest,
-    TaskOutputUploadRequest, TaskResultUploadRequest, TaskUsageRequest,
+    node_manager_service_client::NodeManagerServiceClient, user_service_client::UserServiceClient,
+    LoginRequest, RegisterWorkerNodeRequest, ResourceSpec as ProtoResourceSpec,
+    ResourceUsage as ProtoResourceUsage, RunningStatusRequest, TaskOutputUploadRequest,
+    TaskResultUploadRequest, TaskUsageRequest,
 };
 use tokio::sync::watch;
 use tonic::transport::Channel;
@@ -36,15 +37,81 @@ pub fn advertise_addr(listen_addr: &str, configured: Option<String>) -> anyhow::
     Ok(listen_addr.to_string())
 }
 
+pub async fn login_to_nodepool(
+    nodepool_addr: &str,
+    username: &str,
+    password: &str,
+) -> anyhow::Result<String> {
+    let username = username.trim();
+    if username.is_empty() {
+        anyhow::bail!("nodepool login username is required");
+    }
+    if password.is_empty() {
+        anyhow::bail!("nodepool login password is required");
+    }
+    let mut client = UserServiceClient::connect(nodepool_endpoint(nodepool_addr)).await?;
+    let response = client
+        .login(LoginRequest {
+            username: username.to_string(),
+            password: password.to_string(),
+        })
+        .await?
+        .into_inner();
+    if !response.success || response.token.trim().is_empty() {
+        anyhow::bail!(
+            "nodepool login failed: {}",
+            if response.status_message.is_empty() {
+                "invalid credentials"
+            } else {
+                response.status_message.as_str()
+            }
+        );
+    }
+    Ok(response.token)
+}
+
+pub async fn resolve_nodepool_token(
+    nodepool_addr: &str,
+    worker_id: &str,
+    configured_token: Option<&str>,
+    login_username: Option<&str>,
+    login_password: Option<&str>,
+) -> anyhow::Result<String> {
+    if let Some(token) = configured_token.map(str::trim).filter(|t| !t.is_empty()) {
+        return Ok(token.to_string());
+    }
+    let username = login_username
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            let id = worker_id.trim();
+            if id.is_empty() {
+                None
+            } else {
+                Some(id.to_string())
+            }
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "set WORKER_NODEPOOL_TOKEN or WORKER_NODEPOOL_USERNAME/WORKER_NODEPOOL_PASSWORD (or WORKER_USERNAME/WORKER_PASSWORD)"
+            )
+        })?;
+    let password = login_password
+        .ok_or_else(|| anyhow::anyhow!("WORKER_NODEPOOL_PASSWORD (or WORKER_PASSWORD) is required when WORKER_NODEPOOL_TOKEN is not set"))?;
+    login_to_nodepool(nodepool_addr, &username, password).await
+}
+
 pub fn build_register_request(
     worker_id: &str,
+    username: &str,
     worker_addr: &str,
     resources: ResourceSpec,
     location: &str,
     token: &str,
 ) -> RegisterWorkerNodeRequest {
     RegisterWorkerNodeRequest {
-        username: worker_id.to_string(),
+        username: username.to_string(),
         worker_id: worker_id.to_string(),
         ip: worker_addr.to_string(),
         resources: Some(resource_spec_to_proto(resources)),
@@ -71,6 +138,7 @@ pub fn build_status_request(
 pub async fn register_once(
     endpoint: &str,
     worker_id: &str,
+    username: &str,
     worker_addr: &str,
     resources: ResourceSpec,
     location: &str,
@@ -80,6 +148,7 @@ pub async fn register_once(
     let response = client
         .register_worker_node(build_register_request(
             worker_id,
+            username,
             worker_addr,
             resources,
             location,
@@ -162,20 +231,25 @@ pub async fn report_task_usage_once(
     Ok(())
 }
 
+pub struct RegistrationLoopConfig {
+    pub nodepool_addr: String,
+    pub worker_id: String,
+    pub username: String,
+    pub worker_addr: String,
+    pub location: String,
+    pub token: String,
+    pub interval: Duration,
+}
+
 pub fn start_registration_loop(
     executor: Arc<WorkerExecutor>,
-    nodepool_addr: String,
-    worker_id: String,
-    worker_addr: String,
-    location: String,
-    token: String,
-    interval: Duration,
+    registration: RegistrationLoopConfig,
 ) -> watch::Sender<bool> {
     let (tx, mut rx) = watch::channel(false);
     tokio::spawn(async move {
-        let endpoint = nodepool_endpoint(&nodepool_addr);
+        let endpoint = nodepool_endpoint(&registration.nodepool_addr);
         let mut client: Option<NodeManagerServiceClient<Channel>> = None;
-        let mut tick = tokio::time::interval(interval);
+        let mut tick = tokio::time::interval(registration.interval);
 
         loop {
             tokio::select! {
@@ -184,15 +258,16 @@ pub fn start_registration_loop(
                         match NodeManagerServiceClient::connect(endpoint.clone()).await {
                             Ok(mut connected) => {
                                 let request = build_register_request(
-                                    &worker_id,
-                                    &worker_addr,
+                                    &registration.worker_id,
+                                    &registration.username,
+                                    &registration.worker_addr,
                                     executor.get_resource_spec(),
-                                    &location,
-                                    &token,
+                                    &registration.location,
+                                    &registration.token,
                                 );
                                 match connected.register_worker_node(request).await {
                                     Ok(response) if response.get_ref().success => {
-                                        info!("Worker {} registered with nodepool {}", worker_id, endpoint);
+                                        info!("Worker {} registered with nodepool {}", registration.worker_id, endpoint);
                                         client = Some(connected);
                                     }
                                     Ok(response) => warn!("Worker registration rejected: {}", response.get_ref().status_message),
@@ -204,7 +279,7 @@ pub fn start_registration_loop(
                     }
 
                     if let Some(connected) = client.as_mut() {
-                        let request = build_status_request(&worker_id, "IDLE", executor.get_resource_usage(), &token);
+                        let request = build_status_request(&registration.worker_id, "IDLE", executor.get_resource_usage(), &registration.token);
                         match connected.report_status(request).await {
                             Ok(response) if response.get_ref().success => {}
                             Ok(response) => {
@@ -324,8 +399,14 @@ mod tests {
             storage_available_gb: 500,
         };
 
-        let request =
-            super::build_register_request("worker-1", "127.0.0.1:50053", spec, "local", "token");
+        let request = super::build_register_request(
+            "worker-1",
+            "worker-1",
+            "127.0.0.1:50053",
+            spec,
+            "local",
+            "token",
+        );
         let resources = request.resources.unwrap();
 
         assert_eq!(request.worker_id, "worker-1");

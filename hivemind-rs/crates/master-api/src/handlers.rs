@@ -6,7 +6,6 @@ use axum::{
 };
 use hivemind_config::HivemindConfig;
 use hivemind_proto::ResourceSpec as ProtoResourceSpec;
-use hivemind_torrent_service::TorrentService;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -164,6 +163,8 @@ pub struct RemoveWorkerBody {
 
 struct TaskDistribution {
     torrent_source: Option<String>,
+    package_data: Vec<u8>,
+    package_filename: String,
 }
 
 fn bad_task_response(message: impl Into<String>) -> (StatusCode, Json<TaskResponse>) {
@@ -332,49 +333,38 @@ fn task_upload_path(config: &HivemindConfig, task_id: &str) -> PathBuf {
 
 async fn resolve_task_distribution(
     body: &CreateTaskBody,
-    config: &HivemindConfig,
+    _config: &HivemindConfig,
 ) -> anyhow::Result<TaskDistribution> {
+    // ZIP packages are uploaded as bytes to nodepool (trusted seeder). Master does
+    // not create torrents or advertise HTTP artifact URLs as the primary path.
     if let Some(zip_path) = body
         .zip_path
         .as_deref()
         .filter(|path| !path.trim().is_empty())
     {
-        if let Some(url) = remote_task_artifact_url(config, zip_path) {
-            return Ok(TaskDistribution {
-                torrent_source: Some(url),
-            });
+        let package_data = std::fs::read(zip_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read uploaded task package: {e}"))?;
+        if package_data.is_empty() {
+            anyhow::bail!("uploaded task package is empty");
         }
-        if !config.torrent.allow_local_task_artifacts {
-            anyhow::bail!(
-                "ZIP upload uses local task artifacts and is disabled for distributed deployments; set TORRENT_ALLOW_LOCAL_TASK_ARTIFACTS=true only when workers share the configured artifact directory, or submit a remote task reference"
-            );
-        }
-        let torrent = TorrentService::new(config);
-        let info = torrent
-            .zip_to_torrent(Path::new(zip_path), &config.torrent.announce_url)
-            .await?;
-        let name = Path::new(zip_path)
+        let package_filename = Path::new(zip_path)
             .file_name()
             .and_then(|name| name.to_str())
-            .unwrap_or(&body.task_id);
+            .unwrap_or(&body.task_id)
+            .to_string();
         return Ok(TaskDistribution {
-            torrent_source: Some(torrent.magnet_uri(&info.info_hash, name)),
+            // torrent_source filled by nodepool after seeding.
+            torrent_source: None,
+            package_data,
+            package_filename,
         });
     }
 
     Ok(TaskDistribution {
         torrent_source: body.torrent.clone(),
+        package_data: Vec::new(),
+        package_filename: String::new(),
     })
-}
-
-fn remote_task_artifact_url(config: &HivemindConfig, zip_path: &str) -> Option<String> {
-    let base = config.torrent.task_artifact_base_url.as_deref()?;
-    let filename = Path::new(zip_path).file_name()?.to_str()?;
-    Some(format!(
-        "{}/uploads/{}",
-        base.trim_end_matches('/'),
-        filename
-    ))
 }
 
 #[derive(Debug, Serialize)]
@@ -942,8 +932,8 @@ async fn create_task_from_body(
             return budget_guard_response(quoted_cpt, mc);
         }
     }
-    let ts = match resolve_task_distribution(&body, &state.config).await {
-        Ok(m) => m.torrent_source.unwrap_or_default(),
+    let distribution = match resolve_task_distribution(&body, &state.config).await {
+        Ok(m) => m,
         Err(e) => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -955,6 +945,7 @@ async fn create_task_from_body(
             )
         }
     };
+    let ts = distribution.torrent_source.unwrap_or_default();
     let req = ProtoResourceSpec {
         cpu_cores: 0,
         memory_mb: body.memory_gb.unwrap_or(0) as i64 * 1024,
@@ -977,6 +968,8 @@ async fn create_task_from_body(
             body.max_cpt.unwrap_or(quoted_cpt),
             body.runtime.as_deref().unwrap_or(""),
             body.task_source.as_deref().unwrap_or(""),
+            distribution.package_data,
+            &distribution.package_filename,
         )
         .await
     {
@@ -2142,40 +2135,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zip_distribution_requires_explicit_local_artifact_opt_in() {
+    async fn zip_distribution_loads_package_bytes_for_nodepool_seed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("zip-nodepool.zip");
+        std::fs::write(&zip_path, b"package-bytes-for-nodepool").unwrap();
         let config = HivemindConfig::default();
         let body = CreateTaskBody {
-            task_id: "zip-local-only".into(),
+            task_id: "zip-nodepool".into(),
             torrent: None,
-            zip_path: Some("task.zip".into()),
-            runtime: None,
-            task_source: None,
-            memory_gb: None,
-            cpu_score: None,
-            gpu_score: None,
-            gpu_memory_gb: None,
-            storage_gb: None,
-            location: None,
-            host_count: None,
-            max_cpt: None,
-        };
-
-        let error = match resolve_task_distribution(&body, &config).await {
-            Ok(_) => panic!("local ZIP distribution should require explicit opt-in"),
-            Err(error) => error.to_string(),
-        };
-
-        assert!(error.contains("TORRENT_ALLOW_LOCAL_TASK_ARTIFACTS"));
-    }
-
-    #[tokio::test]
-    async fn zip_distribution_uses_remote_artifact_base_url_without_local_opt_in() {
-        let mut config = HivemindConfig::default();
-        config.torrent.task_artifact_base_url = Some("http://artifacts.example/tasks".into());
-        let body = CreateTaskBody {
-            task_id: "zip-remote".into(),
-            torrent: None,
-            zip_path: Some("D:\\hivemind\\api\\torrents\\uploads\\zip-remote.zip".into()),
+            zip_path: Some(zip_path.display().to_string()),
             runtime: None,
             task_source: None,
             memory_gb: None,
@@ -2190,9 +2158,35 @@ mod tests {
 
         let distribution = resolve_task_distribution(&body, &config).await.unwrap();
 
+        assert!(distribution.torrent_source.is_none());
+        assert_eq!(distribution.package_data, b"package-bytes-for-nodepool");
+        assert_eq!(distribution.package_filename, "zip-nodepool.zip");
+    }
+
+    #[tokio::test]
+    async fn torrent_only_distribution_keeps_reference_without_package_bytes() {
+        let config = HivemindConfig::default();
+        let body = CreateTaskBody {
+            task_id: "magnet-only".into(),
+            torrent: Some("magnet:?xt=urn:btih:abc".into()),
+            zip_path: None,
+            runtime: None,
+            task_source: None,
+            memory_gb: None,
+            cpu_score: None,
+            gpu_score: None,
+            gpu_memory_gb: None,
+            storage_gb: None,
+            location: None,
+            host_count: None,
+            max_cpt: None,
+        };
+
+        let distribution = resolve_task_distribution(&body, &config).await.unwrap();
         assert_eq!(
             distribution.torrent_source.as_deref(),
-            Some("http://artifacts.example/tasks/uploads/zip-remote.zip")
+            Some("magnet:?xt=urn:btih:abc")
         );
+        assert!(distribution.package_data.is_empty());
     }
 }

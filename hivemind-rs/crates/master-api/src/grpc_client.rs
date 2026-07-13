@@ -69,11 +69,16 @@ pub struct GrpcClient {
 
 impl GrpcClient {
     pub async fn connect(addr: &str) -> Result<Self, tonic::transport::Error> {
-        let endpoint = Endpoint::from_shared(format!("http://{}", addr))?;
+        let endpoint =
+            Endpoint::from_shared(format!("http://{}", addr))?.http2_adaptive_window(true);
         let channel = endpoint.connect().await?;
+        // Task package uploads can be large; raise client decode/encode limits.
+        let max_msg = 128 * 1024 * 1024;
         Ok(Self {
             user: UserServiceClient::new(channel.clone()),
-            master: MasterNodeServiceClient::new(channel.clone()),
+            master: MasterNodeServiceClient::new(channel.clone())
+                .max_decoding_message_size(max_msg)
+                .max_encoding_message_size(max_msg),
             node_mgr: NodeManagerServiceClient::new(channel),
         })
     }
@@ -151,6 +156,8 @@ impl GrpcClient {
         max_cpt: i64,
         runtime: &str,
         task_source: &str,
+        package_data: Vec<u8>,
+        package_filename: &str,
     ) -> Result<UploadTaskResponse, tonic::Status> {
         self.master
             .upload_task(Request::new(UploadTaskRequest {
@@ -163,6 +170,8 @@ impl GrpcClient {
                 max_cpt,
                 runtime: runtime.to_string(),
                 task_source: task_source.to_string(),
+                package_data,
+                package_filename: package_filename.to_string(),
             }))
             .await
             .map(|r| r.into_inner())

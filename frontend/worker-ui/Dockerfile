@@ -2,7 +2,7 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci
+RUN npm ci --include=dev
 COPY . .
 ARG VITE_API_BASE=
 ARG VITE_WORKER_CONTROL_BASE=

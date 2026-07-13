@@ -1,0 +1,13 @@
+.git
+.gitignore
+.dockerignore
+
+**/target
+**/node_modules
+**/dist
+**/.vite
+**/.cache
+**/coverage
+
+*.log
+*.tmp

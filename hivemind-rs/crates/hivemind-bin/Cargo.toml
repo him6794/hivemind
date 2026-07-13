@@ -3,6 +3,44 @@ name = "hivemind-bin"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+name = "hivemind_bin"
+path = "src/lib.rs"
+
+[features]
+default = ["master", "nodepool", "worker", "cli"]
+master = ["dep:hivemind-master-api"]
+nodepool = [
+    "dep:hivemind-auth",
+    "dep:hivemind-database",
+    "dep:hivemind-node-manager",
+    "dep:hivemind-task-scheduler",
+    "dep:hivemind-torrent-service",
+    "dep:hivemind-vpn-service",
+]
+worker = ["dep:hivemind-worker-executor"]
+cli = ["dep:reqwest"]
+
+[[bin]]
+name = "hivemind-bin"
+path = "src/bin/hivemind-bin.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "hivemind-master"
+path = "src/bin/hivemind-master.rs"
+required-features = ["master"]
+
+[[bin]]
+name = "hivemind-nodepool"
+path = "src/bin/hivemind-nodepool.rs"
+required-features = ["nodepool"]
+
+[[bin]]
+name = "hivemind-worker"
+path = "src/bin/hivemind-worker.rs"
+required-features = ["worker"]
+
 [dependencies]
 tokio.workspace = true
 tonic.workspace = true
@@ -13,15 +51,16 @@ anyhow.workspace = true
 uuid.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 hivemind-common = { path = "../common" }
 hivemind-proto = { path = "../proto" }
 hivemind-models = { path = "../models" }
 hivemind-config = { path = "../config" }
-hivemind-database = { path = "../database" }
-hivemind-auth = { path = "../auth" }
-hivemind-node-manager = { path = "../node-manager" }
-hivemind-task-scheduler = { path = "../task-scheduler" }
-hivemind-master-api = { path = "../master-api" }
-hivemind-worker-executor = { path = "../worker-executor" }
-hivemind-vpn-service = { path = "../vpn-service" }
+hivemind-database = { path = "../database", optional = true }
+hivemind-auth = { path = "../auth", optional = true }
+hivemind-node-manager = { path = "../node-manager", optional = true }
+hivemind-task-scheduler = { path = "../task-scheduler", optional = true }
+hivemind-master-api = { path = "../master-api", optional = true }
+hivemind-worker-executor = { path = "../worker-executor", optional = true }
+hivemind-vpn-service = { path = "../vpn-service", optional = true }
+hivemind-torrent-service = { path = "../torrent-service", optional = true }

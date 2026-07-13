@@ -233,7 +233,16 @@ fn candidate_task_paths(source: &str, config: &HivemindConfig) -> Vec<PathBuf> {
 
 fn resolve_task_source(task: &Task, config: &HivemindConfig) -> Result<PathBuf> {
     let source = task.torrent_source.as_deref().unwrap_or("");
-    let expected_btih = decode_magnet_btih(source);
+    let expected_btih = decode_magnet_btih(source)
+        .or_else(|| task.expected_btih.clone())
+        .or_else(|| {
+            let trimmed = source.trim();
+            if trimmed.len() == 40 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+                Some(trimmed.to_string())
+            } else {
+                None
+            }
+        });
     for path in candidate_task_paths(source, config) {
         if path.exists() {
             let path = canonicalize_task_artifact(&path, config)?;
@@ -253,10 +262,109 @@ fn resolve_task_source(task: &Task, config: &HivemindConfig) -> Result<PathBuf> 
         return Ok(path);
     }
 
+    if source.trim().starts_with("magnet:?") || expected_btih.is_some() {
+        let path =
+            download_bt_task_artifact(task, source.trim(), expected_btih.as_deref(), config)?;
+        let path = canonicalize_task_artifact(&path, config)?;
+        if let Some(expected_btih) = expected_btih.as_deref() {
+            verify_task_artifact_btih(&path, expected_btih, config)?;
+        }
+        return Ok(path);
+    }
+
     anyhow::bail!(
-        "task source '{}' is not available locally; remote torrent/artifact fetch is not implemented for worker-executor",
+        "task source '{}' is not available locally and is not a magnet/BT reference",
         source
     )
+}
+
+fn decode_magnet_announce(source: &str) -> Option<String> {
+    let query = source.strip_prefix("magnet:?")?;
+    query.split('&').find_map(|part| {
+        let value = part.strip_prefix("tr=")?;
+        let decoded = percent_decode(value);
+        if decoded.trim().is_empty() {
+            None
+        } else {
+            Some(decoded)
+        }
+    })
+}
+
+fn download_bt_task_artifact(
+    task: &Task,
+    source: &str,
+    expected_btih: Option<&str>,
+    config: &HivemindConfig,
+) -> Result<PathBuf> {
+    let info_hash = expected_btih
+        .map(str::to_string)
+        .or_else(|| decode_magnet_btih(source))
+        .ok_or_else(|| anyhow::anyhow!("magnet/BT task source is missing info hash"))?;
+    let announce = decode_magnet_announce(source)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| config.torrent.announce_url.clone());
+    if announce.trim().is_empty() {
+        anyhow::bail!("magnet/BT task source is missing tracker announce URL");
+    }
+
+    let display_name = decode_magnet_display_name(source);
+    let file_name = display_name
+        .as_deref()
+        .map(|name| {
+            Path::new(name)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or(name)
+                .to_string()
+        })
+        .filter(|name| !name.is_empty() && name != "." && name != "..")
+        .unwrap_or_else(|| format!("{}.zip", task.task_id));
+
+    let download_dir = PathBuf::from(&config.torrent.api_dir).join("downloads");
+    fs::create_dir_all(&download_dir).with_context(|| {
+        format!(
+            "failed to create task artifact download directory '{}'",
+            download_dir.display()
+        )
+    })?;
+    let destination = download_dir.join(file_name);
+
+    // Blocking path is used by existing executor code; bridge async BT helpers.
+    let max_bytes = task_download_limit_bytes(task);
+    let peer_id = format!("worker-{}", &task.task_id[..8.min(task.task_id.len())]);
+    let info_hash_clone = info_hash.clone();
+    let announce_clone = announce.clone();
+    let destination_clone = destination.clone();
+    let display_name_clone = display_name.clone();
+    let downloaded = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| anyhow::anyhow!("failed to create BT download runtime: {e}"))?;
+        rt.block_on(async move {
+            let peers = hivemind_torrent_service::transfer::announce_to_tracker(
+                &announce_clone,
+                &info_hash_clone,
+                &peer_id,
+                0,
+                max_bytes,
+            )
+            .await?;
+            hivemind_torrent_service::transfer::download_from_peers(
+                &info_hash_clone,
+                &peers,
+                &destination_clone,
+                display_name_clone.as_deref(),
+                max_bytes,
+            )
+            .await
+        })
+    })
+    .join()
+    .map_err(|_| anyhow::anyhow!("BT download worker thread panicked"))??;
+
+    Ok(downloaded)
 }
 
 fn download_http_task_artifact(
@@ -1181,6 +1289,98 @@ mod tests {
         assert!(resolved.starts_with(downloads_dir));
         assert_eq!(resolved.file_name().unwrap(), "remote-task.zip");
         assert_eq!(std::fs::read(resolved).unwrap(), package_bytes);
+    }
+
+    #[test]
+    fn resolve_task_source_downloads_magnet_via_bt_into_api_dir() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = test_config(tmp.path().join("sandbox").to_str().unwrap());
+        let worker_api_dir = tmp.path().join("worker-api");
+        let seeder_api_dir = tmp.path().join("seeder-api");
+        let bt_dir = tmp.path().join("bt");
+        std::fs::create_dir_all(&worker_api_dir).unwrap();
+        std::fs::create_dir_all(&seeder_api_dir).unwrap();
+        std::fs::create_dir_all(&bt_dir).unwrap();
+        config.torrent.api_dir = worker_api_dir.to_string_lossy().to_string();
+        config.torrent.bt_dir = bt_dir.to_string_lossy().to_string();
+
+        let package_bytes = b"magnet-bt-package-bytes".to_vec();
+        let package_name = "magnet-task.zip";
+
+        // Keep a multi-thread runtime alive for the whole download path.
+        // resolve_task_source() bridges BT I/O on its own thread/runtime, so a
+        // current_thread seeder runtime would stop polling after block_on returns.
+        let seeder_rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let magnet = seeder_rt.block_on(async {
+            use hivemind_torrent_service::tracker::{PeerEntry, Tracker};
+            use hivemind_torrent_service::transfer::{
+                create_and_store_seed, start_http_tracker, start_seed_listener, SeedStore,
+            };
+            use hivemind_torrent_service::TorrentService;
+            use std::sync::Arc;
+
+            let tracker_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let tracker_addr = tracker_listener.local_addr().unwrap();
+            drop(tracker_listener);
+            let seed_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let seed_addr = seed_listener.local_addr().unwrap();
+            drop(seed_listener);
+
+            let announce = format!("http://{tracker_addr}/announce");
+            let store = SeedStore::new();
+            let seeded = create_and_store_seed(
+                &store,
+                &package_bytes,
+                std::path::Path::new(package_name),
+                &announce,
+                &seeder_api_dir,
+                &bt_dir,
+                String::new(),
+            )
+            .await
+            .unwrap();
+            let svc =
+                TorrentService::with_dirs(seeder_api_dir.clone(), bt_dir.clone(), store.clone());
+            let magnet = svc.magnet_uri(&seeded.info_hash, package_name, &announce);
+
+            let tracker = Arc::new(Tracker::new(60));
+            let tracker_handle = start_http_tracker(tracker_addr, tracker.clone())
+                .await
+                .unwrap();
+            let seed_handle = start_seed_listener(seed_addr, store).await.unwrap();
+            tracker
+                .announce(
+                    &seeded.info_hash,
+                    PeerEntry {
+                        peer_id: "nodepool-seeder".into(),
+                        ip: seed_addr.ip().to_string(),
+                        port: seed_addr.port(),
+                        uploaded: 0,
+                        downloaded: 0,
+                        left: 0,
+                        last_announce: 0,
+                    },
+                )
+                .await
+                .unwrap();
+
+            // Detach service tasks so JoinHandle drop does not abort them.
+            // seeder_rt remains in scope until after resolve_task_source().
+            std::mem::forget(tracker_handle);
+            std::mem::forget(seed_handle);
+            magnet
+        });
+
+        let resolved = resolve_task_source(&test_task_with_source(magnet), &config).unwrap();
+        let downloads_dir = std::fs::canonicalize(worker_api_dir.join("downloads")).unwrap();
+        assert!(resolved.starts_with(&downloads_dir));
+        assert_eq!(resolved.file_name().unwrap(), "magnet-task.zip");
+        assert_eq!(std::fs::read(resolved).unwrap(), package_bytes);
+        drop(seeder_rt);
     }
 
     #[test]

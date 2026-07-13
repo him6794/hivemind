@@ -98,8 +98,9 @@ use crate::service::{NodeManagerService as NmSvc, WorkerRegistration};
 use crate::NodeManager;
 use hivemind_auth::AuthManager;
 use hivemind_database::postgres;
-use hivemind_models::{Task, TaskStatus, WorkerNode};
+use hivemind_models::{Claims, Task, TaskStatus, WorkerNode};
 use hivemind_task_scheduler::{dispatcher::worker_endpoint, BatchTaskReport, TaskScheduler};
+use hivemind_torrent_service::DistributionRuntime;
 
 const MAX_TASK_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_RESULT_REFERENCE_BYTES: usize = 4096;
@@ -110,6 +111,39 @@ pub struct NodepoolState {
     pub node_manager: Arc<NodeManager>,
     pub scheduler: TaskScheduler,
     pub artifact_root: PathBuf,
+    /// Trusted task-package distribution runtime (tracker + seeder).
+    /// Optional in pure unit tests that do not exercise package upload.
+    pub distribution: Option<DistributionRuntime>,
+}
+
+fn safe_package_filename(task_id: &str, package_filename: &str) -> Result<String, &'static str> {
+    let raw = package_filename.trim();
+    let candidate = if raw.is_empty() {
+        format!("{task_id}.zip")
+    } else {
+        Path::new(raw)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(task_id)
+            .to_string()
+    };
+    if candidate.is_empty()
+        || candidate == "."
+        || candidate == ".."
+        || candidate.contains("..")
+        || candidate.contains('/')
+        || candidate.contains('\\')
+    {
+        return Err("package_filename is invalid");
+    }
+    Ok(candidate)
+}
+
+fn max_package_upload_bytes() -> usize {
+    std::env::var("HIVEMIND_MAX_TASK_UPLOAD_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(100 * 1024 * 1024)
 }
 
 pub fn artifact_root_for_config(config: &HivemindConfig) -> PathBuf {
@@ -732,7 +766,7 @@ impl NodeManagerService for GrpcNodeManagerService {
                 {
                     return Ok(Response::new(TaskResultUploadResponse {
                         success: false,
-                        status_message: status.message().to_string(),
+                        status_message: status.to_string(),
                     }));
                 }
                 Ok(Response::new(TaskResultUploadResponse {
@@ -930,6 +964,73 @@ impl MasterNodeService for GrpcMasterNodeService {
                 status_message: message.into(),
             }));
         }
+
+        // Prefer package bytes from master: nodepool is the only trusted seeder.
+        let mut torrent_source = req.torrent.clone();
+        let mut expected_btih = None;
+        if !req.package_data.is_empty() {
+            if req.package_data.len() > max_package_upload_bytes() {
+                return Ok(Response::new(UploadTaskResponse {
+                    success: false,
+                    status_message: format!(
+                        "uploaded task package is too large: {} bytes > {} bytes",
+                        req.package_data.len(),
+                        max_package_upload_bytes()
+                    ),
+                }));
+            }
+            let Some(distribution) = self.state.distribution.as_ref() else {
+                return Ok(Response::new(UploadTaskResponse {
+                    success: false,
+                    status_message: "nodepool package distribution runtime is not configured"
+                        .into(),
+                }));
+            };
+            let filename = match safe_package_filename(&req.task_id, &req.package_filename) {
+                Ok(name) => name,
+                Err(status) => {
+                    return Ok(Response::new(UploadTaskResponse {
+                        success: false,
+                        status_message: status.to_string(),
+                    }));
+                }
+            };
+            let package_path = PathBuf::from(&filename);
+            let torrent_service = distribution.torrent_service();
+            let seeded = match torrent_service
+                .package_bytes_to_torrent(
+                    &req.package_data,
+                    &package_path,
+                    &distribution.announce_url,
+                )
+                .await
+            {
+                Ok(info) => info,
+                Err(err) => {
+                    return Ok(Response::new(UploadTaskResponse {
+                        success: false,
+                        status_message: format!("failed to seed task package: {err}"),
+                    }));
+                }
+            };
+            if let Err(err) = distribution
+                .register_local_seeder(&seeded.info_hash, seeded.data_size)
+                .await
+            {
+                return Ok(Response::new(UploadTaskResponse {
+                    success: false,
+                    status_message: format!("failed to register nodepool seeder: {err}"),
+                }));
+            }
+            torrent_source = seeded.magnet_uri;
+            expected_btih = Some(seeded.info_hash);
+        } else if torrent_source.trim().is_empty() {
+            return Ok(Response::new(UploadTaskResponse {
+                success: false,
+                status_message: "torrent or package_data is required".into(),
+            }));
+        }
+
         let task = Task {
             id: uuid::Uuid::new_v4(),
             task_id: req.task_id,
@@ -940,7 +1041,7 @@ impl MasterNodeService for GrpcMasterNodeService {
             status_message: None,
             output: None,
             result_torrent: None,
-            torrent_source: Some(req.torrent),
+            torrent_source: Some(torrent_source),
             runtime: if req.runtime.trim().is_empty() {
                 None
             } else {
@@ -951,7 +1052,7 @@ impl MasterNodeService for GrpcMasterNodeService {
             } else {
                 Some(req.task_source)
             },
-            expected_btih: None,
+            expected_btih,
             cpu_usage: 0.0,
             memory_usage: 0.0,
             gpu_usage: 0.0,
@@ -1078,7 +1179,19 @@ impl MasterNodeService for GrpcMasterNodeService {
         }
         match self.state.scheduler.cancel_task(&req.task_id).await {
             Ok(task) => {
-                let status_message = match request_worker_stop(&task).await {
+                let now = chrono::Utc::now().timestamp() as usize;
+                let worker_token = self
+                    .state
+                    .auth
+                    .jwt_service()
+                    .encode_claims(&Claims {
+                        sub: task.owner.clone(),
+                        user_id: task.owner.clone(),
+                        exp: now + 300,
+                        iat: now,
+                    })
+                    .map_err(|error| Status::internal(format!("Worker token: {error}")))?;
+                let status_message = match request_worker_stop(&task, &worker_token).await {
                     WorkerStopDispatch::NotAssigned => "Task cancellation recorded".to_string(),
                     WorkerStopDispatch::Requested => {
                         "Task cancellation recorded; worker stop requested".to_string()
@@ -2404,7 +2517,7 @@ enum WorkerStopDispatch {
     NotConfirmed(String),
 }
 
-async fn request_worker_stop(task: &Task) -> WorkerStopDispatch {
+async fn request_worker_stop(task: &Task, token: &str) -> WorkerStopDispatch {
     let Some(worker_ip) = task
         .worker_ip
         .as_deref()
@@ -2440,6 +2553,7 @@ async fn request_worker_stop(task: &Task) -> WorkerStopDispatch {
     match client
         .stop_task_execution(StopTaskExecutionRequest {
             task_id: task.task_id.clone(),
+            token: token.to_string(),
         })
         .await
     {
@@ -2520,6 +2634,7 @@ mod tests {
             node_manager,
             scheduler: scheduler.clone(),
             artifact_root: artifact_root_for_config(&config),
+            distribution: None,
         });
         let service = GrpcMasterNodeService::new(state);
         let unique = uuid::Uuid::new_v4().to_string();
@@ -2586,6 +2701,8 @@ mod tests {
                 max_cpt: 10,
                 runtime: String::new(),
                 task_source: String::new(),
+                package_data: Default::default(),
+                package_filename: String::new(),
             }))
             .await
             .unwrap()
@@ -2661,6 +2778,8 @@ mod tests {
                 max_cpt: -1,
                 runtime: String::new(),
                 task_source: String::new(),
+                package_data: Default::default(),
+                package_filename: String::new(),
             }))
             .await
             .unwrap()

@@ -1249,3 +1249,27 @@
 - Confirmed the working tree contains many pre-existing modifications; they will be preserved.
 - Root `AGENTS.md` applies repository-wide.
 - `planning-with-files-zh` instructions were partially garbled by encoding, but the clear requirement to maintain `task_plan.md`, `findings.md`, and `progress.md` is being followed.
+
+
+## 2026-07-12 Nodepool-Trusted BT Distribution Resume
+
+- Goal remains: only nodepool is trusted; master/workers connect to nodepool over gRPC; package distribution is BT/magnet from nodepool.
+- Confirmed production path is already wired:
+  - master ZIP path loads package bytes and uploads via gRPC `package_data`
+  - nodepool seeds package, stores magnet/`expected_btih`, advertises seeder
+  - dispatcher sends magnet/infohash to worker
+  - worker announce + BT download + BTIH verify
+- Fixed worker magnet BT integration test hang in `hivemind-worker-executor`:
+  - `resolve_task_source_downloads_magnet_via_bt_into_api_dir` previously started tracker/seed on a `current_thread` runtime, then returned after `block_on`, so forgotten tasks stopped polling
+  - switched the seeder/tracker host runtime to multi-thread and kept it alive until after `resolve_task_source`
+- Verification:
+  - `cargo test -p hivemind-worker-executor resolve_task_source_downloads_magnet_via_bt_into_api_dir -- --nocapture`: passed
+  - `cargo test -p hivemind-worker-executor magnet_display_name -- --nocapture`: passed (2 tests)
+  - prior session already green: `hivemind-torrent-service` transfer tests, master ZIP/package_bytes distribution tests
+- `cargo check -p hivemind-bin` still blocked in this environment by forced dead proxy (`HTTP(S)_PROXY=http://127.0.0.1:9`) and missing crate cache (`cfg_aliases`); not a product compile error observed in source path review
+- Updated stale docs claim in `docs/UTILITY_PERFORMANCE_EVALUATION.md` that remote torrent fetch was unimplemented
+- Remaining release polish:
+  - live E2E on a network-open host: ZIP upload -> nodepool seed/magnet -> worker BT download
+  - open tracker/seed ports and set `TORRENT_SEED_ADVERTISE_HOST` for workers
+  - optional node-manager unit test covering `package_data` seed path
+  - note this is minimal BT-compatible transfer, not full public swarm

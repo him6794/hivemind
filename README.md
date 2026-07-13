@@ -146,10 +146,13 @@ Configuration is via environment variables:
 | `NODEPOOL_GRPC_ADDR` | `0.0.0.0:50051` | Nodepool gRPC listen/connect address |
 | `WORKER_GRPC_ADDR` | `0.0.0.0:50053` | Worker gRPC listen address |
 | `WORKER_ADVERTISE_ADDR` | - | Worker address registered with nodepool |
-| `TORRENT_API_DIR` | `./api/torrents` | Seed directory for uploaded task packages |
+| `TORRENT_API_DIR` | `./api/torrents` | Nodepool seed directory for uploaded task packages |
 | `TORRENT_BT_DIR` | `./bt_torrents` | Generated `.torrent` output directory |
-| `TORRENT_ANNOUNCE_URL` | `http://localhost:6969/announce` | Tracker announce URL embedded in torrents |
-| `TORRENT_TASK_ARTIFACT_BASE_URL` | unset | Optional HTTP base URL that exposes `TORRENT_API_DIR`; when set, ZIP uploads can be distributed to workers as downloadable `uploads/<task>.zip` URLs without requiring shared local storage |
+| `TORRENT_ANNOUNCE_URL` | `http://localhost:6969/announce` | Tracker announce URL embedded in magnets/torrents (workers must reach this) |
+| `TORRENT_TRACKER_LISTEN_ADDR` | `0.0.0.0:6969` | Nodepool HTTP tracker listen address |
+| `TORRENT_SEED_LISTEN_ADDR` | `0.0.0.0:6881` | Nodepool BitTorrent seed listen address |
+| `TORRENT_SEED_ADVERTISE_HOST` | unset | Optional host/IP advertised to workers for the nodepool seeder |
+| `TORRENT_TASK_ARTIFACT_BASE_URL` | unset | Legacy optional HTTP artifact base URL; primary package distribution is now nodepool BT seeding |
 | `EXECUTOR_SANDBOX_DIR` | `./sandbox` | Per-task sandbox root |
 | `LOG_LEVEL` | `info` | Log level (debug, info, warn, error) |
 
