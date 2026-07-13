@@ -89,6 +89,11 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         request: Request<ExecuteTaskRequest>,
     ) -> Result<Response<ExecuteTaskResponse>, Status> {
         let req = request.into_inner();
+        self.validate_rpc_token(&req.token)
+            .map_err(|status| *status)?;
+        if !crate::sandbox::is_safe_task_id(&req.task_id) {
+            return Err(Status::invalid_argument("unsafe task id"));
+        }
         let limits = req.resource_limits.unwrap_or_default();
         let task = Task {
             id: uuid::Uuid::new_v4(),
@@ -287,6 +292,11 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         request: Request<StopTaskExecutionRequest>,
     ) -> Result<Response<StopTaskExecutionResponse>, Status> {
         let req = request.into_inner();
+        self.validate_rpc_token(&req.token)
+            .map_err(|status| *status)?;
+        if !crate::sandbox::is_safe_task_id(&req.task_id) {
+            return Err(Status::invalid_argument("unsafe task id"));
+        }
         tracing::info!("Stop task {}", req.task_id);
         let (success, status_message) = match self.state.executor.stop_task_execution(&req.task_id)
         {
@@ -370,6 +380,7 @@ mod tests {
         let response = service
             .stop_task_execution(Request::new(StopTaskExecutionRequest {
                 task_id: "missing-task".into(),
+                token: test_token("unit-test-jwt-secret", "worker-owner"),
             }))
             .await
             .unwrap()
@@ -393,6 +404,44 @@ mod tests {
 
         assert!(response.is_err());
         assert_eq!(response.unwrap_err().code(), tonic::Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn execute_task_requires_valid_token_before_running_code() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+
+        let response = service
+            .execute_task(Request::new(ExecuteTaskRequest {
+                task_id: "unauthorized-task".into(),
+                torrent: String::new(),
+                resource_limits: None,
+                runtime: String::new(),
+                task_source: String::new(),
+                token: "not-a-token".into(),
+            }))
+            .await;
+
+        assert_eq!(response.unwrap_err().code(), tonic::Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn execute_task_rejects_unsafe_task_id_before_running_code() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+
+        let response = service
+            .execute_task(Request::new(ExecuteTaskRequest {
+                task_id: "../escape".into(),
+                torrent: String::new(),
+                resource_limits: None,
+                runtime: String::new(),
+                task_source: String::new(),
+                token: test_token("unit-test-jwt-secret", "worker-owner"),
+            }))
+            .await;
+
+        assert_eq!(response.unwrap_err().code(), tonic::Code::InvalidArgument);
     }
 
     #[tokio::test]
@@ -560,6 +609,7 @@ mod tests {
                     }),
                     runtime: String::new(),
                     task_source: String::new(),
+                    token: test_token("unit-test-jwt-secret", "worker-owner"),
                 }))
                 .await
                 .unwrap()
@@ -570,6 +620,7 @@ mod tests {
         let stop = service
             .stop_task_execution(Request::new(StopTaskExecutionRequest {
                 task_id: task_id.clone(),
+                token: test_token("unit-test-jwt-secret", "worker-owner"),
             }))
             .await
             .unwrap()

@@ -37,10 +37,18 @@ pub struct ServerConfig {
     pub worker_grpc_port: u16,
     #[serde(default = "default_worker_control_http_addr")]
     pub worker_control_http_addr: String,
+    #[serde(default = "default_master_ui_dir")]
+    pub master_ui_dir: String,
+    #[serde(default = "default_worker_ui_dir")]
+    pub worker_ui_dir: String,
     #[serde(default)]
     pub worker_advertise_addr: Option<String>,
     #[serde(default)]
     pub worker_nodepool_token: Option<String>,
+    #[serde(default)]
+    pub worker_nodepool_username: Option<String>,
+    #[serde(default)]
+    pub worker_nodepool_password: Option<String>,
     #[serde(default = "default_master_cors_allowed_origins")]
     pub master_cors_allowed_origins: Vec<String>,
     #[serde(default = "default_worker_control_cors_allowed_origins")]
@@ -64,6 +72,9 @@ impl AuthConfig {
         {
             anyhow::bail!("JWT_SECRET must be set to a non-default value");
         }
+        if secret.len() < 32 {
+            anyhow::bail!("JWT_SECRET must contain at least 32 bytes");
+        }
 
         Ok(())
     }
@@ -75,6 +86,12 @@ pub struct TorrentConfig {
     pub bt_dir: String,
     #[serde(default = "default_torrent_announce_url")]
     pub announce_url: String,
+    #[serde(default = "default_torrent_tracker_listen_addr")]
+    pub tracker_listen_addr: String,
+    #[serde(default = "default_torrent_seed_listen_addr")]
+    pub seed_listen_addr: String,
+    #[serde(default)]
+    pub seed_advertise_host: Option<String>,
     #[serde(default)]
     pub allow_local_task_artifacts: bool,
     #[serde(default)]
@@ -129,8 +146,12 @@ impl Default for HivemindConfig {
                 worker_grpc_addr: "0.0.0.0:50053".into(),
                 worker_grpc_port: 50053,
                 worker_control_http_addr: default_worker_control_http_addr(),
+                master_ui_dir: default_master_ui_dir(),
+                worker_ui_dir: default_worker_ui_dir(),
                 worker_advertise_addr: None,
                 worker_nodepool_token: None,
+                worker_nodepool_username: None,
+                worker_nodepool_password: None,
                 master_cors_allowed_origins: default_master_cors_allowed_origins(),
                 worker_control_cors_allowed_origins: default_worker_control_cors_allowed_origins(),
             },
@@ -144,6 +165,9 @@ impl Default for HivemindConfig {
                 api_dir: "./api/torrents".into(),
                 bt_dir: "./bt_torrents".into(),
                 announce_url: "http://localhost:6969/announce".into(),
+                tracker_listen_addr: default_torrent_tracker_listen_addr(),
+                seed_listen_addr: default_torrent_seed_listen_addr(),
+                seed_advertise_host: None,
                 allow_local_task_artifacts: false,
                 task_artifact_base_url: None,
             },
@@ -220,6 +244,22 @@ impl HivemindConfig {
         if let Ok(token) = std::env::var("WORKER_NODEPOOL_TOKEN") {
             config.server.worker_nodepool_token = Some(token);
         }
+        if let Ok(username) = std::env::var("WORKER_NODEPOOL_USERNAME") {
+            config.server.worker_nodepool_username = Some(username);
+        }
+        if let Ok(password) = std::env::var("WORKER_NODEPOOL_PASSWORD") {
+            config.server.worker_nodepool_password = Some(password);
+        }
+        if config.server.worker_nodepool_username.is_none() {
+            if let Ok(username) = std::env::var("WORKER_USERNAME") {
+                config.server.worker_nodepool_username = Some(username);
+            }
+        }
+        if config.server.worker_nodepool_password.is_none() {
+            if let Ok(password) = std::env::var("WORKER_PASSWORD") {
+                config.server.worker_nodepool_password = Some(password);
+            }
+        }
         if let Ok(origins) = std::env::var("MASTER_CORS_ALLOWED_ORIGINS") {
             config.server.master_cors_allowed_origins = parse_csv(&origins);
         }
@@ -283,6 +323,18 @@ impl HivemindConfig {
         if let Ok(url) = std::env::var("TORRENT_ANNOUNCE_URL") {
             config.torrent.announce_url = url;
         }
+        if let Ok(addr) = std::env::var("TORRENT_TRACKER_LISTEN_ADDR") {
+            config.torrent.tracker_listen_addr = addr;
+        }
+        if let Ok(addr) = std::env::var("TORRENT_SEED_LISTEN_ADDR") {
+            config.torrent.seed_listen_addr = addr;
+        }
+        if let Ok(host) = std::env::var("TORRENT_SEED_ADVERTISE_HOST") {
+            let host = host.trim().to_string();
+            if !host.is_empty() {
+                config.torrent.seed_advertise_host = Some(host);
+            }
+        }
         if let Ok(enabled) = std::env::var("TORRENT_ALLOW_LOCAL_TASK_ARTIFACTS") {
             if let Ok(parsed) = enabled.parse() {
                 config.torrent.allow_local_task_artifacts = parsed;
@@ -329,6 +381,14 @@ fn default_torrent_announce_url() -> String {
     "http://localhost:6969/announce".into()
 }
 
+fn default_torrent_tracker_listen_addr() -> String {
+    "0.0.0.0:6969".into()
+}
+
+fn default_torrent_seed_listen_addr() -> String {
+    "0.0.0.0:6881".into()
+}
+
 fn default_sandbox_mode() -> String {
     "dev".into()
 }
@@ -339,6 +399,13 @@ fn default_network_egress_enabled() -> bool {
 
 fn default_network_egress_mode() -> String {
     "denylist".into()
+}
+
+fn default_master_ui_dir() -> String {
+    "./frontend/master-ui/dist".into()
+}
+fn default_worker_ui_dir() -> String {
+    "./frontend/worker-ui/dist".into()
 }
 
 fn default_worker_control_http_addr() -> String {
@@ -542,7 +609,7 @@ mod tests {
                 "unexpected validation error for {secret:?}: {error}"
             );
 
-            auth.jwt_secret = "unit-test-secret".into();
+            auth.jwt_secret = "unit-test-secret-with-at-least-32-bytes".into();
             auth.validate_jwt_secret().unwrap();
         }
     }
@@ -550,7 +617,7 @@ mod tests {
     #[test]
     fn jwt_secret_validation_accepts_non_default_secret() {
         let auth = AuthConfig {
-            jwt_secret: "unit-test-secret".into(),
+            jwt_secret: "unit-test-secret-with-at-least-32-bytes".into(),
             token_expiry_hours: 24,
             refresh_expiry_hours: 168,
             bcrypt_cost: 12,

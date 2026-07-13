@@ -1,14 +1,7 @@
 services:
-  # ============================================
-  # Infrastructure
-  # ============================================
-
   redis:
     image: redis:7-alpine
-    container_name: hivemind-redis
     restart: unless-stopped
-    ports:
-      - "6379:6379"
     volumes:
       - redis-data:/data
     healthcheck:
@@ -21,14 +14,11 @@ services:
 
   postgres:
     image: postgres:16-alpine
-    container_name: hivemind-postgres
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-hivemind}
       POSTGRES_USER: ${POSTGRES_USER:-hivemind}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hivemind}
-    ports:
-      - "5432:5432"
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -39,56 +29,162 @@ services:
     networks:
       - hivemind-network
 
-  # ============================================
-  # Hivemind Rust Services
-  # ============================================
-
-  hivemind:
+  nodepool:
     build:
       context: .
       dockerfile: hivemind-rs/Dockerfile
-    container_name: hivemind
+      args:
+        HIVEMIND_BIN: hivemind-nodepool
+        HIVEMIND_FEATURES: nodepool
+    image: hivemind-nodepool:local
     restart: unless-stopped
+    user: "10001:10001"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER:-hivemind}:${POSTGRES_PASSWORD:-hivemind}@postgres:5432/${POSTGRES_DB:-hivemind}
+      DATABASE_URL: postgres://${POSTGRES_USER:-hivemind}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-hivemind}
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set to a non-default value}
+      NODEPOOL_GRPC_ADDR: 0.0.0.0:50051
+      TORRENT_API_DIR: /app/api/torrents
+      TORRENT_BT_DIR: /app/bt_torrents
+      TORRENT_ANNOUNCE_URL: ${TORRENT_ANNOUNCE_URL:-http://nodepool:6969/announce}
+      HIVEMIND_SEED_DEFAULT_USER: ${HIVEMIND_SEED_DEFAULT_USER:-false}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "50051:50051"
+      - "6969:6969"
+      - "6881:6881"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - hivemind-network
+    volumes:
+      - hivemind-torrents:/app/bt_torrents
+      - hivemind-task-packages:/app/api/torrents
+
+  master:
+    build:
+      context: .
+      dockerfile: hivemind-rs/Dockerfile
+      args:
+        HIVEMIND_BIN: hivemind-master
+        HIVEMIND_FEATURES: master
+    image: hivemind-master:local
+    restart: unless-stopped
+    user: "10001:10001"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set to a non-default value}
+      MASTER_HTTP_ADDR: 0.0.0.0:8082
+      NODEPOOL_GRPC_ENDPOINT: nodepool:50051
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "8082:8082"
+    depends_on:
+      - nodepool
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - hivemind-network
+
+  worker:
+    build:
+      context: .
+      dockerfile: hivemind-rs/Dockerfile
+      args:
+        HIVEMIND_BIN: hivemind-worker
+        HIVEMIND_FEATURES: worker
+    image: hivemind-worker:local
+    restart: unless-stopped
+    user: "10001:10001"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      NODEPOOL_GRPC_ENDPOINT: nodepool:50051
+      WORKER_NODEPOOL_USERNAME: ${WORKER_NODEPOOL_USERNAME:?WORKER_NODEPOOL_USERNAME must be set}
+      WORKER_NODEPOOL_PASSWORD: ${WORKER_NODEPOOL_PASSWORD:?WORKER_NODEPOOL_PASSWORD must be set}
+      WORKER_GRPC_ADDR: 0.0.0.0:50053
+      WORKER_CONTROL_HTTP_ADDR: 0.0.0.0:18080
+      WORKER_ADVERTISE_ADDR: worker:50053
+      WORKER_ID: ${WORKER_ID:-testuser}
+      WORKER_LOCATION: ${WORKER_LOCATION:-local}
+      EXECUTOR_SANDBOX_DIR: /app/sandbox
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "50053:50053"
+      - "127.0.0.1:18080:18080"
+    depends_on:
+      - nodepool
+    networks:
+      - hivemind-network
+    volumes:
+      - hivemind-worker-sandbox:/app/sandbox
+
+  hivemind:
+    profiles: ["all-in-one"]
+    build:
+      context: .
+      dockerfile: hivemind-rs/Dockerfile
+      args:
+        HIVEMIND_BIN: hivemind-bin
+        HIVEMIND_FEATURES: master,nodepool,worker,cli
+    image: hivemind-all:local
+    restart: unless-stopped
+    user: "10001:10001"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-hivemind}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-hivemind}
       REDIS_URL: redis://redis:6379
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set to a non-default value}
       MASTER_HTTP_ADDR: 0.0.0.0:8082
       NODEPOOL_GRPC_ADDR: 0.0.0.0:50051
       WORKER_GRPC_ADDR: 0.0.0.0:50053
       WORKER_CONTROL_HTTP_ADDR: 0.0.0.0:18080
-      WORKER_ADVERTISE_ADDR: hivemind:50053
+      WORKER_ADVERTISE_ADDR: hivemind-all:50053
+      WORKER_NODEPOOL_USERNAME: ${WORKER_NODEPOOL_USERNAME:?WORKER_NODEPOOL_USERNAME must be set}
+      WORKER_NODEPOOL_PASSWORD: ${WORKER_NODEPOOL_PASSWORD:?WORKER_NODEPOOL_PASSWORD must be set}
+      WORKER_ID: ${WORKER_ID:-testuser}
       TORRENT_API_DIR: /app/api/torrents
       TORRENT_BT_DIR: /app/bt_torrents
       TORRENT_ANNOUNCE_URL: ${TORRENT_ANNOUNCE_URL:-http://localhost:6969/announce}
+      HIVEMIND_SEED_DEFAULT_USER: ${HIVEMIND_SEED_DEFAULT_USER:-false}
       EXECUTOR_SANDBOX_DIR: /app/sandbox
       LOG_LEVEL: ${LOG_LEVEL:-info}
+    command: ["/app/hivemind", "all"]
     ports:
-      - "50051:50051"  # gRPC (nodepool)
-      - "8082:8082"    # HTTP API (master)
-      - "50053:50053"  # gRPC (worker)
-      - "18080:18080"  # HTTP API (local worker control)
+      - "50051:50051"
+      - "8082:8082"
+      - "50053:50053"
+      - "127.0.0.1:18080:18080"
     depends_on:
       redis:
         condition: service_healthy
       postgres:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
     networks:
       - hivemind-network
     volumes:
       - hivemind-data:/app/data
       - hivemind-torrents:/app/bt_torrents
       - hivemind-task-packages:/app/api/torrents
-
-  # ============================================
-  # Frontend (optional)
-  # ============================================
 
   master-ui:
     build:
@@ -101,7 +197,7 @@ services:
     ports:
       - "3000:80"
     depends_on:
-      - hivemind
+      - master
     networks:
       - hivemind-network
 
@@ -117,22 +213,14 @@ services:
     ports:
       - "3001:80"
     depends_on:
-      - hivemind
+      - worker
     networks:
       - hivemind-network
-
-# ============================================
-# Networks
-# ============================================
 
 networks:
   hivemind-network:
     driver: bridge
     name: hivemind-network
-
-# ============================================
-# Volumes
-# ============================================
 
 volumes:
   redis-data:
@@ -145,3 +233,5 @@ volumes:
     name: hivemind-torrents
   hivemind-task-packages:
     name: hivemind-task-packages
+  hivemind-worker-sandbox:
+    name: hivemind-worker-sandbox

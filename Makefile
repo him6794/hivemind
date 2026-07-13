@@ -15,6 +15,7 @@ help:
 	@echo "  make docker-down      - Stop Docker Compose"
 	@echo "  make lint             - Run linter"
 	@echo "  make fmt              - Format code"
+	@echo "  make release VERSION=1.0.0 MONTY=path\\to\\monty.exe"
 
 # ============================================
 # Development
@@ -50,6 +51,10 @@ build-frontend:
 	@cd frontend/master-ui && npm run build
 	@cd frontend/worker-ui && npm run build
 	@echo "Frontend build complete"
+
+release:
+	@if [ -z "$(VERSION)" ] || [ -z "$(MONTY)" ]; then echo "Usage: make release VERSION=1.0.0 MONTY=path/to/monty"; exit 1; fi
+	@powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release.ps1 -Version "$(VERSION)" -MontyExecutable "$(MONTY)"
 
 # ============================================
 # Test

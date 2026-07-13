@@ -25,7 +25,9 @@ pub struct Metainfo {
 pub struct InfoDict {
     #[serde(rename = "piece length")]
     pub piece_length: u64,
-    pub pieces: String, // binary blob of concatenated 20-byte SHA-1 hashes
+    /// Concatenated 20-byte SHA-1 hashes. Stored as bytes so binary piece
+    /// digests remain stable through bencode round-trips.
+    pub pieces: Vec<u8>,
     pub name: String,
     pub length: u64,
 }
@@ -34,6 +36,8 @@ pub struct InfoDict {
 pub struct TorrentMetainfo {
     pub metainfo: Metainfo,
     pub info_hash: String,
+    pub info_hash_bytes: [u8; 20],
+    pub piece_hashes: Vec<[u8; 20]>,
     pub piece_count: usize,
     pub piece_size: u64,
 }
@@ -51,23 +55,22 @@ pub fn create_metainfo(
         .to_string_lossy()
         .to_string();
 
-    // Compute SHA-1 piece hashes
     let piece_hashes = compute_pieces(data, piece_size as usize);
     let pieces_binary: Vec<u8> = piece_hashes.iter().flat_map(|h| h.to_vec()).collect();
-    let pieces_string = String::from_utf8(pieces_binary)
-        .unwrap_or_else(|_| String::from_utf8_lossy(b"").to_string());
 
     let info = InfoDict {
         piece_length: piece_size,
-        pieces: pieces_string,
+        pieces: pieces_binary,
         name: file_name,
         length: data.len() as u64,
     };
 
-    // Compute the info-hash (SHA-1 of the bencoded info dict)
     let info_bytes = bendy::serde::to_bytes(&info)
         .map_err(|e| anyhow::anyhow!("Failed to bencode info dict: {}", e))?;
-    let info_hash = hex::encode(Sha1::digest(&info_bytes));
+    let digest = Sha1::digest(&info_bytes);
+    let mut info_hash_bytes = [0u8; 20];
+    info_hash_bytes.copy_from_slice(&digest);
+    let info_hash = hex::encode(info_hash_bytes);
 
     let metainfo = Metainfo {
         announce: announce.to_string(),
@@ -79,13 +82,20 @@ pub fn create_metainfo(
     Ok(TorrentMetainfo {
         metainfo,
         info_hash,
+        info_hash_bytes,
         piece_count: piece_hashes.len(),
+        piece_hashes,
         piece_size,
     })
 }
 
 /// Compute SHA-1 hashes for each piece of data
-fn compute_pieces(data: &[u8], piece_size: usize) -> Vec<[u8; 20]> {
+pub fn compute_pieces(data: &[u8], piece_size: usize) -> Vec<[u8; 20]> {
+    if data.is_empty() {
+        let mut hasher = Sha1::new();
+        hasher.update([]);
+        return vec![hasher.finalize().into()];
+    }
     data.chunks(piece_size)
         .map(|chunk| {
             let mut hasher = Sha1::new();
@@ -101,6 +111,24 @@ pub fn verify_piece(data: &[u8], expected_hash: &[u8; 20]) -> bool {
     hasher.update(data);
     let actual: [u8; 20] = hasher.finalize().into();
     &actual == expected_hash
+}
+
+/// Decode concatenated piece hashes from a metainfo pieces blob.
+pub fn decode_piece_hashes(pieces: &[u8]) -> Result<Vec<[u8; 20]>> {
+    if !pieces.len().is_multiple_of(20) {
+        anyhow::bail!(
+            "invalid pieces blob length {}; expected multiple of 20",
+            pieces.len()
+        );
+    }
+    Ok(pieces
+        .chunks_exact(20)
+        .map(|chunk| {
+            let mut hash = [0u8; 20];
+            hash.copy_from_slice(chunk);
+            hash
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -133,6 +161,7 @@ mod tests {
         assert_eq!(result.metainfo.info.length, data.len() as u64);
         assert!(!result.info_hash.is_empty());
         assert!(result.piece_count >= 1);
+        assert_eq!(result.metainfo.info.pieces.len(), result.piece_count * 20);
     }
 
     #[test]
@@ -149,5 +178,16 @@ mod tests {
         let data = b"some chunk data";
         let bad_hash = [0u8; 20];
         assert!(!verify_piece(data, &bad_hash));
+    }
+
+    #[test]
+    fn create_metainfo_info_hash_is_stable_for_binary_piece_hashes() {
+        let data = b"binary-piece-hash-stability-payload";
+        let path = std::path::Path::new("task.zip");
+        let first = create_metainfo(data, path, "http://tracker:6969/announce").unwrap();
+        let second = create_metainfo(data, path, "http://tracker:6969/announce").unwrap();
+        assert_eq!(first.info_hash, second.info_hash);
+        assert_eq!(first.metainfo.info.pieces, second.metainfo.info.pieces);
+        assert_eq!(first.metainfo.info.pieces.len(), 20);
     }
 }

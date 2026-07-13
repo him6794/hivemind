@@ -1,7 +1,8 @@
 use anyhow::Result;
 use hivemind_database::DatabaseManager;
-use hivemind_models::{Task, TaskStatus, WorkerNode};
+use hivemind_models::{Claims, Task, TaskStatus, WorkerNode};
 use hivemind_proto::{ExecuteTaskRequest, ResourceSpec as ProtoResourceSpec};
+use jsonwebtoken::{encode, EncodingKey, Header};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -15,6 +16,7 @@ pub struct Dispatcher {
     db: DatabaseManager,
     task_timeout_secs: u64,
     max_redispatch: i32,
+    jwt_secret: String,
 }
 
 impl Dispatcher {
@@ -24,7 +26,19 @@ impl Dispatcher {
             db,
             task_timeout_secs,
             max_redispatch,
+            jwt_secret: std::env::var("JWT_SECRET").unwrap_or_default(),
         }
+    }
+
+    pub fn with_jwt_secret(
+        db: DatabaseManager,
+        task_timeout_secs: u64,
+        max_redispatch: i32,
+        jwt_secret: String,
+    ) -> Self {
+        let mut dispatcher = Self::new(db, task_timeout_secs, max_redispatch);
+        dispatcher.jwt_secret = jwt_secret;
+        dispatcher
     }
 
     pub async fn dispatch_one(
@@ -100,8 +114,11 @@ impl Dispatcher {
                 dispatched += 1;
                 let repo = self.repo.clone();
                 let task = task.clone();
+                let jwt_secret = self.jwt_secret.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = execute_on_worker(repo, task, worker_id, worker_addr).await {
+                    if let Err(e) =
+                        execute_on_worker(repo, task, worker_id, worker_addr, &jwt_secret).await
+                    {
                         warn!("Worker execution failed: {}", e);
                     }
                 });
@@ -285,6 +302,10 @@ pub fn worker_endpoint(addr: &str) -> Result<String> {
 }
 
 pub fn build_execute_task_request(task: &Task) -> ExecuteTaskRequest {
+    build_execute_task_request_with_token(task, String::new())
+}
+
+fn build_execute_task_request_with_token(task: &Task, token: String) -> ExecuteTaskRequest {
     ExecuteTaskRequest {
         task_id: task.task_id.clone(),
         torrent: task.torrent_source.clone().unwrap_or_default(),
@@ -301,7 +322,26 @@ pub fn build_execute_task_request(task: &Task) -> ExecuteTaskRequest {
         }),
         runtime: task.runtime.clone().unwrap_or_default(),
         task_source: task.task_source.clone().unwrap_or_default(),
+        token,
     }
+}
+
+fn worker_execution_token(secret: &str, task: &Task) -> anyhow::Result<String> {
+    if secret.trim().is_empty() {
+        anyhow::bail!("JWT_SECRET is required for worker execution dispatch")
+    }
+    let now = chrono::Utc::now().timestamp();
+    let claims = Claims {
+        sub: task.owner.clone(),
+        user_id: task.owner.clone(),
+        exp: (now + 300) as usize,
+        iat: now as usize,
+    };
+    Ok(encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(secret.as_bytes()),
+    )?)
 }
 
 async fn execute_on_worker(
@@ -309,6 +349,7 @@ async fn execute_on_worker(
     task: Task,
     worker_id: String,
     worker_addr: String,
+    jwt_secret: &str,
 ) -> Result<()> {
     let Some(current_task) = repo.find_by_task_id(&task.task_id).await? else {
         warn!("Task {} disappeared before worker execution", task.task_id);
@@ -331,8 +372,9 @@ async fn execute_on_worker(
         worker_endpoint(&worker_addr)?,
     )
     .await?;
+    let token = worker_execution_token(jwt_secret, &current_task)?;
     match client
-        .execute_task(build_execute_task_request(&current_task))
+        .execute_task(build_execute_task_request_with_token(&current_task, token))
         .await
     {
         Ok(response) => {
@@ -700,6 +742,7 @@ mod tests {
             task,
             worker_id.clone(),
             worker_addr.to_string(),
+            "test-secret",
         )
         .await;
 
@@ -790,6 +833,7 @@ mod tests {
             task,
             worker_id.clone(),
             worker_addr.to_string(),
+            "test-secret",
         )
         .await
         .unwrap();

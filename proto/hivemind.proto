@@ -104,9 +104,6 @@ message RunningStatusResponse {
     string status_message = 2;
 }
 
-// ============================================================
-// Master �� Nodepool: Task Submission / Query / Stop
-// ============================================================
 
 message UploadTaskRequest {
     string task_id = 1;
@@ -118,6 +115,10 @@ message UploadTaskRequest {
     int64 max_cpt = 7;
     string runtime = 8;
     string task_source = 9;
+    // Optional task package payload. When present, nodepool is the trusted seeder:
+    // it stores the package, creates metainfo, and returns/stores a magnet URI.
+    bytes package_data = 10;
+    string package_filename = 11;
 }
 
 message UploadTaskResponse {
@@ -336,6 +337,7 @@ message ExecuteTaskRequest {
     ResourceSpec resource_limits = 3;
     string runtime = 4;
     string task_source = 5;
+    string token = 6;          // nodepool-issued JWT for worker execution authorization
 }
 
 message ExecuteTaskResponse {
@@ -380,6 +382,7 @@ message TaskOutputResponse {
 
 message StopTaskExecutionRequest {
     string task_id = 1;
+    string token = 2;
 }
 
 message StopTaskExecutionResponse {

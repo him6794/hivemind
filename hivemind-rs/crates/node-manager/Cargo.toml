@@ -20,3 +20,4 @@ hivemind-database = { path = "../database" }
 hivemind-config = { path = "../config" }
 hivemind-auth = { path = "../auth" }
 hivemind-task-scheduler = { path = "../task-scheduler" }
+hivemind-torrent-service = { path = "../torrent-service" }

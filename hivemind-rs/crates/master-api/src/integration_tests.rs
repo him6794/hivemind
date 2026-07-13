@@ -66,6 +66,7 @@ async fn nodepool_test_fixture() -> Option<NodepoolTestFixture> {
         node_manager,
         scheduler,
         artifact_root: artifact_root_for_config(&config),
+        distribution: None,
     });
 
     let user_svc = UserServiceServer::new(GrpcUserService::new(state.clone()));

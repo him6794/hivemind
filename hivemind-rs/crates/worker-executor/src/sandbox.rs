@@ -92,6 +92,12 @@ impl Default for SandboxLimits {
 
 /// Ensure the sandbox directory exists and is clean
 pub fn prepare_sandbox(base_dir: &str, task_id: &str) -> std::io::Result<PathBuf> {
+    if !is_safe_task_id(task_id) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "unsafe task id",
+        ));
+    }
     let sandbox_path = PathBuf::from(base_dir).join(task_id);
     if sandbox_path.exists() {
         fs::remove_dir_all(&sandbox_path)?;
@@ -125,6 +131,12 @@ pub fn check_storage(sandbox_dir: &str, required_mb: u64) -> bool {
 
 /// Clean up sandbox after task completion
 pub fn cleanup_sandbox(task_id: &str, sandbox_dir: &str) -> std::io::Result<()> {
+    if !is_safe_task_id(task_id) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "unsafe task id",
+        ));
+    }
     let sandbox_path = PathBuf::from(sandbox_dir).join(task_id);
     if sandbox_path.exists() {
         fs::remove_dir_all(&sandbox_path)?;
@@ -134,11 +146,25 @@ pub fn cleanup_sandbox(task_id: &str, sandbox_dir: &str) -> std::io::Result<()> 
 
 /// Estimate sandbox storage usage
 pub fn sandbox_storage_used(task_id: &str, sandbox_dir: &str) -> u64 {
+    if !is_safe_task_id(task_id) {
+        return 0;
+    }
     let sandbox_path = PathBuf::from(sandbox_dir).join(task_id);
     if !sandbox_path.exists() {
         return 0;
     }
     dir_size(&sandbox_path).unwrap_or(0)
+}
+
+pub fn is_safe_task_id(task_id: &str) -> bool {
+    if task_id.len() == 1 && task_id.as_bytes()[0] == b'.' {
+        return false;
+    }
+    !task_id.trim().is_empty()
+        && task_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        && !task_id.contains("..")
 }
 
 fn dir_size(path: &std::path::Path) -> std::io::Result<u64> {
@@ -210,6 +236,16 @@ mod tests {
         let base = tmp.path().to_str().unwrap();
         let result = cleanup_sandbox("nonexistent-task", base);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn sandbox_helpers_reject_path_normalizing_task_ids() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path().to_str().unwrap();
+
+        assert!(!is_safe_task_id("../escape"));
+        assert!(prepare_sandbox(base, "../escape").is_err());
+        assert!(cleanup_sandbox("../escape", base).is_err());
     }
 
     #[test]

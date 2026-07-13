@@ -85,7 +85,7 @@ export default function WorkerApp() {
     const ownerUsername = registrationOwnerUsername(authenticatedUsername, username);
     if (!authToken || !ownerUsername) return;
     setLoading(true);
-    setStatus('正在註冊本機節點到 nodepool...');
+    setStatus('正在註冊節點到 nodepool...');
 
     try {
       const workerId = String(workerProfile.worker_id || '').trim() || ownerUsername;
@@ -265,9 +265,7 @@ export default function WorkerApp() {
                   <div style={{ marginTop: 6, color: '#5e6c7a' }}>worker_id: {registration.workerId}</div>
                 ) : null}
               </div>
-            ) : (
-              <p style={{ color: '#5e6c7a' }}>登入後會把本機節點資訊送到 nodepool，UI 不提供其他 worker 管理功能。</p>
-            )}
+            ) : null}
           </section>
         </div>
       </div>

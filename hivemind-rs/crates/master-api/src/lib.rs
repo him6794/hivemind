@@ -11,6 +11,7 @@ use axum::Router;
 use hivemind_config::HivemindConfig;
 use std::sync::Arc;
 use tokio::time::Duration;
+use tower_http::services::ServeDir;
 
 use crate::grpc_client::GrpcClient;
 
@@ -49,9 +50,19 @@ impl MasterApiServer {
     }
 
     pub async fn serve(self, addr: &str) -> Result<()> {
+        self.serve_with_ui(addr, "./frontend/master-ui/dist").await
+    }
+
+    pub async fn serve_with_ui(self, addr: &str, ui_dir: &str) -> Result<()> {
         let listener = tokio::net::TcpListener::bind(addr).await?;
         tracing::info!("Master API server listening on {}", addr);
-        axum::serve(listener, self.app)
+        let app = if std::path::Path::new(ui_dir).is_dir() {
+            self.app
+                .fallback_service(ServeDir::new(ui_dir).append_index_html_on_directories(true))
+        } else {
+            self.app
+        };
+        axum::serve(listener, app)
             .await
             .map_err(|e| anyhow::anyhow!("Server error: {}", e))?;
         Ok(())
