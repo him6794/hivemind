@@ -65,6 +65,12 @@ jobs:
         working-directory: hivemind-rs
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      - name: Rust dependency audit
+        run: cargo install cargo-audit --locked
+      - name: Audit dependencies
+        working-directory: hivemind-rs
+        run: cargo audit
+
       - name: Check binary crate
         working-directory: hivemind-rs
         run: cargo check -p hivemind-bin
@@ -121,6 +127,10 @@ jobs:
       - name: Unit tests
         working-directory: ${{ matrix.app }}
         run: npm test
+
+      - name: Audit production dependencies
+        working-directory: ${{ matrix.app }}
+        run: npm audit --omit=dev --audit-level=high
 
   docker:
     name: Docker Compose
