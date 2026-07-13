@@ -439,6 +439,7 @@ mod tests {
     use std::net::SocketAddr;
     use std::sync::{Arc, OnceLock};
     use std::time::Duration;
+    use tokio_stream::wrappers::TcpListenerStream;
     use tonic::{Request, Response, Status};
 
     fn dispatcher_db_lock() -> Arc<tokio::sync::Mutex<()>> {
@@ -1228,7 +1229,8 @@ mod tests {
     async fn fake_worker_execute_server_with_response(
         response: ExecuteTaskResponse,
     ) -> Option<(SocketAddr, tokio::sync::mpsc::Receiver<String>)> {
-        let addr = reserve_loopback_addr()?;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.ok()?;
+        let addr = listener.local_addr().ok()?;
         let (execute_tx, execute_rx) = tokio::sync::mpsc::channel(1);
         let service = WorkerNodeServiceServer::new(FakeWorkerExecuteService {
             execute_tx,
@@ -1237,7 +1239,7 @@ mod tests {
         tokio::spawn(async move {
             let _ = tonic::transport::Server::builder()
                 .add_service(service)
-                .serve(addr)
+                .serve_with_incoming(TcpListenerStream::new(listener))
                 .await;
         });
 
@@ -1253,13 +1255,6 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         None
-    }
-
-    fn reserve_loopback_addr() -> Option<SocketAddr> {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
-        let addr = listener.local_addr().ok()?;
-        drop(listener);
-        Some(addr)
     }
 
     struct FakeWorkerExecuteService {

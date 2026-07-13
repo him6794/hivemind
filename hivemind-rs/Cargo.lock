@@ -1113,6 +1113,7 @@ dependencies = [
  "sqlx",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tracing",
  "uuid",
