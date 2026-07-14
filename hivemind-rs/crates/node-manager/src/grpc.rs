@@ -96,7 +96,7 @@ use tonic::{Request, Response, Status};
 
 use crate::service::{NodeManagerService as NmSvc, WorkerRegistration};
 use crate::NodeManager;
-use hivemind_auth::AuthManager;
+use hivemind_auth::{jwt_service::JwtService, AuthManager};
 use hivemind_database::postgres;
 use hivemind_models::{Claims, Task, TaskStatus, WorkerNode};
 use hivemind_task_scheduler::{dispatcher::worker_endpoint, BatchTaskReport, TaskScheduler};
@@ -108,6 +108,7 @@ const MAX_DOWNLOAD_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 
 pub struct NodepoolState {
     pub auth: AuthManager,
+    pub worker_execution_secret: String,
     pub node_manager: Arc<NodeManager>,
     pub scheduler: TaskScheduler,
     pub artifact_root: PathBuf,
@@ -1180,18 +1181,19 @@ impl MasterNodeService for GrpcMasterNodeService {
         match self.state.scheduler.cancel_task(&req.task_id).await {
             Ok(task) => {
                 let now = chrono::Utc::now().timestamp() as usize;
-                let worker_token = self
-                    .state
-                    .auth
-                    .jwt_service()
-                    .encode_claims(&Claims {
+                let worker_token = encode_worker_execution_claims(
+                    &self.state.worker_execution_secret,
+                    &Claims {
                         sub: task.owner.clone(),
                         user_id: task.owner.clone(),
                         role: Some("worker-execution".into()),
+                        task_id: Some(task.task_id.clone()),
+                        worker_id: task.worker_id.clone(),
                         exp: now + 300,
                         iat: now,
-                    })
-                    .map_err(|error| Status::internal(format!("Worker token: {error}")))?;
+                    },
+                )
+                .map_err(|error| Status::internal(format!("Worker token: {error}")))?;
                 let status_message = match request_worker_stop(&task, &worker_token).await {
                     WorkerStopDispatch::NotAssigned => "Task cancellation recorded".to_string(),
                     WorkerStopDispatch::Requested => {
@@ -2518,6 +2520,10 @@ enum WorkerStopDispatch {
     NotConfirmed(String),
 }
 
+fn encode_worker_execution_claims(secret: &str, claims: &Claims) -> anyhow::Result<String> {
+    JwtService::new(secret, 1).encode_claims(claims)
+}
+
 async fn request_worker_stop(task: &Task, token: &str) -> WorkerStopDispatch {
     let Some(worker_ip) = task
         .worker_ip
@@ -2609,6 +2615,38 @@ mod tests {
             .clone()
     }
 
+    #[test]
+    fn cancellation_token_uses_worker_execution_secret() {
+        // Given: cancellation claims and separate trust-domain secrets.
+        let now = Utc::now().timestamp() as usize;
+        let claims = Claims {
+            sub: "task-owner".into(),
+            user_id: "task-owner".into(),
+            role: Some("worker-execution".into()),
+            task_id: Some("cancel-task".into()),
+            worker_id: Some("worker-7".into()),
+            exp: now + 300,
+            iat: now,
+        };
+        let worker_secret = "unit-test-worker-execution-secret-at-least-32-bytes";
+        let control_secret = "unit-test-control-plane-secret-at-least-32-bytes";
+
+        // When: nodepool creates the cancellation token.
+        let token = encode_worker_execution_claims(worker_secret, &claims).unwrap();
+
+        // Then: only the worker-execution trust domain can decode it.
+        assert!(
+            hivemind_auth::jwt_service::JwtService::new(worker_secret, 1)
+                .decode(&token)
+                .is_ok()
+        );
+        assert!(
+            hivemind_auth::jwt_service::JwtService::new(control_secret, 1)
+                .decode(&token)
+                .is_err()
+        );
+    }
+
     async fn test_service() -> Option<(GrpcMasterNodeService, String, String, String)> {
         let config = HivemindConfig::for_test();
         let fixture = hivemind_database::postgres::create_isolated_test_pool_with_config(
@@ -2632,6 +2670,7 @@ mod tests {
         let node_manager = Arc::new(NodeManager::new(&config, db.clone()));
         let state = Arc::new(NodepoolState {
             auth: auth.clone(),
+            worker_execution_secret: config.auth.worker_execution_secret.clone(),
             node_manager,
             scheduler: scheduler.clone(),
             artifact_root: artifact_root_for_config(&config),
@@ -5057,6 +5096,8 @@ mod tests {
                 sub: username.into(),
                 user_id: uuid::Uuid::new_v4().to_string(),
                 role: None,
+                task_id: None,
+                worker_id: None,
                 exp: (Utc::now().timestamp() + 3600) as usize,
                 iat: Utc::now().timestamp() as usize,
             })

@@ -117,8 +117,14 @@ make docker-logs
 make docker-down
 ```
 
-For a multi-host deployment, set `NODEPOOL_GRPC_ENDPOINT`,
-`WORKER_ADVERTISE_ADDR`, `TORRENT_ANNOUNCE_URL`, and
+`JWT_SECRET` is the control-plane signing secret shared by master and nodepool.
+`WORKER_EXECUTION_SECRET` is a distinct secret shared only by nodepool and
+workers for worker RPC tokens. Both must be explicit, non-default values of at
+least 32 bytes. The Compose worker gRPC port binds to loopback by
+default. For a multi-host deployment, set `WORKER_GRPC_BIND_HOST` to the
+specific host interface that should accept worker gRPC traffic and set
+`WORKER_ADVERTISE_ADDR` to the same worker's routable `host:port` endpoint.
+Also set `NODEPOOL_GRPC_ENDPOINT`, `TORRENT_ANNOUNCE_URL`, and
 `TORRENT_SEED_ADVERTISE_HOST` to routable addresses. Keep nodepool/worker
 traffic on a private network or VPN; public Internet TLS/mTLS termination is
 still an operator responsibility.
@@ -150,7 +156,8 @@ Configuration is via environment variables:
 |----------|---------|-------------|
 | `DATABASE_URL` | - | PostgreSQL connection string |
 | `REDIS_URL` | - | Redis connection string |
-| `JWT_SECRET` | - | JWT signing secret |
+| `JWT_SECRET` | - | Master/user control-plane JWT signing secret |
+| `WORKER_EXECUTION_SECRET` | - | Nodepool/worker execution-token signing secret |
 | `HIVEMIND_ADMIN_USERS` | unset | Comma-separated usernames allowed to access `/api/admin/*` endpoints |
 | `HIVEMIND_TASK_SUBMIT_LIMIT_PER_MINUTE` | `60` | Per-user task submission rate limit for a rolling 1-minute window (`0` disables limiting) |
 | `MASTER_HTTP_ADDR` | `0.0.0.0:8082` | Master HTTP listen address |

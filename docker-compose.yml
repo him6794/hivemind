@@ -47,6 +47,7 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-hivemind}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-hivemind}
       REDIS_URL: redis://redis:6379
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set to a non-default value}
+      WORKER_EXECUTION_SECRET: ${WORKER_EXECUTION_SECRET:?WORKER_EXECUTION_SECRET must be set to a non-default value}
       NODEPOOL_GRPC_ADDR: 0.0.0.0:50051
       TORRENT_API_DIR: /app/api/torrents
       TORRENT_BT_DIR: /app/bt_torrents
@@ -116,17 +117,18 @@ services:
       - ALL
     environment:
       NODEPOOL_GRPC_ENDPOINT: nodepool:50051
+      WORKER_EXECUTION_SECRET: ${WORKER_EXECUTION_SECRET:?WORKER_EXECUTION_SECRET must be set to a non-default value}
       WORKER_NODEPOOL_USERNAME: ${WORKER_NODEPOOL_USERNAME:?WORKER_NODEPOOL_USERNAME must be set}
       WORKER_NODEPOOL_PASSWORD: ${WORKER_NODEPOOL_PASSWORD:?WORKER_NODEPOOL_PASSWORD must be set}
       WORKER_GRPC_ADDR: 0.0.0.0:50053
       WORKER_CONTROL_HTTP_ADDR: 0.0.0.0:18080
-      WORKER_ADVERTISE_ADDR: worker:50053
+      WORKER_ADVERTISE_ADDR: ${WORKER_ADVERTISE_ADDR:-worker:50053}
       WORKER_ID: ${WORKER_ID:-testuser}
       WORKER_LOCATION: ${WORKER_LOCATION:-local}
       EXECUTOR_SANDBOX_DIR: /app/sandbox
       LOG_LEVEL: ${LOG_LEVEL:-info}
     ports:
-      - "50053:50053"
+      - "${WORKER_GRPC_BIND_HOST:-127.0.0.1}:50053:50053"
       - "127.0.0.1:18080:18080"
     depends_on:
       - nodepool
@@ -154,11 +156,12 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-hivemind}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-hivemind}
       REDIS_URL: redis://redis:6379
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set to a non-default value}
+      WORKER_EXECUTION_SECRET: ${WORKER_EXECUTION_SECRET:?WORKER_EXECUTION_SECRET must be set to a non-default value}
       MASTER_HTTP_ADDR: 0.0.0.0:8082
       NODEPOOL_GRPC_ADDR: 0.0.0.0:50051
       WORKER_GRPC_ADDR: 0.0.0.0:50053
       WORKER_CONTROL_HTTP_ADDR: 0.0.0.0:18080
-      WORKER_ADVERTISE_ADDR: hivemind-all:50053
+      WORKER_ADVERTISE_ADDR: ${WORKER_ADVERTISE_ADDR:-hivemind-all:50053}
       WORKER_NODEPOOL_USERNAME: ${WORKER_NODEPOOL_USERNAME:?WORKER_NODEPOOL_USERNAME must be set}
       WORKER_NODEPOOL_PASSWORD: ${WORKER_NODEPOOL_PASSWORD:?WORKER_NODEPOOL_PASSWORD must be set}
       WORKER_ID: ${WORKER_ID:-testuser}
@@ -172,7 +175,7 @@ services:
     ports:
       - "50051:50051"
       - "8082:8082"
-      - "50053:50053"
+      - "${WORKER_GRPC_BIND_HOST:-127.0.0.1}:50053:50053"
       - "127.0.0.1:18080:18080"
     depends_on:
       redis:

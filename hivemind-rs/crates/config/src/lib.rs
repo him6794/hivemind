@@ -58,6 +58,8 @@ pub struct ServerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
     pub jwt_secret: String,
+    #[serde(default = "default_worker_execution_secret")]
+    pub worker_execution_secret: String,
     pub token_expiry_hours: i64,
     pub refresh_expiry_hours: i64,
     pub bcrypt_cost: u32,
@@ -65,19 +67,41 @@ pub struct AuthConfig {
 
 impl AuthConfig {
     pub fn validate_jwt_secret(&self) -> anyhow::Result<()> {
-        let secret = self.jwt_secret.trim();
-        if secret.is_empty()
-            || secret.eq_ignore_ascii_case("CHANGE_ME_IN_PRODUCTION")
-            || secret.eq_ignore_ascii_case("change-me-in-production")
-        {
-            anyhow::bail!("JWT_SECRET must be set to a non-default value");
-        }
-        if secret.len() < 32 {
-            anyhow::bail!("JWT_SECRET must contain at least 32 bytes");
-        }
-
-        Ok(())
+        validate_secret(
+            &self.jwt_secret,
+            "JWT_SECRET",
+            &["CHANGE_ME_IN_PRODUCTION", "change-me-in-production"],
+        )
     }
+
+    pub fn validate_worker_execution_secret(&self) -> anyhow::Result<()> {
+        validate_secret(
+            &self.worker_execution_secret,
+            "WORKER_EXECUTION_SECRET",
+            &[
+                "CHANGE_ME_WORKER_EXECUTION_SECRET",
+                "change-me-worker-execution-secret",
+                "CHANGE_ME_IN_PRODUCTION",
+                "change-me-in-production",
+            ],
+        )
+    }
+}
+
+fn validate_secret(secret: &str, name: &str, placeholders: &[&str]) -> anyhow::Result<()> {
+    let secret = secret.trim();
+    if secret.is_empty()
+        || placeholders
+            .iter()
+            .any(|placeholder| secret.eq_ignore_ascii_case(placeholder))
+    {
+        anyhow::bail!("{name} must be set to a non-default value");
+    }
+    if secret.len() < 32 {
+        anyhow::bail!("{name} must contain at least 32 bytes");
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,6 +181,7 @@ impl Default for HivemindConfig {
             },
             auth: AuthConfig {
                 jwt_secret: "CHANGE_ME_IN_PRODUCTION".into(),
+                worker_execution_secret: default_worker_execution_secret(),
                 token_expiry_hours: 24,
                 refresh_expiry_hours: 168,
                 bcrypt_cost: 12,
@@ -232,8 +257,14 @@ impl HivemindConfig {
         if let Ok(addr) = std::env::var("MASTER_HTTP_ADDR") {
             config.server.master_http_addr = addr;
         }
+        if let Ok(dir) = std::env::var("MASTER_UI_DIR") {
+            config.server.master_ui_dir = dir;
+        }
         if let Ok(addr) = std::env::var("WORKER_GRPC_ADDR") {
             config.server.worker_grpc_addr = addr;
+        }
+        if let Ok(dir) = std::env::var("WORKER_UI_DIR") {
+            config.server.worker_ui_dir = dir;
         }
         if let Ok(addr) = std::env::var("WORKER_CONTROL_HTTP_ADDR") {
             config.server.worker_control_http_addr = addr;
@@ -268,6 +299,9 @@ impl HivemindConfig {
         }
         if let Ok(secret) = std::env::var("JWT_SECRET") {
             config.auth.jwt_secret = secret;
+        }
+        if let Ok(secret) = std::env::var("WORKER_EXECUTION_SECRET") {
+            config.auth.worker_execution_secret = secret;
         }
         if let Ok(exec) = std::env::var("MONTY_EXECUTABLE") {
             config.executor.monty_executable = exec;
@@ -412,6 +446,10 @@ fn default_worker_control_http_addr() -> String {
     "127.0.0.1:18080".into()
 }
 
+fn default_worker_execution_secret() -> String {
+    "CHANGE_ME_WORKER_EXECUTION_SECRET".into()
+}
+
 fn default_master_cors_allowed_origins() -> Vec<String> {
     local_ui_origins(&[5173, 3000, 3001])
 }
@@ -512,6 +550,29 @@ mod tests {
             config.server.nodepool_grpc_endpoint.as_deref(),
             Some("nodepool.example:50051")
         );
+        assert_eq!(
+            config.auth.worker_execution_secret,
+            "CHANGE_ME_WORKER_EXECUTION_SECRET"
+        );
+    }
+
+    #[test]
+    fn auth_config_deserializes_worker_execution_secret() {
+        // Given: a JSON auth boundary with distinct control-plane and worker secrets.
+        let auth: AuthConfig = serde_json::from_value(serde_json::json!({
+            "jwt_secret": "control-plane-secret-at-least-32-bytes",
+            "worker_execution_secret": "worker-execution-secret-at-least-32-bytes",
+            "token_expiry_hours": 24,
+            "refresh_expiry_hours": 168,
+            "bcrypt_cost": 12
+        }))
+        .unwrap();
+
+        // When/Then: deserialization preserves the worker trust secret separately.
+        assert_eq!(
+            auth.worker_execution_secret,
+            "worker-execution-secret-at-least-32-bytes"
+        );
     }
 
     #[test]
@@ -588,6 +649,64 @@ mod tests {
     }
 
     #[test]
+    fn env_loading_applies_ui_directory_overrides_without_json_config() {
+        let old_config = std::env::var_os("HIVEMIND_CONFIG");
+        let old_master_ui_dir = std::env::var_os("MASTER_UI_DIR");
+        let old_worker_ui_dir = std::env::var_os("WORKER_UI_DIR");
+        std::env::remove_var("HIVEMIND_CONFIG");
+        std::env::set_var("MASTER_UI_DIR", "./release/master-ui");
+        std::env::set_var("WORKER_UI_DIR", "./release/worker-ui");
+
+        let loaded = HivemindConfig::load_from_env();
+
+        match old_config {
+            Some(value) => std::env::set_var("HIVEMIND_CONFIG", value),
+            None => std::env::remove_var("HIVEMIND_CONFIG"),
+        }
+        match old_master_ui_dir {
+            Some(value) => std::env::set_var("MASTER_UI_DIR", value),
+            None => std::env::remove_var("MASTER_UI_DIR"),
+        }
+        match old_worker_ui_dir {
+            Some(value) => std::env::set_var("WORKER_UI_DIR", value),
+            None => std::env::remove_var("WORKER_UI_DIR"),
+        }
+
+        assert_eq!(loaded.server.master_ui_dir, "./release/master-ui");
+        assert_eq!(loaded.server.worker_ui_dir, "./release/worker-ui");
+    }
+
+    #[test]
+    fn env_loading_reads_worker_execution_secret_without_json_config() {
+        // Given: no JSON config and an explicit worker-execution environment secret.
+        let old_config = std::env::var_os("HIVEMIND_CONFIG");
+        let old_secret = std::env::var_os("WORKER_EXECUTION_SECRET");
+        std::env::remove_var("HIVEMIND_CONFIG");
+        std::env::set_var(
+            "WORKER_EXECUTION_SECRET",
+            "worker-execution-env-secret-at-least-32-bytes",
+        );
+
+        // When: configuration is loaded from the environment.
+        let loaded = HivemindConfig::load_from_env();
+
+        match old_secret {
+            Some(value) => std::env::set_var("WORKER_EXECUTION_SECRET", value),
+            None => std::env::remove_var("WORKER_EXECUTION_SECRET"),
+        }
+        match old_config {
+            Some(value) => std::env::set_var("HIVEMIND_CONFIG", value),
+            None => std::env::remove_var("HIVEMIND_CONFIG"),
+        }
+
+        // Then: the worker secret is independent of JWT_SECRET.
+        assert_eq!(
+            loaded.auth.worker_execution_secret,
+            "worker-execution-env-secret-at-least-32-bytes"
+        );
+    }
+
+    #[test]
     fn jwt_secret_validation_rejects_missing_or_known_placeholders() {
         for secret in [
             "",
@@ -597,6 +716,7 @@ mod tests {
         ] {
             let mut auth = AuthConfig {
                 jwt_secret: secret.into(),
+                worker_execution_secret: default_worker_execution_secret(),
                 token_expiry_hours: 24,
                 refresh_expiry_hours: 168,
                 bcrypt_cost: 12,
@@ -618,11 +738,50 @@ mod tests {
     fn jwt_secret_validation_accepts_non_default_secret() {
         let auth = AuthConfig {
             jwt_secret: "unit-test-secret-with-at-least-32-bytes".into(),
+            worker_execution_secret: default_worker_execution_secret(),
             token_expiry_hours: 24,
             refresh_expiry_hours: 168,
             bcrypt_cost: 12,
         };
 
         auth.validate_jwt_secret().unwrap();
+    }
+
+    #[test]
+    fn worker_execution_secret_validation_rejects_defaults_and_short_values() {
+        // Given: each invalid worker trust-secret class.
+        for secret in [
+            "",
+            "   ",
+            "CHANGE_ME_WORKER_EXECUTION_SECRET",
+            "change-me-worker-execution-secret",
+            "CHANGE_ME_IN_PRODUCTION",
+            "short",
+        ] {
+            let mut auth = HivemindConfig::default().auth;
+            auth.worker_execution_secret = secret.into();
+
+            // When: the worker-execution boundary validates the secret.
+            let error = auth
+                .validate_worker_execution_secret()
+                .unwrap_err()
+                .to_string();
+
+            // Then: startup receives a precise WORKER_EXECUTION_SECRET failure.
+            assert!(
+                error.contains("WORKER_EXECUTION_SECRET"),
+                "unexpected validation error for {secret:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn worker_execution_secret_validation_accepts_32_bytes() {
+        // Given: a non-default worker trust secret at the minimum byte length.
+        let mut auth = HivemindConfig::default().auth;
+        auth.worker_execution_secret = "12345678901234567890123456789012".into();
+
+        // When/Then: the boundary accepts exactly 32 bytes.
+        auth.validate_worker_execution_secret().unwrap();
     }
 }

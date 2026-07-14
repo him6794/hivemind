@@ -17,21 +17,25 @@ use hivemind_models::{Task, TaskStatus};
 pub struct WorkerGrpcState {
     pub config: HivemindConfig,
     pub executor: Arc<WorkerExecutor>,
+    worker_id: Option<String>,
     reports: Mutex<HashMap<String, WorkerTaskReport>>,
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 struct WorkerTaskReport {
+    owner: String,
+    worker_id: Option<String>,
     output: Option<String>,
     result_torrent: Option<String>,
     usage: Option<hivemind_proto::ResourceUsage>,
 }
 
 impl WorkerGrpcState {
-    pub fn new(config: HivemindConfig, executor: Arc<WorkerExecutor>) -> Self {
+    pub fn new(config: HivemindConfig, executor: Arc<WorkerExecutor>, worker_id: String) -> Self {
         Self {
             config,
             executor,
+            worker_id: Some(worker_id),
             reports: Mutex::new(HashMap::new()),
         }
     }
@@ -52,19 +56,74 @@ impl GrpcWorkerNodeService {
     fn validate_rpc_token(&self, token: &str) -> Result<Claims, Box<Status>> {
         decode::<Claims>(
             token,
-            &DecodingKey::from_secret(self.state.config.auth.jwt_secret.as_bytes()),
+            &DecodingKey::from_secret(self.state.config.auth.worker_execution_secret.as_bytes()),
             &Validation::default(),
         )
         .map(|token| token.claims)
         .map_err(|_| Box::new(Status::unauthenticated("Invalid token")))
     }
 
-    fn validate_worker_execution_token(&self, token: &str) -> Result<(), Box<Status>> {
+    fn validate_worker_execution_token(&self, token: &str) -> Result<Claims, Box<Status>> {
         let claims = self.validate_rpc_token(token)?;
         if claims.role.as_deref() != Some("worker-execution") {
             return Err(Box::new(Status::permission_denied(
                 "Worker execution token required",
             )));
+        }
+        Ok(claims)
+    }
+
+    fn record_task_assignment(&self, task_id: &str, owner: &str) -> Result<(), Box<Status>> {
+        let mut reports = self
+            .state
+            .reports
+            .lock()
+            .map_err(|_| Box::new(Status::internal("task report store poisoned")))?;
+        if let Some(report) = reports.get(task_id) {
+            if report.owner != owner {
+                return Err(task_assignment_denied());
+            }
+            return Ok(());
+        }
+        reports.insert(
+            task_id.to_string(),
+            WorkerTaskReport {
+                owner: owner.to_string(),
+                worker_id: self.state.worker_id.clone(),
+                output: None,
+                result_torrent: None,
+                usage: None,
+            },
+        );
+        Ok(())
+    }
+
+    fn validate_task_assignment(
+        &self,
+        token: &str,
+        task_id: &str,
+        worker_id: Option<&str>,
+    ) -> Result<(), Box<Status>> {
+        let claims = self.validate_worker_execution_token(token)?;
+        let reports = self
+            .state
+            .reports
+            .lock()
+            .map_err(|_| Box::new(Status::internal("task report store poisoned")))?;
+        let report = reports.get(task_id).ok_or_else(task_assignment_denied)?;
+        if report.owner != claims.sub {
+            return Err(task_assignment_denied());
+        }
+        if claims.task_id.as_deref() != Some(task_id) {
+            return Err(task_assignment_denied());
+        }
+        if report.worker_id.as_deref() != claims.worker_id.as_deref() {
+            return Err(task_assignment_denied());
+        }
+        if let Some(worker_id) = worker_id {
+            if report.worker_id.as_deref() != Some(worker_id) {
+                return Err(task_assignment_denied());
+            }
         }
         Ok(())
     }
@@ -78,7 +137,9 @@ impl GrpcWorkerNodeService {
             .reports
             .lock()
             .map_err(|_| Box::new(Status::internal("task report store poisoned")))?;
-        let report = reports.entry(task_id.to_string()).or_default();
+        let report = reports
+            .get_mut(task_id)
+            .ok_or_else(task_assignment_denied)?;
         update(report);
         Ok(())
     }
@@ -92,6 +153,12 @@ impl GrpcWorkerNodeService {
     }
 }
 
+fn task_assignment_denied() -> Box<Status> {
+    Box::new(Status::permission_denied(
+        "Token is not authorized for task assignment",
+    ))
+}
+
 #[tonic::async_trait]
 impl WorkerNodeService for GrpcWorkerNodeService {
     async fn execute_task(
@@ -99,17 +166,25 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         request: Request<ExecuteTaskRequest>,
     ) -> Result<Response<ExecuteTaskResponse>, Status> {
         let req = request.into_inner();
-        self.validate_worker_execution_token(&req.token)
+        let claims = self
+            .validate_worker_execution_token(&req.token)
             .map_err(|status| *status)?;
         if !crate::sandbox::is_safe_task_id(&req.task_id) {
             return Err(Status::invalid_argument("unsafe task id"));
         }
+        if claims.task_id.as_deref() != Some(req.task_id.as_str())
+            || claims.worker_id.as_deref() != self.state.worker_id.as_deref()
+        {
+            return Err(*task_assignment_denied());
+        }
+        self.record_task_assignment(&req.task_id, &claims.sub)
+            .map_err(|status| *status)?;
         let limits = req.resource_limits.unwrap_or_default();
         let task = Task {
             id: uuid::Uuid::new_v4(),
             task_id: req.task_id.clone(),
-            owner: String::new(),
-            worker_id: None,
+            owner: claims.sub,
+            worker_id: self.state.worker_id.clone(),
             worker_ip: None,
             status: TaskStatus::Running,
             status_message: None,
@@ -194,7 +269,7 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         request: Request<TaskOutputUploadRequest>,
     ) -> Result<Response<TaskOutputUploadResponse>, Status> {
         let req = request.into_inner();
-        self.validate_worker_execution_token(&req.token)
+        self.validate_task_assignment(&req.token, &req.task_id, Some(&req.worker_id))
             .map_err(|status| *status)?;
         if req.task_id.trim().is_empty() {
             return Ok(Response::new(TaskOutputUploadResponse {
@@ -228,7 +303,7 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         request: Request<TaskResultUploadRequest>,
     ) -> Result<Response<TaskResultUploadResponse>, Status> {
         let req = request.into_inner();
-        self.validate_rpc_token(&req.token)
+        self.validate_task_assignment(&req.token, &req.task_id, Some(&req.worker_id))
             .map_err(|status| *status)?;
         if req.task_id.trim().is_empty() {
             return Ok(Response::new(TaskResultUploadResponse {
@@ -271,7 +346,7 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         request: Request<TaskOutputRequest>,
     ) -> Result<Response<TaskOutputResponse>, Status> {
         let req = request.into_inner();
-        self.validate_rpc_token(&req.token)
+        self.validate_task_assignment(&req.token, &req.task_id, None)
             .map_err(|status| *status)?;
         let Some(report) = self
             .report_for_task(&req.task_id)
@@ -302,7 +377,7 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         request: Request<StopTaskExecutionRequest>,
     ) -> Result<Response<StopTaskExecutionResponse>, Status> {
         let req = request.into_inner();
-        self.validate_rpc_token(&req.token)
+        self.validate_task_assignment(&req.token, &req.task_id, None)
             .map_err(|status| *status)?;
         if !crate::sandbox::is_safe_task_id(&req.task_id) {
             return Err(Status::invalid_argument("unsafe task id"));
@@ -325,7 +400,7 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         request: Request<TaskUsageRequest>,
     ) -> Result<Response<TaskUsageResponse>, Status> {
         let req = request.into_inner();
-        self.validate_rpc_token(&req.token)
+        self.validate_task_assignment(&req.token, &req.task_id, Some(&req.worker_id))
             .map_err(|status| *status)?;
         if req.task_id.trim().is_empty() {
             return Ok(Response::new(TaskUsageResponse {
@@ -382,15 +457,21 @@ mod tests {
     use tempfile::TempDir;
     use tonic::Request;
 
+    const TEST_JWT_SECRET: &str = "unit-test-jwt-secret";
+    const ASSIGNED_OWNER: &str = "task-owner";
+    const OTHER_OWNER: &str = "other-owner";
+    const TEST_WORKER_ID: &str = "worker-1";
+
     #[tokio::test]
     async fn stop_task_execution_reports_not_running_for_unknown_task() {
         let tmp = TempDir::new().unwrap();
         let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        seed_assignment(&service, "missing-task", ASSIGNED_OWNER, None);
 
         let response = service
             .stop_task_execution(Request::new(StopTaskExecutionRequest {
                 task_id: "missing-task".into(),
-                token: test_token("unit-test-jwt-secret", "worker-owner"),
+                token: bound_token(TEST_JWT_SECRET, ASSIGNED_OWNER, "missing-task"),
             }))
             .await
             .unwrap()
@@ -435,6 +516,28 @@ mod tests {
         assert_eq!(response.unwrap_err().code(), tonic::Code::Unauthenticated);
     }
 
+    #[test]
+    fn worker_rpc_rejects_control_plane_tokens() {
+        // Given: a worker configured with distinct execution and control-plane secrets.
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let worker_token = bound_token(TEST_JWT_SECRET, ASSIGNED_OWNER, "task-worker-secret");
+        let control_token = bound_token(
+            "unit-test-control-plane-secret-at-least-32-bytes",
+            ASSIGNED_OWNER,
+            "task-control-secret",
+        );
+
+        // When/Then: worker trust validates only the worker-execution token.
+        assert!(service
+            .validate_worker_execution_token(&worker_token)
+            .is_ok());
+        let error = service
+            .validate_worker_execution_token(&control_token)
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unauthenticated);
+    }
+
     #[tokio::test]
     async fn execute_task_rejects_a_regular_user_token() {
         let tmp = TempDir::new().unwrap();
@@ -447,7 +550,26 @@ mod tests {
                 resource_limits: None,
                 runtime: String::new(),
                 task_source: String::new(),
-                token: test_user_token("unit-test-jwt-secret", "regular-user"),
+                token: test_user_token(TEST_JWT_SECRET, "regular-user"),
+            }))
+            .await;
+
+        assert_eq!(response.unwrap_err().code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn execute_task_rejects_a_token_bound_to_another_task_or_worker() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+
+        let response = service
+            .execute_task(Request::new(ExecuteTaskRequest {
+                task_id: "requested-task".into(),
+                torrent: String::new(),
+                resource_limits: None,
+                runtime: String::new(),
+                task_source: String::new(),
+                token: bound_token(TEST_JWT_SECRET, ASSIGNED_OWNER, "different-task"),
             }))
             .await;
 
@@ -466,7 +588,7 @@ mod tests {
                 resource_limits: None,
                 runtime: String::new(),
                 task_source: String::new(),
-                token: test_token("unit-test-jwt-secret", "worker-owner"),
+                token: test_token(TEST_JWT_SECRET, ASSIGNED_OWNER),
             }))
             .await;
 
@@ -474,15 +596,252 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn task_output_upload_rejects_a_regular_user_token() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        seed_assignment(&service, "assigned-output", ASSIGNED_OWNER, None);
+
+        let response = service
+            .task_output_upload(Request::new(TaskOutputUploadRequest {
+                task_id: "assigned-output".into(),
+                worker_id: TEST_WORKER_ID.into(),
+                output: "stdout".into(),
+                token: test_user_token(TEST_JWT_SECRET, ASSIGNED_OWNER),
+            }))
+            .await;
+
+        assert_eq!(response.unwrap_err().code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn task_result_upload_rejects_a_regular_user_token() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        seed_assignment(&service, "assigned-result", ASSIGNED_OWNER, None);
+
+        let response = service
+            .task_result_upload(Request::new(TaskResultUploadRequest {
+                task_id: "assigned-result".into(),
+                worker_id: TEST_WORKER_ID.into(),
+                result_torrent: "btih:result".into(),
+                token: test_user_token(TEST_JWT_SECRET, ASSIGNED_OWNER),
+            }))
+            .await;
+
+        assert_eq!(response.unwrap_err().code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn task_output_rejects_a_regular_user_token() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        seed_assignment(
+            &service,
+            "assigned-output-read",
+            ASSIGNED_OWNER,
+            Some("private stdout"),
+        );
+
+        let response = service
+            .task_output(Request::new(TaskOutputRequest {
+                task_id: "assigned-output-read".into(),
+                token: test_user_token(TEST_JWT_SECRET, ASSIGNED_OWNER),
+            }))
+            .await;
+
+        assert_eq!(response.unwrap_err().code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn stop_task_execution_rejects_a_regular_user_token() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        seed_assignment(&service, "assigned-stop", ASSIGNED_OWNER, None);
+
+        let response = service
+            .stop_task_execution(Request::new(StopTaskExecutionRequest {
+                task_id: "assigned-stop".into(),
+                token: test_user_token(TEST_JWT_SECRET, ASSIGNED_OWNER),
+            }))
+            .await;
+
+        assert_eq!(response.unwrap_err().code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn task_usage_rejects_a_regular_user_token() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        seed_assignment(&service, "assigned-usage", ASSIGNED_OWNER, None);
+
+        let response = service
+            .task_usage(Request::new(TaskUsageRequest {
+                task_id: "assigned-usage".into(),
+                worker_id: TEST_WORKER_ID.into(),
+                usage: Some(test_usage()),
+                token: test_user_token(TEST_JWT_SECRET, ASSIGNED_OWNER),
+            }))
+            .await;
+
+        assert_eq!(response.unwrap_err().code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn task_output_upload_rejects_a_token_for_another_assignment() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        seed_assignment(&service, "owner-output", ASSIGNED_OWNER, None);
+
+        let response = service
+            .task_output_upload(Request::new(TaskOutputUploadRequest {
+                task_id: "owner-output".into(),
+                worker_id: TEST_WORKER_ID.into(),
+                output: "stdout".into(),
+                token: test_token(TEST_JWT_SECRET, OTHER_OWNER),
+            }))
+            .await;
+
+        assert_eq!(response.unwrap_err().code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn task_output_upload_rejects_the_wrong_worker_identity() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        seed_assignment(&service, "worker-output", ASSIGNED_OWNER, None);
+
+        let response = service
+            .task_output_upload(Request::new(TaskOutputUploadRequest {
+                task_id: "worker-output".into(),
+                worker_id: "other-worker".into(),
+                output: "stdout".into(),
+                token: test_token(TEST_JWT_SECRET, ASSIGNED_OWNER),
+            }))
+            .await;
+
+        assert_eq!(response.unwrap_err().code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn task_result_upload_rejects_a_token_for_another_assignment() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        seed_assignment(&service, "owner-result", ASSIGNED_OWNER, None);
+
+        let response = service
+            .task_result_upload(Request::new(TaskResultUploadRequest {
+                task_id: "owner-result".into(),
+                worker_id: TEST_WORKER_ID.into(),
+                result_torrent: "btih:result".into(),
+                token: test_token(TEST_JWT_SECRET, OTHER_OWNER),
+            }))
+            .await;
+
+        assert_eq!(response.unwrap_err().code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn task_result_upload_rejects_the_wrong_worker_identity() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        seed_assignment(&service, "worker-result", ASSIGNED_OWNER, None);
+
+        let response = service
+            .task_result_upload(Request::new(TaskResultUploadRequest {
+                task_id: "worker-result".into(),
+                worker_id: "other-worker".into(),
+                result_torrent: "btih:result".into(),
+                token: test_token(TEST_JWT_SECRET, ASSIGNED_OWNER),
+            }))
+            .await;
+
+        assert_eq!(response.unwrap_err().code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn task_output_rejects_a_token_for_another_assignment() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        seed_assignment(
+            &service,
+            "owner-output-read",
+            ASSIGNED_OWNER,
+            Some("private stdout"),
+        );
+
+        let response = service
+            .task_output(Request::new(TaskOutputRequest {
+                task_id: "owner-output-read".into(),
+                token: test_token(TEST_JWT_SECRET, OTHER_OWNER),
+            }))
+            .await;
+
+        assert_eq!(response.unwrap_err().code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn stop_task_execution_rejects_a_token_for_another_assignment() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        seed_assignment(&service, "owner-stop", ASSIGNED_OWNER, None);
+
+        let response = service
+            .stop_task_execution(Request::new(StopTaskExecutionRequest {
+                task_id: "owner-stop".into(),
+                token: test_token(TEST_JWT_SECRET, OTHER_OWNER),
+            }))
+            .await;
+
+        assert_eq!(response.unwrap_err().code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn task_usage_rejects_a_token_for_another_assignment() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        seed_assignment(&service, "owner-usage", ASSIGNED_OWNER, None);
+
+        let response = service
+            .task_usage(Request::new(TaskUsageRequest {
+                task_id: "owner-usage".into(),
+                worker_id: TEST_WORKER_ID.into(),
+                usage: Some(test_usage()),
+                token: test_token(TEST_JWT_SECRET, OTHER_OWNER),
+            }))
+            .await;
+
+        assert_eq!(response.unwrap_err().code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn task_usage_rejects_the_wrong_worker_identity() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        seed_assignment(&service, "worker-usage", ASSIGNED_OWNER, None);
+
+        let response = service
+            .task_usage(Request::new(TaskUsageRequest {
+                task_id: "worker-usage".into(),
+                worker_id: "other-worker".into(),
+                usage: Some(test_usage()),
+                token: test_token(TEST_JWT_SECRET, ASSIGNED_OWNER),
+            }))
+            .await;
+
+        assert_eq!(response.unwrap_err().code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
     async fn task_output_upload_and_retrieval_round_trip() {
         let tmp = TempDir::new().unwrap();
         let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
-        let token = test_token("unit-test-jwt-secret", "worker-owner");
+        seed_assignment(&service, "task-with-output", ASSIGNED_OWNER, None);
+        let token = bound_token(TEST_JWT_SECRET, ASSIGNED_OWNER, "task-with-output");
 
         let uploaded = service
             .task_output_upload(Request::new(TaskOutputUploadRequest {
                 task_id: "task-with-output".into(),
-                worker_id: "worker-owner".into(),
+                worker_id: TEST_WORKER_ID.into(),
                 output: "stdout body".into(),
                 token: token.clone(),
             }))
@@ -508,12 +867,13 @@ mod tests {
     async fn result_upload_and_usage_reporting_accept_valid_token() {
         let tmp = TempDir::new().unwrap();
         let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
-        let token = test_token("unit-test-jwt-secret", "worker-owner");
+        seed_assignment(&service, "task-with-result", ASSIGNED_OWNER, None);
+        let token = bound_token(TEST_JWT_SECRET, ASSIGNED_OWNER, "task-with-result");
 
         let result = service
             .task_result_upload(Request::new(TaskResultUploadRequest {
                 task_id: "task-with-result".into(),
-                worker_id: "worker-owner".into(),
+                worker_id: TEST_WORKER_ID.into(),
                 result_torrent: "btih:result-ref".into(),
                 token: token.clone(),
             }))
@@ -525,7 +885,7 @@ mod tests {
         let usage = service
             .task_usage(Request::new(TaskUsageRequest {
                 task_id: "task-with-result".into(),
-                worker_id: "worker-owner".into(),
+                worker_id: TEST_WORKER_ID.into(),
                 usage: Some(hivemind_proto::ResourceUsage {
                     cpu_percent: 12.5,
                     memory_percent: 34.5,
@@ -546,12 +906,13 @@ mod tests {
     async fn task_output_upload_rejects_oversized_output() {
         let tmp = TempDir::new().unwrap();
         let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
-        let token = test_token("unit-test-jwt-secret", "worker-owner");
+        seed_assignment(&service, "oversized-output", ASSIGNED_OWNER, None);
+        let token = bound_token(TEST_JWT_SECRET, ASSIGNED_OWNER, "oversized-output");
 
         let uploaded = service
             .task_output_upload(Request::new(TaskOutputUploadRequest {
                 task_id: "oversized-output".into(),
-                worker_id: "worker-owner".into(),
+                worker_id: TEST_WORKER_ID.into(),
                 output: "x".repeat(MAX_TASK_OUTPUT_BYTES + 1),
                 token,
             }))
@@ -567,12 +928,13 @@ mod tests {
     async fn task_usage_rejects_non_finite_values() {
         let tmp = TempDir::new().unwrap();
         let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
-        let token = test_token("unit-test-jwt-secret", "worker-owner");
+        seed_assignment(&service, "bad-usage", ASSIGNED_OWNER, None);
+        let token = bound_token(TEST_JWT_SECRET, ASSIGNED_OWNER, "bad-usage");
 
         let usage = service
             .task_usage(Request::new(TaskUsageRequest {
                 task_id: "bad-usage".into(),
-                worker_id: "worker-owner".into(),
+                worker_id: TEST_WORKER_ID.into(),
                 usage: Some(hivemind_proto::ResourceUsage {
                     cpu_percent: f32::NAN,
                     memory_percent: 0.0,
@@ -594,12 +956,13 @@ mod tests {
     async fn task_usage_rejects_missing_usage_payload() {
         let tmp = TempDir::new().unwrap();
         let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
-        let token = test_token("unit-test-jwt-secret", "worker-owner");
+        seed_assignment(&service, "missing-usage", ASSIGNED_OWNER, None);
+        let token = bound_token(TEST_JWT_SECRET, ASSIGNED_OWNER, "missing-usage");
 
         let usage = service
             .task_usage(Request::new(TaskUsageRequest {
                 task_id: "missing-usage".into(),
-                worker_id: "worker-owner".into(),
+                worker_id: TEST_WORKER_ID.into(),
                 usage: None,
                 token,
             }))
@@ -623,7 +986,7 @@ mod tests {
         let execute = tokio::spawn(async move {
             execute_service
                 .execute_task(Request::new(ExecuteTaskRequest {
-                    task_id: execute_task_id,
+                    task_id: execute_task_id.clone(),
                     torrent: task_path.to_string_lossy().to_string(),
                     resource_limits: Some(ResourceSpec {
                         cpu_cores: 1,
@@ -638,7 +1001,7 @@ mod tests {
                     }),
                     runtime: String::new(),
                     task_source: String::new(),
-                    token: test_token("unit-test-jwt-secret", "worker-owner"),
+                    token: bound_token(TEST_JWT_SECRET, ASSIGNED_OWNER, &execute_task_id),
                 }))
                 .await
                 .unwrap()
@@ -649,7 +1012,7 @@ mod tests {
         let stop = service
             .stop_task_execution(Request::new(StopTaskExecutionRequest {
                 task_id: task_id.clone(),
-                token: test_token("unit-test-jwt-secret", "worker-owner"),
+                token: bound_token(TEST_JWT_SECRET, ASSIGNED_OWNER, &task_id),
             }))
             .await
             .unwrap()
@@ -667,6 +1030,30 @@ mod tests {
             .contains("Task execution stopped"));
     }
 
+    fn seed_assignment(
+        service: &GrpcWorkerNodeService,
+        task_id: &str,
+        owner: &str,
+        output: Option<&str>,
+    ) {
+        service.record_task_assignment(task_id, owner).unwrap();
+        service
+            .report_for_update(task_id, |report| {
+                report.output = output.map(str::to_owned);
+            })
+            .unwrap();
+    }
+
+    fn test_usage() -> hivemind_proto::ResourceUsage {
+        hivemind_proto::ResourceUsage {
+            cpu_percent: 12.5,
+            memory_percent: 34.5,
+            gpu_percent: 0.0,
+            vram_percent: 0.0,
+            storage_percent: 1.0,
+        }
+    }
+
     fn test_service(base: &std::path::Path, marker: &std::path::Path) -> GrpcWorkerNodeService {
         let api_dir = base.join("api");
         std::fs::create_dir_all(&api_dir).unwrap();
@@ -674,16 +1061,39 @@ mod tests {
         let mut config = HivemindConfig::default();
         config.executor.sandbox_dir = base.join("sandbox").to_string_lossy().to_string();
         config.torrent.api_dir = api_dir.to_string_lossy().to_string();
-        config.auth.jwt_secret = "unit-test-jwt-secret".into();
+        config.auth.jwt_secret = "unit-test-control-plane-secret-at-least-32-bytes".into();
+        config.auth.worker_execution_secret = TEST_JWT_SECRET.into();
         config.executor.monty_executable = write_long_running_executor_script(base, marker)
             .to_string_lossy()
             .to_string();
         let executor = Arc::new(WorkerExecutor::new(config.clone()));
-        GrpcWorkerNodeService::new(Arc::new(WorkerGrpcState::new(config, executor)))
+        GrpcWorkerNodeService::new(Arc::new(WorkerGrpcState {
+            config,
+            executor,
+            worker_id: Some(TEST_WORKER_ID.into()),
+            reports: Mutex::new(HashMap::new()),
+        }))
     }
 
     fn test_token(secret: &str, subject: &str) -> String {
         test_token_with_role(secret, subject, Some("worker-execution"))
+    }
+
+    fn bound_token(secret: &str, subject: &str, task_id: &str) -> String {
+        encode(
+            &Header::default(),
+            &Claims {
+                sub: subject.into(),
+                user_id: subject.into(),
+                role: Some("worker-execution".into()),
+                task_id: Some(task_id.into()),
+                worker_id: Some(TEST_WORKER_ID.into()),
+                exp: (Utc::now().timestamp() + 3600) as usize,
+                iat: Utc::now().timestamp() as usize,
+            },
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap()
     }
 
     fn test_user_token(secret: &str, subject: &str) -> String {
@@ -697,6 +1107,8 @@ mod tests {
                 sub: subject.into(),
                 user_id: uuid::Uuid::new_v4().to_string(),
                 role: role.map(str::to_owned),
+                task_id: None,
+                worker_id: None,
                 exp: (Utc::now().timestamp() + 3600) as usize,
                 iat: Utc::now().timestamp() as usize,
             },

@@ -16,7 +16,7 @@ pub struct Dispatcher {
     db: DatabaseManager,
     task_timeout_secs: u64,
     max_redispatch: i32,
-    jwt_secret: String,
+    worker_execution_secret: String,
 }
 
 impl Dispatcher {
@@ -26,19 +26,13 @@ impl Dispatcher {
             db,
             task_timeout_secs,
             max_redispatch,
-            jwt_secret: std::env::var("JWT_SECRET").unwrap_or_default(),
+            worker_execution_secret: std::env::var("WORKER_EXECUTION_SECRET").unwrap_or_default(),
         }
     }
 
-    pub fn with_jwt_secret(
-        db: DatabaseManager,
-        task_timeout_secs: u64,
-        max_redispatch: i32,
-        jwt_secret: String,
-    ) -> Self {
-        let mut dispatcher = Self::new(db, task_timeout_secs, max_redispatch);
-        dispatcher.jwt_secret = jwt_secret;
-        dispatcher
+    pub fn with_worker_execution_secret(mut self, worker_execution_secret: String) -> Self {
+        self.worker_execution_secret = worker_execution_secret;
+        self
     }
 
     pub async fn dispatch_one(
@@ -114,10 +108,16 @@ impl Dispatcher {
                 dispatched += 1;
                 let repo = self.repo.clone();
                 let task = task.clone();
-                let jwt_secret = self.jwt_secret.clone();
+                let worker_execution_secret = self.worker_execution_secret.clone();
                 tokio::spawn(async move {
-                    if let Err(e) =
-                        execute_on_worker(repo, task, worker_id, worker_addr, &jwt_secret).await
+                    if let Err(e) = execute_on_worker(
+                        repo,
+                        task,
+                        worker_id,
+                        worker_addr,
+                        &worker_execution_secret,
+                    )
+                    .await
                     {
                         warn!("Worker execution failed: {}", e);
                     }
@@ -326,15 +326,17 @@ fn build_execute_task_request_with_token(task: &Task, token: String) -> ExecuteT
     }
 }
 
-fn worker_execution_token(secret: &str, task: &Task) -> anyhow::Result<String> {
+fn worker_execution_token(secret: &str, task: &Task, worker_id: &str) -> anyhow::Result<String> {
     if secret.trim().is_empty() {
-        anyhow::bail!("JWT_SECRET is required for worker execution dispatch")
+        anyhow::bail!("WORKER_EXECUTION_SECRET is required for worker execution dispatch")
     }
     let now = chrono::Utc::now().timestamp();
     let claims = Claims {
         sub: task.owner.clone(),
         user_id: task.owner.clone(),
         role: Some("worker-execution".into()),
+        task_id: Some(task.task_id.clone()),
+        worker_id: Some(worker_id.to_string()),
         exp: (now + 300) as usize,
         iat: now as usize,
     };
@@ -350,7 +352,7 @@ async fn execute_on_worker(
     task: Task,
     worker_id: String,
     worker_addr: String,
-    jwt_secret: &str,
+    worker_execution_secret: &str,
 ) -> Result<()> {
     let Some(current_task) = repo.find_by_task_id(&task.task_id).await? else {
         warn!("Task {} disappeared before worker execution", task.task_id);
@@ -373,7 +375,7 @@ async fn execute_on_worker(
         worker_endpoint(&worker_addr)?,
     )
     .await?;
-    let token = worker_execution_token(jwt_secret, &current_task)?;
+    let token = worker_execution_token(worker_execution_secret, &current_task, &worker_id)?;
     match client
         .execute_task(build_execute_task_request_with_token(&current_task, token))
         .await
@@ -599,6 +601,50 @@ mod tests {
         assert_eq!(limits.cpu_score, 100);
         assert_eq!(limits.memory_mb, 4096);
         assert_eq!(limits.storage_total_gb, 10);
+    }
+
+    #[test]
+    fn worker_execution_token_is_bound_to_task_and_worker() {
+        let task = make_task("bound-dispatch", TaskStatus::Assigned, 0);
+
+        let token = worker_execution_token(
+            "unit-test-worker-execution-secret-32-bytes",
+            &task,
+            "worker-bound-7",
+        )
+        .unwrap();
+        let claims = jsonwebtoken::decode::<serde_json::Value>(
+            &token,
+            &jsonwebtoken::DecodingKey::from_secret(b"unit-test-worker-execution-secret-32-bytes"),
+            &jsonwebtoken::Validation::default(),
+        )
+        .unwrap()
+        .claims;
+
+        assert_eq!(claims["role"], "worker-execution");
+        assert_eq!(claims["task_id"], "bound-dispatch");
+        assert_eq!(claims["worker_id"], "worker-bound-7");
+        assert!(jsonwebtoken::decode::<serde_json::Value>(
+            &token,
+            &jsonwebtoken::DecodingKey::from_secret(b"unit-test-control-jwt-secret-32-bytes"),
+            &jsonwebtoken::Validation::default(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn worker_execution_token_reports_worker_secret_boundary() {
+        // Given: a dispatchable task and a missing worker-execution secret.
+        let task = make_task("missing-worker-secret", TaskStatus::Assigned, 0);
+
+        // When: token creation crosses the signing boundary.
+        let error = worker_execution_token("", &task, "worker-7")
+            .unwrap_err()
+            .to_string();
+
+        // Then: the failure names the worker secret, never JWT_SECRET.
+        assert!(error.contains("WORKER_EXECUTION_SECRET"));
+        assert!(!error.contains("JWT_SECRET"));
     }
 
     #[tokio::test]

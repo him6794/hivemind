@@ -40,14 +40,10 @@ fn validate_production_requirements(
         return Ok(());
     }
 
-    if config.auth.jwt_secret.trim().is_empty()
-        || config.auth.jwt_secret == "CHANGE_ME_IN_PRODUCTION"
-        || config.auth.jwt_secret == "change-me-in-production"
-    {
-        return Err(anyhow::anyhow!(
-            "production mode requires a non-default JWT_SECRET"
-        ));
-    }
+    config
+        .auth
+        .validate_worker_execution_secret()
+        .context("production mode requires a valid WORKER_EXECUTION_SECRET")?;
     if !policy.is_release_safe() {
         return Err(anyhow::anyhow!(
             "production mode requires network egress policy (enable egress and configure allowlist/denylist targets)"
@@ -869,6 +865,8 @@ async fn execute_sandboxed(
     let task_script = prepare_task_script(task, config, limits)?;
 
     let mut cmd = Command::new(&config.executor.monty_executable);
+    cmd.env_remove("JWT_SECRET");
+    cmd.env_remove("WORKER_EXECUTION_SECRET");
     cmd.arg("--max-duration")
         .arg(limits.max_wall_time_secs.to_string())
         .arg("--max-memory")
@@ -1460,14 +1458,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn production_mode_rejects_default_jwt_secret() {
+    async fn production_mode_rejects_default_worker_execution_secret() {
         let tmp = TempDir::new().unwrap();
         let mut config = test_config(tmp.path().to_str().unwrap());
         config.executor.sandbox_mode = "production".into();
         config.executor.network_egress_enabled = true;
         config.executor.network_egress_mode = "allowlist".into();
         config.executor.network_egress_targets = vec!["8.8.8.8".into()];
-        config.auth.jwt_secret = "CHANGE_ME_IN_PRODUCTION".into();
+        config.auth.jwt_secret = "unit-test-control-plane-secret-at-least-32-bytes".into();
+        config.auth.worker_execution_secret = "CHANGE_ME_WORKER_EXECUTION_SECRET".into();
         config.executor.monty_executable = tmp
             .path()
             .join("missing-monty")
@@ -1479,7 +1478,7 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("production mode requires a non-default JWT_SECRET"));
+            .contains("WORKER_EXECUTION_SECRET"));
     }
 
     #[tokio::test]
@@ -1538,6 +1537,8 @@ mod tests {
         let mut config = HivemindConfig::default();
         config.executor.sandbox_dir = sandbox_dir.into();
         config.auth.jwt_secret = "unit-test-jwt-secret".into();
+        config.auth.worker_execution_secret =
+            "unit-test-worker-execution-secret-at-least-32-bytes".into();
         config
     }
 

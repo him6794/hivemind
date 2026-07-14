@@ -63,6 +63,7 @@ async fn nodepool_test_fixture() -> Option<NodepoolTestFixture> {
     let node_manager = Arc::new(NodeManager::new(&config, db.clone()));
     let state = Arc::new(NodepoolState {
         auth,
+        worker_execution_secret: config.auth.worker_execution_secret.clone(),
         node_manager,
         scheduler,
         artifact_root: artifact_root_for_config(&config),
