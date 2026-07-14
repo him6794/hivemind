@@ -560,6 +560,10 @@ pub struct Claims {
     pub user_id: String,
     #[serde(default)]
     pub role: Option<String>,
+    #[serde(default)]
+    pub task_id: Option<String>,
+    #[serde(default)]
+    pub worker_id: Option<String>,
     pub exp: usize,
     pub iat: usize,
 }

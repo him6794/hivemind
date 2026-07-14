@@ -129,9 +129,14 @@ fn should_seed_default_user(value: Option<&str>) -> bool {
     )
 }
 
-#[cfg(any(feature = "master", feature = "nodepool"))]
-fn validate_auth_service_config(config: &HivemindConfig) -> Result<()> {
-    config.auth.validate_jwt_secret()
+fn validate_service_config(config: &HivemindConfig, role: ServiceRole) -> Result<()> {
+    if role.includes_master() || role.includes_nodepool() {
+        config.auth.validate_jwt_secret()?;
+    }
+    if role.includes_nodepool() || role.includes_worker() {
+        config.auth.validate_worker_execution_secret()?;
+    }
+    Ok(())
 }
 
 #[cfg(any(feature = "master", feature = "worker"))]
@@ -183,10 +188,7 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
     #[cfg(not(feature = "worker"))]
     let _ = run_worker;
 
-    #[cfg(any(feature = "master", feature = "nodepool"))]
-    if run_master || run_nodepool {
-        validate_auth_service_config(&config)?;
-    }
+    validate_service_config(&config, role)?;
 
     #[cfg(any(feature = "nodepool", feature = "worker"))]
     let mut shutdown_handles: Vec<watch::Sender<bool>> = Vec::new();
@@ -214,12 +216,10 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
 
         let task_timeout = 30u64;
         let max_redispatch = 2i32;
-        let dispatcher = Arc::new(Dispatcher::with_jwt_secret(
-            db.clone(),
-            task_timeout,
-            max_redispatch,
-            config.auth.jwt_secret.clone(),
-        ));
+        let dispatcher = Arc::new(
+            Dispatcher::new(db.clone(), task_timeout, max_redispatch)
+                .with_worker_execution_secret(config.auth.worker_execution_secret.clone()),
+        );
 
         let disp_shutdown = dispatcher
             .clone()
@@ -241,6 +241,7 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
         }
         let np_state = Arc::new(NodepoolState {
             auth: auth.clone(),
+            worker_execution_secret: config.auth.worker_execution_secret.clone(),
             node_manager: node_mgr.clone(),
             scheduler: scheduler.clone(),
             artifact_root: hivemind_node_manager::grpc::artifact_root_for_config(&config),
@@ -307,14 +308,17 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
             resources.cpu_cores, resources.total_memory_gb
         );
 
-        let wk_state = Arc::new(WorkerGrpcState::new(config.clone(), executor.clone()));
-        let wk_svc = WorkerNodeServiceServer::new(GrpcWorkerNodeService::new(wk_state));
-
         let wk_addr = config.server.worker_grpc_addr.clone();
         let worker_id = std::env::var("WORKER_ID")
             .or_else(|_| std::env::var("COMPUTERNAME"))
             .or_else(|_| std::env::var("HOSTNAME"))
             .unwrap_or_else(|_| format!("worker-{}", uuid::Uuid::new_v4()));
+        let wk_state = Arc::new(WorkerGrpcState::new(
+            config.clone(),
+            executor.clone(),
+            worker_id.clone(),
+        ));
+        let wk_svc = WorkerNodeServiceServer::new(GrpcWorkerNodeService::new(wk_state));
         let nodepool_addr = nodepool_client_addr(&config, run_nodepool)?;
         let worker_nodepool_token =
             worker_nodepool_token(&config, &nodepool_addr, &worker_id).await?;
@@ -411,15 +415,65 @@ mod tests {
     }
 
     #[test]
-    fn auth_service_startup_rejects_default_jwt_secret() {
+    fn master_startup_rejects_default_control_plane_secret() {
+        // Given: valid worker trust but a default control-plane secret.
         let mut config = HivemindConfig::default();
         config.auth.jwt_secret = "CHANGE_ME_IN_PRODUCTION".into();
+        config.auth.worker_execution_secret =
+            "unit-test-worker-execution-secret-at-least-32-bytes".into();
 
-        let error = validate_auth_service_config(&config)
+        // When: master startup validates its role-specific requirements.
+        let error = validate_service_config(&config, ServiceRole::Master)
             .unwrap_err()
             .to_string();
 
+        // Then: only the control-plane boundary blocks startup.
         assert!(error.contains("JWT_SECRET"));
+    }
+
+    #[test]
+    fn worker_startup_requires_worker_secret_but_not_control_plane_secret() {
+        // Given: a worker secret is valid while JWT_SECRET remains at its default.
+        let mut config = HivemindConfig::for_test();
+        config.auth.worker_execution_secret =
+            "unit-test-worker-execution-secret-at-least-32-bytes".into();
+
+        // When/Then: worker-only startup succeeds without control-plane trust.
+        validate_service_config(&config, ServiceRole::Worker).unwrap();
+
+        // Given: only the control-plane secret is valid.
+        config.auth.jwt_secret = "unit-test-control-plane-secret-at-least-32-bytes".into();
+        config.auth.worker_execution_secret = "CHANGE_ME_WORKER_EXECUTION_SECRET".into();
+
+        // When: worker-only startup validates the wrong trust secret.
+        let error = validate_service_config(&config, ServiceRole::Worker)
+            .unwrap_err()
+            .to_string();
+
+        // Then: it reports the worker-execution boundary, not JWT_SECRET.
+        assert!(error.contains("WORKER_EXECUTION_SECRET"));
+    }
+
+    #[test]
+    fn nodepool_startup_requires_both_trust_secrets() {
+        // Given: valid control-plane auth but a default worker-execution secret.
+        let mut config = HivemindConfig::for_test();
+        config.auth.jwt_secret = "unit-test-control-plane-secret-at-least-32-bytes".into();
+
+        // When: nodepool startup validates both trust domains.
+        let error = validate_service_config(&config, ServiceRole::Nodepool)
+            .unwrap_err()
+            .to_string();
+
+        // Then: worker-execution trust is independently required.
+        assert!(error.contains("WORKER_EXECUTION_SECRET"));
+
+        // Given: both trust domains are configured.
+        config.auth.worker_execution_secret =
+            "unit-test-worker-execution-secret-at-least-32-bytes".into();
+
+        // When/Then: nodepool startup accepts the complete trust contract.
+        validate_service_config(&config, ServiceRole::Nodepool).unwrap();
     }
 
     #[test]

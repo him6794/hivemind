@@ -15,6 +15,86 @@ function Assert-Contains {
     }
 }
 
+function Assert-NotContains {
+    param(
+        [Parameter(Mandatory = $true)][string]$Haystack,
+        [Parameter(Mandatory = $true)][string]$Needle,
+        [Parameter(Mandatory = $true)][string]$Message
+    )
+
+    if ($Haystack.Contains($Needle)) {
+        throw $Message
+    }
+}
+
+$composePath = Join-Path $PSScriptRoot "..\docker-compose.yml"
+$composeText = Get-Content -LiteralPath $composePath -Raw
+$workerBlockMatch = [regex]::Match($composeText, '(?ms)^  worker:\r?\n.*?(?=^  [a-z-]+:|\z)')
+if (!$workerBlockMatch.Success) {
+    throw "docker-compose.yml must contain a worker service block."
+}
+$workerBlock = $workerBlockMatch.Value
+$nodepoolBlockMatch = [regex]::Match($composeText, '(?ms)^  nodepool:\r?\n.*?(?=^  [a-z-]+:|\z)')
+if (!$nodepoolBlockMatch.Success) {
+    throw "docker-compose.yml must contain a nodepool service block."
+}
+$nodepoolBlock = $nodepoolBlockMatch.Value
+$allInOneBlockMatch = [regex]::Match($composeText, '(?ms)^  hivemind:\r?\n.*?(?=^  [a-z-]+:|\z)')
+if (!$allInOneBlockMatch.Success) {
+    throw "docker-compose.yml must contain the all-in-one service block."
+}
+$allInOneBlock = $allInOneBlockMatch.Value
+
+Assert-Contains `
+    -Haystack $workerBlock `
+    -Needle 'WORKER_EXECUTION_SECRET: ${WORKER_EXECUTION_SECRET:?WORKER_EXECUTION_SECRET must be set to a non-default value}' `
+    -Message "canonical Compose worker must require the worker-execution secret."
+
+Assert-NotContains `
+    -Haystack $workerBlock `
+    -Needle 'JWT_SECRET:' `
+    -Message "canonical Compose worker must not receive the control-plane JWT_SECRET."
+
+Assert-Contains `
+    -Haystack $nodepoolBlock `
+    -Needle 'WORKER_EXECUTION_SECRET: ${WORKER_EXECUTION_SECRET:?WORKER_EXECUTION_SECRET must be set to a non-default value}' `
+    -Message "canonical Compose nodepool must require the worker-execution secret."
+
+Assert-Contains `
+    -Haystack $allInOneBlock `
+    -Needle 'WORKER_EXECUTION_SECRET: ${WORKER_EXECUTION_SECRET:?WORKER_EXECUTION_SECRET must be set to a non-default value}' `
+    -Message "canonical Compose all-in-one service must require the worker-execution secret."
+
+Assert-Contains `
+    -Haystack $workerBlock `
+    -Needle '- "${WORKER_GRPC_BIND_HOST:-127.0.0.1}:50053:50053"' `
+    -Message "canonical Compose worker gRPC host exposure must default to loopback."
+
+Assert-Contains `
+    -Haystack $workerBlock `
+    -Needle 'WORKER_ADVERTISE_ADDR: ${WORKER_ADVERTISE_ADDR:-worker:50053}' `
+    -Message "canonical Compose worker must preserve an explicit multi-host advertise endpoint override."
+
+Assert-NotContains `
+    -Haystack $workerBlock `
+    -Needle '- "50053:50053"' `
+    -Message "canonical Compose worker must not publish gRPC on every host interface by default."
+
+Assert-Contains `
+    -Haystack $allInOneBlock `
+    -Needle '- "${WORKER_GRPC_BIND_HOST:-127.0.0.1}:50053:50053"' `
+    -Message "canonical Compose all-in-one worker gRPC host exposure must default to loopback."
+
+Assert-Contains `
+    -Haystack $allInOneBlock `
+    -Needle 'WORKER_ADVERTISE_ADDR: ${WORKER_ADVERTISE_ADDR:-hivemind-all:50053}' `
+    -Message "canonical Compose all-in-one worker must preserve an explicit advertise endpoint override."
+
+Assert-NotContains `
+    -Haystack $allInOneBlock `
+    -Needle '- "50053:50053"' `
+    -Message "canonical Compose all-in-one worker must not publish gRPC on every host interface by default."
+
 Assert-Contains `
     -Haystack $scriptText `
     -Needle "function Reset-CmdConsoleOpacity" `
@@ -91,20 +171,40 @@ if ($resetCall -lt 0 -or $importCall -lt 0) {
     throw "start-worker launcher must reset console opacity before .env import or validation can abort startup."
 }
 
-Assert-Contains `
+Assert-NotContains `
     -Haystack $scriptText `
     -Needle 'function Ensure-JwtSecret' `
-    -Message "start-worker launcher must auto-generate a JWT secret when it is blank."
+    -Message "start-worker launcher must not auto-generate a JWT secret that cannot match nodepool."
+
+Assert-NotContains `
+    -Haystack $scriptText `
+    -Needle 'function New-RandomJwtSecret' `
+    -Message "start-worker launcher must not contain a local JWT secret generator."
 
 Assert-Contains `
     -Haystack $scriptText `
-    -Needle 'Assert-RequiredEnv -Names @("NODEPOOL_GRPC_ADDR", "WORKER_GRPC_ADDR", "WORKER_CONTROL_HTTP_ADDR", "WORKER_NODEPOOL_TOKEN")' `
-    -Message "start-worker launcher must require the worker nodepool token but not require WORKER_ADVERTISE_ADDR or JWT_SECRET."
+    -Needle 'Assert-RequiredEnv -Names @("NODEPOOL_GRPC_ADDR", "WORKER_GRPC_ADDR", "WORKER_CONTROL_HTTP_ADDR", "WORKER_ADVERTISE_ADDR", "WORKER_NODEPOOL_TOKEN", "WORKER_EXECUTION_SECRET")' `
+    -Message "start-worker launcher must require an explicit advertise endpoint, nodepool token, and worker-execution secret."
 
-Assert-Contains `
+Assert-NotContains `
     -Haystack $scriptText `
     -Needle 'Ensure-JwtSecret -Path $envFile' `
-    -Message "start-worker launcher must call the JWT secret initializer."
+    -Message "start-worker launcher must not initialize JWT_SECRET locally."
+
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle 'WORKER_EXECUTION_SECRET=' `
+    -Message "worker package template must provide an explicit worker-execution secret setting."
+
+Assert-NotContains `
+    -Haystack $scriptText `
+    -Needle 'JWT_SECRET=' `
+    -Message "worker package must not request the control-plane JWT_SECRET."
+
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle 'same non-default worker-execution secret used by the nodepool' `
+    -Message "worker package README must document the nodepool/worker trust secret."
 
 Assert-Contains `
     -Haystack $scriptText `
