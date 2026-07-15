@@ -1354,3 +1354,14 @@
 - [x] Code review / security audit complete
 - [x] Progress.md updated with all evidence
 - [x] Local git commit
+
+## 2026-07-15 Reproducible Gate Re-run
+
+- `cargo fmt --all -- --check` — PASS (exit 0; rustfmt emitted only existing nightly-option warnings).
+- `cargo check --workspace --all-targets --locked` — PASS (exit 0; 1m44s).
+- Role release builds — PASS (exit 0):
+  - `cargo build --locked --release --no-default-features --features worker --bin hivemind-worker` (2m27s)
+  - `cargo build --locked --release --no-default-features --features master --bin hivemind-master` (23s)
+  - `cargo build --locked --release --no-default-features --features nodepool --bin hivemind-nodepool` (48s)
+- Frontend gates — PASS (exit 0): master UI build + 5/5 tests; worker UI build + 7/7 tests; root frontend build.
+- `cargo test --workspace --all-targets --locked -- --test-threads=1` — INCONCLUSIVE: the test suite progressed through node-manager and task-scheduler integration tests but exceeded the enforced 15-minute command limit. It must be re-run in a CI or dedicated database test environment before treating the complete Rust test gate as passed.
