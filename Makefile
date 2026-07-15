@@ -1,4 +1,4 @@
-﻿.PHONY: help dev build test clean proto docker-build docker-up docker-down
+﻿.PHONY: help dev build test clean proto docker-build docker-up docker-down package-role-clients package-role-clients-test release
 
 # Default target
 help:
@@ -16,6 +16,8 @@ help:
 	@echo "  make lint             - Run linter"
 	@echo "  make fmt              - Format code"
 	@echo "  make release VERSION=1.0.0 MONTY=path\\to\\monty.exe"
+	@echo "  make package-role-clients - Build master/worker clients and nodepool server packages"
+	@echo "  make package-role-clients-test - Validate role packaging script"
 
 # ============================================
 # Development
@@ -57,6 +59,12 @@ release:
 	@if [ -z "$(VERSION)" ] || [ -z "$(MONTY)" ]; then echo "Usage: make release VERSION=1.0.0 MONTY=path/to/monty"; exit 1; fi
 	@powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release.ps1 -Version "$(VERSION)" -MontyExecutable "$(MONTY)"
 
+
+package-role-clients:
+	@powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-role-clients.ps1 -Configuration release
+
+package-role-clients-test:
+	@powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-role-clients.Tests.ps1
 # ============================================
 # Test
 # ============================================
@@ -148,3 +156,5 @@ clean:
 
 clean-all: clean docker-clean
 	@echo "Full cleanup complete"
+
+

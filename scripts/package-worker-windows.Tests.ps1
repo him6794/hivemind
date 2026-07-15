@@ -183,8 +183,18 @@ Assert-NotContains `
 
 Assert-Contains `
     -Haystack $scriptText `
-    -Needle 'Assert-RequiredEnv -Names @("NODEPOOL_GRPC_ADDR", "WORKER_GRPC_ADDR", "WORKER_CONTROL_HTTP_ADDR", "WORKER_ADVERTISE_ADDR", "WORKER_NODEPOOL_TOKEN", "WORKER_EXECUTION_SECRET")' `
-    -Message "start-worker launcher must require an explicit advertise endpoint, nodepool token, and worker-execution secret."
+    -Needle 'Assert-RequiredEnv -Names @("NODEPOOL_GRPC_ADDR", "WORKER_GRPC_ADDR", "WORKER_CONTROL_HTTP_ADDR", "WORKER_ADVERTISE_ADDR", "WORKER_EXECUTION_SECRET")' `
+    -Message "start-worker launcher must require explicit nodepool, advertise endpoint, control API, and worker-execution settings."
+
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle 'Set WORKER_NODEPOOL_TOKEN, or set both WORKER_NODEPOOL_USERNAME and WORKER_NODEPOOL_PASSWORD.' `
+    -Message "start-worker launcher must allow token or username/password nodepool authentication."
+
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle 'WORKER_CONTROL_HTTP_ADDR=$WorkerControlHttpAddr' `
+    -Message "worker package template must default the control HTTP address so the Worker UI starts with the worker."
 
 Assert-NotContains `
     -Haystack $scriptText `

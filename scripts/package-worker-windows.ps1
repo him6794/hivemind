@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Configuration = "release",
     [string]$OutputDir = "dist\windows-worker",
     [string]$NodepoolGrpcAddr = "nodepool.example.com:50051",
@@ -19,11 +19,11 @@ if ($Configuration -ne "release" -and $Configuration -ne "debug") {
 Push-Location $rustRoot
 try {
     if ($Configuration -eq "release") {
-        cargo build --release --bin hivemind-bin
-        $binary = Join-Path $rustRoot "target\release\hivemind-bin.exe"
+        cargo build --release --no-default-features --features worker --bin hivemind-worker
+        $binary = Join-Path $rustRoot "target\release\hivemind-worker.exe"
     } else {
-        cargo build --bin hivemind-bin
-        $binary = Join-Path $rustRoot "target\debug\hivemind-bin.exe"
+        cargo build --no-default-features --features worker --bin hivemind-worker
+        $binary = Join-Path $rustRoot "target\debug\hivemind-worker.exe"
     }
 } finally {
     Pop-Location
@@ -34,17 +34,29 @@ if (!(Test-Path $binary)) {
 }
 
 New-Item -ItemType Directory -Force -Path $out | Out-Null
-$packagedBinary = Join-Path $out "hivemind-bin.exe"
+$packagedBinary = Join-Path $out "hivemind-worker.exe"
 Copy-Item -Force $binary $packagedBinary
+# Package Worker UI assets served by the worker control HTTP endpoint.
+$uiSource = Join-Path $repoRoot "frontend\worker-ui\dist"
+$uiDest = Join-Path $out "ui\worker"
+if (!(Test-Path -LiteralPath $uiSource -PathType Container)) {
+    throw "Worker UI dist was not found at $uiSource. Run npm run build in frontend/worker-ui first."
+}
+New-Item -ItemType Directory -Force -Path $uiDest | Out-Null
+Copy-Item -Recurse -Force -Path (Join-Path $uiSource "*") -Destination $uiDest
+
 
 $envTemplate = @"
 # Hivemind Windows worker configuration
 NODEPOOL_GRPC_ADDR=$NodepoolGrpcAddr
 WORKER_GRPC_ADDR=$WorkerGrpcAddr
 WORKER_CONTROL_HTTP_ADDR=$WorkerControlHttpAddr
+WORKER_UI_DIR=.\ui\worker
 # Must be reachable by the nodepool; set this explicitly for multi-host deployments.
 WORKER_ADVERTISE_ADDR=
 WORKER_NODEPOOL_TOKEN=
+WORKER_NODEPOOL_USERNAME=
+WORKER_NODEPOOL_PASSWORD=
 WORKER_ID=$env:COMPUTERNAME
 WORKER_LOCATION=windows
 
@@ -249,9 +261,17 @@ if (!(Test-Path $envFile)) {
 }
 
 Import-DotEnv -Path $envFile
-Assert-RequiredEnv -Names @("NODEPOOL_GRPC_ADDR", "WORKER_GRPC_ADDR", "WORKER_CONTROL_HTTP_ADDR", "WORKER_ADVERTISE_ADDR", "WORKER_NODEPOOL_TOKEN", "WORKER_EXECUTION_SECRET")
+Assert-RequiredEnv -Names @("NODEPOOL_GRPC_ADDR", "WORKER_GRPC_ADDR", "WORKER_CONTROL_HTTP_ADDR", "WORKER_ADVERTISE_ADDR", "WORKER_EXECUTION_SECRET")
 
-& (Join-Path $PSScriptRoot "hivemind-bin.exe") worker
+$workerNodepoolToken = [Environment]::GetEnvironmentVariable("WORKER_NODEPOOL_TOKEN", "Process")
+$workerNodepoolUsername = [Environment]::GetEnvironmentVariable("WORKER_NODEPOOL_USERNAME", "Process")
+$workerNodepoolPassword = [Environment]::GetEnvironmentVariable("WORKER_NODEPOOL_PASSWORD", "Process")
+if ([string]::IsNullOrWhiteSpace($workerNodepoolToken) -and
+    ([string]::IsNullOrWhiteSpace($workerNodepoolUsername) -or [string]::IsNullOrWhiteSpace($workerNodepoolPassword))) {
+    throw "Set WORKER_NODEPOOL_TOKEN, or set both WORKER_NODEPOOL_USERNAME and WORKER_NODEPOOL_PASSWORD."
+}
+
+& (Join-Path $PSScriptRoot "hivemind-worker.exe")
 '@
 $launcher | Set-Content -Encoding ASCII (Join-Path $out "start-worker.ps1")
 
@@ -260,10 +280,10 @@ $readme = @"
 
 1. Copy `.env.worker.example` to `.env.worker`.
 2. Set `NODEPOOL_GRPC_ADDR` to the reachable nodepool gRPC address.
-3. Set `WORKER_NODEPOOL_TOKEN` to a nodepool JWT whose subject matches `WORKER_ID`, or to an admin token that is allowed to register this worker.
+3. Set `WORKER_NODEPOOL_TOKEN` to a nodepool JWT whose subject matches `WORKER_ID`, or set both `WORKER_NODEPOOL_USERNAME` and `WORKER_NODEPOOL_PASSWORD` so the worker can log in to nodepool.
 4. Set `WORKER_ADVERTISE_ADDR` to the address other machines can use to reach this worker, for example `203.0.113.10:50053` or a Tailscale address. It is required when `WORKER_GRPC_ADDR` listens on `0.0.0.0` (the package default).
 5. Set `WORKER_EXECUTION_SECRET` to the same non-default worker-execution secret used by the nodepool. Do not provide the control-plane `JWT_SECRET` to workers.
-6. Put `monty.exe` next to `hivemind-bin.exe` or update `MONTY_EXECUTABLE`.
+6. Put `monty.exe` next to `hivemind-worker.exe` or update `MONTY_EXECUTABLE`.
 7. Run PowerShell as the provider user and execute:
 
 ```powershell
@@ -285,7 +305,7 @@ try {
     $gitDirty = $true
 }
 
-("{0} *{1}" -f $artifactHash, "hivemind-bin.exe") | Set-Content -Encoding ASCII -Path $shaFile
+("{0} *{1}" -f $artifactHash, "hivemind-worker.exe") | Set-Content -Encoding ASCII -Path $shaFile
 
 $manifest = [ordered]@{
     package = "hivemind-windows-worker"
@@ -295,7 +315,7 @@ $manifest = [ordered]@{
     git_dirty = $gitDirty
     artifacts = @(
         [ordered]@{
-            name = "hivemind-bin.exe"
+            name = "hivemind-worker.exe"
             sha256 = $artifactHash
             source = $binary
         }
@@ -304,3 +324,6 @@ $manifest = [ordered]@{
 $manifest | ConvertTo-Json -Depth 5 | Set-Content -Encoding ASCII -Path $manifestFile
 
 Write-Host "Windows worker package written to $out"
+
+
+
