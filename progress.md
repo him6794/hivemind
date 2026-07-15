@@ -1364,4 +1364,4 @@
   - `cargo build --locked --release --no-default-features --features master --bin hivemind-master` (23s)
   - `cargo build --locked --release --no-default-features --features nodepool --bin hivemind-nodepool` (48s)
 - Frontend gates — PASS (exit 0): master UI build + 5/5 tests; worker UI build + 7/7 tests; root frontend build.
-- `cargo test --workspace --all-targets --locked -- --test-threads=1` — INCONCLUSIVE: the test suite progressed through node-manager and task-scheduler integration tests but exceeded the enforced 15-minute command limit. It must be re-run in a CI or dedicated database test environment before treating the complete Rust test gate as passed.
+- `HIVEMIND_TEST_DATABASE_URL=postgres://hivemind:***@127.0.0.1:15432/hivemind_test cargo test --workspace --all-targets --locked -- --test-threads=1` — PASS (exit 0; 91s). The temporary dedicated Docker database was removed after the gate. This environment variable is required because `HivemindConfig::for_test()` enforces a dedicated `hivemind_test` database; without it, database fixtures wait for connection timeouts and can make the full suite exceed its command bound.
