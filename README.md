@@ -186,7 +186,7 @@ Configuration is via environment variables:
 | `REDIS_URL` | - | Redis connection string |
 | `JWT_SECRET` | - | Master/user control-plane JWT signing secret |
 | `WORKER_EXECUTION_SECRET` | - | Nodepool/worker execution-token signing secret |
-| `HIVEMIND_ADMIN_USERS` | unset | Comma-separated usernames allowed to access `/api/admin/*` endpoints |
+| `HIVEMIND_ADMIN_USERS` | unset | Comma-separated usernames allowed to access `/api/admin/*`; configured names are reserved from public registration |
 | `HIVEMIND_TASK_SUBMIT_LIMIT_PER_MINUTE` | `60` | Per-user task submission rate limit for a rolling 1-minute window (`0` disables limiting) |
 | `MASTER_HTTP_ADDR` | `0.0.0.0:8082` | Master HTTP listen address |
 | `NODEPOOL_GRPC_ADDR` | `0.0.0.0:50051` | Nodepool gRPC listen/connect address |
@@ -229,18 +229,15 @@ curl -X POST http://localhost:8082/api/tasks \
     "max_cpt": 25
   }'
 
-# Create task from a local ZIP path on the master host
-curl -X POST http://localhost:8082/api/tasks \
+# Upload a local ZIP as bytes (JSON task creation rejects server-local paths)
+curl -X POST http://localhost:8082/api/tasks/upload \
   -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "task_id": "task-zip-1",
-    "zip_path": "./task/windows_dist/out/task.zip",
-    "memory_gb": 4,
-    "cpu_score": 100,
-    "storage_gb": 10,
-    "max_cpt": 25
-  }'
+  -F "task_id=task-zip-1" \
+  -F "file=@./task/windows_dist/out/task.zip" \
+  -F "memory_gb=4" \
+  -F "cpu_score=100" \
+  -F "storage_gb=10" \
+  -F "max_cpt=25"
 
 # List tasks
 curl http://localhost:8082/api/tasks \
