@@ -8,7 +8,7 @@ use hivemind_config::HivemindConfig;
 use hivemind_proto::ResourceSpec as ProtoResourceSpec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -103,10 +103,10 @@ pub struct RegisterResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateTaskBody {
     pub task_id: String,
     pub torrent: Option<String>,
-    pub zip_path: Option<String>,
     pub runtime: Option<String>,
     pub task_source: Option<String>,
     pub memory_gb: Option<i32>,
@@ -165,6 +165,11 @@ struct TaskDistribution {
     torrent_source: Option<String>,
     package_data: Vec<u8>,
     package_filename: String,
+}
+
+struct TaskSubmission {
+    body: CreateTaskBody,
+    uploaded_package: Option<TaskDistribution>,
 }
 
 fn bad_task_response(message: impl Into<String>) -> (StatusCode, Json<TaskResponse>) {
@@ -277,6 +282,19 @@ fn uploaded_file_size_error(file_len: usize, max_bytes: usize) -> Option<String>
     }
 }
 
+fn is_reserved_admin_username(username: &str) -> bool {
+    std::env::var("HIVEMIND_ADMIN_USERS")
+        .ok()
+        .map(|users| {
+            users
+                .split(',')
+                .map(str::trim)
+                .filter(|configured| !configured.is_empty())
+                .any(|configured| configured == username)
+        })
+        .unwrap_or(false)
+}
+
 async fn enforce_task_submit_rate_limit(
     state: &AppState,
     owner: &str,
@@ -331,36 +349,11 @@ fn task_upload_path(config: &HivemindConfig, task_id: &str) -> PathBuf {
         .join(format!("{}.zip", task_id))
 }
 
-async fn resolve_task_distribution(
+fn resolve_task_distribution(
     body: &CreateTaskBody,
-    _config: &HivemindConfig,
-) -> anyhow::Result<TaskDistribution> {
-    // ZIP packages are uploaded as bytes to nodepool (trusted seeder). Master does
-    // not create torrents or advertise HTTP artifact URLs as the primary path.
-    if let Some(zip_path) = body
-        .zip_path
-        .as_deref()
-        .filter(|path| !path.trim().is_empty())
-    {
-        let package_data = std::fs::read(zip_path)
-            .map_err(|e| anyhow::anyhow!("Failed to read uploaded task package: {e}"))?;
-        if package_data.is_empty() {
-            anyhow::bail!("uploaded task package is empty");
-        }
-        let package_filename = Path::new(zip_path)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(&body.task_id)
-            .to_string();
-        return Ok(TaskDistribution {
-            // torrent_source filled by nodepool after seeding.
-            torrent_source: None,
-            package_data,
-            package_filename,
-        });
-    }
-
-    Ok(TaskDistribution {
+    uploaded_package: Option<TaskDistribution>,
+) -> TaskDistribution {
+    uploaded_package.unwrap_or_else(|| TaskDistribution {
         torrent_source: body.torrent.clone(),
         package_data: Vec::new(),
         package_filename: String::new(),
@@ -767,6 +760,15 @@ pub async fn register(
             }),
         );
     }
+    if is_reserved_admin_username(username) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(RegisterResponse {
+                success: false,
+                message: "Username is unavailable".into(),
+            }),
+        );
+    }
     if body.password.len() < 8 {
         return (
             StatusCode::BAD_REQUEST,
@@ -887,15 +889,26 @@ pub async fn create_task(
     if let Some(response) = enforce_task_submit_rate_limit(&state, &owner).await {
         return response;
     }
-    create_task_from_body(state, owner, token, body).await
+    create_task_from_submission(
+        state,
+        token,
+        TaskSubmission {
+            body,
+            uploaded_package: None,
+        },
+    )
+    .await
 }
 
-async fn create_task_from_body(
+async fn create_task_from_submission(
     state: AppState,
-    _owner: String,
     token: String,
-    body: CreateTaskBody,
+    submission: TaskSubmission,
 ) -> (StatusCode, Json<TaskResponse>) {
+    let TaskSubmission {
+        body,
+        uploaded_package,
+    } = submission;
     if !is_safe_task_id(&body.task_id) {
         return bad_task_response("task_id is required and must be a safe file name");
     }
@@ -932,19 +945,7 @@ async fn create_task_from_body(
             return budget_guard_response(quoted_cpt, mc);
         }
     }
-    let distribution = match resolve_task_distribution(&body, &state.config).await {
-        Ok(m) => m,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(TaskResponse {
-                    success: false,
-                    message: format!("Failed to prepare task package: {}", e),
-                    task: None,
-                }),
-            )
-        }
-    };
+    let distribution = resolve_task_distribution(&body, uploaded_package);
     let ts = distribution.torrent_source.unwrap_or_default();
     let req = ProtoResourceSpec {
         cpu_cores: 0,
@@ -1013,7 +1014,6 @@ pub async fn upload_task(
     let mut body = CreateTaskBody {
         task_id: String::new(),
         torrent: None,
-        zip_path: None,
         runtime: None,
         task_source: None,
         memory_gb: None,
@@ -1070,8 +1070,24 @@ pub async fn upload_task(
     if let Err(e) = std::fs::write(&zp, &fb) {
         return bad_task_response(format!("Failed to save uploaded file: {}", e));
     }
-    body.zip_path = Some(zp.display().to_string());
-    create_task_from_body(state, owner, token, body).await
+    let package_filename = zp
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&body.task_id)
+        .to_string();
+    create_task_from_submission(
+        state,
+        token,
+        TaskSubmission {
+            body,
+            uploaded_package: Some(TaskDistribution {
+                torrent_source: None,
+                package_data: fb.to_vec(),
+                package_filename,
+            }),
+        },
+    )
+    .await
 }
 
 /// GET /api/tasks
@@ -2016,6 +2032,77 @@ fn safe_download_filename(filename: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{body::Body, http::Request, routing::post, Router};
+    use tower::ServiceExt;
+
+    fn admin_users_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    #[test]
+    fn public_registration_reserves_configured_admin_username() {
+        // Given: the public HTTP registration boundary and a configured admin name.
+        let _lock = admin_users_env_lock().lock().unwrap();
+        let previous = std::env::var_os("HIVEMIND_ADMIN_USERS");
+        std::env::set_var("HIVEMIND_ADMIN_USERS", "other-admin, platform-admin");
+
+        // When: the registration policy evaluates the configured admin username.
+        let reserved = is_reserved_admin_username("platform-admin");
+
+        // Then: the HTTP boundary reserves it from public registration.
+        match previous {
+            Some(value) => std::env::set_var("HIVEMIND_ADMIN_USERS", value),
+            None => std::env::remove_var("HIVEMIND_ADMIN_USERS"),
+        }
+        assert!(reserved);
+    }
+
+    #[test]
+    fn public_registration_allows_non_admin_username() {
+        // Given: one configured admin and a distinct public username.
+        let _lock = admin_users_env_lock().lock().unwrap();
+        let previous = std::env::var_os("HIVEMIND_ADMIN_USERS");
+        std::env::set_var("HIVEMIND_ADMIN_USERS", "platform-admin");
+
+        // When: the registration policy evaluates the non-admin username.
+        let reserved = is_reserved_admin_username("ordinary-user");
+
+        // Then: the HTTP boundary leaves that username available.
+        match previous {
+            Some(value) => std::env::set_var("HIVEMIND_ADMIN_USERS", value),
+            None => std::env::remove_var("HIVEMIND_ADMIN_USERS"),
+        }
+        assert!(!reserved);
+    }
+
+    #[tokio::test]
+    async fn json_task_creation_rejects_non_empty_zip_path_at_http_boundary() {
+        // Given: an authenticated JSON task-create payload naming a local master path.
+        let app = Router::new().route(
+            "/api/tasks",
+            post(|Json(_body): Json<CreateTaskBody>| async { StatusCode::CREATED }),
+        );
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/tasks")
+            .header(header::AUTHORIZATION, "Bearer authenticated-test-token")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "caller-path-probe",
+                    "zip_path": "C:\\master-secrets\\private.zip"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        // When: axum parses the request through the production JSON boundary type.
+        let response = app.oneshot(request).await.unwrap();
+
+        // Then: parsing rejects the path before the task handler can access the filesystem.
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
 
     #[test]
     fn task_submit_limiter_blocks_after_limit_until_window_resets() {
@@ -2134,16 +2221,12 @@ mod tests {
         assert_eq!(resources.storage_available_gb, 750);
     }
 
-    #[tokio::test]
-    async fn zip_distribution_loads_package_bytes_for_nodepool_seed() {
-        let tmp = tempfile::tempdir().unwrap();
-        let zip_path = tmp.path().join("zip-nodepool.zip");
-        std::fs::write(&zip_path, b"package-bytes-for-nodepool").unwrap();
-        let config = HivemindConfig::default();
+    #[test]
+    fn uploaded_distribution_preserves_package_bytes_for_nodepool_seed() {
+        // Given: multipart upload bytes already read at the HTTP boundary.
         let body = CreateTaskBody {
             task_id: "zip-nodepool".into(),
             torrent: None,
-            zip_path: Some(zip_path.display().to_string()),
             runtime: None,
             task_source: None,
             memory_gb: None,
@@ -2155,21 +2238,27 @@ mod tests {
             host_count: None,
             max_cpt: None,
         };
+        let uploaded_package = TaskDistribution {
+            torrent_source: None,
+            package_data: b"package-bytes-for-nodepool".to_vec(),
+            package_filename: "zip-nodepool.zip".into(),
+        };
 
-        let distribution = resolve_task_distribution(&body, &config).await.unwrap();
+        // When: task distribution selects the trusted multipart package.
+        let distribution = resolve_task_distribution(&body, Some(uploaded_package));
 
+        // Then: nodepool receives the same bytes and generated package name.
         assert!(distribution.torrent_source.is_none());
         assert_eq!(distribution.package_data, b"package-bytes-for-nodepool");
         assert_eq!(distribution.package_filename, "zip-nodepool.zip");
     }
 
-    #[tokio::test]
-    async fn torrent_only_distribution_keeps_reference_without_package_bytes() {
-        let config = HivemindConfig::default();
+    #[test]
+    fn torrent_only_distribution_keeps_reference_without_package_bytes() {
+        // Given: JSON task creation with a supported torrent reference.
         let body = CreateTaskBody {
             task_id: "magnet-only".into(),
             torrent: Some("magnet:?xt=urn:btih:abc".into()),
-            zip_path: None,
             runtime: None,
             task_source: None,
             memory_gb: None,
@@ -2182,7 +2271,10 @@ mod tests {
             max_cpt: None,
         };
 
-        let distribution = resolve_task_distribution(&body, &config).await.unwrap();
+        // When: task distribution has no multipart package.
+        let distribution = resolve_task_distribution(&body, None);
+
+        // Then: the torrent reference is preserved without package bytes.
         assert_eq!(
             distribution.torrent_source.as_deref(),
             Some("magnet:?xt=urn:btih:abc")

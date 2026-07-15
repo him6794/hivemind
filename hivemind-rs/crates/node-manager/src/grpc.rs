@@ -181,6 +181,12 @@ impl UserService for GrpcUserService {
                 status_message: "Username must be at least 3 characters".into(),
             }));
         }
+        if is_admin(username) {
+            return Ok(Response::new(RegisterUserResponse {
+                success: false,
+                status_message: "Username is unavailable".into(),
+            }));
+        }
         if password.len() < 8 {
             return Ok(Response::new(RegisterUserResponse {
                 success: false,
@@ -2615,6 +2621,27 @@ mod tests {
             .clone()
     }
 
+    struct AdminUsersEnvGuard {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl AdminUsersEnvGuard {
+        fn set(value: &str) -> Self {
+            let previous = std::env::var_os("HIVEMIND_ADMIN_USERS");
+            std::env::set_var("HIVEMIND_ADMIN_USERS", value);
+            Self { previous }
+        }
+    }
+
+    impl Drop for AdminUsersEnvGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("HIVEMIND_ADMIN_USERS", value),
+                None => std::env::remove_var("HIVEMIND_ADMIN_USERS"),
+            }
+        }
+    }
+
     #[test]
     fn cancellation_token_uses_worker_execution_secret() {
         // Given: cancellation claims and separate trust-domain secrets.
@@ -2708,6 +2735,87 @@ mod tests {
             schema.starts_with("hm_test_"),
             "node-manager gRPC tests must use an isolated schema, got {schema}"
         );
+    }
+
+    #[tokio::test]
+    async fn register_user_rejects_configured_admin_username() {
+        // Given: a configured admin username and a real isolated registration database.
+        let lock = grpc_db_lock();
+        let _lock_guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = test_service()
+            .await
+            .expect("registration security tests require PostgreSQL");
+        let admin_username = format!("reserved-admin-{}", uuid::Uuid::new_v4());
+        let _env_guard = AdminUsersEnvGuard::set(&format!("other-admin, {admin_username}"));
+        let user_service = GrpcUserService::new(service.state.clone());
+
+        // When: the public gRPC registration surface receives that username.
+        let response = user_service
+            .register_user(Request::new(RegisterUserRequest {
+                username: admin_username.clone(),
+                password: "valid-test-password".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // Then: registration is denied and no account is persisted.
+        let persisted: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE username = $1)")
+                .bind(&admin_username)
+                .fetch_one(&service.state.scheduler.database().pool)
+                .await
+                .unwrap();
+        sqlx::query("DELETE FROM users WHERE username = $1")
+            .bind(&admin_username)
+            .execute(&service.state.scheduler.database().pool)
+            .await
+            .unwrap();
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+
+        assert!(!response.success);
+        assert!(!persisted);
+    }
+
+    #[tokio::test]
+    async fn register_user_allows_non_admin_username_when_admin_is_configured() {
+        // Given: a configured admin username and a distinct public username.
+        let lock = grpc_db_lock();
+        let _lock_guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = test_service()
+            .await
+            .expect("registration security tests require PostgreSQL");
+        let configured_admin = format!("reserved-admin-{}", uuid::Uuid::new_v4());
+        let username = format!("public-user-{}", uuid::Uuid::new_v4());
+        let _env_guard = AdminUsersEnvGuard::set(&configured_admin);
+        let user_service = GrpcUserService::new(service.state.clone());
+
+        // When: the public gRPC registration surface receives the non-admin username.
+        let response = user_service
+            .register_user(Request::new(RegisterUserRequest {
+                username: username.clone(),
+                password: "valid-test-password".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // Then: the account is created in the real registration store.
+        let persisted: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE username = $1)")
+                .bind(&username)
+                .fetch_one(&service.state.scheduler.database().pool)
+                .await
+                .unwrap();
+        sqlx::query("DELETE FROM users WHERE username = $1")
+            .bind(&username)
+            .execute(&service.state.scheduler.database().pool)
+            .await
+            .unwrap();
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+
+        assert!(response.success);
+        assert!(persisted);
     }
 
     #[tokio::test]
