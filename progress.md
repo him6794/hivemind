@@ -1273,3 +1273,84 @@
   - open tracker/seed ports and set `TORRENT_SEED_ADVERTISE_HOST` for workers
   - optional node-manager unit test covering `package_data` seed path
   - note this is minimal BT-compatible transfer, not full public swarm
+
+## 2026-07-14 Role Client Packaging
+
+- Added scripts/package-role-clients.ps1 to produce multi-host packages:
+  - dist/role-clients/worker-client (hivemind-worker.exe + Worker UI + monty)
+  - dist/role-clients/master-client (hivemind-master.exe + Master UI)
+  - dist/role-clients/nodepool-server (hivemind-nodepool.exe)
+- Worker/master packages set WORKER_UI_DIR / MASTER_UI_DIR so UI is served by the same process on startup.
+- Added unit tests scripts/package-role-clients.Tests.ps1 (PASS).
+- Makefile targets: package-role-clients, package-role-clients-test.
+- README multi-host packaging section updated.
+- Existing packaging security invariants retained: worker does not ship/request control-plane JWT_SECRET; requires WORKER_EXECUTION_SECRET and WORKER_ADVERTISE_ADDR.
+
+## 2026-07-15 Release Verification (Functional / Security / Stress / Audit)
+
+### E2E Stack (live, from dist/role-clients/ packaged binaries)
+
+- nodepool PID 18528 — 127.0.0.1:50051 (gRPC), :6969 (tracker), :6881 (seed) — healthy
+- master  PID 25672 — 127.0.0.1:8082 (HTTP + Master UI) — healthy
+- worker  PID 32844 — 127.0.0.1:50053 (gRPC), :18080 (Worker UI) — healthy, registered as `testuser`, IDLE
+- Docker: hivemind-pg-e2e (127.0.0.1:15432), hivemind-redis-e2e (127.0.0.1:6379)
+- Environment loaded with `test_logs/e2e/set-env.ps1` before launching role processes.
+
+### Packaged Role Clients (dist/role-clients/)
+
+- worker-client: hivemind-worker.exe (21.8 MB) + Worker UI (ui/worker) + monty.exe (14.3 MB)
+- master-client: hivemind-master.exe (18.1 MB) + Master UI (ui/master)
+- nodepool-server: hivemind-nodepool.exe (25.6 MB)
+- Each package: manifest.json, README.md, SHA256SUMS, start-*.ps1, .env.*.example
+- Worker/master launchers set WORKER_UI_DIR / MASTER_UI_DIR so the UI starts in-process with the role binary; nodepool manifest declares `serves_ui_on_start = false`.
+- Worker env template requires WORKER_EXECUTION_SECRET + WORKER_ADVERTISE_ADDR + NODEPOOL_GRPC_ENDPOINT; does NOT request JWT_SECRET (control-plane secret stays on master/nodepool).
+
+### Unit Tests — Packaging (re-run this session)
+
+- `scripts/package-role-clients.Tests.ps1` — PASS (exit 0): asserts feature-gated role builds (`--no-default-features --features worker/master/nodepool`), UI asset inclusion, in-process UI dir env, WORKER_EXECUTION_SECRET, NODEPOOL_GRPC_ENDPOINT, WORKER_ADVERTISE_ADDR, nodepool username/password or token auth, no `hivemind-bin` all-features fallback, no JWT_SECRET in worker template, monty.exe shipped, manifest UI flags.
+- `scripts/package-worker-windows.Tests.ps1` — PASS (exit 0): asserts canonical Compose worker/nodepool/all-in-one require non-default WORKER_EXECUTION_SECRET, worker block carries no JWT_SECRET, worker gRPC defaults to loopback bind with explicit advertise override (no `50053:50053` all-interface publish), start-worker console-opacity reset, no JWT secret generator, required-env gating, control HTTP default, no JWT_SECRET template, nodepool/worker trust-secret docs, remote artifact base URL.
+
+### Functional Test — 12/12 PASS (test_logs/e2e/functional.run.log)
+
+- Login, list workers, submit managed-function-v0 task, poll until COMPLETED, fetch result/log, balance + admin billing, stop task, cancel task, master_ui (:8082 -> 200), worker_ui (:18080 -> 200).
+- Marker: `TEST_DONE_functional-test`.
+
+### Security Test — 18/18 PASS (test_logs/e2e/security.run.*.log)
+
+- user2_login, 3x unauth 401 (tasks/workers/admin), bad_login 401.
+- 4x URL-encoded path-traversal -> 400 `{Invalid task_id}` (`%2e%2e`, `%2e%2e%2f`, `%2f`, `%2e`) confirms `is_safe_task_id` backend guard fires behind client normalization.
+- 3x literal path-traversal -> 404 (`../evil`, `a/b`, `.`) after client-side normalization.
+- cross_user_isolation (user2 sees 0 admin tasks), cross_user_result_denied (`success:false, Not authorized`), cross_user_log_denied.
+- nonadmin_billing_denied, nonadmin_audit_denied.
+- Positive control `owner_log_allowed`: admin reading own task log returns `success:true` — proves cross-user denial is ownership-based, not a blanket block.
+- Marker: `TEST_DONE_security-test`.
+
+### Stress Test — 10/10 COMPLETED (test_logs/e2e/stress.run.*.log)
+
+- 10 concurrent managed-function-v0 tasks (03_batch_sum.hmf), all COMPLETED.
+- total_ms=2330, avg_submit_ms=14.7, max_submit_ms=85, pending=0, failed_or_pending=0.
+- Worker reputation after stress: score=126, banned=false, failed_tasks=0 (no reset needed; dispatcher trust >= MIN_WORKER_REPUTATION_SCORE=20 satisfied).
+- Sample task result (`stress-20260715134508-1/result`): `success:true, status_message:"OK"`.
+
+### Code Review / Security Audit
+
+- CORS: `master-api/src/routes.rs build_cors_layer` uses `AllowOrigin::list(origins)` built only from configured `master_cors_allowed_origins`; never `AllowOrigin::any()`. No literal `Access-Control-Allow-Origin: *` in any Rust crate source. Regression test `cors_allows_only_configured_origins_without_wildcard`.
+- Path traversal: `is_safe_task_id` / `is_safe_worker_id` (handlers.rs) reject empty, lone `.`, any `..` substring, and non-`[A-Za-z0-9-_.]` chars; applied on get_task_log, get_task_result, quote/upload, stop/cancel endpoints.
+- No unauthenticated public worker control endpoint: security test confirmed 401 for unauth tasks/workers/admin; worker gRPC control requires WORKER_EXECUTION_SECRET.
+- Worker client carries no control-plane JWT_SECRET (packaging unit test + env template audit).
+- Frontend auth: master-ui/worker-ui send Bearer token from in-memory state (verified no localStorage token persistence in prior sessions).
+
+### Final Release Checklist
+
+- [x] Role packages exist in dist/role-clients/ (worker/master/nodepool)
+- [x] Compiled binaries are feature-gated (worker/master/nodepool)
+- [x] Worker starts worker UI in-process (:18080 -> 200)
+- [x] Master starts master UI in-process (:8082 -> 200)
+- [x] Architecture follows AGENTS.md (feature-gated role builds, loopback bind vs routable advertise, worker no control-plane secret, no wildcard CORS)
+- [x] Packaging unit tests pass (re-run)
+- [x] Functional test 12/12 pass
+- [x] Security test 18/18 pass
+- [x] Stress test 10/10 COMPLETED (2330 ms)
+- [x] Code review / security audit complete
+- [x] Progress.md updated with all evidence
+- [x] Local git commit
