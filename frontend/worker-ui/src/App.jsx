@@ -28,8 +28,11 @@ const buttonStyle = {
 };
 
 export default function WorkerApp() {
-  const apiBase = String(import.meta.env.VITE_API_BASE || '').trim().replace(/\/$/, '');
-  const workerControlBase = String(import.meta.env.VITE_WORKER_CONTROL_BASE || '')
+  // Worker UI talks only to the local worker control HTTP backend.
+  // That backend proxies login/register to the configured nodepool.
+  const apiBase = String(
+    import.meta.env.VITE_WORKER_CONTROL_BASE || import.meta.env.VITE_API_BASE || '',
+  )
     .trim()
     .replace(/\/$/, '');
 
@@ -53,13 +56,16 @@ export default function WorkerApp() {
     }
   }
 
-  async function authedFetch(path, options = {}, authToken = token) {
+  async function localFetch(path, options = {}, authToken = token) {
+    const headers = {
+      ...(options.headers || {}),
+    };
+    if (authToken) {
+      headers.Authorization = `Bearer ${authToken}`;
+    }
     const res = await fetch(`${apiBase}${path}`, {
       ...options,
-      headers: {
-        ...(options.headers || {}),
-        Authorization: `Bearer ${authToken}`,
-      },
+      headers,
     });
     const data = await readJson(res);
     if (!res.ok) {
@@ -69,9 +75,8 @@ export default function WorkerApp() {
   }
 
   async function refreshLocalProfile() {
-    const res = await fetch(`${workerControlBase}/api/worker-info`);
-    const data = await readJson(res);
-    if (!res.ok || !data.success || !data.profile) {
+    const data = await localFetch('/api/worker-info', {}, '');
+    if (!data.success || !data.profile) {
       throw new Error(data.status_message || data.message || 'Local worker agent unavailable');
     }
 
@@ -89,11 +94,15 @@ export default function WorkerApp() {
 
     try {
       const workerId = String(workerProfile.worker_id || '').trim() || ownerUsername;
-      const data = await authedFetch('/api/register-worker', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(buildRegisterWorkerBody(ownerUsername, workerProfile, endpoint)),
-      }, authToken);
+      const data = await localFetch(
+        '/api/register-worker',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(buildRegisterWorkerBody(ownerUsername, workerProfile, endpoint)),
+        },
+        authToken,
+      );
 
       if (!data.success) {
         throw new Error(data.status_message || 'Worker registration failed');
@@ -122,13 +131,16 @@ export default function WorkerApp() {
     setRegistration(null);
 
     try {
-      const res = await fetch(`${apiBase}/api/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
-      });
-      const data = await readJson(res);
-      if (!res.ok || !data.success) {
+      const data = await localFetch(
+        '/api/login',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        },
+        '',
+      );
+      if (!data.success) {
         throw new Error(data.message || data.status_message || 'Login failed');
       }
 
@@ -228,14 +240,20 @@ export default function WorkerApp() {
               <dt>GPU name</dt>
               <dd>{profile.gpu_name || '-'}</dd>
               <dt>Storage</dt>
-              <dd>{profile.storage_available_gb} / {profile.storage_total_gb} GB</dd>
+              <dd>
+                {profile.storage_available_gb} / {profile.storage_total_gb} GB
+              </dd>
               <dt>Location</dt>
               <dd>{profile.location || 'local'}</dd>
             </dl>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 16 }}>
               <button
                 type="button"
-                onClick={() => refreshLocalProfile().then(() => setStatus('本機資源已更新')).catch((err) => setStatus(`更新失敗: ${err.message}`))}
+                onClick={() =>
+                  refreshLocalProfile()
+                    .then(() => setStatus('本機資源已更新'))
+                    .catch((err) => setStatus(`更新失敗: ${err.message}`))
+                }
                 style={{ ...buttonStyle, background: '#e7edf3', color: '#22313f' }}
               >
                 Refresh profile
@@ -256,10 +274,14 @@ export default function WorkerApp() {
           <section style={panelStyle}>
             <h2 style={{ margin: '0 0 12px', fontSize: 20 }}>Registration Status</h2>
             {registration ? (
-              <div style={{ padding: 12, borderRadius: 10, background: registration.success ? '#eef7ef' : '#fff2f2' }}>
-                <div style={{ fontWeight: 700 }}>
-                  {registration.success ? 'Registered' : 'Not registered'}
-                </div>
+              <div
+                style={{
+                  padding: 12,
+                  borderRadius: 10,
+                  background: registration.success ? '#eef7ef' : '#fff2f2',
+                }}
+              >
+                <div style={{ fontWeight: 700 }}>{registration.success ? 'Registered' : 'Not registered'}</div>
                 <div style={{ marginTop: 6 }}>{registration.message}</div>
                 {registration.workerId ? (
                   <div style={{ marginTop: 6, color: '#5e6c7a' }}>worker_id: {registration.workerId}</div>
