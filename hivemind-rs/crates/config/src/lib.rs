@@ -227,121 +227,127 @@ impl HivemindConfig {
         config
     }
 
+    /// Loads JSON/default configuration first, then applies process environment overrides.
     pub fn load() -> anyhow::Result<Self> {
         dotenvy::dotenv().ok();
-        let config = match std::env::var("HIVEMIND_CONFIG") {
+        let mut config = match std::env::var("HIVEMIND_CONFIG") {
             Ok(path) => {
                 let contents = std::fs::read_to_string(&path)?;
                 serde_json::from_str(&contents)?
             }
-            Err(_) => Self::load_from_env(),
+            Err(_) => {
+                let mut config = Self::default();
+                config.executor.sandbox_mode = "production".into();
+                config
+            }
         };
+        config.apply_env_overrides()?;
         Ok(config)
     }
 
+    #[cfg(test)]
     fn load_from_env() -> Self {
         let mut config = Self::default();
         config.executor.sandbox_mode = "production".into();
+        config
+            .apply_env_overrides()
+            .expect("test environment overrides must be valid");
+        config
+    }
+
+    fn apply_env_overrides(&mut self) -> anyhow::Result<()> {
         if let Ok(url) = std::env::var("DATABASE_URL") {
-            config.database.url = url;
+            self.database.url = url;
         }
         if let Ok(url) = std::env::var("REDIS_URL") {
-            config.redis.url = url;
+            self.redis.url = url;
         }
         if let Ok(addr) = std::env::var("NODEPOOL_GRPC_ADDR") {
-            config.server.nodepool_grpc_addr = addr;
+            self.server.nodepool_grpc_addr = addr;
         }
         if let Ok(endpoint) = std::env::var("NODEPOOL_GRPC_ENDPOINT") {
-            config.server.nodepool_grpc_endpoint = Some(endpoint);
+            self.server.nodepool_grpc_endpoint = Some(endpoint);
         }
         if let Ok(addr) = std::env::var("MASTER_HTTP_ADDR") {
-            config.server.master_http_addr = addr;
+            self.server.master_http_addr = addr;
         }
         if let Ok(dir) = std::env::var("MASTER_UI_DIR") {
-            config.server.master_ui_dir = dir;
+            self.server.master_ui_dir = dir;
         }
         if let Ok(addr) = std::env::var("WORKER_GRPC_ADDR") {
-            config.server.worker_grpc_addr = addr;
+            self.server.worker_grpc_addr = addr;
         }
         if let Ok(dir) = std::env::var("WORKER_UI_DIR") {
-            config.server.worker_ui_dir = dir;
+            self.server.worker_ui_dir = dir;
         }
         if let Ok(addr) = std::env::var("WORKER_CONTROL_HTTP_ADDR") {
-            config.server.worker_control_http_addr = addr;
+            self.server.worker_control_http_addr = addr;
         }
         if let Ok(addr) = std::env::var("WORKER_ADVERTISE_ADDR") {
-            config.server.worker_advertise_addr = Some(addr);
+            self.server.worker_advertise_addr = Some(addr);
         }
         if let Ok(token) = std::env::var("WORKER_NODEPOOL_TOKEN") {
-            config.server.worker_nodepool_token = Some(token);
+            self.server.worker_nodepool_token = Some(token);
         }
         if let Ok(username) = std::env::var("WORKER_NODEPOOL_USERNAME") {
-            config.server.worker_nodepool_username = Some(username);
+            self.server.worker_nodepool_username = Some(username);
         }
         if let Ok(password) = std::env::var("WORKER_NODEPOOL_PASSWORD") {
-            config.server.worker_nodepool_password = Some(password);
+            self.server.worker_nodepool_password = Some(password);
         }
-        if config.server.worker_nodepool_username.is_none() {
+        if self.server.worker_nodepool_username.is_none() {
             if let Ok(username) = std::env::var("WORKER_USERNAME") {
-                config.server.worker_nodepool_username = Some(username);
+                self.server.worker_nodepool_username = Some(username);
             }
         }
-        if config.server.worker_nodepool_password.is_none() {
+        if self.server.worker_nodepool_password.is_none() {
             if let Ok(password) = std::env::var("WORKER_PASSWORD") {
-                config.server.worker_nodepool_password = Some(password);
+                self.server.worker_nodepool_password = Some(password);
             }
         }
         if let Ok(origins) = std::env::var("MASTER_CORS_ALLOWED_ORIGINS") {
-            config.server.master_cors_allowed_origins = parse_csv(&origins);
+            self.server.master_cors_allowed_origins = parse_csv(&origins);
         }
         if let Ok(origins) = std::env::var("WORKER_CONTROL_CORS_ALLOWED_ORIGINS") {
-            config.server.worker_control_cors_allowed_origins = parse_csv(&origins);
+            self.server.worker_control_cors_allowed_origins = parse_csv(&origins);
         }
         if let Ok(secret) = std::env::var("JWT_SECRET") {
-            config.auth.jwt_secret = secret;
+            self.auth.jwt_secret = secret;
         }
         if let Ok(secret) = std::env::var("WORKER_EXECUTION_SECRET") {
-            config.auth.worker_execution_secret = secret;
+            self.auth.worker_execution_secret = secret;
         }
         if let Ok(exec) = std::env::var("MONTY_EXECUTABLE") {
-            config.executor.monty_executable = exec;
+            self.executor.monty_executable = exec;
         }
         if let Ok(dir) = std::env::var("EXECUTOR_SANDBOX_DIR") {
-            config.executor.sandbox_dir = dir;
+            self.executor.sandbox_dir = dir;
         }
         if let Ok(value) = std::env::var("EXECUTOR_MAX_CPU_PERCENT") {
-            if let Ok(parsed) = value.parse() {
-                config.executor.max_cpu_percent = parsed;
-            }
+            self.executor.max_cpu_percent = parse_env("EXECUTOR_MAX_CPU_PERCENT", &value)?;
         }
         if let Ok(value) = std::env::var("EXECUTOR_MAX_MEMORY_MB") {
-            if let Ok(parsed) = value.parse() {
-                config.executor.max_memory_mb = parsed;
-            }
+            self.executor.max_memory_mb = parse_env("EXECUTOR_MAX_MEMORY_MB", &value)?;
         }
         if let Ok(value) = std::env::var("EXECUTOR_TASK_TIMEOUT_SECS") {
-            if let Ok(parsed) = value.parse() {
-                config.executor.task_timeout_secs = parsed;
-            }
+            self.executor.task_timeout_secs = parse_env("EXECUTOR_TASK_TIMEOUT_SECS", &value)?;
         }
         if let Ok(value) = std::env::var("EXECUTOR_MAX_CONCURRENT_TASKS") {
-            if let Ok(parsed) = value.parse() {
-                config.executor.max_concurrent_tasks = parsed;
-            }
+            self.executor.max_concurrent_tasks =
+                parse_env("EXECUTOR_MAX_CONCURRENT_TASKS", &value)?;
         }
         if let Ok(mode) = std::env::var("EXECUTOR_SANDBOX_MODE") {
-            config.executor.sandbox_mode = mode;
+            self.executor.sandbox_mode = mode;
         }
         if let Ok(enabled) = std::env::var("EXECUTOR_NETWORK_EGRESS_ENABLED") {
-            if let Ok(parsed) = enabled.parse() {
-                config.executor.network_egress_enabled = parsed;
-            }
+            self.executor.network_egress_enabled =
+                parse_env("EXECUTOR_NETWORK_EGRESS_ENABLED", &enabled)?;
         }
         if let Ok(mode) = std::env::var("EXECUTOR_NETWORK_EGRESS_MODE") {
-            config.executor.network_egress_mode = mode;
+            self.executor.network_egress_mode = mode;
         }
         if let Ok(targets) = std::env::var("EXECUTOR_NETWORK_EGRESS_TARGETS") {
-            config.executor.network_egress_targets = targets
+            self.executor.network_egress_targets = targets
                 .split(',')
                 .map(|target| target.trim())
                 .filter(|target| !target.is_empty())
@@ -349,50 +355,49 @@ impl HivemindConfig {
                 .collect();
         }
         if let Ok(dir) = std::env::var("TORRENT_API_DIR") {
-            config.torrent.api_dir = dir;
+            self.torrent.api_dir = dir;
         }
         if let Ok(dir) = std::env::var("TORRENT_BT_DIR") {
-            config.torrent.bt_dir = dir;
+            self.torrent.bt_dir = dir;
         }
         if let Ok(url) = std::env::var("TORRENT_ANNOUNCE_URL") {
-            config.torrent.announce_url = url;
+            self.torrent.announce_url = url;
         }
         if let Ok(addr) = std::env::var("TORRENT_TRACKER_LISTEN_ADDR") {
-            config.torrent.tracker_listen_addr = addr;
+            self.torrent.tracker_listen_addr = addr;
         }
         if let Ok(addr) = std::env::var("TORRENT_SEED_LISTEN_ADDR") {
-            config.torrent.seed_listen_addr = addr;
+            self.torrent.seed_listen_addr = addr;
         }
         if let Ok(host) = std::env::var("TORRENT_SEED_ADVERTISE_HOST") {
             let host = host.trim().to_string();
             if !host.is_empty() {
-                config.torrent.seed_advertise_host = Some(host);
+                self.torrent.seed_advertise_host = Some(host);
             }
         }
         if let Ok(enabled) = std::env::var("TORRENT_ALLOW_LOCAL_TASK_ARTIFACTS") {
-            if let Ok(parsed) = enabled.parse() {
-                config.torrent.allow_local_task_artifacts = parsed;
-            }
+            self.torrent.allow_local_task_artifacts =
+                parse_env("TORRENT_ALLOW_LOCAL_TASK_ARTIFACTS", &enabled)?;
         }
         if let Ok(url) = std::env::var("TORRENT_TASK_ARTIFACT_BASE_URL") {
             let url = url.trim().trim_end_matches('/').to_string();
             if !url.is_empty() {
-                config.torrent.task_artifact_base_url = Some(url);
+                self.torrent.task_artifact_base_url = Some(url);
             }
         }
         if let Ok(url) = std::env::var("HEADSCALE_URL") {
-            config.vpn.headscale_url = url;
+            self.vpn.headscale_url = url;
         }
         if let Ok(key) = std::env::var("HEADSCALE_API_KEY") {
-            config.vpn.headscale_api_key = key;
+            self.vpn.headscale_api_key = key;
         }
         if let Ok(ip) = std::env::var("VPN_BASE_VIRTUAL_IP") {
-            config.vpn.base_virtual_ip = ip;
+            self.vpn.base_virtual_ip = ip;
         }
         if let Ok(network) = std::env::var("VPN_NETWORK") {
-            config.vpn.vpn_network = network;
+            self.vpn.vpn_network = network;
         }
-        config
+        Ok(())
     }
 }
 
@@ -477,6 +482,16 @@ fn parse_csv(value: &str) -> Vec<String> {
         .filter(|entry| !entry.is_empty())
         .map(ToString::to_string)
         .collect()
+}
+
+fn parse_env<T>(name: &str, value: &str) -> anyhow::Result<T>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    value
+        .parse()
+        .map_err(|error| anyhow::anyhow!("{name} must be valid: {error}"))
 }
 
 #[cfg(test)]
@@ -704,6 +719,102 @@ mod tests {
             loaded.auth.worker_execution_secret,
             "worker-execution-env-secret-at-least-32-bytes"
         );
+    }
+
+    #[test]
+    fn json_config_applies_environment_overrides_after_file_defaults() {
+        // Given: a JSON configuration with file defaults and distinct launcher overrides.
+        let old_env = [
+            ("HIVEMIND_CONFIG", std::env::var_os("HIVEMIND_CONFIG")),
+            ("JWT_SECRET", std::env::var_os("JWT_SECRET")),
+            (
+                "WORKER_EXECUTION_SECRET",
+                std::env::var_os("WORKER_EXECUTION_SECRET"),
+            ),
+            (
+                "NODEPOOL_GRPC_ENDPOINT",
+                std::env::var_os("NODEPOOL_GRPC_ENDPOINT"),
+            ),
+            ("MASTER_HTTP_ADDR", std::env::var_os("MASTER_HTTP_ADDR")),
+            ("MASTER_UI_DIR", std::env::var_os("MASTER_UI_DIR")),
+            ("WORKER_UI_DIR", std::env::var_os("WORKER_UI_DIR")),
+            (
+                "WORKER_ADVERTISE_ADDR",
+                std::env::var_os("WORKER_ADVERTISE_ADDR"),
+            ),
+            (
+                "EXECUTOR_SANDBOX_MODE",
+                std::env::var_os("EXECUTOR_SANDBOX_MODE"),
+            ),
+        ];
+        let path = std::env::temp_dir().join(format!(
+            "hivemind-config-json-overrides-{}.json",
+            std::process::id()
+        ));
+        let mut file_config = HivemindConfig::default();
+        file_config.auth.jwt_secret = "file-jwt-secret-at-least-32-bytes".into();
+        file_config.auth.worker_execution_secret = "file-worker-secret-at-least-32-bytes".into();
+        file_config.server.nodepool_grpc_endpoint = Some("file-nodepool:50051".into());
+        file_config.server.master_http_addr = "file-master:8082".into();
+        file_config.server.master_ui_dir = "./file/master-ui".into();
+        file_config.server.worker_ui_dir = "./file/worker-ui".into();
+        file_config.server.worker_advertise_addr = Some("file-worker:50053".into());
+        file_config.executor.sandbox_mode = "file-sandbox".into();
+        std::fs::write(&path, serde_json::to_string(&file_config).unwrap()).unwrap();
+
+        std::env::set_var("HIVEMIND_CONFIG", path.as_os_str());
+        std::env::set_var("JWT_SECRET", "env-jwt-secret-at-least-32-bytes");
+        std::env::set_var(
+            "WORKER_EXECUTION_SECRET",
+            "env-worker-secret-at-least-32-bytes",
+        );
+        std::env::set_var("NODEPOOL_GRPC_ENDPOINT", "env-nodepool:50051");
+        std::env::set_var("MASTER_HTTP_ADDR", "env-master:8082");
+        std::env::set_var("MASTER_UI_DIR", "./env/master-ui");
+        std::env::set_var("WORKER_UI_DIR", "./env/worker-ui");
+        std::env::remove_var("WORKER_ADVERTISE_ADDR");
+        std::env::remove_var("EXECUTOR_SANDBOX_MODE");
+
+        // When: the runtime loads the configuration through its public entry point.
+        let loaded = HivemindConfig::load();
+
+        for (name, value) in old_env {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+        std::fs::remove_file(&path).unwrap();
+
+        // Then: environment values override secrets/endpoints/UI paths while file defaults survive.
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.auth.jwt_secret, "env-jwt-secret-at-least-32-bytes");
+        assert_eq!(
+            loaded.auth.worker_execution_secret,
+            "env-worker-secret-at-least-32-bytes"
+        );
+        assert_eq!(
+            loaded.server.nodepool_grpc_endpoint.as_deref(),
+            Some("env-nodepool:50051")
+        );
+        assert_eq!(loaded.server.master_http_addr, "env-master:8082");
+        assert_eq!(loaded.server.master_ui_dir, "./env/master-ui");
+        assert_eq!(loaded.server.worker_ui_dir, "./env/worker-ui");
+        assert_eq!(
+            loaded.server.worker_advertise_addr.as_deref(),
+            Some("file-worker:50053")
+        );
+        assert_eq!(loaded.executor.sandbox_mode, "file-sandbox");
+    }
+
+    #[test]
+    fn invalid_numeric_environment_value_returns_configuration_error() {
+        // Given: a malformed value at the shared environment parsing seam.
+        let error = parse_env::<u64>("EXECUTOR_MAX_MEMORY_MB", "not-a-memory-limit")
+            .expect_err("malformed numeric override must fail configuration loading");
+
+        // Then: the invalid variable is named instead of silently falling back.
+        assert!(error.to_string().contains("EXECUTOR_MAX_MEMORY_MB"));
     }
 
     #[test]
