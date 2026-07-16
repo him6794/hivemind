@@ -1,7 +1,8 @@
 use hivemind_proto::{
-    vpn_service_server::VpnService, GetTaskPeersRequest, GetTaskPeersResponse, JoinVpnRequest,
-    JoinVpnResponse, LeaveVpnRequest, LeaveVpnResponse, PeerInfo as ProtoPeerInfo,
-    UpdateVpnStatusRequest, UpdateVpnStatusResponse,
+    vpn_service_server::VpnService, GetTaskPeersRequest, GetTaskPeersResponse,
+    IssueUserVpnConfigRequest, IssueUserVpnConfigResponse, JoinVpnRequest, JoinVpnResponse,
+    LeaveVpnRequest, LeaveVpnResponse, PeerInfo as ProtoPeerInfo, UpdateVpnStatusRequest,
+    UpdateVpnStatusResponse,
 };
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
@@ -112,6 +113,38 @@ impl VpnService for GrpcVpnService {
             Err(e) => Ok(Response::new(UpdateVpnStatusResponse {
                 success: false,
                 status_message: e.to_string(),
+            })),
+        }
+    }
+    async fn issue_user_vpn_config(
+        &self,
+        request: Request<IssueUserVpnConfigRequest>,
+    ) -> Result<Response<IssueUserVpnConfigResponse>, Status> {
+        let req = request.into_inner();
+        match self
+            .vpn
+            .issue_user_vpn_config_from_token(&req.token, &req.client_name)
+            .await
+        {
+            Ok(cfg) => Ok(Response::new(IssueUserVpnConfigResponse {
+                success: true,
+                status_message: "VPN config issued".into(),
+                login_server: cfg.login_server,
+                auth_key: cfg.auth_key,
+                virtual_ip: cfg.virtual_ip,
+                client_id: cfg.client_id,
+                config_text: cfg.config_text,
+                expires_at: cfg.expires_at,
+            })),
+            Err(e) => Ok(Response::new(IssueUserVpnConfigResponse {
+                success: false,
+                status_message: e.to_string(),
+                login_server: String::new(),
+                auth_key: String::new(),
+                virtual_ip: String::new(),
+                client_id: String::new(),
+                config_text: String::new(),
+                expires_at: String::new(),
             })),
         }
     }

@@ -8,8 +8,9 @@ name = "hivemind_bin"
 path = "src/lib.rs"
 
 [features]
-default = ["master", "nodepool", "worker", "cli"]
+default = ["master", "nodepool", "worker", "website", "cli"]
 master = ["dep:hivemind-master-api"]
+website = ["dep:hivemind-website-api"]
 nodepool = [
     "dep:hivemind-auth",
     "dep:hivemind-database",
@@ -30,6 +31,11 @@ required-features = ["cli"]
 name = "hivemind-master"
 path = "src/bin/hivemind-master.rs"
 required-features = ["master"]
+
+[[bin]]
+name = "hivemind-website-api"
+path = "src/bin/hivemind-website-api.rs"
+required-features = ["website"]
 
 [[bin]]
 name = "hivemind-nodepool"
@@ -61,6 +67,7 @@ hivemind-auth = { path = "../auth", optional = true }
 hivemind-node-manager = { path = "../node-manager", optional = true }
 hivemind-task-scheduler = { path = "../task-scheduler", optional = true }
 hivemind-master-api = { path = "../master-api", optional = true }
+hivemind-website-api = { path = "../website-api", optional = true }
 hivemind-worker-executor = { path = "../worker-executor", optional = true }
 hivemind-vpn-service = { path = "../vpn-service", optional = true }
 hivemind-torrent-service = { path = "../torrent-service", optional = true }

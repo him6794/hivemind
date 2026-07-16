@@ -33,6 +33,8 @@ pub struct ServerConfig {
     #[serde(default)]
     pub nodepool_grpc_endpoint: Option<String>,
     pub master_http_addr: String,
+    #[serde(default = "default_website_http_addr")]
+    pub website_http_addr: String,
     pub worker_grpc_addr: String,
     pub worker_grpc_port: u16,
     #[serde(default = "default_worker_control_http_addr")]
@@ -51,6 +53,8 @@ pub struct ServerConfig {
     pub worker_nodepool_password: Option<String>,
     #[serde(default = "default_master_cors_allowed_origins")]
     pub master_cors_allowed_origins: Vec<String>,
+    #[serde(default = "default_website_cors_allowed_origins")]
+    pub website_cors_allowed_origins: Vec<String>,
     #[serde(default = "default_worker_control_cors_allowed_origins")]
     pub worker_control_cors_allowed_origins: Vec<String>,
 }
@@ -125,6 +129,9 @@ pub struct TorrentConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VpnConfig {
     pub headscale_url: String,
+    /// Public login server advertised to clients. Falls back to headscale_url.
+    #[serde(default)]
+    pub headscale_login_server: String,
     pub headscale_api_key: String,
     pub base_virtual_ip: String,
     pub vpn_network: String,
@@ -167,6 +174,7 @@ impl Default for HivemindConfig {
                 nodepool_grpc_addr: "0.0.0.0:50051".into(),
                 nodepool_grpc_endpoint: None,
                 master_http_addr: "0.0.0.0:8082".into(),
+                website_http_addr: default_website_http_addr(),
                 worker_grpc_addr: "0.0.0.0:50053".into(),
                 worker_grpc_port: 50053,
                 worker_control_http_addr: default_worker_control_http_addr(),
@@ -177,6 +185,7 @@ impl Default for HivemindConfig {
                 worker_nodepool_username: None,
                 worker_nodepool_password: None,
                 master_cors_allowed_origins: default_master_cors_allowed_origins(),
+                website_cors_allowed_origins: default_website_cors_allowed_origins(),
                 worker_control_cors_allowed_origins: default_worker_control_cors_allowed_origins(),
             },
             auth: AuthConfig {
@@ -198,6 +207,7 @@ impl Default for HivemindConfig {
             },
             vpn: VpnConfig {
                 headscale_url: "http://localhost:8080".into(),
+                headscale_login_server: "".into(),
                 headscale_api_key: "".into(),
                 base_virtual_ip: "100.64.0.0".into(),
                 vpn_network: "100.64.0.0/10".into(),
@@ -271,6 +281,9 @@ impl HivemindConfig {
         if let Ok(addr) = std::env::var("MASTER_HTTP_ADDR") {
             self.server.master_http_addr = addr;
         }
+        if let Ok(addr) = std::env::var("WEBSITE_HTTP_ADDR") {
+            self.server.website_http_addr = addr;
+        }
         if let Ok(dir) = std::env::var("MASTER_UI_DIR") {
             self.server.master_ui_dir = dir;
         }
@@ -307,6 +320,9 @@ impl HivemindConfig {
         }
         if let Ok(origins) = std::env::var("MASTER_CORS_ALLOWED_ORIGINS") {
             self.server.master_cors_allowed_origins = parse_csv(&origins);
+        }
+        if let Ok(origins) = std::env::var("WEBSITE_CORS_ALLOWED_ORIGINS") {
+            self.server.website_cors_allowed_origins = parse_csv(&origins);
         }
         if let Ok(origins) = std::env::var("WORKER_CONTROL_CORS_ALLOWED_ORIGINS") {
             self.server.worker_control_cors_allowed_origins = parse_csv(&origins);
@@ -388,6 +404,9 @@ impl HivemindConfig {
         if let Ok(url) = std::env::var("HEADSCALE_URL") {
             self.vpn.headscale_url = url;
         }
+        if let Ok(url) = std::env::var("HEADSCALE_LOGIN_SERVER") {
+            self.vpn.headscale_login_server = url;
+        }
         if let Ok(key) = std::env::var("HEADSCALE_API_KEY") {
             self.vpn.headscale_api_key = key;
         }
@@ -443,6 +462,9 @@ fn default_network_egress_mode() -> String {
 fn default_master_ui_dir() -> String {
     "./frontend/master-ui/dist".into()
 }
+fn default_website_http_addr() -> String {
+    "0.0.0.0:8090".into()
+}
 fn default_worker_ui_dir() -> String {
     "./frontend/worker-ui/dist".into()
 }
@@ -457,6 +479,10 @@ fn default_worker_execution_secret() -> String {
 
 fn default_master_cors_allowed_origins() -> Vec<String> {
     local_ui_origins(&[5173, 3000, 3001])
+}
+
+fn default_website_cors_allowed_origins() -> Vec<String> {
+    local_ui_origins(&[5173, 3080])
 }
 
 fn default_worker_control_cors_allowed_origins() -> Vec<String> {

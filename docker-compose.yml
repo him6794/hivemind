@@ -94,7 +94,7 @@ services:
       MASTER_HTTP_ADDR: 0.0.0.0:8082
       NODEPOOL_GRPC_ENDPOINT: nodepool:50051
       MASTER_UI_DIR: /app/frontend/master-ui/dist
-      MASTER_CORS_ALLOWED_ORIGINS: ${MASTER_CORS_ALLOWED_ORIGINS:-http://localhost:3080,http://127.0.0.1:3080,http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001,http://localhost:5173,http://127.0.0.1:5173}
+      MASTER_CORS_ALLOWED_ORIGINS: ${MASTER_CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     ports:
       - "8082:8082"
@@ -142,7 +142,7 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
     ports:
       - "${WORKER_GRPC_BIND_HOST:-0.0.0.0}:50053:50053"
-      - "0.0.0.0:18080:18080"
+      - "${WORKER_CONTROL_BIND_HOST:-127.0.0.1}:18080:18080"
     depends_on:
       - nodepool
     networks:
@@ -207,7 +207,7 @@ services:
       context: ./frontend/master-ui
       dockerfile: Dockerfile
       args:
-        VITE_API_BASE: ${VITE_API_BASE:-http://localhost:8082}
+        VITE_API_BASE: ${VITE_MASTER_API_BASE:-${VITE_API_BASE:-http://localhost:8082}}
     container_name: hivemind-master-ui
     image: hivemind-master-ui:local
     restart: unless-stopped
@@ -253,21 +253,53 @@ services:
       - hivemind-network
     profiles: ["vpn"]
 
+  website-api:
+    build:
+      context: .
+      dockerfile: hivemind-rs/Dockerfile
+      args:
+        HIVEMIND_BIN: hivemind-website-api
+        HIVEMIND_FEATURES: website
+    image: hivemind-website-api:local
+    restart: unless-stopped
+    user: "10001:10001"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set to a non-default value}
+      WEBSITE_HTTP_ADDR: ${WEBSITE_HTTP_ADDR:-0.0.0.0:8090}
+      NODEPOOL_GRPC_ENDPOINT: ${NODEPOOL_GRPC_ENDPOINT:-nodepool:50051}
+      WEBSITE_CORS_ALLOWED_ORIGINS: ${WEBSITE_CORS_ALLOWED_ORIGINS:-http://localhost:3080,http://127.0.0.1:3080,http://localhost:5173,http://127.0.0.1:5173}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "8090:8090"
+    depends_on:
+      - nodepool
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8090/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - hivemind-network
+
   website:
     build:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        VITE_API_BASE: ${VITE_API_BASE:-http://localhost:8082}
-        VITE_MASTER_UI: ${VITE_MASTER_UI:-http://100.124.230.74:3000}
-        VITE_WORKER_UI: ${VITE_WORKER_UI:-http://100.124.230.74:3001}
+        # Public website talks to official website-api, never user master HTTP.
+        VITE_API_BASE: ${VITE_WEBSITE_API_BASE:-http://localhost:8090}
     container_name: hivemind-website
     image: hivemind-website:local
     restart: unless-stopped
     ports:
       - "3080:80"
     depends_on:
-      - master
+      - website-api
     networks:
       - hivemind-network
 

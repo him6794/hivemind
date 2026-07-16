@@ -40,6 +40,21 @@ message GetBalanceResponse {
     int64 balance = 3;
 }
 
+message TransferCptRequest {
+    string token = 1;
+    string to_username = 2;
+    int64 amount_cpt = 3;
+    string idempotency_key = 4;
+}
+
+message TransferCptResponse {
+    bool success = 1;
+    string status_message = 2;
+    int64 from_balance = 3;
+    int64 to_balance = 4;
+    string transfer_id = 5;
+}
+
 message RefreshTokenRequest {
     string old_token = 1;
 }
@@ -729,6 +744,7 @@ service UserService {
     rpc RegisterUser(RegisterUserRequest) returns (RegisterUserResponse);
     rpc Login(LoginRequest) returns (LoginResponse);
     rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse);
+    rpc TransferCpt(TransferCptRequest) returns (TransferCptResponse);
     rpc RefreshToken(RefreshTokenRequest) returns (RefreshTokenResponse);
 }
 

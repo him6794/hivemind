@@ -49,4 +49,18 @@ impl UserRepository {
         .await?;
         Ok(result.rows_affected() > 0)
     }
+
+    pub async fn credit_balance(&self, username: &str, amount: i64) -> Result<bool> {
+        if amount < 0 {
+            anyhow::bail!("credit amount must be non-negative");
+        }
+        let result = sqlx::query(
+            "UPDATE users SET balance = balance + $1, updated_at = NOW() WHERE username = $2 AND is_active = true",
+        )
+        .bind(amount)
+        .bind(username)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
 }

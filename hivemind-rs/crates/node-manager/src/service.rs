@@ -20,6 +20,25 @@ impl NodeManagerService {
     }
 
     pub async fn register_worker(&self, reg: &WorkerRegistration) -> Result<WorkerNode> {
+        self.register_worker_with_authorization(reg, "", true).await
+    }
+
+    pub async fn register_worker_for_owner(
+        &self,
+        reg: &WorkerRegistration,
+        owner: &str,
+        is_admin: bool,
+    ) -> Result<WorkerNode> {
+        self.register_worker_with_authorization(reg, owner, is_admin)
+            .await
+    }
+
+    async fn register_worker_with_authorization(
+        &self,
+        reg: &WorkerRegistration,
+        owner: &str,
+        is_admin: bool,
+    ) -> Result<WorkerNode> {
         let gpu_count = reg.resources.gpu_count;
         let worker = WorkerNode {
             id: uuid::Uuid::new_v4(),
@@ -59,6 +78,12 @@ impl NodeManagerService {
             registered_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
-        self.manager.register_worker(&worker).await
+        if is_admin {
+            self.manager.register_worker(&worker).await
+        } else {
+            self.manager
+                .register_worker_for_owner(&worker, owner, false)
+                .await
+        }
     }
 }

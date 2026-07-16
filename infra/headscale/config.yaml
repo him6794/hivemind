@@ -1,0 +1,30 @@
+# Minimal Headscale config scaffold for local/dev use.
+# Bootstrap an API key after first start, then set HEADSCALE_API_KEY in .env.
+server_url: http://100.124.230.74:8080
+listen_addr: 0.0.0.0:8080
+metrics_listen_addr: 127.0.0.1:9090
+grpc_listen_addr: 0.0.0.0:50443
+grpc_allow_insecure: true
+noise:
+  private_key_path: /var/lib/headscale/noise_private.key
+prefixes:
+  v4: 100.64.0.0/10
+  v6: fd7a:115c:a1e0::/48
+derp:
+  server:
+    enabled: false
+  urls:
+    - https://controlplane.tailscale.com/derpmap/default
+  auto_update_enabled: true
+  update_frequency: 24h
+database:
+  type: sqlite
+  sqlite:
+    path: /var/lib/headscale/db.sqlite
+unix_socket: /var/run/headscale/headscale.sock
+unix_socket_permission: "0770"
+log:
+  level: info
+dns:
+  magic_dns: true
+  base_domain: hivemind.local

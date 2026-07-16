@@ -115,6 +115,70 @@ impl HeadscaleClient {
         Ok(key)
     }
 
+    /// Create a Headscale user if the API supports it. Missing endpoint is ignored.
+    pub async fn ensure_user(&self, user: &str) -> Result<()> {
+        self.ensure_configured()?;
+        let user = user.trim();
+        if user.is_empty() {
+            anyhow::bail!("Headscale user is required");
+        }
+        match self
+            .request_json(
+                Method::POST,
+                self.api_url("user")?,
+                Some(serde_json::json!({ "name": user })),
+            )
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                let msg = err.to_string().to_lowercase();
+                if msg.contains("already") || msg.contains("exists") || msg.contains("409") {
+                    Ok(())
+                } else {
+                    // Some Headscale versions use /user, others pre-create users out-of-band.
+                    tracing::warn!("Headscale ensure_user soft-failed for {}: {}", user, err);
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    /// Create a pre-authentication key for a Headscale user with explicit options.
+    pub async fn create_preauth_key_for_user(
+        &self,
+        user: &str,
+        reusable: bool,
+        ephemeral: bool,
+    ) -> Result<String> {
+        self.ensure_configured()?;
+        let user = user.trim();
+        if user.is_empty() {
+            anyhow::bail!("Headscale preauth key user is required");
+        }
+        let response = self
+            .request_json(
+                Method::POST,
+                self.api_url("preauthkey")?,
+                Some(serde_json::json!({
+                    "user": user,
+                    "reusable": reusable,
+                    "ephemeral": ephemeral,
+                    "expiration": (chrono::Utc::now() + chrono::Duration::hours(24)).to_rfc3339(),
+                })),
+            )
+            .await?;
+        let key = Self::extract_preauth_key(&response).ok_or_else(|| {
+            anyhow::anyhow!("Headscale preauth key response did not contain a key")
+        })?;
+        tracing::info!(
+            "Headscale {}: created preauth key for user {}",
+            self.base_url,
+            user,
+        );
+        Ok(key)
+    }
+
     /// Delete/expire a node from the Tailscale network
     pub async fn delete_node(&self, node_id: &str) -> Result<()> {
         self.ensure_configured()?;

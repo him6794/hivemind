@@ -77,6 +77,8 @@ use hivemind_proto::{
     TaskUsageResponse,
     TasklogRequest,
     TasklogResponse,
+    TransferCptRequest,
+    TransferCptResponse,
     UpdateProviderWorkerSettingsRequest,
     UpdateProviderWorkerSettingsResponse,
     UpdateWorkerTrustControlRequest,
@@ -145,6 +147,14 @@ fn max_package_upload_bytes() -> usize {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(100 * 1024 * 1024)
+}
+
+fn task_create_error_message(error: &anyhow::Error) -> String {
+    if error.to_string().contains("tasks_task_id_key") {
+        "task_id already exists".into()
+    } else {
+        error.to_string()
+    }
 }
 
 pub fn artifact_root_for_config(config: &HivemindConfig) -> PathBuf {
@@ -274,6 +284,233 @@ impl UserService for GrpcUserService {
             balance,
         }))
     }
+
+    async fn transfer_cpt(
+        &self,
+        request: Request<TransferCptRequest>,
+    ) -> Result<Response<TransferCptResponse>, Status> {
+        let req = request.into_inner();
+        let claims = self
+            .state
+            .auth
+            .validate_token(&req.token)
+            .map_err(|_| Status::unauthenticated("Invalid token"))?;
+        let from_user = claims.sub.trim().to_string();
+        let to_user = req.to_username.trim().to_string();
+        if to_user.is_empty() {
+            return Ok(Response::new(TransferCptResponse {
+                success: false,
+                status_message: "to_username is required".into(),
+                from_balance: 0,
+                to_balance: 0,
+                transfer_id: String::new(),
+            }));
+        }
+        if to_user == from_user {
+            return Ok(Response::new(TransferCptResponse {
+                success: false,
+                status_message: "cannot transfer to the same account".into(),
+                from_balance: 0,
+                to_balance: 0,
+                transfer_id: String::new(),
+            }));
+        }
+        if req.amount_cpt <= 0 {
+            return Ok(Response::new(TransferCptResponse {
+                success: false,
+                status_message: "amount_cpt must be positive".into(),
+                from_balance: 0,
+                to_balance: 0,
+                transfer_id: String::new(),
+            }));
+        }
+
+        let transfer_id = if req.idempotency_key.trim().is_empty() {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            req.idempotency_key.trim().to_string()
+        };
+        if transfer_id.len() > 200 {
+            return Ok(Response::new(TransferCptResponse {
+                success: false,
+                status_message: "idempotency_key is too long".into(),
+                from_balance: 0,
+                to_balance: 0,
+                transfer_id: String::new(),
+            }));
+        }
+
+        let debit_key = format!("user-transfer:{transfer_id}:debit");
+        let credit_key = format!("user-transfer:{transfer_id}:credit");
+        let pool = &self.state.scheduler.database().pool;
+
+        // Idempotent replay: if debit already settled, return current balances.
+        let existing: Option<(String, Option<String>, i64)> = sqlx::query_as(
+            "SELECT payer_user, provider_user, amount_cpt
+             FROM ledger_entries
+             WHERE idempotency_key = $1 AND kind = 'user_transfer_debit' AND status = 'settled'",
+        )
+        .bind(&debit_key)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+        if let Some((payer, provider, amount)) = existing {
+            if payer != from_user {
+                return Ok(Response::new(TransferCptResponse {
+                    success: false,
+                    status_message: "idempotency_key belongs to another user".into(),
+                    from_balance: 0,
+                    to_balance: 0,
+                    transfer_id: String::new(),
+                }));
+            }
+            if provider.as_deref() != Some(to_user.as_str()) || amount != req.amount_cpt {
+                return Ok(Response::new(TransferCptResponse {
+                    success: false,
+                    status_message: "idempotency_key already used with different transfer details"
+                        .into(),
+                    from_balance: 0,
+                    to_balance: 0,
+                    transfer_id: String::new(),
+                }));
+            }
+            let from_balance: i64 = sqlx::query_scalar(
+                "SELECT balance FROM users WHERE username = $1 AND is_active = true",
+            )
+            .bind(&from_user)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .unwrap_or(0);
+            let to_balance: i64 = sqlx::query_scalar(
+                "SELECT balance FROM users WHERE username = $1 AND is_active = true",
+            )
+            .bind(&to_user)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .unwrap_or(0);
+            return Ok(Response::new(TransferCptResponse {
+                success: true,
+                status_message: "Transfer already settled".into(),
+                from_balance,
+                to_balance,
+                transfer_id,
+            }));
+        }
+
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let recipient_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM users WHERE username = $1 AND is_active = true)",
+        )
+        .bind(&to_user)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+        if !recipient_exists {
+            return Ok(Response::new(TransferCptResponse {
+                success: false,
+                status_message: "recipient not found".into(),
+                from_balance: 0,
+                to_balance: 0,
+                transfer_id: String::new(),
+            }));
+        }
+
+        let debited = sqlx::query(
+            "UPDATE users SET balance = balance - $1, updated_at = NOW()
+             WHERE username = $2 AND is_active = true AND balance >= $1",
+        )
+        .bind(req.amount_cpt)
+        .bind(&from_user)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .rows_affected()
+            > 0;
+        if !debited {
+            return Ok(Response::new(TransferCptResponse {
+                success: false,
+                status_message: "insufficient balance".into(),
+                from_balance: 0,
+                to_balance: 0,
+                transfer_id: String::new(),
+            }));
+        }
+
+        let credited = sqlx::query(
+            "UPDATE users SET balance = balance + $1, updated_at = NOW()
+             WHERE username = $2 AND is_active = true",
+        )
+        .bind(req.amount_cpt)
+        .bind(&to_user)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .rows_affected()
+            > 0;
+        if !credited {
+            return Ok(Response::new(TransferCptResponse {
+                success: false,
+                status_message: "recipient not found".into(),
+                from_balance: 0,
+                to_balance: 0,
+                transfer_id: String::new(),
+            }));
+        }
+
+        let task_id = format!("user-transfer:{transfer_id}");
+        sqlx::query(
+            "INSERT INTO ledger_entries (
+                task_id, payer_user, provider_worker_id, provider_user,
+                kind, amount_cpt, currency, status, idempotency_key
+             ) VALUES
+             ($1, $2, NULL, $3, 'user_transfer_debit', $4, 'CPT', 'settled', $5),
+             ($1, $2, NULL, $3, 'user_transfer_credit', $4, 'CPT', 'settled', $6)
+             ON CONFLICT (idempotency_key) DO NOTHING",
+        )
+        .bind(&task_id)
+        .bind(&from_user)
+        .bind(&to_user)
+        .bind(req.amount_cpt)
+        .bind(&debit_key)
+        .bind(&credit_key)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+        let from_balance: i64 = sqlx::query_scalar(
+            "SELECT balance FROM users WHERE username = $1 AND is_active = true",
+        )
+        .bind(&from_user)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+        let to_balance: i64 = sqlx::query_scalar(
+            "SELECT balance FROM users WHERE username = $1 AND is_active = true",
+        )
+        .bind(&to_user)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(TransferCptResponse {
+            success: true,
+            status_message: "Transfer settled".into(),
+            from_balance,
+            to_balance,
+            transfer_id,
+        }))
+    }
+
     async fn refresh_token(
         &self,
         request: Request<RefreshTokenRequest>,
@@ -589,11 +826,28 @@ impl NodeManagerService for GrpcNodeManagerService {
                 status_message: "Invalid worker_id".into(),
             }));
         }
-        if claims.sub != worker_id && claims.sub != username && !is_admin(&claims.sub) {
+        let admin = is_admin(&claims.sub);
+        if !admin && username != claims.sub {
             return Ok(Response::new(StatusResponse {
                 success: false,
                 status_message: "Not authorized".into(),
             }));
+        }
+        if !admin {
+            if let Some(existing) = self
+                .state
+                .node_manager
+                .get_worker(&worker_id)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?
+            {
+                if existing.username != claims.sub {
+                    return Ok(Response::new(StatusResponse {
+                        success: false,
+                        status_message: "Worker is owned by another user".into(),
+                    }));
+                }
+            }
         }
         if let Err(message) = validate_worker_registration_resources(&r) {
             return Ok(Response::new(StatusResponse {
@@ -609,7 +863,10 @@ impl NodeManagerService for GrpcNodeManagerService {
             resources: proto_resource_spec_to_model(r),
             location: req.location,
         };
-        match svc.register_worker(&reg).await {
+        match svc
+            .register_worker_for_owner(&reg, &claims.sub, admin)
+            .await
+        {
             Ok(w) => {
                 sqlx::query(
                     "INSERT INTO worker_reputation (worker_id) VALUES ($1) ON CONFLICT (worker_id) DO NOTHING",
@@ -964,6 +1221,19 @@ impl MasterNodeService for GrpcMasterNodeService {
                 status_message: "task_id is required and must be a safe file name".into(),
             }));
         }
+        if self
+            .state
+            .scheduler
+            .get_task(&req.task_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .is_some()
+        {
+            return Ok(Response::new(UploadTaskResponse {
+                success: false,
+                status_message: "task_id already exists".into(),
+            }));
+        }
         let r = req.requirements.unwrap_or_default();
         if let Err(message) = validate_task_submission_resources(&r, req.host_count, req.max_cpt) {
             return Ok(Response::new(UploadTaskResponse {
@@ -1101,7 +1371,7 @@ impl MasterNodeService for GrpcMasterNodeService {
             }
             Err(e) => Ok(Response::new(UploadTaskResponse {
                 success: false,
-                status_message: e.to_string(),
+                status_message: task_create_error_message(&e),
             })),
         }
     }
@@ -3941,6 +4211,90 @@ mod tests {
             .await
             .ok();
         cleanup(&service.state.scheduler, &task_id, &owner).await;
+    }
+
+    #[tokio::test]
+    async fn test_transfer_cpt_moves_balance_atomically() {
+        let (service, _task_id, _other_token, _owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let user_service = GrpcUserService::new(service.state.clone());
+        let from = format!("xfer-from-{}", uuid::Uuid::new_v4());
+        let to = format!("xfer-to-{}", uuid::Uuid::new_v4());
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 500), ($2, 'hash', 10)",
+        )
+        .bind(&from)
+        .bind(&to)
+        .execute(&service.state.scheduler.database().pool)
+        .await
+        .unwrap();
+        let token = token_for(&service.state.auth, &from);
+        let response = user_service
+            .transfer_cpt(Request::new(TransferCptRequest {
+                token,
+                to_username: to.clone(),
+                amount_cpt: 120,
+                idempotency_key: format!("idem-{}", uuid::Uuid::new_v4()),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(response.success, "{}", response.status_message);
+        assert_eq!(response.from_balance, 380);
+        assert_eq!(response.to_balance, 130);
+
+        let from_balance: i64 = sqlx::query_scalar("SELECT balance FROM users WHERE username = $1")
+            .bind(&from)
+            .fetch_one(&service.state.scheduler.database().pool)
+            .await
+            .unwrap();
+        let to_balance: i64 = sqlx::query_scalar("SELECT balance FROM users WHERE username = $1")
+            .bind(&to)
+            .fetch_one(&service.state.scheduler.database().pool)
+            .await
+            .unwrap();
+        assert_eq!(from_balance, 380);
+        assert_eq!(to_balance, 130);
+    }
+
+    #[tokio::test]
+    async fn test_transfer_cpt_rejects_insufficient_balance() {
+        let (service, _task_id, _other_token, _owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let user_service = GrpcUserService::new(service.state.clone());
+        let from = format!("xfer-poor-{}", uuid::Uuid::new_v4());
+        let to = format!("xfer-rich-{}", uuid::Uuid::new_v4());
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 20), ($2, 'hash', 10)",
+        )
+        .bind(&from)
+        .bind(&to)
+        .execute(&service.state.scheduler.database().pool)
+        .await
+        .unwrap();
+        let token = token_for(&service.state.auth, &from);
+        let response = user_service
+            .transfer_cpt(Request::new(TransferCptRequest {
+                token,
+                to_username: to.clone(),
+                amount_cpt: 50,
+                idempotency_key: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!response.success);
+        assert!(response.status_message.contains("insufficient"));
+        let from_balance: i64 = sqlx::query_scalar("SELECT balance FROM users WHERE username = $1")
+            .bind(&from)
+            .fetch_one(&service.state.scheduler.database().pool)
+            .await
+            .unwrap();
+        assert_eq!(from_balance, 20);
     }
 
     #[tokio::test]

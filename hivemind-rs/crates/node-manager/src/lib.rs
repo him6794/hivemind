@@ -25,6 +25,15 @@ impl NodeManager {
     pub async fn register_worker(&self, worker: &WorkerNode) -> Result<WorkerNode> {
         self.repo.upsert(worker).await
     }
+
+    pub async fn register_worker_for_owner(
+        &self,
+        worker: &WorkerNode,
+        owner: &str,
+        is_admin: bool,
+    ) -> Result<WorkerNode> {
+        self.repo.upsert_for_owner(worker, owner, is_admin).await
+    }
     pub async fn get_worker(&self, worker_id: &str) -> Result<Option<WorkerNode>> {
         self.repo.find_by_worker_id(worker_id).await
     }

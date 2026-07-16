@@ -59,6 +59,8 @@ pub enum LedgerEntryKind {
     PayerDebit,
     ProviderCredit,
     PlatformFee,
+    UserTransferDebit,
+    UserTransferCredit,
 }
 
 impl LedgerEntryKind {
@@ -67,6 +69,8 @@ impl LedgerEntryKind {
             Self::PayerDebit => "payer_debit",
             Self::ProviderCredit => "provider_credit",
             Self::PlatformFee => "platform_fee",
+            Self::UserTransferDebit => "user_transfer_debit",
+            Self::UserTransferCredit => "user_transfer_credit",
         }
     }
 }
@@ -77,6 +81,8 @@ impl std::str::FromStr for LedgerEntryKind {
         Ok(match s {
             "provider_credit" => Self::ProviderCredit,
             "platform_fee" => Self::PlatformFee,
+            "user_transfer_debit" => Self::UserTransferDebit,
+            "user_transfer_credit" => Self::UserTransferCredit,
             _ => Self::PayerDebit,
         })
     }
