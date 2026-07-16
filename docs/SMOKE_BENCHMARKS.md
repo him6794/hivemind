@@ -30,17 +30,17 @@ The script records:
 ## Command
 
 Run from the repository root after the master/nodepool/worker services are
-running and after obtaining a requestor token:
+running and after obtaining a requestor token. Submit the smoke ZIP through the
+master HTTP API (multipart `/api/tasks/upload`) and record per-task latency and
+terminal status into `test_logs/smoke-benchmark/` as CSV and JSON.
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass `
-  -File .\scripts\hivemind-smoke-benchmark.ps1 `
-  -MasterUrl http://127.0.0.1:8082 `
-  -Token "<requestor-token>" `
-  -TaskZip .\test_tasks\cpu-smoke.zip
+Example submission surface:
+
+```bash
+curl -sS -H "Authorization: Bearer <requestor-token>" \
+  -F "file=@test_tasks/cpu-smoke.zip" \
+  http://127.0.0.1:8082/api/tasks/upload
 ```
-
-Outputs are written to `test_logs/smoke-benchmark/` as CSV and JSON.
 
 ## Pass criteria
 
@@ -56,12 +56,12 @@ For a release candidate, record the exact commit and require:
 
 ## Notes
 
-- The benchmark script uses the current Master HTTP API and multipart
+- The benchmark uses the current Master HTTP API and multipart
   `/api/tasks/upload` path.
 - For distributed workers that do not share the master's local artifact
   directory, set `TORRENT_TASK_ARTIFACT_BASE_URL` to an HTTP server exposing
   `TORRENT_API_DIR`. Uploaded ZIP tasks will then be advertised as
   `uploads/<task>.zip` URLs and workers will download them before execution.
-- The benchmark does not scale workers by itself; `WorkerCounts` are target
-  labels and the script records the observed worker count from `/api/workers`.
+- The benchmark does not scale workers by itself; record the observed worker
+  count from `/api/workers` at scenario start.
 - CPT-to-fiat conversion is intentionally out of scope.

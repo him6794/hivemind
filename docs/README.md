@@ -26,7 +26,7 @@ HiveMind is organized around these runtime pieces:
 
 ## Build Entry Points
 
-```powershell
+```bash
 cd hivemind-rs
 cargo build
 cargo test

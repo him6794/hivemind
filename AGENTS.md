@@ -22,7 +22,7 @@ HiveMind is a Rust distributed task runtime with nodepool coordination, master A
 | Worker execution | `hivemind-rs/crates/worker-executor` |
 | Deployment | `docker-compose.yml`, `.env.example`, `hivemind-rs/Dockerfile` |
 | UI | `frontend/master-ui`, `frontend/worker-ui` |
-| Release | `scripts/package-worker-windows.ps1`, `Makefile` |
+| Release | `Makefile`, `docker-compose.yml`, feature-gated `cargo build` |
 
 ## CONVENTIONS
 - Rust is the backend source of truth; do not revive the missing `services/` legacy tree.
@@ -40,7 +40,7 @@ HiveMind is a Rust distributed task runtime with nodepool coordination, master A
 - Do not use `infra/` or `task/windows_dist/` as Rust sources without reconciliation.
 
 ## COMMANDS
-```powershell
+```bash
 cargo fmt --all -- --check
 cargo check --workspace
 cargo test --workspace
@@ -51,6 +51,6 @@ npm ci; npm run build; npm test
 ```
 
 ## NOTES
-- `HIVEMIND_CONFIG` JSON loading can bypass environment overrides; verify precedence.
+- Env overrides apply after `HIVEMIND_CONFIG` JSON load; invalid numeric env values fail closed.
 - Workers need the managed runtime and reachable nodepool/torrent topology.
 - UI assets must be version-compatible with the backend serving them.
