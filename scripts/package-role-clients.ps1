@@ -27,6 +27,13 @@ function Assert-PathLeaf {
     }
 }
 
+function Assert-NativeCommandSuccess {
+    param([Parameter(Mandatory = $true)][string]$Command)
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Command failed with exit code $LASTEXITCODE."
+    }
+}
+
 function Build-RoleBinary {
     param(
         [Parameter(Mandatory = $true)][string]$Bin,
@@ -43,8 +50,10 @@ function Build-RoleBinary {
     try {
         if ($Configuration -eq "release") {
             cargo build --release --no-default-features --features $Features --bin $Bin
+            Assert-NativeCommandSuccess -Command "cargo build role binary '$Bin'"
         } else {
             cargo build --no-default-features --features $Features --bin $Bin
+            Assert-NativeCommandSuccess -Command "cargo build role binary '$Bin'"
         }
     } finally {
         Pop-Location
@@ -68,10 +77,13 @@ function Build-Frontend {
         try {
             if (Test-Path (Join-Path $appRoot "package-lock.json")) {
                 npm ci --ignore-scripts
+                Assert-NativeCommandSuccess -Command "npm ci for '$RelativePath'"
             } else {
                 npm install --ignore-scripts
+                Assert-NativeCommandSuccess -Command "npm install for '$RelativePath'"
             }
             npm run build
+            Assert-NativeCommandSuccess -Command "npm run build for '$RelativePath'"
         } finally {
             Pop-Location
         }
@@ -223,7 +235,7 @@ WORKER_ADVERTISE_ADDR=
 WORKER_NODEPOOL_TOKEN=
 WORKER_NODEPOOL_USERNAME=
 WORKER_NODEPOOL_PASSWORD=
-WORKER_ID=$env:COMPUTERNAME
+WORKER_ID=
 WORKER_LOCATION=windows
 # Must match the non-default worker-execution secret configured on nodepool.
 WORKER_EXECUTION_SECRET=
@@ -260,6 +272,7 @@ Assert-RequiredEnv -Names @(
     "WORKER_GRPC_ADDR",
     "WORKER_CONTROL_HTTP_ADDR",
     "WORKER_ADVERTISE_ADDR",
+    "WORKER_ID",
     "WORKER_EXECUTION_SECRET"
 )
 
@@ -301,9 +314,10 @@ This package is the multi-host worker client:
 
 1. Copy `.env.worker.example` to `.env.worker`.
 2. Set `NODEPOOL_GRPC_ENDPOINT` to a reachable nodepool.
-3. Set `WORKER_ADVERTISE_ADDR` to a routable host:port for this worker.
-4. Set `WORKER_EXECUTION_SECRET` and either `WORKER_NODEPOOL_TOKEN` or both `WORKER_NODEPOOL_USERNAME` / `WORKER_NODEPOOL_PASSWORD`.
-5. Run:
+3. Set `WORKER_ID` to a stable, deployment-specific worker identifier.
+4. Set `WORKER_ADVERTISE_ADDR` to a routable host:port for this worker.
+5. Set `WORKER_EXECUTION_SECRET` and either `WORKER_NODEPOOL_TOKEN` or both `WORKER_NODEPOOL_USERNAME` / `WORKER_NODEPOOL_PASSWORD`.
+6. Run:
 
 ```powershell
 .\start-worker.ps1
