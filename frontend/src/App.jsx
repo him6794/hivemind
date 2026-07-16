@@ -362,9 +362,11 @@ export default function App() {
   return (
     <Layout
       t={t}
+      lang={lang}
       path={path === '/features' || path === '/account' || path === '/vpn' || path === '/faq' ? path : '/'}
       navigate={navigate}
       masterUi={masterUi}
+      workerUi={workerUi}
       onToggleLang={() => setLang((prev) => (prev === 'zh' ? 'en' : 'zh'))}
       sessionUser={sessionUser}
     >

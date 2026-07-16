@@ -1,21 +1,22 @@
 const dict = {
   en: {
     brand: 'hivemind',
-    tagline: 'Official account gateway',
+    tagline: 'Distributed compute network',
     nav: {
       home: 'Home',
-      features: 'Features',
+      features: 'About',
       account: 'Account',
       vpn: 'VPN',
       faq: 'FAQ',
-      master: 'Master UI',
+      docs: 'Docs',
+      master: 'Start building',
       lang: '中文',
     },
     common: {
-      enter: 'Enter gateway',
-      learnVpn: 'How VPN works',
-      openMaster: 'Open Master UI',
-      openWorker: 'Open Worker UI',
+      enter: 'Open account',
+      learnVpn: 'Private access',
+      openMaster: 'Start building',
+      openWorker: 'Provide resources',
       signedIn: 'Signed in',
       signOut: 'Sign out',
       signIn: 'Sign in',
@@ -25,25 +26,56 @@ const dict = {
       copied: 'Copied',
       download: 'Download file',
       loading: '…',
+      learnMore: 'Learn more',
+      explore: 'Explore',
+      getStarted: 'Get started',
     },
     home: {
-      badge: 'New',
-      badgeText: 'Account · CPT · VPN gateway',
-      title: 'One gateway for identity, value, and private access.',
+      heroLines: ['Create.', 'Compute.', 'Earn.'],
       subtitle:
-        'Create an account, move CPT, and receive a Headscale-compatible VPN profile — without mixing worker mesh control into the public surface.',
-      promptPlaceholder: 'Ask Hivemind to issue access, transfer CPT, or explain the control planes…',
-      promptHint: 'This is a guided entry point. Use Account for actions, Features for architecture.',
-      frameworks: 'Frameworks',
-      integrations: 'Surfaces',
-      frameworksList: ['React', 'Rust', 'gRPC', 'Headscale'],
-      integrationsList: ['Master UI', 'Worker UI', 'Nodepool', 'Website API', 'VPN control plane'],
-      ctaTitle: 'Start with identity. Keep execution separate.',
-      ctaBody: 'The website is the public doorway. Master submits work. Worker operates nodes. VPN enrolls people.',
+        'Hivemind is an open, self-hostable network where operators request compute, workers contribute capacity, and accounts move CPT without relying on a single cloud landlord.',
+      primaryCta: 'Create',
+      secondaryCta: 'Earn',
+      newsLabel: 'Network note',
+      newsTitle: 'Account, CPT, and user VPN now live on the public gateway.',
+      newsBody:
+        'The website issues identity, value transfer, and Headscale-compatible profiles. Master and Worker remain separate control surfaces by design.',
+      newsCta: 'Open account',
+      whatLabel: 'What is Hivemind',
+      whatTitle: 'Decentralized computing with explicit trust boundaries',
+      whatBody:
+        'Hivemind connects requestors and providers through a nodepool, while the public website handles only the doorway: accounts, CPT, and human VPN enrollment. Execution stays behind role-specific APIs so each operator can self-host without inheriting someone else’s authority.',
+      whatCta: 'Network surfaces',
+      requestorTitle: 'Build as a requestor',
+      requestorBody:
+        'Submit work through Master, track jobs, and consume capacity from the network. Integrate against master HTTP and keep billing tied to your own account balance.',
+      requestorCta: 'Start building',
+      providerTitle: 'Earn as a provider',
+      providerBody:
+        'Run a Worker node, register capacity with nodepool, and keep local control of the machine. Provider operations never pass through another deployment’s master UI.',
+      providerCta: 'Provide resources',
+      tokenTitle: 'Move value with CPT',
+      tokenBody:
+        'CPT is the account balance used on the public gateway. Transfer between users with atomic settlement and idempotency keys, then spend that balance across the network surfaces you operate.',
+      tokenCta: 'Open account gateway',
+      accessTitle: 'Private access for people',
+      accessBody:
+        'Issue a Headscale-compatible profile for a person or device. User VPN enrollment is independent from worker mesh membership, so support can hand out join commands without touching scheduling.',
+      accessCta: 'Issue VPN profile',
+      communityTitle: 'Compose your own topology',
+      communityBody:
+        'Master, nodepool, worker, website, and Headscale can be deployed independently. Every UI only trusts its own HTTP API — a practical model for multi-operator, multi-tenant compute.',
+      communityCta: 'Read the architecture',
+      stats: [
+        { value: 'CPT', label: 'Portable account balance' },
+        { value: 'VPN', label: 'Human enrollment path' },
+        { value: 'gRPC', label: 'Nodepool coordination' },
+        { value: 'Self-host', label: 'No shared master authority' },
+      ],
     },
     features: {
-      title: 'Designed for self-hosted trust boundaries',
-      body: 'Scroll through the platform layers. Sticky navigation tracks where you are while each section keeps role boundaries explicit.',
+      title: 'About the network',
+      body: 'Hivemind keeps public identity, compute execution, and private access on separate rails. Scroll the layers and keep the boundaries explicit.',
       sections: [
         {
           id: 'identity',
@@ -51,6 +83,13 @@ const dict = {
           title: 'Accounts live on the public gateway',
           body: 'Register and sign in through master HTTP. Tokens belong to the user account, not to a foreign deployment of master or worker.',
           visual: 'POST /api/register\\nPOST /api/login\\nGET  /api/balance',
+        },
+        {
+          id: 'compute',
+          label: 'Compute',
+          title: 'Requestors and providers meet at nodepool',
+          body: 'Master submits work. Workers advertise capacity. Nodepool coordinates the marketplace without forcing every operator onto one control plane.',
+          visual: 'master → nodepool gRPC\\nworker → nodepool + control API\\ntask packages over torrent topology',
         },
         {
           id: 'value',
@@ -66,41 +105,34 @@ const dict = {
           body: 'IssueUserVpnConfig creates Headscale users and preauth keys for people. Worker mesh join stays on a different protocol path.',
           visual: 'POST /api/vpn/config\\nlogin_server\\nauth_key\\nvirtual_ip',
         },
-        {
-          id: 'deploy',
-          label: 'Deploy',
-          title: 'Composable, multi-operator topology',
-          body: 'Master, nodepool, worker, website, and Headscale can be self-hosted independently. Each UI only trusts its own HTTP API.',
-          visual: 'website → master HTTP\\nmaster → nodepool gRPC\\nworker → nodepool + control API',
-        },
       ],
-      quotesTitle: 'Operators care about boundaries',
+      quotesTitle: 'Why operators split the surfaces',
       quotes: [
         {
           name: 'Aria Chen',
           handle: '@edge-ops',
-          quote: 'The useful part is that account and VPN enrollment are not glued to worker control. We can expose the gateway without opening the mesh.',
+          quote: 'Account and VPN enrollment are not glued to worker control. We can expose the gateway without opening the mesh.',
         },
         {
           name: 'Jonah Park',
           handle: '@distributed',
-          quote: 'CPT transfer with idempotency is the difference between a demo wallet and something we can put in front of real users.',
+          quote: 'CPT transfer with idempotency is the difference between a demo wallet and something real users can trust.',
         },
         {
           name: 'Mira Sol',
           handle: '@selfhost',
-          quote: 'Atmospheric UI is nice. Clear trust boundaries are nicer. Hivemind keeps those separate on purpose.',
+          quote: 'Requestor and provider paths stay distinct. That is the only way multi-operator compute stays sane.',
         },
         {
           name: 'Leo Ng',
           handle: '@headscale',
-          quote: 'User VPN profiles coming from the website means support can hand someone a join command without touching node scheduling.',
+          quote: 'User VPN profiles from the website mean support can hand someone a join command without touching node scheduling.',
         },
       ],
     },
     account: {
       title: 'Account gateway',
-      body: 'Sign in to inspect balance, transfer CPT, and move into the private access flow.',
+      body: 'Create an identity, inspect CPT balance, and transfer value. This is the public doorway — not the worker control plane.',
       username: 'Username',
       password: 'Password',
       confirm: 'Confirm password',
@@ -148,7 +180,7 @@ const dict = {
     },
     faq: {
       title: 'Questions, answered cleanly',
-      body: 'A short reference for the public gateway, CPT, and VPN enrollment.',
+      body: 'A short reference for the public gateway, CPT, requestor/provider roles, and VPN enrollment.',
       items: [
         {
           q: 'What does the website control?',
@@ -156,7 +188,7 @@ const dict = {
         },
         {
           q: 'Where do Master UI and Worker UI fit?',
-          a: 'Master UI submits and tracks tasks. Worker UI manages local node registration and capacity. Both remain separate destinations from this gateway.',
+          a: 'Master UI is the requestor console for submitting and tracking tasks. Worker UI is the provider console for local node registration and capacity. Both remain separate destinations from this gateway.',
         },
         {
           q: 'Is VPN the same as worker join?',
@@ -172,24 +204,33 @@ const dict = {
         },
       ],
     },
+    footer: {
+      platform: 'Platform',
+      community: 'Surfaces',
+      token: 'Value',
+      resources: 'Resources',
+      about: 'About',
+      rights: 'Self-hostable compute gateway',
+    },
   },
   zh: {
     brand: 'hivemind',
-    tagline: '官方帳戶入口',
+    tagline: '分散式運算網路',
     nav: {
       home: '首頁',
-      features: '能力',
+      features: '關於',
       account: '帳戶',
       vpn: 'VPN',
       faq: 'FAQ',
-      master: 'Master UI',
+      docs: '文件',
+      master: '開始建置',
       lang: 'EN',
     },
     common: {
-      enter: '進入入口',
-      learnVpn: '了解 VPN',
-      openMaster: '開啟 Master UI',
-      openWorker: '開啟 Worker UI',
+      enter: '開啟帳戶',
+      learnVpn: '私有連線',
+      openMaster: '開始建置',
+      openWorker: '提供資源',
       signedIn: '已登入',
       signOut: '登出',
       signIn: '登入',
@@ -199,25 +240,56 @@ const dict = {
       copied: '已複製',
       download: '下載設定檔',
       loading: '…',
+      learnMore: '了解更多',
+      explore: '探索',
+      getStarted: '開始使用',
     },
     home: {
-      badge: '新',
-      badgeText: '帳戶 · CPT · VPN 入口',
-      title: '身份、價值與私有連線，同一個入口。',
+      heroLines: ['建立。', '運算。', '賺取。'],
       subtitle:
-        '建立帳戶、轉移 CPT、取得 Headscale 相容 VPN 設定。公開面不做 worker mesh 控制，角色邊界保持清楚。',
-      promptPlaceholder: '告訴 Hivemind：發放存取、轉帳 CPT，或說明控制面分工…',
-      promptHint: '這是導覽式入口。實際操作請到「帳戶」，架構說明請到「能力」。',
-      frameworks: '技術棧',
-      integrations: '介面與服務',
-      frameworksList: ['React', 'Rust', 'gRPC', 'Headscale'],
-      integrationsList: ['Master UI', 'Worker UI', 'Nodepool', 'Website API', 'VPN 控制面'],
-      ctaTitle: '先處理身份，執行面保持分離。',
-      ctaBody: '官網是公開門口。Master 提交任務。Worker 操作節點。VPN 服務的是人，不是 mesh 控制。',
+        'Hivemind 是可自架的開放網路：需求端申請算力、供應端貢獻容量、帳戶以 CPT 流動價值，不必依賴單一雲端房東。',
+      primaryCta: '建立',
+      secondaryCta: '賺取',
+      newsLabel: '網路動態',
+      newsTitle: '帳戶、CPT 與使用者 VPN 已在公開入口上線。',
+      newsBody:
+        '官網負責身份、價值轉移與 Headscale 相容設定。Master 與 Worker 仍是刻意分離的控制面。',
+      newsCta: '開啟帳戶',
+      whatLabel: '什麼是 Hivemind',
+      whatTitle: '有清楚信任邊界的分散式運算',
+      whatBody:
+        'Hivemind 透過 nodepool 串起需求端與供應端；公開網站只做門口：帳戶、CPT、使用者 VPN。執行面留在角色專屬 API 之後，讓每位運營者都能自架，不必繼承別人的權限。',
+      whatCta: '查看介面',
+      requestorTitle: '以需求端建置',
+      requestorBody:
+        '透過 Master 提交任務、追蹤工作，並使用網路算力。對接 master HTTP，帳單與餘額綁在自己的帳戶。',
+      requestorCta: '開始建置',
+      providerTitle: '以供應端賺取',
+      providerBody:
+        '運行 Worker 節點，向 nodepool 註冊容量，並保有本機控制權。供應端操作不會經過別人的 master UI。',
+      providerCta: '提供資源',
+      tokenTitle: '用 CPT 移動價值',
+      tokenBody:
+        'CPT 是公開入口上的帳戶餘額。以原子結算與 idempotency key 在用戶間轉帳，再把餘額用在你運營的網路介面。',
+      tokenCta: '開啟帳戶入口',
+      accessTitle: '給人的私有連線',
+      accessBody:
+        '為使用者或裝置發放 Headscale 相容設定。使用者 VPN 入網獨立於 worker mesh，支援只要給 join 指令，不必碰到排程。',
+      accessCta: '發放 VPN 設定',
+      communityTitle: '組合你自己的拓樸',
+      communityBody:
+        'Master、nodepool、worker、website、Headscale 都可獨立部署。每個 UI 只信任自己的 HTTP API，適合多運營者與多租戶算力。',
+      communityCta: '閱讀架構',
+      stats: [
+        { value: 'CPT', label: '可攜帳戶餘額' },
+        { value: 'VPN', label: '使用者入網路徑' },
+        { value: 'gRPC', label: 'Nodepool 協調' },
+        { value: 'Self-host', label: '不共享 master 權威' },
+      ],
     },
     features: {
-      title: '為自架與信任邊界而設計',
-      body: '用滾動閱讀平台分層。左側 sticky 導覽會跟隨目前章節，每一段都把角色邊界寫清楚。',
+      title: '關於這個網路',
+      body: 'Hivemind 把公開身份、算力執行與私有連線分在不同軌道。往下看每一層，邊界都保持清楚。',
       sections: [
         {
           id: 'identity',
@@ -225,6 +297,13 @@ const dict = {
           title: '帳戶落在公開入口',
           body: '透過 master HTTP 註冊與登入。Token 屬於使用者帳戶，不屬於別人的 master 或 worker 部署。',
           visual: 'POST /api/register\\nPOST /api/login\\nGET  /api/balance',
+        },
+        {
+          id: 'compute',
+          label: '算力',
+          title: '需求端與供應端在 nodepool 會合',
+          body: 'Master 提交任務。Worker 宣告容量。Nodepool 協調市集，但不強迫所有運營者共用同一個控制面。',
+          visual: 'master → nodepool gRPC\\nworker → nodepool + control API\\ntask packages over torrent topology',
         },
         {
           id: 'value',
@@ -240,20 +319,13 @@ const dict = {
           body: 'IssueUserVpnConfig 為使用者建立 Headscale user 與 preauth key。Worker mesh join 走另一條協定路徑。',
           visual: 'POST /api/vpn/config\\nlogin_server\\nauth_key\\nvirtual_ip',
         },
-        {
-          id: 'deploy',
-          label: '部署',
-          title: '可組合、多運營者拓樸',
-          body: 'Master、nodepool、worker、website、Headscale 都可獨立自架。每個 UI 只信任自己的 HTTP API。',
-          visual: 'website → master HTTP\\nmaster → nodepool gRPC\\nworker → nodepool + control API',
-        },
       ],
-      quotesTitle: '運營者在意邊界',
+      quotesTitle: '運營者為何拆分介面',
       quotes: [
         {
           name: 'Aria Chen',
           handle: '@edge-ops',
-          quote: '真正有用的是帳戶與 VPN 入網沒有跟 worker 控制黏在一起。我可以把入口公開，卻不必打開 mesh。',
+          quote: '帳戶與 VPN 入網沒有跟 worker 控制黏在一起。可以把入口公開，卻不必打開 mesh。',
         },
         {
           name: 'Jonah Park',
@@ -263,7 +335,7 @@ const dict = {
         {
           name: 'Mira Sol',
           handle: '@selfhost',
-          quote: '氛圍感 UI 很好，但清楚的信任邊界更好。Hivemind 把這件事刻意分開。',
+          quote: '需求端與供應端路徑保持分離，多運營者算力才不會失控。',
         },
         {
           name: 'Leo Ng',
@@ -274,7 +346,7 @@ const dict = {
     },
     account: {
       title: '帳戶入口',
-      body: '登入後可查看餘額、轉帳 CPT，並進入私有連線流程。',
+      body: '建立身份、查看 CPT 餘額、轉移價值。這是公開門口，不是 worker 控制面。',
       username: '帳號',
       password: '密碼',
       confirm: '確認密碼',
@@ -322,7 +394,7 @@ const dict = {
     },
     faq: {
       title: '清楚回答幾個關鍵問題',
-      body: '關於公開入口、CPT 與 VPN 入網的簡短說明。',
+      body: '關於公開入口、CPT、需求端/供應端角色與 VPN 入網的簡短說明。',
       items: [
         {
           q: '官網控制什麼？',
@@ -330,7 +402,7 @@ const dict = {
         },
         {
           q: 'Master UI 與 Worker UI 呢？',
-          a: 'Master UI 提交與追蹤任務。Worker UI 管理本機節點註冊與容量。兩者都是分離目的地，不是這個入口的一部分。',
+          a: 'Master UI 是需求端主控台，負責提交與追蹤任務。Worker UI 是供應端主控台，管理本機節點註冊與容量。兩者都是分離目的地。',
         },
         {
           q: 'VPN 等於 worker join 嗎？',
@@ -345,6 +417,14 @@ const dict = {
           a: '使用公開 DERP map 通常沒有額外授權費；你仍要負擔自己的 Headscale 主機與頻寬。',
         },
       ],
+    },
+    footer: {
+      platform: '平台',
+      community: '介面',
+      token: '價值',
+      resources: '資源',
+      about: '關於',
+      rights: '可自架的算力入口',
     },
   },
 };
