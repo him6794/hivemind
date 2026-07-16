@@ -40,6 +40,11 @@ Assert-Contains -Haystack $scriptText -Needle 'WORKER_NODEPOOL_USERNAME' -Messag
 Assert-Contains -Haystack $scriptText -Needle 'Set WORKER_NODEPOOL_TOKEN, or set both WORKER_NODEPOOL_USERNAME and WORKER_NODEPOOL_PASSWORD.' -Message 'worker launcher must allow token or username/password authentication'
 Assert-NotContains -Haystack $scriptText -Needle 'cargo build --release --bin hivemind-bin' -Message 'role packaging must not fall back to the all-features hivemind-bin binary'
 
+$nativeGuardCount = ([regex]::Matches($scriptText, 'Assert-NativeCommandSuccess -Command')).Count
+if ($nativeGuardCount -lt 5) {
+    throw 'cargo and every npm build/install command must check the native exit code before packaging continues'
+}
+
 $workerEnvStart = $scriptText.IndexOf('# HiveMind Windows worker client')
 $workerEnvEnd = $scriptText.IndexOf('Set-Content -Encoding ASCII (Join-Path $packageDir ".env.worker.example")')
 if ($workerEnvStart -lt 0 -or $workerEnvEnd -lt 0 -or $workerEnvEnd -le $workerEnvStart) {
@@ -48,8 +53,55 @@ if ($workerEnvStart -lt 0 -or $workerEnvEnd -lt 0 -or $workerEnvEnd -le $workerE
 $workerEnv = $scriptText.Substring($workerEnvStart, $workerEnvEnd - $workerEnvStart)
 Assert-NotContains -Haystack $workerEnv -Needle 'JWT_SECRET=' -Message 'worker env template must not request JWT_SECRET='
 Assert-Contains -Haystack $workerEnv -Needle 'WORKER_UI_DIR=.\ui\worker' -Message 'worker env template must default UI dir to packaged assets'
+Assert-Contains -Haystack $workerEnv -Needle 'WORKER_ID=' -Message 'worker env template must require deployment-time worker identity'
+Assert-NotContains -Haystack $workerEnv -Needle 'WORKER_ID=$env:COMPUTERNAME' -Message 'worker env template must not bake the packager computer name into the package'
+Assert-Contains -Haystack $scriptText -Needle '"WORKER_ID",' -Message 'worker launcher must require an explicit worker identity'
 Assert-Contains -Haystack $scriptText -Needle 'serves_ui_on_start = $true' -Message 'master/worker manifests must declare UI startup'
 Assert-Contains -Haystack $scriptText -Needle 'serves_ui_on_start = $false' -Message 'nodepool manifest must declare no UI surface'
 Assert-Contains -Haystack $scriptText -Needle 'monty.exe' -Message 'worker package must ship monty runtime'
+
+$failureTestRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("hivemind-package-role-clients-failure-" + [guid]::NewGuid().ToString("N"))
+$fakeBin = Join-Path $failureTestRoot "bin"
+$outputRelative = "tmp\package-role-clients-failure-" + [guid]::NewGuid().ToString("N")
+$outputRoot = Join-Path (Split-Path -Parent $PSScriptRoot) $outputRelative
+New-Item -ItemType Directory -Force -Path $fakeBin | Out-Null
+$oldPath = $env:PATH
+try {
+    @'
+@echo off
+exit /b 17
+'@ | Set-Content -Encoding ASCII (Join-Path $fakeBin "cargo.cmd")
+
+    $env:PATH = "$fakeBin;$oldPath"
+    $powershell = (Get-Command powershell.exe -ErrorAction Stop).Source
+    $oldErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $failureOutput = (& $powershell -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Role nodepool -SkipFrontendBuild -OutputDir $outputRelative 2>&1 | Out-String)
+    }
+    finally {
+        $ErrorActionPreference = $oldErrorActionPreference
+    }
+    $failureExitCode = $LASTEXITCODE
+
+    if ($failureExitCode -eq 0) {
+        throw 'packaging must return a nonzero exit code when cargo fails'
+    }
+    if ($failureOutput -notmatch 'cargo build role binary') {
+        throw "packaging did not report the cargo failure before checking for a stale artifact: $failureOutput"
+    }
+    if (Test-Path -LiteralPath (Join-Path $outputRoot 'nodepool-server')) {
+        throw 'packaging must not create a successful role package after cargo fails'
+    }
+}
+finally {
+    $env:PATH = $oldPath
+    if (Test-Path -LiteralPath $failureTestRoot) {
+        Remove-Item -Recurse -Force -LiteralPath $failureTestRoot
+    }
+    if (Test-Path -LiteralPath $outputRoot) {
+        Remove-Item -Recurse -Force -LiteralPath $outputRoot
+    }
+}
 
 Write-Host "package-role-clients tests passed"

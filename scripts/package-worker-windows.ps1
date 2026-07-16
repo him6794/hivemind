@@ -8,6 +8,14 @@
 
 $ErrorActionPreference = "Stop"
 
+function Assert-NativeCommandSuccess {
+    param([Parameter(Mandatory = $true)][string]$Command)
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Command failed with exit code $LASTEXITCODE."
+    }
+}
+
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $rustRoot = Join-Path $repoRoot "hivemind-rs"
 $out = Join-Path $repoRoot $OutputDir
@@ -20,9 +28,11 @@ Push-Location $rustRoot
 try {
     if ($Configuration -eq "release") {
         cargo build --release --no-default-features --features worker --bin hivemind-worker
+        Assert-NativeCommandSuccess -Command "cargo build worker binary"
         $binary = Join-Path $rustRoot "target\release\hivemind-worker.exe"
     } else {
         cargo build --no-default-features --features worker --bin hivemind-worker
+        Assert-NativeCommandSuccess -Command "cargo build worker binary"
         $binary = Join-Path $rustRoot "target\debug\hivemind-worker.exe"
     }
 } finally {
@@ -57,7 +67,7 @@ WORKER_ADVERTISE_ADDR=
 WORKER_NODEPOOL_TOKEN=
 WORKER_NODEPOOL_USERNAME=
 WORKER_NODEPOOL_PASSWORD=
-WORKER_ID=$env:COMPUTERNAME
+WORKER_ID=
 WORKER_LOCATION=windows
 
 # Must exactly match the non-default worker-execution secret used by the nodepool.
@@ -261,7 +271,7 @@ if (!(Test-Path $envFile)) {
 }
 
 Import-DotEnv -Path $envFile
-Assert-RequiredEnv -Names @("NODEPOOL_GRPC_ADDR", "WORKER_GRPC_ADDR", "WORKER_CONTROL_HTTP_ADDR", "WORKER_ADVERTISE_ADDR", "WORKER_EXECUTION_SECRET")
+Assert-RequiredEnv -Names @("NODEPOOL_GRPC_ADDR", "WORKER_GRPC_ADDR", "WORKER_CONTROL_HTTP_ADDR", "WORKER_ADVERTISE_ADDR", "WORKER_ID", "WORKER_EXECUTION_SECRET")
 
 $workerNodepoolToken = [Environment]::GetEnvironmentVariable("WORKER_NODEPOOL_TOKEN", "Process")
 $workerNodepoolUsername = [Environment]::GetEnvironmentVariable("WORKER_NODEPOOL_USERNAME", "Process")
@@ -280,11 +290,12 @@ $readme = @"
 
 1. Copy `.env.worker.example` to `.env.worker`.
 2. Set `NODEPOOL_GRPC_ADDR` to the reachable nodepool gRPC address.
-3. Set `WORKER_NODEPOOL_TOKEN` to a nodepool JWT whose subject matches `WORKER_ID`, or set both `WORKER_NODEPOOL_USERNAME` and `WORKER_NODEPOOL_PASSWORD` so the worker can log in to nodepool.
-4. Set `WORKER_ADVERTISE_ADDR` to the address other machines can use to reach this worker, for example `203.0.113.10:50053` or a Tailscale address. It is required when `WORKER_GRPC_ADDR` listens on `0.0.0.0` (the package default).
-5. Set `WORKER_EXECUTION_SECRET` to the same non-default worker-execution secret used by the nodepool. Do not provide the control-plane `JWT_SECRET` to workers.
-6. Put `monty.exe` next to `hivemind-worker.exe` or update `MONTY_EXECUTABLE`.
-7. Run PowerShell as the provider user and execute:
+3. Set `WORKER_ID` to a stable, deployment-specific identifier. The package never derives identity from the build host.
+4. Set `WORKER_NODEPOOL_TOKEN` to a nodepool JWT whose subject matches `WORKER_ID`, or set both `WORKER_NODEPOOL_USERNAME` and `WORKER_NODEPOOL_PASSWORD` so the worker can log in to nodepool.
+5. Set `WORKER_ADVERTISE_ADDR` to the address other machines can use to reach this worker, for example `203.0.113.10:50053` or a Tailscale address. It is required when `WORKER_GRPC_ADDR` listens on `0.0.0.0` (the package default).
+6. Set `WORKER_EXECUTION_SECRET` to the same non-default worker-execution secret used by the nodepool. Do not provide the control-plane `JWT_SECRET` to workers.
+7. Put `monty.exe` next to `hivemind-worker.exe` or update `MONTY_EXECUTABLE`.
+8. Run PowerShell as the provider user and execute:
 
 ```powershell
 .\start-worker.ps1

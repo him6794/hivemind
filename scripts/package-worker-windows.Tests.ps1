@@ -27,6 +27,26 @@ function Assert-NotContains {
     }
 }
 
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle 'function Assert-NativeCommandSuccess' `
+    -Message "standalone worker packager must define a native-command failure guard."
+
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle 'Assert-NativeCommandSuccess -Command "cargo build worker binary"' `
+    -Message "standalone worker packager must stop after a failed Cargo build."
+
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle 'WORKER_ID=' `
+    -Message "standalone worker package must require deployment-time worker identity."
+
+Assert-NotContains `
+    -Haystack $scriptText `
+    -Needle 'WORKER_ID=$env:COMPUTERNAME' `
+    -Message "standalone worker package must not bake the build host identity."
+
 $composePath = Join-Path $PSScriptRoot "..\docker-compose.yml"
 $composeText = Get-Content -LiteralPath $composePath -Raw
 $workerBlockMatch = [regex]::Match($composeText, '(?ms)^  worker:\r?\n.*?(?=^  [a-z-]+:|\z)')
@@ -87,7 +107,7 @@ Assert-Contains `
 
 Assert-Contains `
     -Haystack $allInOneBlock `
-    -Needle 'WORKER_ADVERTISE_ADDR: ${WORKER_ADVERTISE_ADDR:-hivemind-all:50053}' `
+    -Needle 'WORKER_ADVERTISE_ADDR: ${WORKER_ADVERTISE_ADDR:-hivemind:50053}' `
     -Message "canonical Compose all-in-one worker must preserve an explicit advertise endpoint override."
 
 Assert-NotContains `
@@ -183,7 +203,7 @@ Assert-NotContains `
 
 Assert-Contains `
     -Haystack $scriptText `
-    -Needle 'Assert-RequiredEnv -Names @("NODEPOOL_GRPC_ADDR", "WORKER_GRPC_ADDR", "WORKER_CONTROL_HTTP_ADDR", "WORKER_ADVERTISE_ADDR", "WORKER_EXECUTION_SECRET")' `
+    -Needle 'Assert-RequiredEnv -Names @("NODEPOOL_GRPC_ADDR", "WORKER_GRPC_ADDR", "WORKER_CONTROL_HTTP_ADDR", "WORKER_ADVERTISE_ADDR", "WORKER_ID", "WORKER_EXECUTION_SECRET")' `
     -Message "start-worker launcher must require explicit nodepool, advertise endpoint, control API, and worker-execution settings."
 
 Assert-Contains `
