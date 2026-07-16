@@ -37,7 +37,7 @@ HiveMind is a Rust distributed task runtime with nodepool coordination, master A
 - No path joins/deletes from unvalidated task IDs.
 - No secrets, tokens, or weak credentials in release artifacts.
 - No claim of release readiness from compilation alone.
-- Do not use `infra/` or `task/windows_dist/` as Rust sources without reconciliation.
+- Do not use `infra/` or other legacy packaging trees as Rust sources without reconciliation.
 
 ## COMMANDS
 ```bash
