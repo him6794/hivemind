@@ -1,9 +1,0 @@
-2026-06-06T01:50:58.144840Z  INFO Worker executor: 12 cores, 32643 GB RAM
-ram是mb不是gb
-
-worker 應該是任何人都可以部屬，再登入後才註冊節點信息到nodepool
-worker ui不應該能管理到其他的worker，worker ui還需要看附載
-CPU應該用cpu分數，gpu也同理，分數計算使用浮點數運算來計算其單位時間內可計算次數
-
-master也應該所有人都能部屬，他只能上傳任務 查看該用戶的任務進度及下載結果
-master ui不應該能管理到其他的worker，上傳任務應上傳zip master自動作種
