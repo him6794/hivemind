@@ -1,317 +1,323 @@
 import React, { useEffect, useState } from 'react';
 import SectionEyebrow from '../components/SectionEyebrow';
-import { colors, font, glassSoft, glassStrong, primaryButton, secondaryButton } from '../theme';
+import { colors, font, glassStrong, pageWrap, primaryButton, secondaryButton } from '../theme';
 import { getSection } from '../i18n';
 
-export default function HomePage({ lang, t, navigate, masterUi, workerUi }) {
+export default function HomePage({ lang, t, navigate }) {
   const home = getSection(lang, 'home');
-  const [lineIndex, setLineIndex] = useState(0);
   const [typed, setTyped] = useState('');
 
   useEffect(() => {
-    const full = home.heroLines.join(' ');
     let i = 0;
     setTyped('');
-    setLineIndex(0);
+    const text = home.heroTitle;
     const id = setInterval(() => {
       i += 1;
-      const next = full.slice(0, i);
-      setTyped(next);
-      // rough active line tracking for visual emphasis
-      const parts = home.heroLines;
-      let acc = 0;
-      for (let idx = 0; idx < parts.length; idx += 1) {
-        acc += parts[idx].length + (idx < parts.length - 1 ? 1 : 0);
-        if (i <= acc) {
-          setLineIndex(idx);
-          break;
-        }
-      }
-      if (i >= full.length) clearInterval(id);
-    }, 42);
+      setTyped(text.slice(0, i));
+      if (i >= text.length) clearInterval(id);
+    }, 34);
     return () => clearInterval(id);
-  }, [home.heroLines]);
+  }, [home.heroTitle]);
+
+  const trust = home.trust || ['BARE METAL', 'TRUSTLESS', 'REALTIME', 'GLOBAL'];
 
   return (
     <>
-      <section
-        style={{
-          minHeight: '100vh',
-          padding: '48px 20px 36px',
-          display: 'flex',
-          alignItems: 'center',
-          position: 'relative',
-        }}
-      >
-        <div
-          className="hm-hero-grid"
-          style={{
-            maxWidth: 1200,
-            margin: '0 auto',
-            width: '100%',
-            display: 'grid',
-            gridTemplateColumns: '1.15fr 0.85fr',
-            gap: 28,
-            alignItems: 'center',
-          }}
-        >
-          <div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 18 }}>
-              {home.heroLines.map((line, idx) => {
-                const full = home.heroLines.join(' ');
-                const start = home.heroLines.slice(0, idx).join(' ').length + (idx ? 1 : 0);
-                const end = start + line.length;
-                const visible = typed.slice(start, Math.min(end, typed.length));
-                const active = lineIndex === idx;
-                return (
-                  <div
-                    key={line}
-                    style={{
-                      fontFamily: font.serif,
-                      fontWeight: 600,
-                      fontSize: 'clamp(48px, 8vw, 88px)',
-                      lineHeight: 1.02,
-                      letterSpacing: '-0.04em',
-                      color: active || visible ? colors.white : 'rgba(255,255,255,0.28)',
-                      minHeight: '1.05em',
-                    }}
-                  >
-                    {visible || (idx === 0 ? '' : '')}
-                    {idx === lineIndex ? <span className="hm-cursor" style={{ color: '#a5b4fc' }}>|</span> : null}
-                  </div>
-                );
-              })}
-            </div>
-
-            <p style={{ margin: '0 0 28px', maxWidth: 640, color: 'rgba(226,232,240,0.78)', fontSize: 17, lineHeight: 1.8 }}>
-              {home.subtitle}
-            </p>
-
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-              <button type="button" className="hm-btn" style={primaryButton} onClick={() => navigate('/account')}>
-                {home.primaryCta}
-              </button>
-              <button type="button" className="hm-btn" style={secondaryButton} onClick={() => window.open(workerUi, '_blank', 'noreferrer')}>
-                {home.secondaryCta}
-              </button>
-            </div>
+      <section style={{ position: 'relative', padding: '108px 24px 72px', overflow: 'hidden' }}>
+        <div style={{ ...pageWrap, display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center' }}>
+          <div
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 8,
+              padding: '6px 12px',
+              borderRadius: 999,
+              background: 'rgba(6,182,212,0.1)',
+              border: '1px solid rgba(34,211,238,0.2)',
+              color: '#22d3ee',
+              fontSize: 10,
+              fontWeight: 700,
+              letterSpacing: '0.16em',
+              textTransform: 'uppercase',
+              fontFamily: font.display,
+              marginBottom: 28,
+            }}
+          >
+            {home.badge || home.bannerLabel}
           </div>
 
-          <div style={{ ...glassStrong, borderRadius: 28, padding: 18, minHeight: 360, position: 'relative', overflow: 'hidden' }}>
-            <div
-              aria-hidden
-              style={{
-                position: 'absolute',
-                inset: 0,
-                background:
-                  'radial-gradient(circle at 30% 25%, rgba(99,102,241,0.35), transparent 28%), radial-gradient(circle at 75% 70%, rgba(236,72,153,0.18), transparent 30%), linear-gradient(160deg, rgba(15,23,42,0.1), rgba(15,23,42,0.65))',
-              }}
-            />
-            <div style={{ position: 'relative', height: '100%', display: 'grid', alignContent: 'space-between', minHeight: 320 }}>
-              <div>
-                <SectionEyebrow dark>Hivemind</SectionEyebrow>
-                <div style={{ marginTop: 18, fontFamily: font.display, fontSize: 14, letterSpacing: '0.14em', textTransform: 'uppercase', color: 'rgba(226,232,240,0.6)' }}>
-                  Create · Compute · Earn
-                </div>
-              </div>
-              <div style={{ display: 'grid', gap: 10 }}>
-                {[t('common.openMaster'), t('common.openWorker'), t('common.enter')].map((label, i) => (
-                  <div key={label} style={{ ...glassSoft, borderRadius: 14, padding: '12px 14px', display: 'flex', justifyContent: 'space-between', gap: 12 }}>
-                    <span style={{ color: 'rgba(226,232,240,0.8)', fontSize: 13 }}>{label}</span>
-                    <span style={{ color: '#c7d2fe', fontFamily: font.display, fontSize: 12 }}>0{i + 1}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
+          <h1
+            style={{
+              margin: '0 auto 24px',
+              fontFamily: font.serif,
+              fontWeight: 500,
+              fontSize: 'clamp(44px, 8vw, 88px)',
+              lineHeight: 1.05,
+              letterSpacing: '-0.04em',
+              maxWidth: 980,
+              width: '100%',
+              textWrap: 'balance',
+              textAlign: 'center',
+              minHeight: '1.15em',
+            }}
+          >
+            {typed}
+            <span className="hm-cursor" style={{ color: '#67e8f9' }}>|</span>
+          </h1>
+
+          <p
+            style={{
+              margin: '0 auto 34px',
+              maxWidth: 680,
+              color: 'rgba(226,232,240,0.72)',
+              fontSize: 17,
+              lineHeight: 1.85,
+              textAlign: 'center',
+            }}
+          >
+            {home.subtitle}
+          </p>
+
+          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', justifyContent: 'center', marginBottom: 36 }}>
+            <button type="button" className="hm-btn" style={{ ...primaryButton, padding: '16px 28px', fontSize: 13 }} onClick={() => navigate('/download')}>
+              {home.primaryCta}
+            </button>
+            <button type="button" className="hm-btn hm-btn-secondary" style={{ ...secondaryButton, padding: '16px 28px', fontSize: 13 }} onClick={() => navigate('/account')}>
+              {home.secondaryCta}
+            </button>
+          </div>
+
+          <div
+            style={{
+              display: 'flex',
+              gap: 18,
+              flexWrap: 'wrap',
+              justifyContent: 'center',
+              color: 'rgba(226,232,240,0.42)',
+              fontFamily: font.display,
+              fontSize: 11,
+              letterSpacing: '0.16em',
+              fontWeight: 600,
+            }}
+          >
+            {trust.map((item) => (
+              <span key={item}>{item}</span>
+            ))}
           </div>
         </div>
       </section>
 
-      <section style={{ padding: '0 20px 28px' }}>
-        <div
-          style={{
-            maxWidth: 1200,
-            margin: '0 auto',
-            ...glassSoft,
-            borderRadius: 20,
-            padding: '18px 20px',
-            display: 'grid',
-            gridTemplateColumns: '1.2fr 1fr auto',
-            gap: 16,
-            alignItems: 'center',
-          }}
-          className="hm-hero-grid"
-        >
-          <div>
-            <div style={{ fontSize: 12, letterSpacing: '0.12em', textTransform: 'uppercase', color: '#a5b4fc', fontFamily: font.display }}>
-              {home.newsLabel}
-            </div>
-            <div style={{ marginTop: 8, fontFamily: font.serif, fontSize: 22, fontWeight: 600, letterSpacing: '-0.02em' }}>
-              {home.newsTitle}
-            </div>
-          </div>
-          <p style={{ margin: 0, color: 'rgba(226,232,240,0.7)', lineHeight: 1.7, fontSize: 14 }}>{home.newsBody}</p>
-          <button type="button" className="hm-btn" style={primaryButton} onClick={() => navigate('/account')}>
-            {home.newsCta}
-          </button>
-        </div>
-      </section>
-
-      <section style={{ background: colors.surface, color: colors.ink, padding: '80px 20px' }}>
-        <div style={{ maxWidth: 1200, margin: '0 auto' }}>
-          <SectionEyebrow>{home.whatLabel}</SectionEyebrow>
-          <div className="hm-hero-grid" style={{ display: 'grid', gridTemplateColumns: '1.1fr 0.9fr', gap: 28, marginTop: 18, alignItems: 'start' }}>
+      <section style={{ background: colors.white, color: colors.ink, padding: '112px 24px' }}>
+        <div style={pageWrap}>
+          <div className="hm-hero-grid" style={{ display: 'grid', gridTemplateColumns: '1.05fr 0.95fr', gap: 64, alignItems: 'start' }}>
             <div>
+              <SectionEyebrow>{home.whatLabel}</SectionEyebrow>
               <h2
                 style={{
-                  margin: '0 0 16px',
+                  margin: '22px 0 18px',
                   fontFamily: font.serif,
-                  fontWeight: 600,
-                  fontSize: 'clamp(34px, 4.5vw, 52px)',
-                  lineHeight: 1.12,
-                  letterSpacing: '-0.03em',
+                  fontWeight: 500,
+                  fontSize: 'clamp(40px, 5.5vw, 64px)',
+                  lineHeight: 0.98,
+                  letterSpacing: '-0.04em',
+                  maxWidth: 560,
                 }}
               >
                 {home.whatTitle}
               </h2>
-              <p style={{ margin: 0, color: colors.muted, fontSize: 16, lineHeight: 1.85, maxWidth: 640 }}>{home.whatBody}</p>
-              <button
-                type="button"
-                className="hm-btn"
-                onClick={() => navigate('/features')}
-                style={{ ...primaryButton, marginTop: 24, boxShadow: '0 10px 28px rgba(99,102,241,0.25)' }}
-              >
-                {home.whatCta}
-              </button>
+              <p style={{ margin: 0, color: colors.muted, fontSize: 16, lineHeight: 1.85, maxWidth: 520 }}>{home.whatBody}</p>
             </div>
-            <div className="hm-stats-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-              {home.stats.map((item) => (
-                <div
-                  key={item.value}
-                  style={{
-                    background: colors.white,
-                    borderRadius: 18,
-                    border: '1px solid rgba(15,23,42,0.08)',
-                    padding: 18,
-                    boxShadow: '0 16px 36px rgba(15,23,42,0.04)',
-                  }}
-                >
-                  <div style={{ fontFamily: font.display, fontSize: 24, fontWeight: 700, color: colors.indigo }}>{item.value}</div>
-                  <div style={{ marginTop: 8, color: colors.muted, fontSize: 13, lineHeight: 1.5 }}>{item.label}</div>
-                </div>
-              ))}
+
+            <div style={{ display: 'grid', gap: 16 }}>
+              {home.whatPoints.map((item, index) => {
+                const dark = index % 2 === 0;
+                return (
+                  <article
+                    key={item.title}
+                    style={{
+                      background: dark ? colors.dark : colors.white,
+                      color: dark ? colors.white : colors.ink,
+                      borderRadius: 28,
+                      border: dark ? '1px solid rgba(255,255,255,0.08)' : '1px solid rgba(15,23,42,0.08)',
+                      padding: 28,
+                      boxShadow: dark ? '0 18px 40px rgba(15,23,42,0.18)' : '0 12px 28px rgba(15,23,42,0.04)',
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontFamily: font.display,
+                        fontSize: 11,
+                        letterSpacing: '0.14em',
+                        textTransform: 'uppercase',
+                        color: dark ? '#67e8f9' : '#0e7490',
+                        marginBottom: 12,
+                        fontWeight: 700,
+                      }}
+                    >
+                      0{index + 1}
+                    </div>
+                    <h3 style={{ margin: '0 0 10px', fontFamily: font.serif, fontSize: 28, letterSpacing: '-0.02em', lineHeight: 1.15 }}>
+                      {item.title}
+                    </h3>
+                    <p style={{ margin: 0, color: dark ? 'rgba(226,232,240,0.72)' : colors.muted, lineHeight: 1.75, fontSize: 14 }}>
+                      {item.body}
+                    </p>
+                  </article>
+                );
+              })}
             </div>
           </div>
         </div>
       </section>
 
-      <section style={{ background: '#eef1f4', color: colors.ink, padding: '72px 20px' }}>
-        <div style={{ maxWidth: 1200, margin: '0 auto' }}>
-          <div className="hm-dual-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>
-            <article style={roleCard}>
-              <div style={roleTag}>{home.requestorTitle}</div>
-              <h3 style={roleTitle}>{home.requestorTitle}</h3>
-              <p style={roleBody}>{home.requestorBody}</p>
-              <a href={masterUi} target="_blank" rel="noreferrer" className="hm-btn" style={{ ...primaryButton, alignSelf: 'start' }}>
-                {home.requestorCta}
-              </a>
-            </article>
-            <article style={roleCard}>
-              <div style={roleTag}>{home.providerTitle}</div>
-              <h3 style={roleTitle}>{home.providerTitle}</h3>
-              <p style={roleBody}>{home.providerBody}</p>
-              <a href={workerUi} target="_blank" rel="noreferrer" className="hm-btn" style={{ ...primaryButton, alignSelf: 'start' }}>
-                {home.providerCta}
-              </a>
-            </article>
-          </div>
+      <section style={{ background: colors.panel, color: colors.ink, padding: '104px 24px' }}>
+        <div style={{ ...pageWrap, textAlign: 'center', marginBottom: 40, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+          <SectionEyebrow>{home.rolesLabel || home.whatLabel}</SectionEyebrow>
+          <h2 style={{ ...sectionTitle, marginTop: 18, marginBottom: 10, textAlign: 'center' }}>{home.rolesTitle || home.requestorTitle}</h2>
+          <p style={{ margin: '0 auto', maxWidth: 560, color: colors.muted, lineHeight: 1.8, textAlign: 'center' }}>{home.rolesBody || home.bannerBody}</p>
         </div>
-      </section>
-
-      <section style={{ background: colors.dark, color: colors.white, padding: '80px 20px' }}>
-        <div style={{ maxWidth: 1200, margin: '0 auto', display: 'grid', gap: 18 }}>
-          {[
-            {
-              title: home.tokenTitle,
-              body: home.tokenBody,
-              cta: home.tokenCta,
-              action: () => navigate('/account'),
-            },
-            {
-              title: home.accessTitle,
-              body: home.accessBody,
-              cta: home.accessCta,
-              action: () => navigate('/vpn'),
-            },
-            {
-              title: home.communityTitle,
-              body: home.communityBody,
-              cta: home.communityCta,
-              action: () => navigate('/features'),
-            },
-          ].map((block, index) => (
-            <div
-              key={block.title}
-              style={{
-                ...glassStrong,
-                borderRadius: 24,
-                padding: 28,
-                display: 'grid',
-                gridTemplateColumns: '1.4fr auto',
-                gap: 18,
-                alignItems: 'center',
-              }}
-              className="hm-hero-grid"
-            >
-              <div>
-                <div style={{ fontFamily: font.display, fontSize: 12, letterSpacing: '0.14em', textTransform: 'uppercase', color: '#a5b4fc' }}>
-                  0{index + 1}
-                </div>
-                <h3 style={{ margin: '10px 0 10px', fontFamily: font.serif, fontSize: 30, letterSpacing: '-0.02em' }}>{block.title}</h3>
-                <p style={{ margin: 0, color: 'rgba(226,232,240,0.72)', lineHeight: 1.8, maxWidth: 720 }}>{block.body}</p>
+        <div style={pageWrap}>
+          <div className="hm-dual-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
+            <article style={roleCard}>
+              <div style={roleHead}>
+                <div style={roleTag}>{home.requestorKicker}</div>
+                <h3 style={roleTitle}>{home.requestorTitle}</h3>
               </div>
-              <button type="button" className="hm-btn" style={primaryButton} onClick={block.action}>
-                {block.cta}
+              <p style={roleBody}>{home.requestorBody}</p>
+              <button type="button" className="hm-btn" style={{ ...primaryButton, alignSelf: 'center' }} onClick={() => navigate('/download')}>
+                {home.requestorCta}
               </button>
+            </article>
+            <article style={roleCard}>
+              <div style={roleHead}>
+                <div style={roleTag}>{home.providerKicker}</div>
+                <h3 style={roleTitle}>{home.providerTitle}</h3>
+              </div>
+              <p style={roleBody}>{home.providerBody}</p>
+              <button type="button" className="hm-btn" style={{ ...primaryButton, alignSelf: 'center' }} onClick={() => navigate('/download')}>
+                {home.providerCta}
+              </button>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section style={{ background: colors.dark, color: colors.white, padding: '88px 24px' }}>
+        <div style={pageWrap}>
+          <div
+            className="hm-hero-grid"
+            style={{
+              ...glassStrong,
+              borderRadius: 40,
+              padding: '48px 40px',
+              display: 'grid',
+              gridTemplateColumns: '1.4fr auto',
+              gap: 28,
+              alignItems: 'center',
+            }}
+          >
+            <div>
+              <div style={{ fontFamily: font.display, fontSize: 11, letterSpacing: '0.16em', textTransform: 'uppercase', color: '#67e8f9', fontWeight: 700 }}>
+                CPT
+              </div>
+              <h3 style={{ margin: '14px 0 14px', fontFamily: font.serif, fontSize: 'clamp(30px, 4vw, 42px)', letterSpacing: '-0.03em', lineHeight: 1.1 }}>
+                {home.valueTitle}
+              </h3>
+              <p style={{ margin: 0, color: 'rgba(226,232,240,0.7)', lineHeight: 1.8, maxWidth: 700, fontSize: 16 }}>{home.valueBody}</p>
             </div>
-          ))}
+            <button type="button" className="hm-btn" style={{ ...primaryButton, padding: '16px 28px' }} onClick={() => navigate('/account')}>
+              {home.valueCta}
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section style={{ background: colors.white, color: colors.ink, padding: '112px 24px' }}>
+        <div style={{ maxWidth: 900, margin: '0 auto', textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+          <h2 style={{ ...sectionTitle, marginBottom: 18, fontSize: 'clamp(40px, 5.5vw, 64px)', lineHeight: 0.98, textAlign: 'center' }}>{home.finalTitle}</h2>
+          <p style={{ margin: '0 auto 30px', color: colors.muted, fontSize: 17, lineHeight: 1.85, maxWidth: 620, textAlign: 'center' }}>{home.finalBody}</p>
+          <div style={{ display: 'flex', gap: 14, justifyContent: 'center', flexWrap: 'wrap' }}>
+            <button type="button" className="hm-btn" style={{ ...primaryButton, padding: '16px 30px' }} onClick={() => navigate('/download')}>
+              {home.finalCta}
+            </button>
+            <button
+              type="button"
+              className="hm-btn"
+              style={{
+                ...secondaryButton,
+                padding: '16px 30px',
+                color: colors.ink,
+                background: 'transparent',
+                border: '1px solid transparent',
+                boxShadow: 'none',
+              }}
+              onClick={() => navigate('/faq')}
+            >
+              {t('nav.faq')}
+            </button>
+          </div>
         </div>
       </section>
     </>
   );
 }
 
+const sectionTitle = {
+  margin: 0,
+  fontFamily: font.serif,
+  fontWeight: 500,
+  fontSize: 'clamp(34px, 4.6vw, 48px)',
+  lineHeight: 1.08,
+  letterSpacing: '-0.03em',
+};
+
 const roleCard = {
   background: colors.white,
-  borderRadius: 22,
+  borderRadius: 28,
   border: '1px solid rgba(15,23,42,0.08)',
-  padding: 28,
+  padding: 36,
   display: 'grid',
   gap: 14,
-  boxShadow: '0 18px 40px rgba(15,23,42,0.05)',
-  minHeight: 280,
+  boxShadow: '0 18px 40px rgba(15,23,42,0.04)',
+  textAlign: 'center',
+  justifyItems: 'center',
+  alignContent: 'start',
+};
+
+const roleHead = {
+  display: 'grid',
+  gap: 8,
+  justifyItems: 'center',
 };
 
 const roleTag = {
   display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
   width: 'fit-content',
-  padding: '6px 10px',
+  padding: '5px 10px',
   borderRadius: 999,
-  background: 'rgba(99,102,241,0.1)',
-  color: '#4f46e5',
+  background: 'rgba(6,182,212,0.1)',
+  color: '#0e7490',
   fontSize: 11,
   fontWeight: 700,
-  letterSpacing: '0.12em',
-  textTransform: 'uppercase',
+  letterSpacing: '0.04em',
+  textTransform: 'none',
   fontFamily: font.display,
+  whiteSpace: 'nowrap',
+  lineHeight: 1.1,
+  margin: 0,
 };
 
 const roleTitle = {
   margin: 0,
   fontFamily: font.serif,
-  fontSize: 30,
-  letterSpacing: '-0.02em',
-  lineHeight: 1.15,
+  fontSize: 34,
+  letterSpacing: '-0.03em',
+  lineHeight: 1.12,
+  fontWeight: 500,
+  textAlign: 'center',
 };
 
 const roleBody = {
@@ -319,4 +325,6 @@ const roleBody = {
   color: colors.muted,
   lineHeight: 1.8,
   fontSize: 15,
+  textAlign: 'center',
+  maxWidth: 420,
 };

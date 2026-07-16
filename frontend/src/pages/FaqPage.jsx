@@ -1,30 +1,33 @@
 import React from 'react';
 import FaqItem from '../components/FaqItem';
 import SectionEyebrow from '../components/SectionEyebrow';
-import { colors, font } from '../theme';
+import { colors, font, pageWrap } from '../theme';
 import { getSection } from '../i18n';
 
 export default function FaqPage({ lang }) {
   const faq = getSection(lang, 'faq');
 
   return (
-    <section style={{ background: colors.white, color: colors.ink, padding: '56px 18px 90px', minHeight: '70vh' }}>
-      <div style={{ maxWidth: 820, margin: '0 auto' }}>
-        <SectionEyebrow>{faq.title}</SectionEyebrow>
-        <h1
-          style={{
-            margin: '16px 0 12px',
-            fontFamily: font.serif,
-            fontWeight: 600,
-            fontSize: 'clamp(34px, 4.8vw, 52px)',
-            lineHeight: 1.1,
-            letterSpacing: '-0.03em',
-          }}
-        >
-          {faq.title}
-        </h1>
-        <p style={{ margin: '0 0 28px', color: colors.muted, lineHeight: 1.8 }}>{faq.body}</p>
-        <div style={{ display: 'grid', gap: 12 }}>
+    <section style={{ background: colors.white, color: colors.ink, padding: '96px 24px 120px', minHeight: '70vh' }}>
+      <div style={{ ...pageWrap, maxWidth: 820 }}>
+        <div style={{ marginBottom: 36, textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+          <SectionEyebrow>{faq.kicker || faq.title}</SectionEyebrow>
+          <h1
+            style={{
+              margin: '22px 0 18px',
+              fontFamily: font.serif,
+              fontWeight: 500,
+              fontSize: 'clamp(44px, 6vw, 68px)',
+              lineHeight: 0.98,
+              letterSpacing: '-0.04em',
+              textAlign: 'center',
+            }}
+          >
+            {faq.title}
+          </h1>
+          <p style={{ margin: 0, color: colors.muted, lineHeight: 1.85, fontSize: 16, maxWidth: 640, textAlign: 'center' }}>{faq.body}</p>
+        </div>
+        <div style={{ display: 'grid', gap: 14 }}>
           {faq.items.map((item) => (
             <FaqItem key={item.q} question={item.q} answer={item.a} />
           ))}

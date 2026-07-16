@@ -11,7 +11,7 @@ export default function VibeInput({ value, onChange, placeholder, hint }) {
           position: 'absolute',
           inset: -4,
           borderRadius: 22,
-          background: 'linear-gradient(90deg, #6366f1, #a855f7, #ec4899)',
+          background: 'linear-gradient(90deg, #06b6d4, #22d3ee, #2dd4bf)',
           filter: 'blur(16px)',
           opacity: 0.35,
           transition: 'opacity 500ms ease',
@@ -53,7 +53,7 @@ export default function VibeInput({ value, onChange, placeholder, hint }) {
               borderRadius: 999,
               display: 'grid',
               placeItems: 'center',
-              background: 'linear-gradient(135deg, #6366f1, #7c3aed)',
+              background: 'linear-gradient(135deg, #06b6d4, #0891b2)',
               color: colors.white,
               fontSize: 16,
             }}

@@ -8,7 +8,7 @@ export default function FaqItem({ question, answer }) {
     <div
       style={{
         background: colors.faq,
-        borderRadius: 16,
+        borderRadius: 18,
         overflow: 'hidden',
         border: '1px solid rgba(15,23,42,0.05)',
       }}
@@ -21,7 +21,7 @@ export default function FaqItem({ question, answer }) {
           textAlign: 'left',
           border: 0,
           background: 'transparent',
-          padding: '18px 18px',
+          padding: '20px 22px',
           display: 'flex',
           justifyContent: 'space-between',
           gap: 16,
@@ -30,7 +30,7 @@ export default function FaqItem({ question, answer }) {
           color: colors.ink,
         }}
       >
-        <span style={{ fontFamily: font.serif, fontSize: 18, fontWeight: 600, letterSpacing: '-0.02em' }}>{question}</span>
+        <span style={{ fontFamily: font.serif, fontSize: 19, fontWeight: 500, letterSpacing: '-0.02em', lineHeight: 1.25 }}>{question}</span>
         <span
           style={{
             display: 'inline-block',
@@ -38,6 +38,7 @@ export default function FaqItem({ question, answer }) {
             transform: open ? 'rotate(180deg)' : 'rotate(0deg)',
             color: colors.muted,
             fontSize: 18,
+            flexShrink: 0,
           }}
         >
           ⌄
@@ -51,7 +52,7 @@ export default function FaqItem({ question, answer }) {
         }}
       >
         <div style={{ overflow: 'hidden' }}>
-          <div style={{ padding: '0 18px 18px', color: colors.muted, lineHeight: 1.75, fontSize: 14 }}>{answer}</div>
+          <div style={{ padding: '0 22px 20px', color: colors.muted, lineHeight: 1.8, fontSize: 15 }}>{answer}</div>
         </div>
       </div>
     </div>
