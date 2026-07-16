@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "hivemind-config"
 version.workspace = true
 edition.workspace = true

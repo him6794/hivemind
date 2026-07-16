@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "hivemind-proto"
 version.workspace = true
 edition.workspace = true
