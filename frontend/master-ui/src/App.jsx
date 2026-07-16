@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from 'react';
 import { artifactFilenameFromContentDisposition } from './artifactDownloadPolicy.mjs';
-import { taskIdFromFileName, validateTaskId } from './taskIdPolicy.mjs';
 
 const panelStyle = {
   border: '1px solid #d8e0e8',
@@ -42,7 +41,6 @@ export default function MasterApp() {
   const [status, setStatus] = useState('請先登入');
   const [loading, setLoading] = useState(false);
 
-  const [taskId, setTaskId] = useState('');
   const [zipFile, setZipFile] = useState(null);
   const [cpuScore, setCpuScore] = useState(0);
   const [gpuScore, setGpuScore] = useState(0);
@@ -132,16 +130,6 @@ export default function MasterApp() {
 
     try {
       const form = new FormData();
-      const effectiveTaskId = taskId.trim() || taskIdFromFileName(zipFile.name);
-      if (!effectiveTaskId) {
-        throw new Error('task_id is required');
-      }
-      const validatedTaskId = validateTaskId(effectiveTaskId);
-      if (!validatedTaskId.ok) {
-        throw new Error(validatedTaskId.message);
-      }
-
-      form.append('task_id', validatedTaskId.taskId);
       form.append('file', zipFile);
 
       if (cpuScore > 0) form.append('cpu_score', String(toNumber(cpuScore)));
@@ -157,9 +145,8 @@ export default function MasterApp() {
         throw new Error(data.message || data.status_message || 'Task upload failed');
       }
 
-      setTaskId('');
       setZipFile(null);
-      setStatus(`任務已提交: ${effectiveTaskId}`);
+      setStatus(`任務已提交: ${data.message || 'UUID task created'}`);
       await refreshTasks();
     } catch (err) {
       setStatus(`提交失敗: ${err.message}`);
@@ -334,16 +321,7 @@ export default function MasterApp() {
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 18, marginTop: 18 }}>
             <section style={panelStyle}>
               <h2 style={{ margin: '0 0 12px', fontSize: 20 }}>Upload ZIP Task</h2>
-              <label>
-                Task ID
-                <input
-                  value={taskId}
-                  onChange={(e) => setTaskId(e.target.value)}
-                  placeholder="optional, defaults to zip file name"
-                  style={fieldStyle}
-                />
-              </label>
-              <label style={{ display: 'block', marginTop: 12 }}>
+              <label style={{ display: 'block' }}>
                 ZIP file
                 <input
                   type="file"
@@ -351,9 +329,6 @@ export default function MasterApp() {
                   onChange={(e) => {
                     const file = e.target.files?.[0] || null;
                     setZipFile(file);
-                    if (file && !taskId.trim()) {
-                      setTaskId(taskIdFromFileName(file.name));
-                    }
                   }}
                   style={{ ...fieldStyle, paddingTop: 9 }}
                 />
