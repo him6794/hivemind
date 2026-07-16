@@ -213,12 +213,6 @@ fn detect_gpus_windows() -> Vec<GpuInfo> {
     }
 }
 
-#[cfg(not(windows))]
-fn detect_gpus_windows() -> Vec<GpuInfo> {
-    tracing::info!("GPU detection: nvidia-smi not found, no other backend available");
-    Vec::new()
-}
-
 /// Detect storage space using sysinfo
 fn detect_storage() -> (i64, i64) {
     use sysinfo::Disks;
