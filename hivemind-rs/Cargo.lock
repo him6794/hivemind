@@ -966,6 +966,7 @@ dependencies = [
  "hivemind-task-scheduler",
  "hivemind-torrent-service",
  "hivemind-vpn-service",
+ "hivemind-website-api",
  "hivemind-worker-executor",
  "reqwest",
  "serde",
@@ -1157,6 +1158,29 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tonic",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "hivemind-website-api"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum 0.7.9",
+ "chrono",
+ "hivemind-config",
+ "hivemind-models",
+ "hivemind-proto",
+ "hyper",
+ "jsonwebtoken",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tonic",
+ "tower",
+ "tower-http 0.5.2",
  "tracing",
  "uuid",
 ]

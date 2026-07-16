@@ -36,6 +36,8 @@ use hivemind_torrent_service::DistributionRuntime;
 use hivemind_vpn_service::grpc_server::GrpcVpnService;
 #[cfg(feature = "nodepool")]
 use hivemind_vpn_service::VpnService;
+#[cfg(feature = "website")]
+use hivemind_website_api::WebsiteApiServer;
 #[cfg(feature = "worker")]
 use hivemind_worker_executor::control_api::WorkerProfile;
 #[cfg(feature = "worker")]
@@ -52,12 +54,17 @@ pub enum ServiceRole {
     Master,
     Nodepool,
     Worker,
+    Website,
     All,
 }
 
 impl ServiceRole {
     pub fn includes_master(self) -> bool {
         matches!(self, ServiceRole::Master | ServiceRole::All)
+    }
+
+    pub fn includes_website(self) -> bool {
+        matches!(self, ServiceRole::Website | ServiceRole::All)
     }
 
     pub fn includes_nodepool(self) -> bool {
@@ -96,9 +103,10 @@ pub async fn run_from_cli(args: Vec<String>) -> Result<()> {
         "master" => ServiceRole::Master,
         "nodepool" => ServiceRole::Nodepool,
         "worker" => ServiceRole::Worker,
+        "website" => ServiceRole::Website,
         "all" => ServiceRole::All,
         _ => {
-            eprintln!("Usage: hivemind-bin [master|nodepool|worker|all]");
+            eprintln!("Usage: hivemind-bin [master|nodepool|worker|website|all]");
             std::process::exit(1);
         }
     };
@@ -109,6 +117,9 @@ pub async fn run_from_cli(args: Vec<String>) -> Result<()> {
 fn ensure_role_supported(role: ServiceRole) -> Result<()> {
     if role.includes_master() && !cfg!(feature = "master") {
         anyhow::bail!("this binary was built without master support");
+    }
+    if role.includes_website() && !cfg!(feature = "website") {
+        anyhow::bail!("this binary was built without website support");
     }
     if role.includes_nodepool() && !cfg!(feature = "nodepool") {
         anyhow::bail!("this binary was built without nodepool support");
@@ -130,7 +141,7 @@ fn should_seed_default_user(value: Option<&str>) -> bool {
 }
 
 fn validate_service_config(config: &HivemindConfig, role: ServiceRole) -> Result<()> {
-    if role.includes_master() || role.includes_nodepool() {
+    if role.includes_master() || role.includes_nodepool() || role.includes_website() {
         config.auth.validate_jwt_secret()?;
     }
     if role.includes_nodepool() || role.includes_worker() {
@@ -139,7 +150,7 @@ fn validate_service_config(config: &HivemindConfig, role: ServiceRole) -> Result
     Ok(())
 }
 
-#[cfg(any(feature = "master", feature = "worker"))]
+#[cfg(any(feature = "master", feature = "worker", feature = "website"))]
 fn nodepool_client_addr(config: &HivemindConfig, run_nodepool: bool) -> Result<String> {
     if let Some(endpoint) = config
         .server
@@ -180,11 +191,14 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
     let config = HivemindConfig::load()?;
 
     let run_master = role.includes_master();
+    let run_website = role.includes_website();
     let run_nodepool = role.includes_nodepool();
     let run_worker = role.includes_worker();
 
     #[cfg(not(feature = "master"))]
     let _ = run_master;
+    #[cfg(not(feature = "website"))]
+    let _ = run_website;
     #[cfg(not(feature = "worker"))]
     let _ = run_worker;
 
@@ -299,6 +313,25 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
         );
     }
 
+    #[cfg(feature = "website")]
+    if run_website {
+        let nodepool_grpc = nodepool_client_addr(&config, run_nodepool)?;
+        let jwt_secret = config.auth.jwt_secret.clone();
+        let token_expiry = config.auth.token_expiry_hours;
+        let api =
+            WebsiteApiServer::new(jwt_secret, token_expiry, nodepool_grpc, config.clone()).await?;
+        let addr = config.server.website_http_addr.clone();
+        tokio::spawn(async move {
+            if let Err(e) = api.serve(&addr).await {
+                tracing::error!("Website API error: {}", e);
+            }
+        });
+        info!(
+            "Website HTTP API started on {}",
+            config.server.website_http_addr
+        );
+    }
+
     #[cfg(feature = "worker")]
     if run_worker {
         let executor = Arc::new(WorkerExecutor::new(config.clone()));
@@ -332,6 +365,10 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
             std::env::var("WORKER_LOCATION").unwrap_or_else(|_| "local".into()),
             executor.get_resource_spec(),
         );
+        let control_state = hivemind_worker_executor::control_api::ControlApiState {
+            profile: control_profile,
+            nodepool_addr: nodepool_addr.clone(),
+        };
         let control_addr = config.server.worker_control_http_addr.clone();
         let worker_control_allowed_origins =
             config.server.worker_control_cors_allowed_origins.clone();
@@ -339,7 +376,7 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
         tokio::spawn(async move {
             if let Err(e) = hivemind_worker_executor::control_api::serve_with_allowed_origins(
                 &control_addr,
-                control_profile,
+                control_state,
                 &worker_control_allowed_origins,
                 Some(&worker_ui_dir),
             )

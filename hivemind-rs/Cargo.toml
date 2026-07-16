@@ -9,6 +9,7 @@ members = [
     "crates/node-manager",
     "crates/task-scheduler",
     "crates/master-api",
+    "crates/website-api",
     "crates/worker-executor",
     "crates/vpn-service",
     "crates/torrent-service",

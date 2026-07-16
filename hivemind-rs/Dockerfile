@@ -1,4 +1,4 @@
-FROM rust:1.90-bookworm AS builder
+FROM rust:1.96-bookworm AS builder
 
 WORKDIR /app
 
@@ -53,6 +53,6 @@ RUN groupadd --system --gid 10001 hivemind \
 USER 10001:10001
 ENV MONTY_EXECUTABLE=/app/monty
 
-EXPOSE 8082 50051 50053 18080 6969 6881
+EXPOSE 8082 8090 50051 50053 18080 6969 6881
 
 CMD ["/app/hivemind"]

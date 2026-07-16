@@ -1,0 +1,23 @@
+[package]
+name = "hivemind-website-api"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio.workspace = true
+tonic.workspace = true
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+hyper.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+jsonwebtoken.workspace = true
+hivemind-proto = { path = "../proto" }
+hivemind-models = { path = "../models" }
+hivemind-config = { path = "../config" }

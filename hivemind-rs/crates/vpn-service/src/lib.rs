@@ -12,6 +12,37 @@ use hivemind_config::HivemindConfig;
 use hivemind_database::DatabaseManager;
 use hivemind_models::VpnPeer;
 
+#[derive(Debug, Clone)]
+pub struct UserVpnConfig {
+    pub login_server: String,
+    pub auth_key: String,
+    pub virtual_ip: String,
+    pub client_id: String,
+    pub config_text: String,
+    pub expires_at: String,
+}
+
+fn sanitize_client_label(raw: &str) -> Result<String> {
+    let cleaned: String = raw
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim_matches('-').to_string();
+    if cleaned.is_empty() {
+        anyhow::bail!("client_name is invalid");
+    }
+    if cleaned.len() > 48 {
+        anyhow::bail!("client_name is too long");
+    }
+    Ok(cleaned)
+}
+
 pub struct VpnService {
     client: headscale_client::HeadscaleClient,
     db: DatabaseManager,
@@ -157,6 +188,132 @@ impl VpnService {
         sqlx::query("UPDATE vpn_peers SET virtual_ip = $1, online = $2, last_seen = NOW() WHERE worker_id = $3")
             .bind(virtual_ip).bind(online).bind(worker_id).execute(&self.db.pool).await?;
         Ok(())
+    }
+
+    /// Issue a downloadable Headscale join config for an authenticated website user.
+    /// This path is independent from worker mesh join and does not require a worker node.
+    pub async fn issue_user_vpn_config_from_token(
+        &self,
+        auth_token: &str,
+        client_name: &str,
+    ) -> Result<UserVpnConfig> {
+        let claims = JwtService::new(
+            &self.config.auth.jwt_secret,
+            self.config.auth.token_expiry_hours,
+        )
+        .validate(auth_token)?;
+        self.issue_user_vpn_config(&claims.sub, client_name, auth_token)
+            .await
+    }
+
+    pub async fn issue_user_vpn_config(
+        &self,
+        username: &str,
+        client_name: &str,
+        auth_token: &str,
+    ) -> Result<UserVpnConfig> {
+        let claims = JwtService::new(
+            &self.config.auth.jwt_secret,
+            self.config.auth.token_expiry_hours,
+        )
+        .validate(auth_token)?;
+        if claims.sub != username {
+            anyhow::bail!("VPN token is not authorized for user");
+        }
+
+        let username = username.trim();
+        if username.is_empty() {
+            anyhow::bail!("username is required");
+        }
+        let client_name = client_name.trim();
+        let client_label = if client_name.is_empty() {
+            "default".to_string()
+        } else {
+            sanitize_client_label(client_name)?
+        };
+        let client_id = format!("user:{}:{}", username, client_label);
+
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM users WHERE username = $1 AND is_active = true)",
+        )
+        .bind(username)
+        .fetch_one(&self.db.pool)
+        .await?;
+        if !exists {
+            anyhow::bail!("user not found");
+        }
+
+        // Ensure Headscale has a user namespace for this account.
+        let _ = self.client.ensure_user(username).await;
+        let auth_key = self
+            .client
+            .create_preauth_key_for_user(username, false, false)
+            .await?;
+        let virtual_ip = peer_manager::allocate_ip(&self.db, &self.config).await?;
+        let expires_at = chrono::Utc::now() + chrono::Duration::hours(24);
+        let login_server = {
+            let advertised = self.config.vpn.headscale_login_server.trim();
+            let fallback = self.config.vpn.headscale_url.trim();
+            let chosen = if !advertised.is_empty() {
+                advertised
+            } else {
+                fallback
+            };
+            chosen.trim_end_matches('/').to_string()
+        };
+        let config_text = [
+            "# Hivemind VPN client config (Headscale/Tailscale)",
+            "# Save this file and join with your Tailscale-compatible client.",
+            "#",
+            &format!("# login_server={login_server}"),
+            &format!("# auth_key={auth_key}"),
+            &format!("# suggested_hostname={client_id}"),
+            &format!("# assigned_virtual_ip={virtual_ip}"),
+            &format!("# expires_at={}", expires_at.to_rfc3339()),
+            "#",
+            "# Example (Tailscale CLI):",
+            &format!(
+                "#   tailscale up --login-server={login_server} --authkey={auth_key} --hostname={client_id}"
+            ),
+            "#",
+            "# Example (Headscale-compatible client env):",
+            &format!("#   TS_LOGIN_SERVER={login_server}"),
+            &format!("#   TS_AUTHKEY={auth_key}"),
+            "",
+        ]
+        .join("\n");
+
+        sqlx::query(
+            "INSERT INTO vpn_peers (worker_id, hostname, virtual_ip, auth_key, online, last_seen)
+             VALUES ($1, $2, $3, $4, false, NOW())
+             ON CONFLICT (worker_id) DO UPDATE SET
+                 hostname = EXCLUDED.hostname,
+                 virtual_ip = EXCLUDED.virtual_ip,
+                 auth_key = EXCLUDED.auth_key,
+                 last_seen = NOW()",
+        )
+        .bind(&client_id)
+        .bind(format!("{username}-{client_label}"))
+        .bind(&virtual_ip)
+        .bind(&auth_key)
+        .execute(&self.db.pool)
+        .await?;
+
+        tracing::info!(
+            "VPN user config issued: user={} client_id={} ip={}",
+            username,
+            client_id,
+            virtual_ip
+        );
+
+        Ok(UserVpnConfig {
+            login_server,
+            auth_key,
+            virtual_ip,
+            client_id,
+            config_text,
+            expires_at: expires_at.to_rfc3339(),
+        })
     }
 
     pub async fn list_online_peers(&self) -> Result<Vec<VpnPeer>> {
@@ -343,5 +500,20 @@ mod tests {
 
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].worker_id, assigned_worker);
+    }
+}
+
+#[cfg(test)]
+mod user_config_tests {
+    use super::sanitize_client_label;
+
+    #[test]
+    fn sanitize_client_label_accepts_simple_names() {
+        assert_eq!(sanitize_client_label("Laptop-01").unwrap(), "laptop-01");
+    }
+
+    #[test]
+    fn sanitize_client_label_rejects_empty() {
+        assert!(sanitize_client_label("@@@").is_err());
     }
 }

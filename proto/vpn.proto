@@ -67,9 +67,27 @@ message UpdateVPNStatusResponse {
     string status_message = 2;
 }
 
+// Website/user client enrollment: issue Headscale join config for an authenticated user.
+message IssueUserVpnConfigRequest {
+    string token = 1;
+    string client_name = 2;
+}
+
+message IssueUserVpnConfigResponse {
+    bool success = 1;
+    string status_message = 2;
+    string login_server = 3;
+    string auth_key = 4;
+    string virtual_ip = 5;
+    string client_id = 6;
+    string config_text = 7;
+    string expires_at = 8;
+}
+
 service VPNService {
     rpc JoinVPN(JoinVPNRequest) returns (JoinVPNResponse);
     rpc GetTaskPeers(GetTaskPeersRequest) returns (GetTaskPeersResponse);
     rpc LeaveVPN(LeaveVPNRequest) returns (LeaveVPNResponse);
     rpc UpdateVPNStatus(UpdateVPNStatusRequest) returns (UpdateVPNStatusResponse);
+    rpc IssueUserVpnConfig(IssueUserVpnConfigRequest) returns (IssueUserVpnConfigResponse);
 }

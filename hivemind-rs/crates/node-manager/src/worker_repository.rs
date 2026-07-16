@@ -74,6 +74,83 @@ impl WorkerRepository {
         }
     }
 
+    /// Register a worker on behalf of an authenticated owner. Existing worker
+    /// records may only be refreshed by their current owner (or an admin).
+    /// The owner predicate is part of the UPDATE so a concurrent request
+    /// cannot overwrite a worker after an earlier read/check.
+    pub async fn upsert_for_owner(
+        &self,
+        worker: &WorkerNode,
+        owner: &str,
+        is_admin: bool,
+    ) -> Result<WorkerNode> {
+        let updated = sqlx::query_as::<_, WorkerNode>(
+            "UPDATE worker_nodes SET username = $1, ip = $2, cpu_cores = $3, memory_gb = $4,
+             cpu_score = $5, gpu_score = $6, gpu_memory_gb = $7,
+             gpu_name = $8, vram_mb = $9,
+             storage_total_gb = $10, storage_available_gb = $11,
+             location = $12, status = $13,
+             available_memory_gb = $14, queue_capacity = $15,
+             last_heartbeat = NOW(), updated_at = NOW()
+             WHERE worker_id = $16 AND (username = $17 OR $18)
+             RETURNING *",
+        )
+        .bind(&worker.username)
+        .bind(&worker.ip)
+        .bind(worker.cpu_cores)
+        .bind(worker.memory_gb)
+        .bind(worker.cpu_score)
+        .bind(worker.gpu_score)
+        .bind(worker.gpu_memory_gb)
+        .bind(&worker.gpu_name)
+        .bind(worker.vram_mb)
+        .bind(worker.storage_total_gb)
+        .bind(worker.storage_available_gb)
+        .bind(&worker.location)
+        .bind(worker.status.as_str())
+        .bind(worker.available_memory_gb)
+        .bind(worker.queue_capacity)
+        .bind(&worker.worker_id)
+        .bind(owner)
+        .bind(is_admin)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(updated) = updated {
+            return Ok(updated);
+        }
+
+        // A missing row can be inserted. If another request wins the race,
+        // the unique worker_id constraint rejects the insert rather than
+        // allowing an ownership-changing overwrite.
+        sqlx::query_as::<_, WorkerNode>(
+            "INSERT INTO worker_nodes (worker_id, username, ip, cpu_cores, memory_gb,
+             cpu_score, gpu_score, gpu_memory_gb,
+             gpu_name, vram_mb, storage_total_gb, storage_available_gb,
+             location, status, available_memory_gb, queue_capacity)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+             RETURNING *",
+        )
+        .bind(&worker.worker_id)
+        .bind(&worker.username)
+        .bind(&worker.ip)
+        .bind(worker.cpu_cores)
+        .bind(worker.memory_gb)
+        .bind(worker.cpu_score)
+        .bind(worker.gpu_score)
+        .bind(worker.gpu_memory_gb)
+        .bind(&worker.gpu_name)
+        .bind(worker.vram_mb)
+        .bind(worker.storage_total_gb)
+        .bind(worker.storage_available_gb)
+        .bind(&worker.location)
+        .bind(worker.status.as_str())
+        .bind(worker.available_memory_gb)
+        .bind(worker.queue_capacity)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
     pub async fn find_by_worker_id(&self, worker_id: &str) -> Result<Option<WorkerNode>> {
         sqlx::query_as::<_, WorkerNode>("SELECT * FROM worker_nodes WHERE worker_id = $1")
             .bind(worker_id)

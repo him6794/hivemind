@@ -889,6 +889,8 @@ pub async fn create_task(
     if let Some(response) = enforce_task_submit_rate_limit(&state, &owner).await {
         return response;
     }
+    let mut body = body;
+    body.task_id = uuid::Uuid::new_v4().to_string();
     create_task_from_submission(
         state,
         token,
@@ -977,6 +979,8 @@ async fn create_task_from_submission(
         Ok(resp) => {
             let s = if resp.success {
                 StatusCode::CREATED
+            } else if resp.status_message == "task_id already exists" {
+                StatusCode::CONFLICT
             } else {
                 StatusCode::BAD_REQUEST
             };
@@ -1052,15 +1056,13 @@ pub async fn upload_task(
             }
         }
     }
-    if !is_safe_task_id(&body.task_id) {
-        return bad_task_response("task_id is required and must be a safe file name");
-    }
     let Some(fb) = fb else {
         return bad_task_response("file is required");
     };
     if let Some(message) = uploaded_file_size_error(fb.len(), max_task_upload_bytes()) {
         return task_response(StatusCode::PAYLOAD_TOO_LARGE, false, message);
     }
+    body.task_id = uuid::Uuid::new_v4().to_string();
     let zp = task_upload_path(&state.config, &body.task_id);
     if let Some(p) = zp.parent() {
         if let Err(e) = std::fs::create_dir_all(p) {
