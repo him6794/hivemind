@@ -20,10 +20,6 @@
   3) Worker：`worker/src/hivemind_worker/__main__.py` 或 `worker/main.py`（會連 `NODEPOOL_ADDRESS`）
   4) Master UI（可選）：`master_node.py`（預設 5002）
   
-- Worker Windows 編譯（Nuitka）：`worker/build_worker.ps1`（見 `worker/BUILD.md`）
-  - 編譯前會把 `node_pool/nodepool_pb2*.py` 複製到 worker。
-  - `worker/runtime/` 可能包含 **bundled Python runtime**（B1）供無系統 Python 的 venv fallback（同樣由 build script 複製到 dist）。
-
 ## 任務 ZIP 格式與執行規則（很常踩坑）
 - 任務 ZIP 建議包含：`main.py`（或 `app.py/run.py/start.py`）+ 可選 `requirements.txt`（見 `master/.../templates_master/master_upload.html` 與 `task_executor._find_executable_script()`）。
 - Worker 執行路徑：解壓到 temp workspace（`task_executor._safe_extract_zip()` 有 ZipSlip 防護）。

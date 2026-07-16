@@ -1,32 +1,11 @@
 # Provider Installer Scaffold
 
-This scaffold bootstraps a provider worker with low-friction scripts for Windows and Linux.
+This scaffold bootstraps a provider worker with low-friction shell install/update scripts.
 
-## Windows
-
-Run in PowerShell:
-
-```powershell
-.\install-worker.ps1 -MasterUrl "http://127.0.0.1:8082" -AuthToken "<token>" -InstallDir "C:\hivemind-worker"
-```
-
-Update an existing install:
-
-```powershell
-.\update-worker.ps1 -InstallDir "C:\hivemind-worker"
-```
-
-## Linux
-
-Run in shell:
+## Install / Update
 
 ```bash
 ./install-worker.sh --master-url http://127.0.0.1:8082 --auth-token <token> --install-dir /opt/hivemind-worker
-```
-
-Update an existing install:
-
-```bash
 ./update-worker.sh --install-dir /opt/hivemind-worker
 ```
 
@@ -43,11 +22,4 @@ Example release signing flow:
 ```bash
 sha256sum worker-executor > SHA256SUMS
 openssl dgst -sha256 -sign release-private-key.pem -out SHA256SUMS.sig SHA256SUMS
-```
-
-PowerShell uses the same signature format:
-
-```powershell
-openssl dgst -sha256 -sign release-private-key.pem -out SHA256SUMS.sig SHA256SUMS
-$env:HIVEMIND_RELEASE_PUBLIC_KEY = "C:\hivemind-worker\release-public-key.pem"
 ```

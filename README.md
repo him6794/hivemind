@@ -100,31 +100,18 @@ make fmt
 ## Deployment
 
 
-## Multi-Host Role Packages
+## Multi-Host Role Binaries
 
-Publishable role packages (feature-gated binaries):
+Build feature-gated role binaries from the Rust workspace:
 
-```powershell
-# Requires a built Monty runtime for the worker client
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-role-clients.ps1 `
-  -MontyExecutable path\to\monty.exe
+```bash
+cd hivemind-rs
+cargo build --release --no-default-features --features worker --bin hivemind-worker
+cargo build --release --no-default-features --features master --bin hivemind-master
+cargo build --release --no-default-features --features nodepool --bin hivemind-nodepool
 ```
 
-Outputs under `dist/role-clients/`:
-
-| Package | Binary | UI |
-|---|---|---|
-| `worker-client` | `hivemind-worker.exe` | Worker UI starts with the process (`WORKER_UI_DIR`) |
-| `master-client` | `hivemind-master.exe` | Master UI starts with the process (`MASTER_UI_DIR`) |
-| `nodepool-server` | `hivemind-nodepool.exe` | Server only (PostgreSQL + Redis required) |
-
-Validate packaging invariants:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-role-clients.Tests.ps1
-```
-
-For multi-host deployments, set bind and advertise endpoints separately (`WORKER_ADVERTISE_ADDR`, `NODEPOOL_GRPC_ENDPOINT`, `TORRENT_SEED_ADVERTISE_HOST`). Backend authorization, not UI checks, defines privilege. Workers must receive `WORKER_EXECUTION_SECRET` and must not receive control-plane `JWT_SECRET`.
+For multi-host deployments, set bind and advertise endpoints separately (`WORKER_ADVERTISE_ADDR`, `NODEPOOL_GRPC_ENDPOINT`, `TORRENT_SEED_ADVERTISE_HOST`). Backend authorization, not UI checks, defines privilege. Workers must receive `WORKER_EXECUTION_SECRET` and must not receive control-plane `JWT_SECRET`. Prefer `docker-compose.yml` for the canonical multi-service topology.
 
 
 ### Docker Compose
