@@ -52,7 +52,13 @@ services:
       TORRENT_API_DIR: /app/api/torrents
       TORRENT_BT_DIR: /app/bt_torrents
       TORRENT_ANNOUNCE_URL: ${TORRENT_ANNOUNCE_URL:-http://nodepool:6969/announce}
+      TORRENT_SEED_ADVERTISE_HOST: ${TORRENT_SEED_ADVERTISE_HOST:-nodepool}
       HIVEMIND_SEED_DEFAULT_USER: ${HIVEMIND_SEED_DEFAULT_USER:-false}
+      HEADSCALE_URL: ${HEADSCALE_URL:-http://headscale:8080}
+      HEADSCALE_LOGIN_SERVER: ${HEADSCALE_LOGIN_SERVER:-http://100.124.230.74:8080}
+      HEADSCALE_API_KEY: ${HEADSCALE_API_KEY:-}
+      VPN_BASE_VIRTUAL_IP: ${VPN_BASE_VIRTUAL_IP:-100.64.0.0}
+      VPN_NETWORK: ${VPN_NETWORK:-100.64.0.0/10}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     ports:
       - "50051:50051"
@@ -87,6 +93,8 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set to a non-default value}
       MASTER_HTTP_ADDR: 0.0.0.0:8082
       NODEPOOL_GRPC_ENDPOINT: nodepool:50051
+      MASTER_UI_DIR: /app/frontend/master-ui/dist
+      MASTER_CORS_ALLOWED_ORIGINS: ${MASTER_CORS_ALLOWED_ORIGINS:-http://localhost:3080,http://127.0.0.1:3080,http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001,http://localhost:5173,http://127.0.0.1:5173}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     ports:
       - "8082:8082"
@@ -125,11 +133,16 @@ services:
       WORKER_ADVERTISE_ADDR: ${WORKER_ADVERTISE_ADDR:-worker:50053}
       WORKER_ID: ${WORKER_ID:-testuser}
       WORKER_LOCATION: ${WORKER_LOCATION:-local}
+      WORKER_UI_DIR: /app/frontend/worker-ui/dist
+      MONTY_EXECUTABLE: /app/monty
       EXECUTOR_SANDBOX_DIR: /app/sandbox
+      EXECUTOR_NETWORK_EGRESS_ENABLED: ${EXECUTOR_NETWORK_EGRESS_ENABLED:-true}
+      EXECUTOR_NETWORK_EGRESS_MODE: ${EXECUTOR_NETWORK_EGRESS_MODE:-allowlist}
+      EXECUTOR_NETWORK_EGRESS_TARGETS: ${EXECUTOR_NETWORK_EGRESS_TARGETS:-8.8.8.8,1.1.1.1}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     ports:
-      - "${WORKER_GRPC_BIND_HOST:-127.0.0.1}:50053:50053"
-      - "127.0.0.1:18080:18080"
+      - "${WORKER_GRPC_BIND_HOST:-0.0.0.0}:50053:50053"
+      - "0.0.0.0:18080:18080"
     depends_on:
       - nodepool
     networks:
@@ -196,6 +209,7 @@ services:
       args:
         VITE_API_BASE: ${VITE_API_BASE:-http://localhost:8082}
     container_name: hivemind-master-ui
+    image: hivemind-master-ui:local
     restart: unless-stopped
     ports:
       - "3000:80"
@@ -212,6 +226,7 @@ services:
         VITE_API_BASE: ${VITE_API_BASE:-http://localhost:8082}
         VITE_WORKER_CONTROL_BASE: ${VITE_WORKER_CONTROL_BASE:-http://localhost:18080}
     container_name: hivemind-worker-ui
+    image: hivemind-worker-ui:local
     restart: unless-stopped
     ports:
       - "3001:80"
@@ -219,6 +234,43 @@ services:
       - worker
     networks:
       - hivemind-network
+
+  headscale:
+    image: headscale/headscale:0.23.0
+    container_name: hivemind-headscale
+    restart: unless-stopped
+    command: serve
+    environment:
+      # Headscale requires a config file in real deployments.
+      # This service is optional scaffolding; set HEADSCALE_API_KEY after bootstrap.
+      TZ: UTC
+    volumes:
+      - headscale-data:/var/lib/headscale
+      - ./infra/headscale/config.yaml:/etc/headscale/config.yaml:ro
+    ports:
+      - "8080:8080"
+    networks:
+      - hivemind-network
+    profiles: ["vpn"]
+
+  website:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE: ${VITE_API_BASE:-http://localhost:8082}
+        VITE_MASTER_UI: ${VITE_MASTER_UI:-http://100.124.230.74:3000}
+        VITE_WORKER_UI: ${VITE_WORKER_UI:-http://100.124.230.74:3001}
+    container_name: hivemind-website
+    image: hivemind-website:local
+    restart: unless-stopped
+    ports:
+      - "3080:80"
+    depends_on:
+      - master
+    networks:
+      - hivemind-network
+
 
 networks:
   hivemind-network:
@@ -238,3 +290,5 @@ volumes:
     name: hivemind-task-packages
   hivemind-worker-sandbox:
     name: hivemind-worker-sandbox
+  headscale-data:
+    name: hivemind-headscale-data
