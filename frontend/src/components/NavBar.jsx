@@ -1,21 +1,21 @@
 import React, { useEffect, useState } from 'react';
 import LogoMark from './LogoMark';
-import { colors, font, primaryButton, secondaryButton } from '../theme';
+import { colors, font, primaryButton, secondaryButton, shellWrap } from '../theme';
 
 const routes = [
   { id: 'home', path: '/' },
   { id: 'features', path: '/features' },
   { id: 'account', path: '/account' },
-  { id: 'vpn', path: '/vpn' },
+  { id: 'download', path: '/download' },
   { id: 'faq', path: '/faq' },
 ];
 
-export default function NavBar({ t, path, navigate, masterUi, onToggleLang, sessionUser }) {
+export default function NavBar({ t, path, navigate, onToggleLang, sessionUser }) {
   const [navSolid, setNavSolid] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
 
   useEffect(() => {
-    const onScroll = () => setNavSolid(window.scrollY > 18);
+    const onScroll = () => setNavSolid(window.scrollY > 12);
     onScroll();
     window.addEventListener('scroll', onScroll, { passive: true });
     return () => window.removeEventListener('scroll', onScroll);
@@ -30,20 +30,18 @@ export default function NavBar({ t, path, navigate, masterUi, onToggleLang, sess
       style={{
         position: 'sticky',
         top: 0,
-        zIndex: 40,
-        transition: 'background 500ms ease, border-color 500ms ease, box-shadow 500ms ease, backdrop-filter 500ms ease',
-        background: navSolid || menuOpen ? 'rgba(15, 23, 42, 0.92)' : 'transparent',
-        borderBottom: navSolid || menuOpen ? '1px solid rgba(255,255,255,0.08)' : '1px solid transparent',
-        backdropFilter: navSolid || menuOpen ? 'blur(16px)' : 'none',
-        WebkitBackdropFilter: navSolid || menuOpen ? 'blur(16px)' : 'none',
-        boxShadow: navSolid ? '0 8px 30px rgba(0,0,0,0.18)' : 'none',
+        zIndex: 50,
+        transition: 'background 500ms ease, border-color 500ms ease, backdrop-filter 500ms ease',
+        background: navSolid || menuOpen ? 'rgba(15, 23, 42, 0.8)' : 'rgba(15, 23, 42, 0.35)',
+        borderBottom: '1px solid rgba(255,255,255,0.05)',
+        backdropFilter: 'blur(18px)',
+        WebkitBackdropFilter: 'blur(18px)',
       }}
     >
       <div
         style={{
-          maxWidth: 1200,
-          margin: '0 auto',
-          padding: '16px 20px',
+          ...shellWrap,
+          padding: '16px 24px',
           display: 'flex',
           justifyContent: 'space-between',
           gap: 16,
@@ -66,14 +64,30 @@ export default function NavBar({ t, path, navigate, masterUi, onToggleLang, sess
         >
           <LogoMark />
           <div style={{ textAlign: 'left' }}>
-            <div style={{ fontFamily: font.display, fontWeight: 700, letterSpacing: '-0.04em', fontSize: 20 }}>
+            <div style={{ fontFamily: font.display, fontWeight: 700, letterSpacing: '-0.04em', fontSize: 18 }}>
               {t('brand')}
             </div>
-            <div style={{ color: 'rgba(226,232,240,0.58)', fontSize: 11, letterSpacing: '0.04em' }}>{t('tagline')}</div>
+            <div style={{ color: 'rgba(226,232,240,0.5)', fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase' }}>
+              {t('tagline')}
+            </div>
           </div>
         </button>
 
-        <nav className="hm-desktop-nav" style={{ display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap' }}>
+        <nav
+          className="hm-desktop-nav"
+          style={{
+            display: 'flex',
+            gap: 2,
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            padding: 4,
+            borderRadius: 999,
+            background: 'rgba(255,255,255,0.05)',
+            border: '1px solid rgba(255,255,255,0.05)',
+            backdropFilter: 'blur(12px)',
+            WebkitBackdropFilter: 'blur(12px)',
+          }}
+        >
           {routes.map((route) => {
             const active = path === route.path;
             return (
@@ -84,14 +98,14 @@ export default function NavBar({ t, path, navigate, masterUi, onToggleLang, sess
                 style={{
                   border: 0,
                   cursor: 'pointer',
-                  padding: '10px 12px',
-                  borderRadius: 10,
-                  background: active ? 'rgba(255,255,255,0.08)' : 'transparent',
-                  color: active ? colors.white : 'rgba(248,250,252,0.78)',
-                  fontSize: 14,
+                  padding: '8px 16px',
+                  borderRadius: 999,
+                  background: active ? 'rgba(255,255,255,0.1)' : 'transparent',
+                  color: active ? colors.white : 'rgba(248,250,252,0.6)',
+                  fontSize: 12,
                   fontWeight: 600,
                   fontFamily: font.sans,
-                  transition: 'background 500ms ease, color 500ms ease',
+                  transition: 'background 300ms ease, color 300ms ease',
                 }}
               >
                 {t(`nav.${route.id}`)}
@@ -100,18 +114,23 @@ export default function NavBar({ t, path, navigate, masterUi, onToggleLang, sess
           })}
         </nav>
 
-        <div className="hm-desktop-actions" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <div className="hm-desktop-actions" style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
           {sessionUser ? (
-            <span style={{ fontSize: 12, color: 'rgba(226,232,240,0.7)', maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            <span style={{ fontSize: 12, color: 'rgba(226,232,240,0.65)', maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis' }}>
               {sessionUser}
             </span>
           ) : null}
-          <button type="button" className="hm-btn" onClick={onToggleLang} style={{ ...secondaryButton, padding: '10px 14px' }}>
+          <button
+            type="button"
+            className="hm-btn hm-btn-secondary"
+            onClick={onToggleLang}
+            style={{ ...secondaryButton, padding: '8px 14px', fontSize: 12 }}
+          >
             {t('nav.lang')}
           </button>
-          <a href={masterUi} className="hm-btn" style={primaryButton} target="_blank" rel="noreferrer">
-            {t('nav.master')}
-          </a>
+          <button type="button" className="hm-btn" style={{ ...primaryButton, padding: '8px 16px', fontSize: 12 }} onClick={() => navigate('/download')}>
+            {t('nav.start')}
+          </button>
         </div>
 
         <button
@@ -124,8 +143,8 @@ export default function NavBar({ t, path, navigate, masterUi, onToggleLang, sess
             width: 42,
             height: 42,
             borderRadius: 12,
-            border: '1px solid rgba(255,255,255,0.12)',
-            background: 'rgba(255,255,255,0.06)',
+            border: '1px solid rgba(255,255,255,0.1)',
+            background: 'rgba(255,255,255,0.05)',
             color: colors.white,
             cursor: 'pointer',
           }}
@@ -138,10 +157,10 @@ export default function NavBar({ t, path, navigate, masterUi, onToggleLang, sess
         <div
           className="hm-mobile-menu"
           style={{
-            padding: '8px 20px 18px',
+            padding: '8px 24px 18px',
             display: 'grid',
             gap: 8,
-            borderTop: '1px solid rgba(255,255,255,0.06)',
+            borderTop: '1px solid rgba(255,255,255,0.05)',
           }}
         >
           {routes.map((route) => (
@@ -152,7 +171,7 @@ export default function NavBar({ t, path, navigate, masterUi, onToggleLang, sess
               style={{
                 textAlign: 'left',
                 border: 0,
-                background: path === route.path ? 'rgba(99,102,241,0.18)' : 'transparent',
+                background: path === route.path ? 'rgba(6,182,212,0.16)' : 'transparent',
                 color: colors.white,
                 padding: '12px 12px',
                 borderRadius: 12,
@@ -164,12 +183,12 @@ export default function NavBar({ t, path, navigate, masterUi, onToggleLang, sess
             </button>
           ))}
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', paddingTop: 4 }}>
-            <button type="button" className="hm-btn" onClick={onToggleLang} style={{ ...secondaryButton, flex: 1 }}>
+            <button type="button" className="hm-btn hm-btn-secondary" onClick={onToggleLang} style={{ ...secondaryButton, flex: 1 }}>
               {t('nav.lang')}
             </button>
-            <a href={masterUi} className="hm-btn" style={{ ...primaryButton, flex: 1 }} target="_blank" rel="noreferrer">
-              {t('nav.master')}
-            </a>
+            <button type="button" className="hm-btn" style={{ ...primaryButton, flex: 1 }} onClick={() => navigate('/download')}>
+              {t('nav.start')}
+            </button>
           </div>
         </div>
       ) : null}

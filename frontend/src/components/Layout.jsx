@@ -1,20 +1,13 @@
 import React from 'react';
 import NavBar from './NavBar';
-import { colors, font } from '../theme';
+import { colors, font, shellWrap } from '../theme';
 import { getSection } from '../i18n';
 
-export default function Layout({ children, t, path, navigate, masterUi, workerUi, onToggleLang, sessionUser, lang }) {
+export default function Layout({ children, t, path, navigate, onToggleLang, sessionUser, lang }) {
   const footer = getSection(lang, 'footer');
 
   return (
-    <div
-      style={{
-        minHeight: '100vh',
-        color: colors.white,
-        background: colors.dark,
-        fontFamily: font.sans,
-      }}
-    >
+    <div style={{ minHeight: '100vh', color: colors.white, background: colors.dark, fontFamily: font.sans }}>
       <div
         aria-hidden
         style={{
@@ -22,11 +15,11 @@ export default function Layout({ children, t, path, navigate, masterUi, workerUi
           inset: 0,
           pointerEvents: 'none',
           backgroundImage:
-            'linear-gradient(rgba(148,163,184,0.05) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,0.05) 1px, transparent 1px)',
-          backgroundSize: '64px 64px',
-          maskImage: 'radial-gradient(circle at 50% 10%, black 0%, transparent 70%)',
-          WebkitMaskImage: 'radial-gradient(circle at 50% 10%, black 0%, transparent 70%)',
-          opacity: 0.7,
+            'linear-gradient(rgba(148,163,184,0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,0.03) 1px, transparent 1px)',
+          backgroundSize: '48px 48px',
+          maskImage: 'radial-gradient(circle at 50% 0%, black 0%, transparent 85%)',
+          WebkitMaskImage: 'radial-gradient(circle at 50% 0%, black 0%, transparent 85%)',
+          opacity: 1,
         }}
       />
       <div
@@ -35,13 +28,13 @@ export default function Layout({ children, t, path, navigate, masterUi, workerUi
           position: 'fixed',
           top: '-18%',
           left: '50%',
-          width: 900,
+          width: 920,
           height: 520,
           transform: 'translateX(-50%)',
           background:
-            'radial-gradient(circle, rgba(99,102,241,0.28) 0%, rgba(168,85,247,0.14) 36%, rgba(236,72,153,0.08) 55%, transparent 72%)',
-          filter: 'blur(22px)',
-          opacity: 0.35,
+            'radial-gradient(circle, rgba(6,182,212,0.22) 0%, rgba(34,211,238,0.1) 40%, rgba(45,212,191,0.05) 58%, transparent 72%)',
+          filter: 'blur(28px)',
+          opacity: 0.42,
           pointerEvents: 'none',
         }}
       />
@@ -50,7 +43,6 @@ export default function Layout({ children, t, path, navigate, masterUi, workerUi
         t={t}
         path={path}
         navigate={navigate}
-        masterUi={masterUi}
         onToggleLang={onToggleLang}
         sessionUser={sessionUser}
       />
@@ -60,80 +52,44 @@ export default function Layout({ children, t, path, navigate, masterUi, workerUi
       <footer
         style={{
           position: 'relative',
-          marginTop: 20,
-          borderTop: '1px solid rgba(255,255,255,0.08)',
-          background: 'rgba(8, 13, 24, 0.92)',
-          padding: '48px 20px 28px',
+          marginTop: 0,
+          borderTop: '1px solid rgba(255,255,255,0.05)',
+          background: colors.footer,
+          padding: '84px 24px 36px',
         }}
       >
-        <div style={{ maxWidth: 1200, margin: '0 auto' }}>
-          <div
-            className="hm-footer-grid"
-            style={{
-              display: 'grid',
-              gridTemplateColumns: '1.2fr repeat(4, minmax(0, 1fr))',
-              gap: 24,
-            }}
-          >
+        <div style={shellWrap}>
+          <div className="hm-footer-grid" style={{ display: 'grid', gridTemplateColumns: '1.5fr repeat(3, minmax(0, 1fr))', gap: 36 }}>
             <div>
               <div style={{ fontFamily: font.display, fontWeight: 700, fontSize: 22, letterSpacing: '-0.03em' }}>{t('brand')}</div>
-              <p style={{ margin: '12px 0 0', color: 'rgba(226,232,240,0.62)', lineHeight: 1.7, maxWidth: 280 }}>
+              <p style={{ margin: '14px 0 0', color: 'rgba(226,232,240,0.58)', lineHeight: 1.75, maxWidth: 300, fontSize: 14 }}>
                 {t('tagline')}
               </p>
             </div>
-
-            <div>
-              <div style={{ fontFamily: font.display, fontSize: 13, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'rgba(226,232,240,0.5)', marginBottom: 12 }}>
-                {footer.platform}
-              </div>
-              <div style={{ display: 'grid', gap: 10 }}>
-                <button type="button" onClick={() => navigate('/features')} style={linkBtn}>{t('nav.features')}</button>
-                <button type="button" onClick={() => navigate('/account')} style={linkBtn}>{t('nav.account')}</button>
-                <button type="button" onClick={() => navigate('/vpn')} style={linkBtn}>{t('nav.vpn')}</button>
-              </div>
-            </div>
-
-            <div>
-              <div style={{ fontFamily: font.display, fontSize: 13, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'rgba(226,232,240,0.5)', marginBottom: 12 }}>
-                {footer.community}
-              </div>
-              <div style={{ display: 'grid', gap: 10 }}>
-                <a href={masterUi} target="_blank" rel="noreferrer" style={linkA}>{t('common.openMaster')}</a>
-                <a href={workerUi} target="_blank" rel="noreferrer" style={linkA}>{t('common.openWorker')}</a>
-              </div>
-            </div>
-
-            <div>
-              <div style={{ fontFamily: font.display, fontSize: 13, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'rgba(226,232,240,0.5)', marginBottom: 12 }}>
-                {footer.token}
-              </div>
-              <div style={{ display: 'grid', gap: 10 }}>
-                <button type="button" onClick={() => navigate('/account')} style={linkBtn}>CPT</button>
-                <button type="button" onClick={() => navigate('/vpn')} style={linkBtn}>VPN</button>
-              </div>
-            </div>
-
-            <div>
-              <div style={{ fontFamily: font.display, fontSize: 13, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'rgba(226,232,240,0.5)', marginBottom: 12 }}>
-                {footer.resources}
-              </div>
-              <div style={{ display: 'grid', gap: 10 }}>
-                <button type="button" onClick={() => navigate('/faq')} style={linkBtn}>{t('nav.faq')}</button>
-                <button type="button" onClick={() => navigate('/features')} style={linkBtn}>{footer.about}</button>
-              </div>
-            </div>
+            <FooterCol title={footer.platform}>
+              <FooterBtn onClick={() => navigate('/features')}>{t('nav.features')}</FooterBtn>
+              <FooterBtn onClick={() => navigate('/account')}>{t('nav.account')}</FooterBtn>
+              <FooterBtn onClick={() => navigate('/download')}>{t('nav.download')}</FooterBtn>
+            </FooterCol>
+            <FooterCol title={footer.surfaces}>
+              <FooterBtn onClick={() => navigate('/download')}>{t('common.getStarted')}</FooterBtn>
+              <FooterBtn onClick={() => navigate('/download')}>{t('common.openDownload')}</FooterBtn>
+            </FooterCol>
+            <FooterCol title={footer.resources}>
+              <FooterBtn onClick={() => navigate('/faq')}>{t('nav.faq')}</FooterBtn>
+              <FooterBtn onClick={() => navigate('/account')}>{t('nav.account')}</FooterBtn>
+            </FooterCol>
           </div>
-
           <div
             style={{
-              marginTop: 36,
-              paddingTop: 18,
-              borderTop: '1px solid rgba(255,255,255,0.06)',
+              marginTop: 56,
+              paddingTop: 22,
+              borderTop: '1px solid rgba(255,255,255,0.05)',
               display: 'flex',
               justifyContent: 'space-between',
               gap: 12,
               flexWrap: 'wrap',
-              color: 'rgba(226,232,240,0.45)',
+              color: 'rgba(226,232,240,0.4)',
               fontSize: 13,
             }}
           >
@@ -147,13 +103,20 @@ export default function Layout({ children, t, path, navigate, masterUi, workerUi
         html, body, #root { margin: 0; min-height: 100%; background: ${colors.dark}; }
         a { color: inherit; text-decoration: none; }
         button, input, textarea { font: inherit; }
-        .hm-btn:hover { transform: translateY(-1px); }
-        .hm-btn:active { transform: translateY(0); opacity: 0.92; }
-        .hm-logo:hover { transform: rotate(180deg); }
+        .hm-btn:hover { transform: translateY(-2px); box-shadow: 0 12px 24px rgba(6,182,212,0.28); }
+        .hm-btn:active { transform: translateY(0); opacity: 0.94; }
+        .hm-btn-secondary:hover { background: rgba(255,255,255,0.08) !important; border-color: rgba(255,255,255,0.2) !important; box-shadow: none !important; }
+        .hm-logo { transition: transform 500ms ease; }
+        .hm-logo:hover { transform: scale(1.06); }
         .hm-field:focus {
-          border-color: rgba(165, 180, 252, 0.7) !important;
-          box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.18);
+          border-color: rgba(103, 232, 249, 0.55) !important;
+          box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.16);
           background: rgba(15, 23, 42, 0.72) !important;
+        }
+        .hm-field-light:focus {
+          border-color: rgba(6, 182, 212, 0.55) !important;
+          box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.12);
+          background: #ffffff !important;
         }
         .hm-cursor {
           display: inline-block;
@@ -165,7 +128,7 @@ export default function Layout({ children, t, path, navigate, masterUi, workerUi
           50%, 100% { opacity: 0; }
         }
         @media (max-width: 920px) {
-          .hm-hero-grid, .hm-feature-grid, .hm-account-grid, .hm-vpn-grid, .hm-dual-grid, .hm-footer-grid, .hm-stats-grid { grid-template-columns: 1fr !important; }
+          .hm-hero-grid, .hm-feature-grid, .hm-account-grid, .hm-dual-grid, .hm-footer-grid { grid-template-columns: 1fr !important; }
           .hm-feature-sidebar { position: static !important; }
         }
       `}</style>
@@ -173,17 +136,36 @@ export default function Layout({ children, t, path, navigate, masterUi, workerUi
   );
 }
 
-const linkBtn = {
-  border: 0,
-  background: 'transparent',
-  color: 'rgba(226,232,240,0.78)',
-  textAlign: 'left',
-  padding: 0,
-  cursor: 'pointer',
-  fontSize: 14,
-};
+function FooterCol({ title, children }) {
+  return (
+    <div>
+      <div style={{ fontFamily: font.display, fontSize: 12, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'rgba(226,232,240,0.45)', marginBottom: 14, fontWeight: 600 }}>
+        {title}
+      </div>
+      <div style={{ display: 'grid', gap: 12 }}>{children}</div>
+    </div>
+  );
+}
 
-const linkA = {
-  color: 'rgba(226,232,240,0.78)',
-  fontSize: 14,
-};
+function FooterBtn({ onClick, children }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        border: 0,
+        background: 'transparent',
+        color: 'rgba(226,232,240,0.72)',
+        textAlign: 'left',
+        padding: 0,
+        cursor: 'pointer',
+        fontSize: 14,
+        transition: 'color 300ms ease',
+      }}
+      onMouseEnter={(e) => { e.currentTarget.style.color = '#67e8f9'; }}
+      onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(226,232,240,0.72)'; }}
+    >
+      {children}
+    </button>
+  );
+}

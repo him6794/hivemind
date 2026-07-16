@@ -3,33 +3,69 @@ import Layout from './components/Layout';
 import HomePage from './pages/HomePage';
 import FeaturesPage from './pages/FeaturesPage';
 import AccountPage from './pages/AccountPage';
-import VpnPage from './pages/VpnPage';
+import DownloadPage from './pages/DownloadPage';
 import FaqPage from './pages/FaqPage';
 import { createT, supportedLangs } from './i18n';
 
 const TOKEN_KEY = 'hivemind.website.token';
 const USER_KEY = 'hivemind.website.username';
 const LANG_KEY = 'hivemind.website.lang';
+const PAGE_IDS = new Set(['features', 'account', 'download', 'faq']);
 
-function normalizePath(pathname) {
+function stripTrailingSlash(pathname) {
   if (!pathname || pathname === '/') return '/';
-  const clean = pathname.replace(/\/+$/, '');
-  return clean || '/';
+  return pathname.replace(/\/+$/, '') || '/';
 }
 
-function readInitialLang() {
+function parseLocation(pathname) {
+  const clean = stripTrailingSlash(pathname);
+  const parts = clean.split('/').filter(Boolean);
+
+  let lang = null;
+  let index = 0;
+  if (parts[0] === 'zh' || parts[0] === 'en') {
+    lang = parts[0];
+    index = 1;
+  }
+
+  const page = parts[index] || '';
+  // Legacy aliases that should land on a real product page.
+  const legacyAliases = {
+    vpn: 'download',
+  };
+  const resolvedPage = legacyAliases[page] || page;
+  const isLegacyAlias = Boolean(legacyAliases[page]);
+  const known = !resolvedPage || PAGE_IDS.has(resolvedPage);
+  const path = resolvedPage && PAGE_IDS.has(resolvedPage) ? `/${resolvedPage}` : '/';
+  const fullPath = `/${lang || 'zh'}${path === '/' ? '' : path}`;
+
+  return {
+    lang,
+    path: known ? path : '/',
+    fullPath,
+    known: Boolean(lang) && known && !isLegacyAlias,
+    // Force redirect for missing locale, unknown pages, or legacy aliases.
+    needsRedirect: !lang || (!known && Boolean(page)) || isLegacyAlias,
+  };
+}
+
+function buildPath(lang, path = '/') {
+  const normalized = path === '/' ? '' : stripTrailingSlash(path);
+  return `/${lang}${normalized}`;
+}
+
+function readPreferredLang() {
   const stored = localStorage.getItem(LANG_KEY);
   if (supportedLangs.includes(stored)) return stored;
   return 'zh';
 }
 
 export default function App() {
-  const apiBase = String(import.meta.env.VITE_API_BASE || 'http://localhost:8082').trim().replace(/\/$/, '');
-  const masterUi = String(import.meta.env.VITE_MASTER_UI || 'http://100.124.230.74:3000').trim().replace(/\/$/, '');
-  const workerUi = String(import.meta.env.VITE_WORKER_UI || 'http://100.124.230.74:3001').trim().replace(/\/$/, '');
+  const apiBase = String(import.meta.env.VITE_API_BASE || 'http://localhost:8090').trim().replace(/\/$/, '');
 
-  const [lang, setLang] = useState(readInitialLang);
-  const [path, setPath] = useState(() => normalizePath(window.location.pathname));
+  const initial = parseLocation(window.location.pathname);
+  const [lang, setLang] = useState(() => initial.lang || readPreferredLang());
+  const [path, setPath] = useState(() => initial.path);
 
   const [authMode, setAuthMode] = useState('login');
   const [username, setUsername] = useState(() => localStorage.getItem(USER_KEY) || '');
@@ -45,8 +81,6 @@ export default function App() {
   const [transferTo, setTransferTo] = useState('');
   const [transferAmount, setTransferAmount] = useState('');
   const [transferNote, setTransferNote] = useState('');
-  const [vpnClientName, setVpnClientName] = useState('laptop');
-  const [vpnConfig, setVpnConfig] = useState(null);
   const [bootstrapping, setBootstrapping] = useState(Boolean(localStorage.getItem(TOKEN_KEY)));
 
   const t = useMemo(() => createT(lang), [lang]);
@@ -56,23 +90,56 @@ export default function App() {
     setStatusTone(tone);
   }, []);
 
-  const navigate = useCallback((nextPath) => {
-    const target = normalizePath(nextPath);
+  const navigate = useCallback((nextPath, nextLang = lang) => {
+    const targetLang = supportedLangs.includes(nextLang) ? nextLang : 'zh';
+    let targetPath = '/';
+
+    if (typeof nextPath === 'string') {
+      const parsed = parseLocation(nextPath);
+      if (nextPath === '/' || nextPath === '') {
+        targetPath = '/';
+      } else if (parsed.lang && (nextPath === `/${parsed.lang}` || nextPath.startsWith(`/${parsed.lang}/`))) {
+        targetPath = parsed.path;
+      } else {
+        targetPath = stripTrailingSlash(nextPath.startsWith('/') ? nextPath : `/${nextPath}`);
+        if (!PAGE_IDS.has(targetPath.slice(1)) && targetPath !== '/') {
+          targetPath = '/';
+        }
+      }
+    }
+
+    const target = buildPath(targetLang, targetPath);
     if (window.location.pathname !== target) {
       window.history.pushState({}, '', target);
     }
-    setPath(target);
+    setLang(targetLang);
+    setPath(targetPath);
     window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [lang]);
+
+  const syncFromLocation = useCallback(() => {
+    const parsed = parseLocation(window.location.pathname);
+    const preferred = parsed.lang || readPreferredLang();
+    if (!parsed.lang || parsed.needsRedirect) {
+      const target = buildPath(preferred, parsed.path);
+      window.history.replaceState({}, '', target);
+      setLang(preferred);
+      setPath(parsed.path);
+      return;
+    }
+    setLang(parsed.lang);
+    setPath(parsed.path);
   }, []);
 
   useEffect(() => {
-    const onPop = () => setPath(normalizePath(window.location.pathname));
+    syncFromLocation();
+    const onPop = () => syncFromLocation();
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
-  }, []);
+  }, [syncFromLocation]);
 
   useEffect(() => {
-    document.title = lang === 'zh' ? 'Hivemind | 官方入口' : 'Hivemind | Official Gateway';
+    document.title = lang === 'zh' ? 'Hivemind | 開放算力網路' : 'Hivemind | Open Compute Network';
     document.documentElement.lang = lang === 'zh' ? 'zh-Hant' : 'en';
   }, [lang]);
 
@@ -127,7 +194,6 @@ export default function App() {
   const logout = useCallback((message) => {
     persistSession('', sessionUser);
     setBalance(null);
-    setVpnConfig(null);
     setTransferTo('');
     setTransferAmount('');
     setTransferNote('');
@@ -205,9 +271,8 @@ export default function App() {
       setUsername(name);
       setPassword('');
       setConfirmPassword('');
-      setVpnConfig(null);
       await refreshBalance(nextToken);
-      setFlash(authMode === 'register' ? t('account.sessionRestored') : t('account.sessionRestored'), 'ok');
+      setFlash(t('account.sessionRestored'), 'ok');
     } catch (err) {
       if (err.code === 401) logout(err.message);
       else setFlash(err.message || 'Request failed', 'err');
@@ -256,48 +321,6 @@ export default function App() {
     }
   }
 
-  async function handleIssueVpnConfig(e) {
-    e.preventDefault();
-    if (!token) {
-      setFlash(t('vpn.needAuth'), 'err');
-      navigate('/account');
-      return;
-    }
-    setLoading(true);
-    setBusyAction('vpn');
-    setFlash(t('vpn.issuing'));
-    try {
-      const clientName = vpnClientName.trim() || 'default';
-      const res = await api('POST', '/api/vpn/config', { client_name: clientName }, token);
-      if (!res.data.success) throw new Error(res.data.message || 'VPN issue failed');
-      setVpnConfig(res.data);
-      setFlash(t('vpn.ready'), 'ok');
-    } catch (err) {
-      if (err.code === 401) logout(err.message);
-      else setFlash(err.message || 'VPN issue failed', 'err');
-    } finally {
-      setLoading(false);
-      setBusyAction('');
-    }
-  }
-
-  function downloadVpnConfig() {
-    if (!vpnConfig?.config_text) return;
-    const blob = new Blob([vpnConfig.config_text], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${(vpnConfig.client_id || 'hivemind-vpn').replace(/[^a-zA-Z0-9:_-]/g, '_')}.txt`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-  }
-
-  const joinCommand = vpnConfig
-    ? `tailscale up --login-server=${vpnConfig.login_server} --authkey=${vpnConfig.auth_key} --hostname=${vpnConfig.client_id}`
-    : '';
-
   const session = {
     token,
     sessionUser,
@@ -323,51 +346,22 @@ export default function App() {
     logout,
     authMode,
     setAuthMode,
-    vpnClientName,
-    setVpnClientName,
-    vpnConfig,
-    handleIssueVpnConfig,
-    downloadVpnConfig,
-    joinCommand,
   };
 
   let page = null;
   if (path === '/features') page = <FeaturesPage lang={lang} />;
-  else if (path === '/account') {
-    page = (
-      <AccountPage
-        lang={lang}
-        t={t}
-        navigate={navigate}
-        apiBase={apiBase}
-        masterUi={masterUi}
-        workerUi={workerUi}
-        session={session}
-      />
-    );
-  } else if (path === '/vpn') page = <VpnPage lang={lang} t={t} navigate={navigate} session={session} />;
+  else if (path === '/account') page = <AccountPage lang={lang} t={t} navigate={navigate} session={session} />;
+  else if (path === '/download') page = <DownloadPage lang={lang} t={t} navigate={navigate} />;
   else if (path === '/faq') page = <FaqPage lang={lang} />;
-  else {
-    page = (
-      <HomePage
-        lang={lang}
-        t={t}
-        navigate={navigate}
-        masterUi={masterUi}
-        workerUi={workerUi}
-      />
-    );
-  }
+  else page = <HomePage lang={lang} t={t} navigate={navigate} />;
 
   return (
     <Layout
       t={t}
       lang={lang}
-      path={path === '/features' || path === '/account' || path === '/vpn' || path === '/faq' ? path : '/'}
+      path={path}
       navigate={navigate}
-      masterUi={masterUi}
-      workerUi={workerUi}
-      onToggleLang={() => setLang((prev) => (prev === 'zh' ? 'en' : 'zh'))}
+      onToggleLang={() => navigate(path, lang === 'zh' ? 'en' : 'zh')}
       sessionUser={sessionUser}
     >
       {page}
