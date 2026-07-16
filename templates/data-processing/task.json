@@ -1,8 +1,8 @@
 ﻿{
   "name": "data-processing",
   "version": "1.0",
-  "description": "Process input data and produce transformed output",
-  "entrypoint": "run.py",
+  "description": "Process example data and report a summary",
+  "entrypoint": "main.py",
   "requirements": {
     "cpu_score": 200,
     "memory_gb": 4,

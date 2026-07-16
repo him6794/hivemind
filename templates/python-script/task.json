@@ -1,8 +1,8 @@
 ﻿{
   "name": "python-script",
   "version": "1.0",
-  "description": "Run any Python script with dependencies",
-  "entrypoint": "run.py",
+  "description": "Run a Monty-compatible Python script and report its result",
+  "entrypoint": "main.py",
   "requirements": {
     "cpu_score": 100,
     "memory_gb": 2,

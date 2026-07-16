@@ -1,8 +1,8 @@
 ﻿{
   "name": "batch-render",
   "version": "1.0",
-  "description": "Batch rendering job (Blender, FFmpeg, etc.)",
-  "entrypoint": "run.py",
+  "description": "Render a deterministic frame range and report completion",
+  "entrypoint": "main.py",
   "requirements": {
     "cpu_score": 500,
     "memory_gb": 8,
