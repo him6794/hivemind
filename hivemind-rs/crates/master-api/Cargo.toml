@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "hivemind-master-api"
 version.workspace = true
 edition.workspace = true

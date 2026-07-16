@@ -26,7 +26,7 @@ export default function DownloadPage({ lang, t, navigate }) {
 
   function handlePackageAction() {
     if (selectedPackage?.id === 'source') {
-      window.open('https://github.com/', '_blank', 'noreferrer');
+      window.open('https://github.com/him6794/hivemind', '_blank', 'noreferrer');
       return;
     }
     window.alert(download.comingSoon);
