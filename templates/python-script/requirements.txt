@@ -1,12 +1,10 @@
 ﻿# Python Script Template
 #
 # To use:
-#   1. Replace run.py with your own script
-#   2. Add dependencies to requirements.txt
+#   1. Replace main.py with your own Monty-compatible script
+#   2. Keep this file empty; third-party packages are not available to the Rust worker
 #   3. Adjust resource requirements in task.json
-#   4. Package: zip -r task.zip run.py requirements.txt task.json
+#   4. Package: zip -r task.zip main.py requirements.txt task.json
 #   5. Submit: hivemind submit task.zip --username user --password pass
 
-# Example: add numpy, pandas, etc.
-numpy>=1.24
-pandas>=2.0
+# No third-party packages are supported by the Rust worker's Monty runtime.
