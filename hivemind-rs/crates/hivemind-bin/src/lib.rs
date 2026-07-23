@@ -1,4 +1,6 @@
 use anyhow::Result;
+#[cfg(any(feature = "master", feature = "worker"))]
+use hivemind_client_runtime as client_runtime;
 use hivemind_config::HivemindConfig;
 use tokio::sync::watch;
 use tracing::info;
@@ -141,11 +143,16 @@ fn should_seed_default_user(value: Option<&str>) -> bool {
 }
 
 fn validate_service_config(config: &HivemindConfig, role: ServiceRole) -> Result<()> {
-    if role.includes_master() || role.includes_nodepool() || role.includes_website() {
+    // User-deployed masters must not require the platform JWT signing secret.
+    // Nodepool remains the signing authority; website-api is platform-side.
+    if role.includes_nodepool() || role.includes_website() {
         config.auth.validate_jwt_secret()?;
     }
-    if role.includes_nodepool() || role.includes_worker() {
-        config.auth.validate_worker_execution_secret()?;
+    if role.includes_nodepool() {
+        config.auth.validate_worker_execution_private_key()?;
+    }
+    if role.includes_worker() {
+        config.auth.validate_worker_execution_public_key()?;
     }
     Ok(())
 }
@@ -161,7 +168,20 @@ fn nodepool_client_addr(config: &HivemindConfig, run_nodepool: bool) -> Result<S
         return Ok(endpoint.clone());
     }
 
-    if !run_nodepool && config.server.nodepool_grpc_addr.starts_with("0.0.0.0:") {
+    let addr = config.server.nodepool_grpc_addr.trim();
+    if !addr.is_empty() && !addr.starts_with("0.0.0.0:") && !addr.starts_with("[::]:") {
+        return Ok(addr.to_string());
+    }
+
+    // Downloaded master/worker clients default to the platform nodepool hostname
+    // on the VPN overlay. Website-api still requires an explicit endpoint when it
+    // is not colocated with nodepool.
+    #[cfg(any(feature = "master", feature = "worker"))]
+    if !run_nodepool {
+        return Ok(client_runtime::resolve_nodepool_grpc_endpoint(config));
+    }
+
+    if !run_nodepool && (addr.starts_with("0.0.0.0:") || addr.starts_with("[::]:")) {
         anyhow::bail!(
             "NODEPOOL_GRPC_ENDPOINT must be set when this process does not run nodepool and NODEPOOL_GRPC_ADDR is a bind address ({})",
             config.server.nodepool_grpc_addr
@@ -188,6 +208,18 @@ async fn worker_nodepool_token(
 }
 
 async fn run_service_inner(role: ServiceRole) -> Result<()> {
+    #[cfg(feature = "worker")]
+    if role.includes_worker() && std::env::var_os("HIVEMIND_CONFIG").is_none() {
+        // Downloaded workers must be runnable with only website credentials.
+        // Keep the release egress gate enabled with the platform-safe defaults;
+        // explicit operator environment variables still override these values.
+        set_worker_egress_default("EXECUTOR_NETWORK_EGRESS_ENABLED", "true");
+        set_worker_egress_default("EXECUTOR_NETWORK_EGRESS_MODE", "allowlist");
+        set_worker_egress_default(
+            "EXECUTOR_NETWORK_EGRESS_TARGETS",
+            "8.8.8.8,1.1.1.1,100.64.0.0/10",
+        );
+    }
     let config = HivemindConfig::load()?;
 
     let run_master = role.includes_master();
@@ -232,7 +264,9 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
         let max_redispatch = 2i32;
         let dispatcher = Arc::new(
             Dispatcher::new(db.clone(), task_timeout, max_redispatch)
-                .with_worker_execution_secret(config.auth.worker_execution_secret.clone()),
+                .with_worker_execution_private_key(
+                    config.auth.worker_execution_private_key_pem.clone(),
+                ),
         );
 
         let disp_shutdown = dispatcher
@@ -255,7 +289,7 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
         }
         let np_state = Arc::new(NodepoolState {
             auth: auth.clone(),
-            worker_execution_secret: config.auth.worker_execution_secret.clone(),
+            worker_execution_private_key_pem: config.auth.worker_execution_private_key_pem.clone(),
             node_manager: node_mgr.clone(),
             scheduler: scheduler.clone(),
             artifact_root: hivemind_node_manager::grpc::artifact_root_for_config(&config),
@@ -296,10 +330,7 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
     #[cfg(feature = "master")]
     if run_master {
         let nodepool_grpc = nodepool_client_addr(&config, run_nodepool)?;
-        let jwt_secret = config.auth.jwt_secret.clone();
-        let token_expiry = config.auth.token_expiry_hours;
-        let api =
-            MasterApiServer::new(jwt_secret, token_expiry, nodepool_grpc, config.clone()).await?;
+        let api = MasterApiServer::new(nodepool_grpc, config.clone()).await?;
         let addr = config.server.master_http_addr.clone();
         let master_ui_dir = config.server.master_ui_dir.clone();
         tokio::spawn(async move {
@@ -334,6 +365,10 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
 
     #[cfg(feature = "worker")]
     if run_worker {
+        // Optional operator-provisioned VPN auth key bootstrap. Downloaded workers
+        // typically skip this and auto-issue a preauth key via website-api on login.
+        client_runtime::ensure_env_vpn(&config, client_runtime::ClientRole::Worker).await?;
+
         let executor = Arc::new(WorkerExecutor::new(config.clone()));
         let resources = executor.get_system_resources();
         info!(
@@ -353,12 +388,28 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
         ));
         let wk_svc = WorkerNodeServiceServer::new(GrpcWorkerNodeService::new(wk_state));
         let nodepool_addr = nodepool_client_addr(&config, run_nodepool)?;
-        let worker_nodepool_token =
-            worker_nodepool_token(&config, &nodepool_addr, &worker_id).await?;
-        let worker_advertise_addr = nodepool_client::advertise_addr(
+        let worker_advertise_addr = match nodepool_client::advertise_addr(
             &config.server.worker_grpc_addr,
             config.server.worker_advertise_addr.clone(),
-        )?;
+        ) {
+            Ok(addr) => addr,
+            Err(err) => {
+                // Downloaded workers often listen on 0.0.0.0 and learn a stable
+                // advertise address after VPN join. Fall back to worker_id:port
+                // so the control UI can still start; operators can override.
+                let port = config
+                    .server
+                    .worker_grpc_addr
+                    .rsplit(':')
+                    .next()
+                    .unwrap_or("50053");
+                let fallback = format!("{worker_id}:{port}");
+                tracing::warn!(
+                    "WORKER_ADVERTISE_ADDR unset ({err}); using fallback advertise addr {fallback}"
+                );
+                fallback
+            }
+        };
         let control_profile = WorkerProfile::from_resource_spec(
             worker_id.clone(),
             worker_advertise_addr.clone(),
@@ -367,7 +418,8 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
         );
         let control_state = hivemind_worker_executor::control_api::ControlApiState {
             profile: control_profile,
-            nodepool_addr: nodepool_addr.clone(),
+            nodepool_addr: std::sync::Arc::new(std::sync::Mutex::new(nodepool_addr.clone())),
+            config: config.clone(),
         };
         let control_addr = config.server.worker_control_http_addr.clone();
         let worker_control_allowed_origins =
@@ -390,26 +442,59 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
             config.server.worker_control_http_addr
         );
 
-        let worker_username = config
+        // Only start the automatic registration loop when credentials/token are
+        // already provisioned. Downloaded workers authenticate through the local
+        // UI after VPN bootstrap and register from there.
+        let has_preprovisioned_auth = config
             .server
-            .worker_nodepool_username
-            .as_ref()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| worker_id.clone());
-        let reg_shutdown = nodepool_client::start_registration_loop(
-            executor.clone(),
-            nodepool_client::RegistrationLoopConfig {
-                nodepool_addr: nodepool_addr.clone(),
-                worker_id,
-                username: worker_username,
-                worker_addr: worker_advertise_addr,
-                location: std::env::var("WORKER_LOCATION").unwrap_or_else(|_| "local".into()),
-                token: worker_nodepool_token,
-                interval: std::time::Duration::from_secs(10),
-            },
-        );
-        shutdown_handles.push(reg_shutdown);
+            .worker_nodepool_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .is_some()
+            || (config
+                .server
+                .worker_nodepool_username
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .is_some()
+                && config
+                    .server
+                    .worker_nodepool_password
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .is_some());
+
+        if has_preprovisioned_auth {
+            let worker_nodepool_token =
+                worker_nodepool_token(&config, &nodepool_addr, &worker_id).await?;
+            let worker_username = config
+                .server
+                .worker_nodepool_username
+                .as_ref()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| worker_id.clone());
+            let reg_shutdown = nodepool_client::start_registration_loop(
+                executor.clone(),
+                nodepool_client::RegistrationLoopConfig {
+                    nodepool_addr: nodepool_addr.clone(),
+                    worker_id: worker_id.clone(),
+                    username: worker_username,
+                    worker_addr: worker_advertise_addr,
+                    location: std::env::var("WORKER_LOCATION").unwrap_or_else(|_| "local".into()),
+                    token: worker_nodepool_token,
+                    interval: std::time::Duration::from_secs(10),
+                },
+            );
+            shutdown_handles.push(reg_shutdown);
+        } else {
+            info!(
+                "Worker registration loop deferred until UI login (no WORKER_NODEPOOL_TOKEN/USERNAME/PASSWORD)"
+            );
+        }
 
         tokio::spawn(async move {
             if let Err(e) = tonic::transport::Server::builder()
@@ -436,6 +521,15 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "worker")]
+fn set_worker_egress_default(key: &str, value: &str) {
+    if std::env::var_os(key).is_none() {
+        // The process is the downloaded worker's configuration boundary; these
+        // defaults are set before HivemindConfig applies environment overrides.
+        unsafe { std::env::set_var(key, value) };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,49 +546,41 @@ mod tests {
     }
 
     #[test]
-    fn master_startup_rejects_default_control_plane_secret() {
-        // Given: valid worker trust but a default control-plane secret.
+    fn master_startup_does_not_require_platform_jwt_secret() {
+        // Given: a default control-plane secret (not distributed to masters).
         let mut config = HivemindConfig::default();
         config.auth.jwt_secret = "CHANGE_ME_IN_PRODUCTION".into();
-        config.auth.worker_execution_secret =
-            "unit-test-worker-execution-secret-at-least-32-bytes".into();
 
-        // When: master startup validates its role-specific requirements.
-        let error = validate_service_config(&config, ServiceRole::Master)
-            .unwrap_err()
-            .to_string();
-
-        // Then: only the control-plane boundary blocks startup.
-        assert!(error.contains("JWT_SECRET"));
+        // When/Then: user-deployed master startup no longer requires JWT_SECRET.
+        validate_service_config(&config, ServiceRole::Master).unwrap();
     }
 
     #[test]
-    fn worker_startup_requires_worker_secret_but_not_control_plane_secret() {
-        // Given: a worker secret is valid while JWT_SECRET remains at its default.
-        let mut config = HivemindConfig::for_test();
-        config.auth.worker_execution_secret =
-            "unit-test-worker-execution-secret-at-least-32-bytes".into();
+    fn worker_startup_uses_public_key_and_not_control_plane_secret() {
+        // Given: the embedded platform public key while JWT_SECRET remains default.
+        let mut config = HivemindConfig::default();
+        config.auth.jwt_secret = "CHANGE_ME_IN_PRODUCTION".into();
 
-        // When/Then: worker-only startup succeeds without control-plane trust.
+        // When/Then: worker-only startup succeeds without control-plane trust or private key.
         validate_service_config(&config, ServiceRole::Worker).unwrap();
 
-        // Given: only the control-plane secret is valid.
-        config.auth.jwt_secret = "unit-test-control-plane-secret-at-least-32-bytes".into();
-        config.auth.worker_execution_secret = "CHANGE_ME_WORKER_EXECUTION_SECRET".into();
+        // Given: an invalid public key override.
+        config.auth.worker_execution_public_key_pem = "not-a-key".into();
 
-        // When: worker-only startup validates the wrong trust secret.
+        // When: worker-only startup validates the verification key.
         let error = validate_service_config(&config, ServiceRole::Worker)
             .unwrap_err()
             .to_string();
 
-        // Then: it reports the worker-execution boundary, not JWT_SECRET.
-        assert!(error.contains("WORKER_EXECUTION_SECRET"));
+        // Then: it reports the public-key boundary, not JWT_SECRET.
+        assert!(error.contains("WORKER_EXECUTION_PUBLIC_KEY_PEM"));
+        assert!(!error.contains("JWT_SECRET"));
     }
 
     #[test]
-    fn nodepool_startup_requires_both_trust_secrets() {
-        // Given: valid control-plane auth but a default worker-execution secret.
-        let mut config = HivemindConfig::for_test();
+    fn nodepool_startup_requires_jwt_secret_and_execution_private_key() {
+        // Given: valid control-plane auth but a missing worker-execution private key.
+        let mut config = HivemindConfig::default();
         config.auth.jwt_secret = "unit-test-control-plane-secret-at-least-32-bytes".into();
 
         // When: nodepool startup validates both trust domains.
@@ -502,27 +588,28 @@ mod tests {
             .unwrap_err()
             .to_string();
 
-        // Then: worker-execution trust is independently required.
-        assert!(error.contains("WORKER_EXECUTION_SECRET"));
+        // Then: worker-execution signing material is independently required.
+        assert!(error.contains("WORKER_EXECUTION_PRIVATE_KEY_PEM"));
 
         // Given: both trust domains are configured.
-        config.auth.worker_execution_secret =
-            "unit-test-worker-execution-secret-at-least-32-bytes".into();
+        config.auth.worker_execution_private_key_pem =
+            hivemind_config::sample_worker_execution_private_key_pem();
 
         // When/Then: nodepool startup accepts the complete trust contract.
         validate_service_config(&config, ServiceRole::Nodepool).unwrap();
     }
 
     #[test]
-    fn remote_master_or_worker_requires_nodepool_endpoint_for_bind_addr() {
+    fn remote_master_or_worker_defaults_nodepool_endpoint_for_bind_addr() {
         let mut config = HivemindConfig::default();
         config.server.nodepool_grpc_addr = "0.0.0.0:50051".into();
         config.server.nodepool_grpc_endpoint = None;
 
-        let error = nodepool_client_addr(&config, false)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("NODEPOOL_GRPC_ENDPOINT"));
+        // Downloaded clients fall back to the platform VPN MagicDNS endpoint.
+        assert_eq!(
+            nodepool_client_addr(&config, false).unwrap(),
+            client_runtime::DEFAULT_NODEPOOL_GRPC_ENDPOINT
+        );
 
         config.server.nodepool_grpc_endpoint = Some("nodepool.internal:50051".into());
         assert_eq!(
@@ -543,6 +630,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "worker")]
     #[tokio::test]
     async fn worker_uses_configured_nodepool_token_without_login() {
         let mut config = HivemindConfig::default();

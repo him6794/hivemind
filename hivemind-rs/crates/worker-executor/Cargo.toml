@@ -17,12 +17,15 @@ jsonwebtoken.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
+reqwest.workspace = true
 sysinfo.workspace = true
 sha1.workspace = true
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 hivemind-proto = { path = "../proto" }
 hivemind-models = { path = "../models" }
 hivemind-config = { path = "../config" }
+hivemind-client-runtime = { path = "../client-runtime" }
+hivemind-auth = { path = "../auth" }
 hivemind-torrent-service = { path = "../torrent-service" }
 managed-function-runtime = { path = "../../../executor-rs/crates/managed-function-runtime" }
 tempfile.workspace = true

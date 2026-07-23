@@ -62,8 +62,13 @@ pub struct ServerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
     pub jwt_secret: String,
-    #[serde(default = "default_worker_execution_secret")]
-    pub worker_execution_secret: String,
+    /// Platform Ed25519 private key PEM used by nodepool to sign worker-execution tokens.
+    #[serde(default)]
+    pub worker_execution_private_key_pem: String,
+    /// Platform Ed25519 public key PEM used by workers to verify execution tokens.
+    /// Official workers embed a default; self-hosted platforms can override this.
+    #[serde(default = "default_worker_execution_public_key_pem")]
+    pub worker_execution_public_key_pem: String,
     pub token_expiry_hours: i64,
     pub refresh_expiry_hours: i64,
     pub bcrypt_cost: u32,
@@ -78,17 +83,32 @@ impl AuthConfig {
         )
     }
 
-    pub fn validate_worker_execution_secret(&self) -> anyhow::Result<()> {
-        validate_secret(
-            &self.worker_execution_secret,
-            "WORKER_EXECUTION_SECRET",
-            &[
-                "CHANGE_ME_WORKER_EXECUTION_SECRET",
-                "change-me-worker-execution-secret",
-                "CHANGE_ME_IN_PRODUCTION",
-                "change-me-in-production",
-            ],
-        )
+    pub fn validate_worker_execution_private_key(&self) -> anyhow::Result<()> {
+        let pem = self.worker_execution_private_key_pem.trim();
+        if pem.is_empty() {
+            anyhow::bail!("WORKER_EXECUTION_PRIVATE_KEY_PEM must be set to a non-default value");
+        }
+        let pem = pem.replace("\\n", "\n");
+        jsonwebtoken::EncodingKey::from_ed_pem(pem.as_bytes()).map_err(|error| {
+            anyhow::anyhow!(
+                "WORKER_EXECUTION_PRIVATE_KEY_PEM is not a valid Ed25519 private key PEM: {error}"
+            )
+        })?;
+        Ok(())
+    }
+
+    pub fn validate_worker_execution_public_key(&self) -> anyhow::Result<()> {
+        let pem = self.worker_execution_public_key_pem.trim();
+        if pem.is_empty() {
+            anyhow::bail!("WORKER_EXECUTION_PUBLIC_KEY_PEM must be set to a non-default value");
+        }
+        let pem = pem.replace("\\n", "\n");
+        jsonwebtoken::DecodingKey::from_ed_pem(pem.as_bytes()).map_err(|error| {
+            anyhow::anyhow!(
+                "WORKER_EXECUTION_PUBLIC_KEY_PEM is not a valid Ed25519 public key PEM: {error}"
+            )
+        })?;
+        Ok(())
     }
 }
 
@@ -135,6 +155,14 @@ pub struct VpnConfig {
     pub headscale_api_key: String,
     pub base_virtual_ip: String,
     pub vpn_network: String,
+    /// Platform WireGuard public key (hex-encoded, 32 bytes) for embedded client connections.
+    /// This is the nodepool's WireGuard public key that clients will connect to.
+    #[serde(default)]
+    pub wireguard_platform_public_key: String,
+    /// Platform WireGuard endpoint (host:port) for embedded client connections.
+    /// This is the nodepool's WireGuard listen address.
+    #[serde(default)]
+    pub wireguard_platform_endpoint: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,7 +218,8 @@ impl Default for HivemindConfig {
             },
             auth: AuthConfig {
                 jwt_secret: "CHANGE_ME_IN_PRODUCTION".into(),
-                worker_execution_secret: default_worker_execution_secret(),
+                worker_execution_private_key_pem: String::new(),
+                worker_execution_public_key_pem: default_worker_execution_public_key_pem(),
                 token_expiry_hours: 24,
                 refresh_expiry_hours: 168,
                 bcrypt_cost: 12,
@@ -206,10 +235,12 @@ impl Default for HivemindConfig {
                 task_artifact_base_url: None,
             },
             vpn: VpnConfig {
-                headscale_url: "http://localhost:8080".into(),
-                headscale_login_server: "".into(),
+                headscale_url: "https://Headscale.justin0711.com".into(),
+                headscale_login_server: "https://Headscale.justin0711.com".into(),
                 headscale_api_key: "".into(),
                 base_virtual_ip: "100.64.0.0".into(),
+                wireguard_platform_public_key: String::new(),
+                wireguard_platform_endpoint: String::new(),
                 vpn_network: "100.64.0.0/10".into(),
             },
             executor: ExecutorConfig {
@@ -232,6 +263,7 @@ impl HivemindConfig {
     pub fn for_test() -> Self {
         let mut config = Self::default();
         config.torrent.allow_local_task_artifacts = true;
+        config.auth.worker_execution_private_key_pem = sample_worker_execution_private_key_pem();
         config.database.url = std::env::var("HIVEMIND_TEST_DATABASE_URL")
             .unwrap_or_else(|_| "postgres://hivemind:hivemind@localhost:5432/hivemind_test".into());
         config
@@ -252,6 +284,7 @@ impl HivemindConfig {
             }
         };
         config.apply_env_overrides()?;
+        config.resolve_packaged_ui_dirs();
         Ok(config)
     }
 
@@ -330,8 +363,11 @@ impl HivemindConfig {
         if let Ok(secret) = std::env::var("JWT_SECRET") {
             self.auth.jwt_secret = secret;
         }
-        if let Ok(secret) = std::env::var("WORKER_EXECUTION_SECRET") {
-            self.auth.worker_execution_secret = secret;
+        if let Ok(private_key) = std::env::var("WORKER_EXECUTION_PRIVATE_KEY_PEM") {
+            self.auth.worker_execution_private_key_pem = private_key;
+        }
+        if let Ok(public_key) = std::env::var("WORKER_EXECUTION_PUBLIC_KEY_PEM") {
+            self.auth.worker_execution_public_key_pem = public_key;
         }
         if let Ok(exec) = std::env::var("MONTY_EXECUTABLE") {
             self.executor.monty_executable = exec;
@@ -418,6 +454,49 @@ impl HivemindConfig {
         }
         Ok(())
     }
+
+    /// Prefer UI assets shipped next to the binary for downloaded clients.
+    ///
+    /// Packaged master/worker layouts use `./ui` beside the executable. Keep the
+    /// repo-relative defaults when those directories are absent so local dev and
+    /// compose still work unchanged.
+    fn resolve_packaged_ui_dirs(&mut self) {
+        let Some(exe_dir) = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
+        else {
+            return;
+        };
+
+        // A downloaded client must use the UI shipped beside its executable.
+        // This prevents a stale MASTER_UI_DIR/HIVEMIND_CONFIG from making the
+        // client serve an older UI from a previous installation.
+        if let Some(dir) = first_existing_dir(&[
+            exe_dir.join("ui"),
+            exe_dir.join("master-ui"),
+            exe_dir.join("frontend").join("master-ui").join("dist"),
+        ]) {
+            self.server.master_ui_dir = dir;
+        }
+
+        if let Some(dir) = first_existing_dir(&[
+            exe_dir.join("ui"),
+            exe_dir.join("worker-ui"),
+            exe_dir.join("frontend").join("worker-ui").join("dist"),
+        ]) {
+            self.server.worker_ui_dir = dir;
+        }
+    }
+}
+
+fn first_existing_dir(candidates: &[std::path::PathBuf]) -> Option<String> {
+    candidates.iter().find_map(|path| {
+        if path.is_dir() {
+            Some(path.to_string_lossy().into_owned())
+        } else {
+            None
+        }
+    })
 }
 
 #[cfg(test)]
@@ -473,8 +552,17 @@ fn default_worker_control_http_addr() -> String {
     "127.0.0.1:18080".into()
 }
 
-fn default_worker_execution_secret() -> String {
-    "CHANGE_ME_WORKER_EXECUTION_SECRET".into()
+fn default_worker_execution_public_key_pem() -> String {
+    // Official/sample platform public key. Workers can start without operator input.
+    "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAfG12U4EBcWCj7yKaZUhlUmPvRtLEAZshKvN2WyL7EPs=\n-----END PUBLIC KEY-----\n"
+        .into()
+}
+
+/// Sample/dev private key matching the default public key. Used only by tests and
+/// local compose samples; production nodepools must supply their own private key.
+pub fn sample_worker_execution_private_key_pem() -> String {
+    "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEICKHh+VEGAfiiOPJJzI7afT5yro9vY5hldaNtGSXSDhY\n-----END PRIVATE KEY-----\n"
+        .into()
 }
 
 fn default_master_cors_allowed_origins() -> Vec<String> {
@@ -591,29 +679,34 @@ mod tests {
             config.server.nodepool_grpc_endpoint.as_deref(),
             Some("nodepool.example:50051")
         );
-        assert_eq!(
-            config.auth.worker_execution_secret,
-            "CHANGE_ME_WORKER_EXECUTION_SECRET"
-        );
+        assert!(config.auth.worker_execution_private_key_pem.is_empty());
+        assert!(config
+            .auth
+            .worker_execution_public_key_pem
+            .contains("BEGIN PUBLIC KEY"));
     }
 
     #[test]
-    fn auth_config_deserializes_worker_execution_secret() {
-        // Given: a JSON auth boundary with distinct control-plane and worker secrets.
+    fn auth_config_deserializes_worker_execution_keys() {
+        // Given: a JSON auth boundary with distinct control-plane and worker-execution keys.
         let auth: AuthConfig = serde_json::from_value(serde_json::json!({
             "jwt_secret": "control-plane-secret-at-least-32-bytes",
-            "worker_execution_secret": "worker-execution-secret-at-least-32-bytes",
+            "worker_execution_private_key_pem": sample_worker_execution_private_key_pem(),
+            "worker_execution_public_key_pem": default_worker_execution_public_key_pem(),
             "token_expiry_hours": 24,
             "refresh_expiry_hours": 168,
             "bcrypt_cost": 12
         }))
         .unwrap();
 
-        // When/Then: deserialization preserves the worker trust secret separately.
-        assert_eq!(
-            auth.worker_execution_secret,
-            "worker-execution-secret-at-least-32-bytes"
-        );
+        // When/Then: deserialization preserves worker-execution trust material separately.
+        assert!(auth
+            .worker_execution_private_key_pem
+            .contains("BEGIN PRIVATE KEY"));
+        assert!(auth
+            .worker_execution_public_key_pem
+            .contains("BEGIN PUBLIC KEY"));
+        assert_eq!(auth.jwt_secret, "control-plane-secret-at-least-32-bytes");
     }
 
     #[test]
@@ -718,33 +811,46 @@ mod tests {
     }
 
     #[test]
-    fn env_loading_reads_worker_execution_secret_without_json_config() {
-        // Given: no JSON config and an explicit worker-execution environment secret.
+    fn env_loading_reads_worker_execution_keys_without_json_config() {
+        // Given: no JSON config and explicit worker-execution key material.
         let old_config = std::env::var_os("HIVEMIND_CONFIG");
-        let old_secret = std::env::var_os("WORKER_EXECUTION_SECRET");
+        let old_private = std::env::var_os("WORKER_EXECUTION_PRIVATE_KEY_PEM");
+        let old_public = std::env::var_os("WORKER_EXECUTION_PUBLIC_KEY_PEM");
         std::env::remove_var("HIVEMIND_CONFIG");
         std::env::set_var(
-            "WORKER_EXECUTION_SECRET",
-            "worker-execution-env-secret-at-least-32-bytes",
+            "WORKER_EXECUTION_PRIVATE_KEY_PEM",
+            sample_worker_execution_private_key_pem(),
+        );
+        std::env::set_var(
+            "WORKER_EXECUTION_PUBLIC_KEY_PEM",
+            default_worker_execution_public_key_pem(),
         );
 
         // When: configuration is loaded from the environment.
         let loaded = HivemindConfig::load_from_env();
 
-        match old_secret {
-            Some(value) => std::env::set_var("WORKER_EXECUTION_SECRET", value),
-            None => std::env::remove_var("WORKER_EXECUTION_SECRET"),
+        match old_private {
+            Some(value) => std::env::set_var("WORKER_EXECUTION_PRIVATE_KEY_PEM", value),
+            None => std::env::remove_var("WORKER_EXECUTION_PRIVATE_KEY_PEM"),
+        }
+        match old_public {
+            Some(value) => std::env::set_var("WORKER_EXECUTION_PUBLIC_KEY_PEM", value),
+            None => std::env::remove_var("WORKER_EXECUTION_PUBLIC_KEY_PEM"),
         }
         match old_config {
             Some(value) => std::env::set_var("HIVEMIND_CONFIG", value),
             None => std::env::remove_var("HIVEMIND_CONFIG"),
         }
 
-        // Then: the worker secret is independent of JWT_SECRET.
-        assert_eq!(
-            loaded.auth.worker_execution_secret,
-            "worker-execution-env-secret-at-least-32-bytes"
-        );
+        // Then: worker execution trust material is independent of JWT_SECRET.
+        assert!(loaded
+            .auth
+            .worker_execution_private_key_pem
+            .contains("BEGIN PRIVATE KEY"));
+        assert!(loaded
+            .auth
+            .worker_execution_public_key_pem
+            .contains("BEGIN PUBLIC KEY"));
     }
 
     #[test]
@@ -754,8 +860,12 @@ mod tests {
             ("HIVEMIND_CONFIG", std::env::var_os("HIVEMIND_CONFIG")),
             ("JWT_SECRET", std::env::var_os("JWT_SECRET")),
             (
-                "WORKER_EXECUTION_SECRET",
-                std::env::var_os("WORKER_EXECUTION_SECRET"),
+                "WORKER_EXECUTION_PRIVATE_KEY_PEM",
+                std::env::var_os("WORKER_EXECUTION_PRIVATE_KEY_PEM"),
+            ),
+            (
+                "WORKER_EXECUTION_PUBLIC_KEY_PEM",
+                std::env::var_os("WORKER_EXECUTION_PUBLIC_KEY_PEM"),
             ),
             (
                 "NODEPOOL_GRPC_ENDPOINT",
@@ -779,7 +889,8 @@ mod tests {
         ));
         let mut file_config = HivemindConfig::default();
         file_config.auth.jwt_secret = "file-jwt-secret-at-least-32-bytes".into();
-        file_config.auth.worker_execution_secret = "file-worker-secret-at-least-32-bytes".into();
+        file_config.auth.worker_execution_private_key_pem = "file-private-key-placeholder".into();
+        file_config.auth.worker_execution_public_key_pem = "file-public-key-placeholder".into();
         file_config.server.nodepool_grpc_endpoint = Some("file-nodepool:50051".into());
         file_config.server.master_http_addr = "file-master:8082".into();
         file_config.server.master_ui_dir = "./file/master-ui".into();
@@ -791,8 +902,12 @@ mod tests {
         std::env::set_var("HIVEMIND_CONFIG", path.as_os_str());
         std::env::set_var("JWT_SECRET", "env-jwt-secret-at-least-32-bytes");
         std::env::set_var(
-            "WORKER_EXECUTION_SECRET",
-            "env-worker-secret-at-least-32-bytes",
+            "WORKER_EXECUTION_PRIVATE_KEY_PEM",
+            sample_worker_execution_private_key_pem(),
+        );
+        std::env::set_var(
+            "WORKER_EXECUTION_PUBLIC_KEY_PEM",
+            default_worker_execution_public_key_pem(),
         );
         std::env::set_var("NODEPOOL_GRPC_ENDPOINT", "env-nodepool:50051");
         std::env::set_var("MASTER_HTTP_ADDR", "env-master:8082");
@@ -802,7 +917,11 @@ mod tests {
         std::env::remove_var("EXECUTOR_SANDBOX_MODE");
 
         // When: the runtime loads the configuration through its public entry point.
+        // Change to temp directory to avoid loading workspace .env file
+        let orig_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&path.parent().unwrap()).unwrap();
         let loaded = HivemindConfig::load();
+        std::env::set_current_dir(orig_dir).unwrap();
 
         for (name, value) in old_env {
             match value {
@@ -815,10 +934,14 @@ mod tests {
         // Then: environment values override secrets/endpoints/UI paths while file defaults survive.
         let loaded = loaded.unwrap();
         assert_eq!(loaded.auth.jwt_secret, "env-jwt-secret-at-least-32-bytes");
-        assert_eq!(
-            loaded.auth.worker_execution_secret,
-            "env-worker-secret-at-least-32-bytes"
-        );
+        assert!(loaded
+            .auth
+            .worker_execution_private_key_pem
+            .contains("BEGIN PRIVATE KEY"));
+        assert!(loaded
+            .auth
+            .worker_execution_public_key_pem
+            .contains("BEGIN PUBLIC KEY"));
         assert_eq!(
             loaded.server.nodepool_grpc_endpoint.as_deref(),
             Some("env-nodepool:50051")
@@ -853,7 +976,8 @@ mod tests {
         ] {
             let mut auth = AuthConfig {
                 jwt_secret: secret.into(),
-                worker_execution_secret: default_worker_execution_secret(),
+                worker_execution_private_key_pem: String::new(),
+                worker_execution_public_key_pem: default_worker_execution_public_key_pem(),
                 token_expiry_hours: 24,
                 refresh_expiry_hours: 168,
                 bcrypt_cost: 12,
@@ -875,7 +999,8 @@ mod tests {
     fn jwt_secret_validation_accepts_non_default_secret() {
         let auth = AuthConfig {
             jwt_secret: "unit-test-secret-with-at-least-32-bytes".into(),
-            worker_execution_secret: default_worker_execution_secret(),
+            worker_execution_private_key_pem: String::new(),
+            worker_execution_public_key_pem: default_worker_execution_public_key_pem(),
             token_expiry_hours: 24,
             refresh_expiry_hours: 168,
             bcrypt_cost: 12,
@@ -885,40 +1010,42 @@ mod tests {
     }
 
     #[test]
-    fn worker_execution_secret_validation_rejects_defaults_and_short_values() {
-        // Given: each invalid worker trust-secret class.
-        for secret in [
-            "",
-            "   ",
-            "CHANGE_ME_WORKER_EXECUTION_SECRET",
-            "change-me-worker-execution-secret",
-            "CHANGE_ME_IN_PRODUCTION",
-            "short",
-        ] {
+    fn worker_execution_private_key_validation_rejects_empty_or_invalid_pem() {
+        // Given: missing and invalid private key material.
+        for secret in ["", "   ", "not-a-pem", "CHANGE_ME_WORKER_EXECUTION_SECRET"] {
             let mut auth = HivemindConfig::default().auth;
-            auth.worker_execution_secret = secret.into();
+            auth.worker_execution_private_key_pem = secret.into();
 
-            // When: the worker-execution boundary validates the secret.
+            // When: nodepool validates the signing key.
             let error = auth
-                .validate_worker_execution_secret()
+                .validate_worker_execution_private_key()
                 .unwrap_err()
                 .to_string();
 
-            // Then: startup receives a precise WORKER_EXECUTION_SECRET failure.
+            // Then: startup receives a precise private-key failure.
             assert!(
-                error.contains("WORKER_EXECUTION_SECRET"),
+                error.contains("WORKER_EXECUTION_PRIVATE_KEY_PEM"),
                 "unexpected validation error for {secret:?}: {error}"
             );
         }
     }
 
     #[test]
-    fn worker_execution_secret_validation_accepts_32_bytes() {
-        // Given: a non-default worker trust secret at the minimum byte length.
+    fn worker_execution_private_key_validation_accepts_sample_ed25519_pem() {
+        // Given: the sample platform private key used by local compose/tests.
         let mut auth = HivemindConfig::default().auth;
-        auth.worker_execution_secret = "12345678901234567890123456789012".into();
+        auth.worker_execution_private_key_pem = sample_worker_execution_private_key_pem();
 
-        // When/Then: the boundary accepts exactly 32 bytes.
-        auth.validate_worker_execution_secret().unwrap();
+        // When/Then: nodepool accepts a valid Ed25519 private key PEM.
+        auth.validate_worker_execution_private_key().unwrap();
+    }
+
+    #[test]
+    fn worker_execution_public_key_validation_accepts_default_platform_key() {
+        // Given: the embedded official/sample public key.
+        let auth = HivemindConfig::default().auth;
+
+        // When/Then: workers can verify with the default public key.
+        auth.validate_worker_execution_public_key().unwrap();
     }
 }

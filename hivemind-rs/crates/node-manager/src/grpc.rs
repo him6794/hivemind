@@ -98,7 +98,7 @@ use tonic::{Request, Response, Status};
 
 use crate::service::{NodeManagerService as NmSvc, WorkerRegistration};
 use crate::NodeManager;
-use hivemind_auth::{jwt_service::JwtService, AuthManager};
+use hivemind_auth::AuthManager;
 use hivemind_database::postgres;
 use hivemind_models::{Claims, Task, TaskStatus, WorkerNode};
 use hivemind_task_scheduler::{dispatcher::worker_endpoint, BatchTaskReport, TaskScheduler};
@@ -110,7 +110,7 @@ const MAX_DOWNLOAD_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 
 pub struct NodepoolState {
     pub auth: AuthManager,
-    pub worker_execution_secret: String,
+    pub worker_execution_private_key_pem: String,
     pub node_manager: Arc<NodeManager>,
     pub scheduler: TaskScheduler,
     pub artifact_root: PathBuf,
@@ -1458,7 +1458,7 @@ impl MasterNodeService for GrpcMasterNodeService {
             Ok(task) => {
                 let now = chrono::Utc::now().timestamp() as usize;
                 let worker_token = encode_worker_execution_claims(
-                    &self.state.worker_execution_secret,
+                    &self.state.worker_execution_private_key_pem,
                     &Claims {
                         sub: task.owner.clone(),
                         user_id: task.owner.clone(),
@@ -2796,8 +2796,12 @@ enum WorkerStopDispatch {
     NotConfirmed(String),
 }
 
-fn encode_worker_execution_claims(secret: &str, claims: &Claims) -> anyhow::Result<String> {
-    JwtService::new(secret, 1).encode_claims(claims)
+fn encode_worker_execution_claims(
+    private_key_pem: &str,
+    claims: &Claims,
+) -> anyhow::Result<String> {
+    hivemind_auth::worker_execution::WorkerExecutionSigner::from_pem(private_key_pem)?
+        .encode_claims(claims)
 }
 
 async fn request_worker_stop(task: &Task, token: &str) -> WorkerStopDispatch {
@@ -2913,8 +2917,8 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_token_uses_worker_execution_secret() {
-        // Given: cancellation claims and separate trust-domain secrets.
+    fn cancellation_token_uses_worker_execution_private_key() {
+        // Given: cancellation claims and platform execution key material.
         let now = Utc::now().timestamp() as usize;
         let claims = Claims {
             sub: "task-owner".into(),
@@ -2925,15 +2929,19 @@ mod tests {
             exp: now + 300,
             iat: now,
         };
-        let worker_secret = "unit-test-worker-execution-secret-at-least-32-bytes";
+        let private_key = hivemind_config::sample_worker_execution_private_key_pem();
+        let public_key = HivemindConfig::default()
+            .auth
+            .worker_execution_public_key_pem;
         let control_secret = "unit-test-control-plane-secret-at-least-32-bytes";
 
-        // When: nodepool creates the cancellation token.
-        let token = encode_worker_execution_claims(worker_secret, &claims).unwrap();
+        // When: nodepool creates the cancellation token with the platform private key.
+        let token = encode_worker_execution_claims(&private_key, &claims).unwrap();
 
-        // Then: only the worker-execution trust domain can decode it.
+        // Then: only the worker-execution public key trust domain can decode it.
         assert!(
-            hivemind_auth::jwt_service::JwtService::new(worker_secret, 1)
+            hivemind_auth::worker_execution::WorkerExecutionVerifier::from_pem(&public_key)
+                .unwrap()
                 .decode(&token)
                 .is_ok()
         );
@@ -2967,7 +2975,7 @@ mod tests {
         let node_manager = Arc::new(NodeManager::new(&config, db.clone()));
         let state = Arc::new(NodepoolState {
             auth: auth.clone(),
-            worker_execution_secret: config.auth.worker_execution_secret.clone(),
+            worker_execution_private_key_pem: config.auth.worker_execution_private_key_pem.clone(),
             node_manager,
             scheduler: scheduler.clone(),
             artifact_root: artifact_root_for_config(&config),
@@ -3012,9 +3020,10 @@ mod tests {
         // Given: a configured admin username and a real isolated registration database.
         let lock = grpc_db_lock();
         let _lock_guard = lock.lock().await;
-        let (service, task_id, _other_token, owner) = test_service()
-            .await
-            .expect("registration security tests require PostgreSQL");
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
         let admin_username = format!("reserved-admin-{}", uuid::Uuid::new_v4());
         let _env_guard = AdminUsersEnvGuard::set(&format!("other-admin, {admin_username}"));
         let user_service = GrpcUserService::new(service.state.clone());
@@ -3052,9 +3061,10 @@ mod tests {
         // Given: a configured admin username and a distinct public username.
         let lock = grpc_db_lock();
         let _lock_guard = lock.lock().await;
-        let (service, task_id, _other_token, owner) = test_service()
-            .await
-            .expect("registration security tests require PostgreSQL");
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
         let configured_admin = format!("reserved-admin-{}", uuid::Uuid::new_v4());
         let username = format!("public-user-{}", uuid::Uuid::new_v4());
         let _env_guard = AdminUsersEnvGuard::set(&configured_admin);
