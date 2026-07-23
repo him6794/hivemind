@@ -15,6 +15,10 @@ thiserror.workspace = true
 anyhow.workspace = true
 sqlx.workspace = true
 reqwest.workspace = true
+x25519-dalek.workspace = true
+rand.workspace = true
+hex.workspace = true
+boringtun.workspace = true
 hivemind-proto = { path = "../proto" }
 hivemind-models = { path = "../models" }
 hivemind-database = { path = "../database" }

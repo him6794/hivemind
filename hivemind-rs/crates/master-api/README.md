@@ -1,157 +1,79 @@
-# Master API 模組
+# Master API
 
-**Master API** 是 HiveMind 的核心對外接口服務，提供 RESTful API 和 WebSocket 通信功能。
+User-deployed requestor client HTTP surface for HiveMind.
 
-## 主要功能
+Master is **not** the official public account service. It:
 
-- 提供 RESTful API 接口
-- 處理用戶認證和授權
-- 管理任務提交和查詢
-- 協調 Node Manager 和 Task Scheduler
-- 提供 WebSocket 實時通信
+- serves the local master UI and requestor HTTP API
+- logs the operator into nodepool and forwards the resulting user JWT
+- does **not** require or hold the platform `JWT_SECRET`
+- optionally auto-joins the platform VPN via website-api on login
 
-## API 端點
-
-### 任務相關
-
-- `POST /api/tasks` - 提交新任務
-- `GET /api/tasks/{id}` - 查詢任務狀態
-- `GET /api/tasks` - 列表所有任務
-
-### 節點管理
-
-- `GET /api/nodes` - 列表所有工作節點
-- `GET /api/nodes/{id}` - 查詢節點狀態
-
-### 認證
-
-- `POST /api/auth/login` - 登錄
-- `POST /api/auth/refresh` - 刷新令牌
-- `GET /api/auth/me` - 獲取當前用戶信息
-
-## 配置
-
-主配置文件路徑: `config/master-api.toml`
-
-```toml
-[server]
-host = "0.0.0.0"
-port = 8080
-
-[database]
-url = "postgres://hivemind:password@localhost/hivemind"
-
-[auth]
-jwt_secret = "your-secret-key"
-jwt_expires_in = "86400"
-```
-
-## 運行
-
-```bash
-# 以開發模式運行
-cargo run --bin hivemind master-api
-
-# 構建發布版本
-cargo build --release --bin hivemind
-```
-
-## 開發
-
-### 代碼結構
+## Runtime model
 
 ```text
-master-api/
-├── src/
-│   ├── controllers/    # 控制器邏輯
-│   ├── models/         # 數據模型
-│   ├── services/       # 業務邏輯
-│   ├── middlewares/    # 中間件
-│   ├── routes.rs       # 路由定義
-│   └── lib.rs          # 庫入口
-├── Cargo.toml          # 包清單
-└── README.md           # 本文檔
+master-ui ── HTTP /api/* ──▶ master (:8082)
+                              ├─ optional website-api VPN bootstrap
+                              └─ authenticated gRPC ──▶ nodepool
 ```
 
-### 添加新 API
+- Nodepool remains the authority for token validation and authorization.
+- Master only extracts structural JWT claims locally (subject / expiry) so it can
+  rate-limit and route; signature verification stays with nodepool.
+- Account registration belongs on the official website / website-api.
+  `POST /api/register` on master is disabled (`410 Gone`).
 
-1. 創建新控制器文件 `src/controllers/<module>.rs`
-2. 定義路由 `src/routes.rs`
-3. 編寫業務邏輯 `src/services/<module>.rs`
+## Important endpoints
 
----
+Public:
 
-# Master API Module
+- `GET /health`
+- `POST /api/login` — login through nodepool; may auto-issue VPN config first
+- `POST /api/register` — disabled; register on the official website
 
-**Master API** is the core external interface service of HiveMind, providing RESTful API and WebSocket communication.
+Authenticated (Bearer user JWT from login):
 
-## Key Features
-
-- RESTful API interface
-- User authentication and authorization
-- Task submission and query management
-- Coordination between Node Manager and Task Scheduler
-- WebSocket real-time communication
-
-## API Endpoints
-
-### Task Related
-
-- `POST /api/tasks` - Submit new task
-- `GET /api/tasks/{id}` - Query task status
-- `GET /api/tasks` - List all tasks
-
-### Node Management
-
-- `GET /api/nodes` - List all worker nodes
-- `GET /api/nodes/{id}` - Query node status
-
-### Authentication
-
-- `POST /api/auth/login` - Login
-- `POST /api/auth/refresh` - Refresh token
-- `GET /api/auth/me` - Get current user info
+- `GET /api/tasks`, `POST /api/tasks`, `POST /api/tasks/upload`, `POST /api/tasks/quote`
+- `GET /api/tasks/:task_id/log|result`, `POST /api/tasks/:task_id/stop`
+- `GET /api/tasks/:task_id/artifact/download`
+- `GET /api/balance`, `GET /api/workers`
+- provider / admin routes are still proxied; nodepool enforces ownership/admin scope
 
 ## Configuration
 
-Main config file path: `config/master-api.toml`
+| Variable | Purpose |
+|---|---|
+| `MASTER_HTTP_ADDR` | Local HTTP bind (default `0.0.0.0:8082`) |
+| `NODEPOOL_GRPC_ENDPOINT` | Reachable nodepool gRPC host:port (usually over VPN) |
+| `MASTER_UI_DIR` | Bundled master-ui asset directory |
+| `MASTER_WEBSITE_API_BASE` | Official website-api base for automatic VPN issue on login |
+| `MASTER_VPN_AUTHKEY` | Optional operator override; skips website-api issue when set |
+| `MASTER_VPN_LOGIN_SERVER` / `HEADSCALE_LOGIN_SERVER` | Headscale login server for VPN join |
+| `MASTER_VPN_HOSTNAME` | Optional Tailscale hostname |
+| `MASTER_VPN_STATE_DIR` | Optional userspace Tailscale state dir |
+| `MASTER_VPN_TAILSCALE_BIN` | Optional path to `tailscale` binary |
+| `MASTER_CORS_ALLOWED_ORIGINS` | Explicit CORS allow-list (no wildcard) |
 
-```toml
-[server]
-host = "0.0.0.0"
-port = 8080
+Master does **not** need `JWT_SECRET`.
 
-[database]
-url = "postgres://hivemind:password@localhost/hivemind"
+## VPN bootstrap
 
-[auth]
-jwt_secret = "your-secret-key"
-jwt_expires_in = "86400"
-```
+For a downloaded remote master:
 
-## Running
+1. Set `MASTER_WEBSITE_API_BASE` to the public website-api.
+2. Set `NODEPOOL_GRPC_ENDPOINT` to the nodepool address reachable over the VPN.
+3. Start master; UI comes up immediately (nodepool connect is lazy).
+4. Operator logs in with website credentials.
+5. Master calls website-api `/api/vpn/config`, joins Headscale automatically, then
+   logs into nodepool and returns the user JWT to the UI.
+
+Local compose can omit `MASTER_WEBSITE_API_BASE` when master and nodepool already
+share a network.
+
+## Build / test
 
 ```bash
-# Run in development mode
-cargo run --bin hivemind master-api
-
-# Build release version
-cargo build --release --bin hivemind
-```
-
-## Development
-
-### Code Structure
-
-```text
-master-api/
-├── src/
-│   ├── controllers/    # Controller logic
-│   ├── models/         # Data models
-│   ├── services/       # Business logic
-│   ├── middlewares/    # Middlewares
-│   ├── routes.rs       # Route definitions
-│   └── lib.rs          # Library entry
-├── Cargo.toml          # Package manifest
-└── README.md           # This document
+cargo check -p hivemind-bin --no-default-features --features master --bin hivemind-master
+cargo test -p hivemind-master-api --lib
+cargo test -p hivemind-bin --no-default-features --features master --lib
 ```

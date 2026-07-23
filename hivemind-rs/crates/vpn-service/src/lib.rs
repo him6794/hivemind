@@ -6,6 +6,9 @@ pub mod headscale_client;
 pub mod peer_manager;
 pub mod wireguard_config;
 
+use crate::wireguard_config::{
+    generate_keypair, generate_wireguard_config, get_platform_endpoint, get_platform_public_key,
+};
 use anyhow::Result;
 use hivemind_auth::jwt_service::JwtService;
 use hivemind_config::HivemindConfig;
@@ -20,6 +23,54 @@ pub struct UserVpnConfig {
     pub client_id: String,
     pub config_text: String,
     pub expires_at: String,
+    pub wireguard_private_key: String,
+    pub wireguard_peer_public_key: String,
+    pub wireguard_endpoint: String,
+    pub wireguard_allowed_ips: String,
+}
+
+fn shared_headscale_client_user() -> String {
+    std::env::var("HEADSCALE_CLIENT_USER")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            std::env::var("NODEPOOL_VPN_HEADSCALE_USER")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        })
+        // Default to the same Headscale user the platform nodepool sidecar joins.
+        .unwrap_or_else(|| "nodepool".to_string())
+}
+
+fn advertised_nodepool_grpc_endpoint() -> String {
+    if let Some(endpoint) = std::env::var("NODEPOOL_OVERLAY_GRPC_ENDPOINT")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    {
+        return endpoint;
+    }
+
+    if let Some(endpoint) = std::env::var("NODEPOOL_GRPC_ENDPOINT")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .filter(|v| !v.starts_with("0.0.0.0:") && !v.starts_with("[::]:"))
+        .filter(|v| {
+            // website-api compose uses docker DNS names that downloaded clients
+            // cannot resolve. Only accept overlay IPs / explicit hostnames.
+            let host = v.split(':').next().unwrap_or(v);
+            host.parse::<std::net::Ipv4Addr>().is_ok()
+                || host.parse::<std::net::Ipv6Addr>().is_ok()
+                || host.contains('.')
+        })
+    {
+        return endpoint;
+    }
+
+    "100.64.0.1:50051".to_string()
 }
 
 fn sanitize_client_label(raw: &str) -> Result<String> {
@@ -243,11 +294,15 @@ impl VpnService {
             anyhow::bail!("user not found");
         }
 
-        // Ensure Headscale has a user namespace for this account.
-        let _ = self.client.ensure_user(username).await;
+        // Clients must join the shared platform Headscale namespace so they can
+        // reach the nodepool sidecar. Per-account Headscale users isolate the
+        // mesh and make nodepool access fail even after a successful tailscale up.
+        // Application identity remains the Hivemind JWT/user DB.
+        let headscale_user = shared_headscale_client_user();
+        let _ = self.client.ensure_user(&headscale_user).await;
         let auth_key = self
             .client
-            .create_preauth_key_for_user(username, false, false)
+            .create_preauth_key_for_user(&headscale_user, false, false)
             .await?;
         let virtual_ip = peer_manager::allocate_ip(&self.db, &self.config).await?;
         let expires_at = chrono::Utc::now() + chrono::Duration::hours(24);
@@ -261,15 +316,44 @@ impl VpnService {
             };
             chosen.trim_end_matches('/').to_string()
         };
+        let nodepool_grpc_endpoint = advertised_nodepool_grpc_endpoint();
+        // Generate WireGuard keypair for the client
+        let (wg_private_key, _wg_public_key) = generate_keypair();
+        let wg_endpoint = get_platform_endpoint(&self.config);
+        let wg_peer_public_key = get_platform_public_key(&self.config);
+        let wg_allowed_ips = "100.64.0.0/10";
+
+        let wireguard_config_text = if !wg_peer_public_key.is_empty() {
+            generate_wireguard_config(
+                &client_id,
+                &virtual_ip,
+                &wg_private_key,
+                &wg_peer_public_key,
+                &wg_endpoint,
+            )
+        } else {
+            String::new()
+        };
+
         let config_text = [
-            "# Hivemind VPN client config (Headscale/Tailscale)",
+            "# Hivemind VPN client config (Headscale/Tailscale + WireGuard)",
             "# Save this file and join with your Tailscale-compatible client.",
             "#",
             &format!("# login_server={login_server}"),
             &format!("# auth_key={auth_key}"),
             &format!("# suggested_hostname={client_id}"),
             &format!("# assigned_virtual_ip={virtual_ip}"),
+            &format!("# nodepool_grpc_endpoint={nodepool_grpc_endpoint}"),
+            &format!("# headscale_user={headscale_user}"),
             &format!("# expires_at={}", expires_at.to_rfc3339()),
+            "",
+            "# WireGuard config (embedded client):",
+            &format!("# wireguard_private_key={wg_private_key}"),
+            &format!("# wireguard_peer_public_key={wg_peer_public_key}"),
+            &format!("# wireguard_endpoint={wg_endpoint}"),
+            &format!("# wireguard_allowed_ips={wg_allowed_ips}"),
+            "",
+            &wireguard_config_text,
             "#",
             "# Example (Tailscale CLI):",
             &format!(
@@ -313,6 +397,10 @@ impl VpnService {
             client_id,
             config_text,
             expires_at: expires_at.to_rfc3339(),
+            wireguard_private_key: wg_private_key,
+            wireguard_peer_public_key: wg_peer_public_key,
+            wireguard_endpoint: wg_endpoint,
+            wireguard_allowed_ips: wg_allowed_ips.to_string(),
         })
     }
 

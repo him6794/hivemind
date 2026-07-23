@@ -22,7 +22,9 @@ jsonwebtoken.workspace = true
 hivemind-proto = { path = "../proto" }
 hivemind-models = { path = "../models" }
 hivemind-config = { path = "../config" }
+hivemind-client-runtime = { path = "../client-runtime" }
 hivemind-torrent-service = { path = "../torrent-service" }
+reqwest.workspace = true
 
 [dev-dependencies]
 tower.workspace = true

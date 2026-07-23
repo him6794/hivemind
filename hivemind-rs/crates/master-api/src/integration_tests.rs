@@ -63,7 +63,7 @@ async fn nodepool_test_fixture() -> Option<NodepoolTestFixture> {
     let node_manager = Arc::new(NodeManager::new(&config, db.clone()));
     let state = Arc::new(NodepoolState {
         auth,
-        worker_execution_secret: config.auth.worker_execution_secret.clone(),
+        worker_execution_private_key_pem: config.auth.worker_execution_private_key_pem.clone(),
         node_manager,
         scheduler,
         artifact_root: artifact_root_for_config(&config),
@@ -250,8 +250,6 @@ async fn worker_path_routes_reject_unsafe_worker_ids_before_grpc() {
 
     let config = HivemindConfig::for_test();
     let state = crate::handlers::AppState {
-        jwt_secret: config.auth.jwt_secret.clone(),
-        token_expiry_hours: config.auth.token_expiry_hours,
         grpc_client: client,
         config,
         task_submit_limiter: Arc::new(tokio::sync::Mutex::new(
@@ -342,8 +340,6 @@ async fn task_path_routes_reject_unsafe_task_ids_before_grpc() {
 
     let config = HivemindConfig::for_test();
     let state = crate::handlers::AppState {
-        jwt_secret: config.auth.jwt_secret.clone(),
-        token_expiry_hours: config.auth.token_expiry_hours,
         grpc_client: client,
         config,
         task_submit_limiter: Arc::new(tokio::sync::Mutex::new(
@@ -419,8 +415,6 @@ async fn task_submission_routes_reject_invalid_resource_values_before_grpc() {
 
     let config = HivemindConfig::for_test();
     let state = crate::handlers::AppState {
-        jwt_secret: config.auth.jwt_secret.clone(),
-        token_expiry_hours: config.auth.token_expiry_hours,
         grpc_client: client,
         config,
         task_submit_limiter: Arc::new(tokio::sync::Mutex::new(
