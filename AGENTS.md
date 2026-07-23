@@ -108,3 +108,50 @@ worker (:50053) ◀─ authenticated execution RPC ── nodepool scheduler
 - `nodepool` is the only role that owns scheduler/database/worker-registry state. Its gRPC methods still validate the token in each request; network reachability is not authorization.
 - Master task reads are user-scoped: list uses the JWT subject, while result/log/stop/artifact handlers verify the stored task owner (artifact download additionally permits configured admins). Worker/provider operations are scoped by the registered worker owner or admin.
 - Worker control HTTP defaults to loopback. Expose it remotely only with an explicit bind override and an authenticated operator/network boundary; `/api/worker-info` is intentionally a local profile bootstrap endpoint and must not be exposed publicly.
+
+## PRODUCT DEPLOYMENT MODEL
+
+The public Hivemind platform has one authoritative `nodepool` control plane and
+can have arbitrarily many independently downloaded and deployed clients:
+
+```text
+official website
+  └─ account registration/login and VPN bootstrap configuration
+
+one platform nodepool
+  ├─ many worker clients (providers)
+  └─ many master clients (requestors)
+```
+
+- The official website is the public account entrypoint. A user registers there
+  before installing a worker or master client.
+- A worker is a user-owned provider client. Its backend must automatically
+  obtain the user's VPN bootstrap configuration, join the configured Headscale
+  network, connect to the platform nodepool over the VPN, start its local
+  worker-control backend, and serve the worker UI. The UI sends the user's
+  credentials to the local worker backend; the backend authenticates through
+  nodepool, registers that worker for the user, and receives work authorized for
+  that account.
+- A master is a user-owned requestor client. Its backend must perform the same
+  automatic VPN bootstrap and nodepool connection, then serve the local master
+  UI. The UI sends credentials to the local master backend; the backend logs in
+  through nodepool, retains the resulting user JWT, and uses that JWT for task
+  submission and task-management calls on behalf of that user.
+- Master and worker deployments are not shared multi-tenant consoles. Each
+  installed master belongs to the operator using it and must expose only that
+  user's task and provider scope. Backend/nodepool authorization remains the
+  authority; UI checks are not security boundaries.
+- VPN provisioning is part of worker/master startup automation. Users must not
+  be required to manually copy pre-auth keys or hand-configure a VPN after
+  downloading a client. Headscale is the coordination service; Tailscale/
+  WireGuard is the client data-plane connection.
+- The nodepool is the shared platform control-plane endpoint for this model; it
+  is not duplicated per master/worker client. It must not be exposed directly
+  to the public WAN merely because clients are numerous. Clients reach it over
+  the VPN overlay.
+- A master that receives a user JWT from nodepool should treat that token as
+  the user's delegated credential and forward it to nodepool for validation and
+  authorization. Do not require every user-deployed master to possess a
+  shared platform JWT signing secret; if local claim verification is needed,
+  use a verification design that does not distribute the nodepool signing
+  secret.

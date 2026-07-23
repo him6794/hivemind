@@ -17,14 +17,16 @@ RUN cargo build --locked --release --bin ${HIVEMIND_BIN} --no-default-features -
 WORKDIR /app/executor-rs
 RUN cargo build --locked --release --bin monty
 
-FROM node:20-alpine AS master-ui
+# UI assets are architecture-independent. Build them on the native builder
+# platform so cross-compiling the ARM runtime does not execute Node under QEMU.
+FROM --platform=$BUILDPLATFORM node:20-alpine AS master-ui
 WORKDIR /ui
 COPY frontend/master-ui/package*.json ./
 RUN npm ci --include=dev
 COPY frontend/master-ui/ ./
 RUN npm run build
 
-FROM node:20-alpine AS worker-ui
+FROM --platform=$BUILDPLATFORM node:20-alpine AS worker-ui
 WORKDIR /ui
 COPY frontend/worker-ui/package*.json ./
 RUN npm ci --include=dev

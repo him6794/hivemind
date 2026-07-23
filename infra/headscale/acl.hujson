@@ -1,0 +1,11 @@
+{
+  // Platform mesh: every enrolled client can reach the shared control plane and peers.
+  // Hivemind authorization remains JWT/nodepool scoped; this only opens the overlay.
+  "acls": [
+    {
+      "action": "accept",
+      "src": ["*"],
+      "dst": ["*:*"]
+    }
+  ]
+}
