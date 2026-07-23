@@ -919,7 +919,7 @@ mod tests {
         // When: the runtime loads the configuration through its public entry point.
         // Change to temp directory to avoid loading workspace .env file
         let orig_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&path.parent().unwrap()).unwrap();
+        std::env::set_current_dir(path.parent().unwrap()).unwrap();
         let loaded = HivemindConfig::load();
         std::env::set_current_dir(orig_dir).unwrap();
 
