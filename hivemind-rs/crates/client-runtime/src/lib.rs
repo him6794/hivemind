@@ -19,8 +19,11 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
+#[cfg(target_os = "windows")]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+#[cfg(target_os = "windows")]
+use tokio::net::TcpListener;
+use tokio::net::TcpStream;
 use tokio::sync::Mutex as TokioMutex;
 use tokio::time::sleep;
 
@@ -197,6 +200,7 @@ fn sessions_map() -> &'static StdMutex<HashMap<ClientRole, Arc<VpnSession>>> {
 }
 
 /// Store a VPN session
+#[allow(dead_code)]
 async fn store_vpn_session(session: VpnSession) -> Arc<VpnSession> {
     let arc = Arc::new(session);
     sessions_map().lock().unwrap().insert(arc.role, arc.clone());
@@ -561,13 +565,10 @@ async fn nodepool_endpoint_candidates(
     } else {
         // Try DNS resolution as fallback
         for hostname in &hostnames {
-            match tokio::net::lookup_host(format!("{}:{}", hostname, port)).await {
-                Ok(addrs) => {
-                    for addr in addrs {
-                        push_unique(addr.to_string());
-                    }
+            if let Ok(addrs) = tokio::net::lookup_host(format!("{}:{}", hostname, port)).await {
+                for addr in addrs {
+                    push_unique(addr.to_string());
                 }
-                Err(_) => {}
             }
         }
     }
@@ -989,6 +990,25 @@ async fn bring_up_vpn(
     login_server: &str,
     hostname: &str,
 ) -> Result<Arc<VpnSession>> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (role, auth_key, login_server, hostname);
+        bail!("embedded libtailscale is currently only packaged for Windows");
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        bring_up_vpn_windows(role, auth_key, login_server, hostname).await
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn bring_up_vpn_windows(
+    role: ClientRole,
+    auth_key: &str,
+    login_server: &str,
+    hostname: &str,
+) -> Result<Arc<VpnSession>> {
     let hostname = sanitize_hostname(hostname);
     let state_dir = vpn_state_dir(role);
     std::fs::create_dir_all(&state_dir).with_context(|| {
@@ -1002,11 +1022,6 @@ async fn bring_up_vpn(
     #[cfg(target_os = "windows")]
     let (vpn_handle, loopback_addr, proxy_cred, overlay_ip) =
         start_libtailscale(&state_dir, &hostname, auth_key, login_server).await?;
-    #[cfg(not(target_os = "windows"))]
-    let (loopback_addr, proxy_cred): (String, String) =
-        { bail!("embedded libtailscale is currently only packaged for Windows") };
-    #[cfg(not(target_os = "windows"))]
-    let overlay_ip: Option<String> = None;
     #[cfg(target_os = "windows")]
     let network = CString::new("tcp")?;
     #[cfg(target_os = "windows")]
@@ -1072,9 +1087,12 @@ pub async fn userspace_tcp_bridge(role: ClientRole, target: &str) -> Result<Stri
     ) {
         return Ok(start_socks_bridge(socks, cred, target).await?.to_string());
     }
+    #[cfg(not(target_os = "windows"))]
+    let _ = session;
     Ok(target.to_string())
 }
 
+#[allow(dead_code)]
 fn resolve_tailscale_bins(role: ClientRole) -> Result<(PathBuf, PathBuf)> {
     let mut roots = Vec::new();
     if let Ok(root) = std::env::var("HIVEMIND_CLIENT_RUNTIME_DIR") {
@@ -1113,6 +1131,7 @@ fn resolve_tailscale_bins(role: ClientRole) -> Result<(PathBuf, PathBuf)> {
     bail!("bundled Tailscale runtime not found; expected {exe_name} and {daemon_name} beside the client")
 }
 
+#[allow(dead_code)]
 fn endpoint_port_for_worker(_role: ClientRole) -> u16 {
     50053
 }
@@ -1220,6 +1239,7 @@ async fn start_libtailscale(
     .context("embedded libtailscale worker stopped unexpectedly")?
 }
 
+#[allow(dead_code)]
 fn which_on_path(program: &PathBuf) -> bool {
     if program.components().count() > 1 {
         return program.is_file();
@@ -1229,6 +1249,7 @@ fn which_on_path(program: &PathBuf) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(target_os = "windows")]
 async fn start_socks_bridge(
     socks_addr: &str,
     proxy_cred: &str,
@@ -1257,6 +1278,7 @@ async fn start_socks_bridge(
     Ok(local)
 }
 
+#[cfg(target_os = "windows")]
 async fn proxy_socks5(
     mut client: TcpStream,
     socks_addr: &str,
@@ -1322,6 +1344,7 @@ async fn proxy_socks5(
 }
 
 /// Parse WireGuard auth key format: wg-<private_key_hex>:<peer_public_key_hex>:<endpoint>
+#[allow(dead_code)]
 fn parse_wireguard_auth_key(
     auth_key: &str,
 ) -> Result<(
@@ -1371,6 +1394,7 @@ async fn wireguard_is_up(session: &VpnSession) -> Result<bool> {
 }
 
 /// Ping nodepool peer over WireGuard tunnel
+#[allow(dead_code)]
 async fn ping_nodepool_over_wireguard(session: &VpnSession) -> Result<bool> {
     if session.transport != VpnTransport::Wireguard {
         return Ok(false);
@@ -1398,17 +1422,15 @@ async fn discover_nodepool_peer_ips_over_wireguard(
     for hostname in hostnames {
         // Try to resolve via the WireGuard network
         // We can attempt to connect to the endpoint and extract the peer IP
-        if let Some(endpoint) = session.wg_endpoint {
+        if session.wg_endpoint.is_some() {
             // Try DNS resolution through the tunnel context
-            match tokio::net::lookup_host(format!("{}:{}", hostname, DEFAULT_NODEPOOL_GRPC_PORT))
-                .await
+            if let Ok(addrs) =
+                tokio::net::lookup_host(format!("{}:{}", hostname, DEFAULT_NODEPOOL_GRPC_PORT))
+                    .await
             {
-                Ok(addrs) => {
-                    for addr in addrs {
-                        ips.push(addr.ip().to_string());
-                    }
+                for addr in addrs {
+                    ips.push(addr.ip().to_string());
                 }
-                Err(_) => {}
             }
         }
     }
@@ -1476,8 +1498,8 @@ fn endpoint_port(endpoint: &str) -> Option<u16> {
 }
 
 /// Ensure a userspace TCP bridge for gRPC over WireGuard
-async fn ensure_userspace_bridge(session: &VpnSession, peer_ip: &str) -> Result<()> {
-    if let Some(bridge_addr) = session.bridge_addr {
+async fn ensure_userspace_bridge(session: &VpnSession, _peer_ip: &str) -> Result<()> {
+    if session.bridge_addr.is_some() {
         // Bridge already running on the WireGuard local address
         // The WireGuard tunnel already provides the network path
         return Ok(());
@@ -1488,7 +1510,7 @@ async fn ensure_userspace_bridge(session: &VpnSession, peer_ip: &str) -> Result<
 /// Get the VPN state directory for a role
 fn vpn_state_dir(role: ClientRole) -> PathBuf {
     let base = dirs::data_dir()
-        .or_else(|| dirs::home_dir())
+        .or_else(dirs::home_dir)
         .unwrap_or_else(|| PathBuf::from("."));
     base.join(".hivemind")
         .join(format!("{}-vpn", role.as_str()))
@@ -1542,11 +1564,9 @@ fn env_trim(key: &str) -> Option<String> {
 
 /// Get first non-empty value from a list of options
 fn first_nonempty(options: &[Option<String>]) -> Option<String> {
-    for opt in options {
-        if let Some(val) = opt {
-            if !val.is_empty() {
-                return Some(val.clone());
-            }
+    for val in options.iter().flatten() {
+        if !val.is_empty() {
+            return Some(val.clone());
         }
     }
     None
@@ -1650,7 +1670,7 @@ mod wireguard {
             // Create Tunn (boringtun's WireGuard implementation)
             // Clone values since we need to move config into the struct later
             let private_key = config.private_key.clone();
-            let peer_public_key = config.peers[0].public_key.clone();
+            let peer_public_key = config.peers[0].public_key;
             let persistent_keepalive = config.peers[0].persistent_keepalive;
             let tunnel = Tunn::new(
                 private_key,
@@ -1730,7 +1750,7 @@ mod wireguard {
                                         let mut tunnel_guard = tunnel.lock().await;
                                         // Parse incoming packet
                                         match Tunn::parse_incoming_packet(&buf[..n]) {
-                                            Ok(packet) => {
+                                            Ok(_packet) => {
                                                 let mut out_buf = [0u8; 2048];
                                                 match tunnel_guard.decapsulate(None, &buf[..n], &mut out_buf) {
                                                     TunnResult::WriteToNetwork(buf) => {
@@ -1793,8 +1813,9 @@ mod wireguard {
     }
 
     /// Build WireGuard configuration from VPN config provided by website-api
+    #[allow(dead_code)]
     pub async fn build_wireguard_config_from_vpn(
-        vpn_config: &WebsiteVpnConfigResponse,
+        _vpn_config: &WebsiteVpnConfigResponse,
         nodepool_endpoint: &str,
     ) -> Result<(StaticSecret, PublicKey, SocketAddr, Vec<Ipv4Addr>)> {
         // Parse the nodepool endpoint
@@ -1852,6 +1873,7 @@ mod wireguard {
     /// # wireguard_peer_public_key=...
     /// # wireguard_endpoint=...
     /// # wireguard_allowed_ips=...
+    #[allow(dead_code)]
     pub fn parse_wireguard_from_config_text(
         config_text: &str,
     ) -> Option<(StaticSecret, PublicKey, SocketAddr, Vec<Ipv4Addr>)> {
@@ -1905,6 +1927,7 @@ mod wireguard {
 
 /// Extract nodepool peer IPs from Tailscale status JSON.
 /// Returns IPv4 addresses for peers matching the given hostnames.
+#[allow(dead_code)]
 fn extract_nodepool_peer_ips(status: &serde_json::Value, hostnames: &[String]) -> Vec<String> {
     let mut ips = Vec::new();
     if let Some(peer_map) = status.get("Peer").and_then(|v| v.as_object()) {
