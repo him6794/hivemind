@@ -20,6 +20,11 @@ message JoinVPNResponse {
     string virtual_ip = 3;       // Assigned Tailscale IP (100.64.x.x)
     string auth_key = 4;         // Tailscale pre-auth key
     string derp_map = 5;         // DERP relay map for NAT traversal (JSON)
+    // WireGuard configuration for embedded client (replaces tailscale binary dependency)
+    string wireguard_private_key = 6;    // Client private key (hex-encoded, 32 bytes)
+    string wireguard_peer_public_key = 7; // Server peer public key (hex-encoded, 32 bytes)
+    string wireguard_endpoint = 8;       // Server endpoint (host:port)
+    string wireguard_allowed_ips = 9;    // Comma-separated allowed IPs (e.g., "100.64.0.0/10")
 }
 
 // Get peer list for a specific task's P2P swarm
@@ -82,6 +87,11 @@ message IssueUserVpnConfigResponse {
     string client_id = 6;
     string config_text = 7;
     string expires_at = 8;
+    // WireGuard configuration for embedded client (replaces tailscale binary dependency)
+    string wireguard_private_key = 9;    // Client private key (hex-encoded, 32 bytes)
+    string wireguard_peer_public_key = 10; // Server peer public key (hex-encoded, 32 bytes)
+    string wireguard_endpoint = 11;       // Server endpoint (host:port)
+    string wireguard_allowed_ips = 12;    // Comma-separated allowed IPs (e.g., "100.64.0.0/10")
 }
 
 service VPNService {

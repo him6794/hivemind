@@ -17,11 +17,12 @@ use crate::middleware::AuthUser;
 
 // ---- Shared App State ----
 
-/// Shared application state - Master is now a pure HTTP-to-gRPC proxy (no DB access).
+/// Shared application state - Master is a pure HTTP-to-gRPC requestor proxy.
+///
+/// It does not hold the platform JWT signing secret. Nodepool remains the
+/// authority for token validation and authorization.
 #[derive(Clone)]
 pub struct AppState {
-    pub jwt_secret: String,
-    pub token_expiry_hours: i64,
     pub grpc_client: GrpcClient,
     pub config: HivemindConfig,
     pub task_submit_limiter: Arc<tokio::sync::Mutex<TaskSubmitRateLimiter>>,
@@ -105,6 +106,7 @@ pub struct RegisterResponse {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateTaskBody {
+    #[serde(default)]
     pub task_id: String,
     pub torrent: Option<String>,
     pub runtime: Option<String>,
@@ -282,6 +284,7 @@ fn uploaded_file_size_error(file_len: usize, max_bytes: usize) -> Option<String>
     }
 }
 
+#[allow(dead_code)] // retained for registration policy tests; master no longer exposes public register
 fn is_reserved_admin_username(username: &str) -> bool {
     std::env::var("HIVEMIND_ADMIN_USERS")
         .ok()
@@ -712,20 +715,82 @@ pub async fn health_check() -> &'static str {
 }
 
 /// POST /api/login
+///
+/// User-deployed master requestor login:
+/// 1. Optionally auto-issue VPN config from website-api and join Headscale.
+/// 2. Login to nodepool over the (now reachable) control-plane path.
+/// 3. Return the nodepool-issued user JWT for subsequent task APIs.
 pub async fn login(
     State(state): State<AppState>,
     Json(body): Json<LoginBody>,
 ) -> (StatusCode, Json<LoginResponse>) {
+    // Prefer automatic website-api VPN bootstrap for remote masters. Local
+    // compose deployments leave MASTER_WEBSITE_API_BASE unset and skip this.
+    match crate::vpn_bootstrap::ensure_master_vpn_for_user(
+        &state.config,
+        &body.username,
+        &body.password,
+        None,
+    )
+    .await
+    {
+        Ok(Some(endpoint)) => {
+            // VPN may have just come up; point gRPC at the discovered VIP/IP.
+            state.grpc_client.set_endpoint(endpoint).await;
+        }
+        Ok(None) => {}
+        Err(err) => {
+            let message = err.to_string();
+            tracing::warn!("Master VPN bootstrap before login failed: {}", message);
+            // Hard-fail remote overlay problems instead of masking them as a later
+            // generic nodepool transport error.
+            if message.contains("nodepool endpoint")
+                || message.contains("VPN bootstrap")
+                || message.contains("tailscale")
+                || message.contains("website-api")
+            {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(LoginResponse {
+                        success: false,
+                        message: format!("VPN/nodepool bootstrap failed: {message}"),
+                        token: None,
+                    }),
+                );
+            }
+            // Continue: nodepool may already be reachable without VPN (local).
+        }
+    }
+
     let mut grpc = state.grpc_client.clone();
     match grpc.login(&body.username, &body.password).await {
-        Ok(resp) if resp.success => (
-            StatusCode::OK,
-            Json(LoginResponse {
-                success: true,
-                message: "Login successful".into(),
-                token: Some(resp.token),
-            }),
-        ),
+        Ok(resp) if resp.success => {
+            // If login succeeded without VPN earlier, still attempt bootstrap so
+            // subsequent nodepool calls can move onto the overlay when configured.
+            match crate::vpn_bootstrap::ensure_master_vpn_for_user(
+                &state.config,
+                &body.username,
+                &body.password,
+                Some(resp.token.as_str()),
+            )
+            .await
+            {
+                Ok(Some(endpoint)) => state.grpc_client.set_endpoint(endpoint).await,
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!("Master VPN bootstrap after login failed: {}", err);
+                }
+            }
+
+            (
+                StatusCode::OK,
+                Json(LoginResponse {
+                    success: true,
+                    message: "Login successful".into(),
+                    token: Some(resp.token),
+                }),
+            )
+        }
         Ok(resp) => (
             StatusCode::UNAUTHORIZED,
             Json(LoginResponse {
@@ -734,75 +799,83 @@ pub async fn login(
                 token: None,
             }),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(LoginResponse {
-                success: false,
-                message: format!("gRPC error: {}", e),
-                token: None,
-            }),
-        ),
+        Err(e) => {
+            // One more VPN attempt, then retry nodepool login once. This covers
+            // the common remote path: website-api is public, nodepool is VPN-only.
+            if let Ok(Some(endpoint)) = crate::vpn_bootstrap::ensure_master_vpn_for_user(
+                &state.config,
+                &body.username,
+                &body.password,
+                None,
+            )
+            .await
+            {
+                state.grpc_client.set_endpoint(endpoint).await;
+                match grpc.login(&body.username, &body.password).await {
+                    Ok(resp) if resp.success => {
+                        return (
+                            StatusCode::OK,
+                            Json(LoginResponse {
+                                success: true,
+                                message: "Login successful".into(),
+                                token: Some(resp.token),
+                            }),
+                        );
+                    }
+                    Ok(resp) => {
+                        return (
+                            StatusCode::UNAUTHORIZED,
+                            Json(LoginResponse {
+                                success: false,
+                                message: resp.status_message,
+                                token: None,
+                            }),
+                        );
+                    }
+                    Err(retry_err) => {
+                        return (
+                            StatusCode::BAD_GATEWAY,
+                            Json(LoginResponse {
+                                success: false,
+                                message: format!(
+                                    "nodepool unavailable after VPN bootstrap: {retry_err}"
+                                ),
+                                token: None,
+                            }),
+                        );
+                    }
+                }
+            }
+
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(LoginResponse {
+                    success: false,
+                    message: format!("nodepool unavailable: {e}"),
+                    token: None,
+                }),
+            )
+        }
     }
 }
 
 /// POST /api/register
+///
+/// Master is a user-owned requestor client, not the public multi-tenant account
+/// service. Account registration belongs on the official website/website-api.
 pub async fn register(
-    State(state): State<AppState>,
-    Json(body): Json<RegisterBody>,
+    State(_state): State<AppState>,
+    Json(_body): Json<RegisterBody>,
 ) -> (StatusCode, Json<RegisterResponse>) {
-    let username = body.username.trim();
-    if username.len() < 3 {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(RegisterResponse {
-                success: false,
-                message: "Username must be at least 3 characters".into(),
-            }),
-        );
-    }
-    if is_reserved_admin_username(username) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(RegisterResponse {
-                success: false,
-                message: "Username is unavailable".into(),
-            }),
-        );
-    }
-    if body.password.len() < 8 {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(RegisterResponse {
-                success: false,
-                message: "Password must be at least 8 characters".into(),
-            }),
-        );
-    }
-
-    let mut grpc = state.grpc_client.clone();
-    match grpc.register_user(username, &body.password).await {
-        Ok(resp) if resp.success => (
-            StatusCode::CREATED,
-            Json(RegisterResponse {
-                success: true,
-                message: resp.status_message,
-            }),
-        ),
-        Ok(resp) => (
-            StatusCode::BAD_REQUEST,
-            Json(RegisterResponse {
-                success: false,
-                message: resp.status_message,
-            }),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(RegisterResponse {
-                success: false,
-                message: format!("gRPC error: {}", e),
-            }),
-        ),
-    }
+    (
+        StatusCode::GONE,
+        Json(RegisterResponse {
+            success: false,
+            message:
+                "Register on the official Hivemind website; master is a local requestor client"
+                    .into(),
+        }),
+    )
 }
 
 /// POST /api/tasks/quote

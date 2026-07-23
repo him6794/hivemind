@@ -7,6 +7,7 @@ use hivemind_proto::{
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
+use crate::wireguard_config::{get_platform_endpoint, get_platform_public_key};
 use crate::VpnService as VpnSvc;
 
 pub struct GrpcVpnService {
@@ -31,19 +32,35 @@ impl VpnService for GrpcVpnService {
             .join_vpn(&req.worker_id, &req.hostname, &req.auth_token)
             .await
         {
-            Ok(peer) => Ok(Response::new(JoinVpnResponse {
-                success: true,
-                status_message: "Joined VPN".into(),
-                virtual_ip: peer.virtual_ip,
-                auth_key: peer.auth_key,
-                derp_map: String::new(),
-            })),
+            Ok(peer) => {
+                // Get platform WireGuard config for embedded client
+                let config = &self.vpn.config;
+                let wg_peer_public_key = get_platform_public_key(config);
+                let wg_endpoint = get_platform_endpoint(config);
+                let wg_allowed_ips = "100.64.0.0/10".to_string();
+
+                Ok(Response::new(JoinVpnResponse {
+                    success: true,
+                    status_message: "Joined VPN".into(),
+                    virtual_ip: peer.virtual_ip,
+                    auth_key: peer.auth_key,
+                    derp_map: String::new(),
+                    wireguard_private_key: String::new(), // Client generates its own private key
+                    wireguard_peer_public_key: wg_peer_public_key,
+                    wireguard_endpoint: wg_endpoint,
+                    wireguard_allowed_ips: wg_allowed_ips,
+                }))
+            }
             Err(e) => Ok(Response::new(JoinVpnResponse {
                 success: false,
                 status_message: e.to_string(),
                 virtual_ip: String::new(),
                 auth_key: String::new(),
                 derp_map: String::new(),
+                wireguard_private_key: String::new(),
+                wireguard_peer_public_key: String::new(),
+                wireguard_endpoint: String::new(),
+                wireguard_allowed_ips: String::new(),
             })),
         }
     }
@@ -135,6 +152,10 @@ impl VpnService for GrpcVpnService {
                 client_id: cfg.client_id,
                 config_text: cfg.config_text,
                 expires_at: cfg.expires_at,
+                wireguard_private_key: cfg.wireguard_private_key,
+                wireguard_peer_public_key: cfg.wireguard_peer_public_key,
+                wireguard_endpoint: cfg.wireguard_endpoint,
+                wireguard_allowed_ips: cfg.wireguard_allowed_ips,
             })),
             Err(e) => Ok(Response::new(IssueUserVpnConfigResponse {
                 success: false,
@@ -145,6 +166,10 @@ impl VpnService for GrpcVpnService {
                 client_id: String::new(),
                 config_text: String::new(),
                 expires_at: String::new(),
+                wireguard_private_key: String::new(),
+                wireguard_peer_public_key: String::new(),
+                wireguard_endpoint: String::new(),
+                wireguard_allowed_ips: String::new(),
             })),
         }
     }

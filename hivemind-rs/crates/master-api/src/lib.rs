@@ -2,15 +2,16 @@ pub mod grpc_client;
 pub mod handlers;
 pub mod middleware;
 pub mod routes;
+pub mod vpn_bootstrap;
 
 #[cfg(test)]
 mod integration_tests;
 
 use anyhow::Result;
 use axum::Router;
+use hivemind_client_runtime as client_runtime;
 use hivemind_config::HivemindConfig;
 use std::sync::Arc;
-use tokio::time::Duration;
 use tower_http::services::ServeDir;
 
 use crate::grpc_client::GrpcClient;
@@ -20,25 +21,15 @@ pub struct MasterApiServer {
 }
 
 impl MasterApiServer {
-    pub async fn new(
-        jwt_secret: String,
-        token_expiry_hours: i64,
-        nodepool_grpc_addr: String,
-        config: HivemindConfig,
-    ) -> Result<Self> {
-        let grpc =
-            GrpcClient::connect_with_retry(&nodepool_grpc_addr, 50, Duration::from_millis(200))
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "Failed to connect to nodepool gRPC at {}: {}",
-                        nodepool_grpc_addr,
-                        e
-                    )
-                })?;
+    pub async fn new(nodepool_grpc_addr: String, config: HivemindConfig) -> Result<Self> {
+        // Optional operator-provisioned VPN auth key bootstrap. Downloaded masters
+        // typically skip this and auto-issue a preauth key via website-api on login.
+        crate::vpn_bootstrap::ensure_master_vpn(&config).await?;
+
+        // Do not block UI startup on nodepool reachability. Remote masters often
+        // need login-driven VPN bootstrap before the overlay path exists.
+        let grpc = GrpcClient::new(nodepool_grpc_addr);
         let state = handlers::AppState {
-            jwt_secret,
-            token_expiry_hours,
             grpc_client: grpc,
             config,
             task_submit_limiter: Arc::new(tokio::sync::Mutex::new(
@@ -56,6 +47,11 @@ impl MasterApiServer {
     pub async fn serve_with_ui(self, addr: &str, ui_dir: &str) -> Result<()> {
         let listener = tokio::net::TcpListener::bind(addr).await?;
         tracing::info!("Master API server listening on {}", addr);
+        tracing::info!("Master UI directory: {}", ui_dir);
+        let open_addr = addr.to_string();
+        tokio::spawn(async move {
+            client_runtime::open_ui_when_ready(&open_addr).await;
+        });
         let app = if std::path::Path::new(ui_dir).is_dir() {
             self.app
                 .fallback_service(ServeDir::new(ui_dir).append_index_html_on_directories(true))
