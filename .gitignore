@@ -11,10 +11,18 @@ node_modules/
 
 # Build outputs and compiler caches
 target/
+hivemind-rs/target-*/
+dist/
+frontend/**/dist/
 subagents/sandbox-egress/target/
 hivemind-rs/target-alt/
 hivemind-rs/target-local/
 tmp/
+
+# Downloaded dependencies and release artifacts
+.cache/
+artifacts/
+vendor/
 
 # Python caches
 __pycache__/
@@ -23,6 +31,7 @@ scripts/__pycache__/
 
 # Logs and test artifacts
 *.log
+logs/
 test_logs/
 worklog/
 
@@ -31,7 +40,10 @@ docs_backup_*/
 api/
 hivemind-rs/api/
 hivemind-rs/bt_torrents/
+bt_torrents/
 test_tasks/
+sandbox/
+sandbox-remote-worker/
 
 # Misc local state
 *.db
