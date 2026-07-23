@@ -111,7 +111,7 @@ cargo build --release --no-default-features --features master --bin hivemind-mas
 cargo build --release --no-default-features --features nodepool --bin hivemind-nodepool
 ```
 
-For multi-host deployments, set bind and advertise endpoints separately (`WORKER_ADVERTISE_ADDR`, `NODEPOOL_GRPC_ENDPOINT`, `TORRENT_SEED_ADVERTISE_HOST`). Backend authorization, not UI checks, defines privilege. Workers must receive `WORKER_EXECUTION_SECRET` and must not receive control-plane `JWT_SECRET`. Prefer `docker-compose.yml` for the canonical multi-service topology.
+For multi-host deployments, set bind and advertise endpoints separately (`WORKER_ADVERTISE_ADDR`, `NODEPOOL_GRPC_ENDPOINT`, `TORRENT_SEED_ADVERTISE_HOST`). Backend authorization, not UI checks, defines privilege. Workers verify nodepool-issued execution tokens with the platform public key (embedded by default) and must not receive control-plane `JWT_SECRET` or the execution private key. Prefer `docker-compose.yml` for the canonical multi-service topology.
 
 
 ### Docker Compose
@@ -132,17 +132,26 @@ make docker-logs
 make docker-down
 ```
 
-`JWT_SECRET` is the control-plane signing secret shared by master and nodepool.
-`WORKER_EXECUTION_SECRET` is a distinct secret shared only by nodepool and
-workers for worker RPC tokens. Both must be explicit, non-default values of at
-least 32 bytes. The Compose worker gRPC port binds to loopback by
-default. For a multi-host deployment, set `WORKER_GRPC_BIND_HOST` to the
-specific host interface that should accept worker gRPC traffic and set
-`WORKER_ADVERTISE_ADDR` to the same worker's routable `host:port` endpoint.
-Also set `NODEPOOL_GRPC_ENDPOINT`, `TORRENT_ANNOUNCE_URL`, and
-`TORRENT_SEED_ADVERTISE_HOST` to routable addresses. Keep nodepool/worker
-traffic on a private network or VPN; public Internet TLS/mTLS termination is
-still an operator responsibility.
+`JWT_SECRET` is the control-plane signing secret for nodepool and website-api. User-deployed masters do not receive this secret; they forward nodepool-issued JWTs. Remote masters set `MASTER_WEBSITE_API_BASE` so login can auto-issue VPN bootstrap config from website-api (no manual preauth key copy).
+`WORKER_EXECUTION_PRIVATE_KEY_PEM` is the platform Ed25519 private key used by
+nodepool to sign worker execution tokens. Put it on one `.env` line with literal
+`\n` separators. Official/sample workers embed the matching public key and do
+not require an execution secret. For local/dev with those workers you can use:
+
+```bash
+WORKER_EXECUTION_PRIVATE_KEY_PEM=-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEICKHh+VEGAfiiOPJJzI7afT5yro9vY5hldaNtGSXSDhY\n-----END PRIVATE KEY-----\n
+```
+
+Generate a production key with `openssl genpkey -algorithm Ed25519` and convert
+newlines to `\n`. Self-hosted platforms that mint a new key must also set
+`WORKER_EXECUTION_PUBLIC_KEY_PEM` on workers. The
+Compose worker gRPC port binds to loopback by default. For a multi-host
+deployment, set `WORKER_GRPC_BIND_HOST` to the specific host interface that
+should accept worker gRPC traffic and set `WORKER_ADVERTISE_ADDR` to the same
+worker's routable `host:port` endpoint. Also set `NODEPOOL_GRPC_ENDPOINT`,
+`TORRENT_ANNOUNCE_URL`, and `TORRENT_SEED_ADVERTISE_HOST` to routable
+addresses. Keep nodepool/worker traffic on a private network or VPN; public
+Internet TLS/mTLS termination is still an operator responsibility.
 
 ### Manual
 
@@ -171,8 +180,9 @@ Configuration is via environment variables:
 |----------|---------|-------------|
 | `DATABASE_URL` | - | PostgreSQL connection string |
 | `REDIS_URL` | - | Redis connection string |
-| `JWT_SECRET` | - | Master/user control-plane JWT signing secret |
-| `WORKER_EXECUTION_SECRET` | - | Nodepool/worker execution-token signing secret |
+| `JWT_SECRET` | - | Nodepool/website-api control-plane JWT signing secret |
+| `WORKER_EXECUTION_PRIVATE_KEY_PEM` | - | Nodepool Ed25519 private key PEM for signing worker execution tokens |
+| `WORKER_EXECUTION_PUBLIC_KEY_PEM` | embedded sample/official key | Worker Ed25519 public key PEM used to verify execution tokens |
 | `HIVEMIND_ADMIN_USERS` | unset | Comma-separated usernames allowed to access `/api/admin/*`; configured names are reserved from public registration |
 | `HIVEMIND_TASK_SUBMIT_LIMIT_PER_MINUTE` | `60` | Per-user task submission rate limit for a rolling 1-minute window (`0` disables limiting) |
 | `MASTER_HTTP_ADDR` | `0.0.0.0:8082` | Master HTTP listen address |

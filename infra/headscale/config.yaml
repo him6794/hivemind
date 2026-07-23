@@ -28,3 +28,6 @@ log:
 dns:
   magic_dns: true
   base_domain: hivemind.local
+policy:
+  mode: file
+  path: /etc/headscale/acl.hujson

@@ -47,7 +47,7 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-hivemind}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-hivemind}
       REDIS_URL: redis://redis:6379
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set to a non-default value}
-      WORKER_EXECUTION_SECRET: ${WORKER_EXECUTION_SECRET:?WORKER_EXECUTION_SECRET must be set to a non-default value}
+      WORKER_EXECUTION_PRIVATE_KEY_PEM: ${WORKER_EXECUTION_PRIVATE_KEY_PEM:?WORKER_EXECUTION_PRIVATE_KEY_PEM must be set}
       NODEPOOL_GRPC_ADDR: 0.0.0.0:50051
       TORRENT_API_DIR: /app/api/torrents
       TORRENT_BT_DIR: /app/bt_torrents
@@ -90,11 +90,20 @@ services:
     cap_drop:
       - ALL
     environment:
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set to a non-default value}
+      # User-deployed masters forward nodepool-issued JWTs and do not need JWT_SECRET.
       MASTER_HTTP_ADDR: 0.0.0.0:8082
       NODEPOOL_GRPC_ENDPOINT: nodepool:50051
+      # Local compose reaches nodepool directly; skip public website-api VPN bootstrap.
+      HIVEMIND_DISABLE_WEBSITE_VPN: "1"
       MASTER_UI_DIR: /app/frontend/master-ui/dist
       MASTER_CORS_ALLOWED_ORIGINS: ${MASTER_CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173}
+      # Remote masters should set MASTER_WEBSITE_API_BASE so login can auto-issue
+      # a user VPN preauth key. Local compose reaches nodepool directly.
+      # MASTER_WEBSITE_API_BASE: ${MASTER_WEBSITE_API_BASE:-}
+      # Optional operator override:
+      # MASTER_VPN_AUTHKEY: ${MASTER_VPN_AUTHKEY:-}
+      # MASTER_VPN_LOGIN_SERVER: ${HEADSCALE_LOGIN_SERVER:-}
+      # MASTER_VPN_HOSTNAME: ${MASTER_VPN_HOSTNAME:-hivemind-master}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     ports:
       - "8082:8082"
@@ -125,7 +134,10 @@ services:
       - ALL
     environment:
       NODEPOOL_GRPC_ENDPOINT: nodepool:50051
-      WORKER_EXECUTION_SECRET: ${WORKER_EXECUTION_SECRET:?WORKER_EXECUTION_SECRET must be set to a non-default value}
+      # Local compose reaches nodepool directly; skip public website-api VPN bootstrap.
+      HIVEMIND_DISABLE_WEBSITE_VPN: "1"
+      # Official/sample workers verify with the embedded platform public key.
+      # Self-hosted platforms may override with WORKER_EXECUTION_PUBLIC_KEY_PEM.
       WORKER_NODEPOOL_USERNAME: ${WORKER_NODEPOOL_USERNAME:?WORKER_NODEPOOL_USERNAME must be set}
       WORKER_NODEPOOL_PASSWORD: ${WORKER_NODEPOOL_PASSWORD:?WORKER_NODEPOOL_PASSWORD must be set}
       WORKER_GRPC_ADDR: 0.0.0.0:50053
@@ -169,7 +181,7 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-hivemind}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-hivemind}
       REDIS_URL: redis://redis:6379
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set to a non-default value}
-      WORKER_EXECUTION_SECRET: ${WORKER_EXECUTION_SECRET:?WORKER_EXECUTION_SECRET must be set to a non-default value}
+      WORKER_EXECUTION_PRIVATE_KEY_PEM: ${WORKER_EXECUTION_PRIVATE_KEY_PEM:?WORKER_EXECUTION_PRIVATE_KEY_PEM must be set}
       MASTER_HTTP_ADDR: 0.0.0.0:8082
       NODEPOOL_GRPC_ADDR: 0.0.0.0:50051
       WORKER_GRPC_ADDR: 0.0.0.0:50053
@@ -247,6 +259,7 @@ services:
     volumes:
       - headscale-data:/var/lib/headscale
       - ./infra/headscale/config.yaml:/etc/headscale/config.yaml:ro
+      - ./infra/headscale/acl.hujson:/etc/headscale/acl.hujson:ro
     ports:
       - "8080:8080"
     networks:

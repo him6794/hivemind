@@ -1,0 +1,40 @@
+FROM rust:1.96-bookworm AS builder
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends protobuf-compiler pkg-config ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY proto ./proto
+COPY hivemind-rs ./hivemind-rs
+COPY executor-rs ./executor-rs
+
+WORKDIR /app/hivemind-rs
+RUN cargo build --locked --release --bin hivemind-nodepool \
+      --no-default-features --features nodepool \
+    && cargo build --locked --release --bin hivemind-website-api \
+      --no-default-features --features website
+
+FROM debian:bookworm-slim AS runtime-base
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 10001 hivemind \
+    && useradd --system --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin hivemind
+
+RUN mkdir -p /app/api/torrents /app/bt_torrents \
+    && chown -R 10001:10001 /app
+
+USER 10001:10001
+
+FROM runtime-base AS nodepool
+COPY --from=builder /app/hivemind-rs/target/release/hivemind-nodepool /app/hivemind
+ENTRYPOINT ["/app/hivemind"]
+
+FROM runtime-base AS website-api
+COPY --from=builder /app/hivemind-rs/target/release/hivemind-website-api /app/hivemind
+ENTRYPOINT ["/app/hivemind"]
