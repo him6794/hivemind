@@ -62,6 +62,7 @@ hivemind-common = { path = "../common" }
 hivemind-proto = { path = "../proto" }
 hivemind-models = { path = "../models" }
 hivemind-config = { path = "../config" }
+hivemind-client-runtime = { path = "../client-runtime" }
 hivemind-database = { path = "../database", optional = true }
 hivemind-auth = { path = "../auth", optional = true }
 hivemind-node-manager = { path = "../node-manager", optional = true }

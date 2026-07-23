@@ -134,6 +134,25 @@ impl TaskRepository {
         .map_err(Into::into)
     }
 
+    pub async fn refresh_worker_endpoint(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        worker_ip: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE tasks
+             SET worker_ip = $1, last_update = NOW()
+             WHERE task_id = $2 AND worker_id = $3 AND status IN ('ASSIGNED', 'RUNNING')",
+        )
+        .bind(worker_ip)
+        .bind(task_id)
+        .bind(worker_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn claim_pending_for_worker(
         &self,
         worker_id: &str,

@@ -1,5 +1,6 @@
 pub mod jwt_service;
 pub mod user_repository;
+pub mod worker_execution;
 
 use anyhow::Result;
 use hivemind_database::DatabaseManager;

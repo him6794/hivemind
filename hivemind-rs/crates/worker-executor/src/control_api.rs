@@ -5,6 +5,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use hivemind_client_runtime::{self as client_runtime, ClientRole};
 use hivemind_config::HivemindConfig;
 use hivemind_models::ResourceSpec;
 use serde::{Deserialize, Serialize};
@@ -73,7 +74,26 @@ impl WorkerProfile {
 #[derive(Debug, Clone)]
 pub struct ControlApiState {
     pub profile: WorkerProfile,
-    pub nodepool_addr: String,
+    pub nodepool_addr: std::sync::Arc<std::sync::Mutex<String>>,
+    pub config: HivemindConfig,
+}
+
+impl ControlApiState {
+    fn nodepool_addr(&self) -> String {
+        self.nodepool_addr
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    fn set_nodepool_addr(&self, endpoint: impl Into<String>) {
+        let endpoint = endpoint.into();
+        let mut guard = self
+            .nodepool_addr
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        *guard = endpoint;
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -124,11 +144,10 @@ pub fn router(profile: WorkerProfile) -> Router {
     router_with_allowed_origins(
         ControlApiState {
             profile,
-            nodepool_addr: config
-                .server
-                .nodepool_grpc_endpoint
-                .clone()
-                .unwrap_or_else(|| config.server.nodepool_grpc_addr.clone()),
+            nodepool_addr: std::sync::Arc::new(std::sync::Mutex::new(
+                client_runtime::resolve_nodepool_grpc_endpoint(&config),
+            )),
+            config: config.clone(),
         },
         &config.server.worker_control_cors_allowed_origins,
     )
@@ -147,11 +166,10 @@ pub fn router_with_profile_and_allowed_origins(
     router_with_allowed_origins(
         ControlApiState {
             profile,
-            nodepool_addr: config
-                .server
-                .nodepool_grpc_endpoint
-                .clone()
-                .unwrap_or_else(|| config.server.nodepool_grpc_addr.clone()),
+            nodepool_addr: std::sync::Arc::new(std::sync::Mutex::new(
+                client_runtime::resolve_nodepool_grpc_endpoint(&config),
+            )),
+            config: config.clone(),
         },
         allowed_origins,
     )
@@ -196,11 +214,10 @@ pub async fn serve(addr: &str, profile: WorkerProfile) -> Result<()> {
         addr,
         ControlApiState {
             profile,
-            nodepool_addr: config
-                .server
-                .nodepool_grpc_endpoint
-                .clone()
-                .unwrap_or_else(|| config.server.nodepool_grpc_addr.clone()),
+            nodepool_addr: std::sync::Arc::new(std::sync::Mutex::new(
+                client_runtime::resolve_nodepool_grpc_endpoint(&config),
+            )),
+            config: config.clone(),
         },
         &config.server.worker_control_cors_allowed_origins,
         Some(&config.server.worker_ui_dir),
@@ -215,14 +232,25 @@ pub async fn serve_with_allowed_origins(
     ui_dir: Option<&str>,
 ) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    let open_addr = addr.to_string();
+    tokio::spawn(async move {
+        client_runtime::open_ui_when_ready(&open_addr).await;
+    });
     axum::serve(listener, router_with_ui_dir(state, allowed_origins, ui_dir)).await?;
     Ok(())
 }
 
 async fn worker_info(State(state): State<ControlApiState>) -> Json<WorkerInfoResponse> {
+    let mut profile = state.profile.clone();
+    if let Some(session) = client_runtime::current_vpn_session(ClientRole::Worker).await {
+        if let Some(ip) = session.overlay_ip.as_deref() {
+            let port = profile.ip.rsplit(':').next().unwrap_or("50053");
+            profile.ip = format!("{ip}:{port}");
+        }
+    }
     Json(WorkerInfoResponse {
         success: true,
-        profile: state.profile.clone(),
+        profile,
     })
 }
 
@@ -230,16 +258,118 @@ async fn login(
     State(state): State<ControlApiState>,
     Json(body): Json<LoginBody>,
 ) -> (StatusCode, Json<LoginResponse>) {
-    match login_to_nodepool(&state.nodepool_addr, &body.username, &body.password).await {
-        Ok(token) => (
-            StatusCode::OK,
-            Json(LoginResponse {
-                success: true,
-                message: "Login successful".into(),
-                token: Some(token),
-            }),
-        ),
+    // Prefer automatic website-api VPN bootstrap for remote workers. Local
+    // compose can disable it with WORKER_DISABLE_WEBSITE_VPN=1.
+    match client_runtime::ensure_user_vpn(
+        &state.config,
+        ClientRole::Worker,
+        &body.username,
+        &body.password,
+        None,
+    )
+    .await
+    {
+        Ok(Some(endpoint)) => {
+            state.set_nodepool_addr(endpoint);
+            tracing::info!("Worker VPN bootstrap succeeded before nodepool login");
+        }
+        Ok(None) => {}
         Err(err) => {
+            let message = err.to_string();
+            tracing::warn!("Worker VPN bootstrap before login failed: {}", message);
+            if message.contains("nodepool endpoint")
+                || message.contains("VPN bootstrap")
+                || message.contains("tailscale")
+                || message.contains("website-api")
+            {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(LoginResponse {
+                        success: false,
+                        message: format!("VPN/nodepool bootstrap failed: {message}"),
+                        token: None,
+                    }),
+                );
+            }
+        }
+    }
+
+    let nodepool_addr = state.nodepool_addr();
+    match login_to_nodepool(&nodepool_addr, &body.username, &body.password).await {
+        Ok(token) => {
+            // If nodepool was already reachable, still ensure VPN for subsequent
+            // overlay-only control-plane operations when website-api is configured.
+            match client_runtime::ensure_user_vpn(
+                &state.config,
+                ClientRole::Worker,
+                &body.username,
+                &body.password,
+                Some(token.as_str()),
+            )
+            .await
+            {
+                Ok(Some(endpoint)) => state.set_nodepool_addr(endpoint),
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!("Worker VPN bootstrap after login failed: {}", err);
+                }
+            }
+            (
+                StatusCode::OK,
+                Json(LoginResponse {
+                    success: true,
+                    message: "Login successful".into(),
+                    token: Some(token),
+                }),
+            )
+        }
+        Err(err) => {
+            // Common remote path: website-api is public, nodepool is VPN-only.
+            if let Ok(Some(endpoint)) = client_runtime::ensure_user_vpn(
+                &state.config,
+                ClientRole::Worker,
+                &body.username,
+                &body.password,
+                None,
+            )
+            .await
+            {
+                state.set_nodepool_addr(endpoint);
+                let nodepool_addr = state.nodepool_addr();
+                match login_to_nodepool(&nodepool_addr, &body.username, &body.password).await {
+                    Ok(token) => {
+                        return (
+                            StatusCode::OK,
+                            Json(LoginResponse {
+                                success: true,
+                                message: "Login successful".into(),
+                                token: Some(token),
+                            }),
+                        );
+                    }
+                    Err(retry_err) => {
+                        let message = retry_err.to_string();
+                        let status = if message.contains("invalid credentials")
+                            || message.contains("nodepool login failed")
+                        {
+                            StatusCode::UNAUTHORIZED
+                        } else {
+                            StatusCode::BAD_GATEWAY
+                        };
+                        return (
+                            status,
+                            Json(LoginResponse {
+                                success: false,
+                                message: format!(
+                                    "nodepool unavailable after VPN bootstrap: {message}"
+                                ),
+                                token: None,
+                            }),
+                        );
+                    }
+                }
+            }
+
             let message = err.to_string();
             let status = if message.contains("invalid credentials")
                 || message.contains("nodepool login failed")
@@ -382,7 +512,7 @@ async fn register_worker(
     };
 
     match register_once(
-        &state.nodepool_addr,
+        &state.nodepool_addr(),
         &profile.worker_id,
         owner,
         &profile.ip,
@@ -467,7 +597,8 @@ mod tests {
     fn sample_state() -> super::ControlApiState {
         super::ControlApiState {
             profile: sample_profile(),
-            nodepool_addr: "127.0.0.1:50051".into(),
+            nodepool_addr: std::sync::Arc::new(std::sync::Mutex::new("127.0.0.1:50051".into())),
+            config: HivemindConfig::default(),
         }
     }
 

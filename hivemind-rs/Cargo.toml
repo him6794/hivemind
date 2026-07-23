@@ -11,6 +11,7 @@ members = [
     "crates/master-api",
     "crates/website-api",
     "crates/worker-executor",
+    "crates/client-runtime",
     "crates/vpn-service",
     "crates/torrent-service",
     "crates/hivemind-bin",
@@ -55,3 +56,9 @@ anyhow = "1"
 tempfile = "3"
 dotenvy = "0.15"
 sysinfo = "0.30"
+
+# WireGuard userspace implementation (boringtun)
+boringtun = "0.7"
+x25519-dalek = "2.0"
+rand = { version = "0.8", features = ["std_rng"] }
+zeroize = "1.8"

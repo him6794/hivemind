@@ -1,5 +1,6 @@
 use super::sandbox::{SandboxEgressPolicy, SandboxLimits};
 use anyhow::{Context, Result};
+use hivemind_client_runtime::{self as client_runtime, ClientRole};
 use hivemind_config::HivemindConfig;
 use hivemind_models::Task;
 use managed_function_runtime::{ExecutionLimits, ManagedExecutor, Value};
@@ -42,8 +43,8 @@ fn validate_production_requirements(
 
     config
         .auth
-        .validate_worker_execution_secret()
-        .context("production mode requires a valid WORKER_EXECUTION_SECRET")?;
+        .validate_worker_execution_public_key()
+        .context("production mode requires a valid WORKER_EXECUTION_PUBLIC_KEY_PEM")?;
     if !policy.is_release_safe() {
         return Err(anyhow::anyhow!(
             "production mode requires network egress policy (enable egress and configure allowlist/denylist targets)"
@@ -339,17 +340,39 @@ fn download_bt_task_artifact(
             .build()
             .map_err(|e| anyhow::anyhow!("failed to create BT download runtime: {e}"))?;
         rt.block_on(async move {
+            let tracker_target = tracker_target(&announce_clone);
+            let tracker_local = if let Some(target) = tracker_target.as_deref() {
+                client_runtime::userspace_tcp_bridge(ClientRole::Worker, target).await?
+            } else {
+                announce_clone.clone()
+            };
+            let announce_for_worker = if tracker_target.is_some() {
+                replace_tracker_target(&announce_clone, &tracker_local)
+            } else {
+                announce_clone.clone()
+            };
             let peers = hivemind_torrent_service::transfer::announce_to_tracker(
-                &announce_clone,
+                &announce_for_worker,
                 &info_hash_clone,
                 &peer_id,
                 0,
                 max_bytes,
             )
             .await?;
+            let mut routed_peers = Vec::with_capacity(peers.len());
+            for mut peer in peers {
+                let target = format!("{}:{}", peer.ip, peer.port);
+                let local =
+                    client_runtime::userspace_tcp_bridge(ClientRole::Worker, &target).await?;
+                if let Some((host, port)) = split_host_port(&local) {
+                    peer.ip = host;
+                    peer.port = port;
+                }
+                routed_peers.push(peer);
+            }
             hivemind_torrent_service::transfer::download_from_peers(
                 &info_hash_clone,
-                &peers,
+                &routed_peers,
                 &destination_clone,
                 display_name_clone.as_deref(),
                 max_bytes,
@@ -361,6 +384,29 @@ fn download_bt_task_artifact(
     .map_err(|_| anyhow::anyhow!("BT download worker thread panicked"))??;
 
     Ok(downloaded)
+}
+
+fn tracker_target(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("http://")?;
+    let (authority, _) = rest.split_once('/').unwrap_or((rest, ""));
+    let (host, port) = authority.rsplit_once(':')?;
+    Some(format!("{host}:{port}"))
+}
+
+fn replace_tracker_target(url: &str, target: &str) -> String {
+    let Some(rest) = url.strip_prefix("http://") else {
+        return url.to_string();
+    };
+    let path = rest.find('/').map(|index| &rest[index..]).unwrap_or("/");
+    format!("http://{target}{path}")
+}
+
+fn split_host_port(endpoint: &str) -> Option<(String, u16)> {
+    let (host, port) = endpoint.rsplit_once(':')?;
+    Some((
+        host.trim_matches(['[', ']']).to_string(),
+        port.parse().ok()?,
+    ))
 }
 
 fn download_http_task_artifact(
@@ -866,7 +912,8 @@ async fn execute_sandboxed(
 
     let mut cmd = Command::new(&config.executor.monty_executable);
     cmd.env_remove("JWT_SECRET");
-    cmd.env_remove("WORKER_EXECUTION_SECRET");
+    cmd.env_remove("WORKER_EXECUTION_PRIVATE_KEY_PEM");
+    cmd.env_remove("WORKER_EXECUTION_PUBLIC_KEY_PEM");
     cmd.arg("--max-duration")
         .arg(limits.max_wall_time_secs.to_string())
         .arg("--max-memory")
@@ -1458,7 +1505,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn production_mode_rejects_default_worker_execution_secret() {
+    async fn production_mode_rejects_invalid_worker_execution_public_key() {
         let tmp = TempDir::new().unwrap();
         let mut config = test_config(tmp.path().to_str().unwrap());
         config.executor.sandbox_mode = "production".into();
@@ -1466,7 +1513,7 @@ mod tests {
         config.executor.network_egress_mode = "allowlist".into();
         config.executor.network_egress_targets = vec!["8.8.8.8".into()];
         config.auth.jwt_secret = "unit-test-control-plane-secret-at-least-32-bytes".into();
-        config.auth.worker_execution_secret = "CHANGE_ME_WORKER_EXECUTION_SECRET".into();
+        config.auth.worker_execution_public_key_pem = "not-a-public-key".into();
         config.executor.monty_executable = tmp
             .path()
             .join("missing-monty")
@@ -1478,7 +1525,7 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("WORKER_EXECUTION_SECRET"));
+            .contains("WORKER_EXECUTION_PUBLIC_KEY_PEM"));
     }
 
     #[tokio::test]
@@ -1537,8 +1584,7 @@ mod tests {
         let mut config = HivemindConfig::default();
         config.executor.sandbox_dir = sandbox_dir.into();
         config.auth.jwt_secret = "unit-test-jwt-secret".into();
-        config.auth.worker_execution_secret =
-            "unit-test-worker-execution-secret-at-least-32-bytes".into();
+        // Workers only need the platform public key; the default sample key is valid.
         config
     }
 

@@ -151,7 +151,7 @@ jobs:
         env:
           POSTGRES_PASSWORD: ci-postgres-password
           JWT_SECRET: ci-only-secret-with-at-least-32-bytes
-          WORKER_EXECUTION_SECRET: ci-worker-execution-secret-32-bytes-minimum
+          WORKER_EXECUTION_PRIVATE_KEY_PEM: "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEICKHh+VEGAfiiOPJJzI7afT5yro9vY5hldaNtGSXSDhY\n-----END PRIVATE KEY-----\n"
           WORKER_NODEPOOL_USERNAME: testuser
           WORKER_NODEPOOL_PASSWORD: ci-worker-password
         run: docker compose config

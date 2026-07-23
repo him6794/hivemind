@@ -1,8 +1,8 @@
 use anyhow::Result;
+use hivemind_auth::worker_execution::WorkerExecutionSigner;
 use hivemind_database::DatabaseManager;
 use hivemind_models::{Claims, Task, TaskStatus, WorkerNode};
 use hivemind_proto::{ExecuteTaskRequest, ResourceSpec as ProtoResourceSpec};
-use jsonwebtoken::{encode, EncodingKey, Header};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -16,7 +16,7 @@ pub struct Dispatcher {
     db: DatabaseManager,
     task_timeout_secs: u64,
     max_redispatch: i32,
-    worker_execution_secret: String,
+    worker_execution_private_key_pem: String,
 }
 
 impl Dispatcher {
@@ -26,12 +26,13 @@ impl Dispatcher {
             db,
             task_timeout_secs,
             max_redispatch,
-            worker_execution_secret: std::env::var("WORKER_EXECUTION_SECRET").unwrap_or_default(),
+            worker_execution_private_key_pem: std::env::var("WORKER_EXECUTION_PRIVATE_KEY_PEM")
+                .unwrap_or_default(),
         }
     }
 
-    pub fn with_worker_execution_secret(mut self, worker_execution_secret: String) -> Self {
-        self.worker_execution_secret = worker_execution_secret;
+    pub fn with_worker_execution_private_key(mut self, private_key_pem: String) -> Self {
+        self.worker_execution_private_key_pem = private_key_pem;
         self
     }
 
@@ -69,11 +70,12 @@ impl Dispatcher {
     }
 
     pub async fn dispatch_pending(&self, workers: &[WorkerNode]) -> Result<u64> {
-        let trusted_workers = self.repo.trusted_workers(workers).await?;
+        let mut available_workers = self.repo.trusted_workers(workers).await?;
         let pending = self.repo.find_pending().await?;
         let mut dispatched = 0u64;
         for task in &pending {
-            if self.dispatch_one(task, &trusted_workers).await.is_some() {
+            if let Some((worker_id, _)) = self.dispatch_one(task, &available_workers).await {
+                reserve_worker_for_batch(&mut available_workers, &worker_id);
                 dispatched += 1;
             }
         }
@@ -99,23 +101,26 @@ impl Dispatcher {
 
     pub async fn dispatch_pending_from_registered_workers_and_execute(&self) -> Result<u64> {
         let workers = self.registered_workers().await?;
-        let trusted_workers = self.repo.trusted_workers(&workers).await?;
+        let mut available_workers = self.repo.trusted_workers(&workers).await?;
         let pending = self.repo.find_pending().await?;
         let mut dispatched = 0u64;
         for task in &pending {
-            if let Some((worker_id, worker_addr)) = self.dispatch_one(task, &trusted_workers).await
+            if let Some((worker_id, worker_addr)) =
+                self.dispatch_one(task, &available_workers).await
             {
+                reserve_worker_for_batch(&mut available_workers, &worker_id);
                 dispatched += 1;
                 let repo = self.repo.clone();
                 let task = task.clone();
-                let worker_execution_secret = self.worker_execution_secret.clone();
+                let worker_execution_private_key_pem =
+                    self.worker_execution_private_key_pem.clone();
                 tokio::spawn(async move {
                     if let Err(e) = execute_on_worker(
                         repo,
                         task,
                         worker_id,
                         worker_addr,
-                        &worker_execution_secret,
+                        &worker_execution_private_key_pem,
                     )
                     .await
                     {
@@ -326,9 +331,13 @@ fn build_execute_task_request_with_token(task: &Task, token: String) -> ExecuteT
     }
 }
 
-fn worker_execution_token(secret: &str, task: &Task, worker_id: &str) -> anyhow::Result<String> {
-    if secret.trim().is_empty() {
-        anyhow::bail!("WORKER_EXECUTION_SECRET is required for worker execution dispatch")
+fn worker_execution_token(
+    private_key_pem: &str,
+    task: &Task,
+    worker_id: &str,
+) -> anyhow::Result<String> {
+    if private_key_pem.trim().is_empty() {
+        anyhow::bail!("WORKER_EXECUTION_PRIVATE_KEY_PEM is required for worker execution dispatch")
     }
     let now = chrono::Utc::now().timestamp();
     let claims = Claims {
@@ -340,11 +349,7 @@ fn worker_execution_token(secret: &str, task: &Task, worker_id: &str) -> anyhow:
         exp: (now + 300) as usize,
         iat: now as usize,
     };
-    Ok(encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(secret.as_bytes()),
-    )?)
+    WorkerExecutionSigner::from_pem(private_key_pem)?.encode_claims(&claims)
 }
 
 async fn execute_on_worker(
@@ -352,7 +357,7 @@ async fn execute_on_worker(
     task: Task,
     worker_id: String,
     worker_addr: String,
-    worker_execution_secret: &str,
+    worker_execution_private_key_pem: &str,
 ) -> Result<()> {
     let Some(current_task) = repo.find_by_task_id(&task.task_id).await? else {
         warn!("Task {} disappeared before worker execution", task.task_id);
@@ -375,7 +380,10 @@ async fn execute_on_worker(
         worker_endpoint(&worker_addr)?,
     )
     .await?;
-    let token = worker_execution_token(worker_execution_secret, &current_task, &worker_id)?;
+    repo.refresh_worker_endpoint(&task.task_id, &worker_id, &worker_addr)
+        .await?;
+    let token =
+        worker_execution_token(worker_execution_private_key_pem, &current_task, &worker_id)?;
     match client
         .execute_task(build_execute_task_request_with_token(&current_task, token))
         .await
@@ -426,10 +434,21 @@ async fn execute_on_worker(
     Ok(())
 }
 
+fn reserve_worker_for_batch(workers: &mut [WorkerNode], worker_id: &str) {
+    if let Some(worker) = workers
+        .iter_mut()
+        .find(|worker| worker.worker_id == worker_id)
+    {
+        worker.status = hivemind_models::WorkerStatus::Busy;
+        worker.queue_capacity = worker.queue_capacity.saturating_sub(1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::Utc;
+    use hivemind_config::HivemindConfig;
     use hivemind_models::{TaskStatus, WorkerStatus};
     use hivemind_proto::{
         worker_node_service_server::{WorkerNodeService, WorkerNodeServiceServer},
@@ -606,24 +625,22 @@ mod tests {
     #[test]
     fn worker_execution_token_is_bound_to_task_and_worker() {
         let task = make_task("bound-dispatch", TaskStatus::Assigned, 0);
+        let private_key = hivemind_config::sample_worker_execution_private_key_pem();
+        let public_key = HivemindConfig::default()
+            .auth
+            .worker_execution_public_key_pem;
 
-        let token = worker_execution_token(
-            "unit-test-worker-execution-secret-32-bytes",
-            &task,
-            "worker-bound-7",
-        )
-        .unwrap();
-        let claims = jsonwebtoken::decode::<serde_json::Value>(
-            &token,
-            &jsonwebtoken::DecodingKey::from_secret(b"unit-test-worker-execution-secret-32-bytes"),
-            &jsonwebtoken::Validation::default(),
-        )
-        .unwrap()
-        .claims;
+        let token = worker_execution_token(&private_key, &task, "worker-bound-7").unwrap();
+        let claims =
+            hivemind_auth::worker_execution::WorkerExecutionVerifier::from_pem(&public_key)
+                .unwrap()
+                .decode(&token)
+                .unwrap();
 
-        assert_eq!(claims["role"], "worker-execution");
-        assert_eq!(claims["task_id"], "bound-dispatch");
-        assert_eq!(claims["worker_id"], "worker-bound-7");
+        assert_eq!(claims.role.as_deref(), Some("worker-execution"));
+        assert_eq!(claims.task_id.as_deref(), Some("bound-dispatch"));
+        assert_eq!(claims.worker_id.as_deref(), Some("worker-bound-7"));
+        // HMAC secrets must not verify asymmetric execution tokens.
         assert!(jsonwebtoken::decode::<serde_json::Value>(
             &token,
             &jsonwebtoken::DecodingKey::from_secret(b"unit-test-control-jwt-secret-32-bytes"),
@@ -633,17 +650,17 @@ mod tests {
     }
 
     #[test]
-    fn worker_execution_token_reports_worker_secret_boundary() {
-        // Given: a dispatchable task and a missing worker-execution secret.
-        let task = make_task("missing-worker-secret", TaskStatus::Assigned, 0);
+    fn worker_execution_token_reports_private_key_boundary() {
+        // Given: a dispatchable task and a missing worker-execution private key.
+        let task = make_task("missing-worker-private-key", TaskStatus::Assigned, 0);
 
         // When: token creation crosses the signing boundary.
         let error = worker_execution_token("", &task, "worker-7")
             .unwrap_err()
             .to_string();
 
-        // Then: the failure names the worker secret, never JWT_SECRET.
-        assert!(error.contains("WORKER_EXECUTION_SECRET"));
+        // Then: the failure names the private key, never JWT_SECRET.
+        assert!(error.contains("WORKER_EXECUTION_PRIVATE_KEY_PEM"));
         assert!(!error.contains("JWT_SECRET"));
     }
 
@@ -1356,5 +1373,25 @@ mod tests {
         ) -> Result<Response<TaskUsageResponse>, Status> {
             Err(Status::unimplemented("fake worker does not report usage"))
         }
+    }
+
+    #[test]
+    fn reserve_worker_for_batch_prefers_the_other_idle_worker() {
+        let mut workers = vec![
+            make_worker("worker-a", 4, 16, WorkerStatus::Idle),
+            make_worker("worker-b", 4, 16, WorkerStatus::Idle),
+        ];
+        reserve_worker_for_batch(&mut workers, "worker-a");
+
+        let task = make_task("batch-fairness", TaskStatus::Pending, 0);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let selected = runtime.block_on(scheduler::find_best_worker(&task, &workers));
+
+        assert_eq!(
+            selected.map(|worker| worker.worker_id),
+            Some("worker-b".into())
+        );
+        assert_eq!(workers[0].status, WorkerStatus::Busy);
+        assert_eq!(workers[0].queue_capacity, 3);
     }
 }
