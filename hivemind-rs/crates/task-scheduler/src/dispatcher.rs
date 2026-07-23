@@ -898,7 +898,7 @@ mod tests {
             task,
             worker_id.clone(),
             worker_addr.to_string(),
-            "test-secret",
+            &hivemind_config::sample_worker_execution_private_key_pem(),
         )
         .await
         .unwrap();
