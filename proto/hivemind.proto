@@ -353,6 +353,7 @@ message ExecuteTaskRequest {
     string runtime = 4;
     string task_source = 5;
     string token = 6;          // nodepool-issued JWT for worker execution authorization
+    int64 managed_budget_units = 7; // user-selected managed-function usage budget
 }
 
 message ExecuteTaskResponse {

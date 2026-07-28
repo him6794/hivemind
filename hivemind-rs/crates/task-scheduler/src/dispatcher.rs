@@ -328,6 +328,11 @@ fn build_execute_task_request_with_token(task: &Task, token: String) -> ExecuteT
         runtime: task.runtime.clone().unwrap_or_default(),
         task_source: task.task_source.clone().unwrap_or_default(),
         token,
+        managed_budget_units: if task.runtime.as_deref() == Some("managed-function-v0") {
+            task.max_cpt.max(0)
+        } else {
+            0
+        },
     }
 }
 
@@ -549,6 +554,7 @@ mod tests {
 
         assert_eq!(request.runtime, "managed-function-v0");
         assert_eq!(request.task_source, "return get(input, \"value\") + 1;");
+        assert_eq!(request.managed_budget_units, 1_000);
         assert_eq!(request.torrent, "{\"value\": 41}");
     }
 

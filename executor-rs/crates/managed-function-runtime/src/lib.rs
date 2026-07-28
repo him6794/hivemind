@@ -24,6 +24,7 @@ pub enum Status {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionLimits {
     pub max_ops: u64,
+    pub max_usage_units: Option<u64>,
     pub max_call_depth: usize,
     pub max_output_bytes: usize,
     pub max_loop_iterations: u64,
@@ -33,6 +34,7 @@ impl Default for ExecutionLimits {
     fn default() -> Self {
         Self {
             max_ops: 1_000_000,
+            max_usage_units: None,
             max_call_depth: 64,
             max_output_bytes: 1_048_576,
             max_loop_iterations: 100_000,
@@ -40,9 +42,23 @@ impl Default for ExecutionLimits {
     }
 }
 
+impl ExecutionLimits {
+    #[must_use]
+    pub fn unlimited() -> Self {
+        Self {
+            max_ops: u64::MAX,
+            max_usage_units: None,
+            max_call_depth: usize::MAX,
+            max_output_bytes: usize::MAX,
+            max_loop_iterations: u64::MAX,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExecutionReceipt {
     pub executed_ops: u64,
+    pub usage_units: u64,
     pub function_calls: u64,
     pub loop_iterations: u64,
     pub max_call_depth: usize,
@@ -1093,7 +1109,12 @@ impl Evaluator {
         if next > self.limits.max_ops {
             return Err(RuntimeError::new("op_limit_exceeded", "operation limit exceeded"));
         }
+        let next_usage = self.receipt.usage_units.saturating_add(cost);
+        if self.limits.max_usage_units.is_some_and(|limit| next_usage > limit) {
+            return Err(RuntimeError::new("budget_exhausted", "execution budget exhausted"));
+        }
         self.receipt.executed_ops = next;
+        self.receipt.usage_units = next_usage;
         Ok(())
     }
 }

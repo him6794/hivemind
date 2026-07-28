@@ -21,7 +21,44 @@ subtotal + 1;
     assert_eq!(result.output, "priced\n");
     assert!(result.receipt.executed_ops > 0);
     assert_eq!(result.receipt.function_calls, 1);
+    assert!(result.receipt.usage_units >= result.receipt.executed_ops);
     assert_eq!(result.receipt.output_bytes, 7);
+}
+
+#[test]
+fn charges_builtin_and_user_calls_against_user_selected_budget() {
+    let source = r#"
+fn add(a, b) { return a + b; }
+return len([add(1, 2), add(3, 4)]);
+"#;
+
+    let result = ManagedExecutor
+        .execute(
+            source,
+            ExecutionLimits {
+                max_usage_units: Some(30),
+                ..ExecutionLimits::unlimited()
+            },
+        )
+        .expect("budget should cover the program");
+
+    assert_eq!(result.value, Value::Int(2));
+    assert!(result.receipt.usage_units > result.receipt.function_calls);
+}
+
+#[test]
+fn stops_with_structured_budget_exhaustion_when_user_budget_is_spent() {
+    let err = ManagedExecutor
+        .execute(
+            "return 1 + 2 + 3;",
+            ExecutionLimits {
+                max_usage_units: Some(2),
+                ..ExecutionLimits::unlimited()
+            },
+        )
+        .expect_err("the selected budget should be exhausted");
+
+    assert_eq!(err.code(), "budget_exhausted");
 }
 
 #[test]

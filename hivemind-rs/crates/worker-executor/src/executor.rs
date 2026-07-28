@@ -121,8 +121,36 @@ fn execute_managed_function_task(task: &Task, elapsed_ms: i64) -> Result<super::
         .as_deref()
         .filter(|input| !input.trim().is_empty())
         .unwrap_or("null");
-    let execution =
-        ManagedExecutor.execute_json_input(source, ExecutionLimits::default(), input)?;
+    let limits = ExecutionLimits {
+        max_usage_units: (task.max_cpt > 0).then_some(task.max_cpt as u64),
+        ..ExecutionLimits::unlimited()
+    };
+    let execution = match ManagedExecutor.execute_json_input(source, limits, input) {
+        Ok(execution) => execution,
+        Err(error) => {
+            let receipt = json!({
+                "runtime": "managed-function-v0",
+                "status": "failed",
+                "executed_ops": 0,
+                "output_bytes": 0,
+                "failure_code": error.code(),
+                "failure_message": error.to_string(),
+            });
+            return Ok(super::TaskResult {
+                task_id: task.task_id.clone(),
+                success: false,
+                output: None,
+                error: Some(error.to_string()),
+                exit_code: 1,
+                cpu_time_ms: 0,
+                wall_time_ms: elapsed_ms,
+                peak_memory_mb: 0,
+                managed_executed_ops: 0,
+                managed_output_bytes: 0,
+                managed_receipt_json: Some(receipt.to_string()),
+            });
+        }
+    };
     let output = if execution.output.is_empty() {
         render_managed_output(&execution.value)
     } else {
@@ -132,6 +160,7 @@ fn execute_managed_function_task(task: &Task, elapsed_ms: i64) -> Result<super::
     let receipt = json!({
         "runtime": "managed-function-v0",
         "status": "completed",
+        "usage_units": execution.receipt.usage_units,
         "executed_ops": execution.receipt.executed_ops,
         "function_calls": execution.receipt.function_calls,
         "loop_iterations": execution.receipt.loop_iterations,
@@ -150,7 +179,7 @@ fn execute_managed_function_task(task: &Task, elapsed_ms: i64) -> Result<super::
         cpu_time_ms: 0,
         wall_time_ms: elapsed_ms,
         peak_memory_mb: 0,
-        managed_executed_ops: execution.receipt.executed_ops.min(i64::MAX as u64) as i64,
+        managed_executed_ops: execution.receipt.usage_units.min(i64::MAX as u64) as i64,
         managed_output_bytes: output_bytes,
         managed_receipt_json: Some(receipt.to_string()),
     })
@@ -1578,6 +1607,27 @@ mod tests {
         assert!(result.managed_receipt_json.is_some());
         assert!(result.managed_executed_ops > 0);
         assert_eq!(result.managed_output_bytes, 1);
+    }
+
+    #[tokio::test]
+    async fn managed_function_budget_exhaustion_returns_structured_failure() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = test_config(tmp.path().join("sandbox").to_str().unwrap());
+        let mut task = test_task_with_source("null");
+        task.runtime = Some("managed-function-v0".into());
+        task.max_cpt = 2;
+        task.task_source = Some("return 1 + 2 + 3;".into());
+
+        let result = run_task(&task, &config).await.unwrap();
+
+        assert!(!result.success);
+        assert!(result.error.as_deref().unwrap_or_default().contains("budget_exhausted"));
+        assert!(result
+            .managed_receipt_json
+            .as_deref()
+            .unwrap_or_default()
+            .contains("budget_exhausted"));
+        config.executor.monty_executable.clear();
     }
 
     fn test_config(sandbox_dir: &str) -> HivemindConfig {
