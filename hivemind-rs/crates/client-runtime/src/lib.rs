@@ -15,7 +15,7 @@ use std::collections::HashMap;
 #[cfg(target_os = "windows")]
 use std::ffi::{CStr, CString};
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
@@ -993,7 +993,7 @@ async fn bring_up_vpn_windows(
         role.as_str(),
         configured_endpoint
     );
-    let bridge_addr = start_socks_bridge(&loopback_addr, &proxy_cred, &configured_endpoint).await?;
+    let bridge_addr = start_socks_bridge(&loopback_addr, &proxy_cred, configured_endpoint).await?;
 
     let session = VpnSession {
         role,
@@ -1083,12 +1083,12 @@ fn endpoint_port_for_worker(_role: ClientRole) -> u16 {
 
 #[cfg(target_os = "windows")]
 async fn start_libtailscale(
-    state_dir: &PathBuf,
+    state_dir: &Path,
     hostname: &str,
     auth_key: &str,
     login_server: &str,
 ) -> Result<(Arc<LibtailscaleSession>, String, String, Option<String>)> {
-    let state_dir = state_dir.clone();
+    let state_dir = state_dir.to_path_buf();
     let hostname = CString::new(hostname)?;
     let auth_key = CString::new(auth_key)?;
     let login_server = CString::new(login_server)?;
