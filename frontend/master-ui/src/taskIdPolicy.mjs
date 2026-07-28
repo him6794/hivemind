@@ -20,6 +20,15 @@ export function validateTaskId(taskId) {
   return { ok: true, taskId: value, message: '' };
 }
 
+export function createTaskId(randomUuid = () => globalThis.crypto?.randomUUID?.()) {
+  const taskId = randomUuid();
+  const validated = validateTaskId(taskId);
+  if (!validated.ok) {
+    throw new Error('Unable to generate task_id');
+  }
+  return validated.taskId;
+}
+
 export function taskIdFromFileName(fileName) {
   const candidate = String(fileName ?? '')
     .replace(/\.[^.]+$/, '')

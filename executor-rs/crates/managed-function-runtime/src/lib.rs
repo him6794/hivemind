@@ -1,8 +1,10 @@
 //! Metered managed function runtime.
 
-use std::collections::{BTreeMap, HashMap};
-use std::error::Error;
-use std::fmt::{Display, Formatter};
+use std::{
+    collections::{BTreeMap, HashMap},
+    error::Error,
+    fmt::{Display, Formatter},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {

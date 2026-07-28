@@ -109,7 +109,7 @@ Golem 的實用優勢是 requestor/provider 任務市場、Yagna runtime、GLM �
 
 主要缺口：
 
-- worker-executor 已支援 nodepool BT/magnet fetch：announce tracker 後從 nodepool seeder 下載 package，並以 BTIH 驗證；本地 path 與 legacy HTTP 仍保留作 dev/fallback。
+- worker-executor 目前對遠端 torrent/artifact 的 fetch 還未完成；若 worker 本地沒有 task artifact，會回報「remote torrent/artifact fetch is not implemented」。
 - 沒有公開 marketplace、撮合與計費結算的完整閉環。
 - 沒有硬體能力校準/防作弊的標準化 benchmark。
 - 沒有端到端效能 benchmark、壓測、SLO 或容量模型。
@@ -182,7 +182,7 @@ Hivemind worker executor 的優勢是直接在本機 worker 上啟動任務程�
 
 ### 網路與資料分發效能
 
-Hivemind 目前以 nodepool 為唯一可信 seeder/tracker：master 上傳 package bytes 到 nodepool，nodepool 產出 magnet 並做種，worker 以 BT/magnet 下載後執行。這是受控最小 BT 相容傳輸，不是完整公開 swarm client。
+Hivemind 目前以 ZIP/torrent metainfo 作 artifact 基礎，但 worker executor 還依賴本地 artifact path。這代表現階段的資料分發效能不是「去中心化 swarm 已可用」狀態，而是「artifact 模型已開始，但遠端 fetch 還需實作」。
 
 和 Akash/Golem 對比：
 
@@ -244,7 +244,8 @@ Hivemind 目前有 `max_cpt`、`min_cpt_per_hour` 與 budget guard 的雛形，�
 
 - 完成 worker 遠端 artifact fetch：
   - 支援 master API 上傳後 worker 可下載 artifact；
-  - 已完成 worker 端 magnet/BT fetch 與 BTIH 驗證；後續可再強化 multi-peer swarm 與公開 BT 相容。
+  - 若使用 torrent，完成 worker 端 magnet/torrent fetch；
+  - 驗證 BTIH / checksum。
 - 建立端到端 smoke benchmark：
   - 1 worker / 10 tasks；
   - 5 workers / 100 tasks；
@@ -370,19 +371,31 @@ Hivemind 應採取「Golem-like batch runtime 的受控版本」作為近期產�
 
 Akash provider/GPU 快照：
 
-```bash
-curl -fsS https://console-api.akash.network/v1/providers | jq '[
-  .[] | select(.isOnline == true)
-] | {
-  online: length,
-  gpu_providers: map(select(.gpuModels != null and (.gpuModels | length) > 0)) | length
-}'
+```powershell
+$providers = Invoke-RestMethod -Uri 'https://console-api.akash.network/v1/providers' -TimeoutSec 30
+$online = @($providers | Where-Object { $_.isOnline })
+$gpuProviders = @($online | Where-Object { $_.gpuModels -and $_.gpuModels.Count -gt 0 })
+$gpuTotal = 0; $gpuAvailable = 0; $gpuActive = 0
+foreach ($p in $online) {
+  if ($p.stats -and $p.stats.gpu) {
+    $gpuTotal += [int]$p.stats.gpu.total
+    $gpuAvailable += [int]$p.stats.gpu.available
+    $gpuActive += [int]$p.stats.gpu.active
+  }
+}
+$models = $gpuProviders |
+  ForEach-Object { $_.gpuModels } |
+  Group-Object model |
+  Sort-Object Count -Descending |
+  Select-Object -First 10 Name,Count
 ```
 
 Golem network 快照：
 
-```bash
-curl -fsS https://api2.stats.golem.network/v2/network/historical/stats -o /tmp/golem-hist.json
-curl -fsS https://api2.stats.golem.network/v1/network/utilization -o /tmp/golem-util.json
-curl -fsS https://api2.stats.golem.network/v1/network/earnings/overviewnew -o /tmp/golem-earn.json
+```powershell
+$hist = Invoke-RestMethod -Uri 'https://api2.stats.golem.network/v2/network/historical/stats' -TimeoutSec 30
+$util = Invoke-RestMethod -Uri 'https://api2.stats.golem.network/v1/network/utilization' -TimeoutSec 30
+$earn = Invoke-RestMethod -Uri 'https://api2.stats.golem.network/v1/network/earnings/overviewnew' -TimeoutSec 30
+$latest = $hist.vm.'1d' | Select-Object -Last 1
+$computing = [double]($util.data.result[0].values | Select-Object -Last 1)[1]
 ```

@@ -8,12 +8,9 @@
 node_modules/
 .cargo/
 .rustup/
-
+.omo/
 # Build outputs and compiler caches
 target/
-hivemind-rs/target-*/
-dist/
-frontend/**/dist/
 subagents/sandbox-egress/target/
 hivemind-rs/target-alt/
 hivemind-rs/target-local/
@@ -24,6 +21,11 @@ tmp/
 artifacts/
 vendor/
 
+# Frontend build outputs (Next.js standalone, Vite dist, Vite dep cache)
+dist/
+.next/
+.vite/
+
 # Python caches
 __pycache__/
 scripts/__pycache__/
@@ -31,7 +33,6 @@ scripts/__pycache__/
 
 # Logs and test artifacts
 *.log
-logs/
 test_logs/
 worklog/
 
@@ -40,10 +41,7 @@ docs_backup_*/
 api/
 hivemind-rs/api/
 hivemind-rs/bt_torrents/
-bt_torrents/
 test_tasks/
-sandbox/
-sandbox-remote-worker/
 
 # Misc local state
 *.db
@@ -63,6 +61,4 @@ task_state.json
 job_queue.json
 config/local.yaml
 config/secrets.yaml
-
-# Superdesign local temp
-.superdesign/tmp/
+workspace-*.tar

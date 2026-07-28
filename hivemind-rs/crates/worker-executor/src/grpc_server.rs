@@ -446,21 +446,27 @@ fn resource_usage_is_finite(usage: &hivemind_proto::ResourceUsage) -> bool {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use hivemind_auth::worker_execution::{
-        WorkerExecutionSigner, SAMPLE_WORKER_EXECUTION_PRIVATE_KEY_PEM,
-    };
+    use hivemind_auth::worker_execution::WorkerExecutionSigner;
     use hivemind_models::Claims;
     use hivemind_proto::ResourceSpec;
-    use std::sync::Arc;
+    use std::sync::{Arc, OnceLock};
     use std::time::Duration;
     use tempfile::TempDir;
     use tonic::Request;
 
-    const TEST_PRIVATE_KEY_PEM: &str = SAMPLE_WORKER_EXECUTION_PRIVATE_KEY_PEM;
     const CONTROL_PLANE_SECRET: &str = "unit-test-control-plane-secret-at-least-32-bytes";
     const ASSIGNED_OWNER: &str = "task-owner";
     const OTHER_OWNER: &str = "other-owner";
     const TEST_WORKER_ID: &str = "worker-1";
+
+    fn test_key_pair() -> &'static (String, String) {
+        static KEY_PAIR: OnceLock<(String, String)> = OnceLock::new();
+        KEY_PAIR.get_or_init(hivemind_config::generate_worker_execution_test_key_pair)
+    }
+
+    fn test_private_key_pem() -> &'static str {
+        test_key_pair().0.as_str()
+    }
 
     #[tokio::test]
     async fn stop_task_execution_reports_not_running_for_unknown_task() {
@@ -471,7 +477,7 @@ mod tests {
         let response = service
             .stop_task_execution(Request::new(StopTaskExecutionRequest {
                 task_id: "missing-task".into(),
-                token: bound_token(TEST_PRIVATE_KEY_PEM, ASSIGNED_OWNER, "missing-task"),
+                token: bound_token(test_private_key_pem(), ASSIGNED_OWNER, "missing-task"),
             }))
             .await
             .unwrap()
@@ -521,7 +527,8 @@ mod tests {
         // Given: a worker configured with the platform public key and a control-plane HS256 token.
         let tmp = TempDir::new().unwrap();
         let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
-        let worker_token = bound_token(TEST_PRIVATE_KEY_PEM, ASSIGNED_OWNER, "task-worker-secret");
+        let worker_token =
+            bound_token(test_private_key_pem(), ASSIGNED_OWNER, "task-worker-secret");
         let control_token =
             hmac_bound_token(CONTROL_PLANE_SECRET, ASSIGNED_OWNER, "task-control-secret");
 
@@ -547,7 +554,7 @@ mod tests {
                 resource_limits: None,
                 runtime: String::new(),
                 task_source: String::new(),
-                token: test_user_token(TEST_PRIVATE_KEY_PEM, "regular-user"),
+                token: test_user_token(test_private_key_pem(), "regular-user"),
             }))
             .await;
 
@@ -566,7 +573,7 @@ mod tests {
                 resource_limits: None,
                 runtime: String::new(),
                 task_source: String::new(),
-                token: bound_token(TEST_PRIVATE_KEY_PEM, ASSIGNED_OWNER, "different-task"),
+                token: bound_token(test_private_key_pem(), ASSIGNED_OWNER, "different-task"),
             }))
             .await;
 
@@ -585,7 +592,7 @@ mod tests {
                 resource_limits: None,
                 runtime: String::new(),
                 task_source: String::new(),
-                token: test_token(TEST_PRIVATE_KEY_PEM, ASSIGNED_OWNER),
+                token: test_token(test_private_key_pem(), ASSIGNED_OWNER),
             }))
             .await;
 
@@ -603,7 +610,7 @@ mod tests {
                 task_id: "assigned-output".into(),
                 worker_id: TEST_WORKER_ID.into(),
                 output: "stdout".into(),
-                token: test_user_token(TEST_PRIVATE_KEY_PEM, ASSIGNED_OWNER),
+                token: test_user_token(test_private_key_pem(), ASSIGNED_OWNER),
             }))
             .await;
 
@@ -621,7 +628,7 @@ mod tests {
                 task_id: "assigned-result".into(),
                 worker_id: TEST_WORKER_ID.into(),
                 result_torrent: "btih:result".into(),
-                token: test_user_token(TEST_PRIVATE_KEY_PEM, ASSIGNED_OWNER),
+                token: test_user_token(test_private_key_pem(), ASSIGNED_OWNER),
             }))
             .await;
 
@@ -642,7 +649,7 @@ mod tests {
         let response = service
             .task_output(Request::new(TaskOutputRequest {
                 task_id: "assigned-output-read".into(),
-                token: test_user_token(TEST_PRIVATE_KEY_PEM, ASSIGNED_OWNER),
+                token: test_user_token(test_private_key_pem(), ASSIGNED_OWNER),
             }))
             .await;
 
@@ -658,7 +665,7 @@ mod tests {
         let response = service
             .stop_task_execution(Request::new(StopTaskExecutionRequest {
                 task_id: "assigned-stop".into(),
-                token: test_user_token(TEST_PRIVATE_KEY_PEM, ASSIGNED_OWNER),
+                token: test_user_token(test_private_key_pem(), ASSIGNED_OWNER),
             }))
             .await;
 
@@ -676,7 +683,7 @@ mod tests {
                 task_id: "assigned-usage".into(),
                 worker_id: TEST_WORKER_ID.into(),
                 usage: Some(test_usage()),
-                token: test_user_token(TEST_PRIVATE_KEY_PEM, ASSIGNED_OWNER),
+                token: test_user_token(test_private_key_pem(), ASSIGNED_OWNER),
             }))
             .await;
 
@@ -694,7 +701,7 @@ mod tests {
                 task_id: "owner-output".into(),
                 worker_id: TEST_WORKER_ID.into(),
                 output: "stdout".into(),
-                token: test_token(TEST_PRIVATE_KEY_PEM, OTHER_OWNER),
+                token: test_token(test_private_key_pem(), OTHER_OWNER),
             }))
             .await;
 
@@ -712,7 +719,7 @@ mod tests {
                 task_id: "worker-output".into(),
                 worker_id: "other-worker".into(),
                 output: "stdout".into(),
-                token: test_token(TEST_PRIVATE_KEY_PEM, ASSIGNED_OWNER),
+                token: test_token(test_private_key_pem(), ASSIGNED_OWNER),
             }))
             .await;
 
@@ -730,7 +737,7 @@ mod tests {
                 task_id: "owner-result".into(),
                 worker_id: TEST_WORKER_ID.into(),
                 result_torrent: "btih:result".into(),
-                token: test_token(TEST_PRIVATE_KEY_PEM, OTHER_OWNER),
+                token: test_token(test_private_key_pem(), OTHER_OWNER),
             }))
             .await;
 
@@ -748,7 +755,7 @@ mod tests {
                 task_id: "worker-result".into(),
                 worker_id: "other-worker".into(),
                 result_torrent: "btih:result".into(),
-                token: test_token(TEST_PRIVATE_KEY_PEM, ASSIGNED_OWNER),
+                token: test_token(test_private_key_pem(), ASSIGNED_OWNER),
             }))
             .await;
 
@@ -769,7 +776,7 @@ mod tests {
         let response = service
             .task_output(Request::new(TaskOutputRequest {
                 task_id: "owner-output-read".into(),
-                token: test_token(TEST_PRIVATE_KEY_PEM, OTHER_OWNER),
+                token: test_token(test_private_key_pem(), OTHER_OWNER),
             }))
             .await;
 
@@ -785,7 +792,7 @@ mod tests {
         let response = service
             .stop_task_execution(Request::new(StopTaskExecutionRequest {
                 task_id: "owner-stop".into(),
-                token: test_token(TEST_PRIVATE_KEY_PEM, OTHER_OWNER),
+                token: test_token(test_private_key_pem(), OTHER_OWNER),
             }))
             .await;
 
@@ -803,7 +810,7 @@ mod tests {
                 task_id: "owner-usage".into(),
                 worker_id: TEST_WORKER_ID.into(),
                 usage: Some(test_usage()),
-                token: test_token(TEST_PRIVATE_KEY_PEM, OTHER_OWNER),
+                token: test_token(test_private_key_pem(), OTHER_OWNER),
             }))
             .await;
 
@@ -821,7 +828,7 @@ mod tests {
                 task_id: "worker-usage".into(),
                 worker_id: "other-worker".into(),
                 usage: Some(test_usage()),
-                token: test_token(TEST_PRIVATE_KEY_PEM, ASSIGNED_OWNER),
+                token: test_token(test_private_key_pem(), ASSIGNED_OWNER),
             }))
             .await;
 
@@ -833,7 +840,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
         seed_assignment(&service, "task-with-output", ASSIGNED_OWNER, None);
-        let token = bound_token(TEST_PRIVATE_KEY_PEM, ASSIGNED_OWNER, "task-with-output");
+        let token = bound_token(test_private_key_pem(), ASSIGNED_OWNER, "task-with-output");
 
         let uploaded = service
             .task_output_upload(Request::new(TaskOutputUploadRequest {
@@ -865,7 +872,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
         seed_assignment(&service, "task-with-result", ASSIGNED_OWNER, None);
-        let token = bound_token(TEST_PRIVATE_KEY_PEM, ASSIGNED_OWNER, "task-with-result");
+        let token = bound_token(test_private_key_pem(), ASSIGNED_OWNER, "task-with-result");
 
         let result = service
             .task_result_upload(Request::new(TaskResultUploadRequest {
@@ -904,7 +911,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
         seed_assignment(&service, "oversized-output", ASSIGNED_OWNER, None);
-        let token = bound_token(TEST_PRIVATE_KEY_PEM, ASSIGNED_OWNER, "oversized-output");
+        let token = bound_token(test_private_key_pem(), ASSIGNED_OWNER, "oversized-output");
 
         let uploaded = service
             .task_output_upload(Request::new(TaskOutputUploadRequest {
@@ -926,7 +933,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
         seed_assignment(&service, "bad-usage", ASSIGNED_OWNER, None);
-        let token = bound_token(TEST_PRIVATE_KEY_PEM, ASSIGNED_OWNER, "bad-usage");
+        let token = bound_token(test_private_key_pem(), ASSIGNED_OWNER, "bad-usage");
 
         let usage = service
             .task_usage(Request::new(TaskUsageRequest {
@@ -954,7 +961,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
         seed_assignment(&service, "missing-usage", ASSIGNED_OWNER, None);
-        let token = bound_token(TEST_PRIVATE_KEY_PEM, ASSIGNED_OWNER, "missing-usage");
+        let token = bound_token(test_private_key_pem(), ASSIGNED_OWNER, "missing-usage");
 
         let usage = service
             .task_usage(Request::new(TaskUsageRequest {
@@ -998,7 +1005,7 @@ mod tests {
                     }),
                     runtime: String::new(),
                     task_source: String::new(),
-                    token: bound_token(TEST_PRIVATE_KEY_PEM, ASSIGNED_OWNER, &execute_task_id),
+                    token: bound_token(test_private_key_pem(), ASSIGNED_OWNER, &execute_task_id),
                 }))
                 .await
                 .unwrap()
@@ -1009,7 +1016,7 @@ mod tests {
         let stop = service
             .stop_task_execution(Request::new(StopTaskExecutionRequest {
                 task_id: task_id.clone(),
-                token: bound_token(TEST_PRIVATE_KEY_PEM, ASSIGNED_OWNER, &task_id),
+                token: bound_token(test_private_key_pem(), ASSIGNED_OWNER, &task_id),
             }))
             .await
             .unwrap()
@@ -1059,9 +1066,7 @@ mod tests {
         config.executor.sandbox_dir = base.join("sandbox").to_string_lossy().to_string();
         config.torrent.api_dir = api_dir.to_string_lossy().to_string();
         config.auth.jwt_secret = CONTROL_PLANE_SECRET.into();
-        config.auth.worker_execution_public_key_pem = HivemindConfig::default()
-            .auth
-            .worker_execution_public_key_pem;
+        config.auth.worker_execution_public_key_pem = test_key_pair().1.clone();
         config.executor.monty_executable = write_long_running_executor_script(base, marker)
             .to_string_lossy()
             .to_string();
@@ -1079,7 +1084,7 @@ mod tests {
     }
 
     fn bound_token(_private_key_pem: &str, subject: &str, task_id: &str) -> String {
-        WorkerExecutionSigner::from_pem(TEST_PRIVATE_KEY_PEM)
+        WorkerExecutionSigner::from_pem(test_private_key_pem())
             .unwrap()
             .encode_claims(&Claims {
                 sub: subject.into(),
@@ -1129,7 +1134,7 @@ mod tests {
     }
 
     fn test_token_with_role(subject: &str, role: Option<&str>) -> String {
-        WorkerExecutionSigner::from_pem(TEST_PRIVATE_KEY_PEM)
+        WorkerExecutionSigner::from_pem(test_private_key_pem())
             .unwrap()
             .encode_claims(&Claims {
                 sub: subject.into(),

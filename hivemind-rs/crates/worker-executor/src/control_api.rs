@@ -13,6 +13,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::ServeDir;
 
 use crate::nodepool_client::{self, login_to_nodepool, register_once};
+use crate::WorkerExecutor;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerProfile {
@@ -71,11 +72,14 @@ impl WorkerProfile {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ControlApiState {
     pub profile: WorkerProfile,
     pub nodepool_addr: std::sync::Arc<std::sync::Mutex<String>>,
     pub config: HivemindConfig,
+    pub executor: std::sync::Arc<WorkerExecutor>,
+    pub registration_shutdown:
+        std::sync::Arc<std::sync::Mutex<Option<tokio::sync::watch::Sender<bool>>>>,
 }
 
 impl ControlApiState {
@@ -93,6 +97,29 @@ impl ControlApiState {
             .lock()
             .unwrap_or_else(|err| err.into_inner());
         *guard = endpoint;
+    }
+
+    fn ensure_registration_loop(&self, username: &str, token: &str) {
+        let mut guard = self
+            .registration_shutdown
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if guard.is_some() {
+            return;
+        }
+        let shutdown = nodepool_client::start_registration_loop(
+            self.executor.clone(),
+            nodepool_client::RegistrationLoopConfig {
+                nodepool_addr: self.nodepool_addr(),
+                worker_id: self.profile.worker_id.clone(),
+                username: username.to_string(),
+                worker_addr: self.profile.ip.clone(),
+                location: self.profile.location.clone(),
+                token: token.to_string(),
+                interval: std::time::Duration::from_secs(10),
+            },
+        );
+        *guard = Some(shutdown);
     }
 }
 
@@ -148,6 +175,8 @@ pub fn router(profile: WorkerProfile) -> Router {
                 client_runtime::resolve_nodepool_grpc_endpoint(&config),
             )),
             config: config.clone(),
+            executor: std::sync::Arc::new(WorkerExecutor::new(config.clone())),
+            registration_shutdown: std::sync::Arc::new(std::sync::Mutex::new(None)),
         },
         &config.server.worker_control_cors_allowed_origins,
     )
@@ -170,6 +199,8 @@ pub fn router_with_profile_and_allowed_origins(
                 client_runtime::resolve_nodepool_grpc_endpoint(&config),
             )),
             config: config.clone(),
+            executor: std::sync::Arc::new(WorkerExecutor::new(config.clone())),
+            registration_shutdown: std::sync::Arc::new(std::sync::Mutex::new(None)),
         },
         allowed_origins,
     )
@@ -218,6 +249,8 @@ pub async fn serve(addr: &str, profile: WorkerProfile) -> Result<()> {
                 client_runtime::resolve_nodepool_grpc_endpoint(&config),
             )),
             config: config.clone(),
+            executor: std::sync::Arc::new(WorkerExecutor::new(config.clone())),
+            registration_shutdown: std::sync::Arc::new(std::sync::Mutex::new(None)),
         },
         &config.server.worker_control_cors_allowed_origins,
         Some(&config.server.worker_ui_dir),
@@ -260,7 +293,7 @@ async fn login(
 ) -> (StatusCode, Json<LoginResponse>) {
     // Prefer automatic website-api VPN bootstrap for remote workers. Local
     // compose can disable it with WORKER_DISABLE_WEBSITE_VPN=1.
-    match client_runtime::ensure_user_vpn(
+    let bootstrap_endpoint = match client_runtime::ensure_user_vpn(
         &state.config,
         ClientRole::Worker,
         &body.username,
@@ -270,10 +303,11 @@ async fn login(
     .await
     {
         Ok(Some(endpoint)) => {
-            state.set_nodepool_addr(endpoint);
+            state.set_nodepool_addr(endpoint.clone());
             tracing::info!("Worker VPN bootstrap succeeded before nodepool login");
+            Some(endpoint)
         }
-        Ok(None) => {}
+        Ok(None) => None,
         Err(err) => {
             let message = err.to_string();
             tracing::warn!("Worker VPN bootstrap before login failed: {}", message);
@@ -291,8 +325,9 @@ async fn login(
                     }),
                 );
             }
+            None
         }
-    }
+    };
 
     let nodepool_addr = state.nodepool_addr();
     match login_to_nodepool(&nodepool_addr, &body.username, &body.password).await {
@@ -324,6 +359,34 @@ async fn login(
             )
         }
         Err(err) => {
+            // VPN bootstrap already completed. Retry the configured endpoint
+            // directly instead of issuing another website login/VPN config,
+            // which previously added another 15-30 seconds to every failure.
+            if let Some(endpoint) = bootstrap_endpoint {
+                state.set_nodepool_addr(endpoint);
+                let retry_addr = state.nodepool_addr();
+                if let Err(retry_err) =
+                    login_to_nodepool(&retry_addr, &body.username, &body.password).await
+                {
+                    let message = retry_err.to_string();
+                    let status = if message.contains("invalid credentials")
+                        || message.contains("nodepool login failed")
+                    {
+                        StatusCode::UNAUTHORIZED
+                    } else {
+                        StatusCode::BAD_GATEWAY
+                    };
+                    return (
+                        status,
+                        Json(LoginResponse {
+                            success: false,
+                            message: format!("nodepool unavailable after VPN bootstrap: {message}"),
+                            token: None,
+                        }),
+                    );
+                }
+            }
+
             // Common remote path: website-api is public, nodepool is VPN-only.
             if let Ok(Some(endpoint)) = client_runtime::ensure_user_vpn(
                 &state.config,
@@ -522,13 +585,20 @@ async fn register_worker(
     )
     .await
     {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(StatusResponse {
-                success: true,
-                status_message: "OK".into(),
-            }),
-        ),
+        Ok(()) => {
+            // UI-authenticated workers do not start the pre-provisioned
+            // registration loop during process startup. Start it after the
+            // first successful registration so the node remains online and
+            // the dispatcher can continue seeing it after 30 seconds.
+            state.ensure_registration_loop(owner, &token);
+            (
+                StatusCode::OK,
+                Json(StatusResponse {
+                    success: true,
+                    status_message: "OK".into(),
+                }),
+            )
+        }
         Err(err) => (
             StatusCode::BAD_GATEWAY,
             Json(StatusResponse {
@@ -599,6 +669,8 @@ mod tests {
             profile: sample_profile(),
             nodepool_addr: std::sync::Arc::new(std::sync::Mutex::new("127.0.0.1:50051".into())),
             config: HivemindConfig::default(),
+            executor: std::sync::Arc::new(super::WorkerExecutor::new(HivemindConfig::default())),
+            registration_shutdown: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 

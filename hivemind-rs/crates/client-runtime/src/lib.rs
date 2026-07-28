@@ -39,6 +39,9 @@ pub const DEFAULT_NODEPOOL_VPN_HOSTNAME: &str = "hivemind-nodepool";
 pub const DEFAULT_NODEPOOL_GRPC_PORT: u16 = 50051;
 /// Default WireGuard platform public key (to be set via env or config)
 pub const DEFAULT_PLATFORM_WG_PUBLIC_KEY: &str = "";
+const WEBSITE_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const WEBSITE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const NODEPOOL_PROBE_TIMEOUT: Duration = Duration::from_millis(800);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ClientRole {
@@ -91,11 +94,6 @@ struct WebsiteVpnConfigResponse {
     auth_key: String,
     #[serde(default)]
     client_id: String,
-    #[serde(default)]
-    config_text: String,
-    /// Optional direct overlay endpoint advertised by website-api.
-    #[serde(default)]
-    nodepool_grpc_endpoint: String,
 }
 
 /// VPN transport type - WireGuard only
@@ -371,14 +369,9 @@ pub async fn ensure_user_vpn(
     .unwrap_or_else(|| format!("{}-{}", role.as_str(), short_host_id()));
 
     let vpn = website_issue_vpn_config(&website_base, &token, &hostname).await?;
-    let advertised_nodepool = first_nonempty(&[
-        Some(vpn.nodepool_grpc_endpoint.clone()).filter(|v| !v.trim().is_empty()),
-        extract_config_text_value(&vpn.config_text, "nodepool_grpc_endpoint"),
-        extract_config_text_value(&vpn.config_text, "nodepool_endpoint"),
-    ]);
-    let configured_endpoint =
-        first_nonempty(&[advertised_nodepool.clone(), Some(configured_endpoint)])
-            .unwrap_or_else(|| DEFAULT_NODEPOOL_GRPC_ENDPOINT.to_string());
+    // NODEPOOL_GRPC_ENDPOINT/config is authoritative. The public website-api
+    // must not redirect a client to an internal or stale endpoint from the
+    // VPN response.
     let login_server = first_nonempty(&[
         Some(vpn.login_server.clone()).filter(|v| !v.trim().is_empty()),
         env_trim(&format!("{}_VPN_LOGIN_SERVER", role.env_prefix())),
@@ -500,8 +493,21 @@ async fn first_reachable_nodepool_endpoint(
     let session = current_vpn_session(role).await;
     let candidates =
         nodepool_endpoint_candidates(role, configured_endpoint, session.as_deref()).await;
+    // Probe candidates concurrently. Sequential 3-second probes made every
+    // login wait for dead overlay/DNS candidates before trying the live one.
+    let mut probes = tokio::task::JoinSet::new();
     for candidate in candidates {
-        if nodepool_endpoint_reachable(&candidate).await {
+        probes.spawn(async move {
+            if nodepool_endpoint_reachable(&candidate).await {
+                Some(candidate)
+            } else {
+                None
+            }
+        });
+    }
+    while let Some(result) = probes.join_next().await {
+        if let Ok(Some(candidate)) = result {
+            probes.abort_all();
             if candidate != configured_endpoint {
                 tracing::info!(
                     "{} discovered reachable nodepool endpoint {} (configured was {})",
@@ -517,7 +523,7 @@ async fn first_reachable_nodepool_endpoint(
 }
 
 async fn nodepool_endpoint_candidates(
-    role: ClientRole,
+    _role: ClientRole,
     configured_endpoint: &str,
     session: Option<&VpnSession>,
 ) -> Vec<String> {
@@ -540,58 +546,11 @@ async fn nodepool_endpoint_candidates(
         }
     }
 
-    // Explicit operator configuration always stays first after the bridge.
+    // The configured endpoint is authoritative. Do not guess alternate
+    // hostnames/IPs: deployments may intentionally expose nodepool at a
+    // private or user-selected address.
     push_unique(configured_endpoint.to_string());
-
-    let port = endpoint_port(configured_endpoint).unwrap_or(DEFAULT_NODEPOOL_GRPC_PORT);
-    let hostnames = nodepool_peer_hostnames();
-
-    // For WireGuard, we can try to resolve the nodepool hostname if we have a tunnel
-    if let Some(session) = session {
-        // Try to discover peer IPs through the WireGuard tunnel
-        match discover_nodepool_peer_ips_over_wireguard(session, &hostnames).await {
-            Ok(ips) => {
-                for ip in ips {
-                    push_unique(format_host_port(&ip, port));
-                }
-            }
-            Err(err) => {
-                tracing::debug!(
-                    "{} WireGuard peer discovery unavailable: {err}",
-                    role.as_str()
-                );
-            }
-        }
-    } else {
-        // Try DNS resolution as fallback
-        for hostname in &hostnames {
-            if let Ok(addrs) = tokio::net::lookup_host(format!("{}:{}", hostname, port)).await {
-                for addr in addrs {
-                    push_unique(addr.to_string());
-                }
-            }
-        }
-    }
-
-    // MagicDNS-style names as a last resort when peer IP parsing is unavailable.
-    for hostname in &hostnames {
-        push_unique(format!("{hostname}:{port}"));
-        push_unique(format!("{hostname}.hivemind.local:{port}"));
-    }
-
-    // Keep the historical VIP around for older deployments that pin it.
-    push_unique(DEFAULT_NODEPOOL_GRPC_ENDPOINT.to_string());
     candidates
-}
-
-fn nodepool_peer_hostnames() -> Vec<String> {
-    let mut names = Vec::new();
-    if let Some(name) = env_trim("NODEPOOL_VPN_HOSTNAME") {
-        names.push(name);
-    }
-    names.push(DEFAULT_NODEPOOL_VPN_HOSTNAME.to_string());
-    names.push("nodepool".to_string());
-    names
 }
 
 /// Convert a listen/bind address into a browser URL on localhost when needed.
@@ -692,7 +651,7 @@ fn env_auth_key_present(role: ClientRole) -> bool {
 }
 
 async fn website_login(base: &str, username: &str, password: &str) -> Result<String> {
-    let client = reqwest::Client::new();
+    let client = website_http_client()?;
     let response = client
         .post(format!("{base}/api/login"))
         .json(&serde_json::json!({
@@ -723,7 +682,7 @@ async fn website_issue_vpn_config(
     token: &str,
     client_name: &str,
 ) -> Result<WebsiteVpnConfigResponse> {
-    let client = reqwest::Client::new();
+    let client = website_http_client()?;
     let response = client
         .post(format!("{base}/api/vpn/config"))
         .bearer_auth(token)
@@ -757,14 +716,12 @@ fn truncate_response_body(body: &str) -> String {
     }
 }
 
-fn extract_config_text_value(config_text: &str, key: &str) -> Option<String> {
-    for line in config_text.lines() {
-        let line = line.trim();
-        if let Some(val) = line.strip_prefix(&format!("# {key}=")) {
-            return Some(val.trim().to_string());
-        }
-    }
-    None
+fn website_http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(WEBSITE_CONNECT_TIMEOUT)
+        .timeout(WEBSITE_REQUEST_TIMEOUT)
+        .build()
+        .context("failed to create website-api HTTP client")
 }
 
 async fn join_and_confirm_nodepool(
@@ -774,43 +731,15 @@ async fn join_and_confirm_nodepool(
     hostname: &str,
     configured_endpoint: &str,
 ) -> Result<String> {
-    let mut last_err = None;
-    for attempt in 1..=6 {
-        match bring_up_vpn(role, auth_key, login_server, hostname).await {
-            Ok(session) => {
-                match wait_for_nodepool_after_join(role, session.as_ref(), configured_endpoint)
-                    .await
-                {
-                    Ok(endpoint) => {
-                        spawn_vpn_keepalive(
-                            role,
-                            auth_key,
-                            login_server,
-                            hostname,
-                            configured_endpoint,
-                        );
-                        return Ok(endpoint);
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            "{} nodepool still unreachable after VPN join attempt {attempt}/6: {err}",
-                            role.as_str()
-                        );
-                        last_err = Some(err);
-                    }
-                }
-            }
-            Err(err) => {
-                tracing::warn!(
-                    "{} VPN join attempt {attempt}/6 failed: {err}",
-                    role.as_str()
-                );
-                last_err = Some(err);
-            }
-        }
-        sleep(Duration::from_secs(2)).await;
-    }
-    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("VPN/nodepool bootstrap failed")))
+    let session = bring_up_vpn(role, auth_key, login_server, hostname, configured_endpoint).await?;
+    spawn_vpn_keepalive(role, auth_key, login_server, hostname, configured_endpoint);
+
+    // Do not block login on a TCP health probe or try alternate endpoints.
+    // gRPC connects directly to the configured nodepool endpoint below and
+    // reports a bounded connection error if the VPN/control plane is down.
+    Ok(session
+        .bridge_endpoint()
+        .unwrap_or_else(|| configured_endpoint.to_string()))
 }
 
 fn spawn_vpn_keepalive(
@@ -846,7 +775,14 @@ async fn vpn_keepalive_loop(
                     "{} VPN keepalive: session missing; re-joining",
                     role.as_str()
                 );
-                let _ = bring_up_vpn(role, &auth_key, &login_server, &hostname).await;
+                let _ = bring_up_vpn(
+                    role,
+                    &auth_key,
+                    &login_server,
+                    &hostname,
+                    &configured_endpoint,
+                )
+                .await;
                 continue;
             }
         };
@@ -873,7 +809,15 @@ async fn vpn_keepalive_loop(
             "{} VPN keepalive missed nodepool (streak={failures}); forcing reconnect",
             role.as_str()
         );
-        if let Err(err) = bring_up_vpn(role, &auth_key, &login_server, &hostname).await {
+        if let Err(err) = bring_up_vpn(
+            role,
+            &auth_key,
+            &login_server,
+            &hostname,
+            &configured_endpoint,
+        )
+        .await
+        {
             tracing::warn!("{} VPN reconnect failed: {err}", role.as_str());
             continue;
         }
@@ -958,6 +902,7 @@ async fn wait_for_nodepool_after_join(
                         &session.auth_key,
                         &session.login_server,
                         &session.hostname,
+                        configured_endpoint,
                     )
                     .await;
                 }
@@ -989,16 +934,17 @@ async fn bring_up_vpn(
     auth_key: &str,
     login_server: &str,
     hostname: &str,
+    configured_endpoint: &str,
 ) -> Result<Arc<VpnSession>> {
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (role, auth_key, login_server, hostname);
+        let _ = (role, auth_key, login_server, hostname, configured_endpoint);
         bail!("embedded libtailscale is currently only packaged for Windows");
     }
 
     #[cfg(target_os = "windows")]
     {
-        bring_up_vpn_windows(role, auth_key, login_server, hostname).await
+        bring_up_vpn_windows(role, auth_key, login_server, hostname, configured_endpoint).await
     }
 }
 
@@ -1008,6 +954,7 @@ async fn bring_up_vpn_windows(
     auth_key: &str,
     login_server: &str,
     hostname: &str,
+    configured_endpoint: &str,
 ) -> Result<Arc<VpnSession>> {
     let hostname = sanitize_hostname(hostname);
     let state_dir = vpn_state_dir(role);
@@ -1041,10 +988,8 @@ async fn bring_up_vpn_windows(
     {
         bail!("embedded libtailscale could not expose worker execution port");
     }
-    let configured_endpoint = std::env::var("NODEPOOL_GRPC_ENDPOINT")
-        .unwrap_or_else(|_| DEFAULT_NODEPOOL_GRPC_ENDPOINT.to_string());
     tracing::info!(
-        "{} VPN joined via embedded libtailscale; probing nodepool {}",
+        "{} VPN joined via embedded libtailscale; nodepool target {}",
         role.as_str(),
         configured_endpoint
     );
@@ -1410,33 +1355,6 @@ async fn ping_nodepool_over_wireguard(session: &VpnSession) -> Result<bool> {
     }
 }
 
-/// Discover nodepool peer IPs over WireGuard tunnel
-async fn discover_nodepool_peer_ips_over_wireguard(
-    session: &VpnSession,
-    hostnames: &[String],
-) -> Result<Vec<String>> {
-    // For WireGuard, we can try to resolve via the tunnel or use DNS
-    // Since we don't have a full TUN device, we'll try DNS resolution
-    // as the WireGuard tunnel provides the network connectivity
-    let mut ips = Vec::new();
-    for hostname in hostnames {
-        // Try to resolve via the WireGuard network
-        // We can attempt to connect to the endpoint and extract the peer IP
-        if session.wg_endpoint.is_some() {
-            // Try DNS resolution through the tunnel context
-            if let Ok(addrs) =
-                tokio::net::lookup_host(format!("{}:{}", hostname, DEFAULT_NODEPOOL_GRPC_PORT))
-                    .await
-            {
-                for addr in addrs {
-                    ips.push(addr.ip().to_string());
-                }
-            }
-        }
-    }
-    Ok(ips)
-}
-
 async fn wait_for_nodepool_endpoint(endpoint: &str) {
     for _ in 0..30 {
         if nodepool_endpoint_reachable(endpoint).await {
@@ -1448,7 +1366,7 @@ async fn wait_for_nodepool_endpoint(endpoint: &str) {
 
 /// Check if a nodepool endpoint is reachable via TCP
 async fn nodepool_endpoint_reachable(endpoint: &str) -> bool {
-    tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(endpoint))
+    tokio::time::timeout(NODEPOOL_PROBE_TIMEOUT, TcpStream::connect(endpoint))
         .await
         .is_ok_and(|r| r.is_ok())
 }
@@ -1476,24 +1394,12 @@ fn endpoint_host(endpoint: &str) -> Option<String> {
     }
 }
 
+#[cfg(test)]
 fn format_host_port(host: &str, port: u16) -> String {
     if host.contains(':') {
         format!("[{host}]:{port}")
     } else {
         format!("{host}:{port}")
-    }
-}
-
-fn endpoint_port(endpoint: &str) -> Option<u16> {
-    let endpoint = endpoint.trim();
-    let endpoint = endpoint
-        .strip_prefix("http://")
-        .or_else(|| endpoint.strip_prefix("https://"))
-        .unwrap_or(endpoint);
-    if endpoint.starts_with('[') {
-        endpoint.split("]:").nth(1)?.parse().ok()
-    } else {
-        endpoint.rsplit_once(':')?.1.parse().ok()
     }
 }
 

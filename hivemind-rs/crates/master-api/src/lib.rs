@@ -1,3 +1,4 @@
+pub mod distribution;
 pub mod grpc_client;
 pub mod handlers;
 pub mod middleware;
@@ -14,6 +15,7 @@ use hivemind_config::HivemindConfig;
 use std::sync::Arc;
 use tower_http::services::ServeDir;
 
+use crate::distribution::MasterDistribution;
 use crate::grpc_client::GrpcClient;
 
 pub struct MasterApiServer {
@@ -29,9 +31,11 @@ impl MasterApiServer {
         // Do not block UI startup on nodepool reachability. Remote masters often
         // need login-driven VPN bootstrap before the overlay path exists.
         let grpc = GrpcClient::new(nodepool_grpc_addr);
+        let distribution = MasterDistribution::start(&config).await?;
         let state = handlers::AppState {
             grpc_client: grpc,
             config,
+            distribution: Some(distribution),
             task_submit_limiter: Arc::new(tokio::sync::Mutex::new(
                 handlers::TaskSubmitRateLimiter::new(),
             )),

@@ -9,9 +9,11 @@ help:
 	@echo "  make build            - Build Rust binary"
 	@echo "  make test             - Run all tests"
 	@echo "  make clean            - Clean build artifacts"
+	@echo "  make build-frontend   - Build official site, master UI, and worker UI"
+	@echo "  make smoke-frontend   - Preview-smoke all frontend release artifacts"
 	@echo "  make proto            - Generate protobuf code"
-	@echo "  make docker-build     - Build Docker images"
-	@echo "  make docker-up        - Start Docker Compose"
+	@echo "  make docker-build     - Build all Docker images (core + three frontends)"
+	@echo "  make docker-up        - Start full stack (site, master-ui, worker-ui, hivemind, infra)"
 	@echo "  make docker-down      - Stop Docker Compose"
 	@echo "  make lint             - Run linter"
 	@echo "  make fmt              - Format code"
@@ -30,6 +32,11 @@ dev: build
 	@echo "Development environment started"
 	@echo "API: http://localhost:8082"
 	@echo "gRPC: localhost:50051"
+	@echo ""
+	@echo "Frontends (build separately with 'make build-frontend'):"
+	@echo "  Official Site:   http://localhost:8080"
+	@echo "  Master UI:       http://localhost:3000"
+	@echo "  Worker UI:       http://localhost:3001"
 
 # ============================================
 # Build
@@ -47,11 +54,13 @@ build-debug:
 
 build-frontend:
 	@echo "Building frontend..."
-	@cd frontend && npm run build
-	@cd frontend/master-ui && npm run build
-	@cd frontend/worker-ui && npm run build
+	@powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release-frontends.ps1
 	@echo "Frontend build complete"
 
+smoke-frontend:
+	@echo "Running frontend release smoke..."
+	@powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release-frontend-smoke.ps1
+	@echo "Frontend release smoke complete"
 
 # ============================================
 # Test
@@ -137,12 +146,11 @@ db-reset:
 clean:
 	@echo "Cleaning build artifacts..."
 	@cd hivemind-rs && cargo clean
+	@rm -rf frontend/dist
+	@rm -rf frontend/.next
 	@rm -rf frontend/master-ui/dist
 	@rm -rf frontend/worker-ui/dist
-	@rm -rf frontend/dist
 	@echo "Clean complete"
 
 clean-all: clean docker-clean
 	@echo "Full cleanup complete"
-
-

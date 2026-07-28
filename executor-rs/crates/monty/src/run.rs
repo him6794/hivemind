@@ -219,12 +219,16 @@ impl Executor {
         // Set the compiled functions in the interns
         interns.set_functions(compile_result.functions);
 
+        // Read the `__name__` slot before the conditional move of `prepared.name_map`
+        // into the `name_map` field below; that move only happens under `ref-count-return`.
+        let main_name_slot = prepared.name_map.get("__name__").copied();
+
         Ok(Self {
             namespace_size: prepared.namespace_size,
             #[cfg(feature = "ref-count-return")]
             name_map: prepared.name_map,
             module_code: compile_result.code,
-            main_name_slot: prepared.name_map.get("__name__").copied(),
+            main_name_slot,
             interns,
             code,
             heap_capacity: AtomicUsize::new(prepared.namespace_size),

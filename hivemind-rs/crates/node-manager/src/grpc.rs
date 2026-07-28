@@ -119,36 +119,6 @@ pub struct NodepoolState {
     pub distribution: Option<DistributionRuntime>,
 }
 
-fn safe_package_filename(task_id: &str, package_filename: &str) -> Result<String, &'static str> {
-    let raw = package_filename.trim();
-    let candidate = if raw.is_empty() {
-        format!("{task_id}.zip")
-    } else {
-        Path::new(raw)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(task_id)
-            .to_string()
-    };
-    if candidate.is_empty()
-        || candidate == "."
-        || candidate == ".."
-        || candidate.contains("..")
-        || candidate.contains('/')
-        || candidate.contains('\\')
-    {
-        return Err("package_filename is invalid");
-    }
-    Ok(candidate)
-}
-
-fn max_package_upload_bytes() -> usize {
-    std::env::var("HIVEMIND_MAX_TASK_UPLOAD_BYTES")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(100 * 1024 * 1024)
-}
-
 fn task_create_error_message(error: &anyhow::Error) -> String {
     if error.to_string().contains("tasks_task_id_key") {
         "task_id already exists".into()
@@ -1242,65 +1212,17 @@ impl MasterNodeService for GrpcMasterNodeService {
             }));
         }
 
-        // Prefer package bytes from master: nodepool is the only trusted seeder.
-        let mut torrent_source = req.torrent.clone();
-        let mut expected_btih = None;
+        // The master owns task package bytes and seeds them. Nodepool stores
+        // only the torrent/magnet reference and must never persist task ZIPs.
+        let torrent_source = req.torrent.clone();
+        let expected_btih = None;
         if !req.package_data.is_empty() {
-            if req.package_data.len() > max_package_upload_bytes() {
-                return Ok(Response::new(UploadTaskResponse {
-                    success: false,
-                    status_message: format!(
-                        "uploaded task package is too large: {} bytes > {} bytes",
-                        req.package_data.len(),
-                        max_package_upload_bytes()
-                    ),
-                }));
-            }
-            let Some(distribution) = self.state.distribution.as_ref() else {
-                return Ok(Response::new(UploadTaskResponse {
-                    success: false,
-                    status_message: "nodepool package distribution runtime is not configured"
+            return Ok(Response::new(UploadTaskResponse {
+                success: false,
+                status_message:
+                    "nodepool does not accept task package bytes; master must create and seed the torrent"
                         .into(),
-                }));
-            };
-            let filename = match safe_package_filename(&req.task_id, &req.package_filename) {
-                Ok(name) => name,
-                Err(status) => {
-                    return Ok(Response::new(UploadTaskResponse {
-                        success: false,
-                        status_message: status.to_string(),
-                    }));
-                }
-            };
-            let package_path = PathBuf::from(&filename);
-            let torrent_service = distribution.torrent_service();
-            let seeded = match torrent_service
-                .package_bytes_to_torrent(
-                    &req.package_data,
-                    &package_path,
-                    &distribution.announce_url,
-                )
-                .await
-            {
-                Ok(info) => info,
-                Err(err) => {
-                    return Ok(Response::new(UploadTaskResponse {
-                        success: false,
-                        status_message: format!("failed to seed task package: {err}"),
-                    }));
-                }
-            };
-            if let Err(err) = distribution
-                .register_local_seeder(&seeded.info_hash, seeded.data_size)
-                .await
-            {
-                return Ok(Response::new(UploadTaskResponse {
-                    success: false,
-                    status_message: format!("failed to register nodepool seeder: {err}"),
-                }));
-            }
-            torrent_source = seeded.magnet_uri;
-            expected_btih = Some(seeded.info_hash);
+            }));
         } else if torrent_source.trim().is_empty() {
             return Ok(Response::new(UploadTaskResponse {
                 success: false,
@@ -2929,10 +2851,7 @@ mod tests {
             exp: now + 300,
             iat: now,
         };
-        let private_key = hivemind_config::sample_worker_execution_private_key_pem();
-        let public_key = HivemindConfig::default()
-            .auth
-            .worker_execution_public_key_pem;
+        let (private_key, public_key) = hivemind_config::generate_worker_execution_test_key_pair();
         let control_secret = "unit-test-control-plane-secret-at-least-32-bytes";
 
         // When: nodepool creates the cancellation token with the platform private key.

@@ -9,3 +9,6 @@ serde_json.workspace = true
 dotenvy.workspace = true
 anyhow.workspace = true
 jsonwebtoken.workspace = true
+ed25519-dalek.workspace = true
+pkcs8.workspace = true
+rand.workspace = true

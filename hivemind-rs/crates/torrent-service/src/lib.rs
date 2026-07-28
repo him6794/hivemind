@@ -10,7 +10,7 @@ use anyhow::Result;
 use hivemind_config::HivemindConfig;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use transfer::SeedStore;
+pub use transfer::SeedStore;
 
 /// Manages torrent creation, seeding, and P2P task distribution
 pub struct TorrentService {

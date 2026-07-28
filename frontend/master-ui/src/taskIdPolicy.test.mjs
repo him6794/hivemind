@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { isSafeTaskId, taskIdFromFileName, validateTaskId } from './taskIdPolicy.mjs';
+import { createTaskId, isSafeTaskId, taskIdFromFileName, validateTaskId } from './taskIdPolicy.mjs';
 
 describe('task id policy', () => {
   it('matches server-safe task id rules', () => {
@@ -34,5 +34,11 @@ describe('task id policy', () => {
     assert.equal(taskIdFromFileName('render job.zip'), 'render-job');
     assert.equal(taskIdFromFileName('..zip'), '');
     assert.equal(taskIdFromFileName('bad/path.zip'), 'bad-path');
+  });
+
+  it('generates default task ids as uuids', () => {
+    const generated = createTaskId(() => '7f50f8b2-a963-49a1-bca0-d79f209991d4');
+
+    assert.equal(generated, '7f50f8b2-a963-49a1-bca0-d79f209991d4');
   });
 });

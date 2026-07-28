@@ -4,7 +4,7 @@ services:
     environment:
       POSTGRES_DB: hivemind_test
       POSTGRES_USER: hivemind
-      POSTGRES_PASSWORD: hivemind
+      POSTGRES_PASSWORD: ${TEST_POSTGRES_PASSWORD:?TEST_POSTGRES_PASSWORD must be set}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U hivemind -d hivemind_test"]
       interval: 5s
@@ -28,10 +28,10 @@ services:
       context: .
       dockerfile: hivemind-rs/Dockerfile.test
     environment:
-      DATABASE_URL: postgres://hivemind:hivemind@postgres:5432/hivemind_test
-      HIVEMIND_TEST_DATABASE_URL: postgres://hivemind:hivemind@postgres:5432/hivemind_test
+      DATABASE_URL: "postgres://hivemind:${TEST_POSTGRES_PASSWORD:?TEST_POSTGRES_PASSWORD must be set}@postgres:5432/hivemind_test"
+      HIVEMIND_TEST_DATABASE_URL: "postgres://hivemind:${TEST_POSTGRES_PASSWORD:?TEST_POSTGRES_PASSWORD must be set}@postgres:5432/hivemind_test"
       REDIS_URL: redis://redis:6379
-      JWT_SECRET: test-only-secret
+      JWT_SECRET: ${TEST_JWT_SECRET:?TEST_JWT_SECRET must be set}
       HIVEMIND_ADMIN_USERS: testuser
       CARGO_INCREMENTAL: "0"
       CARGO_BUILD_JOBS: "1"

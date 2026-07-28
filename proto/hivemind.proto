@@ -130,8 +130,8 @@ message UploadTaskRequest {
     int64 max_cpt = 7;
     string runtime = 8;
     string task_source = 9;
-    // Optional task package payload. When present, nodepool is the trusted seeder:
-    // it stores the package, creates metainfo, and returns/stores a magnet URI.
+    // Deprecated/ rejected: task package bytes remain on the master seeder.
+    // Nodepool stores only the torrent/magnet reference in the task record.
     bytes package_data = 10;
     string package_filename = 11;
 }

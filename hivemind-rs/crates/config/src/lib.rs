@@ -187,7 +187,8 @@ impl Default for HivemindConfig {
     fn default() -> Self {
         Self {
             database: DatabaseConfig {
-                url: "postgres://hivemind:hivemind@localhost:5432/hivemind".into(),
+                url: "postgres://hivemind:replace-with-a-strong-password@localhost:5432/hivemind"
+                    .into(),
                 max_connections: 20,
                 min_connections: 2,
                 idle_timeout_secs: 300,
@@ -262,10 +263,13 @@ impl Default for HivemindConfig {
 impl HivemindConfig {
     pub fn for_test() -> Self {
         let mut config = Self::default();
+        let (private_key, public_key) = generate_worker_execution_test_key_pair();
         config.torrent.allow_local_task_artifacts = true;
-        config.auth.worker_execution_private_key_pem = sample_worker_execution_private_key_pem();
-        config.database.url = std::env::var("HIVEMIND_TEST_DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://hivemind:hivemind@localhost:5432/hivemind_test".into());
+        config.auth.worker_execution_private_key_pem = private_key;
+        config.auth.worker_execution_public_key_pem = public_key;
+        config.database.url = std::env::var("HIVEMIND_TEST_DATABASE_URL").unwrap_or_else(|_| {
+            "postgres://hivemind:replace-with-a-test-password@localhost:5432/hivemind_test".into()
+        });
         config
     }
 
@@ -558,11 +562,27 @@ fn default_worker_execution_public_key_pem() -> String {
         .into()
 }
 
-/// Sample/dev private key matching the default public key. Used only by tests and
-/// local compose samples; production nodepools must supply their own private key.
-pub fn sample_worker_execution_private_key_pem() -> String {
-    "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEICKHh+VEGAfiiOPJJzI7afT5yro9vY5hldaNtGSXSDhY\n-----END PRIVATE KEY-----\n"
-        .into()
+/// Generate ephemeral Ed25519 trust material for tests and `HivemindConfig::for_test`.
+///
+/// The key pair is generated at runtime and is never persisted in source or config files.
+pub fn generate_worker_execution_test_key_pair() -> (String, String) {
+    use ed25519_dalek::{
+        pkcs8::{EncodePrivateKey, EncodePublicKey},
+        SigningKey,
+    };
+    use pkcs8::LineEnding;
+    use rand::rngs::OsRng;
+
+    let signing_key = SigningKey::generate(&mut OsRng);
+    let private_key = signing_key
+        .to_pkcs8_pem(LineEnding::LF)
+        .expect("generated Ed25519 private key should encode as PKCS#8 PEM")
+        .to_string();
+    let public_key = signing_key
+        .verifying_key()
+        .to_public_key_pem(LineEnding::LF)
+        .expect("generated Ed25519 public key should encode as PEM");
+    (private_key, public_key)
 }
 
 fn default_master_cors_allowed_origins() -> Vec<String> {
@@ -689,10 +709,11 @@ mod tests {
     #[test]
     fn auth_config_deserializes_worker_execution_keys() {
         // Given: a JSON auth boundary with distinct control-plane and worker-execution keys.
+        let (private_key, public_key) = generate_worker_execution_test_key_pair();
         let auth: AuthConfig = serde_json::from_value(serde_json::json!({
             "jwt_secret": "control-plane-secret-at-least-32-bytes",
-            "worker_execution_private_key_pem": sample_worker_execution_private_key_pem(),
-            "worker_execution_public_key_pem": default_worker_execution_public_key_pem(),
+            "worker_execution_private_key_pem": private_key,
+            "worker_execution_public_key_pem": public_key,
             "token_expiry_hours": 24,
             "refresh_expiry_hours": 168,
             "bcrypt_cost": 12
@@ -817,14 +838,9 @@ mod tests {
         let old_private = std::env::var_os("WORKER_EXECUTION_PRIVATE_KEY_PEM");
         let old_public = std::env::var_os("WORKER_EXECUTION_PUBLIC_KEY_PEM");
         std::env::remove_var("HIVEMIND_CONFIG");
-        std::env::set_var(
-            "WORKER_EXECUTION_PRIVATE_KEY_PEM",
-            sample_worker_execution_private_key_pem(),
-        );
-        std::env::set_var(
-            "WORKER_EXECUTION_PUBLIC_KEY_PEM",
-            default_worker_execution_public_key_pem(),
-        );
+        let (private_key, public_key) = generate_worker_execution_test_key_pair();
+        std::env::set_var("WORKER_EXECUTION_PRIVATE_KEY_PEM", private_key);
+        std::env::set_var("WORKER_EXECUTION_PUBLIC_KEY_PEM", public_key);
 
         // When: configuration is loaded from the environment.
         let loaded = HivemindConfig::load_from_env();
@@ -901,14 +917,9 @@ mod tests {
 
         std::env::set_var("HIVEMIND_CONFIG", path.as_os_str());
         std::env::set_var("JWT_SECRET", "env-jwt-secret-at-least-32-bytes");
-        std::env::set_var(
-            "WORKER_EXECUTION_PRIVATE_KEY_PEM",
-            sample_worker_execution_private_key_pem(),
-        );
-        std::env::set_var(
-            "WORKER_EXECUTION_PUBLIC_KEY_PEM",
-            default_worker_execution_public_key_pem(),
-        );
+        let (private_key, public_key) = generate_worker_execution_test_key_pair();
+        std::env::set_var("WORKER_EXECUTION_PRIVATE_KEY_PEM", private_key);
+        std::env::set_var("WORKER_EXECUTION_PUBLIC_KEY_PEM", public_key);
         std::env::set_var("NODEPOOL_GRPC_ENDPOINT", "env-nodepool:50051");
         std::env::set_var("MASTER_HTTP_ADDR", "env-master:8082");
         std::env::set_var("MASTER_UI_DIR", "./env/master-ui");
@@ -1031,10 +1042,11 @@ mod tests {
     }
 
     #[test]
-    fn worker_execution_private_key_validation_accepts_sample_ed25519_pem() {
-        // Given: the sample platform private key used by local compose/tests.
+    fn worker_execution_private_key_validation_accepts_generated_ed25519_pem() {
+        // Given: an ephemeral platform private key used by the test.
         let mut auth = HivemindConfig::default().auth;
-        auth.worker_execution_private_key_pem = sample_worker_execution_private_key_pem();
+        let (private_key, _) = generate_worker_execution_test_key_pair();
+        auth.worker_execution_private_key_pem = private_key;
 
         // When/Then: nodepool accepts a valid Ed25519 private key PEM.
         auth.validate_worker_execution_private_key().unwrap();
