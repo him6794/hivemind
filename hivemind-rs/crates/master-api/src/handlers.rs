@@ -227,6 +227,18 @@ fn validate_task_resources(body: &CreateTaskBody) -> Result<(), &'static str> {
     Ok(())
 }
 
+fn validate_runtime_contract(body: &CreateTaskBody) -> Result<(), &'static str> {
+    match body.runtime.as_deref().map(str::trim).filter(|runtime| !runtime.is_empty()) {
+        None => Ok(()),
+        Some("managed-function-v0") if body.task_source.as_deref().is_some_and(|source| !source.trim().is_empty())
+            && body.max_cpt.unwrap_or(0) > 0 => Ok(()),
+        Some("managed-function-v0") => {
+            Err("managed-function-v0 requires task_source and positive max_cpt")
+        }
+        Some(_) => Err("unsupported task runtime"),
+    }
+}
+
 fn is_safe_task_id(task_id: &str) -> bool {
     if task_id.len() == 1 && task_id.as_bytes()[0] == b'.' {
         return false;
@@ -886,7 +898,7 @@ pub async fn quote_task(
     AuthUser { token, .. }: AuthUser,
     Json(body): Json<CreateTaskBody>,
 ) -> (StatusCode, Json<QuoteResponse>) {
-    if validate_task_resources(&body).is_err() {
+    if validate_task_resources(&body).is_err() || validate_runtime_contract(&body).is_err() {
         return (
             StatusCode::BAD_REQUEST,
             Json(QuoteResponse {
@@ -990,6 +1002,9 @@ async fn create_task_from_submission(
         return bad_task_response("task_id is required and must be a safe file name");
     }
     if let Err(message) = validate_task_resources(&body) {
+        return bad_task_response(message);
+    }
+    if let Err(message) = validate_runtime_contract(&body) {
         return bad_task_response(message);
     }
     let mut grpc = state.grpc_client.clone();
@@ -2385,5 +2400,28 @@ mod tests {
             Some("magnet:?xt=urn:btih:abc")
         );
         assert!(distribution.package_data.is_empty());
+    }
+
+    #[test]
+    fn managed_runtime_requires_source_and_positive_user_budget() {
+        let body = CreateTaskBody {
+            task_id: "managed-invalid".into(),
+            torrent: None,
+            runtime: Some("managed-function-v0".into()),
+            task_source: None,
+            memory_gb: None,
+            cpu_score: None,
+            gpu_score: None,
+            gpu_memory_gb: None,
+            storage_gb: None,
+            location: None,
+            host_count: None,
+            max_cpt: Some(0),
+        };
+
+        assert_eq!(
+            validate_runtime_contract(&body),
+            Err("managed-function-v0 requires task_source and positive max_cpt")
+        );
     }
 }

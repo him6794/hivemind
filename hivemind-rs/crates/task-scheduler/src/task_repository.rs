@@ -11,8 +11,6 @@ pub struct TaskRepository {
 
 const PLATFORM_FEE_BPS: i64 = 1000; // 10%
 const MANAGED_BASE_INVOCATION_CPT: i64 = 1;
-const MANAGED_OP_BLOCK_CPT: i64 = 1;
-const MANAGED_OUTPUT_KIB_CPT: i64 = 1;
 pub(crate) const MIN_WORKER_REPUTATION_SCORE: i32 = 20;
 
 struct ManagedCompletionReceipt<'a> {
@@ -648,18 +646,8 @@ async fn insert_ledger_entry(
     Ok(())
 }
 
-fn ceil_div_i64(value: i64, divisor: i64) -> i64 {
-    if value <= 0 {
-        0
-    } else {
-        ((value - 1) / divisor) + 1
-    }
-}
-
 fn managed_receipt_amount_cpt(task: &Task) -> i64 {
-    MANAGED_BASE_INVOCATION_CPT
-        + ceil_div_i64(task.managed_executed_ops, 1_000) * MANAGED_OP_BLOCK_CPT
-        + ceil_div_i64(task.managed_output_bytes, 1_024) * MANAGED_OUTPUT_KIB_CPT
+    MANAGED_BASE_INVOCATION_CPT + task.managed_executed_ops.max(0)
 }
 
 fn billable_amount_cpt(task: &Task) -> i64 {
@@ -2012,18 +2000,18 @@ mod tests {
                 Some("7"),
                 2_500,
                 2_049,
-                "{\"executed_ops\":2500,\"output_bytes\":2049}",
+                "{\"usage_units\":2500,\"output_bytes\":2049}",
             )
             .await
             .unwrap();
 
         assert!(completed.billing_settled);
-        assert_eq!(completed.billed_amount, 7);
+        assert_eq!(completed.billed_amount, 2_501);
         assert_eq!(completed.managed_executed_ops, 2_500);
         assert_eq!(completed.managed_output_bytes, 2_049);
         assert_eq!(
             completed.managed_receipt_json.as_deref(),
-            Some("{\"executed_ops\":2500,\"output_bytes\":2049}")
+            Some("{\"usage_units\":2500,\"output_bytes\":2049}")
         );
 
         let balance: i64 = sqlx::query_scalar("SELECT balance FROM users WHERE username = $1")

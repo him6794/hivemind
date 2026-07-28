@@ -38,6 +38,7 @@ Hivemind task integration:
 Receipt fields:
 
 - `status`
+- `usage_units`
 - `executed_ops`
 - `function_calls`
 - `loop_iterations`
@@ -149,28 +150,31 @@ configured limit.
 Managed function billing should be derived from the receipt, not from wall-clock
 time alone.
 
-Suggested first formula:
+Current formula:
 
 ```text
 total_cpt =
   base_invocation_cpt
-  + ceil(executed_ops / 1000) * op_block_cpt
-  + ceil(output_bytes / 1024) * output_kib_cpt
+  + usage_units
 ```
 
-The runtime should persist the receipt before settlement so billing can be
-recomputed from source, limits, pricing config, and receipt data.
+`usage_units` is accumulated by the evaluator as each primitive expression,
+builtin call, user-function call, and loop body operation executes. The task's
+`max_cpt` is the user-selected budget; it is passed to the worker as the
+managed execution budget and execution stops with `budget_exhausted` when it is
+spent. The receipt is persisted before settlement so billing can be recomputed
+from the versioned cost model and receipt data.
 
 The first integrated billing constants are:
 
 | Component | CPT |
 | --- | ---: |
 | base invocation | 1 |
-| each started 1,000-op block | 1 |
-| each started output KiB | 1 |
+| each usage unit | 1 |
 
-The computed amount is capped by `max_cpt`. Legacy tasks without a managed
-receipt continue to settle at `max_cpt`.
+The computed amount cannot exceed the selected `max_cpt` because the worker
+stops when the budget is spent. Legacy tasks without a managed receipt
+continue to use their legacy billing path during migration.
 
 ## Implementation Plan
 

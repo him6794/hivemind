@@ -1066,6 +1066,13 @@ Status: Accepted (dev-only, never ships in the release binary). The executor `ca
 
 ## Tooling / Coverage Notes
 
+## Current .hmf migration findings
+
+- `.hmf` core execution is present and its focused tests pass, but worker execution still supplies `ExecutionLimits::default()` rather than a task-selected usage budget.
+- The existing receipt separates `executed_ops`, `function_calls`, and `loop_iterations`; it is not yet a single versioned billing-unit counter covering every primitive operation.
+- Worker managed execution currently propagates evaluator errors through `?`, so budget exhaustion and runtime failures do not yet produce a settled structured failure receipt.
+- Existing Monty/Python tasks are not source-compatible with `.hmf`; migration must be explicit before the Monty executable can be removed.
+
 - Docker integration test command could not complete because Docker Desktop returned a 500 error while reading `redis:7-alpine` image metadata. This is an environment/tooling failure, not a code test failure.
 - Docker integration remained blocked after retrying both `desktop-linux` and `default` Docker contexts; both returned Docker API 500 on `/version`.
 - `psql` is not in PATH, so direct ad hoc SQL verification was unavailable; runtime API verification was used instead.

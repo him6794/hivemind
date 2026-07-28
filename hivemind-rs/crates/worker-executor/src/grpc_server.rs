@@ -209,7 +209,7 @@ impl WorkerNodeService for GrpcWorkerNodeService {
             req_gpu_memory_gb: (limits.vram_mb / 1024) as i32,
             req_storage_gb: limits.storage_total_gb,
             host_count: 1,
-            max_cpt: 0,
+            max_cpt: req.managed_budget_units,
             billing_settled: false,
             billed_amount: 0,
             managed_executed_ops: 0,
@@ -516,6 +516,7 @@ mod tests {
                 runtime: String::new(),
                 task_source: String::new(),
                 token: "not-a-token".into(),
+                managed_budget_units: 0,
             }))
             .await;
 
@@ -555,6 +556,7 @@ mod tests {
                 runtime: String::new(),
                 task_source: String::new(),
                 token: test_user_token(test_private_key_pem(), "regular-user"),
+                managed_budget_units: 0,
             }))
             .await;
 
@@ -574,6 +576,7 @@ mod tests {
                 runtime: String::new(),
                 task_source: String::new(),
                 token: bound_token(test_private_key_pem(), ASSIGNED_OWNER, "different-task"),
+                managed_budget_units: 0,
             }))
             .await;
 
@@ -593,6 +596,7 @@ mod tests {
                 runtime: String::new(),
                 task_source: String::new(),
                 token: test_token(test_private_key_pem(), ASSIGNED_OWNER),
+                managed_budget_units: 0,
             }))
             .await;
 
@@ -1006,6 +1010,7 @@ mod tests {
                     runtime: String::new(),
                     task_source: String::new(),
                     token: bound_token(test_private_key_pem(), ASSIGNED_OWNER, &execute_task_id),
+                    managed_budget_units: 0,
                 }))
                 .await
                 .unwrap()
