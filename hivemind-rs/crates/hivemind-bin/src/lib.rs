@@ -420,6 +420,8 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
             profile: control_profile,
             nodepool_addr: std::sync::Arc::new(std::sync::Mutex::new(nodepool_addr.clone())),
             config: config.clone(),
+            executor: executor.clone(),
+            registration_shutdown: std::sync::Arc::new(std::sync::Mutex::new(None)),
         };
         let control_addr = config.server.worker_control_http_addr.clone();
         let worker_control_allowed_origins =
@@ -592,8 +594,8 @@ mod tests {
         assert!(error.contains("WORKER_EXECUTION_PRIVATE_KEY_PEM"));
 
         // Given: both trust domains are configured.
-        config.auth.worker_execution_private_key_pem =
-            hivemind_config::sample_worker_execution_private_key_pem();
+        let (private_key, _) = hivemind_config::generate_worker_execution_test_key_pair();
+        config.auth.worker_execution_private_key_pem = private_key;
 
         // When/Then: nodepool startup accepts the complete trust contract.
         validate_service_config(&config, ServiceRole::Nodepool).unwrap();

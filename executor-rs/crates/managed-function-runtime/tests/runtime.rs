@@ -1,5 +1,6 @@
-use managed_function_runtime::{ExecutionLimits, ManagedExecutor, Status, Value};
 use std::collections::BTreeMap;
+
+use managed_function_runtime::{ExecutionLimits, ManagedExecutor, Status, Value};
 
 #[test]
 fn executes_function_with_branch_and_receipt_metering() {

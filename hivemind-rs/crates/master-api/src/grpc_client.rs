@@ -83,8 +83,9 @@ impl GrpcClient {
             return Ok(());
         }
         let endpoint = self.endpoint.lock().await.clone();
-        let endpoint =
-            Endpoint::from_shared(format!("http://{}", endpoint))?.http2_adaptive_window(true);
+        let endpoint = Endpoint::from_shared(format!("http://{}", endpoint))?
+            .connect_timeout(Duration::from_secs(5))
+            .http2_adaptive_window(true);
         let channel = endpoint.connect().await?;
         // Task package uploads can be large; raise client decode/encode limits.
         let max_msg = 128 * 1024 * 1024;
@@ -169,11 +170,15 @@ impl GrpcClient {
         let username = username.to_string();
         let password = password.to_string();
         self.with_clients(|mut clients| async move {
-            clients
-                .user
-                .login(Request::new(LoginRequest { username, password }))
-                .await
-                .map(|r| r.into_inner())
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                clients
+                    .user
+                    .login(Request::new(LoginRequest { username, password })),
+            )
+            .await
+            .map_err(|_| Status::deadline_exceeded("nodepool login timed out after 10 seconds"))?
+            .map(|r| r.into_inner())
         })
         .await
     }

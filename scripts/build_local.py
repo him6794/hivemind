@@ -28,8 +28,13 @@ def build_backend(repo_root: Path, env: dict[str, str], release: bool) -> None:
 
 
 def build_frontend(repo_root: Path, env: dict[str, str]) -> None:
-    for ui_dir in [repo_root / "frontend" / "master-ui", repo_root / "frontend" / "worker-ui"]:
-        run(["npm", "run", "build"], ui_dir, env)
+    frontend_dirs = [
+        repo_root / "frontend",
+        repo_root / "frontend" / "master-ui",
+        repo_root / "frontend" / "worker-ui",
+    ]
+    for frontend_dir in frontend_dirs:
+        run(["npm", "run", "build"], frontend_dir, env)
 
 
 def main() -> int:

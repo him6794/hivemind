@@ -448,7 +448,6 @@ fn reserve_worker_for_batch(workers: &mut [WorkerNode], worker_id: &str) {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use hivemind_config::HivemindConfig;
     use hivemind_models::{TaskStatus, WorkerStatus};
     use hivemind_proto::{
         worker_node_service_server::{WorkerNodeService, WorkerNodeServiceServer},
@@ -625,10 +624,7 @@ mod tests {
     #[test]
     fn worker_execution_token_is_bound_to_task_and_worker() {
         let task = make_task("bound-dispatch", TaskStatus::Assigned, 0);
-        let private_key = hivemind_config::sample_worker_execution_private_key_pem();
-        let public_key = HivemindConfig::default()
-            .auth
-            .worker_execution_public_key_pem;
+        let (private_key, public_key) = hivemind_config::generate_worker_execution_test_key_pair();
 
         let token = worker_execution_token(&private_key, &task, "worker-bound-7").unwrap();
         let claims =
@@ -893,12 +889,13 @@ mod tests {
             .await
             .unwrap();
 
+        let (private_key, _) = hivemind_config::generate_worker_execution_test_key_pair();
         execute_on_worker(
             dispatcher.repo.clone(),
             task,
             worker_id.clone(),
             worker_addr.to_string(),
-            &hivemind_config::sample_worker_execution_private_key_pem(),
+            &private_key,
         )
         .await
         .unwrap();

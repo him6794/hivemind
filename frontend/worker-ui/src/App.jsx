@@ -1,5 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { buildRegisterWorkerBody, emptyProfile, normalizeWorkerProfile, registrationOwnerUsername } from './workerProfile.mjs';
+import './console.css';
+import { clearStoredSession, readStoredSession, saveStoredSession } from './authSession.mjs';
+import {
+  buildRegisterWorkerBody,
+  emptyProfile,
+  normalizeWorkerProfile,
+  registrationOwnerUsername,
+} from './workerProfile.mjs';
 
 const panelStyle = {
   border: '1px solid #d8e0e8',
@@ -27,22 +34,34 @@ const buttonStyle = {
   fontWeight: 700,
 };
 
+const IP_PATTERN = /^[\w.-]+:\d{1,5}$/;
+const SESSION_KEY = 'hivemind.worker.session.v1';
+
+function validateWorkerEndpoint(value) {
+  if (!value || !value.trim()) return 'Worker endpoint is required';
+  if (!IP_PATTERN.test(value.trim())) return 'Invalid format. Expected host:port (e.g. 127.0.0.1:50053)';
+  return null;
+}
+
 export default function WorkerApp() {
-  // Worker UI talks only to the local worker control HTTP backend.
-  // That backend proxies login/register to the configured nodepool.
-  const apiBase = String(
-    import.meta.env.VITE_WORKER_CONTROL_BASE || import.meta.env.VITE_API_BASE || '',
-  )
+  const apiBase = String(import.meta.env.VITE_API_BASE || '').trim().replace(/\/$/, '');
+  const workerControlBase = String(import.meta.env.VITE_WORKER_CONTROL_BASE || '')
     .trim()
     .replace(/\/$/, '');
+  const initialSession = readStoredSession(window.localStorage, SESSION_KEY);
 
-  const [username, setUsername] = useState('');
+  const [username, setUsername] = useState(initialSession.username);
   const [password, setPassword] = useState('');
-  const [token, setToken] = useState('');
-  const [authenticatedUsername, setAuthenticatedUsername] = useState('');
-  const [status, setStatus] = useState('請先登入後再註冊本機節點');
-  const [loading, setLoading] = useState(false);
+  const [token, setToken] = useState(initialSession.token);
+  const [authenticatedUsername, setAuthenticatedUsername] = useState(initialSession.username);
+  const [status, setStatus] = useState(initialSession.token ? 'Session restored' : '');
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [profileError, setProfileError] = useState(null);
+  const [registerLoading, setRegisterLoading] = useState(false);
+  const [refreshLoading, setRefreshLoading] = useState(false);
   const [workerIp, setWorkerIp] = useState(`${window.location.hostname || '127.0.0.1'}:50053`);
+  const [workerIpError, setWorkerIpError] = useState(null);
   const [profile, setProfile] = useState(emptyProfile);
   const [registration, setRegistration] = useState(null);
 
@@ -56,28 +75,51 @@ export default function WorkerApp() {
     }
   }
 
-  async function localFetch(path, options = {}, authToken = token) {
-    const headers = {
-      ...(options.headers || {}),
-    };
-    if (authToken) {
-      headers.Authorization = `Bearer ${authToken}`;
+  async function authedFetch(path, options = {}, authToken = token) {
+    let res;
+    try {
+      res = await fetch(`${apiBase}${path}`, {
+        ...options,
+        headers: {
+          ...(options.headers || {}),
+          Authorization: `Bearer ${authToken}`,
+        },
+      });
+    } catch {
+      throw new Error(`Cannot reach Hivemind API at ${apiBase}. Check VITE_API_BASE.`);
     }
-    const res = await fetch(`${apiBase}${path}`, {
-      ...options,
-      headers,
-    });
     const data = await readJson(res);
     if (!res.ok) {
+      if (res.status === 401) {
+        logout();
+        throw new Error('Session expired. Please log in again.');
+      }
       throw new Error(data.message || data.status_message || `HTTP ${res.status}`);
     }
     return data;
   }
 
   async function refreshLocalProfile() {
-    const data = await localFetch('/api/worker-info', {}, '');
-    if (!data.success || !data.profile) {
-      throw new Error(data.status_message || data.message || 'Local worker agent unavailable');
+    const ipError = validateWorkerEndpoint(workerIp);
+    if (ipError) {
+      setWorkerIpError(ipError);
+      throw new Error(ipError);
+    }
+    setWorkerIpError(null);
+
+    let res;
+    try {
+      res = await fetch(`${workerControlBase}/api/worker-info`);
+    } catch {
+      throw new Error(
+        `Worker agent not responding at ${workerControlBase}. Verify the worker is running and VITE_WORKER_CONTROL_BASE is correct.`
+      );
+    }
+    const data = await readJson(res);
+    if (!res.ok || !data.success || !data.profile) {
+      throw new Error(
+        `Worker agent not responding at ${workerControlBase}. Verify the worker is running and VITE_WORKER_CONTROL_BASE is correct.`
+      );
     }
 
     const normalized = normalizeWorkerProfile(data.profile, workerIp);
@@ -89,20 +131,16 @@ export default function WorkerApp() {
   async function registerWorker(authToken = token, workerProfile = profile, endpoint = workerIp) {
     const ownerUsername = registrationOwnerUsername(authenticatedUsername, username);
     if (!authToken || !ownerUsername) return;
-    setLoading(true);
-    setStatus('正在註冊節點到 nodepool...');
+    setRegisterLoading(true);
+    setStatus('Registering worker with nodepool...');
 
     try {
       const workerId = String(workerProfile.worker_id || '').trim() || ownerUsername;
-      const data = await localFetch(
-        '/api/register-worker',
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(buildRegisterWorkerBody(ownerUsername, workerProfile, endpoint)),
-        },
-        authToken,
-      );
+      const data = await authedFetch('/api/register-worker', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(buildRegisterWorkerBody(ownerUsername, workerProfile, endpoint)),
+      }, authToken);
 
       if (!data.success) {
         throw new Error(data.status_message || 'Worker registration failed');
@@ -113,181 +151,249 @@ export default function WorkerApp() {
         message: data.status_message || 'Registered',
         workerId,
       });
-      setStatus(`節點已註冊: ${workerId}`);
+      setStatus(`Worker registered: ${workerId}`);
     } catch (err) {
       setRegistration({ success: false, message: err.message });
-      setStatus(`註冊失敗: ${err.message}`);
+      setStatus(`Registration failed: ${err.message}`);
     } finally {
-      setLoading(false);
+      setRegisterLoading(false);
     }
   }
 
   async function handleLogin(e) {
     e.preventDefault();
-    setLoading(true);
-    setStatus('登入中...');
+    setLoginLoading(true);
+    setStatus('Logging in...');
     setToken('');
     setAuthenticatedUsername('');
     setRegistration(null);
 
     try {
-      const data = await localFetch(
-        '/api/login',
-        {
+      let res;
+      try {
+        res = await fetch(`${apiBase}/api/login`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ username, password }),
-        },
-        '',
-      );
-      if (!data.success) {
+        });
+      } catch {
+        throw new Error(`Cannot reach Hivemind API at ${apiBase}. Check VITE_API_BASE.`);
+      }
+      const data = await readJson(res);
+      if (!res.ok || !data.success) {
         throw new Error(data.message || data.status_message || 'Login failed');
       }
 
       const authToken = data.token || '';
       const ownerUsername = username.trim();
+      saveStoredSession(window.localStorage, SESSION_KEY, {
+        token: authToken,
+        username: ownerUsername,
+      });
       setToken(authToken);
+      setUsername(ownerUsername);
       setAuthenticatedUsername(ownerUsername);
-      setStatus('登入成功，準備註冊節點...');
+      setStatus('Logged in. Fetching local worker info...');
       const localProfile = await refreshLocalProfile();
       await registerWorker(authToken, localProfile, localProfile.ip);
     } catch (err) {
-      setStatus(`登入失敗: ${err.message}`);
+      setStatus(`Login failed: ${err.message}`);
     } finally {
-      setLoading(false);
+      setLoginLoading(false);
     }
   }
 
   function logout() {
+    clearStoredSession(window.localStorage, SESSION_KEY);
     setToken('');
     setAuthenticatedUsername('');
     setRegistration(null);
-    setStatus('已登出');
+    setStatus('Signed out');
+  }
+
+  async function handleRefresh() {
+    setRefreshLoading(true);
+    setProfileError(null);
+    try {
+      await refreshLocalProfile();
+      setStatus('Profile refreshed');
+    } catch (err) {
+      setProfileError(err.message);
+      setStatus(`Refresh failed: ${err.message}`);
+    } finally {
+      setRefreshLoading(false);
+    }
+  }
+
+  async function handleRegisterAgain() {
+    const ipError = validateWorkerEndpoint(workerIp);
+    if (ipError) {
+      setWorkerIpError(ipError);
+      setStatus(`Validation error: ${ipError}`);
+      return;
+    }
+    setWorkerIpError(null);
+    await registerWorker();
+  }
+
+  function handleWorkerIpChange(value) {
+    setWorkerIp(value);
+    const error = validateWorkerEndpoint(value);
+    setWorkerIpError(error);
   }
 
   useEffect(() => {
-    refreshLocalProfile().catch((err) => {
-      setStatus(`讀取本機資源失敗: ${err.message}`);
-    });
+    setProfileLoading(true);
+    setProfileError(null);
+    refreshLocalProfile()
+      .then((localProfile) => {
+        if (initialSession.token && initialSession.username) {
+          setStatus('Session restored. Registering local worker...');
+          return registerWorker(initialSession.token, localProfile, localProfile.ip);
+        }
+        setStatus('Local worker profile loaded');
+        return undefined;
+      })
+      .catch((err) => {
+        setProfileError(err.message);
+        setStatus(`Cannot reach local worker agent: ${err.message}`);
+      })
+      .finally(() => setProfileLoading(false));
   }, []);
 
   return (
-    <main
-      style={{
-        minHeight: '100vh',
-        padding: '32px 20px 40px',
-        fontFamily: 'Inter, system-ui, sans-serif',
-        color: '#16202a',
-        background: 'linear-gradient(180deg, #eff4f8 0%, #f8fbfd 100%)',
-      }}
-    >
-      <div style={{ maxWidth: 1040, margin: '0 auto' }}>
-        <header style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
-          <div>
-            <h1 style={{ margin: 0, fontSize: 30 }}>Hivemind Worker</h1>
-            <p style={{ margin: '6px 0 0', color: '#5e6c7a' }}>Local node registration console</p>
+    <main className="app-shell">
+      <div className="app-container">
+        <header className="app-header">
+          <div className="brand-lockup">
+            <div className="brand-mark" aria-hidden="true" />
+            <div>
+              <p className="eyebrow">Hivemind Console</p>
+              <h1>Worker UI</h1>
+              <p className="lead">
+                Register this local worker with the nodepool, publish hardware capacity, and keep the provider session active across page reloads.
+              </p>
+            </div>
           </div>
           {token ? (
-            <button type="button" onClick={logout} style={{ ...buttonStyle, background: '#eef2f6', color: '#24313f' }}>
+            <button type="button" onClick={logout} className="button ghost">
               Sign out
             </button>
           ) : null}
         </header>
 
-        <section style={{ ...panelStyle, marginTop: 20 }}>
-          <form onSubmit={handleLogin} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
-            <label>
-              Username
-              <input value={username} onChange={(e) => setUsername(e.target.value)} style={fieldStyle} />
-            </label>
-            <label>
-              Password
-              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} style={fieldStyle} />
-            </label>
-            <button
-              type="submit"
-              disabled={loading}
-              style={{ ...buttonStyle, alignSelf: 'end', background: '#1f7a4d', color: '#fff' }}
-            >
-              {loading ? 'Working...' : 'Login and register'}
-            </button>
-          </form>
-          <div style={{ marginTop: 12, padding: '10px 12px', borderRadius: 10, background: '#edf4fa', color: '#27465d' }}>
-            {status}
-          </div>
-        </section>
-
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 18, marginTop: 18 }}>
-          <section style={panelStyle}>
-            <h2 style={{ margin: '0 0 12px', fontSize: 20 }}>Local Capacity</h2>
-            <label>
-              Worker endpoint
-              <input value={workerIp} onChange={(e) => setWorkerIp(e.target.value)} style={fieldStyle} />
-            </label>
-            <dl style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, margin: '16px 0 0' }}>
-              <dt>Worker ID</dt>
-              <dd>{profile.worker_id || '(unregistered)'}</dd>
-              <dt>CPU cores</dt>
-              <dd>{profile.cpu_cores}</dd>
-              <dt>Memory</dt>
-              <dd>{profile.memory_gb} GB</dd>
-              <dt>CPU score</dt>
-              <dd>{profile.cpu_score}</dd>
-              <dt>GPU score</dt>
-              <dd>{profile.gpu_score}</dd>
-              <dt>GPU memory</dt>
-              <dd>{profile.gpu_memory_gb} GB</dd>
-              <dt>GPU name</dt>
-              <dd>{profile.gpu_name || '-'}</dd>
-              <dt>Storage</dt>
-              <dd>
-                {profile.storage_available_gb} / {profile.storage_total_gb} GB
-              </dd>
-              <dt>Location</dt>
-              <dd>{profile.location || 'local'}</dd>
-            </dl>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 16 }}>
+        <section className="surface">
+          {token ? (
+            <div className="toolbar">
+              <div>
+                <p className="eyebrow">Authenticated</p>
+                <strong>{authenticatedUsername || username}</strong>
+              </div>
               <button
                 type="button"
-                onClick={() =>
-                  refreshLocalProfile()
-                    .then(() => setStatus('本機資源已更新'))
-                    .catch((err) => setStatus(`更新失敗: ${err.message}`))
-                }
-                style={{ ...buttonStyle, background: '#e7edf3', color: '#22313f' }}
+                onClick={handleRegisterAgain}
+                disabled={registerLoading}
+                className="button primary"
               >
-                Refresh profile
+                {registerLoading ? 'Registering...' : 'Register worker'}
               </button>
-              {token ? (
-                <button
-                  type="button"
-                  onClick={() => registerWorker().catch(() => {})}
-                  disabled={loading}
-                  style={{ ...buttonStyle, background: '#1769aa', color: '#fff' }}
-                >
-                  Register again
-                </button>
-              ) : null}
             </div>
+          ) : (
+            <form onSubmit={handleLogin} className="form-grid">
+              <label>
+                Username
+                <input value={username} onChange={(e) => setUsername(e.target.value)} className="field" />
+              </label>
+              <label>
+                Password
+                <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="field" />
+              </label>
+              <button type="submit" disabled={loginLoading} className="button primary">
+                {loginLoading ? 'Working...' : 'Login and register'}
+              </button>
+            </form>
+          )}
+          {status ? (
+            <div className={`status ${status.toLowerCase().includes('failed') || status.toLowerCase().includes('cannot') ? 'error' : ''}`}>
+              {status}
+            </div>
+          ) : null}
+        </section>
+
+        <div className="grid two" style={{ marginTop: 18 }}>
+          <section className="surface">
+            <h2>Local Capacity</h2>
+            <label>
+              Worker endpoint
+              <input
+                value={workerIp}
+                onChange={(e) => handleWorkerIpChange(e.target.value)}
+                className={`field ${workerIpError ? 'error' : ''}`}
+              />
+            </label>
+            {workerIpError ? <div className="status error">{workerIpError}</div> : null}
+
+            {profileLoading ? (
+              <div className="status">Fetching local worker info...</div>
+            ) : profileError ? (
+              <div className="status error">
+                <strong>Cannot reach local worker agent</strong>
+                <p className="subtle" style={{ marginTop: 6 }}>{profileError}</p>
+                <button type="button" onClick={handleRefresh} disabled={refreshLoading} className="button">
+                  {refreshLoading ? 'Retrying...' : 'Retry'}
+                </button>
+              </div>
+            ) : (
+              <>
+                <dl>
+                  <dt>Worker ID</dt>
+                  <dd>{profile.worker_id || '(unregistered)'}</dd>
+                  <dt>CPU cores</dt>
+                  <dd>{profile.cpu_cores}</dd>
+                  <dt>Memory</dt>
+                  <dd>{profile.memory_gb} GB</dd>
+                  <dt>CPU score</dt>
+                  <dd>{profile.cpu_score}</dd>
+                  <dt>GPU score</dt>
+                  <dd>{profile.gpu_score}</dd>
+                  <dt>GPU memory</dt>
+                  <dd>{profile.gpu_memory_gb} GB</dd>
+                  <dt>GPU name</dt>
+                  <dd>{profile.gpu_name || '-'}</dd>
+                  <dt>Storage</dt>
+                  <dd>{profile.storage_available_gb} / {profile.storage_total_gb} GB</dd>
+                  <dt>Location</dt>
+                  <dd>{profile.location || 'local'}</dd>
+                </dl>
+                <div className="actions">
+                  <button type="button" onClick={handleRefresh} disabled={refreshLoading} className="button">
+                    {refreshLoading ? 'Refreshing...' : 'Refresh profile'}
+                  </button>
+                  {token ? (
+                    <button type="button" onClick={handleRegisterAgain} disabled={registerLoading} className="button primary">
+                      {registerLoading ? 'Registering...' : 'Register again'}
+                    </button>
+                  ) : null}
+                </div>
+              </>
+            )}
           </section>
 
-          <section style={panelStyle}>
-            <h2 style={{ margin: '0 0 12px', fontSize: 20 }}>Registration Status</h2>
+          <section className="surface">
+            <h2>Registration Status</h2>
             {registration ? (
-              <div
-                style={{
-                  padding: 12,
-                  borderRadius: 10,
-                  background: registration.success ? '#eef7ef' : '#fff2f2',
-                }}
-              >
-                <div style={{ fontWeight: 700 }}>{registration.success ? 'Registered' : 'Not registered'}</div>
+              <div className={`status ${registration.success ? 'success' : 'error'}`}>
+                <strong>{registration.success ? 'Registered' : 'Not registered'}</strong>
                 <div style={{ marginTop: 6 }}>{registration.message}</div>
                 {registration.workerId ? (
-                  <div style={{ marginTop: 6, color: '#5e6c7a' }}>worker_id: {registration.workerId}</div>
+                  <div className="subtle" style={{ marginTop: 6 }}>worker_id: {registration.workerId}</div>
                 ) : null}
               </div>
-            ) : null}
+            ) : (
+              <p className="subtle">
+                Log in to register your worker node with the master nodepool. The nodepool can then assign tasks to this machine.
+              </p>
+            )}
           </section>
         </div>
       </div>

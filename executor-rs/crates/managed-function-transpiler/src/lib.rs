@@ -1,7 +1,9 @@
 //! Conservative source-to-managed-function transpiler.
 
-use std::error::Error;
-use std::fmt::{Display, Formatter};
+use std::{
+    error::Error,
+    fmt::{Display, Formatter},
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SourceLanguage {

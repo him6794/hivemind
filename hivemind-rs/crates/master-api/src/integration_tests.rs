@@ -252,6 +252,7 @@ async fn worker_path_routes_reject_unsafe_worker_ids_before_grpc() {
     let state = crate::handlers::AppState {
         grpc_client: client,
         config,
+        distribution: None,
         task_submit_limiter: Arc::new(tokio::sync::Mutex::new(
             crate::handlers::TaskSubmitRateLimiter::new(),
         )),
@@ -342,6 +343,7 @@ async fn task_path_routes_reject_unsafe_task_ids_before_grpc() {
     let state = crate::handlers::AppState {
         grpc_client: client,
         config,
+        distribution: None,
         task_submit_limiter: Arc::new(tokio::sync::Mutex::new(
             crate::handlers::TaskSubmitRateLimiter::new(),
         )),
@@ -417,6 +419,7 @@ async fn task_submission_routes_reject_invalid_resource_values_before_grpc() {
     let state = crate::handlers::AppState {
         grpc_client: client,
         config,
+        distribution: None,
         task_submit_limiter: Arc::new(tokio::sync::Mutex::new(
             crate::handlers::TaskSubmitRateLimiter::new(),
         )),

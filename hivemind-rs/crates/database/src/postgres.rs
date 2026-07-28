@@ -507,8 +507,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_migration_idempotent() {
-        let db_url = std::env::var("HIVEMIND_TEST_DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://hivemind:hivemind@localhost:5432/hivemind_test".into());
+        let db_url = std::env::var("HIVEMIND_TEST_DATABASE_URL").unwrap_or_else(|_| {
+            "postgres://hivemind:replace-with-a-test-password@localhost:5432/hivemind_test".into()
+        });
         let pool = match PgPoolOptions::new()
             .max_connections(1)
             .connect(&db_url)
@@ -575,8 +576,9 @@ mod tests {
         let schema_name = fixture.schema_name().to_string();
         fixture.cleanup().await.unwrap();
 
-        let db_url = std::env::var("HIVEMIND_TEST_DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://hivemind:hivemind@localhost:5432/hivemind_test".into());
+        let db_url = std::env::var("HIVEMIND_TEST_DATABASE_URL").unwrap_or_else(|_| {
+            "postgres://hivemind:replace-with-a-test-password@localhost:5432/hivemind_test".into()
+        });
         let admin_pool = PgPoolOptions::new()
             .max_connections(1)
             .connect(&db_url)
@@ -625,8 +627,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_seed_default_user_inserts_bootstrap_account() {
-        let db_url = std::env::var("HIVEMIND_TEST_DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://hivemind:hivemind@localhost:5432/hivemind_test".into());
+        let db_url = std::env::var("HIVEMIND_TEST_DATABASE_URL").unwrap_or_else(|_| {
+            "postgres://hivemind:replace-with-a-test-password@localhost:5432/hivemind_test".into()
+        });
         let pool = match PgPoolOptions::new()
             .max_connections(1)
             .connect(&db_url)

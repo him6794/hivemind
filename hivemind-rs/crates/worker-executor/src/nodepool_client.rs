@@ -9,7 +9,7 @@ use hivemind_proto::{
     TaskResultUploadRequest, TaskUsageRequest,
 };
 use tokio::sync::watch;
-use tonic::transport::Channel;
+use tonic::transport::{Channel, Endpoint};
 use tracing::{info, warn};
 
 use crate::WorkerExecutor;
@@ -49,14 +49,20 @@ pub async fn login_to_nodepool(
     if password.is_empty() {
         anyhow::bail!("nodepool login password is required");
     }
-    let mut client = UserServiceClient::connect(nodepool_endpoint(nodepool_addr)).await?;
-    let response = client
-        .login(LoginRequest {
+    let endpoint = Endpoint::from_shared(nodepool_endpoint(nodepool_addr))?
+        .connect_timeout(Duration::from_secs(5));
+    let channel = endpoint.connect().await?;
+    let mut client = UserServiceClient::new(channel);
+    let response = tokio::time::timeout(
+        Duration::from_secs(10),
+        client.login(LoginRequest {
             username: username.to_string(),
             password: password.to_string(),
-        })
-        .await?
-        .into_inner();
+        }),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("nodepool login timed out after 10 seconds"))??
+    .into_inner();
     if !response.success || response.token.trim().is_empty() {
         anyhow::bail!(
             "nodepool login failed: {}",
@@ -144,18 +150,25 @@ pub async fn register_once(
     location: &str,
     token: &str,
 ) -> anyhow::Result<()> {
-    let mut client = NodeManagerServiceClient::connect(nodepool_endpoint(endpoint)).await?;
-    let response = client
-        .register_worker_node(build_register_request(
+    let channel = Endpoint::from_shared(nodepool_endpoint(endpoint))?
+        .connect_timeout(Duration::from_secs(5))
+        .connect()
+        .await?;
+    let mut client = NodeManagerServiceClient::new(channel);
+    let response = tokio::time::timeout(
+        Duration::from_secs(10),
+        client.register_worker_node(build_register_request(
             worker_id,
             username,
             worker_addr,
             resources,
             location,
             token,
-        ))
-        .await?
-        .into_inner();
+        )),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("worker registration timed out after 10 seconds"))??
+    .into_inner();
     if !response.success {
         anyhow::bail!(response.status_message);
     }

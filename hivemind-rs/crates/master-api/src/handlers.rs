@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::distribution::MasterDistribution;
 use crate::grpc_client::GrpcClient;
 use crate::middleware::AuthUser;
 
@@ -25,6 +26,7 @@ use crate::middleware::AuthUser;
 pub struct AppState {
     pub grpc_client: GrpcClient,
     pub config: HivemindConfig,
+    pub distribution: Option<Arc<MasterDistribution>>,
     pub task_submit_limiter: Arc<tokio::sync::Mutex<TaskSubmitRateLimiter>>,
 }
 
@@ -1021,7 +1023,35 @@ async fn create_task_from_submission(
         }
     }
     let distribution = resolve_task_distribution(&body, uploaded_package);
-    let ts = distribution.torrent_source.unwrap_or_default();
+    let mut ts = distribution.torrent_source.unwrap_or_default();
+    if !distribution.package_data.is_empty() {
+        let Some(master_distribution) = state.distribution.as_ref() else {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(TaskResponse {
+                    success: false,
+                    message: "master package distribution is not initialized".into(),
+                    task: None,
+                }),
+            );
+        };
+        ts = match master_distribution
+            .seed_package(&distribution.package_data, &distribution.package_filename)
+            .await
+        {
+            Ok(magnet) => magnet,
+            Err(err) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(TaskResponse {
+                        success: false,
+                        message: format!("failed to seed task package from master: {err}"),
+                        task: None,
+                    }),
+                )
+            }
+        };
+    }
     let req = ProtoResourceSpec {
         cpu_cores: 0,
         memory_mb: body.memory_gb.unwrap_or(0) as i64 * 1024,
@@ -1044,8 +1074,8 @@ async fn create_task_from_submission(
             body.max_cpt.unwrap_or(quoted_cpt),
             body.runtime.as_deref().unwrap_or(""),
             body.task_source.as_deref().unwrap_or(""),
-            distribution.package_data,
-            &distribution.package_filename,
+            Vec::new(),
+            "",
         )
         .await
     {

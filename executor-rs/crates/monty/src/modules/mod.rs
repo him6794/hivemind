@@ -199,9 +199,8 @@ impl ModuleFunctions {
 
 #[cfg(test)]
 mod tests {
-    use crate::intern::{StaticStrings, StringId};
-
     use super::{BuiltinModule, BuiltinModuleRegistry};
+    use crate::intern::{StaticStrings, StringId};
 
     #[test]
     fn builtin_module_registry_roundtrip() {

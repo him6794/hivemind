@@ -1,6 +1,9 @@
 import React, { useEffect, useState } from 'react';
+import './console.css';
 import { artifactFilenameFromContentDisposition } from './artifactDownloadPolicy.mjs';
-import { validateTaskId } from './taskIdPolicy.mjs';
+import { clearStoredSession, readStoredSession, saveStoredSession } from './authSession.mjs';
+import { createTaskId, validateTaskId } from './taskIdPolicy.mjs';
+import { validateTaskUploadFile } from './taskUploadPolicy.mjs';
 
 const panelStyle = {
   border: '1px solid #d8e0e8',
@@ -33,15 +36,26 @@ function toNumber(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+const SESSION_KEY = 'hivemind.master.session.v1';
+
 export default function MasterApp() {
   const apiBase = String(import.meta.env.VITE_API_BASE || '').trim().replace(/\/$/, '');
+  const initialSession = readStoredSession(window.localStorage, SESSION_KEY);
 
-  const [username, setUsername] = useState('');
+  const [username, setUsername] = useState(initialSession.username);
   const [password, setPassword] = useState('');
-  const [token, setToken] = useState('');
-  const [status, setStatus] = useState('請先登入');
-  const [loading, setLoading] = useState(false);
+  const [token, setToken] = useState(initialSession.token);
+  const [status, setStatus] = useState(initialSession.token ? 'Session restored' : 'Please log in to manage tasks');
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [submitLoading, setSubmitLoading] = useState(false);
+  const [logLoading, setLogLoading] = useState(null);
+  const [resultLoading, setResultLoading] = useState(null);
+  const [cancelLoading, setCancelLoading] = useState(null);
+  const [downloadLoading, setDownloadLoading] = useState(null);
+  const [lastRefresh, setLastRefresh] = useState(null);
+  const [zipError, setZipError] = useState(null);
 
+  const [taskId, setTaskId] = useState('');
   const [zipFile, setZipFile] = useState(null);
   const [cpuScore, setCpuScore] = useState(0);
   const [gpuScore, setGpuScore] = useState(0);
@@ -73,13 +87,27 @@ export default function MasterApp() {
       headers['Content-Type'] = 'application/json';
     }
 
-    const res = await fetch(`${apiBase}${path}`, {
-      method,
-      headers,
-      body: body instanceof FormData ? body : body !== undefined ? JSON.stringify(body) : undefined,
-    });
+    let res;
+    try {
+      res = await fetch(`${apiBase}${path}`, {
+        method,
+        headers,
+        body: body instanceof FormData ? body : body !== undefined ? JSON.stringify(body) : undefined,
+      });
+    } catch {
+      throw new Error(`Cannot reach Hivemind API at ${apiBase}. Check your connection and VITE_API_BASE.`);
+    }
 
     const data = await readJson(res);
+    if (!res.ok) {
+      if (res.status === 401) {
+        logout();
+        throw new Error('Session expired. Please log in again.');
+      }
+      if (res.status >= 500) {
+        throw new Error(`Server error (${res.status}). Please try again later.`);
+      }
+    }
     return { ok: res.ok, data };
   }
 
@@ -95,17 +123,19 @@ export default function MasterApp() {
 
   useEffect(() => {
     if (!token) return undefined;
-    refreshTasks().catch((err) => setStatus(`任務列表更新失敗: ${err.message}`));
+    refreshTasks()
+      .then(() => setLastRefresh(Date.now()))
+      .catch((err) => setStatus(`Task load failed: ${err.message}`));
     const id = setInterval(() => {
-      refreshTasks().catch(() => {});
+      refreshTasks().then(() => setLastRefresh(Date.now())).catch(() => {});
     }, 5000);
     return () => clearInterval(id);
   }, [token]);
 
   async function handleLogin(e) {
     e.preventDefault();
-    setLoading(true);
-    setStatus('登入中...');
+    setLoginLoading(true);
+    setStatus('Logging in...');
     setToken('');
 
     try {
@@ -114,23 +144,45 @@ export default function MasterApp() {
         throw new Error(data.message || data.status_message || 'Login failed');
       }
 
+      const ownerUsername = username.trim();
+      saveStoredSession(window.localStorage, SESSION_KEY, {
+        token: data.token,
+        username: ownerUsername,
+      });
       setToken(data.token);
-      setStatus('登入成功');
+      setUsername(ownerUsername);
+      setStatus('Logged in successfully');
       await refreshTasks(data.token);
+      setLastRefresh(Date.now());
     } catch (err) {
-      setStatus(`登入失敗: ${err.message}`);
+      setStatus(`Login failed: ${err.message}`);
     } finally {
-      setLoading(false);
+      setLoginLoading(false);
     }
   }
 
   async function submitTask() {
     if (!token || !zipFile) return;
-    setLoading(true);
-    setStatus('上傳 ZIP 任務中...');
+    setSubmitLoading(true);
+    setStatus('Uploading task...');
 
     try {
+      const zipValidation = validateTaskUploadFile(zipFile);
+      if (zipValidation) {
+        throw new Error(zipValidation);
+      }
+
       const form = new FormData();
+      const effectiveTaskId = taskId.trim() || createTaskId();
+      if (!effectiveTaskId) {
+        throw new Error('task_id is required');
+      }
+      const validatedTaskId = validateTaskId(effectiveTaskId);
+      if (!validatedTaskId.ok) {
+        throw new Error(validatedTaskId.message);
+      }
+
+      form.append('task_id', validatedTaskId.taskId);
       form.append('file', zipFile);
 
       if (cpuScore > 0) form.append('cpu_score', String(toNumber(cpuScore)));
@@ -146,23 +198,28 @@ export default function MasterApp() {
         throw new Error(data.message || data.status_message || 'Task upload failed');
       }
 
+      setTaskId('');
       setZipFile(null);
-      setStatus(`任務已提交: ${data.message || 'UUID task created'}`);
+      setZipError(null);
+      setStatus(`Task submitted: ${validatedTaskId.taskId}`);
       await refreshTasks();
+      setLastRefresh(Date.now());
     } catch (err) {
-      setStatus(`提交失敗: ${err.message}`);
+      setStatus(`Upload failed: ${err.message}`);
     } finally {
-      setLoading(false);
+      setSubmitLoading(false);
     }
   }
 
   async function viewTaskLog(task) {
     if (!token) return;
     const rawId = task?.task_id || task?.TaskID || '';
-    if (!String(rawId).trim()) return;
+    setLogLoading(rawId);
+    if (!String(rawId).trim()) { setLogLoading(null); return; }
     const validatedTaskId = validateTaskId(rawId);
     if (!validatedTaskId.ok) {
       setTaskLog(validatedTaskId.message);
+      setLogLoading(null);
       return;
     }
     const id = validatedTaskId.taskId;
@@ -170,12 +227,14 @@ export default function MasterApp() {
     try {
       const { data } = await api('GET', `/api/tasks/${encodeURIComponent(id)}/log`);
       if (data.success) {
-        setTaskLog(data.log || task?.output || task?.status_message || '(無日誌)');
+        setTaskLog(data.log || task?.output || task?.status_message || '(No output yet)');
       } else {
-        setTaskLog(task?.output || task?.status_message || '(無日誌)');
+        setTaskLog(task?.output || task?.status_message || '(No output yet)');
       }
     } catch {
-      setTaskLog(task?.output || task?.status_message || '(無日誌)');
+      setTaskLog(task?.output || task?.status_message || '(No output yet)');
+    } finally {
+      setLogLoading(null);
     }
     setSelectedTask(id);
   }
@@ -183,10 +242,12 @@ export default function MasterApp() {
   async function viewTaskResult(task) {
     if (!token) return;
     const rawId = task?.task_id || task?.TaskID || '';
-    if (!String(rawId).trim()) return;
+    setResultLoading(rawId);
+    if (!String(rawId).trim()) { setResultLoading(null); return; }
     const validatedTaskId = validateTaskId(rawId);
     if (!validatedTaskId.ok) {
       setTaskResult(validatedTaskId.message);
+      setResultLoading(null);
       return;
     }
     const id = validatedTaskId.taskId;
@@ -196,10 +257,12 @@ export default function MasterApp() {
       if (data.success) {
         setTaskResult(JSON.stringify(data, null, 2));
       } else {
-        setTaskResult(data.message || data.status_message || '(無結果)');
+        setTaskResult(data.message || data.status_message || '(No result yet)');
       }
     } catch {
-      setTaskResult('(無結果)');
+      setTaskResult('(No result yet)');
+    } finally {
+      setResultLoading(null);
     }
     setSelectedTask(id);
   }
@@ -208,9 +271,12 @@ export default function MasterApp() {
     if (!token) return;
     const rawId = task?.task_id || task?.TaskID || '';
     if (!String(rawId).trim()) return;
+    if (!window.confirm(`Cancel task "${rawId}"? This cannot be undone.`)) return;
+    setCancelLoading(rawId);
     const validatedTaskId = validateTaskId(rawId);
     if (!validatedTaskId.ok) {
       setStatus(validatedTaskId.message);
+      setCancelLoading(null);
       return;
     }
     const id = validatedTaskId.taskId;
@@ -218,9 +284,12 @@ export default function MasterApp() {
     try {
       await api('POST', `/api/tasks/${encodeURIComponent(id)}/stop`);
       await refreshTasks();
-      setStatus(`已送出取消請求: ${id}`);
+      setLastRefresh(Date.now());
+      setStatus(`Task cancelled: ${id}`);
     } catch (err) {
-      setStatus(`取消失敗: ${err.message}`);
+      setStatus(`Cancel failed: ${err.message}`);
+    } finally {
+      setCancelLoading(null);
     }
   }
 
@@ -228,9 +297,11 @@ export default function MasterApp() {
     if (!token) return;
     const rawId = task?.task_id || task?.TaskID || selectedTask || '';
     if (!String(rawId).trim()) return;
+    setDownloadLoading(rawId);
     const validatedTaskId = validateTaskId(rawId);
     if (!validatedTaskId.ok) {
       setStatus(validatedTaskId.message);
+      setDownloadLoading(null);
       return;
     }
     const id = validatedTaskId.taskId;
@@ -256,175 +327,212 @@ export default function MasterApp() {
       a.click();
       a.remove();
       window.URL.revokeObjectURL(url);
-      setStatus(`artifact 已下載: ${filename}`);
+      setStatus(`Artifact downloaded: ${filename}`);
     } catch (err) {
-      setStatus(`下載失敗: ${err.message}`);
+      setStatus(`Download failed: ${err.message}`);
+    } finally {
+      setDownloadLoading(null);
     }
   }
 
   function logout() {
+    clearStoredSession(window.localStorage, SESSION_KEY);
     setToken('');
     setTasks([]);
     setSelectedTask('');
     setTaskLog('');
     setTaskResult('');
-    setStatus('請先登入');
+    setStatus('Please log in to manage tasks');
     setZipFile(null);
+    setZipError(null);
+    setLastRefresh(null);
+  }
+
+  function isTerminalStatus(statusText) {
+    return statusText === 'COMPLETED' || statusText === 'FAILED' || statusText === 'CANCELLED';
   }
 
   return (
-    <main
-      style={{
-        minHeight: '100vh',
-        padding: '32px 20px 40px',
-        fontFamily: 'Inter, system-ui, sans-serif',
-        color: '#16202a',
-        background: 'linear-gradient(180deg, #f4f7fb 0%, #fafcff 100%)',
-      }}
-    >
-      <div style={{ maxWidth: 1120, margin: '0 auto' }}>
-        <header style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
-          <div>
-            <h1 style={{ margin: 0, fontSize: 30 }}>Hivemind Master</h1>
-            <p style={{ margin: '6px 0 0', color: '#5e6c7a' }}>Submit ZIP tasks and follow your own queue</p>
+    <main className="app-shell">
+      <div className="app-container">
+        <header className="app-header">
+          <div className="brand-lockup">
+            <div className="brand-mark" aria-hidden="true" />
+            <div>
+              <p className="eyebrow">Hivemind Console</p>
+              <h1>Master UI</h1>
+              <p className="lead">
+                Submit ZIP tasks to the local Hivemind runtime, monitor execution, and collect worker output from one account session.
+              </p>
+            </div>
           </div>
           {token ? (
-            <button type="button" onClick={logout} style={{ ...buttonStyle, background: '#eef2f6', color: '#24313f' }}>
+            <button type="button" onClick={logout} className="button ghost">
               Sign out
             </button>
           ) : null}
         </header>
 
-        <section style={{ ...panelStyle, marginTop: 20 }}>
-          <form onSubmit={handleLogin} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
-            <label>
-              Username
-              <input value={username} onChange={(e) => setUsername(e.target.value)} style={fieldStyle} />
-            </label>
-            <label>
-              Password
-              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} style={fieldStyle} />
-            </label>
-            <button
-              type="submit"
-              disabled={loading}
-              style={{ ...buttonStyle, alignSelf: 'end', background: '#1769aa', color: '#fff' }}
-            >
-              {loading ? 'Working...' : 'Login'}
-            </button>
-          </form>
-          <div style={{ marginTop: 12, padding: '10px 12px', borderRadius: 10, background: '#edf4fa', color: '#27465d' }}>
+        <section className="surface">
+          {token ? (
+            <div className="toolbar">
+              <div>
+                <p className="eyebrow">Authenticated</p>
+                <strong>{username}</strong>
+              </div>
+              <button
+                type="button"
+                onClick={() => refreshTasks().then(() => {
+                  setLastRefresh(Date.now());
+                  setStatus('Tasks refreshed');
+                }).catch((err) => setStatus(`Refresh failed: ${err.message}`))}
+                className="button"
+              >
+                Refresh tasks
+              </button>
+            </div>
+          ) : (
+            <form onSubmit={handleLogin} className="form-grid">
+              <label>
+                Username
+                <input value={username} onChange={(e) => setUsername(e.target.value)} className="field" />
+              </label>
+              <label>
+                Password
+                <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="field" />
+              </label>
+              <button type="submit" disabled={loginLoading} className="button primary">
+                {loginLoading ? 'Signing in...' : 'Login'}
+              </button>
+            </form>
+          )}
+          <div className={`status ${status.toLowerCase().includes('failed') || status.toLowerCase().includes('expired') ? 'error' : ''}`}>
             {status}
           </div>
         </section>
 
         {token ? (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 18, marginTop: 18 }}>
-            <section style={panelStyle}>
-              <h2 style={{ margin: '0 0 12px', fontSize: 20 }}>Upload ZIP Task</h2>
-              <label style={{ display: 'block' }}>
-                ZIP file
-                <input
-                  type="file"
-                  accept=".zip,application/zip"
-                  onChange={(e) => {
-                    const file = e.target.files?.[0] || null;
-                    setZipFile(file);
-                  }}
-                  style={{ ...fieldStyle, paddingTop: 9 }}
-                />
-              </label>
-              <div style={{ marginTop: 12, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12 }}>
+          <div className="grid two" style={{ marginTop: 18 }}>
+            <section className="surface">
+              <h2>Upload Task</h2>
+              <div className="grid">
+                <label>
+                  Task ID
+                  <input
+                    value={taskId}
+                    onChange={(e) => setTaskId(e.target.value)}
+                    placeholder="optional, defaults to UUID"
+                    className="field"
+                  />
+                </label>
+                <label>
+                  Task file
+                  <input
+                    type="file"
+                    accept=".torrent,.zip,application/x-bittorrent,application/zip"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0] || null;
+                      const error = validateTaskUploadFile(file);
+                      setZipError(error);
+                      setZipFile(file);
+                    }}
+                    className={`field ${zipError ? 'error' : ''}`}
+                  />
+                  {zipError ? <div className="status error">{zipError}</div> : null}
+                </label>
+              </div>
+
+              <div className="metric-grid" style={{ marginTop: 12 }}>
                 <label>
                   CPU score
-                  <input type="number" min="0" value={cpuScore} onChange={(e) => setCpuScore(e.target.value)} style={fieldStyle} />
+                  <input type="number" min="0" value={cpuScore} onChange={(e) => setCpuScore(e.target.value)} className="field" />
                 </label>
                 <label>
                   GPU score
-                  <input type="number" min="0" value={gpuScore} onChange={(e) => setGpuScore(e.target.value)} style={fieldStyle} />
+                  <input type="number" min="0" value={gpuScore} onChange={(e) => setGpuScore(e.target.value)} className="field" />
                 </label>
                 <label>
                   Memory GB
-                  <input type="number" min="0" value={memoryGb} onChange={(e) => setMemoryGb(e.target.value)} style={fieldStyle} />
+                  <input type="number" min="0" value={memoryGb} onChange={(e) => setMemoryGb(e.target.value)} className="field" />
                 </label>
                 <label>
                   GPU memory GB
-                  <input type="number" min="0" value={gpuMemoryGb} onChange={(e) => setGpuMemoryGb(e.target.value)} style={fieldStyle} />
+                  <input type="number" min="0" value={gpuMemoryGb} onChange={(e) => setGpuMemoryGb(e.target.value)} className="field" />
                 </label>
                 <label>
                   Storage GB
-                  <input type="number" min="0" value={storageGb} onChange={(e) => setStorageGb(e.target.value)} style={fieldStyle} />
+                  <input type="number" min="0" value={storageGb} onChange={(e) => setStorageGb(e.target.value)} className="field" />
                 </label>
                 <label>
                   Host count
-                  <input type="number" min="1" value={hostCount} onChange={(e) => setHostCount(e.target.value)} style={fieldStyle} />
+                  <input type="number" min="1" value={hostCount} onChange={(e) => setHostCount(e.target.value)} className="field" />
                 </label>
                 <label>
                   Max CPT
-                  <input type="number" min="0" value={maxCpt} onChange={(e) => setMaxCpt(e.target.value)} style={fieldStyle} />
+                  <input type="number" min="0" value={maxCpt} onChange={(e) => setMaxCpt(e.target.value)} className="field" />
                 </label>
               </div>
-              <div style={{ marginTop: 14, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <div className="actions">
                 <button
                   type="button"
                   onClick={submitTask}
-                  disabled={loading || !zipFile}
-                  style={{ ...buttonStyle, background: '#1f7a4d', color: '#fff' }}
+                  disabled={submitLoading || !zipFile || !!zipError}
+                  className="button primary"
                 >
-                  {loading ? 'Uploading...' : 'Upload ZIP'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => refreshTasks().then(() => setStatus('任務列表已更新')).catch((err) => setStatus(`更新失敗: ${err.message}`))}
-                  style={{ ...buttonStyle, background: '#e7edf3', color: '#22313f' }}
-                >
-                  Refresh tasks
+                  {submitLoading ? 'Uploading...' : 'Upload Task'}
                 </button>
               </div>
             </section>
 
-            <section style={panelStyle}>
-              <h2 style={{ margin: '0 0 12px', fontSize: 20 }}>Your Tasks</h2>
+            <section className="surface">
+              <div className="toolbar" style={{ marginBottom: 12 }}>
+                <h2 style={{ marginBottom: 0 }}>Your Tasks</h2>
+                {lastRefresh ? (
+                  <span className="subtle">Updated {Math.round((Date.now() - lastRefresh) / 1000)}s ago</span>
+                ) : null}
+              </div>
               {tasks.length === 0 ? (
-                <p style={{ color: '#5e6c7a' }}>沒有任務。</p>
+                <p className="subtle">No tasks yet. Upload a task file to get started.</p>
               ) : (
-                <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'grid', gap: 12 }}>
+                <ul className="task-list">
                   {tasks.map((task) => {
                     const id = task.task_id || task.TaskID || '';
                     const statusText = task.status || task.Status || '';
+                    const statusClass = statusText.toLowerCase();
                     const message = task.status_message || task.StatusMessage || '';
                     const wallTimeMs = Number(task.wall_time_ms || 0);
                     const billedAmount = Number(task.billed_amount || 0);
-                    const statusColor =
-                      statusText === 'COMPLETED' ? '#2e7d32'
-                        : statusText === 'FAILED' ? '#c62828'
-                          : statusText === 'RUNNING' ? '#1565c0'
-                            : '#666';
+                    const terminal = isTerminalStatus(statusText);
+
+                    const isLogLoading = logLoading === id;
+                    const isResultLoading = resultLoading === id;
+                    const isCancelLoading = cancelLoading === id;
+                    const isDownloadLoading = downloadLoading === id;
 
                     return (
-                      <li key={id} style={{ border: '1px solid #dfe5ec', borderRadius: 12, padding: 12 }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center' }}>
+                      <li key={id} className="task-row">
+                        <div className="row-head">
                           <strong>{id}</strong>
-                          <span style={{ color: statusColor, fontWeight: 700, fontSize: 12 }}>{statusText}</span>
+                          <span className={`pill ${statusClass}`}>{statusText}</span>
                         </div>
-                        <div style={{ fontSize: 12, color: '#5e6c7a', marginTop: 4 }}>{message}</div>
-                        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 6, fontSize: 12, color: '#66717d' }}>
-                          <span>wall: {(wallTimeMs / 1000).toFixed(1)}s</span>
-                          <span>billed: {billedAmount} CPT</span>
-                          {task.retry_count ? <span>retries: {task.retry_count}</span> : null}
+                        <div className="subtle" style={{ marginTop: 4, fontSize: 12 }}>{message}</div>
+                        <div className="meta">
+                          <span>wall {(wallTimeMs / 1000).toFixed(1)}s</span>
+                          <span>billed {billedAmount} CPT</span>
+                          {task.retry_count ? <span>retries {task.retry_count}</span> : null}
                         </div>
-                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
-                          <button type="button" onClick={() => viewTaskLog(task)} style={{ ...buttonStyle, background: '#eef2f6', color: '#24313f' }}>
-                            Log
+                        <div className="actions">
+                          <button type="button" onClick={() => viewTaskLog(task)} disabled={isLogLoading} className="button">
+                            {isLogLoading ? 'Loading...' : 'Log'}
                           </button>
-                          <button type="button" onClick={() => viewTaskResult(task)} style={{ ...buttonStyle, background: '#eef2f6', color: '#24313f' }}>
-                            Result
+                          <button type="button" onClick={() => viewTaskResult(task)} disabled={isResultLoading} className="button">
+                            {isResultLoading ? 'Loading...' : 'Result'}
                           </button>
-                          <button type="button" onClick={() => downloadArtifact(task)} style={{ ...buttonStyle, background: '#eef2f6', color: '#24313f' }}>
-                            Download
+                          <button type="button" onClick={() => downloadArtifact(task)} disabled={isDownloadLoading} className="button">
+                            {isDownloadLoading ? 'Downloading...' : 'Download'}
                           </button>
-                          <button type="button" onClick={() => cancelTask(task)} style={{ ...buttonStyle, background: '#f4d7d7', color: '#8d1d1d' }}>
-                            Cancel
+                          <button type="button" onClick={() => cancelTask(task)} disabled={isCancelLoading || terminal} className="button danger">
+                            {isCancelLoading ? 'Cancelling...' : 'Cancel'}
                           </button>
                         </div>
                       </li>
@@ -434,22 +542,16 @@ export default function MasterApp() {
               )}
             </section>
 
-            <section style={{ ...panelStyle, gridColumn: '1 / -1' }}>
-              <h2 style={{ margin: '0 0 12px', fontSize: 20 }}>
-                Task Detail {selectedTask ? `(${selectedTask})` : ''}
-              </h2>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 16 }}>
+            <section className="surface" style={{ gridColumn: '1 / -1' }}>
+              <h2>Task Detail {selectedTask ? `(${selectedTask})` : ''}</h2>
+              <div className="grid two">
                 <div>
                   <strong>Log</strong>
-                  <pre style={{ whiteSpace: 'pre-wrap', background: '#fafcff', border: '1px solid #e3e8ef', padding: 12, borderRadius: 10, minHeight: 160 }}>
-                    {taskLog || '(empty)'}
-                  </pre>
+                  <pre>{logLoading ? 'Loading log...' : (taskLog || '(No output yet)')}</pre>
                 </div>
                 <div>
                   <strong>Result</strong>
-                  <pre style={{ whiteSpace: 'pre-wrap', background: '#fafcff', border: '1px solid #e3e8ef', padding: 12, borderRadius: 10, minHeight: 160 }}>
-                    {taskResult || '(empty)'}
-                  </pre>
+                  <pre>{resultLoading ? 'Loading result...' : (taskResult || '(No result yet)')}</pre>
                 </div>
               </div>
             </section>

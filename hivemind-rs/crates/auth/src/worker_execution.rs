@@ -12,11 +12,6 @@ pub const DEFAULT_WORKER_EXECUTION_PUBLIC_KEY_PEM: &str = "-----BEGIN PUBLIC KEY
 MCowBQYDK2VwAyEAfG12U4EBcWCj7yKaZUhlUmPvRtLEAZshKvN2WyL7EPs=\n\
 -----END PUBLIC KEY-----\n";
 
-/// Matching sample/dev private key for local compose and unit tests only.
-pub const SAMPLE_WORKER_EXECUTION_PRIVATE_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
-MC4CAQAwBQYDK2VwBCIEICKHh+VEGAfiiOPJJzI7afT5yro9vY5hldaNtGSXSDhY\n\
------END PRIVATE KEY-----\n";
-
 /// Signs worker-execution JWTs with the platform Ed25519 private key.
 #[derive(Clone)]
 pub struct WorkerExecutionSigner {
@@ -107,10 +102,9 @@ mod tests {
 
     #[test]
     fn ed25519_roundtrip_binds_task_and_worker() {
-        let signer =
-            WorkerExecutionSigner::from_pem(SAMPLE_WORKER_EXECUTION_PRIVATE_KEY_PEM).unwrap();
-        let verifier =
-            WorkerExecutionVerifier::from_pem(DEFAULT_WORKER_EXECUTION_PUBLIC_KEY_PEM).unwrap();
+        let (private_key, public_key) = hivemind_config::generate_worker_execution_test_key_pair();
+        let signer = WorkerExecutionSigner::from_pem(&private_key).unwrap();
+        let verifier = WorkerExecutionVerifier::from_pem(&public_key).unwrap();
         let token = signer.encode_claims(&sample_claims()).unwrap();
         let claims = verifier.decode(&token).unwrap();
         assert_eq!(claims.role.as_deref(), Some("worker-execution"));

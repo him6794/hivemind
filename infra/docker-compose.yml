@@ -22,5 +22,5 @@ services:
     environment:
       POSTGRES_DB: hivemind
       POSTGRES_USER: hivemind
-      POSTGRES_PASSWORD: hivemind
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
     restart: unless-stopped

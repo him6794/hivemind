@@ -26,7 +26,9 @@ If you want to upload a task and write the task program, start here:
 Hivemind is a batch-oriented distributed compute runtime. The system consists of:
 
 - **Hivemind Binary** (`hivemind-rs/`) - Unified Rust binary containing all services
-- **Frontend** (`frontend/`) - React UIs for master and worker management
+- **Official Site** (`frontend/`) - Public-facing product site, account center, and documentation
+- **Master UI** (`frontend/master-ui/`) - React surface for users: task submission, API keys, dashboard
+- **Worker UI** (`frontend/worker-ui/`) - React surface for workers: node status, task queue, earnings
 - **Infrastructure** - Docker Compose for Redis and PostgreSQL
 
 ### Services
@@ -75,6 +77,19 @@ make build
 
 # Build frontend
 make build-frontend
+
+# Release smoke all frontend surfaces
+make smoke-frontend
+```
+
+The shared frontend release harness also runs directly on Windows PowerShell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release-frontends.ps1
+
+$env:VITE_API_BASE = "http://127.0.0.1:8082"
+$env:VITE_WORKER_CONTROL_BASE = "http://127.0.0.1:18080"
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release-frontend-smoke.ps1
 ```
 
 ### Test
@@ -99,27 +114,21 @@ make fmt
 
 ## Deployment
 
+### Exposed Ports
 
-## Multi-Host Role Binaries
-
-Build feature-gated role binaries from the Rust workspace:
-
-```bash
-cd hivemind-rs
-cargo build --release --no-default-features --features worker --bin hivemind-worker
-cargo build --release --no-default-features --features master --bin hivemind-master
-cargo build --release --no-default-features --features nodepool --bin hivemind-nodepool
-```
-
-For multi-host deployments, set bind and advertise endpoints separately (`WORKER_ADVERTISE_ADDR`, `NODEPOOL_GRPC_ENDPOINT`, `TORRENT_SEED_ADVERTISE_HOST`). Backend authorization, not UI checks, defines privilege. Workers verify nodepool-issued execution tokens with the platform public key (embedded by default) and must not receive control-plane `JWT_SECRET` or the execution private key. Prefer `docker-compose.yml` for the canonical multi-service topology.
-
+| Service       | Port  | Description                |
+|---------------|-------|----------------------------|
+| Official Site | 8080  | Public product site and account center |
+| Master UI     | 3000  | User-facing task dashboard |
+| Worker UI     | 3001  | Worker node control panel  |
+| Master API    | 8082  | HTTP API (auth, tasks)     |
+| Nodepool gRPC | 50051 | Worker registration        |
+| Worker gRPC   | 50053 | Task execution             |
+| Worker HTTP   | 18080 | Local worker control API   |
+| Redis         | 6379  | Session & cache            |
+| PostgreSQL    | 5432  | Persistent data            |
 
 ### Docker Compose
-
-Copy `.env.example` to `.env`, replace every `replace-me` value, and provision
-the worker registration account before starting the worker. The worker image
-contains the pinned Monty runtime and serves its UI from the same process; the
-master image likewise serves the master UI.
 
 ```bash
 # Start all services
@@ -132,27 +141,6 @@ make docker-logs
 make docker-down
 ```
 
-`JWT_SECRET` is the control-plane signing secret for nodepool and website-api. User-deployed masters do not receive this secret; they forward nodepool-issued JWTs. Remote masters set `MASTER_WEBSITE_API_BASE` so login can auto-issue VPN bootstrap config from website-api (no manual preauth key copy).
-`WORKER_EXECUTION_PRIVATE_KEY_PEM` is the platform Ed25519 private key used by
-nodepool to sign worker execution tokens. Put it on one `.env` line with literal
-`\n` separators. Official/sample workers embed the matching public key and do
-not require an execution secret. For local/dev with those workers you can use:
-
-```bash
-WORKER_EXECUTION_PRIVATE_KEY_PEM=-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEICKHh+VEGAfiiOPJJzI7afT5yro9vY5hldaNtGSXSDhY\n-----END PRIVATE KEY-----\n
-```
-
-Generate a production key with `openssl genpkey -algorithm Ed25519` and convert
-newlines to `\n`. Self-hosted platforms that mint a new key must also set
-`WORKER_EXECUTION_PUBLIC_KEY_PEM` on workers. The
-Compose worker gRPC port binds to loopback by default. For a multi-host
-deployment, set `WORKER_GRPC_BIND_HOST` to the specific host interface that
-should accept worker gRPC traffic and set `WORKER_ADVERTISE_ADDR` to the same
-worker's routable `host:port` endpoint. Also set `NODEPOOL_GRPC_ENDPOINT`,
-`TORRENT_ANNOUNCE_URL`, and `TORRENT_SEED_ADVERTISE_HOST` to routable
-addresses. Keep nodepool/worker traffic on a private network or VPN; public
-Internet TLS/mTLS termination is still an operator responsibility.
-
 ### Manual
 
 ```bash
@@ -160,14 +148,15 @@ Internet TLS/mTLS termination is still an operator responsibility.
 docker run -d -p 6379:6379 redis:7-alpine
 
 # Start PostgreSQL
+export POSTGRES_PASSWORD='replace-with-a-strong-password'
 docker run -d -p 5432:5432 \
   -e POSTGRES_DB=hivemind \
   -e POSTGRES_USER=hivemind \
-  -e POSTGRES_PASSWORD=hivemind \
+  -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
   postgres:16-alpine
 
 # Run Hivemind
-DATABASE_URL=postgres://hivemind:hivemind@localhost:5432/hivemind \
+DATABASE_URL="postgres://hivemind:${POSTGRES_PASSWORD}@localhost:5432/hivemind" \
 REDIS_URL=redis://localhost:6379 \
 ./target/release/hivemind-bin all
 ```
@@ -180,22 +169,18 @@ Configuration is via environment variables:
 |----------|---------|-------------|
 | `DATABASE_URL` | - | PostgreSQL connection string |
 | `REDIS_URL` | - | Redis connection string |
-| `JWT_SECRET` | - | Nodepool/website-api control-plane JWT signing secret |
-| `WORKER_EXECUTION_PRIVATE_KEY_PEM` | - | Nodepool Ed25519 private key PEM for signing worker execution tokens |
-| `WORKER_EXECUTION_PUBLIC_KEY_PEM` | embedded sample/official key | Worker Ed25519 public key PEM used to verify execution tokens |
-| `HIVEMIND_ADMIN_USERS` | unset | Comma-separated usernames allowed to access `/api/admin/*`; configured names are reserved from public registration |
+| `JWT_SECRET` | - | JWT signing secret |
+| `HIVEMIND_ADMIN_USERS` | unset | Comma-separated usernames allowed to access `/api/admin/*` endpoints |
 | `HIVEMIND_TASK_SUBMIT_LIMIT_PER_MINUTE` | `60` | Per-user task submission rate limit for a rolling 1-minute window (`0` disables limiting) |
+| `WEBSITE_NODEPOOL_GRPC_ADDR` | `localhost:50051` | Server-side nodepool target used only by the official website backend for account endpoints |
 | `MASTER_HTTP_ADDR` | `0.0.0.0:8082` | Master HTTP listen address |
 | `NODEPOOL_GRPC_ADDR` | `0.0.0.0:50051` | Nodepool gRPC listen/connect address |
 | `WORKER_GRPC_ADDR` | `0.0.0.0:50053` | Worker gRPC listen address |
 | `WORKER_ADVERTISE_ADDR` | - | Worker address registered with nodepool |
-| `TORRENT_API_DIR` | `./api/torrents` | Nodepool seed directory for uploaded task packages |
+| `TORRENT_API_DIR` | `./api/torrents` | Seed directory for uploaded task packages |
 | `TORRENT_BT_DIR` | `./bt_torrents` | Generated `.torrent` output directory |
-| `TORRENT_ANNOUNCE_URL` | `http://localhost:6969/announce` | Tracker announce URL embedded in magnets/torrents (workers must reach this) |
-| `TORRENT_TRACKER_LISTEN_ADDR` | `0.0.0.0:6969` | Nodepool HTTP tracker listen address |
-| `TORRENT_SEED_LISTEN_ADDR` | `0.0.0.0:6881` | Nodepool BitTorrent seed listen address |
-| `TORRENT_SEED_ADVERTISE_HOST` | unset | Optional host/IP advertised to workers for the nodepool seeder |
-| `TORRENT_TASK_ARTIFACT_BASE_URL` | unset | Legacy optional HTTP artifact base URL; primary package distribution is now nodepool BT seeding |
+| `TORRENT_ANNOUNCE_URL` | `http://localhost:6969/announce` | Tracker announce URL embedded in torrents |
+| `TORRENT_TASK_ARTIFACT_BASE_URL` | unset | Optional HTTP base URL that exposes `TORRENT_API_DIR`; when set, ZIP uploads can be distributed to workers as downloadable `uploads/<task>.zip` URLs without requiring shared local storage |
 | `EXECUTOR_SANDBOX_DIR` | `./sandbox` | Per-task sandbox root |
 | `LOG_LEVEL` | `info` | Log level (debug, info, warn, error) |
 
@@ -226,15 +211,18 @@ curl -X POST http://localhost:8082/api/tasks \
     "max_cpt": 25
   }'
 
-# Upload a local ZIP as bytes (JSON task creation rejects server-local paths)
-curl -X POST http://localhost:8082/api/tasks/upload \
+# Create task from a local ZIP path on the master host
+curl -X POST http://localhost:8082/api/tasks \
   -H "Authorization: Bearer <token>" \
-  -F "task_id=task-zip-1" \
-  -F "file=@./task/windows_dist/out/task.zip" \
-  -F "memory_gb=4" \
-  -F "cpu_score=100" \
-  -F "storage_gb=10" \
-  -F "max_cpt=25"
+  -H "Content-Type: application/json" \
+  -d '{
+    "task_id": "task-zip-1",
+    "zip_path": "./task/windows_dist/out/task.zip",
+    "memory_gb": 4,
+    "cpu_score": 100,
+    "storage_gb": 10,
+    "max_cpt": 25
+  }'
 
 # List tasks
 curl http://localhost:8082/api/tasks \
@@ -266,4 +254,3 @@ curl http://localhost:8082/health
 ## License
 
 MIT
-
