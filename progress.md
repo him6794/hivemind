@@ -3,7 +3,7 @@
 ## 狀態
 
 - overall: `running`
-- current_stage: `budget-runtime-and-wireup`
+- current_stage: `design-audit-after-budget-wireup`
 - owner: Codex
 - last_checkpoint: 建立計劃前已確認 runtime 與 worker 基線測試通過
 
@@ -19,12 +19,14 @@
 - worker 已將 managed budget 傳入 evaluator，並將 evaluator failure 轉為 managed failure receipt。
 - scheduler managed settlement 已改用 `base_invocation_cpt + usage_units`，不再按 output bytes 或 1,000-op block 計價。
 - master API 已要求 managed runtime 同時提供 `task_source` 與正數 `max_cpt`，並拒絕未知 runtime 名稱。
+- 完成 replacement scope 審查：補上 P0/P1/非目標語法矩陣，以及 budget、settlement、receipt trust、I/O、capability、migration、rollback、operations、testing 設計點。
 
 ## 下一個動作
 
-1. 補 API validation、receipt schema version 與 failure settlement tests。
-2. 建立 `.hmf` 語言 migration fixtures，對照現有 Monty-compatible task 能力。
-3. 逐步把 worker legacy execution 改為 `.hmf`，再移除 Monty executable。
+1. 將 P0 grammar 轉成 parser/evaluator failing tests，先補 `null`、unary、logical、indexing、multi-statement function。
+2. 補 API validation、receipt schema version 與 failure settlement tests。
+3. 建立 `.hmf` 語言 migration fixtures，對照現有 Monty-compatible task 能力。
+4. 逐步把 worker legacy execution 改為 `.hmf`，再移除 Monty executable。
 
 ## Verification
 
