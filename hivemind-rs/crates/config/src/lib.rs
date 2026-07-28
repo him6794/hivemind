@@ -631,6 +631,17 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    // These tests mutate process-wide environment and working-directory state.
+    static ENVIRONMENT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn lock_environment() -> std::sync::MutexGuard<'static, ()> {
+        ENVIRONMENT_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     #[test]
     fn omitted_optional_fields_keep_sensible_defaults() {
@@ -732,6 +743,7 @@ mod tests {
 
     #[test]
     fn env_loading_keeps_defaults_for_unspecified_values() {
+        let _environment_lock = lock_environment();
         let old_config = std::env::var_os("HIVEMIND_CONFIG");
         let old_database_url = std::env::var_os("DATABASE_URL");
         let old_redis_url = std::env::var_os("REDIS_URL");
@@ -805,6 +817,7 @@ mod tests {
 
     #[test]
     fn env_loading_applies_ui_directory_overrides_without_json_config() {
+        let _environment_lock = lock_environment();
         let old_config = std::env::var_os("HIVEMIND_CONFIG");
         let old_master_ui_dir = std::env::var_os("MASTER_UI_DIR");
         let old_worker_ui_dir = std::env::var_os("WORKER_UI_DIR");
@@ -833,6 +846,7 @@ mod tests {
 
     #[test]
     fn env_loading_reads_worker_execution_keys_without_json_config() {
+        let _environment_lock = lock_environment();
         // Given: no JSON config and explicit worker-execution key material.
         let old_config = std::env::var_os("HIVEMIND_CONFIG");
         let old_private = std::env::var_os("WORKER_EXECUTION_PRIVATE_KEY_PEM");
@@ -871,6 +885,7 @@ mod tests {
 
     #[test]
     fn json_config_applies_environment_overrides_after_file_defaults() {
+        let _environment_lock = lock_environment();
         // Given: a JSON configuration with file defaults and distinct launcher overrides.
         let old_env = [
             ("HIVEMIND_CONFIG", std::env::var_os("HIVEMIND_CONFIG")),
