@@ -39,6 +39,9 @@ worklog/
 # Local data and backups
 docs_backup_*/
 api/
+!frontend/src/app/api/
+!frontend/src/app/api/[...path]/
+!frontend/src/app/api/[...path]/route.ts
 hivemind-rs/api/
 hivemind-rs/bt_torrents/
 test_tasks/
