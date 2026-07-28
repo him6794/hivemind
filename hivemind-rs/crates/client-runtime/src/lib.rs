@@ -15,7 +15,9 @@ use std::collections::HashMap;
 #[cfg(target_os = "windows")]
 use std::ffi::{CStr, CString};
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "windows")]
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
