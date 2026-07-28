@@ -7,6 +7,10 @@
 ## 成功條件
 
 - `.hmf` 的計價單位由 evaluator 逐個 primitive operation/function call 累加。
+- `.hmf` v1 的核心語意具備圖靈完備能力；實際執行以使用者 budget 作為可中止的 step budget。
+- worker 以固定 IR command 執行，每 100 個 commands 形成一個 settlement chunk 並回報 nodepool。
+- nodepool 在放行下一個 chunk 前，以 cost table 中單一 command 的最高可能成本乘以 100，檢查餘額是否足夠；不足則停止該 task。
+- 每個 chunk 必須附帶可由 nodepool 驗證的 zero-knowledge execution proof。
 - 任務預算由 API/task contract 傳到 scheduler 與 worker；不再使用硬編碼的 runtime 預設計價上限。
 - 使用量用盡時以結構化 `budget_exhausted` 結果結束；成功與失敗都能產生可結算 receipt。
 - 現有 managed-function templates 全部可執行，並有 golden/negative/limit tests。
@@ -25,6 +29,8 @@
    - 修正 UTF-8、負數、overflow、source location 與 parser error。
    - 補齊 `.hmf` 實際 migration 所需的 expressions/statements。
    - 加入 fuzz/property/golden tests。
+   - 將 parser AST 編譯成版本化、deterministic、可計價的 `.hmf` IR；command 定義以 IR instruction 為準，不以 source text statement 為準。
+   - 補齊圖靈完備核心：可變 binding、`while`、recursion、可擴張 heap/list/dict；固定 worker 資源只是實際執行限制，不是語言語意限制。
 
 3. **預算與執行契約整合**
    - API、models、proto、scheduler、worker 傳遞使用者選定的預算/單價版本。
@@ -35,6 +41,11 @@
    - nodepool/scheduler 以 receipt 結算，不信任 caller 任意聲稱的費用。
    - 加入 reservation、settlement、refund/failed-task 規則。
    - receipt schema versioning、hash/source identity 與跨版本相容測試。
+   - 建立 100-command chunk protocol：chunk index、pre-state root、post-state root、command count、usage units、cost table version、balance reservation 與 proof。
+   - nodepool 只在前一 chunk proof 驗證成功且下一 chunk 的 worst-case reserve 足額時放行下一 chunk；worst-case reserve = `max_command_cost(cost_table) * 100`，最後不足 100 commands 的 chunk 按實際 command count 計算。
+   - chunk 完成後按實際 usage settlement，釋放 worst-case reserve 與實際費用的差額；所有 reserve/settlement 必須 idempotent。
+   - ZK proof 的 public inputs 至少包含 task/source/IR hash、runtime/cost-table version、chunk index、pre/post state commitment、command count、usage units；witness 是 execution trace，不把完整 trace 交給 nodepool。
+   - 先 benchmark proof generation、verification、proof size、memory 與 100-command throughput；未達 worker/nodepool SLA 前不得切 production。
 
 5. **任務遷移與雙跑驗證**
    - 將現有適用 Monty task 改為 `.hmf` 或明確標示不可遷移。
@@ -102,3 +113,5 @@
 - **Compatibility/migration**：建立 Monty feature inventory、`.py`→`.hmf` migration validator/transpiler、unsupported diagnostic、golden corpus、dual-run 差異分類與 rollback/canary plan。
 - **Operations**：metrics/log fields、receipt retention、billing audit、runtime version rollout、old receipt replay、跨 worker version compatibility。
 - **Testing**：parser negative tests、property/fuzz tests、resource exhaustion tests、differential tests、cross-platform deterministic tests、benchmark 與 release artifact scan。
+- **ZK correctness**：valid trace 可證明、錯誤 opcode/成本/狀態轉移/跨 chunk state/重播 chunk 必須被拒絕；proof key、circuit/IR version 與 verifier rollout 必須可治理。
+- **Chunk failure semantics**：chunk 中途 budget 不足、worker 掉線、proof invalid、nodepool timeout、redispatch、最後不足 100 commands 的計費與退款規則必須固定。
