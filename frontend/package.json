@@ -25,6 +25,10 @@
     "tailwind-merge": "^3.3.1",
     "zustand": "^5.0.6"
   },
+  "overrides": {
+    "postcss": "8.5.23",
+    "sharp": "0.35.3"
+  },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.1.12",
     "@types/node": "^24.3.0",
