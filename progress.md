@@ -20,13 +20,18 @@
 - scheduler managed settlement 已改用 `base_invocation_cpt + usage_units`，不再按 output bytes 或 1,000-op block 計價。
 - master API 已要求 managed runtime 同時提供 `task_source` 與正數 `max_cpt`，並拒絕未知 runtime 名稱。
 - 完成 replacement scope 審查：補上 P0/P1/非目標語法矩陣，以及 budget、settlement、receipt trust、I/O、capability、migration、rollback、operations、testing 設計點。
+- 新增圖靈完備核心目標：`while`、可變 binding、recursion、可擴張 heap；實際執行由 budget 中止。
+- 新增 100-command chunk settlement 與 worst-case reserve 規則：下一 chunk 需先通過 `max_command_cost * 100` 餘額檢查。
+- 新增每個 chunk 的 zero-knowledge execution proof、state commitment、cost-table version 與 proof benchmark 門檻。
 
 ## 下一個動作
 
 1. 將 P0 grammar 轉成 parser/evaluator failing tests，先補 `null`、unary、logical、indexing、multi-statement function。
-2. 補 API validation、receipt schema version 與 failure settlement tests。
-3. 建立 `.hmf` 語言 migration fixtures，對照現有 Monty-compatible task 能力。
-4. 逐步把 worker legacy execution 改為 `.hmf`，再移除 Monty executable。
+2. 定義並測試版本化 `.hmf` IR 與 command cost table，確認圖靈完備核心的 step semantics。
+3. 實作 100-command chunk protocol、worst-case reserve、actual settlement 與 failure/retry semantics。
+4. 建立 ZK circuit/prover/verifier spike 與 proof benchmark，再接入 nodepool authorization。
+5. 建立 `.hmf` 語言 migration fixtures，對照現有 Monty-compatible task 能力。
+6. 逐步把 worker legacy execution 改為 `.hmf`，再移除 Monty executable。
 
 ## Verification
 
