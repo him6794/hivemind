@@ -11,8 +11,20 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $packagingTestPath = Join-Path $PSScriptRoot "docker-compose-release.Tests.ps1"
-$originalJwtSecret = [Environment]::GetEnvironmentVariable("JWT_SECRET", "Process")
-$restoreJwtSecret = $false
+$managedEnvironmentNames = @(
+    "POSTGRES_PASSWORD",
+    "POSTGRES_HOST_PORT",
+    "REDIS_HOST_PORT",
+    "JWT_SECRET",
+    "WORKER_EXECUTION_PRIVATE_KEY_PEM",
+    "WORKER_EXECUTION_PUBLIC_KEY_PEM"
+)
+$originalEnvironment = @{}
+foreach ($name in $managedEnvironmentNames) {
+    $originalEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
+}
+$restoreEnvironmentNames = @()
+$temporaryKeyDirectory = $null
 $services = @(
     @{
         Name = "official-site"
@@ -94,12 +106,138 @@ function Wait-ForHttpOk {
     throw "Timed out waiting for $Uri. Last error: $lastError"
 }
 
+function New-SecureEphemeralSecret {
+    param([string]$Prefix)
+
+    $randomBytes = New-Object byte[] 32
+    $randomNumberGenerator = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $randomNumberGenerator.GetBytes($randomBytes)
+    }
+    finally {
+        $randomNumberGenerator.Dispose()
+    }
+
+    $randomHex = ([BitConverter]::ToString($randomBytes)).Replace("-", "").ToLowerInvariant()
+    return "${Prefix}${randomHex}"
+}
+
+function Get-AvailableHostPort {
+    param([int[]]$ExcludedPorts = @())
+
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+        $listener = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, 0)
+        try {
+            $listener.Start()
+            $port = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+        }
+        finally {
+            $listener.Stop()
+        }
+
+        if ($ExcludedPorts -notcontains $port) {
+            return $port
+        }
+    }
+
+    throw "Unable to reserve distinct host ports for the release smoke infrastructure."
+}
+
+function Get-OpenSslCommand {
+    $openSsl = Get-Command "openssl" -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $openSsl) {
+        throw "OpenSSL is required to generate the ephemeral Ed25519 worker execution key pair. Install OpenSSL or supply matching WORKER_EXECUTION_PRIVATE_KEY_PEM and WORKER_EXECUTION_PUBLIC_KEY_PEM values."
+    }
+
+    return $openSsl.Source
+}
+
 try {
+    $reservedHostPorts = @()
+    foreach ($name in @("REDIS_HOST_PORT", "POSTGRES_HOST_PORT")) {
+        $configuredPort = $originalEnvironment[$name]
+        if (![string]::IsNullOrWhiteSpace($configuredPort)) {
+            $parsedPort = 0
+            if ([int]::TryParse($configuredPort, [ref]$parsedPort)) {
+                $reservedHostPorts += $parsedPort
+            }
+        }
+    }
+
+    foreach ($name in @("REDIS_HOST_PORT", "POSTGRES_HOST_PORT")) {
+        if ([string]::IsNullOrWhiteSpace($originalEnvironment[$name])) {
+            $ephemeralHostPort = Get-AvailableHostPort -ExcludedPorts $reservedHostPorts
+            [Environment]::SetEnvironmentVariable($name, [string]$ephemeralHostPort, "Process")
+            $reservedHostPorts += $ephemeralHostPort
+            $restoreEnvironmentNames += $name
+            Write-Host "SET ${name} to collision-free ephemeral host port ${ephemeralHostPort}"
+        }
+    }
+
+    $originalPostgresPassword = $originalEnvironment["POSTGRES_PASSWORD"]
+    if ([string]::IsNullOrWhiteSpace($originalPostgresPassword)) {
+        $ephemeralPostgresPassword = New-SecureEphemeralSecret -Prefix "release-stack-smoke-postgres-"
+        [Environment]::SetEnvironmentVariable("POSTGRES_PASSWORD", $ephemeralPostgresPassword, "Process")
+        $restoreEnvironmentNames += "POSTGRES_PASSWORD"
+        Write-Host "SET POSTGRES_PASSWORD to a secure ephemeral release smoke password"
+    }
+
+    $originalJwtSecret = $originalEnvironment["JWT_SECRET"]
     if ([string]::IsNullOrWhiteSpace($originalJwtSecret) -or $originalJwtSecret -eq "change-me-in-production") {
-        $ephemeralJwtSecret = "release-stack-smoke-" + [guid]::NewGuid().ToString("N")
+        $ephemeralJwtSecret = New-SecureEphemeralSecret -Prefix "release-stack-smoke-jwt-"
         [Environment]::SetEnvironmentVariable("JWT_SECRET", $ephemeralJwtSecret, "Process")
-        $restoreJwtSecret = $true
+        $restoreEnvironmentNames += "JWT_SECRET"
         Write-Host "SET JWT_SECRET to an ephemeral non-default release smoke secret"
+    }
+
+    $originalPrivateKey = $originalEnvironment["WORKER_EXECUTION_PRIVATE_KEY_PEM"]
+    $originalPublicKey = $originalEnvironment["WORKER_EXECUTION_PUBLIC_KEY_PEM"]
+    $privateKeyMissing = [string]::IsNullOrWhiteSpace($originalPrivateKey)
+    $publicKeyMissing = [string]::IsNullOrWhiteSpace($originalPublicKey)
+
+    if ($privateKeyMissing -and !$publicKeyMissing) {
+        throw "WORKER_EXECUTION_PRIVATE_KEY_PEM is missing while WORKER_EXECUTION_PUBLIC_KEY_PEM is set. Supply the matching private key or unset both values so the smoke harness can generate an ephemeral Ed25519 pair."
+    }
+
+    if ($privateKeyMissing -or $publicKeyMissing) {
+        $openSslCommand = Get-OpenSslCommand
+        $temporaryKeyDirectory = Join-Path ([IO.Path]::GetTempPath()) ("hivemind-release-stack-smoke-" + [guid]::NewGuid().ToString("N"))
+        [void](New-Item -ItemType Directory -Path $temporaryKeyDirectory)
+        $privateKeyPath = Join-Path $temporaryKeyDirectory "worker-execution-private.pem"
+        $publicKeyPath = Join-Path $temporaryKeyDirectory "worker-execution-public.pem"
+
+        if ($privateKeyMissing) {
+            Invoke-CheckedCommand -Command $openSslCommand -Arguments @(
+                "genpkey",
+                "-algorithm",
+                "Ed25519",
+                "-out",
+                $privateKeyPath
+            ) -WorkingDirectory $temporaryKeyDirectory
+
+            $ephemeralPrivateKey = [IO.File]::ReadAllText($privateKeyPath)
+            [Environment]::SetEnvironmentVariable("WORKER_EXECUTION_PRIVATE_KEY_PEM", $ephemeralPrivateKey, "Process")
+            $restoreEnvironmentNames += "WORKER_EXECUTION_PRIVATE_KEY_PEM"
+            Write-Host "SET WORKER_EXECUTION_PRIVATE_KEY_PEM to an ephemeral Ed25519 release smoke key"
+        }
+        else {
+            $utf8WithoutBom = New-Object Text.UTF8Encoding($false)
+            [IO.File]::WriteAllText($privateKeyPath, $originalPrivateKey, $utf8WithoutBom)
+        }
+
+        Invoke-CheckedCommand -Command $openSslCommand -Arguments @(
+            "pkey",
+            "-in",
+            $privateKeyPath,
+            "-pubout",
+            "-out",
+            $publicKeyPath
+        ) -WorkingDirectory $temporaryKeyDirectory
+
+        $ephemeralPublicKey = [IO.File]::ReadAllText($publicKeyPath)
+        [Environment]::SetEnvironmentVariable("WORKER_EXECUTION_PUBLIC_KEY_PEM", $ephemeralPublicKey, "Process")
+        $restoreEnvironmentNames += "WORKER_EXECUTION_PUBLIC_KEY_PEM"
+        Write-Host "SET WORKER_EXECUTION_PUBLIC_KEY_PEM to the matching ephemeral Ed25519 release smoke key"
     }
 
     if (!(Test-Path -LiteralPath $packagingTestPath)) {
@@ -117,25 +255,21 @@ try {
 
     if ($CheckOnly) {
         Write-Host "release stack smoke check-only passed"
-        exit 0
     }
+    else {
+        Write-Host "RUN docker compose up -d --build"
+        Invoke-CheckedCommand -Command "docker" -Arguments @("compose", "up", "-d", "--build") -WorkingDirectory $repoRoot
 
-    Write-Host "RUN docker compose up -d --build"
-    Invoke-CheckedCommand -Command "docker" -Arguments @("compose", "up", "-d", "--build") -WorkingDirectory $repoRoot
+        foreach ($service in $services) {
+            Write-Host "WAIT $($service.Name) $($service.Uri)"
+            Wait-ForHttpOk -Uri $service.Uri -ExpectedContent $service.Match -TimeoutSeconds $StartupTimeoutSeconds
+            Write-Host "PASS $($service.Name) $($service.Uri)"
+        }
 
-    foreach ($service in $services) {
-        Write-Host "WAIT $($service.Name) $($service.Uri)"
-        Wait-ForHttpOk -Uri $service.Uri -ExpectedContent $service.Match -TimeoutSeconds $StartupTimeoutSeconds
-        Write-Host "PASS $($service.Name) $($service.Uri)"
+        Write-Host "release stack smoke passed for official site, customer app, worker app, api, and worker control"
     }
-
-    Write-Host "release stack smoke passed for official site, customer app, worker app, api, and worker control"
 }
 finally {
-    if ($restoreJwtSecret) {
-        [Environment]::SetEnvironmentVariable("JWT_SECRET", $originalJwtSecret, "Process")
-    }
-
     if (!$CheckOnly -and !$KeepRunning) {
         try {
             Write-Host "RUN docker compose down"
@@ -144,5 +278,13 @@ finally {
         catch {
             Write-Warning "docker compose down failed during cleanup: $($_.Exception.Message)"
         }
+    }
+
+    foreach ($name in $restoreEnvironmentNames) {
+        [Environment]::SetEnvironmentVariable($name, $originalEnvironment[$name], "Process")
+    }
+
+    if ($null -ne $temporaryKeyDirectory -and (Test-Path -LiteralPath $temporaryKeyDirectory)) {
+        Remove-Item -LiteralPath $temporaryKeyDirectory -Recurse -Force
     }
 }
