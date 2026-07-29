@@ -1522,6 +1522,19 @@ impl MasterNodeService for GrpcMasterNodeService {
             .map_err(|e| Status::internal(e.to_string()))?
         };
         let Some(artifact) = artifact else {
+            if requested_artifact_key.is_empty() {
+                if let Some(output) = task.output.as_deref().filter(|value| !value.is_empty()) {
+                    if output.len() <= MAX_DOWNLOAD_ARTIFACT_BYTES {
+                        return Ok(Response::new(DownloadTaskArtifactResponse {
+                            success: true,
+                            status_message: "Task output artifact".into(),
+                            filename: format!("{}-output.txt", task.task_id),
+                            content_type: "text/plain; charset=utf-8".into(),
+                            data: output.as_bytes().to_vec(),
+                        }));
+                    }
+                }
+            }
             return Ok(Response::new(DownloadTaskArtifactResponse {
                 success: false,
                 status_message: "Artifact not found".into(),
@@ -5254,6 +5267,46 @@ mod tests {
         assert!(!whitespace_key.success);
         assert_eq!(whitespace_key.status_message, "Invalid artifact key");
         assert!(whitespace_key.data.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_download_task_artifact_falls_back_to_task_output() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let owner_token = token_for(&service.state.auth, &owner);
+        let expected_output = "worker stdout is available as the default artifact";
+
+        sqlx::query(
+            "UPDATE tasks
+             SET status = 'COMPLETED', output = $1, completed_at = NOW()
+             WHERE task_id = $2",
+        )
+        .bind(expected_output)
+        .bind(&task_id)
+        .execute(&service.state.scheduler.database().pool)
+        .await
+        .unwrap();
+
+        let download = service
+            .download_task_artifact(Request::new(DownloadTaskArtifactRequest {
+                task_id: task_id.clone(),
+                token: owner_token,
+                artifact_key: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+
+        assert!(download.success, "{}", download.status_message);
+        assert_eq!(download.filename, format!("{task_id}-output.txt"));
+        assert_eq!(download.content_type, "text/plain; charset=utf-8");
+        assert_eq!(download.data, expected_output.as_bytes());
     }
 
     #[tokio::test]
