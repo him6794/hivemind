@@ -44,12 +44,239 @@ if (!$scriptText.Contains("-CheckOnly")) {
 }
 
 foreach ($expected in @(
+    "POSTGRES_PASSWORD",
+    "POSTGRES_HOST_PORT",
+    "REDIS_HOST_PORT",
     "JWT_SECRET",
+    "WORKER_EXECUTION_PRIVATE_KEY_PEM",
+    "WORKER_EXECUTION_PUBLIC_KEY_PEM",
     "change-me-in-production",
+    "RandomNumberGenerator",
+    "TcpListener",
+    "Get-Command",
+    "openssl",
+    "OpenSSL is required",
+    "Install OpenSSL",
+    "genpkey",
+    "Ed25519",
+    "-pubout",
+    "Remove-Item",
     "SetEnvironmentVariable"
 )) {
     if (!$scriptText.Contains($expected)) {
-        throw "release stack smoke harness must override default JWT_SECRET handling via '$expected'."
+        throw "release stack smoke harness must securely manage ephemeral release configuration via '$expected'."
+    }
+}
+
+$managedEnvironmentNames = @(
+    "POSTGRES_PASSWORD",
+    "POSTGRES_HOST_PORT",
+    "REDIS_HOST_PORT",
+    "JWT_SECRET",
+    "WORKER_EXECUTION_PRIVATE_KEY_PEM",
+    "WORKER_EXECUTION_PUBLIC_KEY_PEM",
+    "WORKER_NODEPOOL_TOKEN"
+)
+$originalEnvironment = @{}
+foreach ($name in $managedEnvironmentNames) {
+    $originalEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
+}
+$originalPath = $env:Path
+$testOpenSslDirectory = Join-Path ([IO.Path]::GetTempPath()) ("hivemind-openssl-test-" + [guid]::NewGuid().ToString("N"))
+[void](New-Item -ItemType Directory -Path $testOpenSslDirectory)
+$testOpenSslPath = Join-Path $testOpenSslDirectory "openssl.cmd"
+$testOpenSslScript = @'
+@echo off
+setlocal
+set "operation=%~1"
+set "output="
+:parse
+if "%~1"=="" goto write
+if "%~1"=="-out" (
+    set "output=%~2"
+    shift
+)
+shift
+goto parse
+:write
+if not defined output exit /b 2
+if "%operation%"=="genpkey" (
+    >"%output%" echo -----BEGIN PRIVATE KEY-----
+    >>"%output%" echo deterministic-release-smoke-private-key
+    >>"%output%" echo -----END PRIVATE KEY-----
+    exit /b 0
+)
+if "%operation%"=="pkey" (
+    >"%output%" echo -----BEGIN PUBLIC KEY-----
+    >>"%output%" echo deterministic-release-smoke-public-key
+    >>"%output%" echo -----END PUBLIC KEY-----
+    exit /b 0
+)
+exit /b 3
+'@
+[IO.File]::WriteAllText($testOpenSslPath, $testOpenSslScript, (New-Object Text.ASCIIEncoding))
+$env:Path = "${testOpenSslDirectory};${originalPath}"
+
+function Get-ReleaseStackSmokeTempDirectories {
+    return @(Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -Directory -Filter "hivemind-release-stack-smoke-*" -ErrorAction SilentlyContinue |
+        ForEach-Object { $_.FullName })
+}
+
+try {
+    foreach ($name in $managedEnvironmentNames) {
+        [Environment]::SetEnvironmentVariable($name, $null, "Process")
+    }
+
+    $tempDirectoriesBefore = @(Get-ReleaseStackSmokeTempDirectories)
+    $missingEnvironmentOutput = $null
+    try {
+        $missingEnvironmentOutput = @(& $scriptPath -CheckOnly *>&1)
+    }
+    catch {
+        $joinedOutput = (@($missingEnvironmentOutput) + $_ | ForEach-Object { $_.ToString() }) -join "`n"
+        throw "release-stack-smoke.ps1 -CheckOnly must succeed without pre-set release environment variables.`n${joinedOutput}"
+    }
+
+    foreach ($name in $managedEnvironmentNames) {
+        if ($null -ne [Environment]::GetEnvironmentVariable($name, "Process")) {
+            throw "release-stack-smoke.ps1 must restore absent ${name} after check-only completes."
+        }
+    }
+
+    $newTempDirectories = @(Get-ReleaseStackSmokeTempDirectories | Where-Object { $tempDirectoriesBefore -notcontains $_ })
+    if ($newTempDirectories.Count -ne 0) {
+        throw "release-stack-smoke.ps1 must remove ephemeral key directories after check-only: $($newTempDirectories -join ', ')"
+    }
+
+    $missingEnvironmentText = ($missingEnvironmentOutput | ForEach-Object { $_.ToString() }) -join "`n"
+    if ([string]::IsNullOrWhiteSpace($missingEnvironmentText)) {
+        $joinedOutput = $missingEnvironmentOutput -join "`n"
+        throw "release-stack-smoke.ps1 -CheckOnly must report its ephemeral setup and result.`n${joinedOutput}"
+    }
+
+    foreach ($expectedOutput in @(
+        "SET POSTGRES_PASSWORD",
+        "SET POSTGRES_HOST_PORT",
+        "SET REDIS_HOST_PORT",
+        "SET JWT_SECRET",
+        "SET WORKER_EXECUTION_PRIVATE_KEY_PEM",
+        "SET WORKER_EXECUTION_PUBLIC_KEY_PEM",
+        "release stack smoke check-only passed"
+    )) {
+        if (!$missingEnvironmentText.Contains($expectedOutput)) {
+            throw "Missing-environment check-only run must report '$expectedOutput'."
+        }
+    }
+
+    $suppliedEnvironment = @{
+        POSTGRES_PASSWORD = "user-supplied-postgres-password"
+        POSTGRES_HOST_PORT = "15432"
+        REDIS_HOST_PORT = "16379"
+        JWT_SECRET = "user-supplied-jwt-secret-with-at-least-32-bytes"
+        WORKER_EXECUTION_PRIVATE_KEY_PEM = "user-supplied-private-key"
+        WORKER_EXECUTION_PUBLIC_KEY_PEM = "user-supplied-public-key"
+    }
+    foreach ($name in $managedEnvironmentNames) {
+        [Environment]::SetEnvironmentVariable($name, $null, "Process")
+    }
+    foreach ($name in $suppliedEnvironment.Keys) {
+        [Environment]::SetEnvironmentVariable($name, $suppliedEnvironment[$name], "Process")
+    }
+
+    $suppliedEnvironmentOutput = $null
+    try {
+        $suppliedEnvironmentOutput = @(& $scriptPath -CheckOnly *>&1)
+    }
+    catch {
+        $joinedOutput = (@($suppliedEnvironmentOutput) + $_ | ForEach-Object { $_.ToString() }) -join "`n"
+        throw "release-stack-smoke.ps1 -CheckOnly must accept user-supplied release environment variables.`n${joinedOutput}"
+    }
+
+    $suppliedJoinedOutput = ($suppliedEnvironmentOutput | ForEach-Object { $_.ToString() }) -join "`n"
+    foreach ($name in $suppliedEnvironment.Keys) {
+        if ([Environment]::GetEnvironmentVariable($name, "Process") -cne $suppliedEnvironment[$name]) {
+            throw "release stack smoke harness must preserve user-supplied ${name} exactly."
+        }
+        if ($suppliedJoinedOutput.Contains("SET ${name}")) {
+            throw "release stack smoke harness must not replace user-supplied ${name}."
+        }
+    }
+
+    foreach ($name in $managedEnvironmentNames) {
+        [Environment]::SetEnvironmentVariable($name, $null, "Process")
+    }
+    [Environment]::SetEnvironmentVariable("POSTGRES_PASSWORD", "private-only-postgres-password", "Process")
+    [Environment]::SetEnvironmentVariable("JWT_SECRET", "private-only-jwt-secret-with-at-least-32-bytes", "Process")
+    [Environment]::SetEnvironmentVariable("WORKER_EXECUTION_PRIVATE_KEY_PEM", "private-only-test-key", "Process")
+    $tempDirectoriesBefore = @(Get-ReleaseStackSmokeTempDirectories)
+    $privateOnlyOutput = @(& $scriptPath -CheckOnly *>&1)
+    $privateOnlyText = ($privateOnlyOutput | ForEach-Object { $_.ToString() }) -join "`n"
+
+    if (!$privateOnlyText.Contains("SET WORKER_EXECUTION_PUBLIC_KEY_PEM") -or
+        $privateOnlyText.Contains("SET WORKER_EXECUTION_PRIVATE_KEY_PEM")) {
+        throw "A supplied private key must derive only the missing public key."
+    }
+    if ([Environment]::GetEnvironmentVariable("WORKER_EXECUTION_PRIVATE_KEY_PEM", "Process") -cne "private-only-test-key" -or
+        $null -ne [Environment]::GetEnvironmentVariable("WORKER_EXECUTION_PUBLIC_KEY_PEM", "Process")) {
+        throw "Private-only check-only must preserve the supplied private key and restore the absent public key."
+    }
+    $newTempDirectories = @(Get-ReleaseStackSmokeTempDirectories | Where-Object { $tempDirectoriesBefore -notcontains $_ })
+    if ($newTempDirectories.Count -ne 0) {
+        throw "Private-only check-only must remove its temporary key directory: $($newTempDirectories -join ', ')"
+    }
+
+    foreach ($name in $managedEnvironmentNames) {
+        [Environment]::SetEnvironmentVariable($name, $null, "Process")
+    }
+    [Environment]::SetEnvironmentVariable("POSTGRES_PASSWORD", "public-only-postgres-password", "Process")
+    [Environment]::SetEnvironmentVariable("JWT_SECRET", "public-only-jwt-secret-with-at-least-32-bytes", "Process")
+    [Environment]::SetEnvironmentVariable("WORKER_EXECUTION_PUBLIC_KEY_PEM", "public-only-test-key", "Process")
+    $publicOnlyError = $null
+    try {
+        & $scriptPath -CheckOnly *> $null
+    }
+    catch {
+        $publicOnlyError = $_.Exception.Message
+    }
+    if ([string]::IsNullOrWhiteSpace($publicOnlyError) -or
+        !$publicOnlyError.Contains("WORKER_EXECUTION_PRIVATE_KEY_PEM is missing")) {
+        throw "A public key without its private key must fail with an actionable pairing error. Error: $publicOnlyError"
+    }
+    if ($null -ne [Environment]::GetEnvironmentVariable("WORKER_EXECUTION_PRIVATE_KEY_PEM", "Process") -or
+        [Environment]::GetEnvironmentVariable("WORKER_EXECUTION_PUBLIC_KEY_PEM", "Process") -cne "public-only-test-key") {
+        throw "Public-only failure must restore the absent private key and preserve the supplied public key."
+    }
+
+    foreach ($name in $managedEnvironmentNames) {
+        [Environment]::SetEnvironmentVariable($name, $null, "Process")
+    }
+    $env:Path = ""
+    try {
+        $missingOpenSslError = $null
+        try {
+            & $scriptPath -CheckOnly *> $null
+        }
+        catch {
+            $missingOpenSslError = $_.Exception.Message
+        }
+
+        if ([string]::IsNullOrWhiteSpace($missingOpenSslError) -or
+            !$missingOpenSslError.Contains("OpenSSL is required") -or
+            !$missingOpenSslError.Contains("Install OpenSSL")) {
+            throw "release stack smoke harness must fail actionably when OpenSSL is unavailable. Error: $missingOpenSslError"
+        }
+    }
+    finally {
+        $env:Path = $originalPath
+    }
+}
+finally {
+    $env:Path = $originalPath
+    foreach ($name in $managedEnvironmentNames) {
+        [Environment]::SetEnvironmentVariable($name, $originalEnvironment[$name], "Process")
+    }
+    if (Test-Path -LiteralPath $testOpenSslDirectory) {
+        Remove-Item -LiteralPath $testOpenSslDirectory -Recurse -Force
     }
 }
 
