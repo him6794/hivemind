@@ -141,6 +141,31 @@ make docker-logs
 make docker-down
 ```
 
+### Three-surface release
+
+The release candidate consists of the public Official Site/account center on
+port 8080, the task-oriented Master UI on port 3000, and the provider-oriented
+Worker UI on port 3001. The detailed operator runbook, environment contract,
+trust boundaries, smoke checks, browser proof, and troubleshooting steps are in
+[docs/GETTING_STARTED.md](docs/GETTING_STARTED.md).
+
+From the repository root on Windows, build and leave the complete stack running:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release-stack-smoke.ps1 -KeepRunning
+```
+
+Then run the real cross-surface browser journey:
+
+```powershell
+cd frontend; npm run test:e2e
+```
+
+When verification is complete, return to the repository root and run
+`docker compose down`. See the runbook before using raw Compose in production:
+unlike the smoke harness, raw Compose requires secrets and the matching worker
+execution key pair to be supplied.
+
 ### Manual
 
 ```bash
