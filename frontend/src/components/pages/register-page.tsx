@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { useAppStore } from "@/store/app-store";
 import { useI18n } from "@/store/i18n-store";
 import { loginUser, registerUser } from "@/lib/hivemind-api";
+import { validateRegistrationInput } from "@/lib/auth-policy.mjs";
 import { Surface } from "./page-primitives";
 
 export function RegisterPage() {
@@ -20,22 +21,30 @@ export function RegisterPage() {
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (password !== confirm) {
-      setStatus(locale === "zh" ? "兩次輸入的密碼不一致。" : "Passwords do not match.");
+    const validation = validateRegistrationInput(username, password, confirm);
+    if (!validation.ok) {
+      const messages = {
+        username_too_short: locale === "zh" ? "使用者名稱至少需要 3 個字元。" : "Username must be at least 3 characters.",
+        password_too_short: locale === "zh" ? "密碼至少需要 8 個字元。" : "Password must be at least 8 characters.",
+        password_mismatch: locale === "zh" ? "兩次輸入的密碼不一致。" : "Passwords do not match.",
+      };
+      setStatus(messages[validation.code]);
       return;
     }
+
     setLoading(true);
     setStatus(locale === "zh" ? "建立帳號中..." : "Creating account...");
     try {
-      const registered = await registerUser(username, password) as { success?: boolean; message?: string };
+      const registered = await registerUser(validation.username, password) as { success?: boolean; message?: string };
       if (!registered.success) {
         throw new Error(registered.message || "Registration failed.");
       }
-      const login = await loginUser(username, password) as { success?: boolean; token?: string; message?: string };
+      const login = await loginUser(validation.username, password) as { success?: boolean; token?: string; message?: string };
       if (!login.success || !login.token) {
         throw new Error(login.message || "Login failed.");
       }
-      setAuth({ username }, login.token);
+      setUsername(validation.username);
+      setAuth({ username: validation.username }, login.token);
       setStatus(locale === "zh" ? "帳號建立完成。" : "Account created.");
       navigate("account");
     } catch (error) {
@@ -65,30 +74,42 @@ export function RegisterPage() {
       <Surface className="border-border/80 bg-card/70 p-8">
         <form className="space-y-4" onSubmit={handleSubmit}>
           <div>
-            <label className="mb-2 block text-sm font-medium">{locale === "zh" ? "使用者名稱" : "Username"}</label>
+            <label htmlFor="register-username" className="mb-2 block text-sm font-medium">{locale === "zh" ? "使用者名稱" : "Username"}</label>
             <input
+              id="register-username"
               className="w-full rounded-xl border border-border bg-background/70 px-4 py-3 outline-none transition focus:border-honey/40"
               value={username}
               onChange={(event) => setUsername(event.target.value)}
               placeholder="team-ops"
+              minLength={3}
+              autoComplete="username"
+              required
             />
           </div>
           <div>
-            <label className="mb-2 block text-sm font-medium">{locale === "zh" ? "密碼" : "Password"}</label>
+            <label htmlFor="register-password" className="mb-2 block text-sm font-medium">{locale === "zh" ? "密碼" : "Password"}</label>
             <input
+              id="register-password"
               type="password"
               className="w-full rounded-xl border border-border bg-background/70 px-4 py-3 outline-none transition focus:border-honey/40"
               value={password}
               onChange={(event) => setPassword(event.target.value)}
+              minLength={8}
+              autoComplete="new-password"
+              required
             />
           </div>
           <div>
-            <label className="mb-2 block text-sm font-medium">{locale === "zh" ? "確認密碼" : "Confirm password"}</label>
+            <label htmlFor="register-confirm-password" className="mb-2 block text-sm font-medium">{locale === "zh" ? "確認密碼" : "Confirm password"}</label>
             <input
+              id="register-confirm-password"
               type="password"
               className="w-full rounded-xl border border-border bg-background/70 px-4 py-3 outline-none transition focus:border-honey/40"
               value={confirm}
               onChange={(event) => setConfirm(event.target.value)}
+              minLength={8}
+              autoComplete="new-password"
+              required
             />
           </div>
 
@@ -98,7 +119,7 @@ export function RegisterPage() {
           </Button>
         </form>
 
-        <div className="mt-4 rounded-xl border border-border/60 bg-background/40 p-4 text-sm text-muted-foreground">
+        <div aria-live="polite" className="mt-4 rounded-xl border border-border/60 bg-background/40 p-4 text-sm text-muted-foreground">
           {status || (locale === "zh" ? "建立成功後會自動登入並進入帳號中心。" : "After creation, you will sign in automatically and enter the account center.")}
         </div>
       </Surface>
