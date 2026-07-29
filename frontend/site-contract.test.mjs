@@ -84,3 +84,46 @@ test('top-level documentation describes official site as account center, not an 
   assert.doesNotMatch(readme, /\*\*Official Site\*\* \(`frontend\/`\).*task submission/i);
   assert.doesNotMatch(readme, /Official Site\s+\|\s+8080\s+\|.*nginx/i);
 });
+
+test('official-site onboarding validates input, keeps bearer tokens in memory, and exposes logout', () => {
+  const storeSource = fs.readFileSync(new URL('./src/store/app-store.ts', import.meta.url), 'utf8');
+  const loginSource = fs.readFileSync(new URL('./src/components/pages/login-page.tsx', import.meta.url), 'utf8');
+  const registerSource = fs.readFileSync(new URL('./src/components/pages/register-page.tsx', import.meta.url), 'utf8');
+  const accountSource = fs.readFileSync(new URL('./src/components/pages/account-page.tsx', import.meta.url), 'utf8');
+  const navbarSource = fs.readFileSync(new URL('./src/components/site/navbar.tsx', import.meta.url), 'utf8');
+
+  assert.doesNotMatch(storeSource, /zustand\/middleware|persist\s*\(/);
+  assert.match(storeSource, /clearLegacyAuthStorage/);
+  assert.match(loginSource, /validateLoginInput/);
+  assert.match(loginSource, /htmlFor="login-username"/);
+  assert.match(loginSource, /htmlFor="login-password"/);
+  assert.match(registerSource, /validateRegistrationInput/);
+  assert.match(registerSource, /htmlFor="register-username"/);
+  assert.match(registerSource, /htmlFor="register-confirm-password"/);
+  assert.match(accountSource, /parseAccountBalance/);
+  assert.match(navbarSource, /logout/);
+});
+
+test('release browser QA covers account, worker registration, and task lifecycle surfaces', () => {
+  const packageJson = JSON.parse(fs.readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
+  const configSource = fs.readFileSync(new URL('./playwright.config.mjs', import.meta.url), 'utf8');
+  const flowSource = fs.readFileSync(new URL('./e2e/release-flow.spec.mjs', import.meta.url), 'utf8');
+
+  assert.equal(
+    packageJson.scripts['test:e2e'],
+    'node node_modules/@playwright/test/cli.js test',
+  );
+  assert.ok(packageJson.devDependencies['@playwright/test']);
+  assert.match(configSource, /HIVEMIND_E2E_EVIDENCE_DIR/);
+  assert.match(configSource, /msedge|chrome/);
+  assert.match(flowSource, /official site/i);
+  assert.match(flowSource, /Account Center/);
+  assert.match(flowSource, /Worker UI/);
+  assert.match(flowSource, /Login and register/);
+  assert.match(flowSource, /Master UI/);
+  assert.match(flowSource, /Upload Task/);
+  assert.match(flowSource, /Log/);
+  assert.match(flowSource, /Result/);
+  assert.match(flowSource, /Download/);
+  assert.match(flowSource, /Cancel/);
+});

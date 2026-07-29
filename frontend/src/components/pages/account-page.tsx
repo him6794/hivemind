@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { ArrowRight, CreditCard, Download, ShieldCheck, Wallet } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { getBalance } from "@/lib/hivemind-api";
+import { parseAccountBalance } from "@/lib/account-policy.mjs";
 import { getSiteDefinition } from "@/lib/hivemind-site-data.mjs";
 import { useI18n } from "@/store/i18n-store";
 import { useAppStore } from "@/store/app-store";
@@ -32,7 +33,7 @@ export function AccountPage() {
       try {
         const data = await getBalance(token) as { balance?: number; cpt_balance?: number };
         if (cancelled) return;
-        const nextBalance = Number(data.balance ?? data.cpt_balance ?? 0);
+        const nextBalance = parseAccountBalance(data);
         setBalance(nextBalance);
         setStatus("");
       } catch (error) {
@@ -93,7 +94,7 @@ export function AccountPage() {
             />
           </div>
 
-          {status ? <div className="mt-6 rounded-xl border border-border/60 bg-background/40 p-4 text-sm text-muted-foreground">{status}</div> : null}
+          {status ? <div aria-live="polite" className="mt-6 rounded-xl border border-border/60 bg-background/40 p-4 text-sm text-muted-foreground">{status}</div> : null}
         </Surface>
 
         <div className="grid gap-4">

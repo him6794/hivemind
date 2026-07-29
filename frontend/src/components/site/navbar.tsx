@@ -18,6 +18,7 @@ export function Navbar() {
   const route = useAppStore((state) => state.route);
   const navigate = useAppStore((state) => state.navigate);
   const user = useAppStore((state) => state.user);
+  const logout = useAppStore((state) => state.logout);
   const { locale } = useI18n();
   const site = useMemo(() => getSiteDefinition(locale), [locale]);
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -80,6 +81,9 @@ export function Navbar() {
                   <Button variant="ghost" size="sm" onClick={() => navigate("account")}>
                     {site.routes.find((entry) => entry.id === "account")?.label}
                   </Button>
+                  <Button variant="ghost" size="sm" onClick={logout}>
+                    {locale === "zh" ? "登出" : "Sign out"}
+                  </Button>
                   <Button size="sm" onClick={() => navigate("docs")} className="group bg-honey text-honey-foreground hover:bg-honey/90">
                     {site.routes.find((entry) => entry.id === "docs")?.label}
                     <ArrowRight className="size-3.5 transition-transform group-hover:translate-x-0.5" />
@@ -131,6 +135,18 @@ export function Navbar() {
                   {item.label}
                 </button>
               ))}
+              {user ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    logout();
+                    setMobileOpen(false);
+                  }}
+                  className="block w-full rounded-lg px-4 py-3 text-left text-sm font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
+                >
+                  {locale === "zh" ? "登出" : "Sign out"}
+                </button>
+              ) : null}
             </motion.div>
           ) : null}
         </AnimatePresence>

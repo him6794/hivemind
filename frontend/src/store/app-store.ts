@@ -1,7 +1,7 @@
 "use client";
 
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { clearLegacyAuthStorage } from "@/lib/auth-storage-policy.mjs";
 
 export type Route =
   | "home"
@@ -26,30 +26,32 @@ interface AppState {
   setCommandOpen: (open: boolean) => void;
 }
 
-export const useAppStore = create<AppState>()(
-  persist(
-    (set) => ({
-      route: "home",
-      user: null,
-      token: null,
-      commandOpen: false,
-      navigate: (route) => {
-        set({ route });
-        if (typeof window !== "undefined") {
-          window.scrollTo({ top: 0, behavior: "smooth" });
-        }
-      },
-      setAuth: (user, token) => set({ user, token }),
-      logout: () => set({ user: null, token: null, route: "home" }),
-      setCommandOpen: (commandOpen) => set({ commandOpen }),
-    }),
-    {
-      name: "hivemind-site-auth",
-      partialize: (state) => ({
-        route: state.route,
-        user: state.user,
-        token: state.token,
-      }),
+function clearLegacyBrowserAuthStorage() {
+  if (typeof window === "undefined") return;
+  try {
+    clearLegacyAuthStorage(window.localStorage);
+  } catch {
+    // Browser storage can be unavailable under strict privacy policies.
+  }
+}
+
+clearLegacyBrowserAuthStorage();
+
+export const useAppStore = create<AppState>()((set) => ({
+  route: "home",
+  user: null,
+  token: null,
+  commandOpen: false,
+  navigate: (route) => {
+    set({ route });
+    if (typeof window !== "undefined") {
+      window.scrollTo({ top: 0, behavior: "smooth" });
     }
-  )
-);
+  },
+  setAuth: (user, token) => set({ user, token }),
+  logout: () => {
+    clearLegacyBrowserAuthStorage();
+    set({ user: null, token: null, route: "home" });
+  },
+  setCommandOpen: (commandOpen) => set({ commandOpen }),
+}));
