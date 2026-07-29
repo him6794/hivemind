@@ -11,3 +11,9 @@ export function validateTaskUploadFile(file) {
   }
   return null;
 }
+
+export function clearTaskUploadInput(input) {
+  if (input) {
+    input.value = '';
+  }
+}
