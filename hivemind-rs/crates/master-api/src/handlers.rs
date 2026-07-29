@@ -976,8 +976,6 @@ pub async fn create_task(
     if let Some(response) = enforce_task_submit_rate_limit(&state, &owner).await {
         return response;
     }
-    let mut body = body;
-    body.task_id = uuid::Uuid::new_v4().to_string();
     create_task_from_submission(
         state,
         token,
@@ -995,12 +993,13 @@ async fn create_task_from_submission(
     submission: TaskSubmission,
 ) -> (StatusCode, Json<TaskResponse>) {
     let TaskSubmission {
-        body,
+        mut body,
         uploaded_package,
     } = submission;
-    if !is_safe_task_id(&body.task_id) {
+    let Some(task_id) = normalized_task_id(&body.task_id) else {
         return bad_task_response("task_id is required and must be a safe file name");
-    }
+    };
+    body.task_id = task_id;
     if let Err(message) = validate_task_resources(&body) {
         return bad_task_response(message);
     }
@@ -1180,7 +1179,10 @@ pub async fn upload_task(
     if let Some(message) = uploaded_file_size_error(fb.len(), max_task_upload_bytes()) {
         return task_response(StatusCode::PAYLOAD_TOO_LARGE, false, message);
     }
-    body.task_id = uuid::Uuid::new_v4().to_string();
+    let Some(task_id) = normalized_task_id(&body.task_id) else {
+        return bad_task_response("task_id is required and must be a safe file name");
+    };
+    body.task_id = task_id;
     let zp = task_upload_path(&state.config, &body.task_id);
     if let Some(p) = zp.parent() {
         if let Err(e) = std::fs::create_dir_all(p) {
@@ -2254,6 +2256,15 @@ mod tests {
     fn task_id_safety_rejects_single_dot_segment() {
         assert!(is_safe_task_id("task-123"));
         assert!(!is_safe_task_id("."));
+    }
+
+    #[test]
+    fn submission_task_id_normalization_preserves_safe_caller_id() {
+        assert_eq!(
+            normalized_task_id("  caller-selected-task  "),
+            Some("caller-selected-task".to_string())
+        );
+        assert_eq!(normalized_task_id("../caller-selected-task"), None);
     }
 
     #[test]
