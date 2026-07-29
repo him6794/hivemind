@@ -1,9 +1,10 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import './console.css';
 import { artifactFilenameFromContentDisposition } from './artifactDownloadPolicy.mjs';
 import { clearStoredSession, readStoredSession, saveStoredSession } from './authSession.mjs';
 import { createTaskId, validateTaskId } from './taskIdPolicy.mjs';
-import { validateTaskUploadFile } from './taskUploadPolicy.mjs';
+import { taskRequestFailureText, taskResponseFailureMessage } from './taskResponsePolicy.mjs';
+import { clearTaskUploadInput, validateTaskUploadFile } from './taskUploadPolicy.mjs';
 
 const panelStyle = {
   border: '1px solid #d8e0e8',
@@ -54,6 +55,7 @@ export default function MasterApp() {
   const [downloadLoading, setDownloadLoading] = useState(null);
   const [lastRefresh, setLastRefresh] = useState(null);
   const [zipError, setZipError] = useState(null);
+  const taskUploadInputRef = useRef(null);
 
   const [taskId, setTaskId] = useState('');
   const [zipFile, setZipFile] = useState(null);
@@ -201,6 +203,7 @@ export default function MasterApp() {
       setTaskId('');
       setZipFile(null);
       setZipError(null);
+      clearTaskUploadInput(taskUploadInputRef.current);
       setStatus(`Task submitted: ${validatedTaskId.taskId}`);
       await refreshTasks();
       setLastRefresh(Date.now());
@@ -225,14 +228,14 @@ export default function MasterApp() {
     const id = validatedTaskId.taskId;
 
     try {
-      const { data } = await api('GET', `/api/tasks/${encodeURIComponent(id)}/log`);
-      if (data.success) {
-        setTaskLog(data.log || task?.output || task?.status_message || '(No output yet)');
-      } else {
-        setTaskLog(task?.output || task?.status_message || '(No output yet)');
+      const { ok, data } = await api('GET', `/api/tasks/${encodeURIComponent(id)}/log`);
+      const failureMessage = taskResponseFailureMessage(data, 'Log unavailable', ok);
+      if (failureMessage) {
+        throw new Error(failureMessage);
       }
-    } catch {
-      setTaskLog(task?.output || task?.status_message || '(No output yet)');
+      setTaskLog(data.log || '(No output yet)');
+    } catch (err) {
+      setTaskLog(taskRequestFailureText('Log', err, 'Log unavailable'));
     } finally {
       setLogLoading(null);
     }
@@ -253,14 +256,14 @@ export default function MasterApp() {
     const id = validatedTaskId.taskId;
 
     try {
-      const { data } = await api('GET', `/api/tasks/${encodeURIComponent(id)}/result`);
-      if (data.success) {
-        setTaskResult(JSON.stringify(data, null, 2));
-      } else {
-        setTaskResult(data.message || data.status_message || '(No result yet)');
+      const { ok, data } = await api('GET', `/api/tasks/${encodeURIComponent(id)}/result`);
+      const failureMessage = taskResponseFailureMessage(data, 'Result unavailable', ok);
+      if (failureMessage) {
+        throw new Error(failureMessage);
       }
-    } catch {
-      setTaskResult('(No result yet)');
+      setTaskResult(JSON.stringify(data, null, 2));
+    } catch (err) {
+      setTaskResult(taskRequestFailureText('Result', err, 'Result unavailable'));
     } finally {
       setResultLoading(null);
     }
@@ -282,7 +285,11 @@ export default function MasterApp() {
     const id = validatedTaskId.taskId;
 
     try {
-      await api('POST', `/api/tasks/${encodeURIComponent(id)}/stop`);
+      const { ok, data } = await api('POST', `/api/tasks/${encodeURIComponent(id)}/stop`);
+      const failureMessage = taskResponseFailureMessage(data, 'Task cancellation was rejected', ok);
+      if (failureMessage) {
+        throw new Error(failureMessage);
+      }
       await refreshTasks();
       setLastRefresh(Date.now());
       setStatus(`Task cancelled: ${id}`);
@@ -428,6 +435,7 @@ export default function MasterApp() {
                 <label>
                   Task file
                   <input
+                    ref={taskUploadInputRef}
                     type="file"
                     accept=".torrent,.zip,application/x-bittorrent,application/zip"
                     onChange={(e) => {

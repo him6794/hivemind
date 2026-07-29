@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { validateTaskUploadFile } from './taskUploadPolicy.mjs';
+import { clearTaskUploadInput, validateTaskUploadFile } from './taskUploadPolicy.mjs';
 
 function file(name, size = 1024) {
   return { name, size };
@@ -23,5 +23,14 @@ describe('task upload policy', () => {
       validateTaskUploadFile(file('task.torrent', 501 * 1024 * 1024)),
       'File exceeds 500 MB limit. Use a smaller task file.',
     );
+  });
+
+  it('clears the native file input so the same package can be selected again', () => {
+    const input = { value: 'C:\\fakepath\\task.zip' };
+
+    clearTaskUploadInput(input);
+
+    assert.equal(input.value, '');
+    assert.doesNotThrow(() => clearTaskUploadInput(null));
   });
 });
