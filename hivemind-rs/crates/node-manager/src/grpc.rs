@@ -1219,6 +1219,39 @@ impl MasterNodeService for GrpcMasterNodeService {
             }));
         }
 
+        // Balance admission gate. Nodepool is the sole billing authority. A task
+        // can be charged up to `max_cpt` at settlement (see `billable_amount_cpt`),
+        // so refuse submission unless the owner can currently cover that
+        // worst-case amount. This stops broke accounts at the door instead of
+        // letting them accrue unbilled "pending" overruns.
+        if req.max_cpt > 0 {
+            let balance: Option<i64> = sqlx::query_scalar(
+                "SELECT balance FROM users WHERE username = $1 AND is_active = true",
+            )
+            .bind(&claims.sub)
+            .fetch_optional(&self.state.scheduler.database().pool)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+            match balance {
+                Some(balance) if balance >= req.max_cpt => {}
+                Some(_) => {
+                    return Ok(Response::new(UploadTaskResponse {
+                        success: false,
+                        status_message: format!(
+                            "insufficient balance: need {} CPT to cover max_cpt",
+                            req.max_cpt
+                        ),
+                    }));
+                }
+                None => {
+                    return Ok(Response::new(UploadTaskResponse {
+                        success: false,
+                        status_message: "account not found or inactive".into(),
+                    }));
+                }
+            }
+        }
+
         let task = Task {
             id: uuid::Uuid::new_v4(),
             task_id: req.task_id,
@@ -3145,6 +3178,125 @@ mod tests {
         assert!(!response.success);
         assert!(response.status_message.contains("resource"));
         assert!(stored.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_upload_task_rejects_when_owner_balance_below_max_cpt() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        // Owner has less balance than the task's max_cpt.
+        sqlx::query("INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', $2)")
+            .bind(&owner)
+            .bind(5i64)
+            .execute(&service.state.scheduler.database().pool)
+            .await
+            .unwrap();
+        let owner_token = token_for(&service.state.auth, &owner);
+        let broke_task_id = format!("grpc-broke-{task_id}");
+
+        let response = service
+            .upload_task(Request::new(UploadTaskRequest {
+                task_id: broke_task_id.clone(),
+                torrent: "btih:test-input".into(),
+                requirements: Some(ProtoResourceSpec {
+                    cpu_cores: 1,
+                    memory_mb: 1024,
+                    gpu_count: 0,
+                    gpu_name: String::new(),
+                    vram_mb: 0,
+                    cpu_score: 100,
+                    gpu_score: 0,
+                    storage_total_gb: 1,
+                    storage_available_gb: 1,
+                }),
+                location: String::new(),
+                host_count: 1,
+                token: owner_token,
+                max_cpt: 50,
+                runtime: String::new(),
+                task_source: String::new(),
+                package_data: Default::default(),
+                package_filename: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let stored = service
+            .state
+            .scheduler
+            .get_task(&broke_task_id)
+            .await
+            .unwrap();
+        cleanup(&service.state.scheduler, &broke_task_id, &owner).await;
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+
+        assert!(!response.success);
+        assert!(response.status_message.contains("insufficient balance"));
+        assert!(stored.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_upload_task_admits_when_owner_balance_covers_max_cpt() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        // Owner balance is exactly enough to cover max_cpt.
+        sqlx::query("INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', $2)")
+            .bind(&owner)
+            .bind(50i64)
+            .execute(&service.state.scheduler.database().pool)
+            .await
+            .unwrap();
+        let owner_token = token_for(&service.state.auth, &owner);
+        let funded_task_id = format!("grpc-funded-{task_id}");
+
+        let response = service
+            .upload_task(Request::new(UploadTaskRequest {
+                task_id: funded_task_id.clone(),
+                torrent: "btih:test-input".into(),
+                requirements: Some(ProtoResourceSpec {
+                    cpu_cores: 1,
+                    memory_mb: 1024,
+                    gpu_count: 0,
+                    gpu_name: String::new(),
+                    vram_mb: 0,
+                    cpu_score: 100,
+                    gpu_score: 0,
+                    storage_total_gb: 1,
+                    storage_available_gb: 1,
+                }),
+                location: String::new(),
+                host_count: 1,
+                token: owner_token,
+                max_cpt: 50,
+                runtime: String::new(),
+                task_source: String::new(),
+                package_data: Default::default(),
+                package_filename: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let stored = service
+            .state
+            .scheduler
+            .get_task(&funded_task_id)
+            .await
+            .unwrap();
+        cleanup(&service.state.scheduler, &funded_task_id, &owner).await;
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+
+        assert!(response.success, "unexpected: {}", response.status_message);
+        assert!(stored.is_some());
     }
 
     #[tokio::test]
