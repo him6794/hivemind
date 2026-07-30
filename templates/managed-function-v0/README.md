@@ -12,8 +12,8 @@ These templates are small `managed-function-v0` tasks that can be submitted with
 }
 ```
 
-The `torrent` field is used as JSON input for managed functions. ZIP/Python
-tasks should leave `runtime` and `task_source` empty.
+The `torrent` field is used as JSON input for managed functions.
+`managed-function-v0` is the only supported task runtime.
 
 Templates:
 

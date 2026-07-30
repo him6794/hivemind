@@ -16,9 +16,8 @@ hivemind-rs/
   crates/node-manager     worker registration, heartbeat, trust, cleanup
   crates/task-scheduler   dispatch, redispatch, and timeout handling
   crates/master-api       HTTP API and proxy layer
-  crates/worker-executor  sandboxed task execution and worker control API
+  crates/worker-executor  managed-function task execution and worker control API
   crates/vpn-service      VPN peer management
-  crates/torrent-service  artifact and torrent handling
   crates/hivemind-bin     runtime entry point
 ```
 
@@ -48,7 +47,6 @@ Nodepool composes:
 
 Worker execution composes:
   - worker-executor
-  - torrent-service
   - config
   - proto contracts
 ```
@@ -63,8 +61,8 @@ Worker execution composes:
 
 ### Master UI
 - Serves the task operator application on port 3000.
-- Calls the Master API for authentication, ZIP submission, task state,
-  cancellation, logs, results, and artifact downloads.
+- Calls the Master API for authentication, managed-function task submission,
+  task state, cancellation, logs, results, and artifact downloads.
 
 ### Worker UI
 - Serves the provider application on port 3001.
@@ -88,7 +86,7 @@ Worker execution composes:
 - Keeps the task lifecycle moving without embedding execution logic.
 
 ### Worker Executor
-- Runs tasks in a sandboxed environment.
+- Runs `managed-function-v0` tasks in the managed-function runtime.
 - Tracks local resource usage.
 - Exposes worker gRPC and worker control HTTP endpoints; the release stack
   publishes worker control on port 18080.
@@ -97,15 +95,11 @@ Worker execution composes:
 - Manages secure worker connectivity.
 - Handles peer lifecycle and virtual addressing.
 
-### Torrent Service
-- Handles artifact/torrent-oriented payloads used by task execution.
-- Lives alongside the worker runtime and master proxying path.
-
 ## Current Contracts
 
 - `proto/hivemind.proto` defines the shared gRPC surface.
-- The current workspace includes both legacy task upload/result paths and the
-  newer batch-runtime messages in the proto file.
+- Tasks use the `managed-function-v0` runtime: a source function plus a JSON
+  input payload carried in the batch-runtime messages of the proto file.
 - `hivemind-bin` can run `master`, `nodepool`, `worker`, or `all`.
 - The binary also exposes `submit`, `status`, and `result` CLI helpers.
 

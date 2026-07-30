@@ -1,7 +1,9 @@
 param(
     [Parameter(Mandatory = $true)][string]$MasterUrl,
     [Parameter(Mandatory = $true)][string]$Token,
-    [Parameter(Mandatory = $true)][string]$TaskZip,
+    [Parameter(Mandatory = $true)][string]$TaskSourcePath,
+    [string]$TaskInputPath,
+    [string]$Runtime = "managed-function-v0",
     [int[]]$WorkerCounts = @(1, 5),
     [int[]]$TaskCounts = @(10, 100),
     [int]$CpuScore = 1,
@@ -15,8 +17,20 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-if (!(Test-Path -LiteralPath $TaskZip)) {
-    throw "TaskZip not found: $TaskZip"
+if (!(Test-Path -LiteralPath $TaskSourcePath)) {
+    throw "TaskSourcePath not found: $TaskSourcePath"
+}
+$taskSource = Get-Content -LiteralPath $TaskSourcePath -Raw
+if ([string]::IsNullOrWhiteSpace($taskSource)) {
+    throw "TaskSourcePath is empty: $TaskSourcePath"
+}
+
+$taskInput = $null
+if ($TaskInputPath) {
+    if (!(Test-Path -LiteralPath $TaskInputPath)) {
+        throw "TaskInputPath not found: $TaskInputPath"
+    }
+    $taskInput = Get-Content -LiteralPath $TaskInputPath -Raw
 }
 
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
@@ -31,20 +45,28 @@ function Invoke-HivemindGet {
 function Submit-HivemindTask {
     param([Parameter(Mandatory = $true)][string]$TaskId)
 
-    $start = [Diagnostics.Stopwatch]::StartNew()
-    $raw = & curl.exe -sS -X POST "$MasterUrl/api/tasks/upload" `
-        -H "Authorization: Bearer $Token" `
-        -F "task_id=$TaskId" `
-        -F "cpu_score=$CpuScore" `
-        -F "memory_gb=$MemoryGb" `
-        -F "storage_gb=$StorageGb" `
-        -F "max_cpt=$MaxCpt" `
-        -F "file=@$TaskZip"
-    $start.Stop()
-    if ($LASTEXITCODE -ne 0) {
-        throw "curl.exe failed while submitting ${TaskId}: exit $LASTEXITCODE"
+    # managed-function-v0 tasks carry their JSON input in the `torrent` field;
+    # nodepool stores it verbatim as the task input reference.
+    $body = [ordered]@{
+        task_id     = $TaskId
+        runtime     = $Runtime
+        task_source = $taskSource
+        cpu_score   = $CpuScore
+        memory_gb   = $MemoryGb
+        storage_gb  = $StorageGb
+        max_cpt     = $MaxCpt
     }
-    $response = $raw | ConvertFrom-Json
+    if ($null -ne $taskInput) {
+        $body["torrent"] = $taskInput
+    }
+    $payload = $body | ConvertTo-Json -Depth 12
+
+    $start = [Diagnostics.Stopwatch]::StartNew()
+    $response = Invoke-RestMethod -Method Post -Uri "$MasterUrl/api/tasks" `
+        -Headers $headers `
+        -ContentType "application/json" `
+        -Body $payload
+    $start.Stop()
 
     [pscustomobject]@{
         response = $response

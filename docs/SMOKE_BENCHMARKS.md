@@ -6,7 +6,7 @@ This document defines the first practical benchmark gate recommended by
 ## Scope
 
 The smoke benchmark validates that a controlled worker pool can accept,
-dispatch, execute, and complete artifact-based CPU tasks. It does not validate
+dispatch, execute, and complete `managed-function-v0` tasks. It does not validate
 public marketplace pricing, fiat conversion, token settlement, or untrusted
 provider operation.
 
@@ -37,7 +37,8 @@ powershell -NoProfile -ExecutionPolicy Bypass `
   -File .\scripts\hivemind-smoke-benchmark.ps1 `
   -MasterUrl http://127.0.0.1:8082 `
   -Token "<requestor-token>" `
-  -TaskZip .\test_tasks\cpu-smoke.zip
+  -TaskSourcePath .\templates\managed-function-v0\03_batch_sum.hmf `
+  -TaskInputPath .\templates\managed-function-v0\03_batch_sum.input.json
 ```
 
 Outputs are written to `test_logs/smoke-benchmark/` as CSV and JSON.
@@ -56,12 +57,8 @@ For a release candidate, record the exact commit and require:
 
 ## Notes
 
-- The benchmark script uses the current Master HTTP API and multipart
-  `/api/tasks/upload` path.
-- For distributed workers that do not share the master's local artifact
-  directory, set `TORRENT_TASK_ARTIFACT_BASE_URL` to an HTTP server exposing
-  `TORRENT_API_DIR`. Uploaded ZIP tasks will then be advertised as
-  `uploads/<task>.zip` URLs and workers will download them before execution.
+- The benchmark script uses the current Master HTTP API and submits
+  `managed-function-v0` tasks via JSON `POST /api/tasks`.
 - The benchmark does not scale workers by itself; `WorkerCounts` are target
   labels and the script records the observed worker count from `/api/workers`.
 - CPT-to-fiat conversion is intentionally out of scope.

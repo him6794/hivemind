@@ -3,9 +3,9 @@
 ## Goal
 
 The Managed Function Runtime is a restricted, metered execution path for small
-serverless-style Hivemind tasks. It is separate from ZIP/package execution:
-package execution stays available for trusted or private worker pools, while
-managed functions provide predictable billing and a smaller sandbox surface.
+serverless-style Hivemind tasks. It is the only supported task runtime:
+ZIP/package execution has been removed, and managed functions provide
+predictable billing and a small, tightly bounded execution surface.
 
 The first milestone is a Rust executor that parses a fixed syntax, evaluates it
 without file, network, import, subprocess, or reflection support, and returns an
@@ -33,7 +33,8 @@ Hivemind task integration:
 - set `task_source` to the managed function source text
 - set `torrent` / `torrent_source` to the JSON input payload when input is
   needed
-- legacy ZIP/Python task execution is unchanged when `runtime` is empty
+- `managed-function-v0` is the only supported task runtime; ZIP/torrent-based
+  task execution has been removed
 
 Receipt fields:
 

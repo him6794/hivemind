@@ -180,6 +180,10 @@ impl Value {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Token {
+    Null,
+    And,
+    Or,
+    Not,
     Ident(String),
     Int(i64),
     String(String),
@@ -408,6 +412,10 @@ impl<'a> Lexer<'a> {
             "else" => Token::Else,
             "true" => Token::True,
             "false" => Token::False,
+            "and" => Token::And,
+            "or" => Token::Or,
+            "not" => Token::Not,
+            "null" => Token::Null,
             _ => Token::Ident(text.into_owned()),
         }
     }
@@ -474,6 +482,11 @@ enum Stmt {
         body: Vec<Self>,
     },
     Print(Expr),
+    IndexAssign {
+        target: Expr,
+        index: Expr,
+        value: Expr,
+    },
     Expr(Expr),
 }
 
@@ -481,7 +494,7 @@ enum Stmt {
 struct Function {
     name: String,
     params: Vec<String>,
-    body: Expr,
+    body: Vec<Stmt>,
 }
 
 #[derive(Debug, Clone)]
@@ -504,6 +517,19 @@ enum Expr {
         op: BinaryOp,
         right: Box<Self>,
     },
+    Unary {
+        op: UnaryOp,
+        expr: Box<Self>,
+    },
+    Logical {
+        left: Box<Self>,
+        op: LogicalOp,
+        right: Box<Self>,
+    },
+    Index {
+        target: Box<Self>,
+        index: Box<Self>,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -518,6 +544,19 @@ enum BinaryOp {
     LtEq,
     Gt,
     GtEq,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum UnaryOp {
+    Neg,
+    Pos,
+    Not,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LogicalOp {
+    And,
+    Or,
 }
 
 struct Parser {
@@ -566,6 +605,22 @@ impl Parser {
             }
             _ => {
                 let expr = self.expression()?;
+                if matches!(self.peek(), Token::Eq) {
+                    self.advance();
+                    let value = self.expression()?;
+                    self.expect(&Token::Semi)?;
+                    let Expr::Index { target, index } = expr else {
+                        return Err(RuntimeError::new(
+                            "parse_error",
+                            "assignment target must be an index expression",
+                        ));
+                    };
+                    return Ok(Stmt::IndexAssign {
+                        target: *target,
+                        index: *index,
+                        value,
+                    });
+                }
                 self.expect(&Token::Semi)?;
                 Ok(Stmt::Expr(expr))
             }
@@ -603,14 +658,55 @@ impl Parser {
         }
         self.expect(&Token::RParen)?;
         self.expect(&Token::LBrace)?;
-        self.expect(&Token::Return)?;
-        let body = self.expression()?;
-        self.expect(&Token::Semi)?;
+        let mut body = Vec::new();
+        while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+            body.push(self.statement()?);
+        }
         self.expect(&Token::RBrace)?;
         Ok(Function { name, params, body })
     }
 
     fn expression(&mut self) -> Result<Expr, RuntimeError> {
+        self.logic_or()
+    }
+
+    fn logic_or(&mut self) -> Result<Expr, RuntimeError> {
+        let mut expr = self.logic_and()?;
+        while matches!(self.peek(), Token::Or) {
+            self.advance();
+            let right = self.logic_and()?;
+            expr = Expr::Logical {
+                left: Box::new(expr),
+                op: LogicalOp::Or,
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn logic_and(&mut self) -> Result<Expr, RuntimeError> {
+        let mut expr = self.logic_not()?;
+        while matches!(self.peek(), Token::And) {
+            self.advance();
+            let right = self.logic_not()?;
+            expr = Expr::Logical {
+                left: Box::new(expr),
+                op: LogicalOp::And,
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn logic_not(&mut self) -> Result<Expr, RuntimeError> {
+        if matches!(self.peek(), Token::Not) {
+            self.advance();
+            let expr = self.logic_not()?;
+            return Ok(Expr::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(expr),
+            });
+        }
         self.equality()
     }
 
@@ -674,7 +770,7 @@ impl Parser {
     }
 
     fn factor(&mut self) -> Result<Expr, RuntimeError> {
-        let mut expr = self.primary()?;
+        let mut expr = self.unary()?;
         loop {
             let op = match self.peek() {
                 Token::Star => BinaryOp::Mul,
@@ -682,11 +778,42 @@ impl Parser {
                 _ => break,
             };
             self.advance();
-            let right = self.primary()?;
+            let right = self.unary()?;
             expr = Expr::Binary {
                 left: Box::new(expr),
                 op,
                 right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn unary(&mut self) -> Result<Expr, RuntimeError> {
+        let op = match self.peek() {
+            Token::Minus => Some(UnaryOp::Neg),
+            Token::Plus => Some(UnaryOp::Pos),
+            _ => None,
+        };
+        if let Some(op) = op {
+            self.advance();
+            let expr = self.unary()?;
+            return Ok(Expr::Unary {
+                op,
+                expr: Box::new(expr),
+            });
+        }
+        self.postfix()
+    }
+
+    fn postfix(&mut self) -> Result<Expr, RuntimeError> {
+        let mut expr = self.primary()?;
+        while matches!(self.peek(), Token::LBracket) {
+            self.advance();
+            let index = self.expression()?;
+            self.expect(&Token::RBracket)?;
+            expr = Expr::Index {
+                target: Box::new(expr),
+                index: Box::new(index),
             };
         }
         Ok(expr)
@@ -709,6 +836,10 @@ impl Parser {
             Token::False => {
                 self.advance();
                 Ok(Expr::Value(Value::Bool(false)))
+            }
+            Token::Null => {
+                self.advance();
+                Ok(Expr::Value(Value::Null))
             }
             Token::If => self.if_expr(),
             Token::LBracket => self.list_expr(),
@@ -945,6 +1076,20 @@ impl Evaluator {
                 self.receipt.output_bytes = self.output.len();
                 Ok(Control::Continue(Value::Null))
             }
+            Stmt::IndexAssign { target, index, value } => {
+                let value = self.eval_expr(value)?;
+                let index = self.eval_expr(index)?;
+                let Expr::Variable(name) = target else {
+                    return Err(RuntimeError::new(
+                        "type_error",
+                        "index assignment target must be a variable",
+                    ));
+                };
+                let mut current = self.lookup(name)?;
+                assign_index(&mut current, index, value)?;
+                self.assign(name, current)?;
+                Ok(Control::Continue(Value::Null))
+            }
             Stmt::Expr(expr) => self.eval_expr(expr).map(Control::Continue),
         }
     }
@@ -981,6 +1126,44 @@ impl Evaluator {
                 let left = self.eval_expr(left)?;
                 let right = self.eval_expr(right)?;
                 eval_binary(left, *op, right)
+            }
+            Expr::Unary { op, expr } => {
+                let value = self.eval_expr(expr)?;
+                eval_unary(*op, &value)
+            }
+            Expr::Logical { left, op, right } => {
+                let left = self.eval_expr(left)?;
+                let Value::Bool(left) = left else {
+                    return Err(RuntimeError::new(
+                        "type_error",
+                        "logical operators expect bool operands",
+                    ));
+                };
+                match op {
+                    LogicalOp::And => {
+                        if !left {
+                            return Ok(Value::Bool(false));
+                        }
+                    }
+                    LogicalOp::Or => {
+                        if left {
+                            return Ok(Value::Bool(true));
+                        }
+                    }
+                }
+                let right = self.eval_expr(right)?;
+                match right {
+                    Value::Bool(right) => Ok(Value::Bool(right)),
+                    _ => Err(RuntimeError::new(
+                        "type_error",
+                        "logical operators expect bool operands",
+                    )),
+                }
+            }
+            Expr::Index { target, index } => {
+                let target = self.eval_expr(target)?;
+                let index = self.eval_expr(index)?;
+                eval_index(target, index)
             }
         }
     }
@@ -1021,10 +1204,27 @@ impl Evaluator {
             scope.insert(param.clone(), value);
         }
         self.scopes.push(scope);
-        let result = self.eval_expr(&function.body);
+        let outcome = self.eval_function_body(&function.body);
         self.scopes.pop();
         self.call_depth -= 1;
-        result
+        outcome
+    }
+
+    fn eval_function_body(&mut self, body: &[Stmt]) -> Result<Value, RuntimeError> {
+        // Preserve legacy op metering for the common single-`return` body: the
+        // expression is evaluated directly, without an extra statement-dispatch
+        // charge, so existing budget calibrations remain valid.
+        if let [Stmt::Return(expr)] = body {
+            return self.eval_expr(expr);
+        }
+        let mut result = Value::Null;
+        for statement in body {
+            match self.eval_stmt(statement)? {
+                Control::Continue(value) => result = value,
+                Control::Return(value) => return Ok(value),
+            }
+        }
+        Ok(result)
     }
 
     fn builtin_call(&mut self, name: &str, args: &[Expr]) -> Result<Option<Value>, RuntimeError> {
@@ -1100,6 +1300,16 @@ impl Evaluator {
         Err(RuntimeError::new("name_error", format!("unknown variable '{name}'")))
     }
 
+    fn assign(&mut self, name: &str, value: Value) -> Result<(), RuntimeError> {
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(slot) = scope.get_mut(name) {
+                *slot = value;
+                return Ok(());
+            }
+        }
+        Err(RuntimeError::new("name_error", format!("unknown variable '{name}'")))
+    }
+
     fn current_scope(&mut self) -> &mut HashMap<String, Value> {
         self.scopes.last_mut().expect("evaluator always has a current scope")
     }
@@ -1144,6 +1354,73 @@ fn eval_binary(left: Value, op: BinaryOp, right: Value) -> Result<Value, Runtime
         BinaryOp::LtEq => int_compare(left, right, "<=", |left, right| left <= right),
         BinaryOp::Gt => int_compare(left, right, ">", |left, right| left > right),
         BinaryOp::GtEq => int_compare(left, right, ">=", |left, right| left >= right),
+    }
+}
+
+fn eval_unary(op: UnaryOp, value: &Value) -> Result<Value, RuntimeError> {
+    match op {
+        UnaryOp::Neg => match value {
+            Value::Int(value) => Ok(Value::Int(-value)),
+            _ => Err(RuntimeError::new("type_error", "unary - expects an int")),
+        },
+        UnaryOp::Pos => match value {
+            Value::Int(value) => Ok(Value::Int(*value)),
+            _ => Err(RuntimeError::new("type_error", "unary + expects an int")),
+        },
+        UnaryOp::Not => match value {
+            Value::Bool(value) => Ok(Value::Bool(!value)),
+            _ => Err(RuntimeError::new("type_error", "not expects a bool")),
+        },
+    }
+}
+
+fn normalize_index(index: i64, len: usize) -> Result<usize, RuntimeError> {
+    let len_i64 =
+        i64::try_from(len).map_err(|_| RuntimeError::new("runtime_error", "collection is too large to index"))?;
+    let resolved = if index < 0 { index + len_i64 } else { index };
+    if resolved < 0 || resolved >= len_i64 {
+        return Err(RuntimeError::new("index_error", "index out of range"));
+    }
+    usize::try_from(resolved).map_err(|_| RuntimeError::new("runtime_error", "index is out of range"))
+}
+
+fn eval_index(target: Value, index: Value) -> Result<Value, RuntimeError> {
+    match (target, index) {
+        (Value::List(values), Value::Int(index)) => {
+            let idx = normalize_index(index, values.len())?;
+            Ok(values[idx].clone())
+        }
+        (Value::String(value), Value::Int(index)) => {
+            let chars: Vec<char> = value.chars().collect();
+            let idx = normalize_index(index, chars.len())?;
+            Ok(Value::String(chars[idx].to_string()))
+        }
+        (Value::Dict(values), Value::String(key)) => values
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| RuntimeError::new("key_error", format!("key '{key}' not found"))),
+        _ => Err(RuntimeError::new(
+            "type_error",
+            "indexing expects list[int], string[int], or dict[string]",
+        )),
+    }
+}
+
+fn assign_index(target: &mut Value, index: Value, value: Value) -> Result<(), RuntimeError> {
+    match (target, index) {
+        (Value::List(values), Value::Int(index)) => {
+            let idx = normalize_index(index, values.len())?;
+            values[idx] = value;
+            Ok(())
+        }
+        (Value::Dict(values), Value::String(key)) => {
+            values.insert(key, value);
+            Ok(())
+        }
+        _ => Err(RuntimeError::new(
+            "type_error",
+            "index assignment expects list[int] or dict[string]",
+        )),
     }
 }
 

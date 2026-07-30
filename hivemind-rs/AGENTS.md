@@ -1,14 +1,14 @@
 # RUST WORKSPACE KNOWLEDGE
 
 ## OVERVIEW
-Feature-gated Rust services share protobuf models, config, database/auth, scheduling, node management, torrent/VPN services, and worker execution.
+Feature-gated Rust services share protobuf models, config, database/auth, scheduling, node management, VPN service, and worker execution.
 
 ## WHERE TO LOOK
 - `crates/hivemind-bin` — binaries and startup wiring
 - `crates/config` — env/JSON configuration and production validation
 - `crates/master-api` — HTTP routes, auth middleware, gRPC client
 - `crates/node-manager` — nodepool gRPC and owner/admin checks
-- `crates/worker-executor` — sandbox, executor, worker control API
+- `crates/worker-executor` — managed-function executor, worker control API
 - `crates/proto` — generated tonic/prost bindings
 
 ## CONVENTIONS

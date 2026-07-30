@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What is Hivemind?
 
-Hivemind is a distributed compute runtime for public-network workers. Users submit batch tasks as ZIP packages; the system schedules them across a pool of worker nodes and returns results. The backend is a single Rust binary (`hivemind-bin`) that can run as `master`, `nodepool`, `worker`, or `all` (colocated). Frontends are React SPAs.
+Hivemind is a distributed compute runtime for public-network workers. Users submit batch tasks as `managed-function-v0` source functions with a JSON input payload; the system schedules them across a pool of worker nodes and returns results. The backend is a single Rust binary (`hivemind-bin`) that can run as `master`, `nodepool`, `worker`, or `all` (colocated). Frontends are React SPAs.
 
 ## Common Commands
 
@@ -95,9 +95,8 @@ Client / UI
 | `node-manager` | Worker registration, heartbeat tracking, trust/liveness state |
 | `task-scheduler` | Task dispatch, redispatch, timeout loops |
 | `master-api` | Axum HTTP handlers, proxies to nodepool gRPC |
-| `worker-executor` | Sandboxed task execution, resource tracking, worker control API |
+| `worker-executor` | Managed-function task execution, resource tracking, worker control API |
 | `vpn-service` | Headscale-based VPN peer management |
-| `torrent-service` | ZIP-to-torrent metainfo, artifact distribution |
 | `common` | Tracing init, shared error types, helpers |
 
 ### Frontend Structure (`frontend/`)
@@ -112,7 +111,7 @@ Client / UI
 
 1. User submits a task (HTTP POST or CLI `submit`) → Master API → Nodepool gRPC
 2. Nodepool persists task to Postgres, dispatches to an available worker via gRPC
-3. Worker downloads the task package (torrent or HTTP), executes in sandbox
+3. Worker runs the `managed-function-v0` source with its JSON input in the managed-function runtime
 4. Worker reports results back via gRPC → Nodepool marks task complete
 5. Frontend polls Master API for task status/results
 

@@ -13,7 +13,6 @@ members = [
     "crates/worker-executor",
     "crates/client-runtime",
     "crates/vpn-service",
-    "crates/torrent-service",
     "crates/hivemind-bin",
 ]
 resolver = "2"

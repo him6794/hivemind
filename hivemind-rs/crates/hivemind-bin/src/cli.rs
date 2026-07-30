@@ -15,7 +15,8 @@ pub struct SubmitCommand {
     pub api_base: String,
     pub username: String,
     pub password: String,
-    pub zip_path: String,
+    pub source_path: String,
+    pub input: String,
     pub task_id: String,
     pub cpu_score: Option<i32>,
     pub memory_gb: Option<i32>,
@@ -51,22 +52,22 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliCommand> {
         return Ok(CliCommand::Service(command.to_string()));
     }
 
-    let zip_path = args
+    let source_path = args
         .get(2)
         .ok_or_else(|| {
-            anyhow!("Usage: hivemind submit <job.zip> --username <user> --password <pass>")
+            anyhow!(
+                "Usage: hivemind submit <function-source> --username <user> --password <pass> [--input <json>|--input-file <path>] [--task-id <id>]"
+            )
         })?
         .clone();
-    if !zip_path.to_ascii_lowercase().ends_with(".zip") {
-        return Err(anyhow!("submit requires a .zip package"));
-    }
 
     let mut submit = SubmitCommand {
         api_base: default_api_base(),
         username: String::new(),
         password: String::new(),
-        task_id: derive_task_id(&zip_path)?,
-        zip_path,
+        task_id: derive_task_id(&source_path)?,
+        source_path,
+        input: String::new(),
         cpu_score: None,
         memory_gb: None,
         gpu_score: None,
@@ -79,10 +80,6 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliCommand> {
     let mut i = 3;
     while i < args.len() {
         let flag = args[i].as_str();
-        if flag == "--download" {
-            i += 1;
-            continue;
-        }
         let value = args
             .get(i + 1)
             .ok_or_else(|| anyhow!("missing value for {}", flag))?;
@@ -91,6 +88,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliCommand> {
             "--username" => submit.username = value.clone(),
             "--password" => submit.password = value.clone(),
             "--task-id" => submit.task_id = parse_task_id_flag(value)?,
+            "--input" => submit.input = value.clone(),
             "--cpu-score" => submit.cpu_score = Some(parse_i32_flag(flag, value)?),
             "--memory-gb" => submit.memory_gb = Some(parse_i32_flag(flag, value)?),
             "--gpu-score" => submit.gpu_score = Some(parse_i32_flag(flag, value)?),
@@ -192,11 +190,11 @@ fn parse_task_id_flag(value: &str) -> Result<String> {
     }
 }
 
-fn derive_task_id(zip_path: &str) -> Result<String> {
-    let stem = Path::new(zip_path)
+fn derive_task_id(source_path: &str) -> Result<String> {
+    let stem = Path::new(source_path)
         .file_stem()
         .and_then(|value| value.to_str())
-        .ok_or_else(|| anyhow!("could not derive task id from zip path"))?
+        .ok_or_else(|| anyhow!("could not derive task id from source path"))?
         .to_string();
     if is_safe_task_id(&stem) {
         Ok(stem)
@@ -214,40 +212,6 @@ fn is_safe_task_id(task_id: &str) -> bool {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
         && !task_id.contains("..")
-}
-
-pub fn build_multipart_upload_body(
-    submit: &SubmitCommand,
-    zip_bytes: &[u8],
-    boundary: &str,
-) -> Vec<u8> {
-    let mut body = Vec::new();
-    push_text_part(&mut body, boundary, "task_id", &submit.task_id);
-    push_optional_i32(&mut body, boundary, "cpu_score", submit.cpu_score);
-    push_optional_i32(&mut body, boundary, "memory_gb", submit.memory_gb);
-    push_optional_i32(&mut body, boundary, "gpu_score", submit.gpu_score);
-    push_optional_i32(&mut body, boundary, "gpu_memory_gb", submit.gpu_memory_gb);
-    push_optional_i64(&mut body, boundary, "storage_gb", submit.storage_gb);
-    push_optional_i32(&mut body, boundary, "host_count", submit.host_count);
-    push_optional_i64(&mut body, boundary, "max_cpt", submit.max_cpt);
-
-    let filename = Path::new(&submit.zip_path)
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("job.zip");
-    body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
-    body.extend_from_slice(
-        format!(
-            "Content-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\n",
-            filename
-        )
-        .as_bytes(),
-    );
-    body.extend_from_slice(b"Content-Type: application/zip\r\n\r\n");
-    body.extend_from_slice(zip_bytes);
-    body.extend_from_slice(b"\r\n");
-    body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
-    body
 }
 
 #[derive(Debug, Deserialize)]
@@ -309,11 +273,11 @@ async fn login(
 }
 
 pub async fn run_submit(submit: SubmitCommand) -> Result<()> {
-    let zip_bytes = tokio::fs::read(&submit.zip_path)
+    let task_source = tokio::fs::read_to_string(&submit.source_path)
         .await
-        .map_err(|e| anyhow!("failed to read {}: {}", submit.zip_path, e))?;
-    if zip_bytes.is_empty() {
-        return Err(anyhow!("{} is empty", submit.zip_path));
+        .map_err(|e| anyhow!("failed to read {}: {}", submit.source_path, e))?;
+    if task_source.trim().is_empty() {
+        return Err(anyhow!("{} is empty", submit.source_path));
     }
 
     let client = reqwest::Client::new();
@@ -325,31 +289,62 @@ pub async fn run_submit(submit: SubmitCommand) -> Result<()> {
     )
     .await?;
 
-    let boundary = format!("hivemind-{}", uuid::Uuid::new_v4());
-    let body = build_multipart_upload_body(&submit, &zip_bytes, &boundary);
-    let upload_url = format!("{}/api/tasks/upload", submit.api_base);
-    let upload = client
-        .post(&upload_url)
+    // managed-function-v0 tasks carry their JSON input in the `torrent` field;
+    // nodepool stores it verbatim as the task input reference.
+    let input = if submit.input.trim().is_empty() {
+        None
+    } else {
+        Some(submit.input.clone())
+    };
+    let mut body = serde_json::json!({
+        "task_id": submit.task_id,
+        "runtime": "managed-function-v0",
+        "task_source": task_source,
+    });
+    if let Some(input) = input {
+        body["torrent"] = serde_json::Value::String(input);
+    }
+    if let Some(v) = submit.cpu_score {
+        body["cpu_score"] = serde_json::Value::from(v);
+    }
+    if let Some(v) = submit.memory_gb {
+        body["memory_gb"] = serde_json::Value::from(v);
+    }
+    if let Some(v) = submit.gpu_score {
+        body["gpu_score"] = serde_json::Value::from(v);
+    }
+    if let Some(v) = submit.gpu_memory_gb {
+        body["gpu_memory_gb"] = serde_json::Value::from(v);
+    }
+    if let Some(v) = submit.storage_gb {
+        body["storage_gb"] = serde_json::Value::from(v);
+    }
+    if let Some(v) = submit.host_count {
+        body["host_count"] = serde_json::Value::from(v);
+    }
+    if let Some(v) = submit.max_cpt {
+        body["max_cpt"] = serde_json::Value::from(v);
+    }
+
+    let create_url = format!("{}/api/tasks", submit.api_base);
+    let created = client
+        .post(&create_url)
         .bearer_auth(token)
-        .header(
-            reqwest::header::CONTENT_TYPE,
-            format!("multipart/form-data; boundary={}", boundary),
-        )
-        .body(body)
+        .json(&body)
         .send()
         .await
-        .map_err(|e| anyhow!("task upload request failed: {}", e))?;
-    let upload_status = upload.status();
-    let task_response: TaskResponse = upload
+        .map_err(|e| anyhow!("task create request failed: {}", e))?;
+    let create_status = created.status();
+    let task_response: TaskResponse = created
         .json()
         .await
-        .map_err(|e| anyhow!("failed to decode task upload response: {}", e))?;
-    if !upload_status.is_success() || !task_response.success {
+        .map_err(|e| anyhow!("failed to decode task create response: {}", e))?;
+    if !create_status.is_success() || !task_response.success {
         return Err(anyhow!(
-            "task upload failed: {}",
+            "task create failed: {}",
             task_response
                 .message
-                .unwrap_or_else(|| upload_status.to_string())
+                .unwrap_or_else(|| create_status.to_string())
         ));
     }
 
@@ -697,37 +692,16 @@ pub fn format_task_result(body: &serde_json::Value) -> Result<String> {
     ))
 }
 
-fn push_text_part(body: &mut Vec<u8>, boundary: &str, name: &str, value: &str) {
-    body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
-    body.extend_from_slice(
-        format!("Content-Disposition: form-data; name=\"{}\"\r\n\r\n", name).as_bytes(),
-    );
-    body.extend_from_slice(value.as_bytes());
-    body.extend_from_slice(b"\r\n");
-}
-
-fn push_optional_i32(body: &mut Vec<u8>, boundary: &str, name: &str, value: Option<i32>) {
-    if let Some(value) = value {
-        push_text_part(body, boundary, name, &value.to_string());
-    }
-}
-
-fn push_optional_i64(body: &mut Vec<u8>, boundary: &str, name: &str, value: Option<i64>) {
-    if let Some(value) = value {
-        push_text_part(body, boundary, name, &value.to_string());
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn parses_submit_zip_with_resource_and_budget_flags() {
+    fn parses_submit_function_with_resource_and_budget_flags() {
         let args = vec![
             "hivemind".to_string(),
             "submit".to_string(),
-            "job.zip".to_string(),
+            "job.py".to_string(),
             "--api".to_string(),
             "http://localhost:8082/".to_string(),
             "--username".to_string(),
@@ -736,6 +710,8 @@ mod tests {
             "secret".to_string(),
             "--task-id".to_string(),
             "render-001".to_string(),
+            "--input".to_string(),
+            "{\"n\":1}".to_string(),
             "--cpu-score".to_string(),
             "250".to_string(),
             "--memory-gb".to_string(),
@@ -759,7 +735,8 @@ mod tests {
         };
 
         assert_eq!(submit.api_base, "http://localhost:8082");
-        assert_eq!(submit.zip_path, "job.zip");
+        assert_eq!(submit.source_path, "job.py");
+        assert_eq!(submit.input, "{\"n\":1}");
         assert_eq!(submit.username, "alice");
         assert_eq!(submit.password, "secret");
         assert_eq!(submit.task_id, "render-001");
@@ -777,7 +754,7 @@ mod tests {
         let args = vec![
             "hivemind".to_string(),
             "submit".to_string(),
-            "job.zip".to_string(),
+            "job.py".to_string(),
             "--task-id".to_string(),
             "../bad".to_string(),
             "--username".to_string(),
@@ -788,38 +765,6 @@ mod tests {
 
         let err = parse_cli_args(&args).expect_err("unsafe submit task id should be rejected");
         assert!(err.to_string().contains("task id"));
-    }
-
-    #[test]
-    fn multipart_upload_body_contains_zip_file_and_optional_fields() {
-        let submit = SubmitCommand {
-            api_base: "http://localhost:8082".into(),
-            username: "alice".into(),
-            password: "secret".into(),
-            zip_path: "job.zip".into(),
-            task_id: "job-123".into(),
-            cpu_score: Some(250),
-            memory_gb: Some(8),
-            gpu_score: None,
-            gpu_memory_gb: None,
-            storage_gb: Some(20),
-            host_count: Some(1),
-            max_cpt: Some(500),
-        };
-
-        let body = build_multipart_upload_body(&submit, b"zip-bytes", "boundary-123");
-        let body = String::from_utf8(body).expect("body should be utf8 for this test");
-
-        assert!(body.contains("name=\"task_id\""));
-        assert!(body.contains("job-123"));
-        assert!(body.contains("name=\"cpu_score\""));
-        assert!(body.contains("250"));
-        assert!(body.contains("name=\"storage_gb\""));
-        assert!(body.contains("20"));
-        assert!(body.contains("name=\"file\"; filename=\"job.zip\""));
-        assert!(body.contains("Content-Type: application/zip"));
-        assert!(body.contains("zip-bytes"));
-        assert!(body.ends_with("--boundary-123--\r\n"));
     }
 
     #[test]

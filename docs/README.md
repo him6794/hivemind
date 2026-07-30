@@ -19,8 +19,8 @@ HiveMind is organized around these runtime pieces:
 - `hivemind-bin` for process startup and service composition
 - `master-api` for the external HTTP API
 - `node-manager` and `task-scheduler` for worker state and dispatch
-- `worker-executor` for sandboxed execution and worker control
-- `vpn-service` and `torrent-service` for connectivity and artifact support
+- `worker-executor` for managed-function execution and worker control
+- `vpn-service` for worker connectivity
 - `database`, `auth`, `config`, `models`, `common`, and `proto` as shared
   support crates
 

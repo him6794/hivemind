@@ -12,8 +12,6 @@ work.
 - Use `EXECUTOR_SANDBOX_MODE=production` for non-development workers.
 - Configure a non-default `JWT_SECRET`.
 - Configure network egress policy before allowing production task execution.
-- For workers without shared storage, serve `TORRENT_API_DIR` over controlled
-  HTTP and set `TORRENT_TASK_ARTIFACT_BASE_URL`.
 - Treat CPT as an internal quota/budget unit only.
 
 ## Not yet complete
@@ -28,7 +26,6 @@ The following public-network capabilities are not complete:
 - dispute resolution;
 - public SLA guarantees;
 - large-scale scheduler benchmarks;
-- full torrent/swarm artifact fetch for arbitrary public workers.
 
 ## Recommended rollout
 

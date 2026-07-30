@@ -213,8 +213,6 @@ impl GrpcClient {
         max_cpt: i64,
         runtime: &str,
         task_source: &str,
-        package_data: Vec<u8>,
-        package_filename: &str,
     ) -> Result<UploadTaskResponse, tonic::Status> {
         let task_id = task_id.to_string();
         let torrent = torrent.to_string();
@@ -222,7 +220,6 @@ impl GrpcClient {
         let token = token.to_string();
         let runtime = runtime.to_string();
         let task_source = task_source.to_string();
-        let package_filename = package_filename.to_string();
         self.with_clients(|mut clients| async move {
             clients
                 .master
@@ -236,8 +233,8 @@ impl GrpcClient {
                     max_cpt,
                     runtime,
                     task_source,
-                    package_data,
-                    package_filename,
+                    package_data: Vec::new(),
+                    package_filename: String::new(),
                 }))
                 .await
                 .map(|r| r.into_inner())
