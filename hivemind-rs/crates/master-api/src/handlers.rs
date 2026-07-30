@@ -982,6 +982,8 @@ async fn create_task_from_submission(
                 StatusCode::CREATED
             } else if resp.status_message == "task_id already exists" {
                 StatusCode::CONFLICT
+            } else if resp.status_message.starts_with("insufficient balance") {
+                StatusCode::PAYMENT_REQUIRED
             } else {
                 StatusCode::BAD_REQUEST
             };
