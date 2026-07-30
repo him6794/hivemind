@@ -102,7 +102,6 @@ use hivemind_auth::AuthManager;
 use hivemind_database::postgres;
 use hivemind_models::{Claims, Task, TaskStatus, WorkerNode};
 use hivemind_task_scheduler::{dispatcher::worker_endpoint, BatchTaskReport, TaskScheduler};
-use hivemind_torrent_service::DistributionRuntime;
 
 const MAX_TASK_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_RESULT_REFERENCE_BYTES: usize = 4096;
@@ -114,9 +113,6 @@ pub struct NodepoolState {
     pub node_manager: Arc<NodeManager>,
     pub scheduler: TaskScheduler,
     pub artifact_root: PathBuf,
-    /// Trusted task-package distribution runtime (tracker + seeder).
-    /// Optional in pure unit tests that do not exercise package upload.
-    pub distribution: Option<DistributionRuntime>,
 }
 
 fn task_create_error_message(error: &anyhow::Error) -> String {
@@ -1212,21 +1208,14 @@ impl MasterNodeService for GrpcMasterNodeService {
             }));
         }
 
-        // The master owns task package bytes and seeds them. Nodepool stores
-        // only the torrent/magnet reference and must never persist task ZIPs.
+        // Nodepool stores only the task input reference (managed-function tasks
+        // carry their JSON input here). It never persists task packages.
         let torrent_source = req.torrent.clone();
         let expected_btih = None;
-        if !req.package_data.is_empty() {
+        if torrent_source.trim().is_empty() {
             return Ok(Response::new(UploadTaskResponse {
                 success: false,
-                status_message:
-                    "nodepool does not accept task package bytes; master must create and seed the torrent"
-                        .into(),
-            }));
-        } else if torrent_source.trim().is_empty() {
-            return Ok(Response::new(UploadTaskResponse {
-                success: false,
-                status_message: "torrent or package_data is required".into(),
+                status_message: "torrent is required".into(),
             }));
         }
 
@@ -2911,7 +2900,6 @@ mod tests {
             node_manager,
             scheduler: scheduler.clone(),
             artifact_root: artifact_root_for_config(&config),
-            distribution: None,
         });
         let service = GrpcMasterNodeService::new(state);
         let unique = uuid::Uuid::new_v4().to_string();

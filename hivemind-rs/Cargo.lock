@@ -241,18 +241,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bendy"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3d60116e2174fd5ea2889fffacdcbe47229beeb12f7908e1e6525dc346c9431"
-dependencies = [
- "rustversion",
- "serde",
- "serde_bytes",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "bitflags"
 version = "2.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1138,7 +1126,6 @@ dependencies = [
  "hivemind-node-manager",
  "hivemind-proto",
  "hivemind-task-scheduler",
- "hivemind-torrent-service",
  "hivemind-vpn-service",
  "hivemind-website-api",
  "hivemind-worker-executor",
@@ -1233,7 +1220,6 @@ dependencies = [
  "hivemind-node-manager",
  "hivemind-proto",
  "hivemind-task-scheduler",
- "hivemind-torrent-service",
  "hyper",
  "jsonwebtoken",
  "reqwest",
@@ -1275,7 +1261,6 @@ dependencies = [
  "hivemind-models",
  "hivemind-proto",
  "hivemind-task-scheduler",
- "hivemind-torrent-service",
  "serde",
  "serde_json",
  "sqlx",
@@ -1317,26 +1302,6 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "hivemind-torrent-service"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bendy",
- "chrono",
- "hex",
- "hivemind-common",
- "hivemind-config",
- "serde",
- "serde_json",
- "sha1 0.10.6",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
  "tracing",
  "uuid",
 ]
@@ -1403,7 +1368,6 @@ dependencies = [
  "hivemind-config",
  "hivemind-models",
  "hivemind-proto",
- "hivemind-torrent-service",
  "ipnet",
  "jsonwebtoken",
  "managed-function-runtime",
@@ -2734,16 +2698,6 @@ checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
  "serde_derive",
-]
-
-[[package]]
-name = "serde_bytes"
-version = "0.11.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5d440709e79d88e51ac01c4b72fc6cb7314017bb7da9eeff678aa94c10e3ea8"
-dependencies = [
- "serde",
- "serde_core",
 ]
 
 [[package]]

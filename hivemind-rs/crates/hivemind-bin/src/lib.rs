@@ -33,8 +33,6 @@ use hivemind_proto::{
 #[cfg(feature = "nodepool")]
 use hivemind_task_scheduler::{dispatcher::Dispatcher, TaskScheduler};
 #[cfg(feature = "nodepool")]
-use hivemind_torrent_service::DistributionRuntime;
-#[cfg(feature = "nodepool")]
 use hivemind_vpn_service::grpc_server::GrpcVpnService;
 #[cfg(feature = "nodepool")]
 use hivemind_vpn_service::VpnService;
@@ -278,22 +276,12 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
         shutdown_handles.push(timeout_shutdown);
 
         // Build gRPC servers
-        let (distribution, distribution_handles) = DistributionRuntime::start(&config).await?;
-        info!(
-            "Nodepool torrent tracker on {} (announce {}), seed listener on {}",
-            distribution.tracker_addr, distribution.announce_url, distribution.seed_addr
-        );
-        // Keep distribution tasks alive for process lifetime.
-        for handle in distribution_handles {
-            std::mem::forget(handle);
-        }
         let np_state = Arc::new(NodepoolState {
             auth: auth.clone(),
             worker_execution_private_key_pem: config.auth.worker_execution_private_key_pem.clone(),
             node_manager: node_mgr.clone(),
             scheduler: scheduler.clone(),
             artifact_root: hivemind_node_manager::grpc::artifact_root_for_config(&config),
-            distribution: Some(distribution),
         });
 
         let user_svc = UserServiceServer::new(GrpcUserService::new(np_state.clone()));

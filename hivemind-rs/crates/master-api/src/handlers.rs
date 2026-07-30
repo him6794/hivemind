@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Multipart, Path as AxumPath, Query, State},
+    extract::{Path as AxumPath, Query, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -8,11 +8,9 @@ use hivemind_config::HivemindConfig;
 use hivemind_proto::ResourceSpec as ProtoResourceSpec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::distribution::MasterDistribution;
 use crate::grpc_client::GrpcClient;
 use crate::middleware::AuthUser;
 
@@ -26,7 +24,6 @@ use crate::middleware::AuthUser;
 pub struct AppState {
     pub grpc_client: GrpcClient,
     pub config: HivemindConfig,
-    pub distribution: Option<Arc<MasterDistribution>>,
     pub task_submit_limiter: Arc<tokio::sync::Mutex<TaskSubmitRateLimiter>>,
 }
 
@@ -165,15 +162,8 @@ pub struct RemoveWorkerBody {
     pub worker_id: String,
 }
 
-struct TaskDistribution {
-    torrent_source: Option<String>,
-    package_data: Vec<u8>,
-    package_filename: String,
-}
-
 struct TaskSubmission {
     body: CreateTaskBody,
-    uploaded_package: Option<TaskDistribution>,
 }
 
 fn bad_task_response(message: impl Into<String>) -> (StatusCode, Json<TaskResponse>) {
@@ -280,24 +270,6 @@ fn task_submit_limit_per_minute() -> i64 {
         .max(0)
 }
 
-fn max_task_upload_bytes() -> usize {
-    std::env::var("HIVEMIND_MAX_TASK_UPLOAD_BYTES")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(100 * 1024 * 1024)
-}
-
-fn uploaded_file_size_error(file_len: usize, max_bytes: usize) -> Option<String> {
-    if file_len > max_bytes {
-        Some(format!(
-            "uploaded task package is too large: {} bytes > {} bytes",
-            file_len, max_bytes
-        ))
-    } else {
-        None
-    }
-}
-
 #[allow(dead_code)] // retained for registration policy tests; master no longer exposes public register
 fn is_reserved_admin_username(username: &str) -> bool {
     std::env::var("HIVEMIND_ADMIN_USERS")
@@ -327,54 +299,6 @@ async fn enforce_task_submit_rate_limit(
             format!("task submission rate limit exceeded: {} per minute", limit),
         ))
     }
-}
-
-fn parse_optional_i32(name: &str, value: &str) -> anyhow::Result<i32> {
-    value
-        .trim()
-        .parse::<i32>()
-        .map_err(|e| anyhow::anyhow!("Invalid {}: {}", name, e))
-}
-
-fn parse_optional_i64(name: &str, value: &str) -> anyhow::Result<i64> {
-    value
-        .trim()
-        .parse::<i64>()
-        .map_err(|e| anyhow::anyhow!("Invalid {}: {}", name, e))
-}
-
-fn set_upload_text_field(body: &mut CreateTaskBody, name: &str, value: &str) -> anyhow::Result<()> {
-    match name {
-        "task_id" => body.task_id = value.trim().to_string(),
-        "runtime" => body.runtime = Some(value.trim().to_string()),
-        "task_source" => body.task_source = Some(value.to_string()),
-        "memory_gb" => body.memory_gb = Some(parse_optional_i32(name, value)?),
-        "cpu_score" => body.cpu_score = Some(parse_optional_i32(name, value)?),
-        "gpu_score" => body.gpu_score = Some(parse_optional_i32(name, value)?),
-        "gpu_memory_gb" => body.gpu_memory_gb = Some(parse_optional_i32(name, value)?),
-        "storage_gb" => body.storage_gb = Some(parse_optional_i64(name, value)?),
-        "host_count" => body.host_count = Some(parse_optional_i32(name, value)?),
-        "max_cpt" => body.max_cpt = Some(parse_optional_i64(name, value)?),
-        _ => {}
-    }
-    Ok(())
-}
-
-fn task_upload_path(config: &HivemindConfig, task_id: &str) -> PathBuf {
-    PathBuf::from(&config.torrent.api_dir)
-        .join("uploads")
-        .join(format!("{}.zip", task_id))
-}
-
-fn resolve_task_distribution(
-    body: &CreateTaskBody,
-    uploaded_package: Option<TaskDistribution>,
-) -> TaskDistribution {
-    uploaded_package.unwrap_or_else(|| TaskDistribution {
-        torrent_source: body.torrent.clone(),
-        package_data: Vec::new(),
-        package_filename: String::new(),
-    })
 }
 
 #[derive(Debug, Serialize)]
@@ -976,15 +900,7 @@ pub async fn create_task(
     if let Some(response) = enforce_task_submit_rate_limit(&state, &owner).await {
         return response;
     }
-    create_task_from_submission(
-        state,
-        token,
-        TaskSubmission {
-            body,
-            uploaded_package: None,
-        },
-    )
-    .await
+    create_task_from_submission(state, token, TaskSubmission { body }).await
 }
 
 async fn create_task_from_submission(
@@ -992,10 +908,7 @@ async fn create_task_from_submission(
     token: String,
     submission: TaskSubmission,
 ) -> (StatusCode, Json<TaskResponse>) {
-    let TaskSubmission {
-        mut body,
-        uploaded_package,
-    } = submission;
+    let TaskSubmission { mut body } = submission;
     let Some(task_id) = normalized_task_id(&body.task_id) else {
         return bad_task_response("task_id is required and must be a safe file name");
     };
@@ -1036,36 +949,9 @@ async fn create_task_from_submission(
             return budget_guard_response(quoted_cpt, mc);
         }
     }
-    let distribution = resolve_task_distribution(&body, uploaded_package);
-    let mut ts = distribution.torrent_source.unwrap_or_default();
-    if !distribution.package_data.is_empty() {
-        let Some(master_distribution) = state.distribution.as_ref() else {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(TaskResponse {
-                    success: false,
-                    message: "master package distribution is not initialized".into(),
-                    task: None,
-                }),
-            );
-        };
-        ts = match master_distribution
-            .seed_package(&distribution.package_data, &distribution.package_filename)
-            .await
-        {
-            Ok(magnet) => magnet,
-            Err(err) => {
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(TaskResponse {
-                        success: false,
-                        message: format!("failed to seed task package from master: {err}"),
-                        task: None,
-                    }),
-                )
-            }
-        };
-    }
+    // managed-function-v0 tasks carry their JSON input in the `torrent` field;
+    // nodepool stores it verbatim as the task input reference.
+    let ts = body.torrent.clone().unwrap_or_default();
     let req = ProtoResourceSpec {
         cpu_cores: 0,
         memory_mb: body.memory_gb.unwrap_or(0) as i64 * 1024,
@@ -1088,8 +974,6 @@ async fn create_task_from_submission(
             body.max_cpt.unwrap_or(quoted_cpt),
             body.runtime.as_deref().unwrap_or(""),
             body.task_source.as_deref().unwrap_or(""),
-            Vec::new(),
-            "",
         )
         .await
     {
@@ -1119,97 +1003,6 @@ async fn create_task_from_submission(
             }),
         ),
     }
-}
-
-/// POST /api/tasks/upload
-pub async fn upload_task(
-    State(state): State<AppState>,
-    AuthUser { claims, token }: AuthUser,
-    mut multipart: Multipart,
-) -> (StatusCode, Json<TaskResponse>) {
-    let owner = claims.sub;
-    if let Some(response) = enforce_task_submit_rate_limit(&state, &owner).await {
-        return response;
-    }
-
-    let mut body = CreateTaskBody {
-        task_id: String::new(),
-        torrent: None,
-        runtime: None,
-        task_source: None,
-        memory_gb: None,
-        cpu_score: None,
-        gpu_score: None,
-        gpu_memory_gb: None,
-        storage_gb: None,
-        location: None,
-        host_count: None,
-        max_cpt: None,
-    };
-    let mut fb = None;
-    loop {
-        let field = match multipart.next_field().await {
-            Ok(Some(f)) => f,
-            Ok(None) => break,
-            Err(e) => return bad_task_response(format!("Invalid multipart payload: {}", e)),
-        };
-        let name = field.name().unwrap_or_default().to_string();
-        if name == "file" {
-            match field.bytes().await {
-                Ok(b) if !b.is_empty() => fb = Some(b),
-                Ok(_) => return bad_task_response("file is required"),
-                Err(e) => return bad_task_response(format!("Failed to read file: {}", e)),
-            }
-        } else {
-            match field.text().await {
-                Ok(v) => {
-                    if let Err(e) = set_upload_text_field(&mut body, &name, &v) {
-                        return bad_task_response(e.to_string());
-                    }
-                }
-                Err(e) => {
-                    return bad_task_response(format!("Failed to read field {}: {}", name, e))
-                }
-            }
-        }
-    }
-    let Some(fb) = fb else {
-        return bad_task_response("file is required");
-    };
-    if let Some(message) = uploaded_file_size_error(fb.len(), max_task_upload_bytes()) {
-        return task_response(StatusCode::PAYLOAD_TOO_LARGE, false, message);
-    }
-    let Some(task_id) = normalized_task_id(&body.task_id) else {
-        return bad_task_response("task_id is required and must be a safe file name");
-    };
-    body.task_id = task_id;
-    let zp = task_upload_path(&state.config, &body.task_id);
-    if let Some(p) = zp.parent() {
-        if let Err(e) = std::fs::create_dir_all(p) {
-            return bad_task_response(format!("Failed to create upload directory: {}", e));
-        }
-    }
-    if let Err(e) = std::fs::write(&zp, &fb) {
-        return bad_task_response(format!("Failed to save uploaded file: {}", e));
-    }
-    let package_filename = zp
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(&body.task_id)
-        .to_string();
-    create_task_from_submission(
-        state,
-        token,
-        TaskSubmission {
-            body,
-            uploaded_package: Some(TaskDistribution {
-                torrent_source: None,
-                package_data: fb.to_vec(),
-                package_filename,
-            }),
-        },
-    )
-    .await
 }
 
 /// GET /api/tasks
@@ -2245,14 +2038,6 @@ mod tests {
     }
 
     #[test]
-    fn uploaded_file_size_error_allows_exact_limit_and_rejects_over_limit() {
-        assert!(uploaded_file_size_error(1024, 1024).is_none());
-        assert!(uploaded_file_size_error(1025, 1024)
-            .unwrap()
-            .contains("too large"));
-    }
-
-    #[test]
     fn task_id_safety_rejects_single_dot_segment() {
         assert!(is_safe_task_id("task-123"));
         assert!(!is_safe_task_id("."));
@@ -2350,67 +2135,6 @@ mod tests {
         assert_eq!(resources.gpu_score, 1200);
         assert_eq!(resources.storage_total_gb, 1000);
         assert_eq!(resources.storage_available_gb, 750);
-    }
-
-    #[test]
-    fn uploaded_distribution_preserves_package_bytes_for_nodepool_seed() {
-        // Given: multipart upload bytes already read at the HTTP boundary.
-        let body = CreateTaskBody {
-            task_id: "zip-nodepool".into(),
-            torrent: None,
-            runtime: None,
-            task_source: None,
-            memory_gb: None,
-            cpu_score: None,
-            gpu_score: None,
-            gpu_memory_gb: None,
-            storage_gb: None,
-            location: None,
-            host_count: None,
-            max_cpt: None,
-        };
-        let uploaded_package = TaskDistribution {
-            torrent_source: None,
-            package_data: b"package-bytes-for-nodepool".to_vec(),
-            package_filename: "zip-nodepool.zip".into(),
-        };
-
-        // When: task distribution selects the trusted multipart package.
-        let distribution = resolve_task_distribution(&body, Some(uploaded_package));
-
-        // Then: nodepool receives the same bytes and generated package name.
-        assert!(distribution.torrent_source.is_none());
-        assert_eq!(distribution.package_data, b"package-bytes-for-nodepool");
-        assert_eq!(distribution.package_filename, "zip-nodepool.zip");
-    }
-
-    #[test]
-    fn torrent_only_distribution_keeps_reference_without_package_bytes() {
-        // Given: JSON task creation with a supported torrent reference.
-        let body = CreateTaskBody {
-            task_id: "magnet-only".into(),
-            torrent: Some("magnet:?xt=urn:btih:abc".into()),
-            runtime: None,
-            task_source: None,
-            memory_gb: None,
-            cpu_score: None,
-            gpu_score: None,
-            gpu_memory_gb: None,
-            storage_gb: None,
-            location: None,
-            host_count: None,
-            max_cpt: None,
-        };
-
-        // When: task distribution has no multipart package.
-        let distribution = resolve_task_distribution(&body, None);
-
-        // Then: the torrent reference is preserved without package bytes.
-        assert_eq!(
-            distribution.torrent_source.as_deref(),
-            Some("magnet:?xt=urn:btih:abc")
-        );
-        assert!(distribution.package_data.is_empty());
     }
 
     #[test]

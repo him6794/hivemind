@@ -56,7 +56,6 @@ hivemind-rs/
 │   ├── node-manager/   - Worker management
 │   ├── proto/          - gRPC protobuf definitions
 │   ├── task-scheduler/ - Task dispatch & scheduling
-│   ├── torrent-service/- ZIP to BitTorrent metainfo conversion and swarm helpers
 │   ├── vpn-service/    - VPN management
 │   └── worker-executor/- Task execution engine
 ```
@@ -202,11 +201,7 @@ Configuration is via environment variables:
 | `NODEPOOL_GRPC_ADDR` | `0.0.0.0:50051` | Nodepool gRPC listen/connect address |
 | `WORKER_GRPC_ADDR` | `0.0.0.0:50053` | Worker gRPC listen address |
 | `WORKER_ADVERTISE_ADDR` | - | Worker address registered with nodepool |
-| `TORRENT_API_DIR` | `./api/torrents` | Seed directory for uploaded task packages |
-| `TORRENT_BT_DIR` | `./bt_torrents` | Generated `.torrent` output directory |
-| `TORRENT_ANNOUNCE_URL` | `http://localhost:6969/announce` | Tracker announce URL embedded in torrents |
-| `TORRENT_TASK_ARTIFACT_BASE_URL` | unset | Optional HTTP base URL that exposes `TORRENT_API_DIR`; when set, ZIP uploads can be distributed to workers as downloadable `uploads/<task>.zip` URLs without requiring shared local storage |
-| `EXECUTOR_SANDBOX_DIR` | `./sandbox` | Per-task sandbox root |
+| `EXECUTOR_SANDBOX_DIR` | `./sandbox` | Per-task working directory root |
 | `LOG_LEVEL` | `info` | Log level (debug, info, warn, error) |
 
 ## API Reference
@@ -229,20 +224,9 @@ curl -X POST http://localhost:8082/api/tasks \
   -H "Content-Type: application/json" \
   -d '{
     "task_id": "task-1",
-    "torrent": "magnet:?xt=urn:btih:<info-hash>",
-    "memory_gb": 4,
-    "cpu_score": 100,
-    "storage_gb": 10,
-    "max_cpt": 25
-  }'
-
-# Create task from a local ZIP path on the master host
-curl -X POST http://localhost:8082/api/tasks \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "task_id": "task-zip-1",
-    "zip_path": "./task/windows_dist/out/task.zip",
+    "runtime": "managed-function-v0",
+    "task_source": "def main(input):\n    return {\"sum\": input[\"a\"] + input[\"b\"]}\n",
+    "torrent": "{\"a\": 1, \"b\": 2}",
     "memory_gb": 4,
     "cpu_score": 100,
     "storage_gb": 10,

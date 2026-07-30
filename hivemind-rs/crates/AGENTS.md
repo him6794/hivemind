@@ -7,8 +7,8 @@ Each crate owns one backend boundary; preserve narrow dependencies and feature i
 - `common`, `models`, `config`, `proto` — shared foundations
 - `auth`, `database` — identity and persistence
 - `master-api`, `node-manager`, `task-scheduler` — control plane
-- `worker-executor` — untrusted task execution
-- `torrent-service`, `vpn-service` — distribution/network integrations
+- `worker-executor` — untrusted managed-function task execution
+- `vpn-service` — network integration
 
 ## ANTI-PATTERNS
 - Do not create cyclic cross-crate dependencies.

@@ -69,7 +69,6 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/api/tasks/quote", post(super::handlers::quote_task))
         .route("/api/tasks", post(super::handlers::create_task))
-        .route("/api/tasks/upload", post(super::handlers::upload_task))
         .route("/api/tasks", get(super::handlers::list_tasks))
         .route("/api/workers", get(super::handlers::list_workers))
         .route(

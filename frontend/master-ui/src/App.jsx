@@ -1,10 +1,9 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import './console.css';
 import { artifactFilenameFromContentDisposition } from './artifactDownloadPolicy.mjs';
 import { clearStoredSession, readStoredSession, saveStoredSession } from './authSession.mjs';
 import { createTaskId, validateTaskId } from './taskIdPolicy.mjs';
 import { taskRequestFailureText, taskResponseFailureMessage } from './taskResponsePolicy.mjs';
-import { clearTaskUploadInput, validateTaskUploadFile } from './taskUploadPolicy.mjs';
 
 const panelStyle = {
   border: '1px solid #d8e0e8',
@@ -54,11 +53,11 @@ export default function MasterApp() {
   const [cancelLoading, setCancelLoading] = useState(null);
   const [downloadLoading, setDownloadLoading] = useState(null);
   const [lastRefresh, setLastRefresh] = useState(null);
-  const [zipError, setZipError] = useState(null);
-  const taskUploadInputRef = useRef(null);
+  const [sourceError, setSourceError] = useState(null);
 
   const [taskId, setTaskId] = useState('');
-  const [zipFile, setZipFile] = useState(null);
+  const [taskSource, setTaskSource] = useState('');
+  const [taskInput, setTaskInput] = useState('');
   const [cpuScore, setCpuScore] = useState(0);
   const [gpuScore, setGpuScore] = useState(0);
   const [memoryGb, setMemoryGb] = useState(0);
@@ -164,17 +163,25 @@ export default function MasterApp() {
   }
 
   async function submitTask() {
-    if (!token || !zipFile) return;
+    if (!token || !taskSource.trim()) return;
     setSubmitLoading(true);
-    setStatus('Uploading task...');
+    setStatus('Submitting task...');
 
     try {
-      const zipValidation = validateTaskUploadFile(zipFile);
-      if (zipValidation) {
-        throw new Error(zipValidation);
+      if (!taskSource.trim()) {
+        throw new Error('Function source is required');
+      }
+      if (taskInput.trim()) {
+        try {
+          JSON.parse(taskInput);
+        } catch {
+          throw new Error('Input must be valid JSON');
+        }
+      }
+      if (toNumber(maxCpt) <= 0) {
+        throw new Error('Max CPT must be greater than 0 for managed-function tasks');
       }
 
-      const form = new FormData();
       const effectiveTaskId = taskId.trim() || createTaskId();
       if (!effectiveTaskId) {
         throw new Error('task_id is required');
@@ -184,31 +191,35 @@ export default function MasterApp() {
         throw new Error(validatedTaskId.message);
       }
 
-      form.append('task_id', validatedTaskId.taskId);
-      form.append('file', zipFile);
+      const body = {
+        task_id: validatedTaskId.taskId,
+        runtime: 'managed-function-v0',
+        task_source: taskSource,
+      };
+      // managed-function-v0 tasks carry their JSON input in the `torrent` field.
+      if (taskInput.trim()) body.torrent = taskInput;
+      if (cpuScore > 0) body.cpu_score = toNumber(cpuScore);
+      if (gpuScore > 0) body.gpu_score = toNumber(gpuScore);
+      if (memoryGb > 0) body.memory_gb = toNumber(memoryGb);
+      if (gpuMemoryGb > 0) body.gpu_memory_gb = toNumber(gpuMemoryGb);
+      if (storageGb > 0) body.storage_gb = toNumber(storageGb);
+      if (hostCount > 0) body.host_count = toNumber(hostCount);
+      if (maxCpt > 0) body.max_cpt = toNumber(maxCpt);
 
-      if (cpuScore > 0) form.append('cpu_score', String(toNumber(cpuScore)));
-      if (gpuScore > 0) form.append('gpu_score', String(toNumber(gpuScore)));
-      if (memoryGb > 0) form.append('memory_gb', String(toNumber(memoryGb)));
-      if (gpuMemoryGb > 0) form.append('gpu_memory_gb', String(toNumber(gpuMemoryGb)));
-      if (storageGb > 0) form.append('storage_gb', String(toNumber(storageGb)));
-      if (hostCount > 0) form.append('host_count', String(toNumber(hostCount)));
-      if (maxCpt > 0) form.append('max_cpt', String(toNumber(maxCpt)));
-
-      const { data } = await api('POST', '/api/tasks/upload', form);
+      const { data } = await api('POST', '/api/tasks', body);
       if (!data.success) {
-        throw new Error(data.message || data.status_message || 'Task upload failed');
+        throw new Error(data.message || data.status_message || 'Task submission failed');
       }
 
       setTaskId('');
-      setZipFile(null);
-      setZipError(null);
-      clearTaskUploadInput(taskUploadInputRef.current);
+      setTaskSource('');
+      setTaskInput('');
+      setSourceError(null);
       setStatus(`Task submitted: ${validatedTaskId.taskId}`);
       await refreshTasks();
       setLastRefresh(Date.now());
     } catch (err) {
-      setStatus(`Upload failed: ${err.message}`);
+      setStatus(`Submission failed: ${err.message}`);
     } finally {
       setSubmitLoading(false);
     }
@@ -350,8 +361,9 @@ export default function MasterApp() {
     setTaskLog('');
     setTaskResult('');
     setStatus('Please log in to manage tasks');
-    setZipFile(null);
-    setZipError(null);
+    setTaskSource('');
+    setTaskInput('');
+    setSourceError(null);
     setLastRefresh(null);
   }
 
@@ -369,7 +381,7 @@ export default function MasterApp() {
               <p className="eyebrow">Hivemind Console</p>
               <h1>Master UI</h1>
               <p className="lead">
-                Submit ZIP tasks to the local Hivemind runtime, monitor execution, and collect worker output from one account session.
+                Submit managed-function tasks to the local Hivemind runtime, monitor execution, and collect worker output from one account session.
               </p>
             </div>
           </div>
@@ -421,7 +433,7 @@ export default function MasterApp() {
         {token ? (
           <div className="grid two" style={{ marginTop: 18 }}>
             <section className="surface">
-              <h2>Upload Task</h2>
+              <h2>Submit Task</h2>
               <div className="grid">
                 <label>
                   Task ID
@@ -433,20 +445,28 @@ export default function MasterApp() {
                   />
                 </label>
                 <label>
-                  Task file
-                  <input
-                    ref={taskUploadInputRef}
-                    type="file"
-                    accept=".torrent,.zip,application/x-bittorrent,application/zip"
+                  Function source
+                  <textarea
+                    value={taskSource}
                     onChange={(e) => {
-                      const file = e.target.files?.[0] || null;
-                      const error = validateTaskUploadFile(file);
-                      setZipError(error);
-                      setZipFile(file);
+                      setTaskSource(e.target.value);
+                      setSourceError(e.target.value.trim() ? null : 'Function source is required');
                     }}
-                    className={`field ${zipError ? 'error' : ''}`}
+                    placeholder="managed-function-v0 source code"
+                    rows={8}
+                    className={`field ${sourceError ? 'error' : ''}`}
                   />
-                  {zipError ? <div className="status error">{zipError}</div> : null}
+                  {sourceError ? <div className="status error">{sourceError}</div> : null}
+                </label>
+                <label>
+                  Input (JSON)
+                  <textarea
+                    value={taskInput}
+                    onChange={(e) => setTaskInput(e.target.value)}
+                    placeholder='optional, e.g. {"n": 42}'
+                    rows={4}
+                    className="field"
+                  />
                 </label>
               </div>
 
@@ -484,10 +504,10 @@ export default function MasterApp() {
                 <button
                   type="button"
                   onClick={submitTask}
-                  disabled={submitLoading || !zipFile || !!zipError}
+                  disabled={submitLoading || !taskSource.trim() || !!sourceError}
                   className="button primary"
                 >
-                  {submitLoading ? 'Uploading...' : 'Upload Task'}
+                  {submitLoading ? 'Submitting...' : 'Submit Task'}
                 </button>
               </div>
             </section>

@@ -14,7 +14,7 @@ the host:
 | Surface or API | Default URL | Operator purpose |
 | --- | --- | --- |
 | Official Site | `http://localhost:8080` | Public product site and account center |
-| Master UI | `http://localhost:3000` | Submit ZIP tasks and inspect their status, logs, results, and artifacts |
+| Master UI | `http://localhost:3000` | Submit managed-function tasks and inspect their status, logs, results, and artifacts |
 | Worker UI | `http://localhost:3001` | Inspect the local worker and register its capacity |
 | Master API | `http://localhost:8082` | Authenticated HTTP gateway used by the browser surfaces |
 | Worker control | `http://localhost:18080` | Local worker profile/control API used by Worker UI |

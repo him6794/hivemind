@@ -1,38 +1,41 @@
-﻿# Hivemind Task Templates
+# Hivemind Task Templates
 
-Ready-to-use starting points for requestors. Each template is a self-contained directory:
+Ready-to-use starting points for requestors. Hivemind runs
+`managed-function-v0` tasks: a source function plus a JSON input payload.
 
 ## Available Templates
 
-| Template | Use Case | Requirements |
-|----------|----------|-------------|
-| `python-script` | Run a Python script | CPU 100, 2GB RAM, 1GB storage |
-| `data-processing` | Process input files → output | CPU 200, 4GB RAM, 10GB storage |
-| `batch-render` | GPU-accelerated batch rendering | CPU 500, 8GB RAM, GPU, 50GB storage |
-| `docker-job` | Run containerized workloads | CPU 100, 2GB RAM, 5GB storage |
+See `managed-function-v0/` for runnable samples. Each sample is a pair:
+
+| Sample | Use Case |
+|--------|----------|
+| `01_policy_gate` | Approve or reject a request from user risk and budget |
+| `02_weighted_score` | Convert metrics into a weighted score and band |
+| `03_batch_sum` | Summarize a list of payment records |
+| `04_price_quote` | Estimate task price and check budget |
+| `05_route_task` | Choose a worker pool and priority for a task |
 
 ## How to Use
 
-1. Copy the template directory
-2. Replace the entrypoint script with your own code
-3. Adjust `task.json` resource requirements
-4. Package: `zip -r task.zip .` inside the directory
-5. Submit: `hivemind submit task.zip --username user --password pass`
+1. Copy a `.hmf` source file and its matching `.input.json`.
+2. Edit the function source and input for your workload.
+3. Submit with the CLI:
 
-## Structure
+   ```bash
+   hivemind submit templates/managed-function-v0/03_batch_sum.hmf \
+     --input templates/managed-function-v0/03_batch_sum.input.json \
+     --username user --password pass --max-cpt 25
+   ```
 
-Each template contains:
-- `task.json` — metadata and resource requirements
-- `run.py` (or `run.sh`) — the entrypoint script
-- Output goes to `./output/` directory
+   Or submit over HTTP with `POST /api/tasks` (see `docs/MANAGED_FUNCTION_RUNTIME.md`).
 
-## Customization
+## Resource and Budget Overrides
 
-Modify `task.json` to adjust:
-- `cpu_score` — minimum CPU benchmark score
-- `memory_gb` — RAM requirement
-- `gpu_score` — minimum GPU benchmark score (add if needed)
-- `gpu_memory_gb` — VRAM requirement (add if needed)
-- `storage_gb` — disk space requirement
+Submission flags adjust the requested resources and budget:
 
-Run `hivemind submit <zip> --cpu-score 500 --memory-gb 8` to override at submission time.
+- `--cpu-score` - minimum CPU benchmark score
+- `--memory-gb` - RAM requirement
+- `--gpu-score` - minimum GPU benchmark score
+- `--gpu-memory-gb` - VRAM requirement
+- `--storage-gb` - disk space requirement
+- `--max-cpt` - the managed execution budget; execution stops when it is spent

@@ -16,7 +16,6 @@ nodepool = [
     "dep:hivemind-database",
     "dep:hivemind-node-manager",
     "dep:hivemind-task-scheduler",
-    "dep:hivemind-torrent-service",
     "dep:hivemind-vpn-service",
 ]
 worker = ["dep:hivemind-worker-executor"]
@@ -71,4 +70,3 @@ hivemind-master-api = { path = "../master-api", optional = true }
 hivemind-website-api = { path = "../website-api", optional = true }
 hivemind-worker-executor = { path = "../worker-executor", optional = true }
 hivemind-vpn-service = { path = "../vpn-service", optional = true }
-hivemind-torrent-service = { path = "../torrent-service", optional = true }

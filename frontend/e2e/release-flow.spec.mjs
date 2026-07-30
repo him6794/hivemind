@@ -12,7 +12,8 @@ const evidenceDirectory = path.resolve(
 const officialSiteUrl = process.env.HIVEMIND_SITE_URL || 'http://127.0.0.1:8080';
 const masterUiUrl = process.env.HIVEMIND_MASTER_UI_URL || 'http://127.0.0.1:3000';
 const workerUiUrl = process.env.HIVEMIND_WORKER_UI_URL || 'http://127.0.0.1:3001';
-const taskPackagePath = path.join(repositoryRoot, 'test_tasks', '01_hello_world.zip');
+const taskSourceCode = 'return "Hello from Hivemind sample task";';
+const taskInputJson = 'null';
 const runSuffix = Date.now().toString(36);
 const username = `qa${runSuffix}`.slice(0, 28);
 const password = `HiveQA!${runSuffix}`;
@@ -42,7 +43,6 @@ test.describe.serial('release browser flow across the official site, Worker UI, 
       `${new Date().toISOString()} release browser QA started for user ${username}\n`,
       'utf8',
     );
-    expect(fs.existsSync(taskPackagePath)).toBe(true);
   });
 
   test('official site validates registration, exposes account state, and signs out cleanly', async ({ page }) => {
@@ -144,9 +144,11 @@ test.describe.serial('release browser flow across the official site, Worker UI, 
     await expect(page.getByText('Logged in successfully', { exact: true })).toBeVisible();
 
     await page.getByLabel('Task ID').fill(cancelledTaskId);
-    await page.getByLabel('Task file').setInputFiles(taskPackagePath);
+    await page.getByLabel('Function source').fill(taskSourceCode);
+    await page.getByLabel('Input (JSON)').fill(taskInputJson);
     await page.getByLabel('CPU score').fill('999999');
-    await page.getByRole('button', { name: 'Upload Task' }).click();
+    await page.getByLabel('Max CPT').fill('1000000');
+    await page.getByRole('button', { name: 'Submit Task' }).click();
     const cancelledRow = page.locator('li.task-row').filter({ hasText: cancelledTaskId });
     await expect(cancelledRow).toBeVisible();
     page.once('dialog', (dialog) => dialog.accept());
@@ -156,9 +158,11 @@ test.describe.serial('release browser flow across the official site, Worker UI, 
     recordEvidence('PASS Master UI submitted and cancelled an unschedulable task.');
 
     await page.getByLabel('Task ID').fill(completedTaskId);
-    await page.getByLabel('Task file').setInputFiles(taskPackagePath);
+    await page.getByLabel('Function source').fill(taskSourceCode);
+    await page.getByLabel('Input (JSON)').fill(taskInputJson);
     await page.getByLabel('CPU score').fill('0');
-    await page.getByRole('button', { name: 'Upload Task' }).click();
+    await page.getByLabel('Max CPT').fill('1000000');
+    await page.getByRole('button', { name: 'Submit Task' }).click();
     const completedRow = page.locator('li.task-row').filter({ hasText: completedTaskId });
     await expect(completedRow).toBeVisible();
     await expect(completedRow.locator('.pill')).toHaveText('COMPLETED', { timeout: 120_000 });
