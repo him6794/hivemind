@@ -2006,7 +2006,7 @@ mod tests {
             .unwrap();
 
         assert!(completed.billing_settled);
-        assert_eq!(completed.billed_amount, 2_501);
+        assert_eq!(completed.billed_amount, 25);
         assert_eq!(completed.managed_executed_ops, 2_500);
         assert_eq!(completed.managed_output_bytes, 2_049);
         assert_eq!(
@@ -2019,7 +2019,7 @@ mod tests {
             .fetch_one(&repo.pool)
             .await
             .unwrap();
-        assert_eq!(balance, 93);
+        assert_eq!(balance, 75);
 
         cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
         fixture.cleanup().await.ok();

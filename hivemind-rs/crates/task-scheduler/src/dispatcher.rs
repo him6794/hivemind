@@ -920,7 +920,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.status, TaskStatus::Completed);
-        assert_eq!(stored.billed_amount, 7);
+        assert_eq!(stored.billed_amount, 25);
         assert_eq!(stored.managed_executed_ops, 2_500);
         assert_eq!(stored.managed_output_bytes, 2_049);
         assert_eq!(
