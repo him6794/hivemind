@@ -109,6 +109,21 @@ function Test-PortOccupied {
     }
 }
 
+function Stop-PreviewProcessTree {
+    param([Diagnostics.Process]$Process)
+
+    if ($null -eq $Process -or $Process.HasExited) {
+        return
+    }
+
+    if ($env:OS -eq "Windows_NT") {
+        & taskkill.exe /PID ([string]$Process.Id) /T /F 2>$null | Out-Null
+    }
+    else {
+        Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
+    }
+}
+
 $processes = @()
 try {
     $buildScriptPath = Join-Path $PSScriptRoot "build-release-frontends.ps1"
@@ -182,7 +197,7 @@ try {
 finally {
     foreach ($process in $processes) {
         if ($null -ne $process -and !$process.HasExited) {
-            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            Stop-PreviewProcessTree -Process $process
             Write-Host "CLEANUP stopped preview process $($process.Id)"
         }
     }
