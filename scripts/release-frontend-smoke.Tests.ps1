@@ -208,4 +208,38 @@ finally {
     if ($null -eq $previousWebsiteNodepool2) { Remove-Item Env:\WEBSITE_NODEPOOL_GRPC_ADDR -ErrorAction SilentlyContinue } else { $env:WEBSITE_NODEPOOL_GRPC_ADDR = $previousWebsiteNodepool2 }
 }
 
+# Successful-run cleanup regression test
+Write-Host "--- Successful-run cleanup regression test ---"
+$previousApiBase3 = $env:VITE_API_BASE
+$previousWorkerBase3 = $env:VITE_WORKER_CONTROL_BASE
+$previousWebsiteNodepool3 = $env:WEBSITE_NODEPOOL_GRPC_ADDR
+try {
+    $env:VITE_API_BASE = "http://127.0.0.1:8082"
+    $env:VITE_WORKER_CONTROL_BASE = "http://127.0.0.1:8083"
+    $env:WEBSITE_NODEPOOL_GRPC_ADDR = "127.0.0.1:50051"
+
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $scriptPath -SkipBuild -StartupTimeoutSeconds 30
+    if ($LASTEXITCODE -ne 0) {
+        throw "Smoke harness must complete successfully before cleanup is verified."
+    }
+
+    foreach ($port in @(4173, 4174, 4175)) {
+        $cleanupCheck = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $port)
+        try {
+            $cleanupCheck.Start()
+        }
+        catch [System.Net.Sockets.SocketException] {
+            throw "Smoke harness cleanup must release preview port $port."
+        }
+        finally {
+            $cleanupCheck.Stop()
+        }
+    }
+}
+finally {
+    if ($null -eq $previousApiBase3) { Remove-Item Env:\VITE_API_BASE -ErrorAction SilentlyContinue } else { $env:VITE_API_BASE = $previousApiBase3 }
+    if ($null -eq $previousWorkerBase3) { Remove-Item Env:\VITE_WORKER_CONTROL_BASE -ErrorAction SilentlyContinue } else { $env:VITE_WORKER_CONTROL_BASE = $previousWorkerBase3 }
+    if ($null -eq $previousWebsiteNodepool3) { Remove-Item Env:\WEBSITE_NODEPOOL_GRPC_ADDR -ErrorAction SilentlyContinue } else { $env:WEBSITE_NODEPOOL_GRPC_ADDR = $previousWebsiteNodepool3 }
+}
+
 Write-Host "release frontend smoke tests passed"
