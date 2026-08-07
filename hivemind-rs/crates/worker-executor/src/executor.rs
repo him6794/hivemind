@@ -3,6 +3,10 @@ use hivemind_config::HivemindConfig;
 use hivemind_models::Task;
 use managed_function_runtime::{ExecutionLimits, ManagedExecutor, Value};
 use serde_json::json;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Instant;
 use tokio::sync::oneshot;
 
@@ -38,7 +42,11 @@ fn render_managed_output(value: &Value) -> String {
     }
 }
 
-fn execute_managed_function_task(task: &Task, elapsed_ms: i64) -> Result<super::TaskResult> {
+fn execute_managed_function_task(
+    task: &Task,
+    elapsed_ms: i64,
+    cancelled: &AtomicBool,
+) -> Result<super::TaskResult> {
     let source = task
         .task_source
         .as_deref()
@@ -53,32 +61,38 @@ fn execute_managed_function_task(task: &Task, elapsed_ms: i64) -> Result<super::
         max_usage_units: (task.max_cpt > 0).then_some(task.max_cpt as u64),
         ..ExecutionLimits::unlimited()
     };
-    let execution = match ManagedExecutor.execute_json_input(source, limits, input) {
-        Ok(execution) => execution,
-        Err(error) => {
-            let receipt = json!({
-                "runtime": "managed-function-v0",
-                "status": "failed",
-                "executed_ops": 0,
-                "output_bytes": 0,
-                "failure_code": error.code(),
-                "failure_message": error.to_string(),
-            });
-            return Ok(super::TaskResult {
-                task_id: task.task_id.clone(),
-                success: false,
-                output: None,
-                error: Some(error.to_string()),
-                exit_code: 1,
-                cpu_time_ms: 0,
-                wall_time_ms: elapsed_ms,
-                peak_memory_mb: 0,
-                managed_executed_ops: 0,
-                managed_output_bytes: 0,
-                managed_receipt_json: Some(receipt.to_string()),
-            });
-        }
-    };
+    let execution =
+        match ManagedExecutor.execute_json_input_with_cancel(source, limits, input, cancelled) {
+            Ok(execution) => execution,
+            Err(error) => {
+                let error_message = if error.code() == "cancelled" {
+                    "Task execution stopped".to_string()
+                } else {
+                    error.to_string()
+                };
+                let receipt = json!({
+                    "runtime": "managed-function-v0",
+                    "status": "failed",
+                    "executed_ops": 0,
+                    "output_bytes": 0,
+                    "failure_code": error.code(),
+                    "failure_message": error_message,
+                });
+                return Ok(super::TaskResult {
+                    task_id: task.task_id.clone(),
+                    success: false,
+                    output: None,
+                    error: Some(error_message),
+                    exit_code: 1,
+                    cpu_time_ms: 0,
+                    wall_time_ms: elapsed_ms,
+                    peak_memory_mb: 0,
+                    managed_executed_ops: 0,
+                    managed_output_bytes: 0,
+                    managed_receipt_json: Some(receipt.to_string()),
+                });
+            }
+        };
     let output = if execution.output.is_empty() {
         render_managed_output(&execution.value)
     } else {
@@ -121,7 +135,7 @@ pub async fn run_task(task: &Task, config: &HivemindConfig) -> Result<super::Tas
 pub async fn run_task_with_cancel(
     task: &Task,
     _config: &HivemindConfig,
-    _cancel_rx: oneshot::Receiver<()>,
+    cancel_rx: oneshot::Receiver<()>,
 ) -> Result<super::TaskResult> {
     let start = Instant::now();
     tracing::info!(
@@ -133,7 +147,23 @@ pub async fn run_task_with_cancel(
     );
 
     if is_managed_function_task(task) {
-        return execute_managed_function_task(task, start.elapsed().as_millis() as i64);
+        let task = task.clone();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let execution_cancelled = cancelled.clone();
+        let mut execution = tokio::task::spawn_blocking(move || {
+            execute_managed_function_task(
+                &task,
+                start.elapsed().as_millis() as i64,
+                &execution_cancelled,
+            )
+        });
+        return tokio::select! {
+            result = &mut execution => result.map_err(anyhow::Error::from)?,
+            _ = cancel_rx => {
+                cancelled.store(true, Ordering::Release);
+                execution.await.map_err(anyhow::Error::from)?
+            }
+        };
     }
 
     Err(anyhow::anyhow!(
@@ -167,6 +197,7 @@ mod tests {
             "let total = 0; for item in get(input, \"items\") { let total = total + item; } return total;"
                 .into(),
         );
+        task.max_cpt = 1000;
 
         let result = run_task(&task, &config).await.unwrap();
 
@@ -190,7 +221,11 @@ mod tests {
         let result = run_task(&task, &config).await.unwrap();
 
         assert!(!result.success);
-        assert!(result.error.as_deref().unwrap_or_default().contains("budget_exhausted"));
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("budget_exhausted"));
         assert!(result
             .managed_receipt_json
             .as_deref()

@@ -4,6 +4,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     error::Error,
     fmt::{Display, Formatter},
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,6 +144,21 @@ impl ManagedExecutor {
         let tokens = Lexer::new(source).tokenize()?;
         let program = Parser::new(tokens).parse_program()?;
         let mut evaluator = Evaluator::new(limits);
+        evaluator.current_scope().insert("input".to_string(), input);
+        evaluator.eval_program(&program)
+    }
+
+    pub fn execute_json_input_with_cancel(
+        &self,
+        source: &str,
+        limits: ExecutionLimits,
+        input_json: &str,
+        cancelled: &AtomicBool,
+    ) -> Result<ExecutionResult, RuntimeError> {
+        let input = Value::from_json_str(input_json)?;
+        let tokens = Lexer::new(source).tokenize()?;
+        let program = Parser::new(tokens).parse_program()?;
+        let mut evaluator = Evaluator::with_cancellation(limits, cancelled);
         evaluator.current_scope().insert("input".to_string(), input);
         evaluator.eval_program(&program)
     }
@@ -977,16 +993,17 @@ impl Parser {
     }
 }
 
-struct Evaluator {
+struct Evaluator<'a> {
     limits: ExecutionLimits,
     receipt: ExecutionReceipt,
     output: String,
     functions: HashMap<String, Function>,
     scopes: Vec<HashMap<String, Value>>,
     call_depth: usize,
+    cancelled: Option<&'a AtomicBool>,
 }
 
-impl Evaluator {
+impl<'a> Evaluator<'a> {
     fn new(limits: ExecutionLimits) -> Self {
         Self {
             limits,
@@ -995,6 +1012,14 @@ impl Evaluator {
             functions: HashMap::new(),
             scopes: vec![HashMap::new()],
             call_depth: 0,
+            cancelled: None,
+        }
+    }
+
+    fn with_cancellation(limits: ExecutionLimits, cancelled: &'a AtomicBool) -> Self {
+        Self {
+            cancelled: Some(cancelled),
+            ..Self::new(limits)
         }
     }
 
@@ -1315,6 +1340,12 @@ impl Evaluator {
     }
 
     fn charge(&mut self, cost: u64) -> Result<(), RuntimeError> {
+        if self
+            .cancelled
+            .is_some_and(|cancelled| cancelled.load(Ordering::Acquire))
+        {
+            return Err(RuntimeError::new("cancelled", "task execution stopped"));
+        }
         let next = self.receipt.executed_ops.saturating_add(cost);
         if next > self.limits.max_ops {
             return Err(RuntimeError::new("op_limit_exceeded", "operation limit exceeded"));
