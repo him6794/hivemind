@@ -16,7 +16,7 @@ running
 
 ## Current step
 
-階段 2：評估並固定成熟 zkVM backend、toolchain 與可重現 guest image build。
+階段 2：建立 RISC Zero 3.0.6 Docker guest 與 host/guest golden vector。
 
 ## Completed
 
@@ -27,6 +27,8 @@ running
 - 以 RED→GREEN 完成 backend-neutral public execution claim。
 - Journal 綁定 protocol/runtime/cost-model、task id、source/input/output SHA-256、budget 與 execution metrics。
 - Proof crate 3 tests、clippy、fmt、audit 與 GNU workspace 246 tests 通過。
+- 固定 RISC Zero 3.0.6 stable；production verifier 必須使用 `disable-dev-mode`。
+- 將 canonical output rendering 下沉到 managed runtime；runtime 16 tests、Worker 52 tests 通過。
 
 ## Active owners
 
@@ -35,11 +37,11 @@ running
 
 ## Blockers
 
-- 本機 Windows 未安裝 zkVM toolchain；第二階段需解決 Linux/reproducible guest builder。
+- 無立即 blocker；Linux Docker builder 可用，但 builder image digest 尚未固定。
 
 ## Next action
 
-確認 RISC Zero／SP1 等候選的 host/guest 相容性，固定一個 backend 與版本，先寫 guest golden-vector RED test。
+建立獨立的 RISC Zero methods/guest workspace，先寫 guest journal 與 native runtime claim 相同的 RED test。
 
 ## Next checkpoint
 

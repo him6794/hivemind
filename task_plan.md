@@ -29,7 +29,9 @@
 
 ### 階段 2：zkVM guest 與 proof 產生
 
-- [ ] 固定並記錄 zkVM 版本、guest image id 與供應鏈驗證方式
+- [x] 固定 RISC Zero 3.0.6 stable，正式 verifier 必須啟用 `disable-dev-mode`
+- [x] 將 canonical output renderer 下沉到 managed runtime，供 Worker/guest 共用
+- [ ] 固定 builder image digest、guest image id 與供應鏈驗證方式
 - [ ] 將 deterministic managed runtime 放入 guest 執行路徑
 - [ ] guest commit 公開聲明，私有 witness 保留程式輸入／執行軌跡
 - [ ] Worker prover 產生 proof envelope
@@ -72,6 +74,8 @@
 | SHA-256 commitments | 現有 SHA-1 checksum 不適合作為新證明協議的安全承諾 |
 | 版本化 runtime、cost model、proof protocol、guest image | 支援可稽核升級並阻止跨版本混用 |
 | rollout 採 off/observe/enforce | 在 proof 產生與效能驗證完成前不破壞現有測試環境 |
+| RISC Zero 固定 3.0.6 stable | 避免 5.0 RC；具 image ID、journal、receipt、Docker build 與 dev-mode hardening |
+| production verifier 啟用 `disable-dev-mode` | 防止環境變數誤開假證明而繞過結算信任根 |
 
 ## 關鍵風險
 

@@ -17,6 +17,37 @@ pub enum Value {
     Null,
 }
 
+/// Render a managed value using the canonical task-output representation.
+///
+/// Both native workers and zero-knowledge guests must use this function before
+/// committing to output bytes so that verification cannot diverge by renderer.
+#[must_use]
+pub fn render_output(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        Value::Int(value) => value.to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Null => "null".to_string(),
+        Value::List(_) | Value::Dict(_) => render_json_value(value).to_string(),
+    }
+}
+
+fn render_json_value(value: &Value) -> serde_json::Value {
+    match value {
+        Value::Int(value) => serde_json::json!(value),
+        Value::Bool(value) => serde_json::json!(value),
+        Value::String(value) => serde_json::json!(value),
+        Value::List(values) => serde_json::Value::Array(values.iter().map(render_json_value).collect()),
+        Value::Dict(values) => serde_json::Value::Object(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), render_json_value(value)))
+                .collect(),
+        ),
+        Value::Null => serde_json::Value::Null,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Completed,

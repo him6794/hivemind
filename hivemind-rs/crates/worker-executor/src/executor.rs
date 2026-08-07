@@ -1,7 +1,7 @@
 use anyhow::Result;
 use hivemind_config::HivemindConfig;
 use hivemind_models::Task;
-use managed_function_runtime::{ExecutionLimits, ManagedExecutor, Value};
+use managed_function_runtime::{render_output, ExecutionLimits, ManagedExecutor};
 use serde_json::json;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -12,34 +12,6 @@ use tokio::sync::oneshot;
 
 fn is_managed_function_task(task: &Task) -> bool {
     task.runtime.as_deref() == Some("managed-function-v0")
-}
-
-fn render_managed_value(value: &Value) -> serde_json::Value {
-    match value {
-        Value::Int(value) => json!(value),
-        Value::Bool(value) => json!(value),
-        Value::String(value) => json!(value),
-        Value::List(values) => {
-            serde_json::Value::Array(values.iter().map(render_managed_value).collect())
-        }
-        Value::Dict(values) => serde_json::Value::Object(
-            values
-                .iter()
-                .map(|(key, value)| (key.clone(), render_managed_value(value)))
-                .collect(),
-        ),
-        Value::Null => serde_json::Value::Null,
-    }
-}
-
-fn render_managed_output(value: &Value) -> String {
-    match value {
-        Value::String(value) => value.clone(),
-        Value::Int(value) => value.to_string(),
-        Value::Bool(value) => value.to_string(),
-        Value::Null => "null".to_string(),
-        Value::List(_) | Value::Dict(_) => render_managed_value(value).to_string(),
-    }
 }
 
 fn execute_managed_function_task(
@@ -94,7 +66,7 @@ fn execute_managed_function_task(
             }
         };
     let output = if execution.output.is_empty() {
-        render_managed_output(&execution.value)
+        render_output(&execution.value)
     } else {
         execution.output
     };

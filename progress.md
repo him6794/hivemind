@@ -12,8 +12,10 @@
   - RED 測試確認 proof claim API 缺失後，完成最小 GREEN 實作
   - 建立 protocol/runtime/cost-model 版本、task binding、SHA-256 source/input/output commitments 與 budget binding
   - 移除會新增未維護依賴警告的 postcard/bincode，改用既有 serde_json journal
-- next action: 評估並固定 zkVM backend、guest image build 與 toolchain 安裝方式
-- blockers: 本機尚無 zkVM toolchain；第二階段需建立 Linux 或相容 builder
+  - 固定 RISC Zero 3.0.6 stable；production verifier 強制 `disable-dev-mode`
+  - 將 canonical output renderer 從 Worker 下沉到 managed runtime，避免 guest/host commitment 分歧
+- next action: 建立獨立 Docker guest workspace 與 host/guest golden-vector RED test
+- blockers: 無立即 blocker；Docker Linux builder 可用，仍需固定 builder image digest
 - remote actions: none（不 push、不建立 PR）
 
 ### 本輪測試結果
@@ -26,6 +28,9 @@
 | GNU workspace all-target/all-feature tests | 246 passed, 0 failed |
 | `cargo audit` | 0 vulnerabilities；2 個既有 allowed warnings |
 | MSVC workspace test | 既有 MinGW `libtailscale.a` linker 不相容；改用 GNU target 驗證 |
+| canonical renderer RED | 如預期因 runtime API 不存在而失敗 |
+| managed runtime | 16 passed；clippy/fmt passed |
+| Worker executor GNU | 52 passed；clippy/fmt passed |
 
 ## 前一輪平台驗證
 

@@ -23,6 +23,14 @@
 - Focused tests 3 passed；GNU workspace 246 passed；audit 無漏洞且沒有因本切片新增警告。
 - MSVC full workspace 仍無法連結 MinGW `libtailscale.a`，這是既有平台限制；正確 GNU target 完整通過。
 
+### zkVM backend 與第二切片
+
+- 固定 RISC Zero 3.0.6 stable，而非 crates.io 的 5.0 RC；本機有 Linux Docker（12 CPU、約 16.7 GB）與 WSL2，可走官方 Docker guest builder。
+- RISC Zero receipt 以 guest ELF image ID 驗證，journal 與 seal 綁定；production verifier 必須開 `disable-dev-mode`，禁止 `RISC0_DEV_MODE` 假證明。
+- 官方 3.0.6 Docker builder 預設 tag 是 `risczero/risc0-guest-builder:r0.1.88.0`；仍需在下一切片解析並固定 image digest。
+- 原本 Worker 私有的 output renderer 會造成 guest/host 共識分歧風險；現已移到 `managed-function-runtime::render_output` 並由 Worker 共用。
+- Renderer RED 如預期失敗後完成 GREEN；runtime 16 tests、Worker 52 tests 與兩邊 clippy/fmt 通過。
+
 ## Fixed In Current Repair Stream
 
 ### Thirty-Eighth Repair Batch
