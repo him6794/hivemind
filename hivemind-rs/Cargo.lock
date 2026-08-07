@@ -1205,6 +1205,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hivemind-managed-proof"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "hivemind-master-api"
 version = "0.1.0"
 dependencies = [

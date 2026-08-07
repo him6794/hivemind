@@ -11,6 +11,7 @@ members = [
     "crates/master-api",
     "crates/website-api",
     "crates/worker-executor",
+    "crates/managed-proof",
     "crates/client-runtime",
     "crates/vpn-service",
     "crates/hivemind-bin",
@@ -48,6 +49,7 @@ ed25519-dalek = { version = "2", features = ["rand_core", "pem"] }
 pkcs8 = { version = "0.10", features = ["pem"] }
 bcrypt = "0.15"
 sha1 = "0.10"
+sha2 = "0.10"
 hex = "0.4"
 bendy = "0.4"
 tracing = "0.1"
