@@ -218,10 +218,22 @@ fn validate_task_resources(body: &CreateTaskBody) -> Result<(), &'static str> {
 }
 
 fn validate_runtime_contract(body: &CreateTaskBody) -> Result<(), &'static str> {
-    match body.runtime.as_deref().map(str::trim).filter(|runtime| !runtime.is_empty()) {
+    match body
+        .runtime
+        .as_deref()
+        .map(str::trim)
+        .filter(|runtime| !runtime.is_empty())
+    {
         None => Ok(()),
-        Some("managed-function-v0") if body.task_source.as_deref().is_some_and(|source| !source.trim().is_empty())
-            && body.max_cpt.unwrap_or(0) > 0 => Ok(()),
+        Some("managed-function-v0")
+            if body
+                .task_source
+                .as_deref()
+                .is_some_and(|source| !source.trim().is_empty())
+                && body.max_cpt.unwrap_or(0) > 0 =>
+        {
+            Ok(())
+        }
         Some("managed-function-v0") => {
             Err("managed-function-v0 requires task_source and positive max_cpt")
         }
