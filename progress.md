@@ -1,5 +1,34 @@
 # Hivemind 驗證進度
 
+## ZK 函式計費證明（2026-08-07）
+
+- overall: `running`
+- current step: 階段 2，固定 zkVM backend/toolchain 並建立 guest execution slice
+- completed this round:
+  - 確認現有系統沒有真正 ZKP，receipt 是未驗證 Worker claim
+  - 確認 trust model 要求 Nodepool 獨立驗證 Worker 計費聲明
+  - 決定採成熟 zkVM 證明完整 managed runtime 執行
+  - 建立分階段 rollout 與成功標準
+  - RED 測試確認 proof claim API 缺失後，完成最小 GREEN 實作
+  - 建立 protocol/runtime/cost-model 版本、task binding、SHA-256 source/input/output commitments 與 budget binding
+  - 移除會新增未維護依賴警告的 postcard/bincode，改用既有 serde_json journal
+- next action: 評估並固定 zkVM backend、guest image build 與 toolchain 安裝方式
+- blockers: 本機尚無 zkVM toolchain；第二階段需建立 Linux 或相容 builder
+- remote actions: none（不 push、不建立 PR）
+
+### 本輪測試結果
+
+| 測試 | 結果 |
+|---|---|
+| proof-contract RED | 如預期因 API 不存在而失敗 |
+| `cargo test -p hivemind-managed-proof --lib` | 3 passed |
+| proof crate clippy `-D warnings` | passed |
+| GNU workspace all-target/all-feature tests | 246 passed, 0 failed |
+| `cargo audit` | 0 vulnerabilities；2 個既有 allowed warnings |
+| MSVC workspace test | 既有 MinGW `libtailscale.a` linker 不相容；改用 GNU target 驗證 |
+
+## 前一輪平台驗證
+
 ## 目前狀態
 
 - overall: `complete`

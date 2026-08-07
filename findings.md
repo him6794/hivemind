@@ -1,5 +1,28 @@
 ﻿# Full Test And Review Findings
 
+## ZK 函式計費證明（2026-08-07，進行中）
+
+### 現況
+
+- Worker 產生的 managed receipt 是未簽章 JSON；Nodepool 直接使用 Worker 回傳的 `managed_executed_ops` 結算。
+- `managed_executed_ops` 實際承載 `usage_units`，名稱與語義不一致。
+- `checksum_proof` 只是 result reference 的 SHA-1，既不是零知識證明，也不證明程式正確執行。
+- Ed25519 worker-execution JWT 只授權 task/worker 配對，不證明輸出或計費。
+- Repository 沒有 ZK prover/verifier 依賴，本機也沒有 zkVM toolchain。
+
+### 技術方向
+
+- 證明完整 deterministic managed runtime 執行；public journal 綁定 task id、程式／輸入／輸出 commitments、runtime/cost-model/protocol 版本及 usage units。
+- 使用成熟 zkVM；不以「隱藏的函式計數加權和」冒充可驗證執行。
+- 第一個切片建立 backend-neutral 的 proof claim 契約與 tamper-resistant commitments，之後再固定 zkVM backend/image id。
+
+### 第一切片結果
+
+- 新增 `hivemind-managed-proof` shared crate；proof protocol/runtime/cost-model、task、source/input/output、budget 與 metrics 都進入 public claim。
+- Journal 使用既有 `serde_json`；嘗試的 `postcard` 與 `bincode` 因新增未維護依賴警告而移除。
+- Focused tests 3 passed；GNU workspace 246 passed；audit 無漏洞且沒有因本切片新增警告。
+- MSVC full workspace 仍無法連結 MinGW `libtailscale.a`，這是既有平台限制；正確 GNU target 完整通過。
+
 ## Fixed In Current Repair Stream
 
 ### Thirty-Eighth Repair Batch
