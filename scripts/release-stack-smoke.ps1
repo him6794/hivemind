@@ -15,6 +15,28 @@ $managedEnvironmentNames = @(
     "POSTGRES_PASSWORD",
     "POSTGRES_HOST_PORT",
     "REDIS_HOST_PORT",
+    "NODEPOOL_GRPC_HOST_PORT",
+    "TORRENT_TRACKER_HOST_PORT",
+    "TORRENT_SEED_HOST_PORT",
+    "MASTER_HTTP_HOST_PORT",
+    "WORKER_GRPC_HOST_PORT",
+    "WORKER_CONTROL_HOST_PORT",
+    "MASTER_UI_HOST_PORT",
+    "WORKER_UI_HOST_PORT",
+    "SITE_HOST_PORT",
+    "VITE_API_BASE",
+    "VITE_WORKER_CONTROL_BASE",
+    "REDIS_VOLUME_NAME",
+    "POSTGRES_VOLUME_NAME",
+    "HIVEMIND_DATA_VOLUME_NAME",
+    "NODEPOOL_TORRENTS_VOLUME_NAME",
+    "NODEPOOL_TASK_PACKAGES_VOLUME_NAME",
+    "MASTER_TASK_REFERENCES_VOLUME_NAME",
+    "MASTER_TORRENTS_VOLUME_NAME",
+    "WORKER_TASK_DOWNLOADS_VOLUME_NAME",
+    "WORKER_TORRENTS_VOLUME_NAME",
+    "MASTER_CORS_ALLOWED_ORIGINS",
+    "WORKER_CONTROL_CORS_ALLOWED_ORIGINS",
     "JWT_SECRET",
     "WORKER_EXECUTION_PRIVATE_KEY_PEM",
     "WORKER_EXECUTION_PUBLIC_KEY_PEM"
@@ -25,33 +47,7 @@ foreach ($name in $managedEnvironmentNames) {
 }
 $restoreEnvironmentNames = @()
 $temporaryKeyDirectory = $null
-$services = @(
-    @{
-        Name = "official-site"
-        Uri = "http://127.0.0.1:8080"
-        Match = "<html"
-    },
-    @{
-        Name = "master-ui"
-        Uri = "http://127.0.0.1:3000"
-        Match = '<div id="root">'
-    },
-    @{
-        Name = "worker-ui"
-        Uri = "http://127.0.0.1:3001"
-        Match = '<div id="root">'
-    },
-    @{
-        Name = "master-api"
-        Uri = "http://127.0.0.1:8082/health"
-        Match = "OK"
-    },
-    @{
-        Name = "worker-control"
-        Uri = "http://127.0.0.1:18080/api/worker-info"
-        Match = '"success":true'
-    }
-)
+$services = @()
 
 function Invoke-CheckedCommand {
     param(
@@ -153,8 +149,21 @@ function Get-OpenSslCommand {
 }
 
 try {
+    $hostPortEnvironmentNames = @(
+        "REDIS_HOST_PORT",
+        "POSTGRES_HOST_PORT",
+        "NODEPOOL_GRPC_HOST_PORT",
+        "TORRENT_TRACKER_HOST_PORT",
+        "TORRENT_SEED_HOST_PORT",
+        "MASTER_HTTP_HOST_PORT",
+        "WORKER_GRPC_HOST_PORT",
+        "WORKER_CONTROL_HOST_PORT",
+        "MASTER_UI_HOST_PORT",
+        "WORKER_UI_HOST_PORT",
+        "SITE_HOST_PORT"
+    )
     $reservedHostPorts = @()
-    foreach ($name in @("REDIS_HOST_PORT", "POSTGRES_HOST_PORT")) {
+    foreach ($name in $hostPortEnvironmentNames) {
         $configuredPort = $originalEnvironment[$name]
         if (![string]::IsNullOrWhiteSpace($configuredPort)) {
             $parsedPort = 0
@@ -164,7 +173,7 @@ try {
         }
     }
 
-    foreach ($name in @("REDIS_HOST_PORT", "POSTGRES_HOST_PORT")) {
+    foreach ($name in $hostPortEnvironmentNames) {
         if ([string]::IsNullOrWhiteSpace($originalEnvironment[$name])) {
             $ephemeralHostPort = Get-AvailableHostPort -ExcludedPorts $reservedHostPorts
             [Environment]::SetEnvironmentVariable($name, [string]$ephemeralHostPort, "Process")
@@ -172,6 +181,94 @@ try {
             $restoreEnvironmentNames += $name
             Write-Host "SET ${name} to collision-free ephemeral host port ${ephemeralHostPort}"
         }
+    }
+
+    $services = @(
+        @{
+            Name = "official-site"
+            Uri = "http://127.0.0.1:$([Environment]::GetEnvironmentVariable('SITE_HOST_PORT', 'Process'))"
+            Match = "<html"
+        },
+        @{
+            Name = "master-ui"
+            Uri = "http://127.0.0.1:$([Environment]::GetEnvironmentVariable('MASTER_UI_HOST_PORT', 'Process'))"
+            Match = '<div id="root">'
+        },
+        @{
+            Name = "worker-ui"
+            Uri = "http://127.0.0.1:$([Environment]::GetEnvironmentVariable('WORKER_UI_HOST_PORT', 'Process'))"
+            Match = '<div id="root">'
+        },
+        @{
+            Name = "master-api"
+            Uri = "http://127.0.0.1:$([Environment]::GetEnvironmentVariable('MASTER_HTTP_HOST_PORT', 'Process'))/health"
+            Match = "OK"
+        },
+        @{
+            Name = "worker-control"
+            Uri = "http://127.0.0.1:$([Environment]::GetEnvironmentVariable('WORKER_CONTROL_HOST_PORT', 'Process'))/api/worker-info"
+            Match = '"success":true'
+        }
+    )
+
+    if ([string]::IsNullOrWhiteSpace($originalEnvironment["VITE_API_BASE"])) {
+        $masterApiBase = "http://127.0.0.1:$([Environment]::GetEnvironmentVariable('MASTER_HTTP_HOST_PORT', 'Process'))"
+        [Environment]::SetEnvironmentVariable("VITE_API_BASE", $masterApiBase, "Process")
+        $restoreEnvironmentNames += "VITE_API_BASE"
+        Write-Host "SET VITE_API_BASE to ${masterApiBase}"
+    }
+
+    if ([string]::IsNullOrWhiteSpace($originalEnvironment["VITE_WORKER_CONTROL_BASE"])) {
+        $workerControlBase = "http://127.0.0.1:$([Environment]::GetEnvironmentVariable('WORKER_CONTROL_HOST_PORT', 'Process'))"
+        [Environment]::SetEnvironmentVariable("VITE_WORKER_CONTROL_BASE", $workerControlBase, "Process")
+        $restoreEnvironmentNames += "VITE_WORKER_CONTROL_BASE"
+        Write-Host "SET VITE_WORKER_CONTROL_BASE to ${workerControlBase}"
+    }
+
+    $volumeRunId = [guid]::NewGuid().ToString("N").Substring(0, 12)
+    $ephemeralVolumeNames = [ordered]@{
+        REDIS_VOLUME_NAME = "hivemind-smoke-${volumeRunId}-redis"
+        POSTGRES_VOLUME_NAME = "hivemind-smoke-${volumeRunId}-postgres"
+        HIVEMIND_DATA_VOLUME_NAME = "hivemind-smoke-${volumeRunId}-data"
+        NODEPOOL_TORRENTS_VOLUME_NAME = "hivemind-smoke-${volumeRunId}-nodepool-torrents"
+        NODEPOOL_TASK_PACKAGES_VOLUME_NAME = "hivemind-smoke-${volumeRunId}-nodepool-packages"
+        MASTER_TASK_REFERENCES_VOLUME_NAME = "hivemind-smoke-${volumeRunId}-master-references"
+        MASTER_TORRENTS_VOLUME_NAME = "hivemind-smoke-${volumeRunId}-master-torrents"
+        WORKER_TASK_DOWNLOADS_VOLUME_NAME = "hivemind-smoke-${volumeRunId}-worker-downloads"
+        WORKER_TORRENTS_VOLUME_NAME = "hivemind-smoke-${volumeRunId}-worker-torrents"
+    }
+    foreach ($name in $ephemeralVolumeNames.Keys) {
+        if ([string]::IsNullOrWhiteSpace($originalEnvironment[$name])) {
+            $volumeName = $ephemeralVolumeNames[$name]
+            [Environment]::SetEnvironmentVariable($name, $volumeName, "Process")
+            $restoreEnvironmentNames += $name
+            Write-Host "SET ${name} to isolated volume ${volumeName}"
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($originalEnvironment["MASTER_CORS_ALLOWED_ORIGINS"])) {
+        $masterUiHostPort = [Environment]::GetEnvironmentVariable("MASTER_UI_HOST_PORT", "Process")
+        $workerUiHostPort = [Environment]::GetEnvironmentVariable("WORKER_UI_HOST_PORT", "Process")
+        $masterCorsOrigins = @(
+            "http://127.0.0.1:${masterUiHostPort}",
+            "http://localhost:${masterUiHostPort}",
+            "http://127.0.0.1:${workerUiHostPort}",
+            "http://localhost:${workerUiHostPort}"
+        ) -join ","
+        [Environment]::SetEnvironmentVariable("MASTER_CORS_ALLOWED_ORIGINS", $masterCorsOrigins, "Process")
+        $restoreEnvironmentNames += "MASTER_CORS_ALLOWED_ORIGINS"
+        Write-Host "SET MASTER_CORS_ALLOWED_ORIGINS for dynamic release UI ports"
+    }
+
+    if ([string]::IsNullOrWhiteSpace($originalEnvironment["WORKER_CONTROL_CORS_ALLOWED_ORIGINS"])) {
+        $workerUiHostPort = [Environment]::GetEnvironmentVariable("WORKER_UI_HOST_PORT", "Process")
+        $workerControlCorsOrigins = @(
+            "http://127.0.0.1:${workerUiHostPort}",
+            "http://localhost:${workerUiHostPort}"
+        ) -join ","
+        [Environment]::SetEnvironmentVariable("WORKER_CONTROL_CORS_ALLOWED_ORIGINS", $workerControlCorsOrigins, "Process")
+        $restoreEnvironmentNames += "WORKER_CONTROL_CORS_ALLOWED_ORIGINS"
+        Write-Host "SET WORKER_CONTROL_CORS_ALLOWED_ORIGINS for dynamic Worker UI port"
     }
 
     $originalPostgresPassword = $originalEnvironment["POSTGRES_PASSWORD"]
@@ -272,8 +369,8 @@ try {
 finally {
     if (!$CheckOnly -and !$KeepRunning) {
         try {
-            Write-Host "RUN docker compose down"
-            Invoke-CheckedCommand -Command "docker" -Arguments @("compose", "down") -WorkingDirectory $repoRoot
+            Write-Host "RUN docker compose down -v"
+            Invoke-CheckedCommand -Command "docker" -Arguments @("compose", "down", "-v") -WorkingDirectory $repoRoot
         }
         catch {
             Write-Warning "docker compose down failed during cleanup: $($_.Exception.Message)"
