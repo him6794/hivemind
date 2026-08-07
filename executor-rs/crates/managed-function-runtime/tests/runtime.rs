@@ -1,6 +1,20 @@
 use std::collections::BTreeMap;
 
-use managed_function_runtime::{ExecutionLimits, ManagedExecutor, Status, Value};
+use managed_function_runtime::{ExecutionLimits, ManagedExecutor, Status, Value, render_output};
+
+#[test]
+fn renders_canonical_output_for_host_and_zk_guest() {
+    let value = Value::Dict(
+        [
+            ("answer".to_string(), Value::Int(42)),
+            ("nested".to_string(), Value::List(vec![Value::Bool(true), Value::Null])),
+        ]
+        .into(),
+    );
+
+    assert_eq!(render_output(&value), r#"{"answer":42,"nested":[true,null]}"#);
+    assert_eq!(render_output(&Value::String("raw".into())), "raw");
+}
 
 #[test]
 fn executes_function_with_branch_and_receipt_metering() {
