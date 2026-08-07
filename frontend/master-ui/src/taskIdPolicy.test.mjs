@@ -41,4 +41,13 @@ describe('task id policy', () => {
 
     assert.equal(generated, '7f50f8b2-a963-49a1-bca0-d79f209991d4');
   });
+
+  it('falls back to a safe id when randomUUID is unavailable on plain HTTP', () => {
+    const generated = createTaskId(
+      () => undefined,
+      () => 'task-http-fallback-001',
+    );
+
+    assert.equal(generated, 'task-http-fallback-001');
+  });
 });
