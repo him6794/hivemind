@@ -20,13 +20,30 @@ export function validateTaskId(taskId) {
   return { ok: true, taskId: value, message: '' };
 }
 
-export function createTaskId(randomUuid = () => globalThis.crypto?.randomUUID?.()) {
-  const taskId = randomUuid();
-  const validated = validateTaskId(taskId);
-  if (!validated.ok) {
-    throw new Error('Unable to generate task_id');
+function createHttpSafeFallbackTaskId() {
+  const timestamp = Date.now().toString(36);
+  const entropy = `${Math.random().toString(36).slice(2, 12)}${Math.random().toString(36).slice(2, 12)}`;
+  return `task-${timestamp}-${entropy}`;
+}
+
+export function createTaskId(
+  randomUuid = () => globalThis.crypto?.randomUUID?.(),
+  fallbackId = createHttpSafeFallbackTaskId,
+) {
+  try {
+    const generated = validateTaskId(randomUuid());
+    if (generated.ok) {
+      return generated.taskId;
+    }
+  } catch {
+    // randomUUID is restricted to secure contexts in some browsers.
   }
-  return validated.taskId;
+
+  const fallback = validateTaskId(fallbackId());
+  if (fallback.ok) {
+    return fallback.taskId;
+  }
+  throw new Error('Unable to generate task_id');
 }
 
 export function taskIdFromFileName(fileName) {
