@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { buildRegisterWorkerBody, normalizeWorkerProfile, registrationOwnerUsername } from './workerProfile.mjs';
+import {
+  buildRegisterWorkerBody,
+  buildRegisterWorkerRequest,
+  normalizeWorkerProfile,
+  registrationOwnerUsername,
+} from './workerProfile.mjs';
 
 describe('worker profile registration payload', () => {
   it('normalizes local worker info before React state updates', () => {
@@ -66,6 +71,27 @@ describe('worker profile registration payload', () => {
       storage_total_gb: 1000,
       storage_available_gb: 750,
       location: 'taipei',
+    });
+  });
+
+  it('registers through Worker Control so the heartbeat loop starts', () => {
+    const body = { username: 'provider', worker_id: 'local-worker-42' };
+    const request = buildRegisterWorkerRequest(
+      'http://worker-control.example:18080/',
+      'worker-session-token',
+      body,
+    );
+
+    assert.deepEqual(request, {
+      url: 'http://worker-control.example:18080/api/register-worker',
+      options: {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer worker-session-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      },
     });
   });
 
