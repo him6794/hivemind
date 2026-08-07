@@ -471,7 +471,7 @@ mod tests {
     #[tokio::test]
     async fn stop_task_execution_reports_not_running_for_unknown_task() {
         let tmp = TempDir::new().unwrap();
-        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let service = test_service(tmp.path());
         seed_assignment(&service, "missing-task", ASSIGNED_OWNER, None);
 
         let response = service
@@ -490,7 +490,7 @@ mod tests {
     #[tokio::test]
     async fn task_output_rpc_requires_valid_token() {
         let tmp = TempDir::new().unwrap();
-        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let service = test_service(tmp.path());
 
         let response = service
             .task_output(Request::new(TaskOutputRequest {
@@ -506,7 +506,7 @@ mod tests {
     #[tokio::test]
     async fn execute_task_requires_valid_token_before_running_code() {
         let tmp = TempDir::new().unwrap();
-        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let service = test_service(tmp.path());
 
         let response = service
             .execute_task(Request::new(ExecuteTaskRequest {
@@ -527,7 +527,7 @@ mod tests {
     fn worker_rpc_rejects_control_plane_tokens() {
         // Given: a worker configured with the platform public key and a control-plane HS256 token.
         let tmp = TempDir::new().unwrap();
-        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let service = test_service(tmp.path());
         let worker_token =
             bound_token(test_private_key_pem(), ASSIGNED_OWNER, "task-worker-secret");
         let control_token =
@@ -546,7 +546,7 @@ mod tests {
     #[tokio::test]
     async fn execute_task_rejects_a_regular_user_token() {
         let tmp = TempDir::new().unwrap();
-        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let service = test_service(tmp.path());
 
         let response = service
             .execute_task(Request::new(ExecuteTaskRequest {
@@ -566,7 +566,7 @@ mod tests {
     #[tokio::test]
     async fn execute_task_rejects_a_token_bound_to_another_task_or_worker() {
         let tmp = TempDir::new().unwrap();
-        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let service = test_service(tmp.path());
 
         let response = service
             .execute_task(Request::new(ExecuteTaskRequest {
@@ -586,7 +586,7 @@ mod tests {
     #[tokio::test]
     async fn execute_task_rejects_unsafe_task_id_before_running_code() {
         let tmp = TempDir::new().unwrap();
-        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let service = test_service(tmp.path());
 
         let response = service
             .execute_task(Request::new(ExecuteTaskRequest {
@@ -606,7 +606,7 @@ mod tests {
     #[tokio::test]
     async fn task_output_upload_rejects_a_regular_user_token() {
         let tmp = TempDir::new().unwrap();
-        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let service = test_service(tmp.path());
         seed_assignment(&service, "assigned-output", ASSIGNED_OWNER, None);
 
         let response = service
@@ -624,7 +624,7 @@ mod tests {
     #[tokio::test]
     async fn task_result_upload_rejects_a_regular_user_token() {
         let tmp = TempDir::new().unwrap();
-        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let service = test_service(tmp.path());
         seed_assignment(&service, "assigned-result", ASSIGNED_OWNER, None);
 
         let response = service
@@ -642,7 +642,7 @@ mod tests {
     #[tokio::test]
     async fn task_output_rejects_a_regular_user_token() {
         let tmp = TempDir::new().unwrap();
-        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let service = test_service(tmp.path());
         seed_assignment(
             &service,
             "assigned-output-read",
@@ -663,7 +663,7 @@ mod tests {
     #[tokio::test]
     async fn stop_task_execution_rejects_a_regular_user_token() {
         let tmp = TempDir::new().unwrap();
-        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let service = test_service(tmp.path());
         seed_assignment(&service, "assigned-stop", ASSIGNED_OWNER, None);
 
         let response = service
@@ -679,7 +679,7 @@ mod tests {
     #[tokio::test]
     async fn task_usage_rejects_a_regular_user_token() {
         let tmp = TempDir::new().unwrap();
-        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let service = test_service(tmp.path());
         seed_assignment(&service, "assigned-usage", ASSIGNED_OWNER, None);
 
         let response = service
@@ -697,7 +697,7 @@ mod tests {
     #[tokio::test]
     async fn task_output_upload_rejects_a_token_for_another_assignment() {
         let tmp = TempDir::new().unwrap();
-        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let service = test_service(tmp.path());
         seed_assignment(&service, "owner-output", ASSIGNED_OWNER, None);
 
         let response = service
@@ -715,7 +715,7 @@ mod tests {
     #[tokio::test]
     async fn task_output_upload_rejects_the_wrong_worker_identity() {
         let tmp = TempDir::new().unwrap();
-        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let service = test_service(tmp.path());
         seed_assignment(&service, "worker-output", ASSIGNED_OWNER, None);
 
         let response = service
@@ -733,7 +733,7 @@ mod tests {
     #[tokio::test]
     async fn task_result_upload_rejects_a_token_for_another_assignment() {
         let tmp = TempDir::new().unwrap();
-        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let service = test_service(tmp.path());
         seed_assignment(&service, "owner-result", ASSIGNED_OWNER, None);
 
         let response = service
@@ -751,7 +751,7 @@ mod tests {
     #[tokio::test]
     async fn task_result_upload_rejects_the_wrong_worker_identity() {
         let tmp = TempDir::new().unwrap();
-        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let service = test_service(tmp.path());
         seed_assignment(&service, "worker-result", ASSIGNED_OWNER, None);
 
         let response = service
@@ -769,7 +769,7 @@ mod tests {
     #[tokio::test]
     async fn task_output_rejects_a_token_for_another_assignment() {
         let tmp = TempDir::new().unwrap();
-        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let service = test_service(tmp.path());
         seed_assignment(
             &service,
             "owner-output-read",
@@ -790,7 +790,7 @@ mod tests {
     #[tokio::test]
     async fn stop_task_execution_rejects_a_token_for_another_assignment() {
         let tmp = TempDir::new().unwrap();
-        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let service = test_service(tmp.path());
         seed_assignment(&service, "owner-stop", ASSIGNED_OWNER, None);
 
         let response = service
@@ -806,7 +806,7 @@ mod tests {
     #[tokio::test]
     async fn task_usage_rejects_a_token_for_another_assignment() {
         let tmp = TempDir::new().unwrap();
-        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let service = test_service(tmp.path());
         seed_assignment(&service, "owner-usage", ASSIGNED_OWNER, None);
 
         let response = service
@@ -824,7 +824,7 @@ mod tests {
     #[tokio::test]
     async fn task_usage_rejects_the_wrong_worker_identity() {
         let tmp = TempDir::new().unwrap();
-        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let service = test_service(tmp.path());
         seed_assignment(&service, "worker-usage", ASSIGNED_OWNER, None);
 
         let response = service
@@ -842,7 +842,7 @@ mod tests {
     #[tokio::test]
     async fn task_output_upload_and_retrieval_round_trip() {
         let tmp = TempDir::new().unwrap();
-        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let service = test_service(tmp.path());
         seed_assignment(&service, "task-with-output", ASSIGNED_OWNER, None);
         let token = bound_token(test_private_key_pem(), ASSIGNED_OWNER, "task-with-output");
 
@@ -874,7 +874,7 @@ mod tests {
     #[tokio::test]
     async fn result_upload_and_usage_reporting_accept_valid_token() {
         let tmp = TempDir::new().unwrap();
-        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let service = test_service(tmp.path());
         seed_assignment(&service, "task-with-result", ASSIGNED_OWNER, None);
         let token = bound_token(test_private_key_pem(), ASSIGNED_OWNER, "task-with-result");
 
@@ -913,7 +913,7 @@ mod tests {
     #[tokio::test]
     async fn task_output_upload_rejects_oversized_output() {
         let tmp = TempDir::new().unwrap();
-        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let service = test_service(tmp.path());
         seed_assignment(&service, "oversized-output", ASSIGNED_OWNER, None);
         let token = bound_token(test_private_key_pem(), ASSIGNED_OWNER, "oversized-output");
 
@@ -935,7 +935,7 @@ mod tests {
     #[tokio::test]
     async fn task_usage_rejects_non_finite_values() {
         let tmp = TempDir::new().unwrap();
-        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let service = test_service(tmp.path());
         seed_assignment(&service, "bad-usage", ASSIGNED_OWNER, None);
         let token = bound_token(test_private_key_pem(), ASSIGNED_OWNER, "bad-usage");
 
@@ -963,7 +963,7 @@ mod tests {
     #[tokio::test]
     async fn task_usage_rejects_missing_usage_payload() {
         let tmp = TempDir::new().unwrap();
-        let service = test_service(tmp.path(), tmp.path().join("started.marker").as_path());
+        let service = test_service(tmp.path());
         seed_assignment(&service, "missing-usage", ASSIGNED_OWNER, None);
         let token = bound_token(test_private_key_pem(), ASSIGNED_OWNER, "missing-usage");
 
@@ -982,20 +982,19 @@ mod tests {
         assert!(usage.status_message.contains("Usage payload is required"));
     }
 
-    #[tokio::test]
-    async fn stop_task_execution_rpc_kills_running_execute_task() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stop_task_execution_rpc_cancels_running_managed_function() {
         let tmp = TempDir::new().unwrap();
-        let marker = tmp.path().join("started.marker");
-        let service = Arc::new(test_service(tmp.path(), &marker));
-        let task_path = tmp.path().join("api").join("main.py");
-        let task_id = "grpc-stop-long-running".to_string();
+        let service = Arc::new(test_service(tmp.path()));
+        let task_id = "grpc-stop-managed-function".to_string();
+        let input = format!("{{\"items\":[{}]}}", "1,".repeat(500_000) + "1");
         let execute_service = service.clone();
         let execute_task_id = task_id.clone();
         let execute = tokio::spawn(async move {
             execute_service
                 .execute_task(Request::new(ExecuteTaskRequest {
                     task_id: execute_task_id.clone(),
-                    torrent: task_path.to_string_lossy().to_string(),
+                    torrent: input,
                     resource_limits: Some(ResourceSpec {
                         cpu_cores: 1,
                         memory_mb: 1024,
@@ -1007,16 +1006,16 @@ mod tests {
                         storage_total_gb: 1,
                         storage_available_gb: 1,
                     }),
-                    runtime: String::new(),
-                    task_source: String::new(),
+                    runtime: "managed-function-v0".into(),
+                    task_source: "let total = 0; for item in get(input, \"items\") { let total = total + item; } return total;".into(),
                     token: bound_token(test_private_key_pem(), ASSIGNED_OWNER, &execute_task_id),
-                    managed_budget_units: 0,
+                    managed_budget_units: 10_000_000,
                 }))
                 .await
                 .unwrap()
                 .into_inner()
         });
-        wait_for_file(&marker).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
         let stop = service
             .stop_task_execution(Request::new(StopTaskExecutionRequest {
@@ -1029,7 +1028,7 @@ mod tests {
 
         assert!(stop.success);
         assert_eq!(stop.status_message, "Stop requested");
-        let execute_response = tokio::time::timeout(Duration::from_secs(5), execute)
+        let execute_response = tokio::time::timeout(Duration::from_secs(10), execute)
             .await
             .expect("execute_task should return after stop")
             .expect("execute_task join should succeed");
@@ -1063,18 +1062,11 @@ mod tests {
         }
     }
 
-    fn test_service(base: &std::path::Path, marker: &std::path::Path) -> GrpcWorkerNodeService {
-        let api_dir = base.join("api");
-        std::fs::create_dir_all(&api_dir).unwrap();
-        std::fs::write(api_dir.join("main.py"), "print('long task')\n").unwrap();
+    fn test_service(base: &std::path::Path) -> GrpcWorkerNodeService {
         let mut config = HivemindConfig::default();
         config.executor.sandbox_dir = base.join("sandbox").to_string_lossy().to_string();
-        config.torrent.api_dir = api_dir.to_string_lossy().to_string();
         config.auth.jwt_secret = CONTROL_PLANE_SECRET.into();
         config.auth.worker_execution_public_key_pem = test_key_pair().1.clone();
-        config.executor.monty_executable = write_long_running_executor_script(base, marker)
-            .to_string_lossy()
-            .to_string();
         let executor = Arc::new(WorkerExecutor::new(config.clone()));
         GrpcWorkerNodeService::new(Arc::new(WorkerGrpcState {
             config,
@@ -1151,46 +1143,5 @@ mod tests {
                 iat: Utc::now().timestamp() as usize,
             })
             .unwrap()
-    }
-
-    async fn wait_for_file(path: &std::path::Path) {
-        for _ in 0..50 {
-            if path.exists() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        panic!("timed out waiting for {}", path.display());
-    }
-
-    fn write_long_running_executor_script(
-        dir: &std::path::Path,
-        marker: &std::path::Path,
-    ) -> std::path::PathBuf {
-        let path = if cfg!(windows) {
-            dir.join("grpc-long-running-executor.cmd")
-        } else {
-            dir.join("grpc-long-running-executor.sh")
-        };
-        let script = if cfg!(windows) {
-            format!(
-                "@echo off\r\necho started > \"{}\"\r\n:loop\r\nping -n 2 127.0.0.1 >nul\r\ngoto loop\r\n",
-                marker.display()
-            )
-        } else {
-            format!(
-                "#!/bin/sh\nprintf '%s' started > '{}'\nwhile true; do :; done\n",
-                marker.display()
-            )
-        };
-        std::fs::write(&path, script).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&path).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&path, perms).unwrap();
-        }
-        path
     }
 }
