@@ -79,6 +79,24 @@ export function buildRegisterWorkerBody(username, workerProfile, endpoint) {
   };
 }
 
+export function buildRegisterWorkerRequest(workerControlBase, authToken, body) {
+  const base = String(workerControlBase || '').trim().replace(/\/$/, '');
+  if (!base) {
+    throw new Error('Worker Control base URL is required');
+  }
+  return {
+    url: `${base}/api/register-worker`,
+    options: {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${authToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    },
+  };
+}
+
 export function registrationOwnerUsername(authenticatedUsername, formUsername) {
   return String(authenticatedUsername || formUsername || '').trim();
 }

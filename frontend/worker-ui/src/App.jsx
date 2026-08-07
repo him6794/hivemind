@@ -3,6 +3,7 @@ import './console.css';
 import { clearStoredSession, readStoredSession, saveStoredSession } from './authSession.mjs';
 import {
   buildRegisterWorkerBody,
+  buildRegisterWorkerRequest,
   emptyProfile,
   normalizeWorkerProfile,
   registrationOwnerUsername,
@@ -136,11 +137,25 @@ export default function WorkerApp() {
 
     try {
       const workerId = String(workerProfile.worker_id || '').trim() || ownerUsername;
-      const data = await authedFetch('/api/register-worker', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(buildRegisterWorkerBody(ownerUsername, workerProfile, endpoint)),
-      }, authToken);
+      const request = buildRegisterWorkerRequest(
+        workerControlBase,
+        authToken,
+        buildRegisterWorkerBody(ownerUsername, workerProfile, endpoint),
+      );
+      let res;
+      try {
+        res = await fetch(request.url, request.options);
+      } catch {
+        throw new Error(`Cannot reach Worker Control at ${workerControlBase}.`);
+      }
+      const data = await readJson(res);
+      if (!res.ok) {
+        if (res.status === 401) {
+          logout();
+          throw new Error('Session expired. Please log in again.');
+        }
+        throw new Error(data.message || data.status_message || `HTTP ${res.status}`);
+      }
 
       if (!data.success) {
         throw new Error(data.status_message || 'Worker registration failed');
