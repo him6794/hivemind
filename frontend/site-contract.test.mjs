@@ -121,9 +121,13 @@ test('release browser QA covers account, worker registration, and task lifecycle
   assert.match(flowSource, /Worker UI/);
   assert.match(flowSource, /Login and register/);
   assert.match(flowSource, /Master UI/);
-  assert.match(flowSource, /Upload Task/);
+  assert.match(flowSource, /Submit Task/);
   assert.match(flowSource, /Log/);
   assert.match(flowSource, /Result/);
   assert.match(flowSource, /Download/);
   assert.match(flowSource, /Cancel/);
+  assert.match(flowSource, /getByLabel\('CPU score'\)\.fill\('1201'\)/);
+  assert.match(flowSource, /getByLabel\('Max CPT'\)\.fill\('200'\)/);
+  assert.match(flowSource, /getByLabel\('Max CPT'\)\.fill\('100'\)/);
+  assert.doesNotMatch(flowSource, /getByLabel\('Max CPT'\)\.fill\('1000000'\)/);
 });

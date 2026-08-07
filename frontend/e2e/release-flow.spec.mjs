@@ -146,8 +146,8 @@ test.describe.serial('release browser flow across the official site, Worker UI, 
     await page.getByLabel('Task ID').fill(cancelledTaskId);
     await page.getByLabel('Function source').fill(taskSourceCode);
     await page.getByLabel('Input (JSON)').fill(taskInputJson);
-    await page.getByLabel('CPU score').fill('999999');
-    await page.getByLabel('Max CPT').fill('1000000');
+    await page.getByLabel('CPU score').fill('1201');
+    await page.getByLabel('Max CPT').fill('200');
     await page.getByRole('button', { name: 'Submit Task' }).click();
     const cancelledRow = page.locator('li.task-row').filter({ hasText: cancelledTaskId });
     await expect(cancelledRow).toBeVisible();
@@ -161,7 +161,7 @@ test.describe.serial('release browser flow across the official site, Worker UI, 
     await page.getByLabel('Function source').fill(taskSourceCode);
     await page.getByLabel('Input (JSON)').fill(taskInputJson);
     await page.getByLabel('CPU score').fill('0');
-    await page.getByLabel('Max CPT').fill('1000000');
+    await page.getByLabel('Max CPT').fill('100');
     await page.getByRole('button', { name: 'Submit Task' }).click();
     const completedRow = page.locator('li.task-row').filter({ hasText: completedTaskId });
     await expect(completedRow).toBeVisible();
