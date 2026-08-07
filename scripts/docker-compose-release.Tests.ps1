@@ -11,10 +11,35 @@ if (!(Test-Path -LiteralPath $composePath)) {
 $composeText = Get-Content -LiteralPath $composePath -Raw
 foreach ($expectedPortMapping in @(
     '${REDIS_HOST_PORT:-6379}:6379',
-    '${POSTGRES_HOST_PORT:-5432}:5432'
+    '${POSTGRES_HOST_PORT:-5432}:5432',
+    '${NODEPOOL_GRPC_HOST_PORT:-50051}:50051',
+    '${TORRENT_TRACKER_HOST_PORT:-6969}:6969',
+    '${TORRENT_SEED_HOST_PORT:-6881}:6881',
+    '${MASTER_HTTP_HOST_PORT:-8082}:8082',
+    '${WORKER_GRPC_HOST_PORT:-50053}:50053',
+    '${WORKER_CONTROL_HOST_PORT:-18080}:18080',
+    '${MASTER_UI_HOST_PORT:-3000}:80',
+    '${WORKER_UI_HOST_PORT:-3001}:80',
+    '${SITE_HOST_PORT:-8080}:3000'
 )) {
     if (!$composeText.Contains($expectedPortMapping)) {
         throw "docker-compose.yml must allow the release smoke harness to choose a collision-free infrastructure port via '$expectedPortMapping'."
+    }
+}
+
+foreach ($expectedVolumeName in @(
+    '${REDIS_VOLUME_NAME:-hivemind-redis-data}',
+    '${POSTGRES_VOLUME_NAME:-hivemind-postgres-data}',
+    '${HIVEMIND_DATA_VOLUME_NAME:-hivemind-data}',
+    '${NODEPOOL_TORRENTS_VOLUME_NAME:-hivemind-nodepool-torrents}',
+    '${NODEPOOL_TASK_PACKAGES_VOLUME_NAME:-hivemind-nodepool-task-packages}',
+    '${MASTER_TASK_REFERENCES_VOLUME_NAME:-hivemind-master-task-references}',
+    '${MASTER_TORRENTS_VOLUME_NAME:-hivemind-master-torrents}',
+    '${WORKER_TASK_DOWNLOADS_VOLUME_NAME:-hivemind-worker-task-downloads}',
+    '${WORKER_TORRENTS_VOLUME_NAME:-hivemind-worker-torrents}'
+)) {
+    if (!$composeText.Contains($expectedVolumeName)) {
+        throw "docker-compose.yml must let release smoke isolate persistent state via '$expectedVolumeName'."
     }
 }
 
@@ -24,6 +49,15 @@ if (!$composeText.Contains('WORKER_NODEPOOL_TOKEN: ${WORKER_NODEPOOL_TOKEN:-}'))
 
 if (!$composeText.Contains('WORKER_EXECUTION_PUBLIC_KEY_PEM: ${WORKER_EXECUTION_PUBLIC_KEY_PEM:?')) {
     throw "docker-compose.yml must require and propagate WORKER_EXECUTION_PUBLIC_KEY_PEM to the worker."
+}
+
+foreach ($expectedCorsSetting in @(
+    'MASTER_CORS_ALLOWED_ORIGINS: ${MASTER_CORS_ALLOWED_ORIGINS:-}',
+    'WORKER_CONTROL_CORS_ALLOWED_ORIGINS: ${WORKER_CONTROL_CORS_ALLOWED_ORIGINS:-}'
+)) {
+    if (!$composeText.Contains($expectedCorsSetting)) {
+        throw "docker-compose.yml must propagate dynamic release UI origins via '$expectedCorsSetting'."
+    }
 }
 
 if (!(Test-Path -LiteralPath $dockerIgnorePath)) {
@@ -164,7 +198,16 @@ foreach ($expectedVariable in @(
 }
 foreach ($expectedSetting in @(
     "POSTGRES_HOST_PORT=5432",
-    "REDIS_HOST_PORT=6379"
+    "REDIS_HOST_PORT=6379",
+    "NODEPOOL_GRPC_HOST_PORT=50051",
+    "TORRENT_TRACKER_HOST_PORT=6969",
+    "TORRENT_SEED_HOST_PORT=6881",
+    "MASTER_HTTP_HOST_PORT=8082",
+    "WORKER_GRPC_HOST_PORT=50053",
+    "WORKER_CONTROL_HOST_PORT=18080",
+    "MASTER_UI_HOST_PORT=3000",
+    "WORKER_UI_HOST_PORT=3001",
+    "SITE_HOST_PORT=8080"
 )) {
     if ($envExampleLines -notcontains $expectedSetting) {
         throw ".env.example must document the configurable infrastructure mapping '${expectedSetting}'."

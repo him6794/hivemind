@@ -9,13 +9,20 @@ $scriptText = Get-Content -LiteralPath $scriptPath -Raw
 
 foreach ($expected in @(
     "docker compose up -d --build",
-    "docker compose down",
+    "docker compose down -v",
     "Wait-ForHttpOk",
-    "http://127.0.0.1:8080",
-    "http://127.0.0.1:3000",
-    "http://127.0.0.1:3001",
-    "http://127.0.0.1:8082/health",
-    "http://127.0.0.1:18080"
+    "SITE_HOST_PORT",
+    "VITE_API_BASE",
+    "VITE_WORKER_CONTROL_BASE",
+    "POSTGRES_VOLUME_NAME",
+    "REDIS_VOLUME_NAME",
+    "HIVEMIND_DATA_VOLUME_NAME",
+    "MASTER_CORS_ALLOWED_ORIGINS",
+    "WORKER_CONTROL_CORS_ALLOWED_ORIGINS",
+    "MASTER_UI_HOST_PORT",
+    "WORKER_UI_HOST_PORT",
+    "MASTER_HTTP_HOST_PORT",
+    "WORKER_CONTROL_HOST_PORT"
 )) {
     if (!$scriptText.Contains($expected)) {
         throw "release stack smoke harness must include '$expected'."
@@ -27,7 +34,7 @@ if (!$scriptText.Contains('Match = "OK"')) {
 }
 
 foreach ($expected in @(
-    "http://127.0.0.1:18080/api/worker-info",
+    "/api/worker-info",
     '"success":true'
 )) {
     if (!$scriptText.Contains($expected)) {
@@ -47,6 +54,20 @@ foreach ($expected in @(
     "POSTGRES_PASSWORD",
     "POSTGRES_HOST_PORT",
     "REDIS_HOST_PORT",
+    "NODEPOOL_GRPC_HOST_PORT",
+    "TORRENT_TRACKER_HOST_PORT",
+    "TORRENT_SEED_HOST_PORT",
+    "MASTER_HTTP_HOST_PORT",
+    "WORKER_GRPC_HOST_PORT",
+    "WORKER_CONTROL_HOST_PORT",
+    "MASTER_UI_HOST_PORT",
+    "WORKER_UI_HOST_PORT",
+    "SITE_HOST_PORT",
+    "VITE_API_BASE",
+    "VITE_WORKER_CONTROL_BASE",
+    "POSTGRES_VOLUME_NAME",
+    "REDIS_VOLUME_NAME",
+    "HIVEMIND_DATA_VOLUME_NAME",
     "JWT_SECRET",
     "WORKER_EXECUTION_PRIVATE_KEY_PEM",
     "WORKER_EXECUTION_PUBLIC_KEY_PEM",
@@ -72,6 +93,26 @@ $managedEnvironmentNames = @(
     "POSTGRES_PASSWORD",
     "POSTGRES_HOST_PORT",
     "REDIS_HOST_PORT",
+    "NODEPOOL_GRPC_HOST_PORT",
+    "TORRENT_TRACKER_HOST_PORT",
+    "TORRENT_SEED_HOST_PORT",
+    "MASTER_HTTP_HOST_PORT",
+    "WORKER_GRPC_HOST_PORT",
+    "WORKER_CONTROL_HOST_PORT",
+    "MASTER_UI_HOST_PORT",
+    "WORKER_UI_HOST_PORT",
+    "SITE_HOST_PORT",
+    "REDIS_VOLUME_NAME",
+    "POSTGRES_VOLUME_NAME",
+    "HIVEMIND_DATA_VOLUME_NAME",
+    "NODEPOOL_TORRENTS_VOLUME_NAME",
+    "NODEPOOL_TASK_PACKAGES_VOLUME_NAME",
+    "MASTER_TASK_REFERENCES_VOLUME_NAME",
+    "MASTER_TORRENTS_VOLUME_NAME",
+    "WORKER_TASK_DOWNLOADS_VOLUME_NAME",
+    "WORKER_TORRENTS_VOLUME_NAME",
+    "MASTER_CORS_ALLOWED_ORIGINS",
+    "WORKER_CONTROL_CORS_ALLOWED_ORIGINS",
     "JWT_SECRET",
     "WORKER_EXECUTION_PRIVATE_KEY_PEM",
     "WORKER_EXECUTION_PUBLIC_KEY_PEM",
@@ -158,6 +199,28 @@ try {
         "SET POSTGRES_PASSWORD",
         "SET POSTGRES_HOST_PORT",
         "SET REDIS_HOST_PORT",
+        "SET NODEPOOL_GRPC_HOST_PORT",
+        "SET TORRENT_TRACKER_HOST_PORT",
+        "SET TORRENT_SEED_HOST_PORT",
+        "SET MASTER_HTTP_HOST_PORT",
+        "SET WORKER_GRPC_HOST_PORT",
+        "SET WORKER_CONTROL_HOST_PORT",
+        "SET MASTER_UI_HOST_PORT",
+        "SET WORKER_UI_HOST_PORT",
+        "SET SITE_HOST_PORT",
+        "SET VITE_API_BASE",
+        "SET VITE_WORKER_CONTROL_BASE",
+        "SET POSTGRES_VOLUME_NAME",
+        "SET REDIS_VOLUME_NAME",
+        "SET HIVEMIND_DATA_VOLUME_NAME",
+        "SET NODEPOOL_TORRENTS_VOLUME_NAME",
+        "SET NODEPOOL_TASK_PACKAGES_VOLUME_NAME",
+        "SET MASTER_TASK_REFERENCES_VOLUME_NAME",
+        "SET MASTER_TORRENTS_VOLUME_NAME",
+        "SET WORKER_TASK_DOWNLOADS_VOLUME_NAME",
+        "SET WORKER_TORRENTS_VOLUME_NAME",
+        "SET MASTER_CORS_ALLOWED_ORIGINS",
+        "SET WORKER_CONTROL_CORS_ALLOWED_ORIGINS",
         "SET JWT_SECRET",
         "SET WORKER_EXECUTION_PRIVATE_KEY_PEM",
         "SET WORKER_EXECUTION_PUBLIC_KEY_PEM",
@@ -172,6 +235,28 @@ try {
         POSTGRES_PASSWORD = "user-supplied-postgres-password"
         POSTGRES_HOST_PORT = "15432"
         REDIS_HOST_PORT = "16379"
+        NODEPOOL_GRPC_HOST_PORT = "15051"
+        TORRENT_TRACKER_HOST_PORT = "16969"
+        TORRENT_SEED_HOST_PORT = "16881"
+        MASTER_HTTP_HOST_PORT = "18082"
+        WORKER_GRPC_HOST_PORT = "15053"
+        WORKER_CONTROL_HOST_PORT = "18080"
+        MASTER_UI_HOST_PORT = "13000"
+        WORKER_UI_HOST_PORT = "13001"
+        SITE_HOST_PORT = "18000"
+        VITE_API_BASE = "http://127.0.0.1:18082"
+        VITE_WORKER_CONTROL_BASE = "http://127.0.0.1:18080"
+        POSTGRES_VOLUME_NAME = "hivemind-test-postgres"
+        REDIS_VOLUME_NAME = "hivemind-test-redis"
+        HIVEMIND_DATA_VOLUME_NAME = "hivemind-test-data"
+        NODEPOOL_TORRENTS_VOLUME_NAME = "hivemind-test-nodepool-torrents"
+        NODEPOOL_TASK_PACKAGES_VOLUME_NAME = "hivemind-test-nodepool-packages"
+        MASTER_TASK_REFERENCES_VOLUME_NAME = "hivemind-test-master-references"
+        MASTER_TORRENTS_VOLUME_NAME = "hivemind-test-master-torrents"
+        WORKER_TASK_DOWNLOADS_VOLUME_NAME = "hivemind-test-worker-downloads"
+        WORKER_TORRENTS_VOLUME_NAME = "hivemind-test-worker-torrents"
+        MASTER_CORS_ALLOWED_ORIGINS = "http://127.0.0.1:13000,http://127.0.0.1:13001"
+        WORKER_CONTROL_CORS_ALLOWED_ORIGINS = "http://127.0.0.1:13001"
         JWT_SECRET = "user-supplied-jwt-secret-with-at-least-32-bytes"
         WORKER_EXECUTION_PRIVATE_KEY_PEM = "user-supplied-private-key"
         WORKER_EXECUTION_PUBLIC_KEY_PEM = "user-supplied-public-key"

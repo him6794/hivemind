@@ -64,9 +64,9 @@ services:
       TORRENT_ALLOW_LOCAL_TASK_ARTIFACTS: "false"
       LOG_LEVEL: ${LOG_LEVEL:-info}
     ports:
-      - "50051:50051"  # gRPC (nodepool)
-      - "6969:6969"    # BitTorrent tracker announce
-      - "6881:6881"    # BitTorrent task seeder
+      - "${NODEPOOL_GRPC_HOST_PORT:-50051}:50051"  # gRPC (nodepool)
+      - "${TORRENT_TRACKER_HOST_PORT:-6969}:6969"  # BitTorrent tracker announce
+      - "${TORRENT_SEED_HOST_PORT:-6881}:6881"     # BitTorrent task seeder
     depends_on:
       redis:
         condition: service_healthy
@@ -97,6 +97,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set to a non-default value}
       NODEPOOL_GRPC_ENDPOINT: nodepool:50051
       MASTER_HTTP_ADDR: 0.0.0.0:8082
+      MASTER_CORS_ALLOWED_ORIGINS: ${MASTER_CORS_ALLOWED_ORIGINS:-}
       TORRENT_API_DIR: /app/api/torrents
       TORRENT_BT_DIR: /app/bt_torrents
       TORRENT_ANNOUNCE_URL: ${HIVEMIND_TORRENT_ANNOUNCE_URL:-http://nodepool:6969/announce}
@@ -104,7 +105,7 @@ services:
       TORRENT_TASK_ARTIFACT_BASE_URL: ${TORRENT_TASK_ARTIFACT_BASE_URL:-http://master:8082/task-artifacts}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     ports:
-      - "8082:8082"    # HTTP API (master)
+      - "${MASTER_HTTP_HOST_PORT:-8082}:8082"  # HTTP API (master)
     depends_on:
       - nodepool
     networks:
@@ -128,6 +129,7 @@ services:
       WORKER_GRPC_ADDR: 0.0.0.0:50053
       WORKER_ADVERTISE_ADDR: worker:50053
       WORKER_CONTROL_HTTP_ADDR: 0.0.0.0:18080
+      WORKER_CONTROL_CORS_ALLOWED_ORIGINS: ${WORKER_CONTROL_CORS_ALLOWED_ORIGINS:-}
       TORRENT_API_DIR: /app/api/torrents
       TORRENT_BT_DIR: /app/bt_torrents
       TORRENT_ANNOUNCE_URL: ${HIVEMIND_TORRENT_ANNOUNCE_URL:-http://nodepool:6969/announce}
@@ -138,8 +140,8 @@ services:
       EXECUTOR_NETWORK_EGRESS_TARGETS: ${EXECUTOR_NETWORK_EGRESS_TARGETS:-172.28.0.0/24}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     ports:
-      - "50053:50053"  # gRPC (worker)
-      - "18080:18080"  # HTTP API (local worker control)
+      - "${WORKER_GRPC_HOST_PORT:-50053}:50053"        # gRPC (worker)
+      - "${WORKER_CONTROL_HOST_PORT:-18080}:18080"     # HTTP API (local worker control)
     depends_on:
       - nodepool
     networks:
@@ -161,7 +163,7 @@ services:
     container_name: hivemind-master-ui
     restart: unless-stopped
     ports:
-      - "3000:80"
+      - "${MASTER_UI_HOST_PORT:-3000}:80"
     depends_on:
       - master
     networks:
@@ -177,7 +179,7 @@ services:
     container_name: hivemind-worker-ui
     restart: unless-stopped
     ports:
-      - "3001:80"
+      - "${WORKER_UI_HOST_PORT:-3001}:80"
     depends_on:
       - worker
     networks:
@@ -192,7 +194,7 @@ services:
     environment:
       WEBSITE_NODEPOOL_GRPC_ADDR: ${WEBSITE_NODEPOOL_GRPC_ADDR:-nodepool:50051}
     ports:
-      - "8080:3000"
+      - "${SITE_HOST_PORT:-8080}:3000"
     depends_on:
       - nodepool
     networks:
@@ -216,20 +218,20 @@ networks:
 
 volumes:
   redis-data:
-    name: hivemind-redis-data
+    name: ${REDIS_VOLUME_NAME:-hivemind-redis-data}
   postgres-data:
-    name: hivemind-postgres-data
+    name: ${POSTGRES_VOLUME_NAME:-hivemind-postgres-data}
   hivemind-data:
-    name: hivemind-data
+    name: ${HIVEMIND_DATA_VOLUME_NAME:-hivemind-data}
   nodepool-torrents:
-    name: hivemind-nodepool-torrents
+    name: ${NODEPOOL_TORRENTS_VOLUME_NAME:-hivemind-nodepool-torrents}
   nodepool-task-packages:
-    name: hivemind-nodepool-task-packages
+    name: ${NODEPOOL_TASK_PACKAGES_VOLUME_NAME:-hivemind-nodepool-task-packages}
   master-task-references:
-    name: hivemind-master-task-references
+    name: ${MASTER_TASK_REFERENCES_VOLUME_NAME:-hivemind-master-task-references}
   master-torrents:
-    name: hivemind-master-torrents
+    name: ${MASTER_TORRENTS_VOLUME_NAME:-hivemind-master-torrents}
   worker-task-downloads:
-    name: hivemind-worker-task-downloads
+    name: ${WORKER_TASK_DOWNLOADS_VOLUME_NAME:-hivemind-worker-task-downloads}
   worker-torrents:
-    name: hivemind-worker-torrents
+    name: ${WORKER_TORRENTS_VOLUME_NAME:-hivemind-worker-torrents}
