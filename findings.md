@@ -50,6 +50,8 @@
 - 新 envelope 真實 round-trip proof 在 WSL/native Linux 通過，proving 570.02 秒；快速測試亦確認 scheme、image id、journal tamper 被拒絕。
 - `RISC0_SKIP_BUILD=1` 會讓 methods 產生空 guest ELF，只適合 clippy，不能用於 execution/proving test；否則 prover 會回報 `Malformed ProgramBinary`。
 - Linux clippy 可用 RISC Zero Rust 1.97 隨附 driver；若其 host fingerprint 觸發 recursion artifact build，使用上游支援的 `RECURSION_SRC_PATH` 指向本地 SHA-256 `744b999f0a35b3c86753311c7efb2a0054be21727095cf105af6ee7d3f4d8849` 檔即可離線通過，無須修改 registry 原始碼。
+- Worker→Nodepool 的正確 proof transport 是 `ExecuteTaskResponse`；`TaskResultUploadRequest` 只承載 torrent result reference。新增 optional protobuf `ManagedProofEnvelope`，保留原有欄位編號與舊 client wire compatibility。
+- Prover workspace 不應依賴整個 `hivemind-proto` tonic graph。未提交的交叉依賴實驗已撤回；可信 Nodepool verifier adapter 應在主 workspace 擁有 protobuf→receipt 轉換，Worker prover只負責輸出 backend envelope。
 
 ## Fixed In Current Repair Stream
 

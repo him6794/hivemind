@@ -240,6 +240,7 @@ impl WorkerNodeService for GrpcWorkerNodeService {
                         managed_executed_ops: result.managed_executed_ops,
                         managed_output_bytes: result.managed_output_bytes,
                         managed_receipt_json: result.managed_receipt_json.unwrap_or_default(),
+                        managed_proof: None,
                     }))
                 } else {
                     Ok(Response::new(ExecuteTaskResponse {
@@ -248,6 +249,7 @@ impl WorkerNodeService for GrpcWorkerNodeService {
                         managed_executed_ops: result.managed_executed_ops,
                         managed_output_bytes: result.managed_output_bytes,
                         managed_receipt_json: result.managed_receipt_json.unwrap_or_default(),
+                        managed_proof: None,
                     }))
                 }
             }
@@ -257,6 +259,7 @@ impl WorkerNodeService for GrpcWorkerNodeService {
                 managed_executed_ops: 0,
                 managed_output_bytes: 0,
                 managed_receipt_json: String::new(),
+                managed_proof: None,
             })),
         }
     }

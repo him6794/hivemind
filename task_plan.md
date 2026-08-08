@@ -40,7 +40,7 @@
 
 ### 階段 3：協議與 Nodepool 驗證閘門
 
-- [ ] protobuf 傳遞 proof scheme、image id、journal、seal
+- [x] protobuf 傳遞 proof scheme、image id、journal、receipt/seal
 - [ ] Nodepool 以可信 image id 驗證 proof
 - [ ] 驗證 journal 與資料庫 task/source/input/output/max_cpt 完全一致
 - [ ] proof 無效、缺漏、重播或版本不支援時 fail closed
@@ -129,6 +129,7 @@
 | zkVM `cargo audit` 發現 RISC Zero 依賴鏈的 `rsa 0.9.10` RUSTSEC-2023-0071 與 `tracing-subscriber 0.2.25` RUSTSEC-2025-0055 | 1 | 先追蹤精確 dependency path 與可達性；在漏洞未消除或有明確隔離政策前不得標記可發布 |
 | 真實 proof test 使用 `RISC0_SKIP_BUILD=1` 產生空 ELF，回報 `Malformed ProgramBinary` | 1 | 此旗標只用於 clippy；真實 execution/proving test 必須建置並嵌入固定 guest ELF |
 | 標準 Rust 1.90 toolchain 不含 clippy；Windows clippy 再次被上游 MSVC C++17 問題阻擋 | 1 | 使用 RISC Zero Rust 1.97 隨附 clippy，並以官方 `RECURSION_SRC_PATH` 指向 SHA-256 驗證成功的本地 artifact，避免 WSL S3 400 |
+| prover workspace 直接依賴 `hivemind-proto` 會把 tonic/prost server graph 拉進 prover，且獨立 WSL cache 缺少 `prost-types` | 1 | 撤回未提交耦合；protobuf 契約留在主 workspace，Nodepool verifier adapter 由可信端持有，prover 不依賴 Nodepool 協議 |
 
 ## 歷史
 
