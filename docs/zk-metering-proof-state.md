@@ -16,7 +16,7 @@ running
 
 ## Current step
 
-階段 2：建立 RISC Zero 3.0.6 Docker guest 與 host/guest golden vector。
+階段 2：將已驗證的 RISC Zero receipt 封裝為 Worker proof envelope。
 
 ## Completed
 
@@ -29,6 +29,11 @@ running
 - Proof crate 3 tests、clippy、fmt、audit 與 GNU workspace 246 tests 通過。
 - 固定 RISC Zero 3.0.6 stable；production verifier 必須使用 `disable-dev-mode`。
 - 將 canonical output rendering 下沉到 managed runtime；runtime 16 tests、Worker 52 tests 通過。
+- RISC Zero guest 已執行完整 deterministic managed runtime，journal 與 native claim golden vector 完全一致。
+- 真實 receipt 已以固定 guest image id 驗證；錯誤 image id 與篡改 journal 均被拒絕。
+- Builder 使用 `r0.1.88.0@sha256:3e12f71bacd27527a61dea96fa0e53e468c99aa261d3a1019b593f6dbd943eb3`。
+- Guest image id 為 `[506971590, 3534501277, 2979422208, 3812948145, 3156049081, 3116419688, 526806072, 1153593187]`。
+- zkVM tests 2 passed；真實 proving 約 570–580 秒；fmt 與 clippy `-D warnings` passed。
 
 ## Active owners
 
@@ -37,15 +42,17 @@ running
 
 ## Blockers
 
-- 無立即 blocker；Linux Docker builder 可用，但 builder image digest 尚未固定。
+- RISC Zero 3.0.6 lockfile 有 2 個 transitive advisories：`rsa` timing side-channel（經 rzup，無修正版）與舊 `tracing-subscriber` ANSI log injection（經 ark-relations）。發布前需隔離或建立明確 audit policy。
+- 單次 proving 約 9.5 分鐘，現階段不可直接啟用 enforce；需後續 timeout/queue/benchmark 設計。
+- C: Docker VHD 空間不足，prover 改走 WSL/native Linux 並將 artifacts/TMP 放 D:；既有 Docker stack 已恢復且保持 healthy。
 
 ## Next action
 
-建立獨立的 RISC Zero methods/guest workspace，先寫 guest journal 與 native runtime claim 相同的 RED test。
+以 RED 測試定義可序列化 proof envelope，接入 Worker prover 產生路徑；此 checkpoint 不把未驗證 envelope 接入結算。
 
 ## Next checkpoint
 
-zkVM guest 能執行最小 managed function 並輸出與 host runtime 相同的 public claim。
+Worker 能輸出包含 proof scheme、固定 image id、journal 與 receipt seal 的 proof envelope，並可由獨立 verifier round-trip 驗證。
 
 ## Notes
 

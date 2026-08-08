@@ -1,0 +1,11 @@
+[package]
+name = "hivemind-managed-proof-methods"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[build-dependencies]
+risc0-build = { version = "=3.0.6", features = ["docker"] }
+
+[package.metadata.risc0]
+methods = ["guest"]
