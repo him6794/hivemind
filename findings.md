@@ -45,6 +45,11 @@
 - 真實 RISC Zero receipt 已產生並以 guest image id `[506971590, 3534501277, 2979422208, 3812948145, 3156049081, 3116419688, 526806072, 1153593187]` 驗證；journal 等於 native runtime claim，錯誤 image id 與被篡改 journal 都驗證失敗。
 - 兩次真實 proving 分別約 569.69 秒與 579.77 秒，使用約 11–12 CPU cores。此成本遠高於短 managed task，現階段只適合研發/observe，不可直接 enforce。
 - `cargo audit` 對獨立 zkVM lockfile 回報 2 個 RISC Zero transitive vulnerabilities：`RUSTSEC-2023-0071` 經 `rzup -> rsa 0.9.10`（目前無修正版），以及 `RUSTSEC-2025-0055` 經 `ark-relations -> tracing-subscriber 0.2.25`。前者在目前路徑用於工具鏈/簽章驗證而非私鑰解密，後者不接收 Hivemind user input 作 logging，但發布 gate 仍需明確隔離或精確 ignore policy，不能宣稱 audit clean。
+- `WorkerProofEnvelope` 使用固定 `risc0-zkvm-3.0.6` scheme 與編譯期 guest image id，攜帶公開 journal 及完整 `Receipt`。JSON codec 使用 serde_json 的預設遞迴深度限制，避免直接以不受限遞迴 codec 解析不可信 receipt。
+- Envelope verifier 的順序是：scheme → 固定 image id → envelope/receipt journal 一致性 → RISC Zero receipt cryptographic verification → execution claim parsing。錯誤 metadata 不會被拿來選擇 verifier 或信任根。
+- 新 envelope 真實 round-trip proof 在 WSL/native Linux 通過，proving 570.02 秒；快速測試亦確認 scheme、image id、journal tamper 被拒絕。
+- `RISC0_SKIP_BUILD=1` 會讓 methods 產生空 guest ELF，只適合 clippy，不能用於 execution/proving test；否則 prover 會回報 `Malformed ProgramBinary`。
+- Linux clippy 可用 RISC Zero Rust 1.97 隨附 driver；若其 host fingerprint 觸發 recursion artifact build，使用上游支援的 `RECURSION_SRC_PATH` 指向本地 SHA-256 `744b999f0a35b3c86753311c7efb2a0054be21727095cf105af6ee7d3f4d8849` 檔即可離線通過，無須修改 registry 原始碼。
 
 ## Fixed In Current Repair Stream
 

@@ -1435,6 +1435,8 @@ dependencies = [
  "hivemind-managed-proof-methods",
  "managed-function-runtime",
  "risc0-zkvm",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

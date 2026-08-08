@@ -6,7 +6,7 @@
 
 ## 當前階段
 
-階段 2：zkVM guest 與 proof 產生（in_progress）
+階段 3：協議與 Nodepool 驗證閘門（in_progress）
 
 ## 成功標準
 
@@ -34,9 +34,9 @@
 - [x] 固定 builder image digest；產生 guest image id `[506971590, 3534501277, 2979422208, 3812948145, 3156049081, 3116419688, 526806072, 1153593187]`
 - [x] 將 deterministic managed runtime 放入 guest 執行路徑
 - [x] guest commit 公開聲明，私有 witness 保留程式輸入／執行軌跡
-- [ ] Worker prover 產生 proof envelope
+- [x] Worker prover 產生包含 proof scheme、固定 image id、journal 與 receipt 的 proof envelope
 - [x] 加入 golden vectors、image-id/journal tamper tests 與 proof time benchmark（約 570–580 秒）
-- **狀態：** in_progress
+- **狀態：** complete
 
 ### 階段 3：協議與 Nodepool 驗證閘門
 
@@ -45,7 +45,7 @@
 - [ ] 驗證 journal 與資料庫 task/source/input/output/max_cpt 完全一致
 - [ ] proof 無效、缺漏、重播或版本不支援時 fail closed
 - [ ] 驗證成功後才寫 receipt、完成任務與結算
-- **狀態：** pending
+- **狀態：** in_progress
 
 ### 階段 4：遷移、失敗語義與營運
 
@@ -127,6 +127,8 @@
 | zkVM fmt check 發現 methods `lib.rs` 多餘尾端空行 | 1 | 移除空行後重跑；stable rustfmt 的既有 nightly-option warnings 另行記錄，不是格式差異 |
 | clippy outer cargo 的 wrapper 洩漏到 inner guest build，使 RISC Zero rustc 找不到 guest `std`（E0463） | 1 | guest 已由真實 test 完整編譯；clippy gate 使用 RISC Zero 官方 `RISC0_SKIP_BUILD=1` 檢查 host/methods 原始碼，避免以 host clippy wrapper編譯 guest target |
 | zkVM `cargo audit` 發現 RISC Zero 依賴鏈的 `rsa 0.9.10` RUSTSEC-2023-0071 與 `tracing-subscriber 0.2.25` RUSTSEC-2025-0055 | 1 | 先追蹤精確 dependency path 與可達性；在漏洞未消除或有明確隔離政策前不得標記可發布 |
+| 真實 proof test 使用 `RISC0_SKIP_BUILD=1` 產生空 ELF，回報 `Malformed ProgramBinary` | 1 | 此旗標只用於 clippy；真實 execution/proving test 必須建置並嵌入固定 guest ELF |
+| 標準 Rust 1.90 toolchain 不含 clippy；Windows clippy 再次被上游 MSVC C++17 問題阻擋 | 1 | 使用 RISC Zero Rust 1.97 隨附 clippy，並以官方 `RECURSION_SRC_PATH` 指向 SHA-256 驗證成功的本地 artifact，避免 WSL S3 400 |
 
 ## 歷史
 

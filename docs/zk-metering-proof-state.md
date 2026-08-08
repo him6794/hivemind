@@ -16,7 +16,7 @@ running
 
 ## Current step
 
-階段 2：將已驗證的 RISC Zero receipt 封裝為 Worker proof envelope。
+階段 3：定義 protobuf proof transport 與 Nodepool 獨立 verifier。
 
 ## Completed
 
@@ -34,6 +34,9 @@ running
 - Builder 使用 `r0.1.88.0@sha256:3e12f71bacd27527a61dea96fa0e53e468c99aa261d3a1019b593f6dbd943eb3`。
 - Guest image id 為 `[506971590, 3534501277, 2979422208, 3812948145, 3156049081, 3116419688, 526806072, 1153593187]`。
 - zkVM tests 2 passed；真實 proving 約 570–580 秒；fmt 與 clippy `-D warnings` passed。
+- Worker proof envelope 已固定 `risc0-zkvm-3.0.6` scheme、guest image id、journal 與完整 receipt，並支援有遞迴深度限制的 JSON round-trip。
+- Verifier 先拒絕錯誤 scheme、image id 或 envelope/receipt journal 不一致，再驗證 receipt，最後才解析 execution claim。
+- 新 envelope 的真實 proof round-trip 通過；proving 570.02 秒，claim 與 native runtime 相同。
 
 ## Active owners
 
@@ -48,11 +51,11 @@ running
 
 ## Next action
 
-以 RED 測試定義可序列化 proof envelope，接入 Worker prover 產生路徑；此 checkpoint 不把未驗證 envelope 接入結算。
+以 RED 測試定義 protobuf transport 與 Nodepool 獨立 verifier；此 checkpoint 仍不接入結算。
 
 ## Next checkpoint
 
-Worker 能輸出包含 proof scheme、固定 image id、journal 與 receipt seal 的 proof envelope，並可由獨立 verifier round-trip 驗證。
+Nodepool 能從 protobuf envelope 還原 proof、使用可信 image id 驗證，並比對 task/source/input/output/budget binding；尚不寫入結算。
 
 ## Notes
 
