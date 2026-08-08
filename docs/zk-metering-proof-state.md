@@ -37,6 +37,7 @@ running
 - Worker proof envelope 已固定 `risc0-zkvm-3.0.6` scheme、guest image id、journal 與完整 receipt，並支援有遞迴深度限制的 JSON round-trip。
 - Verifier 先拒絕錯誤 scheme、image id 或 envelope/receipt journal 不一致，再驗證 receipt，最後才解析 execution claim。
 - 新 envelope 的真實 proof round-trip 通過；proving 570.02 秒，claim 與 native runtime 相同。
+- Protobuf `ManagedProofEnvelope` 已定義 scheme、固定長度 image-id words、journal 與 receipt JSON，並以 optional `ExecuteTaskResponse.managed_proof` 傳遞；舊欄位編號維持不變。
 
 ## Active owners
 
@@ -51,11 +52,11 @@ running
 
 ## Next action
 
-以 RED 測試定義 protobuf transport 與 Nodepool 獨立 verifier；此 checkpoint 仍不接入結算。
+以 RED 測試建立 Nodepool-owned verifier adapter；此 checkpoint 仍不接入結算。
 
 ## Next checkpoint
 
-Nodepool 能從 protobuf envelope 還原 proof、使用可信 image id 驗證，並比對 task/source/input/output/budget binding；尚不寫入結算。
+Nodepool 能從 protobuf envelope 還原 proof、使用可信 image id 驗證，並輸出已驗證 claim；尚不寫入結算。
 
 ## Notes
 

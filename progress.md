@@ -16,7 +16,8 @@
   - 將 canonical output renderer 從 Worker 下沉到 managed runtime，避免 guest/host commitment 分歧
   - 以 RED→GREEN 完成 `WorkerProofEnvelope`，固定 `risc0-zkvm-3.0.6` scheme、guest image id、journal 與完整 receipt
   - `prove_guest_envelope` 由 prover 直接組裝 envelope；`verify_proof_envelope` 先驗 metadata/journal，再驗 receipt，最後才解析 execution claim
-- next action: 以 RED 測試定義 protobuf transport 與 Nodepool 獨立 verifier；尚不接結算
+  - protobuf `ManagedProofEnvelope` 已攜帶 scheme、8-word image id、journal 與 receipt JSON，並掛入 `ExecuteTaskResponse.managed_proof`
+- next action: 以 RED 測試建立 Nodepool-owned verifier adapter；驗證成功前仍不採信 Worker usage units
 - blockers: RISC Zero 3.0.6 transitive lockfile 有 2 個 audit advisories，需在發布前隔離或建立可稽核 ignore policy；單次 proving 約 9.5 分鐘，不可直接 enforce
 - remote actions: none（不 push、不建立 PR）
 
@@ -55,6 +56,8 @@
 | proof-envelope focused GREEN | 2 passed；JSON round-trip 保留 receipt/metadata，scheme/image/journal tamper 均在 proof verification 前拒絕 |
 | proof-envelope real GREEN | 1 passed；真實 proving 570.02 秒，JSON round-trip 後固定 image verifier 通過且 claim 與 native runtime 相同 |
 | proof-envelope quality gates | fmt、`git diff --check`、clippy workspace/all-target/all-feature `-D warnings` passed；audit 維持既知 2 vulnerabilities、4 allowed warnings |
+| protobuf transport RED | 如預期因 `ManagedProofEnvelope` 與 `ExecuteTaskResponse.managed_proof` 不存在而 E0432/E0560/E0609 |
+| protobuf transport GREEN | proto round-trip 1 passed；proto/Worker/scheduler affected crates `cargo check` passed，既有路徑明確送出 `managed_proof: None` |
 
 ## 前一輪平台驗證
 

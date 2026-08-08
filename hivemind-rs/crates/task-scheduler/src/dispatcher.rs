@@ -859,6 +859,7 @@ mod tests {
             managed_executed_ops: 2_500,
             managed_output_bytes: 2_049,
             managed_receipt_json: receipt_json.clone(),
+            managed_proof: None,
         };
         let (worker_addr, mut execute_rx) =
             match fake_worker_execute_server_with_response(response).await {
@@ -1288,6 +1289,7 @@ mod tests {
             managed_executed_ops: 0,
             managed_output_bytes: 0,
             managed_receipt_json: String::new(),
+            managed_proof: None,
         })
         .await
     }
