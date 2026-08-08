@@ -30,6 +30,21 @@
 - 官方 3.0.6 Docker builder 預設 tag 是 `risczero/risc0-guest-builder:r0.1.88.0`；仍需在下一切片解析並固定 image digest。
 - 原本 Worker 私有的 output renderer 會造成 guest/host 共識分歧風險；現已移到 `managed-function-runtime::render_output` 並由 Worker 共用。
 - Renderer RED 如預期失敗後完成 GREEN；runtime 16 tests、Worker 52 tests 與兩邊 clippy/fmt 通過。
+- RISC Zero 3.0.6 guest 可用 `env::commit_slice` 寫 raw journal，host 可直接讀 `receipt.journal.bytes`；public claim JSON 不需經過 RISC Zero serde 二次編碼。
+- 2026-08-08 查得官方 builder `risczero/risc0-guest-builder:r0.1.88.0` manifest digest 為 `sha256:3e12f71bacd27527a61dea96fa0e53e468c99aa261d3a1019b593f6dbd943eb3`。建置腳本需在使用 tag 前驗證此 digest。
+- Windows MSVC host 啟用 `risc0-zkvm/prove` 時，`risc0-circuit-keccak-sys 4.0.3` 的 build script 傳入 `/std:c++17`，但來源使用 C++20 designated initializers，因 `C7555` 失敗。這不是 guest/runtime 行為錯誤；正式 prover 與 golden-vector host 測試改在 Linux Docker 執行，不修改本機 Cargo registry 或放寬 production verifier。
+- 對 `cargo test` 指定 `x86_64-pc-windows-gnu` 也不能解決：Cargo 的 methods build script 仍為 MSVC host binary，最後因 `risc0-zkvm-platform` 的 `sys_alloc_words` 未解析而失敗。這證實不是單純 target 選擇問題，prover host 必須移到 Linux。
+- Linux host/prover 容器與 nested Docker mount 已驗證可行；首個映像固定 Rust 1.88，但 `managed-function-runtime` 與 `ruint` 目前要求 Rust 1.90，因此測試基底需固定為 Rust 1.90。
+- Rust 1.90 Linux host 已能編譯 RISC Zero prover 依賴。官方 Docker guest build 仍要求 guest workspace 自有 `Cargo.lock`，且 `risc0-build` 在呼叫 builder 前會檢查 RISC Zero Rust toolchain；測試映像需安裝對應 `rzup` toolchain。
+- 將完整 rzup toolchain 封進 Docker image 時，C: 空間耗盡造成 Docker Desktop VHD ext4 I/O error、containerd SIGBUS，連既有 PostgreSQL/Hivemind 容器都被中止。釋放可重建 npm cache 並受控重啟後，所有既有容器與 healthy checks 恢復。後續 zkVM toolchain、Cargo registry、target 必須 bind 到 D: repo `.cache`，禁止再擴張 C: Docker image layer。
+- `risc0-build` 的 Docker guest 路徑使用 `docker build --output`，需要 buildx。僅從 `docker:27-cli` 複製 `/usr/local/bin/docker` 不足；test host 還必須提供 CLI plugin，否則會落到不支援 `--output` 的 legacy builder。
+- 即使 Cargo home、RISC Zero toolchain 與 target 全部 bind 到 D:，nested Docker guest build 的 BuildKit snapshot 仍寫入 C: 的 Docker VHD。C: 再次歸零並讓 daemon unexpected EOF，故本機不可再使用 Docker Desktop 作 prover；後續改用 WSL/native Linux toolchain或先由使用者授權把 Docker data root 移到 D:。
+- Cargo host artifact fingerprint 包含 host rustc；用 RISC Zero Rust 1.97 執行 WSL host build 無法重用 Docker/標準 Rust 1.90 的 circuit artifacts，會重新觸發目前不可達的 S3 artifact 下載。WSL host 必須用標準 Rust 1.90，而 guest 才使用 RISC Zero Rust 1.97。
+- `risc0-build::sanitized_cmd` 會移除所有 `CARGO*` 環境變數，包含 `CARGO_HOME`；因此 local guest cargo 必須透過其預設 `/root/.cargo` 看到既有 registry/cache，否則在 WSL DNS 不可用時直接失敗。
+- Guest RED 最終到達真正程式配置錯誤：managed runtime/claim 使用 Rust `std`，但 guest 的 `risc0-zkvm` 未開 `std` feature，因此 RISC Zero no-std panic handler 與 `std` panic handler 重複（E0152）。GREEN 應在 guest dependency 啟用 `risc0-zkvm/std`，使同一 guest 僅保留標準 panic implementation。
+- 真實 RISC Zero receipt 已產生並以 guest image id `[506971590, 3534501277, 2979422208, 3812948145, 3156049081, 3116419688, 526806072, 1153593187]` 驗證；journal 等於 native runtime claim，錯誤 image id 與被篡改 journal 都驗證失敗。
+- 兩次真實 proving 分別約 569.69 秒與 579.77 秒，使用約 11–12 CPU cores。此成本遠高於短 managed task，現階段只適合研發/observe，不可直接 enforce。
+- `cargo audit` 對獨立 zkVM lockfile 回報 2 個 RISC Zero transitive vulnerabilities：`RUSTSEC-2023-0071` 經 `rzup -> rsa 0.9.10`（目前無修正版），以及 `RUSTSEC-2025-0055` 經 `ark-relations -> tracing-subscriber 0.2.25`。前者在目前路徑用於工具鏈/簽章驗證而非私鑰解密，後者不接收 Hivemind user input 作 logging，但發布 gate 仍需明確隔離或精確 ignore policy，不能宣稱 audit clean。
 
 ## Fixed In Current Repair Stream
 

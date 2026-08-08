@@ -1,0 +1,12 @@
+[package]
+name = "hivemind-managed-proof-zkvm"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+hivemind-managed-proof = { path = "../../../hivemind-rs/crates/managed-proof" }
+hivemind-managed-proof-methods = { path = "../methods" }
+managed-function-runtime = { path = "../../../executor-rs/crates/managed-function-runtime" }
+risc0-zkvm = { version = "=3.0.6", default-features = false, features = ["prove", "disable-dev-mode"] }
