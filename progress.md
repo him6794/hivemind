@@ -3,7 +3,7 @@
 ## ZK 函式計費證明（2026-08-07）
 
 - overall: `running`
-- current step: 階段 2，將已驗證的 RISC Zero receipt 封裝為 Worker proof envelope
+- current step: 階段 3，定義 protobuf proof envelope 與 Nodepool 獨立 verifier
 - completed this round:
   - 確認現有系統沒有真正 ZKP，receipt 是未驗證 Worker claim
   - 確認 trust model 要求 Nodepool 獨立驗證 Worker 計費聲明
@@ -14,7 +14,9 @@
   - 移除會新增未維護依賴警告的 postcard/bincode，改用既有 serde_json journal
   - 固定 RISC Zero 3.0.6 stable；production verifier 強制 `disable-dev-mode`
   - 將 canonical output renderer 從 Worker 下沉到 managed runtime，避免 guest/host commitment 分歧
-- next action: 以 RED 測試定義可序列化 proof envelope，接入 Worker 產生路徑；Nodepool verifier 尚不接結算
+  - 以 RED→GREEN 完成 `WorkerProofEnvelope`，固定 `risc0-zkvm-3.0.6` scheme、guest image id、journal 與完整 receipt
+  - `prove_guest_envelope` 由 prover 直接組裝 envelope；`verify_proof_envelope` 先驗 metadata/journal，再驗 receipt，最後才解析 execution claim
+- next action: 以 RED 測試定義 protobuf transport 與 Nodepool 獨立 verifier；尚不接結算
 - blockers: RISC Zero 3.0.6 transitive lockfile 有 2 個 audit advisories，需在發布前隔離或建立可稽核 ignore policy；單次 proving 約 9.5 分鐘，不可直接 enforce
 - remote actions: none（不 push、不建立 PR）
 
@@ -49,6 +51,10 @@
 | real receipt RED | `receipt_verifies_guest_image_and_commits_native_claim` 如預期因 `prove_guest_execution` 不存在而 E0432；已加入最小 prover API，待 GREEN 驗證 |
 | real receipt/tamper GREEN | 2 tests passed；真實 receipt 驗證固定 image ID，錯誤 image ID 與篡改 journal 均被拒絕；proving 579.77 秒 |
 | zkVM quality gates | fmt passed（僅既有 stable/nightly-option warnings）；clippy `-D warnings` passed with `RISC0_SKIP_BUILD=1`；audit 發現 2 個 RISC Zero transitive vulnerabilities，正在判定可達性/升級路徑 |
+| proof-envelope RED | 如預期只因 `prove_guest_envelope`、`verify_proof_envelope`、`WorkerProofEnvelope` 與 scheme 常數不存在而 E0432 |
+| proof-envelope focused GREEN | 2 passed；JSON round-trip 保留 receipt/metadata，scheme/image/journal tamper 均在 proof verification 前拒絕 |
+| proof-envelope real GREEN | 1 passed；真實 proving 570.02 秒，JSON round-trip 後固定 image verifier 通過且 claim 與 native runtime 相同 |
+| proof-envelope quality gates | fmt、`git diff --check`、clippy workspace/all-target/all-feature `-D warnings` passed；audit 維持既知 2 vulnerabilities、4 allowed warnings |
 
 ## 前一輪平台驗證
 

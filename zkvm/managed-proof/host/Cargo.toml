@@ -10,3 +10,5 @@ hivemind-managed-proof = { path = "../../../hivemind-rs/crates/managed-proof" }
 hivemind-managed-proof-methods = { path = "../methods" }
 managed-function-runtime = { path = "../../../executor-rs/crates/managed-function-runtime" }
 risc0-zkvm = { version = "=3.0.6", default-features = false, features = ["prove", "disable-dev-mode"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
