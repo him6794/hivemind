@@ -25,14 +25,16 @@ use hivemind_node_manager::grpc::{
 };
 #[cfg(feature = "nodepool")]
 use hivemind_node_manager::{heartbeat::HeartbeatHandler, NodeManager};
-#[cfg(feature = "worker")]
-use hivemind_proto::worker_node_service_server::WorkerNodeServiceServer;
 #[cfg(feature = "nodepool")]
 use hivemind_proto::{
     batch_runtime_service_server::BatchRuntimeServiceServer,
     master_node_service_server::MasterNodeServiceServer,
     node_manager_service_server::NodeManagerServiceServer, user_service_server::UserServiceServer,
     vpn_service_server::VpnServiceServer,
+};
+#[cfg(feature = "worker")]
+use hivemind_proto::{
+    worker_node_service_server::WorkerNodeServiceServer, WORKER_RPC_MESSAGE_MAX_BYTES,
 };
 #[cfg(feature = "nodepool")]
 use hivemind_task_scheduler::{dispatcher::Dispatcher, TaskScheduler};
@@ -450,7 +452,9 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
             executor.clone(),
             worker_id.clone(),
         ));
-        let wk_svc = WorkerNodeServiceServer::new(GrpcWorkerNodeService::new(wk_state));
+        let wk_svc = WorkerNodeServiceServer::new(GrpcWorkerNodeService::new(wk_state))
+            .max_decoding_message_size(WORKER_RPC_MESSAGE_MAX_BYTES)
+            .max_encoding_message_size(WORKER_RPC_MESSAGE_MAX_BYTES);
         let nodepool_addr = nodepool_client_addr(&config, run_nodepool)?;
         let worker_advertise_addr = match nodepool_client::advertise_addr(
             &config.server.worker_grpc_addr,

@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 tokio.workspace = true
 tonic.workspace = true
+prost.workspace = true
 axum.workspace = true
 tower.workspace = true
 tower-http.workspace = true
@@ -25,6 +26,7 @@ hivemind-proto = { path = "../proto" }
 hivemind-models = { path = "../models" }
 hivemind-config = { path = "../config" }
 hivemind-client-runtime = { path = "../client-runtime" }
+hivemind-managed-prover-protocol = { path = "../managed-prover-protocol" }
 hivemind-auth = { path = "../auth" }
 managed-function-runtime = { path = "../../../executor-rs/crates/managed-function-runtime" }
 tempfile.workspace = true
