@@ -569,6 +569,9 @@ async fn authorize_worker_identity(
 }
 
 fn is_safe_task_id(task_id: &str) -> bool {
+    if task_id.len() > hivemind_proto::TASK_ID_MAX_BYTES {
+        return false;
+    }
     if task_id.len() == 1 && task_id.as_bytes()[0] == b'.' {
         return false;
     }
@@ -577,6 +580,47 @@ fn is_safe_task_id(task_id: &str) -> bool {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
         && !task_id.contains("..")
+}
+
+fn validate_worker_report_task_id(task_id: &str) -> Result<(), &'static str> {
+    if is_safe_task_id(task_id) {
+        Ok(())
+    } else {
+        Err("Task id is required")
+    }
+}
+
+fn validate_runtime_contract(
+    runtime: &str,
+    task_source: &str,
+    input: &str,
+    budget: i64,
+) -> Result<(), &'static str> {
+    match runtime.trim() {
+        "" => Ok(()),
+        "managed-function-v0" => {
+            if task_source.trim().is_empty() {
+                return Err("managed-function-v0 requires non-empty task_source");
+            }
+            if task_source.len() > hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES {
+                return Err("managed-function-v0 task_source exceeds the byte limit");
+            }
+            if input.trim().is_empty() {
+                return Err("managed-function-v0 requires non-empty JSON input");
+            }
+            if input.len() > hivemind_proto::MANAGED_JSON_INPUT_MAX_BYTES {
+                return Err("managed-function-v0 JSON input exceeds the byte limit");
+            }
+            if budget <= 0 {
+                return Err("managed-function-v0 budget must be positive");
+            }
+            if budget > hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS {
+                return Err("managed-function-v0 budget exceeds the usage-unit limit");
+            }
+            Ok(())
+        }
+        _ => Err("unsupported task runtime"),
+    }
 }
 
 fn is_safe_worker_id(worker_id: &str) -> bool {
@@ -902,10 +946,10 @@ impl NodeManagerService for GrpcNodeManagerService {
         request: Request<TaskOutputUploadRequest>,
     ) -> Result<Response<TaskOutputUploadResponse>, Status> {
         let req = request.into_inner();
-        if req.task_id.trim().is_empty() {
+        if let Err(status_message) = validate_worker_report_task_id(&req.task_id) {
             return Ok(Response::new(TaskOutputUploadResponse {
                 success: false,
-                status_message: "Task id is required".into(),
+                status_message: status_message.into(),
             }));
         }
         if req.output.len() > MAX_TASK_OUTPUT_BYTES {
@@ -949,10 +993,10 @@ impl NodeManagerService for GrpcNodeManagerService {
         request: Request<TaskResultUploadRequest>,
     ) -> Result<Response<TaskResultUploadResponse>, Status> {
         let req = request.into_inner();
-        if req.task_id.trim().is_empty() {
+        if let Err(status_message) = validate_worker_report_task_id(&req.task_id) {
             return Ok(Response::new(TaskResultUploadResponse {
                 success: false,
-                status_message: "Task id is required".into(),
+                status_message: status_message.into(),
             }));
         }
         if req.result_torrent.trim().is_empty() {
@@ -1016,10 +1060,10 @@ impl NodeManagerService for GrpcNodeManagerService {
         request: Request<TaskUsageRequest>,
     ) -> Result<Response<TaskUsageResponse>, Status> {
         let req = request.into_inner();
-        if req.task_id.trim().is_empty() {
+        if let Err(status_message) = validate_worker_report_task_id(&req.task_id) {
             return Ok(Response::new(TaskUsageResponse {
                 success: false,
-                status_message: "Task id is required".into(),
+                status_message: status_message.into(),
             }));
         }
         let Some(usage) = req.usage else {
@@ -1187,6 +1231,14 @@ impl MasterNodeService for GrpcMasterNodeService {
                 status_message: "task_id is required and must be a safe file name".into(),
             }));
         }
+        if let Err(message) =
+            validate_runtime_contract(&req.runtime, &req.task_source, &req.torrent, req.max_cpt)
+        {
+            return Ok(Response::new(UploadTaskResponse {
+                success: false,
+                status_message: message.into(),
+            }));
+        }
         if self
             .state
             .scheduler
@@ -1343,6 +1395,9 @@ impl MasterNodeService for GrpcMasterNodeService {
         request: Request<GetTaskResultRequest>,
     ) -> Result<Response<GetTaskResultResponse>, Status> {
         let req = request.into_inner();
+        if !is_safe_task_id(&req.task_id) {
+            return Err(Status::invalid_argument("Invalid task_id"));
+        }
         let claims = self
             .state
             .auth
@@ -1377,6 +1432,9 @@ impl MasterNodeService for GrpcMasterNodeService {
         request: Request<StopTaskRequest>,
     ) -> Result<Response<StopTaskResponse>, Status> {
         let req = request.into_inner();
+        if !is_safe_task_id(&req.task_id) {
+            return Err(Status::invalid_argument("Invalid task_id"));
+        }
         let claims = self
             .state
             .auth
@@ -1440,6 +1498,9 @@ impl MasterNodeService for GrpcMasterNodeService {
         request: Request<TasklogRequest>,
     ) -> Result<Response<TasklogResponse>, Status> {
         let req = request.into_inner();
+        if !is_safe_task_id(&req.task_id) {
+            return Err(Status::invalid_argument("Invalid task_id"));
+        }
         let claims = self
             .state
             .auth
@@ -1471,6 +1532,9 @@ impl MasterNodeService for GrpcMasterNodeService {
         request: Request<DownloadTaskArtifactRequest>,
     ) -> Result<Response<DownloadTaskArtifactResponse>, Status> {
         let req = request.into_inner();
+        if !is_safe_task_id(&req.task_id) {
+            return Err(Status::invalid_argument("Invalid task_id"));
+        }
         let claims = self
             .state
             .auth
@@ -2946,6 +3010,232 @@ mod tests {
         }
         let other_token = token_for(&auth, &other);
         Some((service, task_id, other_token, owner))
+    }
+
+    #[test]
+    fn task_id_admission_accepts_255_bytes_and_rejects_256() {
+        assert!(is_safe_task_id(
+            &"a".repeat(hivemind_proto::TASK_ID_MAX_BYTES)
+        ));
+        assert!(!is_safe_task_id(
+            &"a".repeat(hivemind_proto::TASK_ID_MAX_BYTES + 1)
+        ));
+    }
+
+    #[test]
+    fn worker_report_task_id_admission_uses_the_shared_cap_and_stable_error() {
+        let exact = "a".repeat(hivemind_proto::TASK_ID_MAX_BYTES);
+        let oversized = "a".repeat(hivemind_proto::TASK_ID_MAX_BYTES + 1);
+
+        assert_eq!(validate_worker_report_task_id(&exact), Ok(()));
+        assert_eq!(
+            validate_worker_report_task_id(&oversized),
+            Err("Task id is required")
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_report_rpcs_reject_oversized_task_id_before_authorization() {
+        let node_service = node_manager_service_without_database();
+        let oversized_task_id = "a".repeat(hivemind_proto::TASK_ID_MAX_BYTES + 1);
+
+        let output = node_service
+            .task_output_upload(Request::new(TaskOutputUploadRequest {
+                task_id: oversized_task_id.clone(),
+                worker_id: String::new(),
+                output: "stdout".into(),
+                token: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let result = node_service
+            .task_result_upload(Request::new(TaskResultUploadRequest {
+                task_id: oversized_task_id.clone(),
+                worker_id: String::new(),
+                result_torrent: "btih:result".into(),
+                token: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let usage = node_service
+            .task_usage(Request::new(TaskUsageRequest {
+                task_id: oversized_task_id,
+                worker_id: String::new(),
+                usage: Some(hivemind_proto::ResourceUsage {
+                    cpu_percent: 1.0,
+                    memory_percent: 1.0,
+                    gpu_percent: 0.0,
+                    vram_percent: 0.0,
+                    storage_percent: 0.0,
+                }),
+                token: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!output.success);
+        assert_eq!(output.status_message, "Task id is required");
+        assert!(!result.success);
+        assert_eq!(result.status_message, "Task id is required");
+        assert!(!usage.success);
+        assert_eq!(usage.status_message, "Task id is required");
+    }
+
+    #[tokio::test]
+    async fn master_task_id_rpcs_reject_oversized_ids_before_state_access() {
+        let service = GrpcMasterNodeService::new(nodepool_state_without_database());
+        let oversized_task_id = "a".repeat(hivemind_proto::TASK_ID_MAX_BYTES + 1);
+
+        let result_error = service
+            .get_task_result(Request::new(GetTaskResultRequest {
+                token: String::new(),
+                task_id: oversized_task_id.clone(),
+            }))
+            .await
+            .expect_err("oversized result task ID must fail admission");
+        let stop_error = service
+            .stop_task(Request::new(StopTaskRequest {
+                token: String::new(),
+                task_id: oversized_task_id.clone(),
+            }))
+            .await
+            .expect_err("oversized stop task ID must fail admission");
+        let log_error = service
+            .get_tasklog(Request::new(TasklogRequest {
+                token: String::new(),
+                task_id: oversized_task_id.clone(),
+            }))
+            .await
+            .expect_err("oversized log task ID must fail admission");
+        let artifact_error = service
+            .download_task_artifact(Request::new(DownloadTaskArtifactRequest {
+                token: String::new(),
+                task_id: oversized_task_id,
+                artifact_key: String::new(),
+            }))
+            .await
+            .expect_err("oversized artifact task ID must fail admission");
+
+        for error in [result_error, stop_error, log_error, artifact_error] {
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+            assert_eq!(error.message(), "Invalid task_id");
+        }
+    }
+
+    fn node_manager_service_without_database() -> GrpcNodeManagerService {
+        GrpcNodeManagerService::new(nodepool_state_without_database())
+    }
+
+    fn nodepool_state_without_database() -> Arc<NodepoolState> {
+        let config = HivemindConfig::for_test();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@127.0.0.1/hivemind_test")
+            .unwrap();
+        let db = hivemind_database::DatabaseManager { pool };
+        let auth = AuthManager::new(&db, "worker-report-task-id-test", 24);
+        let scheduler = TaskScheduler::new(db.clone(), auth.clone());
+        let node_manager = Arc::new(NodeManager::new(&config, db));
+        Arc::new(NodepoolState {
+            auth,
+            worker_execution_private_key_pem: config.auth.worker_execution_private_key_pem.clone(),
+            node_manager,
+            scheduler,
+            artifact_root: artifact_root_for_config(&config),
+        })
+    }
+
+    #[test]
+    fn managed_upload_contract_enforces_source_input_and_budget_caps() {
+        let exact_source = "s".repeat(hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES);
+        let oversized_source = "s".repeat(hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES + 1);
+        let exact_input = "i".repeat(hivemind_proto::MANAGED_JSON_INPUT_MAX_BYTES);
+        let oversized_input = "i".repeat(hivemind_proto::MANAGED_JSON_INPUT_MAX_BYTES + 1);
+
+        assert_eq!(
+            validate_runtime_contract(
+                "managed-function-v0",
+                &exact_source,
+                &exact_input,
+                hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_runtime_contract("managed-function-v0", &oversized_source, "{}", 1,),
+            Err("managed-function-v0 task_source exceeds the byte limit")
+        );
+        assert_eq!(
+            validate_runtime_contract("managed-function-v0", "return 1;", &oversized_input, 1,),
+            Err("managed-function-v0 JSON input exceeds the byte limit")
+        );
+        assert_eq!(
+            validate_runtime_contract(
+                "managed-function-v0",
+                "return 1;",
+                "{}",
+                hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS + 1,
+            ),
+            Err("managed-function-v0 budget exceeds the usage-unit limit")
+        );
+    }
+
+    #[test]
+    fn managed_upload_contract_rejects_blank_fields_and_nonpositive_budget() {
+        assert_eq!(
+            validate_runtime_contract("managed-function-v0", "", "{}", 1),
+            Err("managed-function-v0 requires non-empty task_source")
+        );
+        assert_eq!(
+            validate_runtime_contract("managed-function-v0", "return 1;", "", 1),
+            Err("managed-function-v0 requires non-empty JSON input")
+        );
+        assert_eq!(
+            validate_runtime_contract("managed-function-v0", "return 1;", "{}", 0),
+            Err("managed-function-v0 budget must be positive")
+        );
+        assert_eq!(
+            validate_runtime_contract("managed-function-v0", "return 1;", "{}", -1),
+            Err("managed-function-v0 budget must be positive")
+        );
+    }
+
+    #[test]
+    fn upload_runtime_contract_fails_closed_without_breaking_non_managed_tasks() {
+        assert_eq!(
+            validate_runtime_contract("native-v1", "", "", 0),
+            Err("unsupported task runtime")
+        );
+        assert_eq!(validate_runtime_contract("", "", "btih:input", 0), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn upload_task_rejects_unsupported_runtime_from_direct_grpc_caller() {
+        let service = GrpcMasterNodeService::new(nodepool_state_without_database());
+        let owner = "grpc-runtime-bypass-owner";
+        let rejected_task_id = format!("grpc-runtime-bypass-{}", uuid::Uuid::new_v4());
+        let response = service
+            .upload_task(Request::new(UploadTaskRequest {
+                task_id: rejected_task_id.clone(),
+                torrent: "{}".into(),
+                requirements: Some(ProtoResourceSpec::default()),
+                location: String::new(),
+                host_count: 1,
+                token: token_for(&service.state.auth, &owner),
+                max_cpt: 1,
+                runtime: "native-v1".into(),
+                task_source: "return 1;".into(),
+                package_data: Default::default(),
+                package_filename: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!response.success);
+        assert_eq!(response.status_message, "unsupported task runtime");
     }
 
     #[tokio::test]
