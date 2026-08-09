@@ -31,7 +31,7 @@ fn execute_managed_function_task(
         .unwrap_or("null");
     let limits = ExecutionLimits {
         max_usage_units: (task.max_cpt > 0).then_some(task.max_cpt as u64),
-        ..ExecutionLimits::unlimited()
+        ..ExecutionLimits::default()
     };
     let execution =
         match ManagedExecutor.execute_json_input_with_cancel(source, limits, input, cancelled) {
@@ -216,6 +216,39 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("budget_exhausted"));
+    }
+
+    #[tokio::test]
+    async fn managed_function_task_keeps_its_usage_budget_while_enforcing_default_call_depth() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path().join("sandbox").to_str().unwrap());
+        let mut source = String::new();
+        for depth in 0..64 {
+            source.push_str(&format!(
+                "fn step_{depth}() {{ return step_{}(); }}\n",
+                depth + 1
+            ));
+        }
+        source.push_str("fn step_64() { return 0; }\nreturn step_0();");
+
+        let mut task = test_task_with_source("null");
+        task.runtime = Some("managed-function-v0".into());
+        task.max_cpt = 10_000;
+        task.task_source = Some(source);
+
+        let result = run_task(&task, &config).await.unwrap();
+
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("call_depth_exceeded"));
+        assert!(result
+            .managed_receipt_json
+            .as_deref()
+            .unwrap_or_default()
+            .contains("call_depth_exceeded"));
     }
 
     #[tokio::test]
