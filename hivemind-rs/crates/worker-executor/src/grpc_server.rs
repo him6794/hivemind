@@ -5,12 +5,15 @@ use hivemind_proto::{
     StopTaskExecutionRequest, StopTaskExecutionResponse, TaskOutputRequest, TaskOutputResponse,
     TaskOutputUploadRequest, TaskOutputUploadResponse, TaskResultUploadRequest,
     TaskResultUploadResponse, TaskUsageRequest, TaskUsageResponse,
+    LEGACY_MANAGED_RECEIPT_MAX_BYTES, MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES,
+    WORKER_RPC_MESSAGE_MAX_BYTES, WORKER_STATUS_MESSAGE_MAX_BYTES,
 };
+use prost::Message;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tonic::{Request, Response, Status};
 
-use crate::{StopTaskOutcome, WorkerExecutor};
+use crate::{managed_prover::ManagedProverError, StopTaskOutcome, TaskResult, WorkerExecutor};
 use hivemind_config::HivemindConfig;
 use hivemind_models::{Task, TaskStatus};
 
@@ -264,35 +267,19 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         };
         tracing::info!("Worker executing task {}", req.task_id);
         match self.state.executor.execute_task(&task).await {
-            Ok(result) => {
-                if result.success {
-                    Ok(Response::new(ExecuteTaskResponse {
-                        success: true,
-                        status_message: result.output.unwrap_or_default(),
-                        managed_executed_ops: result.managed_executed_ops,
-                        managed_output_bytes: result.managed_output_bytes,
-                        managed_receipt_json: result.managed_receipt_json.unwrap_or_default(),
-                        managed_proof: None,
-                    }))
+            Ok(result) => Ok(Response::new(execute_response_from_result(
+                result,
+                task.runtime.as_deref() == Some("managed-function-v0"),
+            ))),
+            Err(error) => {
+                if let Some(status) = worker_execution_error_status(&error) {
+                    Err(status)
                 } else {
-                    Ok(Response::new(ExecuteTaskResponse {
-                        success: false,
-                        status_message: result.error.unwrap_or_default(),
-                        managed_executed_ops: result.managed_executed_ops,
-                        managed_output_bytes: result.managed_output_bytes,
-                        managed_receipt_json: result.managed_receipt_json.unwrap_or_default(),
-                        managed_proof: None,
-                    }))
+                    Ok(Response::new(failed_execute_response(
+                        "Task execution failed",
+                    )))
                 }
             }
-            Err(e) => Ok(Response::new(ExecuteTaskResponse {
-                success: false,
-                status_message: e.to_string(),
-                managed_executed_ops: 0,
-                managed_output_bytes: 0,
-                managed_receipt_json: String::new(),
-                managed_proof: None,
-            })),
         }
     }
 
@@ -469,6 +456,69 @@ impl WorkerNodeService for GrpcWorkerNodeService {
     }
 }
 
+fn execute_response_from_result(
+    result: TaskResult,
+    managed_proof_required: bool,
+) -> ExecuteTaskResponse {
+    let TaskResult {
+        success,
+        output,
+        error,
+        managed_executed_ops,
+        managed_output_bytes,
+        managed_receipt_json,
+        managed_proof,
+        ..
+    } = result;
+    let response = ExecuteTaskResponse {
+        success,
+        status_message: if success {
+            output.unwrap_or_default()
+        } else {
+            error.unwrap_or_else(|| "Task execution failed".into())
+        },
+        managed_executed_ops,
+        managed_output_bytes,
+        managed_receipt_json: managed_receipt_json.unwrap_or_default(),
+        managed_proof,
+    };
+
+    if managed_proof_required && response.success && response.managed_proof.is_none() {
+        return failed_execute_response("Managed proof is required");
+    }
+    if !response_fits_worker_rpc_limits(&response) {
+        return failed_execute_response("Task result exceeds supported response limits");
+    }
+
+    response
+}
+
+fn response_fits_worker_rpc_limits(response: &ExecuteTaskResponse) -> bool {
+    response.status_message.len() <= WORKER_STATUS_MESSAGE_MAX_BYTES
+        && response.managed_receipt_json.len() <= LEGACY_MANAGED_RECEIPT_MAX_BYTES
+        && response
+            .managed_proof
+            .as_ref()
+            .is_none_or(|proof| proof.encoded_len() <= MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES)
+        && response.encoded_len() <= WORKER_RPC_MESSAGE_MAX_BYTES
+}
+
+fn failed_execute_response(message: &str) -> ExecuteTaskResponse {
+    ExecuteTaskResponse {
+        success: false,
+        status_message: message.into(),
+        managed_executed_ops: 0,
+        managed_output_bytes: 0,
+        managed_receipt_json: String::new(),
+        managed_proof: None,
+    }
+}
+
+fn worker_execution_error_status(error: &anyhow::Error) -> Option<Status> {
+    (error.downcast_ref::<ManagedProverError>() == Some(&ManagedProverError::QueueFull))
+        .then(|| Status::resource_exhausted("Managed prover is busy"))
+}
+
 fn resource_usage_is_finite(usage: &hivemind_proto::ResourceUsage) -> bool {
     usage.cpu_percent.is_finite()
         && usage.memory_percent.is_finite()
@@ -518,6 +568,59 @@ mod tests {
             token: String::new(),
             managed_budget_units: budget,
         }
+    }
+
+    #[test]
+    fn managed_success_response_forwards_the_proof_envelope() {
+        let proof = hivemind_proto::ManagedProofEnvelope {
+            proof_scheme: "risc0-zkvm-3.0.6".into(),
+            image_id: vec![1, 2, 3, 4, 5, 6, 7, 8],
+            journal: vec![9, 10],
+            receipt_json: br#"{"receipt":true}"#.to_vec(),
+        };
+
+        let response =
+            execute_response_from_result(successful_task_result(Some(proof.clone())), true);
+
+        assert!(response.success);
+        assert_eq!(response.status_message, "42");
+        assert_eq!(response.managed_proof, Some(proof));
+    }
+
+    #[test]
+    fn managed_success_without_a_proof_fails_closed_before_the_rpc_boundary() {
+        let response = execute_response_from_result(successful_task_result(None), true);
+
+        assert!(!response.success);
+        assert_eq!(response.status_message, "Managed proof is required");
+        assert!(response.managed_proof.is_none());
+        assert_eq!(response.managed_executed_ops, 0);
+        assert_eq!(response.managed_output_bytes, 0);
+    }
+
+    #[test]
+    fn worker_response_over_the_shared_output_cap_fails_closed() {
+        let mut result = successful_task_result(None);
+        result.output = Some("x".repeat(hivemind_proto::WORKER_STATUS_MESSAGE_MAX_BYTES + 1));
+
+        let response = execute_response_from_result(result, false);
+
+        assert!(!response.success);
+        assert_eq!(
+            response.status_message,
+            "Task result exceeds supported response limits"
+        );
+        assert!(response.managed_proof.is_none());
+    }
+
+    #[test]
+    fn full_prover_queue_maps_to_redispatchable_resource_exhaustion() {
+        let error = anyhow::Error::new(ManagedProverError::QueueFull);
+        let status = worker_execution_error_status(&error)
+            .expect("a full local prover queue is an RPC resource exhaustion");
+
+        assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+        assert_eq!(status.message(), "Managed prover is busy");
     }
 
     #[test]
@@ -1230,6 +1333,25 @@ mod tests {
             gpu_percent: 0.0,
             vram_percent: 0.0,
             storage_percent: 1.0,
+        }
+    }
+
+    fn successful_task_result(
+        managed_proof: Option<hivemind_proto::ManagedProofEnvelope>,
+    ) -> TaskResult {
+        TaskResult {
+            task_id: "worker-result".into(),
+            success: true,
+            output: Some("42".into()),
+            error: None,
+            exit_code: 0,
+            cpu_time_ms: 0,
+            wall_time_ms: 0,
+            peak_memory_mb: 0,
+            managed_executed_ops: 17,
+            managed_output_bytes: 2,
+            managed_receipt_json: Some("{}".into()),
+            managed_proof,
         }
     }
 

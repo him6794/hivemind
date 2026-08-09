@@ -8,7 +8,7 @@ use std::sync::{
     Arc,
 };
 use std::time::Instant;
-use tokio::sync::oneshot;
+use tokio::sync::watch;
 
 fn is_managed_function_task(task: &Task) -> bool {
     task.runtime.as_deref() == Some("managed-function-v0")
@@ -62,6 +62,7 @@ fn execute_managed_function_task(
                     managed_executed_ops: 0,
                     managed_output_bytes: 0,
                     managed_receipt_json: Some(receipt.to_string()),
+                    managed_proof: None,
                 });
             }
         };
@@ -96,18 +97,19 @@ fn execute_managed_function_task(
         managed_executed_ops: execution.receipt.usage_units.min(i64::MAX as u64) as i64,
         managed_output_bytes: output_bytes,
         managed_receipt_json: Some(receipt.to_string()),
+        managed_proof: None,
     })
 }
 
 pub async fn run_task(task: &Task, config: &HivemindConfig) -> Result<super::TaskResult> {
-    let (_cancel_tx, cancel_rx) = oneshot::channel();
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
     run_task_with_cancel(task, config, cancel_rx).await
 }
 
 pub async fn run_task_with_cancel(
     task: &Task,
     _config: &HivemindConfig,
-    cancel_rx: oneshot::Receiver<()>,
+    mut cancel_rx: watch::Receiver<bool>,
 ) -> Result<super::TaskResult> {
     let start = Instant::now();
     tracing::info!(
@@ -131,7 +133,7 @@ pub async fn run_task_with_cancel(
         });
         return tokio::select! {
             result = &mut execution => result.map_err(anyhow::Error::from)?,
-            _ = cancel_rx => {
+            _ = wait_for_cancellation(&mut cancel_rx) => {
                 cancelled.store(true, Ordering::Release);
                 execution.await.map_err(anyhow::Error::from)?
             }
@@ -142,6 +144,17 @@ pub async fn run_task_with_cancel(
         "unsupported runtime {:?}: only managed-function-v0 tasks are supported",
         task.runtime.as_deref().unwrap_or("<none>")
     ))
+}
+
+async fn wait_for_cancellation(cancellation: &mut watch::Receiver<bool>) {
+    if *cancellation.borrow() {
+        return;
+    }
+    while cancellation.changed().await.is_ok() {
+        if *cancellation.borrow() {
+            return;
+        }
+    }
 }
 
 #[cfg(test)]
