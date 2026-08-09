@@ -14,9 +14,12 @@ website = ["dep:hivemind-website-api"]
 nodepool = [
     "dep:hivemind-auth",
     "dep:hivemind-database",
+    "dep:hivemind-managed-proof",
     "dep:hivemind-node-manager",
     "dep:hivemind-task-scheduler",
     "dep:hivemind-vpn-service",
+    "dep:prost",
+    "hivemind-managed-proof/risc0-verifier",
 ]
 worker = ["dep:hivemind-worker-executor"]
 cli = ["dep:reqwest"]
@@ -56,6 +59,7 @@ anyhow.workspace = true
 uuid.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+prost = { workspace = true, optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 hivemind-common = { path = "../common" }
 hivemind-proto = { path = "../proto" }
@@ -64,6 +68,7 @@ hivemind-config = { path = "../config" }
 hivemind-client-runtime = { path = "../client-runtime" }
 hivemind-database = { path = "../database", optional = true }
 hivemind-auth = { path = "../auth", optional = true }
+hivemind-managed-proof = { path = "../managed-proof", optional = true }
 hivemind-node-manager = { path = "../node-manager", optional = true }
 hivemind-task-scheduler = { path = "../task-scheduler", optional = true }
 hivemind-master-api = { path = "../master-api", optional = true }

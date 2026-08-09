@@ -1,9 +1,15 @@
+use crate::managed_proof_verifier::{verify_managed_proof, ManagedProofVerifierError};
 use anyhow::Result;
 use hivemind_auth::worker_execution::WorkerExecutionSigner;
 use hivemind_database::DatabaseManager;
+use hivemind_managed_proof::{ClaimError, ExecutionClaim};
 use hivemind_models::{Claims, Task, TaskStatus, WorkerNode};
-use hivemind_proto::{ExecuteTaskRequest, ResourceSpec as ProtoResourceSpec};
+use hivemind_proto::{
+    ExecuteTaskRequest, ExecuteTaskResponse, ManagedProofEnvelope,
+    ResourceSpec as ProtoResourceSpec,
+};
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::{error, info, warn};
@@ -395,17 +401,73 @@ async fn execute_on_worker(
     {
         Ok(response) => {
             let response = response.into_inner();
+            if let Err(reason) = validate_worker_response_sizes(&response) {
+                let reason = reason.to_string();
+                repo.fail_for_worker(&task.task_id, &worker_id, &reason)
+                    .await?;
+                warn!(
+                    "Task {} returned an oversized response from worker {}: {}",
+                    task.task_id, worker_id, reason
+                );
+                return Ok(());
+            }
             if response.success {
-                if current_task.runtime.as_deref() == Some("managed-function-v0")
-                    && !response.managed_receipt_json.trim().is_empty()
-                {
+                let managed_proof = match managed_proof_for_completion(&current_task, &response) {
+                    Ok(proof) => proof,
+                    Err(reason) => {
+                        repo.fail_for_worker(&task.task_id, &worker_id, reason)
+                            .await?;
+                        warn!(
+                            "Task {} failed managed proof gate on worker {}: {}",
+                            task.task_id, worker_id, reason
+                        );
+                        return Ok(());
+                    }
+                };
+                let managed_completion = if let Some(proof) = managed_proof {
+                    match resolve_verified_managed_completion(
+                        &current_task,
+                        &response,
+                        verify_managed_proof(proof),
+                    )
+                    .await
+                    {
+                        Ok(completion) => Some(completion),
+                        Err(error) => {
+                            let disposition = managed_proof_failure_disposition(&error);
+                            let reason = error.to_string();
+                            match disposition {
+                                ManagedProofFailureDisposition::RetryWithoutWorkerPenalty => {
+                                    repo.reset_to_pending_for_worker(&task.task_id, &worker_id)
+                                        .await?;
+                                    warn!(
+                                        "Task {} deferred because the local managed proof verifier is busy: {}",
+                                        task.task_id, reason
+                                    );
+                                }
+                                ManagedProofFailureDisposition::FailWorkerResult => {
+                                    repo.fail_for_worker(&task.task_id, &worker_id, &reason)
+                                        .await?;
+                                    warn!(
+                                        "Task {} failed managed proof verification on worker {}: {}",
+                                        task.task_id, worker_id, reason
+                                    );
+                                }
+                            }
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    None
+                };
+                if let Some(completion) = managed_completion {
                     repo.complete_for_worker_with_managed_receipt(
                         &task.task_id,
                         &worker_id,
                         Some(&response.status_message),
-                        response.managed_executed_ops,
-                        response.managed_output_bytes,
-                        &response.managed_receipt_json,
+                        completion.usage_units,
+                        completion.output_bytes,
+                        &completion.claim_json,
                     )
                     .await?;
                 } else {
@@ -439,6 +501,146 @@ async fn execute_on_worker(
     Ok(())
 }
 
+fn managed_proof_for_completion<'a>(
+    task: &Task,
+    response: &'a ExecuteTaskResponse,
+) -> std::result::Result<Option<&'a ManagedProofEnvelope>, &'static str> {
+    if task.runtime.as_deref() != Some("managed-function-v0") {
+        return Ok(None);
+    }
+
+    response
+        .managed_proof
+        .as_ref()
+        .map(Some)
+        .ok_or("Managed proof is required")
+}
+
+const MAX_WORKER_STATUS_MESSAGE_BYTES: usize = 1024 * 1024;
+const MAX_LEGACY_MANAGED_RECEIPT_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+enum WorkerResponseSizeError {
+    #[error("Worker status message exceeds the application limit")]
+    StatusMessageTooLarge,
+    #[error("Worker legacy managed receipt exceeds the application limit")]
+    LegacyReceiptTooLarge,
+}
+
+fn validate_worker_response_sizes(
+    response: &ExecuteTaskResponse,
+) -> std::result::Result<(), WorkerResponseSizeError> {
+    if response.status_message.len() > MAX_WORKER_STATUS_MESSAGE_BYTES {
+        return Err(WorkerResponseSizeError::StatusMessageTooLarge);
+    }
+    if response.managed_receipt_json.len() > MAX_LEGACY_MANAGED_RECEIPT_BYTES {
+        return Err(WorkerResponseSizeError::LegacyReceiptTooLarge);
+    }
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct VerifiedManagedCompletion {
+    usage_units: i64,
+    output_bytes: i64,
+    claim_json: String,
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+enum ManagedCompletionError {
+    #[error("Managed task source is required")]
+    MissingSource,
+    #[error("Managed task budget must be positive")]
+    InvalidBudget,
+    #[error("Managed proof claim does not match the task")]
+    ClaimBinding(#[source] ClaimError),
+    #[error("Managed proof usage is outside the supported range")]
+    UsageOutOfRange,
+    #[error("Managed proof output length is outside the supported range")]
+    OutputBytesOutOfRange,
+    #[error("Managed proof claim could not be encoded")]
+    ClaimEncoding,
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+enum ManagedProofGateError {
+    #[error("Managed proof verification failed")]
+    Verifier(#[source] ManagedProofVerifierError),
+    #[error("Managed proof claim failed task binding")]
+    Completion(#[source] ManagedCompletionError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManagedProofFailureDisposition {
+    RetryWithoutWorkerPenalty,
+    FailWorkerResult,
+}
+
+fn managed_proof_failure_disposition(
+    error: &ManagedProofGateError,
+) -> ManagedProofFailureDisposition {
+    match error {
+        ManagedProofGateError::Verifier(
+            ManagedProofVerifierError::QueueFull
+            | ManagedProofVerifierError::QueueDeadlineExceeded,
+        ) => ManagedProofFailureDisposition::RetryWithoutWorkerPenalty,
+        ManagedProofGateError::Verifier(_) | ManagedProofGateError::Completion(_) => {
+            ManagedProofFailureDisposition::FailWorkerResult
+        }
+    }
+}
+
+async fn resolve_verified_managed_completion(
+    task: &Task,
+    response: &ExecuteTaskResponse,
+    verification: impl Future<Output = std::result::Result<ExecutionClaim, ManagedProofVerifierError>>,
+) -> std::result::Result<VerifiedManagedCompletion, ManagedProofGateError> {
+    let claim = verification
+        .await
+        .map_err(ManagedProofGateError::Verifier)?;
+    verified_managed_completion(task, response, &claim).map_err(ManagedProofGateError::Completion)
+}
+
+fn verified_managed_completion(
+    task: &Task,
+    response: &ExecuteTaskResponse,
+    claim: &ExecutionClaim,
+) -> std::result::Result<VerifiedManagedCompletion, ManagedCompletionError> {
+    let source = task
+        .task_source
+        .as_deref()
+        .filter(|source| !source.trim().is_empty())
+        .ok_or(ManagedCompletionError::MissingSource)?;
+    let input = task
+        .torrent_source
+        .as_deref()
+        .filter(|input| !input.trim().is_empty())
+        .unwrap_or("null");
+    let max_usage_units = u64::try_from(task.max_cpt)
+        .ok()
+        .filter(|budget| *budget > 0)
+        .ok_or(ManagedCompletionError::InvalidBudget)?;
+
+    claim
+        .validate_bindings(
+            &task.task_id,
+            source.as_bytes(),
+            input.as_bytes(),
+            response.status_message.as_bytes(),
+            max_usage_units,
+        )
+        .map_err(ManagedCompletionError::ClaimBinding)?;
+
+    Ok(VerifiedManagedCompletion {
+        usage_units: i64::try_from(claim.usage_units)
+            .map_err(|_| ManagedCompletionError::UsageOutOfRange)?,
+        output_bytes: i64::try_from(claim.output_bytes)
+            .map_err(|_| ManagedCompletionError::OutputBytesOutOfRange)?,
+        claim_json: serde_json::to_string(claim)
+            .map_err(|_| ManagedCompletionError::ClaimEncoding)?,
+    })
+}
+
 fn reserve_worker_for_batch(workers: &mut [WorkerNode], worker_id: &str) {
     if let Some(worker) = workers
         .iter_mut()
@@ -453,6 +655,10 @@ fn reserve_worker_for_batch(workers: &mut [WorkerNode], worker_id: &str) {
 mod tests {
     use super::*;
     use chrono::Utc;
+    use hivemind_managed_proof::{
+        ClaimError, ExecutionClaim, ExecutionMetrics, COST_MODEL_ID, MANAGED_RUNTIME_ID,
+        PROOF_PROTOCOL_VERSION,
+    };
     use hivemind_models::{TaskStatus, WorkerStatus};
     use hivemind_proto::{
         worker_node_service_server::{WorkerNodeService, WorkerNodeServiceServer},
@@ -556,6 +762,376 @@ mod tests {
         assert_eq!(request.task_source, "return get(input, \"value\") + 1;");
         assert_eq!(request.managed_budget_units, 1_000);
         assert_eq!(request.torrent, "{\"value\": 41}");
+    }
+
+    #[test]
+    fn managed_completion_requires_proof_even_with_legacy_receipt_fields() {
+        let mut task = make_task("managed-proof-required", TaskStatus::Running, 0);
+        task.runtime = Some("managed-function-v0".into());
+        let response = ExecuteTaskResponse {
+            success: true,
+            status_message: "7".into(),
+            managed_executed_ops: 2_500,
+            managed_output_bytes: 2_049,
+            managed_receipt_json: "{\"usage_units\":2500}".into(),
+            managed_proof: None,
+        };
+
+        let error = managed_proof_for_completion(&task, &response).unwrap_err();
+
+        assert_eq!(error, "Managed proof is required");
+    }
+
+    #[test]
+    fn worker_response_rejects_oversized_status_message() {
+        let mut response = managed_response("ok");
+        response.status_message = "x".repeat(MAX_WORKER_STATUS_MESSAGE_BYTES + 1);
+
+        assert_eq!(
+            validate_worker_response_sizes(&response).unwrap_err(),
+            WorkerResponseSizeError::StatusMessageTooLarge
+        );
+    }
+
+    #[test]
+    fn worker_response_rejects_oversized_legacy_receipt() {
+        let mut response = managed_response("ok");
+        response.managed_receipt_json = "x".repeat(MAX_LEGACY_MANAGED_RECEIPT_BYTES + 1);
+
+        assert_eq!(
+            validate_worker_response_sizes(&response).unwrap_err(),
+            WorkerResponseSizeError::LegacyReceiptTooLarge
+        );
+    }
+
+    #[test]
+    fn worker_response_accepts_fields_at_application_caps() {
+        let mut response = managed_response("ok");
+        response.status_message = "x".repeat(MAX_WORKER_STATUS_MESSAGE_BYTES);
+        response.managed_receipt_json = "x".repeat(MAX_LEGACY_MANAGED_RECEIPT_BYTES);
+
+        assert_eq!(validate_worker_response_sizes(&response), Ok(()));
+    }
+
+    const MANAGED_SOURCE: &str = "return get(input, \"value\") + 1;";
+    const MANAGED_INPUT: &str = "{\"value\":41}";
+    const MANAGED_OUTPUT: &str = "42";
+    const MANAGED_BUDGET: i64 = 100;
+
+    fn managed_task_for_claim(task_id: &str) -> Task {
+        let mut task = make_task(task_id, TaskStatus::Running, 0);
+        task.runtime = Some(MANAGED_RUNTIME_ID.into());
+        task.task_source = Some(MANAGED_SOURCE.into());
+        task.torrent_source = Some(MANAGED_INPUT.into());
+        task.max_cpt = MANAGED_BUDGET;
+        task
+    }
+
+    fn managed_response(output: &str) -> ExecuteTaskResponse {
+        ExecuteTaskResponse {
+            success: true,
+            status_message: output.into(),
+            managed_executed_ops: i64::MAX,
+            managed_output_bytes: i64::MAX,
+            managed_receipt_json: "{\"worker_selected\":true}".into(),
+            managed_proof: Some(ManagedProofEnvelope::default()),
+        }
+    }
+
+    fn managed_claim(task_id: &str, source: &[u8], input: &[u8], output: &[u8]) -> ExecutionClaim {
+        ExecutionClaim::new(
+            task_id,
+            source,
+            input,
+            output,
+            MANAGED_BUDGET as u64,
+            ExecutionMetrics {
+                usage_units: 17,
+                executed_ops: 11,
+                function_calls: 2,
+                loop_iterations: 3,
+                max_call_depth: 1,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn verified_claim_is_the_only_managed_settlement_source() {
+        let task = managed_task_for_claim("managed-verified-settlement");
+        let response = managed_response(MANAGED_OUTPUT);
+        let claim = managed_claim(
+            &task.task_id,
+            MANAGED_SOURCE.as_bytes(),
+            MANAGED_INPUT.as_bytes(),
+            MANAGED_OUTPUT.as_bytes(),
+        );
+
+        let completion = verified_managed_completion(&task, &response, &claim).unwrap();
+
+        assert_eq!(completion.usage_units, 17);
+        assert_eq!(completion.output_bytes, 2);
+        assert_ne!(completion.usage_units, response.managed_executed_ops);
+        assert_ne!(completion.output_bytes, response.managed_output_bytes);
+        let persisted_claim: ExecutionClaim = serde_json::from_str(&completion.claim_json).unwrap();
+        assert_eq!(persisted_claim, claim);
+        assert_ne!(completion.claim_json, response.managed_receipt_json);
+    }
+
+    #[tokio::test]
+    async fn managed_completion_rejects_a_failed_verifier() {
+        let task = managed_task_for_claim("managed-invalid-proof");
+        let response = managed_response(MANAGED_OUTPUT);
+
+        let error = resolve_verified_managed_completion(
+            &task,
+            &response,
+            std::future::ready(Err(ManagedProofVerifierError::VerifierFailed)),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            ManagedProofGateError::Verifier(ManagedProofVerifierError::VerifierFailed)
+        );
+    }
+
+    #[test]
+    fn verifier_local_queue_pressure_retries_without_blame() {
+        for error in [
+            ManagedProofVerifierError::QueueFull,
+            ManagedProofVerifierError::QueueDeadlineExceeded,
+        ] {
+            assert_eq!(
+                managed_proof_failure_disposition(&ManagedProofGateError::Verifier(error)),
+                ManagedProofFailureDisposition::RetryWithoutWorkerPenalty
+            );
+        }
+        assert_eq!(
+            managed_proof_failure_disposition(&ManagedProofGateError::Verifier(
+                ManagedProofVerifierError::DeadlineExceeded
+            )),
+            ManagedProofFailureDisposition::FailWorkerResult
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_completion_accepts_only_the_verifier_returned_claim() {
+        let task = managed_task_for_claim("managed-valid-proof");
+        let response = managed_response(MANAGED_OUTPUT);
+        let claim = managed_claim(
+            &task.task_id,
+            MANAGED_SOURCE.as_bytes(),
+            MANAGED_INPUT.as_bytes(),
+            MANAGED_OUTPUT.as_bytes(),
+        );
+
+        let completion =
+            resolve_verified_managed_completion(&task, &response, std::future::ready(Ok(claim)))
+                .await
+                .unwrap();
+
+        assert_eq!(completion.usage_units, 17);
+        assert_eq!(completion.output_bytes, 2);
+    }
+
+    #[test]
+    fn verified_claim_rejects_replay_for_another_task() {
+        let task = managed_task_for_claim("managed-replay-target");
+        let response = managed_response(MANAGED_OUTPUT);
+        let claim = managed_claim(
+            "managed-original-task",
+            MANAGED_SOURCE.as_bytes(),
+            MANAGED_INPUT.as_bytes(),
+            MANAGED_OUTPUT.as_bytes(),
+        );
+
+        assert_eq!(
+            verified_managed_completion(&task, &response, &claim).unwrap_err(),
+            ManagedCompletionError::ClaimBinding(ClaimError::TaskIdMismatch)
+        );
+    }
+
+    #[test]
+    fn verified_claim_rejects_source_mismatch() {
+        let task = managed_task_for_claim("managed-source-binding");
+        let response = managed_response(MANAGED_OUTPUT);
+        let claim = managed_claim(
+            &task.task_id,
+            b"return 0;",
+            MANAGED_INPUT.as_bytes(),
+            MANAGED_OUTPUT.as_bytes(),
+        );
+
+        assert_eq!(
+            verified_managed_completion(&task, &response, &claim).unwrap_err(),
+            ManagedCompletionError::ClaimBinding(ClaimError::SourceMismatch)
+        );
+    }
+
+    #[test]
+    fn verified_claim_rejects_input_mismatch() {
+        let task = managed_task_for_claim("managed-input-binding");
+        let response = managed_response(MANAGED_OUTPUT);
+        let claim = managed_claim(
+            &task.task_id,
+            MANAGED_SOURCE.as_bytes(),
+            b"{\"value\":40}",
+            MANAGED_OUTPUT.as_bytes(),
+        );
+
+        assert_eq!(
+            verified_managed_completion(&task, &response, &claim).unwrap_err(),
+            ManagedCompletionError::ClaimBinding(ClaimError::InputMismatch)
+        );
+    }
+
+    #[test]
+    fn verified_claim_rejects_output_mismatch() {
+        let task = managed_task_for_claim("managed-output-binding");
+        let response = managed_response(MANAGED_OUTPUT);
+        let claim = managed_claim(
+            &task.task_id,
+            MANAGED_SOURCE.as_bytes(),
+            MANAGED_INPUT.as_bytes(),
+            b"41",
+        );
+
+        assert_eq!(
+            verified_managed_completion(&task, &response, &claim).unwrap_err(),
+            ManagedCompletionError::ClaimBinding(ClaimError::OutputMismatch)
+        );
+    }
+
+    #[test]
+    fn verified_claim_rejects_budget_mismatch() {
+        let mut task = managed_task_for_claim("managed-budget-binding");
+        let response = managed_response(MANAGED_OUTPUT);
+        let claim = managed_claim(
+            &task.task_id,
+            MANAGED_SOURCE.as_bytes(),
+            MANAGED_INPUT.as_bytes(),
+            MANAGED_OUTPUT.as_bytes(),
+        );
+        task.max_cpt += 1;
+
+        assert_eq!(
+            verified_managed_completion(&task, &response, &claim).unwrap_err(),
+            ManagedCompletionError::ClaimBinding(ClaimError::MaxUsageUnitsMismatch {
+                expected: 101,
+                received: 100,
+            })
+        );
+    }
+
+    #[test]
+    fn verified_claim_rejects_protocol_version_mismatch() {
+        let task = managed_task_for_claim("managed-protocol-binding");
+        let response = managed_response(MANAGED_OUTPUT);
+        let mut claim = managed_claim(
+            &task.task_id,
+            MANAGED_SOURCE.as_bytes(),
+            MANAGED_INPUT.as_bytes(),
+            MANAGED_OUTPUT.as_bytes(),
+        );
+        claim.protocol_version = PROOF_PROTOCOL_VERSION + 1;
+
+        assert_eq!(
+            verified_managed_completion(&task, &response, &claim).unwrap_err(),
+            ManagedCompletionError::ClaimBinding(ClaimError::ProtocolVersionMismatch {
+                expected: PROOF_PROTOCOL_VERSION,
+                received: PROOF_PROTOCOL_VERSION + 1,
+            })
+        );
+    }
+
+    #[test]
+    fn verified_claim_rejects_runtime_version_mismatch() {
+        let task = managed_task_for_claim("managed-runtime-binding");
+        let response = managed_response(MANAGED_OUTPUT);
+        let mut claim = managed_claim(
+            &task.task_id,
+            MANAGED_SOURCE.as_bytes(),
+            MANAGED_INPUT.as_bytes(),
+            MANAGED_OUTPUT.as_bytes(),
+        );
+        claim.runtime_id = "worker-runtime".into();
+
+        assert_eq!(
+            verified_managed_completion(&task, &response, &claim).unwrap_err(),
+            ManagedCompletionError::ClaimBinding(ClaimError::RuntimeIdMismatch)
+        );
+    }
+
+    #[test]
+    fn verified_claim_rejects_cost_model_version_mismatch() {
+        let task = managed_task_for_claim("managed-cost-model-binding");
+        let response = managed_response(MANAGED_OUTPUT);
+        let mut claim = managed_claim(
+            &task.task_id,
+            MANAGED_SOURCE.as_bytes(),
+            MANAGED_INPUT.as_bytes(),
+            MANAGED_OUTPUT.as_bytes(),
+        );
+        assert_eq!(claim.cost_model_id, COST_MODEL_ID);
+        claim.cost_model_id = "worker-cost-model".into();
+
+        assert_eq!(
+            verified_managed_completion(&task, &response, &claim).unwrap_err(),
+            ManagedCompletionError::ClaimBinding(ClaimError::CostModelIdMismatch)
+        );
+    }
+
+    #[test]
+    fn verified_claim_uses_null_for_missing_managed_input() {
+        let mut task = managed_task_for_claim("managed-null-input");
+        task.torrent_source = None;
+        let response = managed_response(MANAGED_OUTPUT);
+        let claim = managed_claim(
+            &task.task_id,
+            MANAGED_SOURCE.as_bytes(),
+            b"null",
+            MANAGED_OUTPUT.as_bytes(),
+        );
+
+        assert!(verified_managed_completion(&task, &response, &claim).is_ok());
+    }
+
+    #[test]
+    fn verified_claim_rejects_missing_source_contract() {
+        let mut task = managed_task_for_claim("managed-missing-source");
+        task.task_source = None;
+        let response = managed_response(MANAGED_OUTPUT);
+        let claim = managed_claim(
+            &task.task_id,
+            MANAGED_SOURCE.as_bytes(),
+            MANAGED_INPUT.as_bytes(),
+            MANAGED_OUTPUT.as_bytes(),
+        );
+
+        assert_eq!(
+            verified_managed_completion(&task, &response, &claim).unwrap_err(),
+            ManagedCompletionError::MissingSource
+        );
+    }
+
+    #[test]
+    fn verified_claim_rejects_nonpositive_budget_contract() {
+        let mut task = managed_task_for_claim("managed-invalid-budget");
+        task.max_cpt = 0;
+        let response = managed_response(MANAGED_OUTPUT);
+        let claim = managed_claim(
+            &task.task_id,
+            MANAGED_SOURCE.as_bytes(),
+            MANAGED_INPUT.as_bytes(),
+            MANAGED_OUTPUT.as_bytes(),
+        );
+
+        assert_eq!(
+            verified_managed_completion(&task, &response, &claim).unwrap_err(),
+            ManagedCompletionError::InvalidBudget
+        );
     }
 
     fn make_worker(id: &str, cpu: i32, mem: i32, status: WorkerStatus) -> WorkerNode {
@@ -840,7 +1416,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_execute_on_worker_settles_managed_task_from_worker_receipt() {
+    async fn test_execute_on_worker_rejects_managed_task_without_proof() {
         let lock = dispatcher_db_lock();
         let _guard = lock.lock().await;
         let (db, fixture) = match test_db("dispatcher_managed_worker_receipt").await {
@@ -920,14 +1496,16 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(stored.status, TaskStatus::Completed);
-        assert_eq!(stored.billed_amount, 25);
-        assert_eq!(stored.managed_executed_ops, 2_500);
-        assert_eq!(stored.managed_output_bytes, 2_049);
+        assert_eq!(stored.status, TaskStatus::Failed);
         assert_eq!(
-            stored.managed_receipt_json.as_deref(),
-            Some(receipt_json.as_str())
+            stored.status_message.as_deref(),
+            Some("Managed proof is required")
         );
+        assert!(!stored.billing_settled);
+        assert_eq!(stored.billed_amount, 0);
+        assert_eq!(stored.managed_executed_ops, 0);
+        assert_eq!(stored.managed_output_bytes, 0);
+        assert!(stored.managed_receipt_json.is_none());
 
         sqlx::query("DELETE FROM ledger_entries WHERE task_id = $1")
             .bind(&task_id)
