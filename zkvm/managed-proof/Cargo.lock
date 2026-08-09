@@ -1433,10 +1433,20 @@ dependencies = [
  "anyhow",
  "hivemind-managed-proof",
  "hivemind-managed-proof-methods",
+ "hivemind-managed-prover-protocol",
  "managed-function-runtime",
  "risc0-zkvm",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "hivemind-managed-prover-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

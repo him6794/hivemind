@@ -4,9 +4,13 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("sidecar-test-harness"))'] }
+
 [dependencies]
 anyhow = "1"
 hivemind-managed-proof = { path = "../../../hivemind-rs/crates/managed-proof" }
+hivemind-managed-prover-protocol = { path = "../../../hivemind-rs/crates/managed-prover-protocol" }
 hivemind-managed-proof-methods = { path = "../methods" }
 managed-function-runtime = { path = "../../../executor-rs/crates/managed-function-runtime" }
 risc0-zkvm = { version = "=3.0.6", default-features = false, features = ["prove", "disable-dev-mode"] }
