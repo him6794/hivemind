@@ -65,6 +65,28 @@ pub enum ClaimError {
         usage_units: u64,
         max_usage_units: u64,
     },
+    #[error("execution claim protocol version mismatch: expected {expected}, received {received}")]
+    ProtocolVersionMismatch { expected: u16, received: u16 },
+    #[error("execution claim runtime id does not match the trusted runtime")]
+    RuntimeIdMismatch,
+    #[error("execution claim cost model id does not match the trusted cost model")]
+    CostModelIdMismatch,
+    #[error("execution claim task id does not match the expected task")]
+    TaskIdMismatch,
+    #[error("execution claim source digest does not match the expected source")]
+    SourceMismatch,
+    #[error("execution claim input digest does not match the expected input")]
+    InputMismatch,
+    #[error("execution claim output digest does not match the expected output")]
+    OutputMismatch,
+    #[error(
+        "execution claim budget mismatch: expected {expected} usage units, received {received}"
+    )]
+    MaxUsageUnitsMismatch { expected: u64, received: u64 },
+    #[error(
+        "execution claim output length mismatch: expected {expected} bytes, received {received}"
+    )]
+    OutputBytesMismatch { expected: u64, received: u64 },
 }
 
 #[cfg(feature = "risc0-verifier")]
@@ -263,6 +285,61 @@ impl ExecutionClaim {
         })
     }
 
+    pub fn validate_bindings(
+        &self,
+        expected_task_id: &str,
+        expected_source: &[u8],
+        expected_input: &[u8],
+        expected_output: &[u8],
+        expected_max_usage_units: u64,
+    ) -> Result<(), ClaimError> {
+        if self.protocol_version != PROOF_PROTOCOL_VERSION {
+            return Err(ClaimError::ProtocolVersionMismatch {
+                expected: PROOF_PROTOCOL_VERSION,
+                received: self.protocol_version,
+            });
+        }
+        if self.runtime_id != MANAGED_RUNTIME_ID {
+            return Err(ClaimError::RuntimeIdMismatch);
+        }
+        if self.cost_model_id != COST_MODEL_ID {
+            return Err(ClaimError::CostModelIdMismatch);
+        }
+        if self.task_id != expected_task_id {
+            return Err(ClaimError::TaskIdMismatch);
+        }
+        if self.source_sha256 != sha256(expected_source) {
+            return Err(ClaimError::SourceMismatch);
+        }
+        if self.input_sha256 != sha256(expected_input) {
+            return Err(ClaimError::InputMismatch);
+        }
+        if self.output_sha256 != sha256(expected_output) {
+            return Err(ClaimError::OutputMismatch);
+        }
+        if self.max_usage_units != expected_max_usage_units {
+            return Err(ClaimError::MaxUsageUnitsMismatch {
+                expected: expected_max_usage_units,
+                received: self.max_usage_units,
+            });
+        }
+        if self.usage_units > self.max_usage_units {
+            return Err(ClaimError::UsageExceedsBudget {
+                usage_units: self.usage_units,
+                max_usage_units: self.max_usage_units,
+            });
+        }
+        let expected_output_bytes =
+            u64::try_from(expected_output.len()).expect("output length fits in u64");
+        if self.output_bytes != expected_output_bytes {
+            return Err(ClaimError::OutputBytesMismatch {
+                expected: expected_output_bytes,
+                received: self.output_bytes,
+            });
+        }
+        Ok(())
+    }
+
     pub fn to_journal_bytes(&self) -> serde_json::Result<Vec<u8>> {
         serde_json::to_vec(self)
     }
@@ -280,6 +357,12 @@ fn sha256(value: &[u8]) -> [u8; 32] {
 mod tests {
     use super::{ClaimError, ExecutionClaim, ExecutionMetrics, PROOF_PROTOCOL_VERSION};
 
+    const TASK_ID: &str = "task-a";
+    const SOURCE: &[u8] = b"fn main(input) { return len(input); }";
+    const INPUT: &[u8] = br#"{"value":"secret"}"#;
+    const OUTPUT: &[u8] = br#"{"result":6}"#;
+    const MAX_USAGE_UNITS: u64 = 100;
+
     fn metrics() -> ExecutionMetrics {
         ExecutionMetrics {
             usage_units: 17,
@@ -291,15 +374,12 @@ mod tests {
     }
 
     fn claim(task_id: &str) -> ExecutionClaim {
-        ExecutionClaim::new(
-            task_id,
-            b"fn main(input) { return len(input); }",
-            br#"{"value":"secret"}"#,
-            br#"{"result":6}"#,
-            100,
-            metrics(),
-        )
-        .expect("valid execution claim")
+        ExecutionClaim::new(task_id, SOURCE, INPUT, OUTPUT, MAX_USAGE_UNITS, metrics())
+            .expect("valid execution claim")
+    }
+
+    fn validate_expected_bindings(claim: &ExecutionClaim) -> Result<(), ClaimError> {
+        claim.validate_bindings(TASK_ID, SOURCE, INPUT, OUTPUT, MAX_USAGE_UNITS)
     }
 
     #[test]
@@ -349,6 +429,150 @@ mod tests {
             )
             .unwrap()
         );
+    }
+
+    #[test]
+    fn claim_binding_accepts_exact_expected_values() {
+        let claim = claim(TASK_ID);
+
+        assert_eq!(validate_expected_bindings(&claim), Ok(()));
+    }
+
+    #[test]
+    fn claim_binding_rejects_protocol_version_mismatch() {
+        let mut claim = claim(TASK_ID);
+        claim.protocol_version = PROOF_PROTOCOL_VERSION + 1;
+
+        assert_eq!(
+            validate_expected_bindings(&claim),
+            Err(ClaimError::ProtocolVersionMismatch {
+                expected: PROOF_PROTOCOL_VERSION,
+                received: PROOF_PROTOCOL_VERSION + 1,
+            })
+        );
+    }
+
+    #[test]
+    fn claim_binding_rejects_runtime_id_mismatch() {
+        let mut claim = claim(TASK_ID);
+        claim.runtime_id = "worker-selected-runtime".into();
+
+        assert_eq!(
+            validate_expected_bindings(&claim),
+            Err(ClaimError::RuntimeIdMismatch)
+        );
+    }
+
+    #[test]
+    fn claim_binding_rejects_cost_model_id_mismatch() {
+        let mut claim = claim(TASK_ID);
+        claim.cost_model_id = "worker-selected-cost-model".into();
+
+        assert_eq!(
+            validate_expected_bindings(&claim),
+            Err(ClaimError::CostModelIdMismatch)
+        );
+    }
+
+    #[test]
+    fn claim_binding_rejects_task_id_mismatch() {
+        let claim = claim(TASK_ID);
+
+        assert_eq!(
+            claim.validate_bindings("task-b", SOURCE, INPUT, OUTPUT, MAX_USAGE_UNITS,),
+            Err(ClaimError::TaskIdMismatch)
+        );
+    }
+
+    #[test]
+    fn claim_binding_rejects_source_mismatch() {
+        let claim = claim(TASK_ID);
+
+        assert_eq!(
+            claim.validate_bindings(
+                TASK_ID,
+                b"fn main(input) { return 0; }",
+                INPUT,
+                OUTPUT,
+                MAX_USAGE_UNITS,
+            ),
+            Err(ClaimError::SourceMismatch)
+        );
+    }
+
+    #[test]
+    fn claim_binding_rejects_input_mismatch() {
+        let claim = claim(TASK_ID);
+
+        assert_eq!(
+            claim.validate_bindings(
+                TASK_ID,
+                SOURCE,
+                br#"{"value":"changed"}"#,
+                OUTPUT,
+                MAX_USAGE_UNITS,
+            ),
+            Err(ClaimError::InputMismatch)
+        );
+    }
+
+    #[test]
+    fn claim_binding_rejects_output_hash_mismatch() {
+        let claim = claim(TASK_ID);
+
+        assert_eq!(
+            claim.validate_bindings(TASK_ID, SOURCE, INPUT, br#"{"result":7}"#, MAX_USAGE_UNITS,),
+            Err(ClaimError::OutputMismatch)
+        );
+    }
+
+    #[test]
+    fn claim_binding_rejects_max_usage_units_mismatch() {
+        let claim = claim(TASK_ID);
+
+        assert_eq!(
+            claim.validate_bindings(TASK_ID, SOURCE, INPUT, OUTPUT, MAX_USAGE_UNITS + 1),
+            Err(ClaimError::MaxUsageUnitsMismatch {
+                expected: MAX_USAGE_UNITS + 1,
+                received: MAX_USAGE_UNITS,
+            })
+        );
+    }
+
+    #[test]
+    fn claim_binding_rejects_usage_above_budget() {
+        let mut claim = claim(TASK_ID);
+        claim.usage_units = MAX_USAGE_UNITS + 1;
+
+        assert_eq!(
+            validate_expected_bindings(&claim),
+            Err(ClaimError::UsageExceedsBudget {
+                usage_units: MAX_USAGE_UNITS + 1,
+                max_usage_units: MAX_USAGE_UNITS,
+            })
+        );
+    }
+
+    #[test]
+    fn claim_binding_rejects_output_bytes_mismatch() {
+        let mut claim = claim(TASK_ID);
+        claim.output_bytes -= 1;
+
+        assert_eq!(
+            validate_expected_bindings(&claim),
+            Err(ClaimError::OutputBytesMismatch {
+                expected: 12,
+                received: 11,
+            })
+        );
+    }
+
+    #[test]
+    fn claim_binding_accepts_usage_equal_to_budget() {
+        let mut claim = claim(TASK_ID);
+        claim.usage_units = MAX_USAGE_UNITS;
+
+        assert_eq!(validate_expected_bindings(&claim), Ok(()));
     }
 
     #[test]
