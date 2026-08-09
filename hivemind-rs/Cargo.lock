@@ -1539,6 +1539,7 @@ dependencies = [
  "hivemind-common",
  "hivemind-config",
  "hivemind-database",
+ "hivemind-managed-proof",
  "hivemind-master-api",
  "hivemind-models",
  "hivemind-node-manager",
@@ -1547,6 +1548,7 @@ dependencies = [
  "hivemind-vpn-service",
  "hivemind-website-api",
  "hivemind-worker-executor",
+ "prost",
  "reqwest",
  "serde",
  "serde_json",
@@ -1721,9 +1723,12 @@ dependencies = [
  "hivemind-auth",
  "hivemind-config",
  "hivemind-database",
+ "hivemind-managed-proof",
  "hivemind-models",
  "hivemind-proto",
  "jsonwebtoken",
+ "libc",
+ "prost",
  "serde",
  "serde_json",
  "sha1 0.10.6",
@@ -1734,6 +1739,7 @@ dependencies = [
  "tonic",
  "tracing",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
