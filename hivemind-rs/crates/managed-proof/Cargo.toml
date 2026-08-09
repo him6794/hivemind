@@ -4,8 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+risc0-verifier = ["dep:hivemind-proto", "dep:risc0-zkvm"]
+
 [dependencies]
 serde.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 serde_json.workspace = true
+hivemind-proto = { path = "../proto", optional = true }
+risc0-zkvm = { version = "=3.0.6", default-features = false, features = ["disable-dev-mode"], optional = true }

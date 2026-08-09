@@ -109,7 +109,9 @@ pub fn verify_proof_envelope(envelope: &WorkerProofEnvelope) -> Result<Execution
 
 #[cfg(test)]
 mod tests {
-    use hivemind_managed_proof::{ExecutionClaim, ExecutionMetrics};
+    use hivemind_managed_proof::{
+        ExecutionClaim, ExecutionMetrics, RISC0_MANAGED_GUEST_ID as NODEPOOL_GUEST_ID,
+    };
     use managed_function_runtime::{render_output, ExecutionLimits, ManagedExecutor};
     use risc0_zkvm::{FakeReceipt, InnerReceipt, Receipt, ReceiptClaim};
 
@@ -128,6 +130,11 @@ return {"total": total};
     const INPUT: &str = r#"{"left":20,"right":22}"#;
     const TASK_ID: &str = "task-zk-golden";
     const MAX_USAGE_UNITS: u64 = 1_000;
+
+    #[test]
+    fn generated_guest_id_matches_nodepool_trust_pin() {
+        assert_eq!(HIVEMIND_MANAGED_PROOF_GUEST_ID, NODEPOOL_GUEST_ID);
+    }
 
     fn native_claim() -> ExecutionClaim {
         let execution = ManagedExecutor

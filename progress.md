@@ -21,6 +21,32 @@
 - blockers: RISC Zero 3.0.6 transitive lockfile 有 2 個 audit advisories，需在發布前隔離或建立可稽核 ignore policy；單次 proving 約 9.5 分鐘，不可直接 enforce
 - remote actions: none（不 push、不建立 PR）
 
+### 2026-08-09 恢復檢查
+
+- 從 `task_plan.md`、`findings.md`、`progress.md` 與 `docs/zk-metering-proof-state.md` 恢復階段 3。
+- `session-catchup.py` 的技能文件仍指向舊 `.claude` 路徑；已確認並改用實際 `.codex` 安裝路徑，恢復成功。
+- WSL 內沒有殘留 Cargo/rustc/generator 程序，也沒有 `/run/desktop/mnt/host/d` 或 `/root/.cargo` 暫時 bind mount；可安全建立本輪精確 mount。
+- 未停止或清理使用者正在測試的 Docker stack。
+- 已確認可重用快取存在於 `D:\hivemind\.cache\zkvm-target`，標準 Rust 1.90 host 工具鏈位於 `.cache/wsl-rust/1.90.0-x86_64-unknown-linux-gnu`，WSL Cargo cache 與 RISC Zero/TMP 亦都在 D:。
+- 現有 guest `.d` 精確記錄 `/run/desktop/mnt/host/d/hivemind/...`，因此本輪會由該絕對路徑執行，並使用 `.cache/zkvm-target`；methods build.rs 已確認 `HIVEMIND_ZKVM_USE_DOCKER=0` 會直接走 native `embed_methods()`。
+- methods-only 第一次 wrapper 在 mount/build 前即因跨 PowerShell/WSL 的 Bash 變數傳遞失真而停止；沒有留下 mount 或 Cargo/rustc 程序，將改用不含 shell 變數的精確絕對路徑命令。
+- 以 D: ignored 腳本消除跨 shell quoting 後，methods-only check 已真正進入 native guest build；因 verifier 變更與 guest 共用 `managed-proof/src/lib.rs`，Cargo 正常重建 guest ELF，依賴/circuits 均命中快取。
+- methods-only native check GREEN：353 秒完成，`cleanup_complete rc=0`；事後確認兩個 bind mount 與 Cargo/rustc/build 程序全部為零。
+- 固定真 receipt fixture generator GREEN：815 秒（host cold build 3分27秒，proof 約 10分）；輸出 664,026-byte envelope，事後 mount/build process 全部為零。
+- fixture claim：usage/executed ops 29、function calls 1、loops 0、max depth 1、output 12 bytes；receipt 是單一 Composite segment、無 assumptions，journal 656 bytes。
+- 正向 verifier 真測試首次跑到 public path 後 RED：`UntrustedImageId`；正在比對重建 guest image ID 與舊 pin，尚未採用 fixture 值作修正。
+- image drift 根因確認後更新可信 pin；真 receipt 正向 verifier GREEN：1 passed，debug verification 約 0.47 秒。最終 verifier-only 變更後仍會重建 guest 並確認 image ID 不再漂移。
+- verifier resource gates 逐項 RED→GREEN：4 KiB journal raw cap、2 MiB receipt raw cap、unsupported scheme 不保存 attacker string、只接受 Composite、恰好 1 segment、拒絕 recursive assumption receipts，且 final claim assumptions 必須明確為 `Value([])`。
+- segment index/hashfn/seal cap、public-path invalid claim prefilter與 thread-local minimal context均完成 RED→GREEN；fixture budget regression鎖住所有實測值。
+- `cargo test -p hivemind-managed-proof --features risc0-verifier`：24 passed，0 failed；真 receipt debug verification約 0.45秒（完整 suite 0.51秒 test runtime）。
+- `cargo fmt --all -- --check`、`git diff --check` 與 verifier clippy `-D warnings` 已通過；feature graph確認未啟用 `prove`、methods或 `risc0-build`。
+- 移除 verifier 不需要的 RISC Zero `std` feature後，24 tests仍通過，主 workspace不再解析有漏洞的 `tracing-subscriber 0.2.25`；另將 `event-listener` 5.4.1更新至修正版5.4.2，`cargo audit` 為0 vulnerabilities（保留3個既有 allowed warnings）。
+- verifier依賴精簡後再次執行 WSL methods rebuild，19秒GREEN；guest ID仍為 `[3606400121, 4250889949, 2277454476, 3430793801, 2111044864, 2713379816, 851522248, 2751351423]`，所有暫時 mount與Cargo/rustc程序均已清理。
+- verifier資源稽核確認近似有效的截短／翻轉／補零 seal約17.6 ms，未發現比合法 proof更昂貴的失敗路徑；2 MiB receipt與131,072-word seal caps彼此相容。
+- Review要求的 crypto-path negative test已補齊：合法大小Composite seal bit flip通過shape/journal gates後回 `InvalidProof`；完整 verifier suite為25 passed。
+- 新增tracked host regression `tests::generated_guest_id_matches_nodepool_trust_pin`；先取得常數被feature gate隱藏的預期RED，再將純trust pin移出feature gate，current-source WSL rebuild後1 passed。ELF/input SHA-256與cleanup證據已寫入 `docs/zk-managed-proof-build-attestation.md`。
+- verifier post-change re-review：CLEAR／APPROVE，原 guest pin與crypto-gate blockers均解除，0 remaining blockers。
+
 ### 本輪測試結果
 
 | 測試 | 結果 |
@@ -58,6 +84,9 @@
 | proof-envelope quality gates | fmt、`git diff --check`、clippy workspace/all-target/all-feature `-D warnings` passed；audit 維持既知 2 vulnerabilities、4 allowed warnings |
 | protobuf transport RED | 如預期因 `ManagedProofEnvelope` 與 `ExecuteTaskResponse.managed_proof` 不存在而 E0432/E0560/E0609 |
 | protobuf transport GREEN | proto round-trip 1 passed；proto/Worker/scheduler affected crates `cargo check` passed，既有路徑明確送出 `managed_proof: None` |
+| Nodepool verifier RED→GREEN | 7 個負向測試逐一先 RED 再 GREEN；錯誤 scheme/image id/receipt/journal、fake proof 與 invalid claim 均 fail closed |
+| verifier real-receipt RED | 正向測試已確認只因固定真 receipt fixture 不存在而失敗；WSL/native Linux 正在產生一次性 fixture，Cargo/target/TMP 全位於 D: |
+| verifier fixture build diagnosis | 首次 generator 在 proving 前因漏設 `HIVEMIND_ZKVM_USE_DOCKER=0` 而落入預設 Docker builder；暫時 mount 已自動清理，methods-only native build 正在驗證既有開關 |
 
 ## 前一輪平台驗證
 

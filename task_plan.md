@@ -31,7 +31,7 @@
 
 - [x] 固定 RISC Zero 3.0.6 stable，正式 verifier 必須啟用 `disable-dev-mode`
 - [x] 將 canonical output renderer 下沉到 managed runtime，供 Worker/guest 共用
-- [x] 固定 builder image digest；產生 guest image id `[506971590, 3534501277, 2979422208, 3812948145, 3156049081, 3116419688, 526806072, 1153593187]`
+- [x] 固定 builder image digest；目前可信 guest image id `[3606400121, 4250889949, 2277454476, 3430793801, 2111044864, 2713379816, 851522248, 2751351423]`
 - [x] 將 deterministic managed runtime 放入 guest 執行路徑
 - [x] guest commit 公開聲明，私有 witness 保留程式輸入／執行軌跡
 - [x] Worker prover 產生包含 proof scheme、固定 image id、journal 與 receipt 的 proof envelope
@@ -88,7 +88,7 @@
 
 | 錯誤 | 嘗試次數 | 解決方案 |
 |---|---:|---|
-| PowerShell glob 直接傳給 `rg` 造成 Windows path error | 1 | 改用 `Get-ChildItem` 展開檔案；不影響程式碼 |
+| PowerShell glob 直接傳給 `rg` 造成 Windows path error | 2 | 改用 `Get-ChildItem` 展開檔案；本輪誤重犯一次後已停止，不影響程式碼 |
 | workflow-orchestrator 引用的 `skills/auto-trigger/SKILL.md` 不存在 | 1 | 記錄為工具環境限制，不阻塞實作 |
 | 首次持久化補丁因 findings 檔頭比對失敗 | 1 | 拆分為小補丁，避免部分更新 |
 | MSVC workspace test 無法連結 MinGW `libtailscale.a` | 1 | 依既有平台契約改用 `x86_64-pc-windows-gnu`，246 tests 通過 |
@@ -130,6 +130,16 @@
 | 真實 proof test 使用 `RISC0_SKIP_BUILD=1` 產生空 ELF，回報 `Malformed ProgramBinary` | 1 | 此旗標只用於 clippy；真實 execution/proving test 必須建置並嵌入固定 guest ELF |
 | 標準 Rust 1.90 toolchain 不含 clippy；Windows clippy 再次被上游 MSVC C++17 問題阻擋 | 1 | 使用 RISC Zero Rust 1.97 隨附 clippy，並以官方 `RECURSION_SRC_PATH` 指向 SHA-256 驗證成功的本地 artifact，避免 WSL S3 400 |
 | prover workspace 直接依賴 `hivemind-proto` 會把 tonic/prost server graph 拉進 prover，且獨立 WSL cache 缺少 `prost-types` | 1 | 撤回未提交耦合；protobuf 契約留在主 workspace，Nodepool verifier adapter 由可信端持有，prover 不依賴 Nodepool 協議 |
+| fixture generator 首次 WSL 執行落入 Docker builder，回報 `Could not find or execute docker` | 1 | 根因是命令漏設 build.rs 既有的 `HIVEMIND_ZKVM_USE_DOCKER=0`；先以 methods-only native build 驗證開關，再重跑 proving，無須修改 production build 邏輯 |
+| planning session-catchup 使用技能文件中的舊 `.claude` 路徑而找不到腳本 | 1 | 已確認腳本實際位於 `.codex/skills/planning-with-files-zh/scripts`；改用實際安裝路徑恢復，不重複舊命令 |
+| fixture artifact 檢查的 JavaScript orchestration 誤用 PowerShell 式 `.Replace` | 1 | 改用 JavaScript `.replace(/\\.d$/, ".bin")`；純診斷命令錯誤，未觸碰專案或建置資源 |
+| methods-only WSL wrapper 的 quoting/變數在 PowerShell→`wsl bash -lc` 引數邊界失真 | 2 | 兩次都在診斷/mount 前失敗；不再 inline 傳 Bash，改以 `apply_patch` 建立 D: ignored 暫時腳本，再用單一無 quoting 的 WSL argv 執行 |
+| integration 搜尋假設存在 `hivemind-rs/crates/db` 目錄，`rg` 回 path not found | 1 | 不重跑錯誤路徑；先以 `rg --files hivemind-rs/crates` 定位實際 task model/repository，再縮小查詢 |
+| future binding 檢查假設 proto 位於 `hivemind-rs/proto/hivemind.proto` | 1 | 不重跑錯誤路徑；用 `rg --files hivemind-rs -g '*.proto'` 取得實際位置後再讀 |
+| RISC Zero claim 結構檢查假設存在 `src/receipt_claim.rs` | 1 | 不重跑錯誤檔名；改在已確認的 crate `src` 根以 symbol 搜尋定位定義 |
+| fixture 分析使用 `System.Text.Json.JsonDocument`，Windows PowerShell 5.1 無該型別 | 1 | 改用內建 `ConvertFrom-Json` 讀結構；receipt 精確 byte 數由 Rust/serde_json 同一 codec 量測，不以 PowerShell 重編碼冒充精確值 |
+| focused test 加 `--exact` 但只給短 test 名，結果 0 tests | 2 | 兩次皆不計為通過；改給完整 module-qualified test path 後重跑 |
+| 真 fixture 正向 verifier 回 `UntrustedImageId` | 1 | 先比較 fixture、最新 methods 產物與 pinned ID，追查 guest image 漂移根因；未直接改常數 |
 
 ## 歷史
 
