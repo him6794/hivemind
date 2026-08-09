@@ -3,6 +3,9 @@ use hivemind_managed_proof::ExecutionClaim;
 use hivemind_managed_proof_methods::{
     HIVEMIND_MANAGED_PROOF_GUEST_ELF, HIVEMIND_MANAGED_PROOF_GUEST_ID,
 };
+use hivemind_managed_prover_protocol::{
+    ManagedProverRequest, ManagedProverResponse, MANAGED_PROVER_PROTOCOL_VERSION,
+};
 use risc0_zkvm::{default_executor, default_prover, ExecutorEnv, Receipt};
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +35,23 @@ impl WorkerProofEnvelope {
 
     pub fn from_json_bytes(bytes: &[u8]) -> Result<Self> {
         serde_json::from_slice(bytes).context("parse RISC Zero proof envelope")
+    }
+}
+
+impl TryFrom<WorkerProofEnvelope> for ManagedProverResponse {
+    type Error = anyhow::Error;
+
+    fn try_from(envelope: WorkerProofEnvelope) -> Result<Self> {
+        let response = Self {
+            protocol_version: MANAGED_PROVER_PROTOCOL_VERSION,
+            proof_scheme: envelope.proof_scheme,
+            image_id: envelope.image_id,
+            journal: envelope.journal,
+            receipt_json: serde_json::to_string(&envelope.receipt)
+                .context("serialize RISC Zero receipt for prover response")?,
+        };
+        response.validate()?;
+        Ok(response)
     }
 }
 
@@ -83,6 +103,27 @@ pub fn prove_guest_envelope(
     )?))
 }
 
+pub fn handle_prover_request(request: ManagedProverRequest) -> Result<ManagedProverResponse> {
+    handle_prover_request_with(request, prove_guest_envelope)
+}
+
+fn handle_prover_request_with<F>(
+    request: ManagedProverRequest,
+    prove: F,
+) -> Result<ManagedProverResponse>
+where
+    F: FnOnce(&str, &str, &str, u64) -> Result<WorkerProofEnvelope>,
+{
+    request.validate()?;
+    let envelope = prove(
+        &request.task_id,
+        &request.source,
+        &request.input,
+        request.max_usage_units,
+    )?;
+    envelope.try_into()
+}
+
 pub fn verify_proof_envelope(envelope: &WorkerProofEnvelope) -> Result<ExecutionClaim> {
     ensure!(
         envelope.proof_scheme == RISC0_PROOF_SCHEME,
@@ -109,8 +150,13 @@ pub fn verify_proof_envelope(envelope: &WorkerProofEnvelope) -> Result<Execution
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use hivemind_managed_proof::{
         ExecutionClaim, ExecutionMetrics, RISC0_MANAGED_GUEST_ID as NODEPOOL_GUEST_ID,
+    };
+    use hivemind_managed_prover_protocol::{
+        ManagedProverRequest, ManagedProverResponse, ProtocolError, MANAGED_PROVER_PROTOCOL_VERSION,
     };
     use managed_function_runtime::{render_output, ExecutionLimits, ManagedExecutor};
     use risc0_zkvm::{FakeReceipt, InnerReceipt, Receipt, ReceiptClaim};
@@ -118,8 +164,8 @@ mod tests {
     use hivemind_managed_proof_methods::HIVEMIND_MANAGED_PROOF_GUEST_ID;
 
     use super::{
-        execute_guest_claim, prove_guest_envelope, verify_proof_envelope, WorkerProofEnvelope,
-        RISC0_PROOF_SCHEME,
+        execute_guest_claim, handle_prover_request_with, prove_guest_envelope,
+        verify_proof_envelope, WorkerProofEnvelope, RISC0_PROOF_SCHEME,
     };
 
     const SOURCE: &str = r#"
@@ -192,6 +238,74 @@ return {"total": total};
         assert_eq!(
             ExecutionClaim::from_journal_bytes(&decoded.journal).unwrap(),
             native_claim()
+        );
+    }
+
+    #[test]
+    fn worker_envelope_converts_to_a_valid_backend_neutral_response() {
+        let envelope = WorkerProofEnvelope::from_receipt(fake_receipt());
+
+        let response =
+            ManagedProverResponse::try_from(envelope.clone()).expect("worker envelope converts");
+
+        assert_eq!(response.protocol_version, MANAGED_PROVER_PROTOCOL_VERSION);
+        assert_eq!(response.proof_scheme, envelope.proof_scheme);
+        assert_eq!(response.image_id, envelope.image_id);
+        assert_eq!(response.journal, envelope.journal);
+        assert_eq!(
+            serde_json::from_str::<Receipt>(&response.receipt_json).unwrap(),
+            envelope.receipt
+        );
+        assert_eq!(response.validate(), Ok(()));
+    }
+
+    #[test]
+    fn request_handler_validates_then_forwards_exact_prover_inputs() {
+        let request = ManagedProverRequest {
+            protocol_version: MANAGED_PROVER_PROTOCOL_VERSION,
+            task_id: TASK_ID.into(),
+            source: SOURCE.into(),
+            input: INPUT.into(),
+            max_usage_units: MAX_USAGE_UNITS,
+        };
+        let called = Cell::new(false);
+
+        let response = handle_prover_request_with(request, |task_id, source, input, budget| {
+            called.set(true);
+            assert_eq!(task_id, TASK_ID);
+            assert_eq!(source, SOURCE);
+            assert_eq!(input, INPUT);
+            assert_eq!(budget, MAX_USAGE_UNITS);
+            Ok(WorkerProofEnvelope::from_receipt(fake_receipt()))
+        })
+        .expect("valid request is handled");
+
+        assert!(called.get());
+        assert_eq!(response.proof_scheme, RISC0_PROOF_SCHEME);
+        assert_eq!(response.validate(), Ok(()));
+    }
+
+    #[test]
+    fn request_handler_fails_closed_before_invoking_the_prover() {
+        let request = ManagedProverRequest {
+            protocol_version: MANAGED_PROVER_PROTOCOL_VERSION,
+            task_id: TASK_ID.into(),
+            source: SOURCE.into(),
+            input: INPUT.into(),
+            max_usage_units: 0,
+        };
+        let called = Cell::new(false);
+
+        let error = handle_prover_request_with(request, |_, _, _, _| {
+            called.set(true);
+            Ok(WorkerProofEnvelope::from_receipt(fake_receipt()))
+        })
+        .unwrap_err();
+
+        assert!(!called.get());
+        assert_eq!(
+            error.downcast_ref::<ProtocolError>(),
+            Some(&ProtocolError::InvalidUsageBudget)
         );
     }
 

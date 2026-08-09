@@ -1,0 +1,16 @@
+[package]
+name = "managed-proof-prover-tdd-red"
+version = "0.0.0"
+edition = "2021"
+
+[features]
+default = ["sidecar-test-harness"]
+sidecar-test-harness = []
+
+[lib]
+path = "../hivemind-managed-proof-prover.rs"
+
+[dependencies]
+hivemind-managed-prover-protocol = { path = "../../../../../../hivemind-rs/crates/managed-prover-protocol" }
+
+[workspace]
