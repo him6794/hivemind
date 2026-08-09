@@ -6,6 +6,9 @@
 /// still echoed into gRPC responses and logs, so we keep the conservative
 /// allowlist (alphanumeric plus `-`, `_`, `.`) and reject path-traversal forms.
 pub fn is_safe_task_id(task_id: &str) -> bool {
+    if task_id.len() > hivemind_proto::TASK_ID_MAX_BYTES {
+        return false;
+    }
     if task_id.len() == 1 && task_id.as_bytes()[0] == b'.' {
         return false;
     }
@@ -34,5 +37,15 @@ mod tests {
         assert!(is_safe_task_id("task-123"));
         assert!(is_safe_task_id("managed_function.v0"));
         assert!(is_safe_task_id("abc123"));
+    }
+
+    #[test]
+    fn task_id_byte_limit_accepts_255_and_rejects_256() {
+        assert!(is_safe_task_id(
+            &"a".repeat(hivemind_proto::TASK_ID_MAX_BYTES)
+        ));
+        assert!(!is_safe_task_id(
+            &"a".repeat(hivemind_proto::TASK_ID_MAX_BYTES + 1)
+        ));
     }
 }

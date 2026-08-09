@@ -1,5 +1,20 @@
 tonic::include_proto!("nodepool");
 
+/// Maximum UTF-8 byte length accepted for any task identifier at an admission boundary.
+pub const TASK_ID_MAX_BYTES: usize = 255;
+
+/// Maximum byte length accepted for `managed-function-v0` source code.
+pub const MANAGED_TASK_SOURCE_MAX_BYTES: usize = 64 * 1024;
+
+/// Maximum byte length accepted for `managed-function-v0` JSON input.
+pub const MANAGED_JSON_INPUT_MAX_BYTES: usize = 1024 * 1024;
+
+/// Maximum signed admission budget accepted for `managed-function-v0` execution.
+pub const MANAGED_BUDGET_MAX_USAGE_UNITS: i64 = 1_000_000;
+
+/// Maximum encoded managed-proof protobuf message accepted across the verifier RPC boundary.
+pub const MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES: usize = 2_166_784;
+
 pub use batch_runtime_service_client::BatchRuntimeServiceClient;
 pub use batch_runtime_service_server::{BatchRuntimeService, BatchRuntimeServiceServer};
 pub use master_node_service_client::MasterNodeServiceClient;
@@ -17,7 +32,20 @@ pub use worker_node_service_server::{WorkerNodeService, WorkerNodeServiceServer}
 mod tests {
     use prost::Message;
 
-    use super::{ExecuteTaskResponse, ManagedProofEnvelope};
+    use super::{
+        ExecuteTaskResponse, ManagedProofEnvelope, MANAGED_BUDGET_MAX_USAGE_UNITS,
+        MANAGED_JSON_INPUT_MAX_BYTES, MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES,
+        MANAGED_TASK_SOURCE_MAX_BYTES, TASK_ID_MAX_BYTES,
+    };
+
+    #[test]
+    fn admission_contract_limits_are_stable() {
+        assert_eq!(TASK_ID_MAX_BYTES, 255);
+        assert_eq!(MANAGED_TASK_SOURCE_MAX_BYTES, 64 * 1024);
+        assert_eq!(MANAGED_JSON_INPUT_MAX_BYTES, 1024 * 1024);
+        assert_eq!(MANAGED_BUDGET_MAX_USAGE_UNITS, 1_000_000);
+        assert_eq!(MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES, 2_166_784);
+    }
 
     #[test]
     fn managed_proof_envelope_round_trips_on_execute_response() {

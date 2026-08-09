@@ -102,6 +102,9 @@ impl GrpcWorkerNodeService {
         worker_id: Option<&str>,
     ) -> Result<(), Box<Status>> {
         let claims = self.validate_worker_execution_token(token)?;
+        if !crate::sandbox::is_safe_task_id(task_id) {
+            return Err(Box::new(Status::invalid_argument("unsafe task id")));
+        }
         let reports = self
             .state
             .reports
@@ -156,6 +159,34 @@ fn task_assignment_denied() -> Box<Status> {
     ))
 }
 
+fn validate_execute_task_contract(request: &ExecuteTaskRequest) -> Result<(), &'static str> {
+    match request.runtime.trim() {
+        "" => Ok(()),
+        "managed-function-v0" => {
+            if request.task_source.trim().is_empty() {
+                return Err("managed-function-v0 requires non-empty task_source");
+            }
+            if request.task_source.len() > hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES {
+                return Err("managed-function-v0 task_source exceeds the byte limit");
+            }
+            if request.torrent.trim().is_empty() {
+                return Err("managed-function-v0 requires non-empty JSON input");
+            }
+            if request.torrent.len() > hivemind_proto::MANAGED_JSON_INPUT_MAX_BYTES {
+                return Err("managed-function-v0 JSON input exceeds the byte limit");
+            }
+            if request.managed_budget_units <= 0 {
+                return Err("managed-function-v0 budget must be positive");
+            }
+            if request.managed_budget_units > hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS {
+                return Err("managed-function-v0 budget exceeds the usage-unit limit");
+            }
+            Ok(())
+        }
+        _ => Err("unsupported task runtime"),
+    }
+}
+
 #[tonic::async_trait]
 impl WorkerNodeService for GrpcWorkerNodeService {
     async fn execute_task(
@@ -174,6 +205,7 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         {
             return Err(*task_assignment_denied());
         }
+        validate_execute_task_contract(&req).map_err(Status::invalid_argument)?;
         self.record_task_assignment(&req.task_id, &claims.sub)
             .map_err(|status| *status)?;
         let limits = req.resource_limits.unwrap_or_default();
@@ -471,6 +503,123 @@ mod tests {
         test_key_pair().0.as_str()
     }
 
+    fn execute_request(
+        runtime: &str,
+        source: String,
+        input: String,
+        budget: i64,
+    ) -> ExecuteTaskRequest {
+        ExecuteTaskRequest {
+            task_id: "managed-contract-test".into(),
+            torrent: input,
+            resource_limits: None,
+            runtime: runtime.into(),
+            task_source: source,
+            token: String::new(),
+            managed_budget_units: budget,
+        }
+    }
+
+    #[test]
+    fn managed_execute_contract_enforces_source_input_and_budget_caps() {
+        let exact = execute_request(
+            "managed-function-v0",
+            "s".repeat(hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES),
+            "i".repeat(hivemind_proto::MANAGED_JSON_INPUT_MAX_BYTES),
+            hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS,
+        );
+        let oversized_source = execute_request(
+            "managed-function-v0",
+            "s".repeat(hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES + 1),
+            "{}".into(),
+            1,
+        );
+        let oversized_input = execute_request(
+            "managed-function-v0",
+            "return 1;".into(),
+            "i".repeat(hivemind_proto::MANAGED_JSON_INPUT_MAX_BYTES + 1),
+            1,
+        );
+        let oversized_budget = execute_request(
+            "managed-function-v0",
+            "return 1;".into(),
+            "{}".into(),
+            hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS + 1,
+        );
+
+        assert_eq!(validate_execute_task_contract(&exact), Ok(()));
+        assert_eq!(
+            validate_execute_task_contract(&oversized_source),
+            Err("managed-function-v0 task_source exceeds the byte limit")
+        );
+        assert_eq!(
+            validate_execute_task_contract(&oversized_input),
+            Err("managed-function-v0 JSON input exceeds the byte limit")
+        );
+        assert_eq!(
+            validate_execute_task_contract(&oversized_budget),
+            Err("managed-function-v0 budget exceeds the usage-unit limit")
+        );
+    }
+
+    #[test]
+    fn managed_execute_contract_rejects_blank_fields_and_nonpositive_budget() {
+        let blank_source = execute_request("managed-function-v0", "".into(), "{}".into(), 1);
+        let blank_input = execute_request("managed-function-v0", "return 1;".into(), "".into(), 1);
+        let zero_budget =
+            execute_request("managed-function-v0", "return 1;".into(), "{}".into(), 0);
+        let negative_budget =
+            execute_request("managed-function-v0", "return 1;".into(), "{}".into(), -1);
+
+        assert_eq!(
+            validate_execute_task_contract(&blank_source),
+            Err("managed-function-v0 requires non-empty task_source")
+        );
+        assert_eq!(
+            validate_execute_task_contract(&blank_input),
+            Err("managed-function-v0 requires non-empty JSON input")
+        );
+        assert_eq!(
+            validate_execute_task_contract(&zero_budget),
+            Err("managed-function-v0 budget must be positive")
+        );
+        assert_eq!(
+            validate_execute_task_contract(&negative_budget),
+            Err("managed-function-v0 budget must be positive")
+        );
+    }
+
+    #[test]
+    fn execute_runtime_contract_fails_closed_without_breaking_non_managed_tasks() {
+        let unsupported = execute_request("native-v1", String::new(), String::new(), 0);
+        let non_managed = execute_request("", String::new(), String::new(), 0);
+
+        assert_eq!(
+            validate_execute_task_contract(&unsupported),
+            Err("unsupported task runtime")
+        );
+        assert_eq!(validate_execute_task_contract(&non_managed), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn execute_task_rejects_runtime_bypass_before_recording_assignment() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path());
+        let task_id = "worker-runtime-bypass";
+        let mut request = execute_request("native-v1", "return 1;".into(), "{}".into(), 1);
+        request.task_id = task_id.into();
+        request.token = bound_token(test_private_key_pem(), ASSIGNED_OWNER, task_id);
+
+        let error = service
+            .execute_task(Request::new(request))
+            .await
+            .expect_err("unsupported runtime must fail admission");
+
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert_eq!(error.message(), "unsupported task runtime");
+        assert!(service.report_for_task(task_id).unwrap().is_none());
+    }
+
     #[tokio::test]
     async fn stop_task_execution_reports_not_running_for_unknown_task() {
         let tmp = TempDir::new().unwrap();
@@ -604,6 +753,25 @@ mod tests {
             .await;
 
         assert_eq!(response.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn task_output_rejects_oversized_assigned_task_id() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path());
+        let task_id = "a".repeat(hivemind_proto::TASK_ID_MAX_BYTES + 1);
+        seed_assignment(&service, &task_id, ASSIGNED_OWNER, Some("private output"));
+
+        let error = service
+            .task_output(Request::new(TaskOutputRequest {
+                task_id: task_id.clone(),
+                token: bound_token(test_private_key_pem(), ASSIGNED_OWNER, &task_id),
+            }))
+            .await
+            .expect_err("oversized task IDs must fail assignment-bound RPC admission");
+
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert_eq!(error.message(), "unsafe task id");
     }
 
     #[tokio::test]
@@ -1012,7 +1180,7 @@ mod tests {
                     runtime: "managed-function-v0".into(),
                     task_source: "let total = 0; for item in get(input, \"items\") { let total = total + item; } return total;".into(),
                     token: bound_token(test_private_key_pem(), ASSIGNED_OWNER, &execute_task_id),
-                    managed_budget_units: 10_000_000,
+                    managed_budget_units: hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS,
                 }))
                 .await
                 .unwrap()
