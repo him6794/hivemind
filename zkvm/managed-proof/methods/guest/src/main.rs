@@ -16,7 +16,7 @@ fn main() {
             &source,
             ExecutionLimits {
                 max_usage_units: Some(max_usage_units),
-                ..ExecutionLimits::unlimited()
+                ..ExecutionLimits::default()
             },
             &input,
         )
