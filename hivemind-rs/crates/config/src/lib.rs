@@ -168,6 +168,10 @@ pub struct VpnConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutorConfig {
     pub monty_executable: String,
+    #[serde(default)]
+    pub managed_prover_executable: String,
+    #[serde(default = "default_managed_prover_timeout_secs")]
+    pub managed_prover_timeout_secs: u64,
     pub sandbox_dir: String,
     pub max_cpu_percent: f64,
     pub max_memory_mb: u64,
@@ -246,6 +250,8 @@ impl Default for HivemindConfig {
             },
             executor: ExecutorConfig {
                 monty_executable: "monty.exe".into(),
+                managed_prover_executable: String::new(),
+                managed_prover_timeout_secs: default_managed_prover_timeout_secs(),
                 sandbox_dir: "./sandbox".into(),
                 max_cpu_percent: 80.0,
                 max_memory_mb: 4096,
@@ -375,6 +381,13 @@ impl HivemindConfig {
         }
         if let Ok(exec) = std::env::var("MONTY_EXECUTABLE") {
             self.executor.monty_executable = exec;
+        }
+        if let Ok(exec) = std::env::var("MANAGED_PROVER_EXECUTABLE") {
+            self.executor.managed_prover_executable = exec;
+        }
+        if let Ok(value) = std::env::var("MANAGED_PROVER_TIMEOUT_SECS") {
+            self.executor.managed_prover_timeout_secs =
+                parse_env("MANAGED_PROVER_TIMEOUT_SECS", &value)?;
         }
         if let Ok(dir) = std::env::var("EXECUTOR_SANDBOX_DIR") {
             self.executor.sandbox_dir = dir;
@@ -534,6 +547,10 @@ fn default_sandbox_mode() -> String {
     "dev".into()
 }
 
+fn default_managed_prover_timeout_secs() -> u64 {
+    900
+}
+
 fn default_network_egress_enabled() -> bool {
     false
 }
@@ -641,6 +658,61 @@ mod tests {
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[test]
+    fn executor_defaults_include_managed_prover_settings() {
+        let config = HivemindConfig::default();
+
+        assert_eq!(config.executor.managed_prover_executable, "");
+        assert_eq!(config.executor.managed_prover_timeout_secs, 900);
+    }
+
+    #[test]
+    fn env_loading_overrides_managed_prover_settings() {
+        let _environment_lock = lock_environment();
+        let old_env = [
+            ("HIVEMIND_CONFIG", std::env::var_os("HIVEMIND_CONFIG")),
+            (
+                "MANAGED_PROVER_EXECUTABLE",
+                std::env::var_os("MANAGED_PROVER_EXECUTABLE"),
+            ),
+            (
+                "MANAGED_PROVER_TIMEOUT_SECS",
+                std::env::var_os("MANAGED_PROVER_TIMEOUT_SECS"),
+            ),
+        ];
+        std::env::remove_var("HIVEMIND_CONFIG");
+        std::env::set_var("MANAGED_PROVER_EXECUTABLE", "risc0-prover");
+        std::env::set_var("MANAGED_PROVER_TIMEOUT_SECS", "1200");
+
+        let loaded = HivemindConfig::load_from_env();
+
+        for (name, value) in old_env {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+
+        assert_eq!(loaded.executor.managed_prover_executable, "risc0-prover");
+        assert_eq!(loaded.executor.managed_prover_timeout_secs, 1200);
+    }
+
+    #[test]
+    fn json_config_missing_managed_prover_settings_uses_defaults() {
+        let mut json = serde_json::to_value(HivemindConfig::default()).unwrap();
+        let executor = json
+            .get_mut("executor")
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap();
+        executor.remove("managed_prover_executable");
+        executor.remove("managed_prover_timeout_secs");
+
+        let config: HivemindConfig = serde_json::from_value(json).unwrap();
+
+        assert_eq!(config.executor.managed_prover_executable, "");
+        assert_eq!(config.executor.managed_prover_timeout_secs, 900);
     }
 
     #[test]
