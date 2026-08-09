@@ -5,8 +5,9 @@ use hivemind_database::DatabaseManager;
 use hivemind_managed_proof::{ClaimError, ExecutionClaim};
 use hivemind_models::{Claims, Task, TaskStatus, WorkerNode};
 use hivemind_proto::{
-    ExecuteTaskRequest, ExecuteTaskResponse, ManagedProofEnvelope,
-    ResourceSpec as ProtoResourceSpec,
+    worker_node_service_client::WorkerNodeServiceClient, ExecuteTaskRequest, ExecuteTaskResponse,
+    ManagedProofEnvelope, ResourceSpec as ProtoResourceSpec, LEGACY_MANAGED_RECEIPT_MAX_BYTES,
+    WORKER_RPC_MESSAGE_MAX_BYTES, WORKER_STATUS_MESSAGE_MAX_BYTES,
 };
 use std::collections::HashMap;
 use std::future::Future;
@@ -387,18 +388,45 @@ async fn execute_on_worker(
         return Ok(());
     }
 
-    let mut client = hivemind_proto::worker_node_service_client::WorkerNodeServiceClient::connect(
-        worker_endpoint(&worker_addr)?,
-    )
-    .await?;
+    let endpoint = match worker_transport_endpoint(&worker_addr) {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            reset_after_worker_rpc_failure(
+                repo.as_ref(),
+                &task.task_id,
+                &worker_id,
+                WorkerRpcFailureDisposition::RetryWithoutWorkerPenalty,
+                &error,
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+    let channel = match endpoint.connect().await {
+        Ok(channel) => channel,
+        Err(error) => {
+            reset_after_worker_rpc_failure(
+                repo.as_ref(),
+                &task.task_id,
+                &worker_id,
+                worker_transport_failure_disposition(&error),
+                &error,
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+    let mut client = WorkerNodeServiceClient::new(channel)
+        .max_encoding_message_size(WORKER_RPC_MESSAGE_MAX_BYTES)
+        .max_decoding_message_size(WORKER_RPC_MESSAGE_MAX_BYTES);
     repo.refresh_worker_endpoint(&task.task_id, &worker_id, &worker_addr)
         .await?;
     let token =
         worker_execution_token(worker_execution_private_key_pem, &current_task, &worker_id)?;
-    match client
-        .execute_task(build_execute_task_request_with_token(&current_task, token))
-        .await
-    {
+    let mut request =
+        tonic::Request::new(build_execute_task_request_with_token(&current_task, token));
+    request.set_timeout(WORKER_EXECUTE_RPC_TIMEOUT);
+    match client.execute_task(request).await {
         Ok(response) => {
             let response = response.into_inner();
             if let Err(reason) = validate_worker_response_sizes(&response) {
@@ -490,15 +518,29 @@ async fn execute_on_worker(
             }
         }
         Err(e) => {
-            repo.reset_to_pending_for_worker(&task.task_id, &worker_id)
-                .await?;
-            warn!(
-                "Task {} could not be sent to worker {}: {}",
-                task.task_id, worker_id, e
-            );
+            let disposition = worker_rpc_failure_disposition(&e);
+            reset_after_worker_rpc_failure(
+                repo.as_ref(),
+                &task.task_id,
+                &worker_id,
+                disposition,
+                &e,
+            )
+            .await?;
         }
     }
     Ok(())
+}
+
+const WORKER_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const WORKER_EXECUTE_RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+
+fn worker_transport_endpoint(worker_addr: &str) -> Result<tonic::transport::Endpoint> {
+    Ok(
+        tonic::transport::Endpoint::from_shared(worker_endpoint(worker_addr)?)?
+            .connect_timeout(WORKER_CONNECT_TIMEOUT)
+            .timeout(WORKER_EXECUTE_RPC_TIMEOUT),
+    )
 }
 
 fn managed_proof_for_completion<'a>(
@@ -516,9 +558,6 @@ fn managed_proof_for_completion<'a>(
         .ok_or("Managed proof is required")
 }
 
-const MAX_WORKER_STATUS_MESSAGE_BYTES: usize = 1024 * 1024;
-const MAX_LEGACY_MANAGED_RECEIPT_BYTES: usize = 64 * 1024;
-
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 enum WorkerResponseSizeError {
     #[error("Worker status message exceeds the application limit")]
@@ -530,10 +569,10 @@ enum WorkerResponseSizeError {
 fn validate_worker_response_sizes(
     response: &ExecuteTaskResponse,
 ) -> std::result::Result<(), WorkerResponseSizeError> {
-    if response.status_message.len() > MAX_WORKER_STATUS_MESSAGE_BYTES {
+    if response.status_message.len() > WORKER_STATUS_MESSAGE_MAX_BYTES {
         return Err(WorkerResponseSizeError::StatusMessageTooLarge);
     }
-    if response.managed_receipt_json.len() > MAX_LEGACY_MANAGED_RECEIPT_BYTES {
+    if response.managed_receipt_json.len() > LEGACY_MANAGED_RECEIPT_MAX_BYTES {
         return Err(WorkerResponseSizeError::LegacyReceiptTooLarge);
     }
     Ok(())
@@ -576,13 +615,56 @@ enum ManagedProofFailureDisposition {
     FailWorkerResult,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerRpcFailureDisposition {
+    RetryAfterResourceExhaustion,
+    RetryWithoutWorkerPenalty,
+}
+
+fn worker_rpc_failure_disposition(error: &tonic::Status) -> WorkerRpcFailureDisposition {
+    match error.code() {
+        tonic::Code::ResourceExhausted => WorkerRpcFailureDisposition::RetryAfterResourceExhaustion,
+        _ => WorkerRpcFailureDisposition::RetryWithoutWorkerPenalty,
+    }
+}
+
+fn worker_transport_failure_disposition(
+    _error: &tonic::transport::Error,
+) -> WorkerRpcFailureDisposition {
+    WorkerRpcFailureDisposition::RetryWithoutWorkerPenalty
+}
+
+async fn reset_after_worker_rpc_failure(
+    repo: &TaskRepository,
+    task_id: &str,
+    worker_id: &str,
+    disposition: WorkerRpcFailureDisposition,
+    error: &impl std::fmt::Display,
+) -> Result<()> {
+    repo.reset_to_pending_for_worker(task_id, worker_id).await?;
+    match disposition {
+        WorkerRpcFailureDisposition::RetryAfterResourceExhaustion => {
+            warn!(
+                "Task {} was rejected because worker {} is resource exhausted; resetting for redispatch: {}",
+                task_id, worker_id, error
+            );
+        }
+        WorkerRpcFailureDisposition::RetryWithoutWorkerPenalty => {
+            warn!(
+                "Task {} could not be sent to worker {}; resetting for redispatch without worker penalty: {}",
+                task_id, worker_id, error
+            );
+        }
+    }
+    Ok(())
+}
+
 fn managed_proof_failure_disposition(
     error: &ManagedProofGateError,
 ) -> ManagedProofFailureDisposition {
     match error {
         ManagedProofGateError::Verifier(
-            ManagedProofVerifierError::QueueFull
-            | ManagedProofVerifierError::QueueDeadlineExceeded,
+            ManagedProofVerifierError::QueueFull | ManagedProofVerifierError::QueueDeadlineExceeded,
         ) => ManagedProofFailureDisposition::RetryWithoutWorkerPenalty,
         ManagedProofGateError::Verifier(_) | ManagedProofGateError::Completion(_) => {
             ManagedProofFailureDisposition::FailWorkerResult
@@ -785,7 +867,7 @@ mod tests {
     #[test]
     fn worker_response_rejects_oversized_status_message() {
         let mut response = managed_response("ok");
-        response.status_message = "x".repeat(MAX_WORKER_STATUS_MESSAGE_BYTES + 1);
+        response.status_message = "x".repeat(WORKER_STATUS_MESSAGE_MAX_BYTES + 1);
 
         assert_eq!(
             validate_worker_response_sizes(&response).unwrap_err(),
@@ -796,7 +878,7 @@ mod tests {
     #[test]
     fn worker_response_rejects_oversized_legacy_receipt() {
         let mut response = managed_response("ok");
-        response.managed_receipt_json = "x".repeat(MAX_LEGACY_MANAGED_RECEIPT_BYTES + 1);
+        response.managed_receipt_json = "x".repeat(LEGACY_MANAGED_RECEIPT_MAX_BYTES + 1);
 
         assert_eq!(
             validate_worker_response_sizes(&response).unwrap_err(),
@@ -807,10 +889,59 @@ mod tests {
     #[test]
     fn worker_response_accepts_fields_at_application_caps() {
         let mut response = managed_response("ok");
-        response.status_message = "x".repeat(MAX_WORKER_STATUS_MESSAGE_BYTES);
-        response.managed_receipt_json = "x".repeat(MAX_LEGACY_MANAGED_RECEIPT_BYTES);
+        response.status_message = "x".repeat(WORKER_STATUS_MESSAGE_MAX_BYTES);
+        response.managed_receipt_json = "x".repeat(LEGACY_MANAGED_RECEIPT_MAX_BYTES);
 
         assert_eq!(validate_worker_response_sizes(&response), Ok(()));
+    }
+
+    #[test]
+    fn worker_transport_contract_has_finite_managed_execution_limits() {
+        assert_eq!(WORKER_CONNECT_TIMEOUT, Duration::from_secs(5));
+        assert_eq!(WORKER_EXECUTE_RPC_TIMEOUT, Duration::from_secs(20 * 60));
+        assert_eq!(
+            hivemind_proto::WORKER_RPC_MESSAGE_MAX_BYTES,
+            4 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn resource_exhausted_has_a_dedicated_no_penalty_redispatch_disposition() {
+        assert_eq!(
+            worker_rpc_failure_disposition(&Status::resource_exhausted("worker queue full")),
+            WorkerRpcFailureDisposition::RetryAfterResourceExhaustion
+        );
+    }
+
+    #[test]
+    fn unavailable_is_redispatchable_without_worker_penalty() {
+        assert_eq!(
+            worker_rpc_failure_disposition(&Status::unavailable("worker temporarily offline")),
+            WorkerRpcFailureDisposition::RetryWithoutWorkerPenalty
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_transport_error_is_redispatchable_without_worker_penalty() {
+        let unavailable_addr = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            drop(listener);
+            addr.to_string()
+        };
+        let endpoint =
+            tonic::transport::Endpoint::from_shared(format!("http://{unavailable_addr}"))
+                .unwrap()
+                .connect_timeout(Duration::from_secs(1));
+        let error = tokio::time::timeout(Duration::from_secs(2), endpoint.connect())
+            .await
+            .expect("closed local port should complete its connection attempt")
+            .expect_err("closed local port should return a transport error");
+
+        assert_eq!(
+            worker_transport_failure_disposition(&error),
+            WorkerRpcFailureDisposition::RetryWithoutWorkerPenalty
+        );
     }
 
     const MANAGED_SOURCE: &str = "return get(input, \"value\") + 1;";
@@ -1406,6 +1537,73 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.status, TaskStatus::Cancelled);
+
+        sqlx::query("DELETE FROM tasks WHERE task_id = $1")
+            .bind(&task_id)
+            .execute(&db.pool)
+            .await
+            .ok();
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_execute_on_worker_redispatches_after_connect_failure_without_worker_penalty() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let (db, fixture) = match test_db("dispatcher_connect_failure_redispatch").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let dispatcher = Dispatcher::new(db.clone(), 30, 2);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let task_id = format!("dispatch-connect-failure-{unique}");
+        let worker_id = format!("dispatch-connect-worker-{unique}");
+        let unavailable_addr = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            drop(listener);
+            addr.to_string()
+        };
+
+        let task = make_task(&task_id, TaskStatus::Pending, 0);
+        dispatcher.repo.create(&task).await.unwrap();
+        dispatcher
+            .repo
+            .assign_to_worker(&task_id, &worker_id, &unavailable_addr)
+            .await
+            .unwrap();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            execute_on_worker(
+                dispatcher.repo.clone(),
+                task,
+                worker_id,
+                unavailable_addr,
+                "not-used-after-connect-failure",
+            ),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "connect failure must not leave a task assigned"
+        );
+        assert!(
+            result.unwrap().is_ok(),
+            "connect failure must be redispatched rather than returned"
+        );
+        let stored = dispatcher
+            .repo
+            .find_by_task_id(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, TaskStatus::Pending);
+        assert_eq!(stored.status_message.as_deref(), Some("Redispatched"));
+        assert!(stored.worker_id.is_none());
+        assert!(stored.worker_ip.is_none());
+        assert_eq!(stored.retry_count, 1);
 
         sqlx::query("DELETE FROM tasks WHERE task_id = $1")
             .bind(&task_id)

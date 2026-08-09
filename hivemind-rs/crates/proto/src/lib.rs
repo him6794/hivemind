@@ -12,8 +12,22 @@ pub const MANAGED_JSON_INPUT_MAX_BYTES: usize = 1024 * 1024;
 /// Maximum signed admission budget accepted for `managed-function-v0` execution.
 pub const MANAGED_BUDGET_MAX_USAGE_UNITS: i64 = 1_000_000;
 
+/// Maximum status/output byte length accepted in a Worker execution response.
+pub const WORKER_STATUS_MESSAGE_MAX_BYTES: usize = 1024 * 1024;
+
+/// Maximum legacy managed-receipt byte length accepted in a Worker execution response.
+pub const LEGACY_MANAGED_RECEIPT_MAX_BYTES: usize = 64 * 1024;
+
 /// Maximum encoded managed-proof protobuf message accepted across the verifier RPC boundary.
 pub const MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES: usize = 2_166_784;
+
+/// Maximum gRPC message size for Worker RPCs.
+///
+/// A managed `ExecuteTaskResponse` can include a 2,166,784-byte proof envelope,
+/// a 1 MiB status/output payload, a legacy receipt, and protobuf field overhead.
+/// This explicit 4 MiB cap matches tonic's default whole-message ceiling while
+/// keeping the Worker client symmetric for request encoding and response decoding.
+pub const WORKER_RPC_MESSAGE_MAX_BYTES: usize = 4 * 1024 * 1024;
 
 pub use batch_runtime_service_client::BatchRuntimeServiceClient;
 pub use batch_runtime_service_server::{BatchRuntimeService, BatchRuntimeServiceServer};
@@ -33,9 +47,10 @@ mod tests {
     use prost::Message;
 
     use super::{
-        ExecuteTaskResponse, ManagedProofEnvelope, MANAGED_BUDGET_MAX_USAGE_UNITS,
-        MANAGED_JSON_INPUT_MAX_BYTES, MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES,
-        MANAGED_TASK_SOURCE_MAX_BYTES, TASK_ID_MAX_BYTES,
+        ExecuteTaskResponse, ManagedProofEnvelope, LEGACY_MANAGED_RECEIPT_MAX_BYTES,
+        MANAGED_BUDGET_MAX_USAGE_UNITS, MANAGED_JSON_INPUT_MAX_BYTES,
+        MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES, MANAGED_TASK_SOURCE_MAX_BYTES, TASK_ID_MAX_BYTES,
+        WORKER_RPC_MESSAGE_MAX_BYTES, WORKER_STATUS_MESSAGE_MAX_BYTES,
     };
 
     #[test]
@@ -45,6 +60,33 @@ mod tests {
         assert_eq!(MANAGED_JSON_INPUT_MAX_BYTES, 1024 * 1024);
         assert_eq!(MANAGED_BUDGET_MAX_USAGE_UNITS, 1_000_000);
         assert_eq!(MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES, 2_166_784);
+        assert_eq!(WORKER_STATUS_MESSAGE_MAX_BYTES, 1024 * 1024);
+        assert_eq!(LEGACY_MANAGED_RECEIPT_MAX_BYTES, 64 * 1024);
+    }
+
+    #[test]
+    fn worker_rpc_message_cap_covers_managed_execution_response() {
+        let response = ExecuteTaskResponse {
+            success: true,
+            status_message: "x".repeat(WORKER_STATUS_MESSAGE_MAX_BYTES),
+            managed_executed_ops: i64::MAX,
+            managed_output_bytes: i64::MAX,
+            managed_receipt_json: "x".repeat(LEGACY_MANAGED_RECEIPT_MAX_BYTES),
+            managed_proof: Some(ManagedProofEnvelope {
+                receipt_json: vec![0; MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES - 16],
+                ..ManagedProofEnvelope::default()
+            }),
+        };
+        let worker_rpc_message_max_bytes = std::hint::black_box(WORKER_RPC_MESSAGE_MAX_BYTES);
+
+        assert!(
+            worker_rpc_message_max_bytes
+                >= MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES
+                    + WORKER_STATUS_MESSAGE_MAX_BYTES
+                    + LEGACY_MANAGED_RECEIPT_MAX_BYTES
+        );
+        assert!(worker_rpc_message_max_bytes <= 4 * WORKER_STATUS_MESSAGE_MAX_BYTES);
+        assert!(response.encoded_len() <= worker_rpc_message_max_bytes);
     }
 
     #[test]
