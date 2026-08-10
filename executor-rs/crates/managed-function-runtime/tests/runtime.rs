@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use managed_function_runtime::{ExecutionLimits, ManagedExecutor, Status, Value, render_output};
+use managed_function_runtime::{ExecutionLimits, ManagedExecutor, Status, Value, render_output, render_output_bounded};
 
 #[test]
 fn renders_canonical_output_for_host_and_zk_guest() {
@@ -14,6 +14,217 @@ fn renders_canonical_output_for_host_and_zk_guest() {
 
     assert_eq!(render_output(&value), r#"{"answer":42,"nested":[true,null]}"#);
     assert_eq!(render_output(&Value::String("raw".into())), "raw");
+}
+
+#[test]
+fn default_limits_reject_oversized_intermediate_string_concatenation() {
+    let operand = "x".repeat(600 * 1024);
+    let source = format!("return \"{operand}\" + \"{operand}\";");
+
+    let result = ManagedExecutor.execute(&source, ExecutionLimits::default());
+    assert!(
+        result.is_err(),
+        "the concatenated value must not exceed the default value limit"
+    );
+    let err = result.unwrap_err();
+
+    assert_eq!(err.code(), "value_limit_exceeded");
+}
+
+#[test]
+fn bounded_canonical_renderer_preserves_output_and_stops_at_its_limit() {
+    let value = Value::Dict(
+        [
+            (
+                "escaped\nkey".to_string(),
+                Value::String("quote: \"; snowman: ☃".into()),
+            ),
+            ("nested".to_string(), Value::List(vec![Value::Bool(true), Value::Null])),
+        ]
+        .into(),
+    );
+
+    let expected = r#"{"escaped\nkey":"quote: \"; snowman: ☃","nested":[true,null]}"#;
+    assert_eq!(render_output_bounded(&value, 1024).unwrap(), expected);
+    assert_eq!(render_output(&value), expected);
+
+    let err = render_output_bounded(&Value::String("abcdef".into()), 5).unwrap_err();
+    assert_eq!(err.code(), "output_limit_exceeded");
+
+    let err = render_output_bounded(&Value::List(vec![Value::String("abcdef".into())]), 8).unwrap_err();
+    assert_eq!(err.code(), "output_limit_exceeded");
+}
+
+#[test]
+fn default_value_safety_limits_are_finite_but_unlimited_disables_them() {
+    let default = ExecutionLimits::default();
+    assert!(default.max_value_bytes < u64::MAX);
+    assert!(default.max_collection_items < u64::MAX);
+    assert!(default.max_value_depth < u64::MAX);
+    assert!(default.max_value_materialization_bytes < u64::MAX);
+
+    let unlimited = ExecutionLimits::unlimited();
+    assert_eq!(unlimited.max_value_bytes, u64::MAX);
+    assert_eq!(unlimited.max_collection_items, u64::MAX);
+    assert_eq!(unlimited.max_value_depth, u64::MAX);
+    assert_eq!(unlimited.max_value_materialization_bytes, u64::MAX);
+}
+
+#[test]
+fn value_limits_reject_oversized_collections_and_cumulative_clones() {
+    let list_err = ManagedExecutor
+        .execute(
+            "return [1, 2, 3];",
+            ExecutionLimits {
+                max_collection_items: 2,
+                ..ExecutionLimits::unlimited()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(list_err.code(), "value_limit_exceeded");
+
+    let dict_err = ManagedExecutor
+        .execute(
+            r#"return {"a": 1, "b": 2};"#,
+            ExecutionLimits {
+                max_collection_items: 1,
+                ..ExecutionLimits::unlimited()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(dict_err.code(), "value_limit_exceeded");
+
+    let clone_err = ManagedExecutor
+        .execute(
+            r#"
+let item = "abc";
+let first = item;
+let second = item;
+return second;
+"#,
+            ExecutionLimits {
+                max_value_bytes: 16,
+                max_value_materialization_bytes: 8,
+                ..ExecutionLimits::unlimited()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(clone_err.code(), "value_limit_exceeded");
+}
+
+#[test]
+fn value_limits_validate_json_input_before_evaluation_clones_it() {
+    let err = ManagedExecutor
+        .execute_json_input(
+            "return input;",
+            ExecutionLimits {
+                max_value_bytes: 14,
+                ..ExecutionLimits::unlimited()
+            },
+            r#"{"key":"value"}"#,
+        )
+        .unwrap_err();
+
+    assert_eq!(err.code(), "value_limit_exceeded");
+}
+
+#[test]
+fn value_limits_reject_deep_values_and_bound_debug_print_output() {
+    let depth_err = ManagedExecutor
+        .execute(
+            "return [[[0]]];",
+            ExecutionLimits {
+                max_value_depth: 2,
+                ..ExecutionLimits::unlimited()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(depth_err.code(), "value_limit_exceeded");
+
+    let print_err = ManagedExecutor
+        .execute(
+            r#"print(["abc", "def"]);"#,
+            ExecutionLimits {
+                max_output_bytes: 8,
+                ..ExecutionLimits::unlimited()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(print_err.code(), "output_limit_exceeded");
+}
+
+#[test]
+fn print_preserves_existing_scalar_and_collection_representation() {
+    let result = ManagedExecutor
+        .execute(
+            r#"
+print("raw");
+print([1, true, null]);
+print({"a": 1});
+"#,
+            ExecutionLimits::default(),
+        )
+        .unwrap();
+
+    assert_eq!(result.output, "raw\n[Int(1), Bool(true), Null]\n{\"a\": Int(1)}\n");
+}
+
+#[test]
+fn cumulative_value_limit_covers_builtin_index_and_assignment_paths() {
+    for source in [
+        r#"
+let values = ["abc"];
+return get(values, 0);
+"#,
+        r#"
+let values = ["abc"];
+return values[0];
+"#,
+    ] {
+        let err = ManagedExecutor
+            .execute(
+                source,
+                ExecutionLimits {
+                    max_value_bytes: 16,
+                    max_value_materialization_bytes: 24,
+                    ..ExecutionLimits::unlimited()
+                },
+            )
+            .unwrap_err();
+        assert_eq!(err.code(), "value_limit_exceeded");
+    }
+
+    let err = ManagedExecutor
+        .execute(
+            r#"
+let data = {};
+data["key"] = "value";
+return data;
+"#,
+            ExecutionLimits {
+                max_value_bytes: 32,
+                max_value_materialization_bytes: 28,
+                ..ExecutionLimits::unlimited()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(err.code(), "value_limit_exceeded");
+}
+
+#[test]
+fn unlimited_limits_allow_large_values_without_changing_usage_accounting() {
+    let operand = "x".repeat(600 * 1024);
+    let source = format!("return \"{operand}\" + \"{operand}\";");
+    let result = ManagedExecutor
+        .execute(&source, ExecutionLimits::unlimited())
+        .expect("unlimited value limits must not reject the large concatenation");
+    assert_eq!(result.value, Value::String(operand.repeat(2)));
+
+    let source = "return [1, 2, 3][1];";
+    let default = ManagedExecutor.execute(source, ExecutionLimits::default()).unwrap();
+    let unlimited = ManagedExecutor.execute(source, ExecutionLimits::unlimited()).unwrap();
+    assert_eq!(default.receipt.executed_ops, unlimited.receipt.executed_ops);
+    assert_eq!(default.receipt.usage_units, unlimited.receipt.usage_units);
 }
 
 #[test]

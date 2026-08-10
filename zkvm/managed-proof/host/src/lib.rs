@@ -158,7 +158,7 @@ mod tests {
     use hivemind_managed_prover_protocol::{
         ManagedProverRequest, ManagedProverResponse, ProtocolError, MANAGED_PROVER_PROTOCOL_VERSION,
     };
-    use managed_function_runtime::{render_output, ExecutionLimits, ManagedExecutor};
+    use managed_function_runtime::{render_output_bounded, ExecutionLimits, ManagedExecutor};
     use risc0_zkvm::{FakeReceipt, InnerReceipt, Receipt, ReceiptClaim};
 
     use hivemind_managed_proof_methods::HIVEMIND_MANAGED_PROOF_GUEST_ID;
@@ -183,18 +183,17 @@ return {"total": total};
     }
 
     fn native_claim() -> ExecutionClaim {
+        let limits = ExecutionLimits {
+            max_usage_units: Some(MAX_USAGE_UNITS),
+            ..ExecutionLimits::default()
+        };
+        let max_output_bytes = limits.max_output_bytes;
         let execution = ManagedExecutor
-            .execute_json_input(
-                SOURCE,
-                ExecutionLimits {
-                    max_usage_units: Some(MAX_USAGE_UNITS),
-                    ..ExecutionLimits::unlimited()
-                },
-                INPUT,
-            )
+            .execute_json_input(SOURCE, limits, INPUT)
             .expect("native golden-vector execution succeeds");
         let output = if execution.output.is_empty() {
-            render_output(&execution.value)
+            render_output_bounded(&execution.value, max_output_bytes)
+                .expect("native golden-vector output is within limits")
         } else {
             execution.output
         };

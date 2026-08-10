@@ -1,7 +1,7 @@
 use anyhow::Result;
 use hivemind_config::HivemindConfig;
 use hivemind_models::Task;
-use managed_function_runtime::{render_output, ExecutionLimits, ManagedExecutor};
+use managed_function_runtime::{render_output_bounded, ExecutionLimits, ManagedExecutor};
 use serde_json::json;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -33,6 +33,7 @@ fn execute_managed_function_task(
         max_usage_units: (task.max_cpt > 0).then_some(task.max_cpt as u64),
         ..ExecutionLimits::default()
     };
+    let max_output_bytes = limits.max_output_bytes;
     let execution =
         match ManagedExecutor.execute_json_input_with_cancel(source, limits, input, cancelled) {
             Ok(execution) => execution,
@@ -67,7 +68,34 @@ fn execute_managed_function_task(
             }
         };
     let output = if execution.output.is_empty() {
-        render_output(&execution.value)
+        match render_output_bounded(&execution.value, max_output_bytes) {
+            Ok(output) => output,
+            Err(error) => {
+                let error_message = error.to_string();
+                let receipt = json!({
+                    "runtime": "managed-function-v0",
+                    "status": "failed",
+                    "executed_ops": execution.receipt.executed_ops,
+                    "output_bytes": 0,
+                    "failure_code": error.code(),
+                    "failure_message": error_message,
+                });
+                return Ok(super::TaskResult {
+                    task_id: task.task_id.clone(),
+                    success: false,
+                    output: None,
+                    error: Some(error_message),
+                    exit_code: 1,
+                    cpu_time_ms: 0,
+                    wall_time_ms: elapsed_ms,
+                    peak_memory_mb: 0,
+                    managed_executed_ops: execution.receipt.executed_ops as i64,
+                    managed_output_bytes: 0,
+                    managed_receipt_json: Some(receipt.to_string()),
+                    managed_proof: None,
+                });
+            }
+        }
     } else {
         execution.output
     };
@@ -249,6 +277,37 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("call_depth_exceeded"));
+    }
+
+    #[tokio::test]
+    async fn managed_function_task_rejects_an_oversized_return_value_before_reporting_success() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path().join("sandbox").to_str().unwrap());
+        let mut expression = "\"x\"".to_string();
+        for _ in 0..21 {
+            expression = format!("double({expression})");
+        }
+
+        let mut task = test_task_with_source("null");
+        task.runtime = Some("managed-function-v0".into());
+        task.max_cpt = 10_000;
+        task.task_source = Some(format!(
+            "fn double(value) {{ return value + value; }} return {expression};"
+        ));
+
+        let result = run_task(&task, &config).await.unwrap();
+
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("value_limit_exceeded"));
+        assert!(result
+            .managed_receipt_json
+            .as_deref()
+            .unwrap_or_default()
+            .contains("value_limit_exceeded"));
     }
 
     #[tokio::test]

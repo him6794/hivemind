@@ -3,7 +3,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     error::Error,
-    fmt::{Display, Formatter},
+    fmt::{Display, Formatter, Write},
     sync::atomic::{AtomicBool, Ordering},
 };
 
@@ -19,33 +19,144 @@ pub enum Value {
 
 /// Render a managed value using the canonical task-output representation.
 ///
-/// Both native workers and zero-knowledge guests must use this function before
-/// committing to output bytes so that verification cannot diverge by renderer.
+/// Prefer [`render_output_bounded`] for untrusted task output. This legacy
+/// convenience function keeps the historical unlimited behavior.
+///
+/// # Panics
+///
+/// Panics only if rendering would overflow `usize`; bounded callers should use
+/// [`render_output_bounded`] and handle its structured error instead.
 #[must_use]
 pub fn render_output(value: &Value) -> String {
+    render_output_bounded(value, u64::MAX).expect("an unlimited canonical renderer can only fail on length overflow")
+}
+
+/// Render a managed value using the canonical task-output representation,
+/// rejecting output that would exceed `max_bytes`.
+///
+/// Strings are emitted raw at the top level; all other values use the same
+/// compact JSON representation as [`render_output`]. The renderer appends
+/// incrementally and checks every append before allocation, so a rejected
+/// value never first creates an unbounded serialized intermediate. `max_bytes`
+/// is a fixed-width logical UTF-8 byte count, so the decision is identical on
+/// native workers and zkVM guests.
+pub fn render_output_bounded(value: &Value, max_bytes: u64) -> Result<String, RuntimeError> {
+    let mut output = BoundedOutput::new(max_bytes);
     match value {
-        Value::String(value) => value.clone(),
-        Value::Int(value) => value.to_string(),
-        Value::Bool(value) => value.to_string(),
-        Value::Null => "null".to_string(),
-        Value::List(_) | Value::Dict(_) => render_json_value(value).to_string(),
+        Value::String(value) => output.push_str(value)?,
+        Value::Int(value) => output.push_str(&value.to_string())?,
+        Value::Bool(value) => output.push_str(if *value { "true" } else { "false" })?,
+        Value::Null => output.push_str("null")?,
+        Value::List(_) | Value::Dict(_) => write_json_value(value, &mut output)?,
+    }
+    Ok(output.into_inner())
+}
+
+struct BoundedOutput {
+    value: String,
+    rendered_bytes: u64,
+    max_bytes: u64,
+}
+
+impl BoundedOutput {
+    fn new(max_bytes: u64) -> Self {
+        Self {
+            value: String::new(),
+            rendered_bytes: 0,
+            max_bytes,
+        }
+    }
+
+    fn into_inner(self) -> String {
+        self.value
+    }
+
+    fn push_str(&mut self, text: &str) -> Result<(), RuntimeError> {
+        let text_bytes = u64::try_from(text.len()).map_err(|_| output_limit_error())?;
+        let next_len = self
+            .rendered_bytes
+            .checked_add(text_bytes)
+            .ok_or_else(output_limit_error)?;
+        if next_len > self.max_bytes {
+            return Err(output_limit_error());
+        }
+        self.value.push_str(text);
+        self.rendered_bytes = next_len;
+        Ok(())
+    }
+
+    fn push_char(&mut self, character: char) -> Result<(), RuntimeError> {
+        let mut encoded = [0; 4];
+        self.push_str(character.encode_utf8(&mut encoded))
     }
 }
 
-fn render_json_value(value: &Value) -> serde_json::Value {
+fn output_limit_error() -> RuntimeError {
+    RuntimeError::new("output_limit_exceeded", "output limit exceeded")
+}
+
+fn write_json_value(value: &Value, output: &mut BoundedOutput) -> Result<(), RuntimeError> {
     match value {
-        Value::Int(value) => serde_json::json!(value),
-        Value::Bool(value) => serde_json::json!(value),
-        Value::String(value) => serde_json::json!(value),
-        Value::List(values) => serde_json::Value::Array(values.iter().map(render_json_value).collect()),
-        Value::Dict(values) => serde_json::Value::Object(
-            values
-                .iter()
-                .map(|(key, value)| (key.clone(), render_json_value(value)))
-                .collect(),
-        ),
-        Value::Null => serde_json::Value::Null,
+        Value::Int(value) => output.push_str(&value.to_string()),
+        Value::Bool(value) => output.push_str(if *value { "true" } else { "false" }),
+        Value::String(value) => write_json_string(value, output),
+        Value::Null => output.push_str("null"),
+        Value::List(values) => {
+            output.push_char('[')?;
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    output.push_char(',')?;
+                }
+                write_json_value(value, output)?;
+            }
+            output.push_char(']')
+        }
+        Value::Dict(values) => {
+            output.push_char('{')?;
+            for (index, (key, value)) in values.iter().enumerate() {
+                if index > 0 {
+                    output.push_char(',')?;
+                }
+                write_json_string(key, output)?;
+                output.push_char(':')?;
+                write_json_value(value, output)?;
+            }
+            output.push_char('}')
+        }
     }
+}
+
+fn write_json_string(value: &str, output: &mut BoundedOutput) -> Result<(), RuntimeError> {
+    output.push_char('"')?;
+    let mut segment_start = 0;
+    for (index, byte) in value.bytes().enumerate() {
+        let escaped = match byte {
+            b'"' => Some(r#"\""#),
+            b'\\' => Some(r"\\"),
+            b'\x08' => Some(r"\b"),
+            b'\x0c' => Some(r"\f"),
+            b'\n' => Some(r"\n"),
+            b'\r' => Some(r"\r"),
+            b'\t' => Some(r"\t"),
+            b'\x00'..=b'\x1f' => None,
+            _ => continue,
+        };
+        output.push_str(&value[segment_start..index])?;
+        if let Some(escaped) = escaped {
+            output.push_str(escaped)?;
+        } else {
+            output.push_str(r"\u00")?;
+            output.push_char(hex_digit(byte >> 4))?;
+            output.push_char(hex_digit(byte & 0x0f))?;
+        }
+        segment_start = index + 1;
+    }
+    output.push_str(&value[segment_start..])?;
+    output.push_char('"')
+}
+
+fn hex_digit(value: u8) -> char {
+    char::from(if value < 10 { b'0' + value } else { b'a' + (value - 10) })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,8 +169,23 @@ pub struct ExecutionLimits {
     pub max_ops: u64,
     pub max_usage_units: Option<u64>,
     pub max_call_depth: usize,
-    pub max_output_bytes: usize,
+    pub max_output_bytes: u64,
     pub max_loop_iterations: u64,
+    /// Maximum canonical-JSON byte size of one materialized managed value.
+    ///
+    /// This is deterministic logical byte accounting, not allocator capacity:
+    /// string/key escaping and collection punctuation are included so native
+    /// workers and zkVM guests make the same acceptance decision. The counter
+    /// is fixed-width (`u64`), rather than pointer-sized.
+    pub max_value_bytes: u64,
+    /// Maximum number of direct elements in any materialized list or dict.
+    pub max_collection_items: u64,
+    /// Maximum nesting depth of any materialized managed value.
+    pub max_value_depth: u64,
+    /// Maximum cumulative deterministic logical bytes materialized by evaluator
+    /// value copies and constructions. This is a safety limit only and never
+    /// contributes to billed `usage_units`.
+    pub max_value_materialization_bytes: u64,
 }
 
 impl Default for ExecutionLimits {
@@ -70,6 +196,10 @@ impl Default for ExecutionLimits {
             max_call_depth: 64,
             max_output_bytes: 1_048_576,
             max_loop_iterations: 100_000,
+            max_value_bytes: 1_048_576,
+            max_collection_items: 100_000,
+            max_value_depth: 64,
+            max_value_materialization_bytes: 16_777_216,
         }
     }
 }
@@ -81,8 +211,12 @@ impl ExecutionLimits {
             max_ops: u64::MAX,
             max_usage_units: None,
             max_call_depth: usize::MAX,
-            max_output_bytes: usize::MAX,
+            max_output_bytes: u64::MAX,
             max_loop_iterations: u64::MAX,
+            max_value_bytes: u64::MAX,
+            max_collection_items: u64::MAX,
+            max_value_depth: u64::MAX,
+            max_value_materialization_bytes: u64::MAX,
         }
     }
 }
@@ -175,6 +309,7 @@ impl ManagedExecutor {
         let tokens = Lexer::new(source).tokenize()?;
         let program = Parser::new(tokens).parse_program()?;
         let mut evaluator = Evaluator::new(limits);
+        evaluator.validate_external_value(&input)?;
         evaluator.current_scope().insert("input".to_string(), input);
         evaluator.eval_program(&program)
     }
@@ -190,6 +325,7 @@ impl ManagedExecutor {
         let tokens = Lexer::new(source).tokenize()?;
         let program = Parser::new(tokens).parse_program()?;
         let mut evaluator = Evaluator::with_cancellation(limits, cancelled);
+        evaluator.validate_external_value(&input)?;
         evaluator.current_scope().insert("input".to_string(), input);
         evaluator.eval_program(&program)
     }
@@ -223,6 +359,192 @@ impl Value {
                 .map(Self::Dict),
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct ValueMetrics {
+    canonical_bytes: u64,
+    depth: u64,
+    max_collection_items: u64,
+}
+
+fn value_metrics(value: &Value) -> Result<ValueMetrics, RuntimeError> {
+    match value {
+        Value::Int(value) => Ok(ValueMetrics {
+            canonical_bytes: logical_usize(value.to_string().len())?,
+            depth: 1,
+            max_collection_items: 0,
+        }),
+        Value::Bool(value) => Ok(ValueMetrics {
+            canonical_bytes: if *value { 4 } else { 5 },
+            depth: 1,
+            max_collection_items: 0,
+        }),
+        Value::String(value) => Ok(ValueMetrics {
+            canonical_bytes: json_string_len(value)?,
+            depth: 1,
+            max_collection_items: 0,
+        }),
+        Value::Null => Ok(ValueMetrics {
+            canonical_bytes: 4,
+            depth: 1,
+            max_collection_items: 0,
+        }),
+        Value::List(values) => list_value_metrics(values),
+        Value::Dict(values) => dict_value_metrics(values),
+    }
+}
+
+fn list_value_metrics(values: &[Value]) -> Result<ValueMetrics, RuntimeError> {
+    let mut canonical_bytes = 2;
+    let mut depth = 1;
+    let mut max_collection_items = logical_usize(values.len())?;
+    let mut first = true;
+    for value in values {
+        if first {
+            first = false;
+        } else {
+            canonical_bytes = checked_value_add(canonical_bytes, 1)?;
+        }
+        let metrics = value_metrics(value)?;
+        canonical_bytes = checked_value_add(canonical_bytes, metrics.canonical_bytes)?;
+        depth = depth.max(metrics.depth.checked_add(1).ok_or_else(value_limit_error)?);
+        max_collection_items = max_collection_items.max(metrics.max_collection_items);
+    }
+    Ok(ValueMetrics {
+        canonical_bytes,
+        depth,
+        max_collection_items,
+    })
+}
+
+fn dict_value_metrics(values: &BTreeMap<String, Value>) -> Result<ValueMetrics, RuntimeError> {
+    let mut canonical_bytes = 2;
+    let mut depth = 1;
+    let mut max_collection_items = logical_usize(values.len())?;
+    let mut first = true;
+    for (key, value) in values {
+        if first {
+            first = false;
+        } else {
+            canonical_bytes = checked_value_add(canonical_bytes, 1)?;
+        }
+        canonical_bytes = checked_value_add(canonical_bytes, json_string_len(key)?)?;
+        canonical_bytes = checked_value_add(canonical_bytes, 1)?;
+        let metrics = value_metrics(value)?;
+        canonical_bytes = checked_value_add(canonical_bytes, metrics.canonical_bytes)?;
+        depth = depth.max(metrics.depth.checked_add(1).ok_or_else(value_limit_error)?);
+        max_collection_items = max_collection_items.max(metrics.max_collection_items);
+    }
+    Ok(ValueMetrics {
+        canonical_bytes,
+        depth,
+        max_collection_items,
+    })
+}
+
+fn list_metrics_after_assignment(
+    values: &[Value],
+    replacement_index: usize,
+    replacement: &Value,
+) -> Result<ValueMetrics, RuntimeError> {
+    let mut canonical_bytes = 2;
+    let mut depth = 1;
+    let mut max_collection_items = logical_usize(values.len())?;
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            canonical_bytes = checked_value_add(canonical_bytes, 1)?;
+        }
+        let metrics = if index == replacement_index {
+            value_metrics(replacement)?
+        } else {
+            value_metrics(value)?
+        };
+        canonical_bytes = checked_value_add(canonical_bytes, metrics.canonical_bytes)?;
+        depth = depth.max(metrics.depth.checked_add(1).ok_or_else(value_limit_error)?);
+        max_collection_items = max_collection_items.max(metrics.max_collection_items);
+    }
+    Ok(ValueMetrics {
+        canonical_bytes,
+        depth,
+        max_collection_items,
+    })
+}
+
+fn dict_metrics_after_assignment(
+    values: &BTreeMap<String, Value>,
+    replacement_key: &str,
+    replacement: &Value,
+) -> Result<ValueMetrics, RuntimeError> {
+    let contains_key = values.contains_key(replacement_key);
+    let value_count = logical_usize(values.len())?;
+    let item_count = if contains_key {
+        value_count
+    } else {
+        checked_value_add(value_count, 1)?
+    };
+    let mut canonical_bytes = 2;
+    let mut depth = 1;
+    let mut max_collection_items = item_count;
+    let mut first = true;
+    for (key, value) in values {
+        if first {
+            first = false;
+        } else {
+            canonical_bytes = checked_value_add(canonical_bytes, 1)?;
+        }
+        canonical_bytes = checked_value_add(canonical_bytes, json_string_len(key)?)?;
+        canonical_bytes = checked_value_add(canonical_bytes, 1)?;
+        let metrics = if key == replacement_key {
+            value_metrics(replacement)?
+        } else {
+            value_metrics(value)?
+        };
+        canonical_bytes = checked_value_add(canonical_bytes, metrics.canonical_bytes)?;
+        depth = depth.max(metrics.depth.checked_add(1).ok_or_else(value_limit_error)?);
+        max_collection_items = max_collection_items.max(metrics.max_collection_items);
+    }
+    if !contains_key {
+        if !first {
+            canonical_bytes = checked_value_add(canonical_bytes, 1)?;
+        }
+        canonical_bytes = checked_value_add(canonical_bytes, json_string_len(replacement_key)?)?;
+        canonical_bytes = checked_value_add(canonical_bytes, 1)?;
+        let metrics = value_metrics(replacement)?;
+        canonical_bytes = checked_value_add(canonical_bytes, metrics.canonical_bytes)?;
+        depth = depth.max(metrics.depth.checked_add(1).ok_or_else(value_limit_error)?);
+        max_collection_items = max_collection_items.max(metrics.max_collection_items);
+    }
+    Ok(ValueMetrics {
+        canonical_bytes,
+        depth,
+        max_collection_items,
+    })
+}
+
+fn json_string_len(value: &str) -> Result<u64, RuntimeError> {
+    let mut length = 2;
+    for byte in value.bytes() {
+        let encoded_len = match byte {
+            b'"' | b'\\' | b'\x08' | b'\x0c' | b'\n' | b'\r' | b'\t' => 2,
+            b'\x00'..=b'\x1f' => 6,
+            _ => 1,
+        };
+        length = checked_value_add(length, encoded_len)?;
+    }
+    Ok(length)
+}
+
+fn logical_usize(value: usize) -> Result<u64, RuntimeError> {
+    u64::try_from(value).map_err(|_| value_limit_error())
+}
+
+fn checked_value_add(left: u64, right: u64) -> Result<u64, RuntimeError> {
+    left.checked_add(right).ok_or_else(value_limit_error)
+}
+
+fn value_limit_error() -> RuntimeError {
+    RuntimeError::new("value_limit_exceeded", "value limit exceeded")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1031,6 +1353,7 @@ struct Evaluator<'a> {
     functions: HashMap<String, Function>,
     scopes: Vec<HashMap<String, Value>>,
     call_depth: usize,
+    materialized_value_bytes: u64,
     cancelled: Option<&'a AtomicBool>,
 }
 
@@ -1043,6 +1366,7 @@ impl<'a> Evaluator<'a> {
             functions: HashMap::new(),
             scopes: vec![HashMap::new()],
             call_depth: 0,
+            materialized_value_bytes: 0,
             cancelled: None,
         }
     }
@@ -1103,13 +1427,18 @@ impl<'a> Evaluator<'a> {
                 };
                 let mut last = Value::Null;
                 for value in values {
-                    if self.receipt.loop_iterations + 1 > self.limits.max_loop_iterations {
+                    let next_iterations = self
+                        .receipt
+                        .loop_iterations
+                        .checked_add(1)
+                        .ok_or_else(|| RuntimeError::new("loop_limit_exceeded", "loop iteration limit exceeded"))?;
+                    if next_iterations > self.limits.max_loop_iterations {
                         return Err(RuntimeError::new(
                             "loop_limit_exceeded",
                             "loop iteration limit exceeded",
                         ));
                     }
-                    self.receipt.loop_iterations += 1;
+                    self.receipt.loop_iterations = next_iterations;
                     self.current_scope().insert(item.clone(), value);
                     for statement in body {
                         match self.eval_stmt(statement)? {
@@ -1123,12 +1452,7 @@ impl<'a> Evaluator<'a> {
             Stmt::Print(expr) => {
                 self.charge(5)?;
                 let value = self.eval_expr(expr)?;
-                let text = format!("{}\n", display_value(&value));
-                let next_len = self.output.len() + text.len();
-                if next_len > self.limits.max_output_bytes {
-                    return Err(RuntimeError::new("output_limit_exceeded", "output limit exceeded"));
-                }
-                self.output.push_str(&text);
+                append_debug_output(&mut self.output, self.limits.max_output_bytes, &value)?;
                 self.receipt.output_bytes = self.output.len();
                 Ok(Control::Continue(Value::Null))
             }
@@ -1142,7 +1466,7 @@ impl<'a> Evaluator<'a> {
                     ));
                 };
                 let mut current = self.lookup(name)?;
-                assign_index(&mut current, index, value)?;
+                self.assign_index(&mut current, index, value)?;
                 self.assign(name, current)?;
                 Ok(Control::Continue(Value::Null))
             }
@@ -1153,7 +1477,7 @@ impl<'a> Evaluator<'a> {
     fn eval_expr(&mut self, expr: &Expr) -> Result<Value, RuntimeError> {
         self.charge(1)?;
         match expr {
-            Expr::Value(value) => Ok(value.clone()),
+            Expr::Value(value) => self.clone_value(value),
             Expr::Variable(name) => self.lookup(name),
             Expr::If {
                 condition,
@@ -1168,20 +1492,12 @@ impl<'a> Evaluator<'a> {
                 }
             }
             Expr::Call { name, args } => self.call(name, args),
-            Expr::List(values) => values
-                .iter()
-                .map(|expr| self.eval_expr(expr))
-                .collect::<Result<Vec<_>, _>>()
-                .map(Value::List),
-            Expr::Dict(values) => values
-                .iter()
-                .map(|(key, expr)| Ok((key.clone(), self.eval_expr(expr)?)))
-                .collect::<Result<BTreeMap<_, _>, _>>()
-                .map(Value::Dict),
+            Expr::List(values) => self.eval_list(values),
+            Expr::Dict(values) => self.eval_dict(values),
             Expr::Binary { left, op, right } => {
                 let left = self.eval_expr(left)?;
                 let right = self.eval_expr(right)?;
-                eval_binary(left, *op, right)
+                self.eval_binary(left, *op, right)
             }
             Expr::Unary { op, expr } => {
                 let value = self.eval_expr(expr)?;
@@ -1219,8 +1535,192 @@ impl<'a> Evaluator<'a> {
             Expr::Index { target, index } => {
                 let target = self.eval_expr(target)?;
                 let index = self.eval_expr(index)?;
-                eval_index(target, index)
+                self.eval_index(target, index)
             }
+        }
+    }
+
+    fn validate_external_value(&self, value: &Value) -> Result<(), RuntimeError> {
+        self.validate_value_metrics(value_metrics(value)?)
+    }
+
+    fn validate_value_metrics(&self, metrics: ValueMetrics) -> Result<(), RuntimeError> {
+        if metrics.canonical_bytes > self.limits.max_value_bytes
+            || metrics.depth > self.limits.max_value_depth
+            || metrics.max_collection_items > self.limits.max_collection_items
+        {
+            return Err(value_limit_error());
+        }
+        Ok(())
+    }
+
+    fn clone_value(&mut self, value: &Value) -> Result<Value, RuntimeError> {
+        let metrics = value_metrics(value)?;
+        self.validate_value_metrics(metrics)?;
+        self.charge_value_materialization(metrics.canonical_bytes)?;
+        Ok(value.clone())
+    }
+
+    fn materialize_owned_value(&mut self, value: Value) -> Result<Value, RuntimeError> {
+        let metrics = value_metrics(&value)?;
+        self.validate_value_metrics(metrics)?;
+        self.charge_value_materialization(metrics.canonical_bytes)?;
+        Ok(value)
+    }
+
+    fn charge_value_materialization(&mut self, bytes: u64) -> Result<(), RuntimeError> {
+        if self.limits.max_value_materialization_bytes == u64::MAX {
+            return Ok(());
+        }
+        let next = self
+            .materialized_value_bytes
+            .checked_add(bytes)
+            .ok_or_else(value_limit_error)?;
+        if next > self.limits.max_value_materialization_bytes {
+            return Err(value_limit_error());
+        }
+        self.materialized_value_bytes = next;
+        Ok(())
+    }
+
+    fn eval_list(&mut self, expressions: &[Expr]) -> Result<Value, RuntimeError> {
+        let mut metrics = ValueMetrics {
+            canonical_bytes: 2,
+            depth: 1,
+            max_collection_items: logical_usize(expressions.len())?,
+        };
+        self.validate_value_metrics(metrics)?;
+        self.charge_value_materialization(metrics.canonical_bytes)?;
+
+        let mut values = Vec::new();
+        for (index, expression) in expressions.iter().enumerate() {
+            let value = self.eval_expr(expression)?;
+            let value_metrics = value_metrics(&value)?;
+            let separator_bytes = u64::from(index > 0);
+            let additional_bytes = checked_value_add(separator_bytes, value_metrics.canonical_bytes)?;
+            metrics = ValueMetrics {
+                canonical_bytes: checked_value_add(metrics.canonical_bytes, additional_bytes)?,
+                depth: metrics
+                    .depth
+                    .max(value_metrics.depth.checked_add(1).ok_or_else(value_limit_error)?),
+                max_collection_items: metrics.max_collection_items.max(value_metrics.max_collection_items),
+            };
+            self.validate_value_metrics(metrics)?;
+            self.charge_value_materialization(additional_bytes)?;
+            values.push(value);
+        }
+        Ok(Value::List(values))
+    }
+
+    fn eval_dict(&mut self, expressions: &[(String, Expr)]) -> Result<Value, RuntimeError> {
+        let mut metrics = ValueMetrics {
+            canonical_bytes: 2,
+            depth: 1,
+            max_collection_items: logical_usize(expressions.len())?,
+        };
+        self.validate_value_metrics(metrics)?;
+        self.charge_value_materialization(metrics.canonical_bytes)?;
+
+        let mut values = BTreeMap::new();
+        for (index, (key, expression)) in expressions.iter().enumerate() {
+            let key_bytes = json_string_len(key)?;
+            let value = self.eval_expr(expression)?;
+            let value_metrics = value_metrics(&value)?;
+            let separator_bytes = u64::from(index > 0);
+            let additional_bytes = checked_value_add(
+                checked_value_add(separator_bytes, key_bytes)?,
+                checked_value_add(1, value_metrics.canonical_bytes)?,
+            )?;
+            metrics = ValueMetrics {
+                canonical_bytes: checked_value_add(metrics.canonical_bytes, additional_bytes)?,
+                depth: metrics
+                    .depth
+                    .max(value_metrics.depth.checked_add(1).ok_or_else(value_limit_error)?),
+                max_collection_items: metrics.max_collection_items.max(value_metrics.max_collection_items),
+            };
+            self.validate_value_metrics(metrics)?;
+            self.charge_value_materialization(additional_bytes)?;
+            values.insert(key.clone(), value);
+        }
+        Ok(Value::Dict(values))
+    }
+
+    fn eval_binary(&mut self, left: Value, op: BinaryOp, right: Value) -> Result<Value, RuntimeError> {
+        match (op, left, right) {
+            (BinaryOp::Add, Value::String(left), Value::String(right)) => self.concat_strings(&left, &right),
+            (op, left, right) => eval_binary(left, op, right),
+        }
+    }
+
+    fn concat_strings(&mut self, left: &str, right: &str) -> Result<Value, RuntimeError> {
+        let raw_bytes = left.len().checked_add(right.len()).ok_or_else(value_limit_error)?;
+        let canonical_bytes = checked_value_add(json_string_len(left)?, json_string_len(right)?)?
+            .checked_sub(2)
+            .ok_or_else(value_limit_error)?;
+        let metrics = ValueMetrics {
+            canonical_bytes,
+            depth: 1,
+            max_collection_items: 0,
+        };
+        self.validate_value_metrics(metrics)?;
+        self.charge_value_materialization(metrics.canonical_bytes)?;
+
+        let mut value = String::with_capacity(raw_bytes);
+        value.push_str(left);
+        value.push_str(right);
+        Ok(Value::String(value))
+    }
+
+    fn eval_index(&mut self, target: Value, index: Value) -> Result<Value, RuntimeError> {
+        match (target, index) {
+            (Value::List(values), Value::Int(index)) => {
+                let index = normalize_index(index, values.len())?;
+                self.clone_value(&values[index])
+            }
+            (Value::String(value), Value::Int(index)) => {
+                let index = normalize_index(index, value.chars().count())?;
+                let character = value
+                    .chars()
+                    .nth(index)
+                    .expect("a normalized string index must be present");
+                self.materialize_owned_value(Value::String(character.to_string()))
+            }
+            (Value::Dict(values), Value::String(key)) => match values.get(&key) {
+                Some(value) => self.clone_value(value),
+                None => Err(RuntimeError::new("key_error", format!("key '{key}' not found"))),
+            },
+            _ => Err(RuntimeError::new(
+                "type_error",
+                "indexing expects list[int], string[int], or dict[string]",
+            )),
+        }
+    }
+
+    fn assign_index(&mut self, target: &mut Value, index: Value, value: Value) -> Result<(), RuntimeError> {
+        match (target, index) {
+            (Value::List(values), Value::Int(index)) => {
+                let index = normalize_index(index, values.len())?;
+                self.validate_value_metrics(list_metrics_after_assignment(values, index, &value)?)?;
+                values[index] = value;
+                Ok(())
+            }
+            (Value::Dict(values), Value::String(key)) => {
+                let inserting = !values.contains_key(&key);
+                self.validate_value_metrics(dict_metrics_after_assignment(values, &key, &value)?)?;
+                if inserting {
+                    let entry_bytes = checked_value_add(
+                        checked_value_add(json_string_len(&key)?, 1)?,
+                        value_metrics(&value)?.canonical_bytes,
+                    )?;
+                    self.charge_value_materialization(entry_bytes)?;
+                }
+                values.insert(key, value);
+                Ok(())
+            }
+            _ => Err(RuntimeError::new(
+                "type_error",
+                "index assignment expects list[int] or dict[string]",
+            )),
         }
     }
 
@@ -1245,15 +1745,19 @@ impl<'a> Evaluator<'a> {
                 ),
             ));
         }
-        let mut values = Vec::with_capacity(args.len());
+        let mut values = Vec::new();
         for arg in args {
             values.push(self.eval_expr(arg)?);
         }
-        if self.call_depth + 1 > self.limits.max_call_depth {
+        let next_call_depth = self
+            .call_depth
+            .checked_add(1)
+            .ok_or_else(|| RuntimeError::new("call_depth_exceeded", "call depth exceeded"))?;
+        if next_call_depth > self.limits.max_call_depth {
             return Err(RuntimeError::new("call_depth_exceeded", "call depth exceeded"));
         }
         self.receipt.function_calls += 1;
-        self.call_depth += 1;
+        self.call_depth = next_call_depth;
         self.receipt.max_call_depth = self.receipt.max_call_depth.max(self.call_depth);
         let mut scope = HashMap::new();
         for (param, value) in function.params.iter().zip(values) {
@@ -1307,14 +1811,19 @@ impl<'a> Evaluator<'a> {
                 let target = self.eval_expr(target)?;
                 let key = self.eval_expr(key)?;
                 let value = match (target, key) {
-                    (Value::Dict(values), Value::String(key)) => values.get(&key).cloned().unwrap_or(Value::Null),
-                    (Value::List(values), Value::Int(index)) if index >= 0 => values
-                        .get(
+                    (Value::Dict(values), Value::String(key)) => match values.get(&key) {
+                        Some(value) => self.clone_value(value)?,
+                        None => Value::Null,
+                    },
+                    (Value::List(values), Value::Int(index)) if index >= 0 => {
+                        match values.get(
                             usize::try_from(index)
                                 .map_err(|_| RuntimeError::new("runtime_error", "list index is out of range"))?,
-                        )
-                        .cloned()
-                        .unwrap_or(Value::Null),
+                        ) {
+                            Some(value) => self.clone_value(value)?,
+                            None => Value::Null,
+                        }
+                    }
                     _ => {
                         return Err(RuntimeError::new(
                             "type_error",
@@ -1347,13 +1856,22 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    fn lookup(&self, name: &str) -> Result<Value, RuntimeError> {
+    fn lookup(&mut self, name: &str) -> Result<Value, RuntimeError> {
+        let metrics = self
+            .scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).map(value_metrics))
+            .transpose()?
+            .ok_or_else(|| RuntimeError::new("name_error", format!("unknown variable '{name}'")))?;
+        self.validate_value_metrics(metrics)?;
+        self.charge_value_materialization(metrics.canonical_bytes)?;
         for scope in self.scopes.iter().rev() {
             if let Some(value) = scope.get(name) {
                 return Ok(value.clone());
             }
         }
-        Err(RuntimeError::new("name_error", format!("unknown variable '{name}'")))
+        unreachable!("a value found while measuring must still be present while cloning")
     }
 
     fn assign(&mut self, name: &str, value: Value) -> Result<(), RuntimeError> {
@@ -1400,7 +1918,6 @@ fn eval_binary(left: Value, op: BinaryOp, right: Value) -> Result<Value, Runtime
     match op {
         BinaryOp::Add => match (left, right) {
             (Value::Int(left), Value::Int(right)) => Ok(Value::Int(left + right)),
-            (Value::String(left), Value::String(right)) => Ok(Value::String(format!("{left}{right}"))),
             _ => Err(RuntimeError::new("type_error", "+ expects matching ints or strings")),
         },
         BinaryOp::Sub => int_binary(left, right, "-", |left, right| left - right),
@@ -1446,46 +1963,6 @@ fn normalize_index(index: i64, len: usize) -> Result<usize, RuntimeError> {
     usize::try_from(resolved).map_err(|_| RuntimeError::new("runtime_error", "index is out of range"))
 }
 
-fn eval_index(target: Value, index: Value) -> Result<Value, RuntimeError> {
-    match (target, index) {
-        (Value::List(values), Value::Int(index)) => {
-            let idx = normalize_index(index, values.len())?;
-            Ok(values[idx].clone())
-        }
-        (Value::String(value), Value::Int(index)) => {
-            let chars: Vec<char> = value.chars().collect();
-            let idx = normalize_index(index, chars.len())?;
-            Ok(Value::String(chars[idx].to_string()))
-        }
-        (Value::Dict(values), Value::String(key)) => values
-            .get(&key)
-            .cloned()
-            .ok_or_else(|| RuntimeError::new("key_error", format!("key '{key}' not found"))),
-        _ => Err(RuntimeError::new(
-            "type_error",
-            "indexing expects list[int], string[int], or dict[string]",
-        )),
-    }
-}
-
-fn assign_index(target: &mut Value, index: Value, value: Value) -> Result<(), RuntimeError> {
-    match (target, index) {
-        (Value::List(values), Value::Int(index)) => {
-            let idx = normalize_index(index, values.len())?;
-            values[idx] = value;
-            Ok(())
-        }
-        (Value::Dict(values), Value::String(key)) => {
-            values.insert(key, value);
-            Ok(())
-        }
-        _ => Err(RuntimeError::new(
-            "type_error",
-            "index assignment expects list[int] or dict[string]",
-        )),
-    }
-}
-
 fn int_binary(
     left: Value,
     right: Value,
@@ -1510,13 +1987,67 @@ fn int_compare(
     }
 }
 
-fn display_value(value: &Value) -> String {
+fn append_debug_output(output: &mut String, max_bytes: u64, value: &Value) -> Result<(), RuntimeError> {
+    let rendered_bytes = logical_usize(output.len())?;
+    let mut writer = BoundedFmtWriter {
+        output,
+        rendered_bytes,
+        max_bytes,
+    };
     match value {
-        Value::Int(value) => value.to_string(),
-        Value::Bool(value) => value.to_string(),
-        Value::String(value) => value.clone(),
-        Value::List(values) => format!("{values:?}"),
-        Value::Dict(values) => format!("{values:?}"),
-        Value::Null => "null".to_string(),
+        Value::Int(value) => write!(&mut writer, "{value}"),
+        Value::Bool(value) => write!(&mut writer, "{value}"),
+        Value::String(value) => writer.write_str(value),
+        Value::List(values) => write!(&mut writer, "{values:?}"),
+        Value::Dict(values) => write!(&mut writer, "{values:?}"),
+        Value::Null => writer.write_str("null"),
+    }
+    .map_err(|_| output_limit_error())?;
+    writer.write_char('\n').map_err(|_| output_limit_error())
+}
+
+struct BoundedFmtWriter<'a> {
+    output: &'a mut String,
+    rendered_bytes: u64,
+    max_bytes: u64,
+}
+
+impl Write for BoundedFmtWriter<'_> {
+    fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        let value_bytes = u64::try_from(value.len()).map_err(|_| std::fmt::Error)?;
+        let next_len = self.rendered_bytes.checked_add(value_bytes).ok_or(std::fmt::Error)?;
+        if next_len > self.max_bytes {
+            return Err(std::fmt::Error);
+        }
+        self.output.push_str(value);
+        self.rendered_bytes = next_len;
+        Ok(())
+    }
+
+    fn write_char(&mut self, character: char) -> std::fmt::Result {
+        let mut encoded = [0; 4];
+        self.write_str(character.encode_utf8(&mut encoded))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Value, render_output_bounded};
+
+    #[test]
+    fn bounded_canonical_renderer_matches_serde_json_escaping() {
+        for value in [
+            "",
+            "plain text",
+            "quote: \"; slash: \\; controls: \u{0008}\u{000c}\n\r\t\u{0000}\u{001f}",
+            "snowman: ☃; line separator: \u{2028}",
+        ] {
+            let managed = Value::List(vec![Value::String(value.to_string())]);
+            let expected = serde_json::to_string(&serde_json::Value::Array(vec![serde_json::Value::String(
+                value.to_string(),
+            )]))
+            .unwrap();
+            assert_eq!(render_output_bounded(&managed, u64::MAX).unwrap(), expected);
+        }
     }
 }

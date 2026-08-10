@@ -1,7 +1,7 @@
 #![no_main]
 
 use hivemind_managed_proof::{ExecutionClaim, ExecutionMetrics};
-use managed_function_runtime::{render_output, ExecutionLimits, ManagedExecutor};
+use managed_function_runtime::{render_output_bounded, ExecutionLimits, ManagedExecutor};
 use risc0_zkvm::guest::env;
 
 risc0_zkvm::guest::entry!(main);
@@ -11,18 +11,17 @@ fn main() {
     let source: String = env::read();
     let input: String = env::read();
     let max_usage_units: u64 = env::read();
+    let limits = ExecutionLimits {
+        max_usage_units: Some(max_usage_units),
+        ..ExecutionLimits::default()
+    };
+    let max_output_bytes = limits.max_output_bytes;
     let execution = ManagedExecutor
-        .execute_json_input(
-            &source,
-            ExecutionLimits {
-                max_usage_units: Some(max_usage_units),
-                ..ExecutionLimits::default()
-            },
-            &input,
-        )
+        .execute_json_input(&source, limits, &input)
         .expect("managed execution succeeds");
     let output = if execution.output.is_empty() {
-        render_output(&execution.value)
+        render_output_bounded(&execution.value, max_output_bytes)
+            .expect("canonical output is within limits")
     } else {
         execution.output
     };
