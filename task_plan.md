@@ -6,7 +6,7 @@
 
 ## 當前階段
 
-階段 3：協議與 Nodepool 驗證閘門（in_progress）
+階段 4：遷移、失敗語義與營運（pending）；階段 3 已完成
 
 ## 成功標準
 
@@ -41,11 +41,12 @@
 ### 階段 3：協議與 Nodepool 驗證閘門
 
 - [x] protobuf 傳遞 proof scheme、image id、journal、receipt/seal
-- [ ] Nodepool 以可信 image id 驗證 proof
-- [ ] 驗證 journal 與資料庫 task/source/input/output/max_cpt 完全一致
-- [ ] proof 無效、缺漏、重播或版本不支援時 fail closed
-- [ ] 驗證成功後才寫 receipt、完成任務與結算
-- **狀態：** in_progress
+- [x] verified claim 對 task/source/input/output/budget/version 的逐項 binding API
+- [x] Nodepool 以可信 image id 驗證 proof
+- [x] 驗證 journal 與資料庫 task/source/input/output/max_cpt 完全一致
+- [x] proof 無效、缺漏、重播或版本不支援時 fail closed
+- [x] 驗證成功後才寫 receipt、完成任務與結算
+- **狀態：** complete（程式碼已驗證；guest image ID／attestation／fixture 待重建）
 
 ### 階段 4：遷移、失敗語義與營運
 
@@ -90,6 +91,24 @@
 |---|---:|---|
 | PowerShell glob 直接傳給 `rg` 造成 Windows path error | 2 | 改用 `Get-ChildItem` 展開檔案；本輪誤重犯一次後已停止，不影響程式碼 |
 | workflow-orchestrator 引用的 `skills/auto-trigger/SKILL.md` 不存在 | 1 | 記錄為工具環境限制，不阻塞實作 |
+| 狀態文件多檔補丁因一處空白未精確匹配而整體拒絕 | 1 | 拆成小補丁並使用剛讀取的精確原文；未發生部分寫入 |
+| `findings.md` 檔首含 BOM，使用可見 header 作 patch context 仍未匹配 | 1 | 改用第二個無 BOM 的 section header 作錨點；未發生部分寫入 |
+| Admission reviewer 回報的 evidence 相對路徑在 repo `.omo` 下不存在 | 1 | 保留 mailbox 的完整 BLOCK 結果，待 owner 重審時要求回報可讀的實體絕對路徑 |
+| 為找 admission review evidence 對整個 `D:\` 執行 `rg --files` 超時 | 1 | 不重跑廣域掃描；後續只查 repo 與明確 `.omo` 目錄 |
+| Verifier full-test orchestration 120 秒超時且未回傳 buffered stdout | 1 | Process trace 證實 admission agent 正在編譯同一 target；不重跑競爭命令，追蹤遺留 nodepool test process 至完成後再用獨立 target-dir 驗證 |
+| PowerShell PID 狀態字串中的 `$id:` 被解析成 drive-qualified variable | 1 | 使用 `${id}` 明確界定變數；純診斷命令未改變任何程序 |
+| JavaScript orchestration 先展開 PowerShell `${id}`，造成 `ReferenceError` | 1 | 改用 PowerShell `-f` format operator，避開跨語言 interpolation；未執行到程序查詢 |
+| Partial lock staging script 誤假設 nested shell result 有 `exit_code` 屬性，check 後提前結束 | 1 | 將 check/apply 放在同一 PowerShell 命令並使用 `$LASTEXITCODE`；index 尚未套用 lock patch |
+| 清理 orphan test tree 時 child 結束使 root PID 在下一次 Stop-Process 前已自行退出 | 1 | 精確驗證三個 PID 均已停止；未重試、未碰代理或服務程序 |
+| 串行 verifier tests 的 5 分鐘工具上限於 nodepool MSVC link 階段到期 | 1 | 精確清理本命令 PID；不再串接兩個 gate，owner 完成後以 15 分鐘上限分開重跑並保留輸出 |
+| Worker config 搜尋同時包含不存在的 `hivemind-rs/.env.example`，使並行讀取整體回傳非零 | 1 | 不重跑不存在路徑；以已定位的 config `lib.rs` 精確區段與 Worker Cargo.toml 分開讀取 |
+| 首次重現 host locked-metadata blocker誤加 `--no-deps`，繞過 reviewer觸發的完整 lock解析 | 1 | 不把通過視為GREEN；改跑 reviewer原始命令，僅將成功JSON輸出導向 null以保留exit/stderr |
+| 假設 proto build輸出名為 `hivemind.rs`，generated wrapper搜尋無結果 | 1 | 先列出實際 build out檔名再查；不重跑錯誤filter |
+| `rg --files` 預設尊重 target ignore，搜尋 generated proto wrapper回傳1 | 1 | 後續若仍需要 generated source，使用 `rg --files -uu` 或直接讀 tonic-build template；未重跑錯誤命令 |
+| Admission接手owner誤以default MSVC link Worker focused test，rustc停在既知MinGW `libtailscale.a`不相容路徑 | 1 | 中斷agent與精確compile tree，改派所有相關link tests走`x86_64-pc-windows-gnu`；不重跑MSVC |
+| GNU link CPU診斷同時查兩個PID，其中一個剛退出使Get-Process回傳1 | 1 | 已取得仍存活PID狀態，不原樣重跑；後續逐PID使用SilentlyContinue |
+| Scheduler GNU full gate的timeout cleanup test在高併發下未建立PID marker | 1 | 69 passed/1 failed/1 ignored；先等reviewer cargo清空，再serial focused重現，驗證是否為helper startup/deadline耦合，不先調常數 |
+| 向既有 admission 代理送出 follow-up 時 collaboration provider 回報 `custom` 不存在 | 2 | 不原樣重試；代理仍在執行且會自行收到子 reviewer 結果，將 review BLOCK 持久化並由 coordinator 在回傳時驗收 |
 | 首次持久化補丁因 findings 檔頭比對失敗 | 1 | 拆分為小補丁，避免部分更新 |
 | MSVC workspace test 無法連結 MinGW `libtailscale.a` | 1 | 依既有平台契約改用 `x86_64-pc-windows-gnu`，246 tests 通過 |
 | `postcard`／`bincode` 引入未維護依賴警告 | 2 | 改用 workspace 既有 `serde_json`，新警告歸零 |
@@ -140,7 +159,101 @@
 | fixture 分析使用 `System.Text.Json.JsonDocument`，Windows PowerShell 5.1 無該型別 | 1 | 改用內建 `ConvertFrom-Json` 讀結構；receipt 精確 byte 數由 Rust/serde_json 同一 codec 量測，不以 PowerShell 重編碼冒充精確值 |
 | focused test 加 `--exact` 但只給短 test 名，結果 0 tests | 2 | 兩次皆不計為通過；改給完整 module-qualified test path 後重跑 |
 | 真 fixture 正向 verifier 回 `UntrustedImageId` | 1 | 先比較 fixture、最新 methods 產物與 pinned ID，追查 guest image 漂移根因；未直接改常數 |
+| 恢復狀態文件首個 patch 因一處空白未精確匹配而失敗 | 1 | 先以 `rg -n` 讀取精確行，再用較小 patch 成功更新；未部分寫入 |
+| 讀取 zkVM workspace 時誤以 `hivemind-rs` 為相對根目錄 | 1 | 改用已確認的 `..\\zkvm\\managed-proof`，不重複不存在的路徑 |
+| 一次 `cargo test` 誤傳兩個 positional test filter | 1 | Cargo 只接受單一 filter；改用共同 `queue` filter 後兩項測試同時通過 |
 
 ## 歷史
 
 上一輪完整平台驗證已完成，摘要保留於 `docs/platform-validation-state.md`；本計畫從該乾淨基線開始。
+
+## 2026-08-09 續作 checkpoint
+
+- 狀態：`running`；尚不可宣稱可發布。
+- 已完成可提交前驗證：verifier／settlement full scheduler gate（70 passed、1 intentional ignored）與 GNU clippy；Admission caps final review `CLEAR / APPROVE`。
+- Verifier kill/reap 測試已移除子程序排程依賴：父端於 `spawn` 後觀察 PID，production 1 秒 deadline 不變。
+- 已提交：`03a080e feat(proof): isolate verified settlement`。
+- 已提交：`367c71d feat(api): enforce managed task admission caps`。
+- 下一步：精確提交 verifier、prover sidecar protocol、admission caps 三個獨立切片，之後以 TDD 實作 Worker shared cancellation、supervisor cleanup、bounded prover sidecar、RPC caps/deadlines。
+- 發布阻擋：Worker 尚未回傳 managed proof；runtime limits/guest attestation 尚未重建；native Windows RISC Zero prover 無官方支援，需限定 Linux/macOS prover host 或提供受支援的 Linux/WSL 部署策略。
+
+## 2026-08-09 持續執行狀態
+
+| 項目 | 狀態 | 證據／下一步 |
+|---|---|---|
+| Verified settlement | 已提交 | `03a080e`；scheduler/nodepool/clippy gates 已通過 |
+| Managed admission caps | 已提交 | `367c71d`；final review `CLEAR / APPROVE` |
+| Prover protocol／sidecar | 已提交 | `6e7af38`；protocol 13、harness 5、clippy/fmt/locked metadata 綠，review `CLEAR / APPROVE` |
+| Worker proof 回傳 | 未開始 production 接線 | 目前固定 `managed_proof: None`；先寫 RED integration test |
+| Worker cleanup/cancel | 未完成 | future drop active-task leak、`spawn_blocking` lifecycle 需 supervisor/RAII 設計 |
+| RPC caps/deadlines | 未完成 | whole request/response cap、connect timeout、20-minute execute deadline |
+| Runtime limits／attestation | 未完成 | guest image 會漂移；需 Linux prover 重建 fixture/attestation |
+| Packaging／cross-platform | 未完成 | Windows native RISC Zero prover 不受官方支持；需 Linux/macOS 或 WSL 策略 |
+| End-to-end release gates | 未完成 | 惡意案例、資源釋放、多節點、audit、release packaging 尚待執行 |
+
+### 恢復順序
+
+1. 僅用精確路徑確認 sidecar source/harness 與 staged diff；絕不 stage `tdd-red/target`。
+2. 封存 sidecar 後，從 Worker lifecycle 的第一個 RED test 開始。
+3. 不跳過 cleanup/cancel/resource-release coverage，也不以 proof-only cap 取代 whole response cap。
+4. 最後以受支持 Linux/macOS 或已驗證 Linux/WSL proving 路徑完成真實 proof 與多節點發布驗證。
+
+## 2026-08-09 最新執行紀錄
+
+- [x] RPC transport hardening 已提交：`1a9fa8f feat(rpc): bound worker proof transport`。Worker RPC 全訊息上限為 4 MiB、連線上限 5 秒、執行 RPC deadline 為 20 分鐘；endpoint 解析、連線與 tonic transport 失敗都會安全重派，不扣 Worker reputation。
+- [x] Worker proving integration 已提交：`d99c8f7 feat(worker): generate managed proofs safely`。managed task 只有 native 執行與 sidecar proof 都成功才回報成功；proof 缺失、sidecar 非正常輸出、取消、逾時或超量資料都 fail closed。
+- [x] 子程序回收已涵蓋 timeout、取消及 proof future 被中止：同步 kill、獨立 reaper、reap 後才釋放 proving permit；Worker active-task registry 由 supervisor/RAII 持有，呼叫端 future 被 drop 仍可清理。
+- [x] 本機 GNU Worker 測試目前 81/81 通過；sidecar focused 15/15、Worker clippy `-D warnings`、Worker binary compile、格式與 diff check 均通過。兩個 code review 均已 APPROVE/CLEAR。
+- [ ] 下一個不可略過的 release gate：Worker 與 zkVM guest 改用相同有限 runtime limits，重新建立 guest image ID、attestation、真實 receipt fixture，並在支援的 Linux/macOS prover host 做實際 proof 與多節點 E2E。
+- [ ] sidecar 尚未被正式 worker image/Compose 打包；未配置 `MANAGED_PROVER_EXECUTABLE` 時 managed task 會明確失敗，不可宣稱可發布。
+
+## 2026-08-09 Runtime safety continuation
+
+狀態：`running`，尚未達可發布等級。
+
+已完成本機提交 `097c98a fix(runtime): enforce finite managed execution limits`：Worker 與 zkVM guest 現在共用有限的 `ExecutionLimits::default()` 安全界限，任務／envelope budget 仍是唯一計費上限；depth-65 回歸測試已證明舊 unlimited 策略會錯誤放行。
+
+目前 release blocker 與後續順序：
+
+1. 以 TDD 加入「不先配置巨大字串」的 canonical return renderer 與中間值配置界限；現有 `max_output_bytes` 只限制 `print`。
+2. 維持 Worker、guest 與 native claim parity test 的完全一致行為。
+3. 在支援的 Linux/macOS prover host 重建最終 guest、更新 trust pin/image ID/attestation/真實 receipt fixture，並跑真 proof。
+4. 將預建 Linux prover sidecar 納入 release Worker image；不能破壞本機開發 Docker 流程或要求 runtime Docker-in-Docker。
+5. 執行多節點 Docker E2E、資源釋放與惡意 Worker 測試後，才能重新評估發布資格。
+
+本輪 owner/checkpoint：`runtime_value_limits_tdd` 正在 shared runtime 實作與驗證 bounded renderer／value-allocation guards；回報條件是可重現的 RED→GREEN、完整 runtime test 與介面摘要。完成後由 coordinator 接線到 Worker、guest、native claim parity test 並進行獨立審查。
+
+## 2026-08-10 Bounded renderer 完成與發布差距重新盤點
+
+本輪提交（皆為本機 commit，未 push）：
+
+- `9ab1ffc test(worker): deflake managed stop cancellation test`
+- `0158129 fix(runtime): bound canonical output and value materialization`
+
+finding #29 已關閉：`render_output_bounded` 在配置前逐次檢查，JSON escaping 以
+`serde_json` 為基準釘住；per-value（canonical bytes／collection items／depth）與
+cumulative materialization 上限皆為固定寬度 u64 邏輯位元組，Worker、zkVM guest 與 host
+golden-vector claim 三者共用同一 renderer。這些只是安全上限，不計入 `usage_units`。
+
+同時修正一個既有測試 race：`stop_task_execution` 在 `execute_task` 記錄 assignment
+之前會回 `PermissionDenied`，而 poll loop 容忍 `success=false` 卻 unwrap 了 `Result`。
+修正前 4/12 通過，修正後 15/15。
+
+驗證（`x86_64-pc-windows-gnu`）：runtime 25、worker-executor lib 83、managed-proof 15、
+task-scheduler lib 75（1 intentional ignored）、clippy `-D warnings`、`cargo fmt --all` 全綠。
+
+階段 3 的勾選框先前已過期；本輪比對程式碼後修正為 complete。實際尚存的發布差距：
+
+1. Guest image ID、build attestation 與真實 receipt fixture 因 guest source 改變而全部過期，
+   必須在支援的 Linux/macOS prover host 重建並跑一次真 proof。
+2. Prover sidecar 未被打包：`docker-compose.yml`、`docker-compose.test.yml` 與 `.env.example`
+   完全沒有 `MANAGED_PROVER_EXECUTABLE`，而該 config 預設為空字串，因此目前用 Compose 起的
+   worker 會讓每一個 managed task 都失敗。這是目前最硬的部署阻擋。
+3. 階段 4 尚未開始：沒有 off/observe/enforce rollout mode，也沒有 proof verification
+   metrics 與 audit events；缺這個代表啟用強制驗證是全有全無，沒有觀察期。
+4. 階段 5 尚未開始：惡意 Worker 測試、多節點 Docker E2E、資源釋放、依賴授權與可重現 guest build。
+5. 經濟模型未定案：單次 proving 約 570-580 秒，對一個毫秒級 managed function 而言，
+   enforce 前需要先有明確決定，否則階段 4 完成也不會真的敢開。
+
+Windows 原生無法編譯 `risc0-circuit-rv32im-sys`（C++ 需 `/std:c++20`），這在
+`cargo check` 進入本專案 crate 之前就失敗，屬既有環境限制，與本輪變更無關。
