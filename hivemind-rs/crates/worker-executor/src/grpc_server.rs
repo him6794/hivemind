@@ -1258,17 +1258,19 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stop_task_execution_rpc_cancels_running_managed_function() {
+        // Bounded managed limits make every real managed function finish in
+        // milliseconds, so cancellation is asserted deterministically with an
+        // injected runner that only returns once cancellation is observed.
         let tmp = TempDir::new().unwrap();
-        let service = Arc::new(test_service(tmp.path()));
+        let service = Arc::new(test_service_with_cancellable_runner(tmp.path()));
         let task_id = "grpc-stop-managed-function".to_string();
-        let input = format!("{{\"items\":[{}]}}", "1,".repeat(500_000) + "1");
         let execute_service = service.clone();
         let execute_task_id = task_id.clone();
         let execute = tokio::spawn(async move {
             execute_service
                 .execute_task(Request::new(ExecuteTaskRequest {
                     task_id: execute_task_id.clone(),
-                    torrent: input,
+                    torrent: "null".into(),
                     resource_limits: Some(ResourceSpec {
                         cpu_cores: 1,
                         memory_mb: 1024,
@@ -1281,7 +1283,7 @@ mod tests {
                         storage_available_gb: 1,
                     }),
                     runtime: "managed-function-v0".into(),
-                    task_source: "let total = 0; for item in get(input, \"items\") { let total = total + item; } return total;".into(),
+                    task_source: "return 1;".into(),
                     token: bound_token(test_private_key_pem(), ASSIGNED_OWNER, &execute_task_id),
                     managed_budget_units: hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS,
                 }))
@@ -1289,16 +1291,35 @@ mod tests {
                 .unwrap()
                 .into_inner()
         });
-        tokio::time::sleep(Duration::from_millis(50)).await;
 
-        let stop = service
-            .stop_task_execution(Request::new(StopTaskExecutionRequest {
-                task_id: task_id.clone(),
-                token: bound_token(test_private_key_pem(), ASSIGNED_OWNER, &task_id),
-            }))
-            .await
-            .unwrap()
-            .into_inner();
+        // Poll instead of sleeping a fixed interval so the stop request never
+        // races task registration.
+        let mut stop = None;
+        for _ in 0..600 {
+            match service
+                .stop_task_execution(Request::new(StopTaskExecutionRequest {
+                    task_id: task_id.clone(),
+                    token: bound_token(test_private_key_pem(), ASSIGNED_OWNER, &task_id),
+                }))
+                .await
+            {
+                Ok(response) => {
+                    let attempt = response.into_inner();
+                    if attempt.success {
+                        stop = Some(attempt);
+                        break;
+                    }
+                }
+                // `execute_task` records the task assignment as part of the
+                // request, so a stop that arrives first is rejected as an
+                // unauthorized assignment rather than an unknown task. Treat
+                // that exactly like a not-yet-running task and keep polling.
+                Err(status) if status.code() == tonic::Code::PermissionDenied => {}
+                Err(status) => panic!("stop_task_execution should not fail: {status:?}"),
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let stop = stop.expect("stop_task_execution should observe the running task");
 
         assert!(stop.success);
         assert_eq!(stop.status_message, "Stop requested");
@@ -1353,6 +1374,43 @@ mod tests {
             managed_receipt_json: Some("{}".into()),
             managed_proof,
         }
+    }
+
+    fn test_service_with_cancellable_runner(base: &std::path::Path) -> GrpcWorkerNodeService {
+        let mut config = HivemindConfig::default();
+        config.executor.sandbox_dir = base.join("sandbox").to_string_lossy().to_string();
+        config.auth.jwt_secret = CONTROL_PLANE_SECRET.into();
+        config.auth.worker_execution_public_key_pem = test_key_pair().1.clone();
+        let executor = Arc::new(WorkerExecutor::new_with_task_runner(
+            config.clone(),
+            |task: hivemind_models::Task, mut cancellation: tokio::sync::watch::Receiver<bool>| async move {
+                while !*cancellation.borrow() {
+                    if cancellation.changed().await.is_err() {
+                        break;
+                    }
+                }
+                Ok(crate::TaskResult {
+                    task_id: task.task_id.clone(),
+                    success: false,
+                    output: None,
+                    error: Some("Task execution stopped".into()),
+                    exit_code: 1,
+                    cpu_time_ms: 0,
+                    wall_time_ms: 0,
+                    peak_memory_mb: 0,
+                    managed_executed_ops: 0,
+                    managed_output_bytes: 0,
+                    managed_receipt_json: None,
+                    managed_proof: None,
+                })
+            },
+        ));
+        GrpcWorkerNodeService::new(Arc::new(WorkerGrpcState {
+            config,
+            executor,
+            worker_id: Some(TEST_WORKER_ID.into()),
+            reports: Mutex::new(HashMap::new()),
+        }))
     }
 
     fn test_service(base: &std::path::Path) -> GrpcWorkerNodeService {
