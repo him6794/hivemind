@@ -1,4 +1,78 @@
-﻿# Full Test And Review Findings
+# Full Test And Review Findings
+
+## Worker prover／RPC／lifecycle seam map（2026-08-09）
+
+- Scheduler `task-scheduler/src/dispatcher.rs::execute_on_worker` 目前直接 `WorkerNodeServiceClient::connect(...).await` 再呼叫 `execute_task`，沒有 explicit connect timeout、約 570 秒 proving 所需的 RPC deadline，亦沒有 client encode/decode caps。
+- Worker server startup 在 `hivemind-bin/src/lib.rs` 未對 Worker service 配置 message-size caps；`worker-executor/src/grpc_server.rs` 所有 `ExecuteTaskResponse` branch 仍固定 `managed_proof: None`。
+- `worker-executor/src/lib.rs::WorkerExecutor::execute_task` 在 await 前插入 `active_tasks`、正常返回後才 remove；future 若被 drop，row 可能殘留，應以 RAII guard 做 drop-safe cleanup。
+- `worker-executor/src/executor.rs::run_task_with_cancel` 使用 `spawn_blocking` 與 atomic cancellation；cancel branch 會等待 blocking task，但外層 future 被 drop 時 blocking work 可能失去追蹤，需在 prover/lifecycle 切片以可注入 runner 做 RED→GREEN。
+- 現有可重用 tests/helpers：dispatcher fake worker servers、Worker managed runtime tests、grpc_server contract tests、proto proof round-trip；下一步先建立 RPC transport cap/deadline 與 active-task drop cleanup 的 RED 測試。
+- 精確 root cause：active row cleanup與 cancellation都綁在被 gRPC/drop 的 `execute_task` future；future drop時 `oneshot::Sender` 被移除，但 `run_task_with_cancel`也同時被 drop，來不及把內部 AtomicBool設為 true，`spawn_blocking` JoinHandle因 drop而 detached。
+- 建議 TDD 架構：共享 cancellation handle（AtomicBool供同步 runtime檢查 + async notification供 sidecar select），outer request drop只負責 signal；獨立 Tokio supervisor持有 active-row RAII guard並等待 blocking/prover child完成，因此即使 request future被 drop，仍會 cancel、reap/await並最後remove row。
+- 只加簡單 RAII remove guard會讓 UI看起來已釋放但背景 blocking仍在跑，屬於掩蓋資源洩漏，不能採用。
+- Workspace使用本地 cached tonic 0.13.1（不是先假設的0.12）；RPC timeout/message-size實作必須依此版本 generated client/server API與 `Endpoint` source驗證，避免憑記憶寫錯builder chain。
+- Tonic 0.13.1 primary source確認 `Endpoint::{timeout,connect_timeout}` 及 client/server `Grpc::{max_decoding_message_size,max_encoding_message_size}` 都是 builder-by-value API；下一步需定位實際 generated service wrapper是否轉曝同名方法，若否則用 `Endpoint` + generated client builder。
+- 實際 `nodepool.rs` generated wrapper確認 `WorkerNodeServiceClient`與`WorkerNodeServiceServer`都轉曝 `max_decoding_message_size`／`max_encoding_message_size`。Scheduler可用 `Endpoint`設定connect/overall timeout後 `WorkerNodeServiceClient::new(channel)`套caps；Worker server可在add_service前直接套caps。
+- `ExecuteTaskResponse`同時含最多1 MiB `status_message` output、64 KiB legacy receipt與最多2,166,784 B proof submessage；合法整包約3.13 MiB，仍低於tonic預設4 MiB，但不可把decode cap設成proof-only值。應新增shared whole-response cap（各field cap總和+protobuf overhead）並在client/server兩端顯式套用。
+- `ExecuteTaskRequest`合法source+input約1.06 MiB，另含task id/runtime/token/resource spec；目前token只有4 MiB transport間接上限。Worker server decode cap可先顯式設2 MiB，後續application layer另加合理token byte cap，避免decode後昂貴JWT處理超大字串。
+- Metis review確認 supervisor+shared cancellation方向正確，但要求明確error taxonomy：queue full/wait timeout/duplicate local admission要回 tonic error供scheduler無懲罰redispatch；native user failure才回 `success=false`；sidecar malformed/nonzero/timeout必須kill/reap且fail closed。
+- Request future需持有 drop guard；normal response前disarm，disconnect/drop則 signal。同一 cancellation handle也供 `stop_task_execution` idempotent signal與 blocking runtime AtomicBool檢查。
+- Supervisor必須在成功insert後立即擁有 active-row RAII guard與response sender；native完成後、spawn prover前再檢查 cancellation，避免已斷線任務浪費約570秒 proving。
+- Worker shutdown仍是獨立風險：detached supervisor依賴 Tokio runtime存活；sidecar至少需 `kill_on_drop`、Windows kill-on-job-close與Unix parent-death/process limit策略，並加入 fake long-running child的drop/timeout/reap測試。
+- 現有worker-execution token TTL 300秒短於 proving，但只在RPC入口驗證；不得在proof中途新增token revalidation，否則合法570秒proof必然失敗。Scheduler ExecuteTask deadline需另設為至少20分鐘，proof child timeout可先設15分鐘。
+
+## Verifier／settlement 切片重審（2026-08-09）
+
+- Parent verifier 在 encode 前限制 proof-only envelope cap，admission 為 1 active + 8 waiters、整體 deadline 1 秒，所有 subprocess error/timeout path 都呼叫 kill/reap；stdout 僅允許 4 KiB claim JSON。
+- `QueueFull` 與 queue wait `QueueDeadlineExceeded` 會把 task reset 為 pending，不寫 Worker failure；真正 child deadline、process/crypto/claim/binding failure 仍 fail closed 且歸責該 Worker result，已消除原 review 的 fairness MEDIUM。
+- Dispatcher 完成 managed task 前先做 application response caps、proof presence、isolated crypto verification 與全 binding；資料庫 settlement 只採 verified claim 的 usage/output/claim JSON，legacy worker scalar/receipt 不參與結算。
+
+## Admission caps final inspection（2026-08-09）
+
+- 四個Master direct task-ID RPC現在都在token驗證與scheduler/state access前套`is_safe_task_id`並回tonic `InvalidArgument`；無token+oversize RED原為`Unauthenticated`，GREEN證明順序已修正。
+- Runtime-bypass integration test改用`connect_lazy` no-DB state，合法test token後會在DB access前拒絕unsupported runtime；不存在fixture時不再silent return。
+- Worker report output/result/usage task IDs也共用255-byte/safe-ID gate；managed source/input/budget/runtime caps在Master API、Node Manager與Worker入口均有負向/boundary測試。
+- Proto目前仍只有proof-only cap，whole ExecuteTaskResponse transport cap確認留給下一TDD slice；不應因此擴大admission commit scope。
+
+## Managed runtime resource-limit audit（2026-08-09）
+
+- `ExecutionLimits::default()` 已有 1,000,000 ops、64 call depth、1 MiB output、100,000 loop iterations；但 native Worker 與 zkVM guest 都以 `..ExecutionLimits::unlimited()` 僅覆寫 user budget，故 depth/loop/output/ops 目前實際不受上限。
+- Runtime 確實在 `Evaluator::charge`、function call、`Stmt::For`、`Stmt::Print` 分別實作 ops/usage、depth、iteration、print output 限制；source/input byte caps 則只存在 transport admission layer。
+- 只改 Worker caller policy 不會漂移 guest ID，但會造成 native execution 與 guest proving semantics 不一致，最後 proof output/binding 可能失敗，因此不能當正式修正。
+- 若讓 guest 與 native 一致採 bounded/default limits，必須改 guest 或 shared runtime使用方式，會重建 ELF、更新 pinned image ID/attestation/真 fixture，並再跑約 570 秒 proving；這是獨立高成本 TDD slice，不可偷偷混入 sidecar 接線。
+- 最小不漂移 guest 的安全措施是維持既有 runtime semantics，同時先完成 source/input/budget admission、bounded prover queue/process、RPC caps 與 cancellation；recursion/loop/output 執行上限列為後續 guest-version upgrade gate，發布前仍必須完成。
+
+## Prover protocol／host adapter review notes（2026-08-09）
+
+- Protocol 是 guest-independent crate；request/response 都 `deny_unknown_fields`、先限制 encoded bytes 再 decode、再限制 decoded fields，task/source/input/budget 與 journal/receipt/scheme caps皆 fail closed。
+- Sidecar outer JSON response cap刻意涵蓋 receipt JSON 作為字串後的 escaping；Worker 後續轉 protobuf 時仍應另用 proof-only cap，不可直接把 sidecar stdout cap當 gRPC cap。
+- `handle_prover_request_with` 在呼叫昂貴 prover 前先 `request.validate()`；`WorkerProofEnvelope -> ManagedProverResponse` 在輸出前再驗證 scheme/journal/receipt caps。最終 crypto/binding trust仍在 Nodepool verifier，不信任 sidecar僅做 syntactic validation。
+- Admission proto 與 guest-independent protocol 各自定義相同 255 B／64 KiB／1 MiB／1,000,000 caps，存在未來漂移風險；Worker接線 slice需要 compile-time equality assertions或集中可共享的最小 constants crate，且不得把 tonic graph拉進 prover。
+- Sidecar binary 先把完整成功 response serialize到記憶體才寫 stdout，validation/prover失敗時 stdout保持空且 stderr固定；extra args、malformed/unknown/trailing/oversized input都在 prover前拒絕。Worker仍必須以 nonzero exit優先忽略任何 partial stdout，不能假設 OS write failure可回滾已寫 bytes。
+- 為避開 Windows RISC Zero host compile，tests以 `src/bin/tdd-red` nested scratch workspace把同一 binary當 lib並替換 backend；可驗證 CLI contract，但 `tdd-red` 命名、獨立 lockfile與 production source旁的 harness是維護性觀察點，等待獨立 reviewer判定是否需重構。
+- Production stdout目前沒有 explicit flush；正常 process teardown通常會 flush，但真 subprocess contract最好在 Worker接線前以 real lightweight executable test確認，或在成功 write後明確 flush並加入 failure handling。
+- 獨立 code review 為 BLOCK：host新增 protocol dependency但 `zkvm/managed-proof/Cargo.lock` 未更新；因此 locked metadata在進入任何 RISC Zero compile前就失敗。必須先重現RED、只更新該 workspace lock、再以相同 `cargo metadata --locked` 轉GREEN。
+- 該 HIGH 已依 exact RED→GREEN 修正：offline lock regeneration diff僅為 `hivemind-managed-proof-zkvm` 加 local dependency及新增 `hivemind-managed-prover-protocol` package，沒有 registry version漂移。
+- Worker config目前只有 legacy `monty_executable`與一般 executor timeout/concurrency，沒有 prover path/timeout；接線時需新增明確 sidecar executable與約900秒 proving timeout，不能挪用不再執行的 Monty設定。
+
+## Prover packaging/deployment map（2026-08-09）
+
+- Windows package只建/放 `hivemind-bin.exe`、`monty.exe`、UI、manifest/checksums；Linux Docker image只建/放主binary與Monty。新prover sidecar尚未進任何package、manifest、launcher、compose或release contract test。
+- 需修改 `scripts/package-worker-windows.ps1`、`scripts/build_windows_x86_64.sh`、`hivemind-rs/Dockerfile`、`docker-compose.yml`與對應PowerShell contract/smoke tests，並新增sidecar path env/config；Cloudflare artifact manifest若分開下載也需加入檔案與checksum。
+- Nodepool verifier仍是主binary hidden mode，不需額外verifier artifact；Worker prover是含RISC Zero `prove` graph的獨立重binary，不能混為同一包裝問題。
+- 目前Windows host無法建prover sidecar（上游C++17/C++20與methods host-link blocker）；在找到官方修正/可升級版本或正式WSL策略前，Windows managed Worker不可宣稱可發布。單純包Linuxbinary並改名`.exe`無效。
+- RISC Zero官方資料確認v3.0.6仍是current stable，但安裝/預編譯host只列Linux與macOS；官方issue把Windows描述為未來可能工作，沒有受支持的native Windows prover配置。
+- 官方current source的`build_kernel`仍只加`/std:c++17`／`-std=c++17`，與本機designated-initializer C7555證據一致；沒有官方Windows workaround或更新stable可直接升級解決。
+- 因此發布策略只能二選一並需明示：managed Worker先限定Linux/macOS supported host，或另建受控Linux prover service/WSL integration。Native Windows managed proof不能在本版本宣稱支援。
+- Primary references：`https://github.com/risc0/risc0/releases`、`https://github.com/risc0/risc0/blob/3bbcd44d6459b9ef6ac0df3846dc9215514934e8/website/api/zkvm/install.md`、`https://github.com/risc0/risc0/issues/1339`、`https://github.com/risc0/risc0/blob/3bbcd44d6459b9ef6ac0df3846dc9215514934e8/risc0/build_kernel/src/lib.rs#L264-L269`。
+
+## Worker prover／RPC／lifecycle seam map（2026-08-09）
+
+- Scheduler `task-scheduler/src/dispatcher.rs::execute_on_worker` 目前直接 `WorkerNodeServiceClient::connect(...).await` 再呼叫 `execute_task`，沒有 explicit connect timeout、約 570 秒 proving 所需的 RPC deadline，亦沒有 client encode/decode caps。
+- Worker server startup 在 `hivemind-bin/src/lib.rs` 未對 Worker service 配置 message-size caps；`worker-executor/src/grpc_server.rs` 所有 `ExecuteTaskResponse` branch 仍固定 `managed_proof: None`。
+- `worker-executor/src/lib.rs::WorkerExecutor::execute_task` 在 await 前插入 `active_tasks`、正常返回後才 remove；future 若被 drop，row 可能殘留，應以 RAII guard 做 drop-safe cleanup。
+- `worker-executor/src/executor.rs::run_task_with_cancel` 使用 `spawn_blocking` 與 atomic cancellation；cancel branch 會等待 blocking task，但外層 future 被 drop 時 blocking work 可能失去追蹤，需在 prover/lifecycle 切片以可注入 runner 做 RED→GREEN。
+- 現有可重用 tests/helpers：dispatcher fake worker servers、Worker managed runtime tests、grpc_server contract tests、proto proof round-trip；下一步先建立 RPC transport cap/deadline 與 active-task drop cleanup 的 RED 測試。
 
 ## ZK 函式計費證明（2026-08-07，進行中）
 
@@ -69,6 +143,10 @@
 - `methods/build.rs` 預設選擇 digest-pinned Docker builder；WSL/native Linux 必須明確設 `HIVEMIND_ZKVM_USE_DOCKER=0` 才會走 `embed_methods()` 的本地 guest toolchain。漏設時會在 proving 前明確失敗，並非 prover 或 guest 程式錯誤。
 - Worker→Nodepool 的正確 proof transport 是 `ExecuteTaskResponse`；`TaskResultUploadRequest` 只承載 torrent result reference。新增 optional protobuf `ManagedProofEnvelope`，保留原有欄位編號與舊 client wire compatibility。
 - Prover workspace 不應依賴整個 `hivemind-proto` tonic graph。未提交的交叉依賴實驗已撤回；可信 Nodepool verifier adapter 應在主 workspace 擁有 protobuf→receipt 轉換，Worker prover只負責輸出 backend envelope。
+- Worker production path 已追到 `grpc_server::execute_task -> WorkerExecutor::execute_task -> executor::run_task_with_cancel`：native managed runtime 成功後只回 legacy receipt/scalars，三個 `ExecuteTaskResponse` 分支仍全部固定 `managed_proof: None`，這正是目前安全 fail-closed 但無法完成 managed task 的直接原因。
+- RISC Zero host/prover 位於獨立 `zkvm/managed-proof` workspace，且依賴 methods `build.rs`；主 workspace 直接依賴會重現既知 Windows toolchain／重型 build graph 問題。實作方向固定為獨立 prover sidecar：新建不被 guest 依賴的輕量 `managed-prover-protocol` crate 擁有版本化 request/response，Worker 以有界 subprocess I/O 轉成既有 protobuf envelope，不讓 prover 依賴完整 tonic proto graph，也避免單純 transport 變更再次漂移可信 guest image ID。
+- Worker prover sidecar 必須與既有 cancel registry 同生命週期：取消、deadline 或 RPC future drop 都要終止並 reap child；同時需修正目前 `WorkerExecutor::execute_task` future 被 drop 時 active-task row 不會移除的資源生命週期風險。proving concurrency 初始上限為 1，避免單次約 11–12 core 的 proving 疊加耗盡主機。
+- Scheduler Worker client 目前是裸 `WorkerNodeServiceClient::connect(...).execute_task(...).await`：沒有 connect timeout、RPC deadline 或明示 encode/decode cap。下一切片會以 proto 的 2,166,784-byte contract 設雙向 message cap，並用足以容納約 9.5 分鐘 proving 的明示 deadline。
 
 ## Fixed In Current Repair Stream
 
@@ -1146,3 +1224,64 @@ Status: Accepted (dev-only, never ships in the release binary). The executor `ca
 - Docker integration test command could not complete because Docker Desktop returned a 500 error while reading `redis:7-alpine` image metadata. This is an environment/tooling failure, not a code test failure.
 - Docker integration remained blocked after retrying both `desktop-linux` and `default` Docker contexts; both returned Docker API 500 on `/version`.
 - `psql` is not in PATH, so direct ad hoc SQL verification was unavailable; runtime API verification was used instead.
+
+## 2026-08-09 managed proof recovery findings
+
+- The verifier kill/reap regression was a test-observation race, not a verifier lifecycle failure: the old test relied on a newly spawned child receiving CPU time to write a PID file before the verifier deadline. The verifier had already spawned and killed the child in the observed failure. Parent-side `Child::id()` capture immediately after `spawn` is the correct lifecycle observation point; it preserves the production one-second deadline.
+- After that observation fix, `managed_proof_verifier::tests::timeout_kills_and_reaps_child` passed in isolation, the scheduler library suite passed 70 tests with one intentionally ignored real-fixture acceptance, and GNU-target clippy with `-D warnings` passed.
+- Admission caps final review is `CLEAR / APPROVE`: direct Node Manager task-ID RPCs now reject unsafe/oversized IDs before auth/state access, and the runtime-bypass test no longer silently skips when a DB fixture is absent.
+- Worker lifecycle mapping confirms a production gap rather than an implementation detail: `WorkerExecutor::execute_task` removes `active_tasks` only after its awaited future returns; request future drop can therefore leave state behind while `spawn_blocking` continues without an owned supervisor. The next implementation must give a detached supervisor the cleanup guard and a shared cancellation signal.
+
+## 2026-08-09 continuation checkpoint
+
+- The two local commits (`03a080e`, `367c71d`) are progress, not release evidence. Worker-side proof production, cleanup, limits, packaging, and E2E validation remain mandatory.
+- Worker must only depend on the lightweight managed-prover protocol and invoke an external sidecar; it must not pull `risc0-zkvm` proving into the main Worker workspace.
+- A valid sidecar response is not transport-safe by itself. After conversion to `ManagedProofEnvelope`, verify protobuf encoded size against `MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES`; set a separate larger cap for whole ExecuteTaskResponse because it includes status/output as well as proof.
+- Native Windows RISC Zero proving is an upstream support limitation, not a compiler-flag task. Release scope must name a supported Linux/macOS prover host or an explicitly validated Linux/WSL path.
+- `zkvm/managed-proof/host/src/bin/tdd-red/target` is generated output and must never be staged. Deletion of that precise path was denied by environment policy; no broad cleanup was attempted.
+- Shell stalls in the preceding turn were environmental. They produced no acceptable test/commit evidence; all future gates must be rerun or independently verified after recovery.
+- The prover sidecar slice is now committed as `6e7af38 feat(proof): add managed prover sidecar`. It remains transport/protocol infrastructure until Worker invokes it, validates the envelope, and returns it through ExecuteTaskResponse.
+
+### 2026-08-09 — Worker proof integration 與 transport fairness
+
+- Worker sidecar adapter 不使用 shell，不把 task source/input 放進命令列或公開錯誤；stdin/stdout 都有契約上限，stderr 丟棄，非零退出、畸形 JSON、超量 response、取消與逾時皆回傳固定 generic failure。
+- proving 採 process-wide concurrency 1。future 被 abort 時，`ChildCleanupGuard` 會同步要求 kill，再由獨立 native reaper 持有 child 與 semaphore permit 到實際 reap 完成；thread 建立失敗則同步 reap。這避免 runtime shutdown 或 future drop 造成孤兒 sidecar 或過早釋放 slot。
+- Worker managed result 在 native runtime 成功後仍必須成功產生 proof；否則清空 output、usage、legacy receipt 與 proof，回報失敗。QueueFull 以 gRPC `ResourceExhausted` 表達，scheduler 會重派且不扣 reputation。
+- Worker RPC response 以應用層欄位 cap 與整體 4 MiB cap 雙重檢查；scheduler/client/server 均套用同一上限。endpoint 解析、connect 及 tonic transport error 會 reset pending，不會誤記為 Worker failure；proof/binding/實際 worker 結果失敗仍維持 fail closed。
+- `TaskResult` 原有 serde 公開契約已保留。proof 使用等價的顯式 wire struct 序列化/反序列化，沒有 `skip`；舊 JSON 未含 `managed_proof` 時可相容讀成 `None`。
+- 本機重新驗證：GNU `hivemind-worker-executor --lib` 81 passed；sidecar focused 15 passed；Worker clippy `-D warnings`、worker-feature binary check、格式和 diff check 通過。RPC/scheduler review 為 CLEAR/APPROVE，Worker/sidecar review 為 APPROVE（僅 LOW 維護性 watch）。
+- 尚存 release blocker：runtime 目前仍有 `ExecutionLimits::unlimited()`；改為有限安全上限會改變 guest image ID，必須連同 attestation、fixture、Linux 實際 proving 與 image/Compose sidecar packaging 一起完成。
+
+### 29. Managed-function canonical return value 可以繞過既有 output guard
+
+狀態：Resolved（`0158129`）。`097c98a` 已讓 Worker 與 zkVM guest 的 operation、call depth、print output、loop iteration 使用有限 guard，但尚未涵蓋 canonical return value 與所有中間值。
+
+- 嚴重度：High（資源耗盡／可用性）
+- 證據：`ExecutionLimits::max_output_bytes` 只在 `Stmt::Print` 檢查。兩個 production caller 在無 print output 時都會呼叫沒有 size 參數的 `render_output(&execution.value)`；字串相加用 `format!("{left}{right}")`，list/dict 則會收集已實體化的值，沒有累積配置預算。
+- 影響：managed function 能在 print output 受限時仍建立超大的回傳值或中間 string/list/dict。只在 renderer 完成後檢查長度也不安全，因為 oversized allocation 已經發生。
+- 後續：先寫 RED 測試，再在 shared runtime 實作受限 canonical renderer 與決定性的 value-allocation safety budget；接著同步更新 Worker/guest、重新生成 guest image/attestation/fixture，並在支援 host 證明最終 source。
+
+### 29 補充：已於 2026-08-10 關閉
+
+`0158129 fix(runtime): bound canonical output and value materialization` 已補上缺口。
+
+- `render_output_bounded` 在每次 append 之前檢查上限，因此被拒絕的值不會先產生超大
+  序列化中間結果；只在事後檢查長度是不夠的。
+- 手寫 escaping 有對 `serde_json` 的等價性測試（quote、backslash、控制字元、non-ASCII），
+  避免自製 renderer 與既有表示法分歧。
+- 新增 per-value canonical bytes／collection items／depth 與 cumulative materialization
+  budget，全部為固定寬度 u64 邏輯位元組，因此 native 與 guest 決策一致。
+- 三個 production 呼叫點（Worker、guest、host golden vector）都已改用 bounded renderer。
+- Worker 超限時回傳結構化 `value_limit_exceeded` 失敗，不再回報成功。
+
+### 30. 既有 flaky test：stop_task_execution 在 assignment 記錄前回 PermissionDenied
+
+狀態：Resolved（`9ab1ffc`）。嚴重度：Low（測試可靠性，非產品行為）。
+
+`execute_task` 是在請求處理中才記錄 task assignment，因此搶先到達的 stop 請求會得到
+`PermissionDenied`（未授權 assignment），而不是「任務不在執行中」。原測試的 poll loop
+容忍 `success=false` 但對 `Result` 直接 unwrap，於是 panic 而非重試；原本的固定 50ms
+sleep 也因 bounded 限制讓真實 managed function 在毫秒內結束而不再是可靠視窗。
+
+修正：以注入式 runner 斷言取消語義，並把 `PermissionDenied` 視為「尚未註冊」繼續 poll，
+其他 status 則明確失敗。修正前 4/12 通過，修正後 15/15。

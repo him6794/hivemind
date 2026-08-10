@@ -16,7 +16,7 @@ running
 
 ## Current step
 
-階段 3：Nodepool-owned RISC Zero verifier 的真 receipt、負向鏈、資源 gate 與 focused quality gates 已 GREEN；正在以 TDD 接入 scheduler／DB 的驗證後結算路徑。
+階段 4 未開始；階段 3：verifier／settlement 已完成 focused gates，正在收斂獨立 commit；admission caps 的首輪 read-only review 發現四個 direct task-ID RPC 漏 gate，等待 owner 以 RED→GREEN 修正；prover sidecar 與 Worker lifecycle/RPC 接線並行盤點中。
 
 ## Completed
 
@@ -45,29 +45,110 @@ running
 - Verifier feature tests 25 passed；包含一筆 within-cap seal bit flip 確實進入 crypto gate 並回 `InvalidProof`；release warm end-to-end p99約 23.6 ms，新 process cold outlier 426.95 ms，因此 phase-1 process isolation暫定 1 s timeout／concurrency 1／128 MiB RSS。
 - Tracked host regression test會把 current methods build產生的 guest ID與 Nodepool trust pin直接比對；本輪 current-source rebuild通過，ELF/input hashes與清理證據記錄於 `docs/zk-managed-proof-build-attestation.md`。
 - Verifier focused fmt、clippy `-D warnings`、diff check 與 feature graph通過；移除不必要的 RISC Zero `std` feature 後，主 workspace `cargo audit` 為 0 vulnerabilities，並將 `event-listener` 由 5.4.1 升至 5.4.2 修正新公布的 unsound advisory。
+- `ExecutionClaim::validate_bindings` 已逐項 fail closed 驗證 protocol/runtime/cost-model、task id、source/input/output SHA-256、max budget、usage bound 與 output length；default 15 tests、all-feature 37 tests、clippy 與 package fmt 均通過，並以本機 commit `eb9894a` 保存。
+- Scheduler verified-claim 轉換的 12 個 focused tests 已完成 RED→GREEN；重播、source/input/output/budget 與 protocol/runtime/cost-model mismatch 均被拒絕，成功路徑只採用 claim 的 usage/output 並忽略 Worker legacy scalars/receipt。
+- Hidden `--verify-managed-proof` mode 已在 `hivemind-bin` 與 `hivemind-nodepool` 於 tracing/config 啟動前攔截；protobuf stdin 有 2,166,784-byte cap，stdout 只回 verified claim JSON；真 fixture、crypto tamper、malformed/trailing/oversize、exact-mode 與 backtrace-on/off 固定錯誤輸出 tests 共 11 passed，clippy/fmt/diff check 皆通過。
+- Nodepool parent verifier adapter 已完成 5 個 focused tests：全域 concurrency 1、8-slot bounded wait queue、1 秒 end-to-end deadline、timeout kill/reap、4 KiB stdout cap、nonzero/malformed/oversize fail closed，並在 Windows 使用 128 MiB Job Object process-memory hard limit、Unix 使用 hard `RLIMIT_AS`。
+- Dispatcher 已呼叫隔離 verifier；proof/subprocess/binding 任一失敗都 `fail_for_worker`，成功時只把 verified claim 的 `usage_units`、`output_bytes` 與 claim JSON交給 transaction completion；failed/valid verifier focused tests 3 passed。
+- Worker response application caps 已完成 RED→GREEN：status message 1 MiB、legacy managed receipt 64 KiB，超限在 proof/settlement 前拒絕；3 tests passed。
+- Scheduler full lib 68 tests 與 all-target clippy `-D warnings` 已通過；Windows timeout cleanup 測試原 250 ms 啟動假設在並行負載下產生 PID-marker flake，確認實際已回 `DeadlineExceeded` 且無殘留 child 後，只將 test deadline 調為 750 ms，10/10 serial 與 full 5-test suite 均通過，production 仍為 1 秒。
+- Read-only code review 為 APPROVE/WATCH、0 blockers；唯一 MEDIUM 指出 nodepool-local verifier queue 壓力不應歸責 Worker。已以 RED→GREEN 區分 `QueueDeadlineExceeded` 與真正 child deadline；`QueueFull`／queue wait timeout 會 redispatch且不寫 worker failure/attestation，其餘 verifier/binding failure仍永久 fail closed。
 
 ## Active owners
 
 - Origin: 使用者
 - Coordinator/implementer: Codex
-- Background review: complete（CLEAR／APPROVE，0 blockers）
+- Claim binding review: complete（CLEAR，0 blockers）
+- Verifier subprocess owner: complete（68 tests／clippy GREEN，review APPROVE，0 blockers）
+- Existing-binary verifier mode owner: `verifier_cli_tdd`（complete；11 tests、clippy/fmt/diff check GREEN）
+- Admission caps owner: `verifier_process_tdd`（running；首輪 review BLOCK，待修正四個 direct task-ID RPC 與 silent-return test）
+- Prover sidecar owner: `prover_sidecar_finish`（complete；locked-metadata RED→GREEN，review CLEAR／APPROVE，0 blockers，待本機commit）
+- Worker lifecycle mapper: `worker_lifecycle_map`（running；read-only，回傳 RPC/取消/資源釋放 test seams）
 
 ## Blockers
 
 - 獨立 zkVM prover/toolchain lockfile 仍有 `rsa` timing side-channel advisory（經 rzup，無修正版）；主 workspace verifier 已不再拉入有漏洞的舊 `tracing-subscriber`。
 - 單次 proving 約 9.5 分鐘，現階段不可直接啟用 enforce；需後續 timeout/queue/benchmark 設計。
-- Scheduler 尚未驗證 proof 與 task/source/input/output/budget binding，transport cap、bounded verifier process、deadline與 admission limits亦尚未接入，因此仍不可發布或 enforce。
+- Worker 與 guest 目前皆以 `ExecutionLimits::unlimited()` 僅覆寫 usage budget，故 recursion、loop、ops 與 runtime output caps 未啟用；一致修正會漂移 guest image ID，需獨立重建 attestation、fixture 與真 proof，發布前不可略過。
+- Worker execution 仍回傳 `managed_proof: None`，因此 managed task 目前會安全地 fail closed，但不能正常完成或結算；Worker prover、queue/cancel/timeout 與 RPC deadline 尚未接入。
+- Admission caps 已完成四個 direct task-ID RPC gate 與 no-DB runtime-bypass test 修正；最終 review 為 `CLEAR / APPROVE`、零 blockers，GNU full/focused tests、clippy、fmt/diff evidence 均已保留。
 - C: Docker VHD 空間不足，prover 改走 WSL/native Linux 並將 artifacts/TMP 放 D:；既有 Docker stack 已恢復且保持 healthy。
+- Worker release packages尚未包含prover sidecar；更關鍵的是RISC Zero prover host在Windows目前受上游C++/link blocker，找到官方受支持修正/升級或明確Linux/WSL部署策略前，Windows managed Worker不是可發布狀態。
+- 官方RISC Zero資料只承諾Linux/macOS first-class host；v3.0.6 current source仍固定C++17 flags，沒有官方native Windows prover workaround。因此本版本發布範圍必須明確限制managed prover host平台，或提供獨立受支持Linux proving部署。
 
 ## Next action
 
-先寫 scheduler proof-gate RED 測試，驗證成功前不得完成任務或結算。
+先完成 verifier/settlement、prover sidecar protocol、admission caps 的精確 staging 與本機 commit；接著以 RED→GREEN 接入 Worker bounded prover、RPC deadline 及取消／kill／reap。
 
 ## Next checkpoint
 
-Scheduler 對 proof 缺漏、無效、重播與 task/source/input/output/budget mismatch 全部 fail closed，且只使用 verified claim 的 usage/output 寫入結算。
+Verifier/settlement 已完成 focused/full scheduler gate（70 passed、1 intentional ignored）及 GNU clippy；三個切片各自形成獨立本機 commit後，下一 checkpoint 是 Worker RPC/prover lifecycle 的首個 RED 測試。
 
 ## Notes
 
 - Docker 測試 stack 仍供使用者測試，不停止、不清理。
 - 不 push；每個完成切片各自本機 commit。
+- Worker prover 採獨立 sidecar，不把 `zkvm/managed-proof/methods/build.rs` 或 RISC Zero `prove` graph 拉入主 workspace；版本化 transport 放在 guest 不依賴的輕量 protocol crate，以免 transport 變更漂移 image ID；Worker 負責有界 I/O 與 cancel/timeout/kill/reap。
+- Verifier kill/reap regression 已改由父端在 `spawn` 後觀察 PID，避免將子程序獲 CPU 的時機錯當成 child lifecycle；production verifier 仍採 1 秒總 deadline，沒有為測試放寬。
+- Verifier／settlement 已封存為本機 commit `03a080e feat(proof): isolate verified settlement`；提交前 scheduler full（70 passed、1 intentional ignored）、focused kill/reap、nodepool verifier（7 passed）與 GNU clippy `-D warnings` 均通過。未 push，Docker stack 未受影響。
+- Admission caps 已封存為本機 commit `367c71d feat(api): enforce managed task admission caps`；範圍限於 proto、Master API、Node Manager、Worker admission gates，final review 為 `CLEAR / APPROVE`。
+
+## Continuation checkpoint — 2026-08-09
+
+- Current status remains `running`; the project is not release-ready.
+- Next code slice is Worker-side bounded proving: validated sidecar request/response, `TaskResult.managed_proof`, supervisor-owned active-task cleanup, cancellation/timeout kill-and-reap, and explicit Worker/server/scheduler transport bounds.
+- Before release, Worker and guest require consistent finite runtime limits; guest image ID, attestation, and real-proof fixture must then be regenerated and verified.
+- Managed proof release validation requires a supported Linux/macOS prover host or an explicit verified Linux/WSL strategy; native Windows RISC Zero proving is not an accepted release path.
+- The untracked `tdd-red/target` test artifact must not be staged. Shell stalls in the prior round are not test outcomes and must not be cited as such.
+- Prover protocol/sidecar is committed as `6e7af38 feat(proof): add managed prover sidecar`; Worker integration, package delivery, and supported-host proving remain required release gates.
+
+## 2026-08-09 Worker 與 RPC 狀態
+
+已提交 `1a9fa8f feat(rpc): bound worker proof transport` 與 `d99c8f7 feat(worker): generate managed proofs safely`。
+
+- Worker 對 `managed-function-v0` 只會在 native function 執行和 sidecar proof 都成功後回覆 success；缺 proof 不可結算。
+- sidecar 有單一 proving slot、bounded stdin/stdout、timeout/cancel/abort kill-and-reap，以及 generic fail-closed error。future drop 不會讓 child 或 permit 無人管理。
+- Scheduler/Worker RPC 設定了 4 MiB 全訊息 cap、5 秒連線上限與 20 分鐘 execution deadline。connect/transport failure 會安全重派、不影響 Worker reputation；不可信 proof、binding failure 與實際 worker failure 仍 fail closed。
+- Worker 公開 `TaskResult` serde 契約已保留，proof 不會被 `skip` 或靜默遺失；舊 JSON 仍可讀取。
+- 本機 GNU Worker suite 81/81、sidecar 15/15、clippy/format/diff、worker binary compile 已通過，且兩次獨立 code review 無 blocker。
+
+此狀態仍不是 release-ready：runtime 仍需從 unlimited 改為有限安全 guard，之後必須重建 guest image/attestation/真實 fixture；還需要支援的 Linux/macOS prover host 實證、sidecar Docker/Compose 打包與多節點 E2E。
+
+## 2026-08-09 Runtime limits and current proof state
+
+本機提交 `097c98a fix(runtime): enforce finite managed execution limits` 已完成。Worker 與 zkVM guest 現在均採用有限的 default evaluator limits，同時維持 managed task/envelope usage budget 為唯一的 billing limit。depth-65 回歸測試證明舊 unlimited Worker policy 會放行、而新的 matched policy 會拒絕。
+
+這已保護 operation、recursion、print-output 與 loop 的無上限路徑，但也變更了 guest source。因此目前受信任的 guest image ID、build attestation 與真實 proof fixture 均已過期，不能用來宣稱可發布。
+
+在重新生成前還有一個 runtime safety blocker：canonical returned value 仍在 evaluation 後以沒有 size-bound API 的方式 render，且 string/list/dict materialization 沒有累積 allocation budget；`max_output_bytes` 只檢查 `print`。下一個切片會以測試先行補上 shared、allocation-safe 的限制，然後在支援的 Linux/macOS host 重建並 prove 最終 guest source、刷新 trust pin 與 fixture。
+
+Current owner/checkpoint: `runtime_value_limits_tdd` owns the shared-runtime RED→GREEN implementation. The return condition is bounded-render and materialization regression coverage plus a clean runtime verification report; the coordinator will then wire that API into Worker, guest and native claim parity before independent review.
+
+## 2026-08-10 Bounded renderer 與剩餘發布差距
+
+本機提交 `0158129 fix(runtime): bound canonical output and value materialization` 已關閉
+finding #29。`max_output_bytes` 先前只作用於 `Stmt::Print`，因此 managed function 仍可
+建立超大 canonical 回傳值或中間 string/list/dict；在 render 完成後才檢查長度並不安全，
+因為超大配置已經發生。
+
+現在 Worker、zkVM guest 與 host golden-vector claim 三者共用 `render_output_bounded`：
+逐次 append 前檢查上限，被拒絕的值不會先實體化超大序列化中間結果。手寫 JSON escaping 以
+`serde_json` 輸出為基準測試釘住，避免 backend 之間分歧。另加入 per-value（canonical
+bytes／collection items／depth）與 cumulative materialization 上限，全部使用固定寬度 u64
+邏輯位元組計數，使 native worker 與 zkVM guest 做出完全相同的 accept／reject 決定。這些是
+安全上限，`usage_units` 的唯一計費上限仍是 task／envelope budget。
+
+驗證（`x86_64-pc-windows-gnu`）：runtime 25、worker-executor lib 83、managed-proof 15、
+task-scheduler lib 75（1 intentional ignored）、clippy `-D warnings`、`cargo fmt --all` 全綠。
+
+此變更改動了共用 guest source，因此目前受信任的 guest image ID、build attestation 與真實
+receipt fixture 全部過期，必須在支援的 Linux/macOS prover host 重建並跑一次真 proof 之後，
+才能用來支持任何發布宣稱。
+
+尚存發布差距：prover sidecar 未進 `docker-compose.yml`／`.env.example`（`MANAGED_PROVER_EXECUTABLE`
+預設空字串，Compose worker 目前會讓所有 managed task 失敗）；階段 4 的 off/observe/enforce
+rollout mode、metrics 與 audit events 未開始；階段 5 的惡意 Worker 測試、多節點 Docker E2E、
+資源釋放與依賴稽核未開始；單次 proving 約 570-580 秒的經濟模型尚未定案。
+
+Windows 原生無法編譯 `risc0-circuit-rv32im-sys`（C++ 需 `/std:c++20`），失敗發生在
+`cargo check` 進入本專案 crate 之前，屬既有環境限制。
