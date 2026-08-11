@@ -48,6 +48,24 @@ fi
 
 export HIVEMIND_ZKVM_USE_DOCKER=0
 
+# The guest image ID depends on the exact guest toolchain and build environment,
+# not just on the tracked source. A prover built somewhere else embeds a
+# different guest, and the Nodepool then rejects every proof it produces —
+# managed tasks fail closed with no clue as to why. Refuse to stage such a
+# binary: this is the same equality the Nodepool enforces at settlement time.
+echo "checking that this environment reproduces the trusted guest image ID"
+(
+  cd "$prover_workspace"
+  cargo test --locked -p hivemind-managed-proof-zkvm \
+    tests::generated_guest_id_matches_nodepool_trust_pin -- --exact
+) || {
+  echo "error: this environment does not reproduce the pinned guest image ID." >&2
+  echo "       A prover built here would have every proof rejected." >&2
+  echo "       Either build where the pin was produced, or re-pin deliberately" >&2
+  echo "       and regenerate docs/zk-managed-proof-build-attestation.md." >&2
+  exit 71
+}
+
 echo "building $binary_name (this compiles the zkVM guest; expect several minutes)"
 started_at="$(date +%s)"
 (
@@ -77,11 +95,12 @@ fi
 
 cat <<'NOTE'
 
+The staged prover embeds the pinned guest: that was checked before building.
+
 Next steps:
-  1. Confirm the embedded guest matches the Nodepool trust pin
-     (RISC0_MANAGED_GUEST_ID in hivemind-rs/crates/managed-proof/src/lib.rs).
-     A mismatch makes the Nodepool reject every envelope this prover produces.
-  2. Record the binary SHA-256 and guest image ID in
-     docs/zk-managed-proof-build-attestation.md.
-  3. Rebuild the worker image so /app/prover/ picks up the staged binary.
+  1. Record the binary SHA-256 in docs/zk-managed-proof-build-attestation.md.
+  2. Rebuild the worker image so /app/prover/ picks up the staged binary.
+  3. Run one managed task end to end. A guest mismatch that somehow survives the
+     check above shows up as every managed task failing with
+     "Managed proof verification failed" in the admin audit log.
 NOTE
