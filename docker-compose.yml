@@ -66,6 +66,10 @@ services:
       # decides whether a managed task settles from a verified claim. Setting it
       # on the worker has no effect.
       MANAGED_PROOF_ROLLOUT_MODE: ${MANAGED_PROOF_ROLLOUT_MODE:-enforce}
+      # Nodepool authorizes every /api/admin/* call, so without this the admin
+      # surface is unreachable in a Compose deployment. Empty means no admins,
+      # which is the safe default.
+      HIVEMIND_ADMIN_USERS: ${HIVEMIND_ADMIN_USERS:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     ports:
       - "${NODEPOOL_GRPC_HOST_PORT:-50051}:50051"  # gRPC (nodepool)
