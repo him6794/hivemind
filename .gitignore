@@ -7,6 +7,14 @@
 # Dependency caches
 node_modules/
 .cargo/
+# ...except two tracked cargo configs. The audit policy records the prover's
+# accepted advisories (see docs/zk-managed-proof-dependency-audit.md), and the
+# workspace config carries the MinGW linker that the documented
+# x86_64-pc-windows-gnu test path needs to be reproducible on another machine.
+!zkvm/managed-proof/.cargo/
+!zkvm/managed-proof/.cargo/audit.toml
+!hivemind-rs/.cargo/
+!hivemind-rs/.cargo/config.toml
 .rustup/
 .omo/
 # Build outputs and compiler caches
@@ -20,6 +28,9 @@ tmp/
 .cache/
 artifacts/
 vendor/
+# Staged managed-proof prover sidecar: ~95 MB of Linux build output produced by
+# scripts/build-managed-prover.sh. The staging directory itself stays tracked.
+packaging/managed-prover/hivemind-managed-proof-prover
 
 # Frontend build outputs (Next.js standalone, Vite dist, Vite dep cache)
 dist/
