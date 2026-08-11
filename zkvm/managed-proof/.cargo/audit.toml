@@ -1,0 +1,26 @@
+# cargo-audit policy for the managed-proof prover workspace.
+#
+# Both entries below are advisories in RISC Zero's transitive dependency graph
+# that cannot be resolved by upgrading: one has no fixed release, the other sits
+# behind a `^0.2` requirement in an upstream crate. Each was checked for
+# reachability from the shipped prover sidecar before being accepted.
+#
+# Full reasoning, dependency paths, and the re-review trigger are in
+# docs/zk-managed-proof-dependency-audit.md. Do not add an entry here without
+# adding the matching analysis there.
+
+[advisories]
+ignore = [
+    # rsa 0.9.10 - Marvin timing side channel (no fixed upgrade available).
+    # Reached only through rzup, the RISC Zero toolchain installer, which the
+    # shipped prover never invokes; the attack also needs private-key
+    # operations, and rzup only verifies download signatures.
+    "RUSTSEC-2023-0071",
+
+    # tracing-subscriber 0.2.25 - ANSI escape sequences can poison logs.
+    # Reached only through ark-relations via risc0-groth16, which serves
+    # Groth16 receipt compression. The prover emits Composite receipts, the
+    # Nodepool verifier accepts nothing else, and the prover installs no
+    # tracing subscriber and writes no log output.
+    "RUSTSEC-2025-0055",
+]
