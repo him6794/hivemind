@@ -42,4 +42,6 @@ executor-rs/crates/*
 !executor-rs/crates/monty-typeshed/**
 !executor-rs/crates/monty-type-checking/
 !executor-rs/crates/monty-type-checking/**
+!packaging/
+!packaging/**
 !.dockerignore

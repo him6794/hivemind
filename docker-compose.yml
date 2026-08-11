@@ -62,6 +62,10 @@ services:
       TORRENT_SEED_LISTEN_ADDR: ${TORRENT_SEED_LISTEN_ADDR:-0.0.0.0:6881}
       TORRENT_SEED_ADVERTISE_ADDR: ${TORRENT_SEED_ADVERTISE_ADDR:-172.28.0.10:6881}
       TORRENT_ALLOW_LOCAL_TASK_ARTIFACTS: "false"
+      # Settlement policy belongs to the nodepool: it owns the dispatcher that
+      # decides whether a managed task settles from a verified claim. Setting it
+      # on the worker has no effect.
+      MANAGED_PROOF_ROLLOUT_MODE: ${MANAGED_PROOF_ROLLOUT_MODE:-enforce}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     ports:
       - "${NODEPOOL_GRPC_HOST_PORT:-50051}:50051"  # gRPC (nodepool)
@@ -134,6 +138,10 @@ services:
       TORRENT_BT_DIR: /app/bt_torrents
       TORRENT_ANNOUNCE_URL: ${HIVEMIND_TORRENT_ANNOUNCE_URL:-http://nodepool:6969/announce}
       MONTY_EXECUTABLE: /app/monty
+      # Proving happens on the worker; the settlement policy that consumes the
+      # resulting proof is configured on the nodepool.
+      MANAGED_PROVER_EXECUTABLE: ${MANAGED_PROVER_EXECUTABLE:-/app/prover/hivemind-managed-proof-prover}
+      MANAGED_PROVER_TIMEOUT_SECS: ${MANAGED_PROVER_TIMEOUT_SECS:-900}
       EXECUTOR_SANDBOX_DIR: /app/sandbox
       EXECUTOR_NETWORK_EGRESS_ENABLED: ${EXECUTOR_NETWORK_EGRESS_ENABLED:-true}
       EXECUTOR_NETWORK_EGRESS_MODE: ${EXECUTOR_NETWORK_EGRESS_MODE:-allowlist}

@@ -91,6 +91,8 @@ foreach ($expected in @(
 }
 
 foreach ($expected in @(
+    "!packaging/",
+    "!packaging/**",
     "!proto/",
     "!proto/**",
     "!hivemind-rs/",
@@ -180,6 +182,39 @@ foreach ($expected in @(
     if (!$dockerfileText.Contains($expected)) {
         throw "hivemind-rs/Dockerfile must preserve the built binary outside the cache mount via '$expected'."
     }
+}
+
+# Managed-function settlement depends on a proof the worker can actually
+# produce. RISC Zero has no supported Windows prover host, so the sidecar is
+# built separately and staged; if the image stops carrying it, every managed
+# task fails closed and no test below this line would notice.
+$proverStagingDir = Join-Path $repoRoot "packaging/managed-prover"
+if (!(Test-Path -LiteralPath $proverStagingDir)) {
+    throw "packaging/managed-prover must exist so the worker image can stage the managed-proof prover sidecar."
+}
+
+if (!$dockerfileText.Contains("COPY packaging/managed-prover/ /app/prover/")) {
+    throw "hivemind-rs/Dockerfile must stage the managed-proof prover sidecar into /app/prover/."
+}
+
+$proverBuildScript = Join-Path $repoRoot "scripts/build-managed-prover.sh"
+if (!(Test-Path -LiteralPath $proverBuildScript)) {
+    throw "scripts/build-managed-prover.sh must exist so the staged prover sidecar is reproducible on a supported host."
+}
+
+foreach ($expectedManagedProofSetting in @(
+    'MANAGED_PROOF_ROLLOUT_MODE: ${MANAGED_PROOF_ROLLOUT_MODE:-enforce}',
+    'MANAGED_PROVER_EXECUTABLE: ${MANAGED_PROVER_EXECUTABLE:-/app/prover/hivemind-managed-proof-prover}',
+    'MANAGED_PROVER_TIMEOUT_SECS: ${MANAGED_PROVER_TIMEOUT_SECS:-900}'
+)) {
+    if (!$composeText.Contains($expectedManagedProofSetting)) {
+        throw "docker-compose.yml must configure managed-proof settlement via '$expectedManagedProofSetting'."
+    }
+}
+
+$managedProofEnvLines = @(Get-Content -LiteralPath (Join-Path $repoRoot ".env.example"))
+if ($managedProofEnvLines -notcontains "MANAGED_PROOF_ROLLOUT_MODE=enforce") {
+    throw ".env.example must document the fail-closed default 'MANAGED_PROOF_ROLLOUT_MODE=enforce'."
 }
 
 $envExamplePath = Join-Path $repoRoot ".env.example"
@@ -304,6 +339,23 @@ try {
     }
     if ($resolvedCompose.services.worker.environment.EXECUTOR_NETWORK_EGRESS_TARGETS -ne "172.28.0.0/24") {
         throw "Resolved worker egress targets must use the IP/CIDR syntax accepted by SandboxEgressPolicy."
+    }
+
+    # The dispatcher that applies the rollout policy runs in nodepool, so the
+    # setting must land there. Placing it only on the worker silently leaves
+    # nodepool on the default, which makes an operator's observe-mode migration
+    # a no-op.
+    if ($resolvedCompose.services.nodepool.environment.MANAGED_PROOF_ROLLOUT_MODE -ne "enforce") {
+        throw "Resolved nodepool configuration must default MANAGED_PROOF_ROLLOUT_MODE to the fail-closed 'enforce'."
+    }
+    if ($null -ne $resolvedCompose.services.worker.environment.MANAGED_PROOF_ROLLOUT_MODE) {
+        throw "MANAGED_PROOF_ROLLOUT_MODE must not be set on the worker: the worker never reads it, so it would imply a policy the worker cannot apply."
+    }
+    if ($resolvedCompose.services.worker.environment.MANAGED_PROVER_EXECUTABLE -ne "/app/prover/hivemind-managed-proof-prover") {
+        throw "Resolved worker configuration must point MANAGED_PROVER_EXECUTABLE at the prover staged into the image."
+    }
+    if ($resolvedCompose.services.worker.environment.MANAGED_PROVER_TIMEOUT_SECS -ne "900") {
+        throw "Resolved worker configuration must allow a full managed proof to complete via MANAGED_PROVER_TIMEOUT_SECS."
     }
 }
 finally {
