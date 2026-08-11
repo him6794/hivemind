@@ -6,6 +6,12 @@
 # packaging/managed-prover/, which hivemind-rs/Dockerfile bakes into the worker
 # image at /app/prover/.
 #
+# On a host that cannot reach risc0-artifacts.s3.us-west-2.amazonaws.com, the
+# risc0-circuit-recursion build script fails after three download attempts. Set
+# RECURSION_SRC_PATH to a local copy of recursion_zkr.zip; the build script
+# verifies its SHA-256 before use, so this reuses a checked artifact rather than
+# skipping the check.
+#
 # The guest is built natively (HIVEMIND_ZKVM_USE_DOCKER=0). The Docker builder
 # path is deliberately not used here: it needs Docker-in-Docker and, on this
 # project's Windows hosts, it repeatedly exhausted the Docker VHD.
