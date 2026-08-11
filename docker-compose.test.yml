@@ -51,7 +51,7 @@ services:
       [
         "sh",
         "-lc",
-        "set -e; /usr/local/cargo/bin/cargo test -p hivemind-auth -- --test-threads=1; /usr/local/cargo/bin/cargo test -p hivemind-config -- --test-threads=1; /usr/local/cargo/bin/cargo test -p hivemind-database -- --test-threads=1; /usr/local/cargo/bin/cargo test -p hivemind-worker-executor -- --test-threads=1; /usr/local/cargo/bin/cargo test -p hivemind-node-manager -- --test-threads=1; /usr/local/cargo/bin/cargo test -p hivemind-master-api -- --test-threads=1; /usr/local/cargo/bin/cargo test -p hivemind-bin -- --test-threads=1",
+        "set -e; /usr/local/cargo/bin/cargo test -p hivemind-auth -- --test-threads=1; /usr/local/cargo/bin/cargo test -p hivemind-config -- --test-threads=1; /usr/local/cargo/bin/cargo test -p hivemind-database -- --test-threads=1; /usr/local/cargo/bin/cargo test -p hivemind-worker-executor -- --test-threads=1; /usr/local/cargo/bin/cargo test -p hivemind-task-scheduler -- --test-threads=1; /usr/local/cargo/bin/cargo test -p hivemind-node-manager -- --test-threads=1; /usr/local/cargo/bin/cargo test -p hivemind-master-api -- --test-threads=1; /usr/local/cargo/bin/cargo test -p hivemind-bin -- --test-threads=1",
       ]
     restart: "no"
 
