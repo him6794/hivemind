@@ -342,7 +342,8 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
             Dispatcher::new(db.clone(), task_timeout, max_redispatch)
                 .with_worker_execution_private_key(
                     config.auth.worker_execution_private_key_pem.clone(),
-                ),
+                )
+                .with_managed_proof_rollout_mode(config.managed_proof.rollout_mode),
         );
 
         let disp_shutdown = dispatcher
@@ -357,6 +358,7 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
         let np_state = Arc::new(NodepoolState {
             auth: auth.clone(),
             worker_execution_private_key_pem: config.auth.worker_execution_private_key_pem.clone(),
+            managed_proof_rollout_mode: config.managed_proof.rollout_mode,
             node_manager: node_mgr.clone(),
             scheduler: scheduler.clone(),
             artifact_root: hivemind_node_manager::grpc::artifact_root_for_config(&config),

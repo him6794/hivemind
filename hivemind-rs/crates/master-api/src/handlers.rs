@@ -417,6 +417,18 @@ pub struct AdminSchedulingCacheMetricsResponse {
     pub top_workers: Vec<WorkerCacheAffinityMetric>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct AdminManagedProofMetricsResponse {
+    pub success: bool,
+    pub rollout_mode: String,
+    pub verification_attempts: i64,
+    pub verified: i64,
+    pub rejected: i64,
+    pub queue_retries: i64,
+    pub observe_fallbacks: i64,
+    pub legacy_settlements: i64,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AdminSchedulingCacheAlertQuery {
     pub low: Option<f64>,
@@ -1613,6 +1625,42 @@ pub async fn get_admin_scheduling_cache_metrics(
                 total_cache_hits: 0,
                 cache_hit_rate: 0.0,
                 top_workers: vec![],
+            }),
+        ),
+    }
+}
+
+/// GET /api/admin/managed-proof/metrics
+pub async fn get_admin_managed_proof_metrics(
+    State(state): State<AppState>,
+    AuthUser { token, .. }: AuthUser,
+) -> (StatusCode, Json<AdminManagedProofMetricsResponse>) {
+    let mut grpc = state.grpc_client.clone();
+    match grpc.get_admin_managed_proof_metrics(&token).await {
+        Ok(resp) => (
+            StatusCode::OK,
+            Json(AdminManagedProofMetricsResponse {
+                success: resp.success,
+                rollout_mode: resp.rollout_mode,
+                verification_attempts: resp.verification_attempts,
+                verified: resp.verified,
+                rejected: resp.rejected,
+                queue_retries: resp.queue_retries,
+                observe_fallbacks: resp.observe_fallbacks,
+                legacy_settlements: resp.legacy_settlements,
+            }),
+        ),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(AdminManagedProofMetricsResponse {
+                success: false,
+                rollout_mode: String::new(),
+                verification_attempts: 0,
+                verified: 0,
+                rejected: 0,
+                queue_retries: 0,
+                observe_fallbacks: 0,
+                legacy_settlements: 0,
             }),
         ),
     }

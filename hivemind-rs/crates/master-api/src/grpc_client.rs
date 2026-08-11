@@ -4,7 +4,8 @@ use hivemind_proto::{
     CleanupAdminArtifactsRequest, CleanupAdminArtifactsResponse, DownloadTaskArtifactRequest,
     DownloadTaskArtifactResponse, GetAdminArtifactOverviewRequest,
     GetAdminArtifactOverviewResponse, GetAdminBillingOverviewRequest,
-    GetAdminBillingOverviewResponse, GetAdminSchedulingCacheAlertRequest,
+    GetAdminBillingOverviewResponse, GetAdminManagedProofMetricsRequest,
+    GetAdminManagedProofMetricsResponse, GetAdminSchedulingCacheAlertRequest,
     GetAdminSchedulingCacheAlertResponse, GetAdminSchedulingCacheMetricsRequest,
     GetAdminSchedulingCacheMetricsResponse, GetAllUserTasksRequest, GetAllUserTasksResponse,
     GetBalanceRequest, GetBalanceResponse, GetProviderEarningsRequest, GetProviderEarningsResponse,
@@ -615,6 +616,23 @@ impl GrpcClient {
                 .list_admin_audit_logs(Request::new(ListAdminAuditLogsRequest { token, limit }))
                 .await
                 .map(|r| r.into_inner())
+        })
+        .await
+    }
+
+    pub async fn get_admin_managed_proof_metrics(
+        &mut self,
+        token: &str,
+    ) -> Result<GetAdminManagedProofMetricsResponse, tonic::Status> {
+        let token = token.to_string();
+        self.with_clients(|mut clients| async move {
+            clients
+                .master
+                .get_admin_managed_proof_metrics(Request::new(GetAdminManagedProofMetricsRequest {
+                    token,
+                }))
+                .await
+                .map(|response| response.into_inner())
         })
         .await
     }

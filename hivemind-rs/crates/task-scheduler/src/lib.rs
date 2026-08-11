@@ -1,4 +1,5 @@
 ﻿pub mod dispatcher;
+pub mod managed_proof_metrics;
 pub(crate) mod managed_proof_verifier;
 pub mod scheduler;
 pub mod task_repository;

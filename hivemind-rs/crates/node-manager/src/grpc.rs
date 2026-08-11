@@ -1,4 +1,4 @@
-use hivemind_config::HivemindConfig;
+use hivemind_config::{HivemindConfig, ManagedProofRolloutMode};
 use hivemind_proto::{
     batch_runtime_service_server::BatchRuntimeService,
     master_node_service_server::MasterNodeService,
@@ -19,6 +19,8 @@ use hivemind_proto::{
     // Admin RPC types
     GetAdminBillingOverviewRequest,
     GetAdminBillingOverviewResponse,
+    GetAdminManagedProofMetricsRequest,
+    GetAdminManagedProofMetricsResponse,
     GetAdminSchedulingCacheAlertRequest,
     GetAdminSchedulingCacheAlertResponse,
     GetAdminSchedulingCacheMetricsRequest,
@@ -110,6 +112,7 @@ const MAX_DOWNLOAD_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 pub struct NodepoolState {
     pub auth: AuthManager,
     pub worker_execution_private_key_pem: String,
+    pub managed_proof_rollout_mode: ManagedProofRolloutMode,
     pub node_manager: Arc<NodeManager>,
     pub scheduler: TaskScheduler,
     pub artifact_root: PathBuf,
@@ -2212,6 +2215,45 @@ impl MasterNodeService for GrpcMasterNodeService {
                 .collect(),
         }))
     }
+
+    async fn get_admin_managed_proof_metrics(
+        &self,
+        request: Request<GetAdminManagedProofMetricsRequest>,
+    ) -> Result<Response<GetAdminManagedProofMetricsResponse>, Status> {
+        let req = request.into_inner();
+        let claims = self
+            .state
+            .auth
+            .validate_token(&req.token)
+            .map_err(|_| Status::unauthenticated("Invalid token"))?;
+        let snapshot = hivemind_task_scheduler::managed_proof_metrics::snapshot();
+        if !is_admin(&claims.sub) {
+            return Ok(Response::new(GetAdminManagedProofMetricsResponse {
+                success: false,
+                status_message: "Forbidden".into(),
+                rollout_mode: String::new(),
+                verification_attempts: 0,
+                verified: 0,
+                rejected: 0,
+                queue_retries: 0,
+                observe_fallbacks: 0,
+                legacy_settlements: 0,
+            }));
+        }
+        Ok(Response::new(GetAdminManagedProofMetricsResponse {
+            success: true,
+            status_message: "OK".into(),
+            rollout_mode: self.state.managed_proof_rollout_mode.to_string(),
+            verification_attempts: i64::try_from(snapshot.verification_attempts)
+                .unwrap_or(i64::MAX),
+            verified: i64::try_from(snapshot.verified).unwrap_or(i64::MAX),
+            rejected: i64::try_from(snapshot.rejected).unwrap_or(i64::MAX),
+            queue_retries: i64::try_from(snapshot.queue_retries).unwrap_or(i64::MAX),
+            observe_fallbacks: i64::try_from(snapshot.observe_fallbacks).unwrap_or(i64::MAX),
+            legacy_settlements: i64::try_from(snapshot.legacy_settlements).unwrap_or(i64::MAX),
+        }))
+    }
+
     async fn quote_task(
         &self,
         request: Request<QuoteTaskRequest>,
@@ -2901,10 +2943,10 @@ mod tests {
     use hivemind_models::Claims;
     use hivemind_proto::{
         worker_node_service_server::{WorkerNodeService, WorkerNodeServiceServer},
-        ExecuteTaskRequest, ExecuteTaskResponse, StopTaskExecutionRequest,
-        StopTaskExecutionResponse, TaskOutputRequest, TaskOutputResponse, TaskOutputUploadRequest,
-        TaskOutputUploadResponse, TaskResultUploadRequest, TaskResultUploadResponse,
-        TaskUsageRequest, TaskUsageResponse,
+        ExecuteTaskRequest, ExecuteTaskResponse, GetAdminManagedProofMetricsRequest,
+        StopTaskExecutionRequest, StopTaskExecutionResponse, TaskOutputRequest, TaskOutputResponse,
+        TaskOutputUploadRequest, TaskOutputUploadResponse, TaskResultUploadRequest,
+        TaskResultUploadResponse, TaskUsageRequest, TaskUsageResponse,
     };
     use std::net::SocketAddr;
     use std::sync::{Arc, OnceLock};
@@ -2994,6 +3036,7 @@ mod tests {
         let state = Arc::new(NodepoolState {
             auth: auth.clone(),
             worker_execution_private_key_pem: config.auth.worker_execution_private_key_pem.clone(),
+            managed_proof_rollout_mode: config.managed_proof.rollout_mode,
             node_manager,
             scheduler: scheduler.clone(),
             artifact_root: artifact_root_for_config(&config),
@@ -3031,6 +3074,33 @@ mod tests {
         assert_eq!(
             validate_worker_report_task_id(&oversized),
             Err("Task id is required")
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_managed_proof_metrics_exposes_authorized_snapshot() {
+        let _admin_users = AdminUsersEnvGuard::set("admin");
+        let node_service = node_manager_service_without_database();
+        let service = GrpcMasterNodeService::new(node_service.state.clone());
+        let before = hivemind_task_scheduler::managed_proof_metrics::snapshot();
+        hivemind_task_scheduler::managed_proof_metrics::record(
+            hivemind_task_scheduler::managed_proof_metrics::ManagedProofMetricEvent::Verified,
+        );
+        let token = token_for(&service.state.auth, "admin");
+
+        let response = service
+            .get_admin_managed_proof_metrics(Request::new(GetAdminManagedProofMetricsRequest {
+                token,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(response.success);
+        assert_eq!(response.rollout_mode, "enforce");
+        assert_eq!(
+            response.verification_attempts,
+            (before.verification_attempts + 1) as i64
         );
     }
 
@@ -3141,6 +3211,7 @@ mod tests {
         Arc::new(NodepoolState {
             auth,
             worker_execution_private_key_pem: config.auth.worker_execution_private_key_pem.clone(),
+            managed_proof_rollout_mode: config.managed_proof.rollout_mode,
             node_manager,
             scheduler,
             artifact_root: artifact_root_for_config(&config),
@@ -3223,7 +3294,7 @@ mod tests {
                 requirements: Some(ProtoResourceSpec::default()),
                 location: String::new(),
                 host_count: 1,
-                token: token_for(&service.state.auth, &owner),
+                token: token_for(&service.state.auth, owner),
                 max_cpt: 1,
                 runtime: "native-v1".into(),
                 task_source: "return 1;".into(),
