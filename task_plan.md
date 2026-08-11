@@ -6,7 +6,7 @@
 
 ## 當前階段
 
-階段 4：遷移、失敗語義與營運（pending）；階段 3 已完成
+階段 5：完整驗證與發布（running）；階段 1–4 已完成。剩餘唯一未完成項目為多節點 Docker E2E 與瀏覽器回歸。
 
 ## 成功標準
 
@@ -31,7 +31,7 @@
 
 - [x] 固定 RISC Zero 3.0.6 stable，正式 verifier 必須啟用 `disable-dev-mode`
 - [x] 將 canonical output renderer 下沉到 managed runtime，供 Worker/guest 共用
-- [x] 固定 builder image digest；目前可信 guest image id `[3606400121, 4250889949, 2277454476, 3430793801, 2111044864, 2713379816, 851522248, 2751351423]`
+- [x] 固定 builder image digest；目前可信 guest image id `[466412732, 2327327967, 2963073729, 178423767, 1914766815, 1823038484, 4206432854, 2659673256]`（2026-08-11 因 guest source 變更重建；舊值為 `[3606400121, ...]`）
 - [x] 將 deterministic managed runtime 放入 guest 執行路徑
 - [x] guest commit 公開聲明，私有 witness 保留程式輸入／執行軌跡
 - [x] Worker prover 產生包含 proof scheme、固定 image id、journal 與 receipt 的 proof envelope
@@ -50,20 +50,20 @@
 
 ### 階段 4：遷移、失敗語義與營運
 
-- [ ] 加入 off/observe/enforce 三段 rollout mode
-- [ ] 定義 proving timeout、取消、失敗與 retry 行為
-- [ ] 限制 proof 大小與 verifier CPU/記憶體消耗
-- [ ] 增加 proof verification metrics、audit events 與管理介面狀態
-- **狀態：** pending
+- [x] 加入 off/observe/enforce 三段 rollout mode（預設 enforce；observe 只觀測並保留 legacy settlement）
+- [x] 定義 proving timeout、取消、失敗與 retry 行為
+- [x] 限制 proof 大小與 verifier CPU/記憶體消耗
+- [x] 增加 proof verification metrics、audit events 與管理介面狀態
+- **狀態：** complete（階段 5 的發布 gates 仍 pending）
 
 ### 階段 5：完整驗證與發布
 
-- [ ] runtime、Worker、scheduler、node-manager focused/full tests
-- [ ] 惡意 Worker 測試：偽造計費、輸出、task id、版本、seal
+- [x] runtime、Worker、scheduler、node-manager focused/full tests（首次接上真實測試資料庫執行，抓出兩個先前被靜默跳過的失敗）
+- [x] 惡意 Worker 測試：偽造計費、輸出、task id、版本、seal — 覆蓋盤點與逐項對照見 `docs/zk-managed-proof-threat-coverage.md`（54 個具名測試已驗證存在）
 - [ ] Docker 多節點完整流程與瀏覽器回歸
-- [ ] cargo fmt、clippy、audit、依賴授權與可重現 guest build
+- [x] cargo fmt、clippy、audit、依賴授權與可重現 guest build
 - [ ] 文件與本機 Conventional Commits 完整；不 push
-- **狀態：** pending
+- **狀態：** running
 
 ## 技術決策
 
@@ -162,6 +162,12 @@
 | 恢復狀態文件首個 patch 因一處空白未精確匹配而失敗 | 1 | 先以 `rg -n` 讀取精確行，再用較小 patch 成功更新；未部分寫入 |
 | 讀取 zkVM workspace 時誤以 `hivemind-rs` 為相對根目錄 | 1 | 改用已確認的 `..\\zkvm\\managed-proof`，不重複不存在的路徑 |
 | 一次 `cargo test` 誤傳兩個 positional test filter | 1 | Cargo 只接受單一 filter；改用共同 `queue` filter 後兩項測試同時通過 |
+| `zkvm` host 測試以 `assert_eq!` 比較 `risc0_zkvm::Receipt`，但該型別無 `PartialEq` | 1 | `6e7af38` 加入後從未編譯過（Windows RISC Zero host build 受阻），使 pin-test 也無法執行；改為比較 canonical JSON，即 verifier 實際解析的表示法 |
+| `test_seed_default_user_inserts_bootstrap_account` 直接用 public schema 且不跑 migration | 1 | 靠其他測試殘留的表才會過，乾淨資料庫上回 `relation "users" does not exist`；改用與兄弟測試相同的隔離 schema fixture |
+| connect-failure 回歸測試的 2 秒 `timeout` 小於實測 2.04 秒 | 1 | 先前無資料庫時整個測試被靜默跳過；量測後確認 production 語義正確，將 liveness guard 調整為高於 5 秒 production connect timeout 的 15 秒 |
+| `MANAGED_PROOF_ROLLOUT_MODE` 只設在 Compose 的 `worker` service | 1 | 讀取者是跑在 nodepool 的 dispatcher，設在 worker 完全無效，會讓 observe 遷移靜默失效；移到 nodepool 並在發布契約加入服務層級斷言（已 red-green） |
+| `docker-compose.test.yml` 的 CI 測試清單漏掉 `hivemind-task-scheduler` | 1 | 結算邏輯所在的 crate 從未在 CI 跑過 DB 測試；已補入清單 |
+| PowerShell `Set-Content -Encoding utf8` 在 red-green 還原時為 `docker-compose.yml` 加上 BOM | 1 | 以 `[System.IO.File]::WriteAllBytes` 去除 BOM 並確認 diff 只剩預期的 8 行新增 |
 
 ## 歷史
 
