@@ -18,15 +18,20 @@ pub const RISC0_MAX_COMPOSITE_SEGMENTS: usize = 1;
 pub const RISC0_MAX_SEGMENT_SEAL_WORDS: usize = 131_072;
 #[cfg(feature = "risc0-verifier")]
 const RISC0_SEGMENT_HASH_FUNCTION: &str = "poseidon2";
+/// The only guest image the Nodepool will settle from. Regenerating it is a
+/// deliberate guest upgrade, never an acceptance of a Worker-chosen image: the
+/// value is produced by rebuilding the guest from tracked source, and
+/// `tests::generated_guest_id_matches_nodepool_trust_pin` in
+/// `zkvm/managed-proof/host` fails whenever the two drift apart.
 pub const RISC0_MANAGED_GUEST_ID: [u32; RISC0_IMAGE_ID_WORDS] = [
-    3_606_400_121,
-    4_250_889_949,
-    2_277_454_476,
-    3_430_793_801,
-    2_111_044_864,
-    2_713_379_816,
-    851_522_248,
-    2_751_351_423,
+    466_412_732,
+    2_327_327_967,
+    2_963_073_729,
+    178_423_767,
+    1_914_766_815,
+    1_823_038_484,
+    4_206_432_854,
+    2_659_673_256,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1059,8 +1064,8 @@ mod risc0_verifier_tests {
             panic!("fixture receipt must be composite");
         };
 
-        assert_eq!(FIXTURE_BYTES.len(), 664_026);
-        assert_eq!(receipt_json.len(), 661_720);
+        assert_eq!(FIXTURE_BYTES.len(), 664_258);
+        assert_eq!(receipt_json.len(), 661_953);
         assert!(receipt_json.len() <= super::RISC0_MAX_RECEIPT_JSON_BYTES);
         assert_eq!(fixture.journal.len(), 656);
         assert!(fixture.journal.len() <= super::RISC0_MAX_JOURNAL_BYTES);
