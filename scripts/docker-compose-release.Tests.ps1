@@ -254,7 +254,13 @@ $composeEnvironmentNames = @(
     "JWT_SECRET",
     "WORKER_EXECUTION_PRIVATE_KEY_PEM",
     "WORKER_EXECUTION_PUBLIC_KEY_PEM",
-    "WORKER_NODEPOOL_TOKEN"
+    "WORKER_NODEPOOL_TOKEN",
+    # Cleared so the assertions below read the compose defaults rather than
+    # whatever the invoking shell happens to export.
+    "HIVEMIND_ADMIN_USERS",
+    "MANAGED_PROOF_ROLLOUT_MODE",
+    "MANAGED_PROVER_EXECUTABLE",
+    "MANAGED_PROVER_TIMEOUT_SECS"
 )
 $originalComposeEnvironment = @{}
 foreach ($name in $composeEnvironmentNames) {
@@ -356,6 +362,17 @@ try {
     }
     if ($resolvedCompose.services.worker.environment.MANAGED_PROVER_TIMEOUT_SECS -ne "900") {
         throw "Resolved worker configuration must allow a full managed proof to complete via MANAGED_PROVER_TIMEOUT_SECS."
+    }
+
+    # Nodepool authorizes every admin RPC, so an unpropagated HIVEMIND_ADMIN_USERS
+    # makes the whole documented /api/admin/* surface unreachable under Compose —
+    # including the managed-proof metrics operators are told to watch during an
+    # observe-mode migration.
+    if ($null -eq $resolvedCompose.services.nodepool.environment.HIVEMIND_ADMIN_USERS) {
+        throw "docker-compose.yml must propagate HIVEMIND_ADMIN_USERS to nodepool, which is where admin authorization happens."
+    }
+    if ($resolvedCompose.services.nodepool.environment.HIVEMIND_ADMIN_USERS -ne "") {
+        throw "Resolved nodepool configuration must default HIVEMIND_ADMIN_USERS to empty so no account is an admin unless one is named."
     }
 }
 finally {
