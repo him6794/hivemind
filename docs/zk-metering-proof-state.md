@@ -72,6 +72,7 @@ running
 - 單次 proving 約 9.5 分鐘，現階段不可直接啟用 enforce；需後續 timeout/queue/benchmark 設計。
 - ~~guest image ID／attestation／真 proof fixture 過期~~：已於 2026-08-11 重建。新 pin 為 `[466412732, ...]`，pin-test 在更新後重跑仍 GREEN，真 fixture 重新 proving（732 秒）且 verifier suite 37 passed。
 - ~~sidecar 尚未進 release image／Compose~~：已打包。`packaging/managed-prover/` → `hivemind-rs/Dockerfile` → `/app/prover/`，Compose 預設指向該路徑；實際建置的 worker 映像已驗證 binary 可執行且 fail-closed。
+- **新發現（2026-08-11 多容器 E2E）**：guest image ID 對**建置環境**敏感，不只對原始碼敏感。先前 staged 的 prover 是在容器內以自帶 rzup guest toolchain 建置，回報 image ID `[851157164, 2331111488, ...]`，與 trust pin `[466412732, ...]` 不符，因此 nodepool 拒絕它產生的每一個 proof。Nodepool 行為完全正確（兩次都 audit 為 `rejected`、任務 `FAILED`、`billing_settled=false`、未結算），代價是可用性而非信任。修正：`scripts/build-managed-prover.sh` 現在會在建置**前**執行 `generated_guest_id_matches_nodepool_trust_pin`，環境無法重現 pin 就拒絕 stage；並以相同 WSL 環境重建 prover。
 - Admission caps 已完成四個 direct task-ID RPC gate 與 no-DB runtime-bypass test 修正；最終 review 為 `CLEAR / APPROVE`、零 blockers，GNU full/focused tests、clippy、fmt/diff evidence 均已保留。
 - C: Docker VHD 空間不足，prover 改走 WSL/native Linux 並將 artifacts/TMP 放 D:；既有 Docker stack 已恢復且保持 healthy。
 - RISC Zero 3.0.6 只承諾 Linux/macOS first-class prover host，沒有官方 native Windows prover workaround。發布策略已明確化而非繞過：prover 在受支援的 Linux/macOS（或 WSL）以 `scripts/build-managed-prover.sh` 建置一次，產物 stage 到 `packaging/managed-prover/`，由 worker 映像烘入。此限制已寫入 README 的「Managed-function proving」與 `docs/GETTING_STARTED.md`。缺 sidecar 時每個 managed task 明確 fail closed，不會靜默降級。

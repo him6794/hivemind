@@ -337,12 +337,49 @@ bounded renderer 的 `managed-function-runtime/src/lib.rs`、`zkvm` 的 `Cargo.l
 | `release-stack-smoke.ps1 -CheckOnly` | passed |
 | worker 映像建置 + 映像內 prover 驗證 | passed |
 
+### 多節點 Docker E2E（已執行，找到一個發布阻擋）
+
+以 `release-stack-smoke.ps1 -KeepRunning` 起完整 8 容器 stack（臨時埠、隔離 volume，
+未動使用者既有 `.env` 與資料），再以新寫的驅動腳本走完整流程。
+
+已驗證可用的部分：
+
+- 官網註冊／登入（master 的 `/api/register` 正確回 410，帳號只能經官網建立）
+- nodepool 拒絕任何人自行註冊 `HIVEMIND_ADMIN_USERS` 中的名字（`register_user_rejects_configured_admin_username`
+  的實地驗證），admin 必須帶外佈建
+- **新的 `/api/admin/managed-proof/metrics` 在真實部署中可用**，回報 `rollout_mode=enforce`
+- Worker Control `/api/register-worker` 註冊成功，nodepool 完成派送
+- worker 確實執行 `managed-function-v0` 並啟動 prover（容器 CPU 達 1183%、2.1 GiB RSS）
+
+發現的阻擋：**guest image ID 對建置環境敏感，不只對原始碼敏感。**
+
+- 容器內 prover 回報 image ID `[851157164, 2331111488, 898154945, 2202623007,
+  559143449, 4095204016, 1237502462, 1480841899]`
+- nodepool trust pin 為 `[466412732, 2327327967, 2963073729, 178423767,
+  1914766815, 1823038484, 4206432854, 2659673256]`
+- 兩者不符，因此 nodepool 拒絕它產生的每一個 proof
+
+該 binary 是在容器內以自帶 rzup guest toolchain 建置，而 pin 來自 WSL native 路徑的
+快取 toolchain。「建置自同一份原始碼」**不是**相符的證據——此處先前的推論已被實測推翻，
+`docs/zk-managed-proof-build-attestation.md` 已更正。
+
+信任模型完全站得住：兩次嘗試都 audit 為 `event=rejected`、
+`reason="Managed proof verification failed"`、`rollout_mode=enforce`；任務最終 `FAILED`、
+`billing_settled=false`、`managed_executed_ops=0`。**沒有任何未經驗證的 claim 被結算。**
+錯配的代價是可用性，不是信任。
+
+修正（`7fae138`）：`scripts/build-managed-prover.sh` 現在在建置**前**執行
+`tests::generated_guest_id_matches_nodepool_trust_pin`，環境若無法重現 pin 就以 exit 71
+拒絕 stage——與 nodepool 在結算時強制的是同一個等式。
+
 ### 剩餘工作
 
-多節點 Docker E2E：在 Compose 起的完整 stack 中提交一個 `managed-function-v0` 任務，
-確認 worker 產生 proof、nodepool 獨立驗證、只依 verified claim 結算，且
-`/api/admin/managed-proof/metrics` 的 `verified` 計數增加、audit log 出現對應項目。
-既有 Playwright `release-flow.spec.mjs` 只覆蓋 UI 流程，不含 managed proving，因此這是新工作。
+以產出 trust pin 的同一 WSL 環境重建 release prover、重新 stage、重建 worker 映像，
+再跑一次 E2E，確認 managed 任務能真正完成 proof-backed 結算
+（`/api/admin/managed-proof/metrics` 的 `verified` 計數增加、`legacy_settlements` 不變）。
+
+既有 Playwright `release-flow.spec.mjs` 只覆蓋 UI 流程、不含 managed proving，
+因此上述 E2E 驅動腳本是新增能力而非既有回歸。
 
 ### 本輪本機提交（未 push）
 
