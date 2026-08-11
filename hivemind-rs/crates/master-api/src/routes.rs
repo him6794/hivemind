@@ -35,6 +35,10 @@ pub fn create_router(state: AppState) -> Router {
             get(super::handlers::get_admin_scheduling_cache_metrics),
         )
         .route(
+            "/api/admin/managed-proof/metrics",
+            get(super::handlers::get_admin_managed_proof_metrics),
+        )
+        .route(
             "/api/admin/scheduling/cache-alert",
             get(super::handlers::get_admin_scheduling_cache_alert),
         )

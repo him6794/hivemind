@@ -1,6 +1,7 @@
 use crate::managed_proof_verifier::{verify_managed_proof, ManagedProofVerifierError};
 use anyhow::Result;
 use hivemind_auth::worker_execution::WorkerExecutionSigner;
+use hivemind_config::ManagedProofRolloutMode;
 use hivemind_database::DatabaseManager;
 use hivemind_managed_proof::{ClaimError, ExecutionClaim};
 use hivemind_models::{Claims, Task, TaskStatus, WorkerNode};
@@ -15,6 +16,7 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::{error, info, warn};
 
+use crate::managed_proof_metrics::{self, ManagedProofMetricEvent};
 use crate::scheduler;
 use crate::task_repository::TaskRepository;
 
@@ -24,6 +26,7 @@ pub struct Dispatcher {
     task_timeout_secs: u64,
     max_redispatch: i32,
     worker_execution_private_key_pem: String,
+    managed_proof_rollout_mode: ManagedProofRolloutMode,
 }
 
 impl Dispatcher {
@@ -35,11 +38,20 @@ impl Dispatcher {
             max_redispatch,
             worker_execution_private_key_pem: std::env::var("WORKER_EXECUTION_PRIVATE_KEY_PEM")
                 .unwrap_or_default(),
+            managed_proof_rollout_mode: ManagedProofRolloutMode::Enforce,
         }
     }
 
     pub fn with_worker_execution_private_key(mut self, private_key_pem: String) -> Self {
         self.worker_execution_private_key_pem = private_key_pem;
+        self
+    }
+
+    pub fn with_managed_proof_rollout_mode(
+        mut self,
+        rollout_mode: ManagedProofRolloutMode,
+    ) -> Self {
+        self.managed_proof_rollout_mode = rollout_mode;
         self
     }
 
@@ -121,6 +133,7 @@ impl Dispatcher {
                 let task = task.clone();
                 let worker_execution_private_key_pem =
                     self.worker_execution_private_key_pem.clone();
+                let managed_proof_rollout_mode = self.managed_proof_rollout_mode;
                 tokio::spawn(async move {
                     if let Err(e) = execute_on_worker(
                         repo,
@@ -128,6 +141,7 @@ impl Dispatcher {
                         worker_id,
                         worker_addr,
                         &worker_execution_private_key_pem,
+                        managed_proof_rollout_mode,
                     )
                     .await
                     {
@@ -370,6 +384,7 @@ async fn execute_on_worker(
     worker_id: String,
     worker_addr: String,
     worker_execution_private_key_pem: &str,
+    managed_proof_rollout_mode: ManagedProofRolloutMode,
 ) -> Result<()> {
     let Some(current_task) = repo.find_by_task_id(&task.task_id).await? else {
         warn!("Task {} disappeared before worker execution", task.task_id);
@@ -440,9 +455,23 @@ async fn execute_on_worker(
                 return Ok(());
             }
             if response.success {
-                let managed_proof = match managed_proof_for_completion(&current_task, &response) {
+                let managed_proof = match managed_proof_for_completion_with_mode(
+                    managed_proof_rollout_mode,
+                    &current_task,
+                    &response,
+                ) {
                     Ok(proof) => proof,
                     Err(reason) => {
+                        managed_proof_metrics::record(ManagedProofMetricEvent::Rejected);
+                        record_managed_proof_audit(
+                            repo.as_ref(),
+                            &task.task_id,
+                            &worker_id,
+                            managed_proof_rollout_mode,
+                            "rejected",
+                            Some(reason),
+                        )
+                        .await;
                         repo.fail_for_worker(&task.task_id, &worker_id, reason)
                             .await?;
                         warn!(
@@ -460,10 +489,93 @@ async fn execute_on_worker(
                     )
                     .await
                     {
-                        Ok(completion) => Some(completion),
+                        Ok(completion) => {
+                            if managed_proof_rollout_mode == ManagedProofRolloutMode::Observe {
+                                managed_proof_metrics::record(ManagedProofMetricEvent::Verified);
+                                managed_proof_metrics::record(
+                                    ManagedProofMetricEvent::ObserveFallback,
+                                );
+                                record_managed_proof_audit(
+                                    repo.as_ref(),
+                                    &task.task_id,
+                                    &worker_id,
+                                    managed_proof_rollout_mode,
+                                    "observed_verified",
+                                    None,
+                                )
+                                .await;
+                                info!(
+                                    task_id = %task.task_id,
+                                    "Managed proof observation verified successfully"
+                                );
+                                None
+                            } else {
+                                managed_proof_metrics::record(ManagedProofMetricEvent::Verified);
+                                record_managed_proof_audit(
+                                    repo.as_ref(),
+                                    &task.task_id,
+                                    &worker_id,
+                                    managed_proof_rollout_mode,
+                                    "verified",
+                                    None,
+                                )
+                                .await;
+                                Some(completion)
+                            }
+                        }
                         Err(error) => {
+                            if managed_proof_rollout_mode == ManagedProofRolloutMode::Observe {
+                                managed_proof_metrics::record(ManagedProofMetricEvent::Rejected);
+                                managed_proof_metrics::record(
+                                    ManagedProofMetricEvent::ObserveFallback,
+                                );
+                                let reason = error.to_string();
+                                record_managed_proof_audit(
+                                    repo.as_ref(),
+                                    &task.task_id,
+                                    &worker_id,
+                                    managed_proof_rollout_mode,
+                                    "observed_rejected",
+                                    Some(&reason),
+                                )
+                                .await;
+                                warn!(
+                                    task_id = %task.task_id,
+                                    error = %error,
+                                    "Managed proof observation failed; retaining legacy settlement"
+                                );
+                                return complete_legacy_worker_result(
+                                    repo.as_ref(),
+                                    &task,
+                                    &worker_id,
+                                    &response,
+                                )
+                                .await;
+                            }
                             let disposition = managed_proof_failure_disposition(&error);
+                            // Local verifier saturation is the nodepool's own
+                            // backpressure, not worker misbehaviour, so it is
+                            // counted and audited as a retry rather than a
+                            // rejection.
+                            let (metric, audit_event) = match disposition {
+                                ManagedProofFailureDisposition::RetryWithoutWorkerPenalty => {
+                                    (ManagedProofMetricEvent::QueueRetry, "queue_retry")
+                                }
+                                ManagedProofFailureDisposition::FailWorkerResult => {
+                                    (ManagedProofMetricEvent::Rejected, "rejected")
+                                }
+                            };
+                            managed_proof_metrics::record(metric);
                             let reason = error.to_string();
+                            record_managed_proof_audit(
+                                repo.as_ref(),
+                                &task.task_id,
+                                &worker_id,
+                                managed_proof_rollout_mode,
+                                audit_event,
+                                Some(&reason),
+                            )
+                            .await;
                             match disposition {
                                 ManagedProofFailureDisposition::RetryWithoutWorkerPenalty => {
                                     repo.reset_to_pending_for_worker(&task.task_id, &worker_id)
@@ -499,6 +611,36 @@ async fn execute_on_worker(
                     )
                     .await?;
                 } else {
+                    if current_task.runtime.as_deref() == Some("managed-function-v0") {
+                        if managed_proof_rollout_mode == ManagedProofRolloutMode::Observe
+                            && response.managed_proof.is_none()
+                        {
+                            managed_proof_metrics::record(ManagedProofMetricEvent::ObserveFallback);
+                            record_managed_proof_audit(
+                                repo.as_ref(),
+                                &task.task_id,
+                                &worker_id,
+                                managed_proof_rollout_mode,
+                                "observed_missing",
+                                Some("Managed proof was not returned by the worker"),
+                            )
+                            .await;
+                        }
+                        if managed_proof_rollout_mode != ManagedProofRolloutMode::Enforce {
+                            managed_proof_metrics::record(
+                                ManagedProofMetricEvent::LegacySettlement,
+                            );
+                            record_managed_proof_audit(
+                                repo.as_ref(),
+                                &task.task_id,
+                                &worker_id,
+                                managed_proof_rollout_mode,
+                                "legacy_settlement",
+                                None,
+                            )
+                            .await;
+                        }
+                    }
                     repo.complete_for_worker(
                         &task.task_id,
                         &worker_id,
@@ -532,6 +674,78 @@ async fn execute_on_worker(
     Ok(())
 }
 
+async fn complete_legacy_worker_result(
+    repo: &TaskRepository,
+    task: &Task,
+    worker_id: &str,
+    response: &ExecuteTaskResponse,
+) -> Result<()> {
+    managed_proof_metrics::record(ManagedProofMetricEvent::LegacySettlement);
+    record_managed_proof_audit(
+        repo,
+        &task.task_id,
+        worker_id,
+        ManagedProofRolloutMode::Observe,
+        "legacy_settlement",
+        None,
+    )
+    .await;
+    repo.complete_for_worker(
+        &task.task_id,
+        worker_id,
+        None,
+        Some(&response.status_message),
+    )
+    .await?;
+    info!(
+        task_id = %task.task_id,
+        worker_id = %worker_id,
+        "Managed proof observation retained legacy settlement"
+    );
+    Ok(())
+}
+
+async fn record_managed_proof_audit(
+    repo: &TaskRepository,
+    task_id: &str,
+    worker_id: &str,
+    rollout_mode: ManagedProofRolloutMode,
+    event: &str,
+    reason: Option<&str>,
+) {
+    let detail = serde_json::json!({
+        "event": event,
+        "worker_id": worker_id,
+        "rollout_mode": rollout_mode.as_str(),
+        "reason": reason,
+    });
+    tracing::info!(
+        target: "hivemind::proof_audit",
+        task_id,
+        worker_id,
+        rollout_mode = rollout_mode.as_str(),
+        event,
+        reason = reason.unwrap_or_default(),
+        "managed proof audit event"
+    );
+    if let Err(error) = sqlx::query(
+        "INSERT INTO admin_audit_logs (admin_user, action, target_type, target_id, detail)
+         VALUES ('system', 'managed_proof_verification', 'task', $1, $2)",
+    )
+    .bind(task_id)
+    .bind(sqlx::types::Json(detail))
+    .execute(&repo.pool)
+    .await
+    {
+        tracing::warn!(
+            target: "hivemind::proof_audit",
+            task_id,
+            error = %error,
+            "failed to persist managed proof audit event"
+        );
+    }
+}
+
 const WORKER_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const WORKER_EXECUTE_RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
 
@@ -543,7 +757,20 @@ fn worker_transport_endpoint(worker_addr: &str) -> Result<tonic::transport::Endp
     )
 }
 
+#[cfg(test)]
 fn managed_proof_for_completion<'a>(
+    task: &Task,
+    response: &'a ExecuteTaskResponse,
+) -> std::result::Result<Option<&'a ManagedProofEnvelope>, &'static str> {
+    managed_proof_for_completion_with_mode(
+        hivemind_config::ManagedProofRolloutMode::Enforce,
+        task,
+        response,
+    )
+}
+
+fn managed_proof_for_completion_with_mode<'a>(
+    rollout_mode: hivemind_config::ManagedProofRolloutMode,
     task: &Task,
     response: &'a ExecuteTaskResponse,
 ) -> std::result::Result<Option<&'a ManagedProofEnvelope>, &'static str> {
@@ -551,11 +778,15 @@ fn managed_proof_for_completion<'a>(
         return Ok(None);
     }
 
-    response
-        .managed_proof
-        .as_ref()
-        .map(Some)
-        .ok_or("Managed proof is required")
+    match rollout_mode {
+        hivemind_config::ManagedProofRolloutMode::Off => Ok(None),
+        hivemind_config::ManagedProofRolloutMode::Observe => Ok(response.managed_proof.as_ref()),
+        hivemind_config::ManagedProofRolloutMode::Enforce => response
+            .managed_proof
+            .as_ref()
+            .map(Some)
+            .ok_or("Managed proof is required"),
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -737,6 +968,7 @@ fn reserve_worker_for_batch(workers: &mut [WorkerNode], worker_id: &str) {
 mod tests {
     use super::*;
     use chrono::Utc;
+    use hivemind_config::ManagedProofRolloutMode;
     use hivemind_managed_proof::{
         ClaimError, ExecutionClaim, ExecutionMetrics, COST_MODEL_ID, MANAGED_RUNTIME_ID,
         PROOF_PROTOCOL_VERSION,
@@ -862,6 +1094,68 @@ mod tests {
         let error = managed_proof_for_completion(&task, &response).unwrap_err();
 
         assert_eq!(error, "Managed proof is required");
+    }
+
+    #[test]
+    fn managed_completion_off_mode_allows_legacy_settlement_without_proof() {
+        let mut task = make_task("managed-proof-off", TaskStatus::Running, 0);
+        task.runtime = Some("managed-function-v0".into());
+        let response = ExecuteTaskResponse {
+            success: true,
+            status_message: "legacy-output".into(),
+            managed_proof: None,
+            ..ExecuteTaskResponse::default()
+        };
+
+        assert!(managed_proof_for_completion_with_mode(
+            ManagedProofRolloutMode::Off,
+            &task,
+            &response
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    #[test]
+    fn managed_completion_observe_mode_allows_legacy_settlement_without_proof() {
+        let mut task = make_task("managed-proof-observe", TaskStatus::Running, 0);
+        task.runtime = Some("managed-function-v0".into());
+        let response = ExecuteTaskResponse {
+            success: true,
+            status_message: "legacy-output".into(),
+            managed_proof: None,
+            ..ExecuteTaskResponse::default()
+        };
+
+        assert!(managed_proof_for_completion_with_mode(
+            ManagedProofRolloutMode::Observe,
+            &task,
+            &response
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    #[test]
+    fn managed_proof_metrics_count_verification_outcomes() {
+        let before = managed_proof_metrics::snapshot();
+
+        managed_proof_metrics::record(ManagedProofMetricEvent::Verified);
+        managed_proof_metrics::record(ManagedProofMetricEvent::Rejected);
+        managed_proof_metrics::record(ManagedProofMetricEvent::QueueRetry);
+        managed_proof_metrics::record(ManagedProofMetricEvent::ObserveFallback);
+        managed_proof_metrics::record(ManagedProofMetricEvent::LegacySettlement);
+
+        let after = managed_proof_metrics::snapshot();
+        assert_eq!(
+            after.verification_attempts - before.verification_attempts,
+            2
+        );
+        assert_eq!(after.verified - before.verified, 1);
+        assert_eq!(after.rejected - before.rejected, 1);
+        assert_eq!(after.queue_retries - before.queue_retries, 1);
+        assert_eq!(after.observe_fallbacks - before.observe_fallbacks, 1);
+        assert_eq!(after.legacy_settlements - before.legacy_settlements, 1);
     }
 
     #[test]
@@ -1517,6 +1811,7 @@ mod tests {
             worker_id.clone(),
             worker_addr.to_string(),
             "test-secret",
+            ManagedProofRolloutMode::Enforce,
         )
         .await;
 
@@ -1573,14 +1868,21 @@ mod tests {
             .await
             .unwrap();
 
+        // Liveness guard only: it must return rather than hang, so the state
+        // assertions below mean something. It is not a latency budget, and it
+        // must stay above the production WORKER_CONNECT_TIMEOUT of 5s — a
+        // refused loopback connect measured 2.04s here, so the original 2s
+        // budget failed on timing alone once the test had a database to run
+        // against.
         let result = tokio::time::timeout(
-            Duration::from_secs(2),
+            Duration::from_secs(15),
             execute_on_worker(
                 dispatcher.repo.clone(),
                 task,
                 worker_id,
                 unavailable_addr,
                 "not-used-after-connect-failure",
+                ManagedProofRolloutMode::Enforce,
             ),
         )
         .await;
@@ -1677,6 +1979,7 @@ mod tests {
             worker_id.clone(),
             worker_addr.to_string(),
             &private_key,
+            ManagedProofRolloutMode::Enforce,
         )
         .await
         .unwrap();
@@ -1701,10 +2004,163 @@ mod tests {
         );
         assert!(!stored.billing_settled);
         assert_eq!(stored.billed_amount, 0);
-        assert_eq!(stored.managed_executed_ops, 0);
         assert_eq!(stored.managed_output_bytes, 0);
+        assert_eq!(stored.managed_executed_ops, 0);
         assert!(stored.managed_receipt_json.is_none());
 
+        // The audit trail is the operator-visible record of every settlement
+        // decision, so exercise the real INSERT rather than trusting that the
+        // statement matches the admin_audit_logs schema.
+        let (audit_event, audit_mode, audit_worker): (String, String, String) = sqlx::query_as(
+            "SELECT detail->>'event', detail->>'rollout_mode', detail->>'worker_id'
+             FROM admin_audit_logs
+             WHERE action = 'managed_proof_verification' AND target_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("a rejected managed proof must leave one audit entry");
+        assert_eq!(audit_event, "rejected");
+        assert_eq!(audit_mode, "enforce");
+        assert_eq!(audit_worker, worker_id);
+
+        sqlx::query("DELETE FROM admin_audit_logs WHERE target_id = $1")
+            .bind(&task_id)
+            .execute(&db.pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM ledger_entries WHERE task_id = $1")
+            .bind(&task_id)
+            .execute(&db.pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM task_attestations WHERE task_id = $1")
+            .bind(&task_id)
+            .execute(&db.pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM tasks WHERE task_id = $1")
+            .bind(&task_id)
+            .execute(&db.pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM worker_reputation WHERE worker_id = $1")
+            .bind(&worker_id)
+            .execute(&db.pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM worker_nodes WHERE worker_id = $1")
+            .bind(&worker_id)
+            .execute(&db.pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM users WHERE username = $1")
+            .bind(&username)
+            .execute(&db.pool)
+            .await
+            .ok();
+        fixture.cleanup().await.ok();
+    }
+
+    /// `off` is the emergency rollback mode: it must still settle the task, but
+    /// it must say so in the audit trail, because the settlement no longer
+    /// rests on anything the nodepool verified.
+    #[tokio::test]
+    async fn test_execute_on_worker_off_mode_settles_managed_task_and_audits_legacy() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let (db, fixture) = match test_db("dispatcher_managed_rollout_off").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let dispatcher = Dispatcher::new(db.clone(), 30, 2);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("dispatch-off-owner-{unique}");
+        let worker_id = format!("dispatch-off-worker-{unique}");
+        let task_id = format!("dispatch-off-task-{unique}");
+        let response = ExecuteTaskResponse {
+            success: true,
+            status_message: "7".into(),
+            managed_executed_ops: 2_500,
+            managed_output_bytes: 2_049,
+            managed_receipt_json: "{\"executed_ops\":2500,\"output_bytes\":2049}".into(),
+            managed_proof: None,
+        };
+        let (worker_addr, _execute_rx) =
+            match fake_worker_execute_server_with_response(response).await {
+                Some(parts) => parts,
+                None => return,
+            };
+
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        )
+        .bind(&username)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO worker_nodes (worker_id, username, ip, cpu_cores, memory_gb)
+             VALUES ($1, $2, '10.0.0.2', 4, 16)",
+        )
+        .bind(&worker_id)
+        .bind(format!("provider-{unique}"))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let mut task = make_task(&task_id, TaskStatus::Pending, 0);
+        task.owner = username.clone();
+        task.runtime = Some("managed-function-v0".into());
+        task.task_source = Some("return 7;".into());
+        task.max_cpt = 25;
+        dispatcher.repo.create(&task).await.unwrap();
+        dispatcher
+            .repo
+            .assign_to_worker(&task_id, &worker_id, &worker_addr.to_string())
+            .await
+            .unwrap();
+
+        let (private_key, _) = hivemind_config::generate_worker_execution_test_key_pair();
+        execute_on_worker(
+            dispatcher.repo.clone(),
+            task,
+            worker_id.clone(),
+            worker_addr.to_string(),
+            &private_key,
+            ManagedProofRolloutMode::Off,
+        )
+        .await
+        .unwrap();
+
+        let stored = dispatcher
+            .repo
+            .find_by_task_id(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, TaskStatus::Completed);
+        // Settlement happened, but not from a verified claim: the verified path
+        // is the only one that writes a managed receipt.
+        assert!(stored.managed_receipt_json.is_none());
+
+        let (audit_event, audit_mode): (String, String) = sqlx::query_as(
+            "SELECT detail->>'event', detail->>'rollout_mode'
+             FROM admin_audit_logs
+             WHERE action = 'managed_proof_verification' AND target_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("an unverified managed settlement must be auditable");
+        assert_eq!(audit_event, "legacy_settlement");
+        assert_eq!(audit_mode, "off");
+
+        sqlx::query("DELETE FROM admin_audit_logs WHERE target_id = $1")
+            .bind(&task_id)
+            .execute(&db.pool)
+            .await
+            .ok();
         sqlx::query("DELETE FROM ledger_entries WHERE task_id = $1")
             .bind(&task_id)
             .execute(&db.pool)

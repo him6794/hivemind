@@ -745,6 +745,24 @@ message ListAdminAuditLogsResponse {
     string status_message = 2;
     repeated AdminAuditLogEntry entries = 3;
 }
+
+// Managed-proof verification observability. The Nodepool is the authority for
+// these counters; Master only proxies them to authenticated administrators.
+message GetAdminManagedProofMetricsRequest {
+    string token = 1;
+}
+
+message GetAdminManagedProofMetricsResponse {
+    bool success = 1;
+    string status_message = 2;
+    string rollout_mode = 3;
+    int64 verification_attempts = 4;
+    int64 verified = 5;
+    int64 rejected = 6;
+    int64 queue_retries = 7;
+    int64 observe_fallbacks = 8;
+    int64 legacy_settlements = 9;
+}
 // ============================================================
 // Services
 // ============================================================
@@ -788,6 +806,7 @@ service MasterNodeService {
     rpc UpdateWorkerTrustControl(UpdateWorkerTrustControlRequest) returns (UpdateWorkerTrustControlResponse);
     rpc ListAdminWorkerTrust(ListAdminWorkerTrustRequest) returns (ListAdminWorkerTrustResponse);
     rpc ListAdminAuditLogs(ListAdminAuditLogsRequest) returns (ListAdminAuditLogsResponse);
+    rpc GetAdminManagedProofMetrics(GetAdminManagedProofMetricsRequest) returns (GetAdminManagedProofMetricsResponse);
 }
 
 service WorkerNodeService {
