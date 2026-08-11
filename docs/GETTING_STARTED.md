@@ -191,6 +191,14 @@ to nodepool. The Official Site backend reaches nodepool server-side through
 `WEBSITE_NODEPOOL_GRPC_ADDR`, while browser-facing traffic uses the Master API
 or the local worker control endpoint.
 
+The same rule governs billing for `managed-function-v0` tasks. A Worker's
+reported usage is a claim, so nodepool settles only from a RISC Zero proof it
+verifies itself, in its own bounded subprocess, against a pinned guest image ID.
+An unproven or unverifiable managed execution is failed, never settled. Workers
+that run managed tasks therefore need the prover sidecar described in the README
+under "Managed-function proving"; `MANAGED_PROOF_ROLLOUT_MODE` defaults to the
+fail-closed `enforce`.
+
 ## Troubleshooting
 
 - **`OpenSSL is required`**: install OpenSSL and ensure `openssl` is on `PATH`,
@@ -209,6 +217,14 @@ or the local worker control endpoint.
   `http://localhost:18080/api/worker-info` responds, the public key matches the
   nodepool private key, and login credentials are valid. A blank
   `WORKER_NODEPOOL_TOKEN` is expected for UI-driven registration.
+- **Every managed-function task fails**: the worker could not produce a
+  verifiable proof. Check that `packaging/managed-prover/` held the sidecar when
+  the worker image was built, that `MANAGED_PROVER_EXECUTABLE` points at it, and
+  that `MANAGED_PROVER_TIMEOUT_SECS` exceeds the ~570-580 second proving time.
+  `/api/admin/managed-proof/metrics` reports the rejection counters, and the
+  admin audit log carries a `managed_proof_verification` entry per decision. A
+  sidecar whose embedded guest does not match the nodepool trust pin is rejected
+  on every task — regenerate the pin and receipt fixture after any guest change.
 - **Playwright cannot launch a browser**: install Edge/Chrome on Windows or the
   Playwright browser dependencies on other platforms; optionally set
   `HIVEMIND_PLAYWRIGHT_CHANNEL`.

@@ -64,6 +64,15 @@ COPY --from=builder /tmp/monty /app/monty
 COPY --from=master-ui /ui/dist /app/frontend/master-ui/dist
 COPY --from=worker-ui /ui/dist /app/frontend/worker-ui/dist
 
+# Optional managed-proof prover sidecar. RISC Zero only supports Linux/macOS
+# prover hosts and needs a dedicated guest toolchain, so the binary is built
+# once by scripts/build-managed-prover.sh and staged in packaging/managed-prover
+# rather than compiled here. The directory always exists, so the image builds
+# with or without it; without the binary every managed task fails closed because
+# MANAGED_PROVER_EXECUTABLE cannot be spawned.
+COPY packaging/managed-prover/ /app/prover/
+RUN chmod -R a+rX /app/prover
+
 RUN mkdir -p /app/api/torrents /app/bt_torrents /app/sandbox
 RUN groupadd --system --gid 10001 hivemind \
     && useradd --system --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin hivemind \

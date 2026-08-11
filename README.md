@@ -165,6 +165,42 @@ When verification is complete, return to the repository root and run
 unlike the smoke harness, raw Compose requires secrets and the matching worker
 execution key pair to be supplied.
 
+### Managed-function proving
+
+`managed-function-v0` tasks are settled only from a RISC Zero proof that the
+Nodepool verifies itself — a Worker's own usage numbers are never trusted. The
+Worker produces that proof by spawning an isolated prover sidecar, so a Worker
+that is meant to run managed tasks needs the sidecar binary present.
+
+RISC Zero 3.0.6 supports Linux and macOS prover hosts only; there is no
+supported native Windows prover. Build the sidecar once on a supported host and
+stage it, then build the worker image:
+
+```bash
+bash scripts/build-managed-prover.sh   # writes packaging/managed-prover/
+docker compose build worker            # bakes it into /app/prover/
+```
+
+`MANAGED_PROVER_EXECUTABLE` defaults to `/app/prover/hivemind-managed-proof-prover`
+under Compose. If the sidecar is missing, or its proof fails verification, the
+task fails — it is never settled from unverified numbers. Proving a single
+managed function currently takes roughly 570–580 seconds, which is why
+`MANAGED_PROVER_TIMEOUT_SECS` defaults to 900.
+
+`MANAGED_PROOF_ROLLOUT_MODE` controls the settlement policy and defaults to the
+fail-closed `enforce`. `observe` verifies proofs and records the outcome but
+still settles from the legacy path, which is useful for a monitored migration;
+`off` skips proof handling entirely and is an emergency rollback only. Both
+non-default modes settle from Worker-reported numbers, so neither is a
+trust-preserving configuration — watch
+`/api/admin/managed-proof/metrics` and the `managed_proof_verification` audit
+entries while either is active.
+
+Note which service takes which setting. `MANAGED_PROOF_ROLLOUT_MODE` belongs to
+the **nodepool**, because the nodepool owns the dispatcher that decides how a
+task settles; setting it on a worker has no effect at all. The prover settings
+belong to the **worker**, because that is where proving happens.
+
 ### Manual
 
 ```bash
@@ -202,6 +238,9 @@ Configuration is via environment variables:
 | `WORKER_GRPC_ADDR` | `0.0.0.0:50053` | Worker gRPC listen address |
 | `WORKER_ADVERTISE_ADDR` | - | Worker address registered with nodepool |
 | `EXECUTOR_SANDBOX_DIR` | `./sandbox` | Per-task working directory root |
+| `MANAGED_PROOF_ROLLOUT_MODE` | `enforce` | Managed-proof settlement policy: `off`, `observe`, or `enforce`; production default is fail-closed `enforce` |
+| `MANAGED_PROVER_EXECUTABLE` | - | Absolute path to the supported Linux/macOS managed-proof prover sidecar; required for managed tasks in `enforce` |
+| `MANAGED_PROVER_TIMEOUT_SECS` | `900` | Bounded prover sidecar execution timeout |
 | `LOG_LEVEL` | `info` | Log level (debug, info, warn, error) |
 
 ## API Reference
@@ -252,7 +291,15 @@ curl "http://localhost:8082/api/admin/scheduling/cache-anomalies?limit=100" \
 # Admin audit logs (trust-control / artifact cleanup / etc.)
 curl "http://localhost:8082/api/admin/audit/logs?limit=100" \
   -H "Authorization: Bearer <admin-token>"
+
+# Managed-proof verification counters and active rollout mode (Nodepool-owned)
+curl http://localhost:8082/api/admin/managed-proof/metrics \
+  -H "Authorization: Bearer <admin-token>"
 ```
+
+Managed-proof verification and observe-mode fallback decisions are also written
+as `managed_proof_verification` entries in the admin audit log. The Nodepool is
+the only authority for these counters; a Master or Worker cannot edit them.
 
 ### Health Check
 
