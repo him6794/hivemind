@@ -128,14 +128,38 @@ The release worker image bakes in a prebuilt sidecar from
 binary must embed this same guest image ID, or the Nodepool rejects every
 envelope it produces.
 
+### The image ID depends on the build environment, not only on the source
+
+An earlier staged binary
+(`c0dc79ea479b64af2d9f62f20315b4442d5776390d6091cf8a403ae22e67b983`, 95,640,904
+bytes) was assumed to match because it was built from the same working tree.
+A multi-container end-to-end run disproved that. Asked to prove the golden
+vector, it returned:
+
 ```text
-c0dc79ea479b64af2d9f62f20315b4442d5776390d6091cf8a403ae22e67b983  hivemind-managed-proof-prover (95,640,904 bytes, Linux x86-64 ELF)
+[851157164, 2331111488, 898154945, 2202623007,
+ 559143449, 4095204016, 1237502462, 1480841899]
 ```
 
-That binary was built from the same working tree that produced the image ID
-above, before the trust-pin value was edited — and the re-run confirms the pin
-edit does not change the guest. It executes correctly on the release runtime
-base image (`debian:bookworm-slim`) and fails closed on malformed input.
+which is not the trusted ID. It had been built in a container with its own
+rzup-installed guest toolchain, while the pin was produced by the WSL native
+path using this repository's cached toolchain. Same source, different guest.
+
+The Nodepool behaved correctly throughout: both attempts were audited as
+`event=rejected`, `reason="Managed proof verification failed"`, the task ended
+`FAILED` with `billing_settled=false` and `managed_executed_ops=0`, and nothing
+was settled from an unverified claim. The cost of the mismatch is availability,
+never trust.
+
+Two consequences, both now enforced rather than documented:
+
+- `scripts/build-managed-prover.sh` runs
+  `tests::generated_guest_id_matches_nodepool_trust_pin` **before** building and
+  refuses to stage anything if this environment does not reproduce the pinned
+  guest.
+- "Built from the same source" is not evidence that a prover matches the pin.
+  Only a build environment that reproduces the pinned image ID is.
 
 This attestation records the local build evidence; the tracked pin-equality test
-remains the executable guard for future source or dependency changes.
+remains the executable guard for future source, dependency, or toolchain
+changes.
