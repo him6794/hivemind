@@ -251,9 +251,12 @@ return {"total": total};
         assert_eq!(response.proof_scheme, envelope.proof_scheme);
         assert_eq!(response.image_id, envelope.image_id);
         assert_eq!(response.journal, envelope.journal);
+        // `risc0_zkvm::Receipt` is not `PartialEq`, so compare the canonical
+        // JSON both sides serialize to. That is also the representation the
+        // Nodepool verifier actually parses.
         assert_eq!(
-            serde_json::from_str::<Receipt>(&response.receipt_json).unwrap(),
-            envelope.receipt
+            serde_json::from_str::<serde_json::Value>(&response.receipt_json).unwrap(),
+            serde_json::to_value(&envelope.receipt).unwrap()
         );
         assert_eq!(response.validate(), Ok(()));
     }
