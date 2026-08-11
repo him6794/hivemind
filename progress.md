@@ -235,3 +235,122 @@ Status remains `running`, not release-ready. Required next gates are finite matc
   3. 階段 4（rollout mode、metrics、audit events）與階段 5（惡意 Worker、多節點 E2E、audit）未開始。
   4. proving 約 570-580 秒 vs 毫秒級任務，enforce 前需要先定經濟模型。
 - remote actions: none（未 push、未建立 PR、未動使用者的 Docker stack）
+## Continuation checkpoint - 2026-08-11
+
+- overall: `awaiting-result`
+- current step: Linux container build of the real `hivemind-managed-proof-prover` sidecar
+- recovery: background cell `252` is still running; container `d8cab3c4b1f2` is compiling the RISC Zero host/C++ dependencies
+- observed output: the first guest-build attempt reported missing RISC Zero Rust toolchain (`rzup install rust`); the current build has not exited yet
+- next action: wait for cell `252`; if it exits with the same toolchain error, install `rzup 0.5.2` and the RISC Zero Rust toolchain inside the builder, then rerun the locked release build
+- blockers: sidecar binary, Worker image packaging, real proving fixture/attestation, rollout regression, malicious-worker tests, and docs remain incomplete
+
+## Prover build result - 2026-08-11
+
+- status: `running`
+- recovery completed: cell `252` exited nonzero after the locked release build finished compiling host dependencies
+- root cause: `risc0-build` could not find the RISC Zero Rust guest toolchain and requested `rzup install rust`
+- next action: rerun in a Linux Rust container with `rzup 0.5.2`, `rzup install rust`, and `HIVEMIND_ZKVM_USE_DOCKER=0`; copy the resulting binary to `.cache/managed-prover-linux/`
+- 後續：該 prover 建置最終成功，binary 位於 `.cache/managed-prover-linux/hivemind-managed-proof-prover`（95,640,904 bytes，Linux x86-64 ELF）。
+
+## 發布驗證 — 2026-08-11
+
+- overall: `running`；階段 1–4 完成，階段 5 僅剩多節點 Docker E2E 與瀏覽器回歸。
+- 起點為 `01ffb3a` 加上未提交的階段 4 rollout/metrics 切片。
+
+### 本輪修正的既有缺陷
+
+這些全部是先前被環境或設定遮蔽、從未真正執行過的路徑：
+
+1. `zkvm/managed-proof/host/src/lib.rs:254` 以 `assert_eq!` 比較 `risc0_zkvm::Receipt`，
+   但該型別沒有 `PartialEq`，整個 crate 的測試無法編譯。該測試由 `6e7af38` 加入，因
+   Windows RISC Zero host build 受阻而從未編譯過，連帶讓 guest image ID 的 pin-test 也
+   無法執行。改為比較 canonical JSON，即 verifier 實際解析的表示法。
+2. `test_seed_default_user_inserts_bootstrap_account` 直接連 public schema 並
+   `DELETE FROM users`，卻從不跑 migration，靠其他測試殘留的表才會過。乾淨資料庫上回
+   `relation "users" does not exist`。改用與兄弟測試相同的隔離 schema fixture。
+3. `test_execute_on_worker_redispatches_after_connect_failure_without_worker_penalty`
+   的 2 秒 liveness guard 小於實測 2.04 秒。量測後確認 production 語義正確（Pending、
+   `Redispatched`、retry_count 1、不扣 Worker reputation），將 guard 調為高於 5 秒
+   production connect timeout 的 15 秒，並在註解說明它不是延遲 SLA。
+4. `MANAGED_PROOF_ROLLOUT_MODE` 只設在 Compose 的 `worker` service，但讀取者是跑在
+   nodepool 的 dispatcher。操作者設 `observe` 想做受監控遷移時，nodepool 仍停在
+   `enforce`，開關靜默失效。已移到 nodepool，並在發布契約加入服務層級斷言（red-green 驗證）。
+5. `docker-compose.test.yml` 的 CI 測試清單漏掉 `hivemind-task-scheduler`——結算邏輯所在
+   的 crate，其 DB 測試從未在 CI 執行過。已補入。
+6. `hivemind-rs/.cargo/config.toml` 被全域 `.cargo/` 規則忽略而未追蹤，使文件記載的
+   `x86_64-pc-windows-gnu` 測試路徑無法在他人機器上重現。已加精確例外追蹤。
+
+### 證明鏈重建
+
+guest source 自上次 attestation 後有 4 個 build input 變更雜湊（`managed-proof/src/lib.rs`、
+bounded renderer 的 `managed-function-runtime/src/lib.rs`、`zkvm` 的 `Cargo.lock`、
+`guest/src/main.rs`），guest image ID 因此漂移。
+
+- 新 image ID：`[466412732, 2327327967, 2963073729, 178423767, 1914766815, 1823038484, 4206432854, 2659673256]`
+- 更新 trust pin 後**重跑 pin-test 仍 GREEN**（114 秒），證明 pin 自身的值不會回饋進 guest
+  codegen，這個更新程序不是循環定義。
+- 真 receipt fixture 重新 proving（732 秒），其內嵌 `image_id` 與新 pin 逐字相符。
+- fixture 形狀未變：journal 656、單一 Composite segment（index 0、poseidon2）、無 assumption、
+  seal 63,914 words。僅位元組數變動：envelope 664,026 → 664,258，receipt JSON
+  661,720 → 661,953，兩者都遠低於 verifier 的 pre-crypto 上限。budget regression 常數已更新。
+- 證據寫入 `docs/zk-managed-proof-build-attestation.md`。
+
+### Prover sidecar 打包
+
+先前最硬的部署阻擋（Compose 起的 worker 會讓每個 managed task 失敗）已解除：
+
+- `packaging/managed-prover/` 為 staging 目錄（binary 本身 gitignore，README 與 `.gitkeep` 追蹤）
+- `scripts/build-managed-prover.sh` 在受支援的 Linux/macOS/WSL 建置，並在不支援的主機上以
+  exit 65 與可行動訊息拒絕（已實測）
+- `hivemind-rs/Dockerfile` 將整個目錄 COPY 到 `/app/prover/`；缺 binary 時映像仍可建置，
+  managed task 則明確 fail closed
+- Compose 的 `MANAGED_PROVER_EXECUTABLE` 預設指向該路徑
+- **實際建置的 worker 映像已驗證**：binary 位於 `/app/prover/`、`-rwxr-xr-x`、以非 root
+  `uid=10001(hivemind)` 執行、空輸入時輸出固定的 `managed proof generation failed` 並 exit 1
+
+### 依賴稽核與威脅覆蓋
+
+- 主 workspace `cargo audit`：0 vulnerabilities，3 個既有 allowed warnings
+- zkVM prover workspace 的兩個無法升級的 advisory（`rsa` RUSTSEC-2023-0071、
+  `tracing-subscriber 0.2.25` RUSTSEC-2025-0055）改為可稽核的接受政策：
+  `zkvm/managed-proof/.cargo/audit.toml` 逐項記錄，可達性分析、依賴路徑與重新檢視觸發條件
+  寫在 `docs/zk-managed-proof-dependency-audit.md`。加上政策後該 workspace `cargo audit` exit 0。
+- `docs/zk-managed-proof-threat-coverage.md` 將每一種惡意 Worker 手法對應到具體測試；
+  文件引用的 54 個測試名稱已逐一驗證存在於原始碼。
+
+### 本輪測試結果
+
+| 關卡 | 結果 |
+|---|---|
+| GNU workspace 測試（接真實測試資料庫，`--no-fail-fast`） | 390 passed、0 failed、1 intentional ignored（37 個測試 binary） |
+| `hivemind-managed-proof --features risc0-verifier` | 37 passed、0 failed（含真實 receipt 密碼學驗證） |
+| WSL guest pin-test（trust pin 更新後） | 1 passed，114 秒，`cleanup_complete rc=0` |
+| WSL fixture 重新 proving | 成功，732 秒，`cleanup_complete rc=0` |
+| clippy `--workspace --all-targets -D warnings` | passed |
+| `cargo fmt --all -- --check` | passed |
+| `cargo audit`（主 workspace） | 0 vulnerabilities |
+| `cargo audit`（zkVM prover，含政策） | exit 0 |
+| 前端測試 | 39 passed（site 13、master-ui 15、worker-ui 11） |
+| 前端 release builds | 3/3 passed |
+| `docker-compose-release.Tests.ps1` | passed（含新增的 prover 打包與服務歸屬斷言） |
+| `release-docs.Tests.ps1` | passed |
+| `release-stack-smoke.ps1 -CheckOnly` | passed |
+| worker 映像建置 + 映像內 prover 驗證 | passed |
+
+### 剩餘工作
+
+多節點 Docker E2E：在 Compose 起的完整 stack 中提交一個 `managed-function-v0` 任務，
+確認 worker 產生 proof、nodepool 獨立驗證、只依 verified claim 結算，且
+`/api/admin/managed-proof/metrics` 的 `verified` 計數增加、audit log 出現對應項目。
+既有 Playwright `release-flow.spec.mjs` 只覆蓋 UI 流程，不含 managed proving，因此這是新工作。
+
+### 本輪本機提交（未 push）
+
+- `b3371fd fix(proof): compile the managed prover host tests`
+- `bcec23e fix(test): run settlement and bootstrap regressions against a real database`
+- `6eaa08b chore(repo): track cargo policy configs and ignore the staged prover`
+- `6db4d7e chore(cargo): declare the workspace license on every crate`
+- `95fb420 feat(proof): add managed-proof rollout modes, metrics and audit events`
+- `c7d9a45 feat(release): package the managed-proof prover sidecar`
+- `8a2f621 chore(proof): re-pin the guest image and regenerate the receipt fixture`
+- `803074a docs(proof): record the dependency audit and threat coverage`

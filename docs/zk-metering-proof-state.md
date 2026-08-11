@@ -16,7 +16,7 @@ running
 
 ## Current step
 
-階段 4 未開始；階段 3：verifier／settlement 已完成 focused gates，正在收斂獨立 commit；admission caps 的首輪 read-only review 發現四個 direct task-ID RPC 漏 gate，等待 owner 以 RED→GREEN 修正；prover sidecar 與 Worker lifecycle/RPC 接線並行盤點中。
+階段 5 進行中。階段 4（off／observe／enforce rollout policy、verification metrics、audit events、admin 查詢介面）已完成並驗證；guest image ID、build attestation 與真實 receipt fixture 已於 2026-08-11 重建並通過 verifier suite；prover sidecar 已打包進 worker image 並以實際映像驗證。剩餘為多節點 Docker E2E 與瀏覽器回歸。
 
 ## Completed
 
@@ -32,7 +32,7 @@ running
 - RISC Zero guest 已執行完整 deterministic managed runtime，journal 與 native claim golden vector 完全一致。
 - 真實 receipt 已以固定 guest image id 驗證；錯誤 image id 與篡改 journal 均被拒絕。
 - Builder 使用 `r0.1.88.0@sha256:3e12f71bacd27527a61dea96fa0e53e468c99aa261d3a1019b593f6dbd943eb3`。
-- Guest image id 為 `[3606400121, 4250889949, 2277454476, 3430793801, 2111044864, 2713379816, 851522248, 2751351423]`；verifier 依賴精簡後重建仍保持相同 ID。
+- Guest image id 曾為 `[3606400121, 4250889949, 2277454476, 3430793801, 2111044864, 2713379816, 851522248, 2751351423]`；bounded renderer 等 guest source 變更後已於 2026-08-11 重建為 `[466412732, 2327327967, 2963073729, 178423767, 1914766815, 1823038484, 4206432854, 2659673256]`，詳見 `docs/zk-managed-proof-build-attestation.md`。
 - zkVM tests 2 passed；真實 proving 約 570–580 秒；fmt 與 clippy `-D warnings` passed。
 - Worker proof envelope 已固定 `risc0-zkvm-3.0.6` scheme、guest image id、journal 與完整 receipt，並支援有遞迴深度限制的 JSON round-trip。
 - Verifier 先拒絕錯誤 scheme、image id 或 envelope/receipt journal 不一致，再驗證 receipt，最後才解析 execution claim。
@@ -61,28 +61,28 @@ running
 - Claim binding review: complete（CLEAR，0 blockers）
 - Verifier subprocess owner: complete（68 tests／clippy GREEN，review APPROVE，0 blockers）
 - Existing-binary verifier mode owner: `verifier_cli_tdd`（complete；11 tests、clippy/fmt/diff check GREEN）
-- Admission caps owner: `verifier_process_tdd`（running；首輪 review BLOCK，待修正四個 direct task-ID RPC 與 silent-return test）
+- Admission caps owner: complete（`367c71d`；final review CLEAR／APPROVE）
 - Prover sidecar owner: `prover_sidecar_finish`（complete；locked-metadata RED→GREEN，review CLEAR／APPROVE，0 blockers，待本機commit）
-- Worker lifecycle mapper: `worker_lifecycle_map`（running；read-only，回傳 RPC/取消/資源釋放 test seams）
+- Worker lifecycle／bounded prover: complete（`1a9fa8f`、`d99c8f7`；tests/review GREEN）
+- Rollout policy owner: Codex（running；RED config contract → scheduler policy → focused/full gates）
 
 ## Blockers
 
-- 獨立 zkVM prover/toolchain lockfile 仍有 `rsa` timing side-channel advisory（經 rzup，無修正版）；主 workspace verifier 已不再拉入有漏洞的舊 `tracing-subscriber`。
+- 獨立 zkVM prover/toolchain lockfile 的 `rsa`（RUSTSEC-2023-0071，經 rzup，無修正版）與 `tracing-subscriber 0.2.25`（RUSTSEC-2025-0055，卡在 `ark-relations` 的 `^0.2`）已改為可稽核的接受政策：`zkvm/managed-proof/.cargo/audit.toml` 記錄兩者，可達性分析與重新檢視觸發條件寫在 `docs/zk-managed-proof-dependency-audit.md`。主 workspace `cargo audit` 為 0 vulnerabilities。
 - 單次 proving 約 9.5 分鐘，現階段不可直接啟用 enforce；需後續 timeout/queue/benchmark 設計。
-- Worker 與 guest 目前皆以 `ExecutionLimits::unlimited()` 僅覆寫 usage budget，故 recursion、loop、ops 與 runtime output caps 未啟用；一致修正會漂移 guest image ID，需獨立重建 attestation、fixture 與真 proof，發布前不可略過。
-- Worker execution 仍回傳 `managed_proof: None`，因此 managed task 目前會安全地 fail closed，但不能正常完成或結算；Worker prover、queue/cancel/timeout 與 RPC deadline 尚未接入。
+- ~~guest image ID／attestation／真 proof fixture 過期~~：已於 2026-08-11 重建。新 pin 為 `[466412732, ...]`，pin-test 在更新後重跑仍 GREEN，真 fixture 重新 proving（732 秒）且 verifier suite 37 passed。
+- ~~sidecar 尚未進 release image／Compose~~：已打包。`packaging/managed-prover/` → `hivemind-rs/Dockerfile` → `/app/prover/`，Compose 預設指向該路徑；實際建置的 worker 映像已驗證 binary 可執行且 fail-closed。
 - Admission caps 已完成四個 direct task-ID RPC gate 與 no-DB runtime-bypass test 修正；最終 review 為 `CLEAR / APPROVE`、零 blockers，GNU full/focused tests、clippy、fmt/diff evidence 均已保留。
 - C: Docker VHD 空間不足，prover 改走 WSL/native Linux 並將 artifacts/TMP 放 D:；既有 Docker stack 已恢復且保持 healthy。
-- Worker release packages尚未包含prover sidecar；更關鍵的是RISC Zero prover host在Windows目前受上游C++/link blocker，找到官方受支持修正/升級或明確Linux/WSL部署策略前，Windows managed Worker不是可發布狀態。
-- 官方RISC Zero資料只承諾Linux/macOS first-class host；v3.0.6 current source仍固定C++17 flags，沒有官方native Windows prover workaround。因此本版本發布範圍必須明確限制managed prover host平台，或提供獨立受支持Linux proving部署。
+- RISC Zero 3.0.6 只承諾 Linux/macOS first-class prover host，沒有官方 native Windows prover workaround。發布策略已明確化而非繞過：prover 在受支援的 Linux/macOS（或 WSL）以 `scripts/build-managed-prover.sh` 建置一次，產物 stage 到 `packaging/managed-prover/`，由 worker 映像烘入。此限制已寫入 README 的「Managed-function proving」與 `docs/GETTING_STARTED.md`。缺 sidecar 時每個 managed task 明確 fail closed，不會靜默降級。
 
 ## Next action
 
-先完成 verifier/settlement、prover sidecar protocol、admission caps 的精確 staging 與本機 commit；接著以 RED→GREEN 接入 Worker bounded prover、RPC deadline 及取消／kill／reap。
+執行多節點 Docker E2E 與瀏覽器回歸（`scripts/release-stack-piecemeal` 之外的完整 `release-stack-smoke.ps1 -KeepRunning` 加 Playwright），並在該環境下實測一次真實 managed-function 端到端結算。
 
 ## Next checkpoint
 
-Verifier/settlement 已完成 focused/full scheduler gate（70 passed、1 intentional ignored）及 GNU clippy；三個切片各自形成獨立本機 commit後，下一 checkpoint 是 Worker RPC/prover lifecycle 的首個 RED 測試。
+Compose 起的完整 stack 中，一個 `managed-function-v0` 任務能由 worker 產生 proof、由 nodepool 獨立驗證並只依 verified claim 結算；`/api/admin/managed-proof/metrics` 的 `verified` 計數增加，且 audit log 出現對應的 `managed_proof_verification` 項目。
 
 ## Notes
 
@@ -145,9 +145,9 @@ task-scheduler lib 75（1 intentional ignored）、clippy `-D warnings`、`cargo
 receipt fixture 全部過期，必須在支援的 Linux/macOS prover host 重建並跑一次真 proof 之後，
 才能用來支持任何發布宣稱。
 
-尚存發布差距：prover sidecar 未進 `docker-compose.yml`／`.env.example`（`MANAGED_PROVER_EXECUTABLE`
-預設空字串，Compose worker 目前會讓所有 managed task 失敗）；階段 4 的 off/observe/enforce
-rollout mode、metrics 與 audit events 未開始；階段 5 的惡意 Worker 測試、多節點 Docker E2E、
+尚存發布差距：prover sidecar 尚未被正式 worker image 打包（`MANAGED_PROVER_EXECUTABLE`
+預設空字串，Compose worker 在 enforce 下會安全 fail closed）；階段 4 的 off/observe/enforce
+rollout mode、metrics 與 audit events 已完成；階段 5 的惡意 Worker 測試、多節點 Docker E2E、
 資源釋放與依賴稽核未開始；單次 proving 約 570-580 秒的經濟模型尚未定案。
 
 Windows 原生無法編譯 `risc0-circuit-rv32im-sys`（C++ 需 `/std:c++20`），失敗發生在
