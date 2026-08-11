@@ -627,41 +627,29 @@ mod tests {
 
     #[tokio::test]
     async fn test_seed_default_user_inserts_bootstrap_account() {
-        let db_url = std::env::var("HIVEMIND_TEST_DATABASE_URL").unwrap_or_else(|_| {
-            "postgres://hivemind:replace-with-a-test-password@localhost:5432/hivemind_test".into()
-        });
-        let pool = match PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&db_url)
-            .await
-        {
-            Ok(p) => p,
+        // Owns its schema and migrations rather than borrowing whatever another
+        // test left in `public`: against a fresh database the shared-pool
+        // version failed with `relation "users" does not exist`, and against a
+        // dirty one it only passed when it happened to run second.
+        let fixture = match create_isolated_test_pool("database_seed_default_user").await {
+            Ok(fixture) => fixture,
             Err(_) => {
                 tracing::warn!("Skipping DB test");
                 return;
             }
         };
+        run_migrations(&fixture.pool).await.unwrap();
 
-        sqlx::query("DELETE FROM users WHERE username = $1")
-            .bind("testuser")
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        seed_default_user(&pool).await.unwrap();
+        seed_default_user(&fixture.pool).await.unwrap();
 
         let exists: bool =
             sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE username = $1)")
                 .bind("testuser")
-                .fetch_one(&pool)
+                .fetch_one(&fixture.pool)
                 .await
                 .unwrap();
         assert!(exists);
 
-        sqlx::query("DELETE FROM users WHERE username = $1")
-            .bind("testuser")
-            .execute(&pool)
-            .await
-            .ok();
+        fixture.cleanup().await.unwrap();
     }
 }
