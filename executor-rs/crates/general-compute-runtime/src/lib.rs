@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub mod reference;
 pub mod supervisor;
 
 pub const GENERAL_COMPUTE_RUNTIME_VERSION: &str = "general-compute-v1";
