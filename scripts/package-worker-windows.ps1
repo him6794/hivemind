@@ -48,7 +48,6 @@ WORKER_ID=$env:COMPUTERNAME
 WORKER_LOCATION=windows
 
 JWT_SECRET=
-MONTY_EXECUTABLE=monty.exe
 # Managed-function proving is unsupported on native Windows: RISC Zero proving
 # hosts are Linux, macOS, and WSL. This package ships no prover sidecar, so
 # MANAGED_PROVER_EXECUTABLE stays unset and managed tasks fail closed here.
@@ -306,8 +305,7 @@ $readme = @'
 3. Set `WORKER_NODEPOOL_TOKEN` to a nodepool JWT whose subject matches `WORKER_ID`, or to an admin token that is allowed to register this worker.
 4. Optionally set `WORKER_ADVERTISE_ADDR` to the address other machines can use to reach this worker, for example `203.0.113.10:50053` or a Tailscale address. If you leave it blank, the worker will derive it from `WORKER_GRPC_ADDR`.
 5. `JWT_SECRET` will be generated automatically on first launch if it is blank. Set it explicitly if you need a fixed deployment secret.
-6. Put `monty.exe` next to `hivemind-bin.exe` or update `MONTY_EXECUTABLE`.
-7. Run PowerShell as the provider user and execute:
+6. Run PowerShell as the provider user and execute:
 
 ```powershell
 .\start-worker.ps1

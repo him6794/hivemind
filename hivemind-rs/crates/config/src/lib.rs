@@ -224,7 +224,6 @@ pub struct VpnConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutorConfig {
-    pub monty_executable: String,
     #[serde(default)]
     pub managed_prover_executable: String,
     #[serde(default = "default_managed_prover_timeout_secs")]
@@ -306,7 +305,6 @@ impl Default for HivemindConfig {
                 vpn_network: "100.64.0.0/10".into(),
             },
             executor: ExecutorConfig {
-                monty_executable: "monty.exe".into(),
                 managed_prover_executable: String::new(),
                 managed_prover_timeout_secs: default_managed_prover_timeout_secs(),
                 sandbox_dir: "./sandbox".into(),
@@ -436,9 +434,6 @@ impl HivemindConfig {
         }
         if let Ok(public_key) = std::env::var("WORKER_EXECUTION_PUBLIC_KEY_PEM") {
             self.auth.worker_execution_public_key_pem = public_key;
-        }
-        if let Ok(exec) = std::env::var("MONTY_EXECUTABLE") {
-            self.executor.monty_executable = exec;
         }
         if let Ok(exec) = std::env::var("MANAGED_PROVER_EXECUTABLE") {
             self.executor.managed_prover_executable = exec;
@@ -872,7 +867,6 @@ mod tests {
                 "vpn_network": "100.64.0.0/10"
             },
             "executor": {
-                "monty_executable": "monty.exe",
                 "sandbox_dir": "./sandbox",
                 "max_cpu_percent": 80.0,
                 "max_memory_mb": 4096,

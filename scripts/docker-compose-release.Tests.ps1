@@ -51,6 +51,10 @@ if (!$composeText.Contains('WORKER_EXECUTION_PUBLIC_KEY_PEM: ${WORKER_EXECUTION_
     throw "docker-compose.yml must require and propagate WORKER_EXECUTION_PUBLIC_KEY_PEM to the worker."
 }
 
+if ($composeText.Contains("MONTY_EXECUTABLE") -or $composeText.Contains("/app/monty")) {
+    throw "docker-compose.yml must not retain the removed Monty executable contract."
+}
+
 foreach ($expectedCorsSetting in @(
     'MASTER_CORS_ALLOWED_ORIGINS: ${MASTER_CORS_ALLOWED_ORIGINS:-}',
     'WORKER_CONTROL_CORS_ALLOWED_ORIGINS: ${WORKER_CONTROL_CORS_ALLOWED_ORIGINS:-}'
@@ -100,27 +104,18 @@ foreach ($expected in @(
     "!frontend/",
     "!frontend/**",
     "!executor-rs/",
-    "!executor-rs/README.md",
     "!executor-rs/Cargo.toml",
     "!executor-rs/Cargo.lock",
     "!executor-rs/crates/managed-function-runtime/",
-    "!executor-rs/crates/managed-function-runtime/**",
-    "!executor-rs/crates/managed-function-transpiler/",
-    "!executor-rs/crates/managed-function-transpiler/**",
-    "!executor-rs/crates/monty/",
-    "!executor-rs/crates/monty/**",
-    "!executor-rs/crates/monty-cli/",
-    "!executor-rs/crates/monty-cli/**",
-    "!executor-rs/crates/monty-js/",
-    "!executor-rs/crates/monty-js/**",
-    "!executor-rs/crates/monty-type-checking/",
-    "!executor-rs/crates/monty-type-checking/**",
-    "!executor-rs/crates/monty-typeshed/",
-    "!executor-rs/crates/monty-typeshed/**"
+    "!executor-rs/crates/managed-function-runtime/**"
 )) {
     if ($dockerIgnoreLines -notcontains $expected) {
         throw ".dockerignore must contain the exact release-context include '$expected'."
     }
+}
+
+if (($dockerIgnoreLines -join "`n") -match "(?i)monty|managed-function-transpiler") {
+    throw ".dockerignore must not restore files belonging to the removed Monty workspace."
 }
 
 foreach ($unexpected in @(
@@ -157,8 +152,12 @@ if (!$dockerfileText.Contains("managed-function-runtime")) {
     throw "hivemind-rs/Dockerfile must stage the managed-function-runtime dependency explicitly."
 }
 
-if (!$dockerfileText.Contains("COPY executor-rs/README.md ./executor-rs/README.md")) {
-    throw "hivemind-rs/Dockerfile must stage executor-rs/README.md because the Monty crate embeds it at compile time."
+if (!$dockerfileText.Contains("COPY executor-rs/Cargo.toml executor-rs/Cargo.lock ./executor-rs/")) {
+    throw "hivemind-rs/Dockerfile must stage the managed runtime workspace manifest explicitly."
+}
+
+if ($dockerfileText -match "(?i)monty|managed-function-transpiler") {
+    throw "hivemind-rs/Dockerfile must not build or package the removed Monty workspace."
 }
 
 if (!$dockerfileText.Contains("18080")) {

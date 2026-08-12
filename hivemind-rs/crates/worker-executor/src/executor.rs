@@ -199,11 +199,6 @@ mod tests {
         let mut config = test_config(tmp.path().join("sandbox").to_str().unwrap());
         config.torrent.api_dir = tmp.path().join("api").to_string_lossy().to_string();
         std::fs::create_dir_all(&config.torrent.api_dir).unwrap();
-        config.executor.monty_executable = tmp
-            .path()
-            .join("must-not-be-called")
-            .to_string_lossy()
-            .to_string();
         let mut task = test_task_with_source("{\"items\":[1,2,3]}");
         task.runtime = Some("managed-function-v0".into());
         task.task_source = Some(

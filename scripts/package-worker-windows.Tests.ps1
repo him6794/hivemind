@@ -3,6 +3,10 @@ $ErrorActionPreference = "Stop"
 $scriptPath = Join-Path $PSScriptRoot "package-worker-windows.ps1"
 $scriptText = Get-Content -LiteralPath $scriptPath -Raw
 
+if ($scriptText -match "(?i)monty") {
+    throw "Windows worker packaging must not retain the removed Monty runtime contract."
+}
+
 function Assert-Contains {
     param(
         [Parameter(Mandatory = $true)][string]$Haystack,

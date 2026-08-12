@@ -141,7 +141,6 @@ services:
       TORRENT_API_DIR: /app/api/torrents
       TORRENT_BT_DIR: /app/bt_torrents
       TORRENT_ANNOUNCE_URL: ${HIVEMIND_TORRENT_ANNOUNCE_URL:-http://nodepool:6969/announce}
-      MONTY_EXECUTABLE: /app/monty
       # Proving happens on the worker; the settlement policy that consumes the
       # resulting proof is configured on the nodepool.
       MANAGED_PROVER_EXECUTABLE: ${MANAGED_PROVER_EXECUTABLE:-/app/prover/hivemind-managed-proof-prover}
