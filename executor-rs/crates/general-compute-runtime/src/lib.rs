@@ -15,6 +15,49 @@ pub const MAX_PROCESSES: u32 = 256;
 pub const MAX_THREADS: u32 = 4096;
 pub const MAX_SCRATCH_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 pub const MAX_OUTPUT_BYTES: u64 = 1024 * 1024 * 1024;
+pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtocolError {
+    PayloadTooLarge,
+    Truncated,
+    InvalidJson,
+}
+
+pub fn encode_frame<T: Serialize>(value: &T, max_payload_bytes: usize) -> Result<Vec<u8>, ProtocolError> {
+    let payload = serde_json::to_vec(value).map_err(|_| ProtocolError::InvalidJson)?;
+    if payload.len() > max_payload_bytes || payload.len() > u32::MAX as usize {
+        return Err(ProtocolError::PayloadTooLarge);
+    }
+
+    let mut frame = Vec::with_capacity(4 + payload.len());
+    frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    frame.extend_from_slice(&payload);
+    Ok(frame)
+}
+
+pub fn decode_frame<T: for<'de> Deserialize<'de>>(
+    input: &[u8],
+    max_payload_bytes: usize,
+) -> Result<(T, usize), ProtocolError> {
+    if input.len() < 4 {
+        return Err(ProtocolError::Truncated);
+    }
+
+    let mut length_bytes = [0u8; 4];
+    length_bytes.copy_from_slice(&input[..4]);
+    let payload_len = u32::from_be_bytes(length_bytes) as usize;
+    if payload_len > max_payload_bytes {
+        return Err(ProtocolError::PayloadTooLarge);
+    }
+    let frame_len = 4usize.checked_add(payload_len).ok_or(ProtocolError::PayloadTooLarge)?;
+    if input.len() < frame_len {
+        return Err(ProtocolError::Truncated);
+    }
+
+    let value = serde_json::from_slice(&input[4..frame_len]).map_err(|_| ProtocolError::InvalidJson)?;
+    Ok((value, frame_len))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GeneralComputeRequest {
