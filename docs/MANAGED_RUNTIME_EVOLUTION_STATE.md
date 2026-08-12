@@ -21,7 +21,7 @@ running
 
 ## Current step
 
-M1 framed stdin/stdout protocol、bounded supervisor lifecycle、bounded stdout/stderr capture 與 process-group／descendant cleanup 小單元已完成；下一步進入 reference interpreter 與 Minsky／recursion／heap／cancellation fixtures。M0 capability matrix 仍是 supervisor 啟動前的 fail-closed gate。
+M1 supervisor、reference fixtures、differential contract、pinned CPython registry 與 bounded CPython subprocess 小單元已完成；下一步補 CPython exception/malformed response mapping，再進 M2 tensor ABI。M0 capability matrix 仍是 supervisor 啟動前的 fail-closed gate。
 
 ## Completed
 
@@ -69,6 +69,9 @@ M1 framed stdin/stdout protocol、bounded supervisor lifecycle、bounded stdout/
 - M1 pinned CPython adapter interface 小單元（待本次 commit）
   - 新增 registry-approved `PythonBackendRegistration`／`PythonBackendRegistry`／`PinnedPythonAdapter`，要求 executable、sha256 guest image、protocol version 與 output cap；observation 使用 `deny_unknown_fields` 並拒絕未知 status/超限 output。
   - adapter tests 3 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
+- M1 bounded CPython subprocess 小單元（待本次 commit）
+  - supervisor 新增 bounded stdin writer；CPython adapter 以 fixed `python -c` runner、framed stdin/stdout 傳遞 source/input/seed，payload 不進 command line；timeout/cancel 映射為 typed supervisor failure。
+  - lifecycle tests 7、CPython adapter tests 6 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
 
 ## Active owners
 
@@ -82,11 +85,11 @@ M1 framed stdin/stdout protocol、bounded supervisor lifecycle、bounded stdout/
 
 ## Next action
 
-在 `general-compute-runtime` 內接上 pinned CPython adapter 的實際 subprocess execution：由 registry 提供固定 executable/args，使用 supervisor framed protocol 執行 source/input，解析 bounded observation 並把 spawn/timeout/cancel 映射成 typed status。Windows Job Object 對等保護另列為 supervisor hardening 小單元。
+在 `general-compute-runtime` 內補 CPython runner 的 exception、non-zero exit、malformed frame 與 trailing bytes mapping，並以 hostile source/output fixtures 驗證 fail-closed；完成後開始 M2 tensor ABI。Windows Job Object 對等保護另列為 supervisor hardening 小單元。
 
 ## Next checkpoint
 
-M1 pinned CPython adapter interface 小單元完成 RED → GREEN、protocol/M0 schema/capability regression 與 v0 consumer checks 全綠並建立本地 commit；下一 checkpoint 為實際 bounded CPython subprocess。
+M1 bounded CPython subprocess 小單元完成 RED → GREEN、protocol/M0 schema/capability regression 與 v0 consumer checks 全綠並建立本地 commit；下一 checkpoint 為 exception/malformed response mapping。
 
 ## Notes
 
