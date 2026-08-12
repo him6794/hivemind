@@ -21,7 +21,7 @@ running
 
 ## Current step
 
-M1 framed stdin/stdout protocol 第一單元已完成；下一步為 bounded supervisor 的 child lifecycle、timeout/cancel、hard kill/reap 與 concurrency-slot cleanup 建立 RED tests。M0 capability matrix 仍是 supervisor 啟動前的 fail-closed gate。
+M1 framed stdin/stdout protocol 與 bounded supervisor lifecycle 第一批小單元已完成；下一步為 process-group／descendant cleanup 與 bounded stdout/stderr capture 建立 RED tests。M0 capability matrix 仍是 supervisor 啟動前的 fail-closed gate。
 
 ## Completed
 
@@ -42,6 +42,9 @@ M1 framed stdin/stdout protocol 第一單元已完成；下一步為 bounded sup
 - M1 framed protocol 小單元（待本次 commit）
   - 新增 4-byte big-endian length-prefixed JSON frame encoder/decoder，先驗證 payload cap，再反序列化；decoder 回傳 consumed bytes 以支援連續 frame。
   - truncated header/payload、oversized payload、invalid JSON、encode cap 與 exact-one-frame consumption tests 4 passed；M0 schema tests 7 passed、executor workspace v0 regression、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
+- M1 bounded supervisor lifecycle 小單元（待本次 commit）
+  - 新增分離的 program/args 啟動、monotonic timeout、cooperative cancellation，以及 timeout/cancel 後 hard kill + wait/reap；空白 program fail-closed。
+  - lifecycle tests 4 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
 
 ## Active owners
 
@@ -55,11 +58,11 @@ M1 framed stdin/stdout protocol 第一單元已完成；下一步為 bounded sup
 
 ## Next action
 
-在 `general-compute-runtime` 內建立 capability matrix 與 threat-model validation：要求 backend/image/capability 明確註冊，拒絕 GPU mismatch、network/filesystem policy 違反、無限 quota 與 artifact chunk gap/overlap。
+在 `general-compute-runtime` 內為 supervisor 建立 process-group／descendant kill 與 bounded stdout/stderr capture 的 RED tests，確保 hostile child 與 pipe back-pressure 不會逃逸或卡住。
 
 ## Next checkpoint
 
-M1 supervisor lifecycle 小單元完成 RED → GREEN、protocol/M0 schema/capability regression 與 v0 consumer checks 全綠並建立本地 commit；然後更新本檔至 reference interpreter fixture。
+M1 supervisor lifecycle 小單元完成 RED → GREEN、protocol/M0 schema/capability regression 與 v0 consumer checks 全綠並建立本地 commit；下一 checkpoint 為 process-group／output-boundary 小單元，之後再進 reference interpreter fixture。
 
 ## Notes
 
