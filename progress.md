@@ -391,3 +391,9 @@ bounded renderer 的 `managed-function-runtime/src/lib.rs`、`zkvm` 的 `Cargo.l
 - `c7d9a45 feat(release): package the managed-proof prover sidecar`
 - `8a2f621 chore(proof): re-pin the guest image and regenerate the receipt fixture`
 - `803074a docs(proof): record the dependency audit and threat coverage`
+## Final release E2E checkpoint - 2026-08-11
+
+- overall: `complete`
+- root cause resolved: the sidecar required `GLIBC_2.39`, while the Debian bookworm Worker runtime only supplied 2.36. The runtime now uses Debian trixie and the release smoke harness probes sidecar launch in the actual Worker image.
+- evidence: `scripts/release-stack-smoke.Tests.ps1` passed; a rebuilt `release-stack-smoke.ps1 -KeepRunning` passed all surfaces and the sidecar launch probe; `zkproof-success-1786448265` completed in `enforce` mode with 3 CPT settled, verified audit event, 2 managed operations, and 17 output bytes.
+- next action: commit the ABI compatibility fix and E2E evidence locally; do not push.

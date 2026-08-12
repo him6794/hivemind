@@ -163,3 +163,23 @@ Two consequences, both now enforced rather than documented:
 This attestation records the local build evidence; the tracked pin-equality test
 remains the executable guard for future source, dependency, or toolchain
 changes.
+
+## Release-image end-to-end verification (2026-08-11)
+
+The approved WSL build staged the sidecar with SHA-256:
+
+```text
+e0fdbd71d410961d0726aa680bfbfeeefe3d7c9278de3cac6d1ee6a8178c508e  hivemind-managed-proof-prover (96,872,808 bytes)
+```
+
+The Worker runtime was upgraded from Debian bookworm to trixie because the
+supported prover-host binary requires `GLIBC_2.39`, while bookworm only ships
+glibc 2.36. `scripts/release-stack-smoke.ps1` now runs the packaged sidecar
+inside the actual Worker image with empty stdin and requires its deliberate
+`managed proof generation failed` parser result. This protects against future
+loader/ABI regressions before any task is dispatched.
+
+With the packaged sidecar in the rebuilt Compose Worker, task
+`zkproof-success-1786448265` completed under rollout mode `enforce`. Nodepool
+recorded `managed_proof_verification` with `event=verified`, settled 3 CPT,
+and persisted `managed_executed_ops=2` and `managed_output_bytes=17`.
