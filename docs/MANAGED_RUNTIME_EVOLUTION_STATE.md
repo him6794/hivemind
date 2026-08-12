@@ -48,12 +48,15 @@ M1 framed stdin/stdout protocol、bounded supervisor lifecycle、bounded stdout/
 - `0dea304 feat(runtime): bound supervisor output capture`
   - supervisor 以獨立 reader 持續 drain stdout/stderr，僅保留 `output_limit` bytes，並回傳各 stream 的 truncation 標記，避免 pipe back-pressure 與無界記憶體。
   - lifecycle tests 5 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
-- M1 process-group／descendant cleanup 小單元（待本次 commit）
+- `a073180 feat(runtime): kill supervisor process trees`
   - timeout/cancel 時 Unix 建立獨立 process group 並以 group kill 清理 descendants；Windows 使用 `taskkill /T /F` 的 tree-kill fallback，完成後 wait/reap。
   - hostile descendant marker fixture 與 lifecycle tests 6 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
 - M1 reference Minsky interpreter 小單元（待本次 commit）
   - 新增獨立 bounded reference module：`Inc`、`DecJump`、`Halt` instruction tape、checked jump targets、BigUint registers、step quota 與 cooperative cancellation。
   - Minsky halt/zero-test、non-terminating `resource_exhausted`、invalid target 與 cancellation fixtures 4 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
+- M1 mutable heap 小單元（待本次 commit）
+  - 新增 checked `Set`／`Allocate`／`Store`／`Load` heap instructions，BigUint cell values、pointer/index validation、cell quota 與 typed `resource_exhausted`。
+  - reference tests 6 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
 
 ## Active owners
 
@@ -67,11 +70,11 @@ M1 framed stdin/stdout protocol、bounded supervisor lifecycle、bounded stdout/
 
 ## Next action
 
-在 `general-compute-runtime` 內擴充 reference interpreter 的 mutable heap 與 recursion fixtures，先鎖定 allocation/heap quota、call-depth quota、exception 與 deterministic cancellation semantics；Windows Job Object 對等保護另列為 supervisor hardening 小單元。
+在 `general-compute-runtime` 內擴充 reference interpreter 的 recursion/call-depth fixtures，先鎖定 deterministic call/return、depth quota 與 typed `resource_exhausted`；exception semantics 另列為下一個小單元。Windows Job Object 對等保護另列為 supervisor hardening 小單元。
 
 ## Next checkpoint
 
-M1 reference Minsky interpreter 小單元完成 RED → GREEN、protocol/M0 schema/capability regression 與 v0 consumer checks 全綠並建立本地 commit；下一 checkpoint 為 mutable heap／recursion fixture。
+M1 mutable heap 小單元完成 RED → GREEN、protocol/M0 schema/capability regression 與 v0 consumer checks 全綠並建立本地 commit；下一 checkpoint 為 recursion/call-depth fixture。
 
 ## Notes
 
