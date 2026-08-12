@@ -51,6 +51,9 @@ M1 framed stdin/stdout protocol、bounded supervisor lifecycle、bounded stdout/
 - M1 process-group／descendant cleanup 小單元（待本次 commit）
   - timeout/cancel 時 Unix 建立獨立 process group 並以 group kill 清理 descendants；Windows 使用 `taskkill /T /F` 的 tree-kill fallback，完成後 wait/reap。
   - hostile descendant marker fixture 與 lifecycle tests 6 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
+- M1 reference Minsky interpreter 小單元（待本次 commit）
+  - 新增獨立 bounded reference module：`Inc`、`DecJump`、`Halt` instruction tape、checked jump targets、BigUint registers、step quota 與 cooperative cancellation。
+  - Minsky halt/zero-test、non-terminating `resource_exhausted`、invalid target 與 cancellation fixtures 4 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
 
 ## Active owners
 
@@ -64,11 +67,11 @@ M1 framed stdin/stdout protocol、bounded supervisor lifecycle、bounded stdout/
 
 ## Next action
 
-在 `general-compute-runtime` 內建立 reference interpreter 的最小 bounded language core 與 Minsky machine fixtures，先鎖定 deterministic step、heap、recursion 與 cancellation semantics；Windows Job Object 對等保護另列為 supervisor hardening 小單元。
+在 `general-compute-runtime` 內擴充 reference interpreter 的 mutable heap 與 recursion fixtures，先鎖定 allocation/heap quota、call-depth quota、exception 與 deterministic cancellation semantics；Windows Job Object 對等保護另列為 supervisor hardening 小單元。
 
 ## Next checkpoint
 
-M1 process-group／descendant cleanup 小單元完成 RED → GREEN、protocol/M0 schema/capability regression 與 v0 consumer checks 全綠並建立本地 commit；下一 checkpoint 為 reference interpreter fixture。
+M1 reference Minsky interpreter 小單元完成 RED → GREEN、protocol/M0 schema/capability regression 與 v0 consumer checks 全綠並建立本地 commit；下一 checkpoint 為 mutable heap／recursion fixture。
 
 ## Notes
 
