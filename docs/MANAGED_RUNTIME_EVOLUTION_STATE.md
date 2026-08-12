@@ -66,6 +66,9 @@ M1 framed stdin/stdout protocol、bounded supervisor lifecycle、bounded stdout/
 - M1 differential harness 小單元（待本次 commit）
   - 新增可序列化 `DifferentialCase`／`ReferenceObservation`，固定 source、JSON input、seed 與 canonical status/steps/output；只允許 registry-pinned fixture 執行。
   - replay、backend mismatch、source/input/seed mismatch fail-closed tests 3 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
+- M1 pinned CPython adapter interface 小單元（待本次 commit）
+  - 新增 registry-approved `PythonBackendRegistration`／`PythonBackendRegistry`／`PinnedPythonAdapter`，要求 executable、sha256 guest image、protocol version 與 output cap；observation 使用 `deny_unknown_fields` 並拒絕未知 status/超限 output。
+  - adapter tests 3 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
 
 ## Active owners
 
@@ -79,11 +82,11 @@ M1 framed stdin/stdout protocol、bounded supervisor lifecycle、bounded stdout/
 
 ## Next action
 
-在 `general-compute-runtime` 內將 differential harness 接到 pinned CPython adapter interface，先以 unavailable backend 與 malformed observation RED tests 鎖定 fail-closed status mapping，再接實際 CPython subprocess。Windows Job Object 對等保護另列為 supervisor hardening 小單元。
+在 `general-compute-runtime` 內接上 pinned CPython adapter 的實際 subprocess execution：由 registry 提供固定 executable/args，使用 supervisor framed protocol 執行 source/input，解析 bounded observation 並把 spawn/timeout/cancel 映射成 typed status。Windows Job Object 對等保護另列為 supervisor hardening 小單元。
 
 ## Next checkpoint
 
-M1 differential harness 小單元完成 RED → GREEN、protocol/M0 schema/capability regression 與 v0 consumer checks 全綠並建立本地 commit；下一 checkpoint 為 pinned CPython adapter interface。
+M1 pinned CPython adapter interface 小單元完成 RED → GREEN、protocol/M0 schema/capability regression 與 v0 consumer checks 全綠並建立本地 commit；下一 checkpoint 為實際 bounded CPython subprocess。
 
 ## Notes
 
