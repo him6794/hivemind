@@ -123,6 +123,249 @@ pub struct ReferenceInterpreter {
     program: MinskyProgram,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeapInstruction {
+    Set {
+        register: usize,
+        value: u64,
+        next: usize,
+    },
+    Allocate {
+        cells: usize,
+        destination: usize,
+        next: usize,
+    },
+    Store {
+        pointer: usize,
+        offset: usize,
+        source: usize,
+        next: usize,
+    },
+    Load {
+        pointer: usize,
+        offset: usize,
+        destination: usize,
+        next: usize,
+    },
+    Halt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeapProgramError {
+    Empty,
+    InvalidTarget { instruction: usize, target: usize },
+    RegisterOutOfRange { instruction: usize, register: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeapProgram {
+    instructions: Vec<HeapInstruction>,
+    register_count: usize,
+}
+
+impl HeapProgram {
+    pub fn new(instructions: Vec<HeapInstruction>, register_count: usize) -> Result<Self, HeapProgramError> {
+        if instructions.is_empty() {
+            return Err(HeapProgramError::Empty);
+        }
+        let instruction_count = instructions.len();
+        for (index, instruction) in instructions.iter().enumerate() {
+            let (registers, targets): (Vec<usize>, Vec<usize>) = match instruction {
+                HeapInstruction::Set { register, next, .. } => (vec![*register], vec![*next]),
+                HeapInstruction::Allocate { destination, next, .. } => (vec![*destination], vec![*next]),
+                HeapInstruction::Store {
+                    pointer, source, next, ..
+                } => (vec![*pointer, *source], vec![*next]),
+                HeapInstruction::Load {
+                    pointer,
+                    destination,
+                    next,
+                    ..
+                } => (vec![*pointer, *destination], vec![*next]),
+                HeapInstruction::Halt => (Vec::new(), Vec::new()),
+            };
+            if let Some(register) = registers.into_iter().find(|register| *register >= register_count) {
+                return Err(HeapProgramError::RegisterOutOfRange {
+                    instruction: index,
+                    register,
+                });
+            }
+            if let Some(target) = targets.into_iter().find(|target| *target >= instruction_count) {
+                return Err(HeapProgramError::InvalidTarget {
+                    instruction: index,
+                    target,
+                });
+            }
+        }
+        Ok(Self {
+            instructions,
+            register_count,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeapLimits {
+    pub max_steps: u64,
+    pub max_cells: usize,
+}
+
+impl HeapLimits {
+    pub fn new(max_steps: u64, max_cells: usize) -> Self {
+        Self { max_steps, max_cells }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeapValue(BigUint);
+
+impl HeapValue {
+    pub fn integer(value: u64) -> Self {
+        Self(BigUint::from(value))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeapStatus {
+    Halted,
+    ResourceExhausted,
+    Cancelled,
+    InvalidMemoryAccess,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeapResult {
+    pub status: HeapStatus,
+    pub steps: u64,
+    pub registers: Vec<HeapValue>,
+    pub heap_cells: usize,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HeapInterpreter {
+    program: HeapProgram,
+}
+
+impl HeapInterpreter {
+    pub fn new(program: HeapProgram) -> Self {
+        Self { program }
+    }
+
+    pub fn run(&self, limits: HeapLimits, cancellation: &Cancellation) -> HeapResult {
+        let mut registers = vec![HeapValue::integer(0); self.program.register_count];
+        let mut heap = Vec::<HeapValue>::new();
+        let mut pointers = vec![None; self.program.register_count];
+        let mut pc = 0usize;
+        let mut steps = 0u64;
+
+        loop {
+            if cancellation.is_cancelled() {
+                return HeapResult {
+                    status: HeapStatus::Cancelled,
+                    steps,
+                    registers,
+                    heap_cells: heap.len(),
+                    error: None,
+                };
+            }
+            if steps >= limits.max_steps {
+                return HeapResult {
+                    status: HeapStatus::ResourceExhausted,
+                    steps,
+                    registers,
+                    heap_cells: heap.len(),
+                    error: None,
+                };
+            }
+            steps += 1;
+            match &self.program.instructions[pc] {
+                HeapInstruction::Set { register, value, next } => {
+                    registers[*register] = HeapValue::integer(*value);
+                    pc = *next;
+                }
+                HeapInstruction::Allocate {
+                    cells,
+                    destination,
+                    next,
+                } => {
+                    let Some(new_len) = heap.len().checked_add(*cells) else {
+                        return memory_error(steps, registers, heap.len(), "heap size overflow");
+                    };
+                    if new_len > limits.max_cells {
+                        return HeapResult {
+                            status: HeapStatus::ResourceExhausted,
+                            steps,
+                            registers,
+                            heap_cells: heap.len(),
+                            error: None,
+                        };
+                    }
+                    let pointer = heap.len();
+                    heap.resize(new_len, HeapValue::integer(0));
+                    pointers[*destination] = Some(pointer);
+                    pc = *next;
+                }
+                HeapInstruction::Store {
+                    pointer,
+                    offset,
+                    source,
+                    next,
+                } => {
+                    let Some(base) = pointers[*pointer] else {
+                        return memory_error(steps, registers, heap.len(), "null heap pointer");
+                    };
+                    let Some(index) = base.checked_add(*offset) else {
+                        return memory_error(steps, registers, heap.len(), "heap offset overflow");
+                    };
+                    let Some(slot) = heap.get_mut(index) else {
+                        return memory_error(steps, registers, heap.len(), "heap index out of bounds");
+                    };
+                    *slot = registers[*source].clone();
+                    pc = *next;
+                }
+                HeapInstruction::Load {
+                    pointer,
+                    offset,
+                    destination,
+                    next,
+                } => {
+                    let Some(base) = pointers[*pointer] else {
+                        return memory_error(steps, registers, heap.len(), "null heap pointer");
+                    };
+                    let Some(index) = base.checked_add(*offset) else {
+                        return memory_error(steps, registers, heap.len(), "heap offset overflow");
+                    };
+                    let Some(value) = heap.get(index) else {
+                        return memory_error(steps, registers, heap.len(), "heap index out of bounds");
+                    };
+                    registers[*destination] = value.clone();
+                    pc = *next;
+                }
+                HeapInstruction::Halt => {
+                    return HeapResult {
+                        status: HeapStatus::Halted,
+                        steps,
+                        registers,
+                        heap_cells: heap.len(),
+                        error: None,
+                    };
+                }
+            }
+        }
+    }
+}
+
+fn memory_error(steps: u64, registers: Vec<HeapValue>, heap_cells: usize, message: &str) -> HeapResult {
+    HeapResult {
+        status: HeapStatus::InvalidMemoryAccess,
+        steps,
+        registers,
+        heap_cells,
+        error: Some(message.to_owned()),
+    }
+}
+
 impl ReferenceInterpreter {
     pub fn new(program: MinskyProgram) -> Self {
         Self { program }

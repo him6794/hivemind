@@ -1,5 +1,6 @@
 use general_compute_runtime::reference::{
-    Instruction, InterpreterLimits, InterpreterStatus, MinskyProgram, ReferenceInterpreter,
+    HeapInstruction, HeapInterpreter, HeapLimits, HeapProgram, HeapStatus, HeapValue, Instruction, InterpreterLimits,
+    InterpreterStatus, MinskyProgram, ReferenceInterpreter,
 };
 use general_compute_runtime::supervisor::Cancellation;
 use std::sync::Arc;
@@ -69,4 +70,65 @@ fn reference_interpreter_stops_cooperatively_on_cancellation() {
 
     assert_eq!(result.status, InterpreterStatus::Cancelled);
     assert!(result.steps > 0, "cancellation should observe executed work");
+}
+
+#[test]
+fn heap_fixture_mutates_and_reads_a_bigint_backed_cell() {
+    let program = HeapProgram::new(
+        vec![
+            HeapInstruction::Set {
+                register: 0,
+                value: 41,
+                next: 1,
+            },
+            HeapInstruction::Allocate {
+                cells: 1,
+                destination: 1,
+                next: 2,
+            },
+            HeapInstruction::Store {
+                pointer: 1,
+                offset: 0,
+                source: 0,
+                next: 3,
+            },
+            HeapInstruction::Load {
+                pointer: 1,
+                offset: 0,
+                destination: 2,
+                next: 4,
+            },
+            HeapInstruction::Halt,
+        ],
+        3,
+    )
+    .expect("heap fixture should validate");
+
+    let result = HeapInterpreter::new(program).run(HeapLimits::new(16, 4), &Cancellation::new());
+
+    assert_eq!(result.status, HeapStatus::Halted);
+    assert_eq!(result.heap_cells, 1);
+    assert_eq!(result.registers[2], HeapValue::integer(41));
+}
+
+#[test]
+fn heap_fixture_returns_resource_exhausted_before_exceeding_cell_quota() {
+    let program = HeapProgram::new(
+        vec![
+            HeapInstruction::Allocate {
+                cells: 2,
+                destination: 0,
+                next: 1,
+            },
+            HeapInstruction::Halt,
+        ],
+        1,
+    )
+    .expect("heap fixture should validate");
+
+    let result = HeapInterpreter::new(program).run(HeapLimits::new(8, 1), &Cancellation::new());
+
+    assert_eq!(result.status, HeapStatus::ResourceExhausted);
+    assert_eq!(result.heap_cells, 0);
+    assert!(result.error.is_none(), "quota exhaustion is not a memory fault");
 }
