@@ -60,6 +60,9 @@ M1 framed stdin/stdout protocol、bounded supervisor lifecycle、bounded stdout/
 - M1 recursion/call-depth 小單元（待本次 commit）
   - 新增 checked `Call`／`Return` recursion tape、return stack、deterministic depth tracking、stack-underflow error 與 call-depth quota。
   - reference tests 8 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
+- M1 exception/exit semantics 小單元（待本次 commit）
+  - 新增 `Raise`／`Exit`／`Jump` signal tape，明確回傳 `Exception`、`Exited`、`ResourceExhausted`、`Cancelled` 與 `Halted` 狀態及 optional exit code。
+  - reference tests 10 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
 
 ## Active owners
 
@@ -73,11 +76,11 @@ M1 framed stdin/stdout protocol、bounded supervisor lifecycle、bounded stdout/
 
 ## Next action
 
-在 `general-compute-runtime` 內加入 reference exception/exit semantics fixtures，明確區分 user exception、stack underflow、resource exhaustion 與 cooperative cancellation；Windows Job Object 對等保護另列為 supervisor hardening 小單元。
+在 `general-compute-runtime` 內建立 pinned CPython/reference differential harness contract，固定 source/input/seed、canonical result 與 status mapping；Windows Job Object 對等保護另列為 supervisor hardening 小單元。
 
 ## Next checkpoint
 
-M1 recursion/call-depth 小單元完成 RED → GREEN、protocol/M0 schema/capability regression 與 v0 consumer checks 全綠並建立本地 commit；下一 checkpoint 為 exception/exit fixture。
+M1 exception/exit 小單元完成 RED → GREEN、protocol/M0 schema/capability regression 與 v0 consumer checks 全綠並建立本地 commit；下一 checkpoint 為 reference differential harness。
 
 ## Notes
 
