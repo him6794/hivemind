@@ -49,6 +49,11 @@ WORKER_LOCATION=windows
 
 JWT_SECRET=
 MONTY_EXECUTABLE=monty.exe
+# Managed-function proving is unsupported on native Windows: RISC Zero proving
+# hosts are Linux, macOS, and WSL. This package ships no prover sidecar, so
+# MANAGED_PROVER_EXECUTABLE stays unset and managed tasks fail closed here.
+# Managed tasks must run on a worker image or runtime that contains the Linux
+# prover sidecar.
 EXECUTOR_SANDBOX_DIR=.\sandbox
 EXECUTOR_MAX_CPU_PERCENT=80
 EXECUTOR_MAX_MEMORY_MB=4096
@@ -290,7 +295,10 @@ Assert-RequiredEnv -Names @("NODEPOOL_GRPC_ADDR", "WORKER_GRPC_ADDR", "WORKER_CO
 '@
 $launcher | Set-Content -Encoding ASCII (Join-Path $out "start-worker.ps1")
 
-$readme = @"
+# Single-quoted here-string on purpose: this text is Markdown, and in a
+# double-quoted here-string PowerShell eats every backtick as an escape
+# character, stripping the inline code spans and breaking the fenced blocks.
+$readme = @'
 # Hivemind Windows Worker Package
 
 1. Copy `.env.worker.example` to `.env.worker`.
@@ -306,7 +314,31 @@ $readme = @"
 ```
 
 The worker starts its gRPC server, local control API, hardware profile reporting, and nodepool registration loop.
-"@
+
+## Managed proving
+
+Windows workers run ordinary worker workloads, but this package does not include
+a RISC Zero prover sidecar: RISC Zero proving hosts are Linux, macOS, and WSL,
+and native Windows proving is unsupported. Managed proving therefore fails closed
+on this worker - `managed-function-v0` tasks are rejected rather than settled
+from unverified numbers. That is the intended safe behaviour, not a silent
+downgrade, which is why `MANAGED_PROVER_EXECUTABLE` is left unset here; pointing
+it at a Windows path does not make proving work.
+
+Managed tasks must run on a worker image or runtime that contains the Linux
+prover sidecar, so managed proving requires deploying this worker on a supported
+Linux-based runtime instead. Build that sidecar on a Linux, macOS, or WSL host.
+From a Windows checkout of the repository:
+
+```powershell
+wsl bash scripts/build-managed-prover.sh
+```
+
+Where network policy blocks the RISC Zero artifact bucket, point
+`RECURSION_SRC_PATH` at a local `recursion_zkr.zip`. That is the official
+upstream offline escape hatch: the build script verifies the artifact SHA-256
+against a pinned digest instead of patching RISC Zero registry sources.
+'@
 $readme | Set-Content -Encoding ASCII (Join-Path $out "README.md")
 
 $shaFile = Join-Path $out "SHA256SUMS"
