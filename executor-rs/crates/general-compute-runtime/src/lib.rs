@@ -7,6 +7,8 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub mod supervisor;
+
 pub const GENERAL_COMPUTE_RUNTIME_VERSION: &str = "general-compute-v1";
 pub const MAX_CPU_MILLIS: u64 = 24 * 60 * 60 * 1000;
 pub const MAX_MEMORY_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
