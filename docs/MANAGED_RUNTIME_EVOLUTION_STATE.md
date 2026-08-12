@@ -21,7 +21,7 @@ running
 
 ## Current step
 
-M0 契約凍結已完成；下一步進入 M1，先為 bounded process supervisor 的 framed stdin/stdout protocol、timeout/cancel 與 kill/reap 建立 RED tests。M0 的 capability matrix 仍是 supervisor 啟動前的 fail-closed gate。
+M1 framed stdin/stdout protocol 第一單元已完成；下一步為 bounded supervisor 的 child lifecycle、timeout/cancel、hard kill/reap 與 concurrency-slot cleanup 建立 RED tests。M0 capability matrix 仍是 supervisor 啟動前的 fail-closed gate。
 
 ## Completed
 
@@ -39,6 +39,9 @@ M0 契約凍結已完成；下一步進入 M1，先為 bounded process superviso
   - 新增 typed validation errors、有限 execution quota、read-only filesystem gate、backend/image/worker capability matrix，以及 network/GPU/thread mismatch fail-closed checks。
   - artifact chunk manifest 必須連續且完整覆蓋 bytes；gap、overlap、overflow、checksum mismatch 都拒絕。
   - capability/schema tests 7 passed；executor workspace（含 v0 regression）7+1+3+25 passed；format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
+- M1 framed protocol 小單元（待本次 commit）
+  - 新增 4-byte big-endian length-prefixed JSON frame encoder/decoder，先驗證 payload cap，再反序列化；decoder 回傳 consumed bytes 以支援連續 frame。
+  - truncated header/payload、oversized payload、invalid JSON、encode cap 與 exact-one-frame consumption tests 4 passed；M0 schema tests 7 passed、executor workspace v0 regression、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
 
 ## Active owners
 
@@ -56,7 +59,7 @@ M0 契約凍結已完成；下一步進入 M1，先為 bounded process superviso
 
 ## Next checkpoint
 
-M1 第一個 supervisor protocol 小單元完成 RED → GREEN、M0 schema/capability regression 與 v0 consumer checks 全綠並建立本地 commit；然後更新本檔至 cancellation/kill/reap fixture。
+M1 supervisor lifecycle 小單元完成 RED → GREEN、protocol/M0 schema/capability regression 與 v0 consumer checks 全綠並建立本地 commit；然後更新本檔至 reference interpreter fixture。
 
 ## Notes
 
