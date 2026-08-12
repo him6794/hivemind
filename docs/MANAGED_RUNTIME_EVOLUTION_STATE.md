@@ -21,7 +21,7 @@ running
 
 ## Current step
 
-M0 契約凍結：先盤點現有 proto/model/runtime 邊界，接著為 `general-compute-v1` request/result、artifact manifest 與 capability matrix 建立 RED tests；在測試正確失敗前不寫 production schema。
+M0 契約凍結已完成；下一步進入 M1，先為 bounded process supervisor 的 framed stdin/stdout protocol、timeout/cancel 與 kill/reap 建立 RED tests。M0 的 capability matrix 仍是 supervisor 啟動前的 fail-closed gate。
 
 ## Completed
 
@@ -31,6 +31,14 @@ M0 契約凍結：先盤點現有 proto/model/runtime 邊界，接著為 `genera
   - `hivemind-config` 與 `hivemind-worker-executor` focused `cargo check --locked` passed。
   - Docker Compose release contract 與 Windows worker package contract passed。
 - 完成演進計畫文件，明確區分 v0 proof-friendly DSL 與 v1 general compute，並定義 M0–M5 gates；文件尚待本輪狀態修正後獨立提交。
+- `f34b8eb feat(runtime): add general compute v1 contracts`
+  - 新增獨立 `general-compute-runtime` crate，不依賴 Hivemind DB／scheduler。
+  - 凍結 `GeneralComputeRequest`／`GeneralComputeResult`、execution/determinism policy、usage claim、artifact/chunk manifest 與 inline SHA-256 validation。
+-  - schema tests 3 passed；executor workspace（v0 + v1）與 Hivemind config/worker consumer checks passed。
+- capability/threat validation 小單元（待本次 commit）
+  - 新增 typed validation errors、有限 execution quota、read-only filesystem gate、backend/image/worker capability matrix，以及 network/GPU/thread mismatch fail-closed checks。
+  - artifact chunk manifest 必須連續且完整覆蓋 bytes；gap、overlap、overflow、checksum mismatch 都拒絕。
+  - capability/schema tests 7 passed；executor workspace（含 v0 regression）7+1+3+25 passed；format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
 
 ## Active owners
 
@@ -44,11 +52,11 @@ M0 契約凍結：先盤點現有 proto/model/runtime 邊界，接著為 `genera
 
 ## Next action
 
-讀取現有 proto、models、task scheduler 與 executor workspace 契約，選定單一 schema owner；建立第一組會因 `general-compute-v1` 型別不存在而正確失敗的 request/result 與 artifact manifest tests。
+在 `general-compute-runtime` 內建立 capability matrix 與 threat-model validation：要求 backend/image/capability 明確註冊，拒絕 GPU mismatch、network/filesystem policy 違反、無限 quota 與 artifact chunk gap/overlap。
 
 ## Next checkpoint
 
-第一個 M0 schema 小單元完成 RED → GREEN、v0 regression／proto consumer checks 全綠並建立本地 commit；然後更新本檔至下一個 capability/threat-model 單元。
+M1 第一個 supervisor protocol 小單元完成 RED → GREEN、M0 schema/capability regression 與 v0 consumer checks 全綠並建立本地 commit；然後更新本檔至 cancellation/kill/reap fixture。
 
 ## Notes
 
