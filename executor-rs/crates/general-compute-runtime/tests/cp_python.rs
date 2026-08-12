@@ -1,6 +1,10 @@
 use general_compute_runtime::cp_python::{
     PinnedPythonAdapter, PythonAdapterError, PythonBackendRegistration, PythonBackendRegistry,
 };
+use general_compute_runtime::supervisor::Cancellation;
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 fn registration() -> PythonBackendRegistration {
     PythonBackendRegistration {
@@ -55,4 +59,69 @@ fn cp_python_adapter_enforces_registered_output_cap() {
         adapter.parse_observation(oversized),
         Err(PythonAdapterError::MalformedObservation(_))
     ));
+}
+
+#[test]
+fn cp_python_adapter_executes_source_over_framed_stdin() {
+    let registry = PythonBackendRegistry::new(vec![registration()]).expect("registration is valid");
+    let adapter =
+        PinnedPythonAdapter::from_registry(&registry, "python-cpython-312").expect("registered backend should resolve");
+
+    let observation = adapter
+        .execute(
+            "result = input['value'] + 1",
+            r#"{"value": 4}"#,
+            7,
+            &Cancellation::new(),
+        )
+        .expect("pinned CPython should execute the fixture");
+
+    assert_eq!(observation.status, "halted");
+    assert_eq!(observation.steps, 1);
+    assert_eq!(observation.output, "5");
+}
+
+#[test]
+fn cp_python_adapter_maps_timeout_to_a_typed_supervisor_failure() {
+    let registry = PythonBackendRegistry::new(vec![registration()]).expect("registration is valid");
+    let adapter =
+        PinnedPythonAdapter::from_registry(&registry, "python-cpython-312").expect("registered backend should resolve");
+
+    let error = adapter
+        .execute_with_timeout(
+            "while True: pass",
+            r#"{"value": 4}"#,
+            7,
+            Duration::from_millis(100),
+            &Cancellation::new(),
+        )
+        .expect_err("infinite Python loop must hit the deadline");
+
+    assert!(matches!(error, PythonAdapterError::Supervisor(message) if message.contains("timed out")));
+}
+
+#[test]
+fn cp_python_adapter_maps_cooperative_cancellation_to_a_typed_failure() {
+    let registry = PythonBackendRegistry::new(vec![registration()]).expect("registration is valid");
+    let adapter =
+        PinnedPythonAdapter::from_registry(&registry, "python-cpython-312").expect("registered backend should resolve");
+    let cancellation = Arc::new(Cancellation::new());
+    let trigger = Arc::clone(&cancellation);
+    let thread = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(100));
+        trigger.cancel();
+    });
+
+    let error = adapter
+        .execute_with_timeout(
+            "while True: pass",
+            r#"{"value": 4}"#,
+            7,
+            Duration::from_secs(5),
+            &cancellation,
+        )
+        .expect_err("cancelled Python loop must stop");
+    thread.join().expect("cancellation trigger should finish");
+
+    assert!(matches!(error, PythonAdapterError::Supervisor(message) if message.contains("cancelled")));
 }

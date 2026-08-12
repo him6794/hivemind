@@ -177,6 +177,28 @@ fn supervisor_drains_and_bounds_stdout_and_stderr_capture() {
 }
 
 #[test]
+fn supervisor_passes_bounded_stdin_without_putting_payload_in_arguments() {
+    let command = if cfg!(windows) {
+        CommandSpec::new(
+            "powershell.exe",
+            [
+                "-NoProfile",
+                "-Command",
+                "[Console]::OpenStandardInput().CopyTo([Console]::OpenStandardOutput())",
+            ],
+        )
+    } else {
+        CommandSpec::new("sh", ["-c", "cat"])
+    };
+    let result = Supervisor::new()
+        .run_with_stdin(command, b"framed-input", &Cancellation::new())
+        .expect("stdin child should execute");
+
+    assert_eq!(result.status, RunStatus::Completed);
+    assert_eq!(result.stdout, b"framed-input");
+}
+
+#[test]
 fn supervisor_timeout_kills_descendants_before_returning() {
     let (start_marker, final_marker) = descendant_marker_paths();
     let result = Supervisor::new()

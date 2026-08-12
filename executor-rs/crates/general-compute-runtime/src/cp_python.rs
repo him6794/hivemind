@@ -1,7 +1,9 @@
 use crate::differential::ReferenceObservation;
+use crate::supervisor::{Cancellation, CommandSpec, RunStatus, Supervisor, SupervisorError};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PythonBackendRegistration {
@@ -65,6 +67,8 @@ impl PythonBackendRegistry {
 pub enum PythonAdapterError {
     BackendUnavailable { backend_id: String },
     MalformedObservation(String),
+    Supervisor(String),
+    Protocol(String),
 }
 
 impl fmt::Display for PythonAdapterError {
@@ -72,6 +76,8 @@ impl fmt::Display for PythonAdapterError {
         match self {
             Self::BackendUnavailable { backend_id } => write!(formatter, "python backend {backend_id} is unavailable"),
             Self::MalformedObservation(message) => write!(formatter, "malformed python observation: {message}"),
+            Self::Supervisor(message) => write!(formatter, "python supervisor failed: {message}"),
+            Self::Protocol(message) => write!(formatter, "python protocol failed: {message}"),
         }
     }
 }
@@ -119,6 +125,84 @@ impl PinnedPythonAdapter {
             output: observation.output,
         })
     }
+
+    pub fn execute(
+        &self,
+        source: &str,
+        input_json: &str,
+        seed: u64,
+        cancellation: &Cancellation,
+    ) -> Result<ReferenceObservation, PythonAdapterError> {
+        self.execute_with_timeout(source, input_json, seed, Duration::from_secs(30), cancellation)
+    }
+
+    pub fn execute_with_timeout(
+        &self,
+        source: &str,
+        input_json: &str,
+        seed: u64,
+        timeout: Duration,
+        cancellation: &Cancellation,
+    ) -> Result<ReferenceObservation, PythonAdapterError> {
+        let request = serde_json::json!({
+            "source": source,
+            "input_json": input_json,
+            "seed": seed,
+        });
+        let input = crate::encode_frame(&request, self.registration.max_output_bytes)
+            .map_err(|error| PythonAdapterError::Protocol(format!("request frame: {error:?}")))?;
+        let command = CommandSpec::new(&self.registration.executable, ["-c", PYTHON_RUNNER])
+            .with_input_limit(input.len())
+            .with_timeout(timeout)
+            .with_output_limit(self.registration.max_output_bytes);
+        let result = Supervisor::new()
+            .run_with_stdin(command, &input, cancellation)
+            .map_err(|error| PythonAdapterError::Supervisor(supervisor_error_message(error)))?;
+        if result.status != RunStatus::Completed {
+            let status = match result.status {
+                RunStatus::TimedOut => "timed out",
+                RunStatus::Cancelled => "cancelled",
+                other => return Err(PythonAdapterError::Supervisor(format!("child ended as {other:?}"))),
+            };
+            return Err(PythonAdapterError::Supervisor(status.into()));
+        }
+        if result.stdout_truncated {
+            return Err(PythonAdapterError::MalformedObservation(
+                "stdout frame was truncated".into(),
+            ));
+        }
+        let (observation, consumed) =
+            crate::decode_frame::<serde_json::Value>(&result.stdout, self.registration.max_output_bytes)
+                .map_err(|error| PythonAdapterError::Protocol(format!("response frame: {error:?}")))?;
+        if consumed != result.stdout.len() {
+            return Err(PythonAdapterError::Protocol("response contains trailing bytes".into()));
+        }
+        let bytes =
+            serde_json::to_vec(&observation).map_err(|error| PythonAdapterError::Protocol(error.to_string()))?;
+        self.parse_observation(&bytes)
+    }
+}
+
+const PYTHON_RUNNER: &str = r#"
+import json, struct, sys
+frame = sys.stdin.buffer.read()
+if len(frame) < 4:
+    raise SystemExit(2)
+size = struct.unpack('>I', frame[:4])[0]
+payload = frame[4:4 + size]
+if len(payload) != size:
+    raise SystemExit(3)
+request = json.loads(payload)
+scope = {'input': json.loads(request['input_json']), 'seed': request['seed']}
+exec(request['source'], {'__builtins__': {}}, scope)
+output = str(scope.get('result', ''))
+response = json.dumps({'status': 'halted', 'steps': 1, 'output': output}, separators=(',', ':')).encode()
+sys.stdout.buffer.write(struct.pack('>I', len(response)) + response)
+sys.stdout.buffer.flush()
+"#;
+
+fn supervisor_error_message(error: SupervisorError) -> String {
+    error.to_string()
 }
 
 fn validate_registration(registration: &PythonBackendRegistration) -> Result<(), PythonRegistryError> {

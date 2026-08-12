@@ -1,4 +1,4 @@
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const DEFAULT_OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
+const DEFAULT_INPUT_LIMIT: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct Cancellation(Arc<AtomicBool>);
@@ -38,6 +39,7 @@ pub struct CommandSpec {
     pub args: Vec<String>,
     pub timeout: Duration,
     pub output_limit: usize,
+    pub input_limit: usize,
 }
 
 impl CommandSpec {
@@ -51,6 +53,7 @@ impl CommandSpec {
             args: args.into_iter().map(Into::into).collect(),
             timeout: DEFAULT_TIMEOUT,
             output_limit: DEFAULT_OUTPUT_LIMIT,
+            input_limit: DEFAULT_INPUT_LIMIT,
         }
     }
 
@@ -61,6 +64,11 @@ impl CommandSpec {
 
     pub fn with_output_limit(mut self, output_limit: usize) -> Self {
         self.output_limit = output_limit;
+        self
+    }
+
+    pub fn with_input_limit(mut self, input_limit: usize) -> Self {
+        self.input_limit = input_limit;
         self
     }
 }
@@ -87,9 +95,12 @@ pub struct RunResult {
 #[derive(Debug)]
 pub enum SupervisorError {
     EmptyProgram,
+    InputTooLarge,
     Spawn(io::Error),
     Wait(io::Error),
     Kill(io::Error),
+    Input(io::Error),
+    InputThread,
     Capture(io::Error),
     CaptureThread,
 }
@@ -98,9 +109,12 @@ impl std::fmt::Display for SupervisorError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::EmptyProgram => formatter.write_str("supervisor program must not be empty"),
+            Self::InputTooLarge => formatter.write_str("supervisor stdin exceeds configured limit"),
             Self::Spawn(_) => formatter.write_str("supervisor failed to spawn child"),
             Self::Wait(_) => formatter.write_str("supervisor failed to wait for child"),
             Self::Kill(_) => formatter.write_str("supervisor failed to kill child process tree"),
+            Self::Input(_) => formatter.write_str("supervisor failed to write child stdin"),
+            Self::InputThread => formatter.write_str("supervisor stdin writer thread panicked"),
             Self::Capture(_) => formatter.write_str("supervisor failed to capture child output"),
             Self::CaptureThread => formatter.write_str("supervisor output capture thread panicked"),
         }
@@ -122,19 +136,36 @@ impl Supervisor {
     }
 
     pub fn run(&self, command: CommandSpec, cancellation: &Cancellation) -> Result<RunResult, SupervisorError> {
+        self.run_with_stdin(command, &[], cancellation)
+    }
+
+    pub fn run_with_stdin(
+        &self,
+        command: CommandSpec,
+        input: &[u8],
+        cancellation: &Cancellation,
+    ) -> Result<RunResult, SupervisorError> {
         if command.program.trim().is_empty() {
             return Err(SupervisorError::EmptyProgram);
+        }
+        if input.len() > command.input_limit {
+            return Err(SupervisorError::InputTooLarge);
         }
 
         let deadline = Instant::now() + command.timeout;
         let mut process = Command::new(&command.program);
         process
             .args(&command.args)
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         configure_process_group(&mut process);
         let mut child = process.spawn().map_err(SupervisorError::Spawn)?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| SupervisorError::Input(io::Error::new(io::ErrorKind::BrokenPipe, "stdin pipe missing")))?;
+        let stdin_writer = spawn_stdin_writer(stdin, input.to_vec());
         let stdout = child.stdout.take().ok_or_else(|| {
             SupervisorError::Capture(io::Error::new(io::ErrorKind::BrokenPipe, "stdout pipe missing"))
         })?;
@@ -153,16 +184,23 @@ impl Supervisor {
                         RunStatus::Failed
                     },
                     status.code(),
+                    stdin_writer,
                     stdout_reader,
                     stderr_reader,
                 );
             }
 
             if cancellation.is_cancelled() {
-                return self.terminate_and_reap(child, stdout_reader, stderr_reader, RunStatus::Cancelled);
+                return self.terminate_and_reap(
+                    child,
+                    stdin_writer,
+                    stdout_reader,
+                    stderr_reader,
+                    RunStatus::Cancelled,
+                );
             }
             if Instant::now() >= deadline {
-                return self.terminate_and_reap(child, stdout_reader, stderr_reader, RunStatus::TimedOut);
+                return self.terminate_and_reap(child, stdin_writer, stdout_reader, stderr_reader, RunStatus::TimedOut);
             }
 
             thread::sleep(self.poll_interval);
@@ -172,22 +210,25 @@ impl Supervisor {
     fn terminate_and_reap(
         &self,
         mut child: Child,
+        stdin_writer: JoinHandle<io::Result<()>>,
         stdout_reader: JoinHandle<io::Result<CapturedOutput>>,
         stderr_reader: JoinHandle<io::Result<CapturedOutput>>,
         status: RunStatus,
     ) -> Result<RunResult, SupervisorError> {
         kill_process_tree(&mut child).map_err(SupervisorError::Kill)?;
         let exit_status = child.wait().map_err(SupervisorError::Wait)?;
-        self.result_after_reap(status, exit_status.code(), stdout_reader, stderr_reader)
+        self.result_after_reap(status, exit_status.code(), stdin_writer, stdout_reader, stderr_reader)
     }
 
     fn result_after_reap(
         &self,
         status: RunStatus,
         exit_code: Option<i32>,
+        stdin_writer: JoinHandle<io::Result<()>>,
         stdout_reader: JoinHandle<io::Result<CapturedOutput>>,
         stderr_reader: JoinHandle<io::Result<CapturedOutput>>,
     ) -> Result<RunResult, SupervisorError> {
+        join_stdin(stdin_writer)?;
         let stdout = join_capture(stdout_reader)?;
         let stderr = join_capture(stderr_reader)?;
         Ok(RunResult {
@@ -239,6 +280,23 @@ where
         }
         Ok(captured)
     })
+}
+
+fn spawn_stdin_writer<W>(mut writer: W, input: Vec<u8>) -> JoinHandle<io::Result<()>>
+where
+    W: Write + Send + 'static,
+{
+    thread::spawn(move || {
+        writer.write_all(&input)?;
+        writer.flush()
+    })
+}
+
+fn join_stdin(handle: JoinHandle<io::Result<()>>) -> Result<(), SupervisorError> {
+    match handle.join() {
+        Ok(result) => result.map_err(SupervisorError::Input),
+        Err(_) => Err(SupervisorError::InputThread),
+    }
 }
 
 fn join_capture(handle: JoinHandle<io::Result<CapturedOutput>>) -> Result<CapturedOutput, SupervisorError> {
