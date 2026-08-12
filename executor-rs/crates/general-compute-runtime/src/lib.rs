@@ -8,6 +8,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const GENERAL_COMPUTE_RUNTIME_VERSION: &str = "general-compute-v1";
+pub const MAX_CPU_MILLIS: u64 = 24 * 60 * 60 * 1000;
+pub const MAX_MEMORY_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
+pub const MAX_WALL_TIME_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+pub const MAX_PROCESSES: u32 = 256;
+pub const MAX_THREADS: u32 = 4096;
+pub const MAX_SCRATCH_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
+pub const MAX_OUTPUT_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GeneralComputeRequest {
@@ -21,6 +28,63 @@ pub struct GeneralComputeRequest {
     pub determinism: DeterminismPolicy,
     pub billing_version: String,
     pub cost_model_version: String,
+}
+
+impl GeneralComputeRequest {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.runtime_version != GENERAL_COMPUTE_RUNTIME_VERSION {
+            return Err(ValidationError::new(
+                ValidationErrorCode::RuntimeVersionMismatch,
+                "unsupported general-compute runtime version",
+            ));
+        }
+        if self.backend_id.trim().is_empty()
+            || self.entrypoint.trim().is_empty()
+            || !is_sha256_digest(&self.guest_image_digest)
+        {
+            return Err(ValidationError::new(
+                ValidationErrorCode::RequestInvalid,
+                "runtime, backend, entrypoint, and guest image digest are required",
+            ));
+        }
+
+        self.execution_policy.validate()?;
+        if !self.execution_policy.filesystem_read_only {
+            return Err(ValidationError::new(
+                ValidationErrorCode::FilesystemPolicyViolation,
+                "general-compute requests require a read-only host filesystem",
+            ));
+        }
+
+        if self.source_artifact.role != ArtifactRole::Source {
+            return Err(ValidationError::new(
+                ValidationErrorCode::ArtifactInvalid,
+                "source artifact has the wrong role",
+            ));
+        }
+        if let Err(message) = self.source_artifact.validate() {
+            return Err(ValidationError::new(ValidationErrorCode::ArtifactInvalid, message));
+        }
+        for artifact in &self.input_artifacts {
+            if artifact.role != ArtifactRole::Input {
+                return Err(ValidationError::new(
+                    ValidationErrorCode::ArtifactInvalid,
+                    "input artifact has the wrong role",
+                ));
+            }
+            if let Err(message) = artifact.validate() {
+                return Err(ValidationError::new(ValidationErrorCode::ArtifactInvalid, message));
+            }
+        }
+
+        if self.billing_version.trim().is_empty() || self.cost_model_version.trim().is_empty() {
+            return Err(ValidationError::new(
+                ValidationErrorCode::RequestInvalid,
+                "billing and cost model versions are required",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +128,47 @@ pub struct ExecutionPolicy {
     pub filesystem_read_only: bool,
     pub gpu_required: bool,
     pub cancellation_deadline_ms: Option<u64>,
+}
+
+impl ExecutionPolicy {
+    fn validate(&self) -> Result<(), ValidationError> {
+        let finite_and_positive = [
+            (self.cpu_millis, MAX_CPU_MILLIS, "cpu quota"),
+            (self.memory_bytes, MAX_MEMORY_BYTES, "memory limit"),
+            (self.wall_time_ms, MAX_WALL_TIME_MS, "wall-time limit"),
+            (self.scratch_bytes, MAX_SCRATCH_BYTES, "scratch limit"),
+            (self.output_bytes, MAX_OUTPUT_BYTES, "output limit"),
+        ];
+        if finite_and_positive
+            .iter()
+            .any(|(value, maximum, _)| *value == 0 || *value > *maximum)
+        {
+            return Err(ValidationError::new(
+                ValidationErrorCode::PolicyInvalid,
+                "execution quotas must be finite, positive, and within the runtime limits",
+            ));
+        }
+        if self.max_processes == 0
+            || self.max_processes > MAX_PROCESSES
+            || self.max_threads == 0
+            || self.max_threads > MAX_THREADS
+        {
+            return Err(ValidationError::new(
+                ValidationErrorCode::PolicyInvalid,
+                "process and thread limits must be finite and within the runtime limits",
+            ));
+        }
+        if self
+            .cancellation_deadline_ms
+            .is_some_and(|deadline| deadline == 0 || deadline > self.wall_time_ms)
+        {
+            return Err(ValidationError::new(
+                ValidationErrorCode::PolicyInvalid,
+                "cancellation deadline must be positive and no later than wall time",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Default for ExecutionPolicy {
@@ -132,6 +237,127 @@ pub enum ArtifactRole {
     Checkpoint,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationErrorCode {
+    RequestInvalid,
+    RuntimeVersionMismatch,
+    PolicyInvalid,
+    FilesystemPolicyViolation,
+    ArtifactInvalid,
+    BackendUnavailable,
+    GuestImageMismatch,
+    NetworkDenied,
+    GpuUnavailable,
+    CapabilityMissing,
+    ThreadLimitExceeded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationError {
+    pub code: ValidationErrorCode,
+    pub message: String,
+}
+
+impl ValidationError {
+    fn new(code: ValidationErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackendRegistration {
+    pub backend_id: String,
+    pub guest_image_digest: String,
+    pub capabilities: Vec<String>,
+    pub max_threads: u32,
+    pub network_allowed: bool,
+    pub filesystem_read_only: bool,
+    pub gpu_allowed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerCapabilities {
+    pub guest_image_digests: Vec<String>,
+    pub capabilities: Vec<String>,
+    pub max_threads: u32,
+    pub gpu_available: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CapabilityMatrix {
+    pub backends: Vec<BackendRegistration>,
+}
+
+impl CapabilityMatrix {
+    pub fn new(backends: Vec<BackendRegistration>) -> Self {
+        Self { backends }
+    }
+
+    pub fn validate_request(
+        &self,
+        request: &GeneralComputeRequest,
+        worker: &WorkerCapabilities,
+    ) -> Result<(), ValidationError> {
+        request.validate()?;
+
+        let Some(backend) = self
+            .backends
+            .iter()
+            .find(|backend| backend.backend_id == request.backend_id)
+        else {
+            return Err(ValidationError::new(
+                ValidationErrorCode::BackendUnavailable,
+                "requested backend is not registered",
+            ));
+        };
+
+        if backend.guest_image_digest != request.guest_image_digest
+            || !worker
+                .guest_image_digests
+                .iter()
+                .any(|digest| digest == &request.guest_image_digest)
+        {
+            return Err(ValidationError::new(
+                ValidationErrorCode::GuestImageMismatch,
+                "requested guest image is not registered for this backend and worker",
+            ));
+        }
+        if request.execution_policy.network_allowed && !backend.network_allowed {
+            return Err(ValidationError::new(
+                ValidationErrorCode::NetworkDenied,
+                "backend registration denies network access",
+            ));
+        }
+        if request.execution_policy.gpu_required && (!backend.gpu_allowed || !worker.gpu_available) {
+            return Err(ValidationError::new(
+                ValidationErrorCode::GpuUnavailable,
+                "requested GPU capability is unavailable",
+            ));
+        }
+        if request.execution_policy.max_threads > backend.max_threads
+            || request.execution_policy.max_threads > worker.max_threads
+        {
+            return Err(ValidationError::new(
+                ValidationErrorCode::ThreadLimitExceeded,
+                "requested thread limit exceeds registered capability",
+            ));
+        }
+        for capability in &backend.capabilities {
+            if !worker.capabilities.iter().any(|available| available == capability) {
+                return Err(ValidationError::new(
+                    ValidationErrorCode::CapabilityMissing,
+                    format!("worker does not provide capability {capability}"),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactChunk {
     pub offset: u64,
@@ -183,8 +409,8 @@ impl ArtifactManifest {
             if chunk.size_bytes == 0 {
                 return Err("artifact chunk size must be positive".into());
             }
-            if chunk.offset < previous_end {
-                return Err("artifact chunks overlap or are out of order".into());
+            if chunk.offset != previous_end {
+                return Err("artifact chunks do not cover artifact bytes".into());
             }
             let end = chunk
                 .offset
@@ -197,6 +423,10 @@ impl ArtifactManifest {
                 return Err("artifact chunk checksum is invalid".into());
             }
             previous_end = end;
+        }
+
+        if !self.chunks.is_empty() && previous_end != self.size_bytes {
+            return Err("artifact chunks do not cover artifact bytes".into());
         }
 
         if !is_sha256_digest(&self.sha256) {
