@@ -42,6 +42,16 @@ foreach ($expected in @(
     }
 }
 
+foreach ($expected in @(
+    "Test-ManagedProverLaunch",
+    "docker compose exec -T worker",
+    "managed proof generation failed"
+)) {
+    if (!$scriptText.Contains($expected)) {
+        throw "release stack smoke harness must verify the packaged managed prover can launch via '$expected'."
+    }
+}
+
 if (!$scriptText.Contains("docker-compose-release.Tests.ps1")) {
     throw "release stack smoke harness must validate compose packaging prerequisites before startup."
 }

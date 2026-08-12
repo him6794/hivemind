@@ -60,7 +60,7 @@
 
 - [x] runtime、Worker、scheduler、node-manager focused/full tests（首次接上真實測試資料庫執行，抓出兩個先前被靜默跳過的失敗）
 - [x] 惡意 Worker 測試：偽造計費、輸出、task id、版本、seal — 覆蓋盤點與逐項對照見 `docs/zk-managed-proof-threat-coverage.md`（54 個具名測試已驗證存在）
-- [ ] Docker 多節點完整流程與瀏覽器回歸
+- [x] Docker 多節點完整流程與瀏覽器回歸
 - [x] cargo fmt、clippy、audit、依賴授權與可重現 guest build
 - [ ] 文件與本機 Conventional Commits 完整；不 push
 - **狀態：** running

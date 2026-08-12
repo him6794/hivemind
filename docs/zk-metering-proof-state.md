@@ -153,3 +153,9 @@ rollout mode、metrics 與 audit events 已完成；階段 5 的惡意 Worker �
 
 Windows 原生無法編譯 `risc0-circuit-rv32im-sys`（C++ 需 `/std:c++20`），失敗發生在
 `cargo check` 進入本專案 crate 之前，屬既有環境限制。
+## Release E2E completion - 2026-08-11
+
+- Status: `complete`
+- The initial release-stack managed-task attempt failed closed before proving because the staged sidecar required `GLIBC_2.39` while the Worker runtime image used Debian bookworm (`glibc 2.36`). No claim was accepted or settled.
+- The runtime image now uses Debian trixie. The release smoke harness directly launches the packaged sidecar inside the Worker image and verifies the expected generic parser failure for empty stdin, preventing recurrence of the ABI-loader failure.
+- A fresh Compose multi-node run registered a Worker, submitted `managed-function-v0` task `zkproof-success-1786448265`, and completed it in `enforce` mode. Nodepool audit recorded `managed_proof_verification: verified`; the persisted task settled 3 CPT with `managed_executed_ops=2` and `managed_output_bytes=17`.

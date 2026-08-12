@@ -50,7 +50,10 @@ RUN npm ci --include=dev
 COPY frontend/worker-ui/ ./
 RUN npm run build
 
-FROM debian:bookworm-slim AS runtime
+# The managed-proof sidecar is built on the supported Linux prover host and
+# currently requires glibc 2.39. Trixie supplies a newer compatible runtime;
+# bookworm's glibc 2.36 made the packaged sidecar fail before parsing input.
+FROM debian:trixie-slim AS runtime
 
 WORKDIR /app
 
