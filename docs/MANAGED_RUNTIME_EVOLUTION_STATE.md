@@ -21,7 +21,7 @@ running
 
 ## Current step
 
-M1 framed stdin/stdout protocol、bounded supervisor lifecycle 與 bounded stdout/stderr capture 小單元已完成；下一步處理 process-group／descendant cleanup。M0 capability matrix 仍是 supervisor 啟動前的 fail-closed gate。
+M1 framed stdin/stdout protocol、bounded supervisor lifecycle、bounded stdout/stderr capture 與 process-group／descendant cleanup 小單元已完成；下一步進入 reference interpreter 與 Minsky／recursion／heap／cancellation fixtures。M0 capability matrix 仍是 supervisor 啟動前的 fail-closed gate。
 
 ## Completed
 
@@ -35,19 +35,22 @@ M1 framed stdin/stdout protocol、bounded supervisor lifecycle 與 bounded stdou
   - 新增獨立 `general-compute-runtime` crate，不依賴 Hivemind DB／scheduler。
   - 凍結 `GeneralComputeRequest`／`GeneralComputeResult`、execution/determinism policy、usage claim、artifact/chunk manifest 與 inline SHA-256 validation。
 -  - schema tests 3 passed；executor workspace（v0 + v1）與 Hivemind config/worker consumer checks passed。
-- capability/threat validation 小單元（待本次 commit）
+- `37ae840 feat(runtime): enforce v1 capabilities and threat boundaries`
   - 新增 typed validation errors、有限 execution quota、read-only filesystem gate、backend/image/worker capability matrix，以及 network/GPU/thread mismatch fail-closed checks。
   - artifact chunk manifest 必須連續且完整覆蓋 bytes；gap、overlap、overflow、checksum mismatch 都拒絕。
   - capability/schema tests 7 passed；executor workspace（含 v0 regression）7+1+3+25 passed；format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
-- M1 framed protocol 小單元（待本次 commit）
+- `f4ac2b9 feat(runtime): add bounded framed protocol`
   - 新增 4-byte big-endian length-prefixed JSON frame encoder/decoder，先驗證 payload cap，再反序列化；decoder 回傳 consumed bytes 以支援連續 frame。
   - truncated header/payload、oversized payload、invalid JSON、encode cap 與 exact-one-frame consumption tests 4 passed；M0 schema tests 7 passed、executor workspace v0 regression、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
-- M1 bounded supervisor lifecycle 小單元（待本次 commit）
+- `5b342f1 feat(runtime): add bounded supervisor lifecycle`
   - 新增分離的 program/args 啟動、monotonic timeout、cooperative cancellation，以及 timeout/cancel 後 hard kill + wait/reap；空白 program fail-closed。
   - lifecycle tests 4 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
-- M1 bounded stdout/stderr capture 小單元（待本次 commit）
+- `0dea304 feat(runtime): bound supervisor output capture`
   - supervisor 以獨立 reader 持續 drain stdout/stderr，僅保留 `output_limit` bytes，並回傳各 stream 的 truncation 標記，避免 pipe back-pressure 與無界記憶體。
   - lifecycle tests 5 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
+- M1 process-group／descendant cleanup 小單元（待本次 commit）
+  - timeout/cancel 時 Unix 建立獨立 process group 並以 group kill 清理 descendants；Windows 使用 `taskkill /T /F` 的 tree-kill fallback，完成後 wait/reap。
+  - hostile descendant marker fixture 與 lifecycle tests 6 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
 
 ## Active owners
 
@@ -61,11 +64,11 @@ M1 framed stdin/stdout protocol、bounded supervisor lifecycle 與 bounded stdou
 
 ## Next action
 
-在 `general-compute-runtime` 內為 supervisor 建立 process-group／descendant kill 的 RED tests，確保 timeout/cancel 後由 command 啟動的 hostile descendant 也被清理；再加入 Windows Job Object 對等保護。
+在 `general-compute-runtime` 內建立 reference interpreter 的最小 bounded language core 與 Minsky machine fixtures，先鎖定 deterministic step、heap、recursion 與 cancellation semantics；Windows Job Object 對等保護另列為 supervisor hardening 小單元。
 
 ## Next checkpoint
 
-M1 bounded output 小單元完成 RED → GREEN、protocol/M0 schema/capability regression 與 v0 consumer checks 全綠並建立本地 commit；下一 checkpoint 為 process-group／descendant cleanup，之後再進 reference interpreter fixture。
+M1 process-group／descendant cleanup 小單元完成 RED → GREEN、protocol/M0 schema/capability regression 與 v0 consumer checks 全綠並建立本地 commit；下一 checkpoint 為 reference interpreter fixture。
 
 ## Notes
 

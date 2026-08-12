@@ -2,6 +2,10 @@ use general_compute_runtime::supervisor::{Cancellation, CommandSpec, RunStatus, 
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 fn command_that_finishes() -> CommandSpec {
     if cfg!(windows) {
@@ -38,6 +42,65 @@ fn command_that_writes_large_output() -> CommandSpec {
             ],
         )
     }
+}
+
+fn descendant_marker_paths() -> (PathBuf, PathBuf) {
+    let suffix = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos()
+    );
+    (
+        std::env::temp_dir().join(format!("hivemind-supervisor-descendant-start-{suffix}.marker")),
+        std::env::temp_dir().join(format!("hivemind-supervisor-descendant-final-{suffix}.marker")),
+    )
+}
+
+fn wait_for_path(path: &Path, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if path.exists() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    path.exists()
+}
+
+#[cfg(unix)]
+fn command_that_spawns_descendant(start: &Path, final_marker: &Path) -> CommandSpec {
+    let start = start.to_string_lossy();
+    let final_marker = final_marker.to_string_lossy();
+    CommandSpec::new(
+        "sh",
+        [
+            "-c",
+            &format!(
+                "(printf started > '{}'; sleep 1; printf survived > '{}') & wait",
+                start.replace('\'', "'\\''"),
+                final_marker.replace('\'', "'\\''")
+            ),
+        ],
+    )
+}
+
+#[cfg(windows)]
+fn command_that_spawns_descendant(start: &Path, final_marker: &Path) -> CommandSpec {
+    let start = start.to_string_lossy().replace('\'', "''");
+    let final_marker = final_marker.to_string_lossy().replace('\'', "''");
+    let child_script = format!(
+        "Set-Content -LiteralPath '{}' -Value started; Start-Sleep -Milliseconds 1500; Set-Content -LiteralPath '{}' -Value survived",
+        start, final_marker
+    );
+    let parent_script = format!(
+        "Set-Content -LiteralPath '{start}' -Value started; $childScript='{child}'; $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript)); $child=Start-Process powershell.exe -ArgumentList @('-NoProfile','-EncodedCommand',$encoded) -PassThru; Start-Sleep -Seconds 5",
+        start = start,
+        child = child_script.replace('\'', "''")
+    );
+    CommandSpec::new("powershell.exe", ["-NoProfile", "-Command", &parent_script])
 }
 
 #[test]
@@ -111,4 +174,29 @@ fn supervisor_drains_and_bounds_stdout_and_stderr_capture() {
         started.elapsed() < Duration::from_secs(3),
         "draining must not deadlock on a full pipe"
     );
+}
+
+#[test]
+fn supervisor_timeout_kills_descendants_before_returning() {
+    let (start_marker, final_marker) = descendant_marker_paths();
+    let result = Supervisor::new()
+        .run(
+            command_that_spawns_descendant(&start_marker, &final_marker).with_timeout(Duration::from_millis(600)),
+            &Cancellation::new(),
+        )
+        .expect("descendant-producing child should execute");
+
+    assert_eq!(result.status, RunStatus::TimedOut);
+    assert!(result.reaped, "timed-out process tree must be reaped");
+    assert!(
+        wait_for_path(&start_marker, Duration::from_secs(1)),
+        "descendant fixture must prove that the child was launched"
+    );
+    thread::sleep(Duration::from_millis(2_000));
+    assert!(
+        !final_marker.exists(),
+        "descendant must not outlive a timed-out supervisor process"
+    );
+    let _ = fs::remove_file(start_marker);
+    let _ = fs::remove_file(final_marker);
 }
