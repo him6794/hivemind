@@ -1,7 +1,8 @@
 use general_compute_runtime::reference::{
     HeapInstruction, HeapInterpreter, HeapLimits, HeapProgram, HeapStatus, HeapValue, Instruction, InterpreterLimits,
     InterpreterStatus, MinskyProgram, RecursionInstruction, RecursionInterpreter, RecursionLimits, RecursionProgram,
-    RecursionStatus, ReferenceInterpreter,
+    RecursionStatus, ReferenceInterpreter, SignalInstruction, SignalInterpreter, SignalLimits, SignalProgram,
+    SignalStatus,
 };
 use general_compute_runtime::supervisor::Cancellation;
 use std::sync::Arc;
@@ -194,4 +195,37 @@ fn recursion_fixture_stops_before_exceeding_call_depth_quota() {
         result.error.is_none(),
         "depth quota exhaustion is typed resource exhaustion"
     );
+}
+
+#[test]
+fn signal_fixture_distinguishes_user_exception_from_exit() {
+    let exception_program = SignalProgram::new(vec![
+        SignalInstruction::Raise { code: 17, next: 1 },
+        SignalInstruction::Halt,
+    ])
+    .expect("exception fixture should validate");
+    let exit_program = SignalProgram::new(vec![
+        SignalInstruction::Exit { code: 9, next: 1 },
+        SignalInstruction::Halt,
+    ])
+    .expect("exit fixture should validate");
+
+    let exception = SignalInterpreter::new(exception_program).run(SignalLimits::new(8), &Cancellation::new());
+    let exit = SignalInterpreter::new(exit_program).run(SignalLimits::new(8), &Cancellation::new());
+
+    assert_eq!(exception.status, SignalStatus::Exception);
+    assert_eq!(exception.code, Some(17));
+    assert_eq!(exit.status, SignalStatus::Exited);
+    assert_eq!(exit.code, Some(9));
+}
+
+#[test]
+fn signal_fixture_reports_resource_exhaustion_before_unbounded_execution() {
+    let program = SignalProgram::new(vec![SignalInstruction::Jump { next: 0 }]).expect("loop fixture should validate");
+
+    let result = SignalInterpreter::new(program).run(SignalLimits::new(3), &Cancellation::new());
+
+    assert_eq!(result.status, SignalStatus::ResourceExhausted);
+    assert_eq!(result.steps, 3);
+    assert_eq!(result.code, None);
 }

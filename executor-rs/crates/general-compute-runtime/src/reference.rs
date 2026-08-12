@@ -576,6 +576,133 @@ fn recursion_result(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignalInstruction {
+    Raise { code: i32, next: usize },
+    Exit { code: i32, next: usize },
+    Jump { next: usize },
+    Halt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignalProgramError {
+    Empty,
+    InvalidTarget { instruction: usize, target: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignalProgram {
+    instructions: Vec<SignalInstruction>,
+}
+
+impl SignalProgram {
+    pub fn new(instructions: Vec<SignalInstruction>) -> Result<Self, SignalProgramError> {
+        if instructions.is_empty() {
+            return Err(SignalProgramError::Empty);
+        }
+        let instruction_count = instructions.len();
+        for (index, instruction) in instructions.iter().enumerate() {
+            let targets = match instruction {
+                SignalInstruction::Raise { next, .. }
+                | SignalInstruction::Exit { next, .. }
+                | SignalInstruction::Jump { next } => vec![*next],
+                SignalInstruction::Halt => Vec::new(),
+            };
+            if let Some(target) = targets.into_iter().find(|target| *target >= instruction_count) {
+                return Err(SignalProgramError::InvalidTarget {
+                    instruction: index,
+                    target,
+                });
+            }
+        }
+        Ok(Self { instructions })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignalLimits {
+    pub max_steps: u64,
+}
+
+impl SignalLimits {
+    pub fn new(max_steps: u64) -> Self {
+        Self { max_steps }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignalStatus {
+    Halted,
+    Exception,
+    Exited,
+    ResourceExhausted,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignalResult {
+    pub status: SignalStatus,
+    pub steps: u64,
+    pub code: Option<i32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SignalInterpreter {
+    program: SignalProgram,
+}
+
+impl SignalInterpreter {
+    pub fn new(program: SignalProgram) -> Self {
+        Self { program }
+    }
+
+    pub fn run(&self, limits: SignalLimits, cancellation: &Cancellation) -> SignalResult {
+        let mut pc = 0usize;
+        let mut steps = 0u64;
+        loop {
+            if cancellation.is_cancelled() {
+                return SignalResult {
+                    status: SignalStatus::Cancelled,
+                    steps,
+                    code: None,
+                };
+            }
+            if steps >= limits.max_steps {
+                return SignalResult {
+                    status: SignalStatus::ResourceExhausted,
+                    steps,
+                    code: None,
+                };
+            }
+            steps += 1;
+            match self.program.instructions[pc] {
+                SignalInstruction::Raise { code, .. } => {
+                    return SignalResult {
+                        status: SignalStatus::Exception,
+                        steps,
+                        code: Some(code),
+                    };
+                }
+                SignalInstruction::Exit { code, .. } => {
+                    return SignalResult {
+                        status: SignalStatus::Exited,
+                        steps,
+                        code: Some(code),
+                    };
+                }
+                SignalInstruction::Jump { next } => pc = next,
+                SignalInstruction::Halt => {
+                    return SignalResult {
+                        status: SignalStatus::Halted,
+                        steps,
+                        code: None,
+                    };
+                }
+            }
+        }
+    }
+}
+
 impl ReferenceInterpreter {
     pub fn new(program: MinskyProgram) -> Self {
         Self { program }
