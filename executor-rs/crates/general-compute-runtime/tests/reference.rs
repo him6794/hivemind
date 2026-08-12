@@ -1,6 +1,7 @@
 use general_compute_runtime::reference::{
     HeapInstruction, HeapInterpreter, HeapLimits, HeapProgram, HeapStatus, HeapValue, Instruction, InterpreterLimits,
-    InterpreterStatus, MinskyProgram, ReferenceInterpreter,
+    InterpreterStatus, MinskyProgram, RecursionInstruction, RecursionInterpreter, RecursionLimits, RecursionProgram,
+    RecursionStatus, ReferenceInterpreter,
 };
 use general_compute_runtime::supervisor::Cancellation;
 use std::sync::Arc;
@@ -131,4 +132,66 @@ fn heap_fixture_returns_resource_exhausted_before_exceeding_cell_quota() {
     assert_eq!(result.status, HeapStatus::ResourceExhausted);
     assert_eq!(result.heap_cells, 0);
     assert!(result.error.is_none(), "quota exhaustion is not a memory fault");
+}
+
+#[test]
+fn recursion_fixture_calls_and_returns_deterministically() {
+    let program = RecursionProgram::new(
+        vec![
+            RecursionInstruction::Set {
+                register: 0,
+                value: 3,
+                next: 1,
+            },
+            RecursionInstruction::Call {
+                target: 3,
+                return_pc: 2,
+            },
+            RecursionInstruction::Halt,
+            RecursionInstruction::DecJump {
+                register: 0,
+                if_nonzero: 4,
+                if_zero: 5,
+            },
+            RecursionInstruction::Call {
+                target: 3,
+                return_pc: 5,
+            },
+            RecursionInstruction::Return,
+        ],
+        1,
+    )
+    .expect("recursion fixture should validate");
+
+    let result = RecursionInterpreter::new(program).run(RecursionLimits::new(64, 8), &Cancellation::new());
+
+    assert_eq!(result.status, RecursionStatus::Halted);
+    assert_eq!(result.max_depth, 4);
+    assert_eq!(result.stack_depth, 0);
+    assert_eq!(result.registers[0], HeapValue::integer(0));
+}
+
+#[test]
+fn recursion_fixture_stops_before_exceeding_call_depth_quota() {
+    let program = RecursionProgram::new(
+        vec![
+            RecursionInstruction::Call {
+                target: 0,
+                return_pc: 1,
+            },
+            RecursionInstruction::Halt,
+        ],
+        0,
+    )
+    .expect("recursive loop should validate");
+
+    let result = RecursionInterpreter::new(program).run(RecursionLimits::new(64, 3), &Cancellation::new());
+
+    assert_eq!(result.status, RecursionStatus::ResourceExhausted);
+    assert_eq!(result.max_depth, 3);
+    assert_eq!(result.stack_depth, 3);
+    assert!(
+        result.error.is_none(),
+        "depth quota exhaustion is typed resource exhaustion"
+    );
 }

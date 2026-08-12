@@ -57,6 +57,9 @@ M1 framed stdin/stdout protocol、bounded supervisor lifecycle、bounded stdout/
 - M1 mutable heap 小單元（待本次 commit）
   - 新增 checked `Set`／`Allocate`／`Store`／`Load` heap instructions，BigUint cell values、pointer/index validation、cell quota 與 typed `resource_exhausted`。
   - reference tests 6 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
+- M1 recursion/call-depth 小單元（待本次 commit）
+  - 新增 checked `Call`／`Return` recursion tape、return stack、deterministic depth tracking、stack-underflow error 與 call-depth quota。
+  - reference tests 8 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
 
 ## Active owners
 
@@ -70,11 +73,11 @@ M1 framed stdin/stdout protocol、bounded supervisor lifecycle、bounded stdout/
 
 ## Next action
 
-在 `general-compute-runtime` 內擴充 reference interpreter 的 recursion/call-depth fixtures，先鎖定 deterministic call/return、depth quota 與 typed `resource_exhausted`；exception semantics 另列為下一個小單元。Windows Job Object 對等保護另列為 supervisor hardening 小單元。
+在 `general-compute-runtime` 內加入 reference exception/exit semantics fixtures，明確區分 user exception、stack underflow、resource exhaustion 與 cooperative cancellation；Windows Job Object 對等保護另列為 supervisor hardening 小單元。
 
 ## Next checkpoint
 
-M1 mutable heap 小單元完成 RED → GREEN、protocol/M0 schema/capability regression 與 v0 consumer checks 全綠並建立本地 commit；下一 checkpoint 為 recursion/call-depth fixture。
+M1 recursion/call-depth 小單元完成 RED → GREEN、protocol/M0 schema/capability regression 與 v0 consumer checks 全綠並建立本地 commit；下一 checkpoint 為 exception/exit fixture。
 
 ## Notes
 

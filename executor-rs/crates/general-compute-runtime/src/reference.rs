@@ -366,6 +366,216 @@ fn memory_error(steps: u64, registers: Vec<HeapValue>, heap_cells: usize, messag
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecursionInstruction {
+    Set {
+        register: usize,
+        value: u64,
+        next: usize,
+    },
+    DecJump {
+        register: usize,
+        if_nonzero: usize,
+        if_zero: usize,
+    },
+    Call {
+        target: usize,
+        return_pc: usize,
+    },
+    Return,
+    Halt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecursionProgramError {
+    Empty,
+    InvalidTarget { instruction: usize, target: usize },
+    RegisterOutOfRange { instruction: usize, register: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecursionProgram {
+    instructions: Vec<RecursionInstruction>,
+    register_count: usize,
+}
+
+impl RecursionProgram {
+    pub fn new(instructions: Vec<RecursionInstruction>, register_count: usize) -> Result<Self, RecursionProgramError> {
+        if instructions.is_empty() {
+            return Err(RecursionProgramError::Empty);
+        }
+        let instruction_count = instructions.len();
+        for (index, instruction) in instructions.iter().enumerate() {
+            let (registers, targets): (Vec<usize>, Vec<usize>) = match instruction {
+                RecursionInstruction::Set { register, next, .. } => (vec![*register], vec![*next]),
+                RecursionInstruction::DecJump {
+                    register,
+                    if_nonzero,
+                    if_zero,
+                } => (vec![*register], vec![*if_nonzero, *if_zero]),
+                RecursionInstruction::Call { target, return_pc } => (Vec::new(), vec![*target, *return_pc]),
+                RecursionInstruction::Return | RecursionInstruction::Halt => (Vec::new(), Vec::new()),
+            };
+            if let Some(register) = registers.into_iter().find(|register| *register >= register_count) {
+                return Err(RecursionProgramError::RegisterOutOfRange {
+                    instruction: index,
+                    register,
+                });
+            }
+            if let Some(target) = targets.into_iter().find(|target| *target >= instruction_count) {
+                return Err(RecursionProgramError::InvalidTarget {
+                    instruction: index,
+                    target,
+                });
+            }
+        }
+        Ok(Self {
+            instructions,
+            register_count,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecursionLimits {
+    pub max_steps: u64,
+    pub max_depth: usize,
+}
+
+impl RecursionLimits {
+    pub fn new(max_steps: u64, max_depth: usize) -> Self {
+        Self { max_steps, max_depth }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecursionStatus {
+    Halted,
+    ResourceExhausted,
+    Cancelled,
+    StackUnderflow,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecursionResult {
+    pub status: RecursionStatus,
+    pub steps: u64,
+    pub registers: Vec<HeapValue>,
+    pub stack_depth: usize,
+    pub max_depth: usize,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RecursionInterpreter {
+    program: RecursionProgram,
+}
+
+impl RecursionInterpreter {
+    pub fn new(program: RecursionProgram) -> Self {
+        Self { program }
+    }
+
+    pub fn run(&self, limits: RecursionLimits, cancellation: &Cancellation) -> RecursionResult {
+        let mut registers = vec![HeapValue::integer(0); self.program.register_count];
+        let mut stack = Vec::<usize>::new();
+        let mut pc = 0usize;
+        let mut steps = 0u64;
+        let mut max_depth = 0usize;
+
+        loop {
+            if cancellation.is_cancelled() {
+                return recursion_result(
+                    RecursionStatus::Cancelled,
+                    steps,
+                    registers,
+                    stack.len(),
+                    max_depth,
+                    None,
+                );
+            }
+            if steps >= limits.max_steps || stack.len() > limits.max_depth {
+                return recursion_result(
+                    RecursionStatus::ResourceExhausted,
+                    steps,
+                    registers,
+                    stack.len(),
+                    max_depth,
+                    None,
+                );
+            }
+            steps += 1;
+            match &self.program.instructions[pc] {
+                RecursionInstruction::Set { register, value, next } => {
+                    registers[*register] = HeapValue::integer(*value);
+                    pc = *next;
+                }
+                RecursionInstruction::DecJump {
+                    register,
+                    if_nonzero,
+                    if_zero,
+                } => {
+                    if registers[*register] == HeapValue::integer(0) {
+                        pc = *if_zero;
+                    } else {
+                        registers[*register].0 -= 1u8;
+                        pc = *if_nonzero;
+                    }
+                }
+                RecursionInstruction::Call { target, return_pc } => {
+                    if stack.len() >= limits.max_depth {
+                        return recursion_result(
+                            RecursionStatus::ResourceExhausted,
+                            steps,
+                            registers,
+                            stack.len(),
+                            max_depth,
+                            None,
+                        );
+                    }
+                    stack.push(*return_pc);
+                    max_depth = max_depth.max(stack.len());
+                    pc = *target;
+                }
+                RecursionInstruction::Return => {
+                    let Some(return_pc) = stack.pop() else {
+                        return recursion_result(
+                            RecursionStatus::StackUnderflow,
+                            steps,
+                            registers,
+                            stack.len(),
+                            max_depth,
+                            Some("return with empty call stack".into()),
+                        );
+                    };
+                    pc = return_pc;
+                }
+                RecursionInstruction::Halt => {
+                    return recursion_result(RecursionStatus::Halted, steps, registers, stack.len(), max_depth, None);
+                }
+            }
+        }
+    }
+}
+
+fn recursion_result(
+    status: RecursionStatus,
+    steps: u64,
+    registers: Vec<HeapValue>,
+    stack_depth: usize,
+    max_depth: usize,
+    error: Option<String>,
+) -> RecursionResult {
+    RecursionResult {
+        status,
+        steps,
+        registers,
+        stack_depth,
+        max_depth,
+        error,
+    }
+}
+
 impl ReferenceInterpreter {
     pub fn new(program: MinskyProgram) -> Self {
         Self { program }
