@@ -172,14 +172,62 @@ Nodepool verifies itself — a Worker's own usage numbers are never trusted. The
 Worker produces that proof by spawning an isolated prover sidecar, so a Worker
 that is meant to run managed tasks needs the sidecar binary present.
 
-RISC Zero 3.0.6 supports Linux and macOS prover hosts only; there is no
-supported native Windows prover. Build the sidecar once on a supported host and
-stage it, then build the worker image:
+#### Supported proving hosts
+
+| Proving host | Supported | Notes |
+|---|---|---|
+| Linux (`x86_64`) | Yes | The host the released sidecar is built on |
+| macOS | Yes | Supported by RISC Zero 3.0.6 |
+| WSL | Yes | Reports `Linux`, so it takes the supported Linux path |
+| Native Windows (MINGW/MSYS/Cygwin) | No | RISC Zero 3.0.6 ships no Windows prover |
+
+There is no native Windows proving path, and Hivemind does not emulate one.
+`scripts/build-managed-prover.sh` refuses to run under a native Windows shell up
+front, rather than failing deep inside a RISC Zero build script.
+
+A native Windows Worker therefore has no prover sidecar to spawn. It can still
+run ordinary worker workloads, but under the default `enforce` rollout mode every
+managed task it is handed **fails closed** — never settled from unverified
+numbers. Managed tasks must run on a worker image or runtime that contains the
+Linux prover sidecar.
+
+`scripts/package-worker-windows.ps1` packages a native Windows worker and so
+stages no prover sidecar. The README it generates states that, rather than
+leaving a provider to infer it from managed tasks failing.
+
+Build the sidecar once on a supported host and stage it, then build the worker
+image:
 
 ```bash
 bash scripts/build-managed-prover.sh   # writes packaging/managed-prover/
 docker compose build worker            # bakes it into /app/prover/
 ```
+
+From a Windows checkout, run the same build through WSL:
+
+```powershell
+wsl bash scripts/build-managed-prover.sh
+```
+
+#### Building without access to the RISC Zero artifact bucket
+
+The recursion circuit build downloads `recursion_zkr.zip` from
+`risc0-artifacts.s3.us-west-2.amazonaws.com`. Where network policy blocks that
+bucket, use `RECURSION_SRC_PATH` — the official upstream offline escape hatch —
+rather than patching anything in the RISC Zero registry sources:
+
+```bash
+RECURSION_SRC_PATH=/path/to/recursion_zkr.zip bash scripts/build-managed-prover.sh
+```
+
+`scripts/build-managed-prover.sh` verifies that artifact's SHA-256 against
+`744b999f0a35b3c86753311c7efb2a0054be21727095cf105af6ee7d3f4d8849` before
+handing it to Cargo, and aborts on a mismatch. This reuses a checked artifact —
+it does not skip the check. With `RECURSION_SRC_PATH` unset the script reuses a
+`recursion_zkr.zip` already present in the Cargo target tree under the same
+digest check, and otherwise leaves RISC Zero to its normal network download.
+
+#### Settlement behaviour
 
 `MANAGED_PROVER_EXECUTABLE` defaults to `/app/prover/hivemind-managed-proof-prover`
 under Compose. If the sidecar is missing, or its proof fails verification, the
@@ -239,7 +287,7 @@ Configuration is via environment variables:
 | `WORKER_ADVERTISE_ADDR` | - | Worker address registered with nodepool |
 | `EXECUTOR_SANDBOX_DIR` | `./sandbox` | Per-task working directory root |
 | `MANAGED_PROOF_ROLLOUT_MODE` | `enforce` | Managed-proof settlement policy: `off`, `observe`, or `enforce`; production default is fail-closed `enforce` |
-| `MANAGED_PROVER_EXECUTABLE` | - | Absolute path to the supported Linux/macOS managed-proof prover sidecar; required for managed tasks in `enforce` |
+| `MANAGED_PROVER_EXECUTABLE` | - | Absolute path to the managed-proof prover sidecar, built on a Linux/macOS/WSL host; required for managed tasks in `enforce`. Unset on native Windows, where managed tasks fail closed |
 | `MANAGED_PROVER_TIMEOUT_SECS` | `900` | Bounded prover sidecar execution timeout |
 | `LOG_LEVEL` | `info` | Log level (debug, info, warn, error) |
 

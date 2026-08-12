@@ -111,4 +111,102 @@ Assert-Contains `
     -Needle 'TORRENT_TASK_ARTIFACT_BASE_URL=' `
     -Message "worker package template must expose the remote task artifact base URL setting."
 
+# The package README is Markdown, and it must be built from a literal
+# here-string: an interpolating one silently eats every backtick as an escape
+# character, so the code spans and fenced blocks reach the provider stripped.
+# Extracting it here also lets the assertions below run against the rendered
+# text, which is what a provider actually reads, rather than the script source.
+$readmeMatch = [regex]::Match($scriptText, "(?s)\`$readme = @'\r?\n(.*?)\r?\n'@")
+if (!$readmeMatch.Success) {
+    throw "windows worker package README must come from a literal here-string, or PowerShell strips its Markdown backticks."
+}
+$packagedReadme = $readmeMatch.Groups[1].Value
+
+Assert-Contains `
+    -Haystack $packagedReadme `
+    -Needle '`.env.worker.example`' `
+    -Message "packaged README must keep its Markdown inline code spans intact."
+
+# The README is written with -Encoding ASCII, which would turn anything else
+# into a literal '?' in the shipped package.
+if ([regex]::IsMatch($packagedReadme, '[^\x00-\x7F]')) {
+    throw "packaged README must stay ASCII-only because it is written with -Encoding ASCII."
+}
+
+# A provider who unpacks this on Windows must not discover the missing prover by
+# watching every managed task fail. Say it in the package README instead.
+$noteStart = $packagedReadme.IndexOf("## Managed proving")
+if ($noteStart -lt 0) {
+    throw "windows worker package README must carry a managed-proving section."
+}
+$note = $packagedReadme.Substring($noteStart)
+
+# Match on prose, not on where the template happens to wrap: re-flowing a
+# paragraph must not turn a documented guarantee into a red test.
+$flowedNote = [regex]::Replace($note, '\s+', ' ')
+
+Assert-Contains `
+    -Haystack $flowedNote `
+    -Needle "ordinary worker workloads" `
+    -Message "windows worker package README must state that Windows workers run ordinary worker workloads."
+
+Assert-Contains `
+    -Haystack $flowedNote `
+    -Needle "does not include a RISC Zero prover sidecar" `
+    -Message "windows worker package README must state that no RISC Zero prover sidecar ships with it."
+
+Assert-Contains `
+    -Haystack $flowedNote `
+    -Needle "Linux, macOS, and WSL" `
+    -Message "windows worker package README must name the supported RISC Zero proving hosts."
+
+Assert-Contains `
+    -Haystack $flowedNote `
+    -Needle "fails closed" `
+    -Message "windows worker package README must state that managed proving fails closed here."
+
+Assert-Contains `
+    -Haystack $flowedNote `
+    -Needle "supported Linux-based runtime" `
+    -Message "windows worker package README must point managed proving at a supported Linux-based runtime."
+
+Assert-Contains `
+    -Haystack $flowedNote `
+    -Needle "worker image or runtime that contains the Linux prover sidecar" `
+    -Message "windows worker package README must say managed tasks need a runtime carrying the Linux prover sidecar."
+
+Assert-Contains `
+    -Haystack $flowedNote `
+    -Needle "wsl bash scripts/build-managed-prover.sh" `
+    -Message "windows worker package README must show how to build the sidecar from a Windows checkout via WSL."
+
+foreach ($expected in @("RECURSION_SRC_PATH", "recursion_zkr.zip", "SHA-256")) {
+    Assert-Contains `
+        -Haystack $flowedNote `
+        -Needle $expected `
+        -Message "windows worker package README must document the offline recursion artifact escape hatch via '$expected'."
+}
+
+Assert-Contains `
+    -Haystack $flowedNote `
+    -Needle "official upstream offline escape hatch" `
+    -Message "windows worker package README must use the canonical official upstream offline escape hatch wording."
+
+# This package ships no prover sidecar, so the template must not hand the worker
+# a prover path: managed proving has to fail closed on native Windows.
+$envMatch = [regex]::Match($scriptText, '(?s)\$envTemplate = @"\r?\n(.*?)\r?\n"@')
+if (!$envMatch.Success) {
+    throw "windows worker package must build .env.worker.example from a here-string."
+}
+$packagedEnv = $envMatch.Groups[1].Value
+
+if ([regex]::IsMatch($packagedEnv, '(?m)^\s*MANAGED_PROVER_EXECUTABLE\s*=\s*\S')) {
+    throw "windows worker template must not point MANAGED_PROVER_EXECUTABLE at a native Windows path; managed proving must fail closed."
+}
+
+Assert-Contains `
+    -Haystack $packagedEnv `
+    -Needle "MANAGED_PROVER_EXECUTABLE" `
+    -Message "windows worker template must explain why no managed prover is configured on native Windows."
+
 Write-Host "package-worker-windows launcher tests passed"

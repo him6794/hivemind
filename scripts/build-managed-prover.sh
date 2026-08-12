@@ -8,9 +8,9 @@
 #
 # On a host that cannot reach risc0-artifacts.s3.us-west-2.amazonaws.com, the
 # risc0-circuit-recursion build script fails after three download attempts. Set
-# RECURSION_SRC_PATH to a local copy of recursion_zkr.zip; the build script
-# verifies its SHA-256 before use, so this reuses a checked artifact rather than
-# skipping the check.
+# RECURSION_SRC_PATH to a local copy of recursion_zkr.zip; that is the official upstream offline escape hatch.
+# The build script verifies its SHA-256 before use, so this reuses a checked
+# artifact rather than skipping the check.
 #
 # The guest is built natively (HIVEMIND_ZKVM_USE_DOCKER=0). The Docker builder
 # path is deliberately not used here: it needs Docker-in-Docker and, on this
@@ -28,10 +28,18 @@ if [[ ! -d "$prover_workspace" ]]; then
   exit 66
 fi
 
-case "$(uname -s)" in
-  Linux | Darwin) ;;
+host_os="$(uname -s)"
+case "$host_os" in
+  Linux | Darwin)
+    # WSL intentionally reports Linux here and follows the supported path.
+    ;;
+  MINGW* | MSYS* | CYGWIN*)
+    echo "error: native Windows proving is unsupported by RISC Zero 3.0.6." >&2
+    echo "       Run this script inside WSL, Linux, or macOS." >&2
+    exit 65
+    ;;
   *)
-    echo "error: RISC Zero has no supported prover host on $(uname -s)." >&2
+    echo "error: RISC Zero has no supported prover host on $host_os." >&2
     echo "       Run this on Linux, macOS, or WSL." >&2
     exit 65
     ;;
@@ -53,6 +61,73 @@ if ! rustup toolchain list 2>/dev/null | grep -q '^risc0'; then
 fi
 
 export HIVEMIND_ZKVM_USE_DOCKER=0
+
+# RISC Zero's recursion circuit build downloads this artifact from its public
+# bucket. The upstream build script supports RECURSION_SRC_PATH as the official
+# upstream offline escape hatch; keep that contract intact and verify the artifact
+# before handing it to Cargo. This is useful on WSL/macOS hosts whose network
+# policy cannot reach the bucket, and avoids patching anything in the registry.
+recursion_artifact_sha256="744b999f0a35b3c86753311c7efb2a0054be21727095cf105af6ee7d3f4d8849"
+
+sha256_file() {
+  local path="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$path" | awk '{print $1}'
+  else
+    echo "error: neither sha256sum nor shasum is available to verify recursion_zkr.zip" >&2
+    return 69
+  fi
+}
+
+absolute_path() {
+  local path="$1"
+  local directory
+  directory="$(cd "$(dirname "$path")" && pwd)"
+  printf '%s/%s\n' "$directory" "$(basename "$path")"
+}
+
+resolve_recursion_artifact() {
+  local artifact="${RECURSION_SRC_PATH:-}"
+
+  if [[ -n "$artifact" ]]; then
+    if [[ ! -f "$artifact" ]]; then
+      echo "error: RECURSION_SRC_PATH does not point to a file: $artifact" >&2
+      return 66
+    fi
+    artifact="$(absolute_path "$artifact")"
+  else
+    local target_root="${CARGO_TARGET_DIR:-$prover_workspace/target}"
+    local discovered
+    discovered="$(find "$target_root" -type f -name recursion_zkr.zip -print -quit 2>/dev/null || true)"
+    if [[ -n "$discovered" ]]; then
+      artifact="$(absolute_path "$discovered")"
+      export RECURSION_SRC_PATH="$artifact"
+      echo "found cached recursion artifact at $artifact"
+    fi
+  fi
+
+  if [[ -z "$artifact" ]]; then
+    echo "no local recursion_zkr.zip found; RISC Zero will try its normal network download" >&2
+    echo "       Set RECURSION_SRC_PATH=/path/to/recursion_zkr.zip for the official upstream offline escape hatch." >&2
+    return 0
+  fi
+
+  local actual_sha256
+  actual_sha256="$(sha256_file "$artifact")" || return $?
+  if [[ "$actual_sha256" != "$recursion_artifact_sha256" ]]; then
+    echo "error: recursion artifact SHA-256 mismatch for $artifact" >&2
+    echo "       expected: $recursion_artifact_sha256" >&2
+    echo "       actual:   $actual_sha256" >&2
+    return 65
+  fi
+
+  export RECURSION_SRC_PATH="$artifact"
+  echo "using verified recursion artifact: $artifact"
+}
+
+resolve_recursion_artifact
 
 # The guest image ID depends on the exact guest toolchain and build environment,
 # not just on the tracked source. A prover built somewhere else embeds a
