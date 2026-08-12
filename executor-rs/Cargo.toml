@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/managed-function-runtime"]
+members = [
+    "crates/managed-function-runtime",
+    "crates/general-compute-runtime",
+]
 default-members = ["crates/managed-function-runtime"]
 
 [workspace.package]
