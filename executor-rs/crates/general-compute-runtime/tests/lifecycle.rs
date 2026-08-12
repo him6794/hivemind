@@ -19,6 +19,27 @@ fn command_that_sleeps() -> CommandSpec {
     }
 }
 
+fn command_that_writes_large_output() -> CommandSpec {
+    if cfg!(windows) {
+        CommandSpec::new(
+            "powershell.exe",
+            [
+                "-NoProfile",
+                "-Command",
+                "$s='x'*65536; [Console]::Out.Write($s); [Console]::Error.Write($s)",
+            ],
+        )
+    } else {
+        CommandSpec::new(
+            "sh",
+            [
+                "-c",
+                "head -c 65536 /dev/zero | tr '\\0' x; head -c 65536 /dev/zero | tr '\\0' e >&2",
+            ],
+        )
+    }
+}
+
 #[test]
 fn supervisor_reports_completed_child_after_waiting_for_reap() {
     let cancellation = Cancellation::new();
@@ -69,4 +90,25 @@ fn supervisor_rejects_empty_program_without_spawning() {
     let result = Supervisor::new().run(CommandSpec::new("", [] as [&str; 0]), &Cancellation::new());
 
     assert!(result.is_err());
+}
+
+#[test]
+fn supervisor_drains_and_bounds_stdout_and_stderr_capture() {
+    let started = std::time::Instant::now();
+    let result = Supervisor::new()
+        .run(
+            command_that_writes_large_output().with_output_limit(64),
+            &Cancellation::new(),
+        )
+        .expect("output-producing child should execute");
+
+    assert_eq!(result.status, RunStatus::Completed);
+    assert!(result.stdout.len() <= 64, "stdout must respect the configured cap");
+    assert!(result.stderr.len() <= 64, "stderr must respect the configured cap");
+    assert!(result.stdout_truncated, "stdout cap must be observable");
+    assert!(result.stderr_truncated, "stderr cap must be observable");
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "draining must not deadlock on a full pipe"
+    );
 }

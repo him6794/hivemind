@@ -21,7 +21,7 @@ running
 
 ## Current step
 
-M1 framed stdin/stdout protocol 與 bounded supervisor lifecycle 第一批小單元已完成；下一步為 process-group／descendant cleanup 與 bounded stdout/stderr capture 建立 RED tests。M0 capability matrix 仍是 supervisor 啟動前的 fail-closed gate。
+M1 framed stdin/stdout protocol、bounded supervisor lifecycle 與 bounded stdout/stderr capture 小單元已完成；下一步處理 process-group／descendant cleanup。M0 capability matrix 仍是 supervisor 啟動前的 fail-closed gate。
 
 ## Completed
 
@@ -45,6 +45,9 @@ M1 framed stdin/stdout protocol 與 bounded supervisor lifecycle 第一批小單
 - M1 bounded supervisor lifecycle 小單元（待本次 commit）
   - 新增分離的 program/args 啟動、monotonic timeout、cooperative cancellation，以及 timeout/cancel 後 hard kill + wait/reap；空白 program fail-closed。
   - lifecycle tests 4 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
+- M1 bounded stdout/stderr capture 小單元（待本次 commit）
+  - supervisor 以獨立 reader 持續 drain stdout/stderr，僅保留 `output_limit` bytes，並回傳各 stream 的 truncation 標記，避免 pipe back-pressure 與無界記憶體。
+  - lifecycle tests 5 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
 
 ## Active owners
 
@@ -58,11 +61,11 @@ M1 framed stdin/stdout protocol 與 bounded supervisor lifecycle 第一批小單
 
 ## Next action
 
-在 `general-compute-runtime` 內為 supervisor 建立 process-group／descendant kill 與 bounded stdout/stderr capture 的 RED tests，確保 hostile child 與 pipe back-pressure 不會逃逸或卡住。
+在 `general-compute-runtime` 內為 supervisor 建立 process-group／descendant kill 的 RED tests，確保 timeout/cancel 後由 command 啟動的 hostile descendant 也被清理；再加入 Windows Job Object 對等保護。
 
 ## Next checkpoint
 
-M1 supervisor lifecycle 小單元完成 RED → GREEN、protocol/M0 schema/capability regression 與 v0 consumer checks 全綠並建立本地 commit；下一 checkpoint 為 process-group／output-boundary 小單元，之後再進 reference interpreter fixture。
+M1 bounded output 小單元完成 RED → GREEN、protocol/M0 schema/capability regression 與 v0 consumer checks 全綠並建立本地 commit；下一 checkpoint 為 process-group／descendant cleanup，之後再進 reference interpreter fixture。
 
 ## Notes
 
