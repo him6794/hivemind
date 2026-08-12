@@ -89,6 +89,7 @@ pub enum SupervisorError {
     EmptyProgram,
     Spawn(io::Error),
     Wait(io::Error),
+    Kill(io::Error),
     Capture(io::Error),
     CaptureThread,
 }
@@ -99,6 +100,7 @@ impl std::fmt::Display for SupervisorError {
             Self::EmptyProgram => formatter.write_str("supervisor program must not be empty"),
             Self::Spawn(_) => formatter.write_str("supervisor failed to spawn child"),
             Self::Wait(_) => formatter.write_str("supervisor failed to wait for child"),
+            Self::Kill(_) => formatter.write_str("supervisor failed to kill child process tree"),
             Self::Capture(_) => formatter.write_str("supervisor failed to capture child output"),
             Self::CaptureThread => formatter.write_str("supervisor output capture thread panicked"),
         }
@@ -125,13 +127,14 @@ impl Supervisor {
         }
 
         let deadline = Instant::now() + command.timeout;
-        let mut child = Command::new(&command.program)
+        let mut process = Command::new(&command.program);
+        process
             .args(&command.args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(SupervisorError::Spawn)?;
+            .stderr(Stdio::piped());
+        configure_process_group(&mut process);
+        let mut child = process.spawn().map_err(SupervisorError::Spawn)?;
         let stdout = child.stdout.take().ok_or_else(|| {
             SupervisorError::Capture(io::Error::new(io::ErrorKind::BrokenPipe, "stdout pipe missing"))
         })?;
@@ -173,7 +176,7 @@ impl Supervisor {
         stderr_reader: JoinHandle<io::Result<CapturedOutput>>,
         status: RunStatus,
     ) -> Result<RunResult, SupervisorError> {
-        let _ = child.kill();
+        kill_process_tree(&mut child).map_err(SupervisorError::Kill)?;
         let exit_status = child.wait().map_err(SupervisorError::Wait)?;
         self.result_after_reap(status, exit_status.code(), stdout_reader, stderr_reader)
     }
@@ -243,4 +246,63 @@ fn join_capture(handle: JoinHandle<io::Result<CapturedOutput>>) -> Result<Captur
         Ok(result) => result.map_err(SupervisorError::Capture),
         Err(_) => Err(SupervisorError::CaptureThread),
     }
+}
+
+#[cfg(unix)]
+fn configure_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    // SAFETY: the hook only changes the child process's own process group before
+    // it executes the requested program. It does not access Rust-managed state.
+    unsafe {
+        command.pre_exec(|| {
+            if setpgid(0, 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn configure_process_group(_command: &mut Command) {}
+
+#[cfg(unix)]
+fn kill_process_tree(child: &mut Child) -> io::Result<()> {
+    let process_group = -(child.id() as i32);
+    // SAFETY: process_group is the negative PID of the group created in the
+    // pre-exec hook, so the signal is scoped to this runtime invocation.
+    let result = unsafe { kill(process_group, SIGKILL) };
+    if result == -1 {
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::NotFound {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn kill_process_tree(child: &mut Child) -> io::Result<()> {
+    let pid = child.id().to_string();
+    let status = Command::new("taskkill.exe")
+        .args(["/PID", &pid, "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if status.success() || child.try_wait()?.is_some() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!("taskkill.exe exited with {status}")))
+    }
+}
+
+#[cfg(unix)]
+const SIGKILL: i32 = 9;
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn setpgid(pid: i32, process_group: i32) -> i32;
+    fn kill(pid: i32, signal: i32) -> i32;
 }
