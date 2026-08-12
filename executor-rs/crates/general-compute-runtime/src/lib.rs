@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub mod differential;
 pub mod reference;
 pub mod supervisor;
 

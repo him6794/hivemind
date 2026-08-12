@@ -63,6 +63,9 @@ M1 framed stdin/stdout protocol、bounded supervisor lifecycle、bounded stdout/
 - M1 exception/exit semantics 小單元（待本次 commit）
   - 新增 `Raise`／`Exit`／`Jump` signal tape，明確回傳 `Exception`、`Exited`、`ResourceExhausted`、`Cancelled` 與 `Halted` 狀態及 optional exit code。
   - reference tests 10 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
+- M1 differential harness 小單元（待本次 commit）
+  - 新增可序列化 `DifferentialCase`／`ReferenceObservation`，固定 source、JSON input、seed 與 canonical status/steps/output；只允許 registry-pinned fixture 執行。
+  - replay、backend mismatch、source/input/seed mismatch fail-closed tests 3 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
 
 ## Active owners
 
@@ -76,11 +79,11 @@ M1 framed stdin/stdout protocol、bounded supervisor lifecycle、bounded stdout/
 
 ## Next action
 
-在 `general-compute-runtime` 內建立 pinned CPython/reference differential harness contract，固定 source/input/seed、canonical result 與 status mapping；Windows Job Object 對等保護另列為 supervisor hardening 小單元。
+在 `general-compute-runtime` 內將 differential harness 接到 pinned CPython adapter interface，先以 unavailable backend 與 malformed observation RED tests 鎖定 fail-closed status mapping，再接實際 CPython subprocess。Windows Job Object 對等保護另列為 supervisor hardening 小單元。
 
 ## Next checkpoint
 
-M1 exception/exit 小單元完成 RED → GREEN、protocol/M0 schema/capability regression 與 v0 consumer checks 全綠並建立本地 commit；下一 checkpoint 為 reference differential harness。
+M1 differential harness 小單元完成 RED → GREEN、protocol/M0 schema/capability regression 與 v0 consumer checks 全綠並建立本地 commit；下一 checkpoint 為 pinned CPython adapter interface。
 
 ## Notes
 
