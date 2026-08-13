@@ -160,6 +160,7 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
             gpu_memory_usage DOUBLE PRECISION NOT NULL DEFAULT 0,
             available_memory_gb INTEGER NOT NULL DEFAULT 0,
             queue_capacity INTEGER NOT NULL DEFAULT 0,
+            general_compute_capabilities_json TEXT,
             last_heartbeat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             registered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -432,6 +433,11 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     .await;
     let _ = sqlx::query(
         "ALTER TABLE worker_nodes ADD COLUMN IF NOT EXISTS min_cpt_per_hour BIGINT NOT NULL DEFAULT 0;",
+    )
+    .execute(pool)
+    .await;
+    let _ = sqlx::query(
+        "ALTER TABLE worker_nodes ADD COLUMN IF NOT EXISTS general_compute_capabilities_json TEXT;",
     )
     .execute(pool)
     .await;

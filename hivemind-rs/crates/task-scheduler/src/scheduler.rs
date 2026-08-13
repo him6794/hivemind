@@ -1,4 +1,25 @@
+use general_compute_runtime::{
+    CapabilityMatrix, GeneralComputeRequest, TrustedWorkerCapabilityRegistration,
+    GENERAL_COMPUTE_RUNTIME_VERSION,
+};
 use hivemind_models::{Task, WorkerNode, WorkerStatus};
+
+pub fn worker_supports_general_compute_request(
+    request: &GeneralComputeRequest,
+    persisted_capabilities_json: Option<&str>,
+) -> bool {
+    let Some(persisted_capabilities_json) = persisted_capabilities_json else {
+        return false;
+    };
+    let Ok(registration) =
+        serde_json::from_str::<TrustedWorkerCapabilityRegistration>(persisted_capabilities_json)
+    else {
+        return false;
+    };
+    CapabilityMatrix::new(registration.backends)
+        .validate_request(request, &registration.worker)
+        .is_ok()
+}
 
 /// Find the best worker for a given task based on resource requirements and availability.
 /// Considers CPU score, GPU score, RAM, VRAM, and storage.
@@ -48,8 +69,23 @@ pub async fn find_best_worker(task: &Task, workers: &[WorkerNode]) -> Option<Wor
             matches!(w.status, WorkerStatus::Active | WorkerStatus::Idle)
         };
 
+        let general_compute_compatible = match task.runtime.as_deref().map(str::trim) {
+            Some(GENERAL_COMPUTE_RUNTIME_VERSION) => task
+                .general_compute_manifest_json
+                .as_deref()
+                .and_then(|manifest| serde_json::from_slice::<GeneralComputeRequest>(manifest).ok())
+                .is_some_and(|request| {
+                    worker_supports_general_compute_request(
+                        &request,
+                        w.general_compute_capabilities_json.as_deref(),
+                    )
+                }),
+            Some(_) | None => true,
+        };
+
         status_ok
             && w.provider_enabled
+            && general_compute_compatible
             && effective_cpu_score(w) >= task.req_cpu_score
             && w.gpu_score >= task.req_gpu_score
             && effective_available_memory_gb(w) >= task.req_memory_gb
@@ -101,6 +137,10 @@ pub async fn find_best_worker(task: &Task, workers: &[WorkerNode]) -> Option<Wor
 #[cfg(test)]
 mod tests {
     use super::*;
+    use general_compute_runtime::{
+        ArtifactManifest, ArtifactRole, DeterminismPolicy, ExecutionPolicy,
+        GeneralComputeRequest, GENERAL_COMPUTE_RUNTIME_VERSION,
+    };
     use hivemind_models::WorkerStatus;
 
     fn make_worker(
@@ -140,6 +180,7 @@ mod tests {
             gpu_memory_usage: 0.0,
             available_memory_gb: mem,
             queue_capacity: cpu,
+            general_compute_capabilities_json: None,
             last_heartbeat: chrono::Utc::now(),
             registered_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -257,6 +298,165 @@ mod tests {
         };
         let best = find_best_worker(&task, &workers).await;
         assert!(best.is_none());
+    }
+
+    #[test]
+    fn alpha_manifest_requires_nodepool_persisted_worker_capabilities() {
+        let request = alpha_request();
+
+        assert!(!worker_supports_general_compute_request(&request, None));
+    }
+
+    #[test]
+    fn alpha_manifest_requires_a_matching_persisted_worker_capability_record() {
+        let request = alpha_request();
+        let matching = r#"{
+            "worker":{
+                "guest_image_digests":["sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+                "capabilities":["cpu"],
+                "max_threads":4,
+                "gpu_available":false
+            },
+            "backends":[{
+                "backend_id":"python-cpython-312",
+                "guest_image_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "capabilities":["cpu"],
+                "max_threads":4,
+                "network_allowed":false,
+                "filesystem_read_only":true,
+                "gpu_allowed":false
+            }]
+        }"#;
+        let wrong_image = r#"{
+            "worker":{
+                "guest_image_digests":["sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+                "capabilities":["cpu"],
+                "max_threads":4,
+                "gpu_available":false
+            },
+            "backends":[{
+                "backend_id":"python-cpython-312",
+                "guest_image_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "capabilities":["cpu"],
+                "max_threads":4,
+                "network_allowed":false,
+                "filesystem_read_only":true,
+                "gpu_allowed":false
+            }]
+        }"#;
+
+        assert!(worker_supports_general_compute_request(&request, Some(matching)));
+        assert!(!worker_supports_general_compute_request(&request, Some(wrong_image)));
+    }
+
+    #[tokio::test]
+    async fn alpha_task_is_scheduled_only_to_a_worker_with_the_nodepool_snapshot() {
+        let request = alpha_request();
+        let mut task = task_with_alpha_manifest(&request);
+        task.req_cpu_score = 0;
+        let unregistered = make_worker("unregistered", 4, 16, 0.0, WorkerStatus::Idle);
+        let mut registered = make_worker("registered", 4, 16, 50.0, WorkerStatus::Active);
+        registered.general_compute_capabilities_json = Some(matching_capability_snapshot());
+
+        let selected = find_best_worker(&task, &[unregistered, registered]).await;
+
+        assert_eq!(selected.map(|worker| worker.worker_id), Some("registered".into()));
+    }
+
+    fn alpha_request() -> GeneralComputeRequest {
+        let mut request = GeneralComputeRequest {
+            execution_id: "execution-1".into(),
+            attempt_id: "attempt-1".into(),
+            idempotency_key: "idempotency-1".into(),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "python-cpython-312".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest::inline_json(
+                "source",
+                ArtifactRole::Source,
+                b"source",
+            ),
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+        request
+    }
+
+    fn task_with_alpha_manifest(request: &GeneralComputeRequest) -> Task {
+        Task {
+            id: uuid::Uuid::new_v4(),
+            task_id: "alpha-capability-task".into(),
+            owner: "owner".into(),
+            worker_id: None,
+            worker_ip: None,
+            status: hivemind_models::TaskStatus::Pending,
+            status_message: None,
+            output: None,
+            result_torrent: None,
+            torrent_source: None,
+            runtime: Some(GENERAL_COMPUTE_RUNTIME_VERSION.into()),
+            task_source: None,
+            general_compute_manifest_json: Some(serde_json::to_vec(request).unwrap()),
+            expected_btih: None,
+            cpu_usage: 0.0,
+            memory_usage: 0.0,
+            gpu_usage: 0.0,
+            gpu_memory_usage: 0.0,
+            req_cpu_score: 0,
+            req_gpu_score: 0,
+            req_memory_gb: 0,
+            req_gpu_memory_gb: 0,
+            req_storage_gb: 0,
+            host_count: 1,
+            max_cpt: 1,
+            billing_settled: false,
+            billed_amount: 0,
+            managed_executed_ops: 0,
+            managed_output_bytes: 0,
+            managed_receipt_json: None,
+            retry_count: 0,
+            max_retries: 0,
+            deadline: None,
+            deterministic: false,
+            side_effects: false,
+            priority: 0,
+            cpu_time_ms: 0,
+            wall_time_ms: 0,
+            peak_memory_mb: 0,
+            download_bytes: 0,
+            cache_hits: 0,
+            created_at: chrono::Utc::now(),
+            last_update: chrono::Utc::now(),
+            completed_at: None,
+        }
+    }
+
+    fn matching_capability_snapshot() -> String {
+        r#"{
+            "worker":{
+                "guest_image_digests":["sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+                "capabilities":["cpu"],
+                "max_threads":4,
+                "gpu_available":false
+            },
+            "backends":[{
+                "backend_id":"python-cpython-312",
+                "guest_image_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "capabilities":["cpu"],
+                "max_threads":4,
+                "network_allowed":false,
+                "filesystem_read_only":true,
+                "gpu_allowed":false
+            }]
+        }"#
+        .into()
     }
 
     #[tokio::test]

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::str::FromStr;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -11,7 +12,27 @@ pub struct HivemindConfig {
     pub vpn: VpnConfig,
     pub executor: ExecutorConfig,
     #[serde(default)]
+    pub general_compute: GeneralComputeConfig,
+    #[serde(default)]
     pub managed_proof: ManagedProofConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GeneralComputeConfig {
+    /// Nodepool operator-approved registrations keyed by immutable worker id.
+    /// Workers cannot populate this map through their registration RPC.
+    #[serde(default)]
+    pub trusted_worker_capabilities: BTreeMap<String, TrustedGeneralComputeWorkerRegistration>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustedGeneralComputeWorkerRegistration {
+    /// Worker owner authorized to activate this exact capability registration.
+    pub owner: String,
+    #[serde(flatten)]
+    pub registration: general_compute_runtime::TrustedWorkerCapabilityRegistration,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -317,6 +338,7 @@ impl Default for HivemindConfig {
                 network_egress_mode: default_network_egress_mode(),
                 network_egress_targets: vec![],
             },
+            general_compute: GeneralComputeConfig::default(),
             managed_proof: ManagedProofConfig::default(),
         }
     }
@@ -722,6 +744,47 @@ mod tests {
 
         assert_eq!(config.executor.managed_prover_executable, "");
         assert_eq!(config.executor.managed_prover_timeout_secs, 900);
+    }
+
+    #[test]
+    fn trusted_worker_capability_config_round_trips_and_rejects_unknown_fields() {
+        let image = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let config: HivemindConfig = serde_json::from_value(serde_json::json!({
+            "database": {"url":"postgres://example","max_connections":1,"min_connections":0,"idle_timeout_secs":30,"connect_timeout_secs":5},
+            "redis": {"url":"redis://example","pool_size":1,"connect_timeout_secs":5},
+            "server": {"nodepool_grpc_addr":"127.0.0.1:50051","master_http_addr":"127.0.0.1:8082","worker_grpc_addr":"127.0.0.1:50053","worker_grpc_port":50053},
+            "auth": {"jwt_secret":"secret","token_expiry_hours":1,"refresh_expiry_hours":2,"bcrypt_cost":4},
+            "torrent": {"api_dir":"./api","bt_dir":"./bt"},
+            "vpn": {"headscale_url":"http://localhost:8080","headscale_api_key":"","base_virtual_ip":"100.64.0.0","vpn_network":"100.64.0.0/10"},
+            "executor": {"sandbox_dir":"./sandbox","max_cpu_percent":80.0,"max_memory_mb":4096,"task_timeout_secs":3600,"max_concurrent_tasks":4},
+            "general_compute": {"trusted_worker_capabilities": {"worker-alpha": {"owner":"alice","worker":{"guest_image_digests":[image],"capabilities":["cpu"],"max_threads":4,"gpu_available":false},"backends":[]}}}
+        })).unwrap();
+
+        let registration = &config.general_compute.trusted_worker_capabilities["worker-alpha"];
+        assert_eq!(registration.owner, "alice");
+        assert_eq!(registration.registration.worker.max_threads, 4);
+
+        let mut json = serde_json::to_value(config).unwrap();
+        json["general_compute"]["trusted_worker_capabilities"]["worker-alpha"]["unexpected"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<HivemindConfig>(json).is_err());
+
+        let mut nested = serde_json::json!({
+            "worker": {
+                "guest_image_digests": [image],
+                "capabilities": ["cpu"],
+                "max_threads": 4,
+                "gpu_available": false
+            },
+            "backends": []
+        });
+        nested["worker"]["unexpected"] = serde_json::json!(true);
+        let mut wrapper = serde_json::json!({
+            "owner": "alice",
+            "worker": nested["worker"].clone(),
+            "backends": []
+        });
+        wrapper["worker"]["unexpected"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<TrustedGeneralComputeWorkerRegistration>(wrapper).is_err());
     }
 
     #[test]

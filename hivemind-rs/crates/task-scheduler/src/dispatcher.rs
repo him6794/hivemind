@@ -1612,6 +1612,7 @@ mod tests {
             gpu_memory_usage: 0.0,
             available_memory_gb: mem,
             queue_capacity: cpu,
+            general_compute_capabilities_json: None,
             last_heartbeat: Utc::now(),
             registered_at: Utc::now(),
             updated_at: Utc::now(),
