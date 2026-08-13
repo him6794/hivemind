@@ -23,6 +23,8 @@ running
 
 M0a v0 semantics/cost/proof freeze 與 M0b 的 alpha runtime、request/result/evidence、artifact/tensor、capability 契約均已完成；M1 的 reference fixtures、bounded supervisor、CPython adapter、combined output cap、trusted executable gate、production sandbox policy 與受驗證 OCI bundle runner 也已落地。runner 只接受 operator-pinned absolute executable 與 SHA-256、精確 OCI 1.0.2 config、rootless/non-root、namespace/cgroup/seccomp/no_new_privileges/read-only root/network-deny/mount annotations，並透過既有 process-tree supervisor 套用 timeout、cancel、output cap、kill/reap；驗證失敗一律 fail closed。實際 Linux rootless OCI namespace/cgroup/seccomp primitives 仍由外部 runner 負責，尚未宣稱平台隔離完成。M0 capability matrix 仍是 supervisor 啟動前的 fail-closed gate。
 
+M3 alpha manifest transport/admission 已由 `8b34285` 完成並提交：HTTP Master、Master→Nodepool gRPC、Nodepool task persistence、scheduler→Worker request 與 Worker capability admission 都帶有明確的 validated manifest bytes。Nodepool 拒絕 alpha runtime 的 legacy `torrent`，Worker 只接受 operator allowlist 的 backend/image；未安裝實際 backend 時刻意 fail-closed 回傳 `UNIMPLEMENTED`。下一個小單元是 Nodepool trusted registry 與 persisted worker-capability compatibility gate。
+
 ## Completed
 
 - `be39bb7 refactor(runtime): remove unused Monty executable contract`
@@ -117,6 +119,10 @@ M0a v0 semantics/cost/proof freeze 與 M0b 的 alpha runtime、request/result/ev
   - runner 參數以 direct `Command` path 傳遞，重用 process-tree supervisor；timeout、cancel、output cap 與 descendant kill/reap 共享既有 lifecycle contract。
   - RED→GREEN sandbox suite 21 tests passed；`cargo test -p general-compute-runtime --locked`、`cargo test --workspace --locked`、`cargo check -p hivemind-worker-executor --locked`、Docker Compose release contract、Windows worker packaging contract 與 scoped rustfmt checks passed。
 
+- `8b34285 feat(runtime): transport alpha manifests across task dispatch`
+  - `general-compute-v1alpha1` manifest 從 HTTP Master 直通 Nodepool、Postgres、scheduler 與 Worker admission；Nodepool 拒絕 legacy `torrent`，Worker 用 operator backend/image allowlist admission，尚未安裝 backend 時 fail-closed `UNIMPLEMENTED`。
+  - Compatibility: Master API 29、Nodepool 69、scheduler 81 passed/1 intentional ignored、proto 3、worker admission 7；scheduler/Master API/Nodepool/worker executor/binary offline cargo check passed。
+
 ## Active owners
 
 - Origin：使用者，擁有完整 M0–M5 目標與「每小單元測試、相容性驗證、local commit」驗收規則。
@@ -130,11 +136,11 @@ M0a v0 semantics/cost/proof freeze 與 M0b 的 alpha runtime、request/result/ev
 
 ## Next action
 
-下一個 M1 小單元是把已驗證的 OCI runner contract 接到 Worker runtime routing／artifact materialization，並補實際 Linux runner capability probe；保持 pinned CPython direct harness 只作 reference/test backend。M2 dtype/complex/數值運算仍列為後續獨立小單元。
+建立 Nodepool trusted registry／persisted worker-capability compatibility gate，然後以 RED→GREEN 做 attempt-bound request/result compatibility；後續再接實際 general-compute backend execution、artifact materialization 與 CAS/chunk resume。保持 pinned CPython direct harness 只作 reference/test backend；M2 dtype/complex/數值運算仍是獨立小單元。
 
 ## Next checkpoint
 
-M1 sandbox policy、leader-exit process-tree cleanup 與 pinned OCI bundle runner focused gates 已完成；下一 checkpoint 為 Worker routing/capability probe 的 RED→GREEN，並維持未通過外部 platform probe 時 fail closed。
+M3 alpha manifest transport/admission 的跨 crate RED→GREEN 已由 `8b34285` 提交，且未安裝 backend 時 Worker 仍 fail closed。下一 checkpoint 是 Nodepool trusted registry/capability persistence，再來是 request/result attempt compatibility。
 
 ## Notes
 
