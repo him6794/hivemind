@@ -109,19 +109,62 @@ fn command_that_spawns_descendant(start: &Path, final_marker: &Path) -> Referenc
     )
 }
 
+#[cfg(unix)]
+fn command_that_exits_with_descendant(start: &Path, final_marker: &Path) -> ReferenceCommandSpec {
+    let start = start.to_string_lossy();
+    let final_marker = final_marker.to_string_lossy();
+    ReferenceCommandSpec::new(
+        "sh",
+        [
+            "-c",
+            &format!(
+                "(printf started > '{}'; sleep 2; printf survived > '{}') & exit 0",
+                start.replace('\'', "'\\''"),
+                final_marker.replace('\'', "'\\''")
+            ),
+        ],
+    )
+}
+
+#[cfg(windows)]
+fn command_that_exits_with_descendant(start: &Path, final_marker: &Path) -> ReferenceCommandSpec {
+    let parent = start.with_extension("parent.cmd");
+    let child = start.with_extension("child.cmd");
+    let ready = start.with_extension("ready.marker");
+    let parent_script = format!(
+        "@echo off\r\necho parent-started > \"{}\"\r\nstart \"\" /b \"{}\"\r\n:wait\r\nif exist \"{}\" exit /b 0\r\ngoto wait\r\n",
+        start.display(),
+        child.display(),
+        ready.display(),
+    );
+    let child_script = format!(
+        "@echo off\r\necho descendant-started\r\necho ready > \"{}\"\r\nping -n 10 127.0.0.1 >NUL\r\necho survived > \"{}\"\r\n",
+        ready.display(),
+        final_marker.display(),
+    );
+    fs::write(&parent, parent_script).expect("parent fixture should be written");
+    fs::write(&child, child_script).expect("descendant fixture should be written");
+    let parent_arg = parent.to_string_lossy().into_owned();
+    ReferenceCommandSpec::new("cmd.exe", ["/C".to_string(), parent_arg])
+}
+
 #[cfg(windows)]
 fn command_that_spawns_descendant(start: &Path, final_marker: &Path) -> ReferenceCommandSpec {
-    let start = start.to_string_lossy().replace('\'', "''");
-    let final_marker = final_marker.to_string_lossy().replace('\'', "''");
+    let parent = start.with_extension("parent.cmd");
+    let child = start.with_extension("child.cmd");
     let child_script = format!(
-        "Set-Content -LiteralPath '{start}' -Value started; Start-Sleep -Milliseconds 1500; Set-Content -LiteralPath '{final_marker}' -Value survived"
+        "@echo off\r\necho started > \"{}\"\r\nping -n 10 127.0.0.1 >NUL\r\necho survived > \"{}\"\r\n",
+        start.display(),
+        final_marker.display(),
     );
     let parent_script = format!(
-        "Set-Content -LiteralPath '{start}' -Value started; $childScript='{child}'; $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript)); $child=Start-Process powershell.exe -ArgumentList @('-NoProfile','-EncodedCommand',$encoded) -PassThru; Start-Sleep -Seconds 5",
-        start = start,
-        child = child_script.replace('\'', "''")
+        "@echo off\r\nstart \"\" /b \"{}\"\r\nping -n 20 127.0.0.1 >NUL\r\n",
+        child.display(),
     );
-    ReferenceCommandSpec::new("powershell.exe", ["-NoProfile", "-Command", &parent_script])
+    fs::write(&parent, parent_script).expect("parent fixture should be written");
+    fs::write(&child, child_script).expect("descendant fixture should be written");
+    let parent_arg = parent.to_string_lossy().into_owned();
+    ReferenceCommandSpec::new("cmd.exe", ["/C".to_string(), parent_arg])
 }
 
 #[test]
@@ -293,6 +336,44 @@ fn supervisor_timeout_kills_descendants_before_returning() {
         !final_marker.exists(),
         "descendant must not outlive a timed-out supervisor process"
     );
+    let _ = fs::remove_file(start_marker.with_extension("parent.cmd"));
+    let _ = fs::remove_file(start_marker.with_extension("child.cmd"));
+    let _ = fs::remove_file(start_marker);
+    let _ = fs::remove_file(final_marker);
+}
+
+#[test]
+fn supervisor_normal_leader_exit_kills_descendants_before_joining_pipes() {
+    let (start_marker, final_marker) = descendant_marker_paths();
+    let started = std::time::Instant::now();
+    let result = ReferenceProcessSupervisor::new()
+        .run(
+            command_that_exits_with_descendant(&start_marker, &final_marker),
+            &Cancellation::new(),
+        )
+        .expect("leader should execute");
+
+    assert_eq!(result.status, RunStatus::Completed);
+    assert!(result.reaped, "normal completion must reap the leader");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "leader exit must not wait for a descendant holding stdout/stderr pipes"
+    );
+    assert!(
+        wait_for_path(
+            &start_marker.with_extension("ready.marker"),
+            Duration::from_secs(1)
+        ),
+        "descendant fixture must prove that the child was launched"
+    );
+    thread::sleep(Duration::from_millis(250));
+    assert!(
+        !final_marker.exists(),
+        "descendant must be killed when the leader exits normally"
+    );
+    let _ = fs::remove_file(start_marker.with_extension("parent.cmd"));
+    let _ = fs::remove_file(start_marker.with_extension("child.cmd"));
+    let _ = fs::remove_file(start_marker.with_extension("ready.marker"));
     let _ = fs::remove_file(start_marker);
     let _ = fs::remove_file(final_marker);
 }
