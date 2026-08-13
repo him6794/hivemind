@@ -44,21 +44,23 @@ impl WorkerExecutor {
         let reference_executor = runtime_admission::WorkerRuntimeAdmission::from_environment()
             .ok()
             .and_then(|admission| executor::reference_executor_from_environment(&admission));
+        let cas_store = executor::cas_store_from_environment();
         Self {
             active_tasks: Arc::new(Mutex::new(HashMap::new())),
             task_runner: Arc::new(move |task, cancellation| {
                 let config = runner_config.clone();
                 let prover = Arc::clone(&prover);
                 let reference_executor = reference_executor.clone();
+                let cas_store = cas_store.clone();
                 Box::pin(async move {
-                    let mut result =
-                        executor::run_task_with_cancel_and_reference(
-                            &task,
-                            &config,
-                            cancellation.clone(),
-                            reference_executor,
-                        )
-                            .await?;
+                    let mut result = executor::run_task_with_cancel_and_reference_and_cas(
+                        &task,
+                        &config,
+                        cancellation.clone(),
+                        reference_executor,
+                        cas_store,
+                    )
+                    .await?;
                     if result.success && task.runtime.as_deref() == Some("managed-function-v0") {
                         match prover.prove(&task, cancellation.clone()).await {
                             Ok(proof) if !*cancellation.borrow() => {

@@ -1,8 +1,6 @@
 use anyhow::Result;
-use general_compute_runtime::artifact::ArtifactMaterializer;
-use general_compute_runtime::cp_python::{
-    PythonBackendRegistration, PythonBackendRegistry,
-};
+use general_compute_runtime::artifact::{ArtifactMaterializer, CasChunkStore};
+use general_compute_runtime::cp_python::{PythonBackendRegistration, PythonBackendRegistry};
 use general_compute_runtime::execution::{ExecutionError, ReferenceBackendExecutor};
 use general_compute_runtime::supervisor::Cancellation;
 use general_compute_runtime::{GeneralComputeRequest, GeneralComputeResult, ResultStatus};
@@ -155,8 +153,19 @@ pub async fn run_task_with_cancel(
 pub async fn run_task_with_cancel_and_reference(
     task: &Task,
     config: &HivemindConfig,
+    cancel_rx: watch::Receiver<bool>,
+    reference_executor: Option<Arc<ReferenceBackendExecutor>>,
+) -> Result<super::TaskResult> {
+    run_task_with_cancel_and_reference_and_cas(task, config, cancel_rx, reference_executor, None)
+        .await
+}
+
+pub async fn run_task_with_cancel_and_reference_and_cas(
+    task: &Task,
+    config: &HivemindConfig,
     mut cancel_rx: watch::Receiver<bool>,
     reference_executor: Option<Arc<ReferenceBackendExecutor>>,
+    cas_store: Option<Arc<CasChunkStore>>,
 ) -> Result<super::TaskResult> {
     let start = Instant::now();
     tracing::info!(
@@ -191,6 +200,7 @@ pub async fn run_task_with_cancel_and_reference(
         let task = task.clone();
         let reference_executor = reference_executor.clone();
         let config = config.clone();
+        let cas_store = cas_store.clone();
         let cancelled = Arc::new(AtomicBool::new(false));
         let runtime_cancellation = Arc::new(Cancellation::new());
         let execution_cancelled = cancelled.clone();
@@ -200,6 +210,7 @@ pub async fn run_task_with_cancel_and_reference(
                 &task,
                 &config,
                 reference_executor.as_deref(),
+                cas_store.as_deref(),
                 &execution_cancelled,
                 &execution_runtime_cancellation,
             )
@@ -224,6 +235,7 @@ fn execute_general_compute_task(
     task: &Task,
     config: &HivemindConfig,
     reference_executor: Option<&ReferenceBackendExecutor>,
+    cas_store: Option<&CasChunkStore>,
     cancelled: &AtomicBool,
     cancellation: &Cancellation,
 ) -> Result<super::TaskResult> {
@@ -232,17 +244,26 @@ fn execute_general_compute_task(
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("general-compute request manifest is required"))
         .and_then(|manifest| {
-            serde_json::from_slice::<GeneralComputeRequest>(manifest)
-                .map_err(|error| anyhow::anyhow!("general-compute request manifest is malformed: {error}"))
+            serde_json::from_slice::<GeneralComputeRequest>(manifest).map_err(|error| {
+                anyhow::anyhow!("general-compute request manifest is malformed: {error}")
+            })
         })?;
     if cancelled.load(Ordering::Acquire) {
         cancellation.cancel();
     }
     let result = if let Some(executor) = reference_executor {
         let root = absolute_runtime_root(config, &task.task_id)?;
-        let materializer = ArtifactMaterializer::new(root)
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        executor.execute_with_cancellation(&request, &materializer, &cancellation)
+        let materializer =
+            ArtifactMaterializer::new(root).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        match cas_store {
+            Some(store) => executor.execute_with_cas_with_cancellation(
+                &request,
+                &materializer,
+                store,
+                cancellation,
+            ),
+            None => executor.execute_with_cancellation(&request, &materializer, cancellation),
+        }
     } else {
         Err(ExecutionError::BackendUnavailable(
             "reference backend is not operator-configured".into(),
@@ -258,7 +279,12 @@ fn execute_general_compute_task(
         task_id: task.task_id.clone(),
         success: completed,
         output: completed.then(|| typed.stdout.clone()),
-        error: (!completed).then(|| typed.error_code.clone().unwrap_or_else(|| "backend_unavailable".into())),
+        error: (!completed).then(|| {
+            typed
+                .error_code
+                .clone()
+                .unwrap_or_else(|| "backend_unavailable".into())
+        }),
         exit_code: typed.exit_code.unwrap_or(1),
         cpu_time_ms: typed.usage.cpu_time_ms.min(i64::MAX as u64) as i64,
         wall_time_ms: typed.usage.wall_time_ms.min(i64::MAX as u64) as i64,
@@ -298,7 +324,10 @@ fn error_code(error: &ExecutionError) -> &'static str {
     }
 }
 
-fn failed_general_compute_result(request: &GeneralComputeRequest, code: &str) -> GeneralComputeResult {
+fn failed_general_compute_result(
+    request: &GeneralComputeRequest,
+    code: &str,
+) -> GeneralComputeResult {
     GeneralComputeResult {
         execution_id: request.execution_id.clone(),
         attempt_id: request.attempt_id.clone(),
@@ -326,13 +355,31 @@ pub fn reference_executor_from_environment(
     admission: &crate::runtime_admission::WorkerRuntimeAdmission,
 ) -> Option<Arc<ReferenceBackendExecutor>> {
     let registrations = std::env::var("HIVEMIND_GENERAL_COMPUTE_REFERENCE_BACKENDS").ok()?;
-    let registrations = serde_json::from_str::<Vec<PythonBackendRegistration>>(&registrations).ok()?;
+    let registrations =
+        serde_json::from_str::<Vec<PythonBackendRegistration>>(&registrations).ok()?;
     let registry = PythonBackendRegistry::new(registrations).ok()?;
     Some(Arc::new(ReferenceBackendExecutor::new(
         admission.capability_matrix(),
         admission.worker_capabilities(),
         registry,
     )))
+}
+
+/// Load the optional operator-owned local CAS root. Invalid or relative roots
+/// disable CAS materialization rather than widening the worker's filesystem
+/// access or falling back to an inferred path.
+pub fn cas_store_from_environment() -> Option<Arc<CasChunkStore>> {
+    let root = std::env::var("HIVEMIND_GENERAL_COMPUTE_CAS_ROOT").ok()?;
+    if root.trim().is_empty() {
+        return None;
+    }
+    match CasChunkStore::new(root) {
+        Ok(store) => Some(Arc::new(store)),
+        Err(error) => {
+            tracing::warn!(error = %error, "general-compute CAS root is invalid; CAS execution disabled");
+            None
+        }
+    }
 }
 
 async fn wait_for_cancellation(cancellation: &mut watch::Receiver<bool>) {
@@ -526,12 +573,138 @@ mod tests {
         let result = run_task(&task, &config).await.unwrap();
 
         assert!(!result.success);
-        let typed: GeneralComputeResult = serde_json::from_slice(
-            result.general_compute_result_json.as_deref().unwrap(),
-        )
-        .unwrap();
+        let typed: GeneralComputeResult =
+            serde_json::from_slice(result.general_compute_result_json.as_deref().unwrap()).unwrap();
         assert_eq!(typed.status, ResultStatus::BackendUnavailable);
         assert_eq!(typed.error_code.as_deref(), Some("backend_unavailable"));
+    }
+
+    #[tokio::test]
+    async fn alpha_worker_executes_with_an_operator_provided_cas_store() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path().join("sandbox").to_str().unwrap());
+        let image = format!("sha256:{}", "a".repeat(64));
+        let source_bytes = b"result = input['value'] + 1";
+        let input_bytes = br#"{"value":4}"#;
+
+        fn cas_manifest(
+            artifact_id: &str,
+            role: general_compute_runtime::ArtifactRole,
+            bytes: &[u8],
+        ) -> (general_compute_runtime::ArtifactManifest, Vec<Vec<u8>>) {
+            let split = bytes.len() / 2;
+            let chunks = vec![bytes[..split].to_vec(), bytes[split..].to_vec()];
+            let manifest = general_compute_runtime::ArtifactManifest {
+                artifact_id: artifact_id.into(),
+                role,
+                size_bytes: bytes.len() as u64,
+                mime_type: "text/plain".into(),
+                sha256: general_compute_runtime::sha256_digest(bytes),
+                chunks: chunks
+                    .iter()
+                    .enumerate()
+                    .map(|(index, chunk)| general_compute_runtime::ArtifactChunk {
+                        offset: if index == 0 { 0 } else { split as u64 },
+                        size_bytes: chunk.len() as u64,
+                        sha256: general_compute_runtime::sha256_digest(chunk),
+                    })
+                    .collect(),
+                inline_bytes: None,
+            };
+            (manifest, chunks)
+        }
+
+        let (source, source_chunks) = cas_manifest(
+            "worker-cas-source",
+            general_compute_runtime::ArtifactRole::Source,
+            source_bytes,
+        );
+        let (input, input_chunks) = cas_manifest(
+            "worker-cas-input",
+            general_compute_runtime::ArtifactRole::Input,
+            input_bytes,
+        );
+        let mut request = GeneralComputeRequest {
+            execution_id: "execution-cas".into(),
+            attempt_id: "attempt-cas".into(),
+            idempotency_key: "idempotency-cas".into(),
+            request_digest: String::new(),
+            runtime_version: general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest: image.clone(),
+            backend_id: "python-cpython-312".into(),
+            entrypoint: "main".into(),
+            source_artifact: source,
+            input_artifacts: vec![input],
+            execution_policy: general_compute_runtime::ExecutionPolicy::default(),
+            determinism: general_compute_runtime::DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+
+        let capabilities = general_compute_runtime::CapabilityMatrix::new(vec![
+            general_compute_runtime::BackendRegistration {
+                backend_id: request.backend_id.clone(),
+                guest_image_digest: image.clone(),
+                capabilities: vec!["cpu".into()],
+                max_threads: 2,
+                network_allowed: false,
+                filesystem_read_only: true,
+                gpu_allowed: false,
+            },
+        ]);
+        let worker = general_compute_runtime::WorkerCapabilities {
+            guest_image_digests: vec![image.clone()],
+            capabilities: vec!["cpu".into()],
+            max_threads: 2,
+            gpu_available: false,
+        };
+        let python_registry = PythonBackendRegistry::new(vec![PythonBackendRegistration {
+            backend_id: request.backend_id.clone(),
+            executable: "python".into(),
+            runtime_version: "CPython 3.12.9".into(),
+            guest_image_digest: image,
+            protocol_version: "general-compute-wire-v1".into(),
+            max_output_bytes: 1024,
+            execution_mode: general_compute_runtime::sandbox::BackendExecutionMode::ReferenceDirect,
+        }])
+        .unwrap();
+        let reference = Arc::new(ReferenceBackendExecutor::new(
+            capabilities,
+            worker,
+            python_registry,
+        ));
+        let cas_root = TempDir::new().unwrap();
+        let store = general_compute_runtime::artifact::CasChunkStore::new(cas_root.path()).unwrap();
+        for (artifact, chunks) in [
+            (&request.source_artifact, source_chunks),
+            (&request.input_artifacts[0], input_chunks),
+        ] {
+            for (manifest_chunk, bytes) in artifact.chunks.iter().zip(chunks) {
+                store
+                    .put_chunk(&manifest_chunk.sha256, &bytes)
+                    .expect("verified chunk should be stored");
+            }
+        }
+
+        let mut task = test_task_with_source("null");
+        task.task_id = "worker-cas-task".into();
+        task.runtime = Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let result = run_task_with_cancel_and_reference_and_cas(
+            &task,
+            &config,
+            cancel_rx,
+            Some(reference),
+            Some(Arc::new(store)),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.success);
+        assert_eq!(result.output.as_deref(), Some("5"));
+        assert!(result.general_compute_result_json.is_some());
     }
 
     fn test_config(sandbox_dir: &str) -> HivemindConfig {

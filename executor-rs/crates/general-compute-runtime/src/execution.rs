@@ -127,6 +127,16 @@ impl ReferenceBackendExecutor {
         self.execute_with_materializer(request, materializer, Some(store), &Cancellation::new())
     }
 
+    pub fn execute_with_cas_with_cancellation(
+        &self,
+        request: &GeneralComputeRequest,
+        materializer: &ArtifactMaterializer,
+        store: &CasChunkStore,
+        cancellation: &Cancellation,
+    ) -> Result<GeneralComputeResult, ExecutionError> {
+        self.execute_with_materializer(request, materializer, Some(store), cancellation)
+    }
+
     fn execute_with_materializer(
         &self,
         request: &GeneralComputeRequest,
