@@ -30,6 +30,9 @@ M1 supervisor、reference fixtures、differential contract、pinned CPython regi
   - executor workspace 29 tests passed。
   - `hivemind-config` 與 `hivemind-worker-executor` focused `cargo check --locked` passed。
   - Docker Compose release contract 與 Windows worker package contract passed。
+- 使用者授權移除剩餘未接線的 Monty source、bindings、typeshed、fuzz crate 與專用建置／CI
+  metadata；`executor-rs` 現在只保留 Hivemind 的兩個 runtime crate。刪除後 executor
+  workspace tests、Worker check 與 release contract tests 均通過。
 - 完成演進計畫文件，明確區分 v0 proof-friendly DSL 與 v1 general compute，並定義 M0–M5 gates；文件尚待本輪狀態修正後獨立提交。
 - `f34b8eb feat(runtime): add general compute v1 contracts`
   - 新增獨立 `general-compute-runtime` crate，不依賴 Hivemind DB／scheduler。
@@ -93,7 +96,8 @@ M1 bounded CPython subprocess 小單元完成 RED → GREEN、protocol/M0 schema
 
 ## Notes
 
+- 2026-08-13 Monty removal was revalidated after the cleanup commit: the root repository has no tracked Monty paths, `executor-rs/Cargo.toml` exposes only `managed-function-runtime` and `general-compute-runtime`, and the executor workspace plus Docker/Windows release-contract gates pass. The nested `executor-rs/.git` directory is history metadata only; it is not tracked by Hivemind and is not part of any build or runtime path.
 - 此檔先前的 `complete` 只代表「舊 Monty 清理與計畫文件」完成，並不代表使用者要求的完整演進計畫完成；2026-08-12 已依實際 scope 修正為 `running`。
-- 不要對工作樹中的其他 dirty frontend/API/Monty 核心變更使用 `reset`、`checkout` 或整批刪除；它們不屬於目前小單元。
+- 不要對工作樹中的其他 dirty frontend/API 變更使用 `reset`、`checkout` 或整批刪除；它們不屬於目前小單元。
 - `managed-function-v0` 的有限配額與 proof settlement 是 load-bearing 契約，不得為了 v1 任意運算而放寬。
 - `general-compute-v1` 必須使用獨立 runtime/version/cost/verifiability contract，不能冒充現有 RISC Zero proof path。
