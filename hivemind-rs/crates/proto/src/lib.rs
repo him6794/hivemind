@@ -9,6 +9,9 @@ pub const MANAGED_TASK_SOURCE_MAX_BYTES: usize = 64 * 1024;
 /// Maximum byte length accepted for `managed-function-v0` JSON input.
 pub const MANAGED_JSON_INPUT_MAX_BYTES: usize = 1024 * 1024;
 
+/// Maximum byte length accepted for a general-compute-v1alpha1 request manifest.
+pub const GENERAL_COMPUTE_MANIFEST_MAX_BYTES: usize = 4 * 1024 * 1024;
+
 /// Maximum signed admission budget accepted for `managed-function-v0` execution.
 pub const MANAGED_BUDGET_MAX_USAGE_UNITS: i64 = 1_000_000;
 
@@ -48,6 +51,7 @@ mod tests {
 
     use super::{
         ExecuteTaskResponse, ManagedProofEnvelope, LEGACY_MANAGED_RECEIPT_MAX_BYTES,
+        GENERAL_COMPUTE_MANIFEST_MAX_BYTES,
         MANAGED_BUDGET_MAX_USAGE_UNITS, MANAGED_JSON_INPUT_MAX_BYTES,
         MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES, MANAGED_TASK_SOURCE_MAX_BYTES, TASK_ID_MAX_BYTES,
         WORKER_RPC_MESSAGE_MAX_BYTES, WORKER_STATUS_MESSAGE_MAX_BYTES,
@@ -58,6 +62,7 @@ mod tests {
         assert_eq!(TASK_ID_MAX_BYTES, 255);
         assert_eq!(MANAGED_TASK_SOURCE_MAX_BYTES, 64 * 1024);
         assert_eq!(MANAGED_JSON_INPUT_MAX_BYTES, 1024 * 1024);
+        assert_eq!(GENERAL_COMPUTE_MANIFEST_MAX_BYTES, 4 * 1024 * 1024);
         assert_eq!(MANAGED_BUDGET_MAX_USAGE_UNITS, 1_000_000);
         assert_eq!(MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES, 2_166_784);
         assert_eq!(WORKER_STATUS_MESSAGE_MAX_BYTES, 1024 * 1024);

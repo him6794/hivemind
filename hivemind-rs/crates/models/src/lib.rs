@@ -320,6 +320,7 @@ pub struct Task {
     pub torrent_source: Option<String>,
     pub runtime: Option<String>,
     pub task_source: Option<String>,
+    pub general_compute_manifest_json: Option<Vec<u8>>,
     pub expected_btih: Option<String>,
     pub cpu_usage: f64,
     pub memory_usage: f64,

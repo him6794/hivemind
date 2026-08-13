@@ -593,12 +593,26 @@ fn validate_worker_report_task_id(task_id: &str) -> Result<(), &'static str> {
     }
 }
 
+#[cfg(test)]
 fn validate_runtime_contract(
     runtime: &str,
     task_source: &str,
     input: &str,
     budget: i64,
 ) -> Result<(), &'static str> {
+    validate_runtime_contract_with_manifest(runtime, task_source, &[], input, budget)
+}
+
+fn validate_runtime_contract_with_manifest(
+    runtime: &str,
+    task_source: &str,
+    manifest_json: &[u8],
+    input: &str,
+    budget: i64,
+) -> Result<(), &'static str> {
+    if !manifest_json.is_empty() && runtime.trim() != "general-compute-v1alpha1" {
+        return Err("general-compute request manifest requires runtime general-compute-v1alpha1");
+    }
     match runtime.trim() {
         "" => Ok(()),
         "managed-function-v0" => {
@@ -622,7 +636,41 @@ fn validate_runtime_contract(
             }
             Ok(())
         }
+        "general-compute-v1alpha1" => {
+            if manifest_json.is_empty() {
+                return Err("general-compute-v1alpha1 requires a non-empty request manifest");
+            }
+            if manifest_json.len() > hivemind_proto::GENERAL_COMPUTE_MANIFEST_MAX_BYTES {
+                return Err("general-compute-v1alpha1 request manifest exceeds the byte limit");
+            }
+            let request = serde_json::from_slice::<general_compute_runtime::GeneralComputeRequest>(manifest_json)
+                .map_err(|_| "general-compute-v1alpha1 request manifest is invalid")?;
+            request
+                .validate()
+                .map_err(|_| "general-compute-v1alpha1 request manifest is invalid")?;
+            Ok(())
+        }
         _ => Err("unsupported task runtime"),
+    }
+}
+
+fn validate_task_input_contract(
+    runtime: &str,
+    torrent: &str,
+    manifest_json: &[u8],
+) -> Result<(), &'static str> {
+    match runtime.trim() {
+        "general-compute-v1alpha1" => {
+            if manifest_json.is_empty() {
+                return Err("general-compute-v1alpha1 requires a non-empty request manifest");
+            }
+            if !torrent.trim().is_empty() {
+                return Err("general-compute-v1alpha1 uses manifest input instead of torrent");
+            }
+            Ok(())
+        }
+        _ if torrent.trim().is_empty() => Err("torrent is required"),
+        _ => Ok(()),
     }
 }
 
@@ -1235,7 +1283,13 @@ impl MasterNodeService for GrpcMasterNodeService {
             }));
         }
         if let Err(message) =
-            validate_runtime_contract(&req.runtime, &req.task_source, &req.torrent, req.max_cpt)
+            validate_runtime_contract_with_manifest(
+                &req.runtime,
+                &req.task_source,
+                &req.general_compute_manifest_json,
+                &req.torrent,
+                req.max_cpt,
+            )
         {
             return Ok(Response::new(UploadTaskResponse {
                 success: false,
@@ -1263,16 +1317,25 @@ impl MasterNodeService for GrpcMasterNodeService {
             }));
         }
 
-        // Nodepool stores only the task input reference (managed-function tasks
-        // carry their JSON input here). It never persists task packages.
-        let torrent_source = req.torrent.clone();
-        let expected_btih = None;
-        if torrent_source.trim().is_empty() {
+        // Nodepool stores the legacy input reference only for legacy/managed
+        // tasks. General-compute requests carry source and input artifacts in
+        // their validated manifest and must not fall back to `torrent`.
+        if let Err(message) = validate_task_input_contract(
+            &req.runtime,
+            &req.torrent,
+            &req.general_compute_manifest_json,
+        ) {
             return Ok(Response::new(UploadTaskResponse {
                 success: false,
-                status_message: "torrent is required".into(),
+                status_message: message.into(),
             }));
         }
+        let torrent_source = if req.runtime.trim() == "general-compute-v1alpha1" {
+            None
+        } else {
+            Some(req.torrent.clone())
+        };
+        let expected_btih = None;
 
         // Balance admission gate. Nodepool is the sole billing authority. A task
         // can be charged up to `max_cpt` at settlement (see `billable_amount_cpt`),
@@ -1317,7 +1380,7 @@ impl MasterNodeService for GrpcMasterNodeService {
             status_message: None,
             output: None,
             result_torrent: None,
-            torrent_source: Some(torrent_source),
+            torrent_source,
             runtime: if req.runtime.trim().is_empty() {
                 None
             } else {
@@ -1327,6 +1390,11 @@ impl MasterNodeService for GrpcMasterNodeService {
                 None
             } else {
                 Some(req.task_source)
+            },
+            general_compute_manifest_json: if req.general_compute_manifest_json.is_empty() {
+                None
+            } else {
+                Some(req.general_compute_manifest_json)
             },
             expected_btih,
             cpu_usage: 0.0,
@@ -3282,6 +3350,67 @@ mod tests {
         assert_eq!(validate_runtime_contract("", "", "btih:input", 0), Ok(()));
     }
 
+    #[test]
+    fn general_compute_runtime_requires_manifest_bytes() {
+        assert_eq!(
+            validate_runtime_contract_with_manifest("general-compute-v1alpha1", "", &[], "{}", 1),
+            Err("general-compute-v1alpha1 requires a non-empty request manifest")
+        );
+    }
+
+    #[test]
+    fn general_compute_runtime_accepts_a_valid_manifest() {
+        let request = valid_general_compute_request();
+        let bytes = serde_json::to_vec(&request).unwrap();
+
+        assert_eq!(
+            validate_runtime_contract_with_manifest(
+                "general-compute-v1alpha1",
+                "",
+                &bytes,
+                "{}",
+                1,
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn general_compute_submission_uses_manifest_as_input_reference() {
+        let request = valid_general_compute_request();
+        let bytes = serde_json::to_vec(&request).unwrap();
+
+        assert_eq!(
+            validate_task_input_contract("general-compute-v1alpha1", "", &bytes),
+            Ok(())
+        );
+    }
+
+    fn valid_general_compute_request() -> general_compute_runtime::GeneralComputeRequest {
+        let mut request = general_compute_runtime::GeneralComputeRequest {
+            execution_id: "execution-1".into(),
+            attempt_id: "attempt-1".into(),
+            idempotency_key: "idempotency-1".into(),
+            request_digest: String::new(),
+            runtime_version: general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "python-cpython-312".into(),
+            entrypoint: "main".into(),
+            source_artifact: general_compute_runtime::ArtifactManifest::inline_json(
+                "source",
+                general_compute_runtime::ArtifactRole::Source,
+                b"source",
+            ),
+            input_artifacts: vec![],
+            execution_policy: general_compute_runtime::ExecutionPolicy::default(),
+            determinism: general_compute_runtime::DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+        request
+    }
+
     #[tokio::test]
     async fn upload_task_rejects_unsupported_runtime_from_direct_grpc_caller() {
         let service = GrpcMasterNodeService::new(nodepool_state_without_database());
@@ -3300,6 +3429,7 @@ mod tests {
                 task_source: "return 1;".into(),
                 package_data: Default::default(),
                 package_filename: String::new(),
+                general_compute_manifest_json: Vec::new(),
             }))
             .await
             .unwrap()
@@ -3445,6 +3575,7 @@ mod tests {
                 task_source: String::new(),
                 package_data: Default::default(),
                 package_filename: String::new(),
+                general_compute_manifest_json: Vec::new(),
             }))
             .await
             .unwrap()
@@ -3522,6 +3653,7 @@ mod tests {
                 task_source: String::new(),
                 package_data: Default::default(),
                 package_filename: String::new(),
+                general_compute_manifest_json: Vec::new(),
             }))
             .await
             .unwrap()
@@ -3582,6 +3714,7 @@ mod tests {
                 task_source: String::new(),
                 package_data: Default::default(),
                 package_filename: String::new(),
+                general_compute_manifest_json: Vec::new(),
             }))
             .await
             .unwrap()
@@ -3642,6 +3775,7 @@ mod tests {
                 task_source: String::new(),
                 package_data: Default::default(),
                 package_filename: String::new(),
+                general_compute_manifest_json: Vec::new(),
             }))
             .await
             .unwrap()
@@ -6093,6 +6227,7 @@ mod tests {
             torrent_source: Some("input".into()),
             runtime: None,
             task_source: None,
+            general_compute_manifest_json: None,
             expected_btih: None,
             cpu_usage: 0.0,
             memory_usage: 0.0,

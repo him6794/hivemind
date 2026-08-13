@@ -356,6 +356,7 @@ mod tests {
             torrent_source: Some(source.into()),
             runtime: None,
             task_source: None,
+            general_compute_manifest_json: None,
             expected_btih: None,
             cpu_usage: 0.0,
             memory_usage: 0.0,

@@ -214,6 +214,7 @@ impl GrpcClient {
         max_cpt: i64,
         runtime: &str,
         task_source: &str,
+        general_compute_manifest_json: &[u8],
     ) -> Result<UploadTaskResponse, tonic::Status> {
         let task_id = task_id.to_string();
         let torrent = torrent.to_string();
@@ -221,6 +222,7 @@ impl GrpcClient {
         let token = token.to_string();
         let runtime = runtime.to_string();
         let task_source = task_source.to_string();
+        let general_compute_manifest_json = general_compute_manifest_json.to_vec();
         self.with_clients(|mut clients| async move {
             clients
                 .master
@@ -236,6 +238,7 @@ impl GrpcClient {
                     task_source,
                     package_data: Vec::new(),
                     package_filename: String::new(),
+                    general_compute_manifest_json,
                 }))
                 .await
                 .map(|r| r.into_inner())

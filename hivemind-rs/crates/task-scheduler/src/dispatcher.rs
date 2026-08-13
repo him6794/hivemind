@@ -354,6 +354,10 @@ fn build_execute_task_request_with_token(task: &Task, token: String) -> ExecuteT
         } else {
             0
         },
+        general_compute_manifest_json: task
+            .general_compute_manifest_json
+            .clone()
+            .unwrap_or_default(),
     }
 }
 
@@ -1029,6 +1033,7 @@ mod tests {
             torrent_source: Some("example-btih".into()),
             runtime: None,
             task_source: None,
+            general_compute_manifest_json: None,
             expected_btih: None,
             cpu_usage: 0.0,
             memory_usage: 0.0,
@@ -1076,6 +1081,23 @@ mod tests {
         assert_eq!(request.task_source, "return get(input, \"value\") + 1;");
         assert_eq!(request.managed_budget_units, 1_000);
         assert_eq!(request.torrent, "{\"value\": 41}");
+    }
+
+    #[test]
+    fn build_execute_task_request_forwards_general_compute_manifest_without_prefix_hack() {
+        let mut task = make_task("general-compute-dispatch", TaskStatus::Pending, 0);
+        task.runtime = Some("general-compute-v1alpha1".into());
+        task.general_compute_manifest_json = Some(
+            br#"{"runtime_version":"general-compute-v1alpha1"}"#.to_vec(),
+        );
+
+        let request = build_execute_task_request(&task);
+
+        assert_eq!(request.task_source, "");
+        assert_eq!(
+            request.general_compute_manifest_json,
+            br#"{"runtime_version":"general-compute-v1alpha1"}"#
+        );
     }
 
     #[test]

@@ -4,6 +4,7 @@ pub mod grpc_server;
 pub mod managed_prover;
 pub mod nodepool_client;
 pub mod resource_monitor;
+pub mod runtime_admission;
 pub mod sandbox;
 
 use anyhow::Result;

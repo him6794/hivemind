@@ -13,7 +13,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tonic::{Request, Response, Status};
 
-use crate::{managed_prover::ManagedProverError, StopTaskOutcome, TaskResult, WorkerExecutor};
+use crate::{
+    managed_prover::ManagedProverError,
+    runtime_admission::{RuntimeRoute, WorkerRuntimeAdmission},
+    StopTaskOutcome, TaskResult, WorkerExecutor,
+};
 use hivemind_config::HivemindConfig;
 use hivemind_models::{Task, TaskStatus};
 
@@ -49,11 +53,21 @@ const MAX_RESULT_REFERENCE_BYTES: usize = 4096;
 
 pub struct GrpcWorkerNodeService {
     state: Arc<WorkerGrpcState>,
+    runtime_admission: WorkerRuntimeAdmission,
 }
 
 impl GrpcWorkerNodeService {
     pub fn new(state: Arc<WorkerGrpcState>) -> Self {
-        Self { state }
+        Self {
+            state,
+            runtime_admission: WorkerRuntimeAdmission::default(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_runtime_admission(mut self, runtime_admission: WorkerRuntimeAdmission) -> Self {
+        self.runtime_admission = runtime_admission;
+        self
     }
 
     fn validate_rpc_token(&self, token: &str) -> Result<Claims, Box<Status>> {
@@ -186,6 +200,17 @@ fn validate_execute_task_contract(request: &ExecuteTaskRequest) -> Result<(), &'
             }
             Ok(())
         }
+        "general-compute-v1alpha1" => {
+            if request.general_compute_manifest_json.is_empty() {
+                return Err("general-compute-v1alpha1 requires a non-empty request manifest");
+            }
+            if request.general_compute_manifest_json.len()
+                > hivemind_proto::GENERAL_COMPUTE_MANIFEST_MAX_BYTES
+            {
+                return Err("general-compute-v1alpha1 request manifest exceeds the byte limit");
+            }
+            Ok(())
+        }
         _ => Err("unsupported task runtime"),
     }
 }
@@ -207,6 +232,15 @@ impl WorkerNodeService for GrpcWorkerNodeService {
             || claims.worker_id.as_deref() != self.state.worker_id.as_deref()
         {
             return Err(*task_assignment_denied());
+        }
+        let route = self
+            .runtime_admission
+            .admit(&req.runtime, &req.general_compute_manifest_json)
+            .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        if matches!(route, RuntimeRoute::GeneralComputeV1Alpha1(_)) {
+            return Err(Status::unimplemented(
+                "general-compute-v1alpha1 route is admitted but its execution backend is not installed",
+            ));
         }
         validate_execute_task_contract(&req).map_err(Status::invalid_argument)?;
         self.record_task_assignment(&req.task_id, &claims.sub)
@@ -232,6 +266,11 @@ impl WorkerNodeService for GrpcWorkerNodeService {
                 None
             } else {
                 Some(req.task_source)
+            },
+            general_compute_manifest_json: if req.general_compute_manifest_json.is_empty() {
+                None
+            } else {
+                Some(req.general_compute_manifest_json)
             },
             expected_btih: None,
             cpu_usage: 0.0,
@@ -567,6 +606,7 @@ mod tests {
             task_source: source,
             token: String::new(),
             managed_budget_units: budget,
+            general_compute_manifest_json: Vec::new(),
         }
     }
 
@@ -772,6 +812,7 @@ mod tests {
                 task_source: String::new(),
                 token: "not-a-token".into(),
                 managed_budget_units: 0,
+                general_compute_manifest_json: Vec::new(),
             }))
             .await;
 
@@ -812,6 +853,7 @@ mod tests {
                 task_source: String::new(),
                 token: test_user_token(test_private_key_pem(), "regular-user"),
                 managed_budget_units: 0,
+                general_compute_manifest_json: Vec::new(),
             }))
             .await;
 
@@ -832,6 +874,7 @@ mod tests {
                 task_source: String::new(),
                 token: bound_token(test_private_key_pem(), ASSIGNED_OWNER, "different-task"),
                 managed_budget_units: 0,
+                general_compute_manifest_json: Vec::new(),
             }))
             .await;
 
@@ -852,6 +895,7 @@ mod tests {
                 task_source: String::new(),
                 token: test_token(test_private_key_pem(), ASSIGNED_OWNER),
                 managed_budget_units: 0,
+                general_compute_manifest_json: Vec::new(),
             }))
             .await;
 
@@ -1286,6 +1330,7 @@ mod tests {
                     task_source: "return 1;".into(),
                     token: bound_token(test_private_key_pem(), ASSIGNED_OWNER, &execute_task_id),
                     managed_budget_units: hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS,
+                    general_compute_manifest_json: Vec::new(),
                 }))
                 .await
                 .unwrap()

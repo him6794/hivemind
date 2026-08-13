@@ -110,6 +110,8 @@ pub struct CreateTaskBody {
     pub torrent: Option<String>,
     pub runtime: Option<String>,
     pub task_source: Option<String>,
+    #[serde(default)]
+    pub general_compute_manifest_json: Option<serde_json::Value>,
     pub memory_gb: Option<i32>,
     pub cpu_score: Option<i32>,
     pub gpu_score: Option<i32>,
@@ -218,7 +220,11 @@ fn validate_task_resources(body: &CreateTaskBody) -> Result<(), &'static str> {
 }
 
 fn validate_runtime_contract(body: &CreateTaskBody) -> Result<(), &'static str> {
-    match body.runtime.as_deref().map(str::trim).unwrap_or_default() {
+    let runtime = body.runtime.as_deref().map(str::trim).unwrap_or_default();
+    if body.general_compute_manifest_json.is_some() && runtime != "general-compute-v1alpha1" {
+        return Err("general-compute request manifest requires runtime general-compute-v1alpha1");
+    }
+    match runtime {
         "" => Ok(()),
         "managed-function-v0" => {
             let source = body.task_source.as_deref().unwrap_or_default();
@@ -241,6 +247,29 @@ fn validate_runtime_contract(body: &CreateTaskBody) -> Result<(), &'static str> 
             }
             if budget > hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS {
                 return Err("managed-function-v0 budget exceeds the usage-unit limit");
+            }
+            Ok(())
+        }
+        "general-compute-v1alpha1" => {
+            let manifest = body
+                .general_compute_manifest_json
+                .as_ref()
+                .ok_or("general-compute-v1alpha1 requires a non-empty request manifest")?;
+            let bytes = serde_json::to_vec(manifest)
+                .map_err(|_| "general-compute-v1alpha1 request manifest is invalid")?;
+            if bytes.is_empty() {
+                return Err("general-compute-v1alpha1 requires a non-empty request manifest");
+            }
+            if bytes.len() > hivemind_proto::GENERAL_COMPUTE_MANIFEST_MAX_BYTES {
+                return Err("general-compute-v1alpha1 request manifest exceeds the byte limit");
+            }
+            let request = serde_json::from_slice::<general_compute_runtime::GeneralComputeRequest>(&bytes)
+                .map_err(|_| "general-compute-v1alpha1 request manifest is invalid")?;
+            request
+                .validate()
+                .map_err(|_| "general-compute-v1alpha1 request manifest is invalid")?;
+            if body.torrent.as_deref().is_some_and(|input| !input.trim().is_empty()) {
+                return Err("general-compute-v1alpha1 must carry input in its manifest");
             }
             Ok(())
         }
@@ -986,6 +1015,13 @@ async fn create_task_from_submission(
     // managed-function-v0 tasks carry their JSON input in the `torrent` field;
     // nodepool stores it verbatim as the task input reference.
     let ts = body.torrent.clone().unwrap_or_default();
+    let general_compute_manifest_json = body
+        .general_compute_manifest_json
+        .as_ref()
+        .map(serde_json::to_vec)
+        .transpose()
+        .unwrap_or_default()
+        .unwrap_or_default();
     let req = ProtoResourceSpec {
         cpu_cores: 0,
         memory_mb: body.memory_gb.unwrap_or(0) as i64 * 1024,
@@ -1008,6 +1044,7 @@ async fn create_task_from_submission(
             body.max_cpt.unwrap_or(quoted_cpt),
             body.runtime.as_deref().unwrap_or(""),
             body.task_source.as_deref().unwrap_or(""),
+            &general_compute_manifest_json,
         )
         .await
     {
@@ -2229,6 +2266,7 @@ mod tests {
             torrent: input,
             runtime: runtime.map(str::to_owned),
             task_source: source,
+            general_compute_manifest_json: None,
             memory_gb: None,
             cpu_score: None,
             gpu_score: None,
@@ -2260,6 +2298,66 @@ mod tests {
             validate_runtime_contract(&oversized),
             Err("managed-function-v0 task_source exceeds the byte limit")
         );
+    }
+
+    #[test]
+    fn general_compute_runtime_requires_an_explicit_manifest() {
+        let missing = task_body(Some("general-compute-v1alpha1"), None, Some("{}".into()), 1);
+
+        assert_eq!(
+            validate_runtime_contract(&missing),
+            Err("general-compute-v1alpha1 requires a non-empty request manifest")
+        );
+    }
+
+    #[test]
+    fn general_compute_runtime_accepts_a_valid_manifest() {
+        let request = general_compute_request_json();
+        let body = CreateTaskBody {
+            general_compute_manifest_json: Some(request),
+            ..task_body(Some("general-compute-v1alpha1"), None, None, 1)
+        };
+
+        assert_eq!(validate_runtime_contract(&body), Ok(()));
+    }
+
+    #[test]
+    fn general_compute_runtime_rejects_legacy_torrent_input() {
+        let request = general_compute_request_json();
+        let body = CreateTaskBody {
+            general_compute_manifest_json: Some(request),
+            ..task_body(Some("general-compute-v1alpha1"), None, Some("{}".into()), 1)
+        };
+
+        assert_eq!(
+            validate_runtime_contract(&body),
+            Err("general-compute-v1alpha1 must carry input in its manifest")
+        );
+    }
+
+    fn general_compute_request_json() -> serde_json::Value {
+        let mut request = general_compute_runtime::GeneralComputeRequest {
+            execution_id: "execution-1".into(),
+            attempt_id: "attempt-1".into(),
+            idempotency_key: "idempotency-1".into(),
+            request_digest: String::new(),
+            runtime_version: general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "python-cpython-312".into(),
+            entrypoint: "main".into(),
+            source_artifact: general_compute_runtime::ArtifactManifest::inline_json(
+                "source",
+                general_compute_runtime::ArtifactRole::Source,
+                b"source",
+            ),
+            input_artifacts: vec![],
+            execution_policy: general_compute_runtime::ExecutionPolicy::default(),
+            determinism: general_compute_runtime::DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+        serde_json::to_value(request).unwrap()
     }
 
     #[test]

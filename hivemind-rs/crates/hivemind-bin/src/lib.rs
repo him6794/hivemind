@@ -48,6 +48,7 @@ use hivemind_website_api::WebsiteApiServer;
 use hivemind_worker_executor::control_api::WorkerProfile;
 #[cfg(feature = "worker")]
 use hivemind_worker_executor::grpc_server::{GrpcWorkerNodeService, WorkerGrpcState};
+use hivemind_worker_executor::runtime_admission::WorkerRuntimeAdmission;
 #[cfg(feature = "worker")]
 use hivemind_worker_executor::nodepool_client;
 #[cfg(feature = "worker")]
@@ -454,7 +455,10 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
             executor.clone(),
             worker_id.clone(),
         ));
-        let wk_svc = WorkerNodeServiceServer::new(GrpcWorkerNodeService::new(wk_state))
+        let runtime_admission = WorkerRuntimeAdmission::from_environment()?;
+        let wk_svc = WorkerNodeServiceServer::new(
+            GrpcWorkerNodeService::new(wk_state).with_runtime_admission(runtime_admission),
+        )
             .max_decoding_message_size(WORKER_RPC_MESSAGE_MAX_BYTES)
             .max_encoding_message_size(WORKER_RPC_MESSAGE_MAX_BYTES);
         let nodepool_addr = nodepool_client_addr(&config, run_nodepool)?;

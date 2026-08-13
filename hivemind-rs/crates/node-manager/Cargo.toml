@@ -21,3 +21,4 @@ hivemind-database = { path = "../database" }
 hivemind-config = { path = "../config" }
 hivemind-auth = { path = "../auth" }
 hivemind-task-scheduler = { path = "../task-scheduler" }
+general-compute-runtime = { path = "../../../executor-rs/crates/general-compute-runtime" }
