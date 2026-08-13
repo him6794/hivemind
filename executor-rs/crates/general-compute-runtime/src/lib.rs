@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 pub mod artifact;
 pub mod cp_python;
 pub mod differential;
+pub mod execution;
 pub mod reference;
 pub mod sandbox;
 pub mod supervisor;

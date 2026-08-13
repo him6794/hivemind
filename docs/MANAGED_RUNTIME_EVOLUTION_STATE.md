@@ -141,7 +141,7 @@ M3 alpha manifest transport/admission 已由 `8b34285` 完成並提交：HTTP Ma
 
 ## Next action
 
-以 RED→GREEN 接 Worker 的 typed general-compute backend execution，先將已 materialize 的 source/input artifacts 交給 operator-approved backend；保持 pinned CPython direct harness 只作 reference/test backend，production execution 仍只能走 validated OCI bundle；接著再做 CAS/chunk transfer、checksum、range validation、resume/idempotency。M2 dtype/complex/數值運算仍是獨立小單元。
+以 RED→GREEN 接 Worker 的 typed general-compute backend execution，先把已 materialize 的 source/input artifacts 交給 operator-approved reference backend；保持 pinned CPython direct harness 只作 reference/test backend，production execution 仍只能走 validated OCI bundle。接著再把這個 typed result 接回 Worker RPC，再做 CAS/chunk transfer、checksum、range validation、resume/idempotency。M2 dtype/complex/數值運算仍是獨立小單元。
 
 ## Next checkpoint
 
@@ -158,6 +158,10 @@ The scheduler now forwards the validated alpha manifest identity (`execution_id`
 ### M3 inline artifact materialization checkpoint (2026-08-13)
 
 The general-compute runtime now exposes an operator-rooted `ArtifactMaterializer` for the first execution slice. It validates the existing `ArtifactManifest`, accepts only verified `inline_bytes`, canonicalizes an absolute materialization root, rejects traversal/path-like artifact ids and symlink targets, writes with `create_new` plus `sync_all`, and replays an identical artifact idempotently. A pre-existing file with different bytes fails closed. CAS-only manifests remain unavailable rather than being guessed from an id or path; network fetch, chunk transfer, resume, and CAS persistence are intentionally deferred to the next checkpoint. RED→GREEN evidence: the new artifact integration test initially failed because the materializer module did not exist, then 3 artifact tests passed; the full `general-compute-runtime` locked suite passed (10 unit, 3 artifact, 18 contract, 11 CPython, 3 differential, 4 protocol, 10 reference, 21 sandbox, 6 tensor, and 1 compile-fail doc test).
+
+### M3 reference backend execution checkpoint (2026-08-13)
+
+`ReferenceBackendExecutor` now validates the full alpha request and trusted capability matrix, materializes source/input artifacts through `ArtifactMaterializer`, invokes only a registry-approved `ReferenceDirect` CPython adapter with the fixed `main` entrypoint, and emits a typed `GeneralComputeResult` whose identity, usage, output manifest, image digest, and unverified evidence are revalidated before return. Source exceptions become typed failed results; unsupported entrypoints, invalid UTF-8, multiple inputs, capability mismatches, and backend/image mismatches fail closed. This adapter is reference/test-only and is not Worker routing or production execution; production registrations remain on the OCI bundle path. RED→GREEN evidence: 3 execution tests passed, full `general-compute-runtime` locked suite passed, and `cargo check -p hivemind-worker-executor --locked` passed. A supervisor descendant-fixture test was flaky once in the combined run and passed on the subsequent full suite; no production code was changed for that unrelated existing fixture.
 
 ## Notes
 
