@@ -1,7 +1,7 @@
 use general_compute_runtime::{
     ArtifactChunk, ArtifactManifest, ArtifactRole, BackendRegistration, CapabilityMatrix, ExecutionPolicy,
     GeneralComputeRequest, GeneralComputeResult, ResultStatus, ValidationErrorCode, WorkerCapabilities,
-    GENERAL_COMPUTE_RUNTIME_VERSION,
+    EvidenceEnvelope, GENERAL_COMPUTE_RUNTIME_VERSION, canonical_artifact_root,
 };
 
 fn valid_request() -> GeneralComputeRequest {
@@ -93,6 +93,12 @@ fn result_round_trip_keeps_claimed_usage_and_output_manifest() {
         input_sha256: "sha256:input".into(),
         determinism: request.determinism.clone(),
         capability_summary: vec!["cpu".into()],
+        output_manifest_root: canonical_artifact_root(&[ArtifactManifest::inline_json(
+            "output-data",
+            ArtifactRole::Output,
+            br#"{"answer":42}"#,
+        )]),
+        evidence: EvidenceEnvelope::default(),
     };
 
     let encoded = serde_json::to_vec(&result).expect("result serializes");
@@ -132,6 +138,8 @@ fn result_validation_rejects_retry_identity_mismatch() {
         input_sha256: "sha256:input".into(),
         determinism: request.determinism.clone(),
         capability_summary: vec!["cpu".into()],
+        output_manifest_root: canonical_artifact_root(&[]),
+        evidence: EvidenceEnvelope::default(),
     };
     let registry = CapabilityMatrix::new(vec![BackendRegistration {
         backend_id: request.backend_id.clone(),
@@ -148,6 +156,98 @@ fn result_validation_rejects_retry_identity_mismatch() {
         .validate_against(&request, &registry)
         .expect_err("a result from another retry attempt must fail closed");
     assert_eq!(error.code, ValidationErrorCode::ResultBindingMismatch);
+}
+
+fn valid_registry(request: &GeneralComputeRequest) -> CapabilityMatrix {
+    CapabilityMatrix::new(vec![BackendRegistration {
+        backend_id: request.backend_id.clone(),
+        guest_image_digest: request.guest_image_digest.clone(),
+        capabilities: vec!["cpu".into()],
+        max_threads: 1,
+        network_allowed: false,
+        filesystem_read_only: true,
+        gpu_allowed: false,
+    }])
+}
+
+fn valid_result(request: &GeneralComputeRequest) -> GeneralComputeResult {
+    let mut result = GeneralComputeResult {
+        execution_id: request.execution_id.clone(),
+        attempt_id: request.attempt_id.clone(),
+        idempotency_key: request.idempotency_key.clone(),
+        request_digest: request.request_digest.clone(),
+        status: ResultStatus::Completed,
+        exit_code: Some(0),
+        error_code: None,
+        stdout: String::new(),
+        stderr: String::new(),
+        output_artifacts: Vec::new(),
+        usage: Default::default(),
+        runtime_version: request.runtime_version.clone(),
+        backend_id: request.backend_id.clone(),
+        guest_image_digest: request.guest_image_digest.clone(),
+        input_sha256: "sha256:input".into(),
+        determinism: request.determinism.clone(),
+        capability_summary: vec!["cpu".into()],
+        output_manifest_root: String::new(),
+        evidence: EvidenceEnvelope::default(),
+    };
+    result.output_manifest_root = canonical_artifact_root(&result.output_artifacts);
+    result
+}
+
+#[test]
+fn result_contract_carries_unverified_evidence_and_output_manifest_root() {
+    let result = valid_result(&valid_request());
+    let encoded = serde_json::to_value(result).expect("result serializes");
+    assert!(encoded.get("evidence").is_some(), "result must carry an evidence envelope");
+    assert!(
+        encoded
+            .get("output_manifest_root")
+            .and_then(serde_json::Value::as_str)
+            .is_some(),
+        "result must bind output artifacts to a manifest root"
+    );
+}
+
+#[test]
+fn result_validation_rejects_completed_with_nonzero_exit_code() {
+    let request = valid_request();
+    let mut result = valid_result(&request);
+    result.exit_code = Some(7);
+
+    let error = result
+        .validate_against(&request, &valid_registry(&request))
+        .expect_err("completed result with nonzero exit code must fail closed");
+    assert_eq!(error.code, ValidationErrorCode::ResultStatusInvalid);
+}
+
+#[test]
+fn result_validation_rejects_usage_claim_above_execution_policy() {
+    let request = valid_request();
+    let mut result = valid_result(&request);
+    result.usage.cpu_time_ms = request.execution_policy.cpu_millis + 1;
+
+    let error = result
+        .validate_against(&request, &valid_registry(&request))
+        .expect_err("usage claims above policy must fail closed");
+    assert_eq!(error.code, ValidationErrorCode::UsageExceedsPolicy);
+}
+
+#[test]
+fn result_validation_rejects_non_output_artifact_role() {
+    let request = valid_request();
+    let mut result = valid_result(&request);
+    result.output_artifacts = vec![ArtifactManifest::inline_json(
+        "wrong-role",
+        ArtifactRole::Input,
+        br#"{}"#,
+    )];
+
+    let error = result
+        .validate_against(&request, &valid_registry(&request))
+        .expect_err("output manifest with an input role must fail closed");
+    assert_eq!(error.code, ValidationErrorCode::ArtifactInvalid);
 }
 
 #[test]
