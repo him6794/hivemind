@@ -380,6 +380,7 @@ message ExecuteTaskResponse {
     string attempt_id = 8;
     string idempotency_key = 9;
     string request_digest = 10;
+    bytes general_compute_result_json = 11; // validated general-compute-v1alpha1 result envelope
 }
 
 message TaskOutputUploadRequest {

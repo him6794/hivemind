@@ -87,6 +87,21 @@ impl TaskRepository {
             .map_err(Into::into)
     }
 
+    pub async fn general_compute_capability_snapshot(
+        &self,
+        worker_id: &str,
+    ) -> Result<Option<String>> {
+        let row = sqlx::query_as::<_, (Option<String>,)>(
+            "SELECT general_compute_capabilities_json
+             FROM worker_nodes
+             WHERE worker_id = $1",
+        )
+        .bind(worker_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|(snapshot,)| snapshot))
+    }
+
     pub async fn find_by_owner(&self, owner: &str) -> Result<Vec<Task>> {
         sqlx::query_as::<_, Task>(
             "SELECT * FROM tasks WHERE owner = $1 ORDER BY created_at DESC LIMIT 100",
@@ -215,7 +230,7 @@ impl TaskRepository {
         result_torrent: Option<&str>,
         output: Option<&str>,
     ) -> Result<Task> {
-        self.complete_guarded(task_id, None, result_torrent, output, None, None)
+        self.complete_guarded(task_id, None, result_torrent, output, None, None, None)
             .await
     }
 
@@ -226,8 +241,16 @@ impl TaskRepository {
         result_torrent: Option<&str>,
         output: Option<&str>,
     ) -> Result<Task> {
-        self.complete_guarded(task_id, Some(worker_id), result_torrent, output, None, None)
-            .await
+        self.complete_guarded(
+            task_id,
+            Some(worker_id),
+            result_torrent,
+            output,
+            None,
+            None,
+            None,
+        )
+        .await
     }
 
     pub async fn complete_general_compute_for_worker(
@@ -235,6 +258,7 @@ impl TaskRepository {
         task_id: &str,
         worker_id: &str,
         expected_manifest: &[u8],
+        result_json: &[u8],
         output: Option<&str>,
     ) -> Result<Task> {
         self.complete_guarded(
@@ -244,6 +268,7 @@ impl TaskRepository {
             output,
             None,
             Some(expected_manifest),
+            Some(result_json),
         )
         .await
     }
@@ -267,6 +292,7 @@ impl TaskRepository {
                 output_bytes,
                 receipt_json,
             }),
+            None,
             None,
         )
         .await
@@ -311,6 +337,7 @@ impl TaskRepository {
         output: Option<&str>,
         managed_receipt: Option<ManagedCompletionReceipt<'_>>,
         expected_manifest: Option<&[u8]>,
+        general_compute_result: Option<&[u8]>,
     ) -> Result<Task> {
         let mut tx = self.pool.begin().await?;
         let deterministic: bool =
@@ -355,6 +382,22 @@ impl TaskRepository {
             .fetch_one(&mut *tx)
             .await?
         };
+
+        if let Some(result_json) = general_compute_result {
+            sqlx::query(
+                "INSERT INTO general_compute_results (task_id, worker_id, result_json)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT (task_id) DO UPDATE
+                 SET worker_id = EXCLUDED.worker_id,
+                     result_json = EXCLUDED.result_json,
+                     created_at = NOW()",
+            )
+            .bind(task_id)
+            .bind(worker_id)
+            .bind(result_json)
+            .execute(&mut *tx)
+            .await?;
+        }
 
         if let Some(receipt) = managed_receipt {
             completed = sqlx::query_as::<_, Task>(
@@ -546,11 +589,7 @@ impl TaskRepository {
         self.reset_to_pending_inner(task_id, Some(worker_id)).await
     }
 
-    async fn reset_to_pending_inner(
-        &self,
-        task_id: &str,
-        worker_id: Option<&str>,
-    ) -> Result<Task> {
+    async fn reset_to_pending_inner(&self, task_id: &str, worker_id: Option<&str>) -> Result<Task> {
         let mut tx = self.pool.begin().await?;
         let current = if let Some(worker_id) = worker_id {
             sqlx::query_as::<_, Task>(
@@ -563,12 +602,10 @@ impl TaskRepository {
             .fetch_one(&mut *tx)
             .await?
         } else {
-            sqlx::query_as::<_, Task>(
-                "SELECT * FROM tasks WHERE task_id = $1 FOR UPDATE",
-            )
-            .bind(task_id)
-            .fetch_one(&mut *tx)
-            .await?
+            sqlx::query_as::<_, Task>("SELECT * FROM tasks WHERE task_id = $1 FOR UPDATE")
+                .bind(task_id)
+                .fetch_one(&mut *tx)
+                .await?
         };
 
         let rotated_manifest = rotate_general_compute_attempt(&current)?;
@@ -1610,6 +1647,8 @@ mod tests {
         };
         request.request_digest = request.canonical_request_digest();
         let current_manifest = serde_json::to_vec(&request).unwrap();
+        let typed_result_json = br#"{"status":"completed","usage":{"wall_time_ms":1}}"#;
+        let stale_result_json = br#"{"status":"stale"}"#;
 
         let mut task = make_task(&task_id, &username);
         task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
@@ -1628,10 +1667,19 @@ mod tests {
                 &task_id,
                 &worker_id,
                 &stale_manifest,
+                stale_result_json,
                 Some("stale output"),
             )
             .await;
         assert!(stale_result.is_err());
+
+        let persisted_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM general_compute_results WHERE task_id = $1")
+                .bind(&task_id)
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap();
+        assert_eq!(persisted_count, 0);
 
         let stored = repo.find_by_task_id(&task_id).await.unwrap().unwrap();
         assert_eq!(stored.status, TaskStatus::Assigned);
@@ -1643,12 +1691,25 @@ mod tests {
                 &task_id,
                 &worker_id,
                 &current_manifest,
+                typed_result_json,
                 Some("current output"),
             )
             .await
             .unwrap();
         assert_eq!(completed.status, TaskStatus::Completed);
         assert_eq!(completed.output.as_deref(), Some("current output"));
+
+        let persisted: (String, Vec<u8>) = sqlx::query_as(
+            "SELECT worker_id, result_json
+             FROM general_compute_results
+             WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(persisted.0, worker_id);
+        assert_eq!(persisted.1, typed_result_json);
 
         cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
         fixture.cleanup().await.ok();
@@ -2030,7 +2091,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_reset_to_pending_for_worker_rotates_general_compute_attempt_identity() {
-        let (p, fixture) = match pool("task_repository_reset_rotates_general_compute_attempt").await {
+        let (p, fixture) = match pool("task_repository_reset_rotates_general_compute_attempt").await
+        {
             Some(parts) => parts,
             None => return,
         };
@@ -2084,10 +2146,9 @@ mod tests {
             .reset_to_pending_for_worker(&task_id, &worker_id)
             .await
             .unwrap();
-        let updated: GeneralComputeRequest = serde_json::from_slice(
-            reset.general_compute_manifest_json.as_deref().unwrap(),
-        )
-        .unwrap();
+        let updated: GeneralComputeRequest =
+            serde_json::from_slice(reset.general_compute_manifest_json.as_deref().unwrap())
+                .unwrap();
 
         assert_eq!(updated.execution_id, request.execution_id);
         assert_ne!(updated.attempt_id, request.attempt_id);

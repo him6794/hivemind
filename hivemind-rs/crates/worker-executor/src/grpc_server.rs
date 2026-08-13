@@ -5,7 +5,8 @@ use hivemind_proto::{
     StopTaskExecutionRequest, StopTaskExecutionResponse, TaskOutputRequest, TaskOutputResponse,
     TaskOutputUploadRequest, TaskOutputUploadResponse, TaskResultUploadRequest,
     TaskResultUploadResponse, TaskUsageRequest, TaskUsageResponse,
-    LEGACY_MANAGED_RECEIPT_MAX_BYTES, MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES,
+    GENERAL_COMPUTE_RESULT_MAX_BYTES, LEGACY_MANAGED_RECEIPT_MAX_BYTES,
+    MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES,
     WORKER_RPC_MESSAGE_MAX_BYTES, WORKER_STATUS_MESSAGE_MAX_BYTES,
 };
 use prost::Message;
@@ -15,7 +16,7 @@ use tonic::{Request, Response, Status};
 
 use crate::{
     managed_prover::ManagedProverError,
-    runtime_admission::{RuntimeRoute, WorkerRuntimeAdmission},
+    runtime_admission::WorkerRuntimeAdmission,
     StopTaskOutcome, TaskResult, WorkerExecutor,
 };
 use hivemind_config::HivemindConfig;
@@ -234,15 +235,10 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         {
             return Err(*task_assignment_denied());
         }
-        let route = self
+        self
             .runtime_admission
             .admit(&req.runtime, &req.general_compute_manifest_json)
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
-        if matches!(route, RuntimeRoute::GeneralComputeV1Alpha1(_)) {
-            return Err(Status::unimplemented(
-                "general-compute-v1alpha1 route is admitted but its execution backend is not installed",
-            ));
-        }
         validate_execute_task_contract(&req).map_err(Status::invalid_argument)?;
         self.record_task_assignment(&req.task_id, &claims.sub)
             .map_err(|status| *status)?;
@@ -511,11 +507,15 @@ fn execute_response_from_result(
         managed_output_bytes,
         managed_receipt_json,
         managed_proof,
+        general_compute_result_json,
         ..
     } = result;
+    let has_typed_general_compute_result = general_compute_result_json.is_some();
     let response = ExecuteTaskResponse {
         success,
-        status_message: if success {
+        status_message: if success && has_typed_general_compute_result {
+            "general-compute result attached".into()
+        } else if success {
             output.unwrap_or_default()
         } else {
             error.unwrap_or_else(|| "Task execution failed".into())
@@ -524,6 +524,7 @@ fn execute_response_from_result(
         managed_output_bytes,
         managed_receipt_json: managed_receipt_json.unwrap_or_default(),
         managed_proof,
+        general_compute_result_json: general_compute_result_json.unwrap_or_default(),
         execution_id: identity.execution_id.clone(),
         attempt_id: identity.attempt_id.clone(),
         idempotency_key: identity.idempotency_key.clone(),
@@ -544,6 +545,7 @@ fn execute_response_from_result(
 fn response_fits_worker_rpc_limits(response: &ExecuteTaskResponse) -> bool {
     response.status_message.len() <= WORKER_STATUS_MESSAGE_MAX_BYTES
         && response.managed_receipt_json.len() <= LEGACY_MANAGED_RECEIPT_MAX_BYTES
+        && response.general_compute_result_json.len() <= GENERAL_COMPUTE_RESULT_MAX_BYTES
         && response
             .managed_proof
             .as_ref()
@@ -559,6 +561,7 @@ fn failed_execute_response(message: &str, identity: &ExecuteTaskIdentity) -> Exe
         managed_output_bytes: 0,
         managed_receipt_json: String::new(),
         managed_proof: None,
+        general_compute_result_json: Vec::new(),
         execution_id: identity.execution_id.clone(),
         attempt_id: identity.attempt_id.clone(),
         idempotency_key: identity.idempotency_key.clone(),
@@ -769,6 +772,26 @@ mod tests {
             "Task result exceeds supported response limits"
         );
         assert!(response.managed_proof.is_none());
+    }
+
+    #[test]
+    fn worker_execute_response_forwards_typed_general_compute_result() {
+        let payload = br#"{"status":"completed"}"#.to_vec();
+        let mut result = successful_task_result(None);
+        result.general_compute_result_json = Some(payload.clone());
+
+        let response = execute_response_from_result(
+            result,
+            false,
+            &ExecuteTaskIdentity::from_request(&execute_request(
+                "general-compute-v1alpha1",
+                String::new(),
+                String::new(),
+                0,
+            )),
+        );
+
+        assert_eq!(response.general_compute_result_json, payload);
     }
 
     #[test]
@@ -1556,6 +1579,7 @@ mod tests {
             managed_output_bytes: 2,
             managed_receipt_json: Some("{}".into()),
             managed_proof,
+            general_compute_result_json: None,
         }
     }
 
@@ -1585,6 +1609,7 @@ mod tests {
                     managed_output_bytes: 0,
                     managed_receipt_json: None,
                     managed_proof: None,
+                    general_compute_result_json: None,
                 })
             },
         ));
