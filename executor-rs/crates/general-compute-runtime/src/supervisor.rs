@@ -86,7 +86,6 @@ impl ReferenceCommandSpec {
         self
     }
 
-    #[cfg(test)]
     pub(crate) fn with_combined_output_limit(mut self, combined_output_limit: usize) -> Self {
         self.combined_output_limit = combined_output_limit;
         self
