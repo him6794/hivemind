@@ -21,7 +21,7 @@ running
 
 ## Current step
 
-M0a v0 semantics/cost/proof freeze 與 M0b 的 alpha runtime、request/result/evidence、artifact/tensor、capability 契約均已完成；M1 的 reference fixtures、bounded supervisor、CPython adapter、combined output cap 與 trusted executable gate 也已落地。當前缺口是 production sandbox boundary：先完成 Linux fail-closed launch policy 與 hostile filesystem/network、leader-exit、drop kill/reap gates，再接 rootless namespace/cgroup/seccomp/no_new_privs primitives。M0 capability matrix 仍是 supervisor 啟動前的 fail-closed gate。
+M0a v0 semantics/cost/proof freeze 與 M0b 的 alpha runtime、request/result/evidence、artifact/tensor、capability 契約均已完成；M1 的 reference fixtures、bounded supervisor、CPython adapter、combined output cap、trusted executable gate 與 production sandbox policy 也已落地。production launcher 目前在驗證完整 rootless OCI／namespace／cgroup v2／default-deny seccomp／no_new_privs／read-only root／network-deny／explicit mounts 後 fail closed；實際 OCI runner 尚未接入。後續缺口是 leader-exit、future-drop kill/reap gates 與實際平台隔離 primitives。M0 capability matrix 仍是 supervisor 啟動前的 fail-closed gate。
 
 ## Completed
 
@@ -106,6 +106,12 @@ M0a v0 semantics/cost/proof freeze 與 M0b 的 alpha runtime、request/result/ev
   - 公開文件明列 v0 source Unicode byte-decoding、無 `\uXXXX`、unchecked `i64` overflow、synthetic/partial failure receipt 與 `ExecutionLimits::unlimited()` 非 production default 等限制；不改動既有 v0 語義。
   - RED 證據：runtime/proof tests 在 manifest/export 尚不存在時編譯失敗；proof integration target 漏帶 feature 時原會 0-test 假綠，改以 Cargo `required-features` 後會明確拒絕執行。
   - GREEN／相容性：managed runtime 1+4+25+4 passed；executor workspace 全綠；managed-proof 37+2 passed；proto 3 passed；scheduler 80 passed/1 environment-gated ignored；Worker GNU 83 passed；Worker MSVC check、Docker Compose與Windows package release contracts passed；獨立 review APPROVE。
+- `12e4b06 feat(runtime): enforce production sandbox policy`
+  - M1 production Linux sandbox launch policy 小單元已提交。
+  - RED：public `ReferenceCommandSpec`／`ReferenceProcessSupervisor` 可被 crate 外直接構造任意 host command；compile-fail doctest 先以成功編譯重現 bypass。
+  - GREEN：加入具名 sandbox policy enum 與 `ProductionSandboxLauncher`；production policy 要求 rootless OCI、user/pid/mount/network namespaces、cgroup v2、default-deny seccomp profile、no_new_privs、read-only root、network deny 與 explicit safe mounts，違規或未支援平台 fail closed；direct CPython 明確標為 reference-only。
+  - API hardening：direct supervisor 收回 `pub(crate)`，lifecycle tests 移入 crate-internal module；compile-fail doctest、sandbox 6、CPython 11、lifecycle 9、executor workspace 98 與 doc tests 皆通過。
+  - 跨元件：`cargo check -p hivemind-worker-executor --locked`、Docker Compose release contract、Windows worker package contract 與 runtime check 通過；scoped rustfmt/diff check 通過。strict clippy 仍受 crate 既有 35 個 warning-as-error debt 阻擋，未宣稱全綠。
 
 ## Active owners
 
@@ -115,19 +121,20 @@ M0a v0 semantics/cost/proof freeze 與 M0b 的 alpha runtime、request/result/ev
 
 ## Blockers
 
-- 無。Linux sandbox、scientific image、GPU host 與 verifiability backend 是後續 milestone 的必要工作，不是目前 M0 的外部阻塞。
+- `general-compute-runtime` 的 strict clippy `-D warnings` 目前仍有既有 crate-wide pedantic debt（主要在 reference/lib/tensor 與既有 API must-use/docs）；本 M1 policy scoped tests、format 與跨元件 checks 已通過，但未把無關 lint debt 混入本單元。
+- 實際 rootless OCI runner、Linux namespace/cgroup/seccomp/no_new_privs primitives 尚未接入；目前 production launch 只能 truthful fail closed。
 
 ## Next action
 
-在 `general-compute-runtime` 內補 M1 sandbox hardening。下一個最小單元先定義並強制 Linux production sandbox launch policy：未註冊 rootless OCI、namespace/cgroup/seccomp/no_new_privs、read-only root 與 network-deny 能力時 fail closed；以 hostile filesystem/network RED tests 驗證，並保持 pinned CPython direct harness 只作 reference/test backend。後續再分別完成 leader-exit descendant、future drop kill/reap 與實際平台隔離 primitives。M2 dtype/complex/數值運算仍列為後續獨立小單元。
+下一個 M1 小單元是 leader-exit／future-drop kill-reap lifecycle hardening，接著才接入實際 Linux rootless OCI runner；保持 pinned CPython direct harness 只作 reference/test backend。M2 dtype/complex/數值運算仍列為後續獨立小單元。
 
 ## Next checkpoint
 
-M0a v0 freeze 已完成 RED → GREEN、跨 runtime/Worker/Nodepool/proof/release gates 並建立獨立本地 commit；下一 checkpoint 為 M1 Linux sandbox launch policy 與 hostile filesystem/network fail-closed gates。
+M1 sandbox policy focused gates 與 review 已完成；下一 checkpoint 為 leader-exit／future-drop kill-reap RED→GREEN，並維持 production runner 在未接入前 fail closed。
 
 ## Notes
 
-- 2026-08-13 Monty removal was revalidated after the cleanup commit: the root repository has no tracked Monty paths, `executor-rs/Cargo.toml` exposes only `managed-function-runtime` and `general-compute-runtime`, and the executor workspace plus Docker/Windows release-contract gates pass. The nested `executor-rs/.git` directory is history metadata only; it is not tracked by Hivemind and is not part of any build or runtime path.
+- 2026-08-13 Monty removal was revalidated after the cleanup commit: the root repository has no tracked Monty paths, `executor-rs/Cargo.toml` exposes only `managed-function-runtime` and `general-compute-runtime`, and the executor workspace plus Docker/Windows release-contract gates pass. The untracked nested `executor-rs/.git` upstream metadata and stale `executor-rs/target` build artifacts were physically removed after explicit user authorization; neither was part of any Hivemind build or runtime path.
 - 此檔先前的 `complete` 只代表「舊 Monty 清理與計畫文件」完成，並不代表使用者要求的完整演進計畫完成；2026-08-12 已依實際 scope 修正為 `running`。
 - 不要對工作樹中的其他 dirty frontend/API 變更使用 `reset`、`checkout` 或整批刪除；它們不屬於目前小單元。
 - `managed-function-v0` 的有限配額與 proof settlement 是 load-bearing 契約，不得為了 v1 任意運算而放寬。
