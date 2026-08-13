@@ -91,6 +91,10 @@ M1 supervisor、reference fixtures、differential contract、pinned CPython regi
 - M0 artifact/CAS manifest 小單元（本次 commit）
   - 先以 RED tests 鎖定 inline/CAS canonical root、chunk checksum、chunk-aligned range 與 resume；加入 metadata-only canonical artifact root、inline chunk verification、range validation 與 missing-chunk selection。
   - focused contracts 18 passed；executor workspace 77 tests、Worker check 與 Docker/Windows release-contract tests passed。
+- M0 contiguous tensor ABI 小單元（本次 commit）
+  - 先以 RED tests 鎖定 `tensor-v1alpha1`、dtype/shape/byte-order/layout、checked shape/byte arithmetic、empty/zero-dimensional tensor、binary-only payload、unknown-field 與 logical hash。
+  - 新增有限 contiguous tensor manifest；BigInt 僅允許 scalar，尚未宣稱 stride/view、sparse 或科學運算支援。
+  - focused tensor tests 6 passed；executor workspace 83 tests、Worker check 與 Docker/Windows release-contract tests passed。
 
 ## Active owners
 
@@ -104,11 +108,11 @@ M1 supervisor、reference fixtures、differential contract、pinned CPython regi
 
 ## Next action
 
-在 `general-compute-runtime` 內補 evidence envelope 與 usage/artifact result validation；先以 unknown-field、status/exit-code、usage quota 與 output artifact binding 的 RED tests 驗證 fail closed，再實作最小 result verifier。Windows Job Object 對等保護與 M2 tensor ABI 仍列為後續獨立小單元。
+在 `general-compute-runtime` 內補 M1 sandbox hardening：Linux namespace/cgroup/seccomp/no_new_privs 與 Windows Job Object 等價邊界；先以 hostile filesystem/network、combined output、leader-exit descendant、drop/kill/reap RED tests 驗證 fail closed，再接平台隔離 primitives。M2 dtype/complex/數值運算仍列為後續獨立小單元。
 
 ## Next checkpoint
 
-M0 evidence/usage/artifact result validation 小單元完成 RED → GREEN、protocol/capability/v0 consumer checks 全綠並建立本地 commit；下一 checkpoint 為 artifact canonical root 與 contiguous tensor ABI。
+M0 contiguous tensor ABI 小單元完成 RED → GREEN、protocol/capability/v0 consumer checks 全綠並建立本地 commit；下一 checkpoint 為 M1 sandbox hardening 與 hostile escape gates。
 
 ## Notes
 

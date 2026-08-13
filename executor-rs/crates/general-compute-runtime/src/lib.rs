@@ -11,6 +11,7 @@ pub mod cp_python;
 pub mod differential;
 pub mod reference;
 pub mod supervisor;
+pub mod tensor;
 
 pub const GENERAL_COMPUTE_RUNTIME_VERSION: &str = "general-compute-v1alpha1";
 pub const MAX_CPU_MILLIS: u64 = 24 * 60 * 60 * 1000;
