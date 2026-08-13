@@ -22,6 +22,7 @@ pub enum PythonRegistryError {
     InvalidImageDigest,
     EmptyProtocolVersion,
     ZeroOutputLimit,
+    UnsafeExecutable,
     DuplicateBackend(String),
 }
 
@@ -33,6 +34,7 @@ impl fmt::Display for PythonRegistryError {
             Self::InvalidImageDigest => formatter.write_str("python image digest must be sha256 pinned"),
             Self::EmptyProtocolVersion => formatter.write_str("python protocol version must not be empty"),
             Self::ZeroOutputLimit => formatter.write_str("python output limit must be positive"),
+            Self::UnsafeExecutable => formatter.write_str("python backend executable is not a registry-safe binary"),
             Self::DuplicateBackend(id) => write!(formatter, "duplicate python backend {id}"),
         }
     }
@@ -221,6 +223,23 @@ fn validate_registration(registration: &PythonBackendRegistration) -> Result<(),
     }
     if registration.executable.trim().is_empty() {
         return Err(PythonRegistryError::EmptyExecutable);
+    }
+    let executable = std::path::Path::new(&registration.executable);
+    let basename = executable
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let has_shell_metacharacter = registration
+        .executable
+        .chars()
+        .any(|character| matches!(character, ' ' | '\t' | '\r' | '\n' | ';' | '|' | '&' | '$' | '`' | '<' | '>'));
+    if has_shell_metacharacter
+        || basename.is_empty()
+        || matches!(basename.as_str(), "sh" | "bash" | "dash" | "zsh" | "cmd.exe" | "powershell.exe" | "pwsh.exe" | "pwsh")
+        || registration.executable.contains("..")
+    {
+        return Err(PythonRegistryError::UnsafeExecutable);
     }
     if !registration.guest_image_digest.starts_with("sha256:")
         || registration.guest_image_digest.len() != "sha256:".len() + 64

@@ -28,6 +28,35 @@ fn cp_python_adapter_requires_a_registry_approved_backend() {
 }
 
 #[test]
+fn python_registry_rejects_shell_interpreters_as_backend_executables() {
+    for executable in ["sh", "bash", "cmd.exe", "powershell.exe", "pwsh"] {
+        let mut spec = registration();
+        spec.executable = executable.into();
+        assert!(
+            PythonBackendRegistry::new(vec![spec]).is_err(),
+            "shell executable {executable} must not be registry-approved"
+        );
+    }
+}
+
+#[test]
+fn python_registry_rejects_executable_argument_injection() {
+    let mut spec = registration();
+    spec.executable = "python -c malicious".into();
+    assert!(
+        PythonBackendRegistry::new(vec![spec]).is_err(),
+        "executable field must not contain an argument string"
+    );
+
+    let mut spec = registration();
+    spec.executable = "python; touch /tmp/escape".into();
+    assert!(
+        PythonBackendRegistry::new(vec![spec]).is_err(),
+        "shell metacharacters must not enter a backend executable"
+    );
+}
+
+#[test]
 fn cp_python_adapter_rejects_malformed_observation_fields_and_status() {
     let registry = PythonBackendRegistry::new(vec![registration()]).expect("registration is valid");
     let adapter =

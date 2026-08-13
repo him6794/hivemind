@@ -98,6 +98,9 @@ M1 supervisor、reference fixtures、differential contract、pinned CPython regi
 - M1 combined supervisor output 小單元（本次 commit）
   - 先以 RED tests 證明 per-stream retained cap 會讓 discarded hostile output 逃過總量限制；加入 shared output budget、`OutputLimitExceeded` 狀態，超限立即 kill/reap。
   - focused lifecycle tests 9 passed；executor workspace 86 tests、Worker check 與 Docker/Windows release-contract tests passed。
+- M1 trusted backend executable gate 小單元（本次 commit）
+  - 先以 RED tests 證明 shell interpreter、參數注入與 shell metacharacter 可進 Python registry；加入 registry-safe executable validation，避免 `CommandSpec` 由不可信字串構造 shell。
+  - focused CPython tests 10 passed；executor workspace 87 tests、Worker check 與 Docker/Windows release-contract tests passed。
 
 ## Active owners
 
