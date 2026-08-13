@@ -44,6 +44,21 @@ fn command_that_writes_large_output() -> CommandSpec {
     }
 }
 
+fn command_that_writes_stdout_only() -> CommandSpec {
+    if cfg!(windows) {
+        CommandSpec::new(
+            "powershell.exe",
+            [
+                "-NoProfile",
+                "-Command",
+                "$s='x'*65536; [Console]::Out.Write($s)",
+            ],
+        )
+    } else {
+        CommandSpec::new("sh", ["-c", "head -c 65536 /dev/zero | tr '\\0' x"])
+    }
+}
+
 fn descendant_marker_paths() -> (PathBuf, PathBuf) {
     let suffix = format!(
         "{}-{}",
@@ -160,7 +175,9 @@ fn supervisor_drains_and_bounds_stdout_and_stderr_capture() {
     let started = std::time::Instant::now();
     let result = Supervisor::new()
         .run(
-            command_that_writes_large_output().with_output_limit(64),
+            command_that_writes_large_output()
+                .with_output_limit(64)
+                .with_combined_output_limit(200_000),
             &Cancellation::new(),
         )
         .expect("output-producing child should execute");
@@ -174,6 +191,38 @@ fn supervisor_drains_and_bounds_stdout_and_stderr_capture() {
         started.elapsed() < Duration::from_secs(3),
         "draining must not deadlock on a full pipe"
     );
+}
+
+#[test]
+fn supervisor_kills_and_reaps_when_combined_output_limit_is_exceeded() {
+    let result = Supervisor::new()
+        .run(
+            command_that_writes_large_output()
+                .with_output_limit(64)
+                .with_combined_output_limit(64),
+            &Cancellation::new(),
+        )
+        .expect("output limit termination should be reported as a run result");
+
+    assert_eq!(result.status, RunStatus::OutputLimitExceeded);
+    assert!(result.reaped, "output-limit termination must reap the child");
+    assert!(result.stdout.len() + result.stderr.len() <= 64);
+    assert!(result.stdout_truncated || result.stderr_truncated);
+}
+
+#[test]
+fn supervisor_counts_discarded_single_stream_output_against_combined_limit() {
+    let result = Supervisor::new()
+        .run(
+            command_that_writes_stdout_only()
+                .with_output_limit(64)
+                .with_combined_output_limit(128),
+            &Cancellation::new(),
+        )
+        .expect("output limit termination should be reported as a run result");
+
+    assert_eq!(result.status, RunStatus::OutputLimitExceeded);
+    assert!(result.reaped, "output-limit termination must reap the child");
 }
 
 #[test]
