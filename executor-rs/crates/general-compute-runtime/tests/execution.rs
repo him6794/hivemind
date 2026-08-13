@@ -243,3 +243,45 @@ fn reference_backend_executes_verified_cas_only_artifacts() {
     let _ = std::fs::remove_dir_all(root);
     let _ = std::fs::remove_dir_all(cas_root);
 }
+
+#[test]
+fn reference_backend_cas_execution_observes_cancellation() {
+    let (source, source_chunks) =
+        cas_artifact("source-cas-loop", ArtifactRole::Source, b"while True: pass");
+    let mut request = request();
+    request.source_artifact = source;
+    request.input_artifacts.clear();
+    request.request_digest = request.canonical_request_digest();
+
+    let root = temp_root();
+    let cas_root = temp_root();
+    let materializer =
+        ArtifactMaterializer::new(&root).expect("materialization root should be valid");
+    let store = CasChunkStore::new(&cas_root).expect("CAS root should be valid");
+    for (manifest_chunk, bytes) in request.source_artifact.chunks.iter().zip(source_chunks) {
+        store
+            .put_chunk(&manifest_chunk.sha256, &bytes)
+            .expect("verified CAS chunk should be accepted");
+    }
+    let cancellation =
+        std::sync::Arc::new(general_compute_runtime::supervisor::Cancellation::new());
+    let trigger = std::sync::Arc::clone(&cancellation);
+    let thread = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        trigger.cancel();
+    });
+
+    let error =
+        ReferenceBackendExecutor::new(capability_matrix(&request), worker(), python_registry())
+            .execute_with_cas_with_cancellation(&request, &materializer, &store, &cancellation)
+            .expect_err("CAS execution must forward cancellation to the supervisor");
+    thread.join().expect("cancellation trigger should finish");
+    assert!(matches!(
+        error,
+        general_compute_runtime::execution::ExecutionError::Backend(
+            general_compute_runtime::cp_python::PythonAdapterError::Supervisor(message)
+        ) if message.contains("cancelled")
+    ));
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(cas_root);
+}
