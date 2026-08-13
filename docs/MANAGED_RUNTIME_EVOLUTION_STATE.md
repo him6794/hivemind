@@ -81,6 +81,10 @@ M1 supervisor、reference fixtures、differential contract、pinned CPython regi
 - M0 alpha runtime id 小單元（本次 commit）
   - 先加入要求 alpha id 且拒絕 stable `general-compute-v1` 的 RED test，再將 contract 常數與 fixtures 固定為 `general-compute-v1alpha1`。
   - focused contracts 8 passed；executor workspace 69 tests、Worker check 與 Docker/Windows release-contract tests passed。
+- M0 request identity/digest binding 小單元（本次 commit）
+  - 先以 RED tests 證明 request/result 缺少 retry identity；加入 immutable `execution_id`、`attempt_id`、idempotency key、canonical request SHA-256 digest 與 `deny_unknown_fields`。
+  - `GeneralComputeResult::validate_against` 驗證 request/result identity、runtime/backend/image/determinism binding；跨 attempt 的 result fail closed。
+  - focused contracts 10 passed；executor workspace 69 tests、Worker check 與 Docker/Windows release-contract tests passed。
 
 ## Active owners
 
@@ -94,11 +98,11 @@ M1 supervisor、reference fixtures、differential contract、pinned CPython regi
 
 ## Next action
 
-在 `general-compute-runtime` 內補 immutable `execution_id`、`attempt_id`、idempotency key 與 canonical request digest；先以 result binding 的 RED tests 驗證重派與篡改不能通過，再實作最小 request/result validation。Windows Job Object 對等保護與 M2 tensor ABI 仍列為後續獨立小單元。
+在 `general-compute-runtime` 內補 evidence envelope 與 usage/artifact result validation；先以 unknown-field、status/exit-code、usage quota 與 output artifact binding 的 RED tests 驗證 fail closed，再實作最小 result verifier。Windows Job Object 對等保護與 M2 tensor ABI 仍列為後續獨立小單元。
 
 ## Next checkpoint
 
-M0 request identity/digest binding 小單元完成 RED → GREEN、protocol/capability/v0 consumer checks 全綠並建立本地 commit；下一 checkpoint 為 evidence envelope 與 usage/artifact result validation。
+M0 evidence/usage/artifact result validation 小單元完成 RED → GREEN、protocol/capability/v0 consumer checks 全綠並建立本地 commit；下一 checkpoint 為 artifact canonical root 與 contiguous tensor ABI。
 
 ## Notes
 

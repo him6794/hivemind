@@ -65,7 +65,12 @@ pub fn decode_frame<T: for<'de> Deserialize<'de>>(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GeneralComputeRequest {
+    pub execution_id: String,
+    pub attempt_id: String,
+    pub idempotency_key: String,
+    pub request_digest: String,
     pub runtime_version: String,
     pub guest_image_digest: String,
     pub backend_id: String,
@@ -79,7 +84,41 @@ pub struct GeneralComputeRequest {
 }
 
 impl GeneralComputeRequest {
+    /// Return the canonical digest of this request, excluding the digest field itself.
+    ///
+    /// The field order is fixed by `CanonicalRequest`, so every verifier hashes the
+    /// same bytes without relying on a map serializer's ordering.
+    pub fn canonical_request_digest(&self) -> String {
+        let canonical = CanonicalRequest::from(self);
+        let bytes = serde_json::to_vec(&canonical).expect("canonical request serialization is infallible");
+        sha256_digest(&bytes)
+    }
+
     pub fn validate(&self) -> Result<(), ValidationError> {
+        for (name, value) in [
+            ("execution id", &self.execution_id),
+            ("attempt id", &self.attempt_id),
+            ("idempotency key", &self.idempotency_key),
+        ] {
+            if value.trim().is_empty() {
+                return Err(ValidationError::new(
+                    ValidationErrorCode::RequestInvalid,
+                    format!("{name} must not be empty"),
+                ));
+            }
+        }
+        if !is_sha256_digest(&self.request_digest) {
+            return Err(ValidationError::new(
+                ValidationErrorCode::RequestDigestInvalid,
+                "request digest must be a sha256 digest",
+            ));
+        }
+        if self.request_digest != self.canonical_request_digest() {
+            return Err(ValidationError::new(
+                ValidationErrorCode::RequestDigestMismatch,
+                "request digest does not match the canonical request",
+            ));
+        }
         if self.runtime_version != GENERAL_COMPUTE_RUNTIME_VERSION {
             return Err(ValidationError::new(
                 ValidationErrorCode::RuntimeVersionMismatch,
@@ -136,7 +175,12 @@ impl GeneralComputeRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GeneralComputeResult {
+    pub execution_id: String,
+    pub attempt_id: String,
+    pub idempotency_key: String,
+    pub request_digest: String,
     pub status: ResultStatus,
     pub exit_code: Option<i32>,
     pub error_code: Option<String>,
@@ -150,6 +194,54 @@ pub struct GeneralComputeResult {
     pub input_sha256: String,
     pub determinism: DeterminismPolicy,
     pub capability_summary: Vec<String>,
+}
+
+impl GeneralComputeResult {
+    /// Validate that a result belongs to exactly one validated request and backend.
+    pub fn validate_against(
+        &self,
+        request: &GeneralComputeRequest,
+        registry: &CapabilityMatrix,
+    ) -> Result<(), ValidationError> {
+        request.validate()?;
+        if self.execution_id != request.execution_id
+            || self.attempt_id != request.attempt_id
+            || self.idempotency_key != request.idempotency_key
+            || self.request_digest != request.request_digest
+        {
+            return Err(ValidationError::new(
+                ValidationErrorCode::ResultBindingMismatch,
+                "result identity does not match the request",
+            ));
+        }
+        if self.runtime_version != request.runtime_version
+            || self.backend_id != request.backend_id
+            || self.guest_image_digest != request.guest_image_digest
+            || self.determinism != request.determinism
+        {
+            return Err(ValidationError::new(
+                ValidationErrorCode::ResultBindingMismatch,
+                "result runtime binding does not match the request",
+            ));
+        }
+        let Some(backend) = registry
+            .backends
+            .iter()
+            .find(|backend| backend.backend_id == self.backend_id)
+        else {
+            return Err(ValidationError::new(
+                ValidationErrorCode::BackendUnavailable,
+                "result backend is not registered",
+            ));
+        };
+        if backend.guest_image_digest != self.guest_image_digest {
+            return Err(ValidationError::new(
+                ValidationErrorCode::GuestImageMismatch,
+                "result guest image is not registered for its backend",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -289,6 +381,9 @@ pub enum ArtifactRole {
 #[serde(rename_all = "snake_case")]
 pub enum ValidationErrorCode {
     RequestInvalid,
+    RequestDigestInvalid,
+    RequestDigestMismatch,
+    ResultBindingMismatch,
     RuntimeVersionMismatch,
     PolicyInvalid,
     FilesystemPolicyViolation,
@@ -299,6 +394,43 @@ pub enum ValidationErrorCode {
     GpuUnavailable,
     CapabilityMissing,
     ThreadLimitExceeded,
+}
+
+#[derive(Debug, Serialize)]
+struct CanonicalRequest<'a> {
+    execution_id: &'a str,
+    attempt_id: &'a str,
+    idempotency_key: &'a str,
+    runtime_version: &'a str,
+    guest_image_digest: &'a str,
+    backend_id: &'a str,
+    entrypoint: &'a str,
+    source_artifact: &'a ArtifactManifest,
+    input_artifacts: &'a [ArtifactManifest],
+    execution_policy: &'a ExecutionPolicy,
+    determinism: &'a DeterminismPolicy,
+    billing_version: &'a str,
+    cost_model_version: &'a str,
+}
+
+impl<'a> From<&'a GeneralComputeRequest> for CanonicalRequest<'a> {
+    fn from(request: &'a GeneralComputeRequest) -> Self {
+        Self {
+            execution_id: &request.execution_id,
+            attempt_id: &request.attempt_id,
+            idempotency_key: &request.idempotency_key,
+            runtime_version: &request.runtime_version,
+            guest_image_digest: &request.guest_image_digest,
+            backend_id: &request.backend_id,
+            entrypoint: &request.entrypoint,
+            source_artifact: &request.source_artifact,
+            input_artifacts: &request.input_artifacts,
+            execution_policy: &request.execution_policy,
+            determinism: &request.determinism,
+            billing_version: &request.billing_version,
+            cost_model_version: &request.cost_model_version,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

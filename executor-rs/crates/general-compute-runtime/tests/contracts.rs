@@ -5,7 +5,11 @@ use general_compute_runtime::{
 };
 
 fn valid_request() -> GeneralComputeRequest {
-    GeneralComputeRequest {
+    let mut request = GeneralComputeRequest {
+        execution_id: "execution-1".into(),
+        attempt_id: "attempt-1".into(),
+        idempotency_key: "idempotency-1".into(),
+        request_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
         runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
         guest_image_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
         backend_id: "python-numpy-scipy".into(),
@@ -20,7 +24,9 @@ fn valid_request() -> GeneralComputeRequest {
         determinism: Default::default(),
         billing_version: "billing-v1".into(),
         cost_model_version: "cost-model-v1".into(),
-    }
+    };
+    request.request_digest = request.canonical_request_digest();
+    request
 }
 
 #[test]
@@ -32,6 +38,7 @@ fn alpha_runtime_id_is_the_only_pre_release_contract() {
     request.validate().expect("alpha runtime id should be accepted");
 
     request.runtime_version = "general-compute-v1".into();
+    request.request_digest = request.canonical_request_digest();
     let error = request
         .validate()
         .expect_err("stable runtime id must remain gated before release promotion");
@@ -39,23 +46,19 @@ fn alpha_runtime_id_is_the_only_pre_release_contract() {
 }
 
 #[test]
+fn request_contract_carries_retry_identity_and_digest() {
+    let encoded = serde_json::to_value(valid_request()).expect("request serializes");
+    for field in ["execution_id", "attempt_id", "idempotency_key", "request_digest"] {
+        assert!(
+            encoded.get(field).and_then(serde_json::Value::as_str).is_some(),
+            "request must carry non-null {field}"
+        );
+    }
+}
+
+#[test]
 fn request_round_trip_preserves_versioned_execution_contract() {
-    let request = GeneralComputeRequest {
-        runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
-        guest_image_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
-        backend_id: "python-numpy-scipy".into(),
-        entrypoint: "main:run".into(),
-        source_artifact: ArtifactManifest::inline_json("input-source", ArtifactRole::Source, br#"{}"#),
-        input_artifacts: vec![ArtifactManifest::inline_json(
-            "input-data",
-            ArtifactRole::Input,
-            br#"{"x":1}"#,
-        )],
-        execution_policy: ExecutionPolicy::default(),
-        determinism: Default::default(),
-        billing_version: "billing-v1".into(),
-        cost_model_version: "cost-model-v1".into(),
-    };
+    let request = valid_request();
 
     let encoded = serde_json::to_vec(&request).expect("request serializes");
     let decoded: GeneralComputeRequest = serde_json::from_slice(&encoded).expect("request decodes");
@@ -67,7 +70,12 @@ fn request_round_trip_preserves_versioned_execution_contract() {
 
 #[test]
 fn result_round_trip_keeps_claimed_usage_and_output_manifest() {
+    let request = valid_request();
     let result = GeneralComputeResult {
+        execution_id: request.execution_id.clone(),
+        attempt_id: request.attempt_id.clone(),
+        idempotency_key: request.idempotency_key.clone(),
+        request_digest: request.request_digest.clone(),
         status: ResultStatus::Completed,
         exit_code: Some(0),
         error_code: None,
@@ -79,11 +87,11 @@ fn result_round_trip_keeps_claimed_usage_and_output_manifest() {
             br#"{"answer":42}"#,
         )],
         usage: Default::default(),
-        runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
-        backend_id: "python-numpy-scipy".into(),
-        guest_image_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
+        runtime_version: request.runtime_version.clone(),
+        backend_id: request.backend_id.clone(),
+        guest_image_digest: request.guest_image_digest.clone(),
         input_sha256: "sha256:input".into(),
-        determinism: Default::default(),
+        determinism: request.determinism.clone(),
         capability_summary: vec!["cpu".into()],
     };
 
@@ -93,6 +101,53 @@ fn result_round_trip_keeps_claimed_usage_and_output_manifest() {
     assert_eq!(decoded, result);
     assert_eq!(decoded.status, ResultStatus::Completed);
     assert_eq!(decoded.output_artifacts[0].size_bytes, 13);
+
+    let encoded = serde_json::to_value(&result).expect("result serializes");
+    for field in ["execution_id", "attempt_id", "idempotency_key", "request_digest"] {
+        assert!(
+            encoded.get(field).and_then(serde_json::Value::as_str).is_some(),
+            "result must carry non-null {field}"
+        );
+    }
+}
+
+#[test]
+fn result_validation_rejects_retry_identity_mismatch() {
+    let request = valid_request();
+    let mut result = GeneralComputeResult {
+        execution_id: request.execution_id.clone(),
+        attempt_id: request.attempt_id.clone(),
+        idempotency_key: request.idempotency_key.clone(),
+        request_digest: request.request_digest.clone(),
+        status: ResultStatus::Completed,
+        exit_code: Some(0),
+        error_code: None,
+        stdout: String::new(),
+        stderr: String::new(),
+        output_artifacts: Vec::new(),
+        usage: Default::default(),
+        runtime_version: request.runtime_version.clone(),
+        backend_id: request.backend_id.clone(),
+        guest_image_digest: request.guest_image_digest.clone(),
+        input_sha256: "sha256:input".into(),
+        determinism: request.determinism.clone(),
+        capability_summary: vec!["cpu".into()],
+    };
+    let registry = CapabilityMatrix::new(vec![BackendRegistration {
+        backend_id: request.backend_id.clone(),
+        guest_image_digest: request.guest_image_digest.clone(),
+        capabilities: vec!["cpu".into()],
+        max_threads: 1,
+        network_allowed: false,
+        filesystem_read_only: true,
+        gpu_allowed: false,
+    }]);
+
+    result.attempt_id = "attempt-2".into();
+    let error = result
+        .validate_against(&request, &registry)
+        .expect_err("a result from another retry attempt must fail closed");
+    assert_eq!(error.code, ValidationErrorCode::ResultBindingMismatch);
 }
 
 #[test]
@@ -108,12 +163,14 @@ fn artifact_manifest_rejects_tampered_inline_bytes() {
 fn request_validation_rejects_unbounded_or_writable_policy() {
     let mut request = valid_request();
     request.execution_policy.cpu_millis = u64::MAX;
+    request.request_digest = request.canonical_request_digest();
 
     let error = request.validate().expect_err("unbounded quota must fail closed");
     assert_eq!(error.code, ValidationErrorCode::PolicyInvalid);
 
     request.execution_policy = ExecutionPolicy::default();
     request.execution_policy.filesystem_read_only = false;
+    request.request_digest = request.canonical_request_digest();
     let error = request
         .validate()
         .expect_err("writable host filesystem must fail closed");
@@ -150,6 +207,7 @@ fn capability_matrix_rejects_network_and_gpu_requirements_without_registration()
     let mut request = valid_request();
     request.execution_policy.network_allowed = true;
     request.execution_policy.gpu_required = true;
+    request.request_digest = request.canonical_request_digest();
     let matrix = CapabilityMatrix::new(vec![BackendRegistration {
         backend_id: "python-numpy-scipy".into(),
         guest_image_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
