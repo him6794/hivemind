@@ -191,6 +191,34 @@ Worker general-compute execution can now receive an explicitly operator-configur
 
 RED→GREEN evidence: the Worker CAS execution test first failed because no CAS-aware Worker route existed; the route then compiled with `cargo check -p hivemind-worker-executor --locked` and `cargo check -p hivemind-worker-executor --tests --locked`. Runtime cancellation was separately locked by a failing CAS cancellation test before adding `execute_with_cas_with_cancellation`; the test now passes, proving the reference supervisor receives the Worker cancellation. `cargo test -p general-compute-runtime --locked` passed (10 supervisor, 5 artifact, 19 contract, 11 CPython, 3 differential, 5 execution, 4 protocol, 10 reference, 21 sandbox, 6 tensor, plus the compile-fail doctest). Running the Worker test binary remains blocked by the pre-existing Windows MSVC/MinGW `__mingw_fprintf_cgo_beginthread` linker symbol; no production code change was made for that toolchain issue. Remote CAS/chunk transport, retry resume across workers, production OCI routing, and trusted usage/billing settlement remain incomplete.
 
+### M3 typed chunk upload/resume transport contract checkpoint (2026-08-13)
+
+The runtime now defines identity-bound `ChunkUploadEnvelope` and
+`ChunkResumeEnvelope` contracts at the local CAS boundary. Every upload carries
+the execution id, attempt id, idempotency key, canonical request digest,
+artifact id, manifest offset/size/digest, and raw bytes. The ingest path
+validates the current request first, requires an exact manifest chunk, applies
+a 16 MiB single-upload limit, rehashes the payload, and only then submits it to
+the operator-owned `CasChunkStore`. Identical retries remain idempotent;
+stale attempts, wrong request digests, unknown/mismatched manifest chunks,
+oversized payloads, tampered bytes, and conflicting existing objects fail
+closed. Resume selection is likewise identity-bound and delegates completed
+digest validation to the artifact manifest contract.
+
+This is deliberately a transport contract, not a network implementation. No
+raw unbound byte RPC, authentication scheme, lease, eviction policy, remote CAS
+population, retry-across-worker orchestration, OCI routing, or typed usage/
+billing settlement was added. The next unit is to carry these envelopes through
+an authenticated proto/gRPC boundary and connect remote population to Worker
+local CAS ingest without weakening the Nodepool trust model.
+
+RED→GREEN evidence: the transport integration test first failed because the
+module and envelopes did not exist; after the minimal implementation,
+`cargo test -p general-compute-runtime --test transport --locked` passed 7
+tests, and the full locked runtime suite passed. Scoped rustfmt/checks remain
+green; crate-wide strict clippy remains blocked by the pre-existing runtime
+pedantic debt documented above.
+
 ## Notes
 
 - 2026-08-13 Monty removal was revalidated after the cleanup commit: the root repository has no tracked Monty paths, `executor-rs/Cargo.toml` exposes only `managed-function-runtime` and `general-compute-runtime`, and the executor workspace plus Docker/Windows release-contract gates pass. The untracked nested `executor-rs/.git` upstream metadata and stale `executor-rs/target` build artifacts were physically removed after explicit user authorization; neither was part of any Hivemind build or runtime path.
