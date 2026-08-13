@@ -428,3 +428,9 @@ bounded renderer 的 `managed-function-runtime/src/lib.rs`、`zkvm` 的 `Cargo.l
 
 - 依使用者明確授權，移除未被 root repository 追蹤的 `executor-rs/.git` upstream Monty metadata 與舊 `executor-rs/target` 編譯產物；root `.git` 未受影響。
 - 驗證：root `git ls-files` 無 Monty 路徑；`executor-rs/Cargo.toml` 僅列 `managed-function-runtime` 與 `general-compute-runtime`；`executor-rs/.git`、`executor-rs/target`、`executor-rs/monty.exe` 均不存在；active source/build paths 無 Monty reference。歷史文件與負向 release contract tests 保留作為「不得加回」證據。
+
+## 2026-08-13：M1 leader-exit process-tree hardening
+
+- `general-compute-runtime` supervisor now owns a platform-specific `ProcessTreeGuard`: Unix keeps the invocation-scoped process group; Windows uses a suspended child, Job Object assignment with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, initial-thread resume, and job termination before output capture joins.
+- Normal leader exit terminates descendants before joining inherited stdout/stderr pipes; timeout, cancellation, and combined-output-limit paths share the same tree termination and wait/reap path. Spawn setup failures explicitly kill and reap the child.
+- RED→GREEN lifecycle coverage includes the normal-leader-exit descendant-pipe regression and Windows descendant fixtures with a strict 600 ms timeout. Cross-component verification passed: executor workspace tests, worker-executor check, Docker Compose release contracts, and Windows worker packaging contracts.
