@@ -1,4 +1,4 @@
-use general_compute_runtime::supervisor::{Cancellation, CommandSpec, RunStatus, Supervisor};
+use super::{Cancellation, ReferenceCommandSpec, ReferenceProcessSupervisor, RunStatus};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -7,25 +7,28 @@ use std::{
     path::{Path, PathBuf},
 };
 
-fn command_that_finishes() -> CommandSpec {
+fn command_that_finishes() -> ReferenceCommandSpec {
     if cfg!(windows) {
-        CommandSpec::new("cmd.exe", ["/C", "exit 0"])
+        ReferenceCommandSpec::new("cmd.exe", ["/C", "exit 0"])
     } else {
-        CommandSpec::new("sh", ["-c", "exit 0"])
+        ReferenceCommandSpec::new("sh", ["-c", "exit 0"])
     }
 }
 
-fn command_that_sleeps() -> CommandSpec {
+fn command_that_sleeps() -> ReferenceCommandSpec {
     if cfg!(windows) {
-        CommandSpec::new("powershell.exe", ["-NoProfile", "-Command", "Start-Sleep -Seconds 5"])
+        ReferenceCommandSpec::new(
+            "powershell.exe",
+            ["-NoProfile", "-Command", "Start-Sleep -Seconds 5"],
+        )
     } else {
-        CommandSpec::new("sh", ["-c", "sleep 5"])
+        ReferenceCommandSpec::new("sh", ["-c", "sleep 5"])
     }
 }
 
-fn command_that_writes_large_output() -> CommandSpec {
+fn command_that_writes_large_output() -> ReferenceCommandSpec {
     if cfg!(windows) {
-        CommandSpec::new(
+        ReferenceCommandSpec::new(
             "powershell.exe",
             [
                 "-NoProfile",
@@ -34,7 +37,7 @@ fn command_that_writes_large_output() -> CommandSpec {
             ],
         )
     } else {
-        CommandSpec::new(
+        ReferenceCommandSpec::new(
             "sh",
             [
                 "-c",
@@ -44,9 +47,9 @@ fn command_that_writes_large_output() -> CommandSpec {
     }
 }
 
-fn command_that_writes_stdout_only() -> CommandSpec {
+fn command_that_writes_stdout_only() -> ReferenceCommandSpec {
     if cfg!(windows) {
-        CommandSpec::new(
+        ReferenceCommandSpec::new(
             "powershell.exe",
             [
                 "-NoProfile",
@@ -55,7 +58,7 @@ fn command_that_writes_stdout_only() -> CommandSpec {
             ],
         )
     } else {
-        CommandSpec::new("sh", ["-c", "head -c 65536 /dev/zero | tr '\\0' x"])
+        ReferenceCommandSpec::new("sh", ["-c", "head -c 65536 /dev/zero | tr '\\0' x"])
     }
 }
 
@@ -69,8 +72,12 @@ fn descendant_marker_paths() -> (PathBuf, PathBuf) {
             .as_nanos()
     );
     (
-        std::env::temp_dir().join(format!("hivemind-supervisor-descendant-start-{suffix}.marker")),
-        std::env::temp_dir().join(format!("hivemind-supervisor-descendant-final-{suffix}.marker")),
+        std::env::temp_dir().join(format!(
+            "hivemind-supervisor-descendant-start-{suffix}.marker"
+        )),
+        std::env::temp_dir().join(format!(
+            "hivemind-supervisor-descendant-final-{suffix}.marker"
+        )),
     )
 }
 
@@ -86,10 +93,10 @@ fn wait_for_path(path: &Path, timeout: Duration) -> bool {
 }
 
 #[cfg(unix)]
-fn command_that_spawns_descendant(start: &Path, final_marker: &Path) -> CommandSpec {
+fn command_that_spawns_descendant(start: &Path, final_marker: &Path) -> ReferenceCommandSpec {
     let start = start.to_string_lossy();
     let final_marker = final_marker.to_string_lossy();
-    CommandSpec::new(
+    ReferenceCommandSpec::new(
         "sh",
         [
             "-c",
@@ -103,31 +110,33 @@ fn command_that_spawns_descendant(start: &Path, final_marker: &Path) -> CommandS
 }
 
 #[cfg(windows)]
-fn command_that_spawns_descendant(start: &Path, final_marker: &Path) -> CommandSpec {
+fn command_that_spawns_descendant(start: &Path, final_marker: &Path) -> ReferenceCommandSpec {
     let start = start.to_string_lossy().replace('\'', "''");
     let final_marker = final_marker.to_string_lossy().replace('\'', "''");
     let child_script = format!(
-        "Set-Content -LiteralPath '{}' -Value started; Start-Sleep -Milliseconds 1500; Set-Content -LiteralPath '{}' -Value survived",
-        start, final_marker
+        "Set-Content -LiteralPath '{start}' -Value started; Start-Sleep -Milliseconds 1500; Set-Content -LiteralPath '{final_marker}' -Value survived"
     );
     let parent_script = format!(
         "Set-Content -LiteralPath '{start}' -Value started; $childScript='{child}'; $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript)); $child=Start-Process powershell.exe -ArgumentList @('-NoProfile','-EncodedCommand',$encoded) -PassThru; Start-Sleep -Seconds 5",
         start = start,
         child = child_script.replace('\'', "''")
     );
-    CommandSpec::new("powershell.exe", ["-NoProfile", "-Command", &parent_script])
+    ReferenceCommandSpec::new("powershell.exe", ["-NoProfile", "-Command", &parent_script])
 }
 
 #[test]
 fn supervisor_reports_completed_child_after_waiting_for_reap() {
     let cancellation = Cancellation::new();
-    let result = Supervisor::new()
+    let result = ReferenceProcessSupervisor::new()
         .run(command_that_finishes(), &cancellation)
         .expect("child should execute");
 
     assert_eq!(result.status, RunStatus::Completed);
     assert_eq!(result.exit_code, Some(0));
-    assert!(result.reaped, "completed child must be waited before returning");
+    assert!(
+        result.reaped,
+        "completed child must be waited before returning"
+    );
 }
 
 #[test]
@@ -136,7 +145,7 @@ fn supervisor_timeout_kills_and_reaps_child() {
     command.timeout = Duration::from_millis(100);
     let started = std::time::Instant::now();
 
-    let result = Supervisor::new()
+    let result = ReferenceProcessSupervisor::new()
         .run(command, &Cancellation::new())
         .expect("spawn should succeed");
 
@@ -154,7 +163,7 @@ fn supervisor_cancellation_kills_and_reaps_child() {
         trigger.cancel();
     });
 
-    let result = Supervisor::new()
+    let result = ReferenceProcessSupervisor::new()
         .run(command_that_sleeps(), &cancellation)
         .expect("spawn should succeed");
     thread.join().expect("cancellation trigger should finish");
@@ -165,7 +174,10 @@ fn supervisor_cancellation_kills_and_reaps_child() {
 
 #[test]
 fn supervisor_rejects_empty_program_without_spawning() {
-    let result = Supervisor::new().run(CommandSpec::new("", [] as [&str; 0]), &Cancellation::new());
+    let result = ReferenceProcessSupervisor::new().run(
+        ReferenceCommandSpec::new("", [] as [&str; 0]),
+        &Cancellation::new(),
+    );
 
     assert!(result.is_err());
 }
@@ -173,7 +185,7 @@ fn supervisor_rejects_empty_program_without_spawning() {
 #[test]
 fn supervisor_drains_and_bounds_stdout_and_stderr_capture() {
     let started = std::time::Instant::now();
-    let result = Supervisor::new()
+    let result = ReferenceProcessSupervisor::new()
         .run(
             command_that_writes_large_output()
                 .with_output_limit(64)
@@ -183,8 +195,14 @@ fn supervisor_drains_and_bounds_stdout_and_stderr_capture() {
         .expect("output-producing child should execute");
 
     assert_eq!(result.status, RunStatus::Completed);
-    assert!(result.stdout.len() <= 64, "stdout must respect the configured cap");
-    assert!(result.stderr.len() <= 64, "stderr must respect the configured cap");
+    assert!(
+        result.stdout.len() <= 64,
+        "stdout must respect the configured cap"
+    );
+    assert!(
+        result.stderr.len() <= 64,
+        "stderr must respect the configured cap"
+    );
     assert!(result.stdout_truncated, "stdout cap must be observable");
     assert!(result.stderr_truncated, "stderr cap must be observable");
     assert!(
@@ -195,7 +213,7 @@ fn supervisor_drains_and_bounds_stdout_and_stderr_capture() {
 
 #[test]
 fn supervisor_kills_and_reaps_when_combined_output_limit_is_exceeded() {
-    let result = Supervisor::new()
+    let result = ReferenceProcessSupervisor::new()
         .run(
             command_that_writes_large_output()
                 .with_output_limit(64)
@@ -205,14 +223,17 @@ fn supervisor_kills_and_reaps_when_combined_output_limit_is_exceeded() {
         .expect("output limit termination should be reported as a run result");
 
     assert_eq!(result.status, RunStatus::OutputLimitExceeded);
-    assert!(result.reaped, "output-limit termination must reap the child");
+    assert!(
+        result.reaped,
+        "output-limit termination must reap the child"
+    );
     assert!(result.stdout.len() + result.stderr.len() <= 64);
     assert!(result.stdout_truncated || result.stderr_truncated);
 }
 
 #[test]
 fn supervisor_counts_discarded_single_stream_output_against_combined_limit() {
-    let result = Supervisor::new()
+    let result = ReferenceProcessSupervisor::new()
         .run(
             command_that_writes_stdout_only()
                 .with_output_limit(64)
@@ -222,13 +243,16 @@ fn supervisor_counts_discarded_single_stream_output_against_combined_limit() {
         .expect("output limit termination should be reported as a run result");
 
     assert_eq!(result.status, RunStatus::OutputLimitExceeded);
-    assert!(result.reaped, "output-limit termination must reap the child");
+    assert!(
+        result.reaped,
+        "output-limit termination must reap the child"
+    );
 }
 
 #[test]
 fn supervisor_passes_bounded_stdin_without_putting_payload_in_arguments() {
     let command = if cfg!(windows) {
-        CommandSpec::new(
+        ReferenceCommandSpec::new(
             "powershell.exe",
             [
                 "-NoProfile",
@@ -237,9 +261,9 @@ fn supervisor_passes_bounded_stdin_without_putting_payload_in_arguments() {
             ],
         )
     } else {
-        CommandSpec::new("sh", ["-c", "cat"])
+        ReferenceCommandSpec::new("sh", ["-c", "cat"])
     };
-    let result = Supervisor::new()
+    let result = ReferenceProcessSupervisor::new()
         .run_with_stdin(command, b"framed-input", &Cancellation::new())
         .expect("stdin child should execute");
 
@@ -250,9 +274,10 @@ fn supervisor_passes_bounded_stdin_without_putting_payload_in_arguments() {
 #[test]
 fn supervisor_timeout_kills_descendants_before_returning() {
     let (start_marker, final_marker) = descendant_marker_paths();
-    let result = Supervisor::new()
+    let result = ReferenceProcessSupervisor::new()
         .run(
-            command_that_spawns_descendant(&start_marker, &final_marker).with_timeout(Duration::from_millis(600)),
+            command_that_spawns_descendant(&start_marker, &final_marker)
+                .with_timeout(Duration::from_millis(600)),
             &Cancellation::new(),
         )
         .expect("descendant-producing child should execute");
@@ -263,7 +288,7 @@ fn supervisor_timeout_kills_descendants_before_returning() {
         wait_for_path(&start_marker, Duration::from_secs(1)),
         "descendant fixture must prove that the child was launched"
     );
-    thread::sleep(Duration::from_millis(2_000));
+    thread::sleep(Duration::from_secs(2));
     assert!(
         !final_marker.exists(),
         "descendant must not outlive a timed-out supervisor process"
