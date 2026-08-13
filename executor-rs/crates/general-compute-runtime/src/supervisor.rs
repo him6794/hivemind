@@ -2,12 +2,14 @@ use std::io::{self, Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicUsize;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const DEFAULT_OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
+const DEFAULT_COMBINED_OUTPUT_LIMIT: usize = DEFAULT_OUTPUT_LIMIT * 2;
 const DEFAULT_INPUT_LIMIT: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
@@ -39,6 +41,7 @@ pub struct CommandSpec {
     pub args: Vec<String>,
     pub timeout: Duration,
     pub output_limit: usize,
+    pub combined_output_limit: usize,
     pub input_limit: usize,
 }
 
@@ -53,6 +56,7 @@ impl CommandSpec {
             args: args.into_iter().map(Into::into).collect(),
             timeout: DEFAULT_TIMEOUT,
             output_limit: DEFAULT_OUTPUT_LIMIT,
+            combined_output_limit: DEFAULT_COMBINED_OUTPUT_LIMIT,
             input_limit: DEFAULT_INPUT_LIMIT,
         }
     }
@@ -64,6 +68,11 @@ impl CommandSpec {
 
     pub fn with_output_limit(mut self, output_limit: usize) -> Self {
         self.output_limit = output_limit;
+        self
+    }
+
+    pub fn with_combined_output_limit(mut self, combined_output_limit: usize) -> Self {
+        self.combined_output_limit = combined_output_limit;
         self
     }
 
@@ -79,6 +88,7 @@ pub enum RunStatus {
     Failed,
     TimedOut,
     Cancelled,
+    OutputLimitExceeded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,10 +182,21 @@ impl Supervisor {
         let stderr = child.stderr.take().ok_or_else(|| {
             SupervisorError::Capture(io::Error::new(io::ErrorKind::BrokenPipe, "stderr pipe missing"))
         })?;
-        let stdout_reader = spawn_capture_reader(stdout, command.output_limit);
-        let stderr_reader = spawn_capture_reader(stderr, command.output_limit);
+        let output_budget = Arc::new(OutputBudget::new(command.combined_output_limit));
+        let stdout_reader = spawn_capture_reader(stdout, command.output_limit, Arc::clone(&output_budget));
+        let stderr_reader = spawn_capture_reader(stderr, command.output_limit, Arc::clone(&output_budget));
 
         loop {
+            if output_budget.exceeded() {
+                return self.terminate_and_reap(
+                    child,
+                    stdin_writer,
+                    stdout_reader,
+                    stderr_reader,
+                    RunStatus::OutputLimitExceeded,
+                    output_budget,
+                );
+            }
             if let Some(status) = child.try_wait().map_err(SupervisorError::Wait)? {
                 return self.result_after_reap(
                     if status.success() {
@@ -187,6 +208,7 @@ impl Supervisor {
                     stdin_writer,
                     stdout_reader,
                     stderr_reader,
+                    output_budget,
                 );
             }
 
@@ -197,10 +219,18 @@ impl Supervisor {
                     stdout_reader,
                     stderr_reader,
                     RunStatus::Cancelled,
+                    output_budget,
                 );
             }
             if Instant::now() >= deadline {
-                return self.terminate_and_reap(child, stdin_writer, stdout_reader, stderr_reader, RunStatus::TimedOut);
+                return self.terminate_and_reap(
+                    child,
+                    stdin_writer,
+                    stdout_reader,
+                    stderr_reader,
+                    RunStatus::TimedOut,
+                    output_budget,
+                );
             }
 
             thread::sleep(self.poll_interval);
@@ -214,10 +244,18 @@ impl Supervisor {
         stdout_reader: JoinHandle<io::Result<CapturedOutput>>,
         stderr_reader: JoinHandle<io::Result<CapturedOutput>>,
         status: RunStatus,
+        output_budget: Arc<OutputBudget>,
     ) -> Result<RunResult, SupervisorError> {
         kill_process_tree(&mut child).map_err(SupervisorError::Kill)?;
         let exit_status = child.wait().map_err(SupervisorError::Wait)?;
-        self.result_after_reap(status, exit_status.code(), stdin_writer, stdout_reader, stderr_reader)
+        self.result_after_reap(
+            status,
+            exit_status.code(),
+            stdin_writer,
+            stdout_reader,
+            stderr_reader,
+            output_budget,
+        )
     }
 
     fn result_after_reap(
@@ -227,12 +265,17 @@ impl Supervisor {
         stdin_writer: JoinHandle<io::Result<()>>,
         stdout_reader: JoinHandle<io::Result<CapturedOutput>>,
         stderr_reader: JoinHandle<io::Result<CapturedOutput>>,
+        output_budget: Arc<OutputBudget>,
     ) -> Result<RunResult, SupervisorError> {
         join_stdin(stdin_writer)?;
         let stdout = join_capture(stdout_reader)?;
         let stderr = join_capture(stderr_reader)?;
         Ok(RunResult {
-            status,
+            status: if status == RunStatus::Completed && output_budget.exceeded() {
+                RunStatus::OutputLimitExceeded
+            } else {
+                status
+            },
             exit_code,
             reaped: true,
             stdout: stdout.bytes,
@@ -255,7 +298,55 @@ struct CapturedOutput {
     truncated: bool,
 }
 
-fn spawn_capture_reader<R>(mut reader: R, output_limit: usize) -> JoinHandle<io::Result<CapturedOutput>>
+#[derive(Debug)]
+struct OutputBudget {
+    limit: usize,
+    captured: AtomicUsize,
+    exceeded: AtomicBool,
+}
+
+impl OutputBudget {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            captured: AtomicUsize::new(0),
+            exceeded: AtomicBool::new(false),
+        }
+    }
+
+    fn reserve(&self, requested: usize) -> usize {
+        let mut current = self.captured.load(Ordering::Acquire);
+        loop {
+            let remaining = self.limit.saturating_sub(current);
+            let granted = remaining.min(requested);
+            let next = current.saturating_add(granted);
+            match self.captured.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    if granted < requested {
+                        self.exceeded.store(true, Ordering::Release);
+                    }
+                    return granted;
+                }
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    fn exceeded(&self) -> bool {
+        self.exceeded.load(Ordering::Acquire)
+    }
+}
+
+fn spawn_capture_reader<R>(
+    mut reader: R,
+    output_limit: usize,
+    output_budget: Arc<OutputBudget>,
+) -> JoinHandle<io::Result<CapturedOutput>>
 where
     R: Read + Send + 'static,
 {
@@ -272,9 +363,10 @@ where
             }
 
             let remaining = output_limit.saturating_sub(captured.bytes.len());
-            let bytes_to_keep = remaining.min(bytes_read);
+            let globally_allowed = output_budget.reserve(bytes_read);
+            let bytes_to_keep = remaining.min(globally_allowed);
             captured.bytes.extend_from_slice(&buffer[..bytes_to_keep]);
-            if bytes_to_keep < bytes_read {
+            if bytes_to_keep < bytes_read || globally_allowed < bytes_read || remaining < bytes_read {
                 captured.truncated = true;
             }
         }
