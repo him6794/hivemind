@@ -18,6 +18,12 @@ pub const GENERAL_COMPUTE_RESULT_MAX_BYTES: usize = 2 * 1024 * 1024;
 /// Maximum raw payload accepted in one general-compute chunk transfer.
 pub const GENERAL_COMPUTE_CHUNK_UPLOAD_MAX_BYTES: usize = 16 * 1024 * 1024;
 
+/// Maximum encoded message size for the dedicated general-compute chunk RPCs.
+/// This is intentionally larger than one raw chunk and is not used for the
+/// existing ExecuteTask RPC contract.
+pub const GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES: usize =
+    GENERAL_COMPUTE_CHUNK_UPLOAD_MAX_BYTES + 64 * 1024;
+
 /// Maximum signed admission budget accepted for `managed-function-v0` execution.
 pub const MANAGED_BUDGET_MAX_USAGE_UNITS: i64 = 1_000_000;
 
@@ -120,6 +126,10 @@ fn is_sha256_digest(value: &str) -> bool {
 
 pub use batch_runtime_service_client::BatchRuntimeServiceClient;
 pub use batch_runtime_service_server::{BatchRuntimeService, BatchRuntimeServiceServer};
+pub use general_compute_chunk_service_client::GeneralComputeChunkServiceClient;
+pub use general_compute_chunk_service_server::{
+    GeneralComputeChunkService, GeneralComputeChunkServiceServer,
+};
 pub use master_node_service_client::MasterNodeServiceClient;
 pub use master_node_service_server::{MasterNodeService, MasterNodeServiceServer};
 pub use node_manager_service_client::NodeManagerServiceClient;
@@ -137,13 +147,15 @@ mod tests {
 
     use super::{
         validate_general_compute_chunk_resume_request, validate_general_compute_chunk_upload,
-        ExecuteTaskResponse, GeneralComputeChunkResumeRequest, GeneralComputeChunkUpload,
-        ManagedProofEnvelope, GENERAL_COMPUTE_CHUNK_UPLOAD_MAX_BYTES,
-        LEGACY_MANAGED_RECEIPT_MAX_BYTES,
+        ExecuteTaskResponse, GeneralComputeChunkDescriptor, GeneralComputeChunkResumeRequest,
+        GeneralComputeChunkResumeResponse, GeneralComputeChunkUpload,
+        GeneralComputeChunkUploadResponse, ManagedProofEnvelope,
+        GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES, GENERAL_COMPUTE_CHUNK_UPLOAD_MAX_BYTES,
         GENERAL_COMPUTE_MANIFEST_MAX_BYTES, GENERAL_COMPUTE_RESULT_MAX_BYTES,
-        MANAGED_BUDGET_MAX_USAGE_UNITS, MANAGED_JSON_INPUT_MAX_BYTES,
-        MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES, MANAGED_TASK_SOURCE_MAX_BYTES, TASK_ID_MAX_BYTES,
-        WORKER_RPC_MESSAGE_MAX_BYTES, WORKER_STATUS_MESSAGE_MAX_BYTES,
+        LEGACY_MANAGED_RECEIPT_MAX_BYTES, MANAGED_BUDGET_MAX_USAGE_UNITS,
+        MANAGED_JSON_INPUT_MAX_BYTES, MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES,
+        MANAGED_TASK_SOURCE_MAX_BYTES, TASK_ID_MAX_BYTES, WORKER_RPC_MESSAGE_MAX_BYTES,
+        WORKER_STATUS_MESSAGE_MAX_BYTES,
     };
 
     #[test]
@@ -244,12 +256,12 @@ mod tests {
             attempt_id: "attempt-1".into(),
             idempotency_key: "idempotency-1".into(),
             request_digest:
-                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-                    .into(),
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
             artifact_id: "source".into(),
             offset: 16,
             size_bytes: 4,
-            sha256: "sha256:3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7".into(),
+            sha256: "sha256:3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7"
+                .into(),
             bytes: b"data".to_vec(),
         };
 
@@ -268,12 +280,12 @@ mod tests {
             attempt_id: "attempt-1".into(),
             idempotency_key: "idempotency-1".into(),
             request_digest:
-                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-                    .into(),
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
             artifact_id: "source".into(),
             offset: 0,
             size_bytes: 4,
-            sha256: "sha256:3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7".into(),
+            sha256: "sha256:3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7"
+                .into(),
             bytes: b"data".to_vec(),
         };
 
@@ -299,8 +311,7 @@ mod tests {
             attempt_id: "attempt-1".into(),
             idempotency_key: "idempotency-1".into(),
             request_digest:
-                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-                    .into(),
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
             artifact_id: "source".into(),
             completed_sha256: vec![
                 "sha256:3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7".into(),
@@ -316,5 +327,41 @@ mod tests {
         let mut invalid = request;
         invalid.completed_sha256[0] = "not-a-sha256".into();
         assert!(validate_general_compute_chunk_resume_request(&invalid).is_err());
+    }
+
+    #[test]
+    fn general_compute_chunk_rpc_response_round_trips_with_a_separate_message_cap() {
+        let response = GeneralComputeChunkUploadResponse {
+            success: true,
+            status_message: "accepted".into(),
+            accepted_chunks: 2,
+        };
+        let decoded =
+            GeneralComputeChunkUploadResponse::decode(response.encode_to_vec().as_slice())
+                .expect("chunk RPC response should decode");
+
+        assert_eq!(decoded, response);
+        assert!(GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES > WORKER_RPC_MESSAGE_MAX_BYTES);
+        assert!(
+            GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES > GENERAL_COMPUTE_CHUNK_UPLOAD_MAX_BYTES
+        );
+    }
+
+    #[test]
+    fn general_compute_chunk_resume_response_round_trips_missing_descriptors() {
+        let response = GeneralComputeChunkResumeResponse {
+            success: true,
+            status_message: "resume".into(),
+            missing_chunks: vec![GeneralComputeChunkDescriptor {
+                offset: 8,
+                size_bytes: 4,
+                sha256: "sha256:3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7"
+                    .into(),
+            }],
+        };
+        let decoded =
+            GeneralComputeChunkResumeResponse::decode(response.encode_to_vec().as_slice())
+                .expect("chunk resume response should decode");
+        assert_eq!(decoded, response);
     }
 }

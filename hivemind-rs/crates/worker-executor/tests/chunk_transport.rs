@@ -7,9 +7,10 @@ use general_compute_runtime::{
 };
 use hivemind_auth::worker_execution::{WorkerExecutionSigner, WorkerExecutionVerifier};
 use hivemind_models::Claims;
-use hivemind_proto::GeneralComputeChunkUpload;
+use hivemind_proto::{GeneralComputeChunkResumeRequest, GeneralComputeChunkUpload};
 use hivemind_worker_executor::chunk_transport::{
-    ingest_general_compute_chunk, VerifiedWorkerExecution, WorkerChunkIngestError,
+    ingest_general_compute_chunk, resume_general_compute_chunks, VerifiedWorkerExecution,
+    WorkerChunkIngestError,
 };
 use std::sync::OnceLock;
 use tempfile::TempDir;
@@ -94,6 +95,18 @@ fn upload(request: &GeneralComputeRequest, token: &str) -> GeneralComputeChunkUp
         size_bytes: BYTES.len() as i64,
         sha256: sha256_digest(BYTES),
         bytes: BYTES.to_vec(),
+    }
+}
+
+fn resume(request: &GeneralComputeRequest, token: &str) -> GeneralComputeChunkResumeRequest {
+    GeneralComputeChunkResumeRequest {
+        token: token.into(),
+        execution_id: request.execution_id.clone(),
+        attempt_id: request.attempt_id.clone(),
+        idempotency_key: request.idempotency_key.clone(),
+        request_digest: request.request_digest.clone(),
+        artifact_id: "source".into(),
+        completed_sha256: vec![],
     }
 }
 
@@ -204,4 +217,36 @@ fn adapter_allows_an_identical_replay_but_not_unverified_bytes() {
         .expect("first verified upload should succeed");
     ingest_general_compute_chunk(&store, &request, &upload, &auth)
         .expect("identical verified replay should be idempotent");
+}
+
+#[test]
+fn adapter_returns_only_manifest_chunks_missing_from_a_verified_resume_request() {
+    let request = request();
+    let (_root, store) = store();
+    let token = token();
+    let resume = resume(&request, &token);
+    let auth = verified_authorization(&token);
+
+    let missing = resume_general_compute_chunks(&store, &request, &resume, &auth)
+        .expect("verified resume request should return missing chunks");
+
+    assert_eq!(missing.len(), 1);
+    assert_eq!(missing[0].offset, 0);
+    assert_eq!(missing[0].sha256, sha256_digest(BYTES));
+}
+
+#[test]
+fn adapter_does_not_trust_a_completed_digest_when_the_local_cas_is_missing_it() {
+    let request = request();
+    let (_root, store) = store();
+    let token = token();
+    let mut resume = resume(&request, &token);
+    resume.completed_sha256 = vec![sha256_digest(BYTES)];
+    let auth = verified_authorization(&token);
+
+    let missing = resume_general_compute_chunks(&store, &request, &resume, &auth)
+        .expect("resume should recompute local CAS state");
+
+    assert_eq!(missing.len(), 1);
+    assert_eq!(missing[0].sha256, sha256_digest(BYTES));
 }

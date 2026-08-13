@@ -34,7 +34,9 @@ use hivemind_proto::{
 };
 #[cfg(feature = "worker")]
 use hivemind_proto::{
-    worker_node_service_server::WorkerNodeServiceServer, WORKER_RPC_MESSAGE_MAX_BYTES,
+    general_compute_chunk_service_server::GeneralComputeChunkServiceServer,
+    worker_node_service_server::WorkerNodeServiceServer,
+    GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES, WORKER_RPC_MESSAGE_MAX_BYTES,
 };
 #[cfg(feature = "nodepool")]
 use hivemind_task_scheduler::{dispatcher::Dispatcher, TaskScheduler};
@@ -47,10 +49,13 @@ use hivemind_website_api::WebsiteApiServer;
 #[cfg(feature = "worker")]
 use hivemind_worker_executor::control_api::WorkerProfile;
 #[cfg(feature = "worker")]
-use hivemind_worker_executor::grpc_server::{GrpcWorkerNodeService, WorkerGrpcState};
-use hivemind_worker_executor::runtime_admission::WorkerRuntimeAdmission;
+use hivemind_worker_executor::grpc_server::{
+    GrpcGeneralComputeChunkService, GrpcWorkerNodeService, WorkerGrpcState,
+};
 #[cfg(feature = "worker")]
 use hivemind_worker_executor::nodepool_client;
+#[cfg(feature = "worker")]
+use hivemind_worker_executor::runtime_admission::WorkerRuntimeAdmission;
 #[cfg(feature = "worker")]
 use hivemind_worker_executor::WorkerExecutor;
 #[cfg(any(feature = "nodepool", feature = "worker"))]
@@ -456,11 +461,16 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
             worker_id.clone(),
         ));
         let runtime_admission = WorkerRuntimeAdmission::from_environment()?;
+        let wk_chunk_svc = GeneralComputeChunkServiceServer::new(
+            GrpcGeneralComputeChunkService::new(wk_state.clone()),
+        )
+        .max_decoding_message_size(GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES)
+        .max_encoding_message_size(GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES);
         let wk_svc = WorkerNodeServiceServer::new(
             GrpcWorkerNodeService::new(wk_state).with_runtime_admission(runtime_admission),
         )
-            .max_decoding_message_size(WORKER_RPC_MESSAGE_MAX_BYTES)
-            .max_encoding_message_size(WORKER_RPC_MESSAGE_MAX_BYTES);
+        .max_decoding_message_size(WORKER_RPC_MESSAGE_MAX_BYTES)
+        .max_encoding_message_size(WORKER_RPC_MESSAGE_MAX_BYTES);
         let nodepool_addr = nodepool_client_addr(&config, run_nodepool)?;
         let worker_advertise_addr = match nodepool_client::advertise_addr(
             &config.server.worker_grpc_addr,
@@ -575,6 +585,7 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
         tokio::spawn(async move {
             if let Err(e) = tonic::transport::Server::builder()
                 .add_service(wk_svc)
+                .add_service(wk_chunk_svc)
                 .serve(wk_addr.parse().unwrap())
                 .await
             {

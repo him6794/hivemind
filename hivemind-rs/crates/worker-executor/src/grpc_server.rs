@@ -1,12 +1,15 @@
 use hivemind_auth::worker_execution::WorkerExecutionVerifier;
 use hivemind_models::Claims;
 use hivemind_proto::{
+    general_compute_chunk_service_server::GeneralComputeChunkService,
     worker_node_service_server::WorkerNodeService, ExecuteTaskRequest, ExecuteTaskResponse,
-    StopTaskExecutionRequest, StopTaskExecutionResponse, TaskOutputRequest, TaskOutputResponse,
-    TaskOutputUploadRequest, TaskOutputUploadResponse, TaskResultUploadRequest,
-    TaskResultUploadResponse, TaskUsageRequest, TaskUsageResponse,
-    GENERAL_COMPUTE_RESULT_MAX_BYTES, LEGACY_MANAGED_RECEIPT_MAX_BYTES,
-    MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES,
+    GeneralComputeChunkDescriptor, GeneralComputeChunkResumeRequest,
+    GeneralComputeChunkResumeResponse, GeneralComputeChunkUpload,
+    GeneralComputeChunkUploadResponse, StopTaskExecutionRequest, StopTaskExecutionResponse,
+    TaskOutputRequest, TaskOutputResponse, TaskOutputUploadRequest, TaskOutputUploadResponse,
+    TaskResultUploadRequest, TaskResultUploadResponse, TaskUsageRequest, TaskUsageResponse,
+    GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES, GENERAL_COMPUTE_RESULT_MAX_BYTES,
+    LEGACY_MANAGED_RECEIPT_MAX_BYTES, MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES,
     WORKER_RPC_MESSAGE_MAX_BYTES, WORKER_STATUS_MESSAGE_MAX_BYTES,
 };
 use prost::Message;
@@ -15,10 +18,11 @@ use std::sync::{Arc, Mutex};
 use tonic::{Request, Response, Status};
 
 use crate::{
-    managed_prover::ManagedProverError,
-    runtime_admission::WorkerRuntimeAdmission,
-    StopTaskOutcome, TaskResult, WorkerExecutor,
+    managed_prover::ManagedProverError, runtime_admission::WorkerRuntimeAdmission, StopTaskOutcome,
+    TaskResult, WorkerExecutor,
 };
+use general_compute_runtime::artifact::CasChunkStore;
+use general_compute_runtime::GeneralComputeRequest;
 use hivemind_config::HivemindConfig;
 use hivemind_models::{Task, TaskStatus};
 
@@ -26,6 +30,7 @@ pub struct WorkerGrpcState {
     pub config: HivemindConfig,
     pub executor: Arc<WorkerExecutor>,
     worker_id: Option<String>,
+    cas_store: Option<Arc<CasChunkStore>>,
     reports: Mutex<HashMap<String, WorkerTaskReport>>,
 }
 
@@ -36,6 +41,7 @@ struct WorkerTaskReport {
     output: Option<String>,
     result_torrent: Option<String>,
     usage: Option<hivemind_proto::ResourceUsage>,
+    general_compute_request: Option<GeneralComputeRequest>,
 }
 
 impl WorkerGrpcState {
@@ -44,6 +50,7 @@ impl WorkerGrpcState {
             config,
             executor,
             worker_id: Some(worker_id),
+            cas_store: crate::executor::cas_store_from_environment(),
             reports: Mutex::new(HashMap::new()),
         }
     }
@@ -55,6 +62,92 @@ const MAX_RESULT_REFERENCE_BYTES: usize = 4096;
 pub struct GrpcWorkerNodeService {
     state: Arc<WorkerGrpcState>,
     runtime_admission: WorkerRuntimeAdmission,
+}
+
+/// Dedicated authenticated CAS/chunk service. This is intentionally a
+/// separate gRPC service from `WorkerNodeService::ExecuteTask`, whose message
+/// cap is too small for a bounded 16 MiB chunk.
+pub struct GrpcGeneralComputeChunkService {
+    state: Arc<WorkerGrpcState>,
+}
+
+impl GrpcGeneralComputeChunkService {
+    pub fn new(state: Arc<WorkerGrpcState>) -> Self {
+        Self { state }
+    }
+
+    fn verifier(&self) -> Result<WorkerExecutionVerifier, Status> {
+        WorkerExecutionVerifier::from_pem(&self.state.config.auth.worker_execution_public_key_pem)
+            .map_err(|_| Status::internal("Worker execution public key is invalid"))
+    }
+
+    fn assignment(
+        &self,
+        token: &str,
+        execution_id: &str,
+        attempt_id: &str,
+        idempotency_key: &str,
+        request_digest: &str,
+    ) -> Result<
+        (
+            crate::chunk_transport::VerifiedWorkerExecution,
+            GeneralComputeRequest,
+        ),
+        Status,
+    > {
+        let verifier = self.verifier()?;
+        let claims = verifier
+            .decode(token)
+            .map_err(|_| Status::unauthenticated("Invalid token"))?;
+        if claims.role.as_deref() != Some("worker-execution") {
+            return Err(Status::permission_denied("Worker execution token required"));
+        }
+        let task_id = claims
+            .task_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| Status::permission_denied("Token is not bound to a task"))?;
+        let worker_id = claims
+            .worker_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| Status::permission_denied("Token is not bound to a worker"))?;
+        if self.state.worker_id.as_deref() != Some(worker_id) {
+            return Err(Status::permission_denied(
+                "Token is not bound to this worker",
+            ));
+        }
+        let reports = self
+            .state
+            .reports
+            .lock()
+            .map_err(|_| Status::internal("task report store poisoned"))?;
+        let report = reports.get(task_id).ok_or_else(|| {
+            Status::permission_denied("Token is not authorized for task assignment")
+        })?;
+        if report.owner != claims.sub || report.worker_id.as_deref() != Some(worker_id) {
+            return Err(Status::permission_denied(
+                "Token is not authorized for task assignment",
+            ));
+        }
+        let request = report.general_compute_request.clone().ok_or_else(|| {
+            Status::failed_precondition("general-compute request is not assigned")
+        })?;
+        if request.execution_id != execution_id
+            || request.attempt_id != attempt_id
+            || request.idempotency_key != idempotency_key
+            || request.request_digest != request_digest
+        {
+            return Err(Status::permission_denied(
+                "Chunk identity is not bound to the assigned attempt",
+            ));
+        }
+        let verified = crate::chunk_transport::VerifiedWorkerExecution::from_token(
+            &verifier, token, task_id, worker_id,
+        )
+        .map_err(chunk_auth_status)?;
+        Ok((verified, request))
+    }
 }
 
 impl GrpcWorkerNodeService {
@@ -108,6 +201,7 @@ impl GrpcWorkerNodeService {
                 output: None,
                 result_torrent: None,
                 usage: None,
+                general_compute_request: None,
             },
         );
         Ok(())
@@ -168,6 +262,16 @@ impl GrpcWorkerNodeService {
             .lock()
             .map_err(|_| Box::new(Status::internal("task report store poisoned")))
             .map(|reports| reports.get(task_id).cloned())
+    }
+
+    fn record_general_compute_request(
+        &self,
+        task_id: &str,
+        request: GeneralComputeRequest,
+    ) -> Result<(), Box<Status>> {
+        self.report_for_update(task_id, |report| {
+            report.general_compute_request = Some(request);
+        })
     }
 }
 
@@ -235,13 +339,17 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         {
             return Err(*task_assignment_denied());
         }
-        self
+        let admitted = self
             .runtime_admission
             .admit(&req.runtime, &req.general_compute_manifest_json)
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
         validate_execute_task_contract(&req).map_err(Status::invalid_argument)?;
         self.record_task_assignment(&req.task_id, &claims.sub)
             .map_err(|status| *status)?;
+        if let crate::runtime_admission::RuntimeRoute::GeneralComputeV1Alpha1(request) = admitted {
+            self.record_general_compute_request(&req.task_id, request)
+                .map_err(|status| *status)?;
+        }
         let limits = req.resource_limits.unwrap_or_default();
         let task = Task {
             id: uuid::Uuid::new_v4(),
@@ -494,6 +602,119 @@ impl WorkerNodeService for GrpcWorkerNodeService {
     }
 }
 
+#[tonic::async_trait]
+impl GeneralComputeChunkService for GrpcGeneralComputeChunkService {
+    async fn upload_chunk(
+        &self,
+        request: Request<GeneralComputeChunkUpload>,
+    ) -> Result<Response<GeneralComputeChunkUploadResponse>, Status> {
+        let upload = request.into_inner();
+        let (verified, request) = self.assignment(
+            &upload.token,
+            &upload.execution_id,
+            &upload.attempt_id,
+            &upload.idempotency_key,
+            &upload.request_digest,
+        )?;
+        let store = self
+            .state
+            .cas_store
+            .as_deref()
+            .ok_or_else(|| Status::failed_precondition("general-compute CAS is unavailable"))?;
+        crate::chunk_transport::ingest_general_compute_chunk(store, &request, &upload, &verified)
+            .map_err(chunk_transport_status)?;
+        Ok(Response::new(GeneralComputeChunkUploadResponse {
+            success: true,
+            status_message: "accepted".into(),
+            accepted_chunks: 1,
+        }))
+    }
+
+    async fn resume_chunks(
+        &self,
+        request: Request<GeneralComputeChunkResumeRequest>,
+    ) -> Result<Response<GeneralComputeChunkResumeResponse>, Status> {
+        let resume = request.into_inner();
+        let (verified, request) = self.assignment(
+            &resume.token,
+            &resume.execution_id,
+            &resume.attempt_id,
+            &resume.idempotency_key,
+            &resume.request_digest,
+        )?;
+        let store = self
+            .state
+            .cas_store
+            .as_deref()
+            .ok_or_else(|| Status::failed_precondition("general-compute CAS is unavailable"))?;
+        let missing = crate::chunk_transport::resume_general_compute_chunks(
+            store, &request, &resume, &verified,
+        )
+        .map_err(chunk_transport_status)?;
+        let response = GeneralComputeChunkResumeResponse {
+            success: true,
+            status_message: "resume".into(),
+            missing_chunks: missing.into_iter().map(chunk_descriptor).collect(),
+        };
+        if response.encoded_len() > GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES {
+            return Err(Status::resource_exhausted(
+                "missing chunk descriptor response is too large",
+            ));
+        }
+        Ok(Response::new(response))
+    }
+}
+
+fn chunk_descriptor(
+    chunk: general_compute_runtime::ArtifactChunk,
+) -> GeneralComputeChunkDescriptor {
+    GeneralComputeChunkDescriptor {
+        offset: chunk.offset as i64,
+        size_bytes: chunk.size_bytes as i64,
+        sha256: chunk.sha256,
+    }
+}
+
+fn chunk_auth_status(error: crate::chunk_transport::WorkerChunkIngestError) -> Status {
+    match error {
+        crate::chunk_transport::WorkerChunkIngestError::AuthorizationInvalid => {
+            Status::unauthenticated(error.to_string())
+        }
+        crate::chunk_transport::WorkerChunkIngestError::AuthorizationMismatch
+        | crate::chunk_transport::WorkerChunkIngestError::TokenMismatch => {
+            Status::permission_denied(error.to_string())
+        }
+        _ => Status::permission_denied(error.to_string()),
+    }
+}
+
+fn chunk_transport_status(error: crate::chunk_transport::WorkerChunkIngestError) -> Status {
+    match error {
+        crate::chunk_transport::WorkerChunkIngestError::TokenMismatch
+        | crate::chunk_transport::WorkerChunkIngestError::AuthorizationMismatch => {
+            Status::permission_denied(error.to_string())
+        }
+        crate::chunk_transport::WorkerChunkIngestError::AuthorizationInvalid => {
+            Status::unauthenticated(error.to_string())
+        }
+        crate::chunk_transport::WorkerChunkIngestError::WireInvalid(_) => {
+            Status::invalid_argument(error.to_string())
+        }
+        crate::chunk_transport::WorkerChunkIngestError::Transport(error) => match error {
+            general_compute_runtime::transport::ChunkTransportError::IdentityMismatch => {
+                Status::permission_denied(error.to_string())
+            }
+            general_compute_runtime::transport::ChunkTransportError::ArtifactNotFound
+            | general_compute_runtime::transport::ChunkTransportError::ManifestChunkMismatch
+            | general_compute_runtime::transport::ChunkTransportError::ManifestInvalid(_)
+            | general_compute_runtime::transport::ChunkTransportError::RequestInvalid(_) => {
+                Status::invalid_argument(error.to_string())
+            }
+            _ => Status::failed_precondition(error.to_string()),
+        },
+    }
+}
+
 fn execute_response_from_result(
     result: TaskResult,
     managed_proof_required: bool,
@@ -609,13 +830,18 @@ fn resource_usage_is_finite(usage: &hivemind_proto::ResourceUsage) -> bool {
 mod tests {
     use super::*;
     use chrono::Utc;
+    use general_compute_runtime::artifact::CasChunkStore;
+    use general_compute_runtime::{
+        sha256_digest, ArtifactChunk, ArtifactManifest, ArtifactRole, ExecutionPolicy,
+        GeneralComputeRequest, GENERAL_COMPUTE_RUNTIME_VERSION,
+    };
     use hivemind_auth::worker_execution::WorkerExecutionSigner;
     use hivemind_models::Claims;
     use hivemind_proto::ResourceSpec;
     use std::sync::{Arc, OnceLock};
     use std::time::Duration;
     use tempfile::TempDir;
-    use tonic::Request;
+    use tonic::{Code, Request};
 
     const CONTROL_PLANE_SECRET: &str = "unit-test-control-plane-secret-at-least-32-bytes";
     const ASSIGNED_OWNER: &str = "task-owner";
@@ -651,6 +877,137 @@ mod tests {
             idempotency_key: String::new(),
             request_digest: String::new(),
         }
+    }
+
+    fn general_compute_request_for_chunk_tests() -> GeneralComputeRequest {
+        let bytes = b"print(42)";
+        let source = ArtifactManifest {
+            artifact_id: "source".into(),
+            role: ArtifactRole::Source,
+            size_bytes: bytes.len() as u64,
+            mime_type: "text/plain".into(),
+            sha256: sha256_digest(bytes),
+            chunks: vec![ArtifactChunk {
+                offset: 0,
+                size_bytes: bytes.len() as u64,
+                sha256: sha256_digest(bytes),
+            }],
+            inline_bytes: None,
+        };
+        let mut request = GeneralComputeRequest {
+            execution_id: "execution-service".into(),
+            attempt_id: "attempt-service".into(),
+            idempotency_key: "idempotency-service".into(),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest: format!("sha256:{}", "a".repeat(64)),
+            backend_id: "python-reference".into(),
+            entrypoint: "main".into(),
+            source_artifact: source,
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: Default::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+        request
+    }
+
+    fn general_compute_upload(
+        request: &GeneralComputeRequest,
+        token: &str,
+        bytes: &[u8],
+    ) -> hivemind_proto::GeneralComputeChunkUpload {
+        hivemind_proto::GeneralComputeChunkUpload {
+            token: token.into(),
+            execution_id: request.execution_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+            request_digest: request.request_digest.clone(),
+            artifact_id: "source".into(),
+            offset: 0,
+            size_bytes: bytes.len() as i64,
+            sha256: sha256_digest(bytes),
+            bytes: bytes.to_vec(),
+        }
+    }
+
+    fn chunk_runtime_admission() -> WorkerRuntimeAdmission {
+        WorkerRuntimeAdmission::new(
+            general_compute_runtime::CapabilityMatrix::new(vec![
+                general_compute_runtime::BackendRegistration {
+                    backend_id: "python-reference".into(),
+                    guest_image_digest: format!("sha256:{}", "a".repeat(64)),
+                    capabilities: vec!["cpu".into()],
+                    max_threads: 2,
+                    network_allowed: false,
+                    filesystem_read_only: true,
+                    gpu_allowed: false,
+                },
+            ]),
+            general_compute_runtime::WorkerCapabilities {
+                guest_image_digests: vec![format!("sha256:{}", "a".repeat(64))],
+                capabilities: vec!["cpu".into()],
+                max_threads: 2,
+                gpu_available: false,
+            },
+        )
+    }
+
+    fn chunk_test_components(
+        base: &std::path::Path,
+        cas_store: Option<Arc<CasChunkStore>>,
+    ) -> (GrpcWorkerNodeService, GrpcGeneralComputeChunkService) {
+        let mut config = HivemindConfig::default();
+        config.executor.sandbox_dir = base.join("sandbox").to_string_lossy().to_string();
+        config.auth.jwt_secret = CONTROL_PLANE_SECRET.into();
+        config.auth.worker_execution_public_key_pem = test_key_pair().1.clone();
+        let executor = Arc::new(WorkerExecutor::new_with_task_runner(
+            config.clone(),
+            |_task, _cancellation| async move { Ok(successful_task_result(None)) },
+        ));
+        let state = Arc::new(WorkerGrpcState {
+            config,
+            executor,
+            worker_id: Some(TEST_WORKER_ID.into()),
+            cas_store,
+            reports: Mutex::new(HashMap::new()),
+        });
+        let worker = GrpcWorkerNodeService::new(state.clone())
+            .with_runtime_admission(chunk_runtime_admission());
+        let chunk_service = GrpcGeneralComputeChunkService::new(state);
+        (worker, chunk_service)
+    }
+
+    fn general_compute_execute_request(
+        request: &GeneralComputeRequest,
+        token: &str,
+        task_id: &str,
+    ) -> ExecuteTaskRequest {
+        ExecuteTaskRequest {
+            task_id: task_id.into(),
+            runtime: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            token: token.into(),
+            general_compute_manifest_json: serde_json::to_vec(request).unwrap(),
+            ..ExecuteTaskRequest::default()
+        }
+    }
+
+    async fn admit_general_compute_request(
+        worker: &GrpcWorkerNodeService,
+        request: &GeneralComputeRequest,
+        token: &str,
+        task_id: &str,
+    ) {
+        let response = worker
+            .execute_task(Request::new(general_compute_execute_request(
+                request, token, task_id,
+            )))
+            .await
+            .expect("general-compute admission should execute")
+            .into_inner();
+        assert!(response.success, "admission runner should succeed");
     }
 
     #[test]
@@ -712,7 +1069,8 @@ mod tests {
 
     #[test]
     fn worker_legacy_execute_response_keeps_attempt_identity_empty() {
-        let mut request = execute_request("managed-function-v0", "return 42;".into(), "{}".into(), 10);
+        let mut request =
+            execute_request("managed-function-v0", "return 42;".into(), "{}".into(), 10);
         request.execution_id = "execution-legacy-should-not-echo".into();
         request.attempt_id = "attempt-legacy-should-not-echo".into();
         request.idempotency_key = "idempotency-legacy-should-not-echo".into();
@@ -1539,6 +1897,139 @@ mod tests {
             .contains("Task execution stopped"));
     }
 
+    #[tokio::test]
+    async fn chunk_service_accepts_only_an_assigned_verified_attempt_and_replays_idempotently() {
+        let tmp = TempDir::new().unwrap();
+        let cas_root = TempDir::new().unwrap();
+        let store = Arc::new(CasChunkStore::new(cas_root.path()).unwrap());
+        let (worker, chunk_service) = chunk_test_components(tmp.path(), Some(store.clone()));
+        let request = general_compute_request_for_chunk_tests();
+        let token = bound_token(test_private_key_pem(), ASSIGNED_OWNER, "chunk-task");
+        admit_general_compute_request(&worker, &request, &token, "chunk-task").await;
+        let upload = general_compute_upload(&request, &token, b"print(42)");
+
+        let first = chunk_service
+            .upload_chunk(Request::new(upload.clone()))
+            .await
+            .expect("assigned chunk should be accepted")
+            .into_inner();
+        assert!(first.success);
+        let replay = chunk_service
+            .upload_chunk(Request::new(upload))
+            .await
+            .expect("identical chunk replay should be accepted")
+            .into_inner();
+        assert!(replay.success);
+        assert_eq!(
+            std::fs::read(store.chunk_path(&sha256_digest(b"print(42)")).unwrap()).unwrap(),
+            b"print(42)"
+        );
+
+        let resume = GeneralComputeChunkResumeRequest {
+            token: token.clone(),
+            execution_id: request.execution_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+            request_digest: request.request_digest.clone(),
+            artifact_id: "source".into(),
+            completed_sha256: vec![sha256_digest(b"print(42)")],
+        };
+        let resumed = chunk_service
+            .resume_chunks(Request::new(resume))
+            .await
+            .expect("resume should inspect the operator CAS")
+            .into_inner();
+        assert!(resumed.success);
+        assert!(resumed.missing_chunks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn chunk_service_rejects_a_token_for_another_assignment() {
+        let tmp = TempDir::new().unwrap();
+        let cas_root = TempDir::new().unwrap();
+        let store = Arc::new(CasChunkStore::new(cas_root.path()).unwrap());
+        let (worker, chunk_service) = chunk_test_components(tmp.path(), Some(store));
+        let request = general_compute_request_for_chunk_tests();
+        let token = bound_token(test_private_key_pem(), ASSIGNED_OWNER, "chunk-task");
+        admit_general_compute_request(&worker, &request, &token, "chunk-task").await;
+
+        let wrong_token = bound_token(test_private_key_pem(), ASSIGNED_OWNER, "other-task");
+        let status = chunk_service
+            .upload_chunk(Request::new(general_compute_upload(
+                &request,
+                &wrong_token,
+                b"print(42)",
+            )))
+            .await
+            .expect_err("a token for another assignment must be rejected");
+        assert_eq!(status.code(), Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn chunk_service_rejects_an_attempt_or_digest_not_bound_to_the_assignment() {
+        let tmp = TempDir::new().unwrap();
+        let cas_root = TempDir::new().unwrap();
+        let store = Arc::new(CasChunkStore::new(cas_root.path()).unwrap());
+        let (worker, chunk_service) = chunk_test_components(tmp.path(), Some(store));
+        let request = general_compute_request_for_chunk_tests();
+        let token = bound_token(test_private_key_pem(), ASSIGNED_OWNER, "chunk-task");
+        admit_general_compute_request(&worker, &request, &token, "chunk-task").await;
+
+        let mut stale = general_compute_upload(&request, &token, b"print(42)");
+        stale.attempt_id = "attempt-stale".into();
+        let status = chunk_service
+            .upload_chunk(Request::new(stale))
+            .await
+            .expect_err("a stale attempt must be rejected");
+        assert_eq!(status.code(), Code::PermissionDenied);
+
+        let mut wrong_digest = general_compute_upload(&request, &token, b"print(42)");
+        wrong_digest.request_digest = format!("sha256:{}", "b".repeat(64));
+        let status = chunk_service
+            .upload_chunk(Request::new(wrong_digest))
+            .await
+            .expect_err("a stale request digest must be rejected");
+        assert_eq!(status.code(), Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn chunk_service_requires_an_admitted_general_compute_request() {
+        let tmp = TempDir::new().unwrap();
+        let cas_root = TempDir::new().unwrap();
+        let store = Arc::new(CasChunkStore::new(cas_root.path()).unwrap());
+        let (worker, chunk_service) = chunk_test_components(tmp.path(), Some(store));
+        let request = general_compute_request_for_chunk_tests();
+        let token = bound_token(test_private_key_pem(), ASSIGNED_OWNER, "chunk-task");
+        worker
+            .record_task_assignment("chunk-task", ASSIGNED_OWNER)
+            .expect("assignment seed should succeed");
+
+        let status = chunk_service
+            .upload_chunk(Request::new(general_compute_upload(
+                &request, &token, b"print(42)",
+            )))
+            .await
+            .expect_err("chunk upload must require an admitted request");
+        assert_eq!(status.code(), Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn chunk_service_fails_closed_when_operator_cas_is_unavailable() {
+        let tmp = TempDir::new().unwrap();
+        let (worker, chunk_service) = chunk_test_components(tmp.path(), None);
+        let request = general_compute_request_for_chunk_tests();
+        let token = bound_token(test_private_key_pem(), ASSIGNED_OWNER, "chunk-task");
+        admit_general_compute_request(&worker, &request, &token, "chunk-task").await;
+
+        let status = chunk_service
+            .upload_chunk(Request::new(general_compute_upload(
+                &request, &token, b"print(42)",
+            )))
+            .await
+            .expect_err("chunk upload must fail closed without an operator CAS");
+        assert_eq!(status.code(), Code::FailedPrecondition);
+    }
+
     fn seed_assignment(
         service: &GrpcWorkerNodeService,
         task_id: &str,
@@ -1617,6 +2108,7 @@ mod tests {
             config,
             executor,
             worker_id: Some(TEST_WORKER_ID.into()),
+            cas_store: None,
             reports: Mutex::new(HashMap::new()),
         }))
     }
@@ -1631,6 +2123,7 @@ mod tests {
             config,
             executor,
             worker_id: Some(TEST_WORKER_ID.into()),
+            cas_store: None,
             reports: Mutex::new(HashMap::new()),
         }))
     }
