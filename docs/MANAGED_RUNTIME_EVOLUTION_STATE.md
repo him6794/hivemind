@@ -219,6 +219,29 @@ tests, and the full locked runtime suite passed. Scoped rustfmt/checks remain
 green; crate-wide strict clippy remains blocked by the pre-existing runtime
 pedantic debt documented above.
 
+### M3 typed proto chunk envelope checkpoint (2026-08-13)
+
+The Hivemind proto contract now carries `GeneralComputeChunkUpload` and
+`GeneralComputeChunkResumeRequest` messages. Both include the Nodepool-issued
+execution token, execution/attempt/idempotency identity, canonical request
+digest, and artifact id. Uploads additionally bind offset, positive size,
+SHA-256, and raw bytes; resume requests carry completed chunk digests. The
+proto crate validates required identity fields, digest syntax, and declared
+size/bytes equality, rejects negative offsets, zero/mismatched sizes, invalid
+digests, and payloads over the 16 MiB per-chunk cap. Runtime CAS ingest remains
+the authority that recomputes SHA-256 over the actual bytes.
+
+This checkpoint intentionally adds messages and pure wire validation only. It
+does not add a new RPC method or enlarge the existing 4 MiB Worker unary RPC;
+the next transport unit must define an authenticated streaming/service boundary
+whose configured message limits can carry the chunk cap, then invoke the
+runtime's identity-bound local-CAS ingest. Nodepool request/attempt binding and
+token authorization remain mandatory at that service boundary.
+
+RED→GREEN evidence: proto tests first failed because the typed messages and
+validators were absent; `cargo test -p hivemind-proto --locked` now passes 8
+tests and `cargo check -p hivemind-proto --locked` is green.
+
 ## Notes
 
 - 2026-08-13 Monty removal was revalidated after the cleanup commit: the root repository has no tracked Monty paths, `executor-rs/Cargo.toml` exposes only `managed-function-runtime` and `general-compute-runtime`, and the executor workspace plus Docker/Windows release-contract gates pass. The untracked nested `executor-rs/.git` upstream metadata and stale `executor-rs/target` build artifacts were physically removed after explicit user authorization; neither was part of any Hivemind build or runtime path.

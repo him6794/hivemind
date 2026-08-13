@@ -383,6 +383,32 @@ message ExecuteTaskResponse {
     bytes general_compute_result_json = 11; // validated general-compute-v1alpha1 result envelope
 }
 
+// Nodepool -> Worker: authenticated, attempt-bound general-compute artifact
+// transfer. These messages intentionally carry the full identity and manifest
+// binding; callers must not replace them with a raw bytes upload.
+message GeneralComputeChunkUpload {
+    string token = 1; // nodepool-issued worker execution token
+    string execution_id = 2;
+    string attempt_id = 3;
+    string idempotency_key = 4;
+    string request_digest = 5;
+    string artifact_id = 6;
+    int64 offset = 7;
+    int64 size_bytes = 8;
+    string sha256 = 9;
+    bytes bytes = 10;
+}
+
+message GeneralComputeChunkResumeRequest {
+    string token = 1; // nodepool-issued worker execution token
+    string execution_id = 2;
+    string attempt_id = 3;
+    string idempotency_key = 4;
+    string request_digest = 5;
+    string artifact_id = 6;
+    repeated string completed_sha256 = 7;
+}
+
 message TaskOutputUploadRequest {
     string task_id = 1;
     string output = 2;
