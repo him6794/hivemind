@@ -1,2 +1,0 @@
-raise TypeError
-# Raise=TypeError()
