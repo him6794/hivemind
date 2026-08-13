@@ -15,3 +15,8 @@ thiserror.workspace = true
 serde_json.workspace = true
 hivemind-proto = { path = "../proto", optional = true }
 risc0-zkvm = { version = "=3.0.6", default-features = false, features = ["disable-dev-mode"], optional = true }
+
+[[test]]
+name = "v0_semantics_manifest"
+path = "tests/v0_semantics_manifest.rs"
+required-features = ["risc0-verifier"]

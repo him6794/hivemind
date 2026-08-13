@@ -789,6 +789,37 @@ mod tests {
         fixture.cleanup().await.ok();
     }
 
+    #[test]
+    fn managed_v0_billing_formula_matches_frozen_manifest() {
+        let manifest: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../executor-rs/crates/managed-function-runtime/managed-function-v0-semantics.json"
+        ))
+        .unwrap();
+        let mut task = make_task("managed-v0-billing-contract", "owner");
+        task.runtime = Some("managed-function-v0".into());
+        task.managed_receipt_json = Some("{}".into());
+        task.managed_executed_ops = 17;
+        task.max_cpt = 100;
+
+        assert_eq!(
+            manifest["billing"]["base_invocation_cpt"],
+            MANAGED_BASE_INVOCATION_CPT
+        );
+        assert_eq!(manifest["billing"]["usage_unit_cpt"], 1);
+        assert_eq!(
+            manifest["billing"]["formula"],
+            "min(max_cpt, base_invocation_cpt + usage_units)"
+        );
+        assert_eq!(managed_receipt_amount_cpt(&task), 18);
+        assert_eq!(billable_amount_cpt(&task), 18);
+
+        task.max_cpt = 10;
+        assert!(manifest["billing"]["max_cpt_cap_applied"]
+            .as_bool()
+            .unwrap());
+        assert_eq!(billable_amount_cpt(&task), 10);
+    }
+
     #[tokio::test]
     async fn test_create_and_find_task() {
         let (p, fixture) = match pool("task_repository_create_and_find_task").await {

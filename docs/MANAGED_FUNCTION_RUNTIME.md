@@ -11,6 +11,34 @@ The first milestone is a Rust executor that parses a fixed syntax, evaluates it
 without file, network, import, subprocess, or reflection support, and returns an
 execution receipt that can be used for deterministic billing.
 
+## Frozen v0 contract
+
+The machine-readable `managed-function-v0` semantics, metering, billing, and
+proof binding is frozen in
+[`executor-rs/crates/managed-function-runtime/managed-function-v0-semantics.json`](../executor-rs/crates/managed-function-runtime/managed-function-v0-semantics.json).
+Its canonical JSON SHA-256 is
+`8ed716dc07c7bc9abcfc5338b1888e71dd041c3fb397c45d0efb1ff76af1deee`.
+The manifest includes executable cost vectors and pins the real proof fixture,
+proof protocol, RISC Zero scheme, guest image ID, admission limits, and default
+runtime limits. An incompatible change requires new runtime, cost-model,
+proof-protocol, and guest-image identifiers; this file is not a mutable latest
+configuration.
+
+The v0 limitations are part of that frozen contract:
+
+- Source string literals are decoded byte by byte and therefore do not preserve
+  non-ASCII UTF-8. The lexer also does not accept `\uXXXX` or surrogate escape
+  syntax. It only recognizes quote, backslash, line-feed, carriage-return, and
+  tab escapes. JSON input and canonical output remain UTF-8.
+- Managed integers are signed `i64`. Arithmetic overflow currently uses the evaluator's
+  unchecked Rust integer operators, so overflow is not a portable or proof-stable result;
+  tasks must keep arithmetic in range.
+- `RuntimeError` does not expose the evaluator's partial receipt. Worker
+  evaluation failures synthesize zeroed counters; final output-render failures
+  retain only `executed_ops`, and failed receipts do not carry proof envelopes.
+- `ExecutionLimits::unlimited()` is a legacy/testing convenience, not the
+  production v0 default.
+
 ## Runtime Contract
 
 Input:

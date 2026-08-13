@@ -21,7 +21,7 @@ running
 
 ## Current step
 
-M1 supervisor、reference fixtures、differential contract、pinned CPython registry、bounded CPython subprocess 與 exception/malformed response mapping 小單元已完成；M0 runtime id 已固定為 `general-compute-v1alpha1`。下一步補 request 的 execution/attempt/idempotency/digest binding 與 result/evidence validation。M0 capability matrix 仍是 supervisor 啟動前的 fail-closed gate。
+M0a v0 semantics/cost/proof freeze 與 M0b 的 alpha runtime、request/result/evidence、artifact/tensor、capability 契約均已完成；M1 的 reference fixtures、bounded supervisor、CPython adapter、combined output cap 與 trusted executable gate 也已落地。當前缺口是 production sandbox boundary：先完成 Linux fail-closed launch policy 與 hostile filesystem/network、leader-exit、drop kill/reap gates，再接 rootless namespace/cgroup/seccomp/no_new_privs primitives。M0 capability matrix 仍是 supervisor 啟動前的 fail-closed gate。
 
 ## Completed
 
@@ -54,53 +54,58 @@ M1 supervisor、reference fixtures、differential contract、pinned CPython regi
 - `a073180 feat(runtime): kill supervisor process trees`
   - timeout/cancel 時 Unix 建立獨立 process group 並以 group kill 清理 descendants；Windows 使用 `taskkill /T /F` 的 tree-kill fallback，完成後 wait/reap。
   - hostile descendant marker fixture 與 lifecycle tests 6 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
-- M1 reference Minsky interpreter 小單元（待本次 commit）
+- M1 reference Minsky interpreter 小單元（`790b10b`）
   - 新增獨立 bounded reference module：`Inc`、`DecJump`、`Halt` instruction tape、checked jump targets、BigUint registers、step quota 與 cooperative cancellation。
   - Minsky halt/zero-test、non-terminating `resource_exhausted`、invalid target 與 cancellation fixtures 4 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
-- M1 mutable heap 小單元（待本次 commit）
+- M1 mutable heap 小單元（`5ba2ac5`）
   - 新增 checked `Set`／`Allocate`／`Store`／`Load` heap instructions，BigUint cell values、pointer/index validation、cell quota 與 typed `resource_exhausted`。
   - reference tests 6 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
-- M1 recursion/call-depth 小單元（待本次 commit）
+- M1 recursion/call-depth 小單元（`74d532d`）
   - 新增 checked `Call`／`Return` recursion tape、return stack、deterministic depth tracking、stack-underflow error 與 call-depth quota。
   - reference tests 8 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
-- M1 exception/exit semantics 小單元（待本次 commit）
+- M1 exception/exit semantics 小單元（`3dc57ae`）
   - 新增 `Raise`／`Exit`／`Jump` signal tape，明確回傳 `Exception`、`Exited`、`ResourceExhausted`、`Cancelled` 與 `Halted` 狀態及 optional exit code。
   - reference tests 10 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
-- M1 differential harness 小單元（待本次 commit）
+- M1 differential harness 小單元（`9c0e49a`）
   - 新增可序列化 `DifferentialCase`／`ReferenceObservation`，固定 source、JSON input、seed 與 canonical status/steps/output；只允許 registry-pinned fixture 執行。
   - replay、backend mismatch、source/input/seed mismatch fail-closed tests 3 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
-- M1 pinned CPython adapter interface 小單元（待本次 commit）
+- M1 pinned CPython adapter interface 小單元（`752425a`）
   - 新增 registry-approved `PythonBackendRegistration`／`PythonBackendRegistry`／`PinnedPythonAdapter`，要求 executable、sha256 guest image、protocol version 與 output cap；observation 使用 `deny_unknown_fields` 並拒絕未知 status/超限 output。
   - adapter tests 3 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
-- M1 bounded CPython subprocess 小單元（待本次 commit）
+- M1 bounded CPython subprocess 小單元（`870aa66`）
   - supervisor 新增 bounded stdin writer；CPython adapter 以 fixed `python -c` runner、framed stdin/stdout 傳遞 source/input/seed，payload 不進 command line；timeout/cancel 映射為 typed supervisor failure。
   - lifecycle tests 7、CPython adapter tests 6 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
 - M1 CPython response hardening 小單元（`942cf0d`）
   - source exception 映射為 bounded `exception` observation；framed response 若有 trailing bytes 即 fail closed。
   - focused CPython tests 8 passed；executor workspace 69 tests、Worker check 與 Docker/Windows release-contract tests passed。
-- M0 alpha runtime id 小單元（本次 commit）
+- M0 alpha runtime id 小單元（`d632e3d`）
   - 先加入要求 alpha id 且拒絕 stable `general-compute-v1` 的 RED test，再將 contract 常數與 fixtures 固定為 `general-compute-v1alpha1`。
   - focused contracts 8 passed；executor workspace 69 tests、Worker check 與 Docker/Windows release-contract tests passed。
-- M0 request identity/digest binding 小單元（本次 commit）
+- M0 request identity/digest binding 小單元（`6155b08`）
   - 先以 RED tests 證明 request/result 缺少 retry identity；加入 immutable `execution_id`、`attempt_id`、idempotency key、canonical request SHA-256 digest 與 `deny_unknown_fields`。
   - `GeneralComputeResult::validate_against` 驗證 request/result identity、runtime/backend/image/determinism binding；跨 attempt 的 result fail closed。
   - focused contracts 10 passed；executor workspace 69 tests、Worker check 與 Docker/Windows release-contract tests passed。
-- M0 evidence/usage/artifact result validation 小單元（本次 commit）
+- M0 evidence/usage/artifact result validation 小單元（`89cb73e`）
   - 先以 RED tests 鎖定 evidence envelope、output manifest root、status/exit-code、usage quota 與 output role；加入 `EvidenceEnvelope`、worker-only `unverified` gate、canonical artifact root 與 result validator。
   - focused contracts 14 passed；executor workspace 73 tests、Worker check 與 Docker/Windows release-contract tests passed。
-- M0 artifact/CAS manifest 小單元（本次 commit）
+- M0 artifact/CAS manifest 小單元（`a1215ad`）
   - 先以 RED tests 鎖定 inline/CAS canonical root、chunk checksum、chunk-aligned range 與 resume；加入 metadata-only canonical artifact root、inline chunk verification、range validation 與 missing-chunk selection。
   - focused contracts 18 passed；executor workspace 77 tests、Worker check 與 Docker/Windows release-contract tests passed。
-- M0 contiguous tensor ABI 小單元（本次 commit）
+- M0 contiguous tensor ABI 小單元（`d02e9c4`）
   - 先以 RED tests 鎖定 `tensor-v1alpha1`、dtype/shape/byte-order/layout、checked shape/byte arithmetic、empty/zero-dimensional tensor、binary-only payload、unknown-field 與 logical hash。
   - 新增有限 contiguous tensor manifest；BigInt 僅允許 scalar，尚未宣稱 stride/view、sparse 或科學運算支援。
   - focused tensor tests 6 passed；executor workspace 83 tests、Worker check 與 Docker/Windows release-contract tests passed。
-- M1 combined supervisor output 小單元（本次 commit）
+- M1 combined supervisor output 小單元（`dca1235`）
   - 先以 RED tests 證明 per-stream retained cap 會讓 discarded hostile output 逃過總量限制；加入 shared output budget、`OutputLimitExceeded` 狀態，超限立即 kill/reap。
   - focused lifecycle tests 9 passed；executor workspace 86 tests、Worker check 與 Docker/Windows release-contract tests passed。
-- M1 trusted backend executable gate 小單元（本次 commit）
+- M1 trusted backend executable gate 小單元（`4f69bc4`）
   - 先以 RED tests 證明 shell interpreter、參數注入與 shell metacharacter 可進 Python registry；加入 registry-safe executable validation，避免 `CommandSpec` 由不可信字串構造 shell。
   - focused CPython tests 10 passed；executor workspace 87 tests、Worker check 與 Docker/Windows release-contract tests passed。
+- M0a v0 semantics/cost/proof freeze 小單元（`docs(runtime): freeze managed v0 semantics manifest`）
+  - 新增 canonical `managed-function-v0-semantics.json`，凍結 runtime/cost-model、default limits、billing、proof/admission binding、真實 receipt fixture 與可執行 cost vectors；canonical SHA-256 為 `8ed716dc07c7bc9abcfc5338b1888e71dd041c3fb397c45d0efb1ff76af1deee`，fixture SHA-256 為 `8221629b1ba7f2a22430cb4b18a8f2ecb02b306bedb1069d6290cbab95f890bb`。
+  - 公開文件明列 v0 source Unicode byte-decoding、無 `\uXXXX`、unchecked `i64` overflow、synthetic/partial failure receipt 與 `ExecutionLimits::unlimited()` 非 production default 等限制；不改動既有 v0 語義。
+  - RED 證據：runtime/proof tests 在 manifest/export 尚不存在時編譯失敗；proof integration target 漏帶 feature 時原會 0-test 假綠，改以 Cargo `required-features` 後會明確拒絕執行。
+  - GREEN／相容性：managed runtime 1+4+25+4 passed；executor workspace 全綠；managed-proof 37+2 passed；proto 3 passed；scheduler 80 passed/1 environment-gated ignored；Worker GNU 83 passed；Worker MSVC check、Docker Compose與Windows package release contracts passed；獨立 review APPROVE。
 
 ## Active owners
 
@@ -114,11 +119,11 @@ M1 supervisor、reference fixtures、differential contract、pinned CPython regi
 
 ## Next action
 
-在 `general-compute-runtime` 內補 M1 sandbox hardening：Linux namespace/cgroup/seccomp/no_new_privs 與 Windows Job Object 等價邊界；先以 hostile filesystem/network、combined output、leader-exit descendant、drop/kill/reap RED tests 驗證 fail closed，再接平台隔離 primitives。M2 dtype/complex/數值運算仍列為後續獨立小單元。
+在 `general-compute-runtime` 內補 M1 sandbox hardening。下一個最小單元先定義並強制 Linux production sandbox launch policy：未註冊 rootless OCI、namespace/cgroup/seccomp/no_new_privs、read-only root 與 network-deny 能力時 fail closed；以 hostile filesystem/network RED tests 驗證，並保持 pinned CPython direct harness 只作 reference/test backend。後續再分別完成 leader-exit descendant、future drop kill/reap 與實際平台隔離 primitives。M2 dtype/complex/數值運算仍列為後續獨立小單元。
 
 ## Next checkpoint
 
-M0 contiguous tensor ABI 小單元完成 RED → GREEN、protocol/capability/v0 consumer checks 全綠並建立本地 commit；下一 checkpoint 為 M1 sandbox hardening 與 hostile escape gates。
+M0a v0 freeze 已完成 RED → GREEN、跨 runtime/Worker/Nodepool/proof/release gates 並建立獨立本地 commit；下一 checkpoint 為 M1 Linux sandbox launch policy 與 hostile filesystem/network fail-closed gates。
 
 ## Notes
 

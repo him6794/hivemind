@@ -1,5 +1,18 @@
 //! Metered managed function runtime.
 
+/// Canonical `managed-function-v0` semantics, metering, billing, and proof
+/// compatibility manifest.
+///
+/// The bytes are deliberately checked into the runtime crate and hash-pinned
+/// by contract tests. Changing them is a runtime/proof protocol migration, not
+/// an in-place behavior edit.
+pub const V0_SEMANTICS_MANIFEST_JSON: &str = include_str!("../managed-function-v0-semantics.json");
+
+/// SHA-256 of the canonical JSON bytes in [`V0_SEMANTICS_MANIFEST_JSON`],
+/// excluding the file's trailing newline.
+pub const V0_SEMANTICS_MANIFEST_SHA256: &str =
+    "8ed716dc07c7bc9abcfc5338b1888e71dd041c3fb397c45d0efb1ff76af1deee";
+
 use std::{
     collections::{BTreeMap, HashMap},
     error::Error,
