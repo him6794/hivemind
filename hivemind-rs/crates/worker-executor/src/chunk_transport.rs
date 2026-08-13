@@ -7,10 +7,15 @@
 //! performs the request, manifest, and bytes checks before CAS ingest.
 
 use general_compute_runtime::artifact::CasChunkStore;
-use general_compute_runtime::transport::{ingest_chunk, ChunkTransportError, ChunkUploadEnvelope};
+use general_compute_runtime::transport::{
+    ingest_chunk, ChunkResumeEnvelope, ChunkTransportError, ChunkUploadEnvelope,
+};
 use general_compute_runtime::GeneralComputeRequest;
 use hivemind_auth::worker_execution::WorkerExecutionVerifier;
-use hivemind_proto::{validate_general_compute_chunk_upload, GeneralComputeChunkUpload};
+use hivemind_proto::{
+    validate_general_compute_chunk_resume_request, validate_general_compute_chunk_upload,
+    GeneralComputeChunkResumeRequest, GeneralComputeChunkUpload,
+};
 
 /// A JWT verified with the configured Nodepool public key and bound to the
 /// task and worker that accepted the execution request.
@@ -57,7 +62,7 @@ impl VerifiedWorkerExecution {
         })
     }
 
-    fn token(&self) -> &str {
+    pub(crate) fn token(&self) -> &str {
         &self.token
     }
 }
@@ -124,4 +129,44 @@ pub fn ingest_general_compute_chunk(
         bytes: upload.bytes.clone(),
     };
     ingest_chunk(store, request, &envelope).map_err(WorkerChunkIngestError::Transport)
+}
+
+/// Return the manifest chunks not listed as complete by an authenticated
+/// attempt. The local CAS is checked so a claimed completed digest is only
+/// treated as complete when its object is actually present and verified.
+pub fn resume_general_compute_chunks(
+    store: &CasChunkStore,
+    request: &GeneralComputeRequest,
+    resume: &GeneralComputeChunkResumeRequest,
+    verified_execution: &VerifiedWorkerExecution,
+) -> Result<Vec<general_compute_runtime::ArtifactChunk>, WorkerChunkIngestError> {
+    if resume.token != verified_execution.token() {
+        return Err(WorkerChunkIngestError::TokenMismatch);
+    }
+    validate_general_compute_chunk_resume_request(resume)
+        .map_err(WorkerChunkIngestError::WireInvalid)?;
+    let envelope = ChunkResumeEnvelope {
+        execution_id: resume.execution_id.clone(),
+        attempt_id: resume.attempt_id.clone(),
+        idempotency_key: resume.idempotency_key.clone(),
+        request_digest: resume.request_digest.clone(),
+        artifact_id: resume.artifact_id.clone(),
+        completed_sha256: resume.completed_sha256.clone(),
+    };
+    let _ = envelope
+        .missing_chunks(request)
+        .map_err(WorkerChunkIngestError::Transport)?;
+    let artifact = std::iter::once(&request.source_artifact)
+        .chain(request.input_artifacts.iter())
+        .find(|artifact| artifact.artifact_id == resume.artifact_id)
+        .ok_or(WorkerChunkIngestError::Transport(
+            ChunkTransportError::ArtifactNotFound,
+        ))?;
+    // The caller's completed list is only an admission hint. Recompute the
+    // actual missing set from the operator-owned CAS so a false claim cannot
+    // suppress a required transfer.
+    let actual_missing = store
+        .missing_chunks(artifact)
+        .map_err(|error| WorkerChunkIngestError::Transport(ChunkTransportError::Storage(error)))?;
+    Ok(actual_missing)
 }
