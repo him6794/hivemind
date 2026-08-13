@@ -190,6 +190,8 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use hivemind_models::TaskStatus;
+    use managed_function_runtime::V0_SEMANTICS_MANIFEST_JSON;
+    use serde_json::Value;
     use tempfile::TempDir;
     use uuid::Uuid;
 
@@ -239,6 +241,22 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("budget_exhausted"));
+
+        let manifest: Value = serde_json::from_str(V0_SEMANTICS_MANIFEST_JSON).unwrap();
+        let receipt: Value =
+            serde_json::from_str(result.managed_receipt_json.as_deref().unwrap()).unwrap();
+        assert!(manifest["failure_receipts"]["worker_synthetic_receipt"]
+            .as_bool()
+            .unwrap());
+        assert_eq!(
+            manifest["failure_receipts"]["evaluation_failure_counters"],
+            "zeroed"
+        );
+        assert_eq!(receipt["runtime"], manifest["runtime_id"]);
+        assert_eq!(receipt["status"], "failed");
+        assert_eq!(receipt["executed_ops"], 0);
+        assert_eq!(receipt["output_bytes"], 0);
+        assert!(result.managed_proof.is_none());
     }
 
     #[tokio::test]
