@@ -7,8 +7,9 @@ use hivemind_managed_proof::{ClaimError, ExecutionClaim};
 use hivemind_models::{Claims, Task, TaskStatus, WorkerNode};
 use hivemind_proto::{
     worker_node_service_client::WorkerNodeServiceClient, ExecuteTaskRequest, ExecuteTaskResponse,
-    ManagedProofEnvelope, ResourceSpec as ProtoResourceSpec, LEGACY_MANAGED_RECEIPT_MAX_BYTES,
-    WORKER_RPC_MESSAGE_MAX_BYTES, WORKER_STATUS_MESSAGE_MAX_BYTES,
+    ManagedProofEnvelope, ResourceSpec as ProtoResourceSpec, GENERAL_COMPUTE_RESULT_MAX_BYTES,
+    LEGACY_MANAGED_RECEIPT_MAX_BYTES, WORKER_RPC_MESSAGE_MAX_BYTES,
+    WORKER_STATUS_MESSAGE_MAX_BYTES,
 };
 use std::collections::HashMap;
 use std::future::Future;
@@ -376,7 +377,8 @@ fn build_execute_task_request_with_token(task: &Task, token: String) -> ExecuteT
 
 fn general_compute_identity(task: &Task) -> Option<(String, String, String, String)> {
     let manifest = task.general_compute_manifest_json.as_deref()?;
-    let request = serde_json::from_slice::<general_compute_runtime::GeneralComputeRequest>(manifest).ok()?;
+    let request =
+        serde_json::from_slice::<general_compute_runtime::GeneralComputeRequest>(manifest).ok()?;
     request.validate().ok()?;
     Some((
         request.execution_id,
@@ -393,7 +395,8 @@ fn validate_general_compute_response_identity(
     if task.runtime.as_deref() != Some("general-compute-v1alpha1") {
         return Ok(());
     }
-    let Some((execution_id, attempt_id, idempotency_key, request_digest)) = general_compute_identity(task)
+    let Some((execution_id, attempt_id, idempotency_key, request_digest)) =
+        general_compute_identity(task)
     else {
         return Err("general-compute request identity is missing or malformed");
     };
@@ -496,15 +499,23 @@ async fn execute_on_worker(
             let response = response.into_inner();
             if let Err(reason) = validate_worker_response_sizes(&response) {
                 let reason = reason.to_string();
-                repo.fail_for_worker(&task.task_id, &worker_id, &reason)
-                    .await?;
+                if current_task.runtime.as_deref()
+                    == Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION)
+                {
+                    repo.reset_to_pending_for_worker(&task.task_id, &worker_id)
+                        .await?;
+                } else {
+                    repo.fail_for_worker(&task.task_id, &worker_id, &reason)
+                        .await?;
+                }
                 warn!(
                     "Task {} returned an oversized response from worker {}: {}",
                     task.task_id, worker_id, reason
                 );
                 return Ok(());
             }
-            if let Err(reason) = validate_general_compute_response_identity(&current_task, &response)
+            if let Err(reason) =
+                validate_general_compute_response_identity(&current_task, &response)
             {
                 repo.reset_to_pending_for_worker(&task.task_id, &worker_id)
                     .await?;
@@ -514,6 +525,39 @@ async fn execute_on_worker(
                 );
                 return Ok(());
             }
+            let general_compute_result = if current_task.runtime.as_deref()
+                == Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION)
+            {
+                let capability_snapshot =
+                    repo.general_compute_capability_snapshot(&worker_id).await?;
+                let Some(capability_snapshot) = capability_snapshot else {
+                    repo.reset_to_pending_for_worker(&task.task_id, &worker_id)
+                        .await?;
+                    warn!(
+                        "Task {} returned a general-compute result from worker {} without a trusted capability snapshot; redispatching",
+                        task.task_id, worker_id
+                    );
+                    return Ok(());
+                };
+                match decode_and_validate_general_compute_result(
+                    &current_task,
+                    &response,
+                    &capability_snapshot,
+                ) {
+                    Ok(result) => Some(result),
+                    Err(reason) => {
+                        repo.reset_to_pending_for_worker(&task.task_id, &worker_id)
+                            .await?;
+                        warn!(
+                            "Task {} returned an invalid typed general-compute result from worker {}; redispatching: {}",
+                            task.task_id, worker_id, reason
+                        );
+                        return Ok(());
+                    }
+                }
+            } else {
+                None
+            };
             if response.success {
                 let managed_proof = match managed_proof_for_completion_with_mode(
                     managed_proof_rollout_mode,
@@ -701,15 +745,18 @@ async fn execute_on_worker(
                             .await;
                         }
                     }
-                    if current_task.runtime.as_deref() == Some("general-compute-v1alpha1") {
+                    if let Some(result) = general_compute_result.as_ref() {
                         repo.complete_general_compute_for_worker(
                             &task.task_id,
                             &worker_id,
                             current_task
                                 .general_compute_manifest_json
                                 .as_deref()
-                                .ok_or_else(|| anyhow::anyhow!("general-compute request manifest is missing"))?,
-                            Some(&response.status_message),
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!("general-compute request manifest is missing")
+                                })?,
+                            &response.general_compute_result_json,
+                            (!result.stdout.is_empty()).then_some(result.stdout.as_str()),
                         )
                         .await?;
                     } else {
@@ -724,6 +771,20 @@ async fn execute_on_worker(
                 }
                 info!("Task {} completed by worker {}", task.task_id, worker_id);
             } else {
+                if let Some(result) = general_compute_result.as_ref() {
+                    let reason = result
+                        .error_code
+                        .as_deref()
+                        .filter(|message| !message.trim().is_empty())
+                        .unwrap_or("general-compute execution failed");
+                    repo.fail_for_worker(&task.task_id, &worker_id, reason)
+                        .await?;
+                    warn!(
+                        "Task {} failed typed general-compute execution on worker {}: {}",
+                        task.task_id, worker_id, reason
+                    );
+                    return Ok(());
+                }
                 repo.fail_for_worker(&task.task_id, &worker_id, &response.status_message)
                     .await?;
                 warn!(
@@ -868,6 +929,8 @@ enum WorkerResponseSizeError {
     StatusMessageTooLarge,
     #[error("Worker legacy managed receipt exceeds the application limit")]
     LegacyReceiptTooLarge,
+    #[error("Worker typed general-compute result exceeds the application limit")]
+    GeneralComputeResultTooLarge,
 }
 
 fn validate_worker_response_sizes(
@@ -879,7 +942,50 @@ fn validate_worker_response_sizes(
     if response.managed_receipt_json.len() > LEGACY_MANAGED_RECEIPT_MAX_BYTES {
         return Err(WorkerResponseSizeError::LegacyReceiptTooLarge);
     }
+    if response.general_compute_result_json.len() > GENERAL_COMPUTE_RESULT_MAX_BYTES {
+        return Err(WorkerResponseSizeError::GeneralComputeResultTooLarge);
+    }
     Ok(())
+}
+
+fn decode_and_validate_general_compute_result(
+    task: &Task,
+    response: &ExecuteTaskResponse,
+    capability_snapshot_json: &str,
+) -> std::result::Result<general_compute_runtime::GeneralComputeResult, String> {
+    if response.general_compute_result_json.is_empty() {
+        return Err("general-compute typed result is missing".into());
+    }
+    let request = task
+        .general_compute_manifest_json
+        .as_deref()
+        .ok_or_else(|| "general-compute request manifest is missing".to_string())
+        .and_then(|manifest| {
+            serde_json::from_slice::<general_compute_runtime::GeneralComputeRequest>(manifest)
+                .map_err(|error| format!("general-compute request is malformed: {error}"))
+        })?;
+    let registration = serde_json::from_str::<
+        general_compute_runtime::TrustedWorkerCapabilityRegistration,
+    >(capability_snapshot_json)
+    .map_err(|error| format!("trusted capability snapshot is malformed: {error}"))?;
+    let matrix = general_compute_runtime::CapabilityMatrix::new(registration.backends);
+    matrix
+        .validate_request(&request, &registration.worker)
+        .map_err(|error| {
+            format!("request no longer matches trusted capability snapshot: {error:?}")
+        })?;
+    let result = serde_json::from_slice::<general_compute_runtime::GeneralComputeResult>(
+        &response.general_compute_result_json,
+    )
+    .map_err(|error| format!("general-compute typed result is malformed: {error}"))?;
+    result
+        .validate_against(&request, &matrix)
+        .map_err(|error| format!("general-compute typed result failed validation: {error:?}"))?;
+    let expected_success = result.status == general_compute_runtime::ResultStatus::Completed;
+    if response.success != expected_success {
+        return Err("worker success flag does not match typed result status".into());
+    }
+    Ok(result)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1042,7 +1148,10 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use general_compute_runtime::{
-        ArtifactManifest, ArtifactRole, DeterminismPolicy, ExecutionPolicy, GeneralComputeRequest,
+        canonical_artifact_root, sha256_digest, ArtifactManifest, ArtifactRole,
+        BackendRegistration, DeterminismPolicy, EvidenceEnvelope, ExecutionPolicy,
+        GeneralComputeRequest, GeneralComputeResult, ResultStatus,
+        TrustedWorkerCapabilityRegistration, UsageClaim, WorkerCapabilities,
         GENERAL_COMPUTE_RUNTIME_VERSION,
     };
     use hivemind_config::ManagedProofRolloutMode;
@@ -1160,9 +1269,8 @@ mod tests {
     fn build_execute_task_request_forwards_general_compute_manifest_without_prefix_hack() {
         let mut task = make_task("general-compute-dispatch", TaskStatus::Pending, 0);
         task.runtime = Some("general-compute-v1alpha1".into());
-        task.general_compute_manifest_json = Some(
-            br#"{"runtime_version":"general-compute-v1alpha1"}"#.to_vec(),
-        );
+        task.general_compute_manifest_json =
+            Some(br#"{"runtime_version":"general-compute-v1alpha1"}"#.to_vec());
 
         let request = build_execute_task_request(&task);
 
@@ -1206,10 +1314,7 @@ mod tests {
         assert_eq!(request.execution_id, "execution-1");
         assert_eq!(request.attempt_id, "attempt-2");
         assert_eq!(request.idempotency_key, "idempotency-1");
-        assert_eq!(
-            request.request_digest,
-            manifest.request_digest
-        );
+        assert_eq!(request.request_digest, manifest.request_digest);
     }
 
     #[test]
@@ -1255,7 +1360,10 @@ mod tests {
         };
         let error = validate_general_compute_response_identity(&task, &mismatched)
             .expect_err("a stale attempt result must fail closed");
-        assert_eq!(error, "general-compute response identity does not match the persisted request");
+        assert_eq!(
+            error,
+            "general-compute response identity does not match the persisted request"
+        );
     }
 
     #[tokio::test]
@@ -1363,10 +1471,9 @@ mod tests {
             .unwrap();
         assert_eq!(stored.status, TaskStatus::Pending);
         assert!(stored.worker_id.is_none());
-        let redispatched: GeneralComputeRequest = serde_json::from_slice(
-            stored.general_compute_manifest_json.as_deref().unwrap(),
-        )
-        .unwrap();
+        let redispatched: GeneralComputeRequest =
+            serde_json::from_slice(stored.general_compute_manifest_json.as_deref().unwrap())
+                .unwrap();
         assert_ne!(redispatched.attempt_id, manifest.attempt_id);
         assert!(stored.output.is_none());
         assert!(!stored.billing_settled);
@@ -1499,6 +1606,213 @@ mod tests {
         response.managed_receipt_json = "x".repeat(LEGACY_MANAGED_RECEIPT_MAX_BYTES);
 
         assert_eq!(validate_worker_response_sizes(&response), Ok(()));
+    }
+
+    #[test]
+    fn general_compute_result_requires_a_typed_payload() {
+        let mut task = make_task("general-compute-result-required", TaskStatus::Running, 0);
+        task.runtime = Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        let request = alpha_result_request();
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
+        let response = ExecuteTaskResponse::default();
+
+        let error = decode_and_validate_general_compute_result(
+            &task,
+            &response,
+            &alpha_capability_snapshot(&request),
+        )
+        .expect_err("alpha completion must carry a typed result envelope");
+
+        assert_eq!(error, "general-compute typed result is missing");
+    }
+
+    #[test]
+    fn general_compute_result_rejects_malformed_json() {
+        let (task, request) = alpha_result_task("general-compute-result-malformed");
+        let response = ExecuteTaskResponse {
+            general_compute_result_json: b"{".to_vec(),
+            ..ExecuteTaskResponse::default()
+        };
+
+        let error = decode_and_validate_general_compute_result(
+            &task,
+            &response,
+            &alpha_capability_snapshot(&request),
+        )
+        .expect_err("malformed typed result must fail closed");
+
+        assert!(error.contains("general-compute typed result is malformed"));
+    }
+
+    #[test]
+    fn general_compute_result_rejects_identity_mismatch() {
+        let (task, request) = alpha_result_task("general-compute-result-identity");
+        let mut result = alpha_result(&request);
+        result.attempt_id = "attempt-stale".into();
+        let response = ExecuteTaskResponse {
+            success: true,
+            general_compute_result_json: serde_json::to_vec(&result).unwrap(),
+            ..ExecuteTaskResponse::default()
+        };
+
+        let error = decode_and_validate_general_compute_result(
+            &task,
+            &response,
+            &alpha_capability_snapshot(&request),
+        )
+        .expect_err("a stale typed result must not settle the current attempt");
+
+        assert!(error.contains("ResultBindingMismatch"));
+    }
+
+    #[test]
+    fn general_compute_result_rejects_capability_image_mismatch() {
+        let (task, request) = alpha_result_task("general-compute-result-capability");
+        let result = alpha_result(&request);
+        let mismatched_snapshot = serde_json::to_string(&TrustedWorkerCapabilityRegistration {
+            worker: WorkerCapabilities {
+                guest_image_digests: vec![request.guest_image_digest.clone()],
+                capabilities: vec![],
+                max_threads: 1,
+                gpu_available: false,
+            },
+            backends: vec![BackendRegistration {
+                backend_id: request.backend_id.clone(),
+                guest_image_digest: format!("sha256:{}", "c".repeat(64)),
+                capabilities: vec![],
+                max_threads: 1,
+                network_allowed: false,
+                filesystem_read_only: true,
+                gpu_allowed: false,
+            }],
+        })
+        .unwrap();
+        let response = ExecuteTaskResponse {
+            success: true,
+            general_compute_result_json: serde_json::to_vec(&result).unwrap(),
+            ..ExecuteTaskResponse::default()
+        };
+
+        let error =
+            decode_and_validate_general_compute_result(&task, &response, &mismatched_snapshot)
+                .expect_err("result validation must use the persisted capability snapshot");
+
+        assert!(error.contains("trusted capability snapshot"));
+    }
+
+    #[test]
+    fn general_compute_result_accepts_a_valid_typed_result() {
+        let (task, request) = alpha_result_task("general-compute-result-valid");
+        let result = alpha_result(&request);
+        let response = ExecuteTaskResponse {
+            success: true,
+            general_compute_result_json: serde_json::to_vec(&result).unwrap(),
+            ..ExecuteTaskResponse::default()
+        };
+
+        let validated = decode_and_validate_general_compute_result(
+            &task,
+            &response,
+            &alpha_capability_snapshot(&request),
+        )
+        .expect("valid typed result should be accepted");
+
+        assert_eq!(validated.stdout, "42");
+        assert_eq!(validated.status, ResultStatus::Completed);
+    }
+
+    #[test]
+    fn worker_response_rejects_oversized_typed_result() {
+        let mut response = managed_response("ok");
+        response.general_compute_result_json = vec![b'x'; GENERAL_COMPUTE_RESULT_MAX_BYTES + 1];
+
+        assert_eq!(
+            validate_worker_response_sizes(&response).unwrap_err(),
+            WorkerResponseSizeError::GeneralComputeResultTooLarge
+        );
+    }
+
+    fn alpha_result_task(task_id: &str) -> (Task, GeneralComputeRequest) {
+        let mut task = make_task(task_id, TaskStatus::Running, 0);
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        let request = alpha_result_request();
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
+        (task, request)
+    }
+
+    fn alpha_result_request() -> GeneralComputeRequest {
+        let mut request = GeneralComputeRequest {
+            execution_id: "execution-1".into(),
+            attempt_id: "attempt-1".into(),
+            idempotency_key: "idempotency-1".into(),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest: format!("sha256:{}", "b".repeat(64)),
+            backend_id: "python-cpython-312".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest::inline_json(
+                "source",
+                ArtifactRole::Source,
+                b"source",
+            ),
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+        request
+    }
+
+    fn alpha_capability_snapshot(request: &GeneralComputeRequest) -> String {
+        serde_json::to_string(&TrustedWorkerCapabilityRegistration {
+            worker: WorkerCapabilities {
+                guest_image_digests: vec![request.guest_image_digest.clone()],
+                capabilities: vec![],
+                max_threads: 1,
+                gpu_available: false,
+            },
+            backends: vec![BackendRegistration {
+                backend_id: request.backend_id.clone(),
+                guest_image_digest: request.guest_image_digest.clone(),
+                capabilities: vec![],
+                max_threads: 1,
+                network_allowed: false,
+                filesystem_read_only: true,
+                gpu_allowed: false,
+            }],
+        })
+        .unwrap()
+    }
+
+    fn alpha_result(request: &GeneralComputeRequest) -> GeneralComputeResult {
+        let output = ArtifactManifest::inline_json("stdout", ArtifactRole::Output, b"42");
+        GeneralComputeResult {
+            execution_id: request.execution_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+            request_digest: request.request_digest.clone(),
+            status: ResultStatus::Completed,
+            exit_code: Some(0),
+            error_code: None,
+            stdout: "42".into(),
+            stderr: String::new(),
+            output_artifacts: vec![output.clone()],
+            usage: UsageClaim {
+                wall_time_ms: 1,
+                output_bytes: 2,
+                ..UsageClaim::default()
+            },
+            runtime_version: request.runtime_version.clone(),
+            backend_id: request.backend_id.clone(),
+            guest_image_digest: request.guest_image_digest.clone(),
+            input_sha256: sha256_digest(&[]),
+            determinism: request.determinism.clone(),
+            capability_summary: vec![],
+            output_manifest_root: canonical_artifact_root(&[output]),
+            evidence: EvidenceEnvelope::default(),
+        }
     }
 
     #[test]

@@ -1,4 +1,11 @@
 use anyhow::Result;
+use general_compute_runtime::artifact::ArtifactMaterializer;
+use general_compute_runtime::cp_python::{
+    PythonBackendRegistration, PythonBackendRegistry,
+};
+use general_compute_runtime::execution::{ExecutionError, ReferenceBackendExecutor};
+use general_compute_runtime::supervisor::Cancellation;
+use general_compute_runtime::{GeneralComputeRequest, GeneralComputeResult, ResultStatus};
 use hivemind_config::HivemindConfig;
 use hivemind_models::Task;
 use managed_function_runtime::{render_output_bounded, ExecutionLimits, ManagedExecutor};
@@ -64,6 +71,7 @@ fn execute_managed_function_task(
                     managed_output_bytes: 0,
                     managed_receipt_json: Some(receipt.to_string()),
                     managed_proof: None,
+                    general_compute_result_json: None,
                 });
             }
         };
@@ -93,6 +101,7 @@ fn execute_managed_function_task(
                     managed_output_bytes: 0,
                     managed_receipt_json: Some(receipt.to_string()),
                     managed_proof: None,
+                    general_compute_result_json: None,
                 });
             }
         }
@@ -126,6 +135,7 @@ fn execute_managed_function_task(
         managed_output_bytes: output_bytes,
         managed_receipt_json: Some(receipt.to_string()),
         managed_proof: None,
+        general_compute_result_json: None,
     })
 }
 
@@ -136,8 +146,17 @@ pub async fn run_task(task: &Task, config: &HivemindConfig) -> Result<super::Tas
 
 pub async fn run_task_with_cancel(
     task: &Task,
-    _config: &HivemindConfig,
+    config: &HivemindConfig,
+    cancel_rx: watch::Receiver<bool>,
+) -> Result<super::TaskResult> {
+    run_task_with_cancel_and_reference(task, config, cancel_rx, None).await
+}
+
+pub async fn run_task_with_cancel_and_reference(
+    task: &Task,
+    config: &HivemindConfig,
     mut cancel_rx: watch::Receiver<bool>,
+    reference_executor: Option<Arc<ReferenceBackendExecutor>>,
 ) -> Result<super::TaskResult> {
     let start = Instant::now();
     tracing::info!(
@@ -168,10 +187,152 @@ pub async fn run_task_with_cancel(
         };
     }
 
+    if task.runtime.as_deref() == Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION) {
+        let task = task.clone();
+        let reference_executor = reference_executor.clone();
+        let config = config.clone();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let runtime_cancellation = Arc::new(Cancellation::new());
+        let execution_cancelled = cancelled.clone();
+        let execution_runtime_cancellation = runtime_cancellation.clone();
+        let mut execution = tokio::task::spawn_blocking(move || {
+            execute_general_compute_task(
+                &task,
+                &config,
+                reference_executor.as_deref(),
+                &execution_cancelled,
+                &execution_runtime_cancellation,
+            )
+        });
+        return tokio::select! {
+            result = &mut execution => result.map_err(anyhow::Error::from)?,
+            _ = wait_for_cancellation(&mut cancel_rx) => {
+                cancelled.store(true, Ordering::Release);
+                runtime_cancellation.cancel();
+                execution.await.map_err(anyhow::Error::from)?
+            }
+        };
+    }
+
     Err(anyhow::anyhow!(
         "unsupported runtime {:?}: only managed-function-v0 tasks are supported",
         task.runtime.as_deref().unwrap_or("<none>")
     ))
+}
+
+fn execute_general_compute_task(
+    task: &Task,
+    config: &HivemindConfig,
+    reference_executor: Option<&ReferenceBackendExecutor>,
+    cancelled: &AtomicBool,
+    cancellation: &Cancellation,
+) -> Result<super::TaskResult> {
+    let request = task
+        .general_compute_manifest_json
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("general-compute request manifest is required"))
+        .and_then(|manifest| {
+            serde_json::from_slice::<GeneralComputeRequest>(manifest)
+                .map_err(|error| anyhow::anyhow!("general-compute request manifest is malformed: {error}"))
+        })?;
+    if cancelled.load(Ordering::Acquire) {
+        cancellation.cancel();
+    }
+    let result = if let Some(executor) = reference_executor {
+        let root = absolute_runtime_root(config, &task.task_id)?;
+        let materializer = ArtifactMaterializer::new(root)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        executor.execute_with_cancellation(&request, &materializer, &cancellation)
+    } else {
+        Err(ExecutionError::BackendUnavailable(
+            "reference backend is not operator-configured".into(),
+        ))
+    };
+    let typed = match result {
+        Ok(result) => result,
+        Err(error) => failed_general_compute_result(&request, error_code(&error)),
+    };
+    let encoded = serde_json::to_vec(&typed)?;
+    let completed = typed.status == ResultStatus::Completed;
+    Ok(super::TaskResult {
+        task_id: task.task_id.clone(),
+        success: completed,
+        output: completed.then(|| typed.stdout.clone()),
+        error: (!completed).then(|| typed.error_code.clone().unwrap_or_else(|| "backend_unavailable".into())),
+        exit_code: typed.exit_code.unwrap_or(1),
+        cpu_time_ms: typed.usage.cpu_time_ms.min(i64::MAX as u64) as i64,
+        wall_time_ms: typed.usage.wall_time_ms.min(i64::MAX as u64) as i64,
+        peak_memory_mb: (typed.usage.peak_memory_bytes / (1024 * 1024)).min(i64::MAX as u64) as i64,
+        managed_executed_ops: 0,
+        managed_output_bytes: typed.usage.output_bytes.min(i64::MAX as u64) as i64,
+        managed_receipt_json: None,
+        managed_proof: None,
+        general_compute_result_json: Some(encoded),
+    })
+}
+
+fn absolute_runtime_root(config: &HivemindConfig, task_id: &str) -> Result<std::path::PathBuf> {
+    if !crate::sandbox::is_safe_task_id(task_id) {
+        anyhow::bail!("unsafe task id for general-compute artifact root");
+    }
+    let root = std::path::PathBuf::from(&config.executor.sandbox_dir);
+    let root = if root.is_absolute() {
+        root
+    } else {
+        std::env::current_dir()?.join(root)
+    };
+    Ok(root.join("general-compute").join(task_id))
+}
+
+fn error_code(error: &ExecutionError) -> &'static str {
+    match error {
+        ExecutionError::BackendUnavailable(_) => "backend_unavailable",
+        ExecutionError::Capability(_) => "capability_rejected",
+        ExecutionError::Artifact(_) => "artifact_invalid",
+        ExecutionError::Request(_) => "request_invalid",
+        ExecutionError::UnsupportedExecutionMode => "backend_unavailable",
+        ExecutionError::UnsupportedEntrypoint => "request_invalid",
+        ExecutionError::SourceNotUtf8 | ExecutionError::InputNotUtf8 => "artifact_invalid",
+        ExecutionError::MultipleInputArtifacts => "request_invalid",
+        ExecutionError::Backend(_) => "backend_failed",
+    }
+}
+
+fn failed_general_compute_result(request: &GeneralComputeRequest, code: &str) -> GeneralComputeResult {
+    GeneralComputeResult {
+        execution_id: request.execution_id.clone(),
+        attempt_id: request.attempt_id.clone(),
+        idempotency_key: request.idempotency_key.clone(),
+        request_digest: request.request_digest.clone(),
+        status: ResultStatus::BackendUnavailable,
+        exit_code: None,
+        error_code: Some(code.into()),
+        stdout: String::new(),
+        stderr: String::new(),
+        output_artifacts: Vec::new(),
+        usage: Default::default(),
+        runtime_version: request.runtime_version.clone(),
+        backend_id: request.backend_id.clone(),
+        guest_image_digest: request.guest_image_digest.clone(),
+        input_sha256: general_compute_runtime::sha256_digest(&[]),
+        determinism: request.determinism.clone(),
+        capability_summary: Vec::new(),
+        output_manifest_root: general_compute_runtime::canonical_artifact_root(&[]),
+        evidence: Default::default(),
+    }
+}
+
+pub fn reference_executor_from_environment(
+    admission: &crate::runtime_admission::WorkerRuntimeAdmission,
+) -> Option<Arc<ReferenceBackendExecutor>> {
+    let registrations = std::env::var("HIVEMIND_GENERAL_COMPUTE_REFERENCE_BACKENDS").ok()?;
+    let registrations = serde_json::from_str::<Vec<PythonBackendRegistration>>(&registrations).ok()?;
+    let registry = PythonBackendRegistry::new(registrations).ok()?;
+    Some(Arc::new(ReferenceBackendExecutor::new(
+        admission.capability_matrix(),
+        admission.worker_capabilities(),
+        registry,
+    )))
 }
 
 async fn wait_for_cancellation(cancellation: &mut watch::Receiver<bool>) {
@@ -331,6 +492,46 @@ mod tests {
 
         let error = run_task(&task, &config).await.unwrap_err();
         assert!(error.to_string().contains("unsupported runtime"));
+    }
+
+    #[tokio::test]
+    async fn alpha_without_reference_configuration_returns_typed_backend_unavailable() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path().join("sandbox").to_str().unwrap());
+        let mut request = GeneralComputeRequest {
+            execution_id: "execution-1".into(),
+            attempt_id: "attempt-1".into(),
+            idempotency_key: "idempotency-1".into(),
+            request_digest: String::new(),
+            runtime_version: general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest: format!("sha256:{}", "a".repeat(64)),
+            backend_id: "python-cpython-312".into(),
+            entrypoint: "main".into(),
+            source_artifact: general_compute_runtime::ArtifactManifest::inline_json(
+                "source",
+                general_compute_runtime::ArtifactRole::Source,
+                b"result = 1",
+            ),
+            input_artifacts: Vec::new(),
+            execution_policy: general_compute_runtime::ExecutionPolicy::default(),
+            determinism: general_compute_runtime::DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+        let mut task = test_task_with_source("null");
+        task.runtime = Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
+
+        let result = run_task(&task, &config).await.unwrap();
+
+        assert!(!result.success);
+        let typed: GeneralComputeResult = serde_json::from_slice(
+            result.general_compute_result_json.as_deref().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(typed.status, ResultStatus::BackendUnavailable);
+        assert_eq!(typed.error_code.as_deref(), Some("backend_unavailable"));
     }
 
     fn test_config(sandbox_dir: &str) -> HivemindConfig {

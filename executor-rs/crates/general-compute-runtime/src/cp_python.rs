@@ -3,12 +3,13 @@ use crate::sandbox::BackendExecutionMode;
 use crate::supervisor::{
     Cancellation, ReferenceCommandSpec, ReferenceProcessSupervisor, RunStatus, SupervisorError,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PythonBackendRegistration {
     pub backend_id: String,
     pub executable: String,

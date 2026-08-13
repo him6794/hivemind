@@ -100,6 +100,7 @@ fn task_result_serializes_proofs_without_losing_legacy_compatibility() {
         managed_output_bytes: 2,
         managed_receipt_json: Some("{}".into()),
         managed_proof: Some(proof.clone()),
+        general_compute_result_json: None,
     };
 
     let serialized = serde_json::to_string(&result)
@@ -161,6 +162,7 @@ async fn dropped_execute_future_keeps_supervisor_cleanup_alive() {
                     managed_output_bytes: 0,
                     managed_receipt_json: None,
                     managed_proof: None,
+                    general_compute_result_json: None,
                 })
             })
         },

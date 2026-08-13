@@ -221,6 +221,17 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     .await?;
 
     sqlx::query(
+        "CREATE TABLE IF NOT EXISTS general_compute_results (
+            task_id VARCHAR(255) PRIMARY KEY,
+            worker_id VARCHAR(255) NOT NULL,
+            result_json BYTEA NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
         "CREATE TABLE IF NOT EXISTS vpn_peers (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             worker_id VARCHAR(255) NOT NULL UNIQUE,
@@ -356,6 +367,12 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_tasks_worker_id ON tasks(worker_id);")
         .execute(pool)
         .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_general_compute_results_worker_id
+         ON general_compute_results(worker_id);",
+    )
+    .execute(pool)
+    .await?;
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_tasks_torrent_source_worker_completed
          ON tasks(torrent_source, worker_id, completed_at DESC)

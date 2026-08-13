@@ -41,14 +41,23 @@ impl WorkerExecutor {
     pub fn new(config: HivemindConfig) -> Self {
         let runner_config = config.clone();
         let prover = Arc::new(managed_prover::ManagedProverExecutor::new(&config));
+        let reference_executor = runtime_admission::WorkerRuntimeAdmission::from_environment()
+            .ok()
+            .and_then(|admission| executor::reference_executor_from_environment(&admission));
         Self {
             active_tasks: Arc::new(Mutex::new(HashMap::new())),
             task_runner: Arc::new(move |task, cancellation| {
                 let config = runner_config.clone();
                 let prover = Arc::clone(&prover);
+                let reference_executor = reference_executor.clone();
                 Box::pin(async move {
                     let mut result =
-                        executor::run_task_with_cancel(&task, &config, cancellation.clone())
+                        executor::run_task_with_cancel_and_reference(
+                            &task,
+                            &config,
+                            cancellation.clone(),
+                            reference_executor,
+                        )
                             .await?;
                     if result.success && task.runtime.as_deref() == Some("managed-function-v0") {
                         match prover.prove(&task, cancellation.clone()).await {
@@ -162,6 +171,10 @@ pub struct TaskResult {
     pub managed_receipt_json: Option<String>,
     #[serde(default, with = "managed_proof_serde")]
     pub managed_proof: Option<hivemind_proto::ManagedProofEnvelope>,
+    /// Serialized typed result for `general-compute-v1alpha1`.
+    /// Legacy managed-function results leave this unset.
+    #[serde(default)]
+    pub general_compute_result_json: Option<Vec<u8>>,
 }
 
 /// Preserves `TaskResult`'s public serde contract without omitting a proof.
@@ -256,6 +269,7 @@ fn managed_proof_failure(mut result: TaskResult, message: &str) -> TaskResult {
     result.managed_output_bytes = 0;
     result.managed_receipt_json = None;
     result.managed_proof = None;
+    result.general_compute_result_json = None;
     result
 }
 

@@ -12,6 +12,9 @@ pub const MANAGED_JSON_INPUT_MAX_BYTES: usize = 1024 * 1024;
 /// Maximum byte length accepted for a general-compute-v1alpha1 request manifest.
 pub const GENERAL_COMPUTE_MANIFEST_MAX_BYTES: usize = 4 * 1024 * 1024;
 
+/// Maximum serialized size accepted for a general-compute-v1alpha1 result envelope.
+pub const GENERAL_COMPUTE_RESULT_MAX_BYTES: usize = 2 * 1024 * 1024;
+
 /// Maximum signed admission budget accepted for `managed-function-v0` execution.
 pub const MANAGED_BUDGET_MAX_USAGE_UNITS: i64 = 1_000_000;
 
@@ -51,7 +54,7 @@ mod tests {
 
     use super::{
         ExecuteTaskResponse, ManagedProofEnvelope, LEGACY_MANAGED_RECEIPT_MAX_BYTES,
-        GENERAL_COMPUTE_MANIFEST_MAX_BYTES,
+        GENERAL_COMPUTE_MANIFEST_MAX_BYTES, GENERAL_COMPUTE_RESULT_MAX_BYTES,
         MANAGED_BUDGET_MAX_USAGE_UNITS, MANAGED_JSON_INPUT_MAX_BYTES,
         MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES, MANAGED_TASK_SOURCE_MAX_BYTES, TASK_ID_MAX_BYTES,
         WORKER_RPC_MESSAGE_MAX_BYTES, WORKER_STATUS_MESSAGE_MAX_BYTES,
@@ -63,6 +66,7 @@ mod tests {
         assert_eq!(MANAGED_TASK_SOURCE_MAX_BYTES, 64 * 1024);
         assert_eq!(MANAGED_JSON_INPUT_MAX_BYTES, 1024 * 1024);
         assert_eq!(GENERAL_COMPUTE_MANIFEST_MAX_BYTES, 4 * 1024 * 1024);
+        assert_eq!(GENERAL_COMPUTE_RESULT_MAX_BYTES, 2 * 1024 * 1024);
         assert_eq!(MANAGED_BUDGET_MAX_USAGE_UNITS, 1_000_000);
         assert_eq!(MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES, 2_166_784);
         assert_eq!(WORKER_STATUS_MESSAGE_MAX_BYTES, 1024 * 1024);
@@ -81,6 +85,7 @@ mod tests {
                 receipt_json: vec![0; MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES - 16],
                 ..ManagedProofEnvelope::default()
             }),
+            ..ExecuteTaskResponse::default()
         };
         let worker_rpc_message_max_bytes = std::hint::black_box(WORKER_RPC_MESSAGE_MAX_BYTES);
 
@@ -108,6 +113,7 @@ mod tests {
                 journal: br#"{"usage_units":17}"#.to_vec(),
                 receipt_json: br#"{"inner":{}}"#.to_vec(),
             }),
+            ..ExecuteTaskResponse::default()
         };
 
         let decoded = ExecuteTaskResponse::decode(response.encode_to_vec().as_slice()).unwrap();
@@ -117,5 +123,30 @@ mod tests {
         assert_eq!(proof.image_id, vec![1, 2, 3, 4, 5, 6, 7, 8]);
         assert_eq!(proof.journal, br#"{"usage_units":17}"#);
         assert_eq!(proof.receipt_json, br#"{"inner":{}}"#);
+    }
+
+    #[test]
+    fn general_compute_result_round_trips_with_a_bounded_payload() {
+        let payload = br#"{"status":"completed","output":"ok"}"#.to_vec();
+        assert!(payload.len() <= GENERAL_COMPUTE_RESULT_MAX_BYTES);
+        let response = ExecuteTaskResponse {
+            success: true,
+            general_compute_result_json: payload.clone(),
+            ..ExecuteTaskResponse::default()
+        };
+
+        let decoded = ExecuteTaskResponse::decode(response.encode_to_vec().as_slice()).unwrap();
+
+        assert_eq!(decoded.general_compute_result_json, payload);
+    }
+
+    #[test]
+    fn worker_rpc_message_cap_covers_the_general_compute_result_payload() {
+        let response = ExecuteTaskResponse {
+            general_compute_result_json: vec![0; GENERAL_COMPUTE_RESULT_MAX_BYTES],
+            ..ExecuteTaskResponse::default()
+        };
+
+        assert!(response.encoded_len() <= WORKER_RPC_MESSAGE_MAX_BYTES);
     }
 }

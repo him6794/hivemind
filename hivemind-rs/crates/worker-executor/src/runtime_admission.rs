@@ -103,6 +103,16 @@ impl WorkerRuntimeAdmission {
         Self { registry, worker }
     }
 
+    #[must_use]
+    pub fn capability_matrix(&self) -> CapabilityMatrix {
+        self.registry.clone()
+    }
+
+    #[must_use]
+    pub fn worker_capabilities(&self) -> WorkerCapabilities {
+        self.worker.clone()
+    }
+
     /// Load an operator-owned capability registry.  An absent registry keeps
     /// the alpha runtime disabled; malformed configuration fails closed at
     /// worker startup instead of silently widening admission.
