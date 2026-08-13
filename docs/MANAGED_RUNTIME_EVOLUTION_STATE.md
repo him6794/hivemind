@@ -23,7 +23,7 @@ running
 
 M0a v0 semantics/cost/proof freeze 與 M0b 的 alpha runtime、request/result/evidence、artifact/tensor、capability 契約均已完成；M1 的 reference fixtures、bounded supervisor、CPython adapter、combined output cap、trusted executable gate、production sandbox policy 與受驗證 OCI bundle runner 也已落地。runner 只接受 operator-pinned absolute executable 與 SHA-256、精確 OCI 1.0.2 config、rootless/non-root、namespace/cgroup/seccomp/no_new_privileges/read-only root/network-deny/mount annotations，並透過既有 process-tree supervisor 套用 timeout、cancel、output cap、kill/reap；驗證失敗一律 fail closed。實際 Linux rootless OCI namespace/cgroup/seccomp primitives 仍由外部 runner 負責，尚未宣稱平台隔離完成。M0 capability matrix 仍是 supervisor 啟動前的 fail-closed gate。
 
-M3 alpha manifest transport/admission 已由 `8b34285` 完成並提交：HTTP Master、Master→Nodepool gRPC、Nodepool task persistence、scheduler→Worker request 與 Worker capability admission 都帶有明確的 validated manifest bytes。Nodepool 拒絕 alpha runtime 的 legacy `torrent`，Worker 只接受 operator allowlist 的 backend/image；未安裝實際 backend 時刻意 fail-closed 回傳 `UNIMPLEMENTED`。下一個小單元是 Nodepool trusted registry 與 persisted worker-capability compatibility gate。
+M3 alpha manifest transport/admission 已由 `8b34285` 完成並提交：HTTP Master、Master→Nodepool gRPC、Nodepool task persistence、scheduler→Worker request 與 Worker capability admission 都帶有明確的 validated manifest bytes。Nodepool 拒絕 alpha runtime 的 legacy `torrent`，Worker 只接受 operator allowlist 的 backend/image；未安裝實際 backend 時刻意 fail-closed 回傳 `UNIMPLEMENTED`。Nodepool trusted registry 與 persisted worker-capability compatibility gate 已完成，下一個小單元是 attempt-bound request/result compatibility。
 
 ## Completed
 
@@ -122,6 +122,11 @@ M3 alpha manifest transport/admission 已由 `8b34285` 完成並提交：HTTP Ma
 - `8b34285 feat(runtime): transport alpha manifests across task dispatch`
   - `general-compute-v1alpha1` manifest 從 HTTP Master 直通 Nodepool、Postgres、scheduler 與 Worker admission；Nodepool 拒絕 legacy `torrent`，Worker 用 operator backend/image allowlist admission，尚未安裝 backend 時 fail-closed `UNIMPLEMENTED`。
   - Compatibility: Master API 29、Nodepool 69、scheduler 81 passed/1 intentional ignored、proto 3、worker admission 7；scheduler/Master API/Nodepool/worker executor/binary offline cargo check passed。
+- `feat(runtime): persist trusted worker capability admission`（本輪待提交）
+  - 新增 operator-owned `TrustedWorkerCapabilityRegistration` 與 config registry；worker capability JSON 使用 `deny_unknown_fields`，不接受 worker RPC 自報資料。
+  - Nodepool registration 以 authenticated owner／admin 驗證 registry entry，將 approved snapshot 寫入 Postgres；untrusted heartbeat 只更新 liveness/resource fields，保留 snapshot；owner-authorized registration 可明確撤銷 snapshot。
+  - scheduler 對 `general-compute-v1alpha1` 僅選 persisted snapshot 與 request matching 的 worker；缺 snapshot、錯 image/backend/capability 都 fail closed。
+  - 驗證：executor workspace、config 21、node-manager 74、task-scheduler 84 passed／1 intentional ignored，以及 Master API／Worker executor／binary offline `cargo check --locked`。
 
 ## Active owners
 
@@ -136,11 +141,15 @@ M3 alpha manifest transport/admission 已由 `8b34285` 完成並提交：HTTP Ma
 
 ## Next action
 
-建立 Nodepool trusted registry／persisted worker-capability compatibility gate，然後以 RED→GREEN 做 attempt-bound request/result compatibility；後續再接實際 general-compute backend execution、artifact materialization 與 CAS/chunk resume。保持 pinned CPython direct harness 只作 reference/test backend；M2 dtype/complex/數值運算仍是獨立小單元。
+以 RED→GREEN 做 attempt-bound request/result compatibility；後續再接實際 general-compute backend execution、artifact materialization 與 CAS/chunk resume。保持 pinned CPython direct harness 只作 reference/test backend；M2 dtype/complex/數值運算仍是獨立小單元。
 
 ## Next checkpoint
 
-M3 alpha manifest transport/admission 的跨 crate RED→GREEN 已由 `8b34285` 提交，且未安裝 backend 時 Worker 仍 fail closed。下一 checkpoint 是 Nodepool trusted registry/capability persistence，再來是 request/result attempt compatibility。
+M3 alpha manifest transport/admission 的跨 crate RED→GREEN 已由 `8b34285` 提交，且未安裝 backend 時 Worker 仍 fail closed。Nodepool trusted registry/capability persistence 已完成並通過 owner、persistence、revocation 與 scheduler admission 測試；下一 checkpoint 是 request/result attempt compatibility。
+
+### M3 trusted capability registry checkpoint (2026-08-13)
+
+The Nodepool trusted registry gate is now implemented. Operator configuration is the only source for a worker's general-compute capability snapshot; registration binds the configured worker id to the authenticated owner (or admin) and rejects mismatches with `PermissionDenied`. Snapshots are persisted in `worker_nodes.general_compute_capabilities_json`, survive untrusted heartbeat refreshes, and can be explicitly revoked by an owner-authorized registration. Scheduler admission for `general-compute-v1alpha1` parses only the persisted Nodepool snapshot and validates backend, image, capability, thread, network, filesystem, and GPU requirements against the request. Missing or malformed snapshots fail closed. The next checkpoint is attempt-bound request/result compatibility, then backend execution and CAS materialization.
 
 ## Notes
 

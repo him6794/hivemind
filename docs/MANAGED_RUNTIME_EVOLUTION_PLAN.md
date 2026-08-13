@@ -193,6 +193,8 @@ v1 延續目前 trust model：Nodepool 是唯一可信結算權威，Worker 的�
 | M4 GPU beta | CUDA/ROCm image、driver matrix、device artifact、CPU fallback | capability mismatch 不誤派；GPU/CPU 結果與成本標記正確 |
 | M5 可用性發布 | canary/migration、文件、SDK 範例、benchmark dashboard、signed image/SBOM、support matrix、回滾 | reproducibility、security、performance、compatibility 全簽核後才把 id升為 `general-compute-v1` |
 
+M3 trusted capability registry gate 已落地：Nodepool operator config 是 worker general-compute capability snapshot 的唯一來源；registration 以 owner binding 寫入 Postgres，untrusted heartbeat 不得覆蓋 snapshot，owner-authorized registration 可撤銷 snapshot，scheduler 對 `general-compute-v1alpha1` 僅依 persisted snapshot 與 request matching 做 admission。下一個 gate 是 attempt-bound request/result compatibility，再接 backend execution、artifact materialization 與 CAS/chunk resume。
+
 每個 milestone 必須提交：測試命令與結果、fixture/hash 清單、benchmark 原始資料、已知限制、rollback 方法與明確 owner。沒有這五項，只能算 prototype，不能標示為 production-ready。
 
 ## 7. 效能、可重現性與營運門檻
@@ -236,9 +238,13 @@ Hivemind 的 source、build 或 release surface。
 - `scripts/docker-compose-release.Tests.ps1`：passed。
 - `scripts/package-worker-windows.Tests.ps1`：passed。
 
-下一個實作 checkpoint 是 M0a/M0b：先凍結 v0 semantics/cost manifest與既知 Unicode/overflow/failure-receipt限制，再把 current contract降為 `general-compute-v1alpha1`，以 RED tests補 execution/attempt binding、result/evidence validation、artifact/tensor canonical hashing與 replay/unknown-field拒絕。這些 gate完成前不接任意 Python套件、不做 variable usage settlement、不宣稱平台已具 general/scientific compute。
+下一個實作 checkpoint 是 attempt-bound request/result compatibility；M0a/M0b contract、artifact/tensor canonical hashing 與 M3 alpha transport/admission 已完成，但這些 gate完成前仍不接任意 Python套件、不做 variable usage settlement、不宣稱平台已具 general/scientific compute。
 
 
 ### M3 alpha transport/admission checkpoint (2026-08-13)
 
-Commit 8b34285 transports validated general-compute-v1alpha1 request-manifest bytes through HTTP Master, Master/Nodepool gRPC, Postgres task persistence, scheduler dispatch, and Worker admission. The Nodepool explicitly rejects a manifest on any other runtime and rejects legacy torrent input for the alpha runtime; the Worker separately checks the operator-owned backend/image capability allowlists. A successfully admitted alpha request still returns UNIMPLEMENTED until trusted registry persistence, backend execution, artifact materialization, CAS transfer/resume, attempt-bound result validation, and Nodepool settlement evidence are implemented. Verification: Master API 29, Nodepool 69, scheduler 81 passed with 1 intentional external-verifier ignore, proto 3, worker admission 7, plus offline integration cargo check for scheduler, Master API, Nodepool, worker executor, and binary.
+Commit 8b34285 transports validated general-compute-v1alpha1 request-manifest bytes through HTTP Master, Master/Nodepool gRPC, Postgres task persistence, scheduler dispatch, and Worker admission. The Nodepool explicitly rejects a manifest on any other runtime and rejects legacy torrent input for the alpha runtime; the Worker separately checks the operator-owned backend/image capability allowlists. A successfully admitted alpha request still returns UNIMPLEMENTED until backend execution, artifact materialization, CAS transfer/resume, attempt-bound result validation, and Nodepool settlement evidence are implemented. Verification: Master API 29, Nodepool 69, scheduler 81 passed with 1 intentional external-verifier ignore, proto 3, worker admission 7, plus offline integration cargo check for scheduler, Master API, Nodepool, worker executor, and binary.
+
+### M3 trusted capability registry checkpoint (2026-08-13)
+
+The Nodepool trusted registry gate is now implemented. Operator configuration is the only source for a worker's general-compute capability snapshot; registration binds the configured worker id to the authenticated owner (or admin) and rejects mismatches with `PermissionDenied`. Snapshots are persisted in `worker_nodes.general_compute_capabilities_json`, survive untrusted heartbeat refreshes, and can be explicitly revoked by an owner-authorized registration. Scheduler admission for `general-compute-v1alpha1` parses only the persisted Nodepool snapshot and validates backend, image, capability, thread, network, filesystem, and GPU requirements against the request. Missing or malformed snapshots fail closed. The next checkpoint is attempt-bound request/result compatibility, then backend execution and CAS materialization.
