@@ -193,7 +193,7 @@ v1 延續目前 trust model：Nodepool 是唯一可信結算權威，Worker 的�
 | M4 GPU beta | CUDA/ROCm image、driver matrix、device artifact、CPU fallback | capability mismatch 不誤派；GPU/CPU 結果與成本標記正確 |
 | M5 可用性發布 | canary/migration、文件、SDK 範例、benchmark dashboard、signed image/SBOM、support matrix、回滾 | reproducibility、security、performance、compatibility 全簽核後才把 id升為 `general-compute-v1` |
 
-M3 trusted capability registry gate 已落地：Nodepool operator config 是 worker general-compute capability snapshot 的唯一來源；registration 以 owner binding 寫入 Postgres，untrusted heartbeat 不得覆蓋 snapshot，owner-authorized registration 可撤銷 snapshot，scheduler 對 `general-compute-v1alpha1` 僅依 persisted snapshot 與 request matching 做 admission。Attempt-bound request/result compatibility 也已完成；inline artifact materialization 已完成第一個獨立 checkpoint。下一個 gate 是 Worker typed backend execution，再接 CAS/chunk resume 與 Nodepool typed result settlement。
+M3 trusted capability registry gate 已落地：Nodepool operator config 是 worker general-compute capability snapshot 的唯一來源；registration 以 owner binding 寫入 Postgres，untrusted heartbeat 不得覆蓋 snapshot，owner-authorized registration 可撤銷 snapshot，scheduler 對 `general-compute-v1alpha1` 僅依 persisted snapshot 與 request matching 做 admission。Attempt-bound request/result compatibility、inline artifact materialization 與 reference-only typed backend execution 已各自完成小 checkpoint；下一個 gate 是 Worker typed result RPC wiring，再接 production OCI execution、CAS/chunk resume 與 Nodepool typed result settlement。
 
 每個 milestone 必須提交：測試命令與結果、fixture/hash 清單、benchmark 原始資料、已知限制、rollback 方法與明確 owner。沒有這五項，只能算 prototype，不能標示為 production-ready。
 
