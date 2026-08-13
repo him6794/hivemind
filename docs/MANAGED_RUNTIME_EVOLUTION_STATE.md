@@ -141,11 +141,11 @@ M3 alpha manifest transport/admission 已由 `8b34285` 完成並提交：HTTP Ma
 
 ## Next action
 
-以 RED→GREEN 接實際 general-compute backend execution、artifact materialization 與 CAS/chunk resume；保持 pinned CPython direct harness 只作 reference/test backend；M2 dtype/complex/數值運算仍是獨立小單元。
+以 RED→GREEN 接 Worker 的 typed general-compute backend execution，先將已 materialize 的 source/input artifacts 交給 operator-approved backend；保持 pinned CPython direct harness 只作 reference/test backend，production execution 仍只能走 validated OCI bundle；接著再做 CAS/chunk transfer、checksum、range validation、resume/idempotency。M2 dtype/complex/數值運算仍是獨立小單元。
 
 ## Next checkpoint
 
-M3 alpha manifest transport/admission 的跨 crate RED→GREEN 已由 `8b34285` 提交，且未安裝 backend 時 Worker 仍 fail closed。Nodepool trusted registry/capability persistence 與 attempt-bound request/result compatibility 已完成並通過 owner、persistence、revocation、scheduler admission、retry、stale-result 與 manifest-guard 測試；下一 checkpoint 是 backend execution、artifact materialization 與 CAS/chunk resume。
+M3 alpha manifest transport/admission 的跨 crate RED→GREEN 已由 `8b34285` 提交，且未安裝 backend 時 Worker 仍 fail closed。Nodepool trusted registry/capability persistence 與 attempt-bound request/result compatibility 已完成並通過 owner、persistence、revocation、scheduler admission、retry、stale-result 與 manifest-guard 測試；inline artifact materialization 已完成第一個獨立 checkpoint，但 backend execution、CAS/chunk transfer/resume 與 Nodepool typed result settlement 仍未完成。
 
 ### M3 trusted capability registry checkpoint (2026-08-13)
 
@@ -154,6 +154,10 @@ The Nodepool trusted registry gate is now implemented. Operator configuration is
 ### M3 attempt-bound request/result compatibility checkpoint (2026-08-13)
 
 The scheduler now forwards the validated alpha manifest identity (`execution_id`, `attempt_id`, `idempotency_key`, and canonical `request_digest`) in the Worker RPC request. Worker alpha responses echo those fields for both success and failure; legacy `managed-function-v0` responses keep the fields empty. Nodepool validates the response identity against the persisted, validated request before any completion or settlement. A mismatch is fail-closed and redispatched without settlement. Retry reset preserves the execution and idempotency identities, rotates the attempt id, and recomputes the canonical request digest. Repository completion additionally compares the exact persisted manifest, preventing a stale manifest from completing a current attempt. Evidence: scheduler lib tests 89 passed, 1 intentional verifier ignore; DB-backed retry, stale-response, and completion-manifest guard tests passed; scheduler, Worker, and proto locked checks passed. The Worker test binary remains blocked by the pre-existing Windows MSVC/MinGW mixed-linker symbol (`__mingw_fprintf_cgo_beginthread`), while the Worker library locked check passes.
+
+### M3 inline artifact materialization checkpoint (2026-08-13)
+
+The general-compute runtime now exposes an operator-rooted `ArtifactMaterializer` for the first execution slice. It validates the existing `ArtifactManifest`, accepts only verified `inline_bytes`, canonicalizes an absolute materialization root, rejects traversal/path-like artifact ids and symlink targets, writes with `create_new` plus `sync_all`, and replays an identical artifact idempotently. A pre-existing file with different bytes fails closed. CAS-only manifests remain unavailable rather than being guessed from an id or path; network fetch, chunk transfer, resume, and CAS persistence are intentionally deferred to the next checkpoint. RED→GREEN evidence: the new artifact integration test initially failed because the materializer module did not exist, then 3 artifact tests passed; the full `general-compute-runtime` locked suite passed (10 unit, 3 artifact, 18 contract, 11 CPython, 3 differential, 4 protocol, 10 reference, 21 sandbox, 6 tensor, and 1 compile-fail doc test).
 
 ## Notes
 
