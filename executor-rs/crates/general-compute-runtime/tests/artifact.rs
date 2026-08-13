@@ -1,5 +1,7 @@
-use general_compute_runtime::artifact::{ArtifactMaterializationError, ArtifactMaterializer};
-use general_compute_runtime::{ArtifactManifest, ArtifactRole};
+use general_compute_runtime::artifact::{
+    ArtifactMaterializationError, ArtifactMaterializer, CasChunkStore,
+};
+use general_compute_runtime::{sha256_digest, ArtifactChunk, ArtifactManifest, ArtifactRole};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -90,4 +92,84 @@ fn artifact_materializer_fails_closed_when_content_is_not_local_inline_bytes() {
         Err(ArtifactMaterializationError::ContentUnavailable)
     ));
     remove_root(&root);
+}
+
+fn chunked_artifact() -> (ArtifactManifest, Vec<&'static [u8]>) {
+    let chunks = [b"abcd" as &[u8], b"efgh" as &[u8]];
+    let bytes = chunks.concat();
+    let artifact = ArtifactManifest {
+        artifact_id: "chunked-source".into(),
+        role: ArtifactRole::Source,
+        size_bytes: bytes.len() as u64,
+        mime_type: "text/plain".into(),
+        sha256: sha256_digest(&bytes),
+        chunks: chunks
+            .iter()
+            .enumerate()
+            .map(|(index, chunk)| ArtifactChunk {
+                offset: (index * 4) as u64,
+                size_bytes: chunk.len() as u64,
+                sha256: sha256_digest(chunk),
+            })
+            .collect(),
+        inline_bytes: None,
+    };
+    (artifact, chunks.to_vec())
+}
+
+#[test]
+fn cas_chunk_store_supports_verified_resume_and_materialization() {
+    let root = temporary_root("cas-resume-artifact");
+    let cas_root = temporary_root("cas-resume-store");
+    let materializer = ArtifactMaterializer::new(&root).expect("absolute artifact root is valid");
+    let store = CasChunkStore::new(&cas_root).expect("absolute CAS root is valid");
+    let (artifact, chunks) = chunked_artifact();
+
+    assert_eq!(store.missing_chunks(&artifact).unwrap().len(), 2);
+    store
+        .put_chunk(&artifact.chunks[0].sha256, chunks[0])
+        .expect("first verified chunk should be stored");
+    assert_eq!(store.missing_chunks(&artifact).unwrap().len(), 1);
+    store
+        .put_chunk(&artifact.chunks[1].sha256, chunks[1])
+        .expect("second verified chunk should be stored");
+
+    let materialized = materializer
+        .materialize_with_cas(&artifact, &store)
+        .expect("complete CAS artifact should materialize");
+    assert_eq!(fs::read(&materialized.path).unwrap(), b"abcdefgh");
+    assert_eq!(materialized.sha256, artifact.sha256);
+
+    remove_root(&root);
+    remove_root(&cas_root);
+}
+
+#[test]
+fn cas_chunk_store_rejects_bad_or_tampered_chunks() {
+    let cas_root = temporary_root("cas-invalid");
+    let store = CasChunkStore::new(&cas_root).expect("absolute CAS root is valid");
+    let digest = sha256_digest(b"expected");
+
+    assert!(matches!(
+        store.put_chunk(&digest, b"tampered"),
+        Err(ArtifactMaterializationError::ChunkChecksumMismatch)
+    ));
+
+    store
+        .put_chunk(&digest, b"expected")
+        .expect("verified chunk should be stored");
+    let (artifact, _) = chunked_artifact();
+    let path = store
+        .chunk_path(&artifact.chunks[0].sha256)
+        .expect("digest path is safe");
+    store
+        .put_chunk(&artifact.chunks[0].sha256, b"abcd")
+        .expect("artifact chunk should be stored");
+    fs::write(path, b"tampered-on-disk").unwrap();
+    assert!(matches!(
+        store.missing_chunks(&artifact),
+        Err(ArtifactMaterializationError::ChunkChecksumMismatch)
+    ));
+
+    remove_root(&cas_root);
 }
