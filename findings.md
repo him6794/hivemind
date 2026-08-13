@@ -1285,3 +1285,72 @@ sleep 也因 bounded 限制讓真實 managed function 在毫秒內結束而不�
 
 修正：以注入式 runner 斷言取消語義，並把 `PermissionDenied` 視為「尚未註冊」繼續 poll，
 其他 status 則明確失敗。修正前 4/12 通過，修正後 15/15。
+
+## 2026-08-12：未使用項目清理與 scientific runtime 初始發現
+
+### 使用者要求與判定邊界
+
+- 附檔確認目前 `managed-function-v0` 已有函式／遞迴、`if/else`、`for`、整數、list/dict 與有限 mutation，但 production Worker 套用有限 execution/materialization/output/source/input/budget caps。
+- 「語言圖靈完備」與「某次 production 執行無界」是兩件事：路線圖必須讓語言模型可表達一般計算（例如資料依賴的 `while`／等價控制流與可成長狀態），同時保留每次執行必然受 fuel、記憶體、深度、輸出與 wall-clock 限制。不能用 `ExecutionLimits::unlimited()` 作為產品能力證明。
+- 現有科學運算缺口包含浮點／複數／decimal、數學函式、dense/sparse array、線性代數、統計／RNG、ODE/PDE、tensor/backend 與 GPU kernel 介面；這些必須以可量測的 kernel/API、測試與 benchmark gate 落地，不能只在 README 宣稱。
+- README 的 Python `def main(...)` 範例與現行 `.hmf`／`fn` DSL 契約疑似不一致；需以 current source、contract tests 與公開文件逐項核對後修正。
+
+### 清理安全基線
+
+- 本輪開始前工作樹已有 23 個 tracked 修改與 4 個 untracked paths；它們跨越 runtime、proto、後端與前端，不能因「未提交」或「新檔」而被視為 unused。
+- 先前 findings 顯示 generated zkVM artifacts、fixtures、platform-specific packaging、sample tasks、build scripts 與 release assets 都曾承擔真實測試／發布契約；引用搜尋為零不足以單獨證明可刪。
+- confirmed-unused 的最低門檻：不在 manifest/workspace/entrypoint/import/router/build/deploy/test/doc contract 中；不屬 convention-discovered、generated-input、fixture、migration 或 platform-specific file；刪除後對應 scoped build/test/lint/reference gates 全綠。
+- 截至此 checkpoint 尚未刪除任何項目；Rust、frontend/assets 與 runtime architecture 三個 read-only 稽核正在平行進行。
+
+### Repository 入口與第一輪候選
+
+- `executor-rs/Cargo.toml` 的 active workspace 只有 `managed-function-runtime` 與 `general-compute-runtime`，而 default member 只有前者；同樹下的 Monty／type-checking／JS／fuzz crates 不是該 workspace member。這只是強候選訊號，尚不能單獨證明可刪，因為它們可能由獨立 manifest、包裝腳本、歷史 general-compute path 或外部發布流程使用。
+- Release Docker context 對 `executor-rs` 只納入 root `Cargo.toml`／`Cargo.lock` 與 `crates/managed-function-runtime/**`；這證明其他 executor crates 不進目前主要 release image，但仍需查 CLI、Windows packaging、CI、docs 與 general-compute runtime references。
+- `hivemind-rs` 的 16 個 workspace crates全部明列為 members；不能依資料夾表面孤立直接刪除。`zkvm/managed-proof` 另有獨立 `host`／`methods` workspace，且先前 proof/release evidence 證明其為 load-bearing。
+- 根 README 第 320–322 行仍把 `runtime: managed-function-v0` 配上 Python `def main(input)` source；current runtime contract test則使用 `let`、`fn`、分號與 `.hmf` templates，公開契約不一致已由原始碼直接確認。
+- `executor-rs/crates/managed-function-runtime/tests/published_doc_example.rs` 是本輪開始前的 untracked 變更，明確釘住 frontend 現有 `.hmf` 範例；它是待整合的新契約測試，不是 unused file。
+- 根目錄 `.cache/`、`.rustup/`、`.omo/`、`target/`、`vendor/`、`worklog/` 等被 ignore，屬本機 cache／協作狀態；本輪 tracked-source 清理不會把它們混入刪除清單。若日後要清 cache，需獨立確認精確路徑與可恢復性。
+
+### 既有演進文件與清理 claim 的 audit 狀態
+
+- Repository 已有 `docs/MANAGED_RUNTIME_EVOLUTION_PLAN.md`，核心架構決策是保留 proof-friendly 的 `managed-function-v0`，另建 `general-compute-v1`；其內容已涵蓋語義、supervisor、artifact/tensor ABI、NumPy/SciPy/BLAS/FFT/ODE/RNG/sparse、GPU、信任／計費、M0–M5 gates、benchmark 與前十個 PR，方向與附檔要求一致。
+- `docs/MANAGED_RUNTIME_EVOLUTION_STATE.md` 顯示先前工作已超出「寫計畫」而開始實作 `general-compute-runtime`：contracts、capability validation、framed protocol、bounded supervisor 與 stdout/stderr capture。這些是現有 dirty work的一部分，本輪不回退；但它們也不能取代對原始「清理＋計畫」要求的完成稽核。
+- 既有 plan 宣稱 commit `be39bb7` 已移除 Monty CLI、舊 Docker server、Windows helper、release docs、workspace members 與 Hivemind `MONTY_EXECUTABLE` contract，且列出五個通過 gate。下一步必須直接檢查 commit diff、current tree、nested executor repo 狀態及 gate coverage，不能只引用文件自述。
+- （刪除前 audit snapshot）同一 plan 明說 Monty core 因 `executor-rs` 當時有 dirty modifications 而未整批刪除。當時 root workspace已不建置它們，但 `executor-rs/Makefile`、README 與其內嵌 GitHub workflows仍自成一套 Monty build/publish flow；後續在使用者明確授權後已移除該產品面。
+- `general-compute-runtime` 目前是 active workspace member且有 current supervisor/lifecycle 修改，並由 evolution plan/state直接引用；它不是 unused candidate。
+
+### Cleanup commit 與 nested repository 證據
+
+- Root commit `be39bb7 refactor(runtime): remove unused Monty executable contract` 確實刪除 5 個 tracked artifacts（Monty CLI manifest/source、舊 server Dockerfile、舊 Windows helper、executor release doc），並從 Docker/config/worker/package contracts移除 runtime-dead Monty wiring；該 commit 淨減少約 4,336 行，符合「先清理」的實際交付而非僅寫文件。
+- `executor-rs` 內含自己的 `.git`，其 current nested status相對 upstream `pydantic/monty` 有 **511 files changed、約 40,867 deletions／489 insertions**，包括大量已刪 Python wrapper/test fixtures與仍修改的 Monty core/type-checking/JS檔案。這直接證實既有 plan 所稱「dirty modifications」仍成立。
+- （刪除前 audit snapshot）因此剩餘 Monty core雖不進 Hivemind active workspace／release image，當時整批物理刪除會抹掉大量 nested-repo user work；在沒有額外授權前，它屬 `uncertain/user-owned`，不能升級為 confirmed-unused deletion。使用者後續明確授權後，本輪完成實體清理。
+- 上述兩項是刪除前的 audit snapshot。使用者其後明確授權「把 Monty 砍了」；因此未接線的 Monty source、bindings、typeshed、fuzz 與專用建置／CI metadata 已按授權移除，不能再視為 current-tree blocker。後續也已移除未被 Hivemind 追蹤的 `executor-rs/.git` upstream metadata 與舊 `executor-rs/target` build artifacts；兩者都不屬於 Hivemind build 或 runtime path。
+- Root current history已包含 `8b0dab0 docs(runtime): track managed runtime evolution roadmap`，接著有 contracts/capability/protocol/supervisor 四個 local commits；cleanup與plan均可由 Git history獨立重現。
+- Root README 的 current dirty diff只改了 User Guide連結，line 321的 Python `def main(input)`仍未修；可在不覆寫既有 README 修改的前提下做單一 JSON source string修正，並用 managed runtime contract test實際執行該範例。
+
+### 本輪 confirmed-unused deletion
+
+| 項目 | 證據 | 處置 | 待驗證 |
+|---|---|---|---|
+| `hivemind-rs/crates/hivemind-bin/src/main.rs` | 內容與 `src/bin/hivemind-bin.rs` 同為呼叫 `run_from_cli`；manifest明列真正 binary path；`cargo metadata --no-deps`的 target graph只列 `src/lib.rs`與五個 `src/bin/*.rs`，不列 `src/main.rs`；全 repository僅 `findings.md`兩筆舊歷史行號引用，沒有 build/package/script/code reference | 已以 `apply_patch` 精確刪除 | 重跑 metadata target graph、`cargo check -p hivemind-bin --all-targets --all-features --locked`、release contract |
+| `executor-rs/crates/managed-function-transpiler/`（4 files） | 不在 executor workspace metadata；除兩個「不得進 Docker」negative release assertions外無外部名稱引用，crate symbol亦零引用；direct `cargo metadata --manifest-path`回報 package繼承 workspace但不是 member，故 current tree無法單獨 build；directory在本輪前 clean | 已以 `apply_patch` 精確刪除 | executor workspace test/metadata、release Docker contract與殘留 reference search |
+| `frontend/src/components/site/network-background.tsx` | 非 Next convention entry；filename、`NetworkBackground`、`AmbientBlobs`在檔外均零引用 | 已刪除整檔 | TypeScript unused check、site tests/build、release frontend smoke |
+| Frontend definition-only code | Master/Worker default `React`、6個 inline style constants、Worker `authedFetch`、API `getApiBase`/`hasApiBase`、4個 Dialog wrapper、`buttonVariants` export均只有定義／export，無 consumer | 已移除；保留仍被內部使用的 Dialog primitives與Button variant implementation | 三 frontend tests/builds與 TypeScript check |
+| Worker copied CSS與 official utility CSS | Worker selectors在 JSX/dynamic class construction零匹配；official gradients/glows/grid/dots/conic/animation utilities零 consumer，blob僅由已刪 orphan component使用 | 已精確刪除 selector/keyframe blocks | static token search、frontend build/smoke與browser regression（若環境可用） |
+| Rust definition-only helpers | `_nodepool_endpoint_helper`僅以 `allow(dead_code)`自我存在；`resolve_tailscale_bins`零 caller，`which_on_path`只被前者呼叫；current Windows path採 embedded libtailscale | 已移除 | worker/client focused tests、all-feature checks、Windows package contract |
+
+### 明確保留的 false positives／不確定項目
+
+- 保留 `frontend/public/logo.svg`：repository內雖零引用，但 `public/`會直接發布且可能有外部 `/logo.svg` consumer，缺乏足夠證據刪除。
+- 保留 `taskIdFromFileName`：目前只被測試使用，但可能代表尚待接回的 filename-derived task-id產品意圖，不能以「application未呼叫」單一訊號刪除。
+- 保留 Next/Vite convention entry/config、dynamic locale/status classes、Playwright/release scripts、proto/build scripts、migrations、ZK guest/methods/fixture、platform-specific libtailscale與 benchmark deps；它們都有 framework/build/test/deploy evidence。
+- 保留 dormant client WireGuard slice：symbol多為 definition-only，但 proto/VPN service仍公開 WireGuard config，屬產品邊界決策而非無風險 dead-code deletion。
+- 不自動刪除 target/node_modules/.next/.cache/.cargo/.rustup/vendor；前四類是可重建 build cache但不屬 source commit，後四類含 offline toolchain、registry、prover evidence或 Windows libtailscale archive。任何空間清理應另立精確、可恢復的操作。
+
+### Runtime roadmap current-code gaps（初步）
+
+- `managed-function-v0` 的 runtime id、cost model與 RISC Zero guest image皆是 proof binding；不可在原版本內加入 float／while／tensor等語義。Roadmap應把新契約先命名為 pre-release `general-compute-v1alpha1`，只有 schema、tensor ABI、sandbox與 verifiability gates完成後才晉升 stable `general-compute-v1`。
+- Current `general-compute-runtime` 已有 serde contracts、capability validation、framed JSON與 process supervisor，但尚未接 Worker；Master／Nodepool／Worker admission仍以 v0為目前 managed path。這是 scaffold，不是平台已具一般運算能力的證據。
+- 尚缺的 production components至少包括 backend adapter、rootless sandbox、cgroup/seccomp或平台等價隔離、CAS/chunk materialization、tensor ABI與 scientific image；current `WorkerCapabilities`是資料結構而非可信 attestation，`UsageClaim`仍是 Worker claim。
+- Current result contract直接內嵌 unbounded-semantics `String` stdout/stderr，雖 supervisor capture有 byte cap，schema本身尚未建立 inline-vs-artifact invariants。Roadmap須要求 output manifest/hash/cap與 validator gate，而非依呼叫者自律。
+- Unix process-group路徑能 kill descendants，但只直接 `wait` leader；正常 leader先退出而 descendant繼承 pipe時仍可能讓 capture join卡住。Windows `taskkill /T`不是 Job Object resource/kill boundary。這些要列為 M1 exit blockers，不能以現有 lifecycle tests概括 sandbox完成。

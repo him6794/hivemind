@@ -397,3 +397,34 @@ bounded renderer 的 `managed-function-runtime/src/lib.rs`、`zkvm` 的 `Cargo.l
 - root cause resolved: the sidecar required `GLIBC_2.39`, while the Debian bookworm Worker runtime only supplied 2.36. The runtime now uses Debian trixie and the release smoke harness probes sidecar launch in the actual Worker image.
 - evidence: `scripts/release-stack-smoke.Tests.ps1` passed; a rebuilt `release-stack-smoke.ps1 -KeepRunning` passed all surfaces and the sidecar launch probe; `zkproof-success-1786448265` completed in `enforce` mode with 3 CPT settled, verified audit event, 2 managed operations, and 17 output bytes.
 - next action: commit the ABI compatibility fix and E2E evidence locally; do not push.
+
+## 2026-08-12：未使用項目清理與科學 runtime 路線圖
+
+- 已以 UTF-8 raw bytes 還原使用者附檔：要求先刪除沒有用到的程式碼／檔案，再寫出能讓底層 runtime 具備圖靈完備語義與科學運算能力的實作計畫。
+- 已讀取既有規劃狀態並執行 session catch-up；catch-up 無額外輸出。
+- 工作樹在本輪開始前已有 23 個 tracked paths 修改與 4 個 untracked paths，涵蓋 runtime、proto、後端及前端；全部視為既有資產，不還原、不覆寫。
+- 已將新目標加入 `task_plan.md`，保留前一 ZK 計費證明工作的完整歷史。
+- 已啟動三個平行 read-only 稽核：Rust 未使用項目、frontend/scripts/assets 未使用項目、managed runtime 架構與 roadmap gap analysis。
+- 目前狀態：階段 A `in_progress`；尚未刪除任何檔案，也尚未把候選誤當成已確認垃圾。
+- 已確認既有規劃資料量：`task_plan.md` 324 行、`findings.md` 1,287 行、`progress.md` 399 行（加入本節前）；歷史內容包含先前安全／ZK／發布修復證據，後續判斷會保留這些 load-bearing context。
+- Cleanup audit確認 root commit `be39bb7` 實際移除 Monty executable contract與 5 個 unused tracked artifacts；使用者其後明確授權移除剩餘未接線的 Monty core、bindings、typeshed、fuzz 與專用建置 metadata，`executor-rs` 現在只保留 Hivemind 兩個 runtime crate。
+- 已讀取並逐章檢查 `docs/MANAGED_RUNTIME_EVOLUTION_PLAN.md`／`STATE.md`；roadmap採 v0/v1 雙 runtime，具體包含圖靈語義、scientific ABI/kernels、sandbox、trust、GPU、測試、benchmark與 M0–M5 gates。
+- README mismatch採 TDD 修正：先新增 `readme_task_submission_publishes_an_executable_managed_function`，focused test如預期因 Python source **RED**；再只把 README `task_source` 改為 `fn`／`get` DSL，同一測試 **GREEN**（1 passed）。
+- Frontend read-only audit的 TypeScript檢查因 `incremental: true`產生 untracked `frontend/tsconfig.tsbuildinfo`；audit agent已立即以精確 path移除並確認 status乾淨，沒有留下 generated artifact或 tracked edit。
+- 已移除兩個本輪新證明的 confirmed-unused項目：Cargo target graph未選取的 duplicate `hivemind-bin/src/main.rs`；不屬 workspace、無 consumer且無法 standalone metadata的 `managed-function-transpiler/` 4-file crate。
+- 已移除 frontend confirmed-unused slice：orphan network canvas component、Master/Worker dead declarations、Worker dead fetch helper與 copied CSS、official zero-consumer utility CSS/keyframes、dead API/Dialog/Button exports；保留 convention/dynamic/external-URL uncertain items。
+- 已移除 Rust definition-only `_nodepool_endpoint_helper`、legacy external Tailscale binary resolver與其私有 PATH helper；保留 platform-used endpoint helper與仍具 proto產品意圖的 WireGuard slice。
+
+## 2026-08-13：M1 production sandbox policy
+
+- RED：新增 compile-fail doctest，證明 crate 外目前能直接使用 reference supervisor；測試按預期因成功編譯而失敗。
+- GREEN：加入 `sandbox.rs` 的 policy envelope 與 `ProductionSandboxLauncher`。Linux policy 缺少 rootless OCI、user/pid/mount/network namespace、cgroup v2、default-deny seccomp、no_new_privs、read-only root、network deny 或 explicit safe mounts 時拒絕；entrypoint、serde unknown fields/tags、mount path 與 digest 皆 fail closed。未接入 OCI runner 時只回 `RunnerUnavailable`／`UnsupportedPlatform`，不 fallback direct spawn。
+- API hardening：`ReferenceCommandSpec`／`ReferenceProcessSupervisor` 改為 `pub(crate)`；lifecycle coverage 從 integration test 移至 `src/supervisor/tests.rs`，保留 timeout/cancel/output cap/descendant kill-reap/stdio coverage。
+- 驗證：sandbox 6、CPython 11、crate-internal lifecycle 9、compile-fail doctest 1、executor workspace 98 與 managed runtime doc tests 全綠；Worker check、Docker Compose release contract、Windows package contract、runtime check、scoped rustfmt/diff check 全綠。
+- strict clippy `cargo clippy -p general-compute-runtime --all-targets -- -D warnings` 仍失敗於 35 個既有 crate-wide pedantic warnings；已記錄為 blocker，沒有為此單元改動無關 reference/lib/tensor API。
+- review：sandbox policy reviewer APPROVE；evidence 位於 `.omo/evidence/m1-sandbox-policy/` 與 `.omo/evidence/review_sandbox_policy-code-review.md`。
+
+## 2026-08-13：Monty 實體殘留清理
+
+- 依使用者明確授權，移除未被 root repository 追蹤的 `executor-rs/.git` upstream Monty metadata 與舊 `executor-rs/target` 編譯產物；root `.git` 未受影響。
+- 驗證：root `git ls-files` 無 Monty 路徑；`executor-rs/Cargo.toml` 僅列 `managed-function-runtime` 與 `general-compute-runtime`；`executor-rs/.git`、`executor-rs/target`、`executor-rs/monty.exe` 均不存在；active source/build paths 無 Monty reference。歷史文件與負向 release contract tests 保留作為「不得加回」證據。
