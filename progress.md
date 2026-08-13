@@ -434,3 +434,11 @@ bounded renderer 的 `managed-function-runtime/src/lib.rs`、`zkvm` 的 `Cargo.l
 - `general-compute-runtime` supervisor now owns a platform-specific `ProcessTreeGuard`: Unix keeps the invocation-scoped process group; Windows uses a suspended child, Job Object assignment with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, initial-thread resume, and job termination before output capture joins.
 - Normal leader exit terminates descendants before joining inherited stdout/stderr pipes; timeout, cancellation, and combined-output-limit paths share the same tree termination and wait/reap path. Spawn setup failures explicitly kill and reap the child.
 - RED→GREEN lifecycle coverage includes the normal-leader-exit descendant-pipe regression and Windows descendant fixtures with a strict 600 ms timeout. Cross-component verification passed: executor workspace tests, worker-executor check, Docker Compose release contracts, and Windows worker packaging contracts.
+
+## 2026-08-13：M1 pinned OCI bundle runner
+
+- `dbf5765 feat(runtime): execute pinned OCI bundles safely` 已本地提交，未 push。
+- 以 RED→GREEN 補齊 `ProductionSandboxLauncher::run_bundle`：fake pinned runner 只有在 absolute regular executable、正確 SHA-256、合法 container ID 與完整 OCI 1.0.2 bundle 通過驗證後才可執行；未知 root/nested fields、namespace 重複或未知、非 root user、symlink/relative bundle、mount/source traversal、image/backend/cgroup/network/seccomp annotation mismatch 均在 spawn 前拒絕。
+- runner 直接以既有 `ReferenceProcessSupervisor` 傳遞 argv，沒有 shell interpolation；timeout、cancellation、combined output limit 與正常 leader exit 共用 process-tree kill/reap，並保留 bounded diagnostics。
+- focused `sandbox` suite：21 passed；`cargo test -p general-compute-runtime --locked`、`cargo test --workspace --locked`、`cargo check -p hivemind-worker-executor --locked`、Docker Compose release contract、Windows worker packaging contract、scoped rustfmt check 均通過。
+- 限制：這個單元驗證並執行 operator-pinned OCI runner，但 Linux rootless namespace/cgroup v2/seccomp/no_new_privs 的 host primitives 仍由外部 runner 實作；Worker/Nodepool runtime routing、artifact materialization 與 capability probe 尚未完成，不能宣稱 M1 或整體 M0–M5 完成。
