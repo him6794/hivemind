@@ -21,7 +21,7 @@ running
 
 ## Current step
 
-M1 supervisor、reference fixtures、differential contract、pinned CPython registry 與 bounded CPython subprocess 小單元已完成；下一步補 CPython exception/malformed response mapping，再進 M2 tensor ABI。M0 capability matrix 仍是 supervisor 啟動前的 fail-closed gate。
+M1 supervisor、reference fixtures、differential contract、pinned CPython registry、bounded CPython subprocess 與 exception/malformed response mapping 小單元已完成；M0 runtime id 已固定為 `general-compute-v1alpha1`。下一步補 request 的 execution/attempt/idempotency/digest binding 與 result/evidence validation。M0 capability matrix 仍是 supervisor 啟動前的 fail-closed gate。
 
 ## Completed
 
@@ -75,6 +75,12 @@ M1 supervisor、reference fixtures、differential contract、pinned CPython regi
 - M1 bounded CPython subprocess 小單元（待本次 commit）
   - supervisor 新增 bounded stdin writer；CPython adapter 以 fixed `python -c` runner、framed stdin/stdout 傳遞 source/input/seed，payload 不進 command line；timeout/cancel 映射為 typed supervisor failure。
   - lifecycle tests 7、CPython adapter tests 6 passed；executor workspace 全測試、format、`hivemind-config` 與 `hivemind-worker-executor` checks passed。
+- M1 CPython response hardening 小單元（`942cf0d`）
+  - source exception 映射為 bounded `exception` observation；framed response 若有 trailing bytes 即 fail closed。
+  - focused CPython tests 8 passed；executor workspace 69 tests、Worker check 與 Docker/Windows release-contract tests passed。
+- M0 alpha runtime id 小單元（本次 commit）
+  - 先加入要求 alpha id 且拒絕 stable `general-compute-v1` 的 RED test，再將 contract 常數與 fixtures 固定為 `general-compute-v1alpha1`。
+  - focused contracts 8 passed；executor workspace 69 tests、Worker check 與 Docker/Windows release-contract tests passed。
 
 ## Active owners
 
@@ -88,11 +94,11 @@ M1 supervisor、reference fixtures、differential contract、pinned CPython regi
 
 ## Next action
 
-在 `general-compute-runtime` 內補 CPython runner 的 exception、non-zero exit、malformed frame 與 trailing bytes mapping，並以 hostile source/output fixtures 驗證 fail-closed；完成後開始 M2 tensor ABI。Windows Job Object 對等保護另列為 supervisor hardening 小單元。
+在 `general-compute-runtime` 內補 immutable `execution_id`、`attempt_id`、idempotency key 與 canonical request digest；先以 result binding 的 RED tests 驗證重派與篡改不能通過，再實作最小 request/result validation。Windows Job Object 對等保護與 M2 tensor ABI 仍列為後續獨立小單元。
 
 ## Next checkpoint
 
-M1 bounded CPython subprocess 小單元完成 RED → GREEN、protocol/M0 schema/capability regression 與 v0 consumer checks 全綠並建立本地 commit；下一 checkpoint 為 exception/malformed response mapping。
+M0 request identity/digest binding 小單元完成 RED → GREEN、protocol/capability/v0 consumer checks 全綠並建立本地 commit；下一 checkpoint 為 evidence envelope 與 usage/artifact result validation。
 
 ## Notes
 

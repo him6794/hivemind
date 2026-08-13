@@ -1,11 +1,12 @@
 use general_compute_runtime::{
     ArtifactChunk, ArtifactManifest, ArtifactRole, BackendRegistration, CapabilityMatrix, ExecutionPolicy,
     GeneralComputeRequest, GeneralComputeResult, ResultStatus, ValidationErrorCode, WorkerCapabilities,
+    GENERAL_COMPUTE_RUNTIME_VERSION,
 };
 
 fn valid_request() -> GeneralComputeRequest {
     GeneralComputeRequest {
-        runtime_version: "general-compute-v1".into(),
+        runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
         guest_image_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
         backend_id: "python-numpy-scipy".into(),
         entrypoint: "main:run".into(),
@@ -23,9 +24,24 @@ fn valid_request() -> GeneralComputeRequest {
 }
 
 #[test]
+fn alpha_runtime_id_is_the_only_pre_release_contract() {
+    assert_eq!(GENERAL_COMPUTE_RUNTIME_VERSION, "general-compute-v1alpha1");
+
+    let mut request = valid_request();
+    request.runtime_version = GENERAL_COMPUTE_RUNTIME_VERSION.into();
+    request.validate().expect("alpha runtime id should be accepted");
+
+    request.runtime_version = "general-compute-v1".into();
+    let error = request
+        .validate()
+        .expect_err("stable runtime id must remain gated before release promotion");
+    assert_eq!(error.code, ValidationErrorCode::RuntimeVersionMismatch);
+}
+
+#[test]
 fn request_round_trip_preserves_versioned_execution_contract() {
     let request = GeneralComputeRequest {
-        runtime_version: "general-compute-v1".into(),
+        runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
         guest_image_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
         backend_id: "python-numpy-scipy".into(),
         entrypoint: "main:run".into(),
@@ -45,7 +61,7 @@ fn request_round_trip_preserves_versioned_execution_contract() {
     let decoded: GeneralComputeRequest = serde_json::from_slice(&encoded).expect("request decodes");
 
     assert_eq!(decoded, request);
-    assert_eq!(decoded.runtime_version, "general-compute-v1");
+    assert_eq!(decoded.runtime_version, GENERAL_COMPUTE_RUNTIME_VERSION);
     assert_eq!(decoded.source_artifact.sha256, request.source_artifact.sha256);
 }
 
@@ -63,7 +79,7 @@ fn result_round_trip_keeps_claimed_usage_and_output_manifest() {
             br#"{"answer":42}"#,
         )],
         usage: Default::default(),
-        runtime_version: "general-compute-v1".into(),
+        runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
         backend_id: "python-numpy-scipy".into(),
         guest_image_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
         input_sha256: "sha256:input".into(),
