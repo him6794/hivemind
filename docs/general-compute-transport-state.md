@@ -2,7 +2,7 @@
 
 - Goal: complete the `general-compute-v1alpha1` authenticated CAS/chunk transport without restoring Monty.
 - Status: running; the runtime local CAS boundary, protobuf chunk envelopes, and the authenticated Worker chunk service are complete, but Nodepool client calls and remote CAS population are not wired yet.
-- Current step: keep the Worker chunk service admission-bound and finish its focused negative coverage before handing the transport surface to the Nodepool client/scheduler.
+- Current step: hand the authenticated Worker transport surface to the Nodepool client/scheduler; keep remote population, cross-worker resume, and lifecycle settlement fail-closed until those paths are implemented.
 - Completed checkpoints:
   - `69098e3` binds local CAS uploads to execution, attempt, idempotency, request digest, artifact manifest coordinates, and SHA-256 bytes.
   - `4b8d955` adds bounded `GeneralComputeChunkUpload` and `GeneralComputeChunkResumeRequest` protobuf envelopes and wire validators.
@@ -19,7 +19,7 @@
 - Verification this round:
   - `cargo check -p hivemind-worker-executor --tests --locked` passed.
   - `cargo check -p hivemind-worker-executor --locked` passed.
-  - `cargo test -p hivemind-worker-executor --test chunk_transport --target x86_64-pc-windows-gnu --locked` passed (6 adapter tests).
+  - `cargo test -p hivemind-worker-executor --test chunk_transport --target x86_64-pc-windows-gnu --locked` passed (8 adapter tests).
   - `cargo test -p hivemind-worker-executor --lib grpc_server::tests::chunk_service --target x86_64-pc-windows-gnu --locked` passed (5 service tests).
   - `cargo test -p general-compute-runtime --locked` passed (all runtime transport, CAS, sandbox, supervisor, and doc tests).
   - `cargo test -p hivemind-proto --locked` passed (8 tests).
