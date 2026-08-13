@@ -21,7 +21,7 @@ running
 
 ## Current step
 
-M0a v0 semantics/cost/proof freeze 與 M0b 的 alpha runtime、request/result/evidence、artifact/tensor、capability 契約均已完成；M1 的 reference fixtures、bounded supervisor、CPython adapter、combined output cap、trusted executable gate 與 production sandbox policy 也已落地。production launcher 目前在驗證完整 rootless OCI／namespace／cgroup v2／default-deny seccomp／no_new_privs／read-only root／network-deny／explicit mounts 後 fail closed；實際 OCI runner 尚未接入。後續缺口是 leader-exit、future-drop kill/reap gates 與實際平台隔離 primitives。M0 capability matrix 仍是 supervisor 啟動前的 fail-closed gate。
+M0a v0 semantics/cost/proof freeze 與 M0b 的 alpha runtime、request/result/evidence、artifact/tensor、capability 契約均已完成；M1 的 reference fixtures、bounded supervisor、CPython adapter、combined output cap、trusted executable gate、production sandbox policy 與受驗證 OCI bundle runner 也已落地。runner 只接受 operator-pinned absolute executable 與 SHA-256、精確 OCI 1.0.2 config、rootless/non-root、namespace/cgroup/seccomp/no_new_privileges/read-only root/network-deny/mount annotations，並透過既有 process-tree supervisor 套用 timeout、cancel、output cap、kill/reap；驗證失敗一律 fail closed。實際 Linux rootless OCI namespace/cgroup/seccomp primitives 仍由外部 runner 負責，尚未宣稱平台隔離完成。M0 capability matrix 仍是 supervisor 啟動前的 fail-closed gate。
 
 ## Completed
 
@@ -112,6 +112,10 @@ M0a v0 semantics/cost/proof freeze 與 M0b 的 alpha runtime、request/result/ev
   - GREEN：加入具名 sandbox policy enum 與 `ProductionSandboxLauncher`；production policy 要求 rootless OCI、user/pid/mount/network namespaces、cgroup v2、default-deny seccomp profile、no_new_privs、read-only root、network deny 與 explicit safe mounts，違規或未支援平台 fail closed；direct CPython 明確標為 reference-only。
   - API hardening：direct supervisor 收回 `pub(crate)`，lifecycle tests 移入 crate-internal module；compile-fail doctest、sandbox 6、CPython 11、lifecycle 9、executor workspace 98 與 doc tests 皆通過。
   - 跨元件：`cargo check -p hivemind-worker-executor --locked`、Docker Compose release contract、Windows worker package contract 與 runtime check 通過；scoped rustfmt/diff check 通過。strict clippy 仍受 crate 既有 35 個 warning-as-error debt 阻擋，未宣稱全綠。
+- `dbf5765 feat(runtime): execute pinned OCI bundles safely`
+  - production launcher 新增受驗證 OCI bundle invocation：要求 absolute regular runner、operator SHA-256 pin、合法 container ID 與 bundle root/rootfs；拒絕 symlink、relative path、未知/重複 namespace、未知 nested OCI fields、非 1.0.2、root user、mount/source traversal、未知 annotations 與 identity/policy mismatch。
+  - runner 參數以 direct `Command` path 傳遞，重用 process-tree supervisor；timeout、cancel、output cap 與 descendant kill/reap 共享既有 lifecycle contract。
+  - RED→GREEN sandbox suite 21 tests passed；`cargo test -p general-compute-runtime --locked`、`cargo test --workspace --locked`、`cargo check -p hivemind-worker-executor --locked`、Docker Compose release contract、Windows worker packaging contract 與 scoped rustfmt checks passed。
 
 ## Active owners
 
@@ -122,21 +126,21 @@ M0a v0 semantics/cost/proof freeze 與 M0b 的 alpha runtime、request/result/ev
 ## Blockers
 
 - `general-compute-runtime` 的 strict clippy `-D warnings` 目前仍有既有 crate-wide pedantic debt（主要在 reference/lib/tensor 與既有 API must-use/docs）；本 M1 policy scoped tests、format 與跨元件 checks 已通過，但未把無關 lint debt 混入本單元。
-- 實際 rootless OCI runner、Linux namespace/cgroup/seccomp/no_new_privs primitives 尚未接入；目前 production launch 只能 truthful fail closed。
+- 實際 Linux rootless OCI namespace/cgroup/seccomp/no_new_privs primitives 仍由外部 operator runner 負責；本程式只驗證 bundle envelope 並透過 pinned runner 啟動，尚未宣稱 host platform isolation 或 Worker/Nodepool runtime routing 已完成。
 
 ## Next action
 
-下一個 M1 小單元是 leader-exit／future-drop kill-reap lifecycle hardening，接著才接入實際 Linux rootless OCI runner；保持 pinned CPython direct harness 只作 reference/test backend。M2 dtype/complex/數值運算仍列為後續獨立小單元。
+下一個 M1 小單元是把已驗證的 OCI runner contract 接到 Worker runtime routing／artifact materialization，並補實際 Linux runner capability probe；保持 pinned CPython direct harness 只作 reference/test backend。M2 dtype/complex/數值運算仍列為後續獨立小單元。
 
 ## Next checkpoint
 
-M1 sandbox policy focused gates 與 review 已完成；下一 checkpoint 為 leader-exit／future-drop kill-reap RED→GREEN，並維持 production runner 在未接入前 fail closed。
+M1 sandbox policy、leader-exit process-tree cleanup 與 pinned OCI bundle runner focused gates 已完成；下一 checkpoint 為 Worker routing/capability probe 的 RED→GREEN，並維持未通過外部 platform probe 時 fail closed。
 
 ## Notes
 
 - 2026-08-13 Monty removal was revalidated after the cleanup commit: the root repository has no tracked Monty paths, `executor-rs/Cargo.toml` exposes only `managed-function-runtime` and `general-compute-runtime`, and the executor workspace plus Docker/Windows release-contract gates pass. The untracked nested `executor-rs/.git` upstream metadata and stale `executor-rs/target` build artifacts were physically removed after explicit user authorization; neither was part of any Hivemind build or runtime path.
 - 2026-08-13 M1 leader-exit process-tree hardening is implemented in the reference lifecycle supervisor: Unix process groups remain scoped to the invocation; Windows starts suspended, assigns a Job Object with kill-on-close, resumes the initial thread, and terminates the job before joining inherited output pipes. Spawn setup failures explicitly kill/reap the child. RED→GREEN coverage now includes normal leader exit with an inherited descendant pipe, timeout descendant cleanup, and Windows fixtures that prove descendant launch without relaxing the 600 ms timeout. `cargo test --workspace --locked`, `cargo check -p hivemind-worker-executor --locked`, Docker Compose release contracts, and Windows worker packaging contracts all pass.
-- Future-drop cleanup remains covered by the existing Worker managed-prover/execute-future guards; the next M1 gap is wiring a real production OCI runner while preserving the current fail-closed launcher boundary.
+- Future-drop cleanup remains covered by the existing Worker managed-prover/execute-future guards; `dbf5765` now wires a validated OCI bundle invocation through the same cleanup boundary, while actual Linux isolation remains an operator-runner responsibility.
 - 此檔先前的 `complete` 只代表「舊 Monty 清理與計畫文件」完成，並不代表使用者要求的完整演進計畫完成；2026-08-12 已依實際 scope 修正為 `running`。
 - 不要對工作樹中的其他 dirty frontend/API 變更使用 `reset`、`checkout` 或整批刪除；它們不屬於目前小單元。
 - `managed-function-v0` 的有限配額與 proof settlement 是 load-bearing 契約，不得為了 v1 任意運算而放寬。
