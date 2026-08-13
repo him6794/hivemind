@@ -1,4 +1,4 @@
-//! Versioned contracts for the `general-compute-v1` runtime.
+//! Versioned contracts for the `general-compute-v1alpha1` runtime.
 //!
 //! This crate deliberately owns data contracts only.  It has no dependency on
 //! the Hivemind database or scheduler, so a worker supervisor and the trusted
@@ -12,7 +12,7 @@ pub mod differential;
 pub mod reference;
 pub mod supervisor;
 
-pub const GENERAL_COMPUTE_RUNTIME_VERSION: &str = "general-compute-v1";
+pub const GENERAL_COMPUTE_RUNTIME_VERSION: &str = "general-compute-v1alpha1";
 pub const MAX_CPU_MILLIS: u64 = 24 * 60 * 60 * 1000;
 pub const MAX_MEMORY_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 pub const MAX_WALL_TIME_MS: u64 = 7 * 24 * 60 * 60 * 1000;
