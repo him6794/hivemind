@@ -24,6 +24,7 @@ pub const MAX_PROCESSES: u32 = 256;
 pub const MAX_THREADS: u32 = 4096;
 pub const MAX_SCRATCH_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 pub const MAX_OUTPUT_BYTES: u64 = 1024 * 1024 * 1024;
+pub const MAX_ARTIFACT_BYTES: u64 = 1024 * 1024 * 1024;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,7 +34,10 @@ pub enum ProtocolError {
     InvalidJson,
 }
 
-pub fn encode_frame<T: Serialize>(value: &T, max_payload_bytes: usize) -> Result<Vec<u8>, ProtocolError> {
+pub fn encode_frame<T: Serialize>(
+    value: &T,
+    max_payload_bytes: usize,
+) -> Result<Vec<u8>, ProtocolError> {
     let payload = serde_json::to_vec(value).map_err(|_| ProtocolError::InvalidJson)?;
     if payload.len() > max_payload_bytes || payload.len() > u32::MAX as usize {
         return Err(ProtocolError::PayloadTooLarge);
@@ -59,12 +63,15 @@ pub fn decode_frame<T: for<'de> Deserialize<'de>>(
     if payload_len > max_payload_bytes {
         return Err(ProtocolError::PayloadTooLarge);
     }
-    let frame_len = 4usize.checked_add(payload_len).ok_or(ProtocolError::PayloadTooLarge)?;
+    let frame_len = 4usize
+        .checked_add(payload_len)
+        .ok_or(ProtocolError::PayloadTooLarge)?;
     if input.len() < frame_len {
         return Err(ProtocolError::Truncated);
     }
 
-    let value = serde_json::from_slice(&input[4..frame_len]).map_err(|_| ProtocolError::InvalidJson)?;
+    let value =
+        serde_json::from_slice(&input[4..frame_len]).map_err(|_| ProtocolError::InvalidJson)?;
     Ok((value, frame_len))
 }
 
@@ -94,7 +101,8 @@ impl GeneralComputeRequest {
     /// same bytes without relying on a map serializer's ordering.
     pub fn canonical_request_digest(&self) -> String {
         let canonical = CanonicalRequest::from(self);
-        let bytes = serde_json::to_vec(&canonical).expect("canonical request serialization is infallible");
+        let bytes =
+            serde_json::to_vec(&canonical).expect("canonical request serialization is infallible");
         sha256_digest(&bytes)
     }
 
@@ -154,7 +162,10 @@ impl GeneralComputeRequest {
             ));
         }
         if let Err(message) = self.source_artifact.validate() {
-            return Err(ValidationError::new(ValidationErrorCode::ArtifactInvalid, message));
+            return Err(ValidationError::new(
+                ValidationErrorCode::ArtifactInvalid,
+                message,
+            ));
         }
         for artifact in &self.input_artifacts {
             if artifact.role != ArtifactRole::Input {
@@ -164,7 +175,10 @@ impl GeneralComputeRequest {
                 ));
             }
             if let Err(message) = artifact.validate() {
-                return Err(ValidationError::new(ValidationErrorCode::ArtifactInvalid, message));
+                return Err(ValidationError::new(
+                    ValidationErrorCode::ArtifactInvalid,
+                    message,
+                ));
             }
         }
 
@@ -256,9 +270,9 @@ impl GeneralComputeResult {
                     "result output artifacts must have the output role",
                 ));
             }
-            artifact
-                .validate()
-                .map_err(|message| ValidationError::new(ValidationErrorCode::ArtifactInvalid, message))?;
+            artifact.validate().map_err(|message| {
+                ValidationError::new(ValidationErrorCode::ArtifactInvalid, message)
+            })?;
         }
         if self.output_manifest_root != canonical_artifact_root(&self.output_artifacts) {
             return Err(ValidationError::new(
@@ -270,7 +284,9 @@ impl GeneralComputeResult {
         let output_artifact_bytes = self
             .output_artifacts
             .iter()
-            .try_fold(0u64, |total, artifact| total.checked_add(artifact.size_bytes))
+            .try_fold(0u64, |total, artifact| {
+                total.checked_add(artifact.size_bytes)
+            })
             .ok_or_else(|| {
                 ValidationError::new(
                     ValidationErrorCode::UsageExceedsPolicy,
@@ -286,7 +302,9 @@ impl GeneralComputeResult {
                 > request
                     .input_artifacts
                     .iter()
-                    .try_fold(0u64, |total, artifact| total.checked_add(artifact.size_bytes))
+                    .try_fold(0u64, |total, artifact| {
+                        total.checked_add(artifact.size_bytes)
+                    })
                     .ok_or_else(|| {
                         ValidationError::new(
                             ValidationErrorCode::UsageExceedsPolicy,
@@ -309,14 +327,20 @@ impl GeneralComputeResult {
             ResultStatus::Completed => self.exit_code == Some(0) && self.error_code.is_none(),
             ResultStatus::Failed => {
                 self.exit_code != Some(0)
-                    && self.error_code.as_deref().is_some_and(|code| !code.trim().is_empty())
+                    && self
+                        .error_code
+                        .as_deref()
+                        .is_some_and(|code| !code.trim().is_empty())
             }
             ResultStatus::Cancelled
             | ResultStatus::TimedOut
             | ResultStatus::ResourceExhausted
             | ResultStatus::BackendUnavailable => {
                 self.exit_code.is_none()
-                    && self.error_code.as_deref().is_some_and(|code| !code.trim().is_empty())
+                    && self
+                        .error_code
+                        .as_deref()
+                        .is_some_and(|code| !code.trim().is_empty())
             }
         };
         if valid {
@@ -660,7 +684,8 @@ impl CapabilityMatrix {
                 "backend registration denies network access",
             ));
         }
-        if request.execution_policy.gpu_required && (!backend.gpu_allowed || !worker.gpu_available) {
+        if request.execution_policy.gpu_required && (!backend.gpu_allowed || !worker.gpu_available)
+        {
             return Err(ValidationError::new(
                 ValidationErrorCode::GpuUnavailable,
                 "requested GPU capability is unavailable",
@@ -675,7 +700,11 @@ impl CapabilityMatrix {
             ));
         }
         for capability in &backend.capabilities {
-            if !worker.capabilities.iter().any(|available| available == capability) {
+            if !worker
+                .capabilities
+                .iter()
+                .any(|available| available == capability)
+            {
                 return Err(ValidationError::new(
                     ValidationErrorCode::CapabilityMissing,
                     format!("worker does not provide capability {capability}"),
@@ -728,6 +757,9 @@ impl ArtifactManifest {
     pub fn validate(&self) -> Result<(), String> {
         if self.artifact_id.trim().is_empty() {
             return Err("artifact id must not be empty".into());
+        }
+        if self.size_bytes > MAX_ARTIFACT_BYTES {
+            return Err("artifact size exceeds the runtime limit".into());
         }
 
         if let Some(bytes) = &self.inline_bytes {
@@ -815,7 +847,10 @@ impl ArtifactManifest {
         Ok(selected)
     }
 
-    pub fn missing_chunks(&self, completed_sha256: &[String]) -> Result<Vec<ArtifactChunk>, String> {
+    pub fn missing_chunks(
+        &self,
+        completed_sha256: &[String],
+    ) -> Result<Vec<ArtifactChunk>, String> {
         self.validate()?;
         for digest in completed_sha256 {
             if !is_sha256_digest(digest) {
@@ -828,7 +863,11 @@ impl ArtifactManifest {
         Ok(self
             .chunks
             .iter()
-            .filter(|chunk| !completed_sha256.iter().any(|digest| digest == &chunk.sha256))
+            .filter(|chunk| {
+                !completed_sha256
+                    .iter()
+                    .any(|digest| digest == &chunk.sha256)
+            })
             .cloned()
             .collect())
     }
@@ -840,8 +879,12 @@ pub fn sha256_digest(bytes: &[u8]) -> String {
 }
 
 pub fn canonical_artifact_root(artifacts: &[ArtifactManifest]) -> String {
-    let canonical: Vec<_> = artifacts.iter().map(CanonicalArtifactManifest::from).collect();
-    let bytes = serde_json::to_vec(&canonical).expect("artifact manifest serialization is infallible");
+    let canonical: Vec<_> = artifacts
+        .iter()
+        .map(CanonicalArtifactManifest::from)
+        .collect();
+    let bytes =
+        serde_json::to_vec(&canonical).expect("artifact manifest serialization is infallible");
     sha256_digest(&bytes)
 }
 
