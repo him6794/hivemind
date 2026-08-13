@@ -356,6 +356,10 @@ message ExecuteTaskRequest {
     string token = 6;          // nodepool-issued JWT for worker execution authorization
     int64 managed_budget_units = 7; // user-selected managed-function usage budget
     bytes general_compute_manifest_json = 8; // canonical general-compute-v1alpha1 request manifest
+    string execution_id = 9; // immutable general-compute execution identity
+    string attempt_id = 10; // immutable dispatch attempt identity
+    string idempotency_key = 11; // Nodepool-owned result idempotency key
+    string request_digest = 12; // canonical SHA-256 request digest
 }
 
 message ManagedProofEnvelope {
@@ -372,6 +376,10 @@ message ExecuteTaskResponse {
     int64 managed_output_bytes = 4;
     string managed_receipt_json = 5;
     ManagedProofEnvelope managed_proof = 6;
+    string execution_id = 7;
+    string attempt_id = 8;
+    string idempotency_key = 9;
+    string request_digest = 10;
 }
 
 message TaskOutputUploadRequest {

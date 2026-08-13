@@ -141,15 +141,19 @@ M3 alpha manifest transport/admission 已由 `8b34285` 完成並提交：HTTP Ma
 
 ## Next action
 
-以 RED→GREEN 做 attempt-bound request/result compatibility；後續再接實際 general-compute backend execution、artifact materialization 與 CAS/chunk resume。保持 pinned CPython direct harness 只作 reference/test backend；M2 dtype/complex/數值運算仍是獨立小單元。
+以 RED→GREEN 接實際 general-compute backend execution、artifact materialization 與 CAS/chunk resume；保持 pinned CPython direct harness 只作 reference/test backend；M2 dtype/complex/數值運算仍是獨立小單元。
 
 ## Next checkpoint
 
-M3 alpha manifest transport/admission 的跨 crate RED→GREEN 已由 `8b34285` 提交，且未安裝 backend 時 Worker 仍 fail closed。Nodepool trusted registry/capability persistence 已完成並通過 owner、persistence、revocation 與 scheduler admission 測試；下一 checkpoint 是 request/result attempt compatibility。
+M3 alpha manifest transport/admission 的跨 crate RED→GREEN 已由 `8b34285` 提交，且未安裝 backend 時 Worker 仍 fail closed。Nodepool trusted registry/capability persistence 與 attempt-bound request/result compatibility 已完成並通過 owner、persistence、revocation、scheduler admission、retry、stale-result 與 manifest-guard 測試；下一 checkpoint 是 backend execution、artifact materialization 與 CAS/chunk resume。
 
 ### M3 trusted capability registry checkpoint (2026-08-13)
 
-The Nodepool trusted registry gate is now implemented. Operator configuration is the only source for a worker's general-compute capability snapshot; registration binds the configured worker id to the authenticated owner (or admin) and rejects mismatches with `PermissionDenied`. Snapshots are persisted in `worker_nodes.general_compute_capabilities_json`, survive untrusted heartbeat refreshes, and can be explicitly revoked by an owner-authorized registration. Scheduler admission for `general-compute-v1alpha1` parses only the persisted Nodepool snapshot and validates backend, image, capability, thread, network, filesystem, and GPU requirements against the request. Missing or malformed snapshots fail closed. The next checkpoint is attempt-bound request/result compatibility, then backend execution and CAS materialization.
+The Nodepool trusted registry gate is now implemented. Operator configuration is the only source for a worker's general-compute capability snapshot; registration binds the configured worker id to the authenticated owner (or admin) and rejects mismatches with `PermissionDenied`. Snapshots are persisted in `worker_nodes.general_compute_capabilities_json`, survive untrusted heartbeat refreshes, and can be explicitly revoked by an owner-authorized registration. Scheduler admission for `general-compute-v1alpha1` parses only the persisted Nodepool snapshot and validates backend, image, capability, thread, network, filesystem, and GPU requirements against the request. Missing or malformed snapshots fail closed. Attempt-bound request/result compatibility is now complete; the next checkpoint is backend execution and CAS materialization.
+
+### M3 attempt-bound request/result compatibility checkpoint (2026-08-13)
+
+The scheduler now forwards the validated alpha manifest identity (`execution_id`, `attempt_id`, `idempotency_key`, and canonical `request_digest`) in the Worker RPC request. Worker alpha responses echo those fields for both success and failure; legacy `managed-function-v0` responses keep the fields empty. Nodepool validates the response identity against the persisted, validated request before any completion or settlement. A mismatch is fail-closed and redispatched without settlement. Retry reset preserves the execution and idempotency identities, rotates the attempt id, and recomputes the canonical request digest. Repository completion additionally compares the exact persisted manifest, preventing a stale manifest from completing a current attempt. Evidence: scheduler lib tests 89 passed, 1 intentional verifier ignore; DB-backed retry, stale-response, and completion-manifest guard tests passed; scheduler, Worker, and proto locked checks passed. The Worker test binary remains blocked by the pre-existing Windows MSVC/MinGW mixed-linker symbol (`__mingw_fprintf_cgo_beginthread`), while the Worker library locked check passes.
 
 ## Notes
 

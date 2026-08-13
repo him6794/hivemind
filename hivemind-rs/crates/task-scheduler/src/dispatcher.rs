@@ -332,6 +332,7 @@ pub fn build_execute_task_request(task: &Task) -> ExecuteTaskRequest {
 }
 
 fn build_execute_task_request_with_token(task: &Task, token: String) -> ExecuteTaskRequest {
+    let identity = general_compute_identity(task);
     ExecuteTaskRequest {
         task_id: task.task_id.clone(),
         torrent: task.torrent_source.clone().unwrap_or_default(),
@@ -358,7 +359,52 @@ fn build_execute_task_request_with_token(task: &Task, token: String) -> ExecuteT
             .general_compute_manifest_json
             .clone()
             .unwrap_or_default(),
+        execution_id: identity
+            .as_ref()
+            .map_or_else(String::new, |identity| identity.0.clone()),
+        attempt_id: identity
+            .as_ref()
+            .map_or_else(String::new, |identity| identity.1.clone()),
+        idempotency_key: identity
+            .as_ref()
+            .map_or_else(String::new, |identity| identity.2.clone()),
+        request_digest: identity
+            .as_ref()
+            .map_or_else(String::new, |identity| identity.3.clone()),
     }
+}
+
+fn general_compute_identity(task: &Task) -> Option<(String, String, String, String)> {
+    let manifest = task.general_compute_manifest_json.as_deref()?;
+    let request = serde_json::from_slice::<general_compute_runtime::GeneralComputeRequest>(manifest).ok()?;
+    request.validate().ok()?;
+    Some((
+        request.execution_id,
+        request.attempt_id,
+        request.idempotency_key,
+        request.request_digest,
+    ))
+}
+
+fn validate_general_compute_response_identity(
+    task: &Task,
+    response: &ExecuteTaskResponse,
+) -> std::result::Result<(), &'static str> {
+    if task.runtime.as_deref() != Some("general-compute-v1alpha1") {
+        return Ok(());
+    }
+    let Some((execution_id, attempt_id, idempotency_key, request_digest)) = general_compute_identity(task)
+    else {
+        return Err("general-compute request identity is missing or malformed");
+    };
+    if response.execution_id != execution_id
+        || response.attempt_id != attempt_id
+        || response.idempotency_key != idempotency_key
+        || response.request_digest != request_digest
+    {
+        return Err("general-compute response identity does not match the persisted request");
+    }
+    Ok(())
 }
 
 fn worker_execution_token(
@@ -454,6 +500,16 @@ async fn execute_on_worker(
                     .await?;
                 warn!(
                     "Task {} returned an oversized response from worker {}: {}",
+                    task.task_id, worker_id, reason
+                );
+                return Ok(());
+            }
+            if let Err(reason) = validate_general_compute_response_identity(&current_task, &response)
+            {
+                repo.reset_to_pending_for_worker(&task.task_id, &worker_id)
+                    .await?;
+                warn!(
+                    "Task {} returned an attempt identity mismatch from worker {}; redispatching: {}",
                     task.task_id, worker_id, reason
                 );
                 return Ok(());
@@ -645,13 +701,26 @@ async fn execute_on_worker(
                             .await;
                         }
                     }
-                    repo.complete_for_worker(
-                        &task.task_id,
-                        &worker_id,
-                        None,
-                        Some(&response.status_message),
-                    )
-                    .await?;
+                    if current_task.runtime.as_deref() == Some("general-compute-v1alpha1") {
+                        repo.complete_general_compute_for_worker(
+                            &task.task_id,
+                            &worker_id,
+                            current_task
+                                .general_compute_manifest_json
+                                .as_deref()
+                                .ok_or_else(|| anyhow::anyhow!("general-compute request manifest is missing"))?,
+                            Some(&response.status_message),
+                        )
+                        .await?;
+                    } else {
+                        repo.complete_for_worker(
+                            &task.task_id,
+                            &worker_id,
+                            None,
+                            Some(&response.status_message),
+                        )
+                        .await?;
+                    }
                 }
                 info!("Task {} completed by worker {}", task.task_id, worker_id);
             } else {
@@ -972,6 +1041,10 @@ fn reserve_worker_for_batch(workers: &mut [WorkerNode], worker_id: &str) {
 mod tests {
     use super::*;
     use chrono::Utc;
+    use general_compute_runtime::{
+        ArtifactManifest, ArtifactRole, DeterminismPolicy, ExecutionPolicy, GeneralComputeRequest,
+        GENERAL_COMPUTE_RUNTIME_VERSION,
+    };
     use hivemind_config::ManagedProofRolloutMode;
     use hivemind_managed_proof::{
         ClaimError, ExecutionClaim, ExecutionMetrics, COST_MODEL_ID, MANAGED_RUNTIME_ID,
@@ -1101,6 +1174,222 @@ mod tests {
     }
 
     #[test]
+    fn build_execute_task_request_forwards_general_compute_attempt_identity() {
+        let mut task = make_task("general-compute-attempt-dispatch", TaskStatus::Pending, 0);
+        task.runtime = Some("general-compute-v1alpha1".into());
+        let mut manifest = GeneralComputeRequest {
+            execution_id: "execution-1".into(),
+            attempt_id: "attempt-2".into(),
+            idempotency_key: "idempotency-1".into(),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "python-cpython-312".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest::inline_json(
+                "source",
+                ArtifactRole::Source,
+                b"source",
+            ),
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        manifest.request_digest = manifest.canonical_request_digest();
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&manifest).unwrap());
+
+        let request = build_execute_task_request(&task);
+
+        assert_eq!(request.execution_id, "execution-1");
+        assert_eq!(request.attempt_id, "attempt-2");
+        assert_eq!(request.idempotency_key, "idempotency-1");
+        assert_eq!(
+            request.request_digest,
+            manifest.request_digest
+        );
+    }
+
+    #[test]
+    fn general_compute_response_identity_must_match_persisted_request_manifest() {
+        let mut task = make_task("general-compute-response-identity", TaskStatus::Running, 0);
+        task.runtime = Some("general-compute-v1alpha1".into());
+        let mut manifest = GeneralComputeRequest {
+            execution_id: "execution-1".into(),
+            attempt_id: "attempt-2".into(),
+            idempotency_key: "idempotency-1".into(),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "python-cpython-312".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest::inline_json(
+                "source",
+                ArtifactRole::Source,
+                b"source",
+            ),
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        manifest.request_digest = manifest.canonical_request_digest();
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&manifest).unwrap());
+
+        let matching = ExecuteTaskResponse {
+            execution_id: manifest.execution_id.clone(),
+            attempt_id: manifest.attempt_id.clone(),
+            idempotency_key: manifest.idempotency_key.clone(),
+            request_digest: manifest.request_digest.clone(),
+            ..ExecuteTaskResponse::default()
+        };
+        assert!(validate_general_compute_response_identity(&task, &matching).is_ok());
+
+        let mismatched = ExecuteTaskResponse {
+            attempt_id: "old-attempt".into(),
+            ..matching
+        };
+        let error = validate_general_compute_response_identity(&task, &mismatched)
+            .expect_err("a stale attempt result must fail closed");
+        assert_eq!(error, "general-compute response identity does not match the persisted request");
+    }
+
+    #[tokio::test]
+    async fn test_execute_on_worker_ignores_stale_general_compute_response_without_settlement() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let (db, fixture) = match test_db("dispatcher_stale_general_compute_response").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let dispatcher = Dispatcher::new(db.clone(), 30, 2);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("dispatch-stale-owner-{unique}");
+        let worker_id = format!("dispatch-stale-worker-{unique}");
+        let task_id = format!("dispatch-stale-task-{unique}");
+        let mut manifest = GeneralComputeRequest {
+            execution_id: format!("execution-{unique}"),
+            attempt_id: "attempt-current".into(),
+            idempotency_key: format!("idempotency-{unique}"),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "python-cpython-312".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest::inline_json(
+                "source",
+                ArtifactRole::Source,
+                b"source",
+            ),
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        manifest.request_digest = manifest.canonical_request_digest();
+        let response = ExecuteTaskResponse {
+            success: true,
+            status_message: "stale output".into(),
+            execution_id: manifest.execution_id.clone(),
+            attempt_id: "attempt-old".into(),
+            idempotency_key: manifest.idempotency_key.clone(),
+            request_digest: manifest.request_digest.clone(),
+            ..ExecuteTaskResponse::default()
+        };
+        let (worker_addr, mut execute_rx) =
+            match fake_worker_execute_server_with_response(response).await {
+                Some(parts) => parts,
+                None => return,
+            };
+
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        )
+        .bind(&username)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO worker_nodes (worker_id, username, ip, cpu_cores, memory_gb)
+             VALUES ($1, $2, '10.0.0.3', 4, 16)",
+        )
+        .bind(&worker_id)
+        .bind(format!("provider-{unique}"))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let mut task = make_task(&task_id, TaskStatus::Pending, 0);
+        task.owner = username.clone();
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&manifest).unwrap());
+        dispatcher.repo.create(&task).await.unwrap();
+        dispatcher
+            .repo
+            .assign_to_worker(&task_id, &worker_id, &worker_addr.to_string())
+            .await
+            .unwrap();
+
+        let (private_key, _) = hivemind_config::generate_worker_execution_test_key_pair();
+        execute_on_worker(
+            dispatcher.repo.clone(),
+            task,
+            worker_id.clone(),
+            worker_addr.to_string(),
+            &private_key,
+            ManagedProofRolloutMode::Enforce,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), execute_rx.recv())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(task_id.as_str())
+        );
+        let stored = dispatcher
+            .repo
+            .find_by_task_id(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, TaskStatus::Pending);
+        assert!(stored.worker_id.is_none());
+        let redispatched: GeneralComputeRequest = serde_json::from_slice(
+            stored.general_compute_manifest_json.as_deref().unwrap(),
+        )
+        .unwrap();
+        assert_ne!(redispatched.attempt_id, manifest.attempt_id);
+        assert!(stored.output.is_none());
+        assert!(!stored.billing_settled);
+
+        sqlx::query("DELETE FROM tasks WHERE task_id = $1")
+            .bind(&task_id)
+            .execute(&db.pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM worker_nodes WHERE worker_id = $1")
+            .bind(&worker_id)
+            .execute(&db.pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM users WHERE username = $1")
+            .bind(&username)
+            .execute(&db.pool)
+            .await
+            .ok();
+        fixture.cleanup().await.ok();
+    }
+
+    #[test]
     fn managed_completion_requires_proof_even_with_legacy_receipt_fields() {
         let mut task = make_task("managed-proof-required", TaskStatus::Running, 0);
         task.runtime = Some("managed-function-v0".into());
@@ -1111,6 +1400,7 @@ mod tests {
             managed_output_bytes: 2_049,
             managed_receipt_json: "{\"usage_units\":2500}".into(),
             managed_proof: None,
+            ..ExecuteTaskResponse::default()
         };
 
         let error = managed_proof_for_completion(&task, &response).unwrap_err();
@@ -1282,6 +1572,7 @@ mod tests {
             managed_output_bytes: i64::MAX,
             managed_receipt_json: "{\"worker_selected\":true}".into(),
             managed_proof: Some(ManagedProofEnvelope::default()),
+            ..ExecuteTaskResponse::default()
         }
     }
 
@@ -1959,6 +2250,7 @@ mod tests {
             managed_output_bytes: 2_049,
             managed_receipt_json: receipt_json.clone(),
             managed_proof: None,
+            ..ExecuteTaskResponse::default()
         };
         let (worker_addr, mut execute_rx) =
             match fake_worker_execute_server_with_response(response).await {
@@ -2108,6 +2400,7 @@ mod tests {
             managed_output_bytes: 2_049,
             managed_receipt_json: "{\"executed_ops\":2500,\"output_bytes\":2049}".into(),
             managed_proof: None,
+            ..ExecuteTaskResponse::default()
         };
         let (worker_addr, _execute_rx) =
             match fake_worker_execute_server_with_response(response).await {
@@ -2545,6 +2838,7 @@ mod tests {
             managed_output_bytes: 0,
             managed_receipt_json: String::new(),
             managed_proof: None,
+            ..ExecuteTaskResponse::default()
         })
         .await
     }

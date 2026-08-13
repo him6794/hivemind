@@ -222,6 +222,7 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         request: Request<ExecuteTaskRequest>,
     ) -> Result<Response<ExecuteTaskResponse>, Status> {
         let req = request.into_inner();
+        let request_identity = ExecuteTaskIdentity::from_request(&req);
         let claims = self
             .validate_worker_execution_token(&req.token)
             .map_err(|status| *status)?;
@@ -309,6 +310,7 @@ impl WorkerNodeService for GrpcWorkerNodeService {
             Ok(result) => Ok(Response::new(execute_response_from_result(
                 result,
                 task.runtime.as_deref() == Some("managed-function-v0"),
+                &request_identity,
             ))),
             Err(error) => {
                 if let Some(status) = worker_execution_error_status(&error) {
@@ -316,6 +318,7 @@ impl WorkerNodeService for GrpcWorkerNodeService {
                 } else {
                     Ok(Response::new(failed_execute_response(
                         "Task execution failed",
+                        &request_identity,
                     )))
                 }
             }
@@ -498,6 +501,7 @@ impl WorkerNodeService for GrpcWorkerNodeService {
 fn execute_response_from_result(
     result: TaskResult,
     managed_proof_required: bool,
+    identity: &ExecuteTaskIdentity,
 ) -> ExecuteTaskResponse {
     let TaskResult {
         success,
@@ -520,13 +524,18 @@ fn execute_response_from_result(
         managed_output_bytes,
         managed_receipt_json: managed_receipt_json.unwrap_or_default(),
         managed_proof,
+        execution_id: identity.execution_id.clone(),
+        attempt_id: identity.attempt_id.clone(),
+        idempotency_key: identity.idempotency_key.clone(),
+        request_digest: identity.request_digest.clone(),
+        ..ExecuteTaskResponse::default()
     };
 
     if managed_proof_required && response.success && response.managed_proof.is_none() {
-        return failed_execute_response("Managed proof is required");
+        return failed_execute_response("Managed proof is required", identity);
     }
     if !response_fits_worker_rpc_limits(&response) {
-        return failed_execute_response("Task result exceeds supported response limits");
+        return failed_execute_response("Task result exceeds supported response limits", identity);
     }
 
     response
@@ -542,7 +551,7 @@ fn response_fits_worker_rpc_limits(response: &ExecuteTaskResponse) -> bool {
         && response.encoded_len() <= WORKER_RPC_MESSAGE_MAX_BYTES
 }
 
-fn failed_execute_response(message: &str) -> ExecuteTaskResponse {
+fn failed_execute_response(message: &str, identity: &ExecuteTaskIdentity) -> ExecuteTaskResponse {
     ExecuteTaskResponse {
         success: false,
         status_message: message.into(),
@@ -550,6 +559,33 @@ fn failed_execute_response(message: &str) -> ExecuteTaskResponse {
         managed_output_bytes: 0,
         managed_receipt_json: String::new(),
         managed_proof: None,
+        execution_id: identity.execution_id.clone(),
+        attempt_id: identity.attempt_id.clone(),
+        idempotency_key: identity.idempotency_key.clone(),
+        request_digest: identity.request_digest.clone(),
+        ..ExecuteTaskResponse::default()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct ExecuteTaskIdentity {
+    execution_id: String,
+    attempt_id: String,
+    idempotency_key: String,
+    request_digest: String,
+}
+
+impl ExecuteTaskIdentity {
+    fn from_request(request: &ExecuteTaskRequest) -> Self {
+        if request.runtime.trim() != "general-compute-v1alpha1" {
+            return Self::default();
+        }
+        Self {
+            execution_id: request.execution_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+            request_digest: request.request_digest.clone(),
+        }
     }
 }
 
@@ -607,6 +643,10 @@ mod tests {
             token: String::new(),
             managed_budget_units: budget,
             general_compute_manifest_json: Vec::new(),
+            execution_id: String::new(),
+            attempt_id: String::new(),
+            idempotency_key: String::new(),
+            request_digest: String::new(),
         }
     }
 
@@ -620,7 +660,16 @@ mod tests {
         };
 
         let response =
-            execute_response_from_result(successful_task_result(Some(proof.clone())), true);
+            execute_response_from_result(
+                successful_task_result(Some(proof.clone())),
+                true,
+                &ExecuteTaskIdentity::from_request(&execute_request(
+                    "managed-function-v0",
+                    "return 42;".into(),
+                    "{}".into(),
+                    10,
+                )),
+            );
 
         assert!(response.success);
         assert_eq!(response.status_message, "42");
@@ -628,8 +677,68 @@ mod tests {
     }
 
     #[test]
+    fn worker_execute_response_echoes_attempt_identity_for_success_and_failure() {
+        let mut request = execute_request("general-compute-v1alpha1", String::new(), String::new(), 0);
+        request.execution_id = "execution-1".into();
+        request.attempt_id = "attempt-2".into();
+        request.idempotency_key = "idempotency-1".into();
+        request.request_digest = "sha256:request-digest".into();
+
+        let success = execute_response_from_result(
+            successful_task_result(None),
+            false,
+            &ExecuteTaskIdentity::from_request(&request),
+        );
+        assert!(success.success);
+        assert_eq!(success.execution_id, request.execution_id);
+        assert_eq!(success.attempt_id, request.attempt_id);
+        assert_eq!(success.idempotency_key, request.idempotency_key);
+        assert_eq!(success.request_digest, request.request_digest);
+
+        let failure = execute_response_from_result(
+            successful_task_result(None),
+            true,
+            &ExecuteTaskIdentity::from_request(&request),
+        );
+        assert!(!failure.success);
+        assert_eq!(failure.execution_id, request.execution_id);
+        assert_eq!(failure.attempt_id, request.attempt_id);
+        assert_eq!(failure.idempotency_key, request.idempotency_key);
+        assert_eq!(failure.request_digest, request.request_digest);
+    }
+
+    #[test]
+    fn worker_legacy_execute_response_keeps_attempt_identity_empty() {
+        let mut request = execute_request("managed-function-v0", "return 42;".into(), "{}".into(), 10);
+        request.execution_id = "execution-legacy-should-not-echo".into();
+        request.attempt_id = "attempt-legacy-should-not-echo".into();
+        request.idempotency_key = "idempotency-legacy-should-not-echo".into();
+        request.request_digest = "sha256:legacy-should-not-echo".into();
+
+        let response = execute_response_from_result(
+            successful_task_result(None),
+            false,
+            &ExecuteTaskIdentity::from_request(&request),
+        );
+
+        assert!(response.execution_id.is_empty());
+        assert!(response.attempt_id.is_empty());
+        assert!(response.idempotency_key.is_empty());
+        assert!(response.request_digest.is_empty());
+    }
+
+    #[test]
     fn managed_success_without_a_proof_fails_closed_before_the_rpc_boundary() {
-        let response = execute_response_from_result(successful_task_result(None), true);
+        let response = execute_response_from_result(
+            successful_task_result(None),
+            true,
+            &ExecuteTaskIdentity::from_request(&execute_request(
+                "managed-function-v0",
+                "return 42;".into(),
+                "{}".into(),
+                10,
+            )),
+        );
 
         assert!(!response.success);
         assert_eq!(response.status_message, "Managed proof is required");
@@ -643,7 +752,16 @@ mod tests {
         let mut result = successful_task_result(None);
         result.output = Some("x".repeat(hivemind_proto::WORKER_STATUS_MESSAGE_MAX_BYTES + 1));
 
-        let response = execute_response_from_result(result, false);
+        let response = execute_response_from_result(
+            result,
+            false,
+            &ExecuteTaskIdentity::from_request(&execute_request(
+                "managed-function-v0",
+                "return 42;".into(),
+                "{}".into(),
+                10,
+            )),
+        );
 
         assert!(!response.success);
         assert_eq!(
@@ -813,6 +931,10 @@ mod tests {
                 token: "not-a-token".into(),
                 managed_budget_units: 0,
                 general_compute_manifest_json: Vec::new(),
+                execution_id: String::new(),
+                attempt_id: String::new(),
+                idempotency_key: String::new(),
+                request_digest: String::new(),
             }))
             .await;
 
@@ -854,6 +976,10 @@ mod tests {
                 token: test_user_token(test_private_key_pem(), "regular-user"),
                 managed_budget_units: 0,
                 general_compute_manifest_json: Vec::new(),
+                execution_id: String::new(),
+                attempt_id: String::new(),
+                idempotency_key: String::new(),
+                request_digest: String::new(),
             }))
             .await;
 
@@ -875,6 +1001,10 @@ mod tests {
                 token: bound_token(test_private_key_pem(), ASSIGNED_OWNER, "different-task"),
                 managed_budget_units: 0,
                 general_compute_manifest_json: Vec::new(),
+                execution_id: String::new(),
+                attempt_id: String::new(),
+                idempotency_key: String::new(),
+                request_digest: String::new(),
             }))
             .await;
 
@@ -896,6 +1026,10 @@ mod tests {
                 token: test_token(test_private_key_pem(), ASSIGNED_OWNER),
                 managed_budget_units: 0,
                 general_compute_manifest_json: Vec::new(),
+                execution_id: String::new(),
+                attempt_id: String::new(),
+                idempotency_key: String::new(),
+                request_digest: String::new(),
             }))
             .await;
 
@@ -1331,6 +1465,10 @@ mod tests {
                     token: bound_token(test_private_key_pem(), ASSIGNED_OWNER, &execute_task_id),
                     managed_budget_units: hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS,
                     general_compute_manifest_json: Vec::new(),
+                    execution_id: String::new(),
+                    attempt_id: String::new(),
+                    idempotency_key: String::new(),
+                    request_digest: String::new(),
                 }))
                 .await
                 .unwrap()
