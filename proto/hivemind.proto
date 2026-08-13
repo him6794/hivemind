@@ -134,6 +134,7 @@ message UploadTaskRequest {
     // Nodepool stores only the torrent/magnet reference in the task record.
     bytes package_data = 10;
     string package_filename = 11;
+    bytes general_compute_manifest_json = 12; // canonical general-compute-v1alpha1 request manifest
 }
 
 message UploadTaskResponse {
@@ -354,6 +355,7 @@ message ExecuteTaskRequest {
     string task_source = 5;
     string token = 6;          // nodepool-issued JWT for worker execution authorization
     int64 managed_budget_units = 7; // user-selected managed-function usage budget
+    bytes general_compute_manifest_json = 8; // canonical general-compute-v1alpha1 request manifest
 }
 
 message ManagedProofEnvelope {

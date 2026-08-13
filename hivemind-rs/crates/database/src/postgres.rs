@@ -182,6 +182,7 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
             torrent_source TEXT,
             runtime TEXT,
             task_source TEXT,
+            general_compute_manifest_json BYTEA,
             expected_btih VARCHAR(64),
             cpu_usage DOUBLE PRECISION NOT NULL DEFAULT 0,
             memory_usage DOUBLE PRECISION NOT NULL DEFAULT 0,
@@ -445,6 +446,11 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     let _ = sqlx::query("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS task_source TEXT;")
         .execute(pool)
         .await;
+    let _ = sqlx::query(
+        "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS general_compute_manifest_json BYTEA;",
+    )
+    .execute(pool)
+    .await;
     let _ = sqlx::query(
         "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS managed_executed_ops BIGINT NOT NULL DEFAULT 0;",
     )

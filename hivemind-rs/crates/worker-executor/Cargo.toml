@@ -30,6 +30,7 @@ hivemind-client-runtime = { path = "../client-runtime" }
 hivemind-managed-prover-protocol = { path = "../managed-prover-protocol" }
 hivemind-auth = { path = "../auth" }
 managed-function-runtime = { path = "../../../executor-rs/crates/managed-function-runtime" }
+general-compute-runtime = { path = "../../../executor-rs/crates/general-compute-runtime" }
 tempfile.workspace = true
 ipnet = "2"
 zip = { version = "2.4.2", default-features = false, features = ["deflate-flate2", "flate2"] }

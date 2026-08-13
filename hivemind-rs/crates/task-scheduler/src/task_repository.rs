@@ -60,15 +60,16 @@ impl TaskRepository {
 
     pub async fn create(&self, task: &Task) -> Result<Task> {
         sqlx::query_as::<_, Task>(
-            "INSERT INTO tasks (task_id, owner, status, status_message, torrent_source, runtime, task_source, expected_btih,
+            "INSERT INTO tasks (task_id, owner, status, status_message, torrent_source, runtime, task_source, general_compute_manifest_json, expected_btih,
              req_cpu_score, req_gpu_score, req_memory_gb, req_gpu_memory_gb, req_storage_gb,
              host_count, max_cpt, max_retries, deadline,
              deterministic, side_effects, priority, created_at, last_update)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,NOW(),NOW()) RETURNING *",
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,NOW(),NOW()) RETURNING *",
         )
         .bind(&task.task_id).bind(&task.owner)
         .bind(task.status.as_str()).bind(&task.status_message)
-        .bind(&task.torrent_source).bind(&task.runtime).bind(&task.task_source).bind(&task.expected_btih)
+        .bind(&task.torrent_source).bind(&task.runtime).bind(&task.task_source)
+        .bind(&task.general_compute_manifest_json).bind(&task.expected_btih)
         .bind(task.req_cpu_score).bind(task.req_gpu_score)
         .bind(task.req_memory_gb).bind(task.req_gpu_memory_gb)
         .bind(task.req_storage_gb)
@@ -841,6 +842,7 @@ mod tests {
             torrent_source: Some("example-btih".into()),
             runtime: None,
             task_source: None,
+            general_compute_manifest_json: None,
             expected_btih: None,
             cpu_usage: 0.0,
             memory_usage: 0.0,
@@ -2310,6 +2312,7 @@ mod tests {
             torrent_source: Some("example-btih".into()),
             runtime: None,
             task_source: None,
+            general_compute_manifest_json: None,
             expected_btih: None,
             cpu_usage: 0.0,
             memory_usage: 0.0,

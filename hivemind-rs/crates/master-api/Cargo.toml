@@ -24,6 +24,7 @@ hivemind-proto = { path = "../proto" }
 hivemind-models = { path = "../models" }
 hivemind-config = { path = "../config" }
 hivemind-client-runtime = { path = "../client-runtime" }
+general-compute-runtime = { path = "../../../executor-rs/crates/general-compute-runtime" }
 reqwest.workspace = true
 
 [dev-dependencies]
