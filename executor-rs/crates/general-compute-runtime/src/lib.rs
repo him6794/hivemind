@@ -194,6 +194,8 @@ pub struct GeneralComputeResult {
     pub input_sha256: String,
     pub determinism: DeterminismPolicy,
     pub capability_summary: Vec<String>,
+    pub output_manifest_root: String,
+    pub evidence: EvidenceEnvelope,
 }
 
 impl GeneralComputeResult {
@@ -238,6 +240,133 @@ impl GeneralComputeResult {
             return Err(ValidationError::new(
                 ValidationErrorCode::GuestImageMismatch,
                 "result guest image is not registered for its backend",
+            ));
+        }
+        self.validate_status()?;
+        self.evidence.validate_worker_claim()?;
+
+        for artifact in &self.output_artifacts {
+            if artifact.role != ArtifactRole::Output {
+                return Err(ValidationError::new(
+                    ValidationErrorCode::ArtifactInvalid,
+                    "result output artifacts must have the output role",
+                ));
+            }
+            artifact
+                .validate()
+                .map_err(|message| ValidationError::new(ValidationErrorCode::ArtifactInvalid, message))?;
+        }
+        if self.output_manifest_root != canonical_artifact_root(&self.output_artifacts) {
+            return Err(ValidationError::new(
+                ValidationErrorCode::ArtifactRootMismatch,
+                "result output manifest root does not match its artifacts",
+            ));
+        }
+
+        let output_artifact_bytes = self
+            .output_artifacts
+            .iter()
+            .try_fold(0u64, |total, artifact| total.checked_add(artifact.size_bytes))
+            .ok_or_else(|| {
+                ValidationError::new(
+                    ValidationErrorCode::UsageExceedsPolicy,
+                    "output artifact size overflows",
+                )
+            })?;
+        if output_artifact_bytes > request.execution_policy.output_bytes
+            || self.usage.cpu_time_ms > request.execution_policy.cpu_millis
+            || self.usage.wall_time_ms > request.execution_policy.wall_time_ms
+            || self.usage.peak_memory_bytes > request.execution_policy.memory_bytes
+            || self.usage.output_bytes > request.execution_policy.output_bytes
+            || self.usage.input_bytes
+                > request
+                    .input_artifacts
+                    .iter()
+                    .try_fold(0u64, |total, artifact| total.checked_add(artifact.size_bytes))
+                    .ok_or_else(|| {
+                        ValidationError::new(
+                            ValidationErrorCode::UsageExceedsPolicy,
+                            "input artifact size overflows",
+                        )
+                    })?
+            || (!request.execution_policy.gpu_required
+                && (self.usage.gpu_time_ms != 0 || self.usage.gpu_memory_bytes != 0))
+        {
+            return Err(ValidationError::new(
+                ValidationErrorCode::UsageExceedsPolicy,
+                "result usage claim exceeds the request policy",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_status(&self) -> Result<(), ValidationError> {
+        let valid = match self.status {
+            ResultStatus::Completed => self.exit_code == Some(0) && self.error_code.is_none(),
+            ResultStatus::Failed => {
+                self.exit_code != Some(0)
+                    && self.error_code.as_deref().is_some_and(|code| !code.trim().is_empty())
+            }
+            ResultStatus::Cancelled
+            | ResultStatus::TimedOut
+            | ResultStatus::ResourceExhausted
+            | ResultStatus::BackendUnavailable => {
+                self.exit_code.is_none()
+                    && self.error_code.as_deref().is_some_and(|code| !code.trim().is_empty())
+            }
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(ValidationError::new(
+                ValidationErrorCode::ResultStatusInvalid,
+                "result status and exit/error code combination is invalid",
+            ))
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceLevel {
+    Unverified,
+    Replicated,
+    TeeAttested,
+    ZkProved,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvidenceEnvelope {
+    pub level: EvidenceLevel,
+    pub payload_sha256: Option<String>,
+}
+
+impl Default for EvidenceEnvelope {
+    fn default() -> Self {
+        Self {
+            level: EvidenceLevel::Unverified,
+            payload_sha256: None,
+        }
+    }
+}
+
+impl EvidenceEnvelope {
+    fn validate_worker_claim(&self) -> Result<(), ValidationError> {
+        if self.level != EvidenceLevel::Unverified {
+            return Err(ValidationError::new(
+                ValidationErrorCode::EvidenceInvalid,
+                "worker results may only claim unverified evidence",
+            ));
+        }
+        if self
+            .payload_sha256
+            .as_deref()
+            .is_some_and(|digest| !is_sha256_digest(digest))
+        {
+            return Err(ValidationError::new(
+                ValidationErrorCode::EvidenceInvalid,
+                "evidence payload digest must be a sha256 digest",
             ));
         }
         Ok(())
@@ -384,6 +513,10 @@ pub enum ValidationErrorCode {
     RequestDigestInvalid,
     RequestDigestMismatch,
     ResultBindingMismatch,
+    ResultStatusInvalid,
+    UsageExceedsPolicy,
+    ArtifactRootMismatch,
+    EvidenceInvalid,
     RuntimeVersionMismatch,
     PolicyInvalid,
     FilesystemPolicyViolation,
@@ -619,6 +752,11 @@ impl ArtifactManifest {
 fn sha256_digest(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     format!("sha256:{digest:x}")
+}
+
+pub fn canonical_artifact_root(artifacts: &[ArtifactManifest]) -> String {
+    let bytes = serde_json::to_vec(artifacts).expect("artifact manifest serialization is infallible");
+    sha256_digest(&bytes)
 }
 
 fn is_sha256_digest(value: &str) -> bool {
