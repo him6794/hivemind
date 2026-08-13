@@ -22,8 +22,12 @@ impl WorkerRepository {
                  storage_total_gb = $10, storage_available_gb = $11,
                  location = $12, status = $13,
                  available_memory_gb = $14, queue_capacity = $15,
+                 -- A worker refresh carries no trusted capability claim. Keep
+                 -- the Nodepool-owned snapshot unless an operator-approved
+                 -- registration explicitly supplies a replacement.
+                 general_compute_capabilities_json = COALESCE($16, general_compute_capabilities_json),
                  last_heartbeat = NOW(), updated_at = NOW()
-                 WHERE worker_id = $16 RETURNING *",
+                 WHERE worker_id = $17 RETURNING *",
             )
             .bind(&worker.username)
             .bind(&worker.ip)
@@ -40,6 +44,7 @@ impl WorkerRepository {
             .bind(worker.status.as_str())
             .bind(worker.available_memory_gb)
             .bind(worker.queue_capacity)
+            .bind(&worker.general_compute_capabilities_json)
             .bind(&worker.worker_id)
             .fetch_one(&self.pool)
             .await
@@ -49,8 +54,8 @@ impl WorkerRepository {
                 "INSERT INTO worker_nodes (worker_id, username, ip, cpu_cores, memory_gb,
                  cpu_score, gpu_score, gpu_memory_gb,
                  gpu_name, vram_mb, storage_total_gb, storage_available_gb,
-                 location, status, available_memory_gb, queue_capacity)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *",
+                 location, status, available_memory_gb, queue_capacity, general_compute_capabilities_json)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING *",
             )
             .bind(&worker.worker_id)
             .bind(&worker.username)
@@ -68,6 +73,7 @@ impl WorkerRepository {
             .bind(worker.status.as_str())
             .bind(worker.available_memory_gb)
             .bind(worker.queue_capacity)
+            .bind(&worker.general_compute_capabilities_json)
             .fetch_one(&self.pool)
             .await
             .map_err(Into::into)
@@ -91,8 +97,11 @@ impl WorkerRepository {
              storage_total_gb = $10, storage_available_gb = $11,
              location = $12, status = $13,
              available_memory_gb = $14, queue_capacity = $15,
+             -- Owner-authorized registration is the source of truth and may
+             -- explicitly revoke a previously persisted snapshot.
+             general_compute_capabilities_json = $16,
              last_heartbeat = NOW(), updated_at = NOW()
-             WHERE worker_id = $16 AND (username = $17 OR $18)
+             WHERE worker_id = $17 AND (username = $18 OR $19)
              RETURNING *",
         )
         .bind(&worker.username)
@@ -110,6 +119,7 @@ impl WorkerRepository {
         .bind(worker.status.as_str())
         .bind(worker.available_memory_gb)
         .bind(worker.queue_capacity)
+        .bind(&worker.general_compute_capabilities_json)
         .bind(&worker.worker_id)
         .bind(owner)
         .bind(is_admin)
@@ -126,8 +136,8 @@ impl WorkerRepository {
             "INSERT INTO worker_nodes (worker_id, username, ip, cpu_cores, memory_gb,
              cpu_score, gpu_score, gpu_memory_gb,
              gpu_name, vram_mb, storage_total_gb, storage_available_gb,
-             location, status, available_memory_gb, queue_capacity)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+             location, status, available_memory_gb, queue_capacity, general_compute_capabilities_json)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
              RETURNING *",
         )
         .bind(&worker.worker_id)
@@ -146,6 +156,7 @@ impl WorkerRepository {
         .bind(worker.status.as_str())
         .bind(worker.available_memory_gb)
         .bind(worker.queue_capacity)
+        .bind(&worker.general_compute_capabilities_json)
         .fetch_one(&self.pool)
         .await
         .map_err(Into::into)
@@ -282,6 +293,7 @@ mod tests {
             gpu_memory_usage: 0.0,
             available_memory_gb: 16,
             queue_capacity: 4,
+            general_compute_capabilities_json: None,
             last_heartbeat: chrono::Utc::now(),
             registered_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -293,6 +305,74 @@ mod tests {
         assert_eq!(created.storage_total_gb, 500);
 
         sqlx::query("DELETE FROM worker_nodes WHERE worker_id = 'example-upsert-1'")
+            .execute(&repo.pool)
+            .await
+            .ok();
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_untrusted_worker_refresh_preserves_nodepool_capability_snapshot() {
+        let fixture = match pool("worker_repository_capability_snapshot").await {
+            Some(fixture) => fixture,
+            None => return,
+        };
+        let repo = WorkerRepository::new(fixture.pool.clone());
+        let worker_id = "capability-snapshot-worker";
+        let snapshot = r#"{"worker":{"guest_image_digests":["sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"capabilities":["cpu"],"max_threads":4,"gpu_available":false},"backends":[]}"#;
+
+        sqlx::query("DELETE FROM worker_nodes WHERE worker_id = $1")
+            .bind(worker_id)
+            .execute(&repo.pool)
+            .await
+            .ok();
+
+        let mut registered = test_worker(worker_id, WorkerStatus::Active);
+        registered.general_compute_capabilities_json = Some(snapshot.into());
+        repo.upsert(&registered).await.unwrap();
+
+        // A worker heartbeat is an untrusted refresh and does not carry the
+        // Nodepool-owned capability snapshot.
+        let mut heartbeat = registered.clone();
+        heartbeat.ip = "192.168.1.99".into();
+        heartbeat.general_compute_capabilities_json = None;
+        let refreshed = repo.upsert(&heartbeat).await.unwrap();
+
+        assert_eq!(refreshed.ip, "192.168.1.99");
+        assert_eq!(refreshed.general_compute_capabilities_json.as_deref(), Some(snapshot));
+
+        sqlx::query("DELETE FROM worker_nodes WHERE worker_id = $1")
+            .bind(worker_id)
+            .execute(&repo.pool)
+            .await
+            .ok();
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_operator_registration_can_revoke_capability_snapshot() {
+        let fixture = match pool("worker_repository_capability_revoke").await {
+            Some(fixture) => fixture,
+            None => return,
+        };
+        let repo = WorkerRepository::new(fixture.pool.clone());
+        let worker_id = "capability-revoke-worker";
+        let snapshot = r#"{"worker":{"guest_image_digests":[],"capabilities":["cpu"],"max_threads":1,"gpu_available":false},"backends":[]}"#;
+        let mut registered = test_worker(worker_id, WorkerStatus::Active);
+        registered.general_compute_capabilities_json = Some(snapshot.into());
+        repo.upsert(&registered).await.unwrap();
+
+        let mut revoked = registered.clone();
+        revoked.general_compute_capabilities_json = None;
+        let stored = repo
+            .upsert_for_owner(&revoked, "example-user", false)
+            .await
+            .unwrap();
+
+        assert!(stored.general_compute_capabilities_json.is_none());
+
+        sqlx::query("DELETE FROM worker_nodes WHERE worker_id = $1")
+            .bind(worker_id)
             .execute(&repo.pool)
             .await
             .ok();
@@ -407,6 +487,7 @@ mod tests {
             gpu_memory_usage: 0.0,
             available_memory_gb: 16,
             queue_capacity: 4,
+            general_compute_capabilities_json: None,
             last_heartbeat: chrono::Utc::now(),
             registered_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),

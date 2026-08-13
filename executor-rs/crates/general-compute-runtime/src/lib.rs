@@ -584,6 +584,7 @@ impl ValidationError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BackendRegistration {
     pub backend_id: String,
     pub guest_image_digest: String,
@@ -595,11 +596,21 @@ pub struct BackendRegistration {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkerCapabilities {
     pub guest_image_digests: Vec<String>,
     pub capabilities: Vec<String>,
     pub max_threads: u32,
     pub gpu_available: bool,
+}
+
+/// Operator-approved general-compute registration for one worker.  This is
+/// intentionally distinct from a worker's self-reported registration RPC.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustedWorkerCapabilityRegistration {
+    pub worker: WorkerCapabilities,
+    pub backends: Vec<BackendRegistration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

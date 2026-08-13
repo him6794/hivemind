@@ -7,23 +7,49 @@ use anyhow::Result;
 use hivemind_config::HivemindConfig;
 use hivemind_database::DatabaseManager;
 use hivemind_models::WorkerNode;
+use std::collections::BTreeMap;
 
 #[derive(Clone)]
 pub struct NodeManager {
     repo: worker_repository::WorkerRepository,
     db: DatabaseManager,
+    trusted_general_compute_capabilities: BTreeMap<
+        String,
+        hivemind_config::TrustedGeneralComputeWorkerRegistration,
+    >,
 }
 
 impl NodeManager {
-    pub fn new(_config: &HivemindConfig, db: DatabaseManager) -> Self {
+    pub fn new(config: &HivemindConfig, db: DatabaseManager) -> Self {
         Self {
             repo: worker_repository::WorkerRepository::new(db.pool.clone()),
             db,
+            trusted_general_compute_capabilities: config
+                .general_compute
+                .trusted_worker_capabilities
+                .clone(),
         }
     }
 
     pub async fn register_worker(&self, worker: &WorkerNode) -> Result<WorkerNode> {
         self.repo.upsert(worker).await
+    }
+
+    pub fn trusted_general_compute_capabilities_json_for_owner(
+        &self,
+        worker_id: &str,
+        owner: &str,
+        is_admin: bool,
+    ) -> Result<Option<String>> {
+        let Some(registered) = self.trusted_general_compute_capabilities.get(worker_id) else {
+            return Ok(None);
+        };
+        if !is_admin && registered.owner != owner {
+            anyhow::bail!("worker capability registration owner does not match authenticated owner");
+        }
+        serde_json::to_string(&registered.registration)
+            .map(Some)
+            .map_err(Into::into)
     }
 
     pub async fn register_worker_for_owner(
@@ -74,5 +100,66 @@ impl NodeManager {
     }
     pub fn database(&self) -> &DatabaseManager {
         &self.db
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use general_compute_runtime::{
+        BackendRegistration, TrustedWorkerCapabilityRegistration, WorkerCapabilities,
+    };
+
+    #[tokio::test]
+    async fn trusted_general_compute_capability_is_bound_to_its_operator_configured_owner() {
+        let mut config = HivemindConfig::for_test();
+        config.general_compute.trusted_worker_capabilities.insert(
+            "worker-alpha".into(),
+            hivemind_config::TrustedGeneralComputeWorkerRegistration {
+                owner: "approved-owner".into(),
+                registration: TrustedWorkerCapabilityRegistration {
+                    worker: WorkerCapabilities {
+                        guest_image_digests: vec![
+                            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                                .into(),
+                        ],
+                        capabilities: vec!["cpu".into()],
+                        max_threads: 4,
+                        gpu_available: false,
+                    },
+                    backends: vec![BackendRegistration {
+                        backend_id: "python-cpython-312".into(),
+                        guest_image_digest:
+                            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                                .into(),
+                        capabilities: vec!["cpu".into()],
+                        max_threads: 4,
+                        network_allowed: false,
+                        filesystem_read_only: true,
+                        gpu_allowed: false,
+                    }],
+                },
+            },
+        );
+        let db = DatabaseManager {
+            pool: sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://postgres:postgres@127.0.0.1/hivemind_test")
+                .unwrap(),
+        };
+        let manager = NodeManager::new(&config, db);
+
+        let rejected = manager.trusted_general_compute_capabilities_json_for_owner(
+            "worker-alpha",
+            "different-owner",
+            false,
+        );
+        let approved = manager.trusted_general_compute_capabilities_json_for_owner(
+            "worker-alpha",
+            "approved-owner",
+            false,
+        );
+
+        assert!(rejected.is_err());
+        assert!(approved.unwrap().is_some());
     }
 }

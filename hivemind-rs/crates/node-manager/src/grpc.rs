@@ -917,12 +917,18 @@ impl NodeManagerService for GrpcNodeManagerService {
             }));
         }
         let svc = NmSvc::new((*self.state.node_manager).clone());
+        let general_compute_capabilities_json = self
+            .state
+            .node_manager
+            .trusted_general_compute_capabilities_json_for_owner(&worker_id, &claims.sub, admin)
+            .map_err(|e| Status::permission_denied(e.to_string()))?;
         let reg = WorkerRegistration {
             worker_id,
             username,
             ip: req.ip,
             resources: proto_resource_spec_to_model(r),
             location: req.location,
+            general_compute_capabilities_json,
         };
         match svc
             .register_worker_for_owner(&reg, &claims.sub, admin)
@@ -3081,7 +3087,13 @@ mod tests {
     }
 
     async fn test_service() -> Option<(GrpcMasterNodeService, String, String, String)> {
-        let config = HivemindConfig::for_test();
+        test_service_with_config_and_owner(HivemindConfig::for_test(), None).await
+    }
+
+    async fn test_service_with_config_and_owner(
+        config: HivemindConfig,
+        configured_owner: Option<String>,
+    ) -> Option<(GrpcMasterNodeService, String, String, String)> {
         let fixture = hivemind_database::postgres::create_isolated_test_pool_with_config(
             &config,
             "node_manager_grpc",
@@ -3112,7 +3124,7 @@ mod tests {
         let service = GrpcMasterNodeService::new(state);
         let unique = uuid::Uuid::new_v4().to_string();
         let task_id = format!("grpc-owner-task-{unique}");
-        let owner = format!("grpc-owner-{unique}");
+        let owner = configured_owner.unwrap_or_else(|| format!("grpc-owner-{unique}"));
         let other = format!("grpc-other-{unique}");
         let task = make_task(&task_id, &owner);
         if scheduler.create_task(&task).await.is_err() {
@@ -3935,6 +3947,157 @@ mod tests {
 
         assert!(!response.success);
         assert_eq!(response.status_message, "Not authorized");
+        assert!(stored.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_register_worker_node_persists_only_operator_trusted_capabilities() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let owner = "grpc-trusted-capability-owner".to_string();
+        let worker_id = "grpc-trusted-capability-worker".to_string();
+        let mut config = HivemindConfig::for_test();
+        let image = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        config
+            .general_compute
+            .trusted_worker_capabilities
+            .insert(
+                worker_id.clone(),
+                hivemind_config::TrustedGeneralComputeWorkerRegistration {
+                    owner: owner.clone(),
+                    registration: general_compute_runtime::TrustedWorkerCapabilityRegistration {
+                        worker: general_compute_runtime::WorkerCapabilities {
+                            guest_image_digests: vec![image.into()],
+                            capabilities: vec!["cpu".into()],
+                            max_threads: 4,
+                            gpu_available: false,
+                        },
+                        backends: vec![general_compute_runtime::BackendRegistration {
+                            backend_id: "python-cpython-312".into(),
+                            guest_image_digest: image.into(),
+                            capabilities: vec!["cpu".into()],
+                            max_threads: 4,
+                            network_allowed: false,
+                            filesystem_read_only: true,
+                            gpu_allowed: false,
+                        }],
+                    },
+                },
+            );
+        let (master_service, task_id, _other_token, owner) =
+            match test_service_with_config_and_owner(config, Some(owner)).await {
+                Some(parts) => parts,
+                None => return,
+            };
+        let node_service = GrpcNodeManagerService::new(master_service.state.clone());
+        let owner_token = token_for(&master_service.state.auth, &owner);
+
+        let response = node_service
+            .register_worker_node(Request::new(RegisterWorkerNodeRequest {
+                username: owner.clone(),
+                worker_id: worker_id.clone(),
+                ip: "10.77.10.10:50053".into(),
+                resources: Some(ProtoResourceSpec {
+                    cpu_cores: 4,
+                    memory_mb: 16 * 1024,
+                    gpu_count: 0,
+                    gpu_name: String::new(),
+                    vram_mb: 0,
+                    cpu_score: 400,
+                    gpu_score: 0,
+                    storage_total_gb: 500,
+                    storage_available_gb: 250,
+                }),
+                location: "local".into(),
+                token: owner_token,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let stored = master_service
+            .state
+            .node_manager
+            .get_worker(&worker_id)
+            .await
+            .unwrap();
+        cleanup_report_worker(&master_service, &worker_id).await;
+        cleanup(&master_service.state.scheduler, &task_id, &owner).await;
+
+        assert!(response.success, "{}", response.status_message);
+        let stored = stored.expect("trusted worker registration should persist");
+        assert!(stored
+            .general_compute_capabilities_json
+            .as_deref()
+            .is_some_and(|json| json.contains("python-cpython-312")));
+    }
+
+    #[tokio::test]
+    async fn test_register_worker_node_rejects_registry_entry_for_wrong_owner() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let configured_owner = "grpc-approved-capability-owner".to_string();
+        let authenticated_owner = "grpc-wrong-capability-owner".to_string();
+        let worker_id = "grpc-wrong-capability-worker".to_string();
+        let mut config = HivemindConfig::for_test();
+        config
+            .general_compute
+            .trusted_worker_capabilities
+            .insert(
+                worker_id.clone(),
+                hivemind_config::TrustedGeneralComputeWorkerRegistration {
+                    owner: configured_owner,
+                    registration: general_compute_runtime::TrustedWorkerCapabilityRegistration {
+                        worker: general_compute_runtime::WorkerCapabilities {
+                            guest_image_digests: vec![],
+                            capabilities: vec!["cpu".into()],
+                            max_threads: 1,
+                            gpu_available: false,
+                        },
+                        backends: vec![],
+                    },
+                },
+            );
+        let (master_service, task_id, _other_token, owner) =
+            match test_service_with_config_and_owner(config, Some(authenticated_owner)).await {
+                Some(parts) => parts,
+                None => return,
+            };
+        let node_service = GrpcNodeManagerService::new(master_service.state.clone());
+        let token = token_for(&master_service.state.auth, &owner);
+
+        let error = node_service
+            .register_worker_node(Request::new(RegisterWorkerNodeRequest {
+                username: owner.clone(),
+                worker_id: worker_id.clone(),
+                ip: "10.77.11.10:50053".into(),
+                resources: Some(ProtoResourceSpec {
+                    cpu_cores: 1,
+                    memory_mb: 1024,
+                    gpu_count: 0,
+                    gpu_name: String::new(),
+                    vram_mb: 0,
+                    cpu_score: 100,
+                    gpu_score: 0,
+                    storage_total_gb: 10,
+                    storage_available_gb: 5,
+                }),
+                location: "local".into(),
+                token,
+            }))
+            .await
+            .expect_err("wrong owner must not activate a trusted registry entry");
+
+        let stored = master_service
+            .state
+            .node_manager
+            .get_worker(&worker_id)
+            .await
+            .unwrap();
+        cleanup_report_worker(&master_service, &worker_id).await;
+        cleanup(&master_service.state.scheduler, &task_id, &owner).await;
+
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
         assert!(stored.is_none());
     }
 

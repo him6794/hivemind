@@ -1607,6 +1607,7 @@ dependencies = [
  "anyhow",
  "dotenvy",
  "ed25519-dalek",
+ "general-compute-runtime",
  "jsonwebtoken",
  "pkcs8",
  "rand 0.8.7",
@@ -1741,6 +1742,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "general-compute-runtime",
  "hivemind-auth",
  "hivemind-config",
  "hivemind-database",

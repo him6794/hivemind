@@ -24,6 +24,7 @@ hivemind-database = { path = "../database" }
 hivemind-config = { path = "../config" }
 hivemind-auth = { path = "../auth" }
 hivemind-managed-proof = { path = "../managed-proof" }
+general-compute-runtime = { path = "../../../executor-rs/crates/general-compute-runtime" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

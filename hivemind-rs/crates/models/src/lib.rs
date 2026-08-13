@@ -215,6 +215,9 @@ pub struct WorkerNode {
     pub gpu_memory_usage: f64,
     pub available_memory_gb: i32,
     pub queue_capacity: i32,
+    /// Nodepool-persisted, operator-approved general-compute registration.
+    /// It is never accepted from a worker registration request.
+    pub general_compute_capabilities_json: Option<String>,
     pub last_heartbeat: DateTime<Utc>,
     pub registered_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
