@@ -1,11 +1,11 @@
-use general_compute_runtime::artifact::ArtifactMaterializer;
+use general_compute_runtime::artifact::{ArtifactMaterializer, CasChunkStore};
 use general_compute_runtime::cp_python::{PythonBackendRegistration, PythonBackendRegistry};
 use general_compute_runtime::execution::ReferenceBackendExecutor;
 use general_compute_runtime::sandbox::BackendExecutionMode;
 use general_compute_runtime::{
-    ArtifactManifest, ArtifactRole, BackendRegistration, CapabilityMatrix, DeterminismPolicy,
-    ExecutionPolicy, GENERAL_COMPUTE_RUNTIME_VERSION, GeneralComputeRequest, ResultStatus,
-    WorkerCapabilities,
+    sha256_digest, ArtifactChunk, ArtifactManifest, ArtifactRole, BackendRegistration,
+    CapabilityMatrix, DeterminismPolicy, ExecutionPolicy, GeneralComputeRequest, ResultStatus,
+    WorkerCapabilities, GENERAL_COMPUTE_RUNTIME_VERSION,
 };
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -92,6 +92,33 @@ fn temp_root() -> PathBuf {
     ))
 }
 
+fn cas_artifact(
+    artifact_id: &str,
+    role: ArtifactRole,
+    bytes: &[u8],
+) -> (ArtifactManifest, Vec<Vec<u8>>) {
+    let split = bytes.len() / 2;
+    let parts = vec![bytes[..split].to_vec(), bytes[split..].to_vec()];
+    let artifact = ArtifactManifest {
+        artifact_id: artifact_id.into(),
+        role,
+        size_bytes: bytes.len() as u64,
+        mime_type: "text/plain".into(),
+        sha256: sha256_digest(bytes),
+        chunks: parts
+            .iter()
+            .enumerate()
+            .map(|(index, chunk)| ArtifactChunk {
+                offset: if index == 0 { 0 } else { split as u64 },
+                size_bytes: chunk.len() as u64,
+                sha256: sha256_digest(chunk),
+            })
+            .collect(),
+        inline_bytes: None,
+    };
+    (artifact, parts)
+}
+
 #[test]
 fn reference_backend_materializes_verified_artifacts_and_emits_a_validated_result() {
     let request = request();
@@ -163,10 +190,12 @@ fn reference_backend_maps_source_exceptions_to_a_failed_typed_result() {
     );
     request.request_digest = request.canonical_request_digest();
     let root = temp_root();
-    let materializer = ArtifactMaterializer::new(&root).expect("materialization root should be valid");
-    let result = ReferenceBackendExecutor::new(capability_matrix(&request), worker(), python_registry())
-        .execute(&request, &materializer)
-        .expect("source exceptions should become typed backend results");
+    let materializer =
+        ArtifactMaterializer::new(&root).expect("materialization root should be valid");
+    let result =
+        ReferenceBackendExecutor::new(capability_matrix(&request), worker(), python_registry())
+            .execute(&request, &materializer)
+            .expect("source exceptions should become typed backend results");
 
     assert_eq!(result.status, ResultStatus::Failed);
     assert_eq!(result.exit_code, Some(1));
@@ -176,4 +205,41 @@ fn reference_backend_maps_source_exceptions_to_a_failed_typed_result() {
         .validate_against(&request, &capability_matrix(&request))
         .expect("failed result must still satisfy the result contract");
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn reference_backend_executes_verified_cas_only_artifacts() {
+    let source_bytes = b"result = input['value'] + 1";
+    let input_bytes = br#"{"value":4}"#;
+    let (source, source_chunks) = cas_artifact("source-cas", ArtifactRole::Source, source_bytes);
+    let (input, input_chunks) = cas_artifact("input-cas", ArtifactRole::Input, input_bytes);
+    let mut request = request();
+    request.source_artifact = source;
+    request.input_artifacts = vec![input];
+    request.request_digest = request.canonical_request_digest();
+
+    let root = temp_root();
+    let cas_root = temp_root();
+    let materializer =
+        ArtifactMaterializer::new(&root).expect("materialization root should be valid");
+    let store = CasChunkStore::new(&cas_root).expect("CAS root should be valid");
+    for (artifact, chunks) in [
+        (&request.source_artifact, source_chunks),
+        (&request.input_artifacts[0], input_chunks),
+    ] {
+        for (manifest_chunk, bytes) in artifact.chunks.iter().zip(chunks) {
+            store
+                .put_chunk(&manifest_chunk.sha256, &bytes)
+                .expect("verified CAS chunk should be accepted");
+        }
+    }
+
+    let result =
+        ReferenceBackendExecutor::new(capability_matrix(&request), worker(), python_registry())
+            .execute_with_cas(&request, &materializer, &store)
+            .expect("reference backend should execute verified CAS artifacts");
+    assert_eq!(result.status, ResultStatus::Completed);
+    assert_eq!(result.stdout, "5");
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(cas_root);
 }

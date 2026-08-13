@@ -6,13 +6,13 @@
 //! backends must use the validated OCI launcher in [`crate::sandbox`] and are
 //! not silently downgraded to this path.
 
-use crate::artifact::{ArtifactMaterializationError, ArtifactMaterializer};
+use crate::artifact::{ArtifactMaterializationError, ArtifactMaterializer, CasChunkStore};
 use crate::cp_python::{PinnedPythonAdapter, PythonAdapterError, PythonBackendRegistry};
 use crate::sandbox::BackendExecutionMode;
 use crate::supervisor::Cancellation;
 use crate::{
-    ArtifactManifest, ArtifactRole, CapabilityMatrix, GeneralComputeRequest, GeneralComputeResult,
-    ResultStatus, UsageClaim, WorkerCapabilities, canonical_artifact_root, sha256_digest,
+    canonical_artifact_root, sha256_digest, ArtifactManifest, ArtifactRole, CapabilityMatrix,
+    GeneralComputeRequest, GeneralComputeResult, ResultStatus, UsageClaim, WorkerCapabilities,
 };
 use std::fmt;
 use std::fs;
@@ -102,13 +102,36 @@ impl ReferenceBackendExecutor {
         request: &GeneralComputeRequest,
         materializer: &ArtifactMaterializer,
     ) -> Result<GeneralComputeResult, ExecutionError> {
-        self.execute_with_cancellation(request, materializer, &Cancellation::new())
+        self.execute_with_materializer(request, materializer, None, &Cancellation::new())
     }
 
     pub fn execute_with_cancellation(
         &self,
         request: &GeneralComputeRequest,
         materializer: &ArtifactMaterializer,
+        cancellation: &Cancellation,
+    ) -> Result<GeneralComputeResult, ExecutionError> {
+        self.execute_with_materializer(request, materializer, None, cancellation)
+    }
+
+    /// Execute using complete, locally verified CAS chunks.
+    ///
+    /// The store is supplied by an operator-owned transport boundary. This
+    /// method performs no network access and does not interpret remote paths.
+    pub fn execute_with_cas(
+        &self,
+        request: &GeneralComputeRequest,
+        materializer: &ArtifactMaterializer,
+        store: &CasChunkStore,
+    ) -> Result<GeneralComputeResult, ExecutionError> {
+        self.execute_with_materializer(request, materializer, Some(store), &Cancellation::new())
+    }
+
+    fn execute_with_materializer(
+        &self,
+        request: &GeneralComputeRequest,
+        materializer: &ArtifactMaterializer,
+        cas_store: Option<&CasChunkStore>,
         cancellation: &Cancellation,
     ) -> Result<GeneralComputeResult, ExecutionError> {
         request
@@ -124,7 +147,8 @@ impl ReferenceBackendExecutor {
             return Err(ExecutionError::UnsupportedEntrypoint);
         }
 
-        let source_path = materializer.materialize(&request.source_artifact)?.path;
+        let source_path =
+            materialize_artifact(materializer, cas_store, &request.source_artifact)?.path;
         let source_bytes = fs::read(source_path).map_err(|error| {
             ExecutionError::Artifact(ArtifactMaterializationError::Io(error.to_string()))
         })?;
@@ -133,7 +157,7 @@ impl ReferenceBackendExecutor {
 
         let (input_bytes, input_json) =
             if let Some(input_artifact) = request.input_artifacts.first() {
-                let path = materializer.materialize(input_artifact)?.path;
+                let path = materialize_artifact(materializer, cas_store, input_artifact)?.path;
                 let bytes = fs::read(path).map_err(|error| {
                     ExecutionError::Artifact(ArtifactMaterializationError::Io(error.to_string()))
                 })?;
@@ -240,6 +264,17 @@ impl ReferenceBackendExecutor {
             .validate_against(request, &self.capabilities)
             .map_err(|error| ExecutionError::Request(error.message))?;
         Ok(result)
+    }
+}
+
+fn materialize_artifact(
+    materializer: &ArtifactMaterializer,
+    cas_store: Option<&CasChunkStore>,
+    artifact: &ArtifactManifest,
+) -> Result<crate::artifact::MaterializedArtifact, ArtifactMaterializationError> {
+    match cas_store {
+        Some(store) => materializer.materialize_with_cas(artifact, store),
+        None => materializer.materialize(artifact),
     }
 }
 

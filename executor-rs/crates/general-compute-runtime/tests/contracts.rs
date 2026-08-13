@@ -1,7 +1,8 @@
 use general_compute_runtime::{
-    ArtifactChunk, ArtifactManifest, ArtifactRange, ArtifactRole, BackendRegistration, CapabilityMatrix, ExecutionPolicy,
-    GeneralComputeRequest, GeneralComputeResult, ResultStatus, ValidationErrorCode, WorkerCapabilities,
-    EvidenceEnvelope, GENERAL_COMPUTE_RUNTIME_VERSION, canonical_artifact_root, sha256_digest,
+    canonical_artifact_root, sha256_digest, ArtifactChunk, ArtifactManifest, ArtifactRange,
+    ArtifactRole, BackendRegistration, CapabilityMatrix, EvidenceEnvelope, ExecutionPolicy,
+    GeneralComputeRequest, GeneralComputeResult, ResultStatus, ValidationErrorCode,
+    WorkerCapabilities, GENERAL_COMPUTE_RUNTIME_VERSION,
 };
 
 fn valid_request() -> GeneralComputeRequest {
@@ -9,12 +10,18 @@ fn valid_request() -> GeneralComputeRequest {
         execution_id: "execution-1".into(),
         attempt_id: "attempt-1".into(),
         idempotency_key: "idempotency-1".into(),
-        request_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
+        request_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+            .into(),
         runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
-        guest_image_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
+        guest_image_digest:
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
         backend_id: "python-numpy-scipy".into(),
         entrypoint: "main:run".into(),
-        source_artifact: ArtifactManifest::inline_json("input-source", ArtifactRole::Source, br#"{}"#),
+        source_artifact: ArtifactManifest::inline_json(
+            "input-source",
+            ArtifactRole::Source,
+            br#"{}"#,
+        ),
         input_artifacts: vec![ArtifactManifest::inline_json(
             "input-data",
             ArtifactRole::Input,
@@ -35,7 +42,9 @@ fn alpha_runtime_id_is_the_only_pre_release_contract() {
 
     let mut request = valid_request();
     request.runtime_version = GENERAL_COMPUTE_RUNTIME_VERSION.into();
-    request.validate().expect("alpha runtime id should be accepted");
+    request
+        .validate()
+        .expect("alpha runtime id should be accepted");
 
     request.runtime_version = "general-compute-v1".into();
     request.request_digest = request.canonical_request_digest();
@@ -48,9 +57,17 @@ fn alpha_runtime_id_is_the_only_pre_release_contract() {
 #[test]
 fn request_contract_carries_retry_identity_and_digest() {
     let encoded = serde_json::to_value(valid_request()).expect("request serializes");
-    for field in ["execution_id", "attempt_id", "idempotency_key", "request_digest"] {
+    for field in [
+        "execution_id",
+        "attempt_id",
+        "idempotency_key",
+        "request_digest",
+    ] {
         assert!(
-            encoded.get(field).and_then(serde_json::Value::as_str).is_some(),
+            encoded
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .is_some(),
             "request must carry non-null {field}"
         );
     }
@@ -65,7 +82,10 @@ fn request_round_trip_preserves_versioned_execution_contract() {
 
     assert_eq!(decoded, request);
     assert_eq!(decoded.runtime_version, GENERAL_COMPUTE_RUNTIME_VERSION);
-    assert_eq!(decoded.source_artifact.sha256, request.source_artifact.sha256);
+    assert_eq!(
+        decoded.source_artifact.sha256,
+        request.source_artifact.sha256
+    );
 }
 
 #[test]
@@ -109,9 +129,17 @@ fn result_round_trip_keeps_claimed_usage_and_output_manifest() {
     assert_eq!(decoded.output_artifacts[0].size_bytes, 13);
 
     let encoded = serde_json::to_value(&result).expect("result serializes");
-    for field in ["execution_id", "attempt_id", "idempotency_key", "request_digest"] {
+    for field in [
+        "execution_id",
+        "attempt_id",
+        "idempotency_key",
+        "request_digest",
+    ] {
         assert!(
-            encoded.get(field).and_then(serde_json::Value::as_str).is_some(),
+            encoded
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .is_some(),
             "result must carry non-null {field}"
         );
     }
@@ -200,7 +228,10 @@ fn valid_result(request: &GeneralComputeRequest) -> GeneralComputeResult {
 fn result_contract_carries_unverified_evidence_and_output_manifest_root() {
     let result = valid_result(&valid_request());
     let encoded = serde_json::to_value(result).expect("result serializes");
-    assert!(encoded.get("evidence").is_some(), "result must carry an evidence envelope");
+    assert!(
+        encoded.get("evidence").is_some(),
+        "result must carry an evidence envelope"
+    );
     assert!(
         encoded
             .get("output_manifest_root")
@@ -277,7 +308,10 @@ fn chunked_artifact_root_is_stable_across_inline_and_cas_forms() {
     cas.inline_bytes = None;
     cas.validate().expect("CAS artifact is valid");
 
-    assert_eq!(canonical_artifact_root(&[inline]), canonical_artifact_root(&[cas]));
+    assert_eq!(
+        canonical_artifact_root(&[inline]),
+        canonical_artifact_root(&[cas])
+    );
 }
 
 #[test]
@@ -339,7 +373,9 @@ fn artifact_manifest_rejects_tampered_inline_bytes() {
     let mut artifact = ArtifactManifest::inline_json("input", ArtifactRole::Input, br#"{"x":1}"#);
     artifact.inline_bytes = Some(br#"{"x":2}"#.to_vec());
 
-    let error = artifact.validate().expect_err("tampered bytes must fail validation");
+    let error = artifact
+        .validate()
+        .expect_err("tampered bytes must fail validation");
     assert_eq!(error, "artifact checksum does not match bytes");
 }
 
@@ -349,7 +385,9 @@ fn request_validation_rejects_unbounded_or_writable_policy() {
     request.execution_policy.cpu_millis = u64::MAX;
     request.request_digest = request.canonical_request_digest();
 
-    let error = request.validate().expect_err("unbounded quota must fail closed");
+    let error = request
+        .validate()
+        .expect_err("unbounded quota must fail closed");
     assert_eq!(error.code, ValidationErrorCode::PolicyInvalid);
 
     request.execution_policy = ExecutionPolicy::default();
@@ -394,7 +432,8 @@ fn capability_matrix_rejects_network_and_gpu_requirements_without_registration()
     request.request_digest = request.canonical_request_digest();
     let matrix = CapabilityMatrix::new(vec![BackendRegistration {
         backend_id: "python-numpy-scipy".into(),
-        guest_image_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
+        guest_image_digest:
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
         capabilities: vec!["cpu".into()],
         max_threads: 4,
         network_allowed: false,
@@ -402,7 +441,9 @@ fn capability_matrix_rejects_network_and_gpu_requirements_without_registration()
         gpu_allowed: false,
     }]);
     let worker = WorkerCapabilities {
-        guest_image_digests: vec!["sha256:0000000000000000000000000000000000000000000000000000000000000000".into()],
+        guest_image_digests: vec![
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
+        ],
         capabilities: vec!["cpu".into()],
         max_threads: 4,
         gpu_available: false,
@@ -422,15 +463,32 @@ fn artifact_manifest_rejects_chunk_gaps() {
         ArtifactChunk {
             offset: 0,
             size_bytes: 3,
-            sha256: "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
+            sha256: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                .into(),
         },
         ArtifactChunk {
             offset: 5,
             size_bytes: 3,
-            sha256: "sha256:1111111111111111111111111111111111111111111111111111111111111111".into(),
+            sha256: "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                .into(),
         },
     ];
 
-    let error = artifact.validate().expect_err("chunk gaps must fail closed");
+    let error = artifact
+        .validate()
+        .expect_err("chunk gaps must fail closed");
     assert_eq!(error, "artifact chunks do not cover artifact bytes");
+}
+
+#[test]
+fn artifact_manifest_rejects_oversized_metadata_before_cas_allocation() {
+    let mut artifact = ArtifactManifest::inline_json("oversized", ArtifactRole::Input, b"x");
+    artifact.inline_bytes = None;
+    artifact.size_bytes = 1024 * 1024 * 1024 + 1;
+    artifact.sha256 = sha256_digest(b"x");
+
+    let error = artifact
+        .validate()
+        .expect_err("oversized artifact metadata must fail before materialization");
+    assert_eq!(error, "artifact size exceeds the runtime limit");
 }
