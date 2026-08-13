@@ -195,6 +195,18 @@ impl ReferenceProcessSupervisor {
             .stderr(Stdio::piped());
         configure_process_group(&mut process);
         let mut child = process.spawn().map_err(SupervisorError::Spawn)?;
+        let process_tree = match ProcessTreeGuard::after_spawn(&mut child) {
+            Ok(process_tree) => process_tree,
+            Err(error) => {
+                // The child is suspended on Windows until it is assigned to its
+                // job. If setup fails, explicitly terminate and reap it before
+                // returning so no orphaned/suspended process survives a spawn
+                // error.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(SupervisorError::Spawn(error));
+            }
+        };
         let stdin = child.stdin.take().ok_or_else(|| {
             SupervisorError::Input(io::Error::new(
                 io::ErrorKind::BrokenPipe,
@@ -223,6 +235,7 @@ impl ReferenceProcessSupervisor {
         loop {
             if output_budget.exceeded() {
                 return self.terminate_and_reap(
+                    &process_tree,
                     child,
                     stdin_writer,
                     stdout_reader,
@@ -232,6 +245,13 @@ impl ReferenceProcessSupervisor {
                 );
             }
             if let Some(status) = child.try_wait().map_err(SupervisorError::Wait)? {
+                // A leader can exit while a descendant still owns one of the
+                // inherited output pipes. Terminate the dedicated process tree
+                // before joining capture readers; otherwise a normal-looking
+                // completion can wait for an untracked descendant indefinitely.
+                process_tree
+                    .terminate_after_leader_exit(&mut child)
+                    .map_err(SupervisorError::Kill)?;
                 return self.result_after_reap(
                     if status.success() {
                         RunStatus::Completed
@@ -248,6 +268,7 @@ impl ReferenceProcessSupervisor {
 
             if cancellation.is_cancelled() {
                 return self.terminate_and_reap(
+                    &process_tree,
                     child,
                     stdin_writer,
                     stdout_reader,
@@ -258,6 +279,7 @@ impl ReferenceProcessSupervisor {
             }
             if Instant::now() >= deadline {
                 return self.terminate_and_reap(
+                    &process_tree,
                     child,
                     stdin_writer,
                     stdout_reader,
@@ -273,6 +295,7 @@ impl ReferenceProcessSupervisor {
 
     fn terminate_and_reap(
         &self,
+        process_tree: &ProcessTreeGuard,
         mut child: Child,
         stdin_writer: JoinHandle<io::Result<()>>,
         stdout_reader: JoinHandle<io::Result<CapturedOutput>>,
@@ -280,7 +303,9 @@ impl ReferenceProcessSupervisor {
         status: RunStatus,
         output_budget: Arc<OutputBudget>,
     ) -> Result<RunResult, SupervisorError> {
-        kill_process_tree(&mut child).map_err(SupervisorError::Kill)?;
+        process_tree
+            .terminate(&mut child)
+            .map_err(SupervisorError::Kill)?;
         let exit_status = child.wait().map_err(SupervisorError::Wait)?;
         self.result_after_reap(
             status,
@@ -452,7 +477,56 @@ fn configure_process_group(command: &mut Command) {
 }
 
 #[cfg(not(unix))]
-fn configure_process_group(_command: &mut Command) {}
+fn configure_process_group(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
+
+        // Start suspended so the job object can own the process before it has
+        // a chance to create descendants. Without this ordering a normal
+        // leader exit can leave an already-running child outside the job.
+        command.creation_flags(CREATE_SUSPENDED);
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, Default)]
+struct ProcessTreeGuard;
+
+#[cfg(unix)]
+impl ProcessTreeGuard {
+    fn after_spawn(_child: &mut Child) -> io::Result<Self> {
+        Ok(Self)
+    }
+
+    fn terminate(&self, child: &mut Child) -> io::Result<()> {
+        kill_process_tree(child)
+    }
+
+    fn terminate_after_leader_exit(&self, child: &mut Child) -> io::Result<()> {
+        kill_process_tree(child)
+    }
+}
+
+#[cfg(windows)]
+#[derive(Debug)]
+struct ProcessTreeGuard(WindowsJob);
+
+#[cfg(windows)]
+impl ProcessTreeGuard {
+    fn after_spawn(child: &mut Child) -> io::Result<Self> {
+        WindowsJob::for_child(child).map(Self)
+    }
+
+    fn terminate(&self, child: &mut Child) -> io::Result<()> {
+        self.0.terminate(child)
+    }
+
+    fn terminate_after_leader_exit(&self, child: &mut Child) -> io::Result<()> {
+        self.0.terminate(child)
+    }
+}
 
 #[cfg(unix)]
 fn kill_process_tree(child: &mut Child) -> io::Result<()> {
@@ -470,20 +544,128 @@ fn kill_process_tree(child: &mut Child) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-fn kill_process_tree(child: &mut Child) -> io::Result<()> {
-    let pid = child.id().to_string();
-    let status = Command::new("taskkill.exe")
-        .args(["/PID", &pid, "/T", "/F"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    if status.success() || child.try_wait()?.is_some() {
+#[derive(Debug)]
+struct WindowsJob(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl WindowsJob {
+    fn for_child(child: &mut Child) -> io::Result<Self> {
+        use std::ffi::c_void;
+        use std::mem::size_of;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            SetInformationJobObject,
+        };
+
+        // The job is created and assigned before the supervisor observes any
+        // completion. Descendants inherit the job membership automatically.
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() || job == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+                return Err(io::Error::last_os_error());
+            }
+            let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let size = u32::try_from(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
+                .map_err(|_| io::Error::other("job limits size overflow"))?;
+            if SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&raw const limits).cast::<c_void>(),
+                size,
+            ) == 0
+            {
+                windows_sys::Win32::Foundation::CloseHandle(job);
+                return Err(io::Error::last_os_error());
+            }
+            let process = child.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+            if AssignProcessToJobObject(job, process) == 0 {
+                windows_sys::Win32::Foundation::CloseHandle(job);
+                return Err(io::Error::last_os_error());
+            }
+            resume_suspended_child(child.id()).map_err(|error| {
+                windows_sys::Win32::System::JobObjects::TerminateJobObject(job, 1);
+                windows_sys::Win32::Foundation::CloseHandle(job);
+                error
+            })?;
+            Ok(Self(job))
+        }
+    }
+
+    fn terminate(&self, child: &mut Child) -> io::Result<()> {
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+
+        unsafe {
+            let result = TerminateJobObject(self.0, 1);
+            if result == 0 && child.try_wait()?.is_none() {
+                return Err(io::Error::last_os_error());
+            }
+        }
         Ok(())
-    } else {
-        Err(io::Error::other(format!(
-            "taskkill.exe exited with {status}"
-        )))
+    }
+}
+
+#[cfg(windows)]
+fn resume_suspended_child(pid: u32) -> io::Result<()> {
+    use std::mem::size_of;
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+    };
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if snapshot.is_null() || snapshot == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        let mut entry = THREADENTRY32 {
+            dwSize: u32::try_from(size_of::<THREADENTRY32>())
+                .map_err(|_| io::Error::other("thread entry size overflow"))?,
+            ..THREADENTRY32::default()
+        };
+        let mut found = false;
+        if Thread32First(snapshot, &mut entry) != 0 {
+            loop {
+                if entry.th32OwnerProcessID == pid {
+                    found = true;
+                    let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                    if thread.is_null() {
+                        windows_sys::Win32::Foundation::CloseHandle(snapshot);
+                        return Err(io::Error::last_os_error());
+                    }
+                    let resumed = ResumeThread(thread);
+                    windows_sys::Win32::Foundation::CloseHandle(thread);
+                    if resumed == u32::MAX {
+                        windows_sys::Win32::Foundation::CloseHandle(snapshot);
+                        return Err(io::Error::last_os_error());
+                    }
+                    break;
+                }
+                if Thread32Next(snapshot, &mut entry) == 0 {
+                    break;
+                }
+            }
+        }
+        windows_sys::Win32::Foundation::CloseHandle(snapshot);
+        if found {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "suspended child thread was not found",
+            ))
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsJob {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
     }
 }
 
