@@ -1,7 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use crate::supervisor::{Cancellation, RunResult};
+use crate::sha256_digest;
+use crate::supervisor::{
+    Cancellation, ReferenceCommandSpec, ReferenceProcessSupervisor, RunResult,
+};
 
 /// Distinguishes the local reference oracle from a production OCI backend.
 ///
@@ -158,7 +164,10 @@ impl LinuxSandboxPolicy {
             }
             match mount {
                 SandboxMount::ReadOnlyArtifact { artifact_id, .. }
-                    if artifact_id.trim().is_empty() =>
+                    if artifact_id.trim().is_empty()
+                        || artifact_id.split('/').any(|component| component == "..")
+                        || artifact_id.split('\\').any(|component| component == "..")
+                        || artifact_id.contains(':') =>
                 {
                     return Err(SandboxPolicyError::InvalidMountSource);
                 }
@@ -231,8 +240,14 @@ pub enum ProductionSandboxError {
     InvalidBackendId,
     InvalidImageDigest,
     InvalidEntrypoint,
+    InvalidContainerId,
+    InvalidBundle,
+    BundleMetadataMismatch,
+    RunnerNotPinned,
+    RunnerDigestMismatch,
     UnsupportedPlatform,
     RunnerUnavailable,
+    RunnerSpawn,
 }
 
 impl std::fmt::Display for ProductionSandboxError {
@@ -247,13 +262,60 @@ impl std::error::Error for ProductionSandboxError {}
 ///
 /// It validates the complete isolation envelope and fails closed until a real
 /// rootless OCI runner is installed by a later milestone.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ProductionSandboxLauncher;
+#[derive(Debug, Clone, Default)]
+pub struct ProductionSandboxLauncher {
+    runner_executable: Option<PathBuf>,
+    runner_prefix_args: Vec<String>,
+    runner_sha256: Option<String>,
+    timeout: Duration,
+    output_limit: usize,
+    combined_output_limit: usize,
+}
 
 impl ProductionSandboxLauncher {
     #[must_use]
-    pub const fn new() -> Self {
-        Self
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Configure an operator-pinned OCI runner executable and fixed argument
+    /// prefix. Arguments are passed directly to `Command`; no shell is used.
+    #[must_use]
+    pub fn with_oci_runner_command<I, S>(executable: impl Into<PathBuf>, prefix_args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            runner_executable: Some(executable.into()),
+            runner_prefix_args: prefix_args.into_iter().map(Into::into).collect(),
+            runner_sha256: None,
+            timeout: Duration::from_secs(30),
+            output_limit: 16 * 1024 * 1024,
+            combined_output_limit: 32 * 1024 * 1024,
+        }
+    }
+
+    /// Pin the exact bytes of the operator-installed runner executable.
+    #[must_use]
+    pub fn with_runner_sha256(mut self, digest: impl Into<String>) -> Self {
+        self.runner_sha256 = Some(digest.into());
+        self
+    }
+
+    /// Bound the complete runner invocation, including its descendants.
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// Bound retained and combined runner diagnostics.
+    #[must_use]
+    pub fn with_output_limits(mut self, per_stream: usize, combined: usize) -> Self {
+        self.output_limit = per_stream;
+        self.combined_output_limit = combined;
+        self
     }
 
     pub fn run(
@@ -267,6 +329,334 @@ impl ProductionSandboxLauncher {
         } else {
             Err(ProductionSandboxError::UnsupportedPlatform)
         }
+    }
+
+    /// Validate and execute an OCI bundle through the operator-pinned runner.
+    ///
+    /// This path intentionally accepts an already materialized bundle rather
+    /// than arbitrary host commands. The OCI config is checked against the
+    /// versioned launch envelope before the runner is spawned, and all runner
+    /// arguments are passed without shell interpolation.
+    pub fn run_bundle(
+        &self,
+        launch: &ProductionSandboxLaunch,
+        bundle_root: &Path,
+        container_id: &str,
+        cancellation: &Cancellation,
+    ) -> Result<RunResult, ProductionSandboxError> {
+        launch.validate()?;
+        if !valid_container_id(container_id) {
+            return Err(ProductionSandboxError::InvalidContainerId);
+        }
+        let runner = self
+            .runner_executable
+            .as_ref()
+            .ok_or(ProductionSandboxError::RunnerUnavailable)?;
+        let runner_metadata =
+            fs::symlink_metadata(runner).map_err(|_| ProductionSandboxError::RunnerNotPinned)?;
+        if !runner.is_absolute()
+            || !runner_metadata.file_type().is_file()
+            || self.runner_sha256.is_none()
+        {
+            return Err(ProductionSandboxError::RunnerNotPinned);
+        }
+        let expected_runner_sha256 = self
+            .runner_sha256
+            .as_deref()
+            .ok_or(ProductionSandboxError::RunnerNotPinned)?;
+        if !is_sha256_digest(expected_runner_sha256) {
+            return Err(ProductionSandboxError::RunnerNotPinned);
+        }
+        let actual_runner_sha256 =
+            sha256_digest(&fs::read(runner).map_err(|_| ProductionSandboxError::RunnerSpawn)?);
+        if actual_runner_sha256 != expected_runner_sha256 {
+            return Err(ProductionSandboxError::RunnerDigestMismatch);
+        }
+        validate_oci_bundle(bundle_root, launch)?;
+
+        let command = ReferenceCommandSpec::new(runner.to_string_lossy(), {
+            let mut args = self.runner_prefix_args.clone();
+            args.extend([
+                "run".to_owned(),
+                "--bundle".to_owned(),
+                bundle_root.to_string_lossy().into_owned(),
+                container_id.to_owned(),
+            ]);
+            args
+        })
+        .with_timeout(self.timeout)
+        .with_output_limit(self.output_limit)
+        .with_combined_output_limit(self.combined_output_limit);
+        // Keep the command construction in one place and make the no-shell
+        // boundary explicit. The supervisor passes every argument directly to
+        // Command and owns process-group/job cleanup.
+        let result = ReferenceProcessSupervisor::new()
+            .run_with_stdin(command, &[], cancellation)
+            .map_err(|_| ProductionSandboxError::RunnerSpawn)?;
+        Ok(result)
+    }
+}
+
+fn valid_container_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value != "."
+        && value != ".."
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn validate_oci_bundle(
+    bundle_root: &Path,
+    launch: &ProductionSandboxLaunch,
+) -> Result<(), ProductionSandboxError> {
+    if !bundle_root.is_absolute()
+        || fs::symlink_metadata(bundle_root)
+            .map_err(|_| ProductionSandboxError::InvalidBundle)?
+            .file_type()
+            .is_symlink()
+    {
+        return Err(ProductionSandboxError::InvalidBundle);
+    }
+    let bundle_root =
+        fs::canonicalize(bundle_root).map_err(|_| ProductionSandboxError::InvalidBundle)?;
+    let metadata =
+        fs::symlink_metadata(&bundle_root).map_err(|_| ProductionSandboxError::InvalidBundle)?;
+    if !metadata.is_dir() {
+        return Err(ProductionSandboxError::InvalidBundle);
+    }
+    let rootfs = bundle_root.join("rootfs");
+    if !fs::symlink_metadata(&rootfs)
+        .map_err(|_| ProductionSandboxError::InvalidBundle)?
+        .is_dir()
+        || fs::canonicalize(&rootfs).map_err(|_| ProductionSandboxError::InvalidBundle)? != rootfs
+    {
+        return Err(ProductionSandboxError::InvalidBundle);
+    }
+    let config_path = bundle_root.join("config.json");
+    let bytes = fs::read(config_path).map_err(|_| ProductionSandboxError::InvalidBundle)?;
+    let config: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|_| ProductionSandboxError::InvalidBundle)?;
+    let Some(object) = config.as_object() else {
+        return Err(ProductionSandboxError::InvalidBundle);
+    };
+    const ALLOWED_ROOT_KEYS: &[&str] = &[
+        "ociVersion",
+        "process",
+        "root",
+        "mounts",
+        "linux",
+        "annotations",
+    ];
+    if object
+        .keys()
+        .any(|key| !ALLOWED_ROOT_KEYS.contains(&key.as_str()))
+    {
+        return Err(ProductionSandboxError::InvalidBundle);
+    }
+    if object.get("ociVersion").and_then(serde_json::Value::as_str) != Some("1.0.2") {
+        return Err(ProductionSandboxError::InvalidBundle);
+    }
+    let process = config
+        .get("process")
+        .and_then(serde_json::Value::as_object)
+        .ok_or(ProductionSandboxError::InvalidBundle)?;
+    const ALLOWED_PROCESS_KEYS: &[&str] = &["args", "cwd", "noNewPrivileges", "user"];
+    if process
+        .keys()
+        .any(|key| !ALLOWED_PROCESS_KEYS.contains(&key.as_str()))
+    {
+        return Err(ProductionSandboxError::InvalidBundle);
+    }
+    let args = process
+        .get("args")
+        .and_then(serde_json::Value::as_array)
+        .ok_or(ProductionSandboxError::InvalidBundle)?;
+    let user = process
+        .get("user")
+        .and_then(serde_json::Value::as_object)
+        .ok_or(ProductionSandboxError::InvalidBundle)?;
+    if user
+        .keys()
+        .any(|key| !["uid", "gid"].contains(&key.as_str()))
+    {
+        return Err(ProductionSandboxError::InvalidBundle);
+    }
+    let expected_args = launch
+        .entrypoint
+        .iter()
+        .map(|part| serde_json::Value::String(part.clone()))
+        .collect::<Vec<_>>();
+    if args != &expected_args
+        || process
+            .get("noNewPrivileges")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        || process
+            .get("user")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|user| user.get("uid"))
+            .and_then(serde_json::Value::as_u64)
+            .is_none_or(|uid| uid == 0)
+        || process
+            .get("user")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|user| user.get("gid"))
+            .and_then(serde_json::Value::as_u64)
+            .is_none_or(|gid| gid == 0)
+    {
+        return Err(ProductionSandboxError::BundleMetadataMismatch);
+    }
+    let root = config
+        .get("root")
+        .and_then(serde_json::Value::as_object)
+        .ok_or(ProductionSandboxError::InvalidBundle)?;
+    if root
+        .keys()
+        .any(|key| !["path", "readonly"].contains(&key.as_str()))
+    {
+        return Err(ProductionSandboxError::InvalidBundle);
+    }
+    if root.get("path").and_then(serde_json::Value::as_str) != Some("rootfs")
+        || root.get("readonly").and_then(serde_json::Value::as_bool) != Some(true)
+    {
+        return Err(ProductionSandboxError::BundleMetadataMismatch);
+    }
+    let linux = config
+        .get("linux")
+        .and_then(serde_json::Value::as_object)
+        .ok_or(ProductionSandboxError::InvalidBundle)?;
+    if linux
+        .keys()
+        .any(|key| !["namespaces", "seccomp"].contains(&key.as_str()))
+    {
+        return Err(ProductionSandboxError::InvalidBundle);
+    }
+    let namespaces = linux
+        .get("namespaces")
+        .and_then(serde_json::Value::as_array)
+        .ok_or(ProductionSandboxError::InvalidBundle)?;
+    let namespace_types = namespaces
+        .iter()
+        .map(|namespace| {
+            let namespace = namespace
+                .as_object()
+                .ok_or(ProductionSandboxError::BundleMetadataMismatch)?;
+            if namespace.keys().any(|key| key != "type") {
+                return Err(ProductionSandboxError::InvalidBundle);
+            }
+            namespace
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(ProductionSandboxError::BundleMetadataMismatch)
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if namespace_types
+        != ["mount", "network", "pid", "user"]
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+        || namespaces.len() != namespace_types.len()
+    {
+        return Err(ProductionSandboxError::BundleMetadataMismatch);
+    }
+    let seccomp = linux
+        .get("seccomp")
+        .and_then(serde_json::Value::as_object)
+        .ok_or(ProductionSandboxError::InvalidBundle)?;
+    if seccomp.keys().any(|key| key != "defaultAction")
+        || seccomp
+            .get("defaultAction")
+            .and_then(serde_json::Value::as_str)
+            != Some("SCMP_ACT_ERRNO")
+    {
+        return Err(ProductionSandboxError::InvalidBundle);
+    }
+    let mounts = config
+        .get("mounts")
+        .and_then(serde_json::Value::as_array)
+        .ok_or(ProductionSandboxError::BundleMetadataMismatch)?;
+    let expected_mounts = launch
+        .policy
+        .mounts
+        .iter()
+        .map(|mount| match mount {
+            crate::sandbox::SandboxMount::ReadOnlyArtifact {
+                artifact_id,
+                destination,
+            } => serde_json::json!({
+                "destination": destination,
+                "type": "bind",
+                "source": format!("/hivemind/artifacts/{artifact_id}"),
+                "options": ["ro", "nodev", "nosuid", "noexec"]
+            }),
+            crate::sandbox::SandboxMount::EphemeralScratch {
+                destination,
+                max_bytes,
+            } => serde_json::json!({
+                "destination": destination,
+                "type": "tmpfs",
+                "source": "tmpfs",
+                "options": [
+                    "rw",
+                    "nodev",
+                    "nosuid",
+                    "noexec",
+                    format!("size={max_bytes}")
+                ]
+            }),
+        })
+        .collect::<Vec<_>>();
+    if mounts != expected_mounts.as_slice() {
+        return Err(ProductionSandboxError::BundleMetadataMismatch);
+    }
+    let annotations = config
+        .get("annotations")
+        .and_then(serde_json::Value::as_object)
+        .ok_or(ProductionSandboxError::InvalidBundle)?;
+    const ALLOWED_ANNOTATIONS: &[&str] = &[
+        "org.hivemind.guest-image-digest",
+        "org.hivemind.backend-id",
+        "org.hivemind.cgroup-version",
+        "org.hivemind.network-policy",
+        "org.hivemind.seccomp-profile-sha256",
+    ];
+    if annotations
+        .keys()
+        .any(|key| !ALLOWED_ANNOTATIONS.contains(&key.as_str()))
+    {
+        return Err(ProductionSandboxError::InvalidBundle);
+    }
+    if annotations
+        .get("org.hivemind.guest-image-digest")
+        .and_then(serde_json::Value::as_str)
+        != Some(launch.guest_image_digest.as_str())
+        || annotations
+            .get("org.hivemind.backend-id")
+            .and_then(serde_json::Value::as_str)
+            != Some(launch.backend_id.as_str())
+        || annotations
+            .get("org.hivemind.cgroup-version")
+            .and_then(serde_json::Value::as_str)
+            != Some("v2")
+        || annotations
+            .get("org.hivemind.network-policy")
+            .and_then(serde_json::Value::as_str)
+            != Some("deny_all")
+        || annotations
+            .get("org.hivemind.seccomp-profile-sha256")
+            .and_then(serde_json::Value::as_str)
+            != Some(expected_seccomp_profile(&launch.policy).as_str())
+    {
+        return Err(ProductionSandboxError::BundleMetadataMismatch);
+    }
+    Ok(())
+}
+
+fn expected_seccomp_profile(policy: &LinuxSandboxPolicy) -> String {
+    match &policy.seccomp {
+        SeccompPolicy::DefaultDeny { profile_sha256 } => profile_sha256.clone(),
+        SeccompPolicy::Disabled => String::new(),
     }
 }
 
