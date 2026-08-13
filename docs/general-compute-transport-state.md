@@ -1,0 +1,23 @@
+# General-compute transport state
+
+- Goal: complete the `general-compute-v1alpha1` authenticated CAS/chunk transport without restoring Monty.
+- Status: running; the runtime local CAS boundary and protobuf chunk envelopes are complete, but no network RPC or remote CAS population is wired yet.
+- Current step: design the authenticated streaming/chunk RPC around the completed Worker-side adapter; keep the RPC separate from the existing `ExecuteTask` unary method.
+- Completed checkpoints:
+  - `69098e3` binds local CAS uploads to execution, attempt, idempotency, request digest, artifact manifest coordinates, and SHA-256 bytes.
+  - `4b8d955` adds bounded `GeneralComputeChunkUpload` and `GeneralComputeChunkResumeRequest` protobuf envelopes and wire validators.
+  - Monty remains removed; do not restore its executable, nested repository metadata, or runtime path.
+- Next checkpoint: add authenticated streaming/chunk RPCs after the adapter is green; do not put 16 MiB chunks into the existing 4 MiB `ExecuteTask` unary RPC.
+- Completed this round:
+  - `VerifiedWorkerExecution::from_token` re-verifies the Ed25519 Nodepool token, requires the `worker-execution` role, and binds JWT task/worker claims to the assigned Worker.
+  - `ingest_general_compute_chunk` rejects a protobuf token that differs from the verified token, validates the bounded wire envelope, converts it to `ChunkUploadEnvelope`, and delegates all request/manifest/bytes/CAS checks to the runtime.
+  - RED/GREEN coverage is in `hivemind-rs/crates/worker-executor/tests/chunk_transport.rs` for token mismatch, stale attempt, wrong request digest, manifest mismatch, payload tampering, and identical replay.
+- Verification this round:
+  - `cargo check -p hivemind-worker-executor --tests --locked` passed.
+  - `cargo check -p hivemind-worker-executor --locked` passed.
+  - `cargo test -p hivemind-worker-executor --test chunk_transport --target x86_64-pc-windows-gnu --locked` passed (6 adapter tests).
+  - `cargo test -p general-compute-runtime --locked` passed (all runtime transport, CAS, sandbox, supervisor, and doc tests).
+  - `cargo test -p hivemind-proto --locked` passed (8 tests).
+- The default MSVC integration-test linker still has the known mixed MSVC/MinGW `libtailscale` symbol mismatch; the scoped adapter suite passes under the configured GNU target.
+- Blockers: Nodepool token claims currently bind task/worker, while the typed request binds execution/attempt; the adapter requires both validated JWT claims and runtime request identity. Authenticated streaming RPC and Nodepool remote population remain unimplemented.
+- Scope guard: preserve unrelated dirty frontend/API/Cargo/proto changes; do not reset, checkout, or bulk-stage them.

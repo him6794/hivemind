@@ -1,3 +1,4 @@
+pub mod chunk_transport;
 pub mod control_api;
 pub mod executor;
 pub mod grpc_server;
