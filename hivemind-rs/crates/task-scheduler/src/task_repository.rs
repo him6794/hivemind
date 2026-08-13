@@ -1,4 +1,5 @@
 use anyhow::Result;
+use general_compute_runtime::GeneralComputeRequest;
 use hivemind_models::{Task, TaskStatus, WorkerNode};
 use sha1::{Digest, Sha1};
 use sqlx::PgPool;
@@ -214,7 +215,7 @@ impl TaskRepository {
         result_torrent: Option<&str>,
         output: Option<&str>,
     ) -> Result<Task> {
-        self.complete_guarded(task_id, None, result_torrent, output, None)
+        self.complete_guarded(task_id, None, result_torrent, output, None, None)
             .await
     }
 
@@ -225,8 +226,26 @@ impl TaskRepository {
         result_torrent: Option<&str>,
         output: Option<&str>,
     ) -> Result<Task> {
-        self.complete_guarded(task_id, Some(worker_id), result_torrent, output, None)
+        self.complete_guarded(task_id, Some(worker_id), result_torrent, output, None, None)
             .await
+    }
+
+    pub async fn complete_general_compute_for_worker(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        expected_manifest: &[u8],
+        output: Option<&str>,
+    ) -> Result<Task> {
+        self.complete_guarded(
+            task_id,
+            Some(worker_id),
+            None,
+            output,
+            None,
+            Some(expected_manifest),
+        )
+        .await
     }
 
     pub async fn complete_for_worker_with_managed_receipt(
@@ -248,6 +267,7 @@ impl TaskRepository {
                 output_bytes,
                 receipt_json,
             }),
+            None,
         )
         .await
     }
@@ -290,6 +310,7 @@ impl TaskRepository {
         result_torrent: Option<&str>,
         output: Option<&str>,
         managed_receipt: Option<ManagedCompletionReceipt<'_>>,
+        expected_manifest: Option<&[u8]>,
     ) -> Result<Task> {
         let mut tx = self.pool.begin().await?;
         let deterministic: bool =
@@ -310,24 +331,27 @@ impl TaskRepository {
                 "UPDATE tasks
                  SET status = 'COMPLETED', result_torrent = $1, output = COALESCE($2, output), last_update = NOW(), completed_at = NOW()
                  WHERE task_id = $3 AND worker_id = $4 AND status IN ('ASSIGNED', 'RUNNING')
+                   AND ($5::bytea IS NULL OR general_compute_manifest_json = $5)
                  RETURNING *",
             )
             .bind(result_torrent)
             .bind(output)
             .bind(task_id)
             .bind(worker_id)
+            .bind(expected_manifest.map(|manifest| manifest.to_vec()))
             .fetch_one(&mut *tx)
             .await?
         } else {
             sqlx::query_as::<_, Task>(
                 "UPDATE tasks
                  SET status = 'COMPLETED', result_torrent = $1, output = COALESCE($2, output), last_update = NOW(), completed_at = NOW()
-                 WHERE task_id = $3
+                 WHERE task_id = $3 AND ($4::bytea IS NULL OR general_compute_manifest_json = $4)
                  RETURNING *",
             )
             .bind(result_torrent)
             .bind(output)
             .bind(task_id)
+            .bind(expected_manifest.map(|manifest| manifest.to_vec()))
             .fetch_one(&mut *tx)
             .await?
         };
@@ -511,9 +535,7 @@ impl TaskRepository {
     }
 
     pub async fn reset_to_pending(&self, task_id: &str) -> Result<Task> {
-        sqlx::query_as::<_, Task>(
-            "UPDATE tasks SET status = 'PENDING', status_message = 'Redispatched', worker_id = NULL, worker_ip = NULL, retry_count = retry_count + 1, last_update = NOW() WHERE task_id = $1 RETURNING *"
-        ).bind(task_id).fetch_one(&self.pool).await.map_err(Into::into)
+        self.reset_to_pending_inner(task_id, None).await
     }
 
     pub async fn reset_to_pending_for_worker(
@@ -521,18 +543,49 @@ impl TaskRepository {
         task_id: &str,
         worker_id: &str,
     ) -> Result<Task> {
-        sqlx::query_as::<_, Task>(
+        self.reset_to_pending_inner(task_id, Some(worker_id)).await
+    }
+
+    async fn reset_to_pending_inner(
+        &self,
+        task_id: &str,
+        worker_id: Option<&str>,
+    ) -> Result<Task> {
+        let mut tx = self.pool.begin().await?;
+        let current = if let Some(worker_id) = worker_id {
+            sqlx::query_as::<_, Task>(
+                "SELECT * FROM tasks
+                 WHERE task_id = $1 AND worker_id = $2 AND status IN ('ASSIGNED', 'RUNNING')
+                 FOR UPDATE",
+            )
+            .bind(task_id)
+            .bind(worker_id)
+            .fetch_one(&mut *tx)
+            .await?
+        } else {
+            sqlx::query_as::<_, Task>(
+                "SELECT * FROM tasks WHERE task_id = $1 FOR UPDATE",
+            )
+            .bind(task_id)
+            .fetch_one(&mut *tx)
+            .await?
+        };
+
+        let rotated_manifest = rotate_general_compute_attempt(&current)?;
+        let updated = sqlx::query_as::<_, Task>(
             "UPDATE tasks
              SET status = 'PENDING', status_message = 'Redispatched', worker_id = NULL, worker_ip = NULL,
+                 general_compute_manifest_json = $1,
                  retry_count = retry_count + 1, last_update = NOW()
-             WHERE task_id = $1 AND worker_id = $2 AND status IN ('ASSIGNED', 'RUNNING')
+             WHERE task_id = $2
              RETURNING *",
         )
+        .bind(rotated_manifest)
         .bind(task_id)
-        .bind(worker_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(Into::into)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(updated)
     }
 
     pub async fn update_resource_usage(
@@ -726,6 +779,20 @@ fn checksum_proof_details(result_ref: &str) -> String {
     )
 }
 
+fn rotate_general_compute_attempt(task: &Task) -> Result<Option<Vec<u8>>> {
+    if task.runtime.as_deref() != Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION) {
+        return Ok(task.general_compute_manifest_json.clone());
+    }
+    let Some(manifest) = task.general_compute_manifest_json.as_deref() else {
+        anyhow::bail!("general-compute task is missing its request manifest");
+    };
+    let mut request: GeneralComputeRequest = serde_json::from_slice(manifest)
+        .map_err(|_| anyhow::anyhow!("general-compute request manifest is malformed"))?;
+    request.attempt_id = uuid::Uuid::new_v4().to_string();
+    request.request_digest = request.canonical_request_digest();
+    Ok(Some(serde_json::to_vec(&request)?))
+}
+
 async fn insert_task_attestation_pool(
     pool: &PgPool,
     task_id: &str,
@@ -752,6 +819,10 @@ async fn insert_task_attestation_pool(
 mod tests {
     use super::*;
     use chrono::Utc;
+    use general_compute_runtime::{
+        ArtifactManifest, ArtifactRole, DeterminismPolicy, ExecutionPolicy, GeneralComputeRequest,
+        GENERAL_COMPUTE_RUNTIME_VERSION,
+    };
     use hivemind_database::postgres::IsolatedTestPool;
 
     // Ledger row shape: (kind, payer_user, provider_worker_id, provider_user, amount_cpt, status)
@@ -1496,6 +1567,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_complete_general_compute_for_worker_rejects_old_manifest() {
+        let (p, fixture) = match pool("task_repository_general_compute_manifest_guard").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("manifest-guard-owner-{unique}");
+        let worker_id = format!("manifest-guard-worker-{unique}");
+        let task_id = format!("manifest-guard-task-{unique}");
+
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        )
+        .bind(&username)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        insert_worker(&repo.pool, &worker_id, "manifest-guard-provider").await;
+
+        let mut request = GeneralComputeRequest {
+            execution_id: format!("execution-{unique}"),
+            attempt_id: "current-attempt".into(),
+            idempotency_key: format!("idempotency-{unique}"),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "python-cpython-312".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest::inline_json(
+                "source",
+                ArtifactRole::Source,
+                b"source",
+            ),
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+        let current_manifest = serde_json::to_vec(&request).unwrap();
+
+        let mut task = make_task(&task_id, &username);
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.general_compute_manifest_json = Some(current_manifest.clone());
+        repo.create(&task).await.unwrap();
+        repo.assign_to_worker(&task_id, &worker_id, "10.0.0.56")
+            .await
+            .unwrap();
+
+        let mut stale_request = request.clone();
+        stale_request.attempt_id = "old-attempt".into();
+        stale_request.request_digest = stale_request.canonical_request_digest();
+        let stale_manifest = serde_json::to_vec(&stale_request).unwrap();
+        let stale_result = repo
+            .complete_general_compute_for_worker(
+                &task_id,
+                &worker_id,
+                &stale_manifest,
+                Some("stale output"),
+            )
+            .await;
+        assert!(stale_result.is_err());
+
+        let stored = repo.find_by_task_id(&task_id).await.unwrap().unwrap();
+        assert_eq!(stored.status, TaskStatus::Assigned);
+        assert!(stored.output.is_none());
+        assert!(!stored.billing_settled);
+
+        let completed = repo
+            .complete_general_compute_for_worker(
+                &task_id,
+                &worker_id,
+                &current_manifest,
+                Some("current output"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(completed.status, TaskStatus::Completed);
+        assert_eq!(completed.output.as_deref(), Some("current output"));
+
+        cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
     async fn test_report_output_for_worker_rejects_stale_worker_after_redispatch() {
         let (p, fixture) = match pool("task_repository_report_output_rejects_stale_worker").await {
             Some(parts) => parts,
@@ -1866,6 +2025,77 @@ mod tests {
             .execute(&repo.pool)
             .await
             .ok();
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_reset_to_pending_for_worker_rotates_general_compute_attempt_identity() {
+        let (p, fixture) = match pool("task_repository_reset_rotates_general_compute_attempt").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("attempt-rotate-owner-{unique}");
+        let worker_id = format!("attempt-rotate-worker-{unique}");
+        let task_id = format!("attempt-rotate-task-{unique}");
+
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        )
+        .bind(&username)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        insert_worker(&repo.pool, &worker_id, "attempt-rotate-provider").await;
+
+        let mut request = GeneralComputeRequest {
+            execution_id: format!("execution-{unique}"),
+            attempt_id: "attempt-1".into(),
+            idempotency_key: format!("idempotency-{unique}"),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "python-cpython-312".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest::inline_json(
+                "source",
+                ArtifactRole::Source,
+                b"source",
+            ),
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+
+        let mut task = make_task(&task_id, &username);
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
+        repo.create(&task).await.unwrap();
+        repo.assign_to_worker(&task_id, &worker_id, "10.0.0.55")
+            .await
+            .unwrap();
+
+        let reset = repo
+            .reset_to_pending_for_worker(&task_id, &worker_id)
+            .await
+            .unwrap();
+        let updated: GeneralComputeRequest = serde_json::from_slice(
+            reset.general_compute_manifest_json.as_deref().unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(updated.execution_id, request.execution_id);
+        assert_ne!(updated.attempt_id, request.attempt_id);
+        assert_eq!(updated.idempotency_key, request.idempotency_key);
+        assert_eq!(updated.request_digest, updated.canonical_request_digest());
+        assert_eq!(reset.retry_count, 1);
+
+        cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
         fixture.cleanup().await.ok();
     }
 
