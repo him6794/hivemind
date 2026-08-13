@@ -409,6 +409,24 @@ message GeneralComputeChunkResumeRequest {
     repeated string completed_sha256 = 7;
 }
 
+message GeneralComputeChunkUploadResponse {
+    bool success = 1;
+    string status_message = 2;
+    int64 accepted_chunks = 3;
+}
+
+message GeneralComputeChunkDescriptor {
+    int64 offset = 1;
+    int64 size_bytes = 2;
+    string sha256 = 3;
+}
+
+message GeneralComputeChunkResumeResponse {
+    bool success = 1;
+    string status_message = 2;
+    repeated GeneralComputeChunkDescriptor missing_chunks = 3;
+}
+
 message TaskOutputUploadRequest {
     string task_id = 1;
     string output = 2;
@@ -853,6 +871,13 @@ service WorkerNodeService {
     rpc TaskOutput(TaskOutputRequest) returns (TaskOutputResponse);
     rpc StopTaskExecution(StopTaskExecutionRequest) returns (StopTaskExecutionResponse);
     rpc TaskUsage(TaskUsageRequest) returns (TaskUsageResponse);
+}
+
+// Dedicated transfer surface for general-compute artifacts. Its message cap
+// is independent from the legacy/execute-task Worker RPC surface.
+service GeneralComputeChunkService {
+    rpc UploadChunk(GeneralComputeChunkUpload) returns (GeneralComputeChunkUploadResponse);
+    rpc ResumeChunks(GeneralComputeChunkResumeRequest) returns (GeneralComputeChunkResumeResponse);
 }
 
 service BatchRuntimeService {
