@@ -1,5 +1,8 @@
 use crate::differential::ReferenceObservation;
-use crate::supervisor::{Cancellation, CommandSpec, RunStatus, Supervisor, SupervisorError};
+use crate::sandbox::BackendExecutionMode;
+use crate::supervisor::{
+    Cancellation, ReferenceCommandSpec, ReferenceProcessSupervisor, RunStatus, SupervisorError,
+};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -13,6 +16,7 @@ pub struct PythonBackendRegistration {
     pub guest_image_digest: String,
     pub protocol_version: String,
     pub max_output_bytes: usize,
+    pub execution_mode: BackendExecutionMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +27,7 @@ pub enum PythonRegistryError {
     EmptyProtocolVersion,
     ZeroOutputLimit,
     UnsafeExecutable,
+    ProductionBackendRequiresSandbox,
     DuplicateBackend(String),
 }
 
@@ -31,10 +36,19 @@ impl fmt::Display for PythonRegistryError {
         match self {
             Self::EmptyBackendId => formatter.write_str("python backend id must not be empty"),
             Self::EmptyExecutable => formatter.write_str("python executable must not be empty"),
-            Self::InvalidImageDigest => formatter.write_str("python image digest must be sha256 pinned"),
-            Self::EmptyProtocolVersion => formatter.write_str("python protocol version must not be empty"),
+            Self::InvalidImageDigest => {
+                formatter.write_str("python image digest must be sha256 pinned")
+            }
+            Self::EmptyProtocolVersion => {
+                formatter.write_str("python protocol version must not be empty")
+            }
             Self::ZeroOutputLimit => formatter.write_str("python output limit must be positive"),
-            Self::UnsafeExecutable => formatter.write_str("python backend executable is not a registry-safe binary"),
+            Self::UnsafeExecutable => {
+                formatter.write_str("python backend executable is not a registry-safe binary")
+            }
+            Self::ProductionBackendRequiresSandbox => {
+                formatter.write_str("production python backends require the OCI sandbox launcher")
+            }
             Self::DuplicateBackend(id) => write!(formatter, "duplicate python backend {id}"),
         }
     }
@@ -52,7 +66,10 @@ impl PythonBackendRegistry {
         let mut backends = BTreeMap::new();
         for registration in registrations {
             validate_registration(&registration)?;
-            if backends.insert(registration.backend_id.clone(), registration).is_some() {
+            if backends
+                .insert(registration.backend_id.clone(), registration)
+                .is_some()
+            {
                 let id = backends.keys().next_back().cloned().unwrap_or_default();
                 return Err(PythonRegistryError::DuplicateBackend(id));
             }
@@ -76,8 +93,12 @@ pub enum PythonAdapterError {
 impl fmt::Display for PythonAdapterError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::BackendUnavailable { backend_id } => write!(formatter, "python backend {backend_id} is unavailable"),
-            Self::MalformedObservation(message) => write!(formatter, "malformed python observation: {message}"),
+            Self::BackendUnavailable { backend_id } => {
+                write!(formatter, "python backend {backend_id} is unavailable")
+            }
+            Self::MalformedObservation(message) => {
+                write!(formatter, "malformed python observation: {message}")
+            }
             Self::Supervisor(message) => write!(formatter, "python supervisor failed: {message}"),
             Self::Protocol(message) => write!(formatter, "python protocol failed: {message}"),
         }
@@ -92,7 +113,10 @@ pub struct PinnedPythonAdapter {
 }
 
 impl PinnedPythonAdapter {
-    pub fn from_registry(registry: &PythonBackendRegistry, backend_id: &str) -> Result<Self, PythonAdapterError> {
+    pub fn from_registry(
+        registry: &PythonBackendRegistry,
+        backend_id: &str,
+    ) -> Result<Self, PythonAdapterError> {
         let Some(registration) = registry.get(backend_id) else {
             return Err(PythonAdapterError::BackendUnavailable {
                 backend_id: backend_id.into(),
@@ -107,14 +131,19 @@ impl PinnedPythonAdapter {
         &self.registration
     }
 
-    pub fn parse_observation(&self, bytes: &[u8]) -> Result<ReferenceObservation, PythonAdapterError> {
+    pub fn parse_observation(
+        &self,
+        bytes: &[u8],
+    ) -> Result<ReferenceObservation, PythonAdapterError> {
         let observation: StrictObservation = serde_json::from_slice(bytes)
             .map_err(|error| PythonAdapterError::MalformedObservation(error.to_string()))?;
         if !matches!(
             observation.status.as_str(),
             "halted" | "exception" | "exited" | "resource_exhausted" | "cancelled"
         ) {
-            return Err(PythonAdapterError::MalformedObservation("unknown status".into()));
+            return Err(PythonAdapterError::MalformedObservation(
+                "unknown status".into(),
+            ));
         }
         if observation.output.len() > self.registration.max_output_bytes {
             return Err(PythonAdapterError::MalformedObservation(
@@ -128,15 +157,22 @@ impl PinnedPythonAdapter {
         })
     }
 
-    pub fn parse_framed_observation(&self, bytes: &[u8]) -> Result<ReferenceObservation, PythonAdapterError> {
+    pub fn parse_framed_observation(
+        &self,
+        bytes: &[u8],
+    ) -> Result<ReferenceObservation, PythonAdapterError> {
         let (observation, consumed) =
             crate::decode_frame::<serde_json::Value>(bytes, self.registration.max_output_bytes)
-                .map_err(|error| PythonAdapterError::Protocol(format!("response frame: {error:?}")))?;
+                .map_err(|error| {
+                    PythonAdapterError::Protocol(format!("response frame: {error:?}"))
+                })?;
         if consumed != bytes.len() {
-            return Err(PythonAdapterError::Protocol("response contains trailing bytes".into()));
+            return Err(PythonAdapterError::Protocol(
+                "response contains trailing bytes".into(),
+            ));
         }
-        let observation =
-            serde_json::to_vec(&observation).map_err(|error| PythonAdapterError::Protocol(error.to_string()))?;
+        let observation = serde_json::to_vec(&observation)
+            .map_err(|error| PythonAdapterError::Protocol(error.to_string()))?;
         self.parse_observation(&observation)
     }
 
@@ -147,7 +183,13 @@ impl PinnedPythonAdapter {
         seed: u64,
         cancellation: &Cancellation,
     ) -> Result<ReferenceObservation, PythonAdapterError> {
-        self.execute_with_timeout(source, input_json, seed, Duration::from_secs(30), cancellation)
+        self.execute_with_timeout(
+            source,
+            input_json,
+            seed,
+            Duration::from_secs(30),
+            cancellation,
+        )
     }
 
     pub fn execute_with_timeout(
@@ -165,18 +207,23 @@ impl PinnedPythonAdapter {
         });
         let input = crate::encode_frame(&request, self.registration.max_output_bytes)
             .map_err(|error| PythonAdapterError::Protocol(format!("request frame: {error:?}")))?;
-        let command = CommandSpec::new(&self.registration.executable, ["-c", PYTHON_RUNNER])
-            .with_input_limit(input.len())
-            .with_timeout(timeout)
-            .with_output_limit(self.registration.max_output_bytes);
-        let result = Supervisor::new()
+        let command =
+            ReferenceCommandSpec::new(&self.registration.executable, ["-c", PYTHON_RUNNER])
+                .with_input_limit(input.len())
+                .with_timeout(timeout)
+                .with_output_limit(self.registration.max_output_bytes);
+        let result = ReferenceProcessSupervisor::new()
             .run_with_stdin(command, &input, cancellation)
             .map_err(|error| PythonAdapterError::Supervisor(supervisor_error_message(error)))?;
         if result.status != RunStatus::Completed {
             let status = match result.status {
                 RunStatus::TimedOut => "timed out",
                 RunStatus::Cancelled => "cancelled",
-                other => return Err(PythonAdapterError::Supervisor(format!("child ended as {other:?}"))),
+                other => {
+                    return Err(PythonAdapterError::Supervisor(format!(
+                        "child ended as {other:?}"
+                    )));
+                }
             };
             return Err(PythonAdapterError::Supervisor(status.into()));
         }
@@ -217,7 +264,9 @@ fn supervisor_error_message(error: SupervisorError) -> String {
     error.to_string()
 }
 
-fn validate_registration(registration: &PythonBackendRegistration) -> Result<(), PythonRegistryError> {
+fn validate_registration(
+    registration: &PythonBackendRegistration,
+) -> Result<(), PythonRegistryError> {
     if registration.backend_id.trim().is_empty() {
         return Err(PythonRegistryError::EmptyBackendId);
     }
@@ -230,13 +279,18 @@ fn validate_registration(registration: &PythonBackendRegistration) -> Result<(),
         .and_then(|name| name.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let has_shell_metacharacter = registration
-        .executable
-        .chars()
-        .any(|character| matches!(character, ' ' | '\t' | '\r' | '\n' | ';' | '|' | '&' | '$' | '`' | '<' | '>'));
+    let has_shell_metacharacter = registration.executable.chars().any(|character| {
+        matches!(
+            character,
+            ' ' | '\t' | '\r' | '\n' | ';' | '|' | '&' | '$' | '`' | '<' | '>'
+        )
+    });
     if has_shell_metacharacter
         || basename.is_empty()
-        || matches!(basename.as_str(), "sh" | "bash" | "dash" | "zsh" | "cmd.exe" | "powershell.exe" | "pwsh.exe" | "pwsh")
+        || matches!(
+            basename.as_str(),
+            "sh" | "bash" | "dash" | "zsh" | "cmd.exe" | "powershell.exe" | "pwsh.exe" | "pwsh"
+        )
         || registration.executable.contains("..")
     {
         return Err(PythonRegistryError::UnsafeExecutable);
@@ -254,6 +308,9 @@ fn validate_registration(registration: &PythonBackendRegistration) -> Result<(),
     }
     if registration.max_output_bytes == 0 {
         return Err(PythonRegistryError::ZeroOutputLimit);
+    }
+    if registration.execution_mode != BackendExecutionMode::ReferenceDirect {
+        return Err(PythonRegistryError::ProductionBackendRequiresSandbox);
     }
     Ok(())
 }

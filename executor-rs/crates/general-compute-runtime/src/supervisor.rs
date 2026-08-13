@@ -1,8 +1,21 @@
+//! Direct-process execution is an internal reference-oracle implementation.
+//! External callers must use the production sandbox boundary and cannot build
+//! arbitrary host commands:
+//!
+//! ```compile_fail
+//! use general_compute_runtime::supervisor::{
+//!     ReferenceCommandSpec, ReferenceProcessSupervisor,
+//! };
+//!
+//! let _command = ReferenceCommandSpec::new("python3", [] as [&str; 0]);
+//! let _supervisor = ReferenceProcessSupervisor::new();
+//! ```
+
 use std::io::{self, Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -35,18 +48,20 @@ impl Default for Cancellation {
     }
 }
 
+/// Direct-process command used only by reference and lifecycle paths.
+/// Production backends use [`crate::sandbox::ProductionSandboxLauncher`].
 #[derive(Debug, Clone)]
-pub struct CommandSpec {
-    pub program: String,
-    pub args: Vec<String>,
-    pub timeout: Duration,
-    pub output_limit: usize,
-    pub combined_output_limit: usize,
-    pub input_limit: usize,
+pub(crate) struct ReferenceCommandSpec {
+    pub(crate) program: String,
+    pub(crate) args: Vec<String>,
+    pub(crate) timeout: Duration,
+    pub(crate) output_limit: usize,
+    pub(crate) combined_output_limit: usize,
+    pub(crate) input_limit: usize,
 }
 
-impl CommandSpec {
-    pub fn new<I, S>(program: impl Into<String>, args: I) -> Self
+impl ReferenceCommandSpec {
+    pub(crate) fn new<I, S>(program: impl Into<String>, args: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
@@ -61,22 +76,23 @@ impl CommandSpec {
         }
     }
 
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+    pub(crate) fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
-    pub fn with_output_limit(mut self, output_limit: usize) -> Self {
+    pub(crate) fn with_output_limit(mut self, output_limit: usize) -> Self {
         self.output_limit = output_limit;
         self
     }
 
-    pub fn with_combined_output_limit(mut self, combined_output_limit: usize) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_combined_output_limit(mut self, combined_output_limit: usize) -> Self {
         self.combined_output_limit = combined_output_limit;
         self
     }
 
-    pub fn with_input_limit(mut self, input_limit: usize) -> Self {
+    pub(crate) fn with_input_limit(mut self, input_limit: usize) -> Self {
         self.input_limit = input_limit;
         self
     }
@@ -133,25 +149,33 @@ impl std::fmt::Display for SupervisorError {
 
 impl std::error::Error for SupervisorError {}
 
+/// Direct-process supervisor for reference-oracle and lifecycle fixtures.
+/// It is deliberately named so it cannot be confused with the production OCI
+/// launch boundary.
 #[derive(Debug, Clone, Copy)]
-pub struct Supervisor {
+pub(crate) struct ReferenceProcessSupervisor {
     poll_interval: Duration,
 }
 
-impl Supervisor {
-    pub fn new() -> Self {
+impl ReferenceProcessSupervisor {
+    pub(crate) fn new() -> Self {
         Self {
             poll_interval: DEFAULT_POLL_INTERVAL,
         }
     }
 
-    pub fn run(&self, command: CommandSpec, cancellation: &Cancellation) -> Result<RunResult, SupervisorError> {
+    #[cfg(test)]
+    pub(crate) fn run(
+        &self,
+        command: ReferenceCommandSpec,
+        cancellation: &Cancellation,
+    ) -> Result<RunResult, SupervisorError> {
         self.run_with_stdin(command, &[], cancellation)
     }
 
-    pub fn run_with_stdin(
+    pub(crate) fn run_with_stdin(
         &self,
-        command: CommandSpec,
+        command: ReferenceCommandSpec,
         input: &[u8],
         cancellation: &Cancellation,
     ) -> Result<RunResult, SupervisorError> {
@@ -171,20 +195,30 @@ impl Supervisor {
             .stderr(Stdio::piped());
         configure_process_group(&mut process);
         let mut child = process.spawn().map_err(SupervisorError::Spawn)?;
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| SupervisorError::Input(io::Error::new(io::ErrorKind::BrokenPipe, "stdin pipe missing")))?;
+        let stdin = child.stdin.take().ok_or_else(|| {
+            SupervisorError::Input(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "stdin pipe missing",
+            ))
+        })?;
         let stdin_writer = spawn_stdin_writer(stdin, input.to_vec());
         let stdout = child.stdout.take().ok_or_else(|| {
-            SupervisorError::Capture(io::Error::new(io::ErrorKind::BrokenPipe, "stdout pipe missing"))
+            SupervisorError::Capture(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "stdout pipe missing",
+            ))
         })?;
         let stderr = child.stderr.take().ok_or_else(|| {
-            SupervisorError::Capture(io::Error::new(io::ErrorKind::BrokenPipe, "stderr pipe missing"))
+            SupervisorError::Capture(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "stderr pipe missing",
+            ))
         })?;
         let output_budget = Arc::new(OutputBudget::new(command.combined_output_limit));
-        let stdout_reader = spawn_capture_reader(stdout, command.output_limit, Arc::clone(&output_budget));
-        let stderr_reader = spawn_capture_reader(stderr, command.output_limit, Arc::clone(&output_budget));
+        let stdout_reader =
+            spawn_capture_reader(stdout, command.output_limit, Arc::clone(&output_budget));
+        let stderr_reader =
+            spawn_capture_reader(stderr, command.output_limit, Arc::clone(&output_budget));
 
         loop {
             if output_budget.exceeded() {
@@ -286,7 +320,7 @@ impl Supervisor {
     }
 }
 
-impl Default for Supervisor {
+impl Default for ReferenceProcessSupervisor {
     fn default() -> Self {
         Self::new()
     }
@@ -366,7 +400,8 @@ where
             let globally_allowed = output_budget.reserve(bytes_read);
             let bytes_to_keep = remaining.min(globally_allowed);
             captured.bytes.extend_from_slice(&buffer[..bytes_to_keep]);
-            if bytes_to_keep < bytes_read || globally_allowed < bytes_read || remaining < bytes_read {
+            if bytes_to_keep < bytes_read || globally_allowed < bytes_read || remaining < bytes_read
+            {
                 captured.truncated = true;
             }
         }
@@ -391,7 +426,9 @@ fn join_stdin(handle: JoinHandle<io::Result<()>>) -> Result<(), SupervisorError>
     }
 }
 
-fn join_capture(handle: JoinHandle<io::Result<CapturedOutput>>) -> Result<CapturedOutput, SupervisorError> {
+fn join_capture(
+    handle: JoinHandle<io::Result<CapturedOutput>>,
+) -> Result<CapturedOutput, SupervisorError> {
     match handle.join() {
         Ok(result) => result.map_err(SupervisorError::Capture),
         Err(_) => Err(SupervisorError::CaptureThread),
@@ -444,7 +481,9 @@ fn kill_process_tree(child: &mut Child) -> io::Result<()> {
     if status.success() || child.try_wait()?.is_some() {
         Ok(())
     } else {
-        Err(io::Error::other(format!("taskkill.exe exited with {status}")))
+        Err(io::Error::other(format!(
+            "taskkill.exe exited with {status}"
+        )))
     }
 }
 
@@ -456,3 +495,6 @@ unsafe extern "C" {
     fn setpgid(pid: i32, process_group: i32) -> i32;
     fn kill(pid: i32, signal: i32) -> i32;
 }
+
+#[cfg(test)]
+mod tests;

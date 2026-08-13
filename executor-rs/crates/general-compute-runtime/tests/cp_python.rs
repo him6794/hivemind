@@ -1,6 +1,7 @@
 use general_compute_runtime::cp_python::{
     PinnedPythonAdapter, PythonAdapterError, PythonBackendRegistration, PythonBackendRegistry,
 };
+use general_compute_runtime::sandbox::BackendExecutionMode;
 use general_compute_runtime::supervisor::Cancellation;
 use std::sync::Arc;
 use std::thread;
@@ -14,7 +15,19 @@ fn registration() -> PythonBackendRegistration {
         guest_image_digest: format!("sha256:{}", "a".repeat(64)),
         protocol_version: "general-compute-wire-v1".into(),
         max_output_bytes: 1024,
+        execution_mode: BackendExecutionMode::ReferenceDirect,
     }
+}
+
+#[test]
+fn direct_python_registry_rejects_production_backend_registration() {
+    let mut spec = registration();
+    spec.execution_mode = BackendExecutionMode::ProductionSandboxedOci;
+
+    assert!(
+        PythonBackendRegistry::new(vec![spec]).is_err(),
+        "direct CPython adapter must remain a reference oracle"
+    );
 }
 
 #[test]
@@ -24,7 +37,10 @@ fn cp_python_adapter_requires_a_registry_approved_backend() {
     let error = PinnedPythonAdapter::from_registry(&registry, "python-cpython-312")
         .expect_err("unregistered CPython backend must fail closed");
 
-    assert!(matches!(error, PythonAdapterError::BackendUnavailable { .. }));
+    assert!(matches!(
+        error,
+        PythonAdapterError::BackendUnavailable { .. }
+    ));
 }
 
 #[test]
@@ -59,8 +75,8 @@ fn python_registry_rejects_executable_argument_injection() {
 #[test]
 fn cp_python_adapter_rejects_malformed_observation_fields_and_status() {
     let registry = PythonBackendRegistry::new(vec![registration()]).expect("registration is valid");
-    let adapter =
-        PinnedPythonAdapter::from_registry(&registry, "python-cpython-312").expect("registered backend should resolve");
+    let adapter = PinnedPythonAdapter::from_registry(&registry, "python-cpython-312")
+        .expect("registered backend should resolve");
 
     let unknown_field = br#"{"status":"halted","steps":1,"output":"1","secret":"leak"}"#;
     assert!(matches!(
@@ -80,8 +96,8 @@ fn cp_python_adapter_enforces_registered_output_cap() {
     let mut spec = registration();
     spec.max_output_bytes = 3;
     let registry = PythonBackendRegistry::new(vec![spec]).expect("registration is valid");
-    let adapter =
-        PinnedPythonAdapter::from_registry(&registry, "python-cpython-312").expect("registered backend should resolve");
+    let adapter = PinnedPythonAdapter::from_registry(&registry, "python-cpython-312")
+        .expect("registered backend should resolve");
 
     let oversized = br#"{"status":"halted","steps":1,"output":"1234"}"#;
     assert!(matches!(
@@ -93,8 +109,8 @@ fn cp_python_adapter_enforces_registered_output_cap() {
 #[test]
 fn cp_python_adapter_executes_source_over_framed_stdin() {
     let registry = PythonBackendRegistry::new(vec![registration()]).expect("registration is valid");
-    let adapter =
-        PinnedPythonAdapter::from_registry(&registry, "python-cpython-312").expect("registered backend should resolve");
+    let adapter = PinnedPythonAdapter::from_registry(&registry, "python-cpython-312")
+        .expect("registered backend should resolve");
 
     let observation = adapter
         .execute(
@@ -113,8 +129,8 @@ fn cp_python_adapter_executes_source_over_framed_stdin() {
 #[test]
 fn cp_python_adapter_maps_timeout_to_a_typed_supervisor_failure() {
     let registry = PythonBackendRegistry::new(vec![registration()]).expect("registration is valid");
-    let adapter =
-        PinnedPythonAdapter::from_registry(&registry, "python-cpython-312").expect("registered backend should resolve");
+    let adapter = PinnedPythonAdapter::from_registry(&registry, "python-cpython-312")
+        .expect("registered backend should resolve");
 
     let error = adapter
         .execute_with_timeout(
@@ -126,14 +142,16 @@ fn cp_python_adapter_maps_timeout_to_a_typed_supervisor_failure() {
         )
         .expect_err("infinite Python loop must hit the deadline");
 
-    assert!(matches!(error, PythonAdapterError::Supervisor(message) if message.contains("timed out")));
+    assert!(
+        matches!(error, PythonAdapterError::Supervisor(message) if message.contains("timed out"))
+    );
 }
 
 #[test]
 fn cp_python_adapter_maps_cooperative_cancellation_to_a_typed_failure() {
     let registry = PythonBackendRegistry::new(vec![registration()]).expect("registration is valid");
-    let adapter =
-        PinnedPythonAdapter::from_registry(&registry, "python-cpython-312").expect("registered backend should resolve");
+    let adapter = PinnedPythonAdapter::from_registry(&registry, "python-cpython-312")
+        .expect("registered backend should resolve");
     let cancellation = Arc::new(Cancellation::new());
     let trigger = Arc::clone(&cancellation);
     let thread = thread::spawn(move || {
@@ -152,14 +170,16 @@ fn cp_python_adapter_maps_cooperative_cancellation_to_a_typed_failure() {
         .expect_err("cancelled Python loop must stop");
     thread.join().expect("cancellation trigger should finish");
 
-    assert!(matches!(error, PythonAdapterError::Supervisor(message) if message.contains("cancelled")));
+    assert!(
+        matches!(error, PythonAdapterError::Supervisor(message) if message.contains("cancelled"))
+    );
 }
 
 #[test]
 fn cp_python_adapter_maps_source_exception_to_bounded_observation() {
     let registry = PythonBackendRegistry::new(vec![registration()]).expect("registration is valid");
-    let adapter =
-        PinnedPythonAdapter::from_registry(&registry, "python-cpython-312").expect("registered backend should resolve");
+    let adapter = PinnedPythonAdapter::from_registry(&registry, "python-cpython-312")
+        .expect("registered backend should resolve");
 
     let observation = adapter
         .execute(
@@ -178,12 +198,14 @@ fn cp_python_adapter_maps_source_exception_to_bounded_observation() {
 #[test]
 fn cp_python_adapter_rejects_runner_output_with_trailing_frame_bytes() {
     let registry = PythonBackendRegistry::new(vec![registration()]).expect("registration is valid");
-    let adapter =
-        PinnedPythonAdapter::from_registry(&registry, "python-cpython-312").expect("registered backend should resolve");
+    let adapter = PinnedPythonAdapter::from_registry(&registry, "python-cpython-312")
+        .expect("registered backend should resolve");
 
-    let frame =
-        general_compute_runtime::encode_frame(&serde_json::json!({"status":"halted","steps":1,"output":"5"}), 1024)
-            .expect("observation frame should encode");
+    let frame = general_compute_runtime::encode_frame(
+        &serde_json::json!({"status":"halted","steps":1,"output":"5"}),
+        1024,
+    )
+    .expect("observation frame should encode");
     let mut trailing = frame;
     trailing.extend_from_slice(b"trailing");
     let error = adapter
