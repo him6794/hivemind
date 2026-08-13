@@ -126,6 +126,18 @@ impl PinnedPythonAdapter {
         })
     }
 
+    pub fn parse_framed_observation(&self, bytes: &[u8]) -> Result<ReferenceObservation, PythonAdapterError> {
+        let (observation, consumed) =
+            crate::decode_frame::<serde_json::Value>(bytes, self.registration.max_output_bytes)
+                .map_err(|error| PythonAdapterError::Protocol(format!("response frame: {error:?}")))?;
+        if consumed != bytes.len() {
+            return Err(PythonAdapterError::Protocol("response contains trailing bytes".into()));
+        }
+        let observation =
+            serde_json::to_vec(&observation).map_err(|error| PythonAdapterError::Protocol(error.to_string()))?;
+        self.parse_observation(&observation)
+    }
+
     pub fn execute(
         &self,
         source: &str,
@@ -171,15 +183,7 @@ impl PinnedPythonAdapter {
                 "stdout frame was truncated".into(),
             ));
         }
-        let (observation, consumed) =
-            crate::decode_frame::<serde_json::Value>(&result.stdout, self.registration.max_output_bytes)
-                .map_err(|error| PythonAdapterError::Protocol(format!("response frame: {error:?}")))?;
-        if consumed != result.stdout.len() {
-            return Err(PythonAdapterError::Protocol("response contains trailing bytes".into()));
-        }
-        let bytes =
-            serde_json::to_vec(&observation).map_err(|error| PythonAdapterError::Protocol(error.to_string()))?;
-        self.parse_observation(&bytes)
+        self.parse_framed_observation(&result.stdout)
     }
 }
 
@@ -194,9 +198,15 @@ if len(payload) != size:
     raise SystemExit(3)
 request = json.loads(payload)
 scope = {'input': json.loads(request['input_json']), 'seed': request['seed']}
-exec(request['source'], {'__builtins__': {}}, scope)
-output = str(scope.get('result', ''))
-response = json.dumps({'status': 'halted', 'steps': 1, 'output': output}, separators=(',', ':')).encode()
+try:
+    safe_globals = {'__builtins__': {}, 'ValueError': ValueError, 'Exception': Exception}
+    exec(request['source'], safe_globals, scope)
+    status = 'halted'
+    output = str(scope.get('result', ''))
+except Exception as error:
+    status = 'exception'
+    output = f'{type(error).__name__}: {error}'
+response = json.dumps({'status': status, 'steps': 1, 'output': output}, separators=(',', ':')).encode()
 sys.stdout.buffer.write(struct.pack('>I', len(response)) + response)
 sys.stdout.buffer.flush()
 "#;

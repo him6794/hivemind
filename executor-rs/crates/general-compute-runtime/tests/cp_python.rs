@@ -125,3 +125,40 @@ fn cp_python_adapter_maps_cooperative_cancellation_to_a_typed_failure() {
 
     assert!(matches!(error, PythonAdapterError::Supervisor(message) if message.contains("cancelled")));
 }
+
+#[test]
+fn cp_python_adapter_maps_source_exception_to_bounded_observation() {
+    let registry = PythonBackendRegistry::new(vec![registration()]).expect("registration is valid");
+    let adapter =
+        PinnedPythonAdapter::from_registry(&registry, "python-cpython-312").expect("registered backend should resolve");
+
+    let observation = adapter
+        .execute(
+            "raise ValueError('bad input')",
+            r#"{"value": 4}"#,
+            7,
+            &Cancellation::new(),
+        )
+        .expect("source exceptions should become observations");
+
+    assert_eq!(observation.status, "exception");
+    assert_eq!(observation.steps, 1);
+    assert!(observation.output.contains("ValueError"));
+}
+
+#[test]
+fn cp_python_adapter_rejects_runner_output_with_trailing_frame_bytes() {
+    let registry = PythonBackendRegistry::new(vec![registration()]).expect("registration is valid");
+    let adapter =
+        PinnedPythonAdapter::from_registry(&registry, "python-cpython-312").expect("registered backend should resolve");
+
+    let frame =
+        general_compute_runtime::encode_frame(&serde_json::json!({"status":"halted","steps":1,"output":"5"}), 1024)
+            .expect("observation frame should encode");
+    let mut trailing = frame;
+    trailing.extend_from_slice(b"trailing");
+    let error = adapter
+        .parse_framed_observation(&trailing)
+        .expect_err("trailing response bytes must fail closed");
+    assert!(matches!(error, PythonAdapterError::Protocol(message) if message.contains("trailing")));
+}
