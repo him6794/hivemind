@@ -88,6 +88,9 @@ M1 supervisor、reference fixtures、differential contract、pinned CPython regi
 - M0 evidence/usage/artifact result validation 小單元（本次 commit）
   - 先以 RED tests 鎖定 evidence envelope、output manifest root、status/exit-code、usage quota 與 output role；加入 `EvidenceEnvelope`、worker-only `unverified` gate、canonical artifact root 與 result validator。
   - focused contracts 14 passed；executor workspace 73 tests、Worker check 與 Docker/Windows release-contract tests passed。
+- M0 artifact/CAS manifest 小單元（本次 commit）
+  - 先以 RED tests 鎖定 inline/CAS canonical root、chunk checksum、chunk-aligned range 與 resume；加入 metadata-only canonical artifact root、inline chunk verification、range validation 與 missing-chunk selection。
+  - focused contracts 18 passed；executor workspace 77 tests、Worker check 與 Docker/Windows release-contract tests passed。
 
 ## Active owners
 

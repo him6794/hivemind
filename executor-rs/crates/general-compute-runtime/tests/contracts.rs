@@ -1,7 +1,7 @@
 use general_compute_runtime::{
-    ArtifactChunk, ArtifactManifest, ArtifactRole, BackendRegistration, CapabilityMatrix, ExecutionPolicy,
+    ArtifactChunk, ArtifactManifest, ArtifactRange, ArtifactRole, BackendRegistration, CapabilityMatrix, ExecutionPolicy,
     GeneralComputeRequest, GeneralComputeResult, ResultStatus, ValidationErrorCode, WorkerCapabilities,
-    EvidenceEnvelope, GENERAL_COMPUTE_RUNTIME_VERSION, canonical_artifact_root,
+    EvidenceEnvelope, GENERAL_COMPUTE_RUNTIME_VERSION, canonical_artifact_root, sha256_digest,
 };
 
 fn valid_request() -> GeneralComputeRequest {
@@ -248,6 +248,90 @@ fn result_validation_rejects_non_output_artifact_role() {
         .validate_against(&request, &valid_registry(&request))
         .expect_err("output manifest with an input role must fail closed");
     assert_eq!(error.code, ValidationErrorCode::ArtifactInvalid);
+}
+
+fn chunked_artifact() -> ArtifactManifest {
+    let bytes = b"abcdefgh";
+    let mut artifact = ArtifactManifest::inline_json("chunked", ArtifactRole::Input, bytes);
+    artifact.chunks = vec![
+        ArtifactChunk {
+            offset: 0,
+            size_bytes: 4,
+            sha256: sha256_digest(&bytes[..4]),
+        },
+        ArtifactChunk {
+            offset: 4,
+            size_bytes: 4,
+            sha256: sha256_digest(&bytes[4..]),
+        },
+    ];
+    artifact
+}
+
+#[test]
+fn chunked_artifact_root_is_stable_across_inline_and_cas_forms() {
+    let inline = chunked_artifact();
+    inline.validate().expect("chunked inline artifact is valid");
+
+    let mut cas = inline.clone();
+    cas.inline_bytes = None;
+    cas.validate().expect("CAS artifact is valid");
+
+    assert_eq!(canonical_artifact_root(&[inline]), canonical_artifact_root(&[cas]));
+}
+
+#[test]
+fn artifact_range_must_be_nonempty_and_chunk_aligned() {
+    let artifact = chunked_artifact();
+    let aligned = artifact
+        .validate_range(ArtifactRange {
+            offset: 4,
+            size_bytes: 4,
+        })
+        .expect("aligned range should be resumable");
+    assert_eq!(aligned.len(), 1);
+    assert_eq!(aligned[0].offset, 4);
+
+    let error = artifact
+        .validate_range(ArtifactRange {
+            offset: 2,
+            size_bytes: 4,
+        })
+        .expect_err("partial chunk range must fail closed");
+    assert!(error.contains("chunk-aligned"));
+
+    let error = artifact
+        .validate_range(ArtifactRange {
+            offset: 0,
+            size_bytes: 0,
+        })
+        .expect_err("empty range must fail closed");
+    assert!(error.contains("non-empty"));
+}
+
+#[test]
+fn artifact_resume_rejects_unknown_completed_chunk_and_returns_missing_chunks() {
+    let artifact = chunked_artifact();
+    let missing = artifact
+        .missing_chunks(&[sha256_digest(b"abcd")])
+        .expect("known completed chunk should be accepted");
+    assert_eq!(missing.len(), 1);
+    assert_eq!(missing[0].offset, 4);
+
+    let error = artifact
+        .missing_chunks(&[sha256_digest(b"unknown")])
+        .expect_err("unknown completed chunk must fail closed");
+    assert!(error.contains("not present"));
+}
+
+#[test]
+fn inline_chunk_checksum_mismatch_is_rejected() {
+    let mut artifact = chunked_artifact();
+    artifact.chunks[0].sha256 = sha256_digest(b"wxyz");
+    let error = artifact
+        .validate()
+        .expect_err("inline bytes must agree with chunk checksums");
+    assert!(error.contains("chunk checksum does not match inline bytes"));
 }
 
 #[test]

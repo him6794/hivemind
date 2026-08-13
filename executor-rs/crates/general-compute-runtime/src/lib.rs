@@ -678,6 +678,13 @@ pub struct ArtifactChunk {
     pub sha256: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactRange {
+    pub offset: u64,
+    pub size_bytes: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactManifest {
     pub artifact_id: String,
@@ -735,6 +742,13 @@ impl ArtifactManifest {
             if !is_sha256_digest(&chunk.sha256) {
                 return Err("artifact chunk checksum is invalid".into());
             }
+            if let Some(bytes) = &self.inline_bytes {
+                let start = chunk.offset as usize;
+                let end = end as usize;
+                if chunk.sha256 != sha256_digest(&bytes[start..end]) {
+                    return Err("chunk checksum does not match inline bytes".into());
+                }
+            }
             previous_end = end;
         }
 
@@ -747,16 +761,96 @@ impl ArtifactManifest {
         }
         Ok(())
     }
+
+    pub fn validate_range(&self, range: ArtifactRange) -> Result<Vec<ArtifactChunk>, String> {
+        self.validate()?;
+        if range.size_bytes == 0 {
+            return Err("artifact range must be non-empty".into());
+        }
+        let end = range
+            .offset
+            .checked_add(range.size_bytes)
+            .ok_or_else(|| "artifact range overflows".to_string())?;
+        if end > self.size_bytes {
+            return Err("artifact range exceeds artifact size".into());
+        }
+        if self.chunks.is_empty() {
+            return Err("artifact range requires chunk-aligned chunks".into());
+        }
+
+        let selected: Vec<_> = self
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.offset >= range.offset && chunk.offset + chunk.size_bytes <= end)
+            .cloned()
+            .collect();
+        let selected_end = selected
+            .last()
+            .map(|chunk| chunk.offset + chunk.size_bytes)
+            .unwrap_or(range.offset);
+        if selected.is_empty()
+            || selected[0].offset != range.offset
+            || selected_end != end
+            || selected
+                .windows(2)
+                .any(|chunks| chunks[0].offset + chunks[0].size_bytes != chunks[1].offset)
+        {
+            return Err("artifact range must be chunk-aligned".into());
+        }
+        Ok(selected)
+    }
+
+    pub fn missing_chunks(&self, completed_sha256: &[String]) -> Result<Vec<ArtifactChunk>, String> {
+        self.validate()?;
+        for digest in completed_sha256 {
+            if !is_sha256_digest(digest) {
+                return Err("completed chunk checksum is invalid".into());
+            }
+            if !self.chunks.iter().any(|chunk| &chunk.sha256 == digest) {
+                return Err("completed chunk is not present in artifact manifest".into());
+            }
+        }
+        Ok(self
+            .chunks
+            .iter()
+            .filter(|chunk| !completed_sha256.iter().any(|digest| digest == &chunk.sha256))
+            .cloned()
+            .collect())
+    }
 }
 
-fn sha256_digest(bytes: &[u8]) -> String {
+pub fn sha256_digest(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     format!("sha256:{digest:x}")
 }
 
 pub fn canonical_artifact_root(artifacts: &[ArtifactManifest]) -> String {
-    let bytes = serde_json::to_vec(artifacts).expect("artifact manifest serialization is infallible");
+    let canonical: Vec<_> = artifacts.iter().map(CanonicalArtifactManifest::from).collect();
+    let bytes = serde_json::to_vec(&canonical).expect("artifact manifest serialization is infallible");
     sha256_digest(&bytes)
+}
+
+#[derive(Debug, Serialize)]
+struct CanonicalArtifactManifest<'a> {
+    artifact_id: &'a str,
+    role: ArtifactRole,
+    size_bytes: u64,
+    mime_type: &'a str,
+    sha256: &'a str,
+    chunks: &'a [ArtifactChunk],
+}
+
+impl<'a> From<&'a ArtifactManifest> for CanonicalArtifactManifest<'a> {
+    fn from(artifact: &'a ArtifactManifest) -> Self {
+        Self {
+            artifact_id: &artifact.artifact_id,
+            role: artifact.role,
+            size_bytes: artifact.size_bytes,
+            mime_type: &artifact.mime_type,
+            sha256: &artifact.sha256,
+            chunks: &artifact.chunks,
+        }
+    }
 }
 
 fn is_sha256_digest(value: &str) -> bool {
