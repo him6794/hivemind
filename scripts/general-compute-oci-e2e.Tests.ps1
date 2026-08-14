@@ -16,6 +16,7 @@ foreach ($expected in @(
     "HIVEMIND_ENABLE_REAL_OCI_E2E",
     "HIVEMIND_GENERAL_COMPUTE_PRODUCTION_BACKENDS",
     "runner_state_root",
+    "seccomp_profile_path",
     "docker compose",
     "--project-name",
     "--project-directory",
@@ -23,7 +24,11 @@ foreach ($expected in @(
     "RunnerNotPinned",
     "rootless",
     "seccomp",
-    "SCMP_ACT_ERRNO"
+    "SCMP_ACT_ERRNO",
+    "SCMP_ACT_ALLOW",
+    "syscalls",
+    "Get-FileHash -LiteralPath",
+    "-isnot [string]"
 )) {
     if (!$harnessText.Contains($expected)) {
         throw "OCI E2E harness must contain the fail-closed/operator-isolation contract '$expected'."

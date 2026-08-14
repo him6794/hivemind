@@ -1091,6 +1091,11 @@ mod tests {
         let mut registration = production_registration(root.clone(), &image);
         std::fs::create_dir_all(registration.bundle_root.join("rootfs")).unwrap();
         std::fs::create_dir_all(&registration.runner_state_root).unwrap();
+        std::fs::write(
+            &registration.seccomp_profile_path,
+            test_seccomp_profile_bytes(),
+        )
+        .unwrap();
         let request = production_request(
             &registration.backend_id,
             &image,
@@ -1376,6 +1381,7 @@ mod tests {
             artifact_root: root.join("artifacts"),
             runner_executable: root.join("runc"),
             runner_state_root: root.join("runner-state"),
+            seccomp_profile_path: root.join("seccomp.json"),
             runner_prefix_args: Vec::new(),
             runner_sha256: format!("sha256:{}", "d".repeat(64)),
             entrypoint: vec!["python".into(), "/runtime/runner.py".into()],
@@ -1389,7 +1395,9 @@ mod tests {
                 ],
                 cgroup: general_compute_runtime::sandbox::CgroupPolicy::V2,
                 seccomp: general_compute_runtime::sandbox::SeccompPolicy::DefaultDeny {
-                    profile_sha256: format!("sha256:{}", "e".repeat(64)),
+                    profile_sha256: general_compute_runtime::sha256_digest(
+                        test_seccomp_profile_bytes(),
+                    ),
                 },
                 privilege_escalation:
                     general_compute_runtime::sandbox::PrivilegeEscalationPolicy::NoNewPrivileges,
@@ -1402,6 +1410,10 @@ mod tests {
             },
             max_output_bytes: 1024,
         }
+    }
+
+    fn test_seccomp_profile_bytes() -> &'static [u8] {
+        br#"{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[{"action":"SCMP_ACT_ALLOW","names":["exit","exit_group"]}]}"#
     }
 
     fn production_request(
