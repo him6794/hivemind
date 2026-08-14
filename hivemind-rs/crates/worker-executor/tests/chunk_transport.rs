@@ -95,6 +95,7 @@ fn upload(request: &GeneralComputeRequest, token: &str) -> GeneralComputeChunkUp
         size_bytes: BYTES.len() as i64,
         sha256: sha256_digest(BYTES),
         bytes: BYTES.to_vec(),
+        transfer_generation: 1,
     }
 }
 
@@ -107,6 +108,7 @@ fn resume(request: &GeneralComputeRequest, token: &str) -> GeneralComputeChunkRe
         request_digest: request.request_digest.clone(),
         artifact_id: "source".into(),
         completed_sha256: vec![],
+        transfer_generation: 1,
     }
 }
 

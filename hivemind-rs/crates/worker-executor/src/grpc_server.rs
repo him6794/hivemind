@@ -930,6 +930,7 @@ mod tests {
             size_bytes: bytes.len() as i64,
             sha256: sha256_digest(bytes),
             bytes: bytes.to_vec(),
+            transfer_generation: 1,
         }
     }
 
@@ -1935,6 +1936,7 @@ mod tests {
             request_digest: request.request_digest.clone(),
             artifact_id: "source".into(),
             completed_sha256: vec![sha256_digest(b"print(42)")],
+            transfer_generation: 1,
         };
         let resumed = chunk_service
             .resume_chunks(Request::new(resume))

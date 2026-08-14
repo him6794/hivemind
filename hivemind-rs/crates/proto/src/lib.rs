@@ -70,6 +70,9 @@ pub fn validate_general_compute_chunk_upload(
     if upload.offset < 0 {
         return Err("chunk offset must not be negative");
     }
+    if upload.transfer_generation <= 0 {
+        return Err("transfer generation must be positive");
+    }
     if upload.size_bytes <= 0 {
         return Err("chunk size must be positive");
     }
@@ -98,6 +101,9 @@ pub fn validate_general_compute_chunk_resume_request(
         &request.request_digest,
         &request.artifact_id,
     )?;
+    if request.transfer_generation <= 0 {
+        return Err("transfer generation must be positive");
+    }
     for digest in &request.completed_sha256 {
         if !is_sha256_digest(digest) {
             return Err("completed chunk digest must be a sha256 digest");
@@ -197,7 +203,8 @@ mod tests {
         validate_general_compute_transfer_lease_request, ExecuteTaskResponse,
         GeneralComputeChunkDescriptor, GeneralComputeChunkResumeRequest,
         GeneralComputeChunkResumeResponse, GeneralComputeChunkUpload,
-        GeneralComputeChunkUploadResponse, ManagedProofEnvelope,
+        GeneralComputeChunkUploadResponse, GeneralComputePrepareRequest,
+        GeneralComputePrepareResponse, ManagedProofEnvelope,
         ValidateGeneralComputeTransferLeaseRequest, ValidateGeneralComputeTransferLeaseResponse,
         GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES, GENERAL_COMPUTE_CHUNK_UPLOAD_MAX_BYTES,
         GENERAL_COMPUTE_MANIFEST_MAX_BYTES, GENERAL_COMPUTE_RESULT_MAX_BYTES,
@@ -449,12 +456,14 @@ mod tests {
             sha256: "sha256:3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7"
                 .into(),
             bytes: b"data".to_vec(),
+            transfer_generation: 7,
         };
 
         validate_general_compute_chunk_upload(&upload).expect("valid chunk upload should pass");
         let decoded = GeneralComputeChunkUpload::decode(upload.encode_to_vec().as_slice())
             .expect("chunk upload should decode");
         assert_eq!(decoded, upload);
+        assert_eq!(decoded.transfer_generation, 7);
         assert_eq!(decoded.bytes.len(), decoded.size_bytes as usize);
     }
 
@@ -473,8 +482,12 @@ mod tests {
             sha256: "sha256:3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7"
                 .into(),
             bytes: b"data".to_vec(),
+            transfer_generation: 7,
         };
 
+        upload.transfer_generation = 0;
+        assert!(validate_general_compute_chunk_upload(&upload).is_err());
+        upload.transfer_generation = 7;
         upload.size_bytes = -1;
         assert!(validate_general_compute_chunk_upload(&upload).is_err());
         upload.size_bytes = 4;
@@ -502,6 +515,7 @@ mod tests {
             completed_sha256: vec![
                 "sha256:3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7".into(),
             ],
+            transfer_generation: 7,
         };
 
         validate_general_compute_chunk_resume_request(&request)
@@ -511,8 +525,43 @@ mod tests {
         assert_eq!(decoded, request);
 
         let mut invalid = request;
+        invalid.transfer_generation = 0;
+        assert!(validate_general_compute_chunk_resume_request(&invalid).is_err());
+        invalid.transfer_generation = 7;
         invalid.completed_sha256[0] = "not-a-sha256".into();
         assert!(validate_general_compute_chunk_resume_request(&invalid).is_err());
+    }
+
+    #[test]
+    fn general_compute_prepare_envelope_round_trips_full_transfer_identity() {
+        let request = GeneralComputePrepareRequest {
+            task_id: "task-1".into(),
+            token: "nodepool-signed-worker-execution-token".into(),
+            runtime: "general-compute-v1alpha1".into(),
+            general_compute_manifest_json: br#"{"execution_id":"execution-1"}"#.to_vec(),
+            execution_id: "execution-1".into(),
+            attempt_id: "attempt-2".into(),
+            idempotency_key: "idempotency-3".into(),
+            request_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            transfer_generation: 7,
+        };
+        let decoded = GeneralComputePrepareRequest::decode(request.encode_to_vec().as_slice())
+            .expect("prepare request should decode");
+        assert_eq!(decoded, request);
+
+        let response = GeneralComputePrepareResponse {
+            success: true,
+            status_message: "prepared".into(),
+            execution_id: request.execution_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+            request_digest: request.request_digest.clone(),
+            transfer_generation: request.transfer_generation,
+        };
+        let decoded = GeneralComputePrepareResponse::decode(response.encode_to_vec().as_slice())
+            .expect("prepare response should decode");
+        assert_eq!(decoded, response);
     }
 
     #[test]

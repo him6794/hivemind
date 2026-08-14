@@ -415,6 +415,7 @@ message GeneralComputeChunkUpload {
     int64 size_bytes = 8;
     string sha256 = 9;
     bytes bytes = 10;
+    int64 transfer_generation = 11; // Nodepool lease generation; must be positive
 }
 
 message GeneralComputeChunkResumeRequest {
@@ -425,6 +426,7 @@ message GeneralComputeChunkResumeRequest {
     string request_digest = 5;
     string artifact_id = 6;
     repeated string completed_sha256 = 7;
+    int64 transfer_generation = 8; // Nodepool lease generation; must be positive
 }
 
 message GeneralComputeChunkUploadResponse {
@@ -443,6 +445,31 @@ message GeneralComputeChunkResumeResponse {
     bool success = 1;
     string status_message = 2;
     repeated GeneralComputeChunkDescriptor missing_chunks = 3;
+}
+
+// Nodepool -> Worker: authenticated admission/readiness for a
+// general-compute attempt. Chunk uploads happen only after this envelope has
+// established the assignment and immutable request identity.
+message GeneralComputePrepareRequest {
+    string task_id = 1;
+    string token = 2; // Nodepool-issued worker execution token
+    string runtime = 3;
+    bytes general_compute_manifest_json = 4;
+    string execution_id = 5;
+    string attempt_id = 6;
+    string idempotency_key = 7;
+    string request_digest = 8;
+    int64 transfer_generation = 9; // Nodepool lease generation; must be positive
+}
+
+message GeneralComputePrepareResponse {
+    bool success = 1;
+    string status_message = 2;
+    string execution_id = 3;
+    string attempt_id = 4;
+    string idempotency_key = 5;
+    string request_digest = 6;
+    int64 transfer_generation = 7;
 }
 
 message TaskOutputUploadRequest {
