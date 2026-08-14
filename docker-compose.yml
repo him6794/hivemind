@@ -5,7 +5,6 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: hivemind-redis
     restart: unless-stopped
     ports:
       - "${REDIS_HOST_PORT:-6379}:6379"
@@ -21,7 +20,6 @@ services:
 
   postgres:
     image: postgres:16-alpine
-    container_name: hivemind-postgres
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-hivemind}
@@ -47,7 +45,6 @@ services:
     build:
       context: .
       dockerfile: hivemind-rs/Dockerfile
-    container_name: hivemind-nodepool
     command: ["/app/hivemind-bin", "nodepool"]
     restart: unless-stopped
     environment:
@@ -60,7 +57,7 @@ services:
       TORRENT_BT_DIR: /app/bt_torrents
       TORRENT_ANNOUNCE_URL: ${HIVEMIND_TORRENT_ANNOUNCE_URL:-http://nodepool:6969/announce}
       TORRENT_SEED_LISTEN_ADDR: ${TORRENT_SEED_LISTEN_ADDR:-0.0.0.0:6881}
-      TORRENT_SEED_ADVERTISE_ADDR: ${TORRENT_SEED_ADVERTISE_ADDR:-172.28.0.10:6881}
+      TORRENT_SEED_ADVERTISE_ADDR: ${TORRENT_SEED_ADVERTISE_ADDR:-nodepool:6881}
       TORRENT_ALLOW_LOCAL_TASK_ARTIFACTS: "false"
       # Settlement policy belongs to the nodepool: it owns the dispatcher that
       # decides whether a managed task settles from a verified claim. Setting it
@@ -87,8 +84,7 @@ services:
       retries: 3
       start_period: 10s
     networks:
-      hivemind-network:
-        ipv4_address: 172.28.0.10
+      - hivemind-network
     volumes:
       - hivemind-data:/app/data
       - nodepool-torrents:/app/bt_torrents
@@ -98,7 +94,6 @@ services:
     build:
       context: .
       dockerfile: hivemind-rs/Dockerfile
-    container_name: hivemind-master
     command: ["/app/hivemind-bin", "master"]
     restart: unless-stopped
     environment:
@@ -126,7 +121,6 @@ services:
     build:
       context: .
       dockerfile: hivemind-rs/Dockerfile
-    container_name: hivemind-worker
     command: ["/app/hivemind-bin", "worker"]
     restart: unless-stopped
     environment:
@@ -185,7 +179,6 @@ services:
       dockerfile: Dockerfile
       args:
         VITE_API_BASE: ${VITE_API_BASE:-http://localhost:8082}
-    container_name: hivemind-master-ui
     restart: unless-stopped
     ports:
       - "${MASTER_UI_HOST_PORT:-3000}:80"
@@ -201,7 +194,6 @@ services:
       args:
         VITE_API_BASE: ${VITE_API_BASE:-http://localhost:8082}
         VITE_WORKER_CONTROL_BASE: ${VITE_WORKER_CONTROL_BASE:-http://localhost:18080}
-    container_name: hivemind-worker-ui
     restart: unless-stopped
     ports:
       - "${WORKER_UI_HOST_PORT:-3001}:80"
@@ -214,7 +206,6 @@ services:
     build:
       context: .
       dockerfile: frontend/Dockerfile
-    container_name: hivemind-site
     restart: unless-stopped
     environment:
       WEBSITE_NODEPOOL_GRPC_ADDR: ${WEBSITE_NODEPOOL_GRPC_ADDR:-nodepool:50051}
@@ -232,10 +223,6 @@ services:
 networks:
   hivemind-network:
     driver: bridge
-    name: hivemind-network
-    ipam:
-      config:
-        - subnet: 172.28.0.0/24
 
 # ============================================
 # Volumes

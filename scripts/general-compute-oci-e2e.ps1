@@ -257,10 +257,73 @@ function Invoke-ComposeConfigCheck {
         [Parameter(Mandatory = $true)][string]$Project
     )
     Require-Command "docker"
-    $null = & docker compose --project-name $Project --project-directory $repoRoot --file $ComposePath config --format json 2>&1
+    $configOutput = @(& docker compose --project-name $Project --project-directory $repoRoot --file $ComposePath config --format json 2>&1)
     if ($LASTEXITCODE -ne 0) {
         Fail-Contract "docker compose config failed; provide the required release secrets and operator environment"
     }
+    try {
+        $resolved = ($configOutput | ForEach-Object { $_.ToString() }) -join "`n" | ConvertFrom-Json
+    } catch {
+        Fail-Contract "docker compose config did not return valid JSON"
+    }
+    $resolvedVolumeNames = @(
+        $resolved.volumes.PSObject.Properties |
+            ForEach-Object { [string]$_.Value.name }
+    )
+    $unisolatedVolumeNames = @(
+        $resolvedVolumeNames | Where-Object { !$_ -or !$_.StartsWith("$Project-") }
+    )
+    if ($resolvedVolumeNames.Count -eq 0 -or $unisolatedVolumeNames.Count -gt 0) {
+        Fail-Contract "resolved isolated Compose volume names must be project-prefixed"
+    }
+}
+
+$isolatedComposeVolumeEnvironmentNames = @(
+    "REDIS_VOLUME_NAME",
+    "POSTGRES_VOLUME_NAME",
+    "HIVEMIND_DATA_VOLUME_NAME",
+    "NODEPOOL_TORRENTS_VOLUME_NAME",
+    "NODEPOOL_TASK_PACKAGES_VOLUME_NAME",
+    "MASTER_TASK_REFERENCES_VOLUME_NAME",
+    "MASTER_TORRENTS_VOLUME_NAME",
+    "WORKER_TASK_DOWNLOADS_VOLUME_NAME",
+    "WORKER_TORRENTS_VOLUME_NAME",
+    "WORKER_GENERAL_COMPUTE_CONFIG_VOLUME_NAME",
+    "WORKER_GENERAL_COMPUTE_STATE_VOLUME_NAME"
+)
+$script:isolatedComposeVolumeEnvironmentBackup = [ordered]@{}
+$script:isolatedComposeVolumesApplied = $false
+
+function Use-IsolatedComposeVolumes {
+    param([Parameter(Mandatory = $true)][string]$Project)
+    if ($script:isolatedComposeVolumesApplied) {
+        Fail-Contract "isolated Compose volume names were applied more than once"
+    }
+    foreach ($name in $isolatedComposeVolumeEnvironmentNames) {
+        $script:isolatedComposeVolumeEnvironmentBackup[$name] =
+            [Environment]::GetEnvironmentVariable($name, "Process")
+        [Environment]::SetEnvironmentVariable(
+            $name,
+            "$Project-$($name.ToLowerInvariant())",
+            "Process"
+        )
+    }
+    $script:isolatedComposeVolumesApplied = $true
+}
+
+function Restore-IsolatedComposeVolumes {
+    if (!$script:isolatedComposeVolumesApplied) {
+        return
+    }
+    foreach ($name in $isolatedComposeVolumeEnvironmentNames) {
+        [Environment]::SetEnvironmentVariable(
+            $name,
+            $script:isolatedComposeVolumeEnvironmentBackup[$name],
+            "Process"
+        )
+    }
+    $script:isolatedComposeVolumeEnvironmentBackup = [ordered]@{}
+    $script:isolatedComposeVolumesApplied = $false
 }
 
 if ($CheckOnly -and $Run) {
@@ -284,35 +347,40 @@ Require-RegularFile "release Compose file" $ComposeFile
 
 $registrations = Validate-OperatorRegistry (Read-OperatorRegistry $RegistryPath)
 $safeProjectName = "$ProjectName-$([guid]::NewGuid().ToString('N').Substring(0, 12))"
-Invoke-ComposeConfigCheck -ComposePath $ComposeFile -Project $safeProjectName
-
-Write-Host ("CHECK operator OCI registry: {0} backend(s)" -f @($registrations).Count)
-Write-Host "CHECK rootless policy, pinned runner/rootfs, and seccomp digest: PASS"
-Write-Host "CHECK isolated Compose project '$safeProjectName': PASS"
-
-if ($CheckOnly) {
-    Write-Host "general-compute OCI E2E preflight passed (execution not requested)"
-    exit 0
-}
-
-if ($env:HIVEMIND_ENABLE_REAL_OCI_E2E -ne "1") {
-    Fail-Contract "-Run requires HIVEMIND_ENABLE_REAL_OCI_E2E=1; no implicit deployment execution is allowed"
-}
-
-$fixturePath = $env:HIVEMIND_GENERAL_COMPUTE_OCI_E2E_TASK_FIXTURE
-if ([string]::IsNullOrWhiteSpace($fixturePath)) {
-    Fail-Contract "-Run requires HIVEMIND_GENERAL_COMPUTE_OCI_E2E_TASK_FIXTURE with a Postgres-backed task fixture"
-}
-Require-RegularFile "multi-process OCI task fixture" $fixturePath
-
-$composeStarted = $false
 try {
-    # The real task submission/completion phase is intentionally gated on an
-    # explicit fixture. Until that fixture exists, refuse to start containers;
-    # this keeps a preflight or fake runner from being reported as E2E.
-    Fail-Contract "multi-process task fixture execution is not yet wired; provide the reviewed fixture implementation before running containers"
-} finally {
-    if ($composeStarted) {
-        & docker compose --project-name $safeProjectName --project-directory $repoRoot --file $ComposeFile down --volumes --remove-orphans
+    Use-IsolatedComposeVolumes -Project $safeProjectName
+    Invoke-ComposeConfigCheck -ComposePath $ComposeFile -Project $safeProjectName
+
+    Write-Host ("CHECK operator OCI registry: {0} backend(s)" -f @($registrations).Count)
+    Write-Host "CHECK rootless policy, pinned runner/rootfs, and seccomp digest: PASS"
+    Write-Host "CHECK isolated Compose project '$safeProjectName': PASS"
+
+    if ($CheckOnly) {
+        Write-Host "general-compute OCI E2E preflight passed (execution not requested)"
+        return
     }
+
+    if ($env:HIVEMIND_ENABLE_REAL_OCI_E2E -ne "1") {
+        Fail-Contract "-Run requires HIVEMIND_ENABLE_REAL_OCI_E2E=1; no implicit deployment execution is allowed"
+    }
+
+    $fixturePath = $env:HIVEMIND_GENERAL_COMPUTE_OCI_E2E_TASK_FIXTURE
+    if ([string]::IsNullOrWhiteSpace($fixturePath)) {
+        Fail-Contract "-Run requires HIVEMIND_GENERAL_COMPUTE_OCI_E2E_TASK_FIXTURE with a Postgres-backed task fixture"
+    }
+    Require-RegularFile "multi-process OCI task fixture" $fixturePath
+
+    $composeStarted = $false
+    try {
+        # The real task submission/completion phase is intentionally gated on an
+        # explicit fixture. Until that fixture exists, refuse to start containers;
+        # this keeps a preflight or fake runner from being reported as E2E.
+        Fail-Contract "multi-process task fixture execution is not yet wired; provide the reviewed fixture implementation before running containers"
+    } finally {
+        if ($composeStarted) {
+            & docker compose --project-name $safeProjectName --project-directory $repoRoot --file $ComposeFile down --volumes --remove-orphans
+        }
+    }
+} finally {
+    Restore-IsolatedComposeVolumes
 }

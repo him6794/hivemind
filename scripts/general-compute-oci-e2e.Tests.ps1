@@ -8,6 +8,11 @@ if (!(Test-Path -LiteralPath $harnessPath -PathType Leaf)) {
 }
 
 $harnessText = Get-Content -LiteralPath $harnessPath -Raw
+$composePath = Join-Path $repoRoot "docker-compose.yml"
+if (!(Test-Path -LiteralPath $composePath -PathType Leaf)) {
+    throw "OCI E2E harness requires the release Compose file at $composePath."
+}
+$composeText = Get-Content -LiteralPath $composePath -Raw
 
 foreach ($expected in @(
     "param(",
@@ -28,7 +33,12 @@ foreach ($expected in @(
     "SCMP_ACT_ALLOW",
     "syscalls",
     "Get-FileHash -LiteralPath",
-    "-isnot [string]"
+    "-isnot [string]",
+    "Use-IsolatedComposeVolumes",
+    "Restore-IsolatedComposeVolumes",
+    "WORKER_GENERAL_COMPUTE_CONFIG_VOLUME_NAME",
+    "WORKER_GENERAL_COMPUTE_STATE_VOLUME_NAME",
+    "resolved isolated Compose volume names"
 )) {
     if (!$harnessText.Contains($expected)) {
         throw "OCI E2E harness must contain the fail-closed/operator-isolation contract '$expected'."
@@ -52,6 +62,18 @@ if ($harnessText -match '(?i)fallback.*direct|direct.*fallback') {
 }
 if ($harnessText -match '(?i)MONTY_EXECUTABLE|/app/monty') {
     throw "OCI E2E harness must not reintroduce the removed Monty contract."
+}
+if ($composeText -match '(?m)^\s*container_name\s*:') {
+    throw "Release Compose must not fix container_name values; project names must isolate OCI E2E containers."
+}
+if ($composeText -match '(?m)^\s*name\s*:\s*hivemind-network\s*$') {
+    throw "Release Compose must not fix the network name; project names must isolate OCI E2E networks."
+}
+if ($composeText -match '(?m)^\s*ipv4_address\s*:') {
+    throw "Release Compose must not fix service IPv4 addresses; project networks must allocate isolated addresses."
+}
+if ($composeText -match '(?m)^\s*-\s*subnet\s*:') {
+    throw "Release Compose must not fix a subnet; project networks must allocate isolated address ranges."
 }
 
 Write-Host "general-compute OCI E2E harness contract passed"
