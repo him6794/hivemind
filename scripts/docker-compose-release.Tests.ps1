@@ -141,7 +141,9 @@ foreach ($expected in @(
     "!executor-rs/Cargo.toml",
     "!executor-rs/Cargo.lock",
     "!executor-rs/crates/managed-function-runtime/",
-    "!executor-rs/crates/managed-function-runtime/**"
+    "!executor-rs/crates/managed-function-runtime/**",
+    "!executor-rs/crates/general-compute-runtime/",
+    "!executor-rs/crates/general-compute-runtime/**"
 )) {
     if ($dockerIgnoreLines -notcontains $expected) {
         throw ".dockerignore must contain the exact release-context include '$expected'."
@@ -178,12 +180,30 @@ if ($dockerfileText.Contains("COPY executor-rs ./executor-rs")) {
     throw "hivemind-rs/Dockerfile must not copy the entire executor-rs workspace into the builder image."
 }
 
+# A production_sandboxed_oci registration is only deployable when the Worker
+# image carries an operator-pinned OCI runner. The launcher never falls back to
+# direct process execution, so an image without runc cannot execute production
+# tasks and must be rejected by the release packaging contract.
+if ($dockerfileText -notmatch '(?m)apt-get install -y --no-install-recommends[^\r\n]*\brunc\b[^\r\n]*\buidmap\b') {
+    throw "hivemind-rs/Dockerfile runtime stage must install runc and uidmap for rootless production OCI execution."
+}
+if (!$dockerfileText.Contains("RUN mkdir -p /app/api/torrents /app/bt_torrents /app/sandbox /app/general-compute")) {
+    throw "hivemind-rs/Dockerfile must create the operator-owned general-compute state root before dropping privileges."
+}
+if (!$dockerfileText.Contains("hivemind:100000:65536")) {
+    throw "hivemind-rs/Dockerfile must provision an explicit subordinate UID/GID range for the non-root OCI runner."
+}
+
 if ($dockerfileText.Contains("COPY --from=builder /app/hivemind-rs/target/release/hivemind-bin")) {
     throw "hivemind-rs/Dockerfile must not copy the release binary directly from the cache-mounted target directory."
 }
 
 if (!$dockerfileText.Contains("managed-function-runtime")) {
     throw "hivemind-rs/Dockerfile must stage the managed-function-runtime dependency explicitly."
+}
+
+if (!$dockerfileText.Contains("COPY executor-rs/crates/general-compute-runtime ./executor-rs/crates/general-compute-runtime")) {
+    throw "hivemind-rs/Dockerfile must stage the general-compute-runtime dependency explicitly for the Worker release build."
 }
 
 if (!$dockerfileText.Contains("COPY executor-rs/Cargo.toml executor-rs/Cargo.lock ./executor-rs/")) {

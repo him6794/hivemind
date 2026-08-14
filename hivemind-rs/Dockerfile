@@ -10,6 +10,7 @@ COPY proto ./proto
 COPY hivemind-rs ./hivemind-rs
 COPY executor-rs/Cargo.toml executor-rs/Cargo.lock ./executor-rs/
 COPY executor-rs/crates/managed-function-runtime ./executor-rs/crates/managed-function-runtime
+COPY executor-rs/crates/general-compute-runtime ./executor-rs/crates/general-compute-runtime
 
 WORKDIR /app/hivemind-rs
 ARG HIVEMIND_BIN=hivemind-bin
@@ -44,7 +45,7 @@ FROM debian:trixie-slim AS runtime
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends ca-certificates curl runc uidmap \
     && rm -rf /var/lib/apt/lists/*
 
 ARG HIVEMIND_BIN=hivemind-bin
@@ -61,9 +62,11 @@ COPY --from=worker-ui /ui/dist /app/frontend/worker-ui/dist
 COPY packaging/managed-prover/ /app/prover/
 RUN chmod -R a+rX /app/prover
 
-RUN mkdir -p /app/api/torrents /app/bt_torrents /app/sandbox
+RUN mkdir -p /app/api/torrents /app/bt_torrents /app/sandbox /app/general-compute
 RUN groupadd --system --gid 10001 hivemind \
     && useradd --system --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin hivemind \
+    && printf '%s\n' 'hivemind:100000:65536' >> /etc/subuid \
+    && printf '%s\n' 'hivemind:100000:65536' >> /etc/subgid \
     && chown -R 10001:10001 /app
 
 USER 10001:10001
