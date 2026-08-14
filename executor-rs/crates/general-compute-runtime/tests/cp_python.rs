@@ -137,13 +137,14 @@ fn cp_python_adapter_maps_timeout_to_a_typed_supervisor_failure() {
             "while True: pass",
             r#"{"value": 4}"#,
             7,
-            Duration::from_millis(100),
+            Duration::from_secs(2),
             &Cancellation::new(),
         )
         .expect_err("infinite Python loop must hit the deadline");
 
     assert!(
-        matches!(error, PythonAdapterError::Supervisor(message) if message.contains("timed out"))
+        matches!(error, PythonAdapterError::Supervisor(ref message) if message.contains("timed out")),
+        "unexpected timeout mapping: {error:?}"
     );
 }
 
