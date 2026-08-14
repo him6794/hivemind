@@ -626,7 +626,13 @@ impl TaskRepository {
         .fetch_one(&mut *tx)
         .await?;
 
-        if let Some(result_json) = nodepool_general_compute_cancellation_result(&cancelled)? {
+        if let Some(result_json) = nodepool_general_compute_terminal_result(
+            &cancelled,
+            ResultStatus::Cancelled,
+            "task_cancelled",
+            "task cancelled by owner",
+            b"general-compute-cancellation-input-v1",
+        )? {
             sqlx::query(
                 "INSERT INTO general_compute_results (task_id, worker_id, result_json)
                  VALUES ($1, $2, $3)
@@ -643,11 +649,36 @@ impl TaskRepository {
     }
 
     pub async fn mark_stale_running(&self) -> Result<u64> {
-        let result = sqlx::query(
+        let mut tx = self.pool.begin().await?;
+        let timed_out = sqlx::query_as::<_, Task>(
             "UPDATE tasks SET status = 'TIMED_OUT', status_message = 'Worker heartbeat lost', completed_at = NOW()
-             WHERE status = 'RUNNING' AND last_update < NOW() - INTERVAL '120 seconds'",
-        ).execute(&self.pool).await?;
-        Ok(result.rows_affected())
+             WHERE status = 'RUNNING' AND last_update < NOW() - INTERVAL '120 seconds'
+             RETURNING *",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        for task in &timed_out {
+            if let Some(result_json) = nodepool_general_compute_terminal_result(
+                task,
+                ResultStatus::TimedOut,
+                "worker_heartbeat_lost",
+                "worker heartbeat lost",
+                b"general-compute-timeout-input-v1",
+            )? {
+                sqlx::query(
+                    "INSERT INTO general_compute_results (task_id, worker_id, result_json)
+                     VALUES ($1, $2, $3)
+                     ON CONFLICT (task_id) DO NOTHING",
+                )
+                .bind(&task.task_id)
+                .bind(task.worker_id.as_deref().unwrap_or("nodepool"))
+                .bind(result_json)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+        tx.commit().await?;
+        Ok(u64::try_from(timed_out.len())?)
     }
 
     pub async fn find_stale_dispatched(&self, timeout_secs: u64) -> Result<Vec<Task>> {
@@ -820,7 +851,13 @@ fn managed_receipt_amount_cpt(task: &Task) -> i64 {
     MANAGED_BASE_INVOCATION_CPT + task.managed_executed_ops.max(0)
 }
 
-fn nodepool_general_compute_cancellation_result(task: &Task) -> Result<Option<Vec<u8>>> {
+fn nodepool_general_compute_terminal_result(
+    task: &Task,
+    status: ResultStatus,
+    error_code: &str,
+    stderr: &str,
+    input_domain: &[u8],
+) -> Result<Option<Vec<u8>>> {
     if task.runtime.as_deref() != Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION) {
         return Ok(None);
     }
@@ -828,7 +865,7 @@ fn nodepool_general_compute_cancellation_result(task: &Task) -> Result<Option<Ve
         .general_compute_manifest_json
         .as_deref()
         .ok_or_else(|| {
-            anyhow::anyhow!("general-compute cancellation is missing its request manifest")
+            anyhow::anyhow!("general-compute task is missing its request manifest")
         })?;
     let request: GeneralComputeRequest = serde_json::from_slice(manifest)
         .map_err(|error| anyhow::anyhow!("general-compute request is malformed: {error}"))?;
@@ -859,11 +896,12 @@ fn nodepool_general_compute_cancellation_result(task: &Task) -> Result<Option<Ve
             .collect::<Vec<_>>();
         general_compute_runtime::canonical_input_digest(source, &inputs)
     } else {
-        // A cancellation can happen before a Worker materializes CAS bytes.
+        // A Nodepool terminal transition can happen before a Worker
+        // materializes CAS bytes.
         // Bind the envelope to the immutable manifest coordinates instead of
         // claiming that unobserved execution inputs were read.
         let mut coordinates = Vec::new();
-        coordinates.extend_from_slice(b"general-compute-cancellation-input-v1");
+        coordinates.extend_from_slice(input_domain);
         for artifact in
             std::iter::once(&request.source_artifact).chain(request.input_artifacts.iter())
         {
@@ -881,11 +919,11 @@ fn nodepool_general_compute_cancellation_result(task: &Task) -> Result<Option<Ve
         attempt_id: request.attempt_id.clone(),
         idempotency_key: request.idempotency_key.clone(),
         request_digest: request.request_digest.clone(),
-        status: ResultStatus::Cancelled,
+        status,
         exit_code: None,
-        error_code: Some("task_cancelled".into()),
+        error_code: Some(error_code.into()),
         stdout: String::new(),
-        stderr: "task cancelled by owner".into(),
+        stderr: stderr.into(),
         output_artifacts: vec![],
         usage: general_compute_runtime::UsageClaim::default(),
         runtime_version: request.runtime_version.clone(),
@@ -2887,6 +2925,107 @@ mod tests {
         let result: GeneralComputeResult = serde_json::from_slice(&persisted).unwrap();
         assert_eq!(result.status, ResultStatus::Cancelled);
         assert_eq!(result.error_code.as_deref(), Some("task_cancelled"));
+        assert_eq!(result.execution_id, request.execution_id);
+        assert_eq!(result.attempt_id, request.attempt_id);
+        assert_eq!(result.request_digest, request.request_digest);
+        assert_eq!(
+            result.input_sha256,
+            general_compute_runtime::canonical_input_digest(b"source", &[])
+        );
+        assert_eq!(result.output_manifest_root, canonical_artifact_root(&[]));
+
+        let settlement_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM general_compute_settlements WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(settlement_count, 0);
+
+        cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn general_compute_stale_running_persists_nodepool_typed_timeout_without_settlement() {
+        let (p, fixture) = match pool("task_repository_general_compute_stale_timeout").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("timeout-owner-{unique}");
+        let worker_id = format!("timeout-worker-{unique}");
+        let task_id = format!("timeout-task-{unique}");
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        )
+        .bind(&username)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        insert_worker(&repo.pool, &worker_id, &format!("provider-{unique}")).await;
+
+        let mut request = GeneralComputeRequest {
+            execution_id: format!("execution-{unique}"),
+            attempt_id: format!("attempt-{unique}"),
+            idempotency_key: format!("idempotency-{unique}"),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "timeout-backend".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest::inline_json(
+                "source",
+                ArtifactRole::Source,
+                b"source",
+            ),
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+        let manifest = serde_json::to_vec(&request).unwrap();
+
+        let mut task = make_task(&task_id, &username);
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.general_compute_manifest_json = Some(manifest);
+        repo.create(&task).await.unwrap();
+        repo.assign_to_worker(&task_id, &worker_id, "10.0.0.80")
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE tasks
+             SET status = 'RUNNING', last_update = NOW() - INTERVAL '121 seconds'
+             WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+
+        assert_eq!(repo.mark_stale_running().await.unwrap(), 1);
+        let timed_out = repo.find_by_task_id(&task_id).await.unwrap().unwrap();
+        assert_eq!(timed_out.status, TaskStatus::TimedOut);
+        assert_eq!(
+            timed_out.status_message.as_deref(),
+            Some("Worker heartbeat lost")
+        );
+
+        let persisted: Vec<u8> = sqlx::query_scalar(
+            "SELECT result_json FROM general_compute_results WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        let result: GeneralComputeResult = serde_json::from_slice(&persisted).unwrap();
+        assert_eq!(result.status, ResultStatus::TimedOut);
+        assert_eq!(result.error_code.as_deref(), Some("worker_heartbeat_lost"));
         assert_eq!(result.execution_id, request.execution_id);
         assert_eq!(result.attempt_id, request.attempt_id);
         assert_eq!(result.request_digest, request.request_digest);
