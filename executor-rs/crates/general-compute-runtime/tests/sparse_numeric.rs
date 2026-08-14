@@ -230,3 +230,45 @@ fn sparse_f64_reference_rejects_nonfinite_materialized_values() {
         Err(SparseNumericError::NonFiniteValue)
     );
 }
+
+#[test]
+fn sparse_matvec_reports_and_enforces_a_residual_tolerance() {
+    let matrix = matrix_from_manifest(&csr_manifest()).expect("valid CSR");
+    let vector = [4.0, 3.0, 5.0];
+    let rhs = [4.0, -10.0];
+
+    let residual = matrix
+        .residual_inf_norm(&vector, &rhs)
+        .expect("residual should be computable");
+    assert_eq!(residual, 0.5);
+    assert!(matrix
+        .matvec_with_residual_tolerance(&vector, &rhs, 0.5)
+        .is_ok());
+    assert_eq!(
+        matrix.matvec_with_residual_tolerance(&vector, &rhs, 0.25),
+        Err(SparseNumericError::ResidualExceeded)
+    );
+}
+
+#[test]
+fn sparse_residual_gate_rejects_invalid_tolerance_and_rhs() {
+    let matrix = matrix_from_manifest(&csr_manifest()).expect("valid CSR");
+    let vector = [4.0, 3.0, 5.0];
+    let rhs = [4.5, -10.0];
+
+    assert_eq!(
+        matrix.matvec_with_residual_tolerance(&vector, &rhs, -1.0),
+        Err(SparseNumericError::InvalidResidualTolerance)
+    );
+    assert_eq!(
+        matrix.matvec_with_residual_tolerance(&vector, &rhs, f64::NAN),
+        Err(SparseNumericError::InvalidResidualTolerance)
+    );
+    assert_eq!(
+        matrix.residual_inf_norm(&vector, &[4.5]),
+        Err(SparseNumericError::ResidualLengthMismatch {
+            expected: 2,
+            actual: 1,
+        })
+    );
+}
