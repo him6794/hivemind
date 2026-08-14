@@ -36,7 +36,9 @@ foreach ($expectedVolumeName in @(
     '${MASTER_TASK_REFERENCES_VOLUME_NAME:-hivemind-master-task-references}',
     '${MASTER_TORRENTS_VOLUME_NAME:-hivemind-master-torrents}',
     '${WORKER_TASK_DOWNLOADS_VOLUME_NAME:-hivemind-worker-task-downloads}',
-    '${WORKER_TORRENTS_VOLUME_NAME:-hivemind-worker-torrents}'
+    '${WORKER_TORRENTS_VOLUME_NAME:-hivemind-worker-torrents}',
+    '${WORKER_GENERAL_COMPUTE_CONFIG_VOLUME_NAME:-hivemind-worker-general-compute-config}',
+    '${WORKER_GENERAL_COMPUTE_STATE_VOLUME_NAME:-hivemind-worker-general-compute-state}'
 )) {
     if (!$composeText.Contains($expectedVolumeName)) {
         throw "docker-compose.yml must let release smoke isolate persistent state via '$expectedVolumeName'."
@@ -49,6 +51,38 @@ if (!$composeText.Contains('WORKER_NODEPOOL_TOKEN: ${WORKER_NODEPOOL_TOKEN:-}'))
 
 if (!$composeText.Contains('WORKER_EXECUTION_PUBLIC_KEY_PEM: ${WORKER_EXECUTION_PUBLIC_KEY_PEM:?')) {
     throw "docker-compose.yml must require and propagate WORKER_EXECUTION_PUBLIC_KEY_PEM to the worker."
+}
+
+# Production general-compute configuration is an operator-owned boundary.  It
+# must be addressed by a fixed in-container path backed by an explicit
+# read-only volume, never by an inferred host path or a caller-provided path.
+foreach ($expectedProductionSetting in @(
+    'HIVEMIND_GENERAL_COMPUTE_PRODUCTION_BACKENDS: /etc/hivemind/general-compute/backends.json',
+    'HIVEMIND_GENERAL_COMPUTE_CAS_ROOT: /var/lib/hivemind/general-compute/cas'
+)) {
+    if (!$composeText.Contains($expectedProductionSetting)) {
+        throw "docker-compose.yml must expose the operator-owned production boundary via '$expectedProductionSetting'."
+    }
+}
+foreach ($unexpectedProductionPath in @(
+    'HIVEMIND_GENERAL_COMPUTE_PRODUCTION_BACKENDS: ${',
+    'HIVEMIND_GENERAL_COMPUTE_PRODUCTION_BACKENDS: ./',
+    'HIVEMIND_GENERAL_COMPUTE_PRODUCTION_BACKENDS: ../'
+)) {
+    if ($composeText.Contains($unexpectedProductionPath)) {
+        throw "docker-compose.yml must not infer a host path for production backend configuration ('$unexpectedProductionPath')."
+    }
+}
+foreach ($expectedProductionVolume in @(
+    'source: worker-general-compute-config',
+    'target: /etc/hivemind/general-compute',
+    'source: worker-general-compute-state',
+    'target: /var/lib/hivemind/general-compute',
+    'read_only: true'
+)) {
+    if (!$composeText.Contains($expectedProductionVolume)) {
+        throw "docker-compose.yml must declare the operator-owned general-compute volume contract '$expectedProductionVolume'."
+    }
 }
 
 if ($composeText.Contains("MONTY_EXECUTABLE") -or $composeText.Contains("/app/monty")) {
@@ -241,7 +275,9 @@ foreach ($expectedSetting in @(
     "WORKER_CONTROL_HOST_PORT=18080",
     "MASTER_UI_HOST_PORT=3000",
     "WORKER_UI_HOST_PORT=3001",
-    "SITE_HOST_PORT=8080"
+    "SITE_HOST_PORT=8080",
+    "WORKER_GENERAL_COMPUTE_CONFIG_VOLUME_NAME=hivemind-worker-general-compute-config",
+    "WORKER_GENERAL_COMPUTE_STATE_VOLUME_NAME=hivemind-worker-general-compute-state"
 )) {
     if ($envExampleLines -notcontains $expectedSetting) {
         throw ".env.example must document the configurable infrastructure mapping '${expectedSetting}'."
@@ -361,6 +397,37 @@ try {
     }
     if ($resolvedCompose.services.worker.environment.MANAGED_PROVER_TIMEOUT_SECS -ne "900") {
         throw "Resolved worker configuration must allow a full managed proof to complete via MANAGED_PROVER_TIMEOUT_SECS."
+    }
+    if ($resolvedCompose.services.worker.environment.HIVEMIND_GENERAL_COMPUTE_PRODUCTION_BACKENDS -ne "/etc/hivemind/general-compute/backends.json") {
+        throw "Resolved worker configuration must use the fixed in-container production backend registry path."
+    }
+    if ($resolvedCompose.services.worker.environment.HIVEMIND_GENERAL_COMPUTE_CAS_ROOT -ne "/var/lib/hivemind/general-compute/cas") {
+        throw "Resolved worker configuration must keep general-compute CAS state under its dedicated mutable volume."
+    }
+
+    $generalComputeConfigMounts = @($resolvedCompose.services.worker.volumes | Where-Object {
+        $_.target -eq "/etc/hivemind/general-compute"
+    })
+    if ($generalComputeConfigMounts.Count -ne 1) {
+        throw "Worker must have exactly one operator-owned general-compute config mount."
+    }
+    $generalComputeConfigMount = $generalComputeConfigMounts[0]
+    if ($generalComputeConfigMount.type -ne "volume" -or
+        $generalComputeConfigMount.source -ne "worker-general-compute-config" -or
+        $generalComputeConfigMount.read_only -ne $true) {
+        throw "Production backend config and pinned runner must come from the read-only named volume."
+    }
+    $generalComputeStateMounts = @($resolvedCompose.services.worker.volumes | Where-Object {
+        $_.target -eq "/var/lib/hivemind/general-compute"
+    })
+    if ($generalComputeStateMounts.Count -ne 1) {
+        throw "Worker must have exactly one dedicated general-compute state mount."
+    }
+    $generalComputeStateMount = $generalComputeStateMounts[0]
+    if ($generalComputeStateMount.type -ne "volume" -or
+        $generalComputeStateMount.source -ne "worker-general-compute-state" -or
+        $generalComputeStateMount.read_only -eq $true) {
+        throw "General-compute task bundles and CAS journal must use the dedicated mutable named volume."
     }
 
     # Nodepool authorizes every admin RPC, so an unpropagated HIVEMIND_ADMIN_USERS

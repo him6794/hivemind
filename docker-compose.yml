@@ -145,6 +145,13 @@ services:
       # resulting proof is configured on the nodepool.
       MANAGED_PROVER_EXECUTABLE: ${MANAGED_PROVER_EXECUTABLE:-/app/prover/hivemind-managed-proof-prover}
       MANAGED_PROVER_TIMEOUT_SECS: ${MANAGED_PROVER_TIMEOUT_SECS:-900}
+      # Production general-compute configuration is deliberately addressed by
+      # fixed paths inside the worker. The registry file and pinned runner are
+      # operator-owned volume contents; the registry must name absolute
+      # operator-provisioned bundle/rootfs/artifact roots. A missing or
+      # malformed registry leaves production routing disabled (fail closed).
+      HIVEMIND_GENERAL_COMPUTE_PRODUCTION_BACKENDS: /etc/hivemind/general-compute/backends.json
+      HIVEMIND_GENERAL_COMPUTE_CAS_ROOT: /var/lib/hivemind/general-compute/cas
       EXECUTOR_SANDBOX_DIR: /app/sandbox
       EXECUTOR_NETWORK_EGRESS_ENABLED: ${EXECUTOR_NETWORK_EGRESS_ENABLED:-true}
       EXECUTOR_NETWORK_EGRESS_MODE: ${EXECUTOR_NETWORK_EGRESS_MODE:-allowlist}
@@ -160,6 +167,13 @@ services:
     volumes:
       - worker-task-downloads:/app/api/torrents
       - worker-torrents:/app/bt_torrents
+      - type: volume
+        source: worker-general-compute-config
+        target: /etc/hivemind/general-compute
+        read_only: true
+      - type: volume
+        source: worker-general-compute-state
+        target: /var/lib/hivemind/general-compute
 
   # ============================================
   # Frontend (optional)
@@ -246,3 +260,13 @@ volumes:
     name: ${WORKER_TASK_DOWNLOADS_VOLUME_NAME:-hivemind-worker-task-downloads}
   worker-torrents:
     name: ${WORKER_TORRENTS_VOLUME_NAME:-hivemind-worker-torrents}
+  # Operators provision backends.json and pinned runner binaries in the config
+  # volume. Bundle/rootfs/artifact roots remain explicit absolute paths in that
+  # registry and may point at the dedicated state volume or another explicit
+  # operator mount; the Worker can only read this config volume.
+  worker-general-compute-config:
+    name: ${WORKER_GENERAL_COMPUTE_CONFIG_VOLUME_NAME:-hivemind-worker-general-compute-config}
+  # Task-specific bundles, materialized artifacts, and the durable CAS journal
+  # are mutable Worker state and stay separate from operator configuration.
+  worker-general-compute-state:
+    name: ${WORKER_GENERAL_COMPUTE_STATE_VOLUME_NAME:-hivemind-worker-general-compute-state}
