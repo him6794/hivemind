@@ -6,7 +6,8 @@
 //! validated inline bytes or chunks explicitly submitted to an operator-rooted
 //! local [`CasChunkStore`].
 
-use crate::{sha256_digest, ArtifactManifest};
+use crate::{ArtifactManifest, sha256_digest};
+use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -23,6 +24,10 @@ pub enum ArtifactMaterializationError {
     ChunkChecksumMismatch,
     ChunkMissing,
     InvalidChunkDigest,
+    TransferIdentityInvalid,
+    TransferStateMismatch,
+    TransferStateCorrupt,
+    TransferChunkMismatch,
     Io(String),
 }
 
@@ -59,11 +64,36 @@ pub struct CasChunkStore {
     root: PathBuf,
 }
 
+/// The immutable part of a transfer is persisted below the operator CAS
+/// root.  Attempt ids are deliberately absent: retries of one execution must
+/// resume the same artifact, while a changed manifest cannot redefine it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TransferManifest {
+    execution_id: String,
+    artifact_id: String,
+    size_bytes: u64,
+    sha256: String,
+    chunks: Vec<crate::ArtifactChunk>,
+}
+
 impl CasChunkStore {
     pub fn new(root: impl AsRef<Path>) -> Result<Self, ArtifactMaterializationError> {
-        Ok(Self {
-            root: canonical_root(root.as_ref())?,
-        })
+        let root = canonical_root(root.as_ref())?;
+        let transfer_root = root.join(".transfers");
+        if let Ok(metadata) = fs::symlink_metadata(&transfer_root) {
+            if metadata.file_type().is_symlink() {
+                return Err(ArtifactMaterializationError::SymlinkTarget);
+            }
+            if !metadata.is_dir() {
+                return Err(ArtifactMaterializationError::Io(
+                    "CAS transfer state root is not a directory".into(),
+                ));
+            }
+        } else {
+            fs::create_dir_all(&transfer_root).map_err(io_error)?;
+        }
+        Ok(Self { root })
     }
 
     pub fn root(&self) -> &Path {
@@ -117,6 +147,188 @@ impl CasChunkStore {
             return Err(io_error(error));
         }
         Ok(())
+    }
+
+    /// Persist the immutable identity for one execution/artifact transfer.
+    /// This is safe to call again after a Worker restart or retry attempt.
+    pub fn prepare_transfer(
+        &self,
+        execution_id: &str,
+        artifact: &ArtifactManifest,
+    ) -> Result<(), ArtifactMaterializationError> {
+        validate_transfer_execution_id(execution_id)?;
+        artifact
+            .validate()
+            .map_err(ArtifactMaterializationError::ManifestInvalid)?;
+        if artifact.chunks.is_empty() {
+            return Err(ArtifactMaterializationError::ContentUnavailable);
+        }
+        let expected = TransferManifest {
+            execution_id: execution_id.to_owned(),
+            artifact_id: artifact.artifact_id.clone(),
+            size_bytes: artifact.size_bytes,
+            sha256: artifact.sha256.clone(),
+            chunks: artifact.chunks.clone(),
+        };
+        let path = self.transfer_manifest_path(execution_id, artifact)?;
+        match fs::read(&path) {
+            Ok(bytes) => {
+                let existing: TransferManifest = serde_json::from_slice(&bytes)
+                    .map_err(|_| ArtifactMaterializationError::TransferStateCorrupt)?;
+                if existing == expected {
+                    Ok(())
+                } else {
+                    Err(ArtifactMaterializationError::TransferStateMismatch)
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let bytes = serde_json::to_vec(&expected)
+                    .map_err(|error| ArtifactMaterializationError::Io(error.to_string()))?;
+                let file = OpenOptions::new().write(true).create_new(true).open(&path);
+                match file {
+                    Ok(mut file) => write_and_sync(&mut file, &bytes).map_err(io_error),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        let existing = fs::read(&path).map_err(io_error)?;
+                        let existing: TransferManifest = serde_json::from_slice(&existing)
+                            .map_err(|_| ArtifactMaterializationError::TransferStateCorrupt)?;
+                        if existing == expected {
+                            Ok(())
+                        } else {
+                            Err(ArtifactMaterializationError::TransferStateMismatch)
+                        }
+                    }
+                    Err(error) => Err(io_error(error)),
+                }
+            }
+            Err(error) => Err(io_error(error)),
+        }
+    }
+
+    /// Store a verified chunk and durably record its availability for the
+    /// execution/artifact transfer. The marker is create-new and therefore
+    /// idempotent; a conflicting marker fails closed.
+    pub fn put_transfer_chunk(
+        &self,
+        execution_id: &str,
+        artifact: &ArtifactManifest,
+        chunk: &crate::ArtifactChunk,
+        bytes: &[u8],
+    ) -> Result<(), ArtifactMaterializationError> {
+        self.prepare_transfer(execution_id, artifact)?;
+        let manifest_chunk = artifact
+            .chunks
+            .iter()
+            .find(|candidate| *candidate == chunk)
+            .ok_or(ArtifactMaterializationError::TransferChunkMismatch)?;
+        if bytes.len() as u64 != manifest_chunk.size_bytes
+            || sha256_digest(bytes) != manifest_chunk.sha256
+        {
+            return Err(ArtifactMaterializationError::ChunkChecksumMismatch);
+        }
+        self.put_chunk(&manifest_chunk.sha256, bytes)?;
+
+        let marker = self.transfer_marker_path(execution_id, artifact, manifest_chunk)?;
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&marker)
+        {
+            Ok(mut file) => {
+                write_and_sync(&mut file, manifest_chunk.sha256.as_bytes()).map_err(io_error)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let existing = fs::read(&marker).map_err(io_error)?;
+                if existing == manifest_chunk.sha256.as_bytes() {
+                    Ok(())
+                } else {
+                    Err(ArtifactMaterializationError::TransferStateCorrupt)
+                }
+            }
+            Err(error) => Err(io_error(error)),
+        }
+    }
+
+    /// Return missing chunks after reopening durable transfer state. CAS bytes
+    /// remain the source of truth; markers are reconciled from verified CAS
+    /// objects so a crash between the object write and marker write is safe.
+    pub fn missing_transfer_chunks(
+        &self,
+        execution_id: &str,
+        artifact: &ArtifactManifest,
+    ) -> Result<Vec<crate::ArtifactChunk>, ArtifactMaterializationError> {
+        self.prepare_transfer(execution_id, artifact)?;
+        let missing = self.missing_chunks(artifact)?;
+        let missing_digests: std::collections::HashSet<_> =
+            missing.iter().map(|chunk| chunk.sha256.as_str()).collect();
+        for chunk in &artifact.chunks {
+            let marker = self.transfer_marker_path(execution_id, artifact, chunk)?;
+            match fs::read(&marker) {
+                Ok(existing) if existing == chunk.sha256.as_bytes() => {}
+                Ok(_) => return Err(ArtifactMaterializationError::TransferStateCorrupt),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if missing_digests.contains(chunk.sha256.as_str()) {
+                        continue;
+                    }
+                    let file = OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&marker);
+                    match file {
+                        Ok(mut file) => {
+                            write_and_sync(&mut file, chunk.sha256.as_bytes()).map_err(io_error)?;
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                            let existing = fs::read(&marker).map_err(io_error)?;
+                            if existing != chunk.sha256.as_bytes() {
+                                return Err(ArtifactMaterializationError::TransferStateCorrupt);
+                            }
+                        }
+                        Err(error) => return Err(io_error(error)),
+                    }
+                }
+                Err(error) => return Err(io_error(error)),
+            }
+        }
+        Ok(missing)
+    }
+
+    fn transfer_manifest_path(
+        &self,
+        execution_id: &str,
+        artifact: &ArtifactManifest,
+    ) -> Result<PathBuf, ArtifactMaterializationError> {
+        let key = transfer_key(execution_id, &artifact.artifact_id);
+        Ok(self.transfer_root()?.join(format!("{key}.manifest.json")))
+    }
+
+    fn transfer_marker_path(
+        &self,
+        execution_id: &str,
+        artifact: &ArtifactManifest,
+        chunk: &crate::ArtifactChunk,
+    ) -> Result<PathBuf, ArtifactMaterializationError> {
+        let key = transfer_key(execution_id, &artifact.artifact_id);
+        let digest = chunk
+            .sha256
+            .strip_prefix("sha256:")
+            .ok_or(ArtifactMaterializationError::InvalidChunkDigest)?;
+        Ok(self
+            .transfer_root()?
+            .join(format!("{key}.{digest}.complete")))
+    }
+
+    fn transfer_root(&self) -> Result<PathBuf, ArtifactMaterializationError> {
+        let path = self.root.join(".transfers");
+        let metadata = fs::symlink_metadata(&path).map_err(io_error)?;
+        if metadata.file_type().is_symlink() {
+            return Err(ArtifactMaterializationError::SymlinkTarget);
+        }
+        if !metadata.is_dir() {
+            return Err(ArtifactMaterializationError::Io(
+                "CAS transfer state root is not a directory".into(),
+            ));
+        }
+        Ok(path)
     }
 
     /// Return chunks absent from this store, rejecting any corrupted object.
@@ -360,4 +572,21 @@ fn write_and_sync(file: &mut File, bytes: &[u8]) -> std::io::Result<()> {
 
 fn io_error(error: std::io::Error) -> ArtifactMaterializationError {
     ArtifactMaterializationError::Io(error.to_string())
+}
+
+fn validate_transfer_execution_id(value: &str) -> Result<(), ArtifactMaterializationError> {
+    if value.trim().is_empty()
+        || value.len() > 256
+        || value.chars().any(|character| character == '\0')
+    {
+        return Err(ArtifactMaterializationError::TransferIdentityInvalid);
+    }
+    Ok(())
+}
+
+fn transfer_key(execution_id: &str, artifact_id: &str) -> String {
+    sha256_digest(format!("general-compute-transfer-v1\0{execution_id}\0{artifact_id}").as_bytes())
+        .strip_prefix("sha256:")
+        .unwrap_or_default()
+        .to_owned()
 }
