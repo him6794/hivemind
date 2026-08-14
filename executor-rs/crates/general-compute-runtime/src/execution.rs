@@ -12,7 +12,8 @@ use crate::sandbox::BackendExecutionMode;
 use crate::supervisor::Cancellation;
 use crate::{
     canonical_artifact_root, sha256_digest, ArtifactManifest, ArtifactRole, CapabilityMatrix,
-    GeneralComputeRequest, GeneralComputeResult, ResultStatus, UsageClaim, WorkerCapabilities,
+    GeneralComputeRequest, GeneralComputeResult, ResultStatus, TrustedWorkerCapabilityRegistration,
+    UsageClaim, WorkerCapabilities,
 };
 use std::fmt;
 use std::fs;
@@ -81,6 +82,7 @@ pub struct ReferenceBackendExecutor {
     capabilities: CapabilityMatrix,
     worker: WorkerCapabilities,
     python_registry: PythonBackendRegistry,
+    trusted_registration: TrustedWorkerCapabilityRegistration,
 }
 
 impl ReferenceBackendExecutor {
@@ -90,10 +92,31 @@ impl ReferenceBackendExecutor {
         worker: WorkerCapabilities,
         python_registry: PythonBackendRegistry,
     ) -> Self {
+        let trusted_registration = TrustedWorkerCapabilityRegistration {
+            worker: worker.clone(),
+            gpu_capabilities: Vec::new(),
+            backends: capabilities.backends.clone(),
+        };
         Self {
             capabilities,
             worker,
             python_registry,
+            trusted_registration,
+        }
+    }
+
+    #[must_use]
+    pub fn new_with_trusted_registration(
+        capabilities: CapabilityMatrix,
+        worker: WorkerCapabilities,
+        python_registry: PythonBackendRegistry,
+        trusted_registration: TrustedWorkerCapabilityRegistration,
+    ) -> Self {
+        Self {
+            capabilities,
+            worker,
+            python_registry,
+            trusted_registration,
         }
     }
 
@@ -149,6 +172,10 @@ impl ReferenceBackendExecutor {
             .map_err(|error| ExecutionError::Request(error.message))?;
         self.capabilities
             .validate_request(request, &self.worker)
+            .map_err(|error| ExecutionError::Capability(error.message))?;
+        let gpu_selection = self
+            .trusted_registration
+            .select_gpu_for_request(request)
             .map_err(|error| ExecutionError::Capability(error.message))?;
         if request.input_artifacts.len() > 1 {
             return Err(ExecutionError::MultipleInputArtifacts);
@@ -268,7 +295,7 @@ impl ReferenceBackendExecutor {
             },
             determinism: request.determinism.clone(),
             capability_summary: backend.capabilities.clone(),
-            gpu_selection: None,
+            gpu_selection,
             evidence: Default::default(),
         };
         result

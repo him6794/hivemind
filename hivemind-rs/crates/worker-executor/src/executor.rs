@@ -3,7 +3,9 @@ use general_compute_runtime::artifact::{ArtifactMaterializer, CasChunkStore};
 use general_compute_runtime::cp_python::{PythonBackendRegistration, PythonBackendRegistry};
 use general_compute_runtime::execution::{ExecutionError, ReferenceBackendExecutor};
 use general_compute_runtime::supervisor::Cancellation;
-use general_compute_runtime::{GeneralComputeRequest, GeneralComputeResult, ResultStatus};
+use general_compute_runtime::{
+    GeneralComputeRequest, GeneralComputeResult, ResultStatus, TrustedWorkerCapabilityRegistration,
+};
 use hivemind_config::HivemindConfig;
 use hivemind_models::Task;
 use managed_function_runtime::{render_output_bounded, ExecutionLimits, ManagedExecutor};
@@ -296,6 +298,91 @@ fn execute_general_compute_task(
         general_compute_result_json: Some(encoded),
     })
 }
+pub(crate) async fn run_task_with_cancel_and_reference_and_cas_and_trusted_registration(
+    task: &Task,
+    config: &HivemindConfig,
+    cancel_rx: watch::Receiver<bool>,
+    reference_executor: Option<Arc<ReferenceBackendExecutor>>,
+    cas_store: Option<Arc<CasChunkStore>>,
+    trusted_registration: Option<TrustedWorkerCapabilityRegistration>,
+) -> Result<super::TaskResult> {
+    let request = task
+        .general_compute_manifest_json
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("general-compute request manifest is required"))
+        .and_then(|manifest| {
+            serde_json::from_slice::<GeneralComputeRequest>(manifest).map_err(|error| {
+                anyhow::anyhow!("general-compute request manifest is malformed: {error}")
+            })
+        })?;
+    let selection = match trusted_gpu_selection(&request, trusted_registration.as_ref()) {
+        Ok(selection) => selection,
+        Err(_error) => {
+            return general_compute_task_result(
+                task,
+                failed_general_compute_result(&request, "gpu_unavailable"),
+            );
+        }
+    };
+    let mut result = run_task_with_cancel_and_reference_and_cas(
+        task,
+        config,
+        cancel_rx,
+        reference_executor,
+        cas_store,
+    )
+    .await?;
+    let Some(encoded) = result.general_compute_result_json.as_deref() else {
+        return Ok(result);
+    };
+    let mut typed = serde_json::from_slice::<GeneralComputeResult>(encoded)?;
+    typed.gpu_selection = selection;
+    result.general_compute_result_json = Some(serde_json::to_vec(&typed)?);
+    Ok(result)
+}
+
+fn trusted_gpu_selection(
+    request: &GeneralComputeRequest,
+    registration: Option<&TrustedWorkerCapabilityRegistration>,
+) -> Result<Option<general_compute_runtime::gpu::GpuSelection>, String> {
+    match registration {
+        Some(registration) => registration
+            .select_gpu_for_request(request)
+            .map_err(|error| error.message),
+        None if request.execution_policy.gpu_required => Err(
+            "typed GPU request requires an operator-approved trusted registration".into(),
+        ),
+        None => Ok(None),
+    }
+}
+
+fn general_compute_task_result(
+    task: &Task,
+    typed: GeneralComputeResult,
+) -> Result<super::TaskResult> {
+    let encoded = serde_json::to_vec(&typed)?;
+    let completed = typed.status == ResultStatus::Completed;
+    Ok(super::TaskResult {
+        task_id: task.task_id.clone(),
+        success: completed,
+        output: completed.then(|| typed.stdout.clone()),
+        error: (!completed).then(|| {
+            typed
+                .error_code
+                .clone()
+                .unwrap_or_else(|| "backend_unavailable".into())
+        }),
+        exit_code: typed.exit_code.unwrap_or(1),
+        cpu_time_ms: typed.usage.cpu_time_ms.min(i64::MAX as u64) as i64,
+        wall_time_ms: typed.usage.wall_time_ms.min(i64::MAX as u64) as i64,
+        peak_memory_mb: (typed.usage.peak_memory_bytes / (1024 * 1024)).min(i64::MAX as u64) as i64,
+        managed_executed_ops: 0,
+        managed_output_bytes: typed.usage.output_bytes.min(i64::MAX as u64) as i64,
+        managed_receipt_json: None,
+        managed_proof: None,
+        general_compute_result_json: Some(encoded),
+    })
+}
 
 fn absolute_runtime_root(config: &HivemindConfig, task_id: &str) -> Result<std::path::PathBuf> {
     if !crate::sandbox::is_safe_task_id(task_id) {
@@ -359,10 +446,11 @@ pub fn reference_executor_from_environment(
     let registrations =
         serde_json::from_str::<Vec<PythonBackendRegistration>>(&registrations).ok()?;
     let registry = PythonBackendRegistry::new(registrations).ok()?;
-    Some(Arc::new(ReferenceBackendExecutor::new(
+    Some(Arc::new(ReferenceBackendExecutor::new_with_trusted_registration(
         admission.capability_matrix(),
         admission.worker_capabilities(),
         registry,
+        admission.trusted_registration(),
     )))
 }
 

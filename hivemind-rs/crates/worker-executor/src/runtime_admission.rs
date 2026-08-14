@@ -6,8 +6,9 @@
 //! strings.
 
 use general_compute_runtime::{
-    BackendRegistration, CapabilityMatrix, GeneralComputeRequest, ValidationError,
-    ValidationErrorCode, WorkerCapabilities, GENERAL_COMPUTE_RUNTIME_VERSION,
+    BackendRegistration, CapabilityMatrix, GeneralComputeRequest,
+    TrustedWorkerCapabilityRegistration, ValidationError, ValidationErrorCode, WorkerCapabilities,
+    GENERAL_COMPUTE_RUNTIME_VERSION,
 };
 use std::fmt;
 
@@ -34,17 +35,25 @@ pub enum RuntimeAdmissionError {
 pub enum RuntimeAdmissionConfigError {
     InvalidBackends(String),
     InvalidWorkerCapabilities(String),
+    InvalidTrustedRegistration(String),
 }
 
 impl fmt::Display for RuntimeAdmissionConfigError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidBackends(message) => {
-                write!(formatter, "general-compute backend registry is invalid: {message}")
+                write!(
+                    formatter,
+                    "general-compute backend registry is invalid: {message}"
+                )
             }
             Self::InvalidWorkerCapabilities(message) => write!(
                 formatter,
                 "general-compute worker capabilities are invalid: {message}"
+            ),
+            Self::InvalidTrustedRegistration(message) => write!(
+                formatter,
+                "general-compute trusted registration is invalid: {message}"
             ),
         }
     }
@@ -81,6 +90,7 @@ impl std::error::Error for RuntimeAdmissionError {}
 pub struct WorkerRuntimeAdmission {
     registry: CapabilityMatrix,
     worker: WorkerCapabilities,
+    trusted_registration: TrustedWorkerCapabilityRegistration,
 }
 
 impl Default for WorkerRuntimeAdmission {
@@ -93,6 +103,16 @@ impl Default for WorkerRuntimeAdmission {
                 max_threads: 0,
                 gpu_available: false,
             },
+            trusted_registration: TrustedWorkerCapabilityRegistration {
+                worker: WorkerCapabilities {
+                    guest_image_digests: Vec::new(),
+                    capabilities: Vec::new(),
+                    max_threads: 0,
+                    gpu_available: false,
+                },
+                gpu_capabilities: Vec::new(),
+                backends: Vec::new(),
+            },
         }
     }
 }
@@ -100,7 +120,31 @@ impl Default for WorkerRuntimeAdmission {
 impl WorkerRuntimeAdmission {
     #[must_use]
     pub fn new(registry: CapabilityMatrix, worker: WorkerCapabilities) -> Self {
-        Self { registry, worker }
+        Self {
+            trusted_registration: TrustedWorkerCapabilityRegistration {
+                worker: worker.clone(),
+                gpu_capabilities: Vec::new(),
+                backends: registry.backends.clone(),
+            },
+            registry,
+            worker,
+        }
+    }
+
+    /// Build admission from the complete operator-owned registration. The
+    /// registration is the only source of typed GPU identities; a worker's
+    /// boolean `gpu_available` claim is not upgraded into a capability row.
+    #[must_use]
+    pub fn new_with_trusted_registration(
+        trusted_registration: TrustedWorkerCapabilityRegistration,
+    ) -> Self {
+        let registry = CapabilityMatrix::new(trusted_registration.backends.clone());
+        let worker = trusted_registration.worker.clone();
+        Self {
+            registry,
+            worker,
+            trusted_registration,
+        }
     }
 
     #[must_use]
@@ -113,13 +157,38 @@ impl WorkerRuntimeAdmission {
         self.worker.clone()
     }
 
+    #[must_use]
+    pub fn trusted_registration(&self) -> TrustedWorkerCapabilityRegistration {
+        self.trusted_registration.clone()
+    }
+
+    /// Select the concrete operator-approved device for a request. Typed GPU
+    /// requests fail closed when the registration has no compatible identity.
+    pub fn select_gpu_for_request(
+        &self,
+        request: &GeneralComputeRequest,
+    ) -> Result<Option<general_compute_runtime::gpu::GpuSelection>, ValidationError> {
+        self.trusted_registration.select_gpu_for_request(request)
+    }
+
     /// Load an operator-owned capability registry.  An absent registry keeps
     /// the alpha runtime disabled; malformed configuration fails closed at
     /// worker startup instead of silently widening admission.
     pub fn from_environment() -> Result<Self, RuntimeAdmissionConfigError> {
+        if let Ok(trusted) = std::env::var("HIVEMIND_GENERAL_COMPUTE_TRUSTED_REGISTRATION") {
+            if !trusted.trim().is_empty() {
+                let registration = serde_json::from_str::<TrustedWorkerCapabilityRegistration>(
+                    &trusted,
+                )
+                .map_err(|error| {
+                    RuntimeAdmissionConfigError::InvalidTrustedRegistration(error.to_string())
+                })?;
+                return Ok(Self::new_with_trusted_registration(registration));
+            }
+        }
         let backends = std::env::var("HIVEMIND_GENERAL_COMPUTE_BACKENDS").unwrap_or_default();
-        let worker = std::env::var("HIVEMIND_GENERAL_COMPUTE_WORKER_CAPABILITIES")
-            .unwrap_or_default();
+        let worker =
+            std::env::var("HIVEMIND_GENERAL_COMPUTE_WORKER_CAPABILITIES").unwrap_or_default();
         if backends.trim().is_empty() && worker.trim().is_empty() {
             return Ok(Self::default());
         }
@@ -155,8 +224,11 @@ impl WorkerRuntimeAdmission {
                     .map_err(|error| RuntimeAdmissionError::ManifestMalformed(error.to_string()))?;
                 self.registry
                     .validate_request(&request, &self.worker)
-                    .map_err(rejected)
-                    .map(|()| RuntimeRoute::GeneralComputeV1Alpha1(request))
+                    .map_err(rejected)?;
+                self.trusted_registration
+                    .select_gpu_for_request(&request)
+                    .map_err(rejected)?;
+                Ok(RuntimeRoute::GeneralComputeV1Alpha1(request))
             }
             other => Err(RuntimeAdmissionError::UnsupportedRuntime(other.into())),
         }
