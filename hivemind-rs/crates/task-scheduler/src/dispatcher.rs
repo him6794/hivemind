@@ -777,8 +777,19 @@ async fn execute_on_worker(
                         .as_deref()
                         .filter(|message| !message.trim().is_empty())
                         .unwrap_or("general-compute execution failed");
-                    repo.fail_for_worker(&task.task_id, &worker_id, reason)
-                        .await?;
+                    repo.fail_general_compute_for_worker(
+                        &task.task_id,
+                        &worker_id,
+                        current_task
+                            .general_compute_manifest_json
+                            .as_deref()
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("general-compute request manifest is missing")
+                            })?,
+                        &response.general_compute_result_json,
+                        reason,
+                    )
+                    .await?;
                     warn!(
                         "Task {} failed typed general-compute execution on worker {}: {}",
                         task.task_id, worker_id, reason
