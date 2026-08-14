@@ -19,6 +19,9 @@ pub enum SparseNumericError {
     ShapeExceeded { dimension: u64, max: usize },
     NnzExceeded { requested: usize, max: usize },
     VectorLengthMismatch { expected: usize, actual: usize },
+    ResidualLengthMismatch { expected: usize, actual: usize },
+    InvalidResidualTolerance,
+    ResidualExceeded,
     NonFiniteValue,
 }
 
@@ -51,6 +54,18 @@ impl fmt::Display for SparseNumericError {
                     formatter,
                     "sparse matvec expects vector length {expected}, got {actual}"
                 )
+            }
+            Self::ResidualLengthMismatch { expected, actual } => {
+                write!(
+                    formatter,
+                    "sparse residual expects RHS length {expected}, got {actual}"
+                )
+            }
+            Self::InvalidResidualTolerance => {
+                formatter.write_str("sparse residual tolerance must be finite and non-negative")
+            }
+            Self::ResidualExceeded => {
+                formatter.write_str("sparse matvec residual exceeds the requested tolerance")
             }
             Self::NonFiniteValue => {
                 formatter.write_str("sparse matvec encountered a non-finite value")
@@ -168,6 +183,56 @@ impl SparseF64Matrix {
         }
         Ok(result)
     }
+
+    /// Compute the sequential infinity norm of `self * vector - rhs`.
+    pub fn residual_inf_norm(
+        &self,
+        vector: &[f64],
+        rhs: &[f64],
+    ) -> Result<f64, SparseNumericError> {
+        let result = self.matvec(vector)?;
+        residual_inf_norm_from_result(&result, rhs)
+    }
+
+    /// Compute a sparse matvec and reject it when its infinity-norm residual
+    /// exceeds a finite, non-negative tolerance.
+    pub fn matvec_with_residual_tolerance(
+        &self,
+        vector: &[f64],
+        rhs: &[f64],
+        tolerance: f64,
+    ) -> Result<Vec<f64>, SparseNumericError> {
+        if !tolerance.is_finite() || tolerance < 0.0 {
+            return Err(SparseNumericError::InvalidResidualTolerance);
+        }
+        let result = self.matvec(vector)?;
+        if residual_inf_norm_from_result(&result, rhs)? > tolerance {
+            return Err(SparseNumericError::ResidualExceeded);
+        }
+        Ok(result)
+    }
+}
+
+fn residual_inf_norm_from_result(result: &[f64], rhs: &[f64]) -> Result<f64, SparseNumericError> {
+    if rhs.len() != result.len() {
+        return Err(SparseNumericError::ResidualLengthMismatch {
+            expected: result.len(),
+            actual: rhs.len(),
+        });
+    }
+    if rhs.iter().any(|value| !value.is_finite()) {
+        return Err(SparseNumericError::NonFiniteValue);
+    }
+
+    let mut maximum = 0.0_f64;
+    for (&actual, &expected) in result.iter().zip(rhs) {
+        let residual = (actual - expected).abs();
+        if !residual.is_finite() {
+            return Err(SparseNumericError::NonFiniteValue);
+        }
+        maximum = maximum.max(residual);
+    }
+    Ok(maximum)
 }
 
 fn checked_shape(manifest: &SparseTensorManifest) -> Result<(usize, usize), SparseNumericError> {
