@@ -17,6 +17,9 @@ const SUBSEQUENCE_MIX: u64 = 0x94D0_49BB_1331_11EB;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RngError {
     SampleCountExceeded { requested: usize, max: usize },
+    InvalidMean,
+    InvalidStandardDeviation,
+    NonFiniteSample,
 }
 
 impl fmt::Display for RngError {
@@ -27,6 +30,13 @@ impl fmt::Display for RngError {
                     formatter,
                     "requested {requested} RNG samples, maximum is {max}"
                 )
+            }
+            Self::InvalidMean => formatter.write_str("normal-distribution mean must be finite"),
+            Self::InvalidStandardDeviation => formatter.write_str(
+                "normal-distribution standard deviation must be finite and non-negative",
+            ),
+            Self::NonFiniteSample => {
+                formatter.write_str("normal-distribution sample became non-finite")
             }
         }
     }
@@ -59,17 +69,80 @@ impl DeterministicRng {
     }
 
     pub fn sample_f64(&mut self, count: usize) -> Result<Vec<f64>, RngError> {
+        Self::validate_count(count)?;
+        let mut samples = Vec::with_capacity(count);
+        for _ in 0..count {
+            samples.push(self.next_f64());
+        }
+        Ok(samples)
+    }
+
+    /// Draw bounded standard-normal values using the pinned Box–Muller
+    /// transform. Each output consumes exactly two deterministic uniforms.
+    pub fn sample_standard_normal(&mut self, count: usize) -> Result<Vec<f64>, RngError> {
+        Self::validate_count(count)?;
+        let mut samples = Vec::with_capacity(count);
+        while samples.len() < count {
+            let radius = (-2.0 * self.next_open01().ln()).sqrt();
+            let angle = std::f64::consts::TAU * self.next_f64();
+            let first = radius * angle.cos();
+            if !first.is_finite() {
+                return Err(RngError::NonFiniteSample);
+            }
+            samples.push(first);
+            if samples.len() < count {
+                let second = radius * angle.sin();
+                if !second.is_finite() {
+                    return Err(RngError::NonFiniteSample);
+                }
+                samples.push(second);
+            }
+        }
+        Ok(samples)
+    }
+
+    /// Draw bounded normal values with finite mean and non-negative standard
+    /// deviation. Arithmetic overflow is reported instead of returning an
+    /// untrusted non-finite claim.
+    pub fn sample_normal(
+        &mut self,
+        mean: f64,
+        standard_deviation: f64,
+        count: usize,
+    ) -> Result<Vec<f64>, RngError> {
+        if !mean.is_finite() {
+            return Err(RngError::InvalidMean);
+        }
+        if !standard_deviation.is_finite() || standard_deviation < 0.0 {
+            return Err(RngError::InvalidStandardDeviation);
+        }
+        let standard = self.sample_standard_normal(count)?;
+        standard
+            .into_iter()
+            .map(|sample| {
+                let value = mean + standard_deviation * sample;
+                if value.is_finite() {
+                    Ok(value)
+                } else {
+                    Err(RngError::NonFiniteSample)
+                }
+            })
+            .collect()
+    }
+
+    fn validate_count(count: usize) -> Result<(), RngError> {
         if count > MAX_RNG_SAMPLES {
             return Err(RngError::SampleCountExceeded {
                 requested: count,
                 max: MAX_RNG_SAMPLES,
             });
         }
-        let mut samples = Vec::with_capacity(count);
-        for _ in 0..count {
-            samples.push(self.next_f64());
-        }
-        Ok(samples)
+        Ok(())
+    }
+
+    fn next_open01(&mut self) -> f64 {
+        let mantissa = self.next_u64() >> 11;
+        (mantissa as f64 + 0.5) / (1u64 << 53) as f64
     }
 }
 
