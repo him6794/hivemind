@@ -245,6 +245,7 @@ pub enum ProductionSandboxError {
     BundleMetadataMismatch,
     RunnerNotPinned,
     RunnerDigestMismatch,
+    RunnerStateRootUnavailable,
     UnsupportedPlatform,
     RunnerUnavailable,
     RunnerSpawn,
@@ -265,6 +266,7 @@ impl std::error::Error for ProductionSandboxError {}
 #[derive(Debug, Clone, Default)]
 pub struct ProductionSandboxLauncher {
     runner_executable: Option<PathBuf>,
+    runner_state_root: Option<PathBuf>,
     runner_prefix_args: Vec<String>,
     runner_sha256: Option<String>,
     timeout: Duration,
@@ -288,6 +290,7 @@ impl ProductionSandboxLauncher {
     {
         Self {
             runner_executable: Some(executable.into()),
+            runner_state_root: None,
             runner_prefix_args: prefix_args.into_iter().map(Into::into).collect(),
             runner_sha256: None,
             timeout: Duration::from_secs(30),
@@ -300,6 +303,15 @@ impl ProductionSandboxLauncher {
     #[must_use]
     pub fn with_runner_sha256(mut self, digest: impl Into<String>) -> Self {
         self.runner_sha256 = Some(digest.into());
+        self
+    }
+
+    /// Configure the operator-owned writable state directory used by the OCI
+    /// runner (runc's `--root` path). The directory is validated again at
+    /// execution time so a replaced or symlinked volume fails closed.
+    #[must_use]
+    pub fn with_runner_state_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.runner_state_root = Some(root.into());
         self
     }
 
@@ -391,6 +403,10 @@ impl ProductionSandboxLauncher {
         if !valid_container_id(container_id) {
             return Err(ProductionSandboxError::InvalidContainerId);
         }
+        self.runner_state_root
+            .as_deref()
+            .ok_or(ProductionSandboxError::RunnerStateRootUnavailable)
+            .and_then(validate_runner_state_root)?;
         validate_oci_bundle_with_artifact_root(bundle_root, launch, artifact_root)?;
         self.run_validated_bundle(launch, bundle_root, container_id, cancellation)
     }
@@ -427,8 +443,17 @@ impl ProductionSandboxLauncher {
             return Err(ProductionSandboxError::RunnerDigestMismatch);
         }
 
+        let runner_state_root = self
+            .runner_state_root
+            .as_deref()
+            .map(validate_runner_state_root)
+            .transpose()?;
+
         let command = ReferenceCommandSpec::new(runner.to_string_lossy(), {
             let mut args = self.runner_prefix_args.clone();
+            if let Some(root) = runner_state_root {
+                args.extend(["--root".to_owned(), root.to_string_lossy().into_owned()]);
+            }
             args.extend([
                 "run".to_owned(),
                 "--bundle".to_owned(),
@@ -448,6 +473,25 @@ impl ProductionSandboxLauncher {
             .map_err(|_| ProductionSandboxError::RunnerSpawn)?;
         Ok(result)
     }
+}
+
+fn validate_runner_state_root(root: &Path) -> Result<&Path, ProductionSandboxError> {
+    if !root.is_absolute()
+        || root.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
+    {
+        return Err(ProductionSandboxError::RunnerStateRootUnavailable);
+    }
+    let metadata = fs::symlink_metadata(root)
+        .map_err(|_| ProductionSandboxError::RunnerStateRootUnavailable)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(ProductionSandboxError::RunnerStateRootUnavailable);
+    }
+    Ok(root)
 }
 
 fn valid_container_id(value: &str) -> bool {

@@ -15,6 +15,7 @@ foreach ($expected in @(
     "[switch]`$Run",
     "HIVEMIND_ENABLE_REAL_OCI_E2E",
     "HIVEMIND_GENERAL_COMPUTE_PRODUCTION_BACKENDS",
+    "runner_state_root",
     "docker compose",
     "--project-name",
     "--project-directory",

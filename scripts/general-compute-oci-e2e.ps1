@@ -152,13 +152,14 @@ function Validate-OperatorRegistry {
         }
         $ids[$backendId] = $true
 
-        foreach ($field in @("bundle_root", "artifact_root", "runner_executable")) {
+        foreach ($field in @("bundle_root", "artifact_root", "runner_executable", "runner_state_root")) {
             $value = [string]$registration.$field
             Require-AbsolutePath "backend '$backendId' $field" $value
         }
         Require-Directory "backend '$backendId' bundle root" ([string]$registration.bundle_root)
         Require-Directory "backend '$backendId' bundle rootfs" (Join-Path ([string]$registration.bundle_root) "rootfs")
         Require-Directory "backend '$backendId' artifact root" ([string]$registration.artifact_root)
+        Require-Directory "backend '$backendId' runner state root" ([string]$registration.runner_state_root)
         Require-RegularFile "backend '$backendId' pinned runner" ([string]$registration.runner_executable)
         Require-Sha256 "backend '$backendId' runner" ([string]$registration.runner_sha256)
         $actualRunner = (Get-FileHash -LiteralPath ([string]$registration.runner_executable) -Algorithm SHA256).Hash.ToLowerInvariant()

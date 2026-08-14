@@ -19,6 +19,10 @@ pub struct ProductionBackendConfig {
     pub bundle_root: PathBuf,
     pub artifact_root: PathBuf,
     pub runner_executable: PathBuf,
+    /// Operator-owned writable state for the OCI runner itself (for example
+    /// runc's `--root` directory). It must be separate from task bundles and
+    /// never be derived from a task id or a Worker request.
+    pub runner_state_root: PathBuf,
     pub runner_prefix_args: Vec<String>,
     pub runner_sha256: String,
     pub entrypoint: Vec<String>,
@@ -119,6 +123,7 @@ impl ProductionBackendConfig {
             &self.bundle_root,
             &self.artifact_root,
             &self.runner_executable,
+            &self.runner_state_root,
         ] {
             if !path.is_absolute() {
                 return Err(ProductionBackendRegistryError::PathMustBeAbsolute);

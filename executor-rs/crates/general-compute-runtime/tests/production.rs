@@ -39,6 +39,7 @@ fn config() -> ProductionBackendConfig {
         bundle_root: PathBuf::from("relative-bundle"),
         artifact_root: PathBuf::from("relative-artifacts"),
         runner_executable: PathBuf::from("relative-runc"),
+        runner_state_root: PathBuf::from("relative-runner-state"),
         runner_prefix_args: Vec::new(),
         runner_sha256: format!("sha256:{}", "c".repeat(64)),
         entrypoint: vec!["python".into(), "/runtime/runner.py".into()],
@@ -55,11 +56,25 @@ fn production_registry_rejects_unpinned_or_relative_operator_paths() {
 }
 
 #[test]
+fn production_registry_requires_a_dedicated_runner_state_root() {
+    let mut registration = config();
+    registration.bundle_root = PathBuf::from("C:\\hivemind\\bundle");
+    registration.artifact_root = PathBuf::from("C:\\hivemind\\artifacts");
+    registration.runner_executable = PathBuf::from("C:\\hivemind\\runc.exe");
+    registration.runner_state_root = PathBuf::from("relative-runner-state");
+
+    let error = ProductionBackendRegistry::new(vec![registration])
+        .expect_err("rootless OCI runners must use an absolute operator state root");
+    assert_eq!(error, ProductionBackendRegistryError::PathMustBeAbsolute);
+}
+
+#[test]
 fn production_registry_rejects_backend_mounts_that_do_not_match_the_entrypoint() {
     let mut registration = config();
     registration.bundle_root = PathBuf::from("C:\\hivemind\\bundle");
     registration.artifact_root = PathBuf::from("C:\\hivemind\\artifacts");
     registration.runner_executable = PathBuf::from("C:\\hivemind\\runc.exe");
+    registration.runner_state_root = PathBuf::from("C:\\hivemind\\runner-state");
     registration.policy.mounts[0] = SandboxMount::ReadOnlyArtifact {
         artifact_id: "different-source".into(),
         destination: "/work/source".into(),
@@ -76,6 +91,7 @@ fn production_task_root_rejects_path_traversal_and_materializes_bound_bundle() {
     registration.bundle_root = std::env::temp_dir().join("hivemind-production-bundles");
     registration.artifact_root = std::env::temp_dir().join("hivemind-production-artifacts");
     registration.runner_executable = PathBuf::from("C:\\hivemind\\runc.exe");
+    registration.runner_state_root = std::env::temp_dir().join("hivemind-production-runner-state");
     let _ = std::fs::remove_dir_all(&registration.bundle_root);
     let _ = std::fs::remove_dir_all(&registration.artifact_root);
     std::fs::create_dir_all(registration.bundle_root.join("rootfs")).unwrap();
@@ -127,6 +143,7 @@ fn production_registry_requires_mounts_for_every_request_artifact() {
     registration.bundle_root = PathBuf::from("C:\\hivemind\\bundle");
     registration.artifact_root = PathBuf::from("C:\\hivemind\\artifacts");
     registration.runner_executable = PathBuf::from("C:\\hivemind\\runc.exe");
+    registration.runner_state_root = PathBuf::from("C:\\hivemind\\runner-state");
     let registry = ProductionBackendRegistry::new(vec![registration.clone()]).unwrap();
     let mut request = GeneralComputeRequest {
         execution_id: "execution-production-input-mount".into(),
@@ -157,6 +174,7 @@ fn production_registry_rejects_mounts_for_unrequested_artifacts() {
     registration.bundle_root = PathBuf::from("C:\\hivemind\\bundle");
     registration.artifact_root = PathBuf::from("C:\\hivemind\\artifacts");
     registration.runner_executable = PathBuf::from("C:\\hivemind\\runc.exe");
+    registration.runner_state_root = PathBuf::from("C:\\hivemind\\runner-state");
     registration.policy.mounts.push(SandboxMount::ReadOnlyArtifact {
         artifact_id: "unrequested".into(),
         destination: "/work/unrequested".into(),
@@ -204,6 +222,7 @@ fn production_materializer_rejects_a_symlinked_task_bundle_root() {
     registration.bundle_root = root.join("bundles");
     registration.artifact_root = root.join("artifacts");
     registration.runner_executable = PathBuf::from("/hivemind/runc");
+    registration.runner_state_root = root.join("runner-state");
     std::fs::create_dir_all(registration.bundle_root.join("rootfs")).unwrap();
     let redirected = root.join("redirected");
     std::fs::create_dir_all(&redirected).unwrap();
@@ -233,6 +252,7 @@ fn production_materializer_rejects_a_symlinked_task_rootfs() {
     registration.bundle_root = root.join("bundles");
     registration.artifact_root = root.join("artifacts");
     registration.runner_executable = PathBuf::from("/hivemind/runc");
+    registration.runner_state_root = root.join("runner-state");
     std::fs::create_dir_all(registration.bundle_root.join("rootfs")).unwrap();
     let redirected = root.join("redirected-rootfs");
     std::fs::create_dir_all(&redirected).unwrap();
@@ -262,6 +282,7 @@ fn production_materializer_rejects_a_symlinked_task_config_before_writing() {
     registration.bundle_root = root.join("bundles");
     registration.artifact_root = root.join("artifacts");
     registration.runner_executable = PathBuf::from("/hivemind/runc");
+    registration.runner_state_root = root.join("runner-state");
     std::fs::create_dir_all(registration.bundle_root.join("rootfs")).unwrap();
     let redirected = root.join("redirected-config.json");
     std::fs::write(&redirected, b"sentinel").unwrap();
