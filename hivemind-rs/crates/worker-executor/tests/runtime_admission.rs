@@ -126,6 +126,8 @@ fn request_manifest(image: &str) -> GeneralComputeRequest {
 fn registry_for(image: String) -> CapabilityMatrix {
     CapabilityMatrix::new(vec![BackendRegistration {
         backend_id: "python-cpython-312".into(),
+        execution_mode:
+            general_compute_runtime::sandbox::BackendExecutionMode::ReferenceDirect,
         guest_image_digest: image,
         capabilities: vec!["cpu".into()],
         max_threads: 2,
