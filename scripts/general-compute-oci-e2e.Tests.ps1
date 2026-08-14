@@ -13,6 +13,7 @@ if (!(Test-Path -LiteralPath $composePath -PathType Leaf)) {
     throw "OCI E2E harness requires the release Compose file at $composePath."
 }
 $composeText = Get-Content -LiteralPath $composePath -Raw
+$fixtureTemplatePath = Join-Path $PSScriptRoot "general-compute-oci-task-fixture.ps1"
 
 foreach ($expected in @(
     "param(",
@@ -77,6 +78,27 @@ foreach ($expected in @(
 
 if ($harnessText -match '(?i)multi-process task fixture execution is not yet wired') {
     throw "OCI E2E -Run must invoke the reviewed fixture instead of retaining the placeholder fail-closed branch."
+}
+
+if (!(Test-Path -LiteralPath $fixtureTemplatePath -PathType Leaf)) {
+    throw "Repository must ship the reviewed Postgres-backed OCI fixture implementation at $fixtureTemplatePath."
+}
+$fixtureTemplateText = Get-Content -LiteralPath $fixtureTemplatePath -Raw
+foreach ($expected in @(
+    'ValidateSet("provision", "execute")',
+    "HIVEMIND_GENERAL_COMPUTE_OCI_E2E_CASES",
+    "Invoke-RestMethod",
+    "general_compute_results",
+    "general_compute_settlements",
+    "encode(result_json",
+    "general-compute-result-v1",
+    "timeout_cancel",
+    "network_denied",
+    "filesystem_denied"
+)) {
+    if (!$fixtureTemplateText.Contains($expected)) {
+        throw "Reviewed OCI fixture must contain the real multi-process evidence path '$expected'."
+    }
 }
 
 if ($harnessText -notmatch '(?i)operator.*registry|registry.*operator') {
