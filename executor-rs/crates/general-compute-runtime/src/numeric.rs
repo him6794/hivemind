@@ -1,11 +1,12 @@
 //! Deterministic CPU reference kernels for the first S2 numerical slice.
 //!
-//! The kernels operate on validated `f64` values in row-major dense tensors.
+//! The kernels operate on validated scalar values in row-major dense tensors.
 //! They intentionally stay independent of the binary tensor artifact layer so
 //! callers can use them as a small reference implementation before wiring a
 //! scientific backend image.
 
 use std::fmt;
+use std::ops::{Add, Div, Mul, Sub};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
@@ -59,13 +60,125 @@ impl fmt::Display for NumericError {
 impl std::error::Error for NumericError {}
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct F64Tensor {
+pub struct DenseTensor<T> {
     shape: Vec<u64>,
-    values: Vec<f64>,
+    values: Vec<T>,
 }
 
-impl F64Tensor {
-    pub fn new(shape: Vec<u64>, values: Vec<f64>) -> Result<Self, NumericError> {
+pub type F32Tensor = DenseTensor<f32>;
+pub type F64Tensor = DenseTensor<f64>;
+pub type Complex64Tensor = DenseTensor<Complex64>;
+pub type Complex128Tensor = DenseTensor<Complex128>;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Complex64 {
+    pub re: f32,
+    pub im: f32,
+}
+
+impl Complex64 {
+    #[must_use]
+    pub const fn new(re: f32, im: f32) -> Self {
+        Self { re, im }
+    }
+}
+
+impl Add for Complex64 {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Self::new(self.re + rhs.re, self.im + rhs.im)
+    }
+}
+
+impl Sub for Complex64 {
+    type Output = Self;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        Self::new(self.re - rhs.re, self.im - rhs.im)
+    }
+}
+
+impl Mul for Complex64 {
+    type Output = Self;
+
+    fn mul(self, rhs: Self) -> Self::Output {
+        Self::new(
+            self.re * rhs.re - self.im * rhs.im,
+            self.re * rhs.im + self.im * rhs.re,
+        )
+    }
+}
+
+impl Div for Complex64 {
+    type Output = Self;
+
+    fn div(self, rhs: Self) -> Self::Output {
+        let denominator = rhs.re * rhs.re + rhs.im * rhs.im;
+        Self::new(
+            (self.re * rhs.re + self.im * rhs.im) / denominator,
+            (self.im * rhs.re - self.re * rhs.im) / denominator,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Complex128 {
+    pub re: f64,
+    pub im: f64,
+}
+
+impl Complex128 {
+    #[must_use]
+    pub const fn new(re: f64, im: f64) -> Self {
+        Self { re, im }
+    }
+}
+
+impl Add for Complex128 {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Self::new(self.re + rhs.re, self.im + rhs.im)
+    }
+}
+
+impl Sub for Complex128 {
+    type Output = Self;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        Self::new(self.re - rhs.re, self.im - rhs.im)
+    }
+}
+
+impl Mul for Complex128 {
+    type Output = Self;
+
+    fn mul(self, rhs: Self) -> Self::Output {
+        Self::new(
+            self.re * rhs.re - self.im * rhs.im,
+            self.re * rhs.im + self.im * rhs.re,
+        )
+    }
+}
+
+impl Div for Complex128 {
+    type Output = Self;
+
+    fn div(self, rhs: Self) -> Self::Output {
+        let denominator = rhs.re * rhs.re + rhs.im * rhs.im;
+        Self::new(
+            (self.re * rhs.re + self.im * rhs.im) / denominator,
+            (self.im * rhs.re - self.re * rhs.im) / denominator,
+        )
+    }
+}
+
+impl<T> DenseTensor<T>
+where
+    T: Copy + Default + Add<Output = T> + Sub<Output = T> + Mul<Output = T> + Div<Output = T>,
+{
+    pub fn new(shape: Vec<u64>, values: Vec<T>) -> Result<Self, NumericError> {
         let expected = element_count(&shape)?;
         if values.len() != expected {
             return Err(NumericError::ValueCountMismatch {
@@ -82,7 +195,7 @@ impl F64Tensor {
     }
 
     #[must_use]
-    pub fn values(&self) -> &[f64] {
+    pub fn values(&self) -> &[T] {
         &self.values
     }
 
@@ -143,7 +256,7 @@ impl F64Tensor {
             .collect();
         let output_len = element_count(&output_shape)?;
         let output_strides = row_major_strides(&output_shape)?;
-        let mut output = vec![0.0; output_len];
+        let mut output = vec![T::default(); output_len];
         let mut coordinates = vec![0usize; self.shape.len()];
 
         for (linear, value) in self.values.iter().copied().enumerate() {
@@ -166,7 +279,7 @@ impl F64Tensor {
                     output_axis += 1;
                 }
             }
-            output[output_linear] += value;
+            output[output_linear] = output[output_linear] + value;
         }
 
         Self::new(output_shape, output)
@@ -194,7 +307,7 @@ impl F64Tensor {
         let mut output = Vec::with_capacity(output_len);
         for row in 0..rows {
             for column in 0..columns {
-                let mut value = 0.0;
+                let mut value = T::default();
                 for shared in 0..inner {
                     let lhs_offset = row
                         .checked_mul(inner)
@@ -204,7 +317,7 @@ impl F64Tensor {
                         .checked_mul(columns)
                         .and_then(|base| base.checked_add(column))
                         .ok_or(NumericError::ShapeOverflow)?;
-                    value += self.values[lhs_offset] * rhs.values[rhs_offset];
+                    value = value + self.values[lhs_offset] * rhs.values[rhs_offset];
                 }
                 output.push(value);
             }
@@ -309,7 +422,10 @@ fn broadcast_offset(
         .sum()
 }
 
-fn apply_binary(lhs: f64, rhs: f64, operation: BinaryOp) -> f64 {
+fn apply_binary<T>(lhs: T, rhs: T, operation: BinaryOp) -> T
+where
+    T: Copy + Add<Output = T> + Sub<Output = T> + Mul<Output = T> + Div<Output = T>,
+{
     match operation {
         BinaryOp::Add => lhs + rhs,
         BinaryOp::Sub => lhs - rhs,

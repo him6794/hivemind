@@ -1,4 +1,7 @@
-use general_compute_runtime::numeric::{BinaryOp, F64Tensor, NumericError};
+use general_compute_runtime::numeric::{
+    BinaryOp, Complex128, Complex128Tensor, Complex64, Complex64Tensor, F32Tensor, F64Tensor,
+    NumericError,
+};
 
 #[test]
 fn elementwise_add_uses_numpy_style_trailing_broadcast() {
@@ -109,4 +112,28 @@ fn matmul_handles_zero_inner_dimensions_without_nan_or_allocation_errors() {
 
     assert_eq!(result.shape(), &[2, 3]);
     assert_eq!(result.values(), &[0.0; 6]);
+}
+
+#[test]
+fn dtype_specific_dense_tensors_preserve_f32_and_complex64_arithmetic() {
+    let f32_lhs = F32Tensor::new(vec![2], vec![1.5_f32, 2.5]).unwrap();
+    let f32_rhs = F32Tensor::new(vec![1], vec![2.0_f32]).unwrap();
+    let f32_result = f32_lhs
+        .elementwise_binary(&f32_rhs, BinaryOp::Mul)
+        .expect("f32 multiplication should broadcast");
+    assert_eq!(f32_result.values(), &[3.0_f32, 5.0]);
+
+    let complex_lhs = Complex64Tensor::new(vec![1], vec![Complex64::new(1.0, 2.0)]).unwrap();
+    let complex_rhs = Complex64Tensor::new(vec![1], vec![Complex64::new(3.0, -4.0)]).unwrap();
+    let complex_result = complex_lhs
+        .elementwise_binary(&complex_rhs, BinaryOp::Mul)
+        .expect("complex64 multiplication should succeed");
+    assert_eq!(complex_result.values(), &[Complex64::new(11.0, 2.0)]);
+
+    let complex128_lhs = Complex128Tensor::new(vec![1], vec![Complex128::new(2.0, 1.0)]).unwrap();
+    let complex128_rhs = Complex128Tensor::new(vec![1], vec![Complex128::new(4.0, -3.0)]).unwrap();
+    let complex128_result = complex128_lhs
+        .elementwise_binary(&complex128_rhs, BinaryOp::Add)
+        .expect("complex128 addition should succeed");
+    assert_eq!(complex128_result.values(), &[Complex128::new(6.0, -2.0)]);
 }
