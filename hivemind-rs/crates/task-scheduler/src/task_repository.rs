@@ -1380,6 +1380,51 @@ impl TaskRepository {
         Ok(failed)
     }
 
+    /// Mark the active assignment terminal without treating a Nodepool-side
+    /// preparation failure as evidence against the Worker.
+    pub async fn fail_for_worker_without_penalty(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        reason: &str,
+    ) -> Result<Task> {
+        let mut tx = self.pool.begin().await?;
+        let failed = sqlx::query_as::<_, Task>(
+            "UPDATE tasks
+             SET status = 'FAILED', status_message = $1, last_update = NOW(), completed_at = NOW()
+             WHERE task_id = $2 AND worker_id = $3 AND status IN ('ASSIGNED', 'RUNNING')
+             RETURNING *",
+        )
+        .bind(reason)
+        .bind(task_id)
+        .bind(worker_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        self.revoke_general_compute_transfer_lease(&mut tx, task_id)
+            .await?;
+        if let Some(result_json) = nodepool_general_compute_terminal_result(
+            &failed,
+            ResultStatus::Failed,
+            "nodepool_task_failed",
+            reason,
+            b"general-compute-nodepool-failure-input-v1",
+        )? {
+            sqlx::query(
+                "INSERT INTO general_compute_results (task_id, worker_id, result_json)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT (task_id) DO NOTHING",
+            )
+            .bind(&failed.task_id)
+            .bind(worker_id)
+            .bind(result_json)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(failed)
+    }
+
     pub async fn cancel(&self, task_id: &str) -> Result<Task> {
         let mut tx = self.pool.begin().await?;
         let cancelled = sqlx::query_as::<_, Task>(
@@ -4636,6 +4681,87 @@ mod tests {
         assert_eq!(state, "expired");
 
         cleanup_task_case(&repo.pool, &task_id, "lease-expiry-owner", None).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn general_compute_fail_without_worker_penalty_is_typed_and_non_settling() {
+        let (p, fixture) = match pool("task_repository_general_compute_no_penalty_failure").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let worker_id = format!("no-penalty-worker-{}", uuid::Uuid::new_v4());
+        let (task_id, request) =
+            create_assigned_general_compute_task(&repo, "no-penalty-failure", &worker_id).await;
+        sqlx::query(
+            "INSERT INTO worker_reputation
+             (worker_id, successful_tasks, failed_tasks, score, banned)
+             VALUES ($1, 0, 0, 100, false)",
+        )
+        .bind(&worker_id)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        let reason = "Nodepool has no trusted artifact source";
+
+        let failed = repo
+            .fail_for_worker_without_penalty(&task_id, &worker_id, reason)
+            .await
+            .unwrap();
+
+        assert_eq!(failed.status, TaskStatus::Failed);
+        assert_eq!(failed.status_message.as_deref(), Some(reason));
+        assert!(repo
+            .general_compute_transfer_lease(&task_id)
+            .await
+            .unwrap()
+            .is_none());
+        let result_json: Vec<u8> = sqlx::query_scalar(
+            "SELECT result_json FROM general_compute_results WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        let result: GeneralComputeResult = serde_json::from_slice(&result_json).unwrap();
+        assert_eq!(result.status, ResultStatus::Failed);
+        assert_eq!(result.error_code.as_deref(), Some("nodepool_task_failed"));
+        assert_eq!(result.stderr, reason);
+        assert_eq!(result.execution_id, request.execution_id);
+        assert_eq!(result.attempt_id, request.attempt_id);
+        assert_eq!(result.request_digest, request.request_digest);
+        let settlement_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM general_compute_settlements WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(settlement_count, 0);
+        let reputation: (i64, i32) = sqlx::query_as(
+            "SELECT failed_tasks, score FROM worker_reputation WHERE worker_id = $1",
+        )
+        .bind(&worker_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(reputation, (0, 100));
+        let attestation_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM task_attestations WHERE task_id = $1")
+                .bind(&task_id)
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap();
+        assert_eq!(attestation_count, 0);
+
+        cleanup_task_case(
+            &repo.pool,
+            &task_id,
+            "no-penalty-failure-owner",
+            Some(&worker_id),
+        )
+        .await;
         fixture.cleanup().await.ok();
     }
 
