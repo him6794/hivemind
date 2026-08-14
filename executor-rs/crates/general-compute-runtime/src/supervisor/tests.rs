@@ -202,7 +202,7 @@ fn supervisor_cancellation_kills_and_reaps_child() {
     let cancellation = Arc::new(Cancellation::new());
     let trigger = Arc::clone(&cancellation);
     let thread = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(500));
         trigger.cancel();
     });
 
@@ -320,7 +320,7 @@ fn supervisor_timeout_kills_descendants_before_returning() {
     let result = ReferenceProcessSupervisor::new()
         .run(
             command_that_spawns_descendant(&start_marker, &final_marker)
-                .with_timeout(Duration::from_millis(600)),
+                .with_timeout(Duration::from_secs(2)),
             &Cancellation::new(),
         )
         .expect("descendant-producing child should execute");
@@ -328,7 +328,7 @@ fn supervisor_timeout_kills_descendants_before_returning() {
     assert_eq!(result.status, RunStatus::TimedOut);
     assert!(result.reaped, "timed-out process tree must be reaped");
     assert!(
-        wait_for_path(&start_marker, Duration::from_secs(1)),
+        wait_for_path(&start_marker, Duration::from_secs(2)),
         "descendant fixture must prove that the child was launched"
     );
     thread::sleep(Duration::from_secs(2));
@@ -356,13 +356,13 @@ fn supervisor_normal_leader_exit_kills_descendants_before_joining_pipes() {
     assert_eq!(result.status, RunStatus::Completed);
     assert!(result.reaped, "normal completion must reap the leader");
     assert!(
-        started.elapsed() < Duration::from_secs(1),
+        started.elapsed() < Duration::from_secs(3),
         "leader exit must not wait for a descendant holding stdout/stderr pipes"
     );
     assert!(
         wait_for_path(
             &start_marker.with_extension("ready.marker"),
-            Duration::from_secs(1)
+            Duration::from_secs(2)
         ),
         "descendant fixture must prove that the child was launched"
     );

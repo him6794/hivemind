@@ -155,7 +155,7 @@ fn cp_python_adapter_maps_cooperative_cancellation_to_a_typed_failure() {
     let cancellation = Arc::new(Cancellation::new());
     let trigger = Arc::clone(&cancellation);
     let thread = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(500));
         trigger.cancel();
     });
 

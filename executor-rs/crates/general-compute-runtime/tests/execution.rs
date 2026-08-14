@@ -267,7 +267,7 @@ fn reference_backend_cas_execution_observes_cancellation() {
         std::sync::Arc::new(general_compute_runtime::supervisor::Cancellation::new());
     let trigger = std::sync::Arc::clone(&cancellation);
     let thread = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(std::time::Duration::from_millis(500));
         trigger.cancel();
     });
 
