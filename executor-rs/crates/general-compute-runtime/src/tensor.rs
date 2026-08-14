@@ -1,4 +1,4 @@
-use crate::{sha256_digest, ArtifactManifest, ArtifactRole};
+use crate::{ArtifactManifest, ArtifactRole, sha256_digest};
 use serde::{Deserialize, Serialize};
 
 pub const TENSOR_ABI_VERSION: &str = "tensor-v1alpha1";
@@ -30,6 +30,14 @@ impl TensorDType {
             Self::Int64 | Self::Uint64 | Self::Float64 | Self::Complex64 => Some(8),
             Self::Complex128 => Some(16),
             Self::BigInt => None,
+        }
+    }
+
+    fn component_byte_width(self) -> Option<usize> {
+        match self {
+            Self::Complex64 => Some(4),
+            Self::Complex128 => Some(8),
+            dtype => dtype.byte_width().map(|width| width as usize),
         }
     }
 }
@@ -70,7 +78,8 @@ impl TensorManifest {
             layout: self.layout,
             data_sha256: &self.data_artifact.sha256,
         };
-        let bytes = serde_json::to_vec(&canonical).expect("tensor canonical serialization is infallible");
+        let bytes =
+            serde_json::to_vec(&canonical).expect("tensor canonical serialization is infallible");
         sha256_digest(&bytes)
     }
 
@@ -83,7 +92,10 @@ impl TensorManifest {
             .iter()
             .try_fold(1u64, |count, dimension| count.checked_mul(*dimension))
             .ok_or_else(|| "tensor shape element count overflows".to_string())?;
-        if !matches!(self.data_artifact.role, ArtifactRole::Input | ArtifactRole::Output) {
+        if !matches!(
+            self.data_artifact.role,
+            ArtifactRole::Input | ArtifactRole::Output
+        ) {
             return Err("tensor data artifact must be input or output".into());
         }
         if self.data_artifact.mime_type != "application/octet-stream" {
@@ -112,6 +124,84 @@ impl TensorManifest {
         }
         Ok(())
     }
+
+    /// Validate bytes after an artifact has been materialized by the trusted
+    /// artifact layer. Metadata-only validation cannot prove that a CAS object
+    /// still contains the bytes described by the manifest, so callers must
+    /// use this boundary before decoding tensor values.
+    pub fn validate_bytes(&self, bytes: &[u8]) -> Result<(), String> {
+        self.validate()?;
+        if self.data_artifact.size_bytes != bytes.len() as u64 {
+            return Err("tensor materialized bytes have the wrong size".into());
+        }
+        if self.data_artifact.sha256 != sha256_digest(bytes) {
+            return Err("tensor materialized bytes checksum does not match".into());
+        }
+        if let Some(inline) = self.data_artifact.inline_bytes.as_deref()
+            && inline != bytes
+        {
+            return Err("tensor materialized bytes differ from inline bytes".into());
+        }
+        if self.dtype == TensorDType::BigInt {
+            validate_bigint_sign_magnitude(bytes, self.byte_order)?;
+        }
+        Ok(())
+    }
+
+    /// Return a canonical little-endian representation without changing the
+    /// logical element order or IEEE-754 bit patterns. Complex values reverse
+    /// each real/imaginary component independently, preserving signed zero,
+    /// NaN, infinity, and subnormal payloads exactly.
+    pub fn canonical_little_endian_bytes(&self, bytes: &[u8]) -> Result<Vec<u8>, String> {
+        self.validate_bytes(bytes)?;
+        if self.byte_order == ByteOrder::Little {
+            return Ok(bytes.to_vec());
+        }
+
+        if self.dtype == TensorDType::BigInt {
+            let mut canonical = bytes.to_vec();
+            canonical[1..].reverse();
+            return Ok(canonical);
+        }
+
+        let element_width = self
+            .dtype
+            .byte_width()
+            .ok_or_else(|| "tensor dtype has no fixed-width byte representation".to_string())?
+            as usize;
+        let component_width = self
+            .dtype
+            .component_byte_width()
+            .ok_or_else(|| "tensor dtype has no component byte representation".to_string())?;
+        let mut canonical = bytes.to_vec();
+        for element in canonical.chunks_exact_mut(element_width) {
+            if matches!(self.dtype, TensorDType::Complex64 | TensorDType::Complex128) {
+                for component in element.chunks_exact_mut(component_width) {
+                    component.reverse();
+                }
+            } else {
+                element.reverse();
+            }
+        }
+        Ok(canonical)
+    }
+}
+
+fn validate_bigint_sign_magnitude(bytes: &[u8], byte_order: ByteOrder) -> Result<(), String> {
+    if bytes.len() < 2 || !matches!(bytes[0], 0 | 1) {
+        return Err("BigInt payload must use canonical sign-magnitude encoding".into());
+    }
+    let magnitude = &bytes[1..];
+    if magnitude.len() > 1 {
+        let redundant_zero = match byte_order {
+            ByteOrder::Big => magnitude.first() == Some(&0),
+            ByteOrder::Little => magnitude.last() == Some(&0),
+        };
+        if redundant_zero {
+            return Err("BigInt payload must use canonical sign-magnitude encoding".into());
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
