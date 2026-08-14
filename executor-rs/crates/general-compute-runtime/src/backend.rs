@@ -23,6 +23,7 @@ pub enum BackendPinError {
     CpuFeatureTooLong,
     FeaturesNotCanonical,
     InvalidReferenceDigest,
+    InvalidImageDigest,
     IdentityMismatch(&'static str),
 }
 
@@ -43,6 +44,9 @@ impl fmt::Display for BackendPinError {
             Self::InvalidReferenceDigest => {
                 formatter.write_str("backend reference-vector digest must be a SHA-256 digest")
             }
+            Self::InvalidImageDigest => {
+                formatter.write_str("backend guest image digest must be a SHA-256 digest")
+            }
             Self::IdentityMismatch(field) => {
                 write!(formatter, "backend runtime identity differs in {field}")
             }
@@ -61,6 +65,7 @@ pub struct BackendRuntimeIdentity {
     pub cpu_features: Vec<String>,
     pub thread_count: u32,
     pub reference_vector_sha256: String,
+    pub guest_image_digest: Option<String>,
 }
 
 impl BackendRuntimeIdentity {
@@ -71,13 +76,50 @@ impl BackendRuntimeIdentity {
         thread_count: u32,
         reference_vector_sha256: impl Into<String>,
     ) -> Result<Self, BackendPinError> {
-        let identity = Self {
-            protocol_version: BACKEND_PIN_PROTOCOL_VERSION.into(),
-            backend_id: backend_id.into(),
-            backend_version: backend_version.into(),
+        Self::new_internal(
+            backend_id.into(),
+            backend_version.into(),
             cpu_features,
             thread_count,
-            reference_vector_sha256: reference_vector_sha256.into(),
+            reference_vector_sha256.into(),
+            None,
+        )
+    }
+
+    pub fn new_with_image(
+        backend_id: impl Into<String>,
+        backend_version: impl Into<String>,
+        cpu_features: Vec<String>,
+        thread_count: u32,
+        reference_vector_sha256: impl Into<String>,
+        guest_image_digest: impl Into<String>,
+    ) -> Result<Self, BackendPinError> {
+        Self::new_internal(
+            backend_id.into(),
+            backend_version.into(),
+            cpu_features,
+            thread_count,
+            reference_vector_sha256.into(),
+            Some(guest_image_digest.into()),
+        )
+    }
+
+    fn new_internal(
+        backend_id: String,
+        backend_version: String,
+        cpu_features: Vec<String>,
+        thread_count: u32,
+        reference_vector_sha256: String,
+        guest_image_digest: Option<String>,
+    ) -> Result<Self, BackendPinError> {
+        let identity = Self {
+            protocol_version: BACKEND_PIN_PROTOCOL_VERSION.into(),
+            backend_id,
+            backend_version,
+            cpu_features,
+            thread_count,
+            reference_vector_sha256,
+            guest_image_digest,
         };
         identity.validate()?;
         Ok(identity)
@@ -90,6 +132,13 @@ impl BackendRuntimeIdentity {
         validate_thread_count(self.thread_count)?;
         if !is_sha256_digest(&self.reference_vector_sha256) {
             return Err(BackendPinError::InvalidReferenceDigest);
+        }
+        if self
+            .guest_image_digest
+            .as_deref()
+            .is_some_and(|digest| !is_sha256_digest(digest))
+        {
+            return Err(BackendPinError::InvalidImageDigest);
         }
         Ok(())
     }
@@ -104,6 +153,7 @@ pub struct OptimizedBackendPin {
     pub cpu_features: Vec<String>,
     pub thread_count: u32,
     pub reference_vector_sha256: String,
+    pub guest_image_digest: Option<String>,
 }
 
 impl OptimizedBackendPin {
@@ -121,14 +171,38 @@ impl OptimizedBackendPin {
             thread_count,
             reference_vector_sha256,
         )?;
-        Ok(Self {
+        Ok(Self::from_identity(identity))
+    }
+
+    pub fn new_with_image(
+        backend_id: impl Into<String>,
+        backend_version: impl Into<String>,
+        cpu_features: Vec<String>,
+        thread_count: u32,
+        reference_vector_sha256: impl Into<String>,
+        guest_image_digest: impl Into<String>,
+    ) -> Result<Self, BackendPinError> {
+        let identity = BackendRuntimeIdentity::new_with_image(
+            backend_id,
+            backend_version,
+            cpu_features,
+            thread_count,
+            reference_vector_sha256,
+            guest_image_digest,
+        )?;
+        Ok(Self::from_identity(identity))
+    }
+
+    fn from_identity(identity: BackendRuntimeIdentity) -> Self {
+        Self {
             protocol_version: identity.protocol_version,
             backend_id: identity.backend_id,
             backend_version: identity.backend_version,
             cpu_features: identity.cpu_features,
             thread_count: identity.thread_count,
             reference_vector_sha256: identity.reference_vector_sha256,
-        })
+            guest_image_digest: identity.guest_image_digest,
+        }
     }
 
     /// Require exact identity equality before an optimized result can be
@@ -154,6 +228,9 @@ impl OptimizedBackendPin {
         if self.reference_vector_sha256 != identity.reference_vector_sha256 {
             return Err(BackendPinError::IdentityMismatch("reference_vector_sha256"));
         }
+        if self.guest_image_digest != identity.guest_image_digest {
+            return Err(BackendPinError::IdentityMismatch("guest_image_digest"));
+        }
         Ok(())
     }
 
@@ -164,6 +241,13 @@ impl OptimizedBackendPin {
         validate_thread_count(self.thread_count)?;
         if !is_sha256_digest(&self.reference_vector_sha256) {
             return Err(BackendPinError::InvalidReferenceDigest);
+        }
+        if self
+            .guest_image_digest
+            .as_deref()
+            .is_some_and(|digest| !is_sha256_digest(digest))
+        {
+            return Err(BackendPinError::InvalidImageDigest);
         }
         Ok(())
     }

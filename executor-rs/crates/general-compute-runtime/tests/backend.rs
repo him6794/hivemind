@@ -68,3 +68,45 @@ fn optimized_backend_pin_rejects_identity_drift_and_noncanonical_inputs() {
         Err(BackendPinError::InvalidThreadCount)
     );
 }
+
+#[test]
+fn optimized_backend_pin_can_bind_an_operator_image_digest() {
+    let image = format!("sha256:{}", "a".repeat(64));
+    let pin = OptimizedBackendPin::new_with_image(
+        "blas-openblas",
+        "0.3.26",
+        vec!["avx2".into(), "fma".into(), "sse4.2".into()],
+        4,
+        sha256_digest(b"dense-reference-v1"),
+        image.clone(),
+    )
+    .expect("image-bound backend pin");
+    let identity = BackendRuntimeIdentity::new_with_image(
+        "blas-openblas",
+        "0.3.26",
+        vec!["avx2".into(), "fma".into(), "sse4.2".into()],
+        4,
+        sha256_digest(b"dense-reference-v1"),
+        image,
+    )
+    .expect("image-bound runtime identity");
+    assert!(pin.verify(&identity).is_ok());
+
+    let mut drifted = identity;
+    drifted.guest_image_digest = Some(format!("sha256:{}", "b".repeat(64)));
+    assert_eq!(
+        pin.verify(&drifted),
+        Err(BackendPinError::IdentityMismatch("guest_image_digest"))
+    );
+    assert_eq!(
+        OptimizedBackendPin::new_with_image(
+            "blas-openblas",
+            "0.3.26",
+            vec!["avx2".into(), "fma".into(), "sse4.2".into()],
+            4,
+            sha256_digest(b"dense-reference-v1"),
+            "not-a-digest",
+        ),
+        Err(BackendPinError::InvalidImageDigest)
+    );
+}
