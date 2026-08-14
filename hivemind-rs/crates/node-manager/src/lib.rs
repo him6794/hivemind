@@ -127,6 +127,7 @@ mod tests {
                         max_threads: 4,
                         gpu_available: false,
                     },
+                    gpu_capabilities: vec![],
                     backends: vec![BackendRegistration {
                         backend_id: "python-cpython-312".into(),
                         guest_image_digest:

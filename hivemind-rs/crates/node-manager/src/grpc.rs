@@ -3972,6 +3972,7 @@ mod tests {
                             max_threads: 4,
                             gpu_available: false,
                         },
+                        gpu_capabilities: vec![],
                         backends: vec![general_compute_runtime::BackendRegistration {
                             backend_id: "python-cpython-312".into(),
                             guest_image_digest: image.into(),
@@ -4053,6 +4054,7 @@ mod tests {
                             capabilities: vec!["cpu".into()],
                             max_threads: 1,
                             gpu_available: false,
+                        gpu_capabilities: vec![],
                         },
                         backends: vec![],
                     },

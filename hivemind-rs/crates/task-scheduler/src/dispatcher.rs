@@ -1676,6 +1676,7 @@ mod tests {
                 max_threads: 1,
                 gpu_available: false,
             },
+            gpu_capabilities: vec![],
             backends: vec![BackendRegistration {
                 backend_id: request.backend_id.clone(),
                 guest_image_digest: format!("sha256:{}", "c".repeat(64)),
@@ -1772,6 +1773,7 @@ mod tests {
                 capabilities: vec![],
                 max_threads: 1,
                 gpu_available: false,
+            gpu_capabilities: vec![],
             },
             backends: vec![BackendRegistration {
                 backend_id: request.backend_id.clone(),

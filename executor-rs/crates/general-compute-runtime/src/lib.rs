@@ -669,7 +669,48 @@ pub struct WorkerCapabilities {
 #[serde(deny_unknown_fields)]
 pub struct TrustedWorkerCapabilityRegistration {
     pub worker: WorkerCapabilities,
+    /// Operator-approved device identities.  This is separate from the
+    /// worker's boolean self-report so admission can fail closed on a typed
+    /// vendor/runtime/driver/image mismatch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gpu_capabilities: Vec<gpu::GpuCapability>,
     pub backends: Vec<BackendRegistration>,
+}
+
+impl TrustedWorkerCapabilityRegistration {
+    /// Validate the operator-owned GPU snapshot and select a deterministic
+    /// device for a request.  The worker's boolean `gpu_available` claim is
+    /// never sufficient for a typed GPU request.
+    pub fn select_gpu_for_request(
+        &self,
+        request: &GeneralComputeRequest,
+    ) -> Result<Option<gpu::GpuSelection>, ValidationError> {
+        request.validate()?;
+        for capability in &self.gpu_capabilities {
+            capability.validate().map_err(|error| {
+                ValidationError::new(
+                    ValidationErrorCode::GpuUnavailable,
+                    format!("trusted GPU capability is invalid: {error}"),
+                )
+            })?;
+        }
+        if !request.execution_policy.gpu_required {
+            return Ok(None);
+        }
+        let requirement = request
+            .execution_policy
+            .gpu_requirement
+            .as_ref()
+            .expect("validated GPU request must carry a typed requirement");
+        gpu::negotiate_gpu(requirement, &self.gpu_capabilities)
+            .map(Some)
+            .map_err(|error| {
+                ValidationError::new(
+                    ValidationErrorCode::GpuUnavailable,
+                    format!("trusted GPU selection failed: {error}"),
+                )
+            })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
