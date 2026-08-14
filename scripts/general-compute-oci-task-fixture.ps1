@@ -284,14 +284,23 @@ function Wait-Http {
 }
 
 function Login-Master {
-    $response = Invoke-Api -Method POST -Uri "$MasterBaseUrl/api/login" -Body @{
-        username = $Username
-        password = $Password
-    }
-    if (!$response.success -or [string]::IsNullOrWhiteSpace([string]$response.token)) {
-        Fail-Fixture "Master login did not return a Nodepool-issued token"
-    }
-    return [string]$response.token
+    $deadline = (Get-Date).AddSeconds(180)
+    do {
+        try {
+            $response = Invoke-Api -Method POST -Uri "$MasterBaseUrl/api/login" -Body @{
+                username = $Username
+                password = $Password
+            }
+            if ($response.success -and ![string]::IsNullOrWhiteSpace([string]$response.token)) {
+                return [string]$response.token
+            }
+        } catch {
+            # Master may be listening before its Nodepool gRPC dependency is
+            # ready; keep login bounded and retry rather than racing startup.
+        }
+        Start-Sleep -Seconds 2
+    } while ((Get-Date) -lt $deadline)
+    Fail-Fixture "Master login did not return a Nodepool-issued token before the deadline"
 }
 
 function Wait-WorkerRegistration {
