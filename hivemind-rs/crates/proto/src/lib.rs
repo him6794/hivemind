@@ -24,6 +24,17 @@ pub const GENERAL_COMPUTE_CHUNK_UPLOAD_MAX_BYTES: usize = 16 * 1024 * 1024;
 pub const GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES: usize =
     GENERAL_COMPUTE_CHUNK_UPLOAD_MAX_BYTES + 64 * 1024;
 
+/// Maximum encoded size accepted for one transfer-lease authority request.
+pub const GENERAL_COMPUTE_TRANSFER_LEASE_RPC_MESSAGE_MAX_BYTES: usize = 16 * 1024;
+
+/// Maximum byte length of a Nodepool-issued Worker execution JWT in an
+/// authority request.
+pub const WORKER_EXECUTION_TOKEN_MAX_BYTES: usize = 8 * 1024;
+
+/// Maximum byte length of task, Worker, execution, attempt, or idempotency
+/// identity fields. This matches the persistent control-plane identifiers.
+pub const GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES: usize = 255;
+
 /// Maximum signed admission budget accepted for `managed-function-v0` execution.
 pub const MANAGED_BUDGET_MAX_USAGE_UNITS: i64 = 1_000_000;
 
@@ -95,6 +106,42 @@ pub fn validate_general_compute_chunk_resume_request(
     Ok(())
 }
 
+/// Validate a Worker-to-Nodepool transfer-lease authority envelope.
+pub fn validate_general_compute_transfer_lease_request(
+    request: &ValidateGeneralComputeTransferLeaseRequest,
+) -> Result<(), &'static str> {
+    if request.token.trim().is_empty() {
+        return Err("worker execution token is required");
+    }
+    if request.token.len() > WORKER_EXECUTION_TOKEN_MAX_BYTES {
+        return Err("worker execution token exceeds the byte limit");
+    }
+    for value in [
+        request.worker_id.as_str(),
+        request.task_id.as_str(),
+        request.execution_id.as_str(),
+        request.attempt_id.as_str(),
+        request.idempotency_key.as_str(),
+    ] {
+        if value.trim().is_empty() {
+            return Err("transfer lease identity fields are required");
+        }
+        if value.len() > GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES {
+            return Err("transfer lease identity field exceeds the byte limit");
+        }
+    }
+    if request.transfer_generation <= 0 {
+        return Err("transfer generation must be positive");
+    }
+    if !is_sha256_digest(&request.request_digest) {
+        return Err("request digest must be a sha256 digest");
+    }
+    if prost::Message::encoded_len(request) > GENERAL_COMPUTE_TRANSFER_LEASE_RPC_MESSAGE_MAX_BYTES {
+        return Err("transfer lease authority request exceeds the message limit");
+    }
+    Ok(())
+}
+
 fn validate_chunk_identity(
     token: &str,
     execution_id: &str,
@@ -147,14 +194,18 @@ mod tests {
 
     use super::{
         validate_general_compute_chunk_resume_request, validate_general_compute_chunk_upload,
-        ExecuteTaskResponse, GeneralComputeChunkDescriptor, GeneralComputeChunkResumeRequest,
+        validate_general_compute_transfer_lease_request, ExecuteTaskResponse,
+        GeneralComputeChunkDescriptor, GeneralComputeChunkResumeRequest,
         GeneralComputeChunkResumeResponse, GeneralComputeChunkUpload,
         GeneralComputeChunkUploadResponse, ManagedProofEnvelope,
+        ValidateGeneralComputeTransferLeaseRequest, ValidateGeneralComputeTransferLeaseResponse,
         GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES, GENERAL_COMPUTE_CHUNK_UPLOAD_MAX_BYTES,
         GENERAL_COMPUTE_MANIFEST_MAX_BYTES, GENERAL_COMPUTE_RESULT_MAX_BYTES,
-        LEGACY_MANAGED_RECEIPT_MAX_BYTES, MANAGED_BUDGET_MAX_USAGE_UNITS,
-        MANAGED_JSON_INPUT_MAX_BYTES, MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES,
-        MANAGED_TASK_SOURCE_MAX_BYTES, TASK_ID_MAX_BYTES, WORKER_RPC_MESSAGE_MAX_BYTES,
+        GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES,
+        GENERAL_COMPUTE_TRANSFER_LEASE_RPC_MESSAGE_MAX_BYTES, LEGACY_MANAGED_RECEIPT_MAX_BYTES,
+        MANAGED_BUDGET_MAX_USAGE_UNITS, MANAGED_JSON_INPUT_MAX_BYTES,
+        MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES, MANAGED_TASK_SOURCE_MAX_BYTES, TASK_ID_MAX_BYTES,
+        WORKER_EXECUTION_TOKEN_MAX_BYTES, WORKER_RPC_MESSAGE_MAX_BYTES,
         WORKER_STATUS_MESSAGE_MAX_BYTES,
     };
 
@@ -169,6 +220,12 @@ mod tests {
         assert_eq!(MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES, 2_166_784);
         assert_eq!(WORKER_STATUS_MESSAGE_MAX_BYTES, 1024 * 1024);
         assert_eq!(LEGACY_MANAGED_RECEIPT_MAX_BYTES, 64 * 1024);
+        assert_eq!(WORKER_EXECUTION_TOKEN_MAX_BYTES, 8 * 1024);
+        assert_eq!(GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES, 255);
+        assert_eq!(
+            GENERAL_COMPUTE_TRANSFER_LEASE_RPC_MESSAGE_MAX_BYTES,
+            16 * 1024
+        );
     }
 
     #[test]
@@ -246,6 +303,135 @@ mod tests {
         };
 
         assert!(response.encoded_len() <= WORKER_RPC_MESSAGE_MAX_BYTES);
+    }
+
+    #[test]
+    fn transfer_lease_authority_envelope_round_trips_full_identity() {
+        let request = ValidateGeneralComputeTransferLeaseRequest {
+            token: "nodepool-signed-worker-execution-token".into(),
+            worker_id: "worker-7".into(),
+            task_id: "task-1".into(),
+            execution_id: "execution-1".into(),
+            attempt_id: "attempt-2".into(),
+            transfer_generation: 3,
+            idempotency_key: "idempotency-4".into(),
+            request_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        };
+
+        validate_general_compute_transfer_lease_request(&request)
+            .expect("fully bound transfer lease request should pass");
+        let decoded =
+            ValidateGeneralComputeTransferLeaseRequest::decode(request.encode_to_vec().as_slice())
+                .expect("transfer lease request should decode");
+        assert_eq!(decoded, request);
+
+        let response = ValidateGeneralComputeTransferLeaseResponse {
+            success: true,
+            status_message: "active".into(),
+        };
+        let decoded = ValidateGeneralComputeTransferLeaseResponse::decode(
+            response.encode_to_vec().as_slice(),
+        )
+        .expect("transfer lease response should decode");
+        assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn transfer_lease_authority_validation_rejects_unbound_or_unbounded_identity() {
+        let valid = ValidateGeneralComputeTransferLeaseRequest {
+            token: "nodepool-signed-worker-execution-token".into(),
+            worker_id: "worker-7".into(),
+            task_id: "task-1".into(),
+            execution_id: "execution-1".into(),
+            attempt_id: "attempt-2".into(),
+            transfer_generation: 3,
+            idempotency_key: "idempotency-4".into(),
+            request_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        };
+        let invalid = [
+            ValidateGeneralComputeTransferLeaseRequest {
+                token: " ".into(),
+                ..valid.clone()
+            },
+            ValidateGeneralComputeTransferLeaseRequest {
+                worker_id: String::new(),
+                ..valid.clone()
+            },
+            ValidateGeneralComputeTransferLeaseRequest {
+                task_id: String::new(),
+                ..valid.clone()
+            },
+            ValidateGeneralComputeTransferLeaseRequest {
+                execution_id: String::new(),
+                ..valid.clone()
+            },
+            ValidateGeneralComputeTransferLeaseRequest {
+                attempt_id: String::new(),
+                ..valid.clone()
+            },
+            ValidateGeneralComputeTransferLeaseRequest {
+                idempotency_key: String::new(),
+                ..valid.clone()
+            },
+            ValidateGeneralComputeTransferLeaseRequest {
+                request_digest: "not-a-digest".into(),
+                ..valid.clone()
+            },
+            ValidateGeneralComputeTransferLeaseRequest {
+                transfer_generation: 0,
+                ..valid.clone()
+            },
+            ValidateGeneralComputeTransferLeaseRequest {
+                transfer_generation: -1,
+                ..valid.clone()
+            },
+            ValidateGeneralComputeTransferLeaseRequest {
+                token: "x".repeat(WORKER_EXECUTION_TOKEN_MAX_BYTES + 1),
+                ..valid.clone()
+            },
+            ValidateGeneralComputeTransferLeaseRequest {
+                worker_id: "x".repeat(GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES + 1),
+                ..valid.clone()
+            },
+            ValidateGeneralComputeTransferLeaseRequest {
+                task_id: "x".repeat(GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES + 1),
+                ..valid.clone()
+            },
+            ValidateGeneralComputeTransferLeaseRequest {
+                execution_id: "x".repeat(GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES + 1),
+                ..valid.clone()
+            },
+            ValidateGeneralComputeTransferLeaseRequest {
+                attempt_id: "x".repeat(GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES + 1),
+                ..valid.clone()
+            },
+            ValidateGeneralComputeTransferLeaseRequest {
+                idempotency_key: "x".repeat(GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES + 1),
+                ..valid.clone()
+            },
+        ];
+
+        for request in invalid {
+            assert!(
+                validate_general_compute_transfer_lease_request(&request).is_err(),
+                "unbound or unbounded transfer identity must be rejected: {request:?}"
+            );
+        }
+
+        let maximum = ValidateGeneralComputeTransferLeaseRequest {
+            token: "x".repeat(WORKER_EXECUTION_TOKEN_MAX_BYTES),
+            worker_id: "w".repeat(GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES),
+            task_id: "t".repeat(GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES),
+            execution_id: "e".repeat(GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES),
+            attempt_id: "a".repeat(GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES),
+            idempotency_key: "i".repeat(GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES),
+            ..valid
+        };
+        validate_general_compute_transfer_lease_request(&maximum)
+            .expect("maximum bounded transfer identity should pass");
+        assert!(maximum.encoded_len() <= GENERAL_COMPUTE_TRANSFER_LEASE_RPC_MESSAGE_MAX_BYTES);
     }
 
     #[test]
