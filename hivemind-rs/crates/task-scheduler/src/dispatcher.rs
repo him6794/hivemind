@@ -968,6 +968,9 @@ fn decode_and_validate_general_compute_result(
         general_compute_runtime::TrustedWorkerCapabilityRegistration,
     >(capability_snapshot_json)
     .map_err(|error| format!("trusted capability snapshot is malformed: {error}"))?;
+    let trusted_gpu_selection = registration
+        .select_gpu_for_request(&request)
+        .map_err(|error| format!("trusted GPU selection failed: {error:?}"))?;
     let matrix = general_compute_runtime::CapabilityMatrix::new(registration.backends);
     matrix
         .validate_request(&request, &registration.worker)
@@ -981,6 +984,12 @@ fn decode_and_validate_general_compute_result(
     result
         .validate_against(&request, &matrix)
         .map_err(|error| format!("general-compute typed result failed validation: {error:?}"))?;
+    if result.gpu_selection != trusted_gpu_selection {
+        return Err(
+            "general-compute typed result GPU selection does not match trusted GPU selection"
+                .into(),
+        );
+    }
     let expected_success = result.status == general_compute_runtime::ResultStatus::Completed;
     if response.success != expected_success {
         return Err("worker success flag does not match typed result status".into());
@@ -1699,6 +1708,86 @@ mod tests {
                 .expect_err("result validation must use the persisted capability snapshot");
 
         assert!(error.contains("trusted capability snapshot"));
+    }
+
+    #[test]
+    fn general_compute_result_rejects_a_selected_gpu_not_in_the_trusted_snapshot() {
+        let (mut task, mut request) = alpha_result_task("general-compute-result-gpu-identity");
+        let image_digest = request.guest_image_digest.clone();
+        request.execution_policy.gpu_required = true;
+        request.execution_policy.gpu_requirement = Some(
+            general_compute_runtime::gpu::GpuRequirement::new(
+                general_compute_runtime::gpu::GpuVendor::Nvidia,
+                "sm_80",
+                general_compute_runtime::gpu::GpuRuntime::Cuda,
+                "550.54",
+                16 * 1024 * 1024 * 1024,
+                8,
+                &image_digest,
+                false,
+            )
+            .unwrap(),
+        );
+        request.request_digest = request.canonical_request_digest();
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
+
+        let trusted_gpu = general_compute_runtime::gpu::GpuCapability::new(
+            general_compute_runtime::gpu::GpuVendor::Nvidia,
+            "gpu-trusted",
+            "sm_80",
+            general_compute_runtime::gpu::GpuRuntime::Cuda,
+            "12.4",
+            "550.54",
+            24 * 1024 * 1024 * 1024,
+            16,
+            &image_digest,
+        )
+        .unwrap();
+        let forged_gpu = general_compute_runtime::gpu::GpuCapability::new(
+            general_compute_runtime::gpu::GpuVendor::Nvidia,
+            "gpu-forged",
+            "sm_80",
+            general_compute_runtime::gpu::GpuRuntime::Cuda,
+            "12.4",
+            "550.54",
+            24 * 1024 * 1024 * 1024,
+            16,
+            &image_digest,
+        )
+        .unwrap();
+        let snapshot = serde_json::to_string(&TrustedWorkerCapabilityRegistration {
+            worker: WorkerCapabilities {
+                guest_image_digests: vec![image_digest.clone()],
+                capabilities: vec![],
+                max_threads: 1,
+                gpu_available: true,
+            },
+            gpu_capabilities: vec![trusted_gpu],
+            backends: vec![BackendRegistration {
+                backend_id: request.backend_id.clone(),
+                execution_mode:
+                    general_compute_runtime::sandbox::BackendExecutionMode::ReferenceDirect,
+                guest_image_digest: image_digest,
+                capabilities: vec![],
+                max_threads: 1,
+                network_allowed: false,
+                filesystem_read_only: true,
+                gpu_allowed: true,
+            }],
+        })
+        .unwrap();
+        let mut result = alpha_result(&request);
+        result.gpu_selection = Some(general_compute_runtime::gpu::GpuSelection::Gpu(forged_gpu));
+        let response = ExecuteTaskResponse {
+            success: true,
+            general_compute_result_json: serde_json::to_vec(&result).unwrap(),
+            ..ExecuteTaskResponse::default()
+        };
+
+        let error = decode_and_validate_general_compute_result(&task, &response, &snapshot)
+            .expect_err("a result must use the exact operator-selected GPU identity");
+
+        assert!(error.contains("trusted GPU selection"));
     }
 
     #[test]
