@@ -456,14 +456,20 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
             .or_else(|_| std::env::var("COMPUTERNAME"))
             .or_else(|_| std::env::var("HOSTNAME"))
             .unwrap_or_else(|_| format!("worker-{}", uuid::Uuid::new_v4()));
-        let wk_state = Arc::new(WorkerGrpcState::new(
+        let nodepool_addr = nodepool_client_addr(&config, run_nodepool)?;
+        let transfer_lease_authority = Arc::new(
+            nodepool_client::NodepoolTransferLeaseAuthority::new(nodepool_addr.clone()),
+        );
+        let wk_state = Arc::new(WorkerGrpcState::new_with_transfer_lease_authority(
             config.clone(),
             executor.clone(),
             worker_id.clone(),
+            transfer_lease_authority,
         ));
         let runtime_admission = WorkerRuntimeAdmission::from_environment()?;
         let wk_chunk_svc = GeneralComputeChunkServiceServer::new(
-            GrpcGeneralComputeChunkService::new(wk_state.clone()),
+            GrpcGeneralComputeChunkService::new(wk_state.clone())
+                .with_runtime_admission(runtime_admission.clone()),
         )
         .max_decoding_message_size(GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES)
         .max_encoding_message_size(GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES);
@@ -472,7 +478,6 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
         )
         .max_decoding_message_size(WORKER_RPC_MESSAGE_MAX_BYTES)
         .max_encoding_message_size(WORKER_RPC_MESSAGE_MAX_BYTES);
-        let nodepool_addr = nodepool_client_addr(&config, run_nodepool)?;
         let worker_advertise_addr = match nodepool_client::advertise_addr(
             &config.server.worker_grpc_addr,
             config.server.worker_advertise_addr.clone(),

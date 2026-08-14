@@ -6,7 +6,7 @@ use hivemind_proto::{
     node_manager_service_client::NodeManagerServiceClient, user_service_client::UserServiceClient,
     LoginRequest, RegisterWorkerNodeRequest, ResourceSpec as ProtoResourceSpec,
     ResourceUsage as ProtoResourceUsage, RunningStatusRequest, TaskOutputUploadRequest,
-    TaskResultUploadRequest, TaskUsageRequest,
+    TaskResultUploadRequest, TaskUsageRequest, ValidateGeneralComputeTransferLeaseRequest,
 };
 use tokio::sync::watch;
 use tonic::transport::{Channel, Endpoint};
@@ -20,6 +20,83 @@ pub fn nodepool_endpoint(addr: &str) -> String {
         addr.to_string()
     } else {
         format!("http://{}", replace_unspecified_host_for_local_client(addr))
+    }
+}
+
+const TRANSFER_LEASE_AUTHORITY_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TransferLeaseAuthorityError {
+    #[error("Nodepool denied the general-compute transfer lease: {0}")]
+    Denied(String),
+    #[error("Nodepool transfer-lease authority is unavailable: {0}")]
+    Unavailable(String),
+}
+
+#[tonic::async_trait]
+pub trait TransferLeaseAuthority: Send + Sync {
+    async fn validate(
+        &self,
+        request: ValidateGeneralComputeTransferLeaseRequest,
+    ) -> Result<(), TransferLeaseAuthorityError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct NodepoolTransferLeaseAuthority {
+    endpoint: String,
+    timeout: Duration,
+}
+
+impl NodepoolTransferLeaseAuthority {
+    #[must_use]
+    pub fn new(endpoint: impl Into<String>) -> Self {
+        Self {
+            endpoint: endpoint.into(),
+            timeout: TRANSFER_LEASE_AUTHORITY_TIMEOUT,
+        }
+    }
+}
+
+#[tonic::async_trait]
+impl TransferLeaseAuthority for NodepoolTransferLeaseAuthority {
+    async fn validate(
+        &self,
+        request: ValidateGeneralComputeTransferLeaseRequest,
+    ) -> Result<(), TransferLeaseAuthorityError> {
+        hivemind_proto::validate_general_compute_transfer_lease_request(&request)
+            .map_err(|message| TransferLeaseAuthorityError::Denied(message.into()))?;
+        let endpoint = Endpoint::from_shared(nodepool_endpoint(&self.endpoint))
+            .map_err(|error| TransferLeaseAuthorityError::Unavailable(error.to_string()))?
+            .connect_timeout(self.timeout);
+        let response = tokio::time::timeout(self.timeout, async move {
+            let channel = endpoint
+                .connect()
+                .await
+                .map_err(|error| error.to_string())?;
+            NodeManagerServiceClient::new(channel)
+                .validate_general_compute_transfer_lease(request)
+                .await
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|_| {
+            TransferLeaseAuthorityError::Unavailable(
+                "validation timed out before Nodepool responded".into(),
+            )
+        })?
+        .map_err(TransferLeaseAuthorityError::Unavailable)?
+        .into_inner();
+        if response.success {
+            Ok(())
+        } else {
+            Err(TransferLeaseAuthorityError::Denied(
+                if response.status_message.trim().is_empty() {
+                    "transfer lease is inactive".into()
+                } else {
+                    response.status_message
+                },
+            ))
+        }
     }
 }
 
@@ -360,6 +437,7 @@ mod tests {
         ListWorkersRequest, ListWorkersResponse, RemoveWorkerRequest, RunningStatusResponse,
         StatusResponse, TaskOutputUploadRequest, TaskOutputUploadResponse, TaskResultUploadRequest,
         TaskResultUploadResponse, TaskUsageRequest, TaskUsageResponse,
+        ValidateGeneralComputeTransferLeaseRequest,
     };
     use std::net::SocketAddr;
     use std::time::Duration;
@@ -541,15 +619,131 @@ mod tests {
         assert_eq!(usage.vram_percent, 44.0);
     }
 
+    fn transfer_authority_request() -> ValidateGeneralComputeTransferLeaseRequest {
+        ValidateGeneralComputeTransferLeaseRequest {
+            token: "signed-worker-execution-token".into(),
+            task_id: "task-transfer-1".into(),
+            worker_id: "worker-transfer-1".into(),
+            execution_id: "execution-transfer-1".into(),
+            attempt_id: "attempt-transfer-1".into(),
+            transfer_generation: 17,
+            idempotency_key: "idempotency-transfer-1".into(),
+            request_digest: format!("sha256:{}", "a".repeat(64)),
+        }
+    }
+
+    #[tokio::test]
+    async fn nodepool_transfer_lease_authority_forwards_the_complete_request() {
+        let (addr, mut reports) = match fake_node_manager_server(AuthorityBehavior::Active).await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let authority = super::NodepoolTransferLeaseAuthority::new(addr.to_string());
+        let expected = transfer_authority_request();
+
+        super::TransferLeaseAuthority::validate(&authority, expected.clone())
+            .await
+            .expect("active Nodepool lease should authorize transfer");
+
+        let captured = tokio::time::timeout(Duration::from_secs(2), reports.authority_rx.recv())
+            .await
+            .expect("Nodepool should receive the authority request")
+            .expect("authority request channel should remain open");
+        assert_eq!(captured, expected);
+    }
+
+    #[tokio::test]
+    async fn nodepool_transfer_lease_authority_maps_rejection_to_denied() {
+        let (addr, _reports) = match fake_node_manager_server(AuthorityBehavior::Denied).await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let authority = super::NodepoolTransferLeaseAuthority::new(addr.to_string());
+
+        let error =
+            super::TransferLeaseAuthority::validate(&authority, transfer_authority_request())
+                .await
+                .expect_err("inactive Nodepool lease must be denied");
+
+        assert_eq!(
+            error,
+            super::TransferLeaseAuthorityError::Denied("lease revoked".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn nodepool_transfer_lease_authority_maps_connect_rpc_and_timeout_to_unavailable() {
+        let unused_addr = reserve_loopback_addr().expect("loopback address should be available");
+        let connect_authority = super::NodepoolTransferLeaseAuthority {
+            endpoint: unused_addr.to_string(),
+            timeout: Duration::from_millis(100),
+        };
+        let connect_error = super::TransferLeaseAuthority::validate(
+            &connect_authority,
+            transfer_authority_request(),
+        )
+        .await
+        .expect_err("connection failure must fail closed");
+        assert!(matches!(
+            connect_error,
+            super::TransferLeaseAuthorityError::Unavailable(_)
+        ));
+
+        let (rpc_addr, _reports) =
+            match fake_node_manager_server(AuthorityBehavior::RpcFailure).await {
+                Some(parts) => parts,
+                None => return,
+            };
+        let rpc_authority = super::NodepoolTransferLeaseAuthority {
+            endpoint: rpc_addr.to_string(),
+            timeout: Duration::from_millis(100),
+        };
+        let rpc_error =
+            super::TransferLeaseAuthority::validate(&rpc_authority, transfer_authority_request())
+                .await
+                .expect_err("RPC failure must fail closed");
+        assert!(matches!(
+            rpc_error,
+            super::TransferLeaseAuthorityError::Unavailable(_)
+        ));
+
+        let (slow_addr, _reports) = match fake_node_manager_server(AuthorityBehavior::Delayed).await
+        {
+            Some(parts) => parts,
+            None => return,
+        };
+        let slow_authority = super::NodepoolTransferLeaseAuthority {
+            endpoint: slow_addr.to_string(),
+            timeout: Duration::from_millis(20),
+        };
+        let timeout_error =
+            super::TransferLeaseAuthority::validate(&slow_authority, transfer_authority_request())
+                .await
+                .expect_err("authority timeout must fail closed");
+        assert!(matches!(
+            timeout_error,
+            super::TransferLeaseAuthorityError::Unavailable(_)
+        ));
+    }
+
     async fn fake_node_manager_report_server() -> Option<(SocketAddr, CapturedReports)> {
+        fake_node_manager_server(AuthorityBehavior::Active).await
+    }
+
+    async fn fake_node_manager_server(
+        authority_behavior: AuthorityBehavior,
+    ) -> Option<(SocketAddr, CapturedReports)> {
         let addr = reserve_loopback_addr()?;
         let (output_tx, output_rx) = mpsc::channel(1);
         let (result_tx, result_rx) = mpsc::channel(1);
         let (usage_tx, usage_rx) = mpsc::channel(1);
+        let (authority_tx, authority_rx) = mpsc::channel(1);
         let service = NodeManagerServiceServer::new(FakeNodeManagerReportService {
             output_tx,
             result_tx,
             usage_tx,
+            authority_tx,
+            authority_behavior,
         });
         tokio::spawn(async move {
             let _ = tonic::transport::Server::builder()
@@ -571,6 +765,7 @@ mod tests {
                         output_rx,
                         result_rx,
                         usage_rx,
+                        authority_rx,
                     },
                 ));
             }
@@ -590,12 +785,23 @@ mod tests {
         output_rx: mpsc::Receiver<TaskOutputUploadRequest>,
         result_rx: mpsc::Receiver<TaskResultUploadRequest>,
         usage_rx: mpsc::Receiver<TaskUsageRequest>,
+        authority_rx: mpsc::Receiver<ValidateGeneralComputeTransferLeaseRequest>,
+    }
+
+    #[derive(Clone, Copy)]
+    enum AuthorityBehavior {
+        Active,
+        Denied,
+        RpcFailure,
+        Delayed,
     }
 
     struct FakeNodeManagerReportService {
         output_tx: mpsc::Sender<TaskOutputUploadRequest>,
         result_tx: mpsc::Sender<TaskResultUploadRequest>,
         usage_tx: mpsc::Sender<TaskUsageRequest>,
+        authority_tx: mpsc::Sender<ValidateGeneralComputeTransferLeaseRequest>,
+        authority_behavior: AuthorityBehavior,
     }
 
     #[tonic::async_trait]
@@ -622,15 +828,37 @@ mod tests {
 
         async fn validate_general_compute_transfer_lease(
             &self,
-            _request: Request<hivemind_proto::ValidateGeneralComputeTransferLeaseRequest>,
+            request: Request<hivemind_proto::ValidateGeneralComputeTransferLeaseRequest>,
         ) -> Result<Response<hivemind_proto::ValidateGeneralComputeTransferLeaseResponse>, Status>
         {
-            Ok(Response::new(
-                hivemind_proto::ValidateGeneralComputeTransferLeaseResponse {
-                    success: true,
-                    status_message: "active".into(),
-                },
-            ))
+            self.authority_tx
+                .send(request.into_inner())
+                .await
+                .map_err(|_| Status::internal("authority receiver dropped"))?;
+            match self.authority_behavior {
+                AuthorityBehavior::Active => Ok(Response::new(
+                    hivemind_proto::ValidateGeneralComputeTransferLeaseResponse {
+                        success: true,
+                        status_message: "active".into(),
+                    },
+                )),
+                AuthorityBehavior::Denied => Ok(Response::new(
+                    hivemind_proto::ValidateGeneralComputeTransferLeaseResponse {
+                        success: false,
+                        status_message: "lease revoked".into(),
+                    },
+                )),
+                AuthorityBehavior::RpcFailure => Err(Status::internal("authority backend failed")),
+                AuthorityBehavior::Delayed => {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    Ok(Response::new(
+                        hivemind_proto::ValidateGeneralComputeTransferLeaseResponse {
+                            success: true,
+                            status_message: "active".into(),
+                        },
+                    ))
+                }
+            }
         }
 
         async fn task_output_upload(
