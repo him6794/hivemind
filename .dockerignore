@@ -29,6 +29,8 @@ executor-rs/*
 executor-rs/crates/*
 !executor-rs/crates/managed-function-runtime/
 !executor-rs/crates/managed-function-runtime/**
+!executor-rs/crates/general-compute-runtime/
+!executor-rs/crates/general-compute-runtime/**
 !packaging/
 !packaging/**
 !.dockerignore
