@@ -112,6 +112,56 @@ pub fn validate_general_compute_chunk_resume_request(
     Ok(())
 }
 
+/// Validate the bounded identity and manifest envelope used to prepare a
+/// general-compute transfer on a Worker.
+pub fn validate_general_compute_prepare_request(
+    request: &GeneralComputePrepareRequest,
+) -> Result<(), &'static str> {
+    if request.task_id.trim().is_empty() {
+        return Err("task id is required");
+    }
+    if request.task_id.len() > TASK_ID_MAX_BYTES {
+        return Err("task id exceeds the byte limit");
+    }
+    if request.token.trim().is_empty() {
+        return Err("worker execution token is required");
+    }
+    if request.token.len() > WORKER_EXECUTION_TOKEN_MAX_BYTES {
+        return Err("worker execution token exceeds the byte limit");
+    }
+    if request.runtime != "general-compute-v1alpha1" {
+        return Err("PrepareGeneralCompute requires general-compute-v1alpha1");
+    }
+    if request.general_compute_manifest_json.is_empty() {
+        return Err("general-compute manifest is required");
+    }
+    if request.general_compute_manifest_json.len() > GENERAL_COMPUTE_MANIFEST_MAX_BYTES {
+        return Err("general-compute manifest exceeds the byte limit");
+    }
+    for value in [
+        request.execution_id.as_str(),
+        request.attempt_id.as_str(),
+        request.idempotency_key.as_str(),
+    ] {
+        if value.trim().is_empty() {
+            return Err("general-compute transfer identity fields are required");
+        }
+        if value.len() > GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES {
+            return Err("general-compute transfer identity field exceeds the byte limit");
+        }
+    }
+    if !is_sha256_digest(&request.request_digest) {
+        return Err("request digest must be a sha256 digest");
+    }
+    if request.transfer_generation <= 0 {
+        return Err("transfer generation must be positive");
+    }
+    if prost::Message::encoded_len(request) > GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES {
+        return Err("general-compute preparation exceeds the message limit");
+    }
+    Ok(())
+}
+
 /// Validate a Worker-to-Nodepool transfer-lease authority envelope.
 pub fn validate_general_compute_transfer_lease_request(
     request: &ValidateGeneralComputeTransferLeaseRequest,
@@ -200,8 +250,8 @@ mod tests {
 
     use super::{
         validate_general_compute_chunk_resume_request, validate_general_compute_chunk_upload,
-        validate_general_compute_transfer_lease_request, ExecuteTaskResponse,
-        GeneralComputeChunkDescriptor, GeneralComputeChunkResumeRequest,
+        validate_general_compute_prepare_request, validate_general_compute_transfer_lease_request,
+        ExecuteTaskResponse, GeneralComputeChunkDescriptor, GeneralComputeChunkResumeRequest,
         GeneralComputeChunkResumeResponse, GeneralComputeChunkUpload,
         GeneralComputeChunkUploadResponse, GeneralComputePrepareRequest,
         GeneralComputePrepareResponse, ManagedProofEnvelope,
@@ -562,6 +612,54 @@ mod tests {
         let decoded = GeneralComputePrepareResponse::decode(response.encode_to_vec().as_slice())
             .expect("prepare response should decode");
         assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn general_compute_prepare_validator_rejects_unbound_or_oversized_fields() {
+        let valid = GeneralComputePrepareRequest {
+            task_id: "task-1".into(),
+            token: "nodepool-signed-worker-execution-token".into(),
+            runtime: "general-compute-v1alpha1".into(),
+            general_compute_manifest_json: br#"{"execution_id":"execution-1"}"#.to_vec(),
+            execution_id: "execution-1".into(),
+            attempt_id: "attempt-2".into(),
+            idempotency_key: "idempotency-3".into(),
+            request_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            transfer_generation: 7,
+        };
+        assert_eq!(validate_general_compute_prepare_request(&valid), Ok(()));
+
+        let mut invalid = valid.clone();
+        invalid.task_id.clear();
+        assert!(validate_general_compute_prepare_request(&invalid).is_err());
+        invalid = valid.clone();
+        invalid.task_id = "x".repeat(TASK_ID_MAX_BYTES + 1);
+        assert!(validate_general_compute_prepare_request(&invalid).is_err());
+        invalid = valid.clone();
+        invalid.token = "x".repeat(WORKER_EXECUTION_TOKEN_MAX_BYTES + 1);
+        assert!(validate_general_compute_prepare_request(&invalid).is_err());
+        invalid = valid.clone();
+        invalid.runtime = "managed-function-v0".into();
+        assert!(validate_general_compute_prepare_request(&invalid).is_err());
+        invalid = valid.clone();
+        invalid.general_compute_manifest_json.clear();
+        assert!(validate_general_compute_prepare_request(&invalid).is_err());
+        invalid = valid.clone();
+        invalid.general_compute_manifest_json = vec![0; GENERAL_COMPUTE_MANIFEST_MAX_BYTES + 1];
+        assert!(validate_general_compute_prepare_request(&invalid).is_err());
+        invalid = valid.clone();
+        invalid.execution_id = " ".into();
+        assert!(validate_general_compute_prepare_request(&invalid).is_err());
+        invalid = valid.clone();
+        invalid.attempt_id = "x".repeat(GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES + 1);
+        assert!(validate_general_compute_prepare_request(&invalid).is_err());
+        invalid = valid.clone();
+        invalid.request_digest = "not-a-sha256".into();
+        assert!(validate_general_compute_prepare_request(&invalid).is_err());
+        invalid = valid;
+        invalid.transfer_generation = 0;
+        assert!(validate_general_compute_prepare_request(&invalid).is_err());
     }
 
     #[test]

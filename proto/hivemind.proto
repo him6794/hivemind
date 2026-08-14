@@ -922,6 +922,7 @@ service WorkerNodeService {
 // Dedicated transfer surface for general-compute artifacts. Its message cap
 // is independent from the legacy/execute-task Worker RPC surface.
 service GeneralComputeChunkService {
+    rpc PrepareGeneralCompute(GeneralComputePrepareRequest) returns (GeneralComputePrepareResponse);
     rpc UploadChunk(GeneralComputeChunkUpload) returns (GeneralComputeChunkUploadResponse);
     rpc ResumeChunks(GeneralComputeChunkResumeRequest) returns (GeneralComputeChunkResumeResponse);
 }
