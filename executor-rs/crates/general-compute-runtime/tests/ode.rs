@@ -1,4 +1,6 @@
-use general_compute_runtime::ode::{MAX_RK4_STEPS, OdeError, OdeStatus, Rk4Config};
+use general_compute_runtime::ode::{
+    AdaptiveRk4Config, OdeError, OdeStatus, Rk4Config, MAX_RK4_STEPS,
+};
 
 #[test]
 fn rk4_integrates_exponential_growth_with_bounded_fixed_steps() {
@@ -52,8 +54,54 @@ fn rk4_rejects_invalid_configuration_step_budget_and_nonfinite_derivatives() {
     let wide_step = Rk4Config::new(4.0, 1e-6, 1).unwrap();
     assert_eq!(
         wide_step.integrate(0.0, 1.0, 4.0, |_, value| {
-            if value.is_finite() { f64::MAX } else { 0.0 }
+            if value.is_finite() {
+                f64::MAX
+            } else {
+                0.0
+            }
         }),
         Err(OdeError::NonFiniteState { step: 0 })
+    );
+}
+
+#[test]
+fn adaptive_rk4_reaches_target_and_reports_error_control_metadata() {
+    let config = AdaptiveRk4Config::new(0.5, 1e-8, 1e-6, 128)
+        .expect("adaptive configuration should validate");
+    let result = config
+        .integrate(0.0, 1.0, 1.0, |_, value| value)
+        .expect("adaptive exponential solve should complete");
+
+    assert_eq!(result.status, OdeStatus::Completed);
+    assert_eq!(result.final_time, 1.0);
+    assert_eq!(result.tolerance, 1e-8);
+    assert!(result.accepted_steps > 0);
+    assert!(result.attempted_steps >= result.accepted_steps);
+    assert!(result.last_step_size >= 1e-6);
+    assert!((result.final_value - std::f64::consts::E).abs() < 2e-7);
+}
+
+#[test]
+fn adaptive_rk4_rejects_invalid_limits_and_unresolvable_steps() {
+    assert_eq!(
+        AdaptiveRk4Config::new(0.0, 1e-8, 1e-6, 128),
+        Err(OdeError::InvalidStepSize)
+    );
+    assert_eq!(
+        AdaptiveRk4Config::new(0.5, 0.0, 1e-6, 128),
+        Err(OdeError::InvalidTolerance)
+    );
+    assert_eq!(
+        AdaptiveRk4Config::new(0.5, 1e-8, 1e-6, 0),
+        Err(OdeError::StepLimitExceeded {
+            requested: 0,
+            max: MAX_RK4_STEPS,
+        })
+    );
+
+    let config = AdaptiveRk4Config::new(1.0, 1e-12, 0.5, 16).unwrap();
+    assert_eq!(
+        config.integrate(0.0, 1.0, 1.0, |_, value| 1_000.0 * value),
+        Err(OdeError::AdaptiveStepTooSmall)
     );
 }
