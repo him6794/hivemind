@@ -17,6 +17,7 @@ pub mod ode;
 pub mod reference;
 pub mod rng;
 pub mod sandbox;
+pub mod sparse_numeric;
 pub mod supervisor;
 pub mod tensor;
 pub mod transport;
