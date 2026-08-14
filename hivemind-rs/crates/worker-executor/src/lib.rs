@@ -42,9 +42,10 @@ impl WorkerExecutor {
     pub fn new(config: HivemindConfig) -> Self {
         let runner_config = config.clone();
         let prover = Arc::new(managed_prover::ManagedProverExecutor::new(&config));
-        let reference_executor = runtime_admission::WorkerRuntimeAdmission::from_environment()
-            .ok()
-            .and_then(|admission| executor::reference_executor_from_environment(&admission));
+        let admission = runtime_admission::WorkerRuntimeAdmission::from_environment()
+            .unwrap_or_default();
+        let trusted_registration = admission.trusted_registration();
+        let reference_executor = executor::reference_executor_from_environment(&admission);
         let cas_store = executor::cas_store_from_environment();
         Self {
             active_tasks: Arc::new(Mutex::new(HashMap::new())),
@@ -53,13 +54,15 @@ impl WorkerExecutor {
                 let prover = Arc::clone(&prover);
                 let reference_executor = reference_executor.clone();
                 let cas_store = cas_store.clone();
+                let trusted_registration = trusted_registration.clone();
                 Box::pin(async move {
-                    let mut result = executor::run_task_with_cancel_and_reference_and_cas(
+                    let mut result = executor::run_task_with_cancel_and_reference_and_cas_and_trusted_registration(
                         &task,
                         &config,
                         cancellation.clone(),
                         reference_executor,
                         cas_store,
+                        Some(trusted_registration),
                     )
                     .await?;
                     if result.success && task.runtime.as_deref() == Some("managed-function-v0") {
