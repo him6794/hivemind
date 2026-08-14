@@ -5,12 +5,16 @@
 //! callers can use them as a small reference implementation before wiring a
 //! scientific backend image.
 
+use std::cmp::Ordering;
 use std::fmt;
 use std::ops::{Add, Div, Mul, Sub};
 
 pub const MAX_REFERENCE_FFT_LEN: usize = 4096;
 pub const MAX_REFERENCE_LU_DIM: usize = 1024;
 pub const MAX_REFERENCE_QR_DIM: usize = 1024;
+pub const MAX_REFERENCE_SVD_DIM: usize = 1024;
+
+type SvdTallFactors = (Vec<f64>, Vec<f64>, Vec<f64>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
@@ -78,11 +82,25 @@ pub enum NumericError {
         expected_columns: u64,
         actual: Vec<u64>,
     },
+    SvdRequiresTwoDimensions,
+    SvdDimensionExceeded {
+        rows: usize,
+        columns: usize,
+        max: usize,
+    },
+    SvdDimensionMismatch {
+        expected_rows: u64,
+        expected_columns: u64,
+        actual: Vec<u64>,
+    },
     SingularMatrix,
     InvalidResidualTolerance,
     ResidualExceeded,
     InvalidQrTolerance,
     QrErrorExceeded,
+    InvalidSvdTolerance,
+    SvdErrorExceeded,
+    SvdNoConvergence,
     NonFiniteValue,
     FftRequiresOneDimension,
     FftLengthExceeded {
@@ -179,6 +197,25 @@ impl fmt::Display for NumericError {
                     "QR reconstruction expects shape {expected_rows}x{expected_columns}, got {actual:?}"
                 )
             }
+            Self::SvdRequiresTwoDimensions => {
+                formatter.write_str("SVD factorization requires a two-dimensional matrix")
+            }
+            Self::SvdDimensionExceeded { rows, columns, max } => {
+                write!(
+                    formatter,
+                    "SVD dimensions {rows}x{columns} exceed reference limit {max}"
+                )
+            }
+            Self::SvdDimensionMismatch {
+                expected_rows,
+                expected_columns,
+                actual,
+            } => {
+                write!(
+                    formatter,
+                    "SVD reconstruction expects shape {expected_rows}x{expected_columns}, got {actual:?}"
+                )
+            }
             Self::SingularMatrix => formatter.write_str("solve matrix is singular"),
             Self::InvalidResidualTolerance => {
                 formatter.write_str("solve residual tolerance must be finite and non-negative")
@@ -191,6 +228,15 @@ impl fmt::Display for NumericError {
             }
             Self::QrErrorExceeded => {
                 formatter.write_str("QR reconstruction or orthogonality error exceeds tolerance")
+            }
+            Self::InvalidSvdTolerance => {
+                formatter.write_str("SVD tolerance must be finite and non-negative")
+            }
+            Self::SvdErrorExceeded => {
+                formatter.write_str("SVD reconstruction or orthogonality error exceeds tolerance")
+            }
+            Self::SvdNoConvergence => {
+                formatter.write_str("SVD reference iteration did not converge")
             }
             Self::NonFiniteValue => {
                 formatter.write_str("numeric operation produced a non-finite value")
@@ -425,6 +471,181 @@ impl QrFactorization {
             return Err(NumericError::NonFiniteValue);
         }
 
+        let reconstructed = self.reconstruct()?;
+        let mut maximum = 0.0_f64;
+        for (actual, expected) in reconstructed.values.iter().zip(original.values.iter()) {
+            let error = (actual - expected).abs();
+            if !error.is_finite() {
+                return Err(NumericError::NonFiniteValue);
+            }
+            maximum = maximum.max(error);
+        }
+        Ok(maximum)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SvdFactorization {
+    left: F64Tensor,
+    singular_values: F64Tensor,
+    right_transpose: F64Tensor,
+}
+
+impl SvdFactorization {
+    #[must_use]
+    pub fn u(&self) -> &F64Tensor {
+        &self.left
+    }
+
+    #[must_use]
+    pub fn left(&self) -> &F64Tensor {
+        &self.left
+    }
+
+    #[must_use]
+    pub fn singular_values(&self) -> &F64Tensor {
+        &self.singular_values
+    }
+
+    #[must_use]
+    pub fn s(&self) -> &F64Tensor {
+        &self.singular_values
+    }
+
+    #[must_use]
+    pub fn vt(&self) -> &F64Tensor {
+        &self.right_transpose
+    }
+
+    #[must_use]
+    pub fn right_transpose(&self) -> &F64Tensor {
+        &self.right_transpose
+    }
+
+    pub fn reconstruct(&self) -> Result<F64Tensor, NumericError> {
+        if self.left.shape.len() != 2
+            || self.singular_values.shape.len() != 1
+            || self.right_transpose.shape.len() != 2
+        {
+            return Err(NumericError::SvdRequiresTwoDimensions);
+        }
+        let rows = usize::try_from(self.left.shape[0]).map_err(|_| NumericError::ShapeOverflow)?;
+        let rank = usize::try_from(self.left.shape[1]).map_err(|_| NumericError::ShapeOverflow)?;
+        let columns = usize::try_from(self.right_transpose.shape[1])
+            .map_err(|_| NumericError::ShapeOverflow)?;
+        if self.singular_values.shape[0] != self.left.shape[1]
+            || self.right_transpose.shape[0] != self.left.shape[1]
+        {
+            return Err(NumericError::SvdDimensionMismatch {
+                expected_rows: self.left.shape[0],
+                expected_columns: self.right_transpose.shape[1],
+                actual: self.singular_values.shape.clone(),
+            });
+        }
+
+        let output_len = rows
+            .checked_mul(columns)
+            .ok_or(NumericError::ShapeOverflow)?;
+        let mut output = vec![0.0; output_len];
+        for row in 0..rows {
+            for column in 0..columns {
+                let mut value = 0.0;
+                for component in 0..rank {
+                    value += self.left.values[row * rank + component]
+                        * self.singular_values.values[component]
+                        * self.right_transpose.values[component * columns + column];
+                    if !value.is_finite() {
+                        return Err(NumericError::NonFiniteValue);
+                    }
+                }
+                output[row * columns + column] = value;
+            }
+        }
+        F64Tensor::new(
+            vec![
+                u64::try_from(rows).map_err(|_| NumericError::ShapeOverflow)?,
+                u64::try_from(columns).map_err(|_| NumericError::ShapeOverflow)?,
+            ],
+            output,
+        )
+    }
+
+    /// Compute the maximum component-wise error in `UᵀU - I` and `VᵀV - I`.
+    pub fn orthogonality_inf_norm(&self) -> Result<f64, NumericError> {
+        if self.left.shape.len() != 2
+            || self.singular_values.shape.len() != 1
+            || self.right_transpose.shape.len() != 2
+        {
+            return Err(NumericError::SvdRequiresTwoDimensions);
+        }
+        let rows = usize::try_from(self.left.shape[0]).map_err(|_| NumericError::ShapeOverflow)?;
+        let rank = usize::try_from(self.left.shape[1]).map_err(|_| NumericError::ShapeOverflow)?;
+        let columns = usize::try_from(self.right_transpose.shape[1])
+            .map_err(|_| NumericError::ShapeOverflow)?;
+        if self.singular_values.shape[0] != self.left.shape[1]
+            || self.right_transpose.shape[0] != self.left.shape[1]
+        {
+            return Err(NumericError::SvdDimensionMismatch {
+                expected_rows: self.left.shape[0],
+                expected_columns: self.right_transpose.shape[1],
+                actual: self.singular_values.shape.clone(),
+            });
+        }
+
+        let mut maximum = 0.0_f64;
+        for left_component in 0..rank {
+            for right_component in 0..rank {
+                let mut left_dot = 0.0;
+                for row in 0..rows {
+                    left_dot += self.left.values[row * rank + left_component]
+                        * self.left.values[row * rank + right_component];
+                    if !left_dot.is_finite() {
+                        return Err(NumericError::NonFiniteValue);
+                    }
+                }
+                let expected = if left_component == right_component {
+                    1.0
+                } else {
+                    0.0
+                };
+                let left_error = (left_dot - expected).abs();
+                if !left_error.is_finite() {
+                    return Err(NumericError::NonFiniteValue);
+                }
+                maximum = maximum.max(left_error);
+
+                let mut right_dot = 0.0;
+                for column in 0..columns {
+                    right_dot += self.right_transpose.values[left_component * columns + column]
+                        * self.right_transpose.values[right_component * columns + column];
+                    if !right_dot.is_finite() {
+                        return Err(NumericError::NonFiniteValue);
+                    }
+                }
+                let right_error = (right_dot - expected).abs();
+                if !right_error.is_finite() {
+                    return Err(NumericError::NonFiniteValue);
+                }
+                maximum = maximum.max(right_error);
+            }
+        }
+        Ok(maximum)
+    }
+
+    /// Compute the infinity norm of `U*S*Vᵀ - original`.
+    pub fn reconstruction_inf_norm(&self, original: &F64Tensor) -> Result<f64, NumericError> {
+        let expected_rows = self.left.shape.first().copied().unwrap_or(0);
+        let expected_columns = self.right_transpose.shape.get(1).copied().unwrap_or(0);
+        if original.shape != [expected_rows, expected_columns] {
+            return Err(NumericError::SvdDimensionMismatch {
+                expected_rows,
+                expected_columns,
+                actual: original.shape.clone(),
+            });
+        }
+        if original.values.iter().any(|value| !value.is_finite()) {
+            return Err(NumericError::NonFiniteValue);
+        }
         let reconstructed = self.reconstruct()?;
         let mut maximum = 0.0_f64;
         for (actual, expected) in reconstructed.values.iter().zip(original.values.iter()) {
@@ -805,6 +1026,117 @@ where
 }
 
 impl DenseTensor<f64> {
+    /// Factor a bounded matrix with a deterministic thin one-sided Jacobi SVD.
+    /// The returned factors satisfy `A = U * diag(S) * Vᵀ`, with `k = min(m,n)`.
+    pub fn svd(&self) -> Result<SvdFactorization, NumericError> {
+        if self.shape.len() != 2 {
+            return Err(NumericError::SvdRequiresTwoDimensions);
+        }
+        let rows = usize::try_from(self.shape[0]).map_err(|_| NumericError::ShapeOverflow)?;
+        let columns = usize::try_from(self.shape[1]).map_err(|_| NumericError::ShapeOverflow)?;
+        if rows > MAX_REFERENCE_SVD_DIM || columns > MAX_REFERENCE_SVD_DIM {
+            return Err(NumericError::SvdDimensionExceeded {
+                rows,
+                columns,
+                max: MAX_REFERENCE_SVD_DIM,
+            });
+        }
+        if self.values.iter().any(|value| !value.is_finite()) {
+            return Err(NumericError::NonFiniteValue);
+        }
+
+        if rows >= columns {
+            let (left, singular_values, right_transpose) =
+                svd_tall_values(&self.values, rows, columns)?;
+            Ok(SvdFactorization {
+                left: Self::new(
+                    vec![
+                        u64::try_from(rows).map_err(|_| NumericError::ShapeOverflow)?,
+                        u64::try_from(columns).map_err(|_| NumericError::ShapeOverflow)?,
+                    ],
+                    left,
+                )?,
+                singular_values: Self::new(
+                    vec![u64::try_from(columns).map_err(|_| NumericError::ShapeOverflow)?],
+                    singular_values,
+                )?,
+                right_transpose: Self::new(
+                    vec![
+                        u64::try_from(columns).map_err(|_| NumericError::ShapeOverflow)?,
+                        u64::try_from(columns).map_err(|_| NumericError::ShapeOverflow)?,
+                    ],
+                    right_transpose,
+                )?,
+            })
+        } else {
+            let transposed_len = rows
+                .checked_mul(columns)
+                .ok_or(NumericError::ShapeOverflow)?;
+            let mut transposed = Vec::with_capacity(transposed_len);
+            for column in 0..columns {
+                for row in 0..rows {
+                    transposed.push(self.values[row * columns + column]);
+                }
+            }
+            let (transposed_left, singular_values, transposed_right_transpose) =
+                svd_tall_values(&transposed, columns, rows)?;
+            let rank = rows;
+            let mut left = vec![0.0; rows.checked_mul(rank).ok_or(NumericError::ShapeOverflow)?];
+            for row in 0..rows {
+                for component in 0..rank {
+                    left[row * rank + component] =
+                        transposed_right_transpose[component * rows + row];
+                }
+            }
+            let mut right_transpose = vec![
+                0.0;
+                rank.checked_mul(columns)
+                    .ok_or(NumericError::ShapeOverflow)?
+            ];
+            for component in 0..rank {
+                for column in 0..columns {
+                    right_transpose[component * columns + column] =
+                        transposed_left[column * rank + component];
+                }
+            }
+            Ok(SvdFactorization {
+                left: Self::new(
+                    vec![
+                        u64::try_from(rows).map_err(|_| NumericError::ShapeOverflow)?,
+                        u64::try_from(rank).map_err(|_| NumericError::ShapeOverflow)?,
+                    ],
+                    left,
+                )?,
+                singular_values: Self::new(
+                    vec![u64::try_from(rank).map_err(|_| NumericError::ShapeOverflow)?],
+                    singular_values,
+                )?,
+                right_transpose: Self::new(
+                    vec![
+                        u64::try_from(rank).map_err(|_| NumericError::ShapeOverflow)?,
+                        u64::try_from(columns).map_err(|_| NumericError::ShapeOverflow)?,
+                    ],
+                    right_transpose,
+                )?,
+            })
+        }
+    }
+
+    /// Factor and require SVD reconstruction and orthogonality errors to fit
+    /// within a finite, non-negative reference tolerance.
+    pub fn svd_with_tolerance(&self, tolerance: f64) -> Result<SvdFactorization, NumericError> {
+        if !tolerance.is_finite() || tolerance < 0.0 {
+            return Err(NumericError::InvalidSvdTolerance);
+        }
+        let factor = self.svd()?;
+        if factor.orthogonality_inf_norm()? > tolerance
+            || factor.reconstruction_inf_norm(self)? > tolerance
+        {
+            return Err(NumericError::SvdErrorExceeded);
+        }
+        Ok(factor)
+    }
+
     /// Factor a bounded tall-or-square matrix with deterministic Householder
     /// reflections. The returned thin factors satisfy `A = Q * R`.
     pub fn qr(&self) -> Result<QrFactorization, NumericError> {
@@ -1276,6 +1608,230 @@ impl DenseTensor<Complex128> {
         }
         Ok(self.clone())
     }
+}
+
+fn svd_tall_values(
+    matrix: &[f64],
+    rows: usize,
+    columns: usize,
+) -> Result<SvdTallFactors, NumericError> {
+    let matrix_len = rows
+        .checked_mul(columns)
+        .ok_or(NumericError::ShapeOverflow)?;
+    if matrix.len() != matrix_len || rows < columns {
+        return Err(NumericError::SvdDimensionMismatch {
+            expected_rows: u64::try_from(rows).map_err(|_| NumericError::ShapeOverflow)?,
+            expected_columns: u64::try_from(columns).map_err(|_| NumericError::ShapeOverflow)?,
+            actual: vec![
+                u64::try_from(rows).map_err(|_| NumericError::ShapeOverflow)?,
+                u64::try_from(columns).map_err(|_| NumericError::ShapeOverflow)?,
+            ],
+        });
+    }
+    if matrix.iter().any(|value| !value.is_finite()) {
+        return Err(NumericError::NonFiniteValue);
+    }
+
+    let mut work = matrix.to_vec();
+    let v_len = columns
+        .checked_mul(columns)
+        .ok_or(NumericError::ShapeOverflow)?;
+    let mut right = vec![0.0; v_len];
+    for diagonal in 0..columns {
+        right[diagonal * columns + diagonal] = 1.0;
+    }
+
+    let mut converged = columns < 2;
+    for _ in 0..128 {
+        let mut rotated = false;
+        for first in 0..columns {
+            for second in (first + 1)..columns {
+                let mut first_norm_squared = 0.0;
+                let mut second_norm_squared = 0.0;
+                let mut cross = 0.0;
+                for row in 0..rows {
+                    let first_value = work[row * columns + first];
+                    let second_value = work[row * columns + second];
+                    first_norm_squared += first_value * first_value;
+                    second_norm_squared += second_value * second_value;
+                    cross += first_value * second_value;
+                    if !first_norm_squared.is_finite()
+                        || !second_norm_squared.is_finite()
+                        || !cross.is_finite()
+                    {
+                        return Err(NumericError::NonFiniteValue);
+                    }
+                }
+                let scale = (first_norm_squared * second_norm_squared).sqrt();
+                if !scale.is_finite() {
+                    return Err(NumericError::NonFiniteValue);
+                }
+                if cross == 0.0 || cross.abs() <= f64::EPSILON * scale {
+                    continue;
+                }
+
+                let tau = (second_norm_squared - first_norm_squared) / (2.0 * cross);
+                if !tau.is_finite() {
+                    return Err(NumericError::SvdNoConvergence);
+                }
+                let tau_norm = tau.hypot(1.0);
+                let tangent = if tau >= 0.0 {
+                    1.0 / (tau + tau_norm)
+                } else {
+                    -1.0 / (-tau + tau_norm)
+                };
+                let cosine = 1.0 / (1.0 + tangent * tangent).sqrt();
+                let sine = tangent * cosine;
+                if !cosine.is_finite() || !sine.is_finite() {
+                    return Err(NumericError::NonFiniteValue);
+                }
+
+                for row in 0..rows {
+                    let first_index = row * columns + first;
+                    let second_index = row * columns + second;
+                    let first_value = work[first_index];
+                    let second_value = work[second_index];
+                    let updated_first = cosine * first_value - sine * second_value;
+                    let updated_second = sine * first_value + cosine * second_value;
+                    if !updated_first.is_finite() || !updated_second.is_finite() {
+                        return Err(NumericError::NonFiniteValue);
+                    }
+                    work[first_index] = updated_first;
+                    work[second_index] = updated_second;
+                }
+                for row in 0..columns {
+                    let first_index = row * columns + first;
+                    let second_index = row * columns + second;
+                    let first_value = right[first_index];
+                    let second_value = right[second_index];
+                    let updated_first = cosine * first_value - sine * second_value;
+                    let updated_second = sine * first_value + cosine * second_value;
+                    if !updated_first.is_finite() || !updated_second.is_finite() {
+                        return Err(NumericError::NonFiniteValue);
+                    }
+                    right[first_index] = updated_first;
+                    right[second_index] = updated_second;
+                }
+                rotated = true;
+            }
+        }
+        if !rotated {
+            converged = true;
+            break;
+        }
+    }
+    if !converged {
+        return Err(NumericError::SvdNoConvergence);
+    }
+
+    let mut singular_values = vec![0.0; columns];
+    let mut largest = 0.0_f64;
+    for column in 0..columns {
+        let mut norm_squared = 0.0;
+        for row in 0..rows {
+            norm_squared += work[row * columns + column] * work[row * columns + column];
+            if !norm_squared.is_finite() {
+                return Err(NumericError::NonFiniteValue);
+            }
+        }
+        let norm = norm_squared.sqrt();
+        if !norm.is_finite() {
+            return Err(NumericError::NonFiniteValue);
+        }
+        singular_values[column] = norm;
+        largest = largest.max(norm);
+    }
+
+    let rank_floor = f64::EPSILON * (rows.max(columns) as f64) * largest.max(1.0) * 32.0;
+    let mut order: Vec<usize> = (0..columns).collect();
+    order.sort_by(|&left, &right| {
+        singular_values[right]
+            .partial_cmp(&singular_values[left])
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| left.cmp(&right))
+    });
+
+    let left_len = rows
+        .checked_mul(columns)
+        .ok_or(NumericError::ShapeOverflow)?;
+    let mut left = vec![0.0; left_len];
+    let mut right_transpose = vec![0.0; v_len];
+    for (component, &source_column) in order.iter().enumerate() {
+        let singular_value = singular_values[source_column];
+        for column in 0..columns {
+            right_transpose[component * columns + column] = right[column * columns + source_column];
+        }
+
+        if singular_value > rank_floor {
+            for row in 0..rows {
+                let value = work[row * columns + source_column] / singular_value;
+                if !value.is_finite() {
+                    return Err(NumericError::NonFiniteValue);
+                }
+                left[row * columns + component] = value;
+            }
+        } else {
+            let mut completed = false;
+            for basis in 0..rows {
+                let mut candidate = vec![0.0; rows];
+                candidate[basis] = 1.0;
+                for prior in 0..component {
+                    let mut projection = 0.0;
+                    for row in 0..rows {
+                        projection += left[row * columns + prior] * candidate[row];
+                    }
+                    for row in 0..rows {
+                        candidate[row] -= projection * left[row * columns + prior];
+                    }
+                }
+                let mut candidate_norm_squared = 0.0;
+                for &value in &candidate {
+                    candidate_norm_squared += value * value;
+                }
+                if candidate_norm_squared > rank_floor * rank_floor
+                    && candidate_norm_squared.is_finite()
+                {
+                    let candidate_norm = candidate_norm_squared.sqrt();
+                    for row in 0..rows {
+                        left[row * columns + component] = candidate[row] / candidate_norm;
+                    }
+                    completed = true;
+                    break;
+                }
+            }
+            if !completed {
+                return Err(NumericError::SvdNoConvergence);
+            }
+        }
+
+        let mut sign = 1.0;
+        for column in 0..columns {
+            let value = right_transpose[component * columns + column];
+            if value.abs() > rank_floor {
+                if value < 0.0 {
+                    sign = -1.0;
+                }
+                break;
+            }
+        }
+        if sign < 0.0 {
+            for row in 0..rows {
+                left[row * columns + component] *= -1.0;
+            }
+            for column in 0..columns {
+                right_transpose[component * columns + column] *= -1.0;
+            }
+        }
+    }
+
+    Ok((
+        left,
+        order
+            .into_iter()
+            .map(|index| singular_values[index])
+            .collect(),
+        right_transpose,
+    ))
 }
 
 fn element_count(shape: &[u64]) -> Result<usize, NumericError> {
