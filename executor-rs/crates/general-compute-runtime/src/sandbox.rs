@@ -687,7 +687,11 @@ fn validate_oci_bundle_inner(
         .get("seccomp")
         .and_then(serde_json::Value::as_object)
         .ok_or(ProductionSandboxError::InvalidBundle)?;
-    if seccomp.keys().any(|key| key != "defaultAction")
+    if artifact_root.is_some() {
+        if !valid_materialized_seccomp_profile(seccomp) {
+            return Err(ProductionSandboxError::InvalidBundle);
+        }
+    } else if seccomp.keys().any(|key| key != "defaultAction")
         || seccomp
             .get("defaultAction")
             .and_then(serde_json::Value::as_str)
@@ -793,6 +797,67 @@ fn is_sha256_digest(value: &str) -> bool {
         return false;
     };
     hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn valid_materialized_seccomp_profile(
+    profile: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    if profile
+        .keys()
+        .any(|key| !matches!(key.as_str(), "defaultAction" | "architectures" | "syscalls"))
+        || profile
+            .get("defaultAction")
+            .and_then(serde_json::Value::as_str)
+            != Some("SCMP_ACT_ERRNO")
+    {
+        return false;
+    }
+    if let Some(architectures) = profile.get("architectures") {
+        let Some(architectures) = architectures.as_array() else {
+            return false;
+        };
+        if architectures.is_empty()
+            || architectures
+                .iter()
+                .any(|architecture| architecture.as_str().is_none())
+        {
+            return false;
+        }
+    }
+    let Some(syscalls) = profile.get("syscalls").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    if syscalls.is_empty() {
+        return false;
+    }
+    let mut names = BTreeSet::new();
+    for group in syscalls {
+        let Some(group) = group.as_object() else {
+            return false;
+        };
+        if group.keys().any(|key| !matches!(key.as_str(), "names" | "action"))
+            || group.get("action").and_then(serde_json::Value::as_str)
+                != Some("SCMP_ACT_ALLOW")
+        {
+            return false;
+        }
+        let Some(syscall_names) = group.get("names").and_then(serde_json::Value::as_array)
+        else {
+            return false;
+        };
+        if syscall_names.is_empty() {
+            return false;
+        }
+        for name in syscall_names {
+            let Some(name) = name.as_str() else {
+                return false;
+            };
+            if name.trim().is_empty() || !names.insert(name) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn valid_mount_destination(destination: &str) -> bool {

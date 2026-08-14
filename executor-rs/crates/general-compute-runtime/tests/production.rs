@@ -20,7 +20,7 @@ fn policy() -> LinuxSandboxPolicy {
         ],
         cgroup: CgroupPolicy::V2,
         seccomp: SeccompPolicy::DefaultDeny {
-            profile_sha256: format!("sha256:{}", "b".repeat(64)),
+            profile_sha256: general_compute_runtime::sha256_digest(seccomp_profile_bytes()),
         },
         privilege_escalation: PrivilegeEscalationPolicy::NoNewPrivileges,
         root_filesystem: RootFilesystemPolicy::ReadOnly,
@@ -32,6 +32,10 @@ fn policy() -> LinuxSandboxPolicy {
     }
 }
 
+fn seccomp_profile_bytes() -> &'static [u8] {
+    br#"{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[{"action":"SCMP_ACT_ALLOW","names":["exit","exit_group"]}]}"#
+}
+
 fn config() -> ProductionBackendConfig {
     ProductionBackendConfig {
         backend_id: "python-cpython-312".into(),
@@ -40,6 +44,7 @@ fn config() -> ProductionBackendConfig {
         artifact_root: PathBuf::from("relative-artifacts"),
         runner_executable: PathBuf::from("relative-runc"),
         runner_state_root: PathBuf::from("relative-runner-state"),
+        seccomp_profile_path: PathBuf::from("relative-seccomp.json"),
         runner_prefix_args: Vec::new(),
         runner_sha256: format!("sha256:{}", "c".repeat(64)),
         entrypoint: vec!["python".into(), "/runtime/runner.py".into()],
@@ -69,12 +74,43 @@ fn production_registry_requires_a_dedicated_runner_state_root() {
 }
 
 #[test]
+fn production_materializer_requires_an_operator_seccomp_profile() {
+    let mut registration = config();
+    let root = std::env::temp_dir().join(format!(
+        "hivemind-production-seccomp-profile-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    registration.bundle_root = root.join("bundles");
+    registration.artifact_root = root.join("artifacts");
+    registration.runner_executable = root.join("runc");
+    registration.runner_state_root = root.join("runner-state");
+    registration.seccomp_profile_path = root.join("missing-seccomp.json");
+    std::fs::create_dir_all(registration.bundle_root.join("rootfs")).unwrap();
+
+    let registry = ProductionBackendRegistry::new(vec![registration.clone()]).unwrap();
+    let request = request_for_mount_test(&registration, "execution-seccomp-profile");
+    let error = registry
+        .get(&registration.backend_id)
+        .unwrap()
+        .materialize_bundle(&request, "task-seccomp-profile")
+        .expect_err("production materialization must require an operator seccomp profile");
+
+    assert!(matches!(
+        error,
+        ProductionBackendRegistryError::SeccompProfileUnavailable(_)
+    ));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn production_registry_rejects_backend_mounts_that_do_not_match_the_entrypoint() {
     let mut registration = config();
     registration.bundle_root = PathBuf::from("C:\\hivemind\\bundle");
     registration.artifact_root = PathBuf::from("C:\\hivemind\\artifacts");
     registration.runner_executable = PathBuf::from("C:\\hivemind\\runc.exe");
     registration.runner_state_root = PathBuf::from("C:\\hivemind\\runner-state");
+    registration.seccomp_profile_path = PathBuf::from("C:\\hivemind\\seccomp.json");
     registration.policy.mounts[0] = SandboxMount::ReadOnlyArtifact {
         artifact_id: "different-source".into(),
         destination: "/work/source".into(),
@@ -92,9 +128,11 @@ fn production_task_root_rejects_path_traversal_and_materializes_bound_bundle() {
     registration.artifact_root = std::env::temp_dir().join("hivemind-production-artifacts");
     registration.runner_executable = PathBuf::from("C:\\hivemind\\runc.exe");
     registration.runner_state_root = std::env::temp_dir().join("hivemind-production-runner-state");
+    registration.seccomp_profile_path = registration.bundle_root.join("seccomp.json");
     let _ = std::fs::remove_dir_all(&registration.bundle_root);
     let _ = std::fs::remove_dir_all(&registration.artifact_root);
     std::fs::create_dir_all(registration.bundle_root.join("rootfs")).unwrap();
+    write_seccomp_profile(&registration);
     let registry = ProductionBackendRegistry::new(vec![registration.clone()]).unwrap();
     assert!(matches!(
         registry.get(&registration.backend_id).unwrap().task_root("../escape"),
@@ -144,6 +182,7 @@ fn production_registry_requires_mounts_for_every_request_artifact() {
     registration.artifact_root = PathBuf::from("C:\\hivemind\\artifacts");
     registration.runner_executable = PathBuf::from("C:\\hivemind\\runc.exe");
     registration.runner_state_root = PathBuf::from("C:\\hivemind\\runner-state");
+    registration.seccomp_profile_path = PathBuf::from("C:\\hivemind\\seccomp.json");
     let registry = ProductionBackendRegistry::new(vec![registration.clone()]).unwrap();
     let mut request = GeneralComputeRequest {
         execution_id: "execution-production-input-mount".into(),
@@ -175,6 +214,7 @@ fn production_registry_rejects_mounts_for_unrequested_artifacts() {
     registration.artifact_root = PathBuf::from("C:\\hivemind\\artifacts");
     registration.runner_executable = PathBuf::from("C:\\hivemind\\runc.exe");
     registration.runner_state_root = PathBuf::from("C:\\hivemind\\runner-state");
+    registration.seccomp_profile_path = PathBuf::from("C:\\hivemind\\seccomp.json");
     registration.policy.mounts.push(SandboxMount::ReadOnlyArtifact {
         artifact_id: "unrequested".into(),
         destination: "/work/unrequested".into(),
@@ -223,7 +263,9 @@ fn production_materializer_rejects_a_symlinked_task_bundle_root() {
     registration.artifact_root = root.join("artifacts");
     registration.runner_executable = PathBuf::from("/hivemind/runc");
     registration.runner_state_root = root.join("runner-state");
+    registration.seccomp_profile_path = root.join("seccomp.json");
     std::fs::create_dir_all(registration.bundle_root.join("rootfs")).unwrap();
+    write_seccomp_profile(&registration);
     let redirected = root.join("redirected");
     std::fs::create_dir_all(&redirected).unwrap();
     std::fs::create_dir_all(&registration.bundle_root).unwrap();
@@ -253,7 +295,9 @@ fn production_materializer_rejects_a_symlinked_task_rootfs() {
     registration.artifact_root = root.join("artifacts");
     registration.runner_executable = PathBuf::from("/hivemind/runc");
     registration.runner_state_root = root.join("runner-state");
+    registration.seccomp_profile_path = root.join("seccomp.json");
     std::fs::create_dir_all(registration.bundle_root.join("rootfs")).unwrap();
+    write_seccomp_profile(&registration);
     let redirected = root.join("redirected-rootfs");
     std::fs::create_dir_all(&redirected).unwrap();
     std::fs::create_dir_all(registration.bundle_root.join("task-rootfs")).unwrap();
@@ -283,7 +327,9 @@ fn production_materializer_rejects_a_symlinked_task_config_before_writing() {
     registration.artifact_root = root.join("artifacts");
     registration.runner_executable = PathBuf::from("/hivemind/runc");
     registration.runner_state_root = root.join("runner-state");
+    registration.seccomp_profile_path = root.join("seccomp.json");
     std::fs::create_dir_all(registration.bundle_root.join("rootfs")).unwrap();
+    write_seccomp_profile(&registration);
     let redirected = root.join("redirected-config.json");
     std::fs::write(&redirected, b"sentinel").unwrap();
     let task_bundle = registration.bundle_root.join("task-config");
@@ -301,6 +347,13 @@ fn production_materializer_rejects_a_symlinked_task_config_before_writing() {
     assert!(matches!(error, ProductionBackendRegistryError::RootUnavailable(_)));
     assert_eq!(std::fs::read(&redirected).unwrap(), b"sentinel");
     let _ = std::fs::remove_dir_all(root);
+}
+
+fn write_seccomp_profile(registration: &ProductionBackendConfig) {
+    if let Some(parent) = registration.seccomp_profile_path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(&registration.seccomp_profile_path, seccomp_profile_bytes()).unwrap();
 }
 
 #[cfg(unix)]

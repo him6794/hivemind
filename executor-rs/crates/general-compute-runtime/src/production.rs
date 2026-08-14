@@ -8,7 +8,7 @@
 use crate::GeneralComputeRequest;
 use crate::sandbox::{BackendExecutionMode, ProductionSandboxLaunch, SandboxMount};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,6 +23,10 @@ pub struct ProductionBackendConfig {
     /// runc's `--root` directory). It must be separate from task bundles and
     /// never be derived from a task id or a Worker request.
     pub runner_state_root: PathBuf,
+    /// Canonical operator-owned OCI seccomp profile bytes. The SHA-256 must
+    /// equal the digest embedded in `policy.seccomp` before a task bundle is
+    /// materialized.
+    pub seccomp_profile_path: PathBuf,
     pub runner_prefix_args: Vec<String>,
     pub runner_sha256: String,
     pub entrypoint: Vec<String>,
@@ -124,6 +128,7 @@ impl ProductionBackendConfig {
             &self.artifact_root,
             &self.runner_executable,
             &self.runner_state_root,
+            &self.seccomp_profile_path,
         ] {
             if !path.is_absolute() {
                 return Err(ProductionBackendRegistryError::PathMustBeAbsolute);
@@ -165,6 +170,7 @@ pub enum ProductionBackendRegistryError {
     PathMustBeAbsolute,
     PathTraversal,
     RunnerDigestInvalid,
+    SeccompProfileUnavailable(String),
     LaunchInvalid(crate::sandbox::ProductionSandboxError),
     SourceArtifactMountRequired,
     UnsafeTaskId,
@@ -234,6 +240,70 @@ impl std::fmt::Display for ProductionBackendRegistryError {
 
 impl std::error::Error for ProductionBackendRegistryError {}
 
+fn validate_seccomp_profile(profile: &serde_json::Value) -> Result<(), String> {
+    let object = profile
+        .as_object()
+        .ok_or_else(|| "seccomp profile must be a JSON object".to_string())?;
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "defaultAction" | "architectures" | "syscalls"))
+    {
+        return Err("seccomp profile contains an unknown field".into());
+    }
+    if object.get("defaultAction").and_then(serde_json::Value::as_str)
+        != Some("SCMP_ACT_ERRNO")
+    {
+        return Err("seccomp profile defaultAction must be SCMP_ACT_ERRNO".into());
+    }
+    if let Some(architectures) = object.get("architectures") {
+        let Some(architectures) = architectures.as_array() else {
+            return Err("seccomp profile architectures must be an array".into());
+        };
+        if architectures.is_empty()
+            || architectures
+                .iter()
+                .any(|architecture| architecture.as_str().is_none())
+        {
+            return Err("seccomp profile architectures must contain names".into());
+        }
+    }
+    let syscalls = object
+        .get("syscalls")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "seccomp profile must contain a syscall allowlist".to_string())?;
+    if syscalls.is_empty() {
+        return Err("seccomp profile syscall allowlist must not be empty".into());
+    }
+    let mut names = BTreeSet::new();
+    for group in syscalls {
+        let group = group
+            .as_object()
+            .ok_or_else(|| "seccomp syscall groups must be objects".to_string())?;
+        if group.keys().any(|key| !matches!(key.as_str(), "names" | "action")) {
+            return Err("seccomp syscall group contains an unknown field".into());
+        }
+        if group.get("action").and_then(serde_json::Value::as_str) != Some("SCMP_ACT_ALLOW") {
+            return Err("seccomp syscall groups must use SCMP_ACT_ALLOW".into());
+        }
+        let syscall_names = group
+            .get("names")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "seccomp syscall group must contain names".to_string())?;
+        if syscall_names.is_empty() {
+            return Err("seccomp syscall group names must not be empty".into());
+        }
+        for name in syscall_names {
+            let Some(name) = name.as_str() else {
+                return Err("seccomp syscall names must be strings".into());
+            };
+            if name.trim().is_empty() || !names.insert(name) {
+                return Err("seccomp syscall names must be unique and non-empty".into());
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ProductionBackendRegistry {
     backends: BTreeMap<String, ProductionBackendConfig>,
@@ -249,6 +319,7 @@ impl ProductionBackendConfig {
         task_id: &str,
     ) -> Result<(PathBuf, PathBuf), ProductionBackendRegistryError> {
         self.validate_request_mounts(request)?;
+        let seccomp_profile = self.load_seccomp_profile()?;
         let (bundle_root, artifact_root) = self.task_root(task_id)?;
         let template_rootfs = self.bundle_root.join("rootfs");
         let template_metadata = std::fs::symlink_metadata(&template_rootfs).map_err(|error| {
@@ -337,7 +408,7 @@ impl ProductionBackendConfig {
                     {"type": "user"}, {"type": "pid"},
                     {"type": "mount"}, {"type": "network"}
                 ],
-                "seccomp": {"defaultAction": "SCMP_ACT_ERRNO"}
+                "seccomp": seccomp_profile
             },
             "annotations": {
                 "org.hivemind.guest-image-digest": self.guest_image_digest,
@@ -368,6 +439,50 @@ impl ProductionBackendConfig {
         std::fs::write(&config_path, bytes)
             .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
         Ok((bundle_root, artifact_root))
+    }
+
+    fn load_seccomp_profile(&self) -> Result<serde_json::Value, ProductionBackendRegistryError> {
+        let metadata = std::fs::symlink_metadata(&self.seccomp_profile_path).map_err(|error| {
+            ProductionBackendRegistryError::SeccompProfileUnavailable(error.to_string())
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(ProductionBackendRegistryError::SeccompProfileUnavailable(
+                "seccomp profile must be a regular non-symlink file".into(),
+            ));
+        }
+        let bytes = std::fs::read(&self.seccomp_profile_path).map_err(|error| {
+            ProductionBackendRegistryError::SeccompProfileUnavailable(error.to_string())
+        })?;
+        let expected_digest = match &self.policy.seccomp {
+            crate::sandbox::SeccompPolicy::DefaultDeny { profile_sha256 } => profile_sha256,
+            crate::sandbox::SeccompPolicy::Disabled => {
+                return Err(ProductionBackendRegistryError::SeccompProfileUnavailable(
+                    "production seccomp policy cannot be disabled".into(),
+                ));
+            }
+        };
+        if crate::sha256_digest(&bytes) != *expected_digest {
+            return Err(ProductionBackendRegistryError::SeccompProfileUnavailable(
+                "seccomp profile SHA-256 does not match the policy pin".into(),
+            ));
+        }
+        let profile: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+            ProductionBackendRegistryError::SeccompProfileUnavailable(format!(
+                "seccomp profile is not valid JSON: {error}"
+            ))
+        })?;
+        validate_seccomp_profile(&profile).map_err(|message| {
+            ProductionBackendRegistryError::SeccompProfileUnavailable(message)
+        })?;
+        let canonical = serde_json::to_vec(&profile).map_err(|error| {
+            ProductionBackendRegistryError::SeccompProfileUnavailable(error.to_string())
+        })?;
+        if canonical != bytes {
+            return Err(ProductionBackendRegistryError::SeccompProfileUnavailable(
+                "seccomp profile must use canonical JSON bytes".into(),
+            ));
+        }
+        Ok(profile)
     }
 }
 

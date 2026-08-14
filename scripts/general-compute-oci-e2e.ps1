@@ -75,6 +75,80 @@ function Require-Sha256 {
     }
 }
 
+function Require-SeccompProfile {
+    param(
+        [Parameter(Mandatory = $true)]$Registration,
+        [Parameter(Mandatory = $true)][string]$BackendId
+    )
+    $profilePath = [string]$Registration.seccomp_profile_path
+    Require-AbsolutePath "backend '$BackendId' seccomp profile" $profilePath
+    Require-RegularFile "backend '$BackendId' seccomp profile" $profilePath
+
+    $expectedDigest = [string]$Registration.policy.seccomp.profile_sha256
+    Require-Sha256 "backend '$BackendId' seccomp profile" $expectedDigest
+    $actualDigest = (Get-FileHash -LiteralPath $profilePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualDigest -ne $expectedDigest.Substring(7).ToLowerInvariant()) {
+        Fail-Contract "backend '$BackendId' seccomp profile SHA-256 does not match the operator pin"
+    }
+
+    try {
+        $profile = Get-Content -LiteralPath $profilePath -Raw | ConvertFrom-Json
+    } catch {
+        Fail-Contract "backend '$BackendId' seccomp profile is not valid JSON"
+    }
+    if ($null -eq $profile) {
+        Fail-Contract "backend '$BackendId' seccomp profile must be a JSON object"
+    }
+    $profileFields = @($profile.PSObject.Properties.Name)
+    if (($profileFields | Where-Object { $_ -notin @("defaultAction", "architectures", "syscalls") }).Count -gt 0) {
+        Fail-Contract "backend '$BackendId' seccomp profile contains an unknown field"
+    }
+    if ([string]$profile.defaultAction -ne "SCMP_ACT_ERRNO") {
+        Fail-Contract "backend '$BackendId' seccomp profile must default to SCMP_ACT_ERRNO"
+    }
+    $architectureProperty = $profile.PSObject.Properties["architectures"]
+    if ($null -ne $architectureProperty) {
+        if (!($profile.architectures -is [System.Array]) -or @($profile.architectures).Count -eq 0) {
+            Fail-Contract "backend '$BackendId' seccomp profile architectures must be a non-empty array"
+        }
+        foreach ($architecture in @($profile.architectures)) {
+            if ($architecture -isnot [string] -or [string]::IsNullOrWhiteSpace($architecture)) {
+                Fail-Contract "backend '$BackendId' seccomp profile architectures must contain names"
+            }
+        }
+    }
+    $syscallsProperty = $profile.PSObject.Properties["syscalls"]
+    if ($null -eq $syscallsProperty -or !($profile.syscalls -is [System.Array]) -or @($profile.syscalls).Count -eq 0) {
+        Fail-Contract "backend '$BackendId' seccomp profile must contain a non-empty syscall allowlist"
+    }
+    $seenNames = @{}
+    foreach ($group in @($profile.syscalls)) {
+        if ($null -eq $group) {
+            Fail-Contract "backend '$BackendId' seccomp syscall groups must be objects"
+        }
+        $groupFields = @($group.PSObject.Properties.Name)
+        if (($groupFields | Where-Object { $_ -notin @("names", "action") }).Count -gt 0) {
+            Fail-Contract "backend '$BackendId' seccomp syscall group contains an unknown field"
+        }
+        if ([string]$group.action -ne "SCMP_ACT_ALLOW") {
+            Fail-Contract "backend '$BackendId' seccomp syscall groups must use SCMP_ACT_ALLOW"
+        }
+        if (!($group.names -is [System.Array]) -or @($group.names).Count -eq 0) {
+            Fail-Contract "backend '$BackendId' seccomp syscall groups must contain names"
+        }
+        foreach ($name in @($group.names)) {
+            if ($name -isnot [string] -or [string]::IsNullOrWhiteSpace($name)) {
+                Fail-Contract "backend '$BackendId' seccomp syscall names must be unique and non-empty"
+            }
+            $nameText = $name
+            if ($seenNames.ContainsKey($nameText)) {
+                Fail-Contract "backend '$BackendId' seccomp syscall names must be unique and non-empty"
+            }
+            $seenNames[$nameText] = $true
+        }
+    }
+}
+
 function Require-Policy {
     param(
         [Parameter(Mandatory = $true)]$Registration,
@@ -152,7 +226,7 @@ function Validate-OperatorRegistry {
         }
         $ids[$backendId] = $true
 
-        foreach ($field in @("bundle_root", "artifact_root", "runner_executable", "runner_state_root")) {
+        foreach ($field in @("bundle_root", "artifact_root", "runner_executable", "runner_state_root", "seccomp_profile_path")) {
             $value = [string]$registration.$field
             Require-AbsolutePath "backend '$backendId' $field" $value
         }
@@ -172,6 +246,7 @@ function Validate-OperatorRegistry {
         }
         Require-Sha256 "backend '$backendId' guest image" ([string]$registration.guest_image_digest)
         Require-Policy $registration $backendId
+        Require-SeccompProfile $registration $backendId
     }
     return $Registrations
 }
