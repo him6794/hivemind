@@ -268,6 +268,7 @@ impl ReferenceBackendExecutor {
             },
             determinism: request.determinism.clone(),
             capability_summary: backend.capabilities.clone(),
+            gpu_selection: None,
             evidence: Default::default(),
         };
         result

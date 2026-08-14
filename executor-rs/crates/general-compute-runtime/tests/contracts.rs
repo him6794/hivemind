@@ -114,6 +114,7 @@ fn result_round_trip_keeps_claimed_usage_and_output_manifest() {
         input_sha256: "sha256:input".into(),
         determinism: request.determinism.clone(),
         capability_summary: vec!["cpu".into()],
+        gpu_selection: None,
         output_manifest_root: canonical_artifact_root(&[ArtifactManifest::inline_json(
             "output-data",
             ArtifactRole::Output,
@@ -166,6 +167,7 @@ fn result_validation_rejects_retry_identity_mismatch() {
         guest_image_digest: request.guest_image_digest.clone(),
         input_sha256: "sha256:input".into(),
         determinism: request.determinism.clone(),
+        gpu_selection: None,
         capability_summary: vec!["cpu".into()],
         output_manifest_root: canonical_artifact_root(&[]),
         evidence: EvidenceEnvelope::default(),
@@ -216,6 +218,7 @@ fn valid_result(request: &GeneralComputeRequest) -> GeneralComputeResult {
         backend_id: request.backend_id.clone(),
         guest_image_digest: request.guest_image_digest.clone(),
         input_sha256: "sha256:input".into(),
+        gpu_selection: None,
         determinism: request.determinism.clone(),
         capability_summary: vec!["cpu".into()],
         output_manifest_root: String::new(),

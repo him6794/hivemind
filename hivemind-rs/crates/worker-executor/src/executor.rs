@@ -346,6 +346,7 @@ fn failed_general_compute_result(
         input_sha256: general_compute_runtime::sha256_digest(&[]),
         determinism: request.determinism.clone(),
         capability_summary: Vec::new(),
+        gpu_selection: None,
         output_manifest_root: general_compute_runtime::canonical_artifact_root(&[]),
         evidence: Default::default(),
     }

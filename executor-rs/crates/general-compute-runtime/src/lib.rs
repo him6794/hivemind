@@ -221,6 +221,8 @@ pub struct GeneralComputeResult {
     pub input_sha256: String,
     pub determinism: DeterminismPolicy,
     pub capability_summary: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_selection: Option<gpu::GpuSelection>,
     pub output_manifest_root: String,
     pub evidence: EvidenceEnvelope,
 }
@@ -231,6 +233,7 @@ impl GeneralComputeResult {
         &self,
         request: &GeneralComputeRequest,
         registry: &CapabilityMatrix,
+        self.validate_gpu_selection(request)?;
     ) -> Result<(), ValidationError> {
         request.validate()?;
         if self.execution_id != request.execution_id
@@ -328,6 +331,71 @@ impl GeneralComputeResult {
                 "result usage claim exceeds the request policy",
             ));
         }
+    /// Validate the typed GPU identity claimed by a result against the
+    /// request. Nodepool must additionally compare a concrete GPU selection
+    /// with its operator-owned registration before treating it as trusted.
+    pub fn validate_gpu_selection(
+        &self,
+        request: &GeneralComputeRequest,
+    ) -> Result<(), ValidationError> {
+        request.validate()?;
+        match (
+            request.execution_policy.gpu_required,
+            self.gpu_selection.as_ref(),
+        ) {
+            (false, None) => Ok(()),
+            (false, Some(_)) => Err(ValidationError::new(
+                ValidationErrorCode::GpuUnavailable,
+                "CPU request must not claim a GPU selection",
+            )),
+            (true, None) => Err(ValidationError::new(
+                ValidationErrorCode::GpuUnavailable,
+                "GPU request result is missing a selected device or explicit fallback",
+            )),
+            (true, Some(gpu::GpuSelection::CpuFallback { .. })) => {
+                if request
+                    .execution_policy
+                    .gpu_requirement
+                    .as_ref()
+                    .is_some_and(|requirement| requirement.allow_cpu_fallback)
+                {
+                    Ok(())
+                } else {
+                    Err(ValidationError::new(
+                        ValidationErrorCode::GpuUnavailable,
+                        "GPU result CPU fallback was not allowed by the request",
+                    ))
+                }
+            }
+            (true, Some(gpu::GpuSelection::Gpu(capability))) => {
+                capability.validate().map_err(|error| {
+                    ValidationError::new(
+                        ValidationErrorCode::GpuUnavailable,
+                        format!("result GPU capability is invalid: {error}"),
+                    )
+                })?;
+                let requirement = request
+                    .execution_policy
+                    .gpu_requirement
+                    .as_ref()
+                    .expect("validated GPU request must carry a typed requirement");
+                if capability.vendor != requirement.vendor
+                    || capability.compute_capability != requirement.compute_capability
+                    || capability.runtime != requirement.runtime
+                    || capability.driver_abi != requirement.driver_abi
+                    || capability.vram_bytes < requirement.min_vram_bytes
+                    || capability.max_streams < requirement.min_streams
+                    || capability.image_digest != requirement.image_digest
+                {
+                    return Err(ValidationError::new(
+                        ValidationErrorCode::GpuUnavailable,
+                        "result GPU identity does not satisfy the request requirement",
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
         Ok(())
     }
 

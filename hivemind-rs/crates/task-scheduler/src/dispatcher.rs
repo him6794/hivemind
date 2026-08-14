@@ -1812,6 +1812,7 @@ mod tests {
             input_sha256: sha256_digest(&[]),
             determinism: request.determinism.clone(),
             capability_summary: vec![],
+            gpu_selection: None,
             output_manifest_root: canonical_artifact_root(&[output]),
             evidence: EvidenceEnvelope::default(),
         }
