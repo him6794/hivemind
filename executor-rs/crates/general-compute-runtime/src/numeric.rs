@@ -23,6 +23,8 @@ pub enum NumericError {
     BroadcastIncompatible { axis: usize, lhs: u64, rhs: u64 },
     AxisOutOfBounds { axis: usize, rank: usize },
     DuplicateAxis { axis: usize },
+    DotRequiresOneDimension,
+    DotLengthMismatch { lhs: u64, rhs: u64 },
     MatmulRequiresTwoDimensions,
     MatmulInnerDimensionMismatch { lhs: u64, rhs: u64 },
 }
@@ -44,6 +46,12 @@ impl fmt::Display for NumericError {
                 write!(formatter, "axis {axis} is out of bounds for rank {rank}")
             }
             Self::DuplicateAxis { axis } => write!(formatter, "axis {axis} was specified twice"),
+            Self::DotRequiresOneDimension => {
+                formatter.write_str("dot requires one-dimensional tensors")
+            }
+            Self::DotLengthMismatch { lhs, rhs } => {
+                write!(formatter, "dot dimensions do not match: {lhs} and {rhs}")
+            }
             Self::MatmulRequiresTwoDimensions => {
                 formatter.write_str("matmul requires two-dimensional tensors")
             }
@@ -327,6 +335,25 @@ where
             u64::try_from(columns).map_err(|_| NumericError::ShapeOverflow)?,
         ];
         Self::new(output_shape, output)
+    }
+
+    pub fn dot(&self, rhs: &Self) -> Result<T, NumericError> {
+        if self.shape.len() != 1 || rhs.shape.len() != 1 {
+            return Err(NumericError::DotRequiresOneDimension);
+        }
+        let (lhs_length, rhs_length) = (self.shape[0], rhs.shape[0]);
+        if lhs_length != rhs_length {
+            return Err(NumericError::DotLengthMismatch {
+                lhs: lhs_length,
+                rhs: rhs_length,
+            });
+        }
+
+        let mut result = T::default();
+        for (&lhs, &rhs) in self.values.iter().zip(rhs.values.iter()) {
+            result = result + lhs * rhs;
+        }
+        Ok(result)
     }
 }
 

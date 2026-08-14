@@ -137,3 +137,49 @@ fn dtype_specific_dense_tensors_preserve_f32_and_complex64_arithmetic() {
         .expect("complex128 addition should succeed");
     assert_eq!(complex128_result.values(), &[Complex128::new(6.0, -2.0)]);
 }
+
+#[test]
+fn dot_computes_a_bounded_f64_vector_product() {
+    let lhs = F64Tensor::new(vec![3], vec![1.0, 2.0, 3.0]).unwrap();
+    let rhs = F64Tensor::new(vec![3], vec![4.0, 5.0, 6.0]).unwrap();
+
+    assert_eq!(lhs.dot(&rhs).expect("matching vectors should dot"), 32.0);
+}
+
+#[test]
+fn dot_preserves_f32_and_complex64_arithmetic() {
+    let f32_lhs = F32Tensor::new(vec![2], vec![1.5_f32, 2.0]).unwrap();
+    let f32_rhs = F32Tensor::new(vec![2], vec![2.0_f32, 4.0]).unwrap();
+    assert_eq!(f32_lhs.dot(&f32_rhs).unwrap(), 11.0_f32);
+
+    let complex_lhs = Complex64Tensor::new(
+        vec![2],
+        vec![Complex64::new(1.0, 2.0), Complex64::new(3.0, 4.0)],
+    )
+    .unwrap();
+    let complex_rhs = Complex64Tensor::new(
+        vec![2],
+        vec![Complex64::new(5.0, 6.0), Complex64::new(7.0, 8.0)],
+    )
+    .unwrap();
+    assert_eq!(
+        complex_lhs.dot(&complex_rhs).unwrap(),
+        Complex64::new(-18.0, 68.0)
+    );
+}
+
+#[test]
+fn dot_rejects_non_vectors_and_mismatched_lengths() {
+    let vector = F64Tensor::new(vec![2], vec![1.0, 2.0]).unwrap();
+    let matrix = F64Tensor::new(vec![1, 2], vec![1.0, 2.0]).unwrap();
+    assert_eq!(
+        vector.dot(&matrix),
+        Err(NumericError::DotRequiresOneDimension)
+    );
+
+    let other = F64Tensor::new(vec![3], vec![1.0, 2.0, 3.0]).unwrap();
+    assert_eq!(
+        vector.dot(&other),
+        Err(NumericError::DotLengthMismatch { lhs: 2, rhs: 3 })
+    );
+}
