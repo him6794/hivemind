@@ -52,6 +52,13 @@ impl TaskScheduler {
         self.repo.find_by_task_id(task_id).await
     }
 
+    pub async fn general_compute_transfer_lease(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<task_repository::GeneralComputeTransferLease>> {
+        self.repo.general_compute_transfer_lease(task_id).await
+    }
+
     pub async fn list_user_tasks(&self, owner: &str) -> Result<Vec<Task>> {
         self.repo.find_by_owner(owner).await
     }

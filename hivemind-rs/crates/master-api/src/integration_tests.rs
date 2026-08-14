@@ -64,6 +64,7 @@ async fn nodepool_test_fixture() -> Option<NodepoolTestFixture> {
     let state = Arc::new(NodepoolState {
         auth,
         worker_execution_private_key_pem: config.auth.worker_execution_private_key_pem.clone(),
+        worker_execution_public_key_pem: config.auth.worker_execution_public_key_pem.clone(),
         managed_proof_rollout_mode: config.managed_proof.rollout_mode,
         node_manager,
         scheduler,

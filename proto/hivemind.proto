@@ -851,6 +851,7 @@ service UserService {
 service NodeManagerService {
     rpc RegisterWorkerNode(RegisterWorkerNodeRequest) returns (StatusResponse);
     rpc ReportStatus(RunningStatusRequest) returns (RunningStatusResponse);
+    rpc ValidateGeneralComputeTransferLease(ValidateGeneralComputeTransferLeaseRequest) returns (ValidateGeneralComputeTransferLeaseResponse);
     rpc TaskOutputUpload(TaskOutputUploadRequest) returns (TaskOutputUploadResponse);
     rpc TaskResultUpload(TaskResultUploadRequest) returns (TaskResultUploadResponse);
     rpc TaskUsage(TaskUsageRequest) returns (TaskUsageResponse);

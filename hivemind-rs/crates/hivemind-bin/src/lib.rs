@@ -364,6 +364,7 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
         let np_state = Arc::new(NodepoolState {
             auth: auth.clone(),
             worker_execution_private_key_pem: config.auth.worker_execution_private_key_pem.clone(),
+            worker_execution_public_key_pem: config.auth.worker_execution_public_key_pem.clone(),
             managed_proof_rollout_mode: config.managed_proof.rollout_mode,
             node_manager: node_mgr.clone(),
             scheduler: scheduler.clone(),
