@@ -1388,6 +1388,7 @@ dependencies = [
  "sha2 0.10.9",
  "windows-sys 0.61.2",
 ]
+
 [[package]]
 name = "generic-array"
 version = "0.14.7"
@@ -1821,8 +1822,8 @@ dependencies = [
  "anyhow",
  "axum 0.7.9",
  "chrono",
- "general-compute-runtime",
  "flate2",
+ "general-compute-runtime",
  "hivemind-auth",
  "hivemind-client-runtime",
  "hivemind-config",
@@ -2347,7 +2348,7 @@ dependencies = [
 
 [[package]]
 name = "managed-function-runtime"
-version = "0.0.7"
+version = "0.1.0"
 dependencies = [
  "serde_json",
 ]
