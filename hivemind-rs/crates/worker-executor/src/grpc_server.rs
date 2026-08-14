@@ -938,6 +938,8 @@ mod tests {
             general_compute_runtime::CapabilityMatrix::new(vec![
                 general_compute_runtime::BackendRegistration {
                     backend_id: "python-reference".into(),
+                    execution_mode:
+                        general_compute_runtime::sandbox::BackendExecutionMode::ReferenceDirect,
                     guest_image_digest: format!("sha256:{}", "a".repeat(64)),
                     capabilities: vec!["cpu".into()],
                     max_threads: 2,
