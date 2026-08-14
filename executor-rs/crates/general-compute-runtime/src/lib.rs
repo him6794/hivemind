@@ -433,6 +433,8 @@ pub struct ExecutionPolicy {
     pub network_allowed: bool,
     pub filesystem_read_only: bool,
     pub gpu_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_requirement: Option<gpu::GpuRequirement>,
     pub cancellation_deadline_ms: Option<u64>,
 }
 
@@ -473,6 +475,27 @@ impl ExecutionPolicy {
                 "cancellation deadline must be positive and no later than wall time",
             ));
         }
+        match (self.gpu_required, self.gpu_requirement.as_ref()) {
+            (true, Some(requirement)) => requirement.validate().map_err(|error| {
+                ValidationError::new(
+                    ValidationErrorCode::PolicyInvalid,
+                    format!("GPU requirement is invalid: {error}"),
+                )
+            })?,
+            (true, None) => {
+                return Err(ValidationError::new(
+                    ValidationErrorCode::PolicyInvalid,
+                    "gpu_required requires a typed GPU requirement",
+                ));
+            }
+            (false, Some(_)) => {
+                return Err(ValidationError::new(
+                    ValidationErrorCode::PolicyInvalid,
+                    "typed GPU requirement requires gpu_required",
+                ));
+            }
+            (false, None) => {}
+        }
         Ok(())
     }
 }
@@ -490,6 +513,7 @@ impl Default for ExecutionPolicy {
             network_allowed: false,
             filesystem_read_only: true,
             gpu_required: false,
+            gpu_requirement: None,
             cancellation_deadline_ms: Some(5_000),
         }
     }
