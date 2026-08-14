@@ -13,6 +13,7 @@ pub mod differential;
 pub mod execution;
 pub mod numeric;
 pub mod reference;
+pub mod rng;
 pub mod sandbox;
 pub mod supervisor;
 pub mod tensor;
