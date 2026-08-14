@@ -1,0 +1,242 @@
+[CmdletBinding()]
+param(
+    [switch]$CheckOnly,
+    [switch]$Run,
+    [string]$RegistryPath,
+    [string]$ComposeFile,
+    [string]$ProjectName = "hivemind-general-compute-oci-e2e"
+)
+
+$ErrorActionPreference = "Stop"
+
+function Fail-Contract {
+    param([Parameter(Mandatory = $true)][string]$Message)
+    throw "general-compute OCI E2E preflight failed closed: $Message"
+}
+
+# Keep the harness vocabulary aligned with the runtime's fail-closed errors:
+# an unpinned runner is `RunnerNotPinned`, and an OCI bundle with a default
+# seccomp action of `SCMP_ACT_ERRNO` is not executable unless the reviewed
+# operator profile is present. The preflight never translates either state
+# into a direct host process.
+
+function Require-Command {
+    param([Parameter(Mandatory = $true)][string]$Name)
+    if (!(Get-Command $Name -ErrorAction SilentlyContinue)) {
+        Fail-Contract "required command '$Name' is not installed"
+    }
+}
+
+function Require-AbsolutePath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Value
+    )
+    if (![System.IO.Path]::IsPathRooted($Value)) {
+        Fail-Contract "$Name must be an absolute operator-owned path"
+    }
+}
+
+function Require-RegularFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+    if (!(Test-Path -LiteralPath $Path -PathType Leaf)) {
+        Fail-Contract "$Name is missing or is not a regular file: $Path"
+    }
+    $item = Get-Item -LiteralPath $Path -Force
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        Fail-Contract "$Name must not be a symlink/reparse point: $Path"
+    }
+}
+
+function Require-Directory {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+    if (!(Test-Path -LiteralPath $Path -PathType Container)) {
+        Fail-Contract "$Name is missing or is not a directory: $Path"
+    }
+    $item = Get-Item -LiteralPath $Path -Force
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        Fail-Contract "$Name must not be a symlink/reparse point: $Path"
+    }
+}
+
+function Require-Sha256 {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Value
+    )
+    if ($Value -notmatch '^sha256:[0-9a-fA-F]{64}$') {
+        Fail-Contract "$Name must be a sha256:<64 hex> digest"
+    }
+}
+
+function Require-Policy {
+    param(
+        [Parameter(Mandatory = $true)]$Registration,
+        [Parameter(Mandatory = $true)][string]$BackendId
+    )
+    $policy = $Registration.policy
+    if ($null -eq $policy) {
+        Fail-Contract "backend '$BackendId' has no sandbox policy"
+    }
+    if ($policy.oci_privilege -ne "rootless") {
+        Fail-Contract "backend '$BackendId' must use rootless OCI"
+    }
+    if ($policy.cgroup -ne "v2") {
+        Fail-Contract "backend '$BackendId' must require cgroup v2"
+    }
+    if ($policy.privilege_escalation -ne "no_new_privileges") {
+        Fail-Contract "backend '$BackendId' must require no_new_privileges"
+    }
+    if ($policy.root_filesystem -ne "read_only") {
+        Fail-Contract "backend '$BackendId' must require a read-only root filesystem"
+    }
+    if ($policy.network -ne "deny_all") {
+        Fail-Contract "backend '$BackendId' must deny network egress"
+    }
+    $namespaces = @($policy.namespaces | ForEach-Object { [string]$_ } | Sort-Object)
+    $expectedNamespaces = @("mount", "network", "pid", "user")
+    if (($namespaces -join ",") -ne ($expectedNamespaces -join ",")) {
+        Fail-Contract "backend '$BackendId' must declare exactly user/pid/mount/network namespaces"
+    }
+    if ($null -eq $policy.seccomp -or $policy.seccomp.default_action -ne "default_deny") {
+        Fail-Contract "backend '$BackendId' must provide a default-deny seccomp policy"
+    }
+    Require-Sha256 "backend '$BackendId' seccomp profile" ([string]$policy.seccomp.profile_sha256)
+    if (@($policy.mounts).Count -eq 0) {
+        Fail-Contract "backend '$BackendId' must declare explicit safe mounts"
+    }
+    foreach ($mount in @($policy.mounts)) {
+        if ($mount.kind -eq "read_only_artifact") {
+            if ([string]::IsNullOrWhiteSpace([string]$mount.artifact_id) -or
+                [string]$mount.artifact_id -match '(^|[\\/])\.\.([\\/]|$)') {
+                Fail-Contract "backend '$BackendId' has an unsafe artifact mount"
+            }
+        } elseif ($mount.kind -ne "ephemeral_scratch") {
+            Fail-Contract "backend '$BackendId' has an unknown mount kind"
+        }
+    }
+}
+
+function Read-OperatorRegistry {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    Require-AbsolutePath "production backend registry" $Path
+    Require-RegularFile "production backend registry" $Path
+    try {
+        $parsed = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    } catch {
+        Fail-Contract "production backend registry is not valid JSON: $Path"
+    }
+    $registrations = @($parsed)
+    if ($registrations.Count -eq 0) {
+        Fail-Contract "production backend registry is empty"
+    }
+    return $registrations
+}
+
+function Validate-OperatorRegistry {
+    param([Parameter(Mandatory = $true)]$Registrations)
+    $ids = @{}
+    foreach ($registration in $Registrations) {
+        $backendId = [string]$registration.backend_id
+        if ([string]::IsNullOrWhiteSpace($backendId)) {
+            Fail-Contract "operator registry contains an empty backend id"
+        }
+        if ($ids.ContainsKey($backendId)) {
+            Fail-Contract "operator registry contains duplicate backend '$backendId'"
+        }
+        $ids[$backendId] = $true
+
+        foreach ($field in @("bundle_root", "artifact_root", "runner_executable")) {
+            $value = [string]$registration.$field
+            Require-AbsolutePath "backend '$backendId' $field" $value
+        }
+        Require-Directory "backend '$backendId' bundle root" ([string]$registration.bundle_root)
+        Require-Directory "backend '$backendId' bundle rootfs" (Join-Path ([string]$registration.bundle_root) "rootfs")
+        Require-Directory "backend '$backendId' artifact root" ([string]$registration.artifact_root)
+        Require-RegularFile "backend '$backendId' pinned runner" ([string]$registration.runner_executable)
+        Require-Sha256 "backend '$backendId' runner" ([string]$registration.runner_sha256)
+        $actualRunner = (Get-FileHash -LiteralPath ([string]$registration.runner_executable) -Algorithm SHA256).Hash.ToLowerInvariant()
+        $expectedRunner = ([string]$registration.runner_sha256).Substring(7).ToLowerInvariant()
+        if ($actualRunner -ne $expectedRunner) {
+            Fail-Contract "backend '$backendId' runner SHA-256 does not match the operator pin"
+        }
+        if ([string]$registration.execution_mode -ne "production_sandboxed_oci") {
+            Fail-Contract "backend '$backendId' is not a production_sandboxed_oci registration"
+        }
+        Require-Sha256 "backend '$backendId' guest image" ([string]$registration.guest_image_digest)
+        Require-Policy $registration $backendId
+    }
+    return $Registrations
+}
+
+function Invoke-ComposeConfigCheck {
+    param(
+        [Parameter(Mandatory = $true)][string]$ComposePath,
+        [Parameter(Mandatory = $true)][string]$Project
+    )
+    Require-Command "docker"
+    $null = & docker compose --project-name $Project --project-directory $repoRoot --file $ComposePath config --format json 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Fail-Contract "docker compose config failed; provide the required release secrets and operator environment"
+    }
+}
+
+if ($CheckOnly -and $Run) {
+    Fail-Contract "-CheckOnly and -Run are mutually exclusive"
+}
+if (!$CheckOnly -and !$Run) {
+    $CheckOnly = $true
+}
+
+$repoRoot = Split-Path -Parent $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($RegistryPath)) {
+    $RegistryPath = $env:HIVEMIND_GENERAL_COMPUTE_PRODUCTION_BACKENDS
+}
+if ([string]::IsNullOrWhiteSpace($RegistryPath)) {
+    Fail-Contract "set HIVEMIND_GENERAL_COMPUTE_PRODUCTION_BACKENDS to the operator registry (the Worker path is /etc/hivemind/general-compute/backends.json)"
+}
+if ([string]::IsNullOrWhiteSpace($ComposeFile)) {
+    $ComposeFile = Join-Path $repoRoot "docker-compose.yml"
+}
+Require-RegularFile "release Compose file" $ComposeFile
+
+$registrations = Validate-OperatorRegistry (Read-OperatorRegistry $RegistryPath)
+$safeProjectName = "$ProjectName-$([guid]::NewGuid().ToString('N').Substring(0, 12))"
+Invoke-ComposeConfigCheck -ComposePath $ComposeFile -Project $safeProjectName
+
+Write-Host ("CHECK operator OCI registry: {0} backend(s)" -f @($registrations).Count)
+Write-Host "CHECK rootless policy, pinned runner/rootfs, and seccomp digest: PASS"
+Write-Host "CHECK isolated Compose project '$safeProjectName': PASS"
+
+if ($CheckOnly) {
+    Write-Host "general-compute OCI E2E preflight passed (execution not requested)"
+    exit 0
+}
+
+if ($env:HIVEMIND_ENABLE_REAL_OCI_E2E -ne "1") {
+    Fail-Contract "-Run requires HIVEMIND_ENABLE_REAL_OCI_E2E=1; no implicit deployment execution is allowed"
+}
+
+$fixturePath = $env:HIVEMIND_GENERAL_COMPUTE_OCI_E2E_TASK_FIXTURE
+if ([string]::IsNullOrWhiteSpace($fixturePath)) {
+    Fail-Contract "-Run requires HIVEMIND_GENERAL_COMPUTE_OCI_E2E_TASK_FIXTURE with a Postgres-backed task fixture"
+}
+Require-RegularFile "multi-process OCI task fixture" $fixturePath
+
+$composeStarted = $false
+try {
+    # The real task submission/completion phase is intentionally gated on an
+    # explicit fixture. Until that fixture exists, refuse to start containers;
+    # this keeps a preflight or fake runner from being reported as E2E.
+    Fail-Contract "multi-process task fixture execution is not yet wired; provide the reviewed fixture implementation before running containers"
+} finally {
+    if ($composeStarted) {
+        & docker compose --project-name $safeProjectName --project-directory $repoRoot --file $ComposeFile down --volumes --remove-orphans
+    }
+}
