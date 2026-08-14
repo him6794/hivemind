@@ -273,6 +273,70 @@ impl TaskRepository {
         .await
     }
 
+    /// Persist a validated typed general-compute failure without treating it
+    /// as a billable completion. The dispatcher validates the result against
+    /// the Nodepool-owned capability snapshot before calling this method; the
+    /// repository still rejects a completed status so a success envelope can
+    /// never be recorded on the failure path by mistake.
+    pub async fn fail_general_compute_for_worker(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        expected_manifest: &[u8],
+        result_json: &[u8],
+        reason: &str,
+    ) -> Result<Task> {
+        let result = serde_json::from_slice::<GeneralComputeResult>(result_json)
+            .map_err(|error| anyhow::anyhow!("general-compute result is malformed: {error}"))?;
+        if result.status == ResultStatus::Completed {
+            anyhow::bail!("completed general-compute result cannot use the failure path");
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let failed = sqlx::query_as::<_, Task>(
+            "UPDATE tasks
+             SET status = 'FAILED', status_message = $1, last_update = NOW(), completed_at = NOW()
+             WHERE task_id = $2 AND worker_id = $3 AND status IN ('ASSIGNED', 'RUNNING')
+               AND general_compute_manifest_json = $4
+             RETURNING *",
+        )
+        .bind(reason)
+        .bind(task_id)
+        .bind(worker_id)
+        .bind(expected_manifest)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO general_compute_results (task_id, worker_id, result_json)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (task_id) DO UPDATE
+             SET worker_id = EXCLUDED.worker_id,
+                 result_json = EXCLUDED.result_json,
+                 created_at = NOW()",
+        )
+        .bind(task_id)
+        .bind(worker_id)
+        .bind(result_json)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO worker_reputation (worker_id, failed_tasks, score, updated_at)
+             VALUES ($1, 1, 95, NOW())
+             ON CONFLICT (worker_id) DO UPDATE SET
+                failed_tasks = worker_reputation.failed_tasks + 1,
+                score = GREATEST(0, worker_reputation.score - 5),
+                updated_at = NOW()",
+        )
+        .bind(worker_id)
+        .execute(&mut *tx)
+        .await?;
+        insert_task_attestation(&mut tx, task_id, worker_id, "rejected", 100, reason).await?;
+        tx.commit().await?;
+        Ok(failed)
+    }
+
     pub async fn complete_for_worker_with_managed_receipt(
         &self,
         task_id: &str,
@@ -2548,6 +2612,117 @@ mod tests {
             registered_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    async fn general_compute_failure_persists_typed_result_without_settlement() {
+        let (p, fixture) = match pool("task_repository_general_compute_failure").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("failure-owner-{unique}");
+        let worker_id = format!("failure-worker-{unique}");
+        let task_id = format!("failure-task-{unique}");
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        )
+        .bind(&username)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        insert_worker(&repo.pool, &worker_id, &format!("provider-{unique}")).await;
+
+        let mut request = GeneralComputeRequest {
+            execution_id: format!("execution-{unique}"),
+            attempt_id: format!("attempt-{unique}"),
+            idempotency_key: format!("idempotency-{unique}"),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "failure-backend".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest::inline_json(
+                "source",
+                ArtifactRole::Source,
+                b"source",
+            ),
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+        let result = general_compute_runtime::GeneralComputeResult {
+            execution_id: request.execution_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+            request_digest: request.request_digest.clone(),
+            status: general_compute_runtime::ResultStatus::BackendUnavailable,
+            exit_code: None,
+            error_code: Some("backend_unavailable".into()),
+            stdout: String::new(),
+            stderr: "network denied".into(),
+            output_artifacts: vec![],
+            usage: general_compute_runtime::UsageClaim::default(),
+            runtime_version: request.runtime_version.clone(),
+            backend_id: request.backend_id.clone(),
+            guest_image_digest: request.guest_image_digest.clone(),
+            input_sha256: general_compute_runtime::canonical_input_digest(b"source", &[]),
+            determinism: request.determinism.clone(),
+            capability_summary: vec![],
+            gpu_selection: None,
+            output_manifest_root: general_compute_runtime::canonical_artifact_root(&[]),
+            evidence: general_compute_runtime::EvidenceEnvelope::default(),
+        };
+        let manifest = serde_json::to_vec(&request).unwrap();
+        let result_json = serde_json::to_vec(&result).unwrap();
+
+        let mut task = make_task(&task_id, &username);
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.max_cpt = 42;
+        task.general_compute_manifest_json = Some(manifest.clone());
+        repo.create(&task).await.unwrap();
+        repo.assign_to_worker(&task_id, &worker_id, "10.0.0.78")
+            .await
+            .unwrap();
+
+        let failed = repo
+            .fail_general_compute_for_worker(
+                &task_id,
+                &worker_id,
+                &manifest,
+                &result_json,
+                "backend_unavailable",
+            )
+            .await
+            .unwrap();
+        assert_eq!(failed.status, TaskStatus::Failed);
+        assert!(!failed.billing_settled);
+
+        let persisted: Vec<u8> = sqlx::query_scalar(
+            "SELECT result_json FROM general_compute_results WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        let persisted_result: general_compute_runtime::GeneralComputeResult = serde_json::from_slice(&persisted).unwrap();
+        assert_eq!(persisted_result, result);
+
+        let settlement_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM general_compute_settlements WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(settlement_count, 0);
+
+        cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
+        fixture.cleanup().await.ok();
     }
 
     async fn cleanup_task_case(
