@@ -33,6 +33,8 @@ pub enum NumericError {
     SolveRequiresSquareMatrix,
     SolveDimensionMismatch { matrix: u64, rhs: u64 },
     SingularMatrix,
+    InvalidResidualTolerance,
+    ResidualExceeded,
     NonFiniteValue,
     FftRequiresOneDimension,
     FftLengthExceeded { length: usize, max: usize },
@@ -88,6 +90,12 @@ impl fmt::Display for NumericError {
                 )
             }
             Self::SingularMatrix => formatter.write_str("solve matrix is singular"),
+            Self::InvalidResidualTolerance => {
+                formatter.write_str("solve residual tolerance must be finite and non-negative")
+            }
+            Self::ResidualExceeded => {
+                formatter.write_str("solve residual exceeds the requested tolerance")
+            }
             Self::NonFiniteValue => {
                 formatter.write_str("numeric operation produced a non-finite value")
             }
@@ -574,6 +582,64 @@ impl DenseTensor<f64> {
             vec![u64::try_from(size).map_err(|_| NumericError::ShapeOverflow)?],
             solution,
         )
+    }
+
+    /// Compute the infinity norm of `self * solution - rhs` for a solved
+    /// square system. The arithmetic is intentionally sequential so the
+    /// reference result is replayable across supported backends.
+    pub fn residual_inf_norm(&self, solution: &Self, rhs: &Self) -> Result<f64, NumericError> {
+        if self.shape.len() != 2 || self.shape[0] != self.shape[1] {
+            return Err(NumericError::SolveRequiresSquareMatrix);
+        }
+        if rhs.shape.len() != 1 || rhs.shape[0] != self.shape[0] {
+            return Err(NumericError::SolveDimensionMismatch {
+                matrix: self.shape[0],
+                rhs: rhs.shape.first().copied().unwrap_or(0),
+            });
+        }
+        if solution.shape.len() != 1 || solution.shape[0] != self.shape[0] {
+            return Err(NumericError::SolveDimensionMismatch {
+                matrix: self.shape[0],
+                rhs: solution.shape.first().copied().unwrap_or(0),
+            });
+        }
+        if self.values.iter().any(|value| !value.is_finite())
+            || solution.values.iter().any(|value| !value.is_finite())
+            || rhs.values.iter().any(|value| !value.is_finite())
+        {
+            return Err(NumericError::NonFiniteValue);
+        }
+
+        let size = usize::try_from(self.shape[0]).map_err(|_| NumericError::ShapeOverflow)?;
+        let mut maximum = 0.0_f64;
+        for row in 0..size {
+            let mut predicted = 0.0;
+            for column in 0..size {
+                predicted += self.values[row * size + column] * solution.values[column];
+                if !predicted.is_finite() {
+                    return Err(NumericError::NonFiniteValue);
+                }
+            }
+            let residual = (predicted - rhs.values[row]).abs();
+            if !residual.is_finite() {
+                return Err(NumericError::NonFiniteValue);
+            }
+            maximum = maximum.max(residual);
+        }
+        Ok(maximum)
+    }
+
+    /// Solve a square system and reject the result unless its infinity-norm
+    /// residual is within a finite, non-negative tolerance.
+    pub fn solve_with_residual(&self, rhs: &Self, tolerance: f64) -> Result<Self, NumericError> {
+        if !tolerance.is_finite() || tolerance < 0.0 {
+            return Err(NumericError::InvalidResidualTolerance);
+        }
+        let solution = self.solve(rhs)?;
+        if self.residual_inf_norm(&solution, rhs)? > tolerance {
+            return Err(NumericError::ResidualExceeded);
+        }
+        Ok(solution)
     }
 }
 
