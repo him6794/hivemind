@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub mod artifact;
+pub mod backend;
 pub mod cp_python;
 pub mod differential;
 pub mod execution;
