@@ -173,3 +173,150 @@ fn cas_chunk_store_rejects_bad_or_tampered_chunks() {
 
     remove_root(&cas_root);
 }
+
+#[test]
+fn cas_transfer_state_survives_store_recreation_and_attempt_rotation() {
+    let cas_root = temporary_root("cas-transfer-state");
+    let (artifact, chunks) = chunked_artifact();
+    let execution_id = "execution-stable";
+
+    let store = CasChunkStore::new(&cas_root).expect("absolute CAS root is valid");
+    store
+        .prepare_transfer(execution_id, &artifact)
+        .expect("transfer manifest should be persisted");
+    assert_eq!(
+        store
+            .missing_transfer_chunks(execution_id, &artifact)
+            .expect("fresh transfer should be resumable")
+            .len(),
+        2
+    );
+    store
+        .put_transfer_chunk(execution_id, &artifact, &artifact.chunks[0], chunks[0])
+        .expect("verified transfer chunk should be recorded");
+
+    drop(store);
+    let recreated = CasChunkStore::new(&cas_root).expect("CAS state should be reopenable");
+    // A retry rotates attempt_id but keeps execution_id and the immutable
+    // artifact identity, so the durable state must remain available.
+    recreated
+        .prepare_transfer(execution_id, &artifact)
+        .expect("same artifact may be prepared by a later attempt");
+    let missing = recreated
+        .missing_transfer_chunks(execution_id, &artifact)
+        .expect("recreated store should resume from durable state");
+    assert_eq!(missing, vec![artifact.chunks[1].clone()]);
+
+    recreated
+        .put_transfer_chunk(execution_id, &artifact, &artifact.chunks[1], chunks[1])
+        .expect("second verified transfer chunk should be recorded");
+    assert!(
+        recreated
+            .missing_transfer_chunks(execution_id, &artifact)
+            .expect("complete transfer should remain readable")
+            .is_empty()
+    );
+
+    remove_root(&cas_root);
+}
+
+#[test]
+fn cas_transfer_state_rejects_manifest_redefinition_for_stable_execution() {
+    let cas_root = temporary_root("cas-transfer-conflict");
+    let (artifact, _) = chunked_artifact();
+    let store = CasChunkStore::new(&cas_root).expect("absolute CAS root is valid");
+    store
+        .prepare_transfer("execution-stable", &artifact)
+        .expect("initial transfer manifest should be persisted");
+
+    let mut changed = artifact.clone();
+    changed.sha256 = sha256_digest(b"different-artifact");
+    assert!(matches!(
+        store.prepare_transfer("execution-stable", &changed),
+        Err(ArtifactMaterializationError::TransferStateMismatch)
+    ));
+
+    remove_root(&cas_root);
+}
+
+#[test]
+fn cas_transfer_state_reconciles_a_store_recreated_after_adapter_upload() {
+    let cas_root = temporary_root("cas-transfer-adapter-restart");
+    let (artifact, chunks) = chunked_artifact();
+    let request = {
+        let mut request = general_compute_runtime::GeneralComputeRequest {
+            execution_id: "execution-adapter".into(),
+            attempt_id: "attempt-1".into(),
+            idempotency_key: "idempotency-adapter".into(),
+            request_digest: String::new(),
+            runtime_version: general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest: format!("sha256:{}", "a".repeat(64)),
+            backend_id: "python-reference".into(),
+            entrypoint: "main".into(),
+            source_artifact: artifact.clone(),
+            input_artifacts: vec![],
+            execution_policy: Default::default(),
+            determinism: Default::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+        request
+    };
+    let envelope = general_compute_runtime::transport::ChunkUploadEnvelope {
+        execution_id: request.execution_id.clone(),
+        attempt_id: request.attempt_id.clone(),
+        idempotency_key: request.idempotency_key.clone(),
+        request_digest: request.request_digest.clone(),
+        artifact_id: artifact.artifact_id.clone(),
+        offset: artifact.chunks[0].offset,
+        size_bytes: artifact.chunks[0].size_bytes,
+        sha256: artifact.chunks[0].sha256.clone(),
+        bytes: chunks[0].to_vec(),
+    };
+
+    let first = CasChunkStore::new(&cas_root).expect("absolute CAS root is valid");
+    general_compute_runtime::transport::ingest_chunk(&first, &request, &envelope)
+        .expect("authenticated adapter upload should persist the first chunk");
+    drop(first);
+
+    let recreated = CasChunkStore::new(&cas_root).expect("CAS state should be reopenable");
+    let missing = recreated
+        .missing_transfer_chunks(&request.execution_id, &artifact)
+        .expect("adapter upload should leave durable resume state");
+    assert_eq!(missing, vec![artifact.chunks[1].clone()]);
+
+    remove_root(&cas_root);
+}
+
+#[test]
+fn cas_transfer_state_fails_closed_when_a_completion_marker_is_corrupt() {
+    let cas_root = temporary_root("cas-transfer-corrupt-marker");
+    let (artifact, chunks) = chunked_artifact();
+    let store = CasChunkStore::new(&cas_root).expect("absolute CAS root is valid");
+    store
+        .put_transfer_chunk(
+            "execution-corrupt",
+            &artifact,
+            &artifact.chunks[0],
+            chunks[0],
+        )
+        .expect("first transfer chunk should be persisted");
+
+    let marker = fs::read_dir(cas_root.join(".transfers"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().and_then(|value| value.to_str()) == Some("complete"))
+        .expect("completion marker should exist");
+    fs::write(&marker, b"sha256:corrupt").unwrap();
+
+    // Remove the CAS object as well: a corrupt marker must not be silently
+    // ignored just because the corresponding chunk is already missing.
+    fs::remove_file(store.chunk_path(&artifact.chunks[0].sha256).unwrap()).unwrap();
+    assert!(matches!(
+        store.missing_transfer_chunks("execution-corrupt", &artifact),
+        Err(ArtifactMaterializationError::TransferStateCorrupt)
+    ));
+
+    remove_root(&cas_root);
+}
