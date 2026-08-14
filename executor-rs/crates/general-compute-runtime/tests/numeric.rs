@@ -183,3 +183,63 @@ fn dot_rejects_non_vectors_and_mismatched_lengths() {
         Err(NumericError::DotLengthMismatch { lhs: 2, rhs: 3 })
     );
 }
+
+#[test]
+fn batched_matmul_broadcasts_a_single_batch_and_preserves_typed_results() {
+    let lhs = F64Tensor::new(vec![2, 2, 2], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]).unwrap();
+    let rhs = F64Tensor::new(vec![1, 2, 2], vec![2.0, 0.0, 1.0, 2.0]).unwrap();
+
+    let result = lhs
+        .batched_matmul(&rhs)
+        .expect("a single rhs batch should broadcast");
+    assert_eq!(result.shape(), &[2, 2, 2]);
+    assert_eq!(
+        result.values(),
+        &[4.0, 4.0, 10.0, 8.0, 16.0, 12.0, 22.0, 16.0]
+    );
+}
+
+#[test]
+fn batched_matmul_handles_zero_inner_dimensions_and_complex_values() {
+    let empty_lhs = F64Tensor::new(vec![2, 1, 0], vec![]).unwrap();
+    let empty_rhs = F64Tensor::new(vec![1, 0, 3], vec![]).unwrap();
+    let empty_result = empty_lhs.batched_matmul(&empty_rhs).unwrap();
+    assert_eq!(empty_result.shape(), &[2, 1, 3]);
+    assert_eq!(empty_result.values(), &[0.0; 6]);
+
+    let complex_lhs = Complex64Tensor::new(
+        vec![1, 1, 2],
+        vec![Complex64::new(1.0, 1.0), Complex64::new(2.0, 0.0)],
+    )
+    .unwrap();
+    let complex_rhs = Complex64Tensor::new(
+        vec![1, 2, 1],
+        vec![Complex64::new(3.0, 0.0), Complex64::new(4.0, 1.0)],
+    )
+    .unwrap();
+    let complex_result = complex_lhs.batched_matmul(&complex_rhs).unwrap();
+    assert_eq!(complex_result.values(), &[Complex64::new(11.0, 5.0)]);
+}
+
+#[test]
+fn batched_matmul_rejects_rank_batch_and_inner_mismatches() {
+    let vector = F64Tensor::new(vec![2], vec![1.0, 2.0]).unwrap();
+    let matrix = F64Tensor::new(vec![1, 2], vec![1.0, 2.0]).unwrap();
+    assert_eq!(
+        vector.batched_matmul(&matrix),
+        Err(NumericError::BatchedMatmulRequiresThreeDimensions)
+    );
+
+    let lhs = F64Tensor::new(vec![2, 1, 2], vec![1.0; 4]).unwrap();
+    let rhs_batch = F64Tensor::new(vec![3, 2, 1], vec![1.0; 6]).unwrap();
+    assert_eq!(
+        lhs.batched_matmul(&rhs_batch),
+        Err(NumericError::BatchedMatmulBatchMismatch { lhs: 2, rhs: 3 })
+    );
+
+    let rhs_inner = F64Tensor::new(vec![1, 3, 1], vec![1.0; 3]).unwrap();
+    assert_eq!(
+        lhs.batched_matmul(&rhs_inner),
+        Err(NumericError::BatchedMatmulInnerDimensionMismatch { lhs: 2, rhs: 3 })
+    );
+}

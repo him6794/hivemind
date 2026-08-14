@@ -25,6 +25,9 @@ pub enum NumericError {
     DuplicateAxis { axis: usize },
     DotRequiresOneDimension,
     DotLengthMismatch { lhs: u64, rhs: u64 },
+    BatchedMatmulRequiresThreeDimensions,
+    BatchedMatmulBatchMismatch { lhs: u64, rhs: u64 },
+    BatchedMatmulInnerDimensionMismatch { lhs: u64, rhs: u64 },
     MatmulRequiresTwoDimensions,
     MatmulInnerDimensionMismatch { lhs: u64, rhs: u64 },
 }
@@ -51,6 +54,21 @@ impl fmt::Display for NumericError {
             }
             Self::DotLengthMismatch { lhs, rhs } => {
                 write!(formatter, "dot dimensions do not match: {lhs} and {rhs}")
+            }
+            Self::BatchedMatmulRequiresThreeDimensions => {
+                formatter.write_str("batched matmul requires three-dimensional tensors")
+            }
+            Self::BatchedMatmulBatchMismatch { lhs, rhs } => {
+                write!(
+                    formatter,
+                    "batched matmul batch dimensions do not broadcast: {lhs} and {rhs}"
+                )
+            }
+            Self::BatchedMatmulInnerDimensionMismatch { lhs, rhs } => {
+                write!(
+                    formatter,
+                    "batched matmul inner dimensions do not match: {lhs} and {rhs}"
+                )
             }
             Self::MatmulRequiresTwoDimensions => {
                 formatter.write_str("matmul requires two-dimensional tensors")
@@ -354,6 +372,93 @@ where
             result = result + lhs * rhs;
         }
         Ok(result)
+    }
+
+    pub fn batched_matmul(&self, rhs: &Self) -> Result<Self, NumericError> {
+        if self.shape.len() != 3 || rhs.shape.len() != 3 {
+            return Err(NumericError::BatchedMatmulRequiresThreeDimensions);
+        }
+        let (lhs_batch, rows, inner) = (self.shape[0], self.shape[1], self.shape[2]);
+        let (rhs_batch, rhs_inner, columns) = (rhs.shape[0], rhs.shape[1], rhs.shape[2]);
+        if inner != rhs_inner {
+            return Err(NumericError::BatchedMatmulInnerDimensionMismatch {
+                lhs: inner,
+                rhs: rhs_inner,
+            });
+        }
+        let batch = if lhs_batch == rhs_batch {
+            lhs_batch
+        } else if lhs_batch == 1 {
+            rhs_batch
+        } else if rhs_batch == 1 {
+            lhs_batch
+        } else {
+            return Err(NumericError::BatchedMatmulBatchMismatch {
+                lhs: lhs_batch,
+                rhs: rhs_batch,
+            });
+        };
+
+        let batch = usize::try_from(batch).map_err(|_| NumericError::ShapeOverflow)?;
+        let lhs_batch = usize::try_from(lhs_batch).map_err(|_| NumericError::ShapeOverflow)?;
+        let rhs_batch = usize::try_from(rhs_batch).map_err(|_| NumericError::ShapeOverflow)?;
+        let rows = usize::try_from(rows).map_err(|_| NumericError::ShapeOverflow)?;
+        let inner = usize::try_from(inner).map_err(|_| NumericError::ShapeOverflow)?;
+        let columns = usize::try_from(columns).map_err(|_| NumericError::ShapeOverflow)?;
+        let lhs_batch_stride = rows.checked_mul(inner).ok_or(NumericError::ShapeOverflow)?;
+        let rhs_batch_stride = inner
+            .checked_mul(columns)
+            .ok_or(NumericError::ShapeOverflow)?;
+        let mut output = Vec::with_capacity(
+            batch
+                .checked_mul(rows)
+                .and_then(|count| count.checked_mul(columns))
+                .ok_or(NumericError::ShapeOverflow)?,
+        );
+
+        for batch_index in 0..batch {
+            let lhs_index = if lhs_batch == 1 { 0 } else { batch_index };
+            let rhs_index = if rhs_batch == 1 { 0 } else { batch_index };
+            let lhs_base = lhs_index
+                .checked_mul(lhs_batch_stride)
+                .ok_or(NumericError::ShapeOverflow)?;
+            let rhs_base = rhs_index
+                .checked_mul(rhs_batch_stride)
+                .ok_or(NumericError::ShapeOverflow)?;
+            for row in 0..rows {
+                for column in 0..columns {
+                    let mut value = T::default();
+                    for shared in 0..inner {
+                        let lhs_offset = lhs_base
+                            .checked_add(
+                                row.checked_mul(inner)
+                                    .and_then(|base| base.checked_add(shared))
+                                    .ok_or(NumericError::ShapeOverflow)?,
+                            )
+                            .ok_or(NumericError::ShapeOverflow)?;
+                        let rhs_offset = rhs_base
+                            .checked_add(
+                                shared
+                                    .checked_mul(columns)
+                                    .and_then(|base| base.checked_add(column))
+                                    .ok_or(NumericError::ShapeOverflow)?,
+                            )
+                            .ok_or(NumericError::ShapeOverflow)?;
+                        value = value + self.values[lhs_offset] * rhs.values[rhs_offset];
+                    }
+                    output.push(value);
+                }
+            }
+        }
+
+        Self::new(
+            vec![
+                u64::try_from(batch).map_err(|_| NumericError::ShapeOverflow)?,
+                u64::try_from(rows).map_err(|_| NumericError::ShapeOverflow)?,
+                u64::try_from(columns).map_err(|_| NumericError::ShapeOverflow)?,
+            ],
+            output,
+        )
     }
 }
 
