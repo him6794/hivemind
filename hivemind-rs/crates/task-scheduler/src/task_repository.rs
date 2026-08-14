@@ -1,5 +1,5 @@
 use anyhow::Result;
-use general_compute_runtime::GeneralComputeRequest;
+use general_compute_runtime::{GeneralComputeRequest, GeneralComputeResult, ResultStatus};
 use hivemind_models::{Task, TaskStatus, WorkerNode};
 use sha1::{Digest, Sha1};
 use sqlx::PgPool;
@@ -615,16 +615,31 @@ impl TaskRepository {
     }
 
     pub async fn cancel(&self, task_id: &str) -> Result<Task> {
-        sqlx::query_as::<_, Task>(
+        let mut tx = self.pool.begin().await?;
+        let cancelled = sqlx::query_as::<_, Task>(
             "UPDATE tasks
              SET status = 'CANCELLED', last_update = NOW(), completed_at = NOW()
              WHERE task_id = $1 AND status IN ('PENDING', 'QUEUED', 'ASSIGNED', 'RUNNING')
              RETURNING *",
         )
         .bind(task_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(Into::into)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        if let Some(result_json) = nodepool_general_compute_cancellation_result(&cancelled)? {
+            sqlx::query(
+                "INSERT INTO general_compute_results (task_id, worker_id, result_json)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT (task_id) DO NOTHING",
+            )
+            .bind(&cancelled.task_id)
+            .bind(cancelled.worker_id.as_deref().unwrap_or("nodepool"))
+            .bind(result_json)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(cancelled)
     }
 
     pub async fn mark_stale_running(&self) -> Result<u64> {
@@ -805,6 +820,87 @@ fn managed_receipt_amount_cpt(task: &Task) -> i64 {
     MANAGED_BASE_INVOCATION_CPT + task.managed_executed_ops.max(0)
 }
 
+fn nodepool_general_compute_cancellation_result(task: &Task) -> Result<Option<Vec<u8>>> {
+    if task.runtime.as_deref() != Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION) {
+        return Ok(None);
+    }
+    let manifest = task
+        .general_compute_manifest_json
+        .as_deref()
+        .ok_or_else(|| {
+            anyhow::anyhow!("general-compute cancellation is missing its request manifest")
+        })?;
+    let request: GeneralComputeRequest = serde_json::from_slice(manifest)
+        .map_err(|error| anyhow::anyhow!("general-compute request is malformed: {error}"))?;
+    request
+        .validate()
+        .map_err(|error| anyhow::anyhow!("general-compute request is invalid: {error:?}"))?;
+
+    let all_inline = request
+        .input_artifacts
+        .iter()
+        .all(|artifact| artifact.inline_bytes.is_some())
+        && request.source_artifact.inline_bytes.is_some();
+    let input_sha256 = if all_inline {
+        let source = request
+            .source_artifact
+            .inline_bytes
+            .as_deref()
+            .expect("all_inline guarantees source bytes");
+        let inputs = request
+            .input_artifacts
+            .iter()
+            .map(|artifact| {
+                artifact
+                    .inline_bytes
+                    .as_deref()
+                    .expect("all_inline guarantees input bytes")
+            })
+            .collect::<Vec<_>>();
+        general_compute_runtime::canonical_input_digest(source, &inputs)
+    } else {
+        // A cancellation can happen before a Worker materializes CAS bytes.
+        // Bind the envelope to the immutable manifest coordinates instead of
+        // claiming that unobserved execution inputs were read.
+        let mut coordinates = Vec::new();
+        coordinates.extend_from_slice(b"general-compute-cancellation-input-v1");
+        for artifact in
+            std::iter::once(&request.source_artifact).chain(request.input_artifacts.iter())
+        {
+            coordinates.extend_from_slice(artifact.artifact_id.as_bytes());
+            coordinates.push(0);
+            coordinates.extend_from_slice(artifact.sha256.as_bytes());
+            coordinates.push(0);
+            coordinates.extend_from_slice(&artifact.size_bytes.to_be_bytes());
+        }
+        general_compute_runtime::sha256_digest(&coordinates)
+    };
+
+    let result = GeneralComputeResult {
+        execution_id: request.execution_id.clone(),
+        attempt_id: request.attempt_id.clone(),
+        idempotency_key: request.idempotency_key.clone(),
+        request_digest: request.request_digest.clone(),
+        status: ResultStatus::Cancelled,
+        exit_code: None,
+        error_code: Some("task_cancelled".into()),
+        stdout: String::new(),
+        stderr: "task cancelled by owner".into(),
+        output_artifacts: vec![],
+        usage: general_compute_runtime::UsageClaim::default(),
+        runtime_version: request.runtime_version.clone(),
+        backend_id: request.backend_id.clone(),
+        guest_image_digest: request.guest_image_digest.clone(),
+        input_sha256,
+        determinism: request.determinism.clone(),
+        capability_summary: vec![],
+        gpu_selection: None,
+        output_manifest_root: general_compute_runtime::canonical_artifact_root(&[]),
+        evidence: general_compute_runtime::EvidenceEnvelope::default(),
+    };
+    Ok(Some(serde_json::to_vec(&result)?))
+}
+
 fn billable_amount_cpt(task: &Task) -> i64 {
     if task.runtime.as_deref() == Some("managed-function-v0") && task.managed_receipt_json.is_some()
     {
@@ -921,7 +1017,8 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use general_compute_runtime::{
-        ArtifactManifest, ArtifactRole, DeterminismPolicy, ExecutionPolicy, GeneralComputeRequest,
+        canonical_artifact_root, ArtifactManifest, ArtifactRole, DeterminismPolicy,
+        ExecutionPolicy, GeneralComputeRequest, GeneralComputeResult, ResultStatus,
         GENERAL_COMPUTE_RUNTIME_VERSION,
     };
     use hivemind_database::postgres::IsolatedTestPool;
@@ -2711,6 +2808,93 @@ mod tests {
         .unwrap();
         let persisted_result: general_compute_runtime::GeneralComputeResult = serde_json::from_slice(&persisted).unwrap();
         assert_eq!(persisted_result, result);
+
+        let settlement_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM general_compute_settlements WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(settlement_count, 0);
+
+        cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn general_compute_cancel_persists_nodepool_typed_result_without_settlement() {
+        let (p, fixture) = match pool("task_repository_general_compute_cancel").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("cancel-owner-{unique}");
+        let worker_id = format!("cancel-worker-{unique}");
+        let task_id = format!("cancel-task-{unique}");
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        )
+        .bind(&username)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        insert_worker(&repo.pool, &worker_id, &format!("provider-{unique}")).await;
+
+        let mut request = GeneralComputeRequest {
+            execution_id: format!("execution-{unique}"),
+            attempt_id: format!("attempt-{unique}"),
+            idempotency_key: format!("idempotency-{unique}"),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "cancel-backend".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest::inline_json(
+                "source",
+                ArtifactRole::Source,
+                b"source",
+            ),
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+        let manifest = serde_json::to_vec(&request).unwrap();
+
+        let mut task = make_task(&task_id, &username);
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.general_compute_manifest_json = Some(manifest);
+        repo.create(&task).await.unwrap();
+        repo.assign_to_worker(&task_id, &worker_id, "10.0.0.79")
+            .await
+            .unwrap();
+
+        let cancelled = repo.cancel(&task_id).await.unwrap();
+        assert_eq!(cancelled.status, TaskStatus::Cancelled);
+
+        let persisted: Vec<u8> = sqlx::query_scalar(
+            "SELECT result_json FROM general_compute_results WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        let result: GeneralComputeResult = serde_json::from_slice(&persisted).unwrap();
+        assert_eq!(result.status, ResultStatus::Cancelled);
+        assert_eq!(result.error_code.as_deref(), Some("task_cancelled"));
+        assert_eq!(result.execution_id, request.execution_id);
+        assert_eq!(result.attempt_id, request.attempt_id);
+        assert_eq!(result.request_digest, request.request_digest);
+        assert_eq!(
+            result.input_sha256,
+            general_compute_runtime::canonical_input_digest(b"source", &[])
+        );
+        assert_eq!(result.output_manifest_root, canonical_artifact_root(&[]));
 
         let settlement_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM general_compute_settlements WHERE task_id = $1",
