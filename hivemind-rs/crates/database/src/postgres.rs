@@ -232,6 +232,26 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     .await?;
 
     sqlx::query(
+        "CREATE TABLE IF NOT EXISTS general_compute_settlements (
+            task_id VARCHAR(255) PRIMARY KEY REFERENCES tasks(task_id) ON DELETE CASCADE,
+            worker_id VARCHAR(255) NOT NULL,
+            execution_id VARCHAR(255) NOT NULL,
+            attempt_id VARCHAR(255) NOT NULL,
+            idempotency_key VARCHAR(255) NOT NULL,
+            request_digest VARCHAR(71) NOT NULL,
+            billing_version VARCHAR(64) NOT NULL,
+            cost_model_version VARCHAR(64) NOT NULL,
+            usage_claim_json BYTEA NOT NULL,
+            evidence_level VARCHAR(32) NOT NULL,
+            settlement_basis VARCHAR(64) NOT NULL,
+            amount_cpt BIGINT NOT NULL CHECK (amount_cpt >= 0),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
         "CREATE TABLE IF NOT EXISTS vpn_peers (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             worker_id VARCHAR(255) NOT NULL UNIQUE,
@@ -650,6 +670,32 @@ mod tests {
         assert!(indexes.contains(&"idx_tasks_pending_priority_created_at".to_string()));
         assert!(indexes.contains(&"idx_tasks_assigned_timeout".to_string()));
         assert!(indexes.contains(&"idx_tasks_torrent_source_worker_completed".to_string()));
+
+        fixture.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn task_migrations_create_general_compute_settlement_table() {
+        let fixture = match create_isolated_test_pool("database_general_compute_settlements").await {
+            Ok(fixture) => fixture,
+            Err(_) => {
+                tracing::warn!("Skipping DB test");
+                return;
+            }
+        };
+        run_migrations(&fixture.pool).await.unwrap();
+
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM information_schema.tables
+                WHERE table_schema = $1 AND table_name = 'general_compute_settlements'
+            )",
+        )
+        .bind(fixture.schema_name())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert!(exists, "Nodepool must persist settlement provenance");
 
         fixture.cleanup().await.unwrap();
     }
