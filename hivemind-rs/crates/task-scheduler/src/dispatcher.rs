@@ -1,15 +1,19 @@
 use crate::managed_proof_verifier::{verify_managed_proof, ManagedProofVerifierError};
 use anyhow::Result;
-use hivemind_auth::worker_execution::WorkerExecutionSigner;
+use hivemind_auth::worker_execution::{WorkerExecutionIdentity, WorkerExecutionSigner};
 use hivemind_config::ManagedProofRolloutMode;
 use hivemind_database::DatabaseManager;
 use hivemind_managed_proof::{ClaimError, ExecutionClaim};
 use hivemind_models::{Claims, Task, TaskStatus, WorkerNode};
 use hivemind_proto::{
-    worker_node_service_client::WorkerNodeServiceClient, ExecuteTaskRequest, ExecuteTaskResponse,
-    ManagedProofEnvelope, ResourceSpec as ProtoResourceSpec, GENERAL_COMPUTE_RESULT_MAX_BYTES,
-    LEGACY_MANAGED_RECEIPT_MAX_BYTES, WORKER_RPC_MESSAGE_MAX_BYTES,
-    WORKER_STATUS_MESSAGE_MAX_BYTES,
+    general_compute_chunk_service_client::GeneralComputeChunkServiceClient,
+    validate_general_compute_chunk_resume_request, validate_general_compute_chunk_upload,
+    validate_general_compute_prepare_request, worker_node_service_client::WorkerNodeServiceClient,
+    ExecuteTaskRequest, ExecuteTaskResponse, GeneralComputeChunkResumeRequest,
+    GeneralComputeChunkUpload, GeneralComputePrepareRequest, ManagedProofEnvelope,
+    ResourceSpec as ProtoResourceSpec, GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES,
+    GENERAL_COMPUTE_RESULT_MAX_BYTES, LEGACY_MANAGED_RECEIPT_MAX_BYTES,
+    WORKER_RPC_MESSAGE_MAX_BYTES, WORKER_STATUS_MESSAGE_MAX_BYTES,
 };
 use std::collections::HashMap;
 use std::future::Future;
@@ -414,6 +418,7 @@ fn worker_execution_token(
     private_key_pem: &str,
     task: &Task,
     worker_id: &str,
+    transfer_generation: Option<i64>,
 ) -> anyhow::Result<String> {
     if private_key_pem.trim().is_empty() {
         anyhow::bail!("WORKER_EXECUTION_PRIVATE_KEY_PEM is required for worker execution dispatch")
@@ -428,7 +433,281 @@ fn worker_execution_token(
         exp: (now + 300) as usize,
         iat: now as usize,
     };
-    WorkerExecutionSigner::from_pem(private_key_pem)?.encode_claims(&claims)
+    let signer = WorkerExecutionSigner::from_pem(private_key_pem)?;
+    if task.runtime.as_deref() == Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION) {
+        let (execution_id, attempt_id, idempotency_key, request_digest) =
+            general_compute_identity(task)
+                .ok_or_else(|| anyhow::anyhow!("general-compute request identity is missing"))?;
+        let transfer_generation = transfer_generation
+            .filter(|generation| *generation > 0)
+            .ok_or_else(|| anyhow::anyhow!("general-compute transfer lease is missing"))?;
+        signer.encode_execution_claims(
+            &claims,
+            &WorkerExecutionIdentity {
+                execution_id,
+                attempt_id,
+                idempotency_key,
+                request_digest,
+                transfer_generation,
+            },
+        )
+    } else {
+        signer.encode_claims(&claims)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Nodepool has no trusted source bytes for artifact {artifact_id}")]
+struct NodepoolArtifactSourceUnavailable {
+    artifact_id: String,
+}
+
+fn general_compute_chunk_plan(
+    task: &Task,
+    token: &str,
+    transfer_generation: i64,
+    source_bytes: &HashMap<String, Vec<u8>>,
+) -> anyhow::Result<Vec<GeneralComputeChunkUpload>> {
+    let manifest = task
+        .general_compute_manifest_json
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("general-compute request manifest is missing"))?;
+    let request: general_compute_runtime::GeneralComputeRequest = serde_json::from_slice(manifest)
+        .map_err(|error| anyhow::anyhow!("general-compute request is malformed: {error}"))?;
+    request
+        .validate()
+        .map_err(|error| anyhow::anyhow!("general-compute request is invalid: {error:?}"))?;
+    if transfer_generation <= 0 {
+        anyhow::bail!("general-compute transfer lease generation must be positive");
+    }
+
+    let artifacts = std::iter::once(&request.source_artifact).chain(request.input_artifacts.iter());
+    let mut uploads = Vec::new();
+    for artifact in artifacts {
+        if artifact.chunks.is_empty() {
+            continue;
+        }
+        let bytes = source_bytes.get(&artifact.artifact_id).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Nodepool has no trusted source bytes for artifact {}",
+                artifact.artifact_id
+            )
+        })?;
+        if bytes.len() as u64 != artifact.size_bytes
+            || general_compute_runtime::sha256_digest(bytes) != artifact.sha256
+        {
+            anyhow::bail!(
+                "Nodepool artifact source does not match manifest for {}",
+                artifact.artifact_id
+            );
+        }
+        for chunk in &artifact.chunks {
+            let start = usize::try_from(chunk.offset)
+                .map_err(|_| anyhow::anyhow!("artifact chunk offset is too large"))?;
+            let size = usize::try_from(chunk.size_bytes)
+                .map_err(|_| anyhow::anyhow!("artifact chunk size is too large"))?;
+            let end = start
+                .checked_add(size)
+                .ok_or_else(|| anyhow::anyhow!("artifact chunk range overflows"))?;
+            let payload = bytes
+                .get(start..end)
+                .ok_or_else(|| anyhow::anyhow!("artifact chunk range exceeds source bytes"))?;
+            let upload = GeneralComputeChunkUpload {
+                token: token.to_owned(),
+                execution_id: request.execution_id.clone(),
+                attempt_id: request.attempt_id.clone(),
+                idempotency_key: request.idempotency_key.clone(),
+                request_digest: request.request_digest.clone(),
+                artifact_id: artifact.artifact_id.clone(),
+                offset: chunk.offset as i64,
+                size_bytes: chunk.size_bytes as i64,
+                sha256: chunk.sha256.clone(),
+                bytes: payload.to_vec(),
+                transfer_generation,
+            };
+            validate_general_compute_chunk_upload(&upload)
+                .map_err(|message| anyhow::anyhow!(message))?;
+            uploads.push(upload);
+        }
+    }
+    Ok(uploads)
+}
+
+async fn load_general_compute_artifact_sources(
+    repo: &TaskRepository,
+    task: &Task,
+) -> anyhow::Result<HashMap<String, Vec<u8>>> {
+    let manifest = task
+        .general_compute_manifest_json
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("general-compute request manifest is missing"))?;
+    let request: general_compute_runtime::GeneralComputeRequest = serde_json::from_slice(manifest)
+        .map_err(|error| anyhow::anyhow!("general-compute request is malformed: {error}"))?;
+    request
+        .validate()
+        .map_err(|error| anyhow::anyhow!("general-compute request is invalid: {error:?}"))?;
+
+    let mut sources = HashMap::new();
+    for artifact in std::iter::once(&request.source_artifact).chain(request.input_artifacts.iter())
+    {
+        if !repo
+            .general_compute_artifact_coordinates_match(
+                &task.task_id,
+                &artifact.artifact_id,
+                artifact.size_bytes,
+                &artifact.sha256,
+                &artifact.chunks,
+            )
+            .await?
+        {
+            anyhow::bail!(
+                "Nodepool artifact coordinates do not match immutable identity for {}",
+                artifact.artifact_id
+            );
+        }
+        let bytes = repo
+            .general_compute_artifact_bytes(
+                &task.task_id,
+                &artifact.artifact_id,
+                &artifact.sha256,
+                artifact.size_bytes,
+            )
+            .await?
+            .ok_or_else(|| {
+                anyhow::Error::new(NodepoolArtifactSourceUnavailable {
+                    artifact_id: artifact.artifact_id.clone(),
+                })
+            })?;
+        if bytes.len() as u64 != artifact.size_bytes
+            || general_compute_runtime::sha256_digest(&bytes) != artifact.sha256
+        {
+            anyhow::bail!(
+                "Nodepool artifact source does not match manifest for {}",
+                artifact.artifact_id
+            );
+        }
+        if sources
+            .insert(artifact.artifact_id.clone(), bytes)
+            .is_some()
+        {
+            anyhow::bail!("general-compute manifest contains duplicate artifact id");
+        }
+    }
+    Ok(sources)
+}
+
+async fn prepare_general_compute_on_worker_with_sources(
+    channel: tonic::transport::Channel,
+    task: &Task,
+    token: &str,
+    transfer_generation: i64,
+    source_bytes: &HashMap<String, Vec<u8>>,
+) -> anyhow::Result<()> {
+    let uploads = general_compute_chunk_plan(task, token, transfer_generation, source_bytes)?;
+    let (execution_id, attempt_id, idempotency_key, request_digest) =
+        general_compute_identity(task)
+            .ok_or_else(|| anyhow::anyhow!("general-compute request identity is missing"))?;
+    let manifest = task
+        .general_compute_manifest_json
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("general-compute request manifest is missing"))?;
+    let mut client = GeneralComputeChunkServiceClient::new(channel)
+        .max_encoding_message_size(GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES)
+        .max_decoding_message_size(GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES);
+    let prepare = GeneralComputePrepareRequest {
+        task_id: task.task_id.clone(),
+        token: token.to_owned(),
+        runtime: general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+        general_compute_manifest_json: manifest,
+        execution_id: execution_id.clone(),
+        attempt_id: attempt_id.clone(),
+        idempotency_key: idempotency_key.clone(),
+        request_digest: request_digest.clone(),
+        transfer_generation,
+    };
+    validate_general_compute_prepare_request(&prepare)
+        .map_err(|message| anyhow::anyhow!(message))?;
+    let prepared = client
+        .prepare_general_compute(tonic::Request::new(prepare))
+        .await?
+        .into_inner();
+    if !prepared.success
+        || prepared.execution_id != execution_id
+        || prepared.attempt_id != attempt_id
+        || prepared.idempotency_key != idempotency_key
+        || prepared.request_digest != request_digest
+        || prepared.transfer_generation != transfer_generation
+    {
+        anyhow::bail!("worker general-compute prepare response did not match the request")
+    }
+
+    let mut artifact_ids = Vec::new();
+    for upload in &uploads {
+        if !artifact_ids.iter().any(|id| id == &upload.artifact_id) {
+            artifact_ids.push(upload.artifact_id.clone());
+        }
+    }
+    for artifact_id in artifact_ids {
+        let resume = GeneralComputeChunkResumeRequest {
+            token: token.to_owned(),
+            execution_id: execution_id.clone(),
+            attempt_id: attempt_id.clone(),
+            idempotency_key: idempotency_key.clone(),
+            request_digest: request_digest.clone(),
+            artifact_id: artifact_id.clone(),
+            transfer_generation,
+            completed_sha256: Vec::new(),
+        };
+        validate_general_compute_chunk_resume_request(&resume)
+            .map_err(|message| anyhow::anyhow!(message))?;
+        let resume = client
+            .resume_chunks(tonic::Request::new(resume))
+            .await?
+            .into_inner();
+        if !resume.success {
+            anyhow::bail!("worker general-compute resume response was unsuccessful")
+        }
+        let artifact_uploads: Vec<_> = uploads
+            .iter()
+            .filter(|upload| upload.artifact_id == artifact_id)
+            .cloned()
+            .collect();
+        for upload in
+            select_missing_general_compute_chunks(&artifact_uploads, &resume.missing_chunks)?
+        {
+            let response = client
+                .upload_chunk(tonic::Request::new(upload))
+                .await?
+                .into_inner();
+            if !response.success || response.accepted_chunks != 1 {
+                anyhow::bail!("worker rejected a general-compute artifact chunk")
+            }
+        }
+    }
+    Ok(())
+}
+
+fn select_missing_general_compute_chunks(
+    uploads: &[GeneralComputeChunkUpload],
+    missing: &[hivemind_proto::GeneralComputeChunkDescriptor],
+) -> anyhow::Result<Vec<GeneralComputeChunkUpload>> {
+    let mut selected = Vec::with_capacity(missing.len());
+    for descriptor in missing {
+        let upload = uploads
+            .iter()
+            .find(|upload| {
+                upload.offset == descriptor.offset
+                    && upload.size_bytes == descriptor.size_bytes
+                    && upload.sha256 == descriptor.sha256
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "worker requested a chunk that is not present in the Nodepool manifest"
+                )
+            })?;
+        selected.push(upload.clone());
+    }
+    Ok(selected)
 }
 
 async fn execute_on_worker(
@@ -484,13 +763,125 @@ async fn execute_on_worker(
             return Ok(());
         }
     };
-    let mut client = WorkerNodeServiceClient::new(channel)
+    let mut client = WorkerNodeServiceClient::new(channel.clone())
         .max_encoding_message_size(WORKER_RPC_MESSAGE_MAX_BYTES)
         .max_decoding_message_size(WORKER_RPC_MESSAGE_MAX_BYTES);
     repo.refresh_worker_endpoint(&task.task_id, &worker_id, &worker_addr)
         .await?;
-    let token =
-        worker_execution_token(worker_execution_private_key_pem, &current_task, &worker_id)?;
+    let transfer_lease = if current_task.runtime.as_deref()
+        == Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION)
+    {
+        let lease = match repo.general_compute_transfer_lease(&task.task_id).await? {
+            Some(lease) => lease,
+            None => {
+                let error =
+                    anyhow::anyhow!("general-compute transfer lease is missing or inactive");
+                reset_after_worker_rpc_failure(
+                    repo.as_ref(),
+                    &task.task_id,
+                    &worker_id,
+                    WorkerRpcFailureDisposition::RetryWithoutWorkerPenalty,
+                    &error,
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        let (execution_id, attempt_id, _, _) = general_compute_identity(&current_task)
+            .ok_or_else(|| anyhow::anyhow!("general-compute request identity is missing"))?;
+        if !lease.matches_assignment(&task.task_id, &execution_id, &attempt_id, &worker_id) {
+            let error = anyhow::anyhow!(
+                "general-compute transfer lease does not match the assigned Worker attempt"
+            );
+            reset_after_worker_rpc_failure(
+                repo.as_ref(),
+                &task.task_id,
+                &worker_id,
+                WorkerRpcFailureDisposition::RetryWithoutWorkerPenalty,
+                &error,
+            )
+            .await?;
+            return Ok(());
+        }
+        Some(lease)
+    } else {
+        None
+    };
+    let token = match worker_execution_token(
+        worker_execution_private_key_pem,
+        &current_task,
+        &worker_id,
+        transfer_lease.as_ref().map(|lease| lease.generation),
+    ) {
+        Ok(token) => token,
+        Err(error) => {
+            let reason = error.to_string();
+            repo.fail_for_worker_without_penalty(&task.task_id, &worker_id, &reason)
+                .await?;
+            warn!(
+                "Task {} could not create a worker execution token; failing without worker penalty: {}",
+                task.task_id, reason
+            );
+            return Ok(());
+        }
+    };
+    if current_task.runtime.as_deref()
+        == Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION)
+    {
+        let source_bytes = match load_general_compute_artifact_sources(repo.as_ref(), &current_task)
+            .await
+        {
+            Ok(source_bytes) => source_bytes,
+            Err(error)
+                if error
+                    .downcast_ref::<NodepoolArtifactSourceUnavailable>()
+                    .is_some() =>
+            {
+                let reason = error.to_string();
+                repo.fail_for_worker_without_penalty(&task.task_id, &worker_id, &reason)
+                    .await?;
+                warn!(
+                    "Task {} cannot load a Nodepool-owned artifact source for worker {}; failing without worker penalty: {}",
+                    task.task_id, worker_id, reason
+                );
+                return Ok(());
+            }
+            Err(error) => {
+                reset_after_worker_rpc_failure(
+                    repo.as_ref(),
+                    &task.task_id,
+                    &worker_id,
+                    WorkerRpcFailureDisposition::RetryWithoutWorkerPenalty,
+                    &error,
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        let generation = transfer_lease
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("general-compute transfer lease is missing"))?
+            .generation;
+        if let Err(error) = prepare_general_compute_on_worker_with_sources(
+            channel,
+            &current_task,
+            &token,
+            generation,
+            &source_bytes,
+        )
+        .await
+        {
+            reset_after_worker_rpc_failure(
+                repo.as_ref(),
+                &task.task_id,
+                &worker_id,
+                WorkerRpcFailureDisposition::RetryWithoutWorkerPenalty,
+                &error,
+            )
+            .await?;
+            return Ok(());
+        }
+    }
     let mut request =
         tonic::Request::new(build_execute_task_request_with_token(&current_task, token));
     request.set_timeout(WORKER_EXECUTE_RPC_TIMEOUT);
@@ -1181,11 +1572,16 @@ mod tests {
     };
     use hivemind_models::{TaskStatus, WorkerStatus};
     use hivemind_proto::{
+        general_compute_chunk_service_server::{
+            GeneralComputeChunkService, GeneralComputeChunkServiceServer,
+        },
         worker_node_service_server::{WorkerNodeService, WorkerNodeServiceServer},
-        ExecuteTaskRequest, ExecuteTaskResponse, StopTaskExecutionRequest,
-        StopTaskExecutionResponse, TaskOutputRequest, TaskOutputResponse, TaskOutputUploadRequest,
-        TaskOutputUploadResponse, TaskResultUploadRequest, TaskResultUploadResponse,
-        TaskUsageRequest, TaskUsageResponse,
+        ExecuteTaskRequest, ExecuteTaskResponse, GeneralComputeChunkDescriptor,
+        GeneralComputeChunkResumeRequest, GeneralComputeChunkResumeResponse,
+        GeneralComputeChunkUploadResponse, GeneralComputePrepareRequest,
+        GeneralComputePrepareResponse, StopTaskExecutionRequest, StopTaskExecutionResponse,
+        TaskOutputRequest, TaskOutputResponse, TaskOutputUploadRequest, TaskOutputUploadResponse,
+        TaskResultUploadRequest, TaskResultUploadResponse, TaskUsageRequest, TaskUsageResponse,
     };
     use std::net::SocketAddr;
     use std::sync::{Arc, OnceLock};
@@ -1219,6 +1615,47 @@ mod tests {
             pool: fixture.pool.clone(),
         };
         Some((db, fixture))
+    }
+
+    #[tokio::test]
+    async fn dispatcher_loads_artifact_bytes_only_from_nodepool_repository() {
+        let Some((db, fixture)) = test_db("dispatcher_nodepool_artifact_source").await else {
+            return;
+        };
+        let repo = TaskRepository::new(db.pool.clone());
+        let task_id = format!("dispatcher-source-{}", uuid::Uuid::new_v4());
+        let bytes = b"trusted-source".to_vec();
+        let mut request = alpha_result_request();
+        request.source_artifact = ArtifactManifest {
+            artifact_id: "source".into(),
+            role: ArtifactRole::Source,
+            size_bytes: bytes.len() as u64,
+            mime_type: "text/plain".into(),
+            sha256: sha256_digest(&bytes),
+            chunks: vec![general_compute_runtime::ArtifactChunk {
+                offset: 0,
+                size_bytes: bytes.len() as u64,
+                sha256: sha256_digest(&bytes),
+            }],
+            inline_bytes: Some(bytes.clone()),
+        };
+        request.request_digest = request.canonical_request_digest();
+        let mut task = make_task(&task_id, TaskStatus::Pending, 0);
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.torrent_source = None;
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
+        repo.create(&task).await.unwrap();
+
+        request.source_artifact.inline_bytes = None;
+        request.request_digest = request.canonical_request_digest();
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
+
+        let sources = load_general_compute_artifact_sources(&repo, &task)
+            .await
+            .unwrap();
+
+        assert_eq!(sources.get("source"), Some(&bytes));
+        fixture.cleanup().await.ok();
     }
 
     fn make_task(id: &str, status: TaskStatus, retry_count: i32) -> Task {
@@ -1335,6 +1772,177 @@ mod tests {
         assert_eq!(request.attempt_id, "attempt-2");
         assert_eq!(request.idempotency_key, "idempotency-1");
         assert_eq!(request.request_digest, manifest.request_digest);
+    }
+
+    #[test]
+    fn general_compute_chunk_plan_binds_nodepool_source_and_generation() {
+        let mut task = make_task("general-compute-source-plan", TaskStatus::Assigned, 0);
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        let bytes = b"source".to_vec();
+        let mut request = alpha_result_request();
+        request.source_artifact.inline_bytes = None;
+        request.source_artifact.chunks = vec![general_compute_runtime::ArtifactChunk {
+            offset: 0,
+            size_bytes: bytes.len() as u64,
+            sha256: sha256_digest(&bytes),
+        }];
+        request.source_artifact.size_bytes = bytes.len() as u64;
+        request.source_artifact.sha256 = sha256_digest(&bytes);
+        request.request_digest = request.canonical_request_digest();
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
+
+        let mut sources = HashMap::new();
+        sources.insert(request.source_artifact.artifact_id.clone(), bytes.clone());
+
+        let uploads = general_compute_chunk_plan(&task, "nodepool-token", 7, &sources).unwrap();
+
+        assert_eq!(uploads.len(), 1);
+        let upload = &uploads[0];
+        assert_eq!(upload.token, "nodepool-token");
+        assert_eq!(upload.execution_id, request.execution_id);
+        assert_eq!(upload.attempt_id, request.attempt_id);
+        assert_eq!(upload.idempotency_key, request.idempotency_key);
+        assert_eq!(upload.request_digest, request.request_digest);
+        assert_eq!(upload.artifact_id, "source");
+        assert_eq!(upload.bytes, bytes);
+        assert_eq!(upload.sha256, request.source_artifact.chunks[0].sha256);
+        assert_eq!(upload.transfer_generation, 7);
+    }
+
+    #[test]
+    fn general_compute_chunk_plan_rejects_nodepool_source_drift() {
+        let mut task = make_task("general-compute-source-drift", TaskStatus::Assigned, 0);
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        let expected = b"source".to_vec();
+        let mut request = alpha_result_request();
+        request.source_artifact.inline_bytes = None;
+        request.source_artifact.chunks = vec![general_compute_runtime::ArtifactChunk {
+            offset: 0,
+            size_bytes: expected.len() as u64,
+            sha256: sha256_digest(&expected),
+        }];
+        request.source_artifact.size_bytes = expected.len() as u64;
+        request.source_artifact.sha256 = sha256_digest(&expected);
+        request.request_digest = request.canonical_request_digest();
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
+
+        let mut sources = HashMap::new();
+        sources.insert(
+            request.source_artifact.artifact_id.clone(),
+            b"sourcf".to_vec(),
+        );
+
+        let error = general_compute_chunk_plan(&task, "nodepool-token", 7, &sources)
+            .expect_err("source bytes that drift from the immutable manifest must fail closed");
+
+        assert!(error.to_string().contains("does not match manifest"));
+    }
+
+    #[tokio::test]
+    async fn nodepool_prepare_binds_generation_and_uploads_only_missing_chunks() {
+        let mut task = make_task("general-compute-client-transport", TaskStatus::Assigned, 0);
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        let bytes = b"sources".to_vec();
+        let mut request = alpha_result_request();
+        request.source_artifact.inline_bytes = None;
+        request.source_artifact.chunks = vec![
+            general_compute_runtime::ArtifactChunk {
+                offset: 0,
+                size_bytes: 6,
+                sha256: sha256_digest(b"source"),
+            },
+            general_compute_runtime::ArtifactChunk {
+                offset: 6,
+                size_bytes: 1,
+                sha256: sha256_digest(b"s"),
+            },
+        ];
+        request.source_artifact.size_bytes = bytes.len() as u64;
+        request.source_artifact.sha256 = sha256_digest(&bytes);
+        request.request_digest = request.canonical_request_digest();
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
+        let mut sources = HashMap::new();
+        sources.insert(request.source_artifact.artifact_id.clone(), bytes);
+
+        let missing = &request.source_artifact.chunks[1];
+        let (addr, mut prepares, mut resumes, mut uploads) =
+            fake_general_compute_chunk_server(vec![GeneralComputeChunkDescriptor {
+                offset: missing.offset as i64,
+                size_bytes: missing.size_bytes as i64,
+                sha256: missing.sha256.clone(),
+            }])
+            .await
+            .unwrap();
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+
+        prepare_general_compute_on_worker_with_sources(
+            channel,
+            &task,
+            "nodepool-token",
+            7,
+            &sources,
+        )
+        .await
+        .unwrap();
+
+        let prepared = prepares.recv().await.unwrap();
+        assert_eq!(prepared.task_id, task.task_id);
+        assert_eq!(prepared.token, "nodepool-token");
+        assert_eq!(prepared.runtime, GENERAL_COMPUTE_RUNTIME_VERSION);
+        assert_eq!(
+            prepared.general_compute_manifest_json.as_slice(),
+            task.general_compute_manifest_json.as_deref().unwrap()
+        );
+        assert_eq!(prepared.execution_id, request.execution_id);
+        assert_eq!(prepared.attempt_id, request.attempt_id);
+        assert_eq!(prepared.idempotency_key, request.idempotency_key);
+        assert_eq!(prepared.request_digest, request.request_digest);
+        assert_eq!(prepared.transfer_generation, 7);
+
+        let resumed = resumes.recv().await.unwrap();
+        assert_eq!(resumed.token, "nodepool-token");
+        assert_eq!(resumed.artifact_id, request.source_artifact.artifact_id);
+        assert_eq!(resumed.transfer_generation, 7);
+
+        let uploaded = uploads.recv().await.unwrap();
+        assert_eq!(uploaded.offset, 6);
+        assert_eq!(uploaded.bytes, b"s");
+        assert_eq!(uploaded.transfer_generation, 7);
+        assert!(uploads.try_recv().is_err());
+    }
+
+    #[test]
+    fn worker_cannot_request_a_chunk_outside_the_nodepool_manifest() {
+        let upload = GeneralComputeChunkUpload {
+            token: "nodepool-token".into(),
+            execution_id: "execution-1".into(),
+            attempt_id: "attempt-1".into(),
+            idempotency_key: "idempotency-1".into(),
+            request_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            artifact_id: "source".into(),
+            offset: 0,
+            size_bytes: 6,
+            sha256: sha256_digest(b"source"),
+            bytes: b"source".to_vec(),
+            transfer_generation: 7,
+        };
+        let missing = GeneralComputeChunkDescriptor {
+            offset: 6,
+            size_bytes: 1,
+            sha256: sha256_digest(b"untrusted"),
+        };
+
+        let error = select_missing_general_compute_chunks(&[upload], &[missing])
+            .expect_err("an untrusted Worker cannot widen the Nodepool upload manifest");
+
+        assert!(error
+            .to_string()
+            .contains("not present in the Nodepool manifest"));
     }
 
     #[test]
@@ -1513,6 +2121,472 @@ mod tests {
             .execute(&db.pool)
             .await
             .ok();
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn execute_on_worker_prepares_authenticated_chunks_before_execution() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_authenticated_chunk_sequence").await else {
+            return;
+        };
+        let dispatcher = Dispatcher::new(db.clone(), 30, 2);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let task_id = format!("dispatch-transfer-task-{unique}");
+        let worker_id = format!("dispatch-transfer-worker-{unique}");
+        let bytes = b"trusted-source".to_vec();
+        let mut manifest = alpha_result_request();
+        manifest.source_artifact = ArtifactManifest {
+            artifact_id: "source".into(),
+            role: ArtifactRole::Source,
+            size_bytes: bytes.len() as u64,
+            mime_type: "text/plain".into(),
+            sha256: sha256_digest(&bytes),
+            chunks: vec![general_compute_runtime::ArtifactChunk {
+                offset: 0,
+                size_bytes: bytes.len() as u64,
+                sha256: sha256_digest(&bytes),
+            }],
+            inline_bytes: Some(bytes.clone()),
+        };
+        manifest.request_digest = manifest.canonical_request_digest();
+        let (worker_addr, mut calls) =
+            authenticated_general_compute_worker_server(GeneralComputeChunkDescriptor {
+                offset: 0,
+                size_bytes: bytes.len() as i64,
+                sha256: sha256_digest(&bytes),
+            })
+            .await
+            .unwrap();
+
+        let mut task = make_task(&task_id, TaskStatus::Pending, 0);
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.torrent_source = None;
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&manifest).unwrap());
+        dispatcher.repo.create(&task).await.unwrap();
+        dispatcher
+            .repo
+            .assign_to_worker(&task_id, &worker_id, &worker_addr.to_string())
+            .await
+            .unwrap();
+        let lease = dispatcher
+            .repo
+            .general_compute_transfer_lease(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let (private_key, public_key) = hivemind_config::generate_worker_execution_test_key_pair();
+
+        execute_on_worker(
+            dispatcher.repo.clone(),
+            task,
+            worker_id.clone(),
+            worker_addr.to_string(),
+            &private_key,
+            ManagedProofRolloutMode::Enforce,
+        )
+        .await
+        .unwrap();
+
+        let mut observed = Vec::new();
+        for _ in 0..4 {
+            observed.push(
+                tokio::time::timeout(Duration::from_secs(1), calls.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        let TransportCall::Prepare(prepared) = &observed[0] else {
+            panic!("first call must prepare the authenticated transfer");
+        };
+        assert_eq!(prepared.task_id, task_id);
+        assert_eq!(prepared.transfer_generation, lease.generation);
+        let claims =
+            hivemind_auth::worker_execution::WorkerExecutionVerifier::from_pem(&public_key)
+                .unwrap()
+                .decode_execution_claims(&prepared.token)
+                .unwrap();
+        assert_eq!(claims.claims.worker_id.as_deref(), Some(worker_id.as_str()));
+        assert_eq!(claims.transfer_generation, Some(lease.generation));
+
+        let TransportCall::Resume(resumed) = &observed[1] else {
+            panic!("second call must request the Worker's verified missing chunks");
+        };
+        assert_eq!(resumed.artifact_id, "source");
+        assert_eq!(resumed.transfer_generation, lease.generation);
+        let TransportCall::Upload(uploaded) = &observed[2] else {
+            panic!("third call must upload the verified missing chunk");
+        };
+        assert_eq!(uploaded.bytes, bytes);
+        assert_eq!(uploaded.transfer_generation, lease.generation);
+        let TransportCall::Execute(execute) = &observed[3] else {
+            panic!("execution must start only after authenticated transfer");
+        };
+        assert_eq!(execute.token, prepared.token);
+        assert_eq!(execute.request_digest, manifest.request_digest);
+
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn prepare_rpc_failure_redispatches_without_worker_penalty() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_prepare_rpc_failure").await else {
+            return;
+        };
+        let dispatcher = Dispatcher::new(db.clone(), 30, 2);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let task_id = format!("dispatch-prepare-failure-task-{unique}");
+        let worker_id = format!("dispatch-prepare-failure-worker-{unique}");
+        let bytes = b"trusted-source".to_vec();
+        let mut manifest = alpha_result_request();
+        manifest.source_artifact = ArtifactManifest {
+            artifact_id: "source".into(),
+            role: ArtifactRole::Source,
+            size_bytes: bytes.len() as u64,
+            mime_type: "text/plain".into(),
+            sha256: sha256_digest(&bytes),
+            chunks: vec![general_compute_runtime::ArtifactChunk {
+                offset: 0,
+                size_bytes: bytes.len() as u64,
+                sha256: sha256_digest(&bytes),
+            }],
+            inline_bytes: Some(bytes),
+        };
+        manifest.request_digest = manifest.canonical_request_digest();
+        let (worker_addr, mut execute_rx) = worker_only_execute_server().await.unwrap();
+
+        let mut task = make_task(&task_id, TaskStatus::Pending, 0);
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.torrent_source = None;
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&manifest).unwrap());
+        dispatcher.repo.create(&task).await.unwrap();
+        dispatcher
+            .repo
+            .assign_to_worker(&task_id, &worker_id, &worker_addr.to_string())
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO worker_reputation
+             (worker_id, successful_tasks, failed_tasks, score, banned)
+             VALUES ($1, 0, 0, 100, false)",
+        )
+        .bind(&worker_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        let (private_key, _) = hivemind_config::generate_worker_execution_test_key_pair();
+
+        execute_on_worker(
+            dispatcher.repo.clone(),
+            task,
+            worker_id.clone(),
+            worker_addr.to_string(),
+            &private_key,
+            ManagedProofRolloutMode::Enforce,
+        )
+        .await
+        .unwrap();
+
+        let stored = dispatcher
+            .repo
+            .find_by_task_id(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, TaskStatus::Pending);
+        assert!(stored.worker_id.is_none());
+        assert!(!stored.billing_settled);
+        let failed_tasks: i64 =
+            sqlx::query_scalar("SELECT failed_tasks FROM worker_reputation WHERE worker_id = $1")
+                .bind(&worker_id)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(failed_tasks, 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), execute_rx.recv())
+                .await
+                .is_err()
+        );
+
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn expired_transfer_lease_redispatches_before_signing_or_execution() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_expired_transfer_lease").await else {
+            return;
+        };
+        let dispatcher = Dispatcher::new(db.clone(), 30, 2);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let task_id = format!("dispatch-expired-lease-task-{unique}");
+        let worker_id = format!("dispatch-expired-lease-worker-{unique}");
+        let bytes = b"trusted-source".to_vec();
+        let mut manifest = alpha_result_request();
+        manifest.source_artifact = ArtifactManifest {
+            artifact_id: "source".into(),
+            role: ArtifactRole::Source,
+            size_bytes: bytes.len() as u64,
+            mime_type: "text/plain".into(),
+            sha256: sha256_digest(&bytes),
+            chunks: vec![general_compute_runtime::ArtifactChunk {
+                offset: 0,
+                size_bytes: bytes.len() as u64,
+                sha256: sha256_digest(&bytes),
+            }],
+            inline_bytes: Some(bytes),
+        };
+        manifest.request_digest = manifest.canonical_request_digest();
+        let (worker_addr, mut execute_rx) = worker_only_execute_server().await.unwrap();
+        let mut task = make_task(&task_id, TaskStatus::Pending, 0);
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.torrent_source = None;
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&manifest).unwrap());
+        dispatcher.repo.create(&task).await.unwrap();
+        dispatcher
+            .repo
+            .assign_to_worker(&task_id, &worker_id, &worker_addr.to_string())
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE general_compute_transfer_leases
+             SET expires_at = NOW() - INTERVAL '1 second'
+             WHERE task_id = $1 AND state = 'active'",
+        )
+        .bind(&task_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO worker_reputation
+             (worker_id, successful_tasks, failed_tasks, score, banned)
+             VALUES ($1, 0, 0, 100, false)",
+        )
+        .bind(&worker_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        let (private_key, _) = hivemind_config::generate_worker_execution_test_key_pair();
+
+        execute_on_worker(
+            dispatcher.repo.clone(),
+            task,
+            worker_id.clone(),
+            worker_addr.to_string(),
+            &private_key,
+            ManagedProofRolloutMode::Enforce,
+        )
+        .await
+        .unwrap();
+
+        let stored = dispatcher
+            .repo
+            .find_by_task_id(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, TaskStatus::Pending);
+        assert!(stored.worker_id.is_none());
+        assert!(!stored.billing_settled);
+        let failed_tasks: i64 =
+            sqlx::query_scalar("SELECT failed_tasks FROM worker_reputation WHERE worker_id = $1")
+                .bind(&worker_id)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(failed_tasks, 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), execute_rx.recv())
+                .await
+                .is_err()
+        );
+
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn missing_nodepool_artifact_source_fails_typed_without_worker_penalty() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_missing_nodepool_source").await else {
+            return;
+        };
+        let dispatcher = Dispatcher::new(db.clone(), 30, 2);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let task_id = format!("dispatch-missing-source-task-{unique}");
+        let worker_id = format!("dispatch-missing-source-worker-{unique}");
+        let bytes = b"unavailable-source";
+        let mut manifest = alpha_result_request();
+        manifest.source_artifact = ArtifactManifest {
+            artifact_id: "source".into(),
+            role: ArtifactRole::Source,
+            size_bytes: bytes.len() as u64,
+            mime_type: "text/plain".into(),
+            sha256: sha256_digest(bytes),
+            chunks: vec![general_compute_runtime::ArtifactChunk {
+                offset: 0,
+                size_bytes: bytes.len() as u64,
+                sha256: sha256_digest(bytes),
+            }],
+            inline_bytes: None,
+        };
+        manifest.request_digest = manifest.canonical_request_digest();
+        let (worker_addr, mut execute_rx) = worker_only_execute_server().await.unwrap();
+
+        let mut task = make_task(&task_id, TaskStatus::Pending, 0);
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.torrent_source = None;
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&manifest).unwrap());
+        dispatcher.repo.create(&task).await.unwrap();
+        dispatcher
+            .repo
+            .assign_to_worker(&task_id, &worker_id, &worker_addr.to_string())
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO worker_reputation
+             (worker_id, successful_tasks, failed_tasks, score, banned)
+             VALUES ($1, 0, 0, 100, false)",
+        )
+        .bind(&worker_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        let (private_key, _) = hivemind_config::generate_worker_execution_test_key_pair();
+
+        execute_on_worker(
+            dispatcher.repo.clone(),
+            task,
+            worker_id.clone(),
+            worker_addr.to_string(),
+            &private_key,
+            ManagedProofRolloutMode::Enforce,
+        )
+        .await
+        .unwrap();
+
+        let stored = dispatcher
+            .repo
+            .find_by_task_id(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, TaskStatus::Failed);
+        assert!(!stored.billing_settled);
+        assert!(dispatcher
+            .repo
+            .general_compute_transfer_lease(&task_id)
+            .await
+            .unwrap()
+            .is_none());
+        let result_json: Vec<u8> = sqlx::query_scalar(
+            "SELECT result_json FROM general_compute_results WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let result: GeneralComputeResult = serde_json::from_slice(&result_json).unwrap();
+        assert_eq!(result.status, ResultStatus::Failed);
+        assert_eq!(result.error_code.as_deref(), Some("nodepool_task_failed"));
+        assert!(result.stderr.contains("no trusted source"));
+        let failed_tasks: i64 =
+            sqlx::query_scalar("SELECT failed_tasks FROM worker_reputation WHERE worker_id = $1")
+                .bind(&worker_id)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(failed_tasks, 0);
+        let settlement_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM general_compute_settlements WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(settlement_count, 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), execute_rx.recv())
+                .await
+                .is_err()
+        );
+
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn execution_token_signing_failure_is_contained_without_worker_penalty() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_execution_token_signing_failure").await
+        else {
+            return;
+        };
+        let dispatcher = Dispatcher::new(db.clone(), 30, 2);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let task_id = format!("dispatch-signing-failure-task-{unique}");
+        let worker_id = format!("dispatch-signing-failure-worker-{unique}");
+        let (worker_addr, mut execute_rx) = worker_only_execute_server().await.unwrap();
+        let mut task = make_task(&task_id, TaskStatus::Pending, 0);
+        task.runtime = Some("managed-function-v0".into());
+        task.task_source = Some("return 7;".into());
+        dispatcher.repo.create(&task).await.unwrap();
+        dispatcher
+            .repo
+            .assign_to_worker(&task_id, &worker_id, &worker_addr.to_string())
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO worker_reputation
+             (worker_id, successful_tasks, failed_tasks, score, banned)
+             VALUES ($1, 0, 0, 100, false)",
+        )
+        .bind(&worker_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        execute_on_worker(
+            dispatcher.repo.clone(),
+            task,
+            worker_id.clone(),
+            worker_addr.to_string(),
+            "not-a-valid-ed25519-private-key",
+            ManagedProofRolloutMode::Enforce,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), execute_rx.recv())
+                .await
+                .is_err()
+        );
+        let stored = dispatcher
+            .repo
+            .find_by_task_id(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, TaskStatus::Failed);
+        assert!(stored
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("WORKER_EXECUTION_PRIVATE_KEY_PEM")));
+        let failed_tasks: i64 =
+            sqlx::query_scalar("SELECT failed_tasks FROM worker_reputation WHERE worker_id = $1")
+                .bind(&worker_id)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(failed_tasks, 0);
+
         fixture.cleanup().await.ok();
     }
 
@@ -2368,7 +3442,7 @@ mod tests {
         let task = make_task("bound-dispatch", TaskStatus::Assigned, 0);
         let (private_key, public_key) = hivemind_config::generate_worker_execution_test_key_pair();
 
-        let token = worker_execution_token(&private_key, &task, "worker-bound-7").unwrap();
+        let token = worker_execution_token(&private_key, &task, "worker-bound-7", None).unwrap();
         let claims =
             hivemind_auth::worker_execution::WorkerExecutionVerifier::from_pem(&public_key)
                 .unwrap()
@@ -2388,12 +3462,49 @@ mod tests {
     }
 
     #[test]
+    fn general_compute_execution_token_binds_attempt_and_transfer_generation() {
+        let (mut task, request) = alpha_result_task("bound-general-compute-token");
+        task.status = TaskStatus::Assigned;
+        let (private_key, public_key) = hivemind_config::generate_worker_execution_test_key_pair();
+
+        let token = worker_execution_token(&private_key, &task, "worker-bound-7", Some(7)).unwrap();
+        let claims =
+            hivemind_auth::worker_execution::WorkerExecutionVerifier::from_pem(&public_key)
+                .unwrap()
+                .decode_execution_claims(&token)
+                .unwrap();
+
+        assert_eq!(
+            claims.claims.task_id.as_deref(),
+            Some(task.task_id.as_str())
+        );
+        assert_eq!(claims.claims.worker_id.as_deref(), Some("worker-bound-7"));
+        assert_eq!(
+            claims.execution_id.as_deref(),
+            Some(request.execution_id.as_str())
+        );
+        assert_eq!(
+            claims.attempt_id.as_deref(),
+            Some(request.attempt_id.as_str())
+        );
+        assert_eq!(
+            claims.idempotency_key.as_deref(),
+            Some(request.idempotency_key.as_str())
+        );
+        assert_eq!(
+            claims.request_digest.as_deref(),
+            Some(request.request_digest.as_str())
+        );
+        assert_eq!(claims.transfer_generation, Some(7));
+    }
+
+    #[test]
     fn worker_execution_token_reports_private_key_boundary() {
         // Given: a dispatchable task and a missing worker-execution private key.
         let task = make_task("missing-worker-private-key", TaskStatus::Assigned, 0);
 
         // When: token creation crosses the signing boundary.
-        let error = worker_execution_token("", &task, "worker-7")
+        let error = worker_execution_token("", &task, "worker-7", None)
             .unwrap_err()
             .to_string();
 
@@ -3250,6 +4361,36 @@ mod tests {
         fixture.cleanup().await.ok();
     }
 
+    async fn worker_only_execute_server(
+    ) -> Option<(SocketAddr, tokio::sync::mpsc::Receiver<String>)> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.ok()?;
+        let addr = listener.local_addr().ok()?;
+        let (execute_tx, execute_rx) = tokio::sync::mpsc::channel(1);
+        let service = WorkerNodeServiceServer::new(FakeWorkerExecuteService {
+            execute_tx,
+            response: ExecuteTaskResponse::default(),
+        });
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(service)
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await;
+        });
+
+        for _ in 0..30 {
+            if hivemind_proto::worker_node_service_client::WorkerNodeServiceClient::connect(
+                format!("http://{addr}"),
+            )
+            .await
+            .is_ok()
+            {
+                return Some((addr, execute_rx));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        None
+    }
+
     async fn fake_worker_execute_server(
     ) -> Option<(SocketAddr, tokio::sync::mpsc::Receiver<String>)> {
         fake_worker_execute_server_with_response(ExecuteTaskResponse {
@@ -3274,9 +4415,11 @@ mod tests {
             execute_tx,
             response,
         });
+        let chunks = GeneralComputeChunkServiceServer::new(PermissiveChunkService);
         tokio::spawn(async move {
             let _ = tonic::transport::Server::builder()
                 .add_service(service)
+                .add_service(chunks)
                 .serve_with_incoming(TcpListenerStream::new(listener))
                 .await;
         });
@@ -3293,6 +4436,316 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         None
+    }
+
+    async fn fake_general_compute_chunk_server(
+        resume_missing: Vec<GeneralComputeChunkDescriptor>,
+    ) -> Option<(
+        SocketAddr,
+        tokio::sync::mpsc::Receiver<GeneralComputePrepareRequest>,
+        tokio::sync::mpsc::Receiver<GeneralComputeChunkResumeRequest>,
+        tokio::sync::mpsc::Receiver<GeneralComputeChunkUpload>,
+    )> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.ok()?;
+        let addr = listener.local_addr().ok()?;
+        let (prepare_tx, prepare_rx) = tokio::sync::mpsc::channel(1);
+        let (resume_tx, resume_rx) = tokio::sync::mpsc::channel(1);
+        let (upload_tx, upload_rx) = tokio::sync::mpsc::channel(2);
+        let service = GeneralComputeChunkServiceServer::new(FakeGeneralComputeChunkService {
+            prepare_tx,
+            resume_tx,
+            upload_tx,
+            resume_missing,
+        });
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(service)
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await;
+        });
+
+        for _ in 0..30 {
+            if hivemind_proto::general_compute_chunk_service_client::GeneralComputeChunkServiceClient::connect(
+                format!("http://{addr}"),
+            )
+            .await
+            .is_ok()
+            {
+                return Some((addr, prepare_rx, resume_rx, upload_rx));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        None
+    }
+
+    struct FakeGeneralComputeChunkService {
+        prepare_tx: tokio::sync::mpsc::Sender<GeneralComputePrepareRequest>,
+        resume_tx: tokio::sync::mpsc::Sender<GeneralComputeChunkResumeRequest>,
+        upload_tx: tokio::sync::mpsc::Sender<GeneralComputeChunkUpload>,
+        resume_missing: Vec<GeneralComputeChunkDescriptor>,
+    }
+
+    #[tonic::async_trait]
+    impl GeneralComputeChunkService for FakeGeneralComputeChunkService {
+        async fn prepare_general_compute(
+            &self,
+            request: Request<GeneralComputePrepareRequest>,
+        ) -> Result<Response<GeneralComputePrepareResponse>, Status> {
+            let request = request.into_inner();
+            let response = GeneralComputePrepareResponse {
+                success: true,
+                status_message: "prepared".into(),
+                execution_id: request.execution_id.clone(),
+                attempt_id: request.attempt_id.clone(),
+                idempotency_key: request.idempotency_key.clone(),
+                request_digest: request.request_digest.clone(),
+                transfer_generation: request.transfer_generation,
+            };
+            self.prepare_tx
+                .send(request)
+                .await
+                .map_err(|_| Status::internal("prepare capture closed"))?;
+            Ok(Response::new(response))
+        }
+
+        async fn upload_chunk(
+            &self,
+            request: Request<GeneralComputeChunkUpload>,
+        ) -> Result<Response<GeneralComputeChunkUploadResponse>, Status> {
+            self.upload_tx
+                .send(request.into_inner())
+                .await
+                .map_err(|_| Status::internal("upload capture closed"))?;
+            Ok(Response::new(GeneralComputeChunkUploadResponse {
+                success: true,
+                status_message: "accepted".into(),
+                accepted_chunks: 1,
+            }))
+        }
+
+        async fn resume_chunks(
+            &self,
+            request: Request<GeneralComputeChunkResumeRequest>,
+        ) -> Result<Response<GeneralComputeChunkResumeResponse>, Status> {
+            self.resume_tx
+                .send(request.into_inner())
+                .await
+                .map_err(|_| Status::internal("resume capture closed"))?;
+            Ok(Response::new(GeneralComputeChunkResumeResponse {
+                success: true,
+                status_message: "resume".into(),
+                missing_chunks: self.resume_missing.clone(),
+            }))
+        }
+    }
+
+    #[derive(Debug)]
+    enum TransportCall {
+        Prepare(GeneralComputePrepareRequest),
+        Resume(GeneralComputeChunkResumeRequest),
+        Upload(GeneralComputeChunkUpload),
+        Execute(ExecuteTaskRequest),
+    }
+
+    async fn authenticated_general_compute_worker_server(
+        missing: GeneralComputeChunkDescriptor,
+    ) -> Option<(SocketAddr, tokio::sync::mpsc::Receiver<TransportCall>)> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.ok()?;
+        let addr = listener.local_addr().ok()?;
+        let (calls_tx, calls_rx) = tokio::sync::mpsc::channel(8);
+        let worker = WorkerNodeServiceServer::new(RecordingWorkerExecuteService {
+            calls_tx: calls_tx.clone(),
+        });
+        let chunks =
+            GeneralComputeChunkServiceServer::new(RecordingChunkService { calls_tx, missing });
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(worker)
+                .add_service(chunks)
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await;
+        });
+
+        for _ in 0..30 {
+            if hivemind_proto::general_compute_chunk_service_client::GeneralComputeChunkServiceClient::connect(
+                format!("http://{addr}"),
+            )
+            .await
+            .is_ok()
+            {
+                return Some((addr, calls_rx));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        None
+    }
+
+    struct RecordingChunkService {
+        calls_tx: tokio::sync::mpsc::Sender<TransportCall>,
+        missing: GeneralComputeChunkDescriptor,
+    }
+
+    #[tonic::async_trait]
+    impl GeneralComputeChunkService for RecordingChunkService {
+        async fn prepare_general_compute(
+            &self,
+            request: Request<GeneralComputePrepareRequest>,
+        ) -> Result<Response<GeneralComputePrepareResponse>, Status> {
+            let request = request.into_inner();
+            let response = GeneralComputePrepareResponse {
+                success: true,
+                status_message: "prepared".into(),
+                execution_id: request.execution_id.clone(),
+                attempt_id: request.attempt_id.clone(),
+                idempotency_key: request.idempotency_key.clone(),
+                request_digest: request.request_digest.clone(),
+                transfer_generation: request.transfer_generation,
+            };
+            self.calls_tx
+                .send(TransportCall::Prepare(request))
+                .await
+                .map_err(|_| Status::internal("transport call receiver closed"))?;
+            Ok(Response::new(response))
+        }
+
+        async fn upload_chunk(
+            &self,
+            request: Request<GeneralComputeChunkUpload>,
+        ) -> Result<Response<GeneralComputeChunkUploadResponse>, Status> {
+            self.calls_tx
+                .send(TransportCall::Upload(request.into_inner()))
+                .await
+                .map_err(|_| Status::internal("transport call receiver closed"))?;
+            Ok(Response::new(GeneralComputeChunkUploadResponse {
+                success: true,
+                status_message: "accepted".into(),
+                accepted_chunks: 1,
+            }))
+        }
+
+        async fn resume_chunks(
+            &self,
+            request: Request<GeneralComputeChunkResumeRequest>,
+        ) -> Result<Response<GeneralComputeChunkResumeResponse>, Status> {
+            self.calls_tx
+                .send(TransportCall::Resume(request.into_inner()))
+                .await
+                .map_err(|_| Status::internal("transport call receiver closed"))?;
+            Ok(Response::new(GeneralComputeChunkResumeResponse {
+                success: true,
+                status_message: "resume".into(),
+                missing_chunks: vec![self.missing.clone()],
+            }))
+        }
+    }
+
+    struct RecordingWorkerExecuteService {
+        calls_tx: tokio::sync::mpsc::Sender<TransportCall>,
+    }
+
+    #[tonic::async_trait]
+    impl WorkerNodeService for RecordingWorkerExecuteService {
+        async fn execute_task(
+            &self,
+            request: Request<ExecuteTaskRequest>,
+        ) -> Result<Response<ExecuteTaskResponse>, Status> {
+            let request = request.into_inner();
+            let response = ExecuteTaskResponse {
+                success: false,
+                status_message: "fixture stops after transport".into(),
+                execution_id: request.execution_id.clone(),
+                attempt_id: request.attempt_id.clone(),
+                idempotency_key: request.idempotency_key.clone(),
+                request_digest: request.request_digest.clone(),
+                ..ExecuteTaskResponse::default()
+            };
+            self.calls_tx
+                .send(TransportCall::Execute(request))
+                .await
+                .map_err(|_| Status::internal("transport call receiver closed"))?;
+            Ok(Response::new(response))
+        }
+
+        async fn task_output_upload(
+            &self,
+            _request: Request<TaskOutputUploadRequest>,
+        ) -> Result<Response<TaskOutputUploadResponse>, Status> {
+            Err(Status::unimplemented("fixture does not upload output"))
+        }
+
+        async fn task_result_upload(
+            &self,
+            _request: Request<TaskResultUploadRequest>,
+        ) -> Result<Response<TaskResultUploadResponse>, Status> {
+            Err(Status::unimplemented("fixture does not upload results"))
+        }
+
+        async fn task_output(
+            &self,
+            _request: Request<TaskOutputRequest>,
+        ) -> Result<Response<TaskOutputResponse>, Status> {
+            Err(Status::unimplemented("fixture has no output"))
+        }
+
+        async fn stop_task_execution(
+            &self,
+            _request: Request<StopTaskExecutionRequest>,
+        ) -> Result<Response<StopTaskExecutionResponse>, Status> {
+            Ok(Response::new(StopTaskExecutionResponse {
+                success: true,
+                status_message: "Stop requested".into(),
+            }))
+        }
+
+        async fn task_usage(
+            &self,
+            _request: Request<TaskUsageRequest>,
+        ) -> Result<Response<TaskUsageResponse>, Status> {
+            Err(Status::unimplemented("fixture does not report usage"))
+        }
+    }
+
+    struct PermissiveChunkService;
+
+    #[tonic::async_trait]
+    impl GeneralComputeChunkService for PermissiveChunkService {
+        async fn prepare_general_compute(
+            &self,
+            request: Request<GeneralComputePrepareRequest>,
+        ) -> Result<Response<GeneralComputePrepareResponse>, Status> {
+            let request = request.into_inner();
+            Ok(Response::new(GeneralComputePrepareResponse {
+                success: true,
+                status_message: "prepared".into(),
+                execution_id: request.execution_id,
+                attempt_id: request.attempt_id,
+                idempotency_key: request.idempotency_key,
+                request_digest: request.request_digest,
+                transfer_generation: request.transfer_generation,
+            }))
+        }
+
+        async fn upload_chunk(
+            &self,
+            _request: Request<GeneralComputeChunkUpload>,
+        ) -> Result<Response<GeneralComputeChunkUploadResponse>, Status> {
+            Ok(Response::new(GeneralComputeChunkUploadResponse {
+                success: true,
+                status_message: "accepted".into(),
+                accepted_chunks: 1,
+            }))
+        }
+
+        async fn resume_chunks(
+            &self,
+            _request: Request<GeneralComputeChunkResumeRequest>,
+        ) -> Result<Response<GeneralComputeChunkResumeResponse>, Status> {
+            Ok(Response::new(GeneralComputeChunkResumeResponse {
+                success: true,
+                status_message: "resume".into(),
+                missing_chunks: Vec::new(),
+            }))
+        }
     }
 
     struct FakeWorkerExecuteService {
