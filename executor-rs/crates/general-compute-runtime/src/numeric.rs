@@ -28,6 +28,10 @@ pub enum NumericError {
     BatchedMatmulRequiresThreeDimensions,
     BatchedMatmulBatchMismatch { lhs: u64, rhs: u64 },
     BatchedMatmulInnerDimensionMismatch { lhs: u64, rhs: u64 },
+    SolveRequiresSquareMatrix,
+    SolveDimensionMismatch { matrix: u64, rhs: u64 },
+    SingularMatrix,
+    NonFiniteValue,
     MatmulRequiresTwoDimensions,
     MatmulInnerDimensionMismatch { lhs: u64, rhs: u64 },
 }
@@ -69,6 +73,19 @@ impl fmt::Display for NumericError {
                     formatter,
                     "batched matmul inner dimensions do not match: {lhs} and {rhs}"
                 )
+            }
+            Self::SolveRequiresSquareMatrix => {
+                formatter.write_str("solve requires a square two-dimensional matrix")
+            }
+            Self::SolveDimensionMismatch { matrix, rhs } => {
+                write!(
+                    formatter,
+                    "solve right-hand side dimension does not match matrix: {matrix} and {rhs}"
+                )
+            }
+            Self::SingularMatrix => formatter.write_str("solve matrix is singular"),
+            Self::NonFiniteValue => {
+                formatter.write_str("numeric operation produced a non-finite value")
             }
             Self::MatmulRequiresTwoDimensions => {
                 formatter.write_str("matmul requires two-dimensional tensors")
@@ -458,6 +475,91 @@ where
                 u64::try_from(columns).map_err(|_| NumericError::ShapeOverflow)?,
             ],
             output,
+        )
+    }
+}
+
+impl DenseTensor<f64> {
+    pub fn solve(&self, rhs: &Self) -> Result<Self, NumericError> {
+        if self.shape.len() != 2 || self.shape[0] != self.shape[1] {
+            return Err(NumericError::SolveRequiresSquareMatrix);
+        }
+        if rhs.shape.len() != 1 || rhs.shape[0] != self.shape[0] {
+            return Err(NumericError::SolveDimensionMismatch {
+                matrix: self.shape[0],
+                rhs: rhs.shape.first().copied().unwrap_or(0),
+            });
+        }
+        if self.values.iter().any(|value| !value.is_finite())
+            || rhs.values.iter().any(|value| !value.is_finite())
+        {
+            return Err(NumericError::NonFiniteValue);
+        }
+
+        let size = usize::try_from(self.shape[0]).map_err(|_| NumericError::ShapeOverflow)?;
+        let mut matrix = self.values.clone();
+        let mut solution = rhs.values.clone();
+
+        for column in 0..size {
+            let mut pivot_row = column;
+            for row in (column + 1)..size {
+                if matrix[row * size + column].abs() > matrix[pivot_row * size + column].abs() {
+                    pivot_row = row;
+                }
+            }
+            let pivot = matrix[pivot_row * size + column];
+            if pivot == 0.0 || !pivot.is_finite() {
+                return Err(NumericError::SingularMatrix);
+            }
+            if pivot_row != column {
+                for index in 0..size {
+                    matrix.swap(column * size + index, pivot_row * size + index);
+                }
+                solution.swap(column, pivot_row);
+            }
+
+            let pivot = matrix[column * size + column];
+            for row in (column + 1)..size {
+                let factor = matrix[row * size + column] / pivot;
+                if !factor.is_finite() {
+                    return Err(NumericError::NonFiniteValue);
+                }
+                matrix[row * size + column] = 0.0;
+                for index in (column + 1)..size {
+                    let updated =
+                        matrix[row * size + index] - factor * matrix[column * size + index];
+                    if !updated.is_finite() {
+                        return Err(NumericError::NonFiniteValue);
+                    }
+                    matrix[row * size + index] = updated;
+                }
+                let updated_rhs = solution[row] - factor * solution[column];
+                if !updated_rhs.is_finite() {
+                    return Err(NumericError::NonFiniteValue);
+                }
+                solution[row] = updated_rhs;
+            }
+        }
+
+        for row in (0..size).rev() {
+            let mut value = solution[row];
+            for index in (row + 1)..size {
+                value -= matrix[row * size + index] * solution[index];
+            }
+            let pivot = matrix[row * size + row];
+            if pivot == 0.0 || !pivot.is_finite() {
+                return Err(NumericError::SingularMatrix);
+            }
+            let solved = value / pivot;
+            if !solved.is_finite() {
+                return Err(NumericError::NonFiniteValue);
+            }
+            solution[row] = solved;
+        }
+
+        Self::new(
+            vec![u64::try_from(size).map_err(|_| NumericError::ShapeOverflow)?],
+            solution,
         )
     }
 }

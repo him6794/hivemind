@@ -243,3 +243,36 @@ fn batched_matmul_rejects_rank_batch_and_inner_mismatches() {
         Err(NumericError::BatchedMatmulInnerDimensionMismatch { lhs: 2, rhs: 3 })
     );
 }
+
+#[test]
+fn f64_solve_uses_bounded_partial_pivoting() {
+    let matrix = F64Tensor::new(vec![2, 2], vec![0.0, 2.0, 1.0, 2.0]).unwrap();
+    let rhs = F64Tensor::new(vec![2], vec![4.0, 5.0]).unwrap();
+
+    let solution = matrix.solve(&rhs).expect("pivoted system should solve");
+    assert_eq!(solution.shape(), &[2]);
+    assert_eq!(solution.values(), &[1.0, 2.0]);
+}
+
+#[test]
+fn f64_solve_rejects_invalid_shapes_singular_and_nonfinite_inputs() {
+    let non_square = F64Tensor::new(vec![2, 3], vec![1.0; 6]).unwrap();
+    let rhs = F64Tensor::new(vec![2], vec![1.0, 2.0]).unwrap();
+    assert_eq!(
+        non_square.solve(&rhs),
+        Err(NumericError::SolveRequiresSquareMatrix)
+    );
+
+    let matrix = F64Tensor::new(vec![2, 2], vec![1.0, 0.0, 0.0, 1.0]).unwrap();
+    let wrong_rhs = F64Tensor::new(vec![3], vec![1.0, 2.0, 3.0]).unwrap();
+    assert_eq!(
+        matrix.solve(&wrong_rhs),
+        Err(NumericError::SolveDimensionMismatch { matrix: 2, rhs: 3 })
+    );
+
+    let singular = F64Tensor::new(vec![2, 2], vec![1.0, 2.0, 2.0, 4.0]).unwrap();
+    assert_eq!(singular.solve(&rhs), Err(NumericError::SingularMatrix));
+
+    let nonfinite = F64Tensor::new(vec![2, 2], vec![1.0, f64::NAN, 0.0, 1.0]).unwrap();
+    assert_eq!(nonfinite.solve(&rhs), Err(NumericError::NonFiniteValue));
+}
