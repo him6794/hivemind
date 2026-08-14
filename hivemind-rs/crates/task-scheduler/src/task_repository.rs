@@ -585,9 +585,38 @@ impl TaskRepository {
     }
 
     pub async fn fail(&self, task_id: &str, reason: &str) -> Result<Task> {
-        sqlx::query_as::<_, Task>(
-            "UPDATE tasks SET status = 'FAILED', status_message = $1, last_update = NOW(), completed_at = NOW() WHERE task_id = $2 RETURNING *"
-        ).bind(reason).bind(task_id).fetch_one(&self.pool).await.map_err(Into::into)
+        let mut tx = self.pool.begin().await?;
+        let failed = sqlx::query_as::<_, Task>(
+            "UPDATE tasks
+             SET status = 'FAILED', status_message = $1, last_update = NOW(), completed_at = NOW()
+             WHERE task_id = $2 AND status IN ('PENDING', 'QUEUED', 'ASSIGNED', 'RUNNING')
+             RETURNING *",
+        )
+        .bind(reason)
+        .bind(task_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        if let Some(result_json) = nodepool_general_compute_terminal_result(
+            &failed,
+            ResultStatus::Failed,
+            "nodepool_task_failed",
+            reason,
+            b"general-compute-nodepool-failure-input-v1",
+        )? {
+            sqlx::query(
+                "INSERT INTO general_compute_results (task_id, worker_id, result_json)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT (task_id) DO NOTHING",
+            )
+            .bind(&failed.task_id)
+            .bind(failed.worker_id.as_deref().unwrap_or("nodepool"))
+            .bind(result_json)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(failed)
     }
 
     pub async fn fail_for_worker(
@@ -3177,6 +3206,126 @@ mod tests {
         assert_eq!(attestation_count, 1);
 
         cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn general_compute_fail_persists_nodepool_typed_failure_without_settlement() {
+        let (p, fixture) = match pool("task_repository_general_compute_fail").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("generic-fail-owner-{unique}");
+        let task_id = format!("generic-fail-task-{unique}");
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        )
+        .bind(&username)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+
+        let mut request = GeneralComputeRequest {
+            execution_id: format!("execution-{unique}"),
+            attempt_id: format!("attempt-{unique}"),
+            idempotency_key: format!("idempotency-{unique}"),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "generic-fail-backend".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest::inline_json(
+                "source",
+                ArtifactRole::Source,
+                b"source",
+            ),
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+        let manifest = serde_json::to_vec(&request).unwrap();
+
+        let mut task = make_task(&task_id, &username);
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.general_compute_manifest_json = Some(manifest);
+        repo.create(&task).await.unwrap();
+
+        let reason = "Nodepool rejected the task";
+        let failed = repo.fail(&task_id, reason).await.unwrap();
+        assert_eq!(failed.status, TaskStatus::Failed);
+        assert_eq!(failed.status_message.as_deref(), Some(reason));
+
+        let persisted: (String, Vec<u8>) = sqlx::query_as(
+            "SELECT worker_id, result_json FROM general_compute_results WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(persisted.0, "nodepool");
+        let result: GeneralComputeResult = serde_json::from_slice(&persisted.1).unwrap();
+        assert_eq!(result.status, ResultStatus::Failed);
+        assert_eq!(result.error_code.as_deref(), Some("nodepool_task_failed"));
+        assert_eq!(result.stderr, reason);
+        assert_eq!(result.execution_id, request.execution_id);
+        assert_eq!(result.attempt_id, request.attempt_id);
+        assert_eq!(result.request_digest, request.request_digest);
+        assert_eq!(
+            result.input_sha256,
+            general_compute_runtime::canonical_input_digest(b"source", &[])
+        );
+        assert_eq!(result.output_manifest_root, canonical_artifact_root(&[]));
+
+        let settlement_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM general_compute_settlements WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(settlement_count, 0);
+
+        cleanup_task_case(&repo.pool, &task_id, &username, None).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_fail_does_not_overwrite_completed_task() {
+        let (p, fixture) = match pool("task_repository_fail_completed_guard").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("fail-guard-owner-{unique}");
+        let task_id = format!("fail-guard-task-{unique}");
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        )
+        .bind(&username)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+
+        let mut task = make_task(&task_id, &username);
+        task.max_cpt = 0;
+        repo.create(&task).await.unwrap();
+        let completed = repo.complete(&task_id, None, Some("done")).await.unwrap();
+        assert_eq!(completed.status, TaskStatus::Completed);
+
+        let late_fail = repo.fail(&task_id, "late failure").await;
+        assert!(late_fail.is_err());
+        let stored = repo.find_by_task_id(&task_id).await.unwrap().unwrap();
+        assert_eq!(stored.status, TaskStatus::Completed);
+        assert_eq!(stored.output.as_deref(), Some("done"));
+
+        cleanup_task_case(&repo.pool, &task_id, &username, None).await;
         fixture.cleanup().await.ok();
     }
 
