@@ -12,6 +12,7 @@ pub mod backend;
 pub mod cp_python;
 pub mod differential;
 pub mod execution;
+pub mod gpu;
 pub mod numeric;
 pub mod monte_carlo;
 pub mod ode;
