@@ -10,6 +10,7 @@ use std::ops::{Add, Div, Mul, Sub};
 
 pub const MAX_REFERENCE_FFT_LEN: usize = 4096;
 pub const MAX_REFERENCE_LU_DIM: usize = 1024;
+pub const MAX_REFERENCE_QR_DIM: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
@@ -22,29 +23,79 @@ pub enum BinaryOp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NumericError {
     ShapeOverflow,
-    ValueCountMismatch { expected: usize, actual: usize },
-    BroadcastIncompatible { axis: usize, lhs: u64, rhs: u64 },
-    AxisOutOfBounds { axis: usize, rank: usize },
-    DuplicateAxis { axis: usize },
+    ValueCountMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    BroadcastIncompatible {
+        axis: usize,
+        lhs: u64,
+        rhs: u64,
+    },
+    AxisOutOfBounds {
+        axis: usize,
+        rank: usize,
+    },
+    DuplicateAxis {
+        axis: usize,
+    },
     DotRequiresOneDimension,
-    DotLengthMismatch { lhs: u64, rhs: u64 },
+    DotLengthMismatch {
+        lhs: u64,
+        rhs: u64,
+    },
     BatchedMatmulRequiresThreeDimensions,
-    BatchedMatmulBatchMismatch { lhs: u64, rhs: u64 },
-    BatchedMatmulInnerDimensionMismatch { lhs: u64, rhs: u64 },
+    BatchedMatmulBatchMismatch {
+        lhs: u64,
+        rhs: u64,
+    },
+    BatchedMatmulInnerDimensionMismatch {
+        lhs: u64,
+        rhs: u64,
+    },
     SolveRequiresSquareMatrix,
-    SolveDimensionMismatch { matrix: u64, rhs: u64 },
+    SolveDimensionMismatch {
+        matrix: u64,
+        rhs: u64,
+    },
     LuRequiresSquareMatrix,
-    LuDimensionExceeded { dimension: usize, max: usize },
+    LuDimensionExceeded {
+        dimension: usize,
+        max: usize,
+    },
+    QrRequiresTwoDimensions,
+    QrRequiresAtLeastAsManyRows {
+        rows: u64,
+        columns: u64,
+    },
+    QrDimensionExceeded {
+        rows: usize,
+        columns: usize,
+        max: usize,
+    },
+    QrDimensionMismatch {
+        expected_rows: u64,
+        expected_columns: u64,
+        actual: Vec<u64>,
+    },
     SingularMatrix,
     InvalidResidualTolerance,
     ResidualExceeded,
+    InvalidQrTolerance,
+    QrErrorExceeded,
     NonFiniteValue,
     FftRequiresOneDimension,
-    FftLengthExceeded { length: usize, max: usize },
+    FftLengthExceeded {
+        length: usize,
+        max: usize,
+    },
     InvalidFftTolerance,
     FftErrorExceeded,
     MatmulRequiresTwoDimensions,
-    MatmulInnerDimensionMismatch { lhs: u64, rhs: u64 },
+    MatmulInnerDimensionMismatch {
+        lhs: u64,
+        rhs: u64,
+    },
 }
 
 impl fmt::Display for NumericError {
@@ -103,12 +154,43 @@ impl fmt::Display for NumericError {
                     "LU dimension {dimension} exceeds reference limit {max}"
                 )
             }
+            Self::QrRequiresTwoDimensions => {
+                formatter.write_str("QR factorization requires a two-dimensional matrix")
+            }
+            Self::QrRequiresAtLeastAsManyRows { rows, columns } => {
+                write!(
+                    formatter,
+                    "QR factorization requires at least as many rows as columns: {rows} and {columns}"
+                )
+            }
+            Self::QrDimensionExceeded { rows, columns, max } => {
+                write!(
+                    formatter,
+                    "QR dimensions {rows}x{columns} exceed reference limit {max}"
+                )
+            }
+            Self::QrDimensionMismatch {
+                expected_rows,
+                expected_columns,
+                actual,
+            } => {
+                write!(
+                    formatter,
+                    "QR reconstruction expects shape {expected_rows}x{expected_columns}, got {actual:?}"
+                )
+            }
             Self::SingularMatrix => formatter.write_str("solve matrix is singular"),
             Self::InvalidResidualTolerance => {
                 formatter.write_str("solve residual tolerance must be finite and non-negative")
             }
             Self::ResidualExceeded => {
                 formatter.write_str("solve residual exceeds the requested tolerance")
+            }
+            Self::InvalidQrTolerance => {
+                formatter.write_str("QR tolerance must be finite and non-negative")
+            }
+            Self::QrErrorExceeded => {
+                formatter.write_str("QR reconstruction or orthogonality error exceeds tolerance")
             }
             Self::NonFiniteValue => {
                 formatter.write_str("numeric operation produced a non-finite value")
@@ -238,6 +320,121 @@ impl LuFactorization {
             }
         }
         F64Tensor::new(vec![size as u64, size as u64], product)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct QrFactorization {
+    orthogonal: F64Tensor,
+    upper: F64Tensor,
+}
+
+impl QrFactorization {
+    #[must_use]
+    pub fn q(&self) -> &F64Tensor {
+        &self.orthogonal
+    }
+
+    #[must_use]
+    pub fn r(&self) -> &F64Tensor {
+        &self.upper
+    }
+
+    #[must_use]
+    pub fn orthogonal(&self) -> &F64Tensor {
+        &self.orthogonal
+    }
+
+    #[must_use]
+    pub fn upper(&self) -> &F64Tensor {
+        &self.upper
+    }
+
+    pub fn reconstruct(&self) -> Result<F64Tensor, NumericError> {
+        let rows =
+            usize::try_from(self.orthogonal.shape[0]).map_err(|_| NumericError::ShapeOverflow)?;
+        let columns =
+            usize::try_from(self.orthogonal.shape[1]).map_err(|_| NumericError::ShapeOverflow)?;
+        let mut values = vec![
+            0.0;
+            rows.checked_mul(columns)
+                .ok_or(NumericError::ShapeOverflow)?
+        ];
+        for row in 0..rows {
+            for column in 0..columns {
+                let mut value = 0.0;
+                for inner in 0..columns {
+                    value += self.orthogonal.values[row * columns + inner]
+                        * self.upper.values[inner * columns + column];
+                    if !value.is_finite() {
+                        return Err(NumericError::NonFiniteValue);
+                    }
+                }
+                values[row * columns + column] = value;
+            }
+        }
+        F64Tensor::new(
+            vec![
+                u64::try_from(rows).map_err(|_| NumericError::ShapeOverflow)?,
+                u64::try_from(columns).map_err(|_| NumericError::ShapeOverflow)?,
+            ],
+            values,
+        )
+    }
+
+    /// Compute the component-wise infinity norm of `QᵀQ - I`.
+    pub fn orthogonality_inf_norm(&self) -> Result<f64, NumericError> {
+        let rows =
+            usize::try_from(self.orthogonal.shape[0]).map_err(|_| NumericError::ShapeOverflow)?;
+        let columns =
+            usize::try_from(self.orthogonal.shape[1]).map_err(|_| NumericError::ShapeOverflow)?;
+        let mut maximum = 0.0_f64;
+        for left in 0..columns {
+            for right in 0..columns {
+                let mut value = 0.0;
+                for row in 0..rows {
+                    value += self.orthogonal.values[row * columns + left]
+                        * self.orthogonal.values[row * columns + right];
+                    if !value.is_finite() {
+                        return Err(NumericError::NonFiniteValue);
+                    }
+                }
+                let expected = if left == right { 1.0 } else { 0.0 };
+                let error = (value - expected).abs();
+                if !error.is_finite() {
+                    return Err(NumericError::NonFiniteValue);
+                }
+                maximum = maximum.max(error);
+            }
+        }
+        Ok(maximum)
+    }
+
+    /// Compute the infinity norm of `Q*R - original`.
+    pub fn reconstruction_inf_norm(&self, original: &F64Tensor) -> Result<f64, NumericError> {
+        let expected_rows = self.orthogonal.shape[0];
+        let expected_columns = self.orthogonal.shape[1];
+        if original.shape != [expected_rows, expected_columns] {
+            return Err(NumericError::QrDimensionMismatch {
+                expected_rows,
+                expected_columns,
+                actual: original.shape.clone(),
+            });
+        }
+        if original.values.iter().any(|value| !value.is_finite()) {
+            return Err(NumericError::NonFiniteValue);
+        }
+
+        let reconstructed = self.reconstruct()?;
+        let mut maximum = 0.0_f64;
+        for (actual, expected) in reconstructed.values.iter().zip(original.values.iter()) {
+            let error = (actual - expected).abs();
+            if !error.is_finite() {
+                return Err(NumericError::NonFiniteValue);
+            }
+            maximum = maximum.max(error);
+        }
+        Ok(maximum)
     }
 }
 
@@ -608,6 +805,173 @@ where
 }
 
 impl DenseTensor<f64> {
+    /// Factor a bounded tall-or-square matrix with deterministic Householder
+    /// reflections. The returned thin factors satisfy `A = Q * R`.
+    pub fn qr(&self) -> Result<QrFactorization, NumericError> {
+        if self.shape.len() != 2 {
+            return Err(NumericError::QrRequiresTwoDimensions);
+        }
+        if self.shape[0] < self.shape[1] {
+            return Err(NumericError::QrRequiresAtLeastAsManyRows {
+                rows: self.shape[0],
+                columns: self.shape[1],
+            });
+        }
+
+        let rows = usize::try_from(self.shape[0]).map_err(|_| NumericError::ShapeOverflow)?;
+        let columns = usize::try_from(self.shape[1]).map_err(|_| NumericError::ShapeOverflow)?;
+        if rows > MAX_REFERENCE_QR_DIM || columns > MAX_REFERENCE_QR_DIM {
+            return Err(NumericError::QrDimensionExceeded {
+                rows,
+                columns,
+                max: MAX_REFERENCE_QR_DIM,
+            });
+        }
+        if self.values.iter().any(|value| !value.is_finite()) {
+            return Err(NumericError::NonFiniteValue);
+        }
+
+        let matrix_len = rows
+            .checked_mul(columns)
+            .ok_or(NumericError::ShapeOverflow)?;
+        let q_len = rows.checked_mul(rows).ok_or(NumericError::ShapeOverflow)?;
+        let mut transformed = self.values.clone();
+        debug_assert_eq!(transformed.len(), matrix_len);
+        let mut full_q = vec![0.0; q_len];
+        for diagonal in 0..rows {
+            full_q[diagonal * rows + diagonal] = 1.0;
+        }
+
+        for column in 0..columns {
+            let mut norm_squared = 0.0;
+            for row in column..rows {
+                norm_squared +=
+                    transformed[row * columns + column] * transformed[row * columns + column];
+                if !norm_squared.is_finite() {
+                    return Err(NumericError::NonFiniteValue);
+                }
+            }
+            let norm = norm_squared.sqrt();
+            if norm == 0.0 || !norm.is_finite() {
+                return Err(NumericError::SingularMatrix);
+            }
+
+            let first = transformed[column * columns + column];
+            let alpha = if first >= 0.0 { -norm } else { norm };
+            let mut reflector = vec![0.0; rows - column];
+            reflector[0] = first - alpha;
+            for (offset, component) in reflector.iter_mut().enumerate().skip(1) {
+                *component = transformed[(column + offset) * columns + column];
+            }
+
+            let mut reflector_norm_squared = 0.0;
+            for &component in &reflector {
+                reflector_norm_squared += component * component;
+                if !reflector_norm_squared.is_finite() {
+                    return Err(NumericError::NonFiniteValue);
+                }
+            }
+            if reflector_norm_squared == 0.0 || !reflector_norm_squared.is_finite() {
+                return Err(NumericError::SingularMatrix);
+            }
+
+            for target_column in column..columns {
+                let mut dot = 0.0;
+                for (offset, &component) in reflector.iter().enumerate() {
+                    dot += component * transformed[(column + offset) * columns + target_column];
+                    if !dot.is_finite() {
+                        return Err(NumericError::NonFiniteValue);
+                    }
+                }
+                let factor = (2.0 * dot) / reflector_norm_squared;
+                if !factor.is_finite() {
+                    return Err(NumericError::NonFiniteValue);
+                }
+                for (offset, &component) in reflector.iter().enumerate() {
+                    let index = (column + offset) * columns + target_column;
+                    let updated = transformed[index] - factor * component;
+                    if !updated.is_finite() {
+                        return Err(NumericError::NonFiniteValue);
+                    }
+                    transformed[index] = updated;
+                }
+            }
+            for row in (column + 1)..rows {
+                transformed[row * columns + column] = 0.0;
+            }
+
+            for row in 0..rows {
+                let mut dot = 0.0;
+                for (offset, &component) in reflector.iter().enumerate() {
+                    dot += full_q[row * rows + column + offset] * component;
+                    if !dot.is_finite() {
+                        return Err(NumericError::NonFiniteValue);
+                    }
+                }
+                let factor = (2.0 * dot) / reflector_norm_squared;
+                if !factor.is_finite() {
+                    return Err(NumericError::NonFiniteValue);
+                }
+                for (offset, &component) in reflector.iter().enumerate() {
+                    let index = row * rows + column + offset;
+                    let updated = full_q[index] - factor * component;
+                    if !updated.is_finite() {
+                        return Err(NumericError::NonFiniteValue);
+                    }
+                    full_q[index] = updated;
+                }
+            }
+        }
+
+        let mut orthogonal = Vec::with_capacity(matrix_len);
+        for row in 0..rows {
+            for column in 0..columns {
+                orthogonal.push(full_q[row * rows + column]);
+            }
+        }
+        let upper_len = columns
+            .checked_mul(columns)
+            .ok_or(NumericError::ShapeOverflow)?;
+        let mut upper = Vec::with_capacity(upper_len);
+        for row in 0..columns {
+            for column in 0..columns {
+                upper.push(transformed[row * columns + column]);
+            }
+        }
+
+        Ok(QrFactorization {
+            orthogonal: Self::new(
+                vec![
+                    u64::try_from(rows).map_err(|_| NumericError::ShapeOverflow)?,
+                    u64::try_from(columns).map_err(|_| NumericError::ShapeOverflow)?,
+                ],
+                orthogonal,
+            )?,
+            upper: Self::new(
+                vec![
+                    u64::try_from(columns).map_err(|_| NumericError::ShapeOverflow)?,
+                    u64::try_from(columns).map_err(|_| NumericError::ShapeOverflow)?,
+                ],
+                upper,
+            )?,
+        })
+    }
+
+    /// Factor and require both reconstruction and orthogonality errors to fit
+    /// within a finite, non-negative reference tolerance.
+    pub fn qr_with_tolerance(&self, tolerance: f64) -> Result<QrFactorization, NumericError> {
+        if !tolerance.is_finite() || tolerance < 0.0 {
+            return Err(NumericError::InvalidQrTolerance);
+        }
+        let factor = self.qr()?;
+        if factor.orthogonality_inf_norm()? > tolerance
+            || factor.reconstruction_inf_norm(self)? > tolerance
+        {
+            return Err(NumericError::QrErrorExceeded);
+        }
+        Ok(factor)
+    }
+
     /// Factor a bounded square matrix with deterministic partial pivoting.
     ///
     /// The returned factors satisfy `P * A = L * U`, where each entry in the
