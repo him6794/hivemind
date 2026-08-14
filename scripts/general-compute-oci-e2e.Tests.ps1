@@ -52,6 +52,7 @@ foreach ($expected in @(
 # the harness validates before reporting an E2E pass.
 foreach ($expected in @(
     "HIVEMIND_GENERAL_COMPUTE_OCI_E2E_EVIDENCE",
+    "HIVEMIND_GENERAL_COMPUTE_OCI_E2E_CASES",
     "-ComposeProject",
     "-ComposeFile",
     "-RegistryPath",
@@ -74,6 +75,12 @@ foreach ($expected in @(
     if (!$harnessText.Contains($expected)) {
         throw "OCI E2E execution must implement the reviewed fixture/evidence contract '$expected'."
     }
+}
+
+$casePlanGuardIndex = $harnessText.IndexOf('Require-RegularFile "OCI E2E case plan"')
+$composeUpIndex = $harnessText.IndexOf('up -d --build')
+if ($casePlanGuardIndex -lt 0 -or $composeUpIndex -lt 0 -or $casePlanGuardIndex -gt $composeUpIndex) {
+    throw "OCI E2E -Run must validate the operator case plan before starting Compose."
 }
 
 if ($harnessText -match '(?i)multi-process task fixture execution is not yet wired') {

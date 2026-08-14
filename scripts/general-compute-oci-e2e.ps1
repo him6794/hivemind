@@ -612,6 +612,13 @@ try {
     }
     Require-RegularFile "multi-process OCI task fixture" $fixturePath
 
+    $casePlanPath = [string]$env:HIVEMIND_GENERAL_COMPUTE_OCI_E2E_CASES
+    if ([string]::IsNullOrWhiteSpace($casePlanPath)) {
+        Fail-Contract "-Run requires HIVEMIND_GENERAL_COMPUTE_OCI_E2E_CASES with a reviewed manifest/case plan"
+    }
+    Require-AbsolutePath "OCI E2E case plan" $casePlanPath
+    Require-RegularFile "OCI E2E case plan" $casePlanPath
+
     $fixtureUsername = [string]$env:HIVEMIND_GENERAL_COMPUTE_OCI_E2E_USERNAME
     if ([string]::IsNullOrWhiteSpace($fixtureUsername)) {
         $fixtureUsername = "testuser"
