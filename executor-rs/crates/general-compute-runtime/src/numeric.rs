@@ -103,12 +103,16 @@ pub enum NumericError {
     SvdNoConvergence,
     NonFiniteValue,
     FftRequiresOneDimension,
+    RealFftRequiresOneDimension,
+    RealFftSpectrumNotConjugateSymmetric,
     FftLengthExceeded {
         length: usize,
         max: usize,
     },
     InvalidFftTolerance,
     FftErrorExceeded,
+    InvalidRealFftTolerance,
+    RealFftErrorExceeded,
     MatmulRequiresTwoDimensions,
     MatmulInnerDimensionMismatch {
         lhs: u64,
@@ -244,6 +248,12 @@ impl fmt::Display for NumericError {
             Self::FftRequiresOneDimension => {
                 formatter.write_str("FFT requires a one-dimensional tensor")
             }
+            Self::RealFftRequiresOneDimension => {
+                formatter.write_str("real FFT requires a one-dimensional tensor")
+            }
+            Self::RealFftSpectrumNotConjugateSymmetric => {
+                formatter.write_str("real FFT spectrum is not conjugate symmetric")
+            }
             Self::FftLengthExceeded { length, max } => {
                 write!(
                     formatter,
@@ -255,6 +265,12 @@ impl fmt::Display for NumericError {
             }
             Self::FftErrorExceeded => {
                 formatter.write_str("FFT round-trip error exceeds the requested tolerance")
+            }
+            Self::InvalidRealFftTolerance => {
+                formatter.write_str("real FFT round-trip tolerance must be finite and non-negative")
+            }
+            Self::RealFftErrorExceeded => {
+                formatter.write_str("real FFT round-trip error exceeds the requested tolerance")
             }
             Self::MatmulRequiresTwoDimensions => {
                 formatter.write_str("matmul requires two-dimensional tensors")
@@ -1528,6 +1544,181 @@ impl DenseTensor<f64> {
             return Err(NumericError::ResidualExceeded);
         }
         Ok(solution)
+    }
+
+    /// Compute a bounded full-spectrum forward DFT for a real signal.
+    /// The output uses the same unscaled convention as `Complex128Tensor::fft`.
+    pub fn real_fft(&self) -> Result<Complex128Tensor, NumericError> {
+        if self.shape.len() != 1 {
+            return Err(NumericError::RealFftRequiresOneDimension);
+        }
+        let length = usize::try_from(self.shape[0]).map_err(|_| NumericError::ShapeOverflow)?;
+        if length > MAX_REFERENCE_FFT_LEN {
+            return Err(NumericError::FftLengthExceeded {
+                length,
+                max: MAX_REFERENCE_FFT_LEN,
+            });
+        }
+        if self.values.iter().any(|value| !value.is_finite()) {
+            return Err(NumericError::NonFiniteValue);
+        }
+        if length == 0 {
+            return Complex128Tensor::new(vec![0], Vec::new());
+        }
+
+        let length_as_f64 = length as f64;
+        let mut output = Vec::with_capacity(length);
+        for frequency in 0..length {
+            let mut sum = Complex128::default();
+            for sample in 0..length {
+                let angle =
+                    -2.0 * std::f64::consts::PI * frequency as f64 * sample as f64 / length_as_f64;
+                let (sin, cos) = angle.sin_cos();
+                sum.re += self.values[sample] * cos;
+                sum.im += self.values[sample] * sin;
+                if !sum.re.is_finite() || !sum.im.is_finite() {
+                    return Err(NumericError::NonFiniteValue);
+                }
+            }
+            output.push(sum);
+        }
+        Complex128Tensor::new(
+            vec![u64::try_from(length).map_err(|_| NumericError::ShapeOverflow)?],
+            output,
+        )
+    }
+
+    /// Alias for `real_fft` using the conventional rFFT spelling.
+    pub fn rfft(&self) -> Result<Complex128Tensor, NumericError> {
+        self.real_fft()
+    }
+
+    /// Invert a full conjugate-symmetric real-spectrum DFT with `1/n`
+    /// normalization and reject spectra that cannot represent real samples.
+    pub fn inverse_real_fft(spectrum: &Complex128Tensor) -> Result<Self, NumericError> {
+        if spectrum.shape.len() != 1 {
+            return Err(NumericError::RealFftRequiresOneDimension);
+        }
+        let length = usize::try_from(spectrum.shape[0]).map_err(|_| NumericError::ShapeOverflow)?;
+        if length > MAX_REFERENCE_FFT_LEN {
+            return Err(NumericError::FftLengthExceeded {
+                length,
+                max: MAX_REFERENCE_FFT_LEN,
+            });
+        }
+        if spectrum
+            .values
+            .iter()
+            .any(|value| !value.re.is_finite() || !value.im.is_finite())
+        {
+            return Err(NumericError::NonFiniteValue);
+        }
+        if length == 0 {
+            return Self::new(vec![0], Vec::new());
+        }
+
+        let symmetry_tolerance = 1e-10_f64;
+        let validate_imaginary = |value: f64| {
+            let scale = value.abs().max(1.0);
+            value.abs() <= symmetry_tolerance * scale
+        };
+        if !validate_imaginary(spectrum.values[0].im) {
+            return Err(NumericError::RealFftSpectrumNotConjugateSymmetric);
+        }
+        if length % 2 == 0 && !validate_imaginary(spectrum.values[length / 2].im) {
+            return Err(NumericError::RealFftSpectrumNotConjugateSymmetric);
+        }
+        for frequency in 1..=((length - 1) / 2) {
+            let mirror = length - frequency;
+            let left = spectrum.values[frequency];
+            let right = spectrum.values[mirror];
+            let scale = left
+                .re
+                .abs()
+                .max(right.re.abs())
+                .max(left.im.abs())
+                .max(right.im.abs())
+                .max(1.0);
+            if (left.re - right.re).abs() > symmetry_tolerance * scale
+                || (left.im + right.im).abs() > symmetry_tolerance * scale
+            {
+                return Err(NumericError::RealFftSpectrumNotConjugateSymmetric);
+            }
+        }
+
+        let length_as_f64 = length as f64;
+        let mut output = Vec::with_capacity(length);
+        for sample in 0..length {
+            let mut real = 0.0;
+            let mut imaginary = 0.0;
+            for frequency in 0..length {
+                let angle =
+                    2.0 * std::f64::consts::PI * frequency as f64 * sample as f64 / length_as_f64;
+                let (sin, cos) = angle.sin_cos();
+                let value = spectrum.values[frequency];
+                real += value.re * cos - value.im * sin;
+                imaginary += value.re * sin + value.im * cos;
+                if !real.is_finite() || !imaginary.is_finite() {
+                    return Err(NumericError::NonFiniteValue);
+                }
+            }
+            real /= length_as_f64;
+            imaginary /= length_as_f64;
+            if !real.is_finite() || !imaginary.is_finite() {
+                return Err(NumericError::NonFiniteValue);
+            }
+            let scale = real.abs().max(1.0);
+            if imaginary.abs() > symmetry_tolerance * scale {
+                return Err(NumericError::RealFftSpectrumNotConjugateSymmetric);
+            }
+            output.push(real);
+        }
+        Self::new(
+            vec![u64::try_from(length).map_err(|_| NumericError::ShapeOverflow)?],
+            output,
+        )
+    }
+
+    /// Alias for `inverse_real_fft` using the conventional rFFT spelling.
+    pub fn irfft(spectrum: &Complex128Tensor) -> Result<Self, NumericError> {
+        Self::inverse_real_fft(spectrum)
+    }
+
+    /// Compute the maximum absolute error after a real FFT/IFFT round trip.
+    pub fn real_fft_round_trip_error_inf_norm(&self) -> Result<f64, NumericError> {
+        let spectrum = self.real_fft()?;
+        let round_trip = Self::inverse_real_fft(&spectrum)?;
+        let mut maximum = 0.0_f64;
+        for (actual, expected) in round_trip.values.iter().zip(self.values.iter()) {
+            let error = (actual - expected).abs();
+            if !error.is_finite() {
+                return Err(NumericError::NonFiniteValue);
+            }
+            maximum = maximum.max(error);
+        }
+        Ok(maximum)
+    }
+
+    /// Alias for `real_fft_round_trip_error_inf_norm` using rFFT spelling.
+    pub fn rfft_round_trip_error_inf_norm(&self) -> Result<f64, NumericError> {
+        self.real_fft_round_trip_error_inf_norm()
+    }
+
+    /// Require a real FFT/IFFT round trip to stay within a finite,
+    /// non-negative component-wise error tolerance.
+    pub fn real_fft_with_round_trip_tolerance(&self, tolerance: f64) -> Result<Self, NumericError> {
+        if !tolerance.is_finite() || tolerance < 0.0 {
+            return Err(NumericError::InvalidRealFftTolerance);
+        }
+        if self.real_fft_round_trip_error_inf_norm()? > tolerance {
+            return Err(NumericError::RealFftErrorExceeded);
+        }
+        Ok(self.clone())
+    }
+
+    /// Alias for `real_fft_with_round_trip_tolerance` using rFFT spelling.
+    pub fn rfft_with_round_trip_tolerance(&self, tolerance: f64) -> Result<Self, NumericError> {
+        self.real_fft_with_round_trip_tolerance(tolerance)
     }
 }
 
