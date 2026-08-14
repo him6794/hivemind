@@ -209,6 +209,172 @@ impl SparseTensorManifest {
         }
         Ok(())
     }
+
+    /// Validate materialized sparse bytes against the manifest and enforce
+    /// format-specific structural invariants before a sparse kernel consumes
+    /// any index or value.
+    pub fn validate_bytes(
+        &self,
+        indptr_bytes: Option<&[u8]>,
+        indices_bytes: &[u8],
+        data_bytes: &[u8],
+    ) -> Result<(), String> {
+        self.validate()?;
+        validate_sparse_materialized_artifact("indices", &self.indices_artifact, indices_bytes)?;
+        validate_sparse_materialized_artifact("data", &self.data_artifact, data_bytes)?;
+
+        let index_width = self.index_dtype.byte_width() as usize;
+        let index_count = indices_bytes.len() / index_width;
+        let nnz = match self.format {
+            SparseFormat::Coo => index_count / 2,
+            SparseFormat::Csr | SparseFormat::Csc => index_count,
+        };
+        match self.format {
+            SparseFormat::Csr | SparseFormat::Csc => {
+                let indptr_artifact = self.indptr_artifact.as_ref().ok_or_else(|| {
+                    "sparse compressed tensor requires an indptr artifact".to_string()
+                })?;
+                let indptr_bytes = indptr_bytes.ok_or_else(|| {
+                    "sparse compressed tensor requires materialized indptr bytes".to_string()
+                })?;
+                validate_sparse_materialized_artifact("indptr", indptr_artifact, indptr_bytes)?;
+                let major_dimension = match self.format {
+                    SparseFormat::Csr => self.shape[0],
+                    SparseFormat::Csc => self.shape[1],
+                    SparseFormat::Coo => unreachable!(),
+                };
+                let expected_end = (self.index_base as u64)
+                    .checked_add(nnz as u64)
+                    .ok_or_else(|| "sparse indptr endpoint overflows".to_string())?;
+                let mut previous_pointer = self.index_base as u64;
+                for segment in 0..major_dimension {
+                    let offset = (segment as usize)
+                        .checked_mul(index_width)
+                        .ok_or_else(|| "sparse indptr offset overflows".to_string())?;
+                    let pointer = decode_sparse_index(
+                        indptr_bytes,
+                        offset,
+                        self.index_dtype,
+                        self.byte_order,
+                    )?;
+                    if pointer < self.index_base as i128 {
+                        return Err("sparse indptr contains a negative or below-base value".into());
+                    }
+                    let pointer = pointer as u64;
+                    if segment == 0 && pointer != self.index_base as u64 {
+                        return Err("sparse indptr must start at index base".into());
+                    }
+                    if pointer < previous_pointer || pointer > expected_end {
+                        return Err("sparse indptr must be monotonic and within bounds".into());
+                    }
+                    previous_pointer = pointer;
+                }
+
+                let final_offset = (major_dimension as usize)
+                    .checked_mul(index_width)
+                    .ok_or_else(|| "sparse indptr offset overflows".to_string())?;
+                let final_pointer = decode_sparse_index(
+                    indptr_bytes,
+                    final_offset,
+                    self.index_dtype,
+                    self.byte_order,
+                )?;
+                if final_pointer < self.index_base as i128 {
+                    return Err("sparse indptr contains a negative or below-base value".into());
+                }
+                let final_pointer = final_pointer as u64;
+                if final_pointer < previous_pointer || final_pointer != expected_end {
+                    return Err("sparse indptr endpoint does not match indices".into());
+                }
+
+                let bounded_dimension = match self.format {
+                    SparseFormat::Csr => self.shape[1],
+                    SparseFormat::Csc => self.shape[0],
+                    SparseFormat::Coo => unreachable!(),
+                };
+                let mut segment_start = self.index_base as u64;
+                for segment in 0..major_dimension {
+                    let offset = (segment as usize)
+                        .checked_add(1)
+                        .and_then(|next| next.checked_mul(index_width))
+                        .ok_or_else(|| "sparse indptr offset overflows".to_string())?;
+                    let segment_end = decode_sparse_index(
+                        indptr_bytes,
+                        offset,
+                        self.index_dtype,
+                        self.byte_order,
+                    )?;
+                    if segment_end < self.index_base as i128 {
+                        return Err("sparse indptr contains a negative or below-base value".into());
+                    }
+                    let segment_end = segment_end as u64;
+                    validate_sparse_segment(
+                        indices_bytes,
+                        index_width,
+                        segment_start,
+                        segment_end,
+                        self.index_base,
+                        bounded_dimension,
+                        self.index_dtype,
+                        self.byte_order,
+                        self.sorted_indices,
+                        self.allow_duplicates,
+                    )?;
+                    segment_start = segment_end;
+                }
+            }
+            SparseFormat::Coo => {
+                if indptr_bytes.is_some() {
+                    return Err("COO sparse tensor must not provide indptr bytes".into());
+                }
+                let mut previous = None;
+                let mut seen = std::collections::HashSet::new();
+                for position in 0..nnz {
+                    let row = decode_sparse_index(
+                        indices_bytes,
+                        position
+                            .checked_mul(2)
+                            .and_then(|offset| offset.checked_mul(index_width))
+                            .ok_or_else(|| "COO coordinate offset overflows".to_string())?,
+                        self.index_dtype,
+                        self.byte_order,
+                    )?;
+                    let column = decode_sparse_index(
+                        indices_bytes,
+                        position
+                            .checked_mul(2)
+                            .and_then(|offset| offset.checked_add(1))
+                            .and_then(|offset| offset.checked_mul(index_width))
+                            .ok_or_else(|| "COO coordinate offset overflows".to_string())?,
+                        self.index_dtype,
+                        self.byte_order,
+                    )?;
+                    let row = sparse_coordinate_value(row, self.index_base, self.shape[0])?;
+                    let column = sparse_coordinate_value(column, self.index_base, self.shape[1])?;
+                    let current = (row, column);
+                    if self.sorted_indices {
+                        if let Some(previous) = previous {
+                            if previous > current {
+                                return Err("sparse COO coordinates are not sorted".into());
+                            }
+                        }
+                    } else if !self.allow_duplicates && !seen.insert(current) {
+                        return Err("sparse COO coordinates contain a duplicate entry".into());
+                    }
+                    if !self.allow_duplicates {
+                        if previous == Some(current) {
+                            return Err("sparse COO coordinates contain a duplicate entry".into());
+                        }
+                        if self.sorted_indices {
+                            seen.insert(current);
+                        }
+                    }
+                    previous = Some(current);
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn validate_sparse_binary_artifact(name: &str, artifact: &ArtifactManifest) -> Result<(), String> {
@@ -220,6 +386,130 @@ fn validate_sparse_binary_artifact(name: &str, artifact: &ArtifactManifest) -> R
     artifact
         .validate()
         .map_err(|error| format!("sparse {name} artifact is invalid: {error}"))
+}
+
+fn validate_sparse_materialized_artifact(
+    name: &str,
+    artifact: &ArtifactManifest,
+    bytes: &[u8],
+) -> Result<(), String> {
+    if artifact.size_bytes != bytes.len() as u64 {
+        return Err(format!(
+            "sparse {name} materialized bytes have the wrong size"
+        ));
+    }
+    if artifact.sha256 != sha256_digest(bytes) {
+        return Err(format!(
+            "sparse {name} materialized bytes checksum does not match"
+        ));
+    }
+    if let Some(inline) = artifact.inline_bytes.as_deref()
+        && inline != bytes
+    {
+        return Err(format!(
+            "sparse {name} materialized bytes differ from inline bytes"
+        ));
+    }
+    Ok(())
+}
+
+fn decode_sparse_index(
+    bytes: &[u8],
+    offset: usize,
+    dtype: SparseIndexDType,
+    byte_order: ByteOrder,
+) -> Result<i128, String> {
+    let width = dtype.byte_width() as usize;
+    let end = offset
+        .checked_add(width)
+        .ok_or_else(|| "sparse index offset overflows".to_string())?;
+    let raw = bytes
+        .get(offset..end)
+        .ok_or_else(|| "sparse index bytes are truncated".to_string())?;
+    Ok(match (dtype, byte_order) {
+        (SparseIndexDType::Int32, ByteOrder::Little) => {
+            i32::from_le_bytes(raw.try_into().expect("index width is fixed")) as i128
+        }
+        (SparseIndexDType::Int32, ByteOrder::Big) => {
+            i32::from_be_bytes(raw.try_into().expect("index width is fixed")) as i128
+        }
+        (SparseIndexDType::Int64, ByteOrder::Little) => {
+            i64::from_le_bytes(raw.try_into().expect("index width is fixed")) as i128
+        }
+        (SparseIndexDType::Int64, ByteOrder::Big) => {
+            i64::from_be_bytes(raw.try_into().expect("index width is fixed")) as i128
+        }
+        (SparseIndexDType::Uint32, ByteOrder::Little) => {
+            u32::from_le_bytes(raw.try_into().expect("index width is fixed")) as i128
+        }
+        (SparseIndexDType::Uint32, ByteOrder::Big) => {
+            u32::from_be_bytes(raw.try_into().expect("index width is fixed")) as i128
+        }
+        (SparseIndexDType::Uint64, ByteOrder::Little) => {
+            u64::from_le_bytes(raw.try_into().expect("index width is fixed")) as i128
+        }
+        (SparseIndexDType::Uint64, ByteOrder::Big) => {
+            u64::from_be_bytes(raw.try_into().expect("index width is fixed")) as i128
+        }
+    })
+}
+
+fn sparse_coordinate_value(value: i128, index_base: u8, dimension: u64) -> Result<u64, String> {
+    let value = u64::try_from(value)
+        .map_err(|_| "sparse index must be non-negative and within bounds".to_string())?;
+    let upper = (index_base as u64)
+        .checked_add(dimension)
+        .ok_or_else(|| "sparse index bound overflows".to_string())?;
+    if value < index_base as u64 || value >= upper {
+        return Err("sparse index is out of bounds".into());
+    }
+    Ok(value)
+}
+
+fn validate_sparse_segment(
+    indices_bytes: &[u8],
+    index_width: usize,
+    start: u64,
+    end: u64,
+    index_base: u8,
+    dimension: u64,
+    dtype: SparseIndexDType,
+    byte_order: ByteOrder,
+    sorted_indices: bool,
+    allow_duplicates: bool,
+) -> Result<(), String> {
+    let start = start
+        .checked_sub(index_base as u64)
+        .ok_or_else(|| "sparse indptr is below index base".to_string())?;
+    let end = end
+        .checked_sub(index_base as u64)
+        .ok_or_else(|| "sparse indptr is below index base".to_string())?;
+    let mut previous = None;
+    let mut seen = std::collections::HashSet::new();
+    for position in start..end {
+        let offset = (position as usize)
+            .checked_mul(index_width)
+            .ok_or_else(|| "sparse index offset overflows".to_string())?;
+        let value = sparse_coordinate_value(
+            decode_sparse_index(indices_bytes, offset, dtype, byte_order)?,
+            index_base,
+            dimension,
+        )?;
+        if sorted_indices {
+            if let Some(previous) = previous {
+                if value < previous {
+                    return Err("sparse indices are not sorted".into());
+                }
+            }
+        } else if !allow_duplicates && !seen.insert(value) {
+            return Err("sparse indices contain a duplicate entry".into());
+        }
+        if !allow_duplicates && previous == Some(value) {
+            return Err("sparse indices contain a duplicate entry".into());
+        }
+        previous = Some(value);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
