@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use hivemind_models::Claims;
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use serde::{Deserialize, Serialize};
 
 /// Sample/dev platform public key embedded in official worker packages so end
 /// users can verify nodepool-issued execution tokens without pasting a secret.
@@ -18,6 +19,54 @@ pub struct WorkerExecutionSigner {
     encoding_key: EncodingKey,
 }
 
+/// Immutable general-compute identity carried by a Nodepool-issued Worker
+/// execution token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerExecutionIdentity {
+    pub execution_id: String,
+    pub attempt_id: String,
+    pub idempotency_key: String,
+    pub request_digest: String,
+    pub transfer_generation: i64,
+}
+
+impl WorkerExecutionIdentity {
+    pub fn validate(&self) -> Result<()> {
+        for (name, value) in [
+            ("execution_id", self.execution_id.as_str()),
+            ("attempt_id", self.attempt_id.as_str()),
+            ("idempotency_key", self.idempotency_key.as_str()),
+            ("request_digest", self.request_digest.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                anyhow::bail!("worker execution {name} must not be empty");
+            }
+        }
+        if self.transfer_generation <= 0 {
+            anyhow::bail!("worker execution transfer generation must be positive");
+        }
+        Ok(())
+    }
+}
+
+/// Extended claims remain backward-compatible with legacy execution tokens;
+/// general-compute consumers must require every optional identity field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerExecutionClaims {
+    #[serde(flatten)]
+    pub claims: Claims,
+    #[serde(default)]
+    pub execution_id: Option<String>,
+    #[serde(default)]
+    pub attempt_id: Option<String>,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+    #[serde(default)]
+    pub request_digest: Option<String>,
+    #[serde(default)]
+    pub transfer_generation: Option<i64>,
+}
+
 impl WorkerExecutionSigner {
     pub fn from_pem(private_key_pem: &str) -> Result<Self> {
         let pem = normalize_pem(private_key_pem);
@@ -31,6 +80,29 @@ impl WorkerExecutionSigner {
         header.typ = Some("JWT".into());
         encode(&header, claims, &self.encoding_key)
             .context("Failed to encode worker execution token")
+    }
+
+    pub fn encode_execution_claims(
+        &self,
+        claims: &Claims,
+        identity: &WorkerExecutionIdentity,
+    ) -> Result<String> {
+        identity.validate()?;
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.typ = Some("JWT".into());
+        encode(
+            &header,
+            &WorkerExecutionClaims {
+                claims: claims.clone(),
+                execution_id: Some(identity.execution_id.clone()),
+                attempt_id: Some(identity.attempt_id.clone()),
+                idempotency_key: Some(identity.idempotency_key.clone()),
+                request_digest: Some(identity.request_digest.clone()),
+                transfer_generation: Some(identity.transfer_generation),
+            },
+            &self.encoding_key,
+        )
+        .context("Failed to encode worker execution token")
     }
 }
 
@@ -56,6 +128,14 @@ impl WorkerExecutionVerifier {
         let mut validation = Validation::new(Algorithm::EdDSA);
         validation.validate_exp = true;
         let token_data = decode::<Claims>(token, &self.decoding_key, &validation)
+            .context("Failed to decode worker execution token")?;
+        Ok(token_data.claims)
+    }
+
+    pub fn decode_execution_claims(&self, token: &str) -> Result<WorkerExecutionClaims> {
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.validate_exp = true;
+        let token_data = decode::<WorkerExecutionClaims>(token, &self.decoding_key, &validation)
             .context("Failed to decode worker execution token")?;
         Ok(token_data.claims)
     }
@@ -110,6 +190,86 @@ mod tests {
         assert_eq!(claims.role.as_deref(), Some("worker-execution"));
         assert_eq!(claims.task_id.as_deref(), Some("task-1"));
         assert_eq!(claims.worker_id.as_deref(), Some("worker-7"));
+    }
+
+    #[test]
+    fn execution_token_roundtrip_binds_attempt_and_transfer_generation() {
+        let (private_key, public_key) = hivemind_config::generate_worker_execution_test_key_pair();
+        let signer = WorkerExecutionSigner::from_pem(&private_key).unwrap();
+        let verifier = WorkerExecutionVerifier::from_pem(&public_key).unwrap();
+        let identity = WorkerExecutionIdentity {
+            execution_id: "execution-1".into(),
+            attempt_id: "attempt-2".into(),
+            idempotency_key: "idempotency-3".into(),
+            request_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            transfer_generation: 7,
+        };
+
+        let token = signer
+            .encode_execution_claims(&sample_claims(), &identity)
+            .unwrap();
+        let legacy_view = verifier.decode(&token).unwrap();
+        let decoded = verifier.decode_execution_claims(&token).unwrap();
+
+        assert_eq!(legacy_view.task_id.as_deref(), Some("task-1"));
+        assert_eq!(legacy_view.worker_id.as_deref(), Some("worker-7"));
+        assert_eq!(decoded.claims.task_id.as_deref(), Some("task-1"));
+        assert_eq!(decoded.claims.worker_id.as_deref(), Some("worker-7"));
+        assert_eq!(decoded.execution_id.as_deref(), Some("execution-1"));
+        assert_eq!(decoded.attempt_id.as_deref(), Some("attempt-2"));
+        assert_eq!(decoded.idempotency_key.as_deref(), Some("idempotency-3"));
+        assert_eq!(decoded.request_digest, Some(identity.request_digest));
+        assert_eq!(decoded.transfer_generation, Some(7));
+    }
+
+    #[test]
+    fn execution_token_signing_rejects_incomplete_or_nonpositive_identity() {
+        let (private_key, _) = hivemind_config::generate_worker_execution_test_key_pair();
+        let signer = WorkerExecutionSigner::from_pem(&private_key).unwrap();
+        let valid = WorkerExecutionIdentity {
+            execution_id: "execution-1".into(),
+            attempt_id: "attempt-2".into(),
+            idempotency_key: "idempotency-3".into(),
+            request_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            transfer_generation: 1,
+        };
+        let invalid = [
+            WorkerExecutionIdentity {
+                execution_id: " ".into(),
+                ..valid.clone()
+            },
+            WorkerExecutionIdentity {
+                attempt_id: String::new(),
+                ..valid.clone()
+            },
+            WorkerExecutionIdentity {
+                idempotency_key: String::new(),
+                ..valid.clone()
+            },
+            WorkerExecutionIdentity {
+                request_digest: String::new(),
+                ..valid.clone()
+            },
+            WorkerExecutionIdentity {
+                transfer_generation: 0,
+                ..valid.clone()
+            },
+            WorkerExecutionIdentity {
+                transfer_generation: -1,
+                ..valid
+            },
+        ];
+
+        for identity in invalid {
+            assert!(
+                signer
+                    .encode_execution_claims(&sample_claims(), &identity)
+                    .is_err(),
+                "Nodepool must not sign an invalid execution identity: {identity:?}"
+            );
+        }
     }
 
     #[test]
