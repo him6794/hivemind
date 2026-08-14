@@ -282,6 +282,20 @@ fn production_launcher_never_falls_back_to_direct_process_spawn() {
 }
 
 #[test]
+fn materialized_production_launch_requires_a_runner_state_root() {
+    let error = ProductionSandboxLauncher::new()
+        .run_materialized_bundle(
+            &valid_launch(),
+            Path::new("/operator/bundle"),
+            Path::new("/operator/artifacts"),
+            "hivemind-state-root-test",
+            &Cancellation::new(),
+        )
+        .expect_err("materialized production launches must bind runner state");
+    assert_eq!(error, ProductionSandboxError::RunnerStateRootUnavailable);
+}
+
+#[test]
 fn sandbox_policy_json_rejects_unknown_fields_and_invalid_tags() {
     let mut value = serde_json::to_value(valid_policy()).expect("policy should serialize");
     value
@@ -326,6 +340,8 @@ fn production_launch_rejects_whitespace_only_entrypoint_parts() {
 fn production_runner_executes_only_a_bound_and_validated_oci_bundle() {
     let root = temporary_bundle_root();
     fs::create_dir_all(&root).expect("temporary runner root should be created");
+    let runner_state_root = root.join("runner-state");
+    fs::create_dir_all(&runner_state_root).expect("runner state root should be created");
     let launch = valid_launch();
     write_valid_bundle(&root, &launch);
     let (executable, marker, prefix_args) = fake_runner(&root);
@@ -333,6 +349,7 @@ fn production_runner_executes_only_a_bound_and_validated_oci_bundle() {
 
     let result = ProductionSandboxLauncher::with_oci_runner_command(executable, prefix_args)
         .with_runner_sha256(runner_sha256.clone())
+        .with_runner_state_root(&runner_state_root)
         .run_bundle(
             &launch,
             &root,
@@ -347,6 +364,8 @@ fn production_runner_executes_only_a_bound_and_validated_oci_bundle() {
     );
     let args = fs::read_to_string(&marker).expect("runner should receive an argument trace");
     assert!(args.contains("run"));
+    assert!(args.contains("--root"));
+    assert!(args.contains(runner_state_root.to_string_lossy().as_ref()));
     assert!(args.contains("--bundle"));
     assert!(args.contains("hivemind-test-container"));
     remove_bundle(&root);

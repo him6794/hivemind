@@ -521,6 +521,7 @@ fn execute_production_backend_task(
         backend.runner_executable.clone(),
         backend.runner_prefix_args.clone(),
     )
+    .with_runner_state_root(backend.runner_state_root.clone())
     .with_runner_sha256(backend.runner_sha256.clone())
     .with_timeout(std::time::Duration::from_millis(
         request.execution_policy.wall_time_ms,
@@ -1089,6 +1090,7 @@ mod tests {
         let root = tmp.path().join("production-success");
         let mut registration = production_registration(root.clone(), &image);
         std::fs::create_dir_all(registration.bundle_root.join("rootfs")).unwrap();
+        std::fs::create_dir_all(&registration.runner_state_root).unwrap();
         let request = production_request(
             &registration.backend_id,
             &image,
@@ -1373,6 +1375,7 @@ mod tests {
             bundle_root: root.join("bundles"),
             artifact_root: root.join("artifacts"),
             runner_executable: root.join("runc"),
+            runner_state_root: root.join("runner-state"),
             runner_prefix_args: Vec::new(),
             runner_sha256: format!("sha256:{}", "d".repeat(64)),
             entrypoint: vec!["python".into(), "/runtime/runner.py".into()],
