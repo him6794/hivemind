@@ -38,6 +38,8 @@ pub enum NumericError {
     NonFiniteValue,
     FftRequiresOneDimension,
     FftLengthExceeded { length: usize, max: usize },
+    InvalidFftTolerance,
+    FftErrorExceeded,
     MatmulRequiresTwoDimensions,
     MatmulInnerDimensionMismatch { lhs: u64, rhs: u64 },
 }
@@ -107,6 +109,12 @@ impl fmt::Display for NumericError {
                     formatter,
                     "FFT length {length} exceeds reference limit {max}"
                 )
+            }
+            Self::InvalidFftTolerance => {
+                formatter.write_str("FFT round-trip tolerance must be finite and non-negative")
+            }
+            Self::FftErrorExceeded => {
+                formatter.write_str("FFT round-trip error exceeds the requested tolerance")
             }
             Self::MatmulRequiresTwoDimensions => {
                 formatter.write_str("matmul requires two-dimensional tensors")
@@ -688,6 +696,37 @@ impl DenseTensor<Complex128> {
             vec![u64::try_from(length).map_err(|_| NumericError::ShapeOverflow)?],
             output,
         )
+    }
+
+    /// Compute the maximum component-wise error after a forward/inverse
+    /// reference FFT round trip.
+    pub fn fft_round_trip_error_inf_norm(&self) -> Result<f64, NumericError> {
+        let spectrum = self.fft(false)?;
+        let round_trip = spectrum.fft(true)?;
+        let mut maximum = 0.0_f64;
+        for (actual, expected) in round_trip.values.iter().zip(self.values.iter()) {
+            let error = (actual.re - expected.re)
+                .abs()
+                .max((actual.im - expected.im).abs());
+            if !error.is_finite() {
+                return Err(NumericError::NonFiniteValue);
+            }
+            maximum = maximum.max(error);
+        }
+        Ok(maximum)
+    }
+
+    /// Require a forward/inverse reference FFT round trip to stay within a
+    /// finite, non-negative component-wise error tolerance.
+    pub fn fft_with_round_trip_tolerance(&self, tolerance: f64) -> Result<Self, NumericError> {
+        if !tolerance.is_finite() || tolerance < 0.0 {
+            return Err(NumericError::InvalidFftTolerance);
+        }
+        let error = self.fft_round_trip_error_inf_norm()?;
+        if error > tolerance {
+            return Err(NumericError::FftErrorExceeded);
+        }
+        Ok(self.clone())
     }
 }
 
