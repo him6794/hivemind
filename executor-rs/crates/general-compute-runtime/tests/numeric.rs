@@ -71,3 +71,42 @@ fn numeric_kernels_reject_duplicate_axes_and_value_count_mismatches() {
         Err(NumericError::DuplicateAxis { axis: 0 })
     ));
 }
+
+#[test]
+fn matmul_computes_a_bounded_two_dimensional_reference_result() {
+    let lhs = F64Tensor::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+    let rhs = F64Tensor::new(vec![3, 2], vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0]).unwrap();
+
+    let result = lhs.matmul(&rhs).expect("2-D matmul should succeed");
+
+    assert_eq!(result.shape(), &[2, 2]);
+    assert_eq!(result.values(), &[58.0, 64.0, 139.0, 154.0]);
+}
+
+#[test]
+fn matmul_rejects_non_matrix_inputs_and_inner_dimension_mismatches() {
+    let vector = F64Tensor::new(vec![3], vec![1.0, 2.0, 3.0]).unwrap();
+    let matrix = F64Tensor::new(vec![3, 1], vec![4.0, 5.0, 6.0]).unwrap();
+    assert!(matches!(
+        vector.matmul(&matrix),
+        Err(NumericError::MatmulRequiresTwoDimensions)
+    ));
+
+    let lhs = F64Tensor::new(vec![2, 3], vec![1.0; 6]).unwrap();
+    let rhs = F64Tensor::new(vec![2, 2], vec![1.0; 4]).unwrap();
+    assert!(matches!(
+        lhs.matmul(&rhs),
+        Err(NumericError::MatmulInnerDimensionMismatch { lhs: 3, rhs: 2 })
+    ));
+}
+
+#[test]
+fn matmul_handles_zero_inner_dimensions_without_nan_or_allocation_errors() {
+    let lhs = F64Tensor::new(vec![2, 0], Vec::new()).unwrap();
+    let rhs = F64Tensor::new(vec![0, 3], Vec::new()).unwrap();
+
+    let result = lhs.matmul(&rhs).expect("zero-width matmul should succeed");
+
+    assert_eq!(result.shape(), &[2, 3]);
+    assert_eq!(result.values(), &[0.0; 6]);
+}

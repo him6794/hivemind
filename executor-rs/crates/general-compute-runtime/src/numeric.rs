@@ -22,6 +22,8 @@ pub enum NumericError {
     BroadcastIncompatible { axis: usize, lhs: u64, rhs: u64 },
     AxisOutOfBounds { axis: usize, rank: usize },
     DuplicateAxis { axis: usize },
+    MatmulRequiresTwoDimensions,
+    MatmulInnerDimensionMismatch { lhs: u64, rhs: u64 },
 }
 
 impl fmt::Display for NumericError {
@@ -41,6 +43,15 @@ impl fmt::Display for NumericError {
                 write!(formatter, "axis {axis} is out of bounds for rank {rank}")
             }
             Self::DuplicateAxis { axis } => write!(formatter, "axis {axis} was specified twice"),
+            Self::MatmulRequiresTwoDimensions => {
+                formatter.write_str("matmul requires two-dimensional tensors")
+            }
+            Self::MatmulInnerDimensionMismatch { lhs, rhs } => {
+                write!(
+                    formatter,
+                    "matmul inner dimensions do not match: {lhs} and {rhs}"
+                )
+            }
         }
     }
 }
@@ -158,6 +169,50 @@ impl F64Tensor {
             output[output_linear] += value;
         }
 
+        Self::new(output_shape, output)
+    }
+
+    pub fn matmul(&self, rhs: &Self) -> Result<Self, NumericError> {
+        if self.shape.len() != 2 || rhs.shape.len() != 2 {
+            return Err(NumericError::MatmulRequiresTwoDimensions);
+        }
+        let (rows, inner) = (self.shape[0], self.shape[1]);
+        let (rhs_inner, columns) = (rhs.shape[0], rhs.shape[1]);
+        if inner != rhs_inner {
+            return Err(NumericError::MatmulInnerDimensionMismatch {
+                lhs: inner,
+                rhs: rhs_inner,
+            });
+        }
+
+        let rows = usize::try_from(rows).map_err(|_| NumericError::ShapeOverflow)?;
+        let inner = usize::try_from(inner).map_err(|_| NumericError::ShapeOverflow)?;
+        let columns = usize::try_from(columns).map_err(|_| NumericError::ShapeOverflow)?;
+        let output_len = rows
+            .checked_mul(columns)
+            .ok_or(NumericError::ShapeOverflow)?;
+        let mut output = Vec::with_capacity(output_len);
+        for row in 0..rows {
+            for column in 0..columns {
+                let mut value = 0.0;
+                for shared in 0..inner {
+                    let lhs_offset = row
+                        .checked_mul(inner)
+                        .and_then(|base| base.checked_add(shared))
+                        .ok_or(NumericError::ShapeOverflow)?;
+                    let rhs_offset = shared
+                        .checked_mul(columns)
+                        .and_then(|base| base.checked_add(column))
+                        .ok_or(NumericError::ShapeOverflow)?;
+                    value += self.values[lhs_offset] * rhs.values[rhs_offset];
+                }
+                output.push(value);
+            }
+        }
+        let output_shape = vec![
+            u64::try_from(rows).map_err(|_| NumericError::ShapeOverflow)?,
+            u64::try_from(columns).map_err(|_| NumericError::ShapeOverflow)?,
+        ];
         Self::new(output_shape, output)
     }
 }
