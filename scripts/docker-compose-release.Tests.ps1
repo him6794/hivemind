@@ -48,6 +48,17 @@ foreach ($expectedVolumeName in @(
 if (!$composeText.Contains('WORKER_NODEPOOL_TOKEN: ${WORKER_NODEPOOL_TOKEN:-}')) {
     throw "docker-compose.yml must allow an empty WORKER_NODEPOOL_TOKEN so worker registration can wait for UI login."
 }
+foreach ($expectedWorkerCredential in @(
+    'WORKER_NODEPOOL_USERNAME: ${WORKER_NODEPOOL_USERNAME:-}',
+    'WORKER_NODEPOOL_PASSWORD: ${WORKER_NODEPOOL_PASSWORD:-}'
+)) {
+    if (!$composeText.Contains($expectedWorkerCredential)) {
+        throw "docker-compose.yml must propagate optional worker registration credential '$expectedWorkerCredential'."
+    }
+}
+if (!$composeText.Contains('HIVEMIND_SEED_DEFAULT_USER: ${HIVEMIND_SEED_DEFAULT_USER:-false}')) {
+    throw "docker-compose.yml must keep default-user seeding explicitly opt-in for the reviewed OCI fixture."
+}
 
 if (!$composeText.Contains('WORKER_EXECUTION_PUBLIC_KEY_PEM: ${WORKER_EXECUTION_PUBLIC_KEY_PEM:?')) {
     throw "docker-compose.yml must require and propagate WORKER_EXECUTION_PUBLIC_KEY_PEM to the worker."
@@ -278,7 +289,9 @@ if (!(Test-Path -LiteralPath $envExamplePath)) {
 $envExampleLines = @(Get-Content -LiteralPath $envExamplePath)
 foreach ($expectedVariable in @(
     "WORKER_EXECUTION_PUBLIC_KEY_PEM",
-    "WORKER_NODEPOOL_TOKEN"
+    "WORKER_NODEPOOL_TOKEN",
+    "WORKER_NODEPOOL_USERNAME",
+    "WORKER_NODEPOOL_PASSWORD"
 )) {
     if ($envExampleLines -notcontains "${expectedVariable}=") {
         throw ".env.example must include an explicit blank ${expectedVariable} entry."
@@ -297,7 +310,8 @@ foreach ($expectedSetting in @(
     "WORKER_UI_HOST_PORT=3001",
     "SITE_HOST_PORT=8080",
     "WORKER_GENERAL_COMPUTE_CONFIG_VOLUME_NAME=hivemind-worker-general-compute-config",
-    "WORKER_GENERAL_COMPUTE_STATE_VOLUME_NAME=hivemind-worker-general-compute-state"
+    "WORKER_GENERAL_COMPUTE_STATE_VOLUME_NAME=hivemind-worker-general-compute-state",
+    "HIVEMIND_SEED_DEFAULT_USER=false"
 )) {
     if ($envExampleLines -notcontains $expectedSetting) {
         throw ".env.example must document the configurable infrastructure mapping '${expectedSetting}'."
