@@ -7,6 +7,10 @@
 
 use std::fmt;
 
+use crate::differential::{
+    DifferentialCase, DifferentialError, DifferentialRunner, ReferenceObservation,
+};
+use crate::sha256_digest;
 use serde::{Deserialize, Serialize};
 
 pub const BACKEND_PIN_PROTOCOL_VERSION: &str = "general-compute-backend-pin-v1";
@@ -14,6 +18,9 @@ pub const MAX_BACKEND_TOKEN_LENGTH: usize = 128;
 pub const MAX_BACKEND_CPU_FEATURES: usize = 128;
 pub const MAX_BACKEND_CPU_FEATURE_LENGTH: usize = 64;
 pub const MAX_BACKEND_THREADS: u32 = 4096;
+pub const MAX_REFERENCE_VECTOR_COUNT: usize = 128;
+pub const MAX_REFERENCE_VECTOR_SOURCE_BYTES: usize = 64 * 1024;
+pub const MAX_REFERENCE_VECTOR_INPUT_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackendPinError {
@@ -248,6 +255,198 @@ impl OptimizedBackendPin {
             .is_some_and(|digest| !is_sha256_digest(digest))
         {
             return Err(BackendPinError::InvalidImageDigest);
+        }
+        Ok(())
+    }
+}
+
+/// An operator-approved optimized backend and the bounded suite used to
+/// validate claims from that backend.
+///
+/// This is deliberately a registration and reference gate. It does not load
+/// a native library, execute an OCI image, or establish hardware attestation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OptimizedBackendRegistration {
+    pub backend_id: String,
+    pub guest_image_digest: String,
+    pub pin: OptimizedBackendPin,
+    pub reference_vectors: Vec<DifferentialCase>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OptimizedBackendRegistrationError {
+    Pin(BackendPinError),
+    ReferenceVector(DifferentialError),
+    ObservationCount,
+    VectorDigest,
+    EmptyReferenceVectors,
+    TooManyReferenceVectors,
+    Canonicalization,
+}
+
+impl fmt::Display for OptimizedBackendRegistrationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Pin(error) => write!(formatter, "optimized backend pin rejected: {error}"),
+            Self::ReferenceVector(error) => {
+                write!(
+                    formatter,
+                    "optimized backend reference vector rejected: {error}"
+                )
+            }
+            Self::ObservationCount => {
+                formatter.write_str("optimized backend observation count does not match vectors")
+            }
+            Self::VectorDigest => {
+                formatter.write_str("optimized backend reference-vector digest drifted")
+            }
+            Self::EmptyReferenceVectors => {
+                formatter.write_str("optimized backend reference-vector suite must not be empty")
+            }
+            Self::TooManyReferenceVectors => write!(
+                formatter,
+                "optimized backend reference-vector suite exceeds {MAX_REFERENCE_VECTOR_COUNT} vectors"
+            ),
+            Self::Canonicalization => formatter
+                .write_str("optimized backend reference vectors could not be canonicalized"),
+        }
+    }
+}
+
+impl std::error::Error for OptimizedBackendRegistrationError {}
+
+/// The bounded evidence produced after replaying a registration's reference
+/// suite through the trusted reference interpreter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReferenceVectorReport {
+    pub vector_count: usize,
+    pub reference_vector_sha256: String,
+}
+
+impl OptimizedBackendRegistration {
+    /// Create a registration whose backend id, image digest, and vector suite
+    /// are all bound to the supplied operator pin.
+    pub fn new(
+        backend_id: impl Into<String>,
+        guest_image_digest: impl Into<String>,
+        pin: OptimizedBackendPin,
+        reference_vectors: Vec<DifferentialCase>,
+    ) -> Result<Self, OptimizedBackendRegistrationError> {
+        let registration = Self {
+            backend_id: backend_id.into(),
+            guest_image_digest: guest_image_digest.into(),
+            pin,
+            reference_vectors,
+        };
+        registration.validate_binding()?;
+        Ok(registration)
+    }
+
+    /// Return the canonical SHA-256 digest for a reference-vector suite.
+    ///
+    /// Serde struct field order is the protocol order for
+    /// `DifferentialCase`; vector order is significant and is preserved.
+    pub fn reference_vector_digest(
+        reference_vectors: &[DifferentialCase],
+    ) -> Result<String, OptimizedBackendRegistrationError> {
+        if reference_vectors.is_empty() {
+            return Err(OptimizedBackendRegistrationError::EmptyReferenceVectors);
+        }
+        if reference_vectors.len() > MAX_REFERENCE_VECTOR_COUNT {
+            return Err(OptimizedBackendRegistrationError::TooManyReferenceVectors);
+        }
+        for reference_vector in reference_vectors {
+            if reference_vector.source.len() > MAX_REFERENCE_VECTOR_SOURCE_BYTES
+                || reference_vector.input_json.len() > MAX_REFERENCE_VECTOR_INPUT_BYTES
+            {
+                return Err(OptimizedBackendRegistrationError::ReferenceVector(
+                    DifferentialError::InvalidCase(
+                        "reference vector source or input exceeds the bounded limit".into(),
+                    ),
+                ));
+            }
+        }
+        let bytes = serde_json::to_vec(reference_vectors)
+            .map_err(|_| OptimizedBackendRegistrationError::Canonicalization)?;
+        Ok(sha256_digest(&bytes))
+    }
+
+    /// Require exact identity equality with the operator-approved pin and
+    /// registration image before accepting any backend claim.
+    pub fn verify_identity(
+        &self,
+        identity: &BackendRuntimeIdentity,
+    ) -> Result<(), OptimizedBackendRegistrationError> {
+        self.validate_binding()?;
+        self.pin
+            .verify(identity)
+            .map_err(OptimizedBackendRegistrationError::Pin)
+    }
+
+    /// Replay the bounded reference suite and return its digest/count report.
+    pub fn execute_reference_vectors(
+        &self,
+    ) -> Result<ReferenceVectorReport, OptimizedBackendRegistrationError> {
+        self.validate_binding()?;
+        let observations = self
+            .reference_vectors
+            .iter()
+            .cloned()
+            .map(|reference_vector| {
+                DifferentialRunner::new(reference_vector)
+                    .run_reference()
+                    .map_err(OptimizedBackendRegistrationError::ReferenceVector)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.verify_observations(&observations)?;
+        Ok(ReferenceVectorReport {
+            vector_count: observations.len(),
+            reference_vector_sha256: self.pin.reference_vector_sha256.clone(),
+        })
+    }
+
+    /// Compare observations from an approved backend with every pinned
+    /// reference vector, including suite digest and observation-count gates.
+    pub fn verify_observations(
+        &self,
+        observations: &[ReferenceObservation],
+    ) -> Result<(), OptimizedBackendRegistrationError> {
+        self.validate_binding()?;
+        if observations.len() != self.reference_vectors.len() {
+            return Err(OptimizedBackendRegistrationError::ObservationCount);
+        }
+        for (reference_vector, observed) in self.reference_vectors.iter().zip(observations) {
+            DifferentialRunner::new(reference_vector.clone())
+                .compare(observed)
+                .map_err(OptimizedBackendRegistrationError::ReferenceVector)?;
+        }
+        Ok(())
+    }
+
+    fn validate_binding(&self) -> Result<(), OptimizedBackendRegistrationError> {
+        self.pin
+            .validate()
+            .map_err(OptimizedBackendRegistrationError::Pin)?;
+        if self.backend_id != self.pin.backend_id {
+            return Err(OptimizedBackendRegistrationError::Pin(
+                BackendPinError::IdentityMismatch("backend_id"),
+            ));
+        }
+        if !is_sha256_digest(&self.guest_image_digest) {
+            return Err(OptimizedBackendRegistrationError::Pin(
+                BackendPinError::InvalidImageDigest,
+            ));
+        }
+        if self.pin.guest_image_digest.as_deref() != Some(self.guest_image_digest.as_str()) {
+            return Err(OptimizedBackendRegistrationError::Pin(
+                BackendPinError::IdentityMismatch("guest_image_digest"),
+            ));
+        }
+        let digest = Self::reference_vector_digest(&self.reference_vectors)?;
+        if digest != self.pin.reference_vector_sha256 {
+            return Err(OptimizedBackendRegistrationError::VectorDigest);
         }
         Ok(())
     }
