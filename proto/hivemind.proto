@@ -119,6 +119,24 @@ message RunningStatusResponse {
     string status_message = 2;
 }
 
+// Worker -> Nodepool envelope for authoritative validation of one immutable
+// general-compute transfer lease identity.
+message ValidateGeneralComputeTransferLeaseRequest {
+    string token = 1; // Nodepool-issued Ed25519 worker-execution token
+    string worker_id = 2;
+    string task_id = 3;
+    string execution_id = 4;
+    string attempt_id = 5;
+    int64 transfer_generation = 6;
+    string idempotency_key = 7;
+    string request_digest = 8;
+}
+
+message ValidateGeneralComputeTransferLeaseResponse {
+    bool success = 1;
+    string status_message = 2;
+}
+
 
 message UploadTaskRequest {
     string task_id = 1;
