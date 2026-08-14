@@ -59,6 +59,38 @@ fn csr_manifest() -> SparseTensorManifest {
     manifest
 }
 
+fn manifest_with_bytes(
+    mut manifest: SparseTensorManifest,
+    indptr: Option<&[u8]>,
+    indices: &[u8],
+    data: &[u8],
+) -> SparseTensorManifest {
+    manifest.indptr_artifact = indptr.map(|bytes| binary_artifact("indptr", bytes));
+    manifest.indices_artifact = binary_artifact("indices", indices);
+    manifest.data_artifact = binary_artifact("data", data);
+    manifest.logical_sha256 = manifest.canonical_logical_sha256();
+    manifest
+}
+
+fn validate_inline(manifest: &SparseTensorManifest) -> Result<(), String> {
+    manifest.validate_bytes(
+        manifest
+            .indptr_artifact
+            .as_ref()
+            .and_then(|artifact| artifact.inline_bytes.as_deref()),
+        manifest
+            .indices_artifact
+            .inline_bytes
+            .as_deref()
+            .expect("test indices should be inline"),
+        manifest
+            .data_artifact
+            .inline_bytes
+            .as_deref()
+            .expect("test data should be inline"),
+    )
+}
+
 #[test]
 fn sparse_csr_manifest_validates_shape_indices_and_data_contract() {
     csr_manifest()
@@ -145,4 +177,203 @@ fn sparse_manifest_rejects_invalid_index_policy_and_tampered_hash() {
         .validate()
         .expect_err("sparse logical hash tampering must fail closed");
     assert!(error.contains("logical hash"));
+}
+
+#[test]
+fn sparse_materialized_bytes_enforce_csr_bounds_and_indptr_monotonicity() {
+    let valid = csr_manifest();
+    validate_inline(&valid).expect("valid CSR bytes should validate");
+
+    let bad_indptr = manifest_with_bytes(
+        valid.clone(),
+        Some(
+            &0u32
+                .to_le_bytes()
+                .into_iter()
+                .chain(2u32.to_le_bytes())
+                .chain(1u32.to_le_bytes())
+                .collect::<Vec<_>>(),
+        ),
+        valid
+            .indices_artifact
+            .inline_bytes
+            .as_deref()
+            .expect("indices should be inline"),
+        valid
+            .data_artifact
+            .inline_bytes
+            .as_deref()
+            .expect("data should be inline"),
+    );
+    let error = validate_inline(&bad_indptr).expect_err("indptr must be monotonic");
+    assert!(error.contains("indptr"));
+
+    let bad_indices = manifest_with_bytes(
+        valid.clone(),
+        valid
+            .indptr_artifact
+            .as_ref()
+            .and_then(|artifact| artifact.inline_bytes.as_deref()),
+        &0u32
+            .to_le_bytes()
+            .into_iter()
+            .chain(3u32.to_le_bytes())
+            .collect::<Vec<_>>(),
+        valid
+            .data_artifact
+            .inline_bytes
+            .as_deref()
+            .expect("data should be inline"),
+    );
+    let error = validate_inline(&bad_indices).expect_err("CSR column bounds must be enforced");
+    assert!(error.contains("bounds"));
+}
+
+#[test]
+fn sparse_materialized_bytes_enforce_sorted_and_duplicate_policy_per_segment() {
+    let base = csr_manifest();
+    let indptr = 0u32
+        .to_le_bytes()
+        .into_iter()
+        .chain(2u32.to_le_bytes())
+        .chain(2u32.to_le_bytes())
+        .collect::<Vec<_>>();
+    let data = base
+        .data_artifact
+        .inline_bytes
+        .as_deref()
+        .expect("data should be inline");
+
+    let unsorted = manifest_with_bytes(
+        base.clone(),
+        Some(&indptr),
+        &1u32
+            .to_le_bytes()
+            .into_iter()
+            .chain(0u32.to_le_bytes())
+            .collect::<Vec<_>>(),
+        data,
+    );
+    let error = validate_inline(&unsorted).expect_err("sorted policy must be enforced");
+    assert!(error.contains("sorted"));
+
+    let duplicate = manifest_with_bytes(
+        base.clone(),
+        Some(&indptr),
+        &0u32
+            .to_le_bytes()
+            .into_iter()
+            .chain(0u32.to_le_bytes())
+            .collect::<Vec<_>>(),
+        data,
+    );
+    let error = validate_inline(&duplicate).expect_err("duplicate policy must be enforced");
+    assert!(error.contains("duplicate"));
+
+    let mut duplicate_allowed = duplicate;
+    duplicate_allowed.allow_duplicates = true;
+    duplicate_allowed.logical_sha256 = duplicate_allowed.canonical_logical_sha256();
+    validate_inline(&duplicate_allowed).expect("allowed duplicates should validate");
+
+    let mut unsorted_allowed = unsorted;
+    unsorted_allowed.sorted_indices = false;
+    unsorted_allowed.logical_sha256 = unsorted_allowed.canonical_logical_sha256();
+    validate_inline(&unsorted_allowed).expect("unsorted indices should validate when allowed");
+}
+
+#[test]
+fn sparse_materialized_bytes_validate_csc_and_coo_pairs() {
+    let base = csr_manifest();
+    let data = base
+        .data_artifact
+        .inline_bytes
+        .as_deref()
+        .expect("data should be inline");
+
+    let mut csc = base.clone();
+    csc.format = SparseFormat::Csc;
+    csc.indptr_artifact = Some(binary_artifact(
+        "csc-indptr",
+        &0u32
+            .to_le_bytes()
+            .into_iter()
+            .chain(1u32.to_le_bytes())
+            .chain(2u32.to_le_bytes())
+            .chain(2u32.to_le_bytes())
+            .collect::<Vec<_>>(),
+    ));
+    csc.indices_artifact = binary_artifact(
+        "csc-indices",
+        &0u32
+            .to_le_bytes()
+            .into_iter()
+            .chain(1u32.to_le_bytes())
+            .collect::<Vec<_>>(),
+    );
+    csc.data_artifact = binary_artifact("csc-data", data);
+    csc.logical_sha256 = csc.canonical_logical_sha256();
+    validate_inline(&csc).expect("valid CSC bytes should validate");
+
+    let mut coo = base.clone();
+    coo.format = SparseFormat::Coo;
+    coo.indptr_artifact = None;
+    coo.indices_artifact = binary_artifact(
+        "coo-indices",
+        &0u32
+            .to_le_bytes()
+            .into_iter()
+            .chain(1u32.to_le_bytes())
+            .chain(1u32.to_le_bytes())
+            .chain(2u32.to_le_bytes())
+            .collect::<Vec<_>>(),
+    );
+    coo.data_artifact = binary_artifact("coo-data", data);
+    coo.logical_sha256 = coo.canonical_logical_sha256();
+    validate_inline(&coo).expect("valid COO pairs should validate");
+
+    let mut bad_coo = coo;
+    bad_coo.indices_artifact = binary_artifact(
+        "coo-indices",
+        &0u32
+            .to_le_bytes()
+            .into_iter()
+            .chain(3u32.to_le_bytes())
+            .chain(1u32.to_le_bytes())
+            .chain(2u32.to_le_bytes())
+            .collect::<Vec<_>>(),
+    );
+    bad_coo.logical_sha256 = bad_coo.canonical_logical_sha256();
+    let error = validate_inline(&bad_coo).expect_err("COO coordinate bounds must be enforced");
+    assert!(error.contains("bounds"));
+}
+
+#[test]
+fn sparse_materialized_bytes_respect_big_endian_one_based_and_signed_indices() {
+    let mut one_based = csr_manifest();
+    one_based.index_dtype = SparseIndexDType::Int32;
+    one_based.byte_order = ByteOrder::Big;
+    one_based.index_base = 1;
+    let indptr = 1u32
+        .to_be_bytes()
+        .into_iter()
+        .chain(2u32.to_be_bytes())
+        .chain(3u32.to_be_bytes())
+        .collect::<Vec<_>>();
+    let indices = 1u32
+        .to_be_bytes()
+        .into_iter()
+        .chain(2u32.to_be_bytes())
+        .collect::<Vec<_>>();
+    let data = vec![0; 16];
+    one_based = manifest_with_bytes(one_based, Some(&indptr), &indices, &data);
+    validate_inline(&one_based).expect("big-endian one-based indices should validate");
+
+    let negative_indices = (-1i32)
+        .to_be_bytes()
+        .into_iter()
+        .chain(2i32.to_be_bytes())
+        .collect::<Vec<_>>();
+    let negative = manifest_with_bytes(one_based, Some(&indptr), &negative_indices, &data);
+    let error = validate_inline(&negative).expect_err("negative signed indices must fail closed");
+    assert!(error.contains("non-negative"));
 }
