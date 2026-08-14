@@ -4,6 +4,7 @@ use general_compute_runtime::{
     GeneralComputeRequest, GeneralComputeResult, ResultStatus, ValidationErrorCode,
     WorkerCapabilities, GENERAL_COMPUTE_RUNTIME_VERSION,
 };
+use general_compute_runtime::gpu::{GpuRequirement, GpuRuntime, GpuVendor};
 
 fn valid_request() -> GeneralComputeRequest {
     let mut request = GeneralComputeRequest {
@@ -428,6 +429,19 @@ fn capability_matrix_rejects_unregistered_image_and_missing_worker_capability() 
 fn capability_matrix_rejects_network_and_gpu_requirements_without_registration() {
     let mut request = valid_request();
     request.execution_policy.network_allowed = true;
+    request.execution_policy.gpu_requirement = Some(
+        GpuRequirement::new(
+            GpuVendor::Nvidia,
+            "sm_80",
+            GpuRuntime::Cuda,
+            "550.54",
+            16 * 1024 * 1024 * 1024,
+            8,
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            false,
+        )
+        .expect("valid GPU requirement"),
+    );
     request.execution_policy.gpu_required = true;
     request.request_digest = request.canonical_request_digest();
     let matrix = CapabilityMatrix::new(vec![BackendRegistration {
