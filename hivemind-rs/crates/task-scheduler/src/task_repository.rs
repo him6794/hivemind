@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use general_compute_runtime::{GeneralComputeRequest, GeneralComputeResult, ResultStatus};
 use hivemind_models::{Task, TaskStatus, WorkerNode};
 use sha1::{Digest, Sha1};
-use sqlx::PgPool;
+use sqlx::{FromRow, PgPool, Postgres, Transaction};
 
 use crate::BatchTaskReport;
 
@@ -22,6 +22,37 @@ pub struct GeneralComputeArtifactState {
     pub availability_status: String,
     pub complete: bool,
     pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Nodepool-owned lease for one general-compute transfer attempt. Workers do
+/// not choose generations; assignment allocates them transactionally.
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct GeneralComputeTransferLease {
+    pub task_id: String,
+    pub execution_id: String,
+    pub attempt_id: String,
+    pub worker_id: String,
+    pub generation: i64,
+    pub state: String,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+impl GeneralComputeTransferLease {
+    pub fn matches_assignment(
+        &self,
+        task_id: &str,
+        execution_id: &str,
+        attempt_id: &str,
+        worker_id: &str,
+    ) -> bool {
+        self.state == "active"
+            && self.task_id == task_id
+            && self.execution_id == execution_id
+            && self.attempt_id == attempt_id
+            && self.worker_id == worker_id
+            && self.generation > 0
+            && self.expires_at.is_none_or(|expiry| expiry > Utc::now())
+    }
 }
 
 const PLATFORM_FEE_BPS: i64 = 1000; // 10%
@@ -685,7 +716,8 @@ impl TaskRepository {
         worker_id: &str,
         worker_ip: &str,
     ) -> Result<Task> {
-        sqlx::query_as::<_, Task>(
+        let mut tx = self.pool.begin().await?;
+        let assigned = sqlx::query_as::<_, Task>(
             "UPDATE tasks
              SET worker_id = $1, worker_ip = $2, status = 'ASSIGNED', last_update = NOW()
              WHERE task_id = $3 AND status IN ('PENDING', 'QUEUED')
@@ -694,9 +726,126 @@ impl TaskRepository {
         .bind(worker_id)
         .bind(worker_ip)
         .bind(task_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(Into::into)
+        .fetch_one(&mut *tx)
+        .await?;
+        self.activate_general_compute_transfer_lease(&mut tx, &assigned, worker_id)
+            .await?;
+        tx.commit().await?;
+        Ok(assigned)
+    }
+
+    /// Return the active Nodepool transfer authority after materializing
+    /// expiry. Revoked, expired, and terminal-task generations are never
+    /// returned.
+    pub async fn general_compute_transfer_lease(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<GeneralComputeTransferLease>> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "UPDATE general_compute_transfer_leases l
+             SET state = CASE
+                     WHEN l.expires_at IS NOT NULL AND l.expires_at <= NOW()
+                         THEN 'expired'
+                     ELSE 'revoked'
+                 END,
+                 updated_at = NOW()
+             FROM tasks t
+             WHERE l.task_id = $1 AND l.task_id = t.task_id AND l.state = 'active'
+               AND (
+                   (l.expires_at IS NOT NULL AND l.expires_at <= NOW())
+                   OR t.status NOT IN ('ASSIGNED', 'RUNNING')
+                   OR t.worker_id IS DISTINCT FROM l.worker_id
+               )",
+        )
+        .bind(task_id)
+        .execute(&mut *tx)
+        .await?;
+        let lease = sqlx::query_as::<_, GeneralComputeTransferLease>(
+            "SELECT l.task_id, l.execution_id, l.attempt_id, l.worker_id,
+                    l.generation, l.state, l.expires_at
+             FROM general_compute_transfer_leases l
+             JOIN tasks t ON t.task_id = l.task_id
+             WHERE l.task_id = $1 AND l.state = 'active'
+               AND t.status IN ('ASSIGNED', 'RUNNING')
+               AND t.worker_id = l.worker_id
+               AND (l.expires_at IS NULL OR l.expires_at > NOW())",
+        )
+        .bind(task_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(lease)
+    }
+
+    async fn activate_general_compute_transfer_lease(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        task: &Task,
+        worker_id: &str,
+    ) -> Result<()> {
+        if task.runtime.as_deref() != Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION)
+        {
+            return Ok(());
+        }
+        let manifest = task
+            .general_compute_manifest_json
+            .as_deref()
+            .ok_or_else(|| {
+                anyhow::anyhow!("general-compute task is missing its request manifest")
+            })?;
+        let request: GeneralComputeRequest = serde_json::from_slice(manifest)
+            .map_err(|_| anyhow::anyhow!("general-compute request manifest is malformed"))?;
+        request
+            .validate()
+            .map_err(|error| anyhow::anyhow!("general-compute request is invalid: {error:?}"))?;
+
+        sqlx::query(
+            "UPDATE general_compute_transfer_leases
+             SET state = 'revoked', updated_at = NOW()
+             WHERE task_id = $1 AND state = 'active'",
+        )
+        .bind(&task.task_id)
+        .execute(&mut **tx)
+        .await?;
+        let generation: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(generation), 0) + 1
+             FROM general_compute_transfer_leases
+             WHERE task_id = $1",
+        )
+        .bind(&task.task_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO general_compute_transfer_leases
+                (task_id, execution_id, attempt_id, worker_id, generation, state, expires_at)
+             VALUES ($1, $2, $3, $4, $5, 'active', $6)",
+        )
+        .bind(&task.task_id)
+        .bind(&request.execution_id)
+        .bind(&request.attempt_id)
+        .bind(worker_id)
+        .bind(generation)
+        .bind(task.deadline)
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
+
+    async fn revoke_general_compute_transfer_lease(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        task_id: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE general_compute_transfer_leases
+             SET state = 'revoked', updated_at = NOW()
+             WHERE task_id = $1 AND state = 'active'",
+        )
+        .bind(task_id)
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
     }
 
     pub async fn refresh_worker_endpoint(
@@ -751,7 +900,8 @@ impl TaskRepository {
         }
 
         let limit = limit.max(1);
-        sqlx::query_as::<_, Task>(
+        let mut tx = self.pool.begin().await?;
+        let claimed = sqlx::query_as::<_, Task>(
             "WITH picked AS (
                 SELECT id
                 FROM tasks
@@ -769,9 +919,14 @@ impl TaskRepository {
         .bind(worker_id)
         .bind(worker_ip)
         .bind(limit)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(Into::into)
+        .fetch_all(&mut *tx)
+        .await?;
+        for task in &claimed {
+            self.activate_general_compute_transfer_lease(&mut tx, task, worker_id)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(claimed)
     }
 
     pub async fn complete(
@@ -856,6 +1011,9 @@ impl TaskRepository {
         .bind(expected_manifest)
         .fetch_one(&mut *tx)
         .await?;
+
+        self.revoke_general_compute_transfer_lease(&mut tx, task_id)
+            .await?;
 
         sqlx::query(
             "INSERT INTO general_compute_results (task_id, worker_id, result_json)
@@ -996,6 +1154,9 @@ impl TaskRepository {
             .fetch_one(&mut *tx)
             .await?
         };
+
+        self.revoke_general_compute_transfer_lease(&mut tx, task_id)
+            .await?;
 
         if let Some(result_json) = general_compute_result {
             sqlx::query(
@@ -1147,6 +1308,9 @@ impl TaskRepository {
         .fetch_one(&mut *tx)
         .await?;
 
+        self.revoke_general_compute_transfer_lease(&mut tx, task_id)
+            .await?;
+
         if let Some(result_json) = nodepool_general_compute_terminal_result(
             &failed,
             ResultStatus::Failed,
@@ -1188,6 +1352,9 @@ impl TaskRepository {
         .fetch_one(&mut *tx)
         .await?;
 
+        self.revoke_general_compute_transfer_lease(&mut tx, task_id)
+            .await?;
+
         if let Some(result_json) = nodepool_general_compute_terminal_result(
             &failed,
             ResultStatus::Failed,
@@ -1225,6 +1392,9 @@ impl TaskRepository {
         .fetch_one(&mut *tx)
         .await?;
 
+        self.revoke_general_compute_transfer_lease(&mut tx, task_id)
+            .await?;
+
         if let Some(result_json) = nodepool_general_compute_terminal_result(
             &cancelled,
             ResultStatus::Cancelled,
@@ -1257,6 +1427,8 @@ impl TaskRepository {
         .fetch_all(&mut *tx)
         .await?;
         for task in &timed_out {
+            self.revoke_general_compute_transfer_lease(&mut tx, &task.task_id)
+                .await?;
             if let Some(result_json) = nodepool_general_compute_terminal_result(
                 task,
                 ResultStatus::TimedOut,
@@ -1318,6 +1490,8 @@ impl TaskRepository {
         };
 
         let rotated_manifest = rotate_general_compute_attempt(&current)?;
+        self.revoke_general_compute_transfer_lease(&mut tx, task_id)
+            .await?;
         let updated = sqlx::query_as::<_, Task>(
             "UPDATE tasks
              SET status = 'PENDING', status_message = 'Redispatched', worker_id = NULL, worker_ip = NULL,
@@ -3724,6 +3898,7 @@ mod tests {
         }
     }
 
+    #[tokio::test]
     async fn general_compute_failure_persists_typed_result_without_settlement() {
         let (p, fixture) = match pool("task_repository_general_compute_failure").await {
             Some(parts) => parts,
@@ -3811,6 +3986,14 @@ mod tests {
             .unwrap();
         assert_eq!(failed.status, TaskStatus::Failed);
         assert!(!failed.billing_settled);
+        let lease_state: String = sqlx::query_scalar(
+            "SELECT state FROM general_compute_transfer_leases WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(lease_state, "revoked");
 
         let persisted: Vec<u8> = sqlx::query_scalar(
             "SELECT result_json FROM general_compute_results WHERE task_id = $1",
@@ -4082,6 +4265,14 @@ mod tests {
             .unwrap();
         assert_eq!(failed.status, TaskStatus::Failed);
         assert_eq!(failed.status_message.as_deref(), Some(reason));
+        let lease_state: String = sqlx::query_scalar(
+            "SELECT state FROM general_compute_transfer_leases WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(lease_state, "revoked");
 
         let persisted: Vec<u8> = sqlx::query_scalar(
             "SELECT result_json FROM general_compute_results WHERE task_id = $1",
@@ -4253,6 +4444,289 @@ mod tests {
 
         cleanup_task_case(&repo.pool, &task_id, &username, None).await;
         fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn general_compute_claim_creates_attempt_bound_transfer_lease() {
+        let (p, fixture) = match pool("task_repository_general_compute_lease_claim").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let worker_id = format!("lease-claim-worker-{unique}");
+        sqlx::query(
+            "INSERT INTO worker_reputation
+                (worker_id, successful_tasks, failed_tasks, score, banned)
+             VALUES ($1, 1, 0, 100, false)",
+        )
+        .bind(&worker_id)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        let request = inline_general_compute_request(&unique, b"claim lease source");
+        let task_id = format!("lease-claim-{unique}");
+        let mut task = task_for_general_compute_request(&task_id, "lease-claim-owner", &request);
+        task.max_cpt = 0;
+        repo.create(&task).await.unwrap();
+
+        let claimed = repo
+            .claim_pending_for_worker(&worker_id, "10.0.0.9", 1)
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 1);
+        let lease = repo
+            .general_compute_transfer_lease(&task_id)
+            .await
+            .unwrap()
+            .expect("claim and lease creation must commit together");
+        assert!(lease.matches_assignment(
+            &task_id,
+            &request.execution_id,
+            &request.attempt_id,
+            &worker_id,
+        ));
+
+        cleanup_task_case(&repo.pool, &task_id, "lease-claim-owner", None).await;
+        sqlx::query("DELETE FROM worker_reputation WHERE worker_id = $1")
+            .bind(&worker_id)
+            .execute(&repo.pool)
+            .await
+            .ok();
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn general_compute_transfer_lease_is_bound_to_the_assignment() {
+        let (p, fixture) = match pool("task_repository_general_compute_lease_binding").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let (task_id, request) =
+            create_assigned_general_compute_task(&repo, "lease-binding", "worker-a").await;
+
+        let lease = repo
+            .general_compute_transfer_lease(&task_id)
+            .await
+            .unwrap()
+            .expect("general-compute assignment must create a lease");
+        assert_eq!(lease.generation, 1);
+        assert!(lease.matches_assignment(
+            &task_id,
+            &request.execution_id,
+            &request.attempt_id,
+            "worker-a",
+        ));
+        assert!(!lease.matches_assignment(
+            &task_id,
+            &request.execution_id,
+            &request.attempt_id,
+            "worker-b",
+        ));
+
+        let legacy_task_id = format!("legacy-lease-{}", uuid::Uuid::new_v4());
+        let legacy = make_task(&legacy_task_id, "legacy-lease-owner");
+        repo.create(&legacy).await.unwrap();
+        repo.assign_to_worker(&legacy_task_id, "worker-a", "10.0.0.1")
+            .await
+            .unwrap();
+        assert!(repo
+            .general_compute_transfer_lease(&legacy_task_id)
+            .await
+            .unwrap()
+            .is_none());
+
+        cleanup_task_case(&repo.pool, &task_id, "lease-binding-owner", None).await;
+        cleanup_task_case(&repo.pool, &legacy_task_id, "legacy-lease-owner", None).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn general_compute_redispatch_revokes_and_rotates_transfer_lease() {
+        let (p, fixture) = match pool("task_repository_general_compute_lease_rotation").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let (task_id, request) =
+            create_assigned_general_compute_task(&repo, "lease-rotation", "worker-a").await;
+        let first = repo
+            .general_compute_transfer_lease(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let pending = repo
+            .reset_to_pending_for_worker(&task_id, "worker-a")
+            .await
+            .unwrap();
+        assert!(repo
+            .general_compute_transfer_lease(&task_id)
+            .await
+            .unwrap()
+            .is_none());
+        let rotated: GeneralComputeRequest =
+            serde_json::from_slice(pending.general_compute_manifest_json.as_deref().unwrap())
+                .unwrap();
+        assert_ne!(rotated.attempt_id, request.attempt_id);
+
+        repo.assign_to_worker(&task_id, "worker-b", "10.0.0.2")
+            .await
+            .unwrap();
+        let second = repo
+            .general_compute_transfer_lease(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.generation, first.generation + 1);
+        assert!(second.matches_assignment(
+            &task_id,
+            &rotated.execution_id,
+            &rotated.attempt_id,
+            "worker-b",
+        ));
+
+        let first_state: String = sqlx::query_scalar(
+            "SELECT state FROM general_compute_transfer_leases
+             WHERE task_id = $1 AND generation = $2",
+        )
+        .bind(&task_id)
+        .bind(first.generation)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(first_state, "revoked");
+
+        cleanup_task_case(&repo.pool, &task_id, "lease-rotation-owner", None).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn general_compute_transfer_lease_expiry_is_materialized_fail_closed() {
+        let (p, fixture) = match pool("task_repository_general_compute_lease_expiry").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let (task_id, _) =
+            create_assigned_general_compute_task(&repo, "lease-expiry", "worker-a").await;
+        sqlx::query(
+            "UPDATE general_compute_transfer_leases
+             SET expires_at = NOW() - INTERVAL '1 second'
+             WHERE task_id = $1 AND state = 'active'",
+        )
+        .bind(&task_id)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+
+        assert!(repo
+            .general_compute_transfer_lease(&task_id)
+            .await
+            .unwrap()
+            .is_none());
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM general_compute_transfer_leases WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(state, "expired");
+
+        cleanup_task_case(&repo.pool, &task_id, "lease-expiry-owner", None).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn general_compute_terminal_transitions_revoke_transfer_leases() {
+        let (p, fixture) = match pool("task_repository_general_compute_lease_terminal").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+
+        for transition in ["complete", "cancel", "fail", "timeout"] {
+            let worker_id = format!("worker-{transition}");
+            let (task_id, _) = create_assigned_general_compute_task(
+                &repo,
+                &format!("lease-{transition}"),
+                &worker_id,
+            )
+            .await;
+            match transition {
+                "complete" => {
+                    repo.complete_for_worker(&task_id, &worker_id, None, Some("done"))
+                        .await
+                        .unwrap();
+                }
+                "cancel" => {
+                    repo.cancel(&task_id).await.unwrap();
+                }
+                "fail" => {
+                    repo.fail(&task_id, "terminal lease test").await.unwrap();
+                }
+                "timeout" => {
+                    sqlx::query(
+                        "UPDATE tasks
+                         SET status = 'RUNNING', last_update = NOW() - INTERVAL '121 seconds'
+                         WHERE task_id = $1",
+                    )
+                    .bind(&task_id)
+                    .execute(&repo.pool)
+                    .await
+                    .unwrap();
+                    assert_eq!(repo.mark_stale_running().await.unwrap(), 1);
+                }
+                _ => unreachable!(),
+            }
+
+            let state: String = sqlx::query_scalar(
+                "SELECT state FROM general_compute_transfer_leases WHERE task_id = $1",
+            )
+            .bind(&task_id)
+            .fetch_one(&repo.pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                state, "revoked",
+                "{transition} must revoke transfer authority"
+            );
+            assert!(repo
+                .general_compute_transfer_lease(&task_id)
+                .await
+                .unwrap()
+                .is_none());
+
+            cleanup_task_case(
+                &repo.pool,
+                &task_id,
+                &format!("lease-{transition}-owner"),
+                None,
+            )
+            .await;
+        }
+
+        fixture.cleanup().await.ok();
+    }
+
+    async fn create_assigned_general_compute_task(
+        repo: &TaskRepository,
+        label: &str,
+        worker_id: &str,
+    ) -> (String, GeneralComputeRequest) {
+        let unique = uuid::Uuid::new_v4().to_string();
+        let task_id = format!("{label}-{unique}");
+        let request = inline_general_compute_request(&unique, b"lease source");
+        let mut task =
+            task_for_general_compute_request(&task_id, &format!("{label}-owner"), &request);
+        task.max_cpt = 0;
+        repo.create(&task).await.unwrap();
+        repo.assign_to_worker(&task_id, worker_id, "10.0.0.1")
+            .await
+            .unwrap();
+        (task_id, request)
     }
 
     fn inline_general_compute_request(unique: &str, bytes: &[u8]) -> GeneralComputeRequest {

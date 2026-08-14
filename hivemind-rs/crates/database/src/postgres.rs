@@ -351,6 +351,43 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     .await?;
 
     sqlx::query(
+        "CREATE TABLE IF NOT EXISTS general_compute_transfer_leases (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            task_id VARCHAR(255) NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+            execution_id VARCHAR(255) NOT NULL,
+            attempt_id VARCHAR(255) NOT NULL,
+            worker_id VARCHAR(255) NOT NULL,
+            generation BIGINT NOT NULL CHECK (generation > 0),
+            state VARCHAR(16) NOT NULL DEFAULT 'active',
+            expires_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE (task_id, execution_id, attempt_id, worker_id, generation),
+            CONSTRAINT general_compute_transfer_leases_state_check
+                CHECK (state IN ('active', 'revoked', 'expired'))
+        );",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_general_compute_transfer_leases_active_task
+         ON general_compute_transfer_leases(task_id)
+         WHERE state = 'active';",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_general_compute_transfer_leases_identity
+         ON general_compute_transfer_leases(
+             task_id, execution_id, attempt_id, worker_id, generation
+         );",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
         "CREATE TABLE IF NOT EXISTS vpn_peers (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             worker_id VARCHAR(255) NOT NULL UNIQUE,
@@ -804,6 +841,61 @@ mod tests {
             .unwrap();
             assert!(exists, "migration must create {table}");
         }
+
+        fixture.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn task_migrations_create_general_compute_transfer_lease_table() {
+        let fixture =
+            match create_isolated_test_pool("database_general_compute_transfer_leases").await {
+                Ok(fixture) => fixture,
+                Err(_) => {
+                    tracing::warn!("Skipping DB test");
+                    return;
+                }
+            };
+        run_migrations(&fixture.pool).await.unwrap();
+
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM information_schema.tables
+                WHERE table_schema = $1 AND table_name = 'general_compute_transfer_leases'
+            )",
+        )
+        .bind(fixture.schema_name())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert!(exists, "Nodepool must persist transfer lease state");
+
+        let indexes: Vec<String> = sqlx::query_scalar(
+            "SELECT indexname FROM pg_indexes
+             WHERE schemaname = $1 AND tablename = 'general_compute_transfer_leases'",
+        )
+        .bind(fixture.schema_name())
+        .fetch_all(&fixture.pool)
+        .await
+        .unwrap();
+        assert!(indexes.contains(&"idx_general_compute_transfer_leases_active_task".into()));
+        assert!(indexes.contains(&"idx_general_compute_transfer_leases_identity".into()));
+
+        let state_check: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM pg_constraint c
+                JOIN pg_class t ON t.oid = c.conrelid
+                JOIN pg_namespace n ON n.oid = t.relnamespace
+                WHERE n.nspname = $1
+                  AND t.relname = 'general_compute_transfer_leases'
+                  AND c.conname = 'general_compute_transfer_leases_state_check'
+            )",
+        )
+        .bind(fixture.schema_name())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert!(state_check, "lease state values must be constrained");
 
         fixture.cleanup().await.unwrap();
     }
