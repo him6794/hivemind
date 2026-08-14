@@ -1699,6 +1699,8 @@ mod tests {
             gpu_capabilities: vec![],
             backends: vec![BackendRegistration {
                 backend_id: request.backend_id.clone(),
+                execution_mode:
+                    general_compute_runtime::sandbox::BackendExecutionMode::ReferenceDirect,
                 guest_image_digest: format!("sha256:{}", "c".repeat(64)),
                 capabilities: vec![],
                 max_threads: 1,
@@ -1873,10 +1875,12 @@ mod tests {
                 capabilities: vec![],
                 max_threads: 1,
                 gpu_available: false,
-            gpu_capabilities: vec![],
             },
+            gpu_capabilities: vec![],
             backends: vec![BackendRegistration {
                 backend_id: request.backend_id.clone(),
+                execution_mode:
+                    general_compute_runtime::sandbox::BackendExecutionMode::ReferenceDirect,
                 guest_image_digest: request.guest_image_digest.clone(),
                 capabilities: vec![],
                 max_threads: 1,
