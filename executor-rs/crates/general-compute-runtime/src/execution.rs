@@ -184,6 +184,16 @@ impl ReferenceBackendExecutor {
             return Err(ExecutionError::UnsupportedEntrypoint);
         }
 
+        let backend = self
+            .capabilities
+            .backends
+            .iter()
+            .find(|backend| backend.backend_id == request.backend_id)
+            .ok_or_else(|| ExecutionError::BackendUnavailable(request.backend_id.clone()))?;
+        if backend.execution_mode != BackendExecutionMode::ReferenceDirect {
+            return Err(ExecutionError::UnsupportedExecutionMode);
+        }
+
         let source_path =
             materialize_artifact(materializer, cas_store, &request.source_artifact)?.path;
         let source_bytes = fs::read(source_path).map_err(|error| {
@@ -208,12 +218,6 @@ impl ReferenceBackendExecutor {
                 (Vec::new(), "null".to_owned())
             };
 
-        let backend = self
-            .capabilities
-            .backends
-            .iter()
-            .find(|backend| backend.backend_id == request.backend_id)
-            .ok_or_else(|| ExecutionError::BackendUnavailable(request.backend_id.clone()))?;
         let adapter =
             PinnedPythonAdapter::from_registry(&self.python_registry, &request.backend_id)
                 .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;

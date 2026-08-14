@@ -16,6 +16,7 @@ pub mod gpu;
 pub mod numeric;
 pub mod monte_carlo;
 pub mod ode;
+pub mod production;
 pub mod reference;
 pub mod rng;
 pub mod sandbox;
@@ -35,6 +36,10 @@ pub const MAX_SCRATCH_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 pub const MAX_OUTPUT_BYTES: u64 = 1024 * 1024 * 1024;
 pub const MAX_ARTIFACT_BYTES: u64 = 1024 * 1024 * 1024;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
+pub const PRODUCTION_RESULT_PROTOCOL_VERSION: &str = "general-compute-result-v1";
+/// Versioned framing used to bind a production result to the exact source and
+/// input bytes mounted into its OCI bundle.
+pub const GENERAL_COMPUTE_INPUT_DIGEST_PROTOCOL_VERSION: &str = "general-compute-input-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtocolError {
@@ -227,15 +232,181 @@ pub struct GeneralComputeResult {
     pub evidence: EvidenceEnvelope,
 }
 
+/// Versioned stdout envelope emitted by an operator-approved production
+/// runner. Raw stdout is never treated as a successful result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductionResultEnvelope {
+    pub protocol_version: String,
+    pub status: ResultStatus,
+    pub exit_code: Option<i32>,
+    pub error_code: Option<String>,
+    pub stdout: String,
+    pub stderr: String,
+    pub output_artifacts: Vec<ArtifactManifest>,
+    pub usage: UsageClaim,
+    pub input_sha256: String,
+    pub output_manifest_root: String,
+}
+
+impl ProductionResultEnvelope {
+    pub fn validate_for(&self, request: &GeneralComputeRequest) -> Result<(), ValidationError> {
+        let expected = canonical_input_digest_for_request(request)?;
+        self.validate_for_with_input_digest(request, &expected)
+    }
+
+    /// Validate a production result against bytes that the Worker actually
+    /// materialized below its operator-owned artifact root.  The runner's
+    /// claimed digest is not accepted merely because it has the right shape.
+    pub fn validate_for_with_input_digest(
+        &self,
+        request: &GeneralComputeRequest,
+        expected_input_sha256: &str,
+    ) -> Result<(), ValidationError> {
+        if self.protocol_version != PRODUCTION_RESULT_PROTOCOL_VERSION {
+            return Err(ValidationError::new(
+                ValidationErrorCode::ResultBindingMismatch,
+                "production result protocol version is unsupported",
+            ));
+        }
+        if self.output_manifest_root != canonical_artifact_root(&self.output_artifacts) {
+            return Err(ValidationError::new(
+                ValidationErrorCode::ArtifactRootMismatch,
+                "production output manifest root does not match artifacts",
+            ));
+        }
+        if !is_sha256_digest(&self.input_sha256) {
+            return Err(ValidationError::new(
+                ValidationErrorCode::ArtifactInvalid,
+                "production input digest is invalid",
+            ));
+        }
+        if !is_sha256_digest(expected_input_sha256) || self.input_sha256 != expected_input_sha256 {
+            return Err(ValidationError::new(
+                ValidationErrorCode::ResultBindingMismatch,
+                "production input digest does not match materialized execution inputs",
+            ));
+        }
+        for artifact in &self.output_artifacts {
+            if artifact.role != ArtifactRole::Output {
+                return Err(ValidationError::new(
+                    ValidationErrorCode::ArtifactInvalid,
+                    "production output artifacts must have the output role",
+                ));
+            }
+            artifact.validate().map_err(|message| {
+                ValidationError::new(ValidationErrorCode::ArtifactInvalid, message)
+            })?;
+        }
+        let output_bytes = self
+            .output_artifacts
+            .iter()
+            .try_fold(0u64, |total, artifact| {
+                total.checked_add(artifact.size_bytes)
+            })
+            .ok_or_else(|| {
+                ValidationError::new(
+                    ValidationErrorCode::UsageExceedsPolicy,
+                    "production output artifact size overflows",
+                )
+            })?;
+        let input_limit = request
+            .input_artifacts
+            .iter()
+            .try_fold(0u64, |total, artifact| {
+                total.checked_add(artifact.size_bytes)
+            })
+            .ok_or_else(|| {
+                ValidationError::new(
+                    ValidationErrorCode::UsageExceedsPolicy,
+                    "production input artifact size overflows",
+                )
+            })?;
+        if output_bytes > request.execution_policy.output_bytes
+            || self.usage.cpu_time_ms > request.execution_policy.cpu_millis
+            || self.usage.wall_time_ms > request.execution_policy.wall_time_ms
+            || self.usage.peak_memory_bytes > request.execution_policy.memory_bytes
+            || self.usage.output_bytes > request.execution_policy.output_bytes
+            || self.usage.input_bytes > input_limit
+        {
+            return Err(ValidationError::new(
+                ValidationErrorCode::UsageExceedsPolicy,
+                "production usage claim exceeds the request policy",
+            ));
+        }
+        let result = GeneralComputeResult {
+            execution_id: request.execution_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+            request_digest: request.request_digest.clone(),
+            status: self.status,
+            exit_code: self.exit_code,
+            error_code: self.error_code.clone(),
+            stdout: self.stdout.clone(),
+            stderr: self.stderr.clone(),
+            output_artifacts: self.output_artifacts.clone(),
+            usage: self.usage.clone(),
+            runtime_version: request.runtime_version.clone(),
+            backend_id: request.backend_id.clone(),
+            guest_image_digest: request.guest_image_digest.clone(),
+            input_sha256: self.input_sha256.clone(),
+            determinism: request.determinism.clone(),
+            capability_summary: Vec::new(),
+            gpu_selection: None,
+            output_manifest_root: self.output_manifest_root.clone(),
+            evidence: EvidenceEnvelope::default(),
+        };
+        result.validate_status()
+    }
+
+    pub fn into_result(
+        self,
+        request: &GeneralComputeRequest,
+    ) -> Result<GeneralComputeResult, ValidationError> {
+        let expected = canonical_input_digest_for_request(request)?;
+        self.into_result_with_input_digest(request, &expected)
+    }
+
+    pub fn into_result_with_input_digest(
+        self,
+        request: &GeneralComputeRequest,
+        expected_input_sha256: &str,
+    ) -> Result<GeneralComputeResult, ValidationError> {
+        self.validate_for_with_input_digest(request, expected_input_sha256)?;
+        Ok(GeneralComputeResult {
+            execution_id: request.execution_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+            request_digest: request.request_digest.clone(),
+            status: self.status,
+            exit_code: self.exit_code,
+            error_code: self.error_code,
+            stdout: self.stdout,
+            stderr: self.stderr,
+            output_artifacts: self.output_artifacts,
+            usage: self.usage,
+            runtime_version: request.runtime_version.clone(),
+            backend_id: request.backend_id.clone(),
+            guest_image_digest: request.guest_image_digest.clone(),
+            input_sha256: self.input_sha256,
+            determinism: request.determinism.clone(),
+            capability_summary: Vec::new(),
+            gpu_selection: None,
+            output_manifest_root: self.output_manifest_root,
+            evidence: EvidenceEnvelope::default(),
+        })
+    }
+}
+
 impl GeneralComputeResult {
     /// Validate that a result belongs to exactly one validated request and backend.
     pub fn validate_against(
         &self,
         request: &GeneralComputeRequest,
         registry: &CapabilityMatrix,
-        self.validate_gpu_selection(request)?;
     ) -> Result<(), ValidationError> {
         request.validate()?;
+        self.validate_gpu_selection(request)?;
         if self.execution_id != request.execution_id
             || self.attempt_id != request.attempt_id
             || self.idempotency_key != request.idempotency_key
@@ -331,6 +502,9 @@ impl GeneralComputeResult {
                 "result usage claim exceeds the request policy",
             ));
         }
+        Ok(())
+    }
+
     /// Validate the typed GPU identity claimed by a result against the
     /// request. Nodepool must additionally compare a concrete GPU selection
     /// with its operator-owned registration before treating it as trusted.
@@ -395,8 +569,6 @@ impl GeneralComputeResult {
                 Ok(())
             }
         }
-    }
-        Ok(())
     }
 
     fn validate_status(&self) -> Result<(), ValidationError> {
@@ -714,6 +886,7 @@ impl ValidationError {
 #[serde(deny_unknown_fields)]
 pub struct BackendRegistration {
     pub backend_id: String,
+    pub execution_mode: sandbox::BackendExecutionMode,
     pub guest_image_digest: String,
     pub capabilities: Vec<String>,
     pub max_threads: u32,
@@ -1018,6 +1191,60 @@ impl ArtifactManifest {
 pub fn sha256_digest(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     format!("sha256:{digest:x}")
+}
+
+/// Compute the canonical digest for the bytes mounted into a production
+/// execution.  Source bytes are framed first, followed by input artifacts in
+/// manifest order; length prefixes prevent concatenation ambiguity.
+pub fn canonical_input_digest(source: &[u8], inputs: &[&[u8]]) -> String {
+    let mut canonical = Vec::with_capacity(
+        GENERAL_COMPUTE_INPUT_DIGEST_PROTOCOL_VERSION.len()
+            + std::mem::size_of::<u64>()
+            + source.len()
+            + std::mem::size_of::<u64>()
+            + inputs
+                .iter()
+                .map(|input| std::mem::size_of::<u64>() + input.len())
+                .sum::<usize>(),
+    );
+    canonical.extend_from_slice(GENERAL_COMPUTE_INPUT_DIGEST_PROTOCOL_VERSION.as_bytes());
+    canonical.push(0);
+    append_input_frame(&mut canonical, source);
+    canonical.extend_from_slice(&(inputs.len() as u64).to_be_bytes());
+    for input in inputs {
+        append_input_frame(&mut canonical, input);
+    }
+    sha256_digest(&canonical)
+}
+
+fn append_input_frame(canonical: &mut Vec<u8>, bytes: &[u8]) {
+    canonical.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+    canonical.extend_from_slice(bytes);
+}
+
+fn canonical_input_digest_for_request(
+    request: &GeneralComputeRequest,
+) -> Result<String, ValidationError> {
+    let source = request
+        .source_artifact
+        .inline_bytes
+        .as_deref()
+        .ok_or_else(|| {
+            ValidationError::new(
+                ValidationErrorCode::ArtifactInvalid,
+                "production input digest requires materialized source bytes",
+            )
+        })?;
+    let mut inputs = Vec::with_capacity(request.input_artifacts.len());
+    for artifact in &request.input_artifacts {
+        inputs.push(artifact.inline_bytes.as_deref().ok_or_else(|| {
+            ValidationError::new(
+                ValidationErrorCode::ArtifactInvalid,
+                "production input digest requires materialized input bytes",
+            )
+        })?);
+    }
+    Ok(canonical_input_digest(source, &inputs))
 }
 
 pub fn canonical_artifact_root(artifacts: &[ArtifactManifest]) -> String {

@@ -2,7 +2,9 @@ use anyhow::Result;
 use general_compute_runtime::artifact::{ArtifactMaterializer, CasChunkStore};
 use general_compute_runtime::cp_python::{PythonBackendRegistration, PythonBackendRegistry};
 use general_compute_runtime::execution::{ExecutionError, ReferenceBackendExecutor};
-use general_compute_runtime::supervisor::Cancellation;
+use general_compute_runtime::production::{ProductionBackendConfig, ProductionBackendRegistry};
+use general_compute_runtime::sandbox::{BackendExecutionMode, ProductionSandboxLauncher};
+use general_compute_runtime::supervisor::{Cancellation, RunResult, RunStatus};
 use general_compute_runtime::{
     GeneralComputeRequest, GeneralComputeResult, ResultStatus, TrustedWorkerCapabilityRegistration,
 };
@@ -165,9 +167,53 @@ pub async fn run_task_with_cancel_and_reference(
 pub async fn run_task_with_cancel_and_reference_and_cas(
     task: &Task,
     config: &HivemindConfig,
+    cancel_rx: watch::Receiver<bool>,
+    reference_executor: Option<Arc<ReferenceBackendExecutor>>,
+    cas_store: Option<Arc<CasChunkStore>>,
+) -> Result<super::TaskResult> {
+    run_task_with_cancel_and_backends(
+        task,
+        config,
+        cancel_rx,
+        reference_executor,
+        cas_store,
+        production_backends_from_environment(),
+        runtime_capability_matrix_from_environment(),
+    )
+    .await
+}
+
+pub(crate) async fn run_task_with_cancel_and_backends(
+    task: &Task,
+    config: &HivemindConfig,
+    cancel_rx: watch::Receiver<bool>,
+    reference_executor: Option<Arc<ReferenceBackendExecutor>>,
+    cas_store: Option<Arc<CasChunkStore>>,
+    production_backends: Option<Arc<ProductionBackendRegistry>>,
+    capability_matrix: Option<Arc<general_compute_runtime::CapabilityMatrix>>,
+) -> Result<super::TaskResult> {
+    run_task_with_cancel_and_backends_and_trusted_registration(
+        task,
+        config,
+        cancel_rx,
+        reference_executor,
+        cas_store,
+        production_backends,
+        capability_matrix,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn run_task_with_cancel_and_backends_and_trusted_registration(
+    task: &Task,
+    config: &HivemindConfig,
     mut cancel_rx: watch::Receiver<bool>,
     reference_executor: Option<Arc<ReferenceBackendExecutor>>,
     cas_store: Option<Arc<CasChunkStore>>,
+    production_backends: Option<Arc<ProductionBackendRegistry>>,
+    capability_matrix: Option<Arc<general_compute_runtime::CapabilityMatrix>>,
+    trusted_registration: Option<TrustedWorkerCapabilityRegistration>,
 ) -> Result<super::TaskResult> {
     let start = Instant::now();
     tracing::info!(
@@ -201,8 +247,11 @@ pub async fn run_task_with_cancel_and_reference_and_cas(
     if task.runtime.as_deref() == Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION) {
         let task = task.clone();
         let reference_executor = reference_executor.clone();
+        let production_backends = production_backends.clone();
         let config = config.clone();
         let cas_store = cas_store.clone();
+        let capability_matrix = capability_matrix.clone();
+        let trusted_registration = trusted_registration.clone();
         let cancelled = Arc::new(AtomicBool::new(false));
         let runtime_cancellation = Arc::new(Cancellation::new());
         let execution_cancelled = cancelled.clone();
@@ -213,6 +262,9 @@ pub async fn run_task_with_cancel_and_reference_and_cas(
                 &config,
                 reference_executor.as_deref(),
                 cas_store.as_deref(),
+                production_backends.as_deref(),
+                capability_matrix.as_deref(),
+                trusted_registration.as_ref(),
                 &execution_cancelled,
                 &execution_runtime_cancellation,
             )
@@ -238,6 +290,9 @@ fn execute_general_compute_task(
     config: &HivemindConfig,
     reference_executor: Option<&ReferenceBackendExecutor>,
     cas_store: Option<&CasChunkStore>,
+    production_backends: Option<&ProductionBackendRegistry>,
+    capability_matrix: Option<&general_compute_runtime::CapabilityMatrix>,
+    trusted_registration: Option<&TrustedWorkerCapabilityRegistration>,
     cancelled: &AtomicBool,
     cancellation: &Cancellation,
 ) -> Result<super::TaskResult> {
@@ -253,92 +308,90 @@ fn execute_general_compute_task(
     if cancelled.load(Ordering::Acquire) {
         cancellation.cancel();
     }
-    let result = if let Some(executor) = reference_executor {
-        let root = absolute_runtime_root(config, &task.task_id)?;
-        let materializer =
-            ArtifactMaterializer::new(root).map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        match cas_store {
-            Some(store) => executor.execute_with_cas_with_cancellation(
-                &request,
-                &materializer,
-                store,
-                cancellation,
-            ),
-            None => executor.execute_with_cancellation(&request, &materializer, cancellation),
-        }
-    } else {
-        Err(ExecutionError::BackendUnavailable(
-            "reference backend is not operator-configured".into(),
-        ))
-    };
-    let typed = match result {
-        Ok(result) => result,
-        Err(error) => failed_general_compute_result(&request, error_code(&error)),
-    };
-    let encoded = serde_json::to_vec(&typed)?;
-    let completed = typed.status == ResultStatus::Completed;
-    Ok(super::TaskResult {
-        task_id: task.task_id.clone(),
-        success: completed,
-        output: completed.then(|| typed.stdout.clone()),
-        error: (!completed).then(|| {
-            typed
-                .error_code
-                .clone()
-                .unwrap_or_else(|| "backend_unavailable".into())
-        }),
-        exit_code: typed.exit_code.unwrap_or(1),
-        cpu_time_ms: typed.usage.cpu_time_ms.min(i64::MAX as u64) as i64,
-        wall_time_ms: typed.usage.wall_time_ms.min(i64::MAX as u64) as i64,
-        peak_memory_mb: (typed.usage.peak_memory_bytes / (1024 * 1024)).min(i64::MAX as u64) as i64,
-        managed_executed_ops: 0,
-        managed_output_bytes: typed.usage.output_bytes.min(i64::MAX as u64) as i64,
-        managed_receipt_json: None,
-        managed_proof: None,
-        general_compute_result_json: Some(encoded),
-    })
-}
-pub(crate) async fn run_task_with_cancel_and_reference_and_cas_and_trusted_registration(
-    task: &Task,
-    config: &HivemindConfig,
-    cancel_rx: watch::Receiver<bool>,
-    reference_executor: Option<Arc<ReferenceBackendExecutor>>,
-    cas_store: Option<Arc<CasChunkStore>>,
-    trusted_registration: Option<TrustedWorkerCapabilityRegistration>,
-) -> Result<super::TaskResult> {
-    let request = task
-        .general_compute_manifest_json
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("general-compute request manifest is required"))
-        .and_then(|manifest| {
-            serde_json::from_slice::<GeneralComputeRequest>(manifest).map_err(|error| {
-                anyhow::anyhow!("general-compute request manifest is malformed: {error}")
-            })
-        })?;
-    let selection = match trusted_gpu_selection(&request, trusted_registration.as_ref()) {
+    if request.validate().is_err() {
+        return typed_task_result(
+            task,
+            failed_general_compute_result(&request, "request_invalid", None),
+        );
+    }
+    let trusted_gpu_selection = match trusted_gpu_selection(&request, trusted_registration) {
         Ok(selection) => selection,
         Err(_error) => {
-            return general_compute_task_result(
+            return typed_task_result(
                 task,
-                failed_general_compute_result(&request, "gpu_unavailable"),
+                failed_general_compute_result(&request, "gpu_unavailable", None),
             );
         }
     };
-    let mut result = run_task_with_cancel_and_reference_and_cas(
-        task,
-        config,
-        cancel_rx,
-        reference_executor,
-        cas_store,
-    )
-    .await?;
-    let Some(encoded) = result.general_compute_result_json.as_deref() else {
-        return Ok(result);
+    let result = match backend_execution_mode(capability_matrix, &request.backend_id) {
+        Some(BackendExecutionMode::ProductionSandboxedOci) => {
+            let Some(production) = production_backends.and_then(|registry| registry.get(&request.backend_id)) else {
+                return typed_task_result(
+                    task,
+                    failed_general_compute_result(
+                        &request,
+                        "backend_unavailable",
+                        trusted_gpu_selection.clone(),
+                    ),
+                );
+            };
+            execute_production_backend_task(
+                &request,
+                task,
+                config,
+                production,
+                cas_store,
+                cancelled,
+                cancellation,
+                trusted_gpu_selection.clone(),
+            )
+        }
+        Some(BackendExecutionMode::ReferenceDirect) if reference_executor.is_some() => {
+            let executor = reference_executor.expect("guarded by is_some");
+            let root = absolute_runtime_root(config, &task.task_id)?;
+            let materializer =
+                ArtifactMaterializer::new(root).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            match cas_store {
+                Some(store) => executor.execute_with_cas_with_cancellation(
+                    &request,
+                    &materializer,
+                    store,
+                    cancellation,
+                ),
+                None => executor.execute_with_cancellation(&request, &materializer, cancellation),
+            }
+        }
+        None if reference_executor.is_some() && production_backends.is_none() => {
+            let executor = reference_executor.expect("guarded by is_some");
+            let root = absolute_runtime_root(config, &task.task_id)?;
+            let materializer =
+                ArtifactMaterializer::new(root).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            match cas_store {
+                Some(store) => executor.execute_with_cas_with_cancellation(
+                    &request,
+                    &materializer,
+                    store,
+                    cancellation,
+                ),
+                None => executor.execute_with_cancellation(&request, &materializer, cancellation),
+            }
+        }
+        _ => Err(ExecutionError::BackendUnavailable(
+            "backend execution mode is not operator-configured".into(),
+        )),
     };
-    let mut typed = serde_json::from_slice::<GeneralComputeResult>(encoded)?;
-    typed.gpu_selection = selection;
-    result.general_compute_result_json = Some(serde_json::to_vec(&typed)?);
-    Ok(result)
+    let typed = match result {
+        Ok(mut result) => {
+            result.gpu_selection = trusted_gpu_selection;
+            result
+        }
+        Err(error) => failed_general_compute_result(
+            &request,
+            error_code(&error),
+            trusted_gpu_selection,
+        ),
+    };
+    typed_task_result(task, typed)
 }
 
 fn trusted_gpu_selection(
@@ -356,7 +409,7 @@ fn trusted_gpu_selection(
     }
 }
 
-fn general_compute_task_result(
+fn typed_task_result(
     task: &Task,
     typed: GeneralComputeResult,
 ) -> Result<super::TaskResult> {
@@ -382,6 +435,156 @@ fn general_compute_task_result(
         managed_proof: None,
         general_compute_result_json: Some(encoded),
     })
+}
+
+fn execute_production_backend_task(
+    request: &GeneralComputeRequest,
+    task: &Task,
+    config: &HivemindConfig,
+    backend: &ProductionBackendConfig,
+    cas_store: Option<&CasChunkStore>,
+    cancelled: &AtomicBool,
+    cancellation: &Cancellation,
+    trusted_gpu_selection: Option<general_compute_runtime::gpu::GpuSelection>,
+) -> Result<GeneralComputeResult, ExecutionError> {
+    if backend.backend_id != request.backend_id
+        || backend.guest_image_digest != request.guest_image_digest
+    {
+        return Err(ExecutionError::BackendUnavailable(
+            "production backend registration does not match request".into(),
+        ));
+    }
+    if cancelled.load(Ordering::Acquire) {
+        cancellation.cancel();
+    }
+    backend
+        .validate_request_mounts(request)
+        .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
+    let (bundle_root, artifact_root) = backend
+        .materialize_bundle(request, &task.task_id)
+        .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
+    let materializer = ArtifactMaterializer::new(&artifact_root)
+        .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
+    let mut materialized_bytes = Vec::with_capacity(1 + request.input_artifacts.len());
+    for artifact in std::iter::once(&request.source_artifact).chain(request.input_artifacts.iter()) {
+        let materialized = match cas_store {
+            Some(store) => materializer.materialize_with_cas(artifact, store),
+            None => materializer.materialize(artifact),
+        }
+        .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
+        if materialized.size_bytes != artifact.size_bytes || materialized.sha256 != artifact.sha256 {
+            return Err(ExecutionError::BackendUnavailable(
+                "materialized production artifact identity mismatch".into(),
+            ));
+        }
+        let bytes = std::fs::read(&materialized.path).map_err(|error| {
+            ExecutionError::BackendUnavailable(format!(
+                "materialized production artifact cannot be read: {error}"
+            ))
+        })?;
+        if bytes.len() as u64 != artifact.size_bytes
+            || general_compute_runtime::sha256_digest(&bytes) != artifact.sha256
+        {
+            return Err(ExecutionError::BackendUnavailable(
+                "materialized production artifact bytes changed after verification".into(),
+            ));
+        }
+        materialized_bytes.push(bytes);
+    }
+    let Some(source_bytes) = materialized_bytes.first() else {
+        return Err(ExecutionError::BackendUnavailable(
+            "production source artifact was not materialized".into(),
+        ));
+    };
+    let input_bytes = materialized_bytes
+        .iter()
+        .skip(1)
+        .map(Vec::as_slice)
+        .collect::<Vec<_>>();
+    let input_sha256 = general_compute_runtime::canonical_input_digest(source_bytes, &input_bytes);
+    for mount in &backend.policy.mounts {
+        if let general_compute_runtime::sandbox::SandboxMount::ReadOnlyArtifact { artifact_id, .. } = mount {
+            let path = artifact_root.join(artifact_id);
+            let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+                ExecutionError::BackendUnavailable(format!(
+                    "declared production artifact mount is unavailable: {error}"
+                ))
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(ExecutionError::BackendUnavailable(
+                    "declared production artifact mount is not a regular file".into(),
+                ));
+            }
+        }
+    }
+    let launcher = ProductionSandboxLauncher::with_oci_runner_command(
+        backend.runner_executable.clone(),
+        backend.runner_prefix_args.clone(),
+    )
+    .with_runner_sha256(backend.runner_sha256.clone())
+    .with_timeout(std::time::Duration::from_millis(
+        request.execution_policy.wall_time_ms,
+    ))
+    .with_output_limits(backend.max_output_bytes, backend.max_output_bytes.saturating_mul(2));
+    let launch = backend.launch();
+    let result = launcher
+        .run_materialized_bundle(
+            &launch,
+            &bundle_root,
+            &artifact_root,
+            &task.task_id,
+            cancellation,
+        )
+        .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
+    production_result(
+        request,
+        result,
+        input_sha256,
+        config,
+        trusted_gpu_selection,
+    )
+}
+
+fn production_result(
+    request: &GeneralComputeRequest,
+    result: RunResult,
+    input_sha256: String,
+    _config: &HivemindConfig,
+    trusted_gpu_selection: Option<general_compute_runtime::gpu::GpuSelection>,
+) -> Result<GeneralComputeResult, ExecutionError> {
+    let status = match result.status {
+        RunStatus::Completed if result.exit_code == Some(0) => ResultStatus::Completed,
+        RunStatus::Cancelled => ResultStatus::Cancelled,
+        RunStatus::TimedOut => ResultStatus::TimedOut,
+        RunStatus::OutputLimitExceeded => ResultStatus::ResourceExhausted,
+        RunStatus::Completed | RunStatus::Failed => ResultStatus::Failed,
+    };
+    let stdout_bytes = result.stdout;
+    let _stdout = String::from_utf8(stdout_bytes.clone())
+        .map_err(|_| ExecutionError::BackendUnavailable("production stdout is not UTF-8".into()))?;
+    let stderr = String::from_utf8(result.stderr)
+        .map_err(|_| ExecutionError::BackendUnavailable("production stderr is not UTF-8".into()))?;
+    let exit_code = match status {
+        ResultStatus::Completed => Some(0),
+        ResultStatus::Failed => result.exit_code.or(Some(1)),
+        _ => None,
+    };
+    let envelope: general_compute_runtime::ProductionResultEnvelope = serde_json::from_slice(&stdout_bytes)
+        .map_err(|error| ExecutionError::BackendUnavailable(format!("production result decoder rejected stdout: {error}")))?;
+    let mut typed = envelope
+        .into_result_with_input_digest(request, &input_sha256)
+        .map_err(|error| {
+        ExecutionError::BackendUnavailable(format!("production result validation failed: {}", error.message))
+        })?;
+    typed.gpu_selection = trusted_gpu_selection;
+    if typed.status != status {
+        return Err(ExecutionError::BackendUnavailable(
+            "production result status disagrees with runner status".into(),
+        ));
+    }
+    typed.stderr = stderr;
+    typed.exit_code = exit_code;
+    Ok(typed)
 }
 
 fn absolute_runtime_root(config: &HivemindConfig, task_id: &str) -> Result<std::path::PathBuf> {
@@ -414,6 +617,7 @@ fn error_code(error: &ExecutionError) -> &'static str {
 fn failed_general_compute_result(
     request: &GeneralComputeRequest,
     code: &str,
+    gpu_selection: Option<general_compute_runtime::gpu::GpuSelection>,
 ) -> GeneralComputeResult {
     GeneralComputeResult {
         execution_id: request.execution_id.clone(),
@@ -433,7 +637,7 @@ fn failed_general_compute_result(
         input_sha256: general_compute_runtime::sha256_digest(&[]),
         determinism: request.determinism.clone(),
         capability_summary: Vec::new(),
-        gpu_selection: None,
+        gpu_selection,
         output_manifest_root: general_compute_runtime::canonical_artifact_root(&[]),
         evidence: Default::default(),
     }
@@ -452,6 +656,51 @@ pub fn reference_executor_from_environment(
         registry,
         admission.trusted_registration(),
     )))
+}
+
+pub fn production_backends_from_environment() -> Option<Arc<ProductionBackendRegistry>> {
+    let path = std::env::var("HIVEMIND_GENERAL_COMPUTE_PRODUCTION_BACKENDS").ok()?;
+    if path.trim().is_empty() {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let registrations = serde_json::from_slice::<Vec<ProductionBackendConfig>>(&bytes).ok()?;
+    ProductionBackendRegistry::new(registrations)
+        .map(Arc::new)
+        .ok()
+}
+
+pub fn runtime_capability_matrix_from_environment(
+) -> Option<Arc<general_compute_runtime::CapabilityMatrix>> {
+    let registrations = match std::env::var("HIVEMIND_GENERAL_COMPUTE_BACKENDS") {
+        Ok(backends) if !backends.trim().is_empty() => {
+            serde_json::from_str::<Vec<general_compute_runtime::BackendRegistration>>(&backends)
+                .ok()?
+        }
+        _ => {
+            let trusted =
+                std::env::var("HIVEMIND_GENERAL_COMPUTE_TRUSTED_REGISTRATION").ok()?;
+            serde_json::from_str::<TrustedWorkerCapabilityRegistration>(&trusted)
+                .ok()?
+                .backends
+        }
+    };
+    Some(Arc::new(general_compute_runtime::CapabilityMatrix::new(
+        registrations,
+    )))
+}
+
+fn backend_execution_mode(
+    capability_matrix: Option<&general_compute_runtime::CapabilityMatrix>,
+    backend_id: &str,
+) -> Option<BackendExecutionMode> {
+    capability_matrix.and_then(|matrix| {
+        matrix
+            .backends
+            .iter()
+            .find(|backend| backend.backend_id == backend_id)
+            .map(|backend| backend.execution_mode)
+    })
 }
 
 /// Load the optional operator-owned local CAS root. Invalid or relative roots
@@ -669,6 +918,315 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn production_capability_without_production_configuration_never_uses_reference_executor() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path().join("sandbox").to_str().unwrap());
+        let image = format!("sha256:{}", "a".repeat(64));
+        let mut request = GeneralComputeRequest {
+            execution_id: "execution-production-routing".into(),
+            attempt_id: "attempt-production-routing".into(),
+            idempotency_key: "idempotency-production-routing".into(),
+            request_digest: String::new(),
+            runtime_version: general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest: image.clone(),
+            backend_id: "python-cpython-312".into(),
+            entrypoint: "main".into(),
+            source_artifact: general_compute_runtime::ArtifactManifest::inline_json(
+                "source",
+                general_compute_runtime::ArtifactRole::Source,
+                b"result = 1",
+            ),
+            input_artifacts: Vec::new(),
+            execution_policy: general_compute_runtime::ExecutionPolicy::default(),
+            determinism: general_compute_runtime::DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+        let capabilities = general_compute_runtime::CapabilityMatrix::new(vec![
+            general_compute_runtime::BackendRegistration {
+                backend_id: request.backend_id.clone(),
+                execution_mode: BackendExecutionMode::ProductionSandboxedOci,
+                guest_image_digest: image.clone(),
+                capabilities: vec!["cpu".into()],
+                max_threads: 2,
+                network_allowed: false,
+                filesystem_read_only: true,
+                gpu_allowed: false,
+            },
+        ]);
+        let worker = general_compute_runtime::WorkerCapabilities {
+            guest_image_digests: vec![image.clone()],
+            capabilities: vec!["cpu".into()],
+            max_threads: 2,
+            gpu_available: false,
+        };
+        let python_registry = PythonBackendRegistry::new(vec![PythonBackendRegistration {
+            backend_id: request.backend_id.clone(),
+            executable: "python".into(),
+            runtime_version: "CPython 3.12.9".into(),
+            guest_image_digest: image,
+            protocol_version: "general-compute-wire-v1".into(),
+            max_output_bytes: 1024,
+            execution_mode: BackendExecutionMode::ReferenceDirect,
+        }])
+        .unwrap();
+        let reference = Arc::new(ReferenceBackendExecutor::new(
+            capabilities.clone(),
+            worker,
+            python_registry,
+        ));
+        let mut task = test_task_with_source("null");
+        task.task_id = "production-routing-task".into();
+        task.runtime = Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+
+        let result = run_task_with_cancel_and_backends(
+            &task,
+            &config,
+            cancel_rx,
+            Some(reference),
+            None,
+            None,
+            Some(Arc::new(capabilities)),
+        )
+        .await
+        .unwrap();
+
+        assert!(!result.success);
+        let typed: GeneralComputeResult =
+            serde_json::from_slice(result.general_compute_result_json.as_deref().unwrap()).unwrap();
+        assert_eq!(typed.status, ResultStatus::BackendUnavailable);
+        assert_eq!(typed.error_code.as_deref(), Some("backend_unavailable"));
+    }
+
+    #[tokio::test]
+    async fn production_worker_missing_pinned_bundle_rootfs_fails_closed() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path().join("sandbox").to_str().unwrap());
+        let image = format!("sha256:{}", "b".repeat(64));
+        let registration = production_registration(tmp.path().join("production"), &image);
+        let backend_id = registration.backend_id.clone();
+        let production = Arc::new(
+            ProductionBackendRegistry::new(vec![registration]).unwrap(),
+        );
+        let request = production_request(&backend_id, &image, "execution-production-rootfs");
+        let capabilities = production_capabilities(&backend_id, &image);
+        let mut task = test_task_with_source("null");
+        task.task_id = "production-rootfs-task".into();
+        task.runtime = Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+
+        let result = run_task_with_cancel_and_backends(
+            &task,
+            &config,
+            cancel_rx,
+            None,
+            None,
+            Some(production),
+            Some(Arc::new(capabilities)),
+        )
+        .await
+        .unwrap();
+
+        assert!(!result.success);
+        let typed: GeneralComputeResult =
+            serde_json::from_slice(result.general_compute_result_json.as_deref().unwrap()).unwrap();
+        assert_eq!(typed.status, ResultStatus::BackendUnavailable);
+        assert_eq!(typed.error_code.as_deref(), Some("backend_unavailable"));
+    }
+
+    #[tokio::test]
+    async fn production_worker_missing_pinned_runner_fails_closed() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path().join("sandbox").to_str().unwrap());
+        let image = format!("sha256:{}", "c".repeat(64));
+        let root = tmp.path().join("production");
+        let registration = production_registration(root.clone(), &image);
+        std::fs::create_dir_all(registration.bundle_root.join("rootfs")).unwrap();
+        let backend_id = registration.backend_id.clone();
+        let production = Arc::new(
+            ProductionBackendRegistry::new(vec![registration]).unwrap(),
+        );
+        let request = production_request(&backend_id, &image, "execution-production-runner");
+        let capabilities = production_capabilities(&backend_id, &image);
+        let mut task = test_task_with_source("null");
+        task.task_id = "production-runner-task".into();
+        task.runtime = Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+
+        let result = run_task_with_cancel_and_backends(
+            &task,
+            &config,
+            cancel_rx,
+            None,
+            None,
+            Some(production),
+            Some(Arc::new(capabilities)),
+        )
+        .await
+        .unwrap();
+
+        assert!(!result.success);
+        let typed: GeneralComputeResult =
+            serde_json::from_slice(result.general_compute_result_json.as_deref().unwrap()).unwrap();
+        assert_eq!(typed.status, ResultStatus::BackendUnavailable);
+        assert_eq!(typed.error_code.as_deref(), Some("backend_unavailable"));
+    }
+
+    #[tokio::test]
+    async fn production_worker_routes_materialized_bundle_to_operator_runner() {
+        // This is a process-level routing fixture with an operator-owned fake
+        // runner. It proves the Worker materializes and validates the bundle,
+        // then consumes the versioned result envelope; it is not a claim that
+        // this host has real rootless OCI isolation.
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path().join("sandbox").to_str().unwrap());
+        let image = format!("sha256:{}", "d".repeat(64));
+        let root = tmp.path().join("production-success");
+        let mut registration = production_registration(root.clone(), &image);
+        std::fs::create_dir_all(registration.bundle_root.join("rootfs")).unwrap();
+        let request = production_request(
+            &registration.backend_id,
+            &image,
+            "execution-production-success",
+        );
+        let envelope = general_compute_runtime::ProductionResultEnvelope {
+            protocol_version: general_compute_runtime::PRODUCTION_RESULT_PROTOCOL_VERSION.into(),
+            status: ResultStatus::Completed,
+            exit_code: Some(0),
+            error_code: None,
+            stdout: "operator runner output".into(),
+            stderr: String::new(),
+            output_artifacts: Vec::new(),
+            usage: Default::default(),
+            input_sha256: general_compute_runtime::canonical_input_digest(b"result = 1", &[]),
+            output_manifest_root: general_compute_runtime::canonical_artifact_root(&[]),
+        };
+        let result_path = root.join("runner-result.json");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&result_path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let runner = root.join("fake-runc.sh");
+            let result_literal = result_path.to_string_lossy().replace('\'', "'\\''");
+            std::fs::write(
+                &runner,
+                format!("#!/bin/sh\ncat '{result_literal}'\n"),
+            )
+            .unwrap();
+            let mut permissions = std::fs::metadata(&runner).unwrap().permissions();
+            permissions.set_mode(0o700);
+            std::fs::set_permissions(&runner, permissions).unwrap();
+            registration.runner_executable = runner;
+            registration.runner_prefix_args = Vec::new();
+        }
+        #[cfg(windows)]
+        {
+            let script = root.join("fake-runc.cmd");
+            std::fs::write(
+                &script,
+                format!(
+                    "@echo off\r\ntype \"{}\"\r\nexit /b 0\r\n",
+                    result_path.display()
+                ),
+            )
+            .unwrap();
+            registration.runner_executable =
+                std::path::PathBuf::from(std::env::var("ComSpec").unwrap());
+            registration.runner_prefix_args =
+                vec!["/C".into(), script.to_string_lossy().into_owned()];
+        }
+        registration.runner_sha256 = general_compute_runtime::sha256_digest(
+            &std::fs::read(&registration.runner_executable).unwrap(),
+        );
+
+        let production = Arc::new(ProductionBackendRegistry::new(vec![registration]).unwrap());
+        let capabilities = production_capabilities(&request.backend_id, &image);
+        let mut task = test_task_with_source("null");
+        task.task_id = "production-success-task".into();
+        task.runtime = Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+
+        let result = run_task_with_cancel_and_backends(
+            &task,
+            &config,
+            cancel_rx,
+            None,
+            None,
+            Some(production),
+            Some(Arc::new(capabilities)),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            result.success,
+            "production runner fixture failed: {:?} {:?}",
+            result.error,
+            result.general_compute_result_json
+        );
+        assert_eq!(result.output.as_deref(), Some("operator runner output"));
+        let typed: GeneralComputeResult =
+            serde_json::from_slice(result.general_compute_result_json.as_deref().unwrap())
+                .unwrap();
+        assert_eq!(typed.status, ResultStatus::Completed);
+        assert_eq!(
+            typed.input_sha256,
+            general_compute_runtime::canonical_input_digest(b"result = 1", &[])
+        );
+    }
+
+    #[test]
+    fn production_result_rejects_a_digest_not_bound_to_materialized_source_bytes() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path().join("sandbox").to_str().unwrap());
+        let image = format!("sha256:{}", "f".repeat(64));
+        let request = production_request(
+            "python-cpython-312",
+            &image,
+            "execution-production-result-digest",
+        );
+        let output = general_compute_runtime::ArtifactManifest::inline_json(
+            "stdout",
+            general_compute_runtime::ArtifactRole::Output,
+            b"ok",
+        );
+        let envelope = general_compute_runtime::ProductionResultEnvelope {
+            protocol_version: general_compute_runtime::PRODUCTION_RESULT_PROTOCOL_VERSION.into(),
+            status: ResultStatus::Completed,
+            exit_code: Some(0),
+            error_code: None,
+            stdout: "ok".into(),
+            stderr: String::new(),
+            output_artifacts: vec![output.clone()],
+            usage: Default::default(),
+            input_sha256: general_compute_runtime::sha256_digest(&[]),
+            output_manifest_root: general_compute_runtime::canonical_artifact_root(&[output]),
+        };
+        let run = RunResult {
+            status: RunStatus::Completed,
+            exit_code: Some(0),
+            reaped: true,
+            stdout: serde_json::to_vec(&envelope).unwrap(),
+            stderr: Vec::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        };
+        let expected = general_compute_runtime::canonical_input_digest(b"result = 1", &[]);
+
+        let error = production_result(&request, run, expected, &config, None)
+            .expect_err("a runner digest that omits the source bytes must fail closed");
+        assert!(error.to_string().contains("input digest"));
+    }
+
+    #[tokio::test]
     async fn alpha_worker_executes_with_an_operator_provided_cas_store() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path().join("sandbox").to_str().unwrap());
@@ -734,6 +1292,7 @@ mod tests {
         let capabilities = general_compute_runtime::CapabilityMatrix::new(vec![
             general_compute_runtime::BackendRegistration {
                 backend_id: request.backend_id.clone(),
+                execution_mode: general_compute_runtime::sandbox::BackendExecutionMode::ReferenceDirect,
                 guest_image_digest: image.clone(),
                 capabilities: vec!["cpu".into()],
                 max_threads: 2,
@@ -802,6 +1361,91 @@ mod tests {
         config.auth.jwt_secret = "unit-test-jwt-secret".into();
         // Workers only need the platform public key; the default sample key is valid.
         config
+    }
+
+    fn production_registration(
+        root: std::path::PathBuf,
+        image: &str,
+    ) -> ProductionBackendConfig {
+        ProductionBackendConfig {
+            backend_id: "python-cpython-312".into(),
+            guest_image_digest: image.into(),
+            bundle_root: root.join("bundles"),
+            artifact_root: root.join("artifacts"),
+            runner_executable: root.join("runc"),
+            runner_prefix_args: Vec::new(),
+            runner_sha256: format!("sha256:{}", "d".repeat(64)),
+            entrypoint: vec!["python".into(), "/runtime/runner.py".into()],
+            policy: general_compute_runtime::sandbox::LinuxSandboxPolicy {
+                oci_privilege: general_compute_runtime::sandbox::OciPrivilegeMode::Rootless,
+                namespaces: vec![
+                    general_compute_runtime::sandbox::LinuxNamespace::User,
+                    general_compute_runtime::sandbox::LinuxNamespace::Pid,
+                    general_compute_runtime::sandbox::LinuxNamespace::Mount,
+                    general_compute_runtime::sandbox::LinuxNamespace::Network,
+                ],
+                cgroup: general_compute_runtime::sandbox::CgroupPolicy::V2,
+                seccomp: general_compute_runtime::sandbox::SeccompPolicy::DefaultDeny {
+                    profile_sha256: format!("sha256:{}", "e".repeat(64)),
+                },
+                privilege_escalation:
+                    general_compute_runtime::sandbox::PrivilegeEscalationPolicy::NoNewPrivileges,
+                root_filesystem: general_compute_runtime::sandbox::RootFilesystemPolicy::ReadOnly,
+                network: general_compute_runtime::sandbox::SandboxNetworkPolicy::DenyAll,
+                mounts: vec![general_compute_runtime::sandbox::SandboxMount::ReadOnlyArtifact {
+                    artifact_id: "source".into(),
+                    destination: "/work/source".into(),
+                }],
+            },
+            max_output_bytes: 1024,
+        }
+    }
+
+    fn production_request(
+        backend_id: &str,
+        image: &str,
+        execution_id: &str,
+    ) -> GeneralComputeRequest {
+        let mut request = GeneralComputeRequest {
+            execution_id: execution_id.into(),
+            attempt_id: "attempt-production-worker".into(),
+            idempotency_key: "idempotency-production-worker".into(),
+            request_digest: String::new(),
+            runtime_version: general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest: image.into(),
+            backend_id: backend_id.into(),
+            entrypoint: "main".into(),
+            source_artifact: general_compute_runtime::ArtifactManifest::inline_json(
+                "source",
+                general_compute_runtime::ArtifactRole::Source,
+                b"result = 1",
+            ),
+            input_artifacts: Vec::new(),
+            execution_policy: general_compute_runtime::ExecutionPolicy::default(),
+            determinism: general_compute_runtime::DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+        request
+    }
+
+    fn production_capabilities(
+        backend_id: &str,
+        image: &str,
+    ) -> general_compute_runtime::CapabilityMatrix {
+        general_compute_runtime::CapabilityMatrix::new(vec![
+            general_compute_runtime::BackendRegistration {
+                backend_id: backend_id.into(),
+                execution_mode: BackendExecutionMode::ProductionSandboxedOci,
+                guest_image_digest: image.into(),
+                capabilities: vec!["cpu".into()],
+                max_threads: 2,
+                network_allowed: false,
+                filesystem_read_only: true,
+                gpu_allowed: false,
+            },
+        ])
     }
 
     fn test_task_with_source(source: impl Into<String>) -> Task {

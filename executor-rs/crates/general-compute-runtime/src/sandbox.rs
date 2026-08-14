@@ -374,6 +374,59 @@ impl ProductionSandboxLauncher {
         }
         validate_oci_bundle(bundle_root, launch)?;
 
+        self.run_validated_bundle(launch, bundle_root, container_id, cancellation)
+    }
+
+    /// Execute a task-specific bundle whose artifact bind sources were
+    /// materialized below the operator-owned `artifact_root`.
+    pub fn run_materialized_bundle(
+        &self,
+        launch: &ProductionSandboxLaunch,
+        bundle_root: &Path,
+        artifact_root: &Path,
+        container_id: &str,
+        cancellation: &Cancellation,
+    ) -> Result<RunResult, ProductionSandboxError> {
+        launch.validate()?;
+        if !valid_container_id(container_id) {
+            return Err(ProductionSandboxError::InvalidContainerId);
+        }
+        validate_oci_bundle_with_artifact_root(bundle_root, launch, artifact_root)?;
+        self.run_validated_bundle(launch, bundle_root, container_id, cancellation)
+    }
+
+    fn run_validated_bundle(
+        &self,
+        _launch: &ProductionSandboxLaunch,
+        bundle_root: &Path,
+        container_id: &str,
+        cancellation: &Cancellation,
+    ) -> Result<RunResult, ProductionSandboxError> {
+        let runner = self
+            .runner_executable
+            .as_ref()
+            .ok_or(ProductionSandboxError::RunnerUnavailable)?;
+        let runner_metadata =
+            fs::symlink_metadata(runner).map_err(|_| ProductionSandboxError::RunnerNotPinned)?;
+        if !runner.is_absolute()
+            || !runner_metadata.file_type().is_file()
+            || self.runner_sha256.is_none()
+        {
+            return Err(ProductionSandboxError::RunnerNotPinned);
+        }
+        let expected_runner_sha256 = self
+            .runner_sha256
+            .as_deref()
+            .ok_or(ProductionSandboxError::RunnerNotPinned)?;
+        if !is_sha256_digest(expected_runner_sha256) {
+            return Err(ProductionSandboxError::RunnerNotPinned);
+        }
+        let actual_runner_sha256 =
+            sha256_digest(&fs::read(runner).map_err(|_| ProductionSandboxError::RunnerSpawn)?);
+        if actual_runner_sha256 != expected_runner_sha256 {
+            return Err(ProductionSandboxError::RunnerDigestMismatch);
+        }
+
         let command = ReferenceCommandSpec::new(runner.to_string_lossy(), {
             let mut args = self.runner_prefix_args.clone();
             args.extend([
@@ -410,6 +463,32 @@ fn valid_container_id(value: &str) -> bool {
 fn validate_oci_bundle(
     bundle_root: &Path,
     launch: &ProductionSandboxLaunch,
+) -> Result<(), ProductionSandboxError> {
+    validate_oci_bundle_inner(bundle_root, launch, None)
+}
+
+fn validate_oci_bundle_with_artifact_root(
+    bundle_root: &Path,
+    launch: &ProductionSandboxLaunch,
+    artifact_root: &Path,
+) -> Result<(), ProductionSandboxError> {
+    if !artifact_root.is_absolute()
+        || fs::symlink_metadata(artifact_root)
+            .map_err(|_| ProductionSandboxError::InvalidBundle)?
+            .file_type()
+            .is_symlink()
+    {
+        return Err(ProductionSandboxError::InvalidBundle);
+    }
+    let artifact_root =
+        fs::canonicalize(artifact_root).map_err(|_| ProductionSandboxError::InvalidBundle)?;
+    validate_oci_bundle_inner(bundle_root, launch, Some(&artifact_root))
+}
+
+fn validate_oci_bundle_inner(
+    bundle_root: &Path,
+    launch: &ProductionSandboxLaunch,
+    artifact_root: Option<&Path>,
 ) -> Result<(), ProductionSandboxError> {
     if !bundle_root.is_absolute()
         || fs::symlink_metadata(bundle_root)
@@ -584,12 +663,17 @@ fn validate_oci_bundle(
             crate::sandbox::SandboxMount::ReadOnlyArtifact {
                 artifact_id,
                 destination,
-            } => serde_json::json!({
-                "destination": destination,
-                "type": "bind",
-                "source": format!("/hivemind/artifacts/{artifact_id}"),
-                "options": ["ro", "nodev", "nosuid", "noexec"]
-            }),
+            } => {
+                let source = artifact_root
+                    .map(|root| root.join(artifact_id).to_string_lossy().into_owned())
+                    .unwrap_or_else(|| format!("/hivemind/artifacts/{artifact_id}"));
+                serde_json::json!({
+                    "destination": destination,
+                    "type": "bind",
+                    "source": source,
+                    "options": ["ro", "nodev", "nosuid", "noexec"]
+                })
+            }
             crate::sandbox::SandboxMount::EphemeralScratch {
                 destination,
                 max_bytes,
