@@ -47,6 +47,12 @@ impl WorkerExecutor {
         let trusted_registration = admission.trusted_registration();
         let reference_executor = executor::reference_executor_from_environment(&admission);
         let cas_store = executor::cas_store_from_environment();
+        let production_backends = executor::production_backends_from_environment();
+        let capability_matrix = if admission.capability_matrix().backends.is_empty() {
+            executor::runtime_capability_matrix_from_environment()
+        } else {
+            Some(Arc::new(admission.capability_matrix()))
+        };
         Self {
             active_tasks: Arc::new(Mutex::new(HashMap::new())),
             task_runner: Arc::new(move |task, cancellation| {
@@ -54,14 +60,18 @@ impl WorkerExecutor {
                 let prover = Arc::clone(&prover);
                 let reference_executor = reference_executor.clone();
                 let cas_store = cas_store.clone();
+                let production_backends = production_backends.clone();
+                let capability_matrix = capability_matrix.clone();
                 let trusted_registration = trusted_registration.clone();
                 Box::pin(async move {
-                    let mut result = executor::run_task_with_cancel_and_reference_and_cas_and_trusted_registration(
+                    let mut result = executor::run_task_with_cancel_and_backends_and_trusted_registration(
                         &task,
                         &config,
                         cancellation.clone(),
                         reference_executor,
                         cas_store,
+                        production_backends,
+                        capability_matrix,
                         Some(trusted_registration),
                     )
                     .await?;
