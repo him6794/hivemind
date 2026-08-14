@@ -1,6 +1,6 @@
 use general_compute_runtime::numeric::{
     BinaryOp, Complex128, Complex128Tensor, Complex64, Complex64Tensor, F32Tensor, F64Tensor,
-    NumericError,
+    NumericError, MAX_REFERENCE_FFT_LEN,
 };
 
 #[test]
@@ -275,4 +275,58 @@ fn f64_solve_rejects_invalid_shapes_singular_and_nonfinite_inputs() {
 
     let nonfinite = F64Tensor::new(vec![2, 2], vec![1.0, f64::NAN, 0.0, 1.0]).unwrap();
     assert_eq!(nonfinite.solve(&rhs), Err(NumericError::NonFiniteValue));
+}
+
+#[test]
+fn complex128_fft_round_trips_with_fixed_inverse_normalization() {
+    let input = Complex128Tensor::new(
+        vec![4],
+        vec![
+            Complex128::new(1.0, 0.0),
+            Complex128::new(2.0, -1.0),
+            Complex128::new(3.0, 2.0),
+            Complex128::new(4.0, 0.5),
+        ],
+    )
+    .unwrap();
+
+    let spectrum = input.fft(false).expect("forward reference FFT should run");
+    assert_eq!(spectrum.values()[0], Complex128::new(10.0, 1.5));
+
+    let round_trip = spectrum
+        .fft(true)
+        .expect("inverse reference FFT should run");
+    for (actual, expected) in round_trip.values().iter().zip(input.values()) {
+        assert!((actual.re - expected.re).abs() < 1e-10);
+        assert!((actual.im - expected.im).abs() < 1e-10);
+    }
+}
+
+#[test]
+fn complex128_fft_rejects_invalid_rank_length_and_nonfinite_values() {
+    let matrix = Complex128Tensor::new(vec![1, 1], vec![Complex128::new(1.0, 0.0)]).unwrap();
+    assert_eq!(
+        matrix.fft(false),
+        Err(NumericError::FftRequiresOneDimension)
+    );
+
+    let oversized = Complex128Tensor::new(
+        vec![(MAX_REFERENCE_FFT_LEN + 1) as u64],
+        vec![Complex128::default(); MAX_REFERENCE_FFT_LEN + 1],
+    )
+    .unwrap();
+    assert_eq!(
+        oversized.fft(false),
+        Err(NumericError::FftLengthExceeded {
+            length: MAX_REFERENCE_FFT_LEN + 1,
+            max: MAX_REFERENCE_FFT_LEN,
+        })
+    );
+
+    let nonfinite =
+        Complex128Tensor::new(vec![1], vec![Complex128::new(f64::INFINITY, 0.0)]).unwrap();
+    assert_eq!(nonfinite.fft(false), Err(NumericError::NonFiniteValue));
+
+    let empty = Complex128Tensor::new(vec![0], vec![]).unwrap();
+    assert_eq!(empty.fft(false).unwrap().values(), &[]);
 }
