@@ -87,6 +87,8 @@ use hivemind_proto::{
     UpdateWorkerTrustControlResponse,
     UploadTaskRequest,
     UploadTaskResponse,
+    ValidateGeneralComputeTransferLeaseRequest,
+    ValidateGeneralComputeTransferLeaseResponse,
     WorkerCacheAffinityMetric,
     WorkerInfo,
     WorkerNodeServiceClient,
@@ -112,6 +114,7 @@ const MAX_DOWNLOAD_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 pub struct NodepoolState {
     pub auth: AuthManager,
     pub worker_execution_private_key_pem: String,
+    pub worker_execution_public_key_pem: String,
     pub managed_proof_rollout_mode: ManagedProofRolloutMode,
     pub node_manager: Arc<NodeManager>,
     pub scheduler: TaskScheduler,
@@ -996,6 +999,70 @@ impl NodeManagerService for GrpcNodeManagerService {
                 status_message: e.to_string(),
             })),
         }
+    }
+
+    async fn validate_general_compute_transfer_lease(
+        &self,
+        request: Request<ValidateGeneralComputeTransferLeaseRequest>,
+    ) -> Result<Response<ValidateGeneralComputeTransferLeaseResponse>, Status> {
+        let request = request.into_inner();
+        if hivemind_proto::validate_general_compute_transfer_lease_request(&request).is_err() {
+            return Ok(Response::new(ValidateGeneralComputeTransferLeaseResponse {
+                success: false,
+                status_message: "invalid transfer lease request".into(),
+            }));
+        }
+        let verifier = hivemind_auth::worker_execution::WorkerExecutionVerifier::from_pem(
+            &self.state.worker_execution_public_key_pem,
+        )
+        .map_err(|error| Status::internal(error.to_string()))?;
+        let claims = match verifier.decode_execution_claims(&request.token) {
+            Ok(claims) => claims,
+            Err(_) => {
+                return Ok(Response::new(ValidateGeneralComputeTransferLeaseResponse {
+                    success: false,
+                    status_message: "invalid worker execution token".into(),
+                }));
+            }
+        };
+        if claims.claims.role.as_deref() != Some("worker-execution")
+            || claims.claims.task_id.as_deref() != Some(request.task_id.as_str())
+            || claims.claims.worker_id.as_deref() != Some(request.worker_id.as_str())
+            || claims.execution_id.as_deref() != Some(request.execution_id.as_str())
+            || claims.attempt_id.as_deref() != Some(request.attempt_id.as_str())
+            || claims.idempotency_key.as_deref() != Some(request.idempotency_key.as_str())
+            || claims.request_digest.as_deref() != Some(request.request_digest.as_str())
+            || claims.transfer_generation != Some(request.transfer_generation)
+        {
+            return Ok(Response::new(ValidateGeneralComputeTransferLeaseResponse {
+                success: false,
+                status_message: "worker execution token is not bound to this transfer lease".into(),
+            }));
+        }
+
+        let lease = self
+            .state
+            .scheduler
+            .general_compute_transfer_lease(&request.task_id)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+        let active = lease.is_some_and(|lease| {
+            lease.generation == request.transfer_generation
+                && lease.matches_assignment(
+                    &request.task_id,
+                    &request.execution_id,
+                    &request.attempt_id,
+                    &request.worker_id,
+                )
+        });
+        Ok(Response::new(ValidateGeneralComputeTransferLeaseResponse {
+            success: active,
+            status_message: if active {
+                "active".into()
+            } else {
+                "transfer lease is no longer active".into()
+            },
+        }))
     }
 
     async fn task_output_upload(
@@ -3016,11 +3083,14 @@ mod tests {
     use hivemind_config::HivemindConfig;
     use hivemind_models::Claims;
     use hivemind_proto::{
+        node_manager_service_client::NodeManagerServiceClient,
+        node_manager_service_server::NodeManagerServiceServer,
         worker_node_service_server::{WorkerNodeService, WorkerNodeServiceServer},
         ExecuteTaskRequest, ExecuteTaskResponse, GetAdminManagedProofMetricsRequest,
         StopTaskExecutionRequest, StopTaskExecutionResponse, TaskOutputRequest, TaskOutputResponse,
         TaskOutputUploadRequest, TaskOutputUploadResponse, TaskResultUploadRequest,
         TaskResultUploadResponse, TaskUsageRequest, TaskUsageResponse,
+        ValidateGeneralComputeTransferLeaseRequest,
     };
     use std::net::SocketAddr;
     use std::sync::{Arc, OnceLock};
@@ -3116,6 +3186,7 @@ mod tests {
         let state = Arc::new(NodepoolState {
             auth: auth.clone(),
             worker_execution_private_key_pem: config.auth.worker_execution_private_key_pem.clone(),
+            worker_execution_public_key_pem: config.auth.worker_execution_public_key_pem.clone(),
             managed_proof_rollout_mode: config.managed_proof.rollout_mode,
             node_manager,
             scheduler: scheduler.clone(),
@@ -3291,6 +3362,7 @@ mod tests {
         Arc::new(NodepoolState {
             auth,
             worker_execution_private_key_pem: config.auth.worker_execution_private_key_pem.clone(),
+            worker_execution_public_key_pem: config.auth.worker_execution_public_key_pem.clone(),
             managed_proof_rollout_mode: config.managed_proof.rollout_mode,
             node_manager,
             scheduler,
@@ -3469,6 +3541,299 @@ mod tests {
             schema.starts_with("hm_test_"),
             "node-manager gRPC tests must use an isolated schema, got {schema}"
         );
+    }
+
+    #[tokio::test]
+    async fn validate_general_compute_transfer_lease_accepts_only_fully_bound_active_identity() {
+        let lock = grpc_db_lock();
+        let _lock_guard = lock.lock().await;
+        let (master_service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+
+        let general_task_id = format!("grpc-transfer-lease-{}", uuid::Uuid::new_v4());
+        let mut request = valid_general_compute_request();
+        request.execution_id = format!("execution-{general_task_id}");
+        request.attempt_id = format!("attempt-{general_task_id}");
+        request.idempotency_key = format!("idempotency-{general_task_id}");
+        request.request_digest = request.canonical_request_digest();
+        let mut general_task = make_task(&general_task_id, &owner);
+        general_task.runtime =
+            Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        general_task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
+        master_service
+            .state
+            .scheduler
+            .create_task(&general_task)
+            .await
+            .unwrap();
+
+        let worker_id = format!("grpc-transfer-worker-{}", uuid::Uuid::new_v4());
+        master_service
+            .state
+            .scheduler
+            .assign_task_to_worker(&general_task_id, &worker_id, "127.0.0.1:50053")
+            .await
+            .unwrap();
+        let generation: i64 = sqlx::query_scalar(
+            "SELECT generation FROM general_compute_transfer_leases
+             WHERE task_id = $1 AND state = 'active'",
+        )
+        .bind(&general_task_id)
+        .fetch_one(&master_service.state.scheduler.database().pool)
+        .await
+        .unwrap();
+
+        let signer = hivemind_auth::worker_execution::WorkerExecutionSigner::from_pem(
+            &master_service.state.worker_execution_private_key_pem,
+        )
+        .unwrap();
+        let token = signer
+            .encode_execution_claims(
+                &Claims {
+                    sub: owner.clone(),
+                    user_id: owner.clone(),
+                    role: Some("worker-execution".into()),
+                    task_id: Some(general_task_id.clone()),
+                    worker_id: Some(worker_id.clone()),
+                    exp: (Utc::now().timestamp() + 300) as usize,
+                    iat: Utc::now().timestamp() as usize,
+                },
+                &hivemind_auth::worker_execution::WorkerExecutionIdentity {
+                    execution_id: request.execution_id.clone(),
+                    attempt_id: request.attempt_id.clone(),
+                    idempotency_key: request.idempotency_key.clone(),
+                    request_digest: request.request_digest.clone(),
+                    transfer_generation: generation,
+                },
+            )
+            .unwrap();
+
+        let addr = reserve_loopback_addr().expect("loopback address should be available");
+        let server_state = master_service.state.clone();
+        let server = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(NodeManagerServiceServer::new(GrpcNodeManagerService::new(
+                    server_state,
+                )))
+                .serve(addr)
+                .await
+        });
+        let mut client = None;
+        for _ in 0..30 {
+            match NodeManagerServiceClient::connect(format!("http://{addr}")).await {
+                Ok(value) => {
+                    client = Some(value);
+                    break;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        }
+        let mut client = client.expect("Nodepool gRPC authority should become reachable");
+        let request_for_authority = || ValidateGeneralComputeTransferLeaseRequest {
+            token: token.clone(),
+            worker_id: worker_id.clone(),
+            task_id: general_task_id.clone(),
+            execution_id: request.execution_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            transfer_generation: generation,
+            idempotency_key: request.idempotency_key.clone(),
+            request_digest: request.request_digest.clone(),
+        };
+
+        let active = client
+            .validate_general_compute_transfer_lease(Request::new(request_for_authority()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(active.success, "{}", active.status_message);
+
+        let mut invalid_token = request_for_authority();
+        invalid_token.token = "not-a-worker-execution-token".into();
+        let invalid_token = client
+            .validate_general_compute_transfer_lease(Request::new(invalid_token))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!invalid_token.success);
+        assert_eq!(
+            invalid_token.status_message,
+            "invalid worker execution token"
+        );
+
+        let mut drifted = Vec::new();
+        let mut value = request_for_authority();
+        value.worker_id = "worker-drift".into();
+        drifted.push(("worker_id", value));
+        let mut value = request_for_authority();
+        value.task_id = "task-drift".into();
+        drifted.push(("task_id", value));
+        let mut value = request_for_authority();
+        value.execution_id = "execution-drift".into();
+        drifted.push(("execution_id", value));
+        let mut value = request_for_authority();
+        value.attempt_id = "attempt-drift".into();
+        drifted.push(("attempt_id", value));
+        let mut value = request_for_authority();
+        value.transfer_generation += 1;
+        drifted.push(("transfer_generation", value));
+        let mut value = request_for_authority();
+        value.idempotency_key = "idempotency-drift".into();
+        drifted.push(("idempotency_key", value));
+        let mut value = request_for_authority();
+        value.request_digest =
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into();
+        drifted.push(("request_digest", value));
+
+        for (field, value) in drifted {
+            let rejected = client
+                .validate_general_compute_transfer_lease(Request::new(value))
+                .await
+                .unwrap()
+                .into_inner();
+            assert!(!rejected.success, "drifted {field} must be rejected");
+            assert_eq!(
+                rejected.status_message,
+                "worker execution token is not bound to this transfer lease",
+                "drifted {field} must fail before database authority"
+            );
+        }
+
+        let repository = hivemind_task_scheduler::task_repository::TaskRepository::new(
+            master_service.state.scheduler.database().pool.clone(),
+        );
+        let pending = repository
+            .reset_to_pending_for_worker(&general_task_id, &worker_id)
+            .await
+            .unwrap();
+        let revoked = client
+            .validate_general_compute_transfer_lease(Request::new(request_for_authority()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!revoked.success);
+        assert_eq!(revoked.status_message, "transfer lease is no longer active");
+
+        let replacement: general_compute_runtime::GeneralComputeRequest = serde_json::from_slice(
+            pending
+                .general_compute_manifest_json
+                .as_deref()
+                .expect("redispatch must rotate the general-compute manifest"),
+        )
+        .unwrap();
+        let replacement_worker = format!("grpc-transfer-worker-{}", uuid::Uuid::new_v4());
+        master_service
+            .state
+            .scheduler
+            .assign_task_to_worker(&general_task_id, &replacement_worker, "127.0.0.1:50054")
+            .await
+            .unwrap();
+        let replacement_lease = master_service
+            .state
+            .scheduler
+            .general_compute_transfer_lease(&general_task_id)
+            .await
+            .unwrap()
+            .expect("replacement assignment must create a transfer lease");
+        assert_eq!(replacement_lease.generation, generation + 1);
+        let replacement_token = signer
+            .encode_execution_claims(
+                &Claims {
+                    sub: owner.clone(),
+                    user_id: owner.clone(),
+                    role: Some("worker-execution".into()),
+                    task_id: Some(general_task_id.clone()),
+                    worker_id: Some(replacement_worker.clone()),
+                    exp: (Utc::now().timestamp() + 300) as usize,
+                    iat: Utc::now().timestamp() as usize,
+                },
+                &hivemind_auth::worker_execution::WorkerExecutionIdentity {
+                    execution_id: replacement.execution_id.clone(),
+                    attempt_id: replacement.attempt_id.clone(),
+                    idempotency_key: replacement.idempotency_key.clone(),
+                    request_digest: replacement.request_digest.clone(),
+                    transfer_generation: replacement_lease.generation,
+                },
+            )
+            .unwrap();
+        let replacement_authority = ValidateGeneralComputeTransferLeaseRequest {
+            token: replacement_token,
+            worker_id: replacement_worker,
+            task_id: general_task_id.clone(),
+            execution_id: replacement.execution_id,
+            attempt_id: replacement.attempt_id,
+            transfer_generation: replacement_lease.generation,
+            idempotency_key: replacement.idempotency_key,
+            request_digest: replacement.request_digest,
+        };
+        let replacement_active = client
+            .validate_general_compute_transfer_lease(Request::new(replacement_authority.clone()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(
+            replacement_active.success,
+            "{}",
+            replacement_active.status_message
+        );
+
+        sqlx::query(
+            "UPDATE general_compute_transfer_leases
+             SET expires_at = NOW() - INTERVAL '1 second', updated_at = NOW()
+             WHERE task_id = $1 AND state = 'active'",
+        )
+        .bind(&general_task_id)
+        .execute(&master_service.state.scheduler.database().pool)
+        .await
+        .unwrap();
+        let expired = client
+            .validate_general_compute_transfer_lease(Request::new(replacement_authority))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!expired.success);
+        assert!(expired.status_message.contains("no longer active"));
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM general_compute_transfer_leases
+             WHERE task_id = $1 AND generation = $2",
+        )
+        .bind(&general_task_id)
+        .bind(replacement_lease.generation)
+        .fetch_one(&master_service.state.scheduler.database().pool)
+        .await
+        .unwrap();
+        assert_eq!(state, "expired");
+
+        server.abort();
+        cleanup(&master_service.state.scheduler, &general_task_id, &owner).await;
+        cleanup(&master_service.state.scheduler, &task_id, &owner).await;
+    }
+
+    #[tokio::test]
+    async fn validate_general_compute_transfer_lease_applies_wire_bounds_before_authority() {
+        let service = GrpcNodeManagerService::new(nodepool_state_without_database());
+        let response = service
+            .validate_general_compute_transfer_lease(Request::new(
+                ValidateGeneralComputeTransferLeaseRequest {
+                    token: "x".repeat(hivemind_proto::WORKER_EXECUTION_TOKEN_MAX_BYTES + 1),
+                    worker_id: "worker-7".into(),
+                    task_id: "task-1".into(),
+                    execution_id: "execution-1".into(),
+                    attempt_id: "attempt-1".into(),
+                    transfer_generation: 1,
+                    idempotency_key: "idempotency-1".into(),
+                    request_digest:
+                        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                            .into(),
+                },
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!response.success);
+        assert_eq!(response.status_message, "invalid transfer lease request");
     }
 
     #[tokio::test]

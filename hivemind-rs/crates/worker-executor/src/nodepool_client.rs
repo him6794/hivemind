@@ -620,6 +620,19 @@ mod tests {
             }))
         }
 
+        async fn validate_general_compute_transfer_lease(
+            &self,
+            _request: Request<hivemind_proto::ValidateGeneralComputeTransferLeaseRequest>,
+        ) -> Result<Response<hivemind_proto::ValidateGeneralComputeTransferLeaseResponse>, Status>
+        {
+            Ok(Response::new(
+                hivemind_proto::ValidateGeneralComputeTransferLeaseResponse {
+                    success: true,
+                    status_message: "active".into(),
+                },
+            ))
+        }
+
         async fn task_output_upload(
             &self,
             request: Request<TaskOutputUploadRequest>,
