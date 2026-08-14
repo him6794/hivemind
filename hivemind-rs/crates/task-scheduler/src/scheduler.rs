@@ -319,6 +319,7 @@ mod tests {
             },
             "backends":[{
                 "backend_id":"python-cpython-312",
+                "execution_mode":"reference_direct",
                 "guest_image_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "capabilities":["cpu"],
                 "max_threads":4,
@@ -336,6 +337,7 @@ mod tests {
             },
             "backends":[{
                 "backend_id":"python-cpython-312",
+                "execution_mode":"reference_direct",
                 "guest_image_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "capabilities":["cpu"],
                 "max_threads":4,
@@ -448,6 +450,7 @@ mod tests {
             },
             "backends":[{
                 "backend_id":"python-cpython-312",
+                "execution_mode":"reference_direct",
                 "guest_image_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "capabilities":["cpu"],
                 "max_threads":4,
