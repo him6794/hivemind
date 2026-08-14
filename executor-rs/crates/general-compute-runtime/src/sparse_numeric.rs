@@ -11,6 +11,7 @@ use crate::tensor::{ByteOrder, SparseFormat, SparseIndexDType, SparseTensorManif
 
 pub const MAX_REFERENCE_SPARSE_DIM: usize = 1_000_000;
 pub const MAX_REFERENCE_SPARSE_NNZ: usize = 1_000_000;
+pub const MAX_REFERENCE_SPARSE_SOLVE_DIM: usize = 2_048;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SparseNumericError {
@@ -22,6 +23,10 @@ pub enum SparseNumericError {
     ResidualLengthMismatch { expected: usize, actual: usize },
     InvalidResidualTolerance,
     ResidualExceeded,
+    SolveNotSquare { rows: usize, columns: usize },
+    SolveDimensionExceeded { requested: usize, max: usize },
+    SolveRhsLengthMismatch { expected: usize, actual: usize },
+    SingularMatrix,
     NonFiniteValue,
 }
 
@@ -67,6 +72,25 @@ impl fmt::Display for SparseNumericError {
             Self::ResidualExceeded => {
                 formatter.write_str("sparse matvec residual exceeds the requested tolerance")
             }
+            Self::SolveNotSquare { rows, columns } => {
+                write!(
+                    formatter,
+                    "sparse solve requires a square matrix, got {rows}x{columns}"
+                )
+            }
+            Self::SolveDimensionExceeded { requested, max } => {
+                write!(
+                    formatter,
+                    "sparse solve dimension {requested} exceeds reference limit {max}"
+                )
+            }
+            Self::SolveRhsLengthMismatch { expected, actual } => {
+                write!(
+                    formatter,
+                    "sparse solve expects RHS length {expected}, got {actual}"
+                )
+            }
+            Self::SingularMatrix => formatter.write_str("sparse solve matrix is singular"),
             Self::NonFiniteValue => {
                 formatter.write_str("sparse matvec encountered a non-finite value")
             }
@@ -80,6 +104,14 @@ impl std::error::Error for SparseNumericError {}
 pub struct SparseF64Matrix {
     shape: [u64; 2],
     entries: Vec<(usize, usize, f64)>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CsrF64Matrix {
+    pub shape: [u64; 2],
+    pub indptr: Vec<u64>,
+    pub indices: Vec<u64>,
+    pub data: Vec<f64>,
 }
 
 impl SparseF64Matrix {
@@ -210,6 +242,188 @@ impl SparseF64Matrix {
             return Err(SparseNumericError::ResidualExceeded);
         }
         Ok(result)
+    }
+
+    /// Reduce entries by row in deterministic source order.
+    pub fn row_sums(&self) -> Result<Vec<f64>, SparseNumericError> {
+        let (rows, _) = self.dimensions()?;
+        let mut sums = vec![0.0; rows];
+        for &(row, _, value) in &self.entries {
+            sums[row] += value;
+            if !sums[row].is_finite() {
+                return Err(SparseNumericError::NonFiniteValue);
+            }
+        }
+        Ok(sums)
+    }
+
+    /// Reduce entries by column in deterministic source order.
+    pub fn column_sums(&self) -> Result<Vec<f64>, SparseNumericError> {
+        let (_, columns) = self.dimensions()?;
+        let mut sums = vec![0.0; columns];
+        for &(_, column, value) in &self.entries {
+            sums[column] += value;
+            if !sums[column].is_finite() {
+                return Err(SparseNumericError::NonFiniteValue);
+            }
+        }
+        Ok(sums)
+    }
+
+    /// Convert CSR/CSC/COO entries into a deterministic row-major CSR form.
+    pub fn to_csr(&self) -> Result<CsrF64Matrix, SparseNumericError> {
+        let (rows, _) = self.dimensions()?;
+        let mut sorted = self.entries.clone();
+        sorted.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+
+        let mut indptr = vec![0u64; rows + 1];
+        for &(row, _, _) in &sorted {
+            indptr[row + 1] =
+                indptr[row + 1]
+                    .checked_add(1)
+                    .ok_or(SparseNumericError::NnzExceeded {
+                        requested: sorted.len(),
+                        max: MAX_REFERENCE_SPARSE_NNZ,
+                    })?;
+        }
+        for row in 1..=rows {
+            indptr[row] = indptr[row].checked_add(indptr[row - 1]).ok_or(
+                SparseNumericError::NnzExceeded {
+                    requested: sorted.len(),
+                    max: MAX_REFERENCE_SPARSE_NNZ,
+                },
+            )?;
+        }
+
+        let mut indices = Vec::with_capacity(sorted.len());
+        let mut data = Vec::with_capacity(sorted.len());
+        for &(_, column, value) in &sorted {
+            indices.push(
+                u64::try_from(column).map_err(|_| SparseNumericError::NnzExceeded {
+                    requested: sorted.len(),
+                    max: MAX_REFERENCE_SPARSE_NNZ,
+                })?,
+            );
+            data.push(value);
+        }
+        Ok(CsrF64Matrix {
+            shape: self.shape,
+            indptr,
+            indices,
+            data,
+        })
+    }
+
+    /// Solve a bounded square sparse system with deterministic dense
+    /// partial-pivot elimination over the validated entry list.
+    pub fn solve(&self, rhs: &[f64]) -> Result<Vec<f64>, SparseNumericError> {
+        let (rows, columns) = self.dimensions()?;
+        if rows != columns {
+            return Err(SparseNumericError::SolveNotSquare { rows, columns });
+        }
+        if rows > MAX_REFERENCE_SPARSE_SOLVE_DIM {
+            return Err(SparseNumericError::SolveDimensionExceeded {
+                requested: rows,
+                max: MAX_REFERENCE_SPARSE_SOLVE_DIM,
+            });
+        }
+        if rhs.len() != rows {
+            return Err(SparseNumericError::SolveRhsLengthMismatch {
+                expected: rows,
+                actual: rhs.len(),
+            });
+        }
+        if rhs.iter().any(|value| !value.is_finite()) {
+            return Err(SparseNumericError::NonFiniteValue);
+        }
+
+        let matrix_len =
+            rows.checked_mul(rows)
+                .ok_or(SparseNumericError::SolveDimensionExceeded {
+                    requested: rows,
+                    max: MAX_REFERENCE_SPARSE_SOLVE_DIM,
+                })?;
+        let mut matrix = vec![0.0; matrix_len];
+        for &(row, column, value) in &self.entries {
+            let index = row * rows + column;
+            matrix[index] += value;
+            if !matrix[index].is_finite() {
+                return Err(SparseNumericError::NonFiniteValue);
+            }
+        }
+        let mut rhs = rhs.to_vec();
+
+        for column in 0..rows {
+            let mut pivot = column;
+            let mut pivot_abs = matrix[column * rows + column].abs();
+            for row in (column + 1)..rows {
+                let candidate = matrix[row * rows + column].abs();
+                if candidate > pivot_abs {
+                    pivot = row;
+                    pivot_abs = candidate;
+                }
+            }
+            if !pivot_abs.is_finite() {
+                return Err(SparseNumericError::NonFiniteValue);
+            }
+            if pivot_abs <= f64::EPSILON {
+                return Err(SparseNumericError::SingularMatrix);
+            }
+            if pivot != column {
+                for offset in column..rows {
+                    matrix.swap(column * rows + offset, pivot * rows + offset);
+                }
+                rhs.swap(column, pivot);
+            }
+
+            let diagonal = matrix[column * rows + column];
+            for row in (column + 1)..rows {
+                let factor = matrix[row * rows + column] / diagonal;
+                if !factor.is_finite() {
+                    return Err(SparseNumericError::NonFiniteValue);
+                }
+                matrix[row * rows + column] = 0.0;
+                for offset in (column + 1)..rows {
+                    let index = row * rows + offset;
+                    matrix[index] -= factor * matrix[column * rows + offset];
+                    if !matrix[index].is_finite() {
+                        return Err(SparseNumericError::NonFiniteValue);
+                    }
+                }
+                rhs[row] -= factor * rhs[column];
+                if !rhs[row].is_finite() {
+                    return Err(SparseNumericError::NonFiniteValue);
+                }
+            }
+        }
+
+        let mut solution = vec![0.0; rows];
+        for row in (0..rows).rev() {
+            let diagonal = matrix[row * rows + row];
+            if !diagonal.is_finite() {
+                return Err(SparseNumericError::NonFiniteValue);
+            }
+            if diagonal.abs() <= f64::EPSILON {
+                return Err(SparseNumericError::SingularMatrix);
+            }
+            let mut remainder = rhs[row];
+            for column in (row + 1)..rows {
+                remainder -= matrix[row * rows + column] * solution[column];
+            }
+            let value = remainder / diagonal;
+            if !value.is_finite() {
+                return Err(SparseNumericError::NonFiniteValue);
+            }
+            solution[row] = value;
+        }
+        Ok(solution)
+    }
+
+    fn dimensions(&self) -> Result<(usize, usize), SparseNumericError> {
+        Ok((
+            checked_dimension(self.shape[0])?,
+            checked_dimension(self.shape[1])?,
+        ))
     }
 }
 

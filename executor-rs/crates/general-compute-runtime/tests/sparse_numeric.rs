@@ -64,6 +64,16 @@ fn csr_manifest() -> SparseTensorManifest {
     manifest
 }
 
+fn square_manifest(data_values: &[f64]) -> SparseTensorManifest {
+    let mut manifest = csr_manifest();
+    manifest.shape = vec![2, 2];
+    manifest.indptr_artifact = Some(artifact("indptr", &u32_bytes(&[0, 2, 4])));
+    manifest.indices_artifact = artifact("indices", &u32_bytes(&[0, 1, 0, 1]));
+    manifest.data_artifact = artifact("data", &f64_bytes(data_values));
+    manifest.logical_sha256 = manifest.canonical_logical_sha256();
+    manifest
+}
+
 fn matrix_from_manifest(
     manifest: &SparseTensorManifest,
 ) -> Result<SparseF64Matrix, SparseNumericError> {
@@ -270,5 +280,51 @@ fn sparse_residual_gate_rejects_invalid_tolerance_and_rhs() {
             expected: 2,
             actual: 1,
         })
+    );
+}
+
+#[test]
+fn sparse_reference_reduces_converts_and_solves_a_square_system() {
+    let matrix =
+        matrix_from_manifest(&square_manifest(&[4.0, 1.0, 2.0, 3.0])).expect("valid square CSR");
+
+    assert_eq!(matrix.row_sums().expect("row reduction"), [5.0, 5.0]);
+    assert_eq!(matrix.column_sums().expect("column reduction"), [6.0, 4.0]);
+    assert_eq!(
+        matrix.solve(&[9.0, 13.0]).expect("square solve"),
+        [1.4, 3.4]
+    );
+
+    let converted = matrix.to_csr().expect("CSR conversion");
+    assert_eq!(converted.shape, [2, 2]);
+    assert_eq!(converted.indptr, [0, 2, 4]);
+    assert_eq!(converted.indices, [0, 1, 0, 1]);
+    assert_eq!(converted.data, [4.0, 1.0, 2.0, 3.0]);
+}
+
+#[test]
+fn sparse_reference_rejects_non_square_singular_and_rhs_mismatch_solves() {
+    let rectangular = matrix_from_manifest(&csr_manifest()).expect("valid rectangular CSR");
+    assert_eq!(
+        rectangular.solve(&[1.0, 2.0]),
+        Err(SparseNumericError::SolveNotSquare {
+            rows: 2,
+            columns: 3,
+        })
+    );
+
+    let square = matrix_from_manifest(&square_manifest(&[4.0, 1.0, 2.0, 3.0])).unwrap();
+    assert_eq!(
+        square.solve(&[1.0]),
+        Err(SparseNumericError::SolveRhsLengthMismatch {
+            expected: 2,
+            actual: 1,
+        })
+    );
+
+    let singular = matrix_from_manifest(&square_manifest(&[1.0, 2.0, 2.0, 4.0])).unwrap();
+    assert_eq!(
+        singular.solve(&[3.0, 6.0]),
+        Err(SparseNumericError::SingularMatrix)
     );
 }
