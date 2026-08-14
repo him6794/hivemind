@@ -9,6 +9,7 @@ use std::fmt;
 use std::ops::{Add, Div, Mul, Sub};
 
 pub const MAX_REFERENCE_FFT_LEN: usize = 4096;
+pub const MAX_REFERENCE_LU_DIM: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
@@ -32,6 +33,8 @@ pub enum NumericError {
     BatchedMatmulInnerDimensionMismatch { lhs: u64, rhs: u64 },
     SolveRequiresSquareMatrix,
     SolveDimensionMismatch { matrix: u64, rhs: u64 },
+    LuRequiresSquareMatrix,
+    LuDimensionExceeded { dimension: usize, max: usize },
     SingularMatrix,
     InvalidResidualTolerance,
     ResidualExceeded,
@@ -91,6 +94,15 @@ impl fmt::Display for NumericError {
                     "solve right-hand side dimension does not match matrix: {matrix} and {rhs}"
                 )
             }
+            Self::LuRequiresSquareMatrix => {
+                formatter.write_str("LU factorization requires a square two-dimensional matrix")
+            }
+            Self::LuDimensionExceeded { dimension, max } => {
+                write!(
+                    formatter,
+                    "LU dimension {dimension} exceeds reference limit {max}"
+                )
+            }
             Self::SingularMatrix => formatter.write_str("solve matrix is singular"),
             Self::InvalidResidualTolerance => {
                 formatter.write_str("solve residual tolerance must be finite and non-negative")
@@ -141,6 +153,93 @@ pub type F32Tensor = DenseTensor<f32>;
 pub type F64Tensor = DenseTensor<f64>;
 pub type Complex64Tensor = DenseTensor<Complex64>;
 pub type Complex128Tensor = DenseTensor<Complex128>;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LuFactorization {
+    lower: F64Tensor,
+    upper: F64Tensor,
+    permutation: Vec<usize>,
+}
+
+impl LuFactorization {
+    #[must_use]
+    pub fn lower(&self) -> &F64Tensor {
+        &self.lower
+    }
+
+    #[must_use]
+    pub fn upper(&self) -> &F64Tensor {
+        &self.upper
+    }
+
+    #[must_use]
+    pub fn permutation(&self) -> &[usize] {
+        &self.permutation
+    }
+
+    pub fn solve(&self, rhs: &F64Tensor) -> Result<F64Tensor, NumericError> {
+        let size = self.permutation.len();
+        if rhs.shape.len() != 1 || rhs.shape[0] != size as u64 {
+            return Err(NumericError::SolveDimensionMismatch {
+                matrix: size as u64,
+                rhs: rhs.shape.first().copied().unwrap_or(0),
+            });
+        }
+        if rhs.values.iter().any(|value| !value.is_finite()) {
+            return Err(NumericError::NonFiniteValue);
+        }
+
+        let mut forward = vec![0.0; size];
+        for row in 0..size {
+            let mut value = rhs.values[self.permutation[row]];
+            for (column, forward_value) in forward.iter().enumerate().take(row) {
+                value -= self.lower.values[row * size + column] * forward_value;
+            }
+            if !value.is_finite() {
+                return Err(NumericError::NonFiniteValue);
+            }
+            forward[row] = value;
+        }
+
+        let mut solution = vec![0.0; size];
+        for row in (0..size).rev() {
+            let mut value = forward[row];
+            for (column, solution_value) in solution.iter().enumerate().skip(row + 1) {
+                value -= self.upper.values[row * size + column] * solution_value;
+            }
+            let pivot = self.upper.values[row * size + row];
+            if pivot == 0.0 || !pivot.is_finite() {
+                return Err(NumericError::SingularMatrix);
+            }
+            let solved = value / pivot;
+            if !solved.is_finite() {
+                return Err(NumericError::NonFiniteValue);
+            }
+            solution[row] = solved;
+        }
+
+        F64Tensor::new(vec![size as u64], solution)
+    }
+
+    pub fn reconstruct_permuted(&self) -> Result<F64Tensor, NumericError> {
+        let size = self.permutation.len();
+        let mut product = vec![0.0; size * size];
+        for row in 0..size {
+            for column in 0..size {
+                let mut value = 0.0;
+                for inner in 0..size {
+                    value += self.lower.values[row * size + inner]
+                        * self.upper.values[inner * size + column];
+                }
+                if !value.is_finite() {
+                    return Err(NumericError::NonFiniteValue);
+                }
+                product[row * size + column] = value;
+            }
+        }
+        F64Tensor::new(vec![size as u64, size as u64], product)
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Complex64 {
@@ -509,6 +608,91 @@ where
 }
 
 impl DenseTensor<f64> {
+    /// Factor a bounded square matrix with deterministic partial pivoting.
+    ///
+    /// The returned factors satisfy `P * A = L * U`, where each entry in the
+    /// permutation records the original row now stored at that pivoted row.
+    /// This is a small reference implementation rather than a production
+    /// BLAS/LAPACK backend, so its dimension is explicitly capped.
+    pub fn lu(&self) -> Result<LuFactorization, NumericError> {
+        if self.shape.len() != 2 || self.shape[0] != self.shape[1] {
+            return Err(NumericError::LuRequiresSquareMatrix);
+        }
+
+        let size = usize::try_from(self.shape[0]).map_err(|_| NumericError::ShapeOverflow)?;
+        if size > MAX_REFERENCE_LU_DIM {
+            return Err(NumericError::LuDimensionExceeded {
+                dimension: size,
+                max: MAX_REFERENCE_LU_DIM,
+            });
+        }
+        if self.values.iter().any(|value| !value.is_finite()) {
+            return Err(NumericError::NonFiniteValue);
+        }
+
+        let matrix_len = size.checked_mul(size).ok_or(NumericError::ShapeOverflow)?;
+        let mut combined = self.values.clone();
+        debug_assert_eq!(combined.len(), matrix_len);
+        let mut permutation: Vec<usize> = (0..size).collect();
+
+        for column in 0..size {
+            let mut pivot_row = column;
+            for row in (column + 1)..size {
+                if combined[row * size + column].abs() > combined[pivot_row * size + column].abs() {
+                    pivot_row = row;
+                }
+            }
+
+            let pivot = combined[pivot_row * size + column];
+            if pivot == 0.0 || !pivot.is_finite() {
+                return Err(NumericError::SingularMatrix);
+            }
+            if pivot_row != column {
+                for index in 0..size {
+                    combined.swap(column * size + index, pivot_row * size + index);
+                }
+                permutation.swap(column, pivot_row);
+            }
+
+            let pivot = combined[column * size + column];
+            for row in (column + 1)..size {
+                let factor = combined[row * size + column] / pivot;
+                if !factor.is_finite() {
+                    return Err(NumericError::NonFiniteValue);
+                }
+                combined[row * size + column] = factor;
+                for index in (column + 1)..size {
+                    let updated =
+                        combined[row * size + index] - factor * combined[column * size + index];
+                    if !updated.is_finite() {
+                        return Err(NumericError::NonFiniteValue);
+                    }
+                    combined[row * size + index] = updated;
+                }
+            }
+        }
+
+        let mut lower = vec![0.0; matrix_len];
+        let mut upper = vec![0.0; matrix_len];
+        for row in 0..size {
+            for column in 0..size {
+                let value = combined[row * size + column];
+                if row > column {
+                    lower[row * size + column] = value;
+                } else {
+                    upper[row * size + column] = value;
+                }
+            }
+            lower[row * size + row] = 1.0;
+        }
+
+        Ok(LuFactorization {
+            lower: Self::new(vec![self.shape[0], self.shape[1]], lower)?,
+            upper: Self::new(vec![self.shape[0], self.shape[1]], upper)?,
+            permutation,
+        })
+    }
+
     pub fn solve(&self, rhs: &Self) -> Result<Self, NumericError> {
         if self.shape.len() != 2 || self.shape[0] != self.shape[1] {
             return Err(NumericError::SolveRequiresSquareMatrix);
