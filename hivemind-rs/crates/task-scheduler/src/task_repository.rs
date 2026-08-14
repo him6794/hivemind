@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use general_compute_runtime::{GeneralComputeRequest, GeneralComputeResult, ResultStatus};
 use hivemind_models::{Task, TaskStatus, WorkerNode};
 use sha1::{Digest, Sha1};
@@ -8,6 +9,19 @@ use crate::BatchTaskReport;
 
 pub struct TaskRepository {
     pub pool: PgPool,
+}
+
+/// Nodepool-owned immutable identity and lifecycle state for one general-
+/// compute artifact. Attempt manifests may rotate, but this row does not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneralComputeArtifactState {
+    pub artifact_id: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+    pub expected_chunk_count: u64,
+    pub availability_status: String,
+    pub complete: bool,
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 const PLATFORM_FEE_BPS: i64 = 1000; // 10%
@@ -60,7 +74,8 @@ impl TaskRepository {
     }
 
     pub async fn create(&self, task: &Task) -> Result<Task> {
-        sqlx::query_as::<_, Task>(
+        let mut tx = self.pool.begin().await?;
+        let created = sqlx::query_as::<_, Task>(
             "INSERT INTO tasks (task_id, owner, status, status_message, torrent_source, runtime, task_source, general_compute_manifest_json, expected_btih,
              req_cpu_score, req_gpu_score, req_memory_gb, req_gpu_memory_gb, req_storage_gb,
              host_count, max_cpt, max_retries, deadline,
@@ -76,7 +91,542 @@ impl TaskRepository {
         .bind(task.req_storage_gb)
         .bind(task.host_count).bind(task.max_cpt).bind(task.max_retries)
         .bind(task.deadline).bind(task.deterministic).bind(task.side_effects).bind(task.priority)
-        .fetch_one(&self.pool).await.map_err(Into::into)
+        .fetch_one(&mut *tx).await?;
+
+        if task.runtime.as_deref() == Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION)
+        {
+            let manifest = task
+                .general_compute_manifest_json
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("general-compute request manifest is missing"))?;
+            let request: GeneralComputeRequest = serde_json::from_slice(manifest)
+                .map_err(|_| anyhow::anyhow!("general-compute request manifest is malformed"))?;
+            request.validate().map_err(|error| {
+                anyhow::anyhow!("general-compute request manifest is invalid: {error:?}")
+            })?;
+            for artifact in
+                std::iter::once(&request.source_artifact).chain(request.input_artifacts.iter())
+            {
+                let artifact_size = i64::try_from(artifact.size_bytes).map_err(|_| {
+                    anyhow::anyhow!("general-compute artifact size exceeds database range")
+                })?;
+                let expected_chunk_count = i64::try_from(artifact.chunks.len()).map_err(|_| {
+                    anyhow::anyhow!("general-compute artifact chunk count exceeds database range")
+                })?;
+                sqlx::query(
+                    "INSERT INTO general_compute_artifacts
+                        (task_id, artifact_id, sha256, size_bytes, expected_chunk_count,
+                         availability_status, complete, expires_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                )
+                .bind(&task.task_id)
+                .bind(&artifact.artifact_id)
+                .bind(&artifact.sha256)
+                .bind(artifact_size)
+                .bind(expected_chunk_count)
+                .bind(if artifact.inline_bytes.is_some() {
+                    "available"
+                } else {
+                    "pending"
+                })
+                .bind(artifact.inline_bytes.is_some())
+                .bind(task.deadline)
+                .execute(&mut *tx)
+                .await?;
+                for chunk in &artifact.chunks {
+                    sqlx::query(
+                        "INSERT INTO general_compute_artifact_manifest_chunks
+                            (task_id, artifact_id, offset_bytes, size_bytes, sha256)
+                         VALUES ($1, $2, $3, $4, $5)",
+                    )
+                    .bind(&task.task_id)
+                    .bind(&artifact.artifact_id)
+                    .bind(i64::try_from(chunk.offset).map_err(|_| {
+                        anyhow::anyhow!("general-compute chunk offset exceeds database range")
+                    })?)
+                    .bind(i64::try_from(chunk.size_bytes).map_err(|_| {
+                        anyhow::anyhow!("general-compute chunk size exceeds database range")
+                    })?)
+                    .bind(&chunk.sha256)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                let Some(bytes) = artifact.inline_bytes.as_deref() else {
+                    continue;
+                };
+                sqlx::query(
+                    "INSERT INTO general_compute_artifact_sources
+                        (task_id, artifact_id, sha256, size_bytes, content, expires_at)
+                     VALUES ($1, $2, $3, $4, $5, $6)",
+                )
+                .bind(&task.task_id)
+                .bind(&artifact.artifact_id)
+                .bind(&artifact.sha256)
+                .bind(artifact_size)
+                .bind(bytes)
+                .bind(task.deadline)
+                .execute(&mut *tx)
+                .await?;
+                for chunk in &artifact.chunks {
+                    let start = usize::try_from(chunk.offset).map_err(|_| {
+                        anyhow::anyhow!("general-compute chunk offset is too large")
+                    })?;
+                    let end = start
+                        .checked_add(usize::try_from(chunk.size_bytes).map_err(|_| {
+                            anyhow::anyhow!("general-compute chunk size is too large")
+                        })?)
+                        .ok_or_else(|| anyhow::anyhow!("general-compute chunk range overflows"))?;
+                    let chunk_bytes = bytes.get(start..end).ok_or_else(|| {
+                        anyhow::anyhow!("general-compute chunk range exceeds inline bytes")
+                    })?;
+                    sqlx::query(
+                        "INSERT INTO general_compute_artifact_chunks
+                            (task_id, artifact_id, offset_bytes, size_bytes, sha256, content)
+                         VALUES ($1, $2, $3, $4, $5, $6)",
+                    )
+                    .bind(&task.task_id)
+                    .bind(&artifact.artifact_id)
+                    .bind(i64::try_from(chunk.offset).map_err(|_| {
+                        anyhow::anyhow!("general-compute chunk offset exceeds database range")
+                    })?)
+                    .bind(i64::try_from(chunk.size_bytes).map_err(|_| {
+                        anyhow::anyhow!("general-compute chunk size exceeds database range")
+                    })?)
+                    .bind(&chunk.sha256)
+                    .bind(chunk_bytes)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+            }
+        }
+        tx.commit().await?;
+        Ok(created)
+    }
+
+    /// Return Nodepool-owned artifact bytes only after the persisted identity,
+    /// content length, and SHA-256 digest all agree.
+    pub async fn general_compute_artifact_bytes(
+        &self,
+        task_id: &str,
+        artifact_id: &str,
+        sha256: &str,
+        size_bytes: u64,
+    ) -> Result<Option<Vec<u8>>> {
+        self.expire_general_compute_artifact(task_id, artifact_id)
+            .await?;
+        let Some(state) = self
+            .general_compute_artifact_state(task_id, artifact_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        if !state.complete
+            || state.availability_status != "available"
+            || state.sha256 != sha256
+            || state.size_bytes != size_bytes
+        {
+            return Ok(None);
+        }
+        let expected_size = i64::try_from(size_bytes)
+            .map_err(|_| anyhow::anyhow!("general-compute artifact size exceeds database range"))?;
+        let row: Option<(String, i64, Vec<u8>, Option<DateTime<Utc>>)> = sqlx::query_as(
+            "SELECT sha256, size_bytes, content, expires_at
+             FROM general_compute_artifact_sources
+             WHERE task_id = $1 AND artifact_id = $2",
+        )
+        .bind(task_id)
+        .bind(artifact_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some((stored_sha256, stored_size, content, expires_at)) = row {
+            if stored_sha256 != sha256
+                || stored_size != expected_size
+                || expires_at.is_some_and(|expiry| expiry <= Utc::now())
+            {
+                return Ok(None);
+            }
+            let digest = general_compute_runtime::sha256_digest(&content);
+            return Ok((content.len() as u64 == size_bytes && digest == sha256).then_some(content));
+        }
+
+        let chunks: Vec<(i64, i64, String, Vec<u8>)> = sqlx::query_as(
+            "SELECT offset_bytes, size_bytes, sha256, content
+             FROM general_compute_artifact_chunks
+             WHERE task_id = $1 AND artifact_id = $2
+             ORDER BY offset_bytes ASC",
+        )
+        .bind(task_id)
+        .bind(artifact_id)
+        .fetch_all(&self.pool)
+        .await?;
+        if chunks.is_empty() {
+            let manifest: Option<(Vec<u8>,)> = sqlx::query_as(
+                "SELECT general_compute_manifest_json
+                 FROM tasks
+                 WHERE task_id = $1 AND runtime = $2",
+            )
+            .bind(task_id)
+            .bind(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION)
+            .fetch_optional(&self.pool)
+            .await?;
+            let Some((manifest,)) = manifest else {
+                return Ok(None);
+            };
+            let request: GeneralComputeRequest = serde_json::from_slice(&manifest)
+                .map_err(|_| anyhow::anyhow!("general-compute task manifest is malformed"))?;
+            request.validate().map_err(|error| {
+                anyhow::anyhow!("general-compute task manifest is invalid: {error:?}")
+            })?;
+            let Some(artifact) = std::iter::once(&request.source_artifact)
+                .chain(request.input_artifacts.iter())
+                .find(|artifact| artifact.artifact_id == artifact_id)
+            else {
+                return Ok(None);
+            };
+            if artifact.sha256 != sha256 || artifact.size_bytes != size_bytes {
+                return Ok(None);
+            }
+            let Some(content) = artifact.inline_bytes.clone() else {
+                return Ok(None);
+            };
+            return Ok((content.len() as u64 == size_bytes
+                && general_compute_runtime::sha256_digest(&content) == sha256)
+                .then_some(content));
+        }
+
+        let mut assembled = Vec::with_capacity(size_bytes as usize);
+        let mut expected_offset = 0u64;
+        for (offset, chunk_size, chunk_sha256, content) in chunks {
+            let offset =
+                u64::try_from(offset).map_err(|_| anyhow::anyhow!("negative chunk offset"))?;
+            let chunk_size =
+                u64::try_from(chunk_size).map_err(|_| anyhow::anyhow!("negative chunk size"))?;
+            if offset != expected_offset
+                || chunk_size != content.len() as u64
+                || general_compute_runtime::sha256_digest(&content) != chunk_sha256
+            {
+                return Ok(None);
+            }
+            expected_offset = expected_offset
+                .checked_add(chunk_size)
+                .ok_or_else(|| anyhow::anyhow!("general-compute artifact size overflows"))?;
+            assembled.extend_from_slice(&content);
+        }
+        Ok((expected_offset == size_bytes
+            && general_compute_runtime::sha256_digest(&assembled) == sha256)
+            .then_some(assembled))
+    }
+
+    pub async fn general_compute_artifact_state(
+        &self,
+        task_id: &str,
+        artifact_id: &str,
+    ) -> Result<Option<GeneralComputeArtifactState>> {
+        self.expire_general_compute_artifact(task_id, artifact_id)
+            .await?;
+        let row: Option<(
+            String,
+            String,
+            i64,
+            i64,
+            String,
+            bool,
+            Option<DateTime<Utc>>,
+        )> = sqlx::query_as(
+            "SELECT artifact_id, sha256, size_bytes, expected_chunk_count,
+                        availability_status, complete, expires_at
+                 FROM general_compute_artifacts
+                 WHERE task_id = $1 AND artifact_id = $2",
+        )
+        .bind(task_id)
+        .bind(artifact_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(
+            |(
+                artifact_id,
+                sha256,
+                size_bytes,
+                expected_chunk_count,
+                availability_status,
+                complete,
+                expires_at,
+            )| {
+                Ok(GeneralComputeArtifactState {
+                    artifact_id,
+                    sha256,
+                    size_bytes: u64::try_from(size_bytes)
+                        .map_err(|_| anyhow::anyhow!("negative general-compute artifact size"))?,
+                    expected_chunk_count: u64::try_from(expected_chunk_count)
+                        .map_err(|_| anyhow::anyhow!("negative general-compute chunk count"))?,
+                    availability_status,
+                    complete,
+                    expires_at,
+                })
+            },
+        )
+        .transpose()
+    }
+
+    /// Verify mutable attempt coordinates against the task-bound immutable
+    /// identity and chunk manifest persisted at task creation.
+    pub async fn general_compute_artifact_coordinates_match(
+        &self,
+        task_id: &str,
+        artifact_id: &str,
+        size_bytes: u64,
+        sha256: &str,
+        chunks: &[general_compute_runtime::ArtifactChunk],
+    ) -> Result<bool> {
+        let Some(state) = self
+            .general_compute_artifact_state(task_id, artifact_id)
+            .await?
+        else {
+            return Ok(false);
+        };
+        if state.size_bytes != size_bytes
+            || state.sha256 != sha256
+            || state.expected_chunk_count != chunks.len() as u64
+            || state.availability_status == "expired"
+        {
+            return Ok(false);
+        }
+        let persisted: Vec<(i64, i64, String)> = sqlx::query_as(
+            "SELECT offset_bytes, size_bytes, sha256
+             FROM general_compute_artifact_manifest_chunks
+             WHERE task_id = $1 AND artifact_id = $2
+             ORDER BY offset_bytes ASC",
+        )
+        .bind(task_id)
+        .bind(artifact_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(persisted.len() == chunks.len()
+            && persisted
+                .iter()
+                .zip(chunks.iter())
+                .all(|((offset, size, digest), chunk)| {
+                    u64::try_from(*offset).ok() == Some(chunk.offset)
+                        && u64::try_from(*size).ok() == Some(chunk.size_bytes)
+                        && digest == &chunk.sha256
+                }))
+    }
+
+    async fn expire_general_compute_artifact(
+        &self,
+        task_id: &str,
+        artifact_id: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE general_compute_artifacts
+             SET availability_status = 'expired', complete = false, updated_at = NOW()
+             WHERE task_id = $1 AND artifact_id = $2
+               AND expires_at IS NOT NULL AND expires_at <= NOW()
+               AND availability_status <> 'expired'",
+        )
+        .bind(task_id)
+        .bind(artifact_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Persist one Nodepool-owned, manifest-bound chunk. Identical retries are
+    /// idempotent; conflicting coordinates or bytes fail closed.
+    pub async fn put_general_compute_artifact_chunk(
+        &self,
+        task_id: &str,
+        artifact_id: &str,
+        offset: u64,
+        size_bytes: u64,
+        sha256: &str,
+        content: &[u8],
+    ) -> Result<()> {
+        self.expire_general_compute_artifact(task_id, artifact_id)
+            .await?;
+        let mut tx = self.pool.begin().await?;
+        let state: Option<(String, i64, i64, String, bool, Option<DateTime<Utc>>)> =
+            sqlx::query_as(
+                "SELECT sha256, size_bytes, expected_chunk_count,
+                        availability_status, complete, expires_at
+                 FROM general_compute_artifacts
+                 WHERE task_id = $1 AND artifact_id = $2
+                 FOR UPDATE",
+            )
+            .bind(task_id)
+            .bind(artifact_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some((
+            expected_sha256,
+            expected_size,
+            expected_chunk_count,
+            status,
+            complete,
+            expires_at,
+        )) = state
+        else {
+            anyhow::bail!("general-compute artifact identity is missing");
+        };
+        if status == "expired" || expires_at.is_some_and(|expiry| expiry <= Utc::now()) {
+            anyhow::bail!("general-compute artifact is expired");
+        }
+        let expected_size = u64::try_from(expected_size)
+            .map_err(|_| anyhow::anyhow!("negative general-compute artifact size"))?;
+        if size_bytes > expected_size {
+            anyhow::bail!("general-compute artifact chunk exceeds artifact size");
+        }
+        let manifest_chunk: Option<(i64, i64, String)> =
+            sqlx::query_as(
+                "SELECT offset_bytes, size_bytes, sha256
+             FROM general_compute_artifact_manifest_chunks
+             WHERE task_id = $1 AND artifact_id = $2 AND offset_bytes = $3",
+            )
+            .bind(task_id)
+            .bind(artifact_id)
+            .bind(i64::try_from(offset).map_err(|_| {
+                anyhow::anyhow!("general-compute chunk offset exceeds database range")
+            })?)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some((manifest_offset, manifest_size, manifest_sha256)) = manifest_chunk else {
+            anyhow::bail!("artifact chunk coordinates do not match immutable manifest");
+        };
+        if u64::try_from(manifest_offset).ok() != Some(offset)
+            || u64::try_from(manifest_size).ok() != Some(size_bytes)
+            || manifest_sha256 != sha256
+        {
+            anyhow::bail!("artifact chunk coordinates do not match immutable manifest");
+        }
+        if size_bytes > general_compute_runtime::transport::MAX_CHUNK_UPLOAD_BYTES as u64 {
+            anyhow::bail!("general-compute artifact chunk exceeds the upload limit");
+        }
+        if content.len() as u64 != size_bytes
+            || general_compute_runtime::sha256_digest(content) != sha256
+        {
+            anyhow::bail!("general-compute artifact chunk content does not match its digest");
+        }
+        let offset = i64::try_from(offset)
+            .map_err(|_| anyhow::anyhow!("general-compute chunk offset exceeds database range"))?;
+        let size = i64::try_from(size_bytes)
+            .map_err(|_| anyhow::anyhow!("general-compute chunk size exceeds database range"))?;
+        sqlx::query(
+            "INSERT INTO general_compute_artifact_chunks
+                (task_id, artifact_id, offset_bytes, size_bytes, sha256, content)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (task_id, artifact_id, offset_bytes) DO NOTHING",
+        )
+        .bind(task_id)
+        .bind(artifact_id)
+        .bind(offset)
+        .bind(size)
+        .bind(sha256)
+        .bind(content)
+        .execute(&mut *tx)
+        .await?;
+        let existing: Option<(String, i64, Vec<u8>)> = sqlx::query_as(
+            "SELECT sha256, size_bytes, content
+             FROM general_compute_artifact_chunks
+             WHERE task_id = $1 AND artifact_id = $2 AND offset_bytes = $3",
+        )
+        .bind(task_id)
+        .bind(artifact_id)
+        .bind(offset)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((existing_sha256, existing_size, existing_content)) = existing else {
+            anyhow::bail!("general-compute artifact chunk was not persisted");
+        };
+        if existing_sha256 != sha256 || existing_size != size || existing_content != content {
+            anyhow::bail!("general-compute artifact chunk conflicts with persisted content");
+        }
+
+        let stored_chunks: Vec<(i64, i64, String, Vec<u8>)> = sqlx::query_as(
+            "SELECT offset_bytes, size_bytes, sha256, content
+             FROM general_compute_artifact_chunks
+             WHERE task_id = $1 AND artifact_id = $2
+             ORDER BY offset_bytes ASC",
+        )
+        .bind(task_id)
+        .bind(artifact_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let expected_chunks: Vec<(i64, i64, String)> = sqlx::query_as(
+            "SELECT offset_bytes, size_bytes, sha256
+             FROM general_compute_artifact_manifest_chunks
+             WHERE task_id = $1 AND artifact_id = $2
+             ORDER BY offset_bytes ASC",
+        )
+        .bind(task_id)
+        .bind(artifact_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let manifest_complete = expected_chunk_count
+            == i64::try_from(expected_chunks.len()).unwrap_or(-1)
+            && expected_chunks.len() == stored_chunks.len()
+            && expected_chunks.iter().zip(stored_chunks.iter()).all(
+                |((expected_offset, expected_size, expected_sha), (offset, size, sha, bytes))| {
+                    expected_offset == offset
+                        && expected_size == size
+                        && expected_sha == sha
+                        && u64::try_from(*size).ok() == Some(bytes.len() as u64)
+                        && general_compute_runtime::sha256_digest(bytes) == *sha
+                },
+            );
+        let content_complete = if manifest_complete {
+            let mut assembled = Vec::with_capacity(expected_size as usize);
+            for (_, _, _, bytes) in &stored_chunks {
+                assembled.extend_from_slice(bytes);
+            }
+            assembled.len() as u64 == expected_size
+                && general_compute_runtime::sha256_digest(&assembled) == expected_sha256
+        } else {
+            false
+        };
+        sqlx::query(
+            "UPDATE general_compute_artifacts
+             SET complete = complete OR $1,
+                 availability_status = CASE
+                     WHEN complete OR $1 THEN 'available'
+                     ELSE 'pending'
+                 END,
+                 updated_at = NOW()
+             WHERE task_id = $2 AND artifact_id = $3 AND availability_status <> 'expired'",
+        )
+        .bind(content_complete || complete)
+        .bind(task_id)
+        .bind(artifact_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn general_compute_artifact_chunks(
+        &self,
+        task_id: &str,
+        artifact_id: &str,
+    ) -> Result<Vec<(u64, u64, String, Vec<u8>)>> {
+        let rows: Vec<(i64, i64, String, Vec<u8>)> = sqlx::query_as(
+            "SELECT offset_bytes, size_bytes, sha256, content
+             FROM general_compute_artifact_chunks
+             WHERE task_id = $1 AND artifact_id = $2
+             ORDER BY offset_bytes ASC",
+        )
+        .bind(task_id)
+        .bind(artifact_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|(offset, size, sha256, content)| {
+                Ok((
+                    u64::try_from(offset).map_err(|_| anyhow::anyhow!("negative chunk offset"))?,
+                    u64::try_from(size).map_err(|_| anyhow::anyhow!("negative chunk size"))?,
+                    sha256,
+                    content,
+                ))
+            })
+            .collect()
     }
 
     pub async fn find_by_task_id(&self, task_id: &str) -> Result<Option<Task>> {
@@ -1244,6 +1794,382 @@ mod tests {
             .execute(&repo.pool)
             .await
             .ok();
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn general_compute_creation_requires_a_valid_manifest_atomically() {
+        let (p, fixture) = match pool("task_repository_general_compute_manifest_required").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let task_id = format!("general-compute-manifest-required-{unique}");
+        let mut task = make_task(&task_id, "manifest-required-owner");
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.torrent_source = None;
+
+        assert!(repo.create(&task).await.is_err());
+        assert!(repo.find_by_task_id(&task_id).await.unwrap().is_none());
+
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn general_compute_inline_artifacts_are_persisted_as_verified_sources() {
+        let (p, fixture) = match pool("task_repository_general_compute_inline_source").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let task_id = format!("general-compute-inline-source-{unique}");
+        let bytes = b"trusted source bytes";
+        let request = inline_general_compute_request(&unique, bytes);
+        let task = task_for_general_compute_request(&task_id, "inline-source-owner", &request);
+        repo.create(&task).await.unwrap();
+
+        assert_eq!(
+            repo.general_compute_artifact_bytes(
+                &task_id,
+                "source",
+                &request.source_artifact.sha256,
+                request.source_artifact.size_bytes,
+            )
+            .await
+            .unwrap(),
+            Some(bytes.to_vec())
+        );
+
+        sqlx::query(
+            "UPDATE general_compute_artifact_sources
+             SET content = $1
+             WHERE task_id = $2 AND artifact_id = 'source'",
+        )
+        .bind(vec![b'x'; bytes.len()])
+        .bind(&task_id)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            repo.general_compute_artifact_bytes(
+                &task_id,
+                "source",
+                &request.source_artifact.sha256,
+                request.source_artifact.size_bytes,
+            )
+            .await
+            .unwrap(),
+            None,
+            "a persisted source row must be rehashed before use"
+        );
+
+        sqlx::query(
+            "UPDATE general_compute_artifact_sources
+             SET sha256 = $1, content = $2
+             WHERE task_id = $3 AND artifact_id = 'source'",
+        )
+        .bind(general_compute_runtime::sha256_digest(b"different bytes"))
+        .bind(bytes.as_slice())
+        .bind(&task_id)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            repo.general_compute_artifact_bytes(
+                &task_id,
+                "source",
+                &request.source_artifact.sha256,
+                request.source_artifact.size_bytes,
+            )
+            .await
+            .unwrap(),
+            None,
+            "a drifted source row must not be mistaken for a missing row"
+        );
+
+        sqlx::query("DELETE FROM general_compute_artifact_sources WHERE task_id = $1")
+            .bind(&task_id)
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.general_compute_artifact_bytes(
+                &task_id,
+                "source",
+                &request.source_artifact.sha256,
+                request.source_artifact.size_bytes,
+            )
+            .await
+            .unwrap(),
+            Some(bytes.to_vec()),
+            "the Nodepool-owned persisted request may restore missing inline source state"
+        );
+
+        cleanup_task_case(&repo.pool, &task_id, "inline-source-owner", None).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn general_compute_chunk_upload_is_manifest_bound_and_idempotent() {
+        let (p, fixture) = match pool("task_repository_general_compute_chunk_source").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let task_id = format!("general-compute-chunk-source-{unique}");
+        let bytes = b"abcd";
+        let request = chunked_general_compute_request(&unique, bytes);
+        let task = task_for_general_compute_request(&task_id, "chunk-source-owner", &request);
+        repo.create(&task).await.unwrap();
+
+        let chunk = &request.source_artifact.chunks[0];
+        for _ in 0..2 {
+            repo.put_general_compute_artifact_chunk(
+                &task_id,
+                "source",
+                chunk.offset,
+                chunk.size_bytes,
+                &chunk.sha256,
+                bytes,
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            repo.general_compute_artifact_chunks(&task_id, "source")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            repo.general_compute_artifact_bytes(
+                &task_id,
+                "source",
+                &request.source_artifact.sha256,
+                request.source_artifact.size_bytes,
+            )
+            .await
+            .unwrap(),
+            Some(bytes.to_vec())
+        );
+
+        let conflict = repo
+            .put_general_compute_artifact_chunk(
+                &task_id,
+                "source",
+                0,
+                bytes.len() as u64,
+                &general_compute_runtime::sha256_digest(b"wxyz"),
+                b"wxyz",
+            )
+            .await;
+        assert!(conflict.is_err());
+
+        cleanup_task_case(&repo.pool, &task_id, "chunk-source-owner", None).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn general_compute_chunk_and_completion_state_are_atomic() {
+        let (p, fixture) = match pool("task_repository_general_compute_chunk_atomicity").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let task_id = format!("general-compute-chunk-atomicity-{unique}");
+        let bytes = b"atomic chunk";
+        let request = chunked_general_compute_request(&unique, bytes);
+        let task = task_for_general_compute_request(&task_id, "chunk-atomicity-owner", &request);
+        repo.create(&task).await.unwrap();
+
+        sqlx::query(
+            "ALTER TABLE general_compute_artifacts
+             ADD CONSTRAINT reject_complete_for_atomicity_test CHECK (complete = false)",
+        )
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+
+        let chunk = &request.source_artifact.chunks[0];
+        repo.put_general_compute_artifact_chunk(
+            &task_id,
+            "source",
+            chunk.offset,
+            chunk.size_bytes,
+            &chunk.sha256,
+            bytes,
+        )
+        .await
+        .expect_err("completion-state failure must abort the chunk write");
+
+        let stored_chunks: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM general_compute_artifact_chunks
+             WHERE task_id = $1 AND artifact_id = 'source'",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            stored_chunks, 0,
+            "chunk and completion state must commit atomically"
+        );
+
+        cleanup_task_case(&repo.pool, &task_id, "chunk-atomicity-owner", None).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn general_compute_chunk_upload_rejects_an_unknown_artifact_identity() {
+        let (p, fixture) = match pool("task_repository_general_compute_chunk_identity").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let task_id = format!("general-compute-chunk-identity-{unique}");
+        let bytes = b"abcd";
+        let request = chunked_general_compute_request(&unique, bytes);
+        let task = task_for_general_compute_request(&task_id, "chunk-identity-owner", &request);
+        repo.create(&task).await.unwrap();
+
+        let error = repo
+            .put_general_compute_artifact_chunk(
+                &task_id,
+                "not-in-manifest",
+                0,
+                bytes.len() as u64,
+                &general_compute_runtime::sha256_digest(bytes),
+                bytes,
+            )
+            .await
+            .expect_err("an upload must bind to a persisted artifact identity");
+        assert!(error.to_string().contains("identity"));
+
+        cleanup_task_case(&repo.pool, &task_id, "chunk-identity-owner", None).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn general_compute_artifact_coordinates_and_expiry_are_fail_closed() {
+        let (p, fixture) = match pool("task_repository_general_compute_artifact_lifecycle").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let task_id = format!("general-compute-artifact-lifecycle-{unique}");
+        let bytes = b"durable lifecycle";
+        let request = chunked_general_compute_request(&unique, bytes);
+        let task = task_for_general_compute_request(&task_id, "artifact-lifecycle-owner", &request);
+        repo.create(&task).await.unwrap();
+
+        let pending = repo
+            .general_compute_artifact_state(&task_id, "source")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.availability_status, "pending");
+        assert!(!pending.complete);
+        assert!(repo
+            .general_compute_artifact_coordinates_match(
+                &task_id,
+                "source",
+                request.source_artifact.size_bytes,
+                &request.source_artifact.sha256,
+                &request.source_artifact.chunks,
+            )
+            .await
+            .unwrap());
+
+        let split = bytes.len() / 2;
+        let drifted_chunks = vec![
+            general_compute_runtime::ArtifactChunk {
+                offset: 0,
+                size_bytes: split as u64,
+                sha256: general_compute_runtime::sha256_digest(&bytes[..split]),
+            },
+            general_compute_runtime::ArtifactChunk {
+                offset: split as u64,
+                size_bytes: (bytes.len() - split) as u64,
+                sha256: general_compute_runtime::sha256_digest(&bytes[split..]),
+            },
+        ];
+        assert!(!repo
+            .general_compute_artifact_coordinates_match(
+                &task_id,
+                "source",
+                request.source_artifact.size_bytes,
+                &request.source_artifact.sha256,
+                &drifted_chunks,
+            )
+            .await
+            .unwrap());
+
+        let chunk = &request.source_artifact.chunks[0];
+        repo.put_general_compute_artifact_chunk(
+            &task_id,
+            "source",
+            chunk.offset,
+            chunk.size_bytes,
+            &chunk.sha256,
+            bytes,
+        )
+        .await
+        .unwrap();
+        let ready = repo
+            .general_compute_artifact_state(&task_id, "source")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ready.availability_status, "available");
+        assert!(ready.complete);
+
+        sqlx::query(
+            "UPDATE general_compute_artifacts
+             SET expires_at = NOW() - INTERVAL '1 second'
+             WHERE task_id = $1 AND artifact_id = 'source'",
+        )
+        .bind(&task_id)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        let expired = repo
+            .general_compute_artifact_state(&task_id, "source")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(expired.availability_status, "expired");
+        assert!(!expired.complete);
+        assert_eq!(
+            repo.general_compute_artifact_bytes(
+                &task_id,
+                "source",
+                &expired.sha256,
+                expired.size_bytes,
+            )
+            .await
+            .unwrap(),
+            None
+        );
+        assert!(repo
+            .put_general_compute_artifact_chunk(
+                &task_id,
+                "source",
+                chunk.offset,
+                chunk.size_bytes,
+                &chunk.sha256,
+                bytes,
+            )
+            .await
+            .is_err());
+
+        cleanup_task_case(&repo.pool, &task_id, "artifact-lifecycle-owner", None).await;
         fixture.cleanup().await.ok();
     }
 
@@ -3327,6 +4253,53 @@ mod tests {
 
         cleanup_task_case(&repo.pool, &task_id, &username, None).await;
         fixture.cleanup().await.ok();
+    }
+
+    fn inline_general_compute_request(unique: &str, bytes: &[u8]) -> GeneralComputeRequest {
+        let mut request = GeneralComputeRequest {
+            execution_id: format!("execution-{unique}"),
+            attempt_id: format!("attempt-{unique}"),
+            idempotency_key: format!("idempotency-{unique}"),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "python-cpython-312".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest::inline_json("source", ArtifactRole::Source, bytes),
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+        request
+    }
+
+    fn chunked_general_compute_request(unique: &str, bytes: &[u8]) -> GeneralComputeRequest {
+        let mut request = inline_general_compute_request(unique, bytes);
+        request.source_artifact.mime_type = "text/plain".into();
+        request.source_artifact.chunks = vec![general_compute_runtime::ArtifactChunk {
+            offset: 0,
+            size_bytes: bytes.len() as u64,
+            sha256: general_compute_runtime::sha256_digest(bytes),
+        }];
+        request.source_artifact.inline_bytes = None;
+        request.request_digest = request.canonical_request_digest();
+        request
+    }
+
+    fn task_for_general_compute_request(
+        task_id: &str,
+        owner: &str,
+        request: &GeneralComputeRequest,
+    ) -> Task {
+        let mut task = make_task(task_id, owner);
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.torrent_source = None;
+        task.general_compute_manifest_json = Some(serde_json::to_vec(request).unwrap());
+        task
     }
 
     async fn cleanup_task_case(

@@ -252,6 +252,105 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     .await?;
 
     sqlx::query(
+        "CREATE TABLE IF NOT EXISTS general_compute_artifact_sources (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            task_id VARCHAR(255) NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+            artifact_id VARCHAR(255) NOT NULL,
+            sha256 VARCHAR(71) NOT NULL,
+            size_bytes BIGINT NOT NULL,
+            content BYTEA NOT NULL,
+            expires_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE (task_id, artifact_id)
+        );",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_general_compute_artifact_sources_task
+         ON general_compute_artifact_sources(task_id);",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS general_compute_artifact_chunks (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            task_id VARCHAR(255) NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+            artifact_id VARCHAR(255) NOT NULL,
+            offset_bytes BIGINT NOT NULL,
+            size_bytes BIGINT NOT NULL,
+            sha256 VARCHAR(71) NOT NULL,
+            content BYTEA NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE (task_id, artifact_id, offset_bytes)
+        );",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_general_compute_artifact_chunks_task
+         ON general_compute_artifact_chunks(task_id, artifact_id, offset_bytes);",
+    )
+    .execute(pool)
+    .await?;
+
+    // Immutable artifact identity and lifecycle state are separate from the
+    // mutable per-attempt request manifest and uploaded chunk content.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS general_compute_artifacts (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            task_id VARCHAR(255) NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+            artifact_id VARCHAR(255) NOT NULL,
+            sha256 VARCHAR(71) NOT NULL,
+            size_bytes BIGINT NOT NULL,
+            expected_chunk_count BIGINT NOT NULL,
+            availability_status VARCHAR(32) NOT NULL DEFAULT 'pending',
+            complete BOOLEAN NOT NULL DEFAULT false,
+            expires_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE (task_id, artifact_id)
+        );",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_general_compute_artifacts_task
+         ON general_compute_artifacts(task_id, artifact_id);",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS general_compute_artifact_manifest_chunks (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            task_id VARCHAR(255) NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+            artifact_id VARCHAR(255) NOT NULL,
+            offset_bytes BIGINT NOT NULL,
+            size_bytes BIGINT NOT NULL,
+            sha256 VARCHAR(71) NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE (task_id, artifact_id, offset_bytes),
+            FOREIGN KEY (task_id, artifact_id)
+                REFERENCES general_compute_artifacts(task_id, artifact_id)
+                ON DELETE CASCADE
+        );",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_general_compute_artifact_manifest_chunks
+         ON general_compute_artifact_manifest_chunks(task_id, artifact_id, offset_bytes);",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
         "CREATE TABLE IF NOT EXISTS vpn_peers (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             worker_id VARCHAR(255) NOT NULL UNIQUE,
@@ -670,6 +769,41 @@ mod tests {
         assert!(indexes.contains(&"idx_tasks_pending_priority_created_at".to_string()));
         assert!(indexes.contains(&"idx_tasks_assigned_timeout".to_string()));
         assert!(indexes.contains(&"idx_tasks_torrent_source_worker_completed".to_string()));
+
+        fixture.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn task_migrations_create_general_compute_artifact_tables() {
+        let fixture = match create_isolated_test_pool("database_general_compute_artifacts").await {
+            Ok(fixture) => fixture,
+            Err(_) => {
+                tracing::warn!("Skipping DB test");
+                return;
+            }
+        };
+
+        run_migrations(&fixture.pool).await.unwrap();
+
+        for table in [
+            "general_compute_artifacts",
+            "general_compute_artifact_manifest_chunks",
+            "general_compute_artifact_sources",
+            "general_compute_artifact_chunks",
+        ] {
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_schema = $1 AND table_name = $2
+                )",
+            )
+            .bind(fixture.schema_name())
+            .bind(table)
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+            assert!(exists, "migration must create {table}");
+        }
 
         fixture.cleanup().await.unwrap();
     }
