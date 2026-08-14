@@ -45,6 +45,40 @@ foreach ($expected in @(
     }
 }
 
+# The execution phase is an explicit reviewed-fixture protocol.  A fixture is
+# not allowed to be an opaque command that merely exits zero: it must receive
+# the isolated Compose identity and write a versioned evidence document that
+# the harness validates before reporting an E2E pass.
+foreach ($expected in @(
+    "HIVEMIND_GENERAL_COMPUTE_OCI_E2E_EVIDENCE",
+    "-ComposeProject",
+    "-ComposeFile",
+    "-RegistryPath",
+    "-EvidencePath",
+    "Invoke-ReviewedTaskFixture",
+    "docker compose",
+    "up",
+    "-d",
+    "--build",
+    "schema_version",
+    "general-compute-oci-e2e-v1",
+    "task_completion",
+    "postgres_settlement",
+    "timeout_cancel",
+    "network_denied",
+    "filesystem_denied",
+    "worker_registered",
+    "ProductionResultEnvelope"
+)) {
+    if (!$harnessText.Contains($expected)) {
+        throw "OCI E2E execution must implement the reviewed fixture/evidence contract '$expected'."
+    }
+}
+
+if ($harnessText -match '(?i)multi-process task fixture execution is not yet wired') {
+    throw "OCI E2E -Run must invoke the reviewed fixture instead of retaining the placeholder fail-closed branch."
+}
+
 if ($harnessText -notmatch '(?i)operator.*registry|registry.*operator') {
     throw "OCI E2E harness must describe the registry as operator-owned."
 }

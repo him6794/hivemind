@@ -63,6 +63,9 @@ services:
       # decides whether a managed task settles from a verified claim. Setting it
       # on the worker has no effect.
       MANAGED_PROOF_ROLLOUT_MODE: ${MANAGED_PROOF_ROLLOUT_MODE:-enforce}
+      # Explicitly opt-in bootstrap credentials are used by the reviewed OCI
+      # E2E fixture only; the default keeps production deployments unseeded.
+      HIVEMIND_SEED_DEFAULT_USER: ${HIVEMIND_SEED_DEFAULT_USER:-false}
       # Nodepool authorizes every /api/admin/* call, so without this the admin
       # surface is unreachable in a Compose deployment. Empty means no admins,
       # which is the safe default.
@@ -127,6 +130,8 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set to a non-default value}
       NODEPOOL_GRPC_ENDPOINT: nodepool:50051
       WORKER_NODEPOOL_TOKEN: ${WORKER_NODEPOOL_TOKEN:-}
+      WORKER_NODEPOOL_USERNAME: ${WORKER_NODEPOOL_USERNAME:-}
+      WORKER_NODEPOOL_PASSWORD: ${WORKER_NODEPOOL_PASSWORD:-}
       WORKER_EXECUTION_PUBLIC_KEY_PEM: ${WORKER_EXECUTION_PUBLIC_KEY_PEM:?WORKER_EXECUTION_PUBLIC_KEY_PEM must be set for worker execution-token verification}
       WORKER_GRPC_ADDR: 0.0.0.0:50053
       WORKER_ADVERTISE_ADDR: worker:50053
