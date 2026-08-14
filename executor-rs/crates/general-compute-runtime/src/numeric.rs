@@ -8,6 +8,8 @@
 use std::fmt;
 use std::ops::{Add, Div, Mul, Sub};
 
+pub const MAX_REFERENCE_FFT_LEN: usize = 4096;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
     Add,
@@ -32,6 +34,8 @@ pub enum NumericError {
     SolveDimensionMismatch { matrix: u64, rhs: u64 },
     SingularMatrix,
     NonFiniteValue,
+    FftRequiresOneDimension,
+    FftLengthExceeded { length: usize, max: usize },
     MatmulRequiresTwoDimensions,
     MatmulInnerDimensionMismatch { lhs: u64, rhs: u64 },
 }
@@ -86,6 +90,15 @@ impl fmt::Display for NumericError {
             Self::SingularMatrix => formatter.write_str("solve matrix is singular"),
             Self::NonFiniteValue => {
                 formatter.write_str("numeric operation produced a non-finite value")
+            }
+            Self::FftRequiresOneDimension => {
+                formatter.write_str("FFT requires a one-dimensional tensor")
+            }
+            Self::FftLengthExceeded { length, max } => {
+                write!(
+                    formatter,
+                    "FFT length {length} exceeds reference limit {max}"
+                )
             }
             Self::MatmulRequiresTwoDimensions => {
                 formatter.write_str("matmul requires two-dimensional tensors")
@@ -560,6 +573,54 @@ impl DenseTensor<f64> {
         Self::new(
             vec![u64::try_from(size).map_err(|_| NumericError::ShapeOverflow)?],
             solution,
+        )
+    }
+}
+
+impl DenseTensor<Complex128> {
+    pub fn fft(&self, inverse: bool) -> Result<Self, NumericError> {
+        if self.shape.len() != 1 {
+            return Err(NumericError::FftRequiresOneDimension);
+        }
+        let length = usize::try_from(self.shape[0]).map_err(|_| NumericError::ShapeOverflow)?;
+        if length > MAX_REFERENCE_FFT_LEN {
+            return Err(NumericError::FftLengthExceeded {
+                length,
+                max: MAX_REFERENCE_FFT_LEN,
+            });
+        }
+        if self
+            .values
+            .iter()
+            .any(|value| !value.re.is_finite() || !value.im.is_finite())
+        {
+            return Err(NumericError::NonFiniteValue);
+        }
+        if length == 0 {
+            return Self::new(vec![0], Vec::new());
+        }
+
+        let sign = if inverse { 1.0 } else { -1.0 };
+        let scale = if inverse { 1.0 / length as f64 } else { 1.0 };
+        let length_as_f64 = length as f64;
+        let mut output = Vec::with_capacity(length);
+        for frequency in 0..length {
+            let mut sum = Complex128::default();
+            for sample in 0..length {
+                let angle = sign * 2.0 * std::f64::consts::PI * frequency as f64 * sample as f64
+                    / length_as_f64;
+                let (sin, cos) = angle.sin_cos();
+                sum = sum + self.values[sample] * Complex128::new(cos, sin);
+            }
+            let value = sum * Complex128::new(scale, 0.0);
+            if !value.re.is_finite() || !value.im.is_finite() {
+                return Err(NumericError::NonFiniteValue);
+            }
+            output.push(value);
+        }
+        Self::new(
+            vec![u64::try_from(length).map_err(|_| NumericError::ShapeOverflow)?],
+            output,
         )
     }
 }
