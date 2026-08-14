@@ -130,6 +130,8 @@ mod tests {
                     gpu_capabilities: vec![],
                     backends: vec![BackendRegistration {
                         backend_id: "python-cpython-312".into(),
+                        execution_mode:
+                            general_compute_runtime::sandbox::BackendExecutionMode::ReferenceDirect,
                         guest_image_digest:
                             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                                 .into(),
