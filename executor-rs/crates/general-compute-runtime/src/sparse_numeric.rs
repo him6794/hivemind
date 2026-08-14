@@ -219,7 +219,11 @@ fn decode_csr(
     for row in 0..rows {
         let start = pointer_at(manifest, indptr_bytes, row, data.len())?;
         let end = pointer_at(manifest, indptr_bytes, row + 1, data.len())?;
-        for (position, &value) in data.iter().enumerate().take(end).skip(start) {
+        let segment = data.get(start..end).ok_or_else(|| {
+            SparseNumericError::ManifestInvalid("CSR data segment is out of bounds".into())
+        })?;
+        for (offset, &value) in segment.iter().enumerate() {
+            let position = start + offset;
             let column = coordinate_at(manifest, indices_bytes, position, columns)?;
             entries.push((row, column, value));
         }
@@ -239,7 +243,11 @@ fn decode_csc(
     for column in 0..columns {
         let start = pointer_at(manifest, indptr_bytes, column, data.len())?;
         let end = pointer_at(manifest, indptr_bytes, column + 1, data.len())?;
-        for (position, &value) in data.iter().enumerate().take(end).skip(start) {
+        let segment = data.get(start..end).ok_or_else(|| {
+            SparseNumericError::ManifestInvalid("CSC data segment is out of bounds".into())
+        })?;
+        for (offset, &value) in segment.iter().enumerate() {
+            let position = start + offset;
             let row = coordinate_at(manifest, indices_bytes, position, rows)?;
             entries.push((row, column, value));
         }
