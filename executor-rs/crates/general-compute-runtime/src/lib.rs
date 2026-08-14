@@ -12,6 +12,7 @@ pub mod cp_python;
 pub mod differential;
 pub mod execution;
 pub mod numeric;
+pub mod ode;
 pub mod reference;
 pub mod rng;
 pub mod sandbox;
