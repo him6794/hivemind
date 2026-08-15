@@ -2,6 +2,8 @@ use general_compute_runtime::sandbox::{
     CgroupPolicy, LinuxNamespace, LinuxSandboxPolicy, OciPrivilegeMode, PrivilegeEscalationPolicy,
     ProductionSandboxError, ProductionSandboxLaunch, ProductionSandboxLauncher,
     RootFilesystemPolicy, SandboxMount, SandboxNetworkPolicy, SandboxPolicyError, SeccompPolicy,
+    WindowsIsolationMode, WindowsNativeSandboxLaunch, WindowsRootFilesystemPolicy,
+    WindowsSandboxNetworkPolicy, WindowsSandboxPolicy,
 };
 use general_compute_runtime::sha256_digest;
 use general_compute_runtime::supervisor::Cancellation;
@@ -36,6 +38,60 @@ fn valid_policy() -> LinuxSandboxPolicy {
             },
         ],
     }
+}
+
+fn valid_windows_policy() -> WindowsSandboxPolicy {
+    WindowsSandboxPolicy {
+        isolation: WindowsIsolationMode::Process,
+        network: WindowsSandboxNetworkPolicy::DenyAll,
+        root_filesystem: WindowsRootFilesystemPolicy::ReadOnly,
+        mounts: vec![
+            SandboxMount::ReadOnlyArtifact {
+                artifact_id: "source".into(),
+                destination: "/work/source".into(),
+            },
+            SandboxMount::EphemeralScratch {
+                destination: "/work/output".into(),
+                max_bytes: 1024,
+            },
+        ],
+        memory_bytes: 1024 * 1024,
+        cpu_millis: 1000,
+        process_limit: 4,
+        thread_limit: 8,
+        scratch_bytes: 1024,
+    }
+}
+
+#[test]
+fn windows_native_policy_requires_process_isolation_and_deny_all_network() {
+    let mut policy = valid_windows_policy();
+    assert!(policy.validate().is_ok());
+
+    policy.network = WindowsSandboxNetworkPolicy::AllowAll;
+    assert!(policy.validate().is_err());
+
+    let mut policy = valid_windows_policy();
+    policy.mounts.pop();
+    assert!(policy.validate().is_err());
+
+    let mut policy = valid_windows_policy();
+    policy.mounts[0] = SandboxMount::ReadOnlyArtifact {
+        artifact_id: "C:\\outside".into(),
+        destination: "/work/source".into(),
+    };
+    assert!(policy.validate().is_err());
+}
+
+#[test]
+fn windows_native_launch_is_distinct_from_linux_oci_launch() {
+    let launch = WindowsNativeSandboxLaunch {
+        backend_id: "windows-python".into(),
+        guest_image_digest: format!("sha256:{}", "a".repeat(64)),
+        entrypoint: vec!["/runtime/runner.exe".into()],
+        policy: valid_windows_policy(),
+    };
+    assert!(launch.validate().is_ok());
 }
 
 fn valid_launch() -> ProductionSandboxLaunch {
