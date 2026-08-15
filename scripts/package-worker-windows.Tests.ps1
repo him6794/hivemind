@@ -115,6 +115,11 @@ Assert-Contains `
     -Needle 'TORRENT_TASK_ARTIFACT_BASE_URL=' `
     -Message "worker package template must expose the remote task artifact base URL setting."
 
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle 'HIVEMIND_GENERAL_COMPUTE_WINDOWS_BACKENDS=' `
+    -Message "worker package template must expose the native Windows HCS registry setting."
+
 # The package README is Markdown, and it must be built from a literal
 # here-string: an interpolating one silently eats every backtick as an escape
 # character, so the code spans and fenced blocks reach the provider stripped.
