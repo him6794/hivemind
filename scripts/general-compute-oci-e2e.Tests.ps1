@@ -132,6 +132,14 @@ if ($harnessText -match '(?i)MONTY_EXECUTABLE|/app/monty') {
 if ($composeText -match '(?m)^\s*container_name\s*:') {
     throw "Release Compose must not fix container_name values; project names must isolate OCI E2E containers."
 }
+$ociComposePath = Join-Path $repoRoot "docker-compose.oci-e2e.yml"
+if (!(Test-Path -LiteralPath $ociComposePath -PathType Leaf)) {
+    throw "Repository must ship the reviewed OCI E2E Compose override."
+}
+$ociComposeText = Get-Content -LiteralPath $ociComposePath -Raw
+if ($ociComposeText -notmatch '(?m)^\s*user:\s*"0:0"\s*$') {
+    throw "OCI E2E Compose must run the nested runc preparation as outer-container root."
+}
 if ($composeText -match '(?m)^\s*name\s*:\s*hivemind-network\s*$') {
     throw "Release Compose must not fix the network name; project names must isolate OCI E2E networks."
 }

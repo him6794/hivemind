@@ -1,0 +1,21 @@
+include:
+  - path: docker-compose.yml
+
+services:
+  nodepool:
+    environment:
+      WORKER_EXECUTION_PUBLIC_KEY_PEM: ${WORKER_EXECUTION_PUBLIC_KEY_PEM:?worker execution public key must be set for OCI E2E}
+      HIVEMIND_GENERAL_COMPUTE_TRUSTED_WORKER_CAPABILITIES: ${HIVEMIND_GENERAL_COMPUTE_TRUSTED_WORKER_CAPABILITIES:-}
+  worker:
+    hostname: ${WORKER_ID:-oci-e2e-worker}
+    # Docker Desktop's nested rootless runc needs outer-container CAP_CHOWN while
+    # it prepares the mapped rootfs. This privilege is scoped to the reviewed
+    # OCI E2E override; release Compose continues to run the worker as uid 10001.
+    user: "0:0"
+    environment:
+      HIVEMIND_GENERAL_COMPUTE_BACKENDS: ${HIVEMIND_GENERAL_COMPUTE_BACKENDS:-}
+      HIVEMIND_GENERAL_COMPUTE_WORKER_CAPABILITIES: ${HIVEMIND_GENERAL_COMPUTE_WORKER_CAPABILITIES:-}
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - seccomp:unconfined
