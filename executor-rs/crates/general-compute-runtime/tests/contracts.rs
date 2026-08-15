@@ -18,6 +18,22 @@ fn production_windows_execution_mode_round_trips_as_a_distinct_contract() {
     assert_eq!(decoded, BackendExecutionMode::ProductionSandboxedWindows);
 }
 
+#[test]
+fn production_dsl_execution_mode_round_trips_as_a_distinct_contract() {
+    let encoded = serde_json::to_string(&BackendExecutionMode::ProductionSandboxedDsl)
+        .expect("execution mode should serialize");
+    assert_eq!(encoded, "\"production_sandboxed_dsl\"");
+    let decoded: BackendExecutionMode = serde_json::from_str(&encoded)
+        .expect("execution mode should deserialize");
+    assert_eq!(decoded, BackendExecutionMode::ProductionSandboxedDsl);
+}
+
+#[test]
+fn unknown_execution_mode_is_rejected_instead_of_downgraded() {
+    assert!(serde_json::from_str::<BackendExecutionMode>("\"production_sandboxed_unknown\"")
+        .is_err());
+}
+
 fn valid_request() -> GeneralComputeRequest {
     let mut request = GeneralComputeRequest {
         execution_id: "execution-1".into(),

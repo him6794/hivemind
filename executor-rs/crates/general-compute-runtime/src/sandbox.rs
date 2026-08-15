@@ -19,6 +19,7 @@ pub enum BackendExecutionMode {
     ReferenceDirect,
     ProductionSandboxedOci,
     ProductionSandboxedWindows,
+    ProductionSandboxedDsl,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

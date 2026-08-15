@@ -1,6 +1,7 @@
 use general_compute_runtime::production::{
-    ProductionBackendConfig, ProductionBackendRegistry, ProductionBackendRegistryError,
-    WindowsProductionBackendConfig, WindowsProductionBackendRegistry,
+    ManagedDslBackendRegistration, ManagedDslBackendRegistry, ProductionBackendConfig,
+    ProductionBackendRegistry, ProductionBackendRegistryError, WindowsProductionBackendConfig,
+    WindowsProductionBackendRegistry,
 };
 use general_compute_runtime::{ArtifactManifest, ArtifactRole, DeterminismPolicy, ExecutionPolicy, GeneralComputeRequest, GENERAL_COMPUTE_RUNTIME_VERSION};
 use general_compute_runtime::sandbox::{
@@ -10,6 +11,75 @@ use general_compute_runtime::sandbox::{
     WindowsSandboxNetworkPolicy, WindowsSandboxPolicy,
 };
 use std::path::PathBuf;
+
+fn dsl_registration(backend_id: &str) -> ManagedDslBackendRegistration {
+    ManagedDslBackendRegistration {
+        backend_id: backend_id.into(),
+        runtime_version: general_compute_runtime::MANAGED_DSL_RUNTIME_VERSION.into(),
+        semantics_manifest_sha256:
+            general_compute_runtime::MANAGED_DSL_SEMANTICS_MANIFEST_SHA256.into(),
+        max_usage_units: 10_000,
+        max_output_bytes: 4096,
+    }
+}
+
+#[test]
+fn managed_dsl_registry_round_trips_and_has_no_host_execution_fields() {
+    let registration = dsl_registration("managed-default");
+    let encoded = serde_json::to_value(&registration).expect("DSL registration serializes");
+    assert_eq!(registration.execution_mode(), general_compute_runtime::sandbox::BackendExecutionMode::ProductionSandboxedDsl);
+    assert!(encoded.get("runner_executable").is_none());
+    assert!(encoded.get("image_root").is_none());
+    assert!(encoded.get("network").is_none());
+    let decoded: ManagedDslBackendRegistration =
+        serde_json::from_value(encoded).expect("DSL registration deserializes");
+    assert_eq!(decoded, registration);
+    assert_eq!(ManagedDslBackendRegistry::new(vec![decoded]).unwrap().len(), 1);
+}
+
+#[test]
+fn managed_dsl_registry_rejects_wrong_identity_or_limits() {
+    let mut registration = dsl_registration("managed-invalid");
+    registration.runtime_version = "managed-function-v1".into();
+    assert_eq!(
+        ManagedDslBackendRegistry::new(vec![registration]).unwrap_err(),
+        ProductionBackendRegistryError::ManagedDslRuntimeMismatch
+    );
+
+    let mut registration = dsl_registration("managed-invalid-digest");
+    registration.semantics_manifest_sha256 = "sha256:bad".into();
+    assert_eq!(
+        ManagedDslBackendRegistry::new(vec![registration]).unwrap_err(),
+        ProductionBackendRegistryError::ManagedDslSemanticsMismatch
+    );
+
+    let mut registration = dsl_registration("managed-invalid-limit");
+    registration.max_usage_units = 0;
+    assert_eq!(
+        ManagedDslBackendRegistry::new(vec![registration]).unwrap_err(),
+        ProductionBackendRegistryError::ManagedDslUsageLimitRequired
+    );
+}
+
+#[test]
+fn managed_dsl_registry_rejects_duplicate_ids_and_unknown_fields() {
+    let error = ManagedDslBackendRegistry::new(vec![
+        dsl_registration("managed-duplicate"),
+        dsl_registration("managed-duplicate"),
+    ])
+    .unwrap_err();
+    assert_eq!(
+        error,
+        ProductionBackendRegistryError::DuplicateBackend("managed-duplicate".into())
+    );
+
+    let mut value = serde_json::to_value(dsl_registration("managed-extra")).unwrap();
+    value
+        .as_object_mut()
+        .unwrap()
+        .insert("runner_executable".into(), serde_json::json!("runner.exe"));
+    assert!(serde_json::from_value::<ManagedDslBackendRegistration>(value).is_err());
+}
 
 fn policy() -> LinuxSandboxPolicy {
     LinuxSandboxPolicy {
