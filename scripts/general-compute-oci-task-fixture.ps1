@@ -235,6 +235,7 @@ function Provision-OperatorVolumes {
             $backendId = [string]$registration.backend_id
             $stateDirectories += "mkdir -p /state/bundles/$backendId /state/artifacts/$backendId /state/runner-state/$backendId"
             $stateDirectories += "cp -a /source/config/bundles/$backendId/. /state/bundles/$backendId/"
+            $stateDirectories += "mkdir -p /state/bundles/$backendId/rootfs/work/source /state/bundles/$backendId/rootfs/work/output"
         }
         $seedCommandParts = @(
             "set -eu",
