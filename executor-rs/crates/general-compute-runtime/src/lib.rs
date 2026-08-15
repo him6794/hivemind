@@ -28,6 +28,12 @@ pub mod transport;
 pub mod windows_hcs;
 
 pub const GENERAL_COMPUTE_RUNTIME_VERSION: &str = "general-compute-v1alpha1";
+/// Runtime identity shared by the closed, metered managed DSL admission path.
+pub const MANAGED_DSL_RUNTIME_VERSION: &str = "managed-function-v0";
+/// Canonical managed DSL semantics binding. Keep synchronized with the
+/// managed-function-runtime proof manifest; changing it is a protocol change.
+pub const MANAGED_DSL_SEMANTICS_MANIFEST_SHA256: &str =
+    "sha256:8ed716dc07c7bc9abcfc5338b1888e71dd041c3fb397c45d0efb1ff76af1deee";
 pub const MAX_CPU_MILLIS: u64 = 24 * 60 * 60 * 1000;
 pub const MAX_MEMORY_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 pub const MAX_WALL_TIME_MS: u64 = 7 * 24 * 60 * 60 * 1000;

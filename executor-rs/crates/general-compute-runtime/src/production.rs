@@ -5,7 +5,9 @@
 //! operator-controlled file and every path is validated before it can reach
 //! the OCI launcher.
 
-use crate::GeneralComputeRequest;
+use crate::{
+    GeneralComputeRequest, MANAGED_DSL_RUNTIME_VERSION, MANAGED_DSL_SEMANTICS_MANIFEST_SHA256,
+};
 use crate::sandbox::{
     BackendExecutionMode, ProductionSandboxLaunch, SandboxMount, WindowsNativeSandboxLaunch,
     WindowsSandboxPolicy,
@@ -13,6 +15,83 @@ use crate::sandbox::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+
+/// Operator-owned registration for the cross-platform closed managed DSL.
+///
+/// Unlike OCI/HCS registrations this contains no executable, image, or host
+/// path. The interpreter is the backend and its semantics digest is the trust
+/// binding used by Worker admission and proof/settlement validation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedDslBackendRegistration {
+    pub backend_id: String,
+    pub runtime_version: String,
+    pub semantics_manifest_sha256: String,
+    pub max_usage_units: u64,
+    pub max_output_bytes: usize,
+}
+
+impl ManagedDslBackendRegistration {
+    pub fn execution_mode(&self) -> BackendExecutionMode {
+        BackendExecutionMode::ProductionSandboxedDsl
+    }
+
+    pub fn validate(&self) -> Result<(), ProductionBackendRegistryError> {
+        if self.backend_id.trim().is_empty() {
+            return Err(ProductionBackendRegistryError::ManagedDslBackendIdEmpty);
+        }
+        if self.runtime_version != MANAGED_DSL_RUNTIME_VERSION {
+            return Err(ProductionBackendRegistryError::ManagedDslRuntimeMismatch);
+        }
+        if self.semantics_manifest_sha256 != MANAGED_DSL_SEMANTICS_MANIFEST_SHA256 {
+            return Err(ProductionBackendRegistryError::ManagedDslSemanticsMismatch);
+        }
+        if self.max_usage_units == 0 {
+            return Err(ProductionBackendRegistryError::ManagedDslUsageLimitRequired);
+        }
+        if self.max_output_bytes == 0 {
+            return Err(ProductionBackendRegistryError::ManagedDslOutputLimitRequired);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ManagedDslBackendRegistry {
+    backends: BTreeMap<String, ManagedDslBackendRegistration>,
+}
+
+impl ManagedDslBackendRegistry {
+    pub fn new(
+        registrations: Vec<ManagedDslBackendRegistration>,
+    ) -> Result<Self, ProductionBackendRegistryError> {
+        let mut backends = BTreeMap::new();
+        for registration in registrations {
+            registration.validate()?;
+            let backend_id = registration.backend_id.clone();
+            if backends.insert(backend_id.clone(), registration).is_some() {
+                return Err(ProductionBackendRegistryError::DuplicateBackend(backend_id));
+            }
+        }
+        Ok(Self { backends })
+    }
+
+    pub fn get(&self, backend_id: &str) -> Option<&ManagedDslBackendRegistration> {
+        self.backends.get(backend_id)
+    }
+
+    pub fn registrations(&self) -> impl Iterator<Item = &ManagedDslBackendRegistration> {
+        self.backends.values()
+    }
+
+    pub fn len(&self) -> usize {
+        self.backends.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.backends.is_empty()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -361,6 +440,11 @@ pub enum ProductionBackendRegistryError {
     WindowsLaunchInvalid(crate::sandbox::ProductionSandboxError),
     WindowsResourceLimitRequired,
     WindowsRegistryEmpty,
+    ManagedDslBackendIdEmpty,
+    ManagedDslRuntimeMismatch,
+    ManagedDslSemanticsMismatch,
+    ManagedDslUsageLimitRequired,
+    ManagedDslOutputLimitRequired,
 }
 
 fn ensure_contained(
