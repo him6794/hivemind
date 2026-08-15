@@ -14,6 +14,8 @@ pub enum WindowsHcsError {
     InvalidSpec(String),
     ProviderUnavailable(String),
     OperationFailed(String),
+    ResultUnavailable(String),
+    ResultTooLarge { limit: usize, actual: usize },
     Cancelled,
     TimedOut,
 }
@@ -91,6 +93,28 @@ fn validate_spec(spec: &WindowsHcsContainerSpec) -> Result<(), WindowsHcsError> 
             "image root and entrypoint are required".into(),
         ));
     }
+    if spec.result_path.as_os_str().is_empty()
+        || spec.result_container_path.is_empty()
+        || spec.max_output_bytes == 0
+    {
+        return Err(WindowsHcsError::InvalidSpec(
+            "result transport and output limit are required".into(),
+        ));
+    }
+    let result_parent = spec.result_path.parent();
+    let result_mount = spec.mounts.iter().any(|mount| {
+        !mount.read_only
+            && result_parent == Some(mount.host_path.as_path())
+            && spec.result_container_path.starts_with(&format!(
+                "{}\\",
+                mount.container_path.trim_end_matches('\\')
+            ))
+    });
+    if !result_mount {
+        return Err(WindowsHcsError::InvalidSpec(
+            "result transport must use an explicit writable mount".into(),
+        ));
+    }
     if !spec.network_isolated || !spec.root_read_only {
         return Err(WindowsHcsError::InvalidSpec(
             "HCS spec must deny networking and use a read-only root".into(),
@@ -117,6 +141,27 @@ fn validate_spec(spec: &WindowsHcsContainerSpec) -> Result<(), WindowsHcsError> 
         ));
     }
     Ok(())
+}
+
+fn read_result_file(
+    path: &std::path::Path,
+    max_output_bytes: usize,
+) -> Result<Vec<u8>, WindowsHcsError> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| WindowsHcsError::ResultUnavailable(error.to_string()))?;
+    if !metadata.is_file() {
+        return Err(WindowsHcsError::ResultUnavailable(
+            "result path is not a regular file".into(),
+        ));
+    }
+    let actual = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
+    if actual > max_output_bytes {
+        return Err(WindowsHcsError::ResultTooLarge {
+            limit: max_output_bytes,
+            actual,
+        });
+    }
+    std::fs::read(path).map_err(|error| WindowsHcsError::ResultUnavailable(error.to_string()))
 }
 
 #[cfg(windows)]
@@ -187,7 +232,9 @@ mod hcs {
         let system = create_system(&id, &configuration, timeout)?;
         let result = run_system(system, timeout, cancellation);
         unsafe { HcsCloseComputeSystem(system) };
-        result
+        let mut result = result?;
+        result.stdout = super::read_result_file(&spec.result_path, spec.max_output_bytes)?;
+        Ok(result)
     }
 
     fn create_system(
@@ -357,7 +404,12 @@ mod hcs {
                     "ReadOnly": mount.read_only,
                 })).collect::<Vec<_>>(),
                 "NetworkEndpoints": [],
-                "Process": {"CommandLine": spec.entrypoint.join(" ")},
+                "Process": {
+                    "CommandLine": spec.entrypoint.join(" "),
+                    "Environment": {
+                        "HIVEMIND_RESULT_PATH": spec.result_container_path,
+                    },
+                },
             }
         }))
         .map_err(|error| WindowsHcsError::InvalidSpec(error.to_string()))
@@ -375,11 +427,21 @@ mod tests {
             container_id: "hivemind-test".into(),
             image_root: PathBuf::from("C:\\hivemind\\image"),
             entrypoint: vec!["runner.exe".into()],
-            mounts: vec![WindowsHcsMountSpec {
-                host_path: PathBuf::from("C:\\hivemind\\artifact"),
-                container_path: "C:\\work\\source".into(),
-                read_only: true,
-            }],
+            mounts: vec![
+                WindowsHcsMountSpec {
+                    host_path: PathBuf::from("C:\\hivemind\\artifact"),
+                    container_path: "C:\\work\\source".into(),
+                    read_only: true,
+                },
+                WindowsHcsMountSpec {
+                    host_path: PathBuf::from("C:\\hivemind\\scratch"),
+                    container_path: "C:\\work\\output".into(),
+                    read_only: false,
+                },
+            ],
+            result_path: PathBuf::from("C:\\hivemind\\scratch\\result.json"),
+            result_container_path: "C:\\work\\output\\result.json".into(),
+            max_output_bytes: 4096,
             network_isolated: true,
             root_read_only: true,
             memory_bytes: 1024,
@@ -388,6 +450,38 @@ mod tests {
             thread_limit: 4,
             scratch_bytes: 1024,
         }
+    }
+
+    #[test]
+    fn result_transport_requires_a_writable_explicit_mount() {
+        let mut invalid = spec();
+        invalid.result_path = PathBuf::from("C:\\hivemind\\artifact\\result.json");
+        let error = WindowsHcsLauncher::new()
+            .run(&invalid, &Cancellation::new())
+            .expect_err("result files must not be written through read-only mounts");
+        assert!(matches!(error, WindowsHcsError::InvalidSpec(_)));
+    }
+
+    #[test]
+    fn result_transport_rejects_missing_and_oversized_files() {
+        let root = std::env::temp_dir().join(format!("hivemind-hcs-result-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let missing = root.join("missing.json");
+        assert!(matches!(
+            read_result_file(&missing, 32),
+            Err(WindowsHcsError::ResultUnavailable(_))
+        ));
+        let oversized = root.join("oversized.json");
+        std::fs::write(&oversized, b"0123456789").unwrap();
+        assert_eq!(
+            read_result_file(&oversized, 4).unwrap_err(),
+            WindowsHcsError::ResultTooLarge {
+                limit: 4,
+                actual: 10,
+            }
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[cfg(not(windows))]

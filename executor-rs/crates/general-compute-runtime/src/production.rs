@@ -200,6 +200,9 @@ pub struct WindowsHcsContainerSpec {
     pub image_root: PathBuf,
     pub entrypoint: Vec<String>,
     pub mounts: Vec<WindowsHcsMountSpec>,
+    pub result_path: PathBuf,
+    pub result_container_path: String,
+    pub max_output_bytes: usize,
     pub network_isolated: bool,
     pub root_read_only: bool,
     pub memory_bytes: u64,
@@ -262,7 +265,7 @@ impl WindowsProductionBackendConfig {
                     destination,
                 } => WindowsHcsMountSpec {
                     host_path: artifact_task_root.join(artifact_id),
-                    container_path: destination.clone(),
+                    container_path: windows_container_path(destination),
                     read_only: true,
                 },
                 SandboxMount::EphemeralScratch {
@@ -270,7 +273,7 @@ impl WindowsProductionBackendConfig {
                     ..
                 } => WindowsHcsMountSpec {
                     host_path: artifact_task_root.join("scratch"),
-                    container_path: destination.clone(),
+                    container_path: windows_container_path(destination),
                     read_only: false,
                 },
             })
@@ -280,6 +283,9 @@ impl WindowsProductionBackendConfig {
             image_root: image_task_root,
             entrypoint: self.entrypoint.clone(),
             mounts,
+            result_path: artifact_task_root.join("scratch").join("result.json"),
+            result_container_path: "C:\\work\\output\\result.json".into(),
+            max_output_bytes: self.max_output_bytes,
             network_isolated: true,
             root_read_only: true,
             memory_bytes: self.policy.memory_bytes,
@@ -318,6 +324,10 @@ impl WindowsProductionBackendConfig {
             .map_err(ProductionBackendRegistryError::WindowsLaunchInvalid)?;
         Ok(())
     }
+}
+
+fn windows_container_path(destination: &str) -> String {
+    format!("C:\\{}", destination.trim_start_matches('/').replace('/', "\\"))
 }
 
 fn is_absolute_windows_path(path: &std::path::Path) -> bool {

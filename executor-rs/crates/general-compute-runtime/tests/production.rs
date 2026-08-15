@@ -156,8 +156,13 @@ fn windows_hcs_spec_uses_only_operator_roots_and_enforces_isolation_flags() {
     assert_eq!(spec.mounts.len(), 2);
     assert!(spec.mounts[0].read_only);
     assert!(spec.mounts[0].host_path.ends_with("artifacts\\task-123\\source"));
+    assert_eq!(spec.mounts[0].container_path, "C:\\work\\source");
     assert!(!spec.mounts[1].read_only);
     assert!(spec.mounts[1].host_path.ends_with("artifacts\\task-123\\scratch"));
+    assert_eq!(spec.mounts[1].container_path, "C:\\work\\output");
+    assert!(spec.result_path.ends_with("artifacts\\task-123\\scratch\\result.json"));
+    assert_eq!(spec.result_container_path, "C:\\work\\output\\result.json");
+    assert_eq!(spec.max_output_bytes, registration.max_output_bytes);
 }
 
 #[test]

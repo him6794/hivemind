@@ -648,9 +648,25 @@ fn execute_windows_backend_task(
         .mounts
         .iter()
         .find_map(|mount| mount.host_path.parent().map(std::path::Path::to_path_buf))
-        .ok_or_else(|| ExecutionError::BackendUnavailable("Windows artifact root is unavailable".into()))?;
+        .ok_or_else(|| {
+            ExecutionError::BackendUnavailable("Windows artifact root is unavailable".into())
+        })?;
     std::fs::create_dir_all(&artifact_root)
         .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
+    let scratch_root = spec.result_path.parent().ok_or_else(|| {
+        ExecutionError::BackendUnavailable("Windows result root is unavailable".into())
+    })?;
+    std::fs::create_dir_all(scratch_root)
+        .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
+    if let Ok(metadata) = std::fs::symlink_metadata(&spec.result_path) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(ExecutionError::BackendUnavailable(
+                "Windows result path is not a regular file".into(),
+            ));
+        }
+        std::fs::remove_file(&spec.result_path)
+            .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
+    }
     let materializer = ArtifactMaterializer::new(&artifact_root)
         .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
     let mut materialized_bytes = Vec::with_capacity(1 + request.input_artifacts.len());
