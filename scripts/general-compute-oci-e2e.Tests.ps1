@@ -103,7 +103,8 @@ foreach ($expected in @(
     "general-compute-result-v1",
     "timeout_cancel",
     "network_denied",
-    "filesystem_denied"
+    "filesystem_denied",
+    "/state/bundles"
 )) {
     if (!$fixtureTemplateText.Contains($expected)) {
         throw "Reviewed OCI fixture must contain the real multi-process evidence path '$expected'."
