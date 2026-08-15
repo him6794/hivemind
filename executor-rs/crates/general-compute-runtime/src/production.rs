@@ -6,7 +6,10 @@
 //! the OCI launcher.
 
 use crate::GeneralComputeRequest;
-use crate::sandbox::{BackendExecutionMode, ProductionSandboxLaunch, SandboxMount};
+use crate::sandbox::{
+    BackendExecutionMode, ProductionSandboxLaunch, SandboxMount, WindowsNativeSandboxLaunch,
+    WindowsSandboxPolicy,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -162,6 +165,91 @@ impl ProductionBackendConfig {
     }
 }
 
+/// Operator-owned registration for a native Windows HCS/container backend.
+///
+/// This schema is intentionally separate from [`ProductionBackendConfig`].
+/// Linux OCI paths and policies must never be reinterpreted as Windows
+/// isolation settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowsProductionBackendConfig {
+    pub backend_id: String,
+    pub guest_image_digest: String,
+    pub image_root: PathBuf,
+    pub artifact_root: PathBuf,
+    pub runner_executable: PathBuf,
+    pub runner_sha256: String,
+    pub entrypoint: Vec<String>,
+    pub policy: WindowsSandboxPolicy,
+    pub max_output_bytes: usize,
+    pub timeout_ms: u64,
+}
+
+impl WindowsProductionBackendConfig {
+    pub fn execution_mode(&self) -> BackendExecutionMode {
+        BackendExecutionMode::ProductionSandboxedWindows
+    }
+
+    pub fn launch(&self) -> WindowsNativeSandboxLaunch {
+        WindowsNativeSandboxLaunch {
+            backend_id: self.backend_id.clone(),
+            guest_image_digest: self.guest_image_digest.clone(),
+            entrypoint: self.entrypoint.clone(),
+            policy: self.policy.clone(),
+        }
+    }
+
+    pub fn task_root(
+        &self,
+        task_id: &str,
+    ) -> Result<(PathBuf, PathBuf), ProductionBackendRegistryError> {
+        if !is_safe_task_id(task_id) {
+            return Err(ProductionBackendRegistryError::UnsafeTaskId);
+        }
+        ensure_contained(&self.image_root, &self.image_root.join(task_id))?;
+        ensure_contained(&self.artifact_root, &self.artifact_root.join(task_id))?;
+        Ok((self.image_root.join(task_id), self.artifact_root.join(task_id)))
+    }
+
+    pub fn validate(&self) -> Result<(), ProductionBackendRegistryError> {
+        if self.backend_id.trim().is_empty() {
+            return Err(ProductionBackendRegistryError::EmptyBackendId);
+        }
+        if self.max_output_bytes == 0 || self.timeout_ms == 0 {
+            return Err(ProductionBackendRegistryError::WindowsResourceLimitRequired);
+        }
+        for path in [&self.image_root, &self.artifact_root, &self.runner_executable] {
+            if !is_absolute_windows_path(path) {
+                return Err(ProductionBackendRegistryError::WindowsPathMustBeAbsolute);
+            }
+            if path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir | std::path::Component::CurDir
+                )
+            }) {
+                return Err(ProductionBackendRegistryError::WindowsPathTraversal);
+            }
+        }
+        if !is_sha256_digest(&self.runner_sha256) {
+            return Err(ProductionBackendRegistryError::WindowsRunnerDigestInvalid);
+        }
+        self.launch()
+            .validate()
+            .map_err(ProductionBackendRegistryError::WindowsLaunchInvalid)?;
+        Ok(())
+    }
+}
+
+fn is_absolute_windows_path(path: &std::path::Path) -> bool {
+    let value = path.to_string_lossy();
+    let bytes = value.as_bytes();
+    (bytes.len() >= 3
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/'))
+        || value.starts_with("\\\\")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProductionBackendRegistryError {
     EmptyBackendId,
@@ -178,6 +266,12 @@ pub enum ProductionBackendRegistryError {
     ArtifactMountRequired(String),
     ArtifactMountNotRequested(String),
     RootUnavailable(String),
+    WindowsPathMustBeAbsolute,
+    WindowsPathTraversal,
+    WindowsRunnerDigestInvalid,
+    WindowsLaunchInvalid(crate::sandbox::ProductionSandboxError),
+    WindowsResourceLimitRequired,
+    WindowsRegistryEmpty,
 }
 
 fn ensure_contained(
@@ -563,6 +657,42 @@ impl ProductionBackendRegistry {
 
     pub fn is_empty(&self) -> bool {
         self.backends.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WindowsProductionBackendRegistry {
+    backends: BTreeMap<String, WindowsProductionBackendConfig>,
+}
+
+impl WindowsProductionBackendRegistry {
+    pub fn new(
+        registrations: Vec<WindowsProductionBackendConfig>,
+    ) -> Result<Self, ProductionBackendRegistryError> {
+        if registrations.is_empty() {
+            return Err(ProductionBackendRegistryError::WindowsRegistryEmpty);
+        }
+        let mut backends = BTreeMap::new();
+        for registration in registrations {
+            registration.validate()?;
+            let backend_id = registration.backend_id.clone();
+            if backends.insert(backend_id.clone(), registration).is_some() {
+                return Err(ProductionBackendRegistryError::DuplicateBackend(backend_id));
+            }
+        }
+        Ok(Self { backends })
+    }
+
+    pub fn get(&self, backend_id: &str) -> Option<&WindowsProductionBackendConfig> {
+        self.backends.get(backend_id)
+    }
+
+    pub fn registrations(&self) -> impl Iterator<Item = &WindowsProductionBackendConfig> {
+        self.backends.values()
+    }
+
+    pub fn len(&self) -> usize {
+        self.backends.len()
     }
 }
 
