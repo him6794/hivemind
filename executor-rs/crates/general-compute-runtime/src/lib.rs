@@ -13,7 +13,6 @@ pub mod cp_python;
 pub mod differential;
 pub mod execution;
 pub mod gpu;
-pub mod gpu_tensor;
 pub mod numeric;
 pub mod monte_carlo;
 pub mod ode;
@@ -26,6 +25,7 @@ pub mod statistics;
 pub mod supervisor;
 pub mod tensor;
 pub mod transport;
+pub mod windows_hcs;
 
 pub const GENERAL_COMPUTE_RUNTIME_VERSION: &str = "general-compute-v1alpha1";
 pub const MAX_CPU_MILLIS: u64 = 24 * 60 * 60 * 1000;
