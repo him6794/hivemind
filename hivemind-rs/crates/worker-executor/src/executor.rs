@@ -3,8 +3,8 @@ use general_compute_runtime::artifact::{ArtifactMaterializer, CasChunkStore};
 use general_compute_runtime::cp_python::{PythonBackendRegistration, PythonBackendRegistry};
 use general_compute_runtime::execution::{ExecutionError, ReferenceBackendExecutor};
 use general_compute_runtime::production::{
-    ProductionBackendConfig, ProductionBackendRegistry, WindowsProductionBackendConfig,
-    WindowsProductionBackendRegistry,
+    ManagedDslBackendRegistry, ProductionBackendConfig, ProductionBackendRegistry,
+    WindowsProductionBackendConfig, WindowsProductionBackendRegistry,
 };
 use general_compute_runtime::sandbox::{BackendExecutionMode, ProductionSandboxLauncher};
 use general_compute_runtime::windows_hcs::WindowsHcsLauncher;
@@ -145,6 +145,118 @@ fn execute_managed_function_task(
     })
 }
 
+fn execute_managed_dsl_task(
+    task: &Task,
+    elapsed_ms: i64,
+    cancelled: &AtomicBool,
+    registry: &ManagedDslBackendRegistry,
+) -> Result<super::TaskResult> {
+    if registry.len() != 1 {
+        return Err(anyhow::anyhow!(
+            "production_sandboxed_dsl requires exactly one operator-managed DSL backend"
+        ));
+    }
+    let backend = registry
+        .registrations()
+        .next()
+        .expect("registry length checked above");
+    let source = task
+        .task_source
+        .as_deref()
+        .filter(|source| !source.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("production_sandboxed_dsl task_source is required"))?;
+    let input = task
+        .torrent_source
+        .as_deref()
+        .filter(|input| !input.trim().is_empty())
+        .unwrap_or("null");
+    let requested_usage = (task.max_cpt > 0).then_some(task.max_cpt as u64);
+    let max_usage_units = requested_usage
+        .map(|requested| requested.min(backend.max_usage_units))
+        .or(Some(backend.max_usage_units));
+    let limits = ExecutionLimits {
+        max_usage_units,
+        max_output_bytes: backend.max_output_bytes as u64,
+        ..ExecutionLimits::default()
+    };
+    let execution = match ManagedExecutor.execute_json_input_with_cancel(
+        source,
+        limits,
+        input,
+        cancelled,
+    ) {
+        Ok(execution) => execution,
+        Err(error) => {
+            let error_message = if error.code() == "cancelled" {
+                "Task execution stopped".to_string()
+            } else {
+                error.to_string()
+            };
+            let receipt = json!({
+                "runtime": "managed-function-v0",
+                "execution_mode": "production_sandboxed_dsl",
+                "backend_id": backend.backend_id,
+                "semantics_manifest_sha256": backend.semantics_manifest_sha256,
+                "status": "failed",
+                "executed_ops": 0,
+                "output_bytes": 0,
+                "failure_code": error.code(),
+                "failure_message": error_message,
+            });
+            return Ok(super::TaskResult {
+                task_id: task.task_id.clone(),
+                success: false,
+                output: None,
+                error: Some(error_message),
+                exit_code: 1,
+                cpu_time_ms: 0,
+                wall_time_ms: elapsed_ms,
+                peak_memory_mb: 0,
+                managed_executed_ops: 0,
+                managed_output_bytes: 0,
+                managed_receipt_json: Some(receipt.to_string()),
+                managed_proof: None,
+                general_compute_result_json: None,
+            });
+        }
+    };
+    let output = if execution.output.is_empty() {
+        render_output_bounded(&execution.value, backend.max_output_bytes as u64)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?
+    } else {
+        execution.output
+    };
+    let output_bytes = output.len() as i64;
+    let receipt = json!({
+        "runtime": "managed-function-v0",
+        "execution_mode": "production_sandboxed_dsl",
+        "backend_id": backend.backend_id,
+        "semantics_manifest_sha256": backend.semantics_manifest_sha256,
+        "status": "completed",
+        "usage_units": execution.receipt.usage_units,
+        "executed_ops": execution.receipt.executed_ops,
+        "function_calls": execution.receipt.function_calls,
+        "loop_iterations": execution.receipt.loop_iterations,
+        "max_call_depth": execution.receipt.max_call_depth,
+        "output_bytes": output_bytes,
+    });
+    Ok(super::TaskResult {
+        task_id: task.task_id.clone(),
+        success: true,
+        output: Some(output),
+        error: None,
+        exit_code: 0,
+        cpu_time_ms: 0,
+        wall_time_ms: elapsed_ms,
+        peak_memory_mb: 0,
+        managed_executed_ops: execution.receipt.usage_units.min(i64::MAX as u64) as i64,
+        managed_output_bytes: output_bytes,
+        managed_receipt_json: Some(receipt.to_string()),
+        managed_proof: None,
+        general_compute_result_json: None,
+    })
+}
+
 pub async fn run_task(task: &Task, config: &HivemindConfig) -> Result<super::TaskResult> {
     let (_cancel_tx, cancel_rx) = watch::channel(false);
     run_task_with_cancel(task, config, cancel_rx).await
@@ -252,6 +364,28 @@ pub(crate) async fn run_task_with_cancel_and_backends_and_trusted_registration_a
         task.req_gpu_score > 0,
         task.req_storage_gb
     );
+
+    if task.runtime.as_deref() == Some("production_sandboxed_dsl") {
+        let task = task.clone();
+        let registry = managed_dsl_backends_from_environment()?;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let execution_cancelled = cancelled.clone();
+        let mut execution = tokio::task::spawn_blocking(move || {
+            execute_managed_dsl_task(
+                &task,
+                start.elapsed().as_millis() as i64,
+                &execution_cancelled,
+                &registry,
+            )
+        });
+        return tokio::select! {
+            result = &mut execution => result.map_err(anyhow::Error::from)?,
+            _ = wait_for_cancellation(&mut cancel_rx) => {
+                cancelled.store(true, Ordering::Release);
+                execution.await.map_err(anyhow::Error::from)?
+            }
+        };
+    }
 
     if is_managed_function_task(task) {
         let task = task.clone();
@@ -834,6 +968,24 @@ pub fn reference_executor_from_environment(
         registry,
         admission.trusted_registration(),
     )))
+}
+
+pub fn managed_dsl_backends_from_environment() -> anyhow::Result<ManagedDslBackendRegistry> {
+    let path = std::env::var("HIVEMIND_MANAGED_DSL_PRODUCTION_BACKENDS")
+        .map_err(|_| anyhow::anyhow!("production_sandboxed_dsl backend registry is unavailable"))?;
+    if path.trim().is_empty() {
+        return Err(anyhow::anyhow!(
+            "production_sandboxed_dsl backend registry is unavailable"
+        ));
+    }
+    let bytes = std::fs::read(&path).map_err(|error| {
+        anyhow::anyhow!("failed to read operator managed DSL backend registry {path:?}: {error}")
+    })?;
+    let registrations = serde_json::from_slice(&bytes).map_err(|error| {
+        anyhow::anyhow!("operator managed DSL backend registry is invalid: {error}")
+    })?;
+    ManagedDslBackendRegistry::new(registrations)
+        .map_err(|error| anyhow::anyhow!("operator managed DSL backend registry is invalid: {error}"))
 }
 
 pub fn production_backends_from_environment(
