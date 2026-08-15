@@ -1560,3 +1560,16 @@ tests and `cargo check -p hivemind-proto --locked` is green.
 - TDD evidence now passes HCS unit tests 6/6 and Windows-target compilation.
   This remains lifecycle-policy evidence only; it is not real Windows HCS,
   container, network, filesystem, hostile-workload, or Postgres E2E evidence.
+
+## Worker protobuf integration checkpoint (2026-08-15)
+
+- Commit `6b9e515 fix(proto): rebuild generated bindings when schemas change`
+  adds explicit `cargo:rerun-if-changed` directives for the shared protobuf
+  schemas. The Worker integration compile blocker was generated-code staleness,
+  not a missing Windows execution API: after regeneration,
+  `cargo check -p hivemind-worker-executor` passes.
+- The Worker library test binary reaches linking but remains environment
+  blocked by an existing Windows native-link failure from the client-runtime
+  dependency (`__mingw_fprintf_cgo_beginthread`, LNK2019/LNK1120). This is
+  reported as a failed test gate, not as passing Worker tests. No production
+  code was weakened to bypass the linker.
