@@ -144,6 +144,32 @@ fn windows_registry_rejects_empty_registry() {
 }
 
 #[test]
+fn windows_hcs_spec_uses_only_operator_roots_and_enforces_isolation_flags() {
+    let registration = windows_config("windows-spec");
+    let spec = registration
+        .hcs_spec("task-123")
+        .expect("validated registration should produce an HCS spec");
+    assert_eq!(spec.container_id, "hivemind-task-123");
+    assert!(spec.network_isolated);
+    assert!(spec.root_read_only);
+    assert_eq!(spec.entrypoint, vec!["hivemind-runner.exe"]);
+    assert_eq!(spec.mounts.len(), 2);
+    assert!(spec.mounts[0].read_only);
+    assert!(spec.mounts[0].host_path.ends_with("artifacts\\task-123\\source"));
+    assert!(!spec.mounts[1].read_only);
+    assert!(spec.mounts[1].host_path.ends_with("artifacts\\task-123\\scratch"));
+}
+
+#[test]
+fn windows_hcs_spec_rejects_task_id_traversal_before_path_construction() {
+    let registration = windows_config("windows-spec-traversal");
+    assert_eq!(
+        registration.hcs_spec("..\\escape").unwrap_err(),
+        ProductionBackendRegistryError::UnsafeTaskId
+    );
+}
+
+#[test]
 fn production_registry_rejects_unpinned_or_relative_operator_paths() {
     let error = ProductionBackendRegistry::new(vec![config()])
         .expect_err("production backend must not accept relative operator paths");

@@ -185,6 +185,30 @@ pub struct WindowsProductionBackendConfig {
     pub timeout_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowsHcsMountSpec {
+    pub host_path: PathBuf,
+    pub container_path: String,
+    pub read_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowsHcsContainerSpec {
+    pub container_id: String,
+    pub image_root: PathBuf,
+    pub entrypoint: Vec<String>,
+    pub mounts: Vec<WindowsHcsMountSpec>,
+    pub network_isolated: bool,
+    pub root_read_only: bool,
+    pub memory_bytes: u64,
+    pub cpu_millis: u64,
+    pub process_limit: u32,
+    pub thread_limit: u32,
+    pub scratch_bytes: u64,
+}
+
 impl WindowsProductionBackendConfig {
     pub fn execution_mode(&self) -> BackendExecutionMode {
         BackendExecutionMode::ProductionSandboxedWindows
@@ -215,6 +239,55 @@ impl WindowsProductionBackendConfig {
         ensure_no_symlink_ancestors(&image_task_root)?;
         ensure_no_symlink_ancestors(&artifact_task_root)?;
         Ok((image_task_root, artifact_task_root))
+    }
+
+    /// Build the operator-owned HCS specification without invoking HCS.
+    ///
+    /// Every host path comes from this validated registration and the
+    /// task-specific operator roots; no Worker-provided path is accepted.
+    pub fn hcs_spec(
+        &self,
+        task_id: &str,
+    ) -> Result<WindowsHcsContainerSpec, ProductionBackendRegistryError> {
+        self.validate()?;
+        let (image_task_root, artifact_task_root) = self.task_root(task_id)?;
+        let container_id = format!("hivemind-{task_id}");
+        let mounts = self
+            .policy
+            .mounts
+            .iter()
+            .map(|mount| match mount {
+                SandboxMount::ReadOnlyArtifact {
+                    artifact_id,
+                    destination,
+                } => WindowsHcsMountSpec {
+                    host_path: artifact_task_root.join(artifact_id),
+                    container_path: destination.clone(),
+                    read_only: true,
+                },
+                SandboxMount::EphemeralScratch {
+                    destination,
+                    ..
+                } => WindowsHcsMountSpec {
+                    host_path: artifact_task_root.join("scratch"),
+                    container_path: destination.clone(),
+                    read_only: false,
+                },
+            })
+            .collect();
+        Ok(WindowsHcsContainerSpec {
+            container_id,
+            image_root: image_task_root,
+            entrypoint: self.entrypoint.clone(),
+            mounts,
+            network_isolated: true,
+            root_read_only: true,
+            memory_bytes: self.policy.memory_bytes,
+            cpu_millis: self.policy.cpu_millis,
+            process_limit: self.policy.process_limit,
+            thread_limit: self.policy.thread_limit,
+            scratch_bytes: self.policy.scratch_bytes,
+        })
     }
 
     pub fn validate(&self) -> Result<(), ProductionBackendRegistryError> {
