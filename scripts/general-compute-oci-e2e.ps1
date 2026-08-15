@@ -549,6 +549,7 @@ function Use-ComposeFixtureEnvironment {
         $registrations | ForEach-Object {
             [ordered]@{
                 backend_id = [string]$_.backend_id
+                execution_mode = [string]$_.execution_mode
                 guest_image_digest = [string]$_.guest_image_digest
                 capabilities = @("cpu")
                 max_threads = 1
