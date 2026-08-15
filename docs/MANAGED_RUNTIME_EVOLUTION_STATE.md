@@ -1590,3 +1590,19 @@ tests and `cargo check -p hivemind-proto --locked` is green.
   and a non-empty operator backend registry; it exits with code 2 before any
   execution when prerequisites are absent. On this host it correctly reports
   `Containers: Disabled` and does not create synthetic evidence.
+
+## Closed DSL platform-boundary checkpoint (2026-08-15)
+
+- The platform contract is now explicitly split: closed `managed-function-v0`
+  workloads are intended to use a cross-platform `production_sandboxed_dsl`
+  backend, while Linux and Windows HCS remain general-compute backends only.
+- A Windows Worker running the closed DSL must not require Windows Containers,
+  HCS, Docker, WSL, or a Linux VM. The DSL remains bounded and capability-closed;
+  it does not become general-compute merely because it runs on Windows.
+- Windows Containers/HCS prerequisites remain mandatory when, and only when, a
+  task selects the Windows general-compute backend. Existing HCS evidence above
+  is therefore conditional general-compute evidence and is not a prerequisite
+  for the DSL product path.
+- This documentation checkpoint does not claim that the production DSL mode,
+  scheduler admission, or explicit backend identity has been implemented yet;
+  those remain the next TDD slices.
