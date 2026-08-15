@@ -107,7 +107,9 @@ foreach ($expected in @(
     "/state/bundles",
     "chown -R 100000:100000 /state/bundles/*/rootfs",
     "rootfs/work/source",
-    "rootfs/work/output"
+    "rootfs/work/output",
+    "Read-ResultDiagnostic",
+    "result diagnostic:"
 )) {
     if (!$fixtureTemplateText.Contains($expected)) {
         throw "Reviewed OCI fixture must contain the real multi-process evidence path '$expected'."
