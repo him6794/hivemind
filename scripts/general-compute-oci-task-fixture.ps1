@@ -242,7 +242,11 @@ function Provision-OperatorVolumes {
             "cp -a /source/config/. /target/",
             "mkdir -p /state/artifacts /state/runner-state"
         ) + $stateDirectories + @(
+            # Rootless runc maps container uid 0 to host uid 100000. The
+            # mapped root must own the immutable rootfs so runc can create
+            # mount destinations such as /work before dropping to uid 65532.
             "chown -R 10001:10001 /state",
+            "chown -R 100000:100000 /state/bundles/*/rootfs",
             "chmod -R a+rX /target",
             "chmod a+rx /target/runners/*/runner"
         )

@@ -104,7 +104,8 @@ foreach ($expected in @(
     "timeout_cancel",
     "network_denied",
     "filesystem_denied",
-    "/state/bundles"
+    "/state/bundles",
+    "chown -R 100000:100000 /state/bundles/*/rootfs"
 )) {
     if (!$fixtureTemplateText.Contains($expected)) {
         throw "Reviewed OCI fixture must contain the real multi-process evidence path '$expected'."
