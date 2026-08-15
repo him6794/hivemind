@@ -5,6 +5,7 @@ use general_compute_runtime::{
     WorkerCapabilities, GENERAL_COMPUTE_RUNTIME_VERSION,
 };
 use general_compute_runtime::gpu::{GpuRequirement, GpuRuntime, GpuVendor};
+use general_compute_runtime::sandbox::BackendExecutionMode;
 
 fn valid_request() -> GeneralComputeRequest {
     let mut request = GeneralComputeRequest {
@@ -174,6 +175,7 @@ fn result_validation_rejects_retry_identity_mismatch() {
     };
     let registry = CapabilityMatrix::new(vec![BackendRegistration {
         backend_id: request.backend_id.clone(),
+        execution_mode: BackendExecutionMode::ReferenceDirect,
         guest_image_digest: request.guest_image_digest.clone(),
         capabilities: vec!["cpu".into()],
         max_threads: 1,
@@ -192,6 +194,7 @@ fn result_validation_rejects_retry_identity_mismatch() {
 fn valid_registry(request: &GeneralComputeRequest) -> CapabilityMatrix {
     CapabilityMatrix::new(vec![BackendRegistration {
         backend_id: request.backend_id.clone(),
+        execution_mode: BackendExecutionMode::ReferenceDirect,
         guest_image_digest: request.guest_image_digest.clone(),
         capabilities: vec!["cpu".into()],
         max_threads: 1,
@@ -408,6 +411,7 @@ fn capability_matrix_rejects_unregistered_image_and_missing_worker_capability() 
     let request = valid_request();
     let matrix = CapabilityMatrix::new(vec![BackendRegistration {
         backend_id: "python-numpy-scipy".into(),
+        execution_mode: BackendExecutionMode::ReferenceDirect,
         guest_image_digest: "sha256:registered".into(),
         capabilities: vec!["cpu".into(), "numpy".into()],
         max_threads: 4,
@@ -449,6 +453,7 @@ fn capability_matrix_rejects_network_and_gpu_requirements_without_registration()
     request.request_digest = request.canonical_request_digest();
     let matrix = CapabilityMatrix::new(vec![BackendRegistration {
         backend_id: "python-numpy-scipy".into(),
+        execution_mode: BackendExecutionMode::ReferenceDirect,
         guest_image_digest:
             "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
         capabilities: vec!["cpu".into()],
