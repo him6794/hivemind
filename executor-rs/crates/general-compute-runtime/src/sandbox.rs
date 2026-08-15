@@ -234,7 +234,7 @@ impl ProductionSandboxLaunch {
 
 /// A production launch can only report policy/platform/runner state here; it
 /// never falls back to direct process execution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProductionSandboxError {
     Policy(SandboxPolicyError),
     InvalidBackendId,
@@ -249,6 +249,7 @@ pub enum ProductionSandboxError {
     UnsupportedPlatform,
     RunnerUnavailable,
     RunnerSpawn,
+    RunnerSpawnDetail(String),
 }
 
 impl std::fmt::Display for ProductionSandboxError {
@@ -470,7 +471,7 @@ impl ProductionSandboxLauncher {
         // Command and owns process-group/job cleanup.
         let result = ReferenceProcessSupervisor::new()
             .run_with_stdin(command, &[], cancellation)
-            .map_err(|_| ProductionSandboxError::RunnerSpawn)?;
+            .map_err(|error| ProductionSandboxError::RunnerSpawnDetail(format!("{error:?}")))?;
         Ok(result)
     }
 }
