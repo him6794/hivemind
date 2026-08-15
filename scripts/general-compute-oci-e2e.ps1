@@ -474,7 +474,10 @@ $composeFixtureEnvironmentNames = @(
     "WORKER_NODEPOOL_USERNAME",
     "WORKER_NODEPOOL_PASSWORD",
     "WORKER_ID",
-    "HIVEMIND_GENERAL_COMPUTE_OCI_E2E_EVIDENCE"
+    "HIVEMIND_GENERAL_COMPUTE_OCI_E2E_EVIDENCE",
+    "HIVEMIND_GENERAL_COMPUTE_TRUSTED_WORKER_CAPABILITIES",
+    "HIVEMIND_GENERAL_COMPUTE_BACKENDS",
+    "HIVEMIND_GENERAL_COMPUTE_WORKER_CAPABILITIES"
 )
 $script:composeFixtureEnvironmentBackup = [ordered]@{}
 $script:composeFixtureEnvironmentApplied = $false
@@ -500,6 +503,76 @@ function Use-ComposeFixtureEnvironment {
     [Environment]::SetEnvironmentVariable(
         "HIVEMIND_GENERAL_COMPUTE_OCI_E2E_EVIDENCE",
         $EvidencePath,
+        "Process"
+    )
+    try {
+        $registrations = Get-Content -LiteralPath $RegistryPath -Raw -Encoding utf8 | ConvertFrom-Json
+    } catch {
+        Fail-Contract "operator production backend registry is not valid JSON: $($_.Exception.Message)"
+    }
+    $trustedBackends = @(
+        $registrations | ForEach-Object {
+            [ordered]@{
+                backend_id = [string]$_.backend_id
+                execution_mode = [string]$_.execution_mode
+                guest_image_digest = [string]$_.guest_image_digest
+                capabilities = @("cpu")
+                max_threads = 1
+                network_allowed = $false
+                filesystem_read_only = $true
+                gpu_allowed = $false
+            }
+        }
+    )
+    # Nodepool must receive the operator-owned capability registration. Worker
+    # self-reporting alone is intentionally insufficient for admission.
+    $first = $registrations | Select-Object -First 1
+    $trusted = [ordered]@{
+        $WorkerId = [ordered]@{
+            owner = $Username
+            worker = [ordered]@{
+                guest_image_digests = @([string]$first.guest_image_digest)
+                capabilities = @("cpu")
+                max_threads = 1
+                gpu_available = $false
+            }
+            backends = $trustedBackends
+        }
+    }
+    $trustedJson = $trusted | ConvertTo-Json -Depth 20 -Compress
+    [Environment]::SetEnvironmentVariable(
+        "HIVEMIND_GENERAL_COMPUTE_TRUSTED_WORKER_CAPABILITIES",
+        $trustedJson,
+        "Process"
+    )
+    $workerBackends = @(
+        $registrations | ForEach-Object {
+            [ordered]@{
+                backend_id = [string]$_.backend_id
+                guest_image_digest = [string]$_.guest_image_digest
+                capabilities = @("cpu")
+                max_threads = 1
+                network_allowed = $false
+                filesystem_read_only = $true
+                gpu_allowed = $false
+            }
+        }
+    )
+    $workerBackendsJson = $workerBackends | ConvertTo-Json -Depth 20 -Compress
+    $workerCapabilitiesJson = [ordered]@{
+        guest_image_digests = @($registrations | ForEach-Object { [string]$_.guest_image_digest })
+        capabilities = @("cpu")
+        max_threads = 1
+        gpu_available = $false
+    } | ConvertTo-Json -Depth 20 -Compress
+    [Environment]::SetEnvironmentVariable(
+        "HIVEMIND_GENERAL_COMPUTE_BACKENDS",
+        $workerBackendsJson,
+        "Process"
+    )
+    [Environment]::SetEnvironmentVariable(
+        "HIVEMIND_GENERAL_COMPUTE_WORKER_CAPABILITIES",
+        $workerCapabilitiesJson,
         "Process"
     )
     $script:composeFixtureEnvironmentApplied = $true
@@ -715,6 +788,15 @@ try {
         Write-Host ("general-compute OCI E2E fixture passed: task {0}, evidence {1}" -f $evidence.task_id, $evidencePath)
     } finally {
         if ($composeStarted) {
+            Write-Host "DIAGNOSTICS docker compose logs --no-color --tail=160 nodepool master worker"
+            $diagnosticLogs = @(& docker compose `
+                --project-name $safeProjectName `
+                --project-directory $repoRoot `
+                --file $ComposeFile `
+                logs --no-color --tail=160 nodepool master worker)
+            $diagnosticLogs | Where-Object {
+                $_.ToString() -match 'error|warn|backend|general-compute|OCI|execution|task'
+            }
             Write-Host "CLEANUP docker compose down --volumes --remove-orphans"
             & docker compose `
                 --project-name $safeProjectName `

@@ -39,6 +39,8 @@ foreach ($expected in @(
     "Restore-IsolatedComposeVolumes",
     "WORKER_GENERAL_COMPUTE_CONFIG_VOLUME_NAME",
     "WORKER_GENERAL_COMPUTE_STATE_VOLUME_NAME",
+    "HIVEMIND_GENERAL_COMPUTE_BACKENDS",
+    "HIVEMIND_GENERAL_COMPUTE_WORKER_CAPABILITIES",
     "resolved isolated Compose volume names"
 )) {
     if (!$harnessText.Contains($expected)) {
