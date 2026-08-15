@@ -110,6 +110,7 @@ foreach ($expected in @(
     "rootfs/work/output",
     "Read-ResultDiagnostic",
     "convert_from(result_json",
+    'for ($attempt = 0; $attempt -lt 10; $attempt++)',
     "result diagnostic:"
 )) {
     if (!$fixtureTemplateText.Contains($expected)) {
