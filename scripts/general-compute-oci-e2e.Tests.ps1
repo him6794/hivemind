@@ -140,6 +140,10 @@ $ociComposeText = Get-Content -LiteralPath $ociComposePath -Raw
 if ($ociComposeText -notmatch '(?m)^\s*user:\s*"0:0"\s*$') {
     throw "OCI E2E Compose must run the nested runc preparation as outer-container root."
 }
+if ($ociComposeText -notmatch '(?m)^\s*privileged:\s*true\s*$' -or
+    $ociComposeText -notmatch '(?m)^\s*cgroupns:\s*host\s*$') {
+    throw "OCI E2E Compose must expose the writable host cgroup v2 hierarchy to nested runc."
+}
 if ($composeText -match '(?m)^\s*name\s*:\s*hivemind-network\s*$') {
     throw "Release Compose must not fix the network name; project names must isolate OCI E2E networks."
 }
