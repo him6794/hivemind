@@ -8,7 +8,7 @@
     "runner_executable": "D:\\hivemind\\test-fixtures\\general-compute-oci\\runners\\runc",
     "runner_state_root": "D:\\hivemind\\test-fixtures\\general-compute-oci\\runner-state\\success",
     "seccomp_profile_path": "D:\\hivemind\\test-fixtures\\general-compute-oci\\seccomp.json",
-    "runner_prefix_args": [],
+    "runner_prefix_args": ["--rootless=true"],
     "runner_sha256": "sha256:3ced9dd99c69f92b860d463177154e7d37273f3c9cf2191ebd673e8760f5c48b",
     "entrypoint": ["/bin/busybox", "sh", "/bin/guest-success"],
     "policy": {
@@ -35,7 +35,7 @@
     "runner_executable": "D:\\hivemind\\test-fixtures\\general-compute-oci\\runners\\runc",
     "runner_state_root": "D:\\hivemind\\test-fixtures\\general-compute-oci\\runner-state\\network",
     "seccomp_profile_path": "D:\\hivemind\\test-fixtures\\general-compute-oci\\seccomp.json",
-    "runner_prefix_args": [],
+    "runner_prefix_args": ["--rootless=true"],
     "runner_sha256": "sha256:3ced9dd99c69f92b860d463177154e7d37273f3c9cf2191ebd673e8760f5c48b",
     "entrypoint": ["/bin/busybox", "sh", "/bin/guest-network"],
     "policy": {
@@ -62,7 +62,7 @@
     "runner_executable": "D:\\hivemind\\test-fixtures\\general-compute-oci\\runners\\runc",
     "runner_state_root": "D:\\hivemind\\test-fixtures\\general-compute-oci\\runner-state\\filesystem",
     "seccomp_profile_path": "D:\\hivemind\\test-fixtures\\general-compute-oci\\seccomp.json",
-    "runner_prefix_args": [],
+    "runner_prefix_args": ["--rootless=true"],
     "runner_sha256": "sha256:3ced9dd99c69f92b860d463177154e7d37273f3c9cf2191ebd673e8760f5c48b",
     "entrypoint": ["/bin/busybox", "sh", "/bin/guest-filesystem"],
     "policy": {
@@ -89,7 +89,7 @@
     "runner_executable": "D:\\hivemind\\test-fixtures\\general-compute-oci\\runners\\runc",
     "runner_state_root": "D:\\hivemind\\test-fixtures\\general-compute-oci\\runner-state\\timeout",
     "seccomp_profile_path": "D:\\hivemind\\test-fixtures\\general-compute-oci\\seccomp.json",
-    "runner_prefix_args": [],
+    "runner_prefix_args": ["--rootless=true"],
     "runner_sha256": "sha256:3ced9dd99c69f92b860d463177154e7d37273f3c9cf2191ebd673e8760f5c48b",
     "entrypoint": ["/bin/busybox", "sh", "/bin/guest-timeout"],
     "policy": {
