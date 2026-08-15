@@ -1545,3 +1545,18 @@ tests and `cargo check -p hivemind-proto --locked` is green.
   contract passes. Worker integration remains blocked by the pre-existing
   protobuf/API drift listed above. No real Windows provider or settlement E2E
   is claimed.
+
+## Windows HCS lifecycle mock checkpoint (2026-08-15)
+
+- Commit `07c43bd test(runtime): cover Windows HCS lifecycle cleanup` factors
+  the start/wait/terminate/shutdown decision loop behind a small lifecycle
+  provider boundary. The native Windows adapter still performs the real HCS
+  calls; the cross-platform mock verifies the cleanup contract without
+  pretending to be provider evidence.
+- Mock coverage verifies normal exit performs shutdown, timeout performs
+  termination, cancellation performs termination, and start failure does not
+  issue cleanup against an unstarted system. The native adapter continues to
+  use bounded one-second exit polling and closes HCS operation/system handles.
+- TDD evidence now passes HCS unit tests 6/6 and Windows-target compilation.
+  This remains lifecycle-policy evidence only; it is not real Windows HCS,
+  container, network, filesystem, hostile-workload, or Postgres E2E evidence.
