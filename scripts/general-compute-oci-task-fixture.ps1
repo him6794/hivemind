@@ -435,7 +435,7 @@ function Read-ResultDiagnostic {
     if ($CaseTaskId -notmatch '^[A-Za-z0-9_.-]+$') {
         return "unsafe task id"
     }
-    $sql = "SELECT COALESCE(result_json->>'error_code', ''), COALESCE(result_json->>'stderr', '') FROM general_compute_results WHERE task_id = '$CaseTaskId';"
+    $sql = "SELECT COALESCE((convert_from(result_json, 'UTF8')::jsonb)->>'error_code', ''), COALESCE((convert_from(result_json, 'UTF8')::jsonb)->>'stderr', '') FROM general_compute_results WHERE task_id = '$CaseTaskId';"
     $lines = @(Invoke-Compose @("exec", "-T", "postgres", "psql", "-U", "hivemind", "-d", "hivemind", "-At", "-c", $sql))
     $diagnostic = ($lines | ForEach-Object { $_.ToString().Trim() } |
         Where-Object { $_ -and $_ -notmatch '^NOTICE:' } | Select-Object -Last 1)
