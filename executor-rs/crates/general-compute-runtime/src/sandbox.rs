@@ -653,7 +653,7 @@ fn validate_oci_bundle_inner(
         .ok_or(ProductionSandboxError::InvalidBundle)?;
     if linux
         .keys()
-        .any(|key| !["namespaces", "seccomp"].contains(&key.as_str()))
+        .any(|key| !["namespaces", "uidMappings", "gidMappings", "seccomp"].contains(&key.as_str()))
     {
         return Err(ProductionSandboxError::InvalidBundle);
     }
