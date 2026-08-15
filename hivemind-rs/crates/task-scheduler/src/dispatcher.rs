@@ -825,7 +825,7 @@ async fn execute_on_worker(
             return Ok(());
         }
     };
-    if current_task.runtime.as_deref()
+    let general_compute_sources = if current_task.runtime.as_deref()
         == Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION)
     {
         let source_bytes = match load_general_compute_artifact_sources(repo.as_ref(), &current_task)
@@ -881,7 +881,10 @@ async fn execute_on_worker(
             .await?;
             return Ok(());
         }
-    }
+        Some(source_bytes)
+    } else {
+        None
+    };
     let mut request =
         tonic::Request::new(build_execute_task_request_with_token(&current_task, token));
     request.set_timeout(WORKER_EXECUTE_RPC_TIMEOUT);
@@ -934,6 +937,7 @@ async fn execute_on_worker(
                     &current_task,
                     &response,
                     &capability_snapshot,
+                    general_compute_sources.as_ref(),
                 ) {
                     Ok(result) => Some(result),
                     Err(reason) => {
@@ -1354,6 +1358,7 @@ fn decode_and_validate_general_compute_result(
     task: &Task,
     response: &ExecuteTaskResponse,
     capability_snapshot_json: &str,
+    nodepool_sources: Option<&HashMap<String, Vec<u8>>>,
 ) -> std::result::Result<general_compute_runtime::GeneralComputeResult, String> {
     if response.general_compute_result_json.is_empty() {
         return Err("general-compute typed result is missing".into());
@@ -1396,7 +1401,70 @@ fn decode_and_validate_general_compute_result(
     if response.success != expected_success {
         return Err("worker success flag does not match typed result status".into());
     }
+    validate_production_input_digest(&request, &result, &matrix, nodepool_sources)?;
     Ok(result)
+}
+
+/// Production results are eligible for completion only when their input claim
+/// is tied to the exact raw bytes that Nodepool loaded from its immutable
+/// artifact source rows. Reference-direct results retain their legacy digest
+/// semantics because that adapter predates the production runner protocol.
+fn validate_production_input_digest(
+    request: &general_compute_runtime::GeneralComputeRequest,
+    result: &general_compute_runtime::GeneralComputeResult,
+    capabilities: &general_compute_runtime::CapabilityMatrix,
+    sources: Option<&HashMap<String, Vec<u8>>>,
+) -> Result<(), String> {
+    let backend = capabilities
+        .backends
+        .iter()
+        .find(|backend| backend.backend_id == request.backend_id)
+        .ok_or_else(|| "production input digest backend is not registered".to_string())?;
+    if backend.execution_mode
+        != general_compute_runtime::sandbox::BackendExecutionMode::ProductionSandboxedOci
+        || result.status != general_compute_runtime::ResultStatus::Completed
+    {
+        return Ok(());
+    }
+    let Some(sources) = sources else {
+        return Err("production input digest has no Nodepool-owned source bytes".into());
+    };
+
+    let source = trusted_artifact_bytes(&request.source_artifact, sources)?;
+    let mut inputs = Vec::with_capacity(request.input_artifacts.len());
+    for artifact in &request.input_artifacts {
+        inputs.push(trusted_artifact_bytes(artifact, sources)?);
+    }
+    let expected = general_compute_runtime::canonical_input_digest(source, &inputs);
+    if result.input_sha256 != expected {
+        return Err(
+            "production input digest does not match Nodepool-owned materialized bytes".into(),
+        );
+    }
+    Ok(())
+}
+
+/// Re-verify a Nodepool-owned artifact row against the manifest it claims to
+/// satisfy. Bytes that drift in length or SHA-256 are never a trusted input.
+fn trusted_artifact_bytes<'a>(
+    artifact: &general_compute_runtime::ArtifactManifest,
+    sources: &'a HashMap<String, Vec<u8>>,
+) -> Result<&'a [u8], String> {
+    let bytes = sources.get(&artifact.artifact_id).ok_or_else(|| {
+        format!(
+            "production input digest bytes are unavailable for {}",
+            artifact.artifact_id
+        )
+    })?;
+    if bytes.len() as u64 != artifact.size_bytes
+        || general_compute_runtime::sha256_digest(bytes) != artifact.sha256
+    {
+        return Err(format!(
+            "production input digest bytes do not match the manifest for {}",
+            artifact.artifact_id
+        ));
+    }
+    Ok(bytes.as_slice())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1559,9 +1627,9 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use general_compute_runtime::{
-        canonical_artifact_root, sha256_digest, ArtifactManifest, ArtifactRole,
-        BackendRegistration, DeterminismPolicy, EvidenceEnvelope, ExecutionPolicy,
-        GeneralComputeRequest, GeneralComputeResult, ResultStatus,
+        canonical_artifact_root, canonical_input_digest, sha256_digest, ArtifactManifest,
+        ArtifactRole, BackendRegistration, CapabilityMatrix, DeterminismPolicy, EvidenceEnvelope,
+        ExecutionPolicy, GeneralComputeRequest, GeneralComputeResult, ResultStatus,
         TrustedWorkerCapabilityRegistration, UsageClaim, WorkerCapabilities,
         GENERAL_COMPUTE_RUNTIME_VERSION,
     };
@@ -2231,6 +2299,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_on_worker_redispatches_a_production_input_digest_mismatch() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_production_input_digest").await else {
+            return;
+        };
+        let dispatcher = Dispatcher::new(db.clone(), 30, 2);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("dispatch-digest-owner-{unique}");
+        let task_id = format!("dispatch-digest-task-{unique}");
+        let worker_id = format!("dispatch-digest-worker-{unique}");
+        let bytes = b"trusted-source".to_vec();
+        let mut manifest = alpha_result_request();
+        manifest.execution_id = format!("execution-{unique}");
+        manifest.idempotency_key = format!("idempotency-{unique}");
+        manifest.source_artifact = ArtifactManifest {
+            artifact_id: "source".into(),
+            role: ArtifactRole::Source,
+            size_bytes: bytes.len() as u64,
+            mime_type: "text/plain".into(),
+            sha256: sha256_digest(&bytes),
+            chunks: vec![general_compute_runtime::ArtifactChunk {
+                offset: 0,
+                size_bytes: bytes.len() as u64,
+                sha256: sha256_digest(&bytes),
+            }],
+            inline_bytes: Some(bytes.clone()),
+        };
+        manifest.request_digest = manifest.canonical_request_digest();
+
+        let mut result = alpha_result(&manifest);
+        result.input_sha256 = canonical_input_digest(b"worker-chosen-source", &[]);
+        let response = ExecuteTaskResponse {
+            success: true,
+            execution_id: manifest.execution_id.clone(),
+            attempt_id: manifest.attempt_id.clone(),
+            idempotency_key: manifest.idempotency_key.clone(),
+            request_digest: manifest.request_digest.clone(),
+            general_compute_result_json: serde_json::to_vec(&result).unwrap(),
+            ..ExecuteTaskResponse::default()
+        };
+        let Some((worker_addr, _execute_rx)) =
+            fake_worker_execute_server_with_response(response).await
+        else {
+            return;
+        };
+
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        )
+        .bind(&username)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO worker_nodes
+             (worker_id, username, ip, cpu_cores, memory_gb, general_compute_capabilities_json)
+             VALUES ($1, $2, '10.0.0.4', 4, 16, $3)",
+        )
+        .bind(&worker_id)
+        .bind(format!("provider-{unique}"))
+        .bind(production_capability_snapshot(&manifest))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let mut task = make_task(&task_id, TaskStatus::Pending, 0);
+        task.owner = username.clone();
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.torrent_source = None;
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&manifest).unwrap());
+        dispatcher.repo.create(&task).await.unwrap();
+        dispatcher
+            .repo
+            .assign_to_worker(&task_id, &worker_id, &worker_addr.to_string())
+            .await
+            .unwrap();
+
+        let (private_key, _) = hivemind_config::generate_worker_execution_test_key_pair();
+        execute_on_worker(
+            dispatcher.repo.clone(),
+            task,
+            worker_id.clone(),
+            worker_addr.to_string(),
+            &private_key,
+            ManagedProofRolloutMode::Enforce,
+        )
+        .await
+        .unwrap();
+
+        let stored = dispatcher
+            .repo
+            .find_by_task_id(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, TaskStatus::Pending);
+        assert!(stored.worker_id.is_none());
+        assert!(stored.output.is_none());
+        assert!(!stored.billing_settled);
+
+        sqlx::query("DELETE FROM tasks WHERE task_id = $1")
+            .bind(&task_id)
+            .execute(&db.pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM worker_nodes WHERE worker_id = $1")
+            .bind(&worker_id)
+            .execute(&db.pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM users WHERE username = $1")
+            .bind(&username)
+            .execute(&db.pool)
+            .await
+            .ok();
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
     async fn prepare_rpc_failure_redispatches_without_worker_penalty() {
         let lock = dispatcher_db_lock();
         let _guard = lock.lock().await;
@@ -2714,6 +2902,7 @@ mod tests {
             &task,
             &response,
             &alpha_capability_snapshot(&request),
+            None,
         )
         .expect_err("alpha completion must carry a typed result envelope");
 
@@ -2732,6 +2921,7 @@ mod tests {
             &task,
             &response,
             &alpha_capability_snapshot(&request),
+            None,
         )
         .expect_err("malformed typed result must fail closed");
 
@@ -2753,6 +2943,7 @@ mod tests {
             &task,
             &response,
             &alpha_capability_snapshot(&request),
+            None,
         )
         .expect_err("a stale typed result must not settle the current attempt");
 
@@ -2790,9 +2981,13 @@ mod tests {
             ..ExecuteTaskResponse::default()
         };
 
-        let error =
-            decode_and_validate_general_compute_result(&task, &response, &mismatched_snapshot)
-                .expect_err("result validation must use the persisted capability snapshot");
+        let error = decode_and_validate_general_compute_result(
+            &task,
+            &response,
+            &mismatched_snapshot,
+            None,
+        )
+        .expect_err("result validation must use the persisted capability snapshot");
 
         assert!(error.contains("trusted capability snapshot"));
     }
@@ -2871,7 +3066,7 @@ mod tests {
             ..ExecuteTaskResponse::default()
         };
 
-        let error = decode_and_validate_general_compute_result(&task, &response, &snapshot)
+        let error = decode_and_validate_general_compute_result(&task, &response, &snapshot, None)
             .expect_err("a result must use the exact operator-selected GPU identity");
 
         assert!(error.contains("trusted GPU selection"));
@@ -2891,11 +3086,166 @@ mod tests {
             &task,
             &response,
             &alpha_capability_snapshot(&request),
+            None,
         )
         .expect("valid typed result should be accepted");
 
         assert_eq!(validated.stdout, "42");
         assert_eq!(validated.status, ResultStatus::Completed);
+    }
+
+    #[test]
+    fn production_result_input_digest_must_match_nodepool_owned_source_bytes() {
+        let request = alpha_result_request();
+        let mut result = alpha_result(&request);
+        result.input_sha256 = sha256_digest(b"worker-chosen-bytes");
+
+        let error = validate_production_input_digest(
+            &request,
+            &result,
+            &production_capability_matrix(&request),
+            Some(&nodepool_owned_sources()),
+        )
+        .expect_err("a production result must bind its digest to Nodepool source bytes");
+
+        assert!(error.contains("input digest"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn production_result_input_digest_accepts_nodepool_owned_bytes() {
+        let request = alpha_result_request();
+        let mut result = alpha_result(&request);
+        result.input_sha256 = canonical_input_digest(b"source", &[]);
+
+        validate_production_input_digest(
+            &request,
+            &result,
+            &production_capability_matrix(&request),
+            Some(&nodepool_owned_sources()),
+        )
+        .expect("a digest over Nodepool-owned bytes must complete");
+    }
+
+    #[test]
+    fn production_result_input_digest_fails_closed_without_nodepool_source_bytes() {
+        let request = alpha_result_request();
+        let mut result = alpha_result(&request);
+        result.input_sha256 = canonical_input_digest(b"source", &[]);
+
+        let error = validate_production_input_digest(
+            &request,
+            &result,
+            &production_capability_matrix(&request),
+            Some(&HashMap::new()),
+        )
+        .expect_err("Nodepool must not settle a digest it cannot re-derive");
+
+        assert!(error.contains("unavailable"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn production_result_input_digest_fails_closed_without_a_loaded_source_map() {
+        let request = alpha_result_request();
+        let mut result = alpha_result(&request);
+        result.input_sha256 = canonical_input_digest(b"source", &[]);
+
+        let error = validate_production_input_digest(
+            &request,
+            &result,
+            &production_capability_matrix(&request),
+            None,
+        )
+        .expect_err("a production result without loaded Nodepool bytes must fail closed");
+
+        assert!(
+            error.contains("no Nodepool-owned source bytes"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn production_result_input_digest_rejects_source_bytes_that_drift_from_the_manifest() {
+        let request = alpha_result_request();
+        let drifted = b"drifted".to_vec();
+        let mut result = alpha_result(&request);
+        result.input_sha256 = canonical_input_digest(&drifted, &[]);
+        let sources = HashMap::from([(request.source_artifact.artifact_id.clone(), drifted)]);
+
+        let error = validate_production_input_digest(
+            &request,
+            &result,
+            &production_capability_matrix(&request),
+            Some(&sources),
+        )
+        .expect_err("stored bytes that drift from the manifest are not a trusted source");
+
+        assert!(
+            error.contains("do not match the manifest"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn production_result_input_digest_covers_every_input_artifact() {
+        let mut request = alpha_result_request();
+        request.input_artifacts = vec![ArtifactManifest::inline_json(
+            "input",
+            ArtifactRole::Input,
+            b"input",
+        )];
+        request.request_digest = request.canonical_request_digest();
+        let matrix = production_capability_matrix(&request);
+        let sources = HashMap::from([
+            (String::from("source"), b"source".to_vec()),
+            (String::from("input"), b"input".to_vec()),
+        ]);
+
+        let mut source_only = alpha_result(&request);
+        source_only.input_sha256 = canonical_input_digest(b"source", &[]);
+        let error =
+            validate_production_input_digest(&request, &source_only, &matrix, Some(&sources))
+                .expect_err("a digest that omits an input artifact must be rejected");
+        assert!(error.contains("input digest"), "unexpected error: {error}");
+
+        let mut complete = alpha_result(&request);
+        complete.input_sha256 = canonical_input_digest(b"source", &[b"input".as_slice()]);
+        validate_production_input_digest(&request, &complete, &matrix, Some(&sources))
+            .expect("input artifacts belong in the canonical digest");
+    }
+
+    #[test]
+    fn reference_direct_results_keep_their_legacy_input_digest_semantics() {
+        let request = alpha_result_request();
+        let result = alpha_result(&request);
+        let registration: TrustedWorkerCapabilityRegistration =
+            serde_json::from_str(&alpha_capability_snapshot(&request)).unwrap();
+
+        assert_ne!(result.input_sha256, canonical_input_digest(b"source", &[]));
+        validate_production_input_digest(
+            &request,
+            &result,
+            &CapabilityMatrix::new(registration.backends),
+            Some(&nodepool_owned_sources()),
+        )
+        .expect("reference-direct results predate the production digest protocol");
+    }
+
+    fn production_capability_snapshot(request: &GeneralComputeRequest) -> String {
+        let mut registration: TrustedWorkerCapabilityRegistration =
+            serde_json::from_str(&alpha_capability_snapshot(request)).unwrap();
+        registration.backends[0].execution_mode =
+            general_compute_runtime::sandbox::BackendExecutionMode::ProductionSandboxedOci;
+        serde_json::to_string(&registration).unwrap()
+    }
+
+    fn production_capability_matrix(request: &GeneralComputeRequest) -> CapabilityMatrix {
+        let registration: TrustedWorkerCapabilityRegistration =
+            serde_json::from_str(&production_capability_snapshot(request)).unwrap();
+        CapabilityMatrix::new(registration.backends)
+    }
+
+    fn nodepool_owned_sources() -> HashMap<String, Vec<u8>> {
+        HashMap::from([(String::from("source"), b"source".to_vec())])
     }
 
     #[test]
