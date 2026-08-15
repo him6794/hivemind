@@ -177,7 +177,7 @@ pub async fn run_task_with_cancel_and_reference_and_cas(
         cancel_rx,
         reference_executor,
         cas_store,
-        production_backends_from_environment(),
+        production_backends_from_environment()?,
         runtime_capability_matrix_from_environment(),
     )
     .await
@@ -683,16 +683,23 @@ pub fn reference_executor_from_environment(
     )))
 }
 
-pub fn production_backends_from_environment() -> Option<Arc<ProductionBackendRegistry>> {
-    let path = std::env::var("HIVEMIND_GENERAL_COMPUTE_PRODUCTION_BACKENDS").ok()?;
-    if path.trim().is_empty() {
-        return None;
-    }
-    let bytes = std::fs::read(path).ok()?;
-    let registrations = serde_json::from_slice::<Vec<ProductionBackendConfig>>(&bytes).ok()?;
+pub fn production_backends_from_environment(
+) -> anyhow::Result<Option<Arc<ProductionBackendRegistry>>> {
+    let path = match std::env::var("HIVEMIND_GENERAL_COMPUTE_PRODUCTION_BACKENDS") {
+        Ok(path) if !path.trim().is_empty() => path,
+        _ => return Ok(None),
+    };
+    let bytes = std::fs::read(&path).map_err(|error| {
+        anyhow::anyhow!(
+            "failed to read operator production backend registry {path:?}: {error}"
+        )
+    })?;
+    let registrations = serde_json::from_slice::<Vec<ProductionBackendConfig>>(&bytes)
+        .map_err(|error| anyhow::anyhow!("operator production backend registry is invalid: {error}"))?;
     ProductionBackendRegistry::new(registrations)
         .map(Arc::new)
-        .ok()
+        .map(Some)
+        .map_err(|error| anyhow::anyhow!("operator production backend registry is invalid: {error}"))
 }
 
 pub fn runtime_capability_matrix_from_environment(
