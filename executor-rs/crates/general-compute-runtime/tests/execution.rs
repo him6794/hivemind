@@ -50,6 +50,7 @@ fn request() -> GeneralComputeRequest {
 fn capability_matrix(request: &GeneralComputeRequest) -> CapabilityMatrix {
     CapabilityMatrix::new(vec![BackendRegistration {
         backend_id: request.backend_id.clone(),
+        execution_mode: BackendExecutionMode::ReferenceDirect,
         guest_image_digest: request.guest_image_digest.clone(),
         capabilities: vec!["cpu".into()],
         max_threads: 2,
