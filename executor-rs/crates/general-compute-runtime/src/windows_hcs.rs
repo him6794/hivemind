@@ -180,15 +180,69 @@ fn read_result_file(
     Ok(bytes)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HcsWaitOutcome {
+    Exited,
+    TimedOut,
+}
+
+trait HcsLifecycleProvider {
+    fn start(&mut self, timeout: Duration) -> Result<(), WindowsHcsError>;
+    fn wait_for_exit(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<HcsWaitOutcome, WindowsHcsError>;
+    fn terminate(&mut self, timeout: Duration);
+    fn shutdown(&mut self, timeout: Duration);
+}
+
+fn run_lifecycle<P: HcsLifecycleProvider>(
+    provider: &mut P,
+    timeout: Duration,
+    cancellation: &Cancellation,
+) -> Result<RunResult, WindowsHcsError> {
+    provider.start(timeout)?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if cancellation.is_cancelled() {
+            provider.terminate(timeout);
+            return Err(WindowsHcsError::Cancelled);
+        }
+        if std::time::Instant::now() >= deadline {
+            provider.terminate(timeout);
+            return Err(WindowsHcsError::TimedOut);
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match provider.wait_for_exit(remaining.min(Duration::from_secs(1)))? {
+            HcsWaitOutcome::TimedOut => continue,
+            HcsWaitOutcome::Exited => {
+                provider.shutdown(timeout);
+                return Ok(RunResult {
+                    status: RunStatus::Completed,
+                    exit_code: Some(0),
+                    reaped: true,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                    stdout_truncated: false,
+                    stderr_truncated: false,
+                });
+            }
+        }
+    }
+}
+
 #[cfg(windows)]
 mod hcs {
-    use super::{Cancellation, RunResult, RunStatus, WindowsHcsError};
+    use super::{
+        run_lifecycle, Cancellation, HcsLifecycleProvider, HcsWaitOutcome, RunResult,
+        WindowsHcsError,
+    };
     use crate::production::WindowsHcsContainerSpec;
     use serde_json::json;
     use std::ffi::{c_void, OsStr};
     use std::os::windows::ffi::OsStrExt;
     use std::ptr;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     use windows_sys::Win32::System::HostComputeSystem::{
         HcsCloseComputeSystem, HcsCloseOperation, HcsCreateComputeSystem, HcsCreateOperation,
         HcsShutDownComputeSystem, HcsStartComputeSystem, HcsTerminateComputeSystem,
@@ -256,61 +310,63 @@ mod hcs {
         Ok(system)
     }
 
+    struct NativeHcsProvider {
+        system: HcsSystem,
+    }
+
+    impl HcsLifecycleProvider for NativeHcsProvider {
+        fn start(&mut self, timeout: Duration) -> Result<(), WindowsHcsError> {
+            let operation = unsafe { HcsCreateOperation(ptr::null(), None) };
+            if operation.is_null() {
+                return Err(WindowsHcsError::ProviderUnavailable(
+                    "HcsCreateOperation returned null".into(),
+                ));
+            }
+            let hr = unsafe { HcsStartComputeSystem(self.system, operation, ptr::null()) };
+            let start_wait = wait_operation(operation, timeout);
+            unsafe { HcsCloseOperation(operation) };
+            if hr < 0 {
+                return Err(WindowsHcsError::OperationFailed(format!(
+                    "HcsStartComputeSystem HRESULT 0x{hr:08x}"
+                )));
+            }
+            start_wait
+        }
+
+        fn wait_for_exit(
+            &mut self,
+            timeout: Duration,
+        ) -> Result<HcsWaitOutcome, WindowsHcsError> {
+            let mut document = ptr::null_mut();
+            let wait_ms = timeout.as_millis().max(1).min(u32::MAX as u128) as u32;
+            let hr = unsafe { HcsWaitForComputeSystemExit(self.system, wait_ms, &mut document) };
+            free_document(document);
+            if is_timeout(hr) {
+                return Ok(HcsWaitOutcome::TimedOut);
+            }
+            if hr >= 0 {
+                return Ok(HcsWaitOutcome::Exited);
+            }
+            Err(WindowsHcsError::OperationFailed(format!(
+                "HcsWaitForComputeSystemExit HRESULT 0x{hr:08x}"
+            )))
+        }
+
+        fn terminate(&mut self, timeout: Duration) {
+            terminate(self.system, timeout);
+        }
+
+        fn shutdown(&mut self, timeout: Duration) {
+            shutdown(self.system, timeout);
+        }
+    }
+
     fn run_system(
         system: HcsSystem,
         timeout: Duration,
         cancellation: &Cancellation,
     ) -> Result<RunResult, WindowsHcsError> {
-        let operation = unsafe { HcsCreateOperation(ptr::null(), None) };
-        if operation.is_null() {
-            return Err(WindowsHcsError::ProviderUnavailable(
-                "HcsCreateOperation returned null".into(),
-            ));
-        }
-        let hr = unsafe { HcsStartComputeSystem(system, operation, ptr::null()) };
-        let start_wait = wait_operation(operation, timeout);
-        unsafe { HcsCloseOperation(operation) };
-        if hr < 0 {
-            return Err(WindowsHcsError::OperationFailed(format!(
-                "HcsStartComputeSystem HRESULT 0x{hr:08x}"
-            )));
-        }
-        start_wait?;
-
-        let deadline = Instant::now() + timeout;
-        loop {
-            if cancellation.is_cancelled() {
-                terminate(system, timeout);
-                return Err(WindowsHcsError::Cancelled);
-            }
-            if Instant::now() >= deadline {
-                terminate(system, timeout);
-                return Err(WindowsHcsError::TimedOut);
-            }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            let mut document = ptr::null_mut();
-            let wait_ms = remaining.as_millis().min(1_000).max(1) as u32;
-            let hr = unsafe { HcsWaitForComputeSystemExit(system, wait_ms, &mut document) };
-            free_document(document);
-            if is_timeout(hr) {
-                continue;
-            }
-            if hr >= 0 {
-                shutdown(system, timeout);
-                return Ok(RunResult {
-                    status: RunStatus::Completed,
-                    exit_code: Some(0),
-                    reaped: true,
-                    stdout: Vec::new(),
-                    stderr: Vec::new(),
-                    stdout_truncated: false,
-                    stderr_truncated: false,
-                });
-            }
-            return Err(WindowsHcsError::OperationFailed(format!(
-                "HcsWaitForComputeSystemExit HRESULT 0x{hr:08x}"
-            )));
-        }
+        run_lifecycle(&mut NativeHcsProvider { system }, timeout, cancellation)
     }
 
     fn is_timeout(hr: i32) -> bool {
@@ -404,6 +460,38 @@ mod tests {
     use crate::production::{WindowsHcsContainerSpec, WindowsHcsMountSpec};
     use std::path::PathBuf;
 
+    struct MockHcsProvider {
+        events: Vec<&'static str>,
+        wait_outcome: HcsWaitOutcome,
+        start_error: bool,
+    }
+
+    impl HcsLifecycleProvider for MockHcsProvider {
+        fn start(&mut self, _timeout: Duration) -> Result<(), WindowsHcsError> {
+            self.events.push("start");
+            if self.start_error {
+                return Err(WindowsHcsError::OperationFailed("mock start".into()));
+            }
+            Ok(())
+        }
+
+        fn wait_for_exit(
+            &mut self,
+            _timeout: Duration,
+        ) -> Result<HcsWaitOutcome, WindowsHcsError> {
+            self.events.push("wait");
+            Ok(self.wait_outcome)
+        }
+
+        fn terminate(&mut self, _timeout: Duration) {
+            self.events.push("terminate");
+        }
+
+        fn shutdown(&mut self, _timeout: Duration) {
+            self.events.push("shutdown");
+        }
+    }
+
     fn spec() -> WindowsHcsContainerSpec {
         WindowsHcsContainerSpec {
             container_id: "hivemind-test".into(),
@@ -432,6 +520,69 @@ mod tests {
             thread_limit: 4,
             scratch_bytes: 1024,
         }
+    }
+
+    #[test]
+    fn mock_hcs_lifecycle_shuts_down_after_normal_exit() {
+        let mut provider = MockHcsProvider {
+            events: Vec::new(),
+            wait_outcome: HcsWaitOutcome::Exited,
+            start_error: false,
+        };
+        let result = run_lifecycle(
+            &mut provider,
+            Duration::from_secs(1),
+            &Cancellation::new(),
+        )
+        .expect("mock HCS completion should succeed");
+        assert_eq!(result.status, RunStatus::Completed);
+        assert_eq!(provider.events, ["start", "wait", "shutdown"]);
+    }
+
+    #[test]
+    fn mock_hcs_lifecycle_terminates_on_timeout_and_cancellation() {
+        let mut timed_out = MockHcsProvider {
+            events: Vec::new(),
+            wait_outcome: HcsWaitOutcome::TimedOut,
+            start_error: false,
+        };
+        let error = run_lifecycle(
+            &mut timed_out,
+            Duration::ZERO,
+            &Cancellation::new(),
+        )
+        .expect_err("zero timeout must fail closed");
+        assert_eq!(error, WindowsHcsError::TimedOut);
+        assert_eq!(timed_out.events, ["start", "terminate"]);
+
+        let cancellation = Cancellation::new();
+        cancellation.cancel();
+        let mut cancelled = MockHcsProvider {
+            events: Vec::new(),
+            wait_outcome: HcsWaitOutcome::Exited,
+            start_error: false,
+        };
+        let error = run_lifecycle(&mut cancelled, Duration::from_secs(1), &cancellation)
+            .expect_err("cancelled HCS task must fail closed");
+        assert_eq!(error, WindowsHcsError::Cancelled);
+        assert_eq!(cancelled.events, ["start", "terminate"]);
+    }
+
+    #[test]
+    fn mock_hcs_lifecycle_does_not_cleanup_after_start_failure() {
+        let mut provider = MockHcsProvider {
+            events: Vec::new(),
+            wait_outcome: HcsWaitOutcome::Exited,
+            start_error: true,
+        };
+        let error = run_lifecycle(
+            &mut provider,
+            Duration::from_secs(1),
+            &Cancellation::new(),
+        )
+        .expect_err("start failure must be returned");
+        assert!(matches!(error, WindowsHcsError::OperationFailed(_)));
+        assert_eq!(provider.events, ["start"]);
     }
 
     #[test]
