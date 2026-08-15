@@ -1522,8 +1522,9 @@ tests and `cargo check -p hivemind-proto --locked` is green.
 
 ## Windows HCS result transport checkpoint (2026-08-15)
 
-- Commits `89debcd` and `d19c63c` add bounded result-envelope transport for the
-  native Windows route. The generated HCS spec now exposes an operator-owned
+- Commits `89debcd`, `d19c63c`, and `51f170a` add bounded result-envelope
+  transport for the native Windows route and switch the HCS calls to the
+  pinned `windows-sys` HostComputeSystem bindings. The generated HCS spec now exposes an operator-owned
   writable scratch mount, a fixed `result.json` host path, a fixed Windows
   container path, and the configured maximum result size; policy destinations
   are translated to Windows container paths rather than passed through as Linux
