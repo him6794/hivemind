@@ -107,7 +107,7 @@ function Copy-TreeWithoutReparsePoints {
         }
     }
     if (!(Test-Path -LiteralPath $Destination -PathType Container)) {
-        New-Item -ItemType Directory -LiteralPath $Destination -Force | Out-Null
+        New-Item -ItemType Directory -Path $Destination -Force | Out-Null
     }
     foreach ($entry in @(Get-ChildItem -LiteralPath $Source -Force)) {
         Copy-Item -LiteralPath $entry.FullName `
@@ -124,19 +124,25 @@ function Copy-VerifiedFile {
     Require-RegularFile $Name $Source
     $parent = Split-Path -Parent $Destination
     if (!(Test-Path -LiteralPath $parent -PathType Container)) {
-        New-Item -ItemType Directory -LiteralPath $parent -Force | Out-Null
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
     }
     Copy-Item -LiteralPath $Source -Destination $Destination -Force
 }
 
 function Invoke-Compose {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
-    $output = @(& docker compose `
-        --project-name $ComposeProject `
-        --project-directory $repoRoot `
-        --file $ComposeFile `
-        @Arguments 2>&1)
-    $exitCode = $LASTEXITCODE
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $output = @(& docker compose `
+            --project-name $ComposeProject `
+            --project-directory $repoRoot `
+            --file $ComposeFile `
+            @Arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     if ($exitCode -ne 0) {
         $diagnostics = ($output | ForEach-Object { $_.ToString() }) -join "`n"
         Fail-Fixture "docker compose $($Arguments -join ' ') failed with exit code $exitCode`n$diagnostics"
@@ -146,8 +152,14 @@ function Invoke-Compose {
 
 function Invoke-Docker {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
-    $output = @(& docker @Arguments 2>&1)
-    $exitCode = $LASTEXITCODE
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $output = @(& docker @Arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     if ($exitCode -ne 0) {
         $diagnostics = ($output | ForEach-Object { $_.ToString() }) -join "`n"
         Fail-Fixture "docker $($Arguments -join ' ') failed with exit code $exitCode`n$diagnostics"
@@ -167,7 +179,7 @@ function Provision-OperatorVolumes {
     )
     $configRoot = Join-Path $stagingRoot "config"
     try {
-        New-Item -ItemType Directory -LiteralPath $configRoot -Force | Out-Null
+        New-Item -ItemType Directory -Path $configRoot -Force | Out-Null
         $transformed = @()
         foreach ($registration in $registrations) {
             $backendId = [string]$registration.backend_id
@@ -190,8 +202,12 @@ function Provision-OperatorVolumes {
             foreach ($property in $registration.PSObject.Properties) {
                 $properties[$property.Name] = $property.Value
             }
+            # The host registry includes the harness-only execution_mode marker,
+            # but ProductionBackendConfig derives that mode and rejects unknown
+            # JSON fields. Strip the marker before seeding Worker config.
+            $properties.Remove("execution_mode")
             $mapped = [pscustomobject]$properties
-            $mapped.bundle_root = "/etc/hivemind/general-compute/bundles/$backendId"
+            $mapped.bundle_root = "/var/lib/hivemind/general-compute/bundles/$backendId"
             $mapped.artifact_root = "/var/lib/hivemind/general-compute/artifacts/$backendId"
             $mapped.runner_executable = "/etc/hivemind/general-compute/runners/$backendId/runner"
             $mapped.runner_state_root = "/var/lib/hivemind/general-compute/runner-state/$backendId"
@@ -204,16 +220,21 @@ function Provision-OperatorVolumes {
         # the privileged volume-seeding helper. The helper shell only copies
         # operator files; no task command is ever passed to the Worker service.
         [void](Invoke-Compose @("build", "worker"))
-        $imageLines = @(Invoke-Compose @("images", "-q", "worker"))
+        # `compose images -q` only reports images attached to an existing
+        # container on current Docker Compose; provisioning happens before
+        # containers exist. Inspect the deterministic Compose image tag instead.
+        $imageName = "$ComposeProject-worker"
+        $imageLines = @(Invoke-Docker @("image", "inspect", "--format", "{{.Id}}", $imageName))
         $image = ($imageLines | ForEach-Object { $_.ToString().Trim() } |
-            Where-Object { $_ -match '^[0-9a-fA-F]{12,64}$' } | Select-Object -Last 1)
+            Where-Object { $_ -match '^sha256:[0-9a-fA-F]{64}$' } | Select-Object -Last 1)
         if ([string]::IsNullOrWhiteSpace([string]$image)) {
-            Fail-Fixture "docker compose did not return a Worker image id for volume provisioning"
+            Fail-Fixture "docker image inspect did not return the Worker image id for volume provisioning"
         }
         $stateDirectories = @("mkdir -p /state/cas")
         foreach ($registration in $transformed) {
             $backendId = [string]$registration.backend_id
-            $stateDirectories += "mkdir -p /state/artifacts/$backendId /state/runner-state/$backendId"
+            $stateDirectories += "mkdir -p /state/bundles/$backendId /state/artifacts/$backendId /state/runner-state/$backendId"
+            $stateDirectories += "cp -a /source/config/bundles/$backendId/. /state/bundles/$backendId/"
         }
         $seedCommandParts = @(
             "set -eu",
