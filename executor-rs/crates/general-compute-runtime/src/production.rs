@@ -206,9 +206,15 @@ impl WindowsProductionBackendConfig {
         if !is_safe_task_id(task_id) {
             return Err(ProductionBackendRegistryError::UnsafeTaskId);
         }
-        ensure_contained(&self.image_root, &self.image_root.join(task_id))?;
-        ensure_contained(&self.artifact_root, &self.artifact_root.join(task_id))?;
-        Ok((self.image_root.join(task_id), self.artifact_root.join(task_id)))
+        ensure_no_symlink_ancestors(&self.image_root)?;
+        ensure_no_symlink_ancestors(&self.artifact_root)?;
+        let image_task_root = self.image_root.join(task_id);
+        let artifact_task_root = self.artifact_root.join(task_id);
+        ensure_contained(&self.image_root, &image_task_root)?;
+        ensure_contained(&self.artifact_root, &artifact_task_root)?;
+        ensure_no_symlink_ancestors(&image_task_root)?;
+        ensure_no_symlink_ancestors(&artifact_task_root)?;
+        Ok((image_task_root, artifact_task_root))
     }
 
     pub fn validate(&self) -> Result<(), ProductionBackendRegistryError> {
