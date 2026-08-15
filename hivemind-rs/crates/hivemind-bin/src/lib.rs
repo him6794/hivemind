@@ -444,7 +444,7 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
         // typically skip this and auto-issue a preauth key via website-api on login.
         client_runtime::ensure_env_vpn(&config, client_runtime::ClientRole::Worker).await?;
 
-        let executor = Arc::new(WorkerExecutor::new(config.clone()));
+        let executor = Arc::new(WorkerExecutor::try_new(config.clone())?);
         let resources = executor.get_system_resources();
         info!(
             "Worker executor: {} cores, {} GB RAM",

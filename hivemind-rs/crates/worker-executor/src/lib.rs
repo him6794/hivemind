@@ -40,6 +40,10 @@ pub struct WorkerExecutor {
 
 impl WorkerExecutor {
     pub fn new(config: HivemindConfig) -> Self {
+        Self::try_new(config).expect("operator worker configuration must be valid")
+    }
+
+    pub fn try_new(config: HivemindConfig) -> Result<Self> {
         let runner_config = config.clone();
         let prover = Arc::new(managed_prover::ManagedProverExecutor::new(&config));
         let admission = runtime_admission::WorkerRuntimeAdmission::from_environment()
@@ -47,13 +51,13 @@ impl WorkerExecutor {
         let trusted_registration = admission.trusted_registration();
         let reference_executor = executor::reference_executor_from_environment(&admission);
         let cas_store = executor::cas_store_from_environment();
-        let production_backends = executor::production_backends_from_environment();
+        let production_backends = executor::production_backends_from_environment()?;
         let capability_matrix = if admission.capability_matrix().backends.is_empty() {
             executor::runtime_capability_matrix_from_environment()
         } else {
             Some(Arc::new(admission.capability_matrix()))
         };
-        Self {
+        Ok(Self {
             active_tasks: Arc::new(Mutex::new(HashMap::new())),
             task_runner: Arc::new(move |task, cancellation| {
                 let config = runner_config.clone();
@@ -96,7 +100,7 @@ impl WorkerExecutor {
                     Ok(result)
                 })
             }),
-        }
+        })
     }
 
     #[cfg(test)]
