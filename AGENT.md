@@ -170,6 +170,20 @@ Do not:
 - Turn public pages into README-style architecture docs.
 - Add Master or Worker operational controls to the official website.
 
+## Native Worker Execution Boundary
+
+Hivemind must support workers running natively on Windows without requiring the user to operate a Linux VM. Production general-compute execution is therefore platform-specific:
+
+- Linux workers use `production_sandboxed_oci` with rootless OCI namespaces, cgroup v2, seccomp, read-only root, explicit artifact mounts, and deny-all networking.
+- Windows workers use a distinct Windows-native production sandbox mode backed by Windows container/HCS process isolation. Windows must not reinterpret Linux OCI policy as a Windows sandbox.
+- `reference_direct` is reference/test-only and is never a production fallback.
+- Docker Desktop, WSL, Linux VMs, and remote Linux hosts may be used as development or validation infrastructure, but they do not constitute native Windows production isolation evidence.
+- If the required platform isolation provider, pinned operator image/assets, resource limits, filesystem policy, or network policy cannot be established, the worker must fail closed as `backend_unavailable`.
+
+A Windows-native production sandbox is not equivalent to a Job Object alone. Job Objects provide lifecycle and process-tree cleanup, but production isolation also requires a verified container boundary, restricted identity, read-only root, explicit artifact mounts, deny-by-default network, bounded CPU/memory/process resources, reparse-point-safe operator roots, and hostile-workload evidence. No implementation may substitute a direct host process, `cmd.exe`, PowerShell, Docker CLI, WSL, or an unconfined AppContainer for this boundary.
+
+The release gate must distinguish policy/specification tests, mocked lifecycle tests, and real Windows HCS/container E2E evidence. A skipped or unavailable Windows isolation provider is not a passing production E2E result.
+
 ## Current Repo Note
 
 The repository may still contain legacy or all-in-one services such as `master-api` and `hivemind-bin all`. Those can exist for development, compatibility, or local deployment, but official website development must follow the deployment model above.
