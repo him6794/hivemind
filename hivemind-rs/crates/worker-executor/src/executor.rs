@@ -1136,6 +1136,49 @@ mod tests {
         assert_eq!(result.managed_output_bytes, 1);
     }
 
+    #[test]
+    fn production_sandboxed_dsl_executes_without_general_compute_launcher() {
+        let mut task = test_task_with_source("{\"items\":[1,2,3]}");
+        task.runtime = Some("production_sandboxed_dsl".into());
+        task.task_source = Some(
+            "let total = 0; for item in get(input, \"items\") { let total = total + item; } return total;"
+                .into(),
+        );
+        task.max_cpt = 1000;
+        let registry = ManagedDslBackendRegistry::new(vec![
+            general_compute_runtime::production::ManagedDslBackendRegistration {
+                backend_id: "managed-default".into(),
+                runtime_version: general_compute_runtime::MANAGED_DSL_RUNTIME_VERSION.into(),
+                semantics_manifest_sha256:
+                    general_compute_runtime::MANAGED_DSL_SEMANTICS_MANIFEST_SHA256.into(),
+                max_usage_units: 1000,
+                max_output_bytes: 4096,
+            },
+        ])
+        .unwrap();
+
+        let result = execute_managed_dsl_task(&task, 0, &AtomicBool::new(false), &registry)
+            .expect("closed DSL execution should return a task result");
+
+        assert!(result.success);
+        assert_eq!(result.output.as_deref(), Some("6"));
+        let receipt: Value = serde_json::from_str(result.managed_receipt_json.as_deref().unwrap())
+            .expect("DSL receipt should be JSON");
+        assert_eq!(receipt["execution_mode"], "production_sandboxed_dsl");
+        assert_eq!(receipt["backend_id"], "managed-default");
+    }
+
+    #[test]
+    fn production_sandboxed_dsl_requires_an_operator_backend() {
+        let task = test_task_with_source("null");
+        let registry = ManagedDslBackendRegistry::new(Vec::new()).unwrap();
+        let error = execute_managed_dsl_task(&task, 0, &AtomicBool::new(false), &registry)
+            .expect_err("closed DSL must fail closed without operator configuration");
+        assert!(error
+            .to_string()
+            .contains("requires exactly one operator-managed DSL backend"));
+    }
+
     #[tokio::test]
     async fn managed_function_budget_exhaustion_returns_structured_failure() {
         let tmp = TempDir::new().unwrap();
