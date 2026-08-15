@@ -2,7 +2,29 @@ use general_compute_runtime::{
     CapabilityMatrix, GeneralComputeRequest, TrustedWorkerCapabilityRegistration,
     GENERAL_COMPUTE_RUNTIME_VERSION,
 };
+use general_compute_runtime::production::ManagedDslBackendRegistration;
+
 use hivemind_models::{Task, WorkerNode, WorkerStatus};
+
+pub fn worker_supports_managed_dsl_request(
+    persisted_capabilities_json: Option<&str>,
+    requested_budget_units: i64,
+) -> bool {
+    let Some(persisted_capabilities_json) = persisted_capabilities_json else {
+        return false;
+    };
+    if requested_budget_units <= 0 {
+        return false;
+    }
+    let Ok(registrations) = serde_json::from_str::<Vec<ManagedDslBackendRegistration>>(
+        persisted_capabilities_json,
+    ) else {
+        return false;
+    };
+    registrations.len() == 1
+        && registrations[0].validate().is_ok()
+        && requested_budget_units as u64 <= registrations[0].max_usage_units
+}
 
 pub fn worker_supports_general_compute_request(
     request: &GeneralComputeRequest,
@@ -70,6 +92,10 @@ pub async fn find_best_worker(task: &Task, workers: &[WorkerNode]) -> Option<Wor
         };
 
         let general_compute_compatible = match task.runtime.as_deref().map(str::trim) {
+            Some("production_sandboxed_dsl") => worker_supports_managed_dsl_request(
+                w.general_compute_capabilities_json.as_deref(),
+                task.max_cpt,
+            ),
             Some(GENERAL_COMPUTE_RUNTIME_VERSION) => task
                 .general_compute_manifest_json
                 .as_deref()

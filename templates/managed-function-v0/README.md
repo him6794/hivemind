@@ -13,7 +13,9 @@ These templates are small `managed-function-v0` tasks that can be submitted with
 ```
 
 The `torrent` field is used as JSON input for managed functions.
-`managed-function-v0` is the only supported task runtime.
+`managed-function-v0` remains the proof-facing runtime contract. Operators may
+select the cross-platform `production_sandboxed_dsl` Worker backend for the
+same closed interpreter; that route does not require Windows Containers/HCS.
 
 Templates:
 
