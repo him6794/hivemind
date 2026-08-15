@@ -430,6 +430,21 @@ function Read-ResultEnvelope {
     return $result
 }
 
+function Read-ResultDiagnostic {
+    param([Parameter(Mandatory = $true)][string]$CaseTaskId)
+    if ($CaseTaskId -notmatch '^[A-Za-z0-9_.-]+$') {
+        return "unsafe task id"
+    }
+    $sql = "SELECT COALESCE(result_json->>'error_code', ''), COALESCE(result_json->>'stderr', '') FROM general_compute_results WHERE task_id = '$CaseTaskId';"
+    $lines = @(Invoke-Compose @("exec", "-T", "postgres", "psql", "-U", "hivemind", "-d", "hivemind", "-At", "-c", $sql))
+    $diagnostic = ($lines | ForEach-Object { $_.ToString().Trim() } |
+        Where-Object { $_ -and $_ -notmatch '^NOTICE:' } | Select-Object -Last 1)
+    if ([string]::IsNullOrWhiteSpace([string]$diagnostic)) {
+        return "no persisted result"
+    }
+    return [string]$diagnostic
+}
+
 function Assert-Settlement {
     param([Parameter(Mandatory = $true)][string]$CaseTaskId)
     if ($CaseTaskId -notmatch '^[A-Za-z0-9_.-]+$') {
@@ -463,7 +478,8 @@ function Invoke-ExecutionPhase {
         -Manifest $plan.primary_manifest -MaxCpt $maxCpt
     $primaryTask = Wait-TaskTerminal -Token $token -CaseTaskId $TaskId
     if ([string]$primaryTask.status -ne "COMPLETED") {
-        Fail-Fixture "primary OCI task '$TaskId' did not complete: $($primaryTask.status)"
+        $diagnostic = Read-ResultDiagnostic -CaseTaskId $TaskId
+        Fail-Fixture "primary OCI task '$TaskId' did not complete: $($primaryTask.status); result diagnostic: $diagnostic"
     }
     $primaryResult = Read-ResultEnvelope -CaseTaskId $TaskId -ExpectedStatus "completed"
     Assert-Settlement -CaseTaskId $TaskId
