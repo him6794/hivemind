@@ -260,10 +260,12 @@ mod hcs {
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             let mut document = ptr::null_mut();
-            let hr = unsafe {
-                HcsWaitForComputeSystemExit(system, remaining.as_millis().min(u32::MAX as u128) as u32, &mut document)
-            };
+            let wait_ms = remaining.as_millis().min(1_000).max(1) as u32;
+            let hr = unsafe { HcsWaitForComputeSystemExit(system, wait_ms, &mut document) };
             free_document(document);
+            if is_timeout(hr) {
+                continue;
+            }
             if hr >= 0 {
                 shutdown(system, timeout);
                 return Ok(RunResult {
@@ -280,6 +282,11 @@ mod hcs {
                 "HcsWaitForComputeSystemExit HRESULT 0x{hr:08x}"
             )));
         }
+    }
+
+    fn is_timeout(hr: i32) -> bool {
+        let value = hr as u32;
+        value == 258 || value == 0x8007_05b4
     }
 
     fn shutdown(system: HcsSystem, timeout: Duration) {
