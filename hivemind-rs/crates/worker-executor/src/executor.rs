@@ -579,7 +579,13 @@ fn production_result(
         _ => None,
     };
     let envelope: general_compute_runtime::ProductionResultEnvelope = serde_json::from_slice(&stdout_bytes)
-        .map_err(|error| ExecutionError::BackendUnavailable(format!("production result decoder rejected stdout: {error}")))?;
+        .map_err(|error| {
+            ExecutionError::BackendUnavailable(format!(
+                "production result decoder rejected stdout: {error}; runner exit_code={:?}; runner stderr: {}",
+                result.exit_code,
+                stderr.trim()
+            ))
+        })?;
     let mut typed = envelope
         .into_result_with_input_digest(request, &input_sha256)
         .map_err(|error| {
