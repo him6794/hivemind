@@ -182,6 +182,158 @@ impl LinuxSandboxPolicy {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsIsolationMode {
+    Process,
+    HyperV,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsSandboxNetworkPolicy {
+    DenyAll,
+    AllowAll,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsRootFilesystemPolicy {
+    ReadOnly,
+    Writable,
+}
+
+/// Operator-enforced policy for native Windows process-isolated containers.
+///
+/// This is deliberately separate from [`LinuxSandboxPolicy`]. A Windows
+/// worker must never reinterpret Linux namespaces or seccomp fields as a
+/// Windows security boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowsSandboxPolicy {
+    pub isolation: WindowsIsolationMode,
+    pub network: WindowsSandboxNetworkPolicy,
+    pub root_filesystem: WindowsRootFilesystemPolicy,
+    pub mounts: Vec<SandboxMount>,
+    pub memory_bytes: u64,
+    pub cpu_millis: u64,
+    pub process_limit: u32,
+    pub thread_limit: u32,
+    pub scratch_bytes: u64,
+}
+
+impl WindowsSandboxPolicy {
+    pub fn validate(&self) -> Result<(), WindowsSandboxPolicyError> {
+        if self.isolation != WindowsIsolationMode::Process {
+            return Err(WindowsSandboxPolicyError::ProcessIsolationRequired);
+        }
+        if self.network != WindowsSandboxNetworkPolicy::DenyAll {
+            return Err(WindowsSandboxPolicyError::NetworkDenyRequired);
+        }
+        if self.root_filesystem != WindowsRootFilesystemPolicy::ReadOnly {
+            return Err(WindowsSandboxPolicyError::ReadOnlyRootRequired);
+        }
+        if self.mounts.is_empty() {
+            return Err(WindowsSandboxPolicyError::ExplicitMountsRequired);
+        }
+        if self.memory_bytes == 0
+            || self.cpu_millis == 0
+            || self.process_limit == 0
+            || self.thread_limit == 0
+            || self.scratch_bytes == 0
+        {
+            return Err(WindowsSandboxPolicyError::ResourceLimitsRequired);
+        }
+
+        let mut destinations = BTreeSet::new();
+        let mut has_artifact = false;
+        let mut has_scratch = false;
+        for mount in &self.mounts {
+            let destination = mount.destination();
+            if !valid_mount_destination(destination) {
+                return Err(WindowsSandboxPolicyError::InvalidMountDestination);
+            }
+            if !destinations.insert(destination) {
+                return Err(WindowsSandboxPolicyError::DuplicateMountDestination);
+            }
+            match mount {
+                SandboxMount::ReadOnlyArtifact { artifact_id, .. }
+                    if artifact_id.trim().is_empty()
+                        || artifact_id.split('/').any(|component| component == "..")
+                        || artifact_id.split('\\').any(|component| component == "..")
+                        || artifact_id.contains(':')
+                        || artifact_id.contains('\\') =>
+                {
+                    return Err(WindowsSandboxPolicyError::InvalidMountSource);
+                }
+                SandboxMount::ReadOnlyArtifact { .. } => has_artifact = true,
+                SandboxMount::EphemeralScratch { max_bytes: 0, .. } => {
+                    return Err(WindowsSandboxPolicyError::InvalidMountSource);
+                }
+                SandboxMount::EphemeralScratch { max_bytes, .. } => {
+                    if *max_bytes > self.scratch_bytes {
+                        return Err(WindowsSandboxPolicyError::ScratchLimitExceeded);
+                    }
+                    has_scratch = true;
+                }
+            }
+        }
+        if !has_artifact || !has_scratch {
+            return Err(WindowsSandboxPolicyError::ExplicitArtifactAndScratchMountsRequired);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowsSandboxPolicyError {
+    ProcessIsolationRequired,
+    NetworkDenyRequired,
+    ReadOnlyRootRequired,
+    ExplicitMountsRequired,
+    ExplicitArtifactAndScratchMountsRequired,
+    ResourceLimitsRequired,
+    ScratchLimitExceeded,
+    InvalidMountDestination,
+    DuplicateMountDestination,
+    InvalidMountSource,
+}
+
+impl std::fmt::Display for WindowsSandboxPolicyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "invalid Windows production sandbox policy: {self:?}")
+    }
+}
+
+impl std::error::Error for WindowsSandboxPolicyError {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowsNativeSandboxLaunch {
+    pub backend_id: String,
+    pub guest_image_digest: String,
+    pub entrypoint: Vec<String>,
+    pub policy: WindowsSandboxPolicy,
+}
+
+impl WindowsNativeSandboxLaunch {
+    pub fn validate(&self) -> Result<(), ProductionSandboxError> {
+        self.policy
+            .validate()
+            .map_err(ProductionSandboxError::WindowsPolicy)?;
+        if self.backend_id.trim().is_empty() {
+            return Err(ProductionSandboxError::InvalidBackendId);
+        }
+        if !is_sha256_digest(&self.guest_image_digest) {
+            return Err(ProductionSandboxError::InvalidImageDigest);
+        }
+        if self.entrypoint.is_empty() || self.entrypoint.iter().any(|part| part.trim().is_empty()) {
+            return Err(ProductionSandboxError::InvalidEntrypoint);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxPolicyError {
     RootlessOciRequired,
@@ -238,6 +390,7 @@ impl ProductionSandboxLaunch {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProductionSandboxError {
     Policy(SandboxPolicyError),
+    WindowsPolicy(WindowsSandboxPolicyError),
     InvalidBackendId,
     InvalidImageDigest,
     InvalidEntrypoint,
