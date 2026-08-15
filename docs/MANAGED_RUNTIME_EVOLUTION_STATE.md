@@ -1603,6 +1603,16 @@ tests and `cargo check -p hivemind-proto --locked` is green.
   task selects the Windows general-compute backend. Existing HCS evidence above
   is therefore conditional general-compute evidence and is not a prerequisite
   for the DSL product path.
-- This documentation checkpoint does not claim that the production DSL mode,
-  scheduler admission, or explicit backend identity has been implemented yet;
-  those remain the next TDD slices.
+- The initial implementation slice now adds the distinct
+  `production_sandboxed_dsl` mode, a deny-unknown-fields operator registry bound
+  to the v0 semantics digest, Worker routing through the existing bounded
+  interpreter, gRPC input bounds, and scheduler filtering for a DSL-only Worker.
+- The registry is intentionally separate from OCI/HCS and currently requires a
+  single operator-selected DSL registration because the persisted task model
+  has no backend-id column yet. Explicit multi-backend task identity remains a
+  follow-up protocol slice; no Worker-provided identity is trusted.
+- TDD evidence: general-compute contracts/production suites pass 24/24 and
+  16/16; Worker and scheduler compile checks pass. The Worker integration test
+  binary remains blocked at Windows link time by the pre-existing
+  `libtailscale`/MinGW symbol (`__mingw_fprintf_cgo_beginthread`, LNK2019), and
+  no linker workaround or skipped test is treated as production evidence.
