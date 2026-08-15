@@ -1584,3 +1584,9 @@ tests and `cargo check -p hivemind-proto --locked` is green.
   denial, hostile workloads, and multi-process/Postgres settlement remain
   blocked on operator infrastructure. No Docker/Linux VM/WSL/direct-process
   result is recorded as Windows production evidence.
+- Commit `6979c3c test(windows): add fail-closed HCS E2E gate` adds
+  `scripts/windows-hcs-e2e.ps1` plus its Pester contract. The gate requires the
+  native Containers feature, running `vmcompute`, an operator Worker binary,
+  and a non-empty operator backend registry; it exits with code 2 before any
+  execution when prerequisites are absent. On this host it correctly reports
+  `Containers: Disabled` and does not create synthetic evidence.
