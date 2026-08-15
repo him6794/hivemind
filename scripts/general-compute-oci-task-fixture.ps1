@@ -436,13 +436,16 @@ function Read-ResultDiagnostic {
         return "unsafe task id"
     }
     $sql = "SELECT COALESCE((convert_from(result_json, 'UTF8')::jsonb)->>'error_code', ''), COALESCE((convert_from(result_json, 'UTF8')::jsonb)->>'stderr', '') FROM general_compute_results WHERE task_id = '$CaseTaskId';"
-    $lines = @(Invoke-Compose @("exec", "-T", "postgres", "psql", "-U", "hivemind", "-d", "hivemind", "-At", "-c", $sql))
-    $diagnostic = ($lines | ForEach-Object { $_.ToString().Trim() } |
-        Where-Object { $_ -and $_ -notmatch '^NOTICE:' } | Select-Object -Last 1)
-    if ([string]::IsNullOrWhiteSpace([string]$diagnostic)) {
-        return "no persisted result"
+    for ($attempt = 0; $attempt -lt 10; $attempt++) {
+        $lines = @(Invoke-Compose @("exec", "-T", "postgres", "psql", "-U", "hivemind", "-d", "hivemind", "-At", "-c", $sql))
+        $diagnostic = ($lines | ForEach-Object { $_.ToString().Trim() } |
+            Where-Object { $_ -and $_ -notmatch '^NOTICE:' } | Select-Object -Last 1)
+        if (![string]::IsNullOrWhiteSpace([string]$diagnostic)) {
+            return [string]$diagnostic
+        }
+        Start-Sleep -Seconds 1
     }
-    return [string]$diagnostic
+    return "no persisted result"
 }
 
 function Assert-Settlement {
