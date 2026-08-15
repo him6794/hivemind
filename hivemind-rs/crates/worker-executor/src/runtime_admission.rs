@@ -16,6 +16,7 @@ use std::fmt;
 pub enum RuntimeRoute {
     Legacy,
     ManagedFunctionV0,
+    ProductionSandboxedDsl,
     GeneralComputeV1Alpha1(GeneralComputeRequest),
 }
 
@@ -71,10 +72,16 @@ impl std::fmt::Display for RuntimeAdmissionError {
                 "general-compute request manifest requires runtime general-compute-v1alpha1",
             ),
             Self::ManifestMalformed(message) => {
-                write!(formatter, "general-compute-v1alpha1 request manifest is malformed: {message}")
+                write!(
+                    formatter,
+                    "general-compute-v1alpha1 request manifest is malformed: {message}"
+                )
             }
             Self::ManifestRejected { code, message } => {
-                write!(formatter, "general-compute-v1alpha1 request was rejected ({code:?}): {message}")
+                write!(
+                    formatter,
+                    "general-compute-v1alpha1 request was rejected ({code:?}): {message}"
+                )
             }
             Self::UnsupportedRuntime(runtime) => {
                 let _ = runtime;
@@ -216,6 +223,7 @@ impl WorkerRuntimeAdmission {
         match runtime.trim() {
             "" => Ok(RuntimeRoute::Legacy),
             "managed-function-v0" => Ok(RuntimeRoute::ManagedFunctionV0),
+            "production_sandboxed_dsl" => Ok(RuntimeRoute::ProductionSandboxedDsl),
             GENERAL_COMPUTE_RUNTIME_VERSION => {
                 if manifest_json.is_empty() {
                     return Err(RuntimeAdmissionError::ManifestRequired);

@@ -37,6 +37,15 @@ fn a_manifest_cannot_be_smuggled_through_the_legacy_route() {
 }
 
 #[test]
+fn production_sandboxed_dsl_is_admitted_without_general_compute_manifest() {
+    let route = WorkerRuntimeAdmission::default()
+        .admit("production_sandboxed_dsl", &[])
+        .expect("closed DSL route should not require a general-compute manifest");
+
+    assert_eq!(route, RuntimeRoute::ProductionSandboxedDsl);
+}
+
+#[test]
 fn managed_function_v0_keeps_its_existing_typed_route() {
     let route = WorkerRuntimeAdmission::default()
         .admit("managed-function-v0", &[])
@@ -126,8 +135,7 @@ fn request_manifest(image: &str) -> GeneralComputeRequest {
 fn registry_for(image: String) -> CapabilityMatrix {
     CapabilityMatrix::new(vec![BackendRegistration {
         backend_id: "python-cpython-312".into(),
-        execution_mode:
-            general_compute_runtime::sandbox::BackendExecutionMode::ReferenceDirect,
+        execution_mode: general_compute_runtime::sandbox::BackendExecutionMode::ReferenceDirect,
         guest_image_digest: image,
         capabilities: vec!["cpu".into()],
         max_threads: 2,
