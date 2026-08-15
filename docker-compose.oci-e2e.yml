@@ -15,7 +15,7 @@ services:
     # Docker Desktop exposes the container cgroup tree read-only by default;
     # nested runc needs a writable v2 hierarchy to enforce the operator policy.
     privileged: true
-    cgroupns: host
+    cgroup: host
     environment:
       HIVEMIND_GENERAL_COMPUTE_BACKENDS: ${HIVEMIND_GENERAL_COMPUTE_BACKENDS:-}
       HIVEMIND_GENERAL_COMPUTE_WORKER_CAPABILITIES: ${HIVEMIND_GENERAL_COMPUTE_WORKER_CAPABILITIES:-}
