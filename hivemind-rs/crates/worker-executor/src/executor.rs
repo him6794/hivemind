@@ -221,8 +221,38 @@ fn execute_managed_dsl_task(
         }
     };
     let output = if execution.output.is_empty() {
-        render_output_bounded(&execution.value, backend.max_output_bytes as u64)
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?
+        match render_output_bounded(&execution.value, backend.max_output_bytes as u64) {
+            Ok(output) => output,
+            Err(error) => {
+                let error_message = error.to_string();
+                let receipt = json!({
+                    "runtime": "managed-function-v0",
+                    "execution_mode": "production_sandboxed_dsl",
+                    "backend_id": backend.backend_id,
+                    "semantics_manifest_sha256": backend.semantics_manifest_sha256,
+                    "status": "failed",
+                    "executed_ops": execution.receipt.executed_ops,
+                    "output_bytes": 0,
+                    "failure_code": error.code(),
+                    "failure_message": error_message,
+                });
+                return Ok(super::TaskResult {
+                    task_id: task.task_id.clone(),
+                    success: false,
+                    output: None,
+                    error: Some(error_message),
+                    exit_code: 1,
+                    cpu_time_ms: 0,
+                    wall_time_ms: elapsed_ms,
+                    peak_memory_mb: 0,
+                    managed_executed_ops: execution.receipt.executed_ops as i64,
+                    managed_output_bytes: 0,
+                    managed_receipt_json: Some(receipt.to_string()),
+                    managed_proof: None,
+                    general_compute_result_json: None,
+                });
+            }
+        }
     } else {
         execution.output
     };
