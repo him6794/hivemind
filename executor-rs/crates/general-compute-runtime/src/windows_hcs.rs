@@ -189,48 +189,14 @@ mod hcs {
     use std::os::windows::ffi::OsStrExt;
     use std::ptr;
     use std::time::{Duration, Instant};
+    use windows_sys::Win32::System::HostComputeSystem::{
+        HcsCloseComputeSystem, HcsCloseOperation, HcsCreateComputeSystem, HcsCreateOperation,
+        HcsShutDownComputeSystem, HcsStartComputeSystem, HcsTerminateComputeSystem,
+        HcsWaitForComputeSystemExit, HcsWaitForOperationResult, HCS_OPERATION, HCS_SYSTEM,
+    };
 
-    type HcsOperation = *mut c_void;
-    type HcsSystem = *mut c_void;
-
-    #[link(name = "computecore")]
-    unsafe extern "system" {
-        fn HcsCreateOperation(context: *mut c_void, callback: *mut c_void) -> HcsOperation;
-        fn HcsCloseOperation(operation: HcsOperation);
-        fn HcsCreateComputeSystem(
-            id: *const u16,
-            configuration: *const u16,
-            operation: HcsOperation,
-            security_descriptor: *const c_void,
-            compute_system: *mut HcsSystem,
-        ) -> i32;
-        fn HcsStartComputeSystem(
-            compute_system: HcsSystem,
-            operation: HcsOperation,
-            options: *const u16,
-        ) -> i32;
-        fn HcsWaitForOperationResult(
-            operation: HcsOperation,
-            timeout_ms: u32,
-            result_document: *mut *mut u16,
-        ) -> i32;
-        fn HcsWaitForComputeSystemExit(
-            compute_system: HcsSystem,
-            timeout_ms: u32,
-            result_document: *mut *mut u16,
-        ) -> i32;
-        fn HcsShutDownComputeSystem(
-            compute_system: HcsSystem,
-            operation: HcsOperation,
-            options: *const u16,
-        ) -> i32;
-        fn HcsTerminateComputeSystem(
-            compute_system: HcsSystem,
-            operation: HcsOperation,
-            options: *const u16,
-        ) -> i32;
-        fn HcsCloseComputeSystem(compute_system: HcsSystem);
-    }
+    type HcsOperation = HCS_OPERATION;
+    type HcsSystem = HCS_SYSTEM;
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -258,7 +224,7 @@ mod hcs {
         configuration: &[u16],
         timeout: Duration,
     ) -> Result<HcsSystem, WindowsHcsError> {
-        let operation = unsafe { HcsCreateOperation(ptr::null_mut(), ptr::null_mut()) };
+        let operation = unsafe { HcsCreateOperation(ptr::null(), None) };
         if operation.is_null() {
             return Err(WindowsHcsError::ProviderUnavailable(
                 "HcsCreateOperation returned null".into(),
@@ -295,7 +261,7 @@ mod hcs {
         timeout: Duration,
         cancellation: &Cancellation,
     ) -> Result<RunResult, WindowsHcsError> {
-        let operation = unsafe { HcsCreateOperation(ptr::null_mut(), ptr::null_mut()) };
+        let operation = unsafe { HcsCreateOperation(ptr::null(), None) };
         if operation.is_null() {
             return Err(WindowsHcsError::ProviderUnavailable(
                 "HcsCreateOperation returned null".into(),
@@ -353,7 +319,7 @@ mod hcs {
     }
 
     fn shutdown(system: HcsSystem, timeout: Duration) {
-        let operation = unsafe { HcsCreateOperation(ptr::null_mut(), ptr::null_mut()) };
+        let operation = unsafe { HcsCreateOperation(ptr::null(), None) };
         if operation.is_null() {
             return;
         }
@@ -365,7 +331,7 @@ mod hcs {
     }
 
     fn terminate(system: HcsSystem, timeout: Duration) {
-        let operation = unsafe { HcsCreateOperation(ptr::null_mut(), ptr::null_mut()) };
+        let operation = unsafe { HcsCreateOperation(ptr::null(), None) };
         if operation.is_null() {
             return;
         }
