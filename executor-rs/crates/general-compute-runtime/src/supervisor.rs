@@ -535,7 +535,7 @@ fn kill_process_tree(child: &mut Child) -> io::Result<()> {
     let result = unsafe { kill(process_group, SIGKILL) };
     if result == -1 {
         let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::NotFound {
+        if error.kind() != io::ErrorKind::NotFound && error.raw_os_error() != Some(3) {
             return Err(error);
         }
     }
