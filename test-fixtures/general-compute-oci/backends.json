@@ -1,0 +1,110 @@
+[
+  {
+    "backend_id": "oci-success",
+    "execution_mode": "production_sandboxed_oci",
+    "guest_image_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "bundle_root": "D:\\hivemind\\test-fixtures\\general-compute-oci\\bundles\\success",
+    "artifact_root": "D:\\hivemind\\test-fixtures\\general-compute-oci\\artifacts\\success",
+    "runner_executable": "D:\\hivemind\\test-fixtures\\general-compute-oci\\runners\\runc",
+    "runner_state_root": "D:\\hivemind\\test-fixtures\\general-compute-oci\\runner-state\\success",
+    "seccomp_profile_path": "D:\\hivemind\\test-fixtures\\general-compute-oci\\seccomp.json",
+    "runner_prefix_args": [],
+    "runner_sha256": "sha256:3ced9dd99c69f92b860d463177154e7d37273f3c9cf2191ebd673e8760f5c48b",
+    "entrypoint": ["/bin/busybox", "sh", "/bin/guest-success"],
+    "policy": {
+      "oci_privilege": "rootless",
+      "namespaces": ["user", "pid", "mount", "network"],
+      "cgroup": "v2",
+      "seccomp": {"default_action": "default_deny", "profile_sha256": "sha256:242670969e144982445b9d16ee206e1e272fd7a955598c8548a70f4b2bfd26fc"},
+      "privilege_escalation": "no_new_privileges",
+      "root_filesystem": "read_only",
+      "network": "deny_all",
+      "mounts": [
+        {"kind": "read_only_artifact", "artifact_id": "source", "destination": "/work/source"},
+        {"kind": "ephemeral_scratch", "destination": "/work/output", "max_bytes": 268435456}
+      ]
+    },
+    "max_output_bytes": 1048576
+  },
+  {
+    "backend_id": "oci-network",
+    "execution_mode": "production_sandboxed_oci",
+    "guest_image_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "bundle_root": "D:\\hivemind\\test-fixtures\\general-compute-oci\\bundles\\network",
+    "artifact_root": "D:\\hivemind\\test-fixtures\\general-compute-oci\\artifacts\\network",
+    "runner_executable": "D:\\hivemind\\test-fixtures\\general-compute-oci\\runners\\runc",
+    "runner_state_root": "D:\\hivemind\\test-fixtures\\general-compute-oci\\runner-state\\network",
+    "seccomp_profile_path": "D:\\hivemind\\test-fixtures\\general-compute-oci\\seccomp.json",
+    "runner_prefix_args": [],
+    "runner_sha256": "sha256:3ced9dd99c69f92b860d463177154e7d37273f3c9cf2191ebd673e8760f5c48b",
+    "entrypoint": ["/bin/busybox", "sh", "/bin/guest-network"],
+    "policy": {
+      "oci_privilege": "rootless",
+      "namespaces": ["user", "pid", "mount", "network"],
+      "cgroup": "v2",
+      "seccomp": {"default_action": "default_deny", "profile_sha256": "sha256:242670969e144982445b9d16ee206e1e272fd7a955598c8548a70f4b2bfd26fc"},
+      "privilege_escalation": "no_new_privileges",
+      "root_filesystem": "read_only",
+      "network": "deny_all",
+      "mounts": [
+        {"kind": "read_only_artifact", "artifact_id": "source", "destination": "/work/source"},
+        {"kind": "ephemeral_scratch", "destination": "/work/output", "max_bytes": 268435456}
+      ]
+    },
+    "max_output_bytes": 1048576
+  },
+  {
+    "backend_id": "oci-filesystem",
+    "execution_mode": "production_sandboxed_oci",
+    "guest_image_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "bundle_root": "D:\\hivemind\\test-fixtures\\general-compute-oci\\bundles\\filesystem",
+    "artifact_root": "D:\\hivemind\\test-fixtures\\general-compute-oci\\artifacts\\filesystem",
+    "runner_executable": "D:\\hivemind\\test-fixtures\\general-compute-oci\\runners\\runc",
+    "runner_state_root": "D:\\hivemind\\test-fixtures\\general-compute-oci\\runner-state\\filesystem",
+    "seccomp_profile_path": "D:\\hivemind\\test-fixtures\\general-compute-oci\\seccomp.json",
+    "runner_prefix_args": [],
+    "runner_sha256": "sha256:3ced9dd99c69f92b860d463177154e7d37273f3c9cf2191ebd673e8760f5c48b",
+    "entrypoint": ["/bin/busybox", "sh", "/bin/guest-filesystem"],
+    "policy": {
+      "oci_privilege": "rootless",
+      "namespaces": ["user", "pid", "mount", "network"],
+      "cgroup": "v2",
+      "seccomp": {"default_action": "default_deny", "profile_sha256": "sha256:242670969e144982445b9d16ee206e1e272fd7a955598c8548a70f4b2bfd26fc"},
+      "privilege_escalation": "no_new_privileges",
+      "root_filesystem": "read_only",
+      "network": "deny_all",
+      "mounts": [
+        {"kind": "read_only_artifact", "artifact_id": "source", "destination": "/work/source"},
+        {"kind": "ephemeral_scratch", "destination": "/work/output", "max_bytes": 268435456}
+      ]
+    },
+    "max_output_bytes": 1048576
+  },
+  {
+    "backend_id": "oci-timeout",
+    "execution_mode": "production_sandboxed_oci",
+    "guest_image_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "bundle_root": "D:\\hivemind\\test-fixtures\\general-compute-oci\\bundles\\timeout",
+    "artifact_root": "D:\\hivemind\\test-fixtures\\general-compute-oci\\artifacts\\timeout",
+    "runner_executable": "D:\\hivemind\\test-fixtures\\general-compute-oci\\runners\\runc",
+    "runner_state_root": "D:\\hivemind\\test-fixtures\\general-compute-oci\\runner-state\\timeout",
+    "seccomp_profile_path": "D:\\hivemind\\test-fixtures\\general-compute-oci\\seccomp.json",
+    "runner_prefix_args": [],
+    "runner_sha256": "sha256:3ced9dd99c69f92b860d463177154e7d37273f3c9cf2191ebd673e8760f5c48b",
+    "entrypoint": ["/bin/busybox", "sh", "/bin/guest-timeout"],
+    "policy": {
+      "oci_privilege": "rootless",
+      "namespaces": ["user", "pid", "mount", "network"],
+      "cgroup": "v2",
+      "seccomp": {"default_action": "default_deny", "profile_sha256": "sha256:242670969e144982445b9d16ee206e1e272fd7a955598c8548a70f4b2bfd26fc"},
+      "privilege_escalation": "no_new_privileges",
+      "root_filesystem": "read_only",
+      "network": "deny_all",
+      "mounts": [
+        {"kind": "read_only_artifact", "artifact_id": "source", "destination": "/work/source"},
+        {"kind": "ephemeral_scratch", "destination": "/work/output", "max_bytes": 268435456}
+      ]
+    },
+    "max_output_bytes": 1048576
+  }
+]
