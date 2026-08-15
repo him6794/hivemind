@@ -1519,3 +1519,28 @@ tests and `cargo check -p hivemind-proto --locked` is green.
   Operator-provided Windows container image layers, result-envelope transport,
   hostile-workload evidence, and a real Windows multi-process/Postgres E2E
   remain release gates.
+
+## Windows HCS result transport checkpoint (2026-08-15)
+
+- Commits `89debcd` and `d19c63c` add bounded result-envelope transport for the
+  native Windows route. The generated HCS spec now exposes an operator-owned
+  writable scratch mount, a fixed `result.json` host path, a fixed Windows
+  container path, and the configured maximum result size; policy destinations
+  are translated to Windows container paths rather than passed through as Linux
+  OCI paths.
+- After a successful HCS exit, the launcher rejects missing, non-regular,
+  symlinked, oversized, or improperly mounted result files. It reads at most
+  `max_output_bytes + 1` bytes, then returns the bytes as the existing
+  `ProductionResultEnvelope` stdout channel, preserving the existing typed
+  protocol/input-digest/output-root validation in the Worker.
+- Worker startup removes only a pre-existing regular result file beneath the
+  validated operator scratch root; a pre-existing symlink or directory fails
+  closed. HCS configuration passes the fixed result path through the
+  operator-generated process environment, with no Worker-provided executable or
+  filesystem path.
+- TDD evidence: HCS unit tests pass 3/3, the Windows HCS-spec contract passes,
+  runtime contracts/sandbox/production suites pass 22/22, 13/13, and 24/24,
+  Windows-target runtime compilation passes, and the Windows packaging Pester
+  contract passes. Worker integration remains blocked by the pre-existing
+  protobuf/API drift listed above. No real Windows provider or settlement E2E
+  is claimed.
