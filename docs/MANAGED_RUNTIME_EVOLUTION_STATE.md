@@ -1573,3 +1573,14 @@ tests and `cargo check -p hivemind-proto --locked` is green.
   dependency (`__mingw_fprintf_cgo_beginthread`, LNK2019/LNK1120). This is
   reported as a failed test gate, not as passing Worker tests. No production
   code was weakened to bypass the linker.
+
+## Windows provider prerequisite checkpoint (2026-08-15)
+
+- The current host reports `vmcompute:Running`, but the Windows `Containers`
+  optional feature is `Disabled`. Docker Server 29.6.2 is available, but its
+  provider mode is not Windows HCS evidence and is not substituted for the
+  required native Windows container provider.
+- Consequently, real Windows HCS/container completion, network/filesystem
+  denial, hostile workloads, and multi-process/Postgres settlement remain
+  blocked on operator infrastructure. No Docker/Linux VM/WSL/direct-process
+  result is recorded as Windows production evidence.
