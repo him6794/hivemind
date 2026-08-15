@@ -385,11 +385,19 @@ fn execute_general_compute_task(
             result.gpu_selection = trusted_gpu_selection;
             result
         }
-        Err(error) => failed_general_compute_result(
-            &request,
-            error_code(&error),
-            trusted_gpu_selection,
-        ),
+        Err(error) => {
+            tracing::warn!(
+                task_id = %task.task_id,
+                backend_id = %request.backend_id,
+                error = %error,
+                "general-compute execution failed"
+            );
+            failed_general_compute_result_with_error(
+                &request,
+                &error,
+                trusted_gpu_selection,
+            )
+        }
     };
     typed_task_result(task, typed)
 }
@@ -615,6 +623,16 @@ fn error_code(error: &ExecutionError) -> &'static str {
     }
 }
 
+fn failed_general_compute_result_with_error(
+    request: &GeneralComputeRequest,
+    error: &ExecutionError,
+    gpu_selection: Option<general_compute_runtime::gpu::GpuSelection>,
+) -> GeneralComputeResult {
+    let mut result = failed_general_compute_result(request, error_code(error), gpu_selection);
+    result.stderr = error.to_string();
+    result
+}
+
 fn failed_general_compute_result(
     request: &GeneralComputeRequest,
     code: &str,
@@ -741,6 +759,21 @@ mod tests {
     use serde_json::Value;
     use tempfile::TempDir;
     use uuid::Uuid;
+
+    #[test]
+    fn failed_production_result_retains_diagnostic_detail() {
+        let request = production_request(
+            "oci-success",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "execution-diagnostic-test",
+        );
+        let error = ExecutionError::BackendUnavailable("runner stderr: permission denied".into());
+
+        let result = failed_general_compute_result_with_error(&request, &error, None);
+
+        assert_eq!(result.error_code.as_deref(), Some("backend_unavailable"));
+        assert_eq!(result.stderr, "general-compute backend unavailable: runner stderr: permission denied");
+    }
 
     #[tokio::test]
     async fn managed_function_task_executes_without_host_artifact_or_process() {
