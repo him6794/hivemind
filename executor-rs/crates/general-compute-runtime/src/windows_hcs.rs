@@ -6,6 +6,7 @@
 
 use crate::production::WindowsHcsContainerSpec;
 use crate::supervisor::{Cancellation, RunResult, RunStatus};
+use std::io::Read;
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,7 +162,22 @@ fn read_result_file(
             actual,
         });
     }
-    std::fs::read(path).map_err(|error| WindowsHcsError::ResultUnavailable(error.to_string()))
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| WindowsHcsError::ResultUnavailable(error.to_string()))?;
+    let mut bytes = Vec::with_capacity(actual.min(max_output_bytes));
+    let read_limit = u64::try_from(max_output_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    file.by_ref().take(read_limit)
+        .read_to_end(&mut bytes)
+        .map_err(|error| WindowsHcsError::ResultUnavailable(error.to_string()))?;
+    if bytes.len() > max_output_bytes {
+        return Err(WindowsHcsError::ResultTooLarge {
+            limit: max_output_bytes,
+            actual: bytes.len(),
+        });
+    }
+    Ok(bytes)
 }
 
 #[cfg(windows)]
