@@ -1,11 +1,22 @@
 use general_compute_runtime::{
-    canonical_artifact_root, sha256_digest, ArtifactChunk, ArtifactManifest, ArtifactRange,
+    canonical_artifact_root, canonical_input_digest, sha256_digest, ArtifactChunk, ArtifactManifest, ArtifactRange,
     ArtifactRole, BackendRegistration, CapabilityMatrix, EvidenceEnvelope, ExecutionPolicy,
     GeneralComputeRequest, GeneralComputeResult, ResultStatus, ValidationErrorCode,
-    WorkerCapabilities, GENERAL_COMPUTE_RUNTIME_VERSION,
+    ProductionResultEnvelope, UsageClaim, WorkerCapabilities, GENERAL_COMPUTE_RUNTIME_VERSION,
+    PRODUCTION_RESULT_PROTOCOL_VERSION,
 };
 use general_compute_runtime::gpu::{GpuRequirement, GpuRuntime, GpuVendor};
 use general_compute_runtime::sandbox::BackendExecutionMode;
+
+#[test]
+fn production_windows_execution_mode_round_trips_as_a_distinct_contract() {
+    let encoded = serde_json::to_string(&BackendExecutionMode::ProductionSandboxedWindows)
+        .expect("execution mode should serialize");
+    assert_eq!(encoded, "\"production_sandboxed_windows\"");
+    let decoded: BackendExecutionMode = serde_json::from_str(&encoded)
+        .expect("execution mode should deserialize");
+    assert_eq!(decoded, BackendExecutionMode::ProductionSandboxedWindows);
+}
 
 fn valid_request() -> GeneralComputeRequest {
     let mut request = GeneralComputeRequest {
@@ -36,6 +47,66 @@ fn valid_request() -> GeneralComputeRequest {
     };
     request.request_digest = request.canonical_request_digest();
     request
+}
+
+#[test]
+fn production_result_envelope_requires_version_and_verified_output_root() {
+    let request = valid_request();
+    let output = ArtifactManifest::inline_json("stdout", ArtifactRole::Output, b"ok");
+    let valid = ProductionResultEnvelope {
+        protocol_version: PRODUCTION_RESULT_PROTOCOL_VERSION.into(),
+        status: ResultStatus::Completed,
+        exit_code: Some(0),
+        error_code: None,
+        stdout: "ok".into(),
+        stderr: String::new(),
+        output_manifest_root: canonical_artifact_root(std::slice::from_ref(&output)),
+        output_artifacts: vec![output],
+        usage: UsageClaim {
+            input_bytes: request.input_artifacts.iter().map(|artifact| artifact.size_bytes).sum(),
+            output_bytes: 2,
+            ..UsageClaim::default()
+        },
+        input_sha256: canonical_input_digest(br#"{}"#, &[br#"{"x":1}"#]),
+    };
+    assert!(valid.validate_for(&request).is_ok());
+
+    let mut wrong_protocol = valid;
+    wrong_protocol.protocol_version = "general-compute-result-v0".into();
+    assert_eq!(
+        wrong_protocol.validate_for(&request).unwrap_err().code,
+        ValidationErrorCode::ResultBindingMismatch
+    );
+}
+
+#[test]
+fn production_result_envelope_binds_materialized_source_and_input_bytes() {
+    let request = valid_request();
+    let output = ArtifactManifest::inline_json("stdout", ArtifactRole::Output, b"ok");
+    let mut envelope = ProductionResultEnvelope {
+        protocol_version: PRODUCTION_RESULT_PROTOCOL_VERSION.into(),
+        status: ResultStatus::Completed,
+        exit_code: Some(0),
+        error_code: None,
+        stdout: "ok".into(),
+        stderr: String::new(),
+        output_artifacts: vec![output.clone()],
+        usage: UsageClaim {
+            input_bytes: request.input_artifacts[0].size_bytes,
+            output_bytes: 2,
+            ..UsageClaim::default()
+        },
+        input_sha256: canonical_input_digest(br#"{}"#, &[br#"{"x":1}"#]),
+        output_manifest_root: canonical_artifact_root(std::slice::from_ref(&output)),
+    };
+
+    assert!(envelope.validate_for(&request).is_ok());
+
+    envelope.input_sha256 = sha256_digest(br#"{"x":1}"#);
+    assert_eq!(
+        envelope.validate_for(&request).unwrap_err().code,
+        ValidationErrorCode::ResultBindingMismatch
+    );
 }
 
 #[test]
@@ -168,14 +239,14 @@ fn result_validation_rejects_retry_identity_mismatch() {
         guest_image_digest: request.guest_image_digest.clone(),
         input_sha256: "sha256:input".into(),
         determinism: request.determinism.clone(),
-        gpu_selection: None,
         capability_summary: vec!["cpu".into()],
+        gpu_selection: None,
         output_manifest_root: canonical_artifact_root(&[]),
         evidence: EvidenceEnvelope::default(),
     };
     let registry = CapabilityMatrix::new(vec![BackendRegistration {
         backend_id: request.backend_id.clone(),
-        execution_mode: BackendExecutionMode::ReferenceDirect,
+        execution_mode: general_compute_runtime::sandbox::BackendExecutionMode::ReferenceDirect,
         guest_image_digest: request.guest_image_digest.clone(),
         capabilities: vec!["cpu".into()],
         max_threads: 1,
@@ -194,7 +265,7 @@ fn result_validation_rejects_retry_identity_mismatch() {
 fn valid_registry(request: &GeneralComputeRequest) -> CapabilityMatrix {
     CapabilityMatrix::new(vec![BackendRegistration {
         backend_id: request.backend_id.clone(),
-        execution_mode: BackendExecutionMode::ReferenceDirect,
+        execution_mode: general_compute_runtime::sandbox::BackendExecutionMode::ReferenceDirect,
         guest_image_digest: request.guest_image_digest.clone(),
         capabilities: vec!["cpu".into()],
         max_threads: 1,
@@ -221,9 +292,9 @@ fn valid_result(request: &GeneralComputeRequest) -> GeneralComputeResult {
         backend_id: request.backend_id.clone(),
         guest_image_digest: request.guest_image_digest.clone(),
         input_sha256: "sha256:input".into(),
-        gpu_selection: None,
         determinism: request.determinism.clone(),
         capability_summary: vec!["cpu".into()],
+        gpu_selection: None,
         output_manifest_root: String::new(),
         evidence: EvidenceEnvelope::default(),
     };
@@ -411,7 +482,7 @@ fn capability_matrix_rejects_unregistered_image_and_missing_worker_capability() 
     let request = valid_request();
     let matrix = CapabilityMatrix::new(vec![BackendRegistration {
         backend_id: "python-numpy-scipy".into(),
-        execution_mode: BackendExecutionMode::ReferenceDirect,
+        execution_mode: general_compute_runtime::sandbox::BackendExecutionMode::ReferenceDirect,
         guest_image_digest: "sha256:registered".into(),
         capabilities: vec!["cpu".into(), "numpy".into()],
         max_threads: 4,
@@ -436,6 +507,7 @@ fn capability_matrix_rejects_unregistered_image_and_missing_worker_capability() 
 fn capability_matrix_rejects_network_and_gpu_requirements_without_registration() {
     let mut request = valid_request();
     request.execution_policy.network_allowed = true;
+    request.execution_policy.gpu_required = true;
     request.execution_policy.gpu_requirement = Some(
         GpuRequirement::new(
             GpuVendor::Nvidia,
@@ -449,11 +521,10 @@ fn capability_matrix_rejects_network_and_gpu_requirements_without_registration()
         )
         .expect("valid GPU requirement"),
     );
-    request.execution_policy.gpu_required = true;
     request.request_digest = request.canonical_request_digest();
     let matrix = CapabilityMatrix::new(vec![BackendRegistration {
         backend_id: "python-numpy-scipy".into(),
-        execution_mode: BackendExecutionMode::ReferenceDirect,
+        execution_mode: general_compute_runtime::sandbox::BackendExecutionMode::ReferenceDirect,
         guest_image_digest:
             "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
         capabilities: vec!["cpu".into()],

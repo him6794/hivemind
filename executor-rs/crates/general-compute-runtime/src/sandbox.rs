@@ -18,6 +18,7 @@ use crate::supervisor::{
 pub enum BackendExecutionMode {
     ReferenceDirect,
     ProductionSandboxedOci,
+    ProductionSandboxedWindows,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
