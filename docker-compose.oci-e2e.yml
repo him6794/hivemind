@@ -12,6 +12,10 @@ services:
     # it prepares the mapped rootfs. This privilege is scoped to the reviewed
     # OCI E2E override; release Compose continues to run the worker as uid 10001.
     user: "0:0"
+    # Docker Desktop exposes the container cgroup tree read-only by default;
+    # nested runc needs a writable v2 hierarchy to enforce the operator policy.
+    privileged: true
+    cgroupns: host
     environment:
       HIVEMIND_GENERAL_COMPUTE_BACKENDS: ${HIVEMIND_GENERAL_COMPUTE_BACKENDS:-}
       HIVEMIND_GENERAL_COMPUTE_WORKER_CAPABILITIES: ${HIVEMIND_GENERAL_COMPUTE_WORKER_CAPABILITIES:-}
