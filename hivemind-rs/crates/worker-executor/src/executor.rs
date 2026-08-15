@@ -2,8 +2,12 @@ use anyhow::Result;
 use general_compute_runtime::artifact::{ArtifactMaterializer, CasChunkStore};
 use general_compute_runtime::cp_python::{PythonBackendRegistration, PythonBackendRegistry};
 use general_compute_runtime::execution::{ExecutionError, ReferenceBackendExecutor};
-use general_compute_runtime::production::{ProductionBackendConfig, ProductionBackendRegistry};
+use general_compute_runtime::production::{
+    ProductionBackendConfig, ProductionBackendRegistry, WindowsProductionBackendConfig,
+    WindowsProductionBackendRegistry,
+};
 use general_compute_runtime::sandbox::{BackendExecutionMode, ProductionSandboxLauncher};
+use general_compute_runtime::windows_hcs::WindowsHcsLauncher;
 use general_compute_runtime::supervisor::{Cancellation, RunResult, RunStatus};
 use general_compute_runtime::{
     GeneralComputeRequest, GeneralComputeResult, ResultStatus, TrustedWorkerCapabilityRegistration,
@@ -208,10 +212,35 @@ pub(crate) async fn run_task_with_cancel_and_backends(
 pub(crate) async fn run_task_with_cancel_and_backends_and_trusted_registration(
     task: &Task,
     config: &HivemindConfig,
+    cancel_rx: watch::Receiver<bool>,
+    reference_executor: Option<Arc<ReferenceBackendExecutor>>,
+    cas_store: Option<Arc<CasChunkStore>>,
+    production_backends: Option<Arc<ProductionBackendRegistry>>,
+    capability_matrix: Option<Arc<general_compute_runtime::CapabilityMatrix>>,
+    trusted_registration: Option<TrustedWorkerCapabilityRegistration>,
+) -> Result<super::TaskResult> {
+    run_task_with_cancel_and_backends_and_trusted_registration_and_windows(
+        task,
+        config,
+        cancel_rx,
+        reference_executor,
+        cas_store,
+        production_backends,
+        None,
+        capability_matrix,
+        trusted_registration,
+    )
+    .await
+}
+
+pub(crate) async fn run_task_with_cancel_and_backends_and_trusted_registration_and_windows(
+    task: &Task,
+    config: &HivemindConfig,
     mut cancel_rx: watch::Receiver<bool>,
     reference_executor: Option<Arc<ReferenceBackendExecutor>>,
     cas_store: Option<Arc<CasChunkStore>>,
     production_backends: Option<Arc<ProductionBackendRegistry>>,
+    windows_backends: Option<Arc<WindowsProductionBackendRegistry>>,
     capability_matrix: Option<Arc<general_compute_runtime::CapabilityMatrix>>,
     trusted_registration: Option<TrustedWorkerCapabilityRegistration>,
 ) -> Result<super::TaskResult> {
@@ -248,6 +277,7 @@ pub(crate) async fn run_task_with_cancel_and_backends_and_trusted_registration(
         let task = task.clone();
         let reference_executor = reference_executor.clone();
         let production_backends = production_backends.clone();
+        let windows_backends = windows_backends.clone();
         let config = config.clone();
         let cas_store = cas_store.clone();
         let capability_matrix = capability_matrix.clone();
@@ -263,6 +293,7 @@ pub(crate) async fn run_task_with_cancel_and_backends_and_trusted_registration(
                 reference_executor.as_deref(),
                 cas_store.as_deref(),
                 production_backends.as_deref(),
+                windows_backends.as_deref(),
                 capability_matrix.as_deref(),
                 trusted_registration.as_ref(),
                 &execution_cancelled,
@@ -291,6 +322,7 @@ fn execute_general_compute_task(
     reference_executor: Option<&ReferenceBackendExecutor>,
     cas_store: Option<&CasChunkStore>,
     production_backends: Option<&ProductionBackendRegistry>,
+    windows_backends: Option<&WindowsProductionBackendRegistry>,
     capability_matrix: Option<&general_compute_runtime::CapabilityMatrix>,
     trusted_registration: Option<&TrustedWorkerCapabilityRegistration>,
     cancelled: &AtomicBool,
@@ -340,6 +372,38 @@ fn execute_general_compute_task(
                 task,
                 config,
                 production,
+                cas_store,
+                cancelled,
+                cancellation,
+                trusted_gpu_selection.clone(),
+            )
+        }
+        Some(BackendExecutionMode::ProductionSandboxedWindows) => {
+            let Some(registry) = windows_backends else {
+                return typed_task_result(
+                    task,
+                    failed_general_compute_result(
+                        &request,
+                        "backend_unavailable",
+                        trusted_gpu_selection.clone(),
+                    ),
+                );
+            };
+            let Some(backend) = registry.get(&request.backend_id) else {
+                return typed_task_result(
+                    task,
+                    failed_general_compute_result(
+                        &request,
+                        "backend_unavailable",
+                        trusted_gpu_selection.clone(),
+                    ),
+                );
+            };
+            execute_windows_backend_task(
+                &request,
+                task,
+                config,
+                backend,
                 cas_store,
                 cancelled,
                 cancellation,
@@ -554,6 +618,79 @@ fn execute_production_backend_task(
     )
 }
 
+fn execute_windows_backend_task(
+    request: &GeneralComputeRequest,
+    task: &Task,
+    config: &HivemindConfig,
+    backend: &WindowsProductionBackendConfig,
+    cas_store: Option<&CasChunkStore>,
+    cancelled: &AtomicBool,
+    cancellation: &Cancellation,
+    trusted_gpu_selection: Option<general_compute_runtime::gpu::GpuSelection>,
+) -> Result<GeneralComputeResult, ExecutionError> {
+    if backend.backend_id != request.backend_id
+        || backend.guest_image_digest != request.guest_image_digest
+    {
+        return Err(ExecutionError::BackendUnavailable(
+            "Windows production backend registration does not match request".into(),
+        ));
+    }
+    if cancelled.load(Ordering::Acquire) {
+        cancellation.cancel();
+    }
+    backend
+        .validate()
+        .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
+    let spec = backend
+        .hcs_spec(&task.task_id)
+        .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
+    let artifact_root = spec
+        .mounts
+        .iter()
+        .find_map(|mount| mount.host_path.parent().map(std::path::Path::to_path_buf))
+        .ok_or_else(|| ExecutionError::BackendUnavailable("Windows artifact root is unavailable".into()))?;
+    std::fs::create_dir_all(&artifact_root)
+        .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
+    let materializer = ArtifactMaterializer::new(&artifact_root)
+        .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
+    let mut materialized_bytes = Vec::with_capacity(1 + request.input_artifacts.len());
+    for artifact in std::iter::once(&request.source_artifact).chain(request.input_artifacts.iter()) {
+        let materialized = match cas_store {
+            Some(store) => materializer.materialize_with_cas(artifact, store),
+            None => materializer.materialize(artifact),
+        }
+        .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
+        let bytes = std::fs::read(&materialized.path)
+            .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
+        if materialized.size_bytes != artifact.size_bytes
+            || materialized.sha256 != artifact.sha256
+            || bytes.len() as u64 != artifact.size_bytes
+            || general_compute_runtime::sha256_digest(&bytes) != artifact.sha256
+        {
+            return Err(ExecutionError::BackendUnavailable(
+                "materialized Windows artifact identity mismatch".into(),
+            ));
+        }
+        materialized_bytes.push(bytes);
+    }
+    let Some(source_bytes) = materialized_bytes.first() else {
+        return Err(ExecutionError::BackendUnavailable(
+            "Windows source artifact was not materialized".into(),
+        ));
+    };
+    let input_sha256 = general_compute_runtime::canonical_input_digest(
+        source_bytes,
+        &materialized_bytes.iter().skip(1).map(Vec::as_slice).collect::<Vec<_>>(),
+    );
+    let launcher = WindowsHcsLauncher::new().with_timeout(std::time::Duration::from_millis(
+        request.execution_policy.wall_time_ms.min(backend.timeout_ms),
+    ));
+    let result = launcher
+        .run(&spec, cancellation)
+        .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
+    production_result(request, result, input_sha256, config, trusted_gpu_selection)
+}
+
 fn production_result(
     request: &GeneralComputeRequest,
     result: RunResult,
@@ -700,6 +837,25 @@ pub fn production_backends_from_environment(
         .map(Arc::new)
         .map(Some)
         .map_err(|error| anyhow::anyhow!("operator production backend registry is invalid: {error}"))
+}
+
+pub fn windows_production_backends_from_environment(
+) -> anyhow::Result<Option<Arc<WindowsProductionBackendRegistry>>> {
+    let path = match std::env::var("HIVEMIND_GENERAL_COMPUTE_WINDOWS_BACKENDS") {
+        Ok(path) if !path.trim().is_empty() => path,
+        _ => return Ok(None),
+    };
+    let bytes = std::fs::read(&path).map_err(|error| {
+        anyhow::anyhow!(
+            "failed to read operator Windows backend registry {path:?}: {error}"
+        )
+    })?;
+    let registrations = serde_json::from_slice::<Vec<WindowsProductionBackendConfig>>(&bytes)
+        .map_err(|error| anyhow::anyhow!("operator Windows backend registry is invalid: {error}"))?;
+    WindowsProductionBackendRegistry::new(registrations)
+        .map(Arc::new)
+        .map(Some)
+        .map_err(|error| anyhow::anyhow!("operator Windows backend registry is invalid: {error}"))
 }
 
 pub fn runtime_capability_matrix_from_environment(
