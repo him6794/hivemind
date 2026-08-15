@@ -172,17 +172,18 @@ Do not:
 
 ## Native Worker Execution Boundary
 
-Hivemind must support workers running natively on Windows without requiring the user to operate a Linux VM. Production general-compute execution is therefore platform-specific:
+Hivemind must support workers running natively on Windows without requiring the user to operate a Linux VM. The production matrix is explicitly split by workload contract:
 
-- Linux workers use `production_sandboxed_oci` with rootless OCI namespaces, cgroup v2, seccomp, read-only root, explicit artifact mounts, and deny-all networking.
-- Windows workers use a distinct Windows-native production sandbox mode backed by Windows container/HCS process isolation. Windows must not reinterpret Linux OCI policy as a Windows sandbox.
+- Closed `managed-function-v0` DSL tasks use `production_sandboxed_dsl`. The interpreter exposes no filesystem, network, process, DLL, or native-API capability and enforces operation/CPT, usage, timeout, loop, call-depth, value/materialization, memory-accounting, and output bounds. This backend is cross-platform and does not require Windows Containers or HCS.
+- Linux general-compute workers use `production_sandboxed_oci` with rootless OCI namespaces, cgroup v2, seccomp, read-only root, explicit artifact mounts, and deny-all networking.
+- Windows general-compute workers use a distinct Windows-native `production_sandboxed_windows` mode backed by Windows container/HCS process isolation. Windows must not reinterpret Linux OCI policy as a Windows sandbox.
 - `reference_direct` is reference/test-only and is never a production fallback.
-- Docker Desktop, WSL, Linux VMs, and remote Linux hosts may be used as development or validation infrastructure, but they do not constitute native Windows production isolation evidence.
-- If the required platform isolation provider, pinned operator image/assets, resource limits, filesystem policy, or network policy cannot be established, the worker must fail closed as `backend_unavailable`.
+- Docker Desktop, WSL, Linux VMs, and remote Linux hosts may be used as development or validation infrastructure, but they do not constitute native Windows general-compute isolation evidence.
+- If the selected backend's required provider, operator-owned assets, resource limits, filesystem policy, or network policy cannot be established, the worker must fail closed as `backend_unavailable`. A missing Windows HCS provider blocks only Windows general-compute, not closed DSL execution.
 
-A Windows-native production sandbox is not equivalent to a Job Object alone. Job Objects provide lifecycle and process-tree cleanup, but production isolation also requires a verified container boundary, restricted identity, read-only root, explicit artifact mounts, deny-by-default network, bounded CPU/memory/process resources, reparse-point-safe operator roots, and hostile-workload evidence. No implementation may substitute a direct host process, `cmd.exe`, PowerShell, Docker CLI, WSL, or an unconfined AppContainer for this boundary.
+A Windows-native general-compute sandbox is not equivalent to a Job Object alone. Job Objects provide lifecycle and process-tree cleanup, but production isolation also requires a verified container boundary, restricted identity, read-only root, explicit artifact mounts, deny-by-default network, bounded CPU/memory/process resources, reparse-point-safe operator roots, and hostile-workload evidence. No implementation may substitute a direct host process, `cmd.exe`, PowerShell, Docker CLI, WSL, or an unconfined AppContainer for this boundary. Those restrictions do not turn the closed DSL into general-compute: the DSL remains safe only because its interpreter has no host capability surface and all bounded execution paths are validated.
 
-The release gate must distinguish policy/specification tests, mocked lifecycle tests, and real Windows HCS/container E2E evidence. A skipped or unavailable Windows isolation provider is not a passing production E2E result.
+The release gate must distinguish DSL semantic/limit tests, general-compute policy/specification tests, mocked lifecycle tests, and real Windows HCS/container E2E evidence. A skipped or unavailable Windows isolation provider is not a passing Windows general-compute E2E result.
 
 ## Current Repo Note
 
