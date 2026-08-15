@@ -1158,7 +1158,7 @@ impl TaskRepository {
         self.revoke_general_compute_transfer_lease(&mut tx, task_id)
             .await?;
 
-        if let Some(result_json) = general_compute_result {
+        let general_compute_settlement_source = if let Some(result_json) = general_compute_result {
             sqlx::query(
                 "INSERT INTO general_compute_results (task_id, worker_id, result_json)
                  VALUES ($1, $2, $3)
@@ -1172,7 +1172,20 @@ impl TaskRepository {
             .bind(result_json)
             .execute(&mut *tx)
             .await?;
-        }
+
+            let result: GeneralComputeResult = serde_json::from_slice(result_json)
+                .map_err(|error| anyhow::anyhow!("general-compute result is malformed: {error}"))?;
+            let billing_fields = expected_manifest
+                .map(serde_json::from_slice::<GeneralComputeRequest>)
+                .transpose()
+                .map_err(|error| {
+                    anyhow::anyhow!("general-compute request is malformed: {error}")
+                })?;
+            billing_fields
+                .map(|request| (result, request.billing_version, request.cost_model_version))
+        } else {
+            None
+        };
 
         if let Some(receipt) = managed_receipt {
             completed = sqlx::query_as::<_, Task>(
@@ -1272,6 +1285,21 @@ impl TaskRepository {
                 platform_fee_cpt,
             )
             .await?;
+
+            if let (Some(settlement_source), Some(worker_id)) = (
+                general_compute_settlement_source.as_ref(),
+                completed.worker_id.as_deref(),
+            ) {
+                insert_general_compute_settlement(
+                    &mut tx,
+                    task_id,
+                    worker_id,
+                    settlement_source,
+                    "fixed_reservation",
+                    billable_cpt,
+                )
+                .await?;
+            }
 
             let settled = sqlx::query_as::<_, Task>(
                 "UPDATE tasks SET billing_settled = true, billed_amount = $1, last_update = NOW()
@@ -1663,6 +1691,59 @@ async fn insert_ledger_entry(
     .execute(&mut **tx)
     .await?;
     Ok(())
+}
+
+/// Persist Nodepool-owned settlement provenance for a general-compute
+/// completion. The amount is never derived from the Worker's own claim here:
+/// callers pass a Nodepool-computed `amount_cpt` (currently always the
+/// fixed reservation ceiling), and the Worker's `usage_claim_json` and
+/// `evidence_level` are recorded for audit only. `result.evidence.level` is
+/// trustworthy at this point because `validate_against` already rejected any
+/// non-`unverified` claim before a result reaches completion.
+async fn insert_general_compute_settlement(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    task_id: &str,
+    worker_id: &str,
+    settlement_source: &(GeneralComputeResult, String, String),
+    settlement_basis: &str,
+    amount_cpt: i64,
+) -> Result<()> {
+    let (result, billing_version, cost_model_version) = settlement_source;
+    let usage_claim_json = serde_json::to_vec(&result.usage)?;
+    sqlx::query(
+        "INSERT INTO general_compute_settlements (
+            task_id, worker_id, execution_id, attempt_id, idempotency_key, request_digest,
+            billing_version, cost_model_version, usage_claim_json, evidence_level,
+            settlement_basis, amount_cpt
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         ON CONFLICT (task_id) DO NOTHING",
+    )
+    .bind(task_id)
+    .bind(worker_id)
+    .bind(&result.execution_id)
+    .bind(&result.attempt_id)
+    .bind(&result.idempotency_key)
+    .bind(&result.request_digest)
+    .bind(billing_version)
+    .bind(cost_model_version)
+    .bind(usage_claim_json)
+    .bind(evidence_level_str(result.evidence.level))
+    .bind(settlement_basis)
+    .bind(amount_cpt)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+fn evidence_level_str(level: general_compute_runtime::EvidenceLevel) -> &'static str {
+    use general_compute_runtime::EvidenceLevel;
+    match level {
+        EvidenceLevel::Unverified => "unverified",
+        EvidenceLevel::Replicated => "replicated",
+        EvidenceLevel::TeeAttested => "tee_attested",
+        EvidenceLevel::ZkProved => "zk_proved",
+    }
 }
 
 fn managed_receipt_amount_cpt(task: &Task) -> i64 {
@@ -3040,7 +3121,33 @@ mod tests {
         };
         request.request_digest = request.canonical_request_digest();
         let current_manifest = serde_json::to_vec(&request).unwrap();
-        let typed_result_json = br#"{"status":"completed","usage":{"wall_time_ms":1}}"#;
+        let output = ArtifactManifest::inline_json("stdout", ArtifactRole::Output, b"42");
+        let typed_result = GeneralComputeResult {
+            execution_id: request.execution_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+            request_digest: request.request_digest.clone(),
+            status: ResultStatus::Completed,
+            exit_code: Some(0),
+            error_code: None,
+            stdout: "42".into(),
+            stderr: String::new(),
+            output_artifacts: vec![output.clone()],
+            usage: general_compute_runtime::UsageClaim {
+                wall_time_ms: 1,
+                ..Default::default()
+            },
+            runtime_version: request.runtime_version.clone(),
+            backend_id: request.backend_id.clone(),
+            guest_image_digest: request.guest_image_digest.clone(),
+            input_sha256: general_compute_runtime::sha256_digest(b"source"),
+            determinism: request.determinism.clone(),
+            capability_summary: vec![],
+            gpu_selection: None,
+            output_manifest_root: canonical_artifact_root(&[output]),
+            evidence: general_compute_runtime::EvidenceEnvelope::default(),
+        };
+        let typed_result_json = serde_json::to_vec(&typed_result).unwrap();
         let stale_result_json = br#"{"status":"stale"}"#;
 
         let mut task = make_task(&task_id, &username);
@@ -3084,7 +3191,7 @@ mod tests {
                 &task_id,
                 &worker_id,
                 &current_manifest,
-                typed_result_json,
+                &typed_result_json,
                 Some("current output"),
             )
             .await
@@ -3103,6 +3210,146 @@ mod tests {
         .unwrap();
         assert_eq!(persisted.0, worker_id);
         assert_eq!(persisted.1, typed_result_json);
+
+        cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn general_compute_completion_persists_fixed_reservation_settlement_provenance() {
+        let (p, fixture) = match pool("task_repository_general_compute_settlement").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("settlement-owner-{unique}");
+        let worker_id = format!("settlement-worker-{unique}");
+        let task_id = format!("settlement-task-{unique}");
+
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 5000)",
+        )
+        .bind(&username)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        insert_worker(&repo.pool, &worker_id, "settlement-provider").await;
+
+        let mut request = GeneralComputeRequest {
+            execution_id: format!("execution-{unique}"),
+            attempt_id: "attempt-1".into(),
+            idempotency_key: format!("idempotency-{unique}"),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "python-cpython-312".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest::inline_json(
+                "source",
+                ArtifactRole::Source,
+                b"source",
+            ),
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+        let manifest = serde_json::to_vec(&request).unwrap();
+
+        let output = ArtifactManifest::inline_json("stdout", ArtifactRole::Output, b"42");
+        let usage = general_compute_runtime::UsageClaim {
+            cpu_time_ms: 456,
+            wall_time_ms: 123,
+            ..Default::default()
+        };
+        let result = GeneralComputeResult {
+            execution_id: request.execution_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+            request_digest: request.request_digest.clone(),
+            status: ResultStatus::Completed,
+            exit_code: Some(0),
+            error_code: None,
+            stdout: "42".into(),
+            stderr: String::new(),
+            output_artifacts: vec![output.clone()],
+            usage: usage.clone(),
+            runtime_version: request.runtime_version.clone(),
+            backend_id: request.backend_id.clone(),
+            guest_image_digest: request.guest_image_digest.clone(),
+            input_sha256: general_compute_runtime::sha256_digest(b"source"),
+            determinism: request.determinism.clone(),
+            capability_summary: vec![],
+            gpu_selection: None,
+            output_manifest_root: canonical_artifact_root(&[output]),
+            evidence: general_compute_runtime::EvidenceEnvelope::default(),
+        };
+        let result_json = serde_json::to_vec(&result).unwrap();
+
+        let mut task = make_task(&task_id, &username);
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.general_compute_manifest_json = Some(manifest.clone());
+        repo.create(&task).await.unwrap();
+        repo.assign_to_worker(&task_id, &worker_id, "10.0.0.57")
+            .await
+            .unwrap();
+
+        let completed = repo
+            .complete_general_compute_for_worker(
+                &task_id,
+                &worker_id,
+                &manifest,
+                &result_json,
+                Some("42"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(completed.status, TaskStatus::Completed);
+        assert!(completed.billing_settled);
+        assert_eq!(completed.billed_amount, 1000);
+
+        #[allow(clippy::type_complexity)]
+        let row: (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Vec<u8>,
+            i64,
+        ) = sqlx::query_as(
+            "SELECT worker_id, execution_id, attempt_id, idempotency_key, request_digest,
+                    billing_version, cost_model_version, evidence_level, settlement_basis,
+                    usage_claim_json, amount_cpt
+             FROM general_compute_settlements
+             WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .expect("a successful general-compute completion must persist settlement provenance");
+
+        assert_eq!(row.0, worker_id);
+        assert_eq!(row.1, request.execution_id);
+        assert_eq!(row.2, request.attempt_id);
+        assert_eq!(row.3, request.idempotency_key);
+        assert_eq!(row.4, request.request_digest);
+        assert_eq!(row.5, "billing-v1");
+        assert_eq!(row.6, "cost-v1");
+        assert_eq!(row.7, "unverified");
+        assert_eq!(row.8, "fixed_reservation");
+        let persisted_usage: general_compute_runtime::UsageClaim =
+            serde_json::from_slice(&row.9).unwrap();
+        assert_eq!(persisted_usage, usage);
+        assert_eq!(row.10, 1000);
 
         cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
         fixture.cleanup().await.ok();
