@@ -1,11 +1,13 @@
 use general_compute_runtime::production::{
     ProductionBackendConfig, ProductionBackendRegistry, ProductionBackendRegistryError,
+    WindowsProductionBackendConfig, WindowsProductionBackendRegistry,
 };
 use general_compute_runtime::{ArtifactManifest, ArtifactRole, DeterminismPolicy, ExecutionPolicy, GeneralComputeRequest, GENERAL_COMPUTE_RUNTIME_VERSION};
 use general_compute_runtime::sandbox::{
     CgroupPolicy, LinuxNamespace, LinuxSandboxPolicy, OciPrivilegeMode,
     PrivilegeEscalationPolicy, RootFilesystemPolicy, SandboxMount, SandboxNetworkPolicy,
-    SeccompPolicy,
+    SeccompPolicy, WindowsIsolationMode, WindowsRootFilesystemPolicy,
+    WindowsSandboxNetworkPolicy, WindowsSandboxPolicy,
 };
 use std::path::PathBuf;
 
@@ -51,6 +53,94 @@ fn config() -> ProductionBackendConfig {
         policy: policy(),
         max_output_bytes: 1024,
     }
+}
+
+fn windows_policy() -> WindowsSandboxPolicy {
+    WindowsSandboxPolicy {
+        isolation: WindowsIsolationMode::Process,
+        network: WindowsSandboxNetworkPolicy::DenyAll,
+        root_filesystem: WindowsRootFilesystemPolicy::ReadOnly,
+        mounts: vec![
+            SandboxMount::ReadOnlyArtifact {
+                artifact_id: "source".into(),
+                destination: "/work/source".into(),
+            },
+            SandboxMount::EphemeralScratch {
+                destination: "/work/output".into(),
+                max_bytes: 4096,
+            },
+        ],
+        memory_bytes: 1024 * 1024,
+        cpu_millis: 1000,
+        process_limit: 8,
+        thread_limit: 16,
+        scratch_bytes: 4096,
+    }
+}
+
+fn windows_config(backend_id: &str) -> WindowsProductionBackendConfig {
+    WindowsProductionBackendConfig {
+        backend_id: backend_id.into(),
+        guest_image_digest: format!("sha256:{}", "a".repeat(64)),
+        image_root: PathBuf::from("C:\\hivemind\\windows\\images\\python"),
+        artifact_root: PathBuf::from("C:\\hivemind\\windows\\artifacts"),
+        runner_executable: PathBuf::from("C:\\hivemind\\windows\\hcs-helper.exe"),
+        runner_sha256: format!("sha256:{}", "b".repeat(64)),
+        entrypoint: vec!["hivemind-runner.exe".into()],
+        policy: windows_policy(),
+        max_output_bytes: 1024 * 1024,
+        timeout_ms: 30_000,
+    }
+}
+
+#[test]
+fn windows_registry_round_trips_a_distinct_native_registration() {
+    let registration = windows_config("windows-python");
+    let encoded = serde_json::to_vec(&registration).expect("Windows registration serializes");
+    let decoded: WindowsProductionBackendConfig =
+        serde_json::from_slice(&encoded).expect("Windows registration deserializes");
+    assert_eq!(decoded, registration);
+    assert_eq!(decoded.execution_mode(), general_compute_runtime::sandbox::BackendExecutionMode::ProductionSandboxedWindows);
+    assert_eq!(WindowsProductionBackendRegistry::new(vec![decoded]).unwrap().len(), 1);
+}
+
+#[test]
+fn windows_registry_rejects_unknown_fields_and_duplicate_backend_ids() {
+    let mut value = serde_json::to_value(windows_config("windows-python")).unwrap();
+    value.as_object_mut().unwrap().insert("bundle_root".into(), serde_json::json!("C:\\\\wrong"));
+    assert!(serde_json::from_value::<WindowsProductionBackendConfig>(value).is_err());
+
+    let error = WindowsProductionBackendRegistry::new(vec![
+        windows_config("windows-python"),
+        windows_config("windows-python"),
+    ])
+    .expect_err("duplicate Windows backend ids must fail closed");
+    assert_eq!(error, ProductionBackendRegistryError::DuplicateBackend("windows-python".into()));
+}
+
+#[test]
+fn windows_registry_rejects_relative_or_traversing_operator_paths() {
+    let mut registration = windows_config("windows-paths");
+    registration.image_root = PathBuf::from("windows\\images");
+    assert_eq!(
+        WindowsProductionBackendRegistry::new(vec![registration]).unwrap_err(),
+        ProductionBackendRegistryError::WindowsPathMustBeAbsolute
+    );
+
+    let mut registration = windows_config("windows-traversal");
+    registration.artifact_root = PathBuf::from("C:\\hivemind\\windows\\..\\artifacts");
+    assert_eq!(
+        WindowsProductionBackendRegistry::new(vec![registration]).unwrap_err(),
+        ProductionBackendRegistryError::WindowsPathTraversal
+    );
+}
+
+#[test]
+fn windows_registry_rejects_empty_registry() {
+    assert_eq!(
+        WindowsProductionBackendRegistry::new(Vec::new()).unwrap_err(),
+        ProductionBackendRegistryError::WindowsRegistryEmpty
+    );
 }
 
 #[test]
