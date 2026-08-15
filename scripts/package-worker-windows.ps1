@@ -64,6 +64,9 @@ EXECUTOR_NETWORK_EGRESS_MODE=allowlist
 EXECUTOR_NETWORK_EGRESS_TARGETS=127.0.0.1
 TORRENT_ALLOW_LOCAL_TASK_ARTIFACTS=false
 TORRENT_TASK_ARTIFACT_BASE_URL=
+# Operator-owned native Windows HCS backend registry. The worker fails closed
+# if this file is set but missing, malformed, or invalid.
+HIVEMIND_GENERAL_COMPUTE_WINDOWS_BACKENDS=
 "@
 $envTemplate | Set-Content -Encoding ASCII (Join-Path $out ".env.worker.example")
 
