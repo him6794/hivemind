@@ -408,6 +408,8 @@ impl ProductionBackendConfig {
                     {"type": "user"}, {"type": "pid"},
                     {"type": "mount"}, {"type": "network"}
                 ],
+                "uidMappings": [{"containerID": 0, "hostID": 100000, "size": 65536}],
+                "gidMappings": [{"containerID": 0, "hostID": 100000, "size": 65536}],
                 "seccomp": seccomp_profile
             },
             "annotations": {
