@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use hivemind_config::HivemindConfig;
+use hivemind_managed_proof::dsl_proof_task_id;
 use hivemind_managed_prover_protocol::{
     ManagedProverRequest, ManagedProverResponse, MANAGED_PROVER_PROTOCOL_VERSION,
     MAX_RESPONSE_JSON_BYTES,
@@ -256,9 +257,29 @@ fn request_for_task(task: &Task) -> Result<ManagedProverRequest, ManagedProverEr
         return Err(ManagedProverError::Failed);
     }
 
+    let task_id = if task.runtime.as_deref() == Some("production_sandboxed_dsl") {
+        let backend_id = task
+            .managed_dsl_backend_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or(ManagedProverError::Failed)?;
+        let semantics_digest = task
+            .managed_dsl_semantics_manifest_sha256
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or(ManagedProverError::Failed)?;
+        dsl_proof_task_id(
+            &task.task_id,
+            "production_sandboxed_dsl",
+            backend_id,
+            semantics_digest,
+        )
+    } else {
+        task.task_id.clone()
+    };
     let request = ManagedProverRequest {
         protocol_version: MANAGED_PROVER_PROTOCOL_VERSION,
-        task_id: task.task_id.clone(),
+        task_id,
         source: task.task_source.clone().unwrap_or_default(),
         input: task.torrent_source.clone().unwrap_or_default(),
         max_usage_units: task.max_cpt as u64,
@@ -390,6 +411,28 @@ mod tests {
             task.torrent_source.expect("test task has input")
         );
         assert_eq!(request.max_usage_units, task.max_cpt as u64);
+    }
+
+    #[test]
+    fn production_dsl_request_authenticates_task_identity_in_proved_task_id() {
+        let mut task = test_task();
+        task.runtime = Some("production_sandboxed_dsl".into());
+        task.managed_dsl_backend_id = Some("managed-default".into());
+        task.managed_dsl_semantics_manifest_sha256 =
+            Some(general_compute_runtime::MANAGED_DSL_SEMANTICS_MANIFEST_SHA256.into());
+
+        let request = request_for_task(&task).expect("production DSL task produces a request");
+
+        assert_eq!(
+            request.task_id,
+            hivemind_managed_proof::dsl_proof_task_id(
+                &task.task_id,
+                "production_sandboxed_dsl",
+                "managed-default",
+                general_compute_runtime::MANAGED_DSL_SEMANTICS_MANIFEST_SHA256,
+            )
+        );
+        assert_ne!(request.task_id, task.task_id);
     }
 
     #[test]
@@ -734,6 +777,8 @@ mod tests {
             runtime: Some("managed-function-v0".into()),
             task_source: Some("return input;".into()),
             general_compute_manifest_json: None,
+            managed_dsl_backend_id: None,
+            managed_dsl_semantics_manifest_sha256: None,
             expected_btih: None,
             cpu_usage: 0.0,
             memory_usage: 0.0,

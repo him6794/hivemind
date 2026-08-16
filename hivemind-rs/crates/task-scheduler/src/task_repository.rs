@@ -24,8 +24,9 @@ pub struct GeneralComputeArtifactState {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
-/// Nodepool-owned lease for one general-compute transfer attempt. Workers do
-/// not choose generations; assignment allocates them transactionally.
+/// Nodepool-owned lease for one general-compute transfer attempt. A Worker
+/// never chooses the generation; it is allocated transactionally when the
+/// task assignment changes and is revoked before redispatch.
 #[derive(Debug, Clone, PartialEq, Eq, FromRow)]
 pub struct GeneralComputeTransferLease {
     pub task_id: String,
@@ -57,12 +58,32 @@ impl GeneralComputeTransferLease {
 
 const PLATFORM_FEE_BPS: i64 = 1000; // 10%
 const MANAGED_BASE_INVOCATION_CPT: i64 = 1;
+const GENERAL_COMPUTE_BILLING_VERSION: &str = "billing-v1";
+const GENERAL_COMPUTE_COST_MODEL_VERSION: &str = "cost-v1";
 pub(crate) const MIN_WORKER_REPUTATION_SCORE: i32 = 20;
 
 struct ManagedCompletionReceipt<'a> {
     executed_ops: i64,
     output_bytes: i64,
     receipt_json: &'a str,
+}
+
+/// Nodepool-owned settlement evidence for an alpha general-compute result.
+/// Worker usage remains an unverified claim; the amount is the task's fixed
+/// reservation and never a worker-selected variable price.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GeneralComputeSettlement {
+    worker_id: String,
+    execution_id: String,
+    attempt_id: String,
+    idempotency_key: String,
+    request_digest: String,
+    billing_version: String,
+    cost_model_version: String,
+    usage_claim_json: Vec<u8>,
+    evidence_level: String,
+    basis: String,
+    amount_cpt: i64,
 }
 
 impl TaskRepository {
@@ -106,17 +127,30 @@ impl TaskRepository {
 
     pub async fn create(&self, task: &Task) -> Result<Task> {
         let mut tx = self.pool.begin().await?;
+        if task.runtime.as_deref() == Some("production_sandboxed_dsl")
+            && (task
+                .managed_dsl_backend_id
+                .as_deref()
+                .is_none_or(|backend_id| backend_id.trim().is_empty())
+                || task.managed_dsl_semantics_manifest_sha256.as_deref()
+                    != Some(general_compute_runtime::MANAGED_DSL_SEMANTICS_MANIFEST_SHA256))
+        {
+            anyhow::bail!("production_sandboxed_dsl task identity is incomplete or invalid");
+        }
         let created = sqlx::query_as::<_, Task>(
-            "INSERT INTO tasks (task_id, owner, status, status_message, torrent_source, runtime, task_source, general_compute_manifest_json, expected_btih,
+            "INSERT INTO tasks (task_id, owner, status, status_message, torrent_source, runtime, task_source, general_compute_manifest_json, managed_dsl_backend_id, managed_dsl_semantics_manifest_sha256, expected_btih,
              req_cpu_score, req_gpu_score, req_memory_gb, req_gpu_memory_gb, req_storage_gb,
              host_count, max_cpt, max_retries, deadline,
              deterministic, side_effects, priority, created_at, last_update)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,NOW(),NOW()) RETURNING *",
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,NOW(),NOW()) RETURNING *",
         )
         .bind(&task.task_id).bind(&task.owner)
         .bind(task.status.as_str()).bind(&task.status_message)
         .bind(&task.torrent_source).bind(&task.runtime).bind(&task.task_source)
-        .bind(&task.general_compute_manifest_json).bind(&task.expected_btih)
+        .bind(&task.general_compute_manifest_json)
+        .bind(&task.managed_dsl_backend_id)
+        .bind(&task.managed_dsl_semantics_manifest_sha256)
+        .bind(&task.expected_btih)
         .bind(task.req_cpu_score).bind(task.req_gpu_score)
         .bind(task.req_memory_gb).bind(task.req_gpu_memory_gb)
         .bind(task.req_storage_gb)
@@ -234,8 +268,10 @@ impl TaskRepository {
         Ok(created)
     }
 
-    /// Return Nodepool-owned artifact bytes only after the persisted identity,
-    /// content length, and SHA-256 digest all agree.
+    /// Read a Nodepool-owned inline artifact source only when its immutable
+    /// manifest coordinates match the persisted source row. This is the sole
+    /// scheduler raw-byte source for repopulating a Worker CAS.
+    #[allow(clippy::type_complexity)]
     pub async fn general_compute_artifact_bytes(
         &self,
         task_id: &str,
@@ -324,7 +360,6 @@ impl TaskRepository {
                 && general_compute_runtime::sha256_digest(&content) == sha256)
                 .then_some(content));
         }
-
         let mut assembled = Vec::with_capacity(size_bytes as usize);
         let mut expected_offset = 0u64;
         for (offset, chunk_size, chunk_sha256, content) in chunks {
@@ -348,6 +383,10 @@ impl TaskRepository {
             .then_some(assembled))
     }
 
+    /// Read the immutable Nodepool-owned artifact identity and its persisted
+    /// availability state. Expiry is materialized before the row is returned
+    /// so callers never treat an expired source as available.
+    #[allow(clippy::type_complexity)]
     pub async fn general_compute_artifact_state(
         &self,
         task_id: &str,
@@ -399,8 +438,9 @@ impl TaskRepository {
         .transpose()
     }
 
-    /// Verify mutable attempt coordinates against the task-bound immutable
-    /// identity and chunk manifest persisted at task creation.
+    /// Verify that a current attempt's artifact coordinates still match the
+    /// task-bound immutable identity and chunk manifest. The attempt may
+    /// rotate, but it cannot redefine which bytes an upload refers to.
     pub async fn general_compute_artifact_coordinates_match(
         &self,
         task_id: &str,
@@ -409,11 +449,28 @@ impl TaskRepository {
         sha256: &str,
         chunks: &[general_compute_runtime::ArtifactChunk],
     ) -> Result<bool> {
-        let Some(state) = self
+        let state = if let Some(state) = self
             .general_compute_artifact_state(task_id, artifact_id)
             .await?
-        else {
-            return Ok(false);
+        {
+            state
+        } else {
+            self.ensure_general_compute_artifact_identity(task_id, artifact_id)
+                .await?;
+            let Some(state) = self
+                .general_compute_artifact_state(task_id, artifact_id)
+                .await?
+            else {
+                return Ok(false);
+            };
+            if state.size_bytes != size_bytes
+                || state.sha256 != sha256
+                || state.expected_chunk_count != chunks.len() as u64
+                || state.availability_status == "expired"
+            {
+                return Ok(false);
+            }
+            state
         };
         if state.size_bytes != size_bytes
             || state.sha256 != sha256
@@ -459,11 +516,23 @@ impl TaskRepository {
         .bind(artifact_id)
         .execute(&self.pool)
         .await?;
+        sqlx::query(
+            "UPDATE general_compute_artifact_sources
+             SET expires_at = COALESCE(expires_at, (
+                 SELECT expires_at FROM general_compute_artifacts
+                 WHERE task_id = $1 AND artifact_id = $2
+             ))
+             WHERE task_id = $1 AND artifact_id = $2",
+        )
+        .bind(task_id)
+        .bind(artifact_id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
     /// Persist one Nodepool-owned, manifest-bound chunk. Identical retries are
-    /// idempotent; conflicting coordinates or bytes fail closed.
+    /// idempotent; a conflicting payload is rejected before later resume.
     pub async fn put_general_compute_artifact_chunk(
         &self,
         task_id: &str,
@@ -475,20 +544,56 @@ impl TaskRepository {
     ) -> Result<()> {
         self.expire_general_compute_artifact(task_id, artifact_id)
             .await?;
+        let state = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                i64,
+                i64,
+                String,
+                bool,
+                Option<DateTime<Utc>>,
+            ),
+        >(
+            "SELECT artifact_id, sha256, size_bytes, expected_chunk_count,
+                    availability_status, complete, expires_at
+             FROM general_compute_artifacts
+             WHERE task_id = $1 AND artifact_id = $2",
+        )
+        .bind(task_id)
+        .bind(artifact_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        if state.is_none() {
+            self.ensure_general_compute_artifact_identity(task_id, artifact_id)
+                .await?;
+        }
         let mut tx = self.pool.begin().await?;
-        let state: Option<(String, i64, i64, String, bool, Option<DateTime<Utc>>)> =
-            sqlx::query_as(
-                "SELECT sha256, size_bytes, expected_chunk_count,
-                        availability_status, complete, expires_at
-                 FROM general_compute_artifacts
-                 WHERE task_id = $1 AND artifact_id = $2
-                 FOR UPDATE",
-            )
-            .bind(task_id)
-            .bind(artifact_id)
-            .fetch_optional(&mut *tx)
-            .await?;
+        let state = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                i64,
+                i64,
+                String,
+                bool,
+                Option<DateTime<Utc>>,
+            ),
+        >(
+            "SELECT artifact_id, sha256, size_bytes, expected_chunk_count,
+                    availability_status, complete, expires_at
+             FROM general_compute_artifacts
+             WHERE task_id = $1 AND artifact_id = $2
+             FOR UPDATE",
+        )
+        .bind(task_id)
+        .bind(artifact_id)
+        .fetch_optional(&mut *tx)
+        .await?;
         let Some((
+            _artifact_id,
             expected_sha256,
             expected_size,
             expected_chunk_count,
@@ -499,15 +604,18 @@ impl TaskRepository {
         else {
             anyhow::bail!("general-compute artifact identity is missing");
         };
-        if status == "expired" || expires_at.is_some_and(|expiry| expiry <= Utc::now()) {
+        if status == "expired" || expires_at.is_some_and(|expires_at| expires_at <= Utc::now()) {
             anyhow::bail!("general-compute artifact is expired");
+        }
+        if expected_sha256.trim().is_empty() {
+            anyhow::bail!("general-compute artifact identity is invalid");
         }
         let expected_size = u64::try_from(expected_size)
             .map_err(|_| anyhow::anyhow!("negative general-compute artifact size"))?;
         if size_bytes > expected_size {
             anyhow::bail!("general-compute artifact chunk exceeds artifact size");
         }
-        let manifest_chunk: Option<(i64, i64, String)> =
+        let chunk: Option<(i64, i64, String)> =
             sqlx::query_as(
                 "SELECT offset_bytes, size_bytes, sha256
              FROM general_compute_artifact_manifest_chunks
@@ -520,7 +628,7 @@ impl TaskRepository {
             })?)
             .fetch_optional(&mut *tx)
             .await?;
-        let Some((manifest_offset, manifest_size, manifest_sha256)) = manifest_chunk else {
+        let Some((manifest_offset, manifest_size, manifest_sha256)) = chunk else {
             anyhow::bail!("artifact chunk coordinates do not match immutable manifest");
         };
         if u64::try_from(manifest_offset).ok() != Some(offset)
@@ -532,6 +640,8 @@ impl TaskRepository {
         if size_bytes > general_compute_runtime::transport::MAX_CHUNK_UPLOAD_BYTES as u64 {
             anyhow::bail!("general-compute artifact chunk exceeds the upload limit");
         }
+        let size = i64::try_from(size_bytes)
+            .map_err(|_| anyhow::anyhow!("general-compute chunk size exceeds database range"))?;
         if content.len() as u64 != size_bytes
             || general_compute_runtime::sha256_digest(content) != sha256
         {
@@ -539,8 +649,6 @@ impl TaskRepository {
         }
         let offset = i64::try_from(offset)
             .map_err(|_| anyhow::anyhow!("general-compute chunk offset exceeds database range"))?;
-        let size = i64::try_from(size_bytes)
-            .map_err(|_| anyhow::anyhow!("general-compute chunk size exceeds database range"))?;
         sqlx::query(
             "INSERT INTO general_compute_artifact_chunks
                 (task_id, artifact_id, offset_bytes, size_bytes, sha256, content)
@@ -571,7 +679,6 @@ impl TaskRepository {
         if existing_sha256 != sha256 || existing_size != size || existing_content != content {
             anyhow::bail!("general-compute artifact chunk conflicts with persisted content");
         }
-
         let stored_chunks: Vec<(i64, i64, String, Vec<u8>)> = sqlx::query_as(
             "SELECT offset_bytes, size_bytes, sha256, content
              FROM general_compute_artifact_chunks
@@ -592,7 +699,7 @@ impl TaskRepository {
         .bind(artifact_id)
         .fetch_all(&mut *tx)
         .await?;
-        let manifest_complete = expected_chunk_count
+        let is_complete = expected_chunk_count
             == i64::try_from(expected_chunks.len()).unwrap_or(-1)
             && expected_chunks.len() == stored_chunks.len()
             && expected_chunks.iter().zip(stored_chunks.iter()).all(
@@ -604,7 +711,7 @@ impl TaskRepository {
                         && general_compute_runtime::sha256_digest(bytes) == *sha
                 },
             );
-        let content_complete = if manifest_complete {
+        let content_complete = if is_complete {
             let mut assembled = Vec::with_capacity(expected_size as usize);
             for (_, _, _, bytes) in &stored_chunks {
                 assembled.extend_from_slice(bytes);
@@ -629,6 +736,142 @@ impl TaskRepository {
         .bind(artifact_id)
         .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Backfill the immutable identity for a task written by an older schema
+    /// or an operator migration that populated the task manifest directly.
+    /// Normal task creation writes this row in the same transaction; this
+    /// fallback only establishes it once, and never replaces an existing row.
+    async fn ensure_general_compute_artifact_identity(
+        &self,
+        task_id: &str,
+        artifact_id: &str,
+    ) -> Result<()> {
+        let manifest: Option<(Vec<u8>, Option<DateTime<Utc>>)> = sqlx::query_as(
+            "SELECT general_compute_manifest_json, deadline
+             FROM tasks
+             WHERE task_id = $1 AND runtime = $2",
+        )
+        .bind(task_id)
+        .bind(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some((manifest, deadline)) = manifest else {
+            anyhow::bail!("general-compute task manifest is missing");
+        };
+        let request: GeneralComputeRequest = serde_json::from_slice(&manifest)
+            .map_err(|_| anyhow::anyhow!("general-compute task manifest is malformed"))?;
+        request.validate().map_err(|error| {
+            anyhow::anyhow!("general-compute task manifest is invalid: {error:?}")
+        })?;
+        let artifact = std::iter::once(&request.source_artifact)
+            .chain(request.input_artifacts.iter())
+            .find(|artifact| artifact.artifact_id == artifact_id)
+            .ok_or_else(|| anyhow::anyhow!("artifact is not present in task manifest"))?;
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO general_compute_artifacts
+                (task_id, artifact_id, sha256, size_bytes, expected_chunk_count,
+                 availability_status, complete, expires_at)
+             VALUES ($1, $2, $3, $4, $5, 'pending', false, $6)
+             ON CONFLICT (task_id, artifact_id) DO NOTHING",
+        )
+        .bind(task_id)
+        .bind(&artifact.artifact_id)
+        .bind(&artifact.sha256)
+        .bind(
+            i64::try_from(artifact.size_bytes).map_err(|_| {
+                anyhow::anyhow!("general-compute artifact size exceeds database range")
+            })?,
+        )
+        .bind(i64::try_from(artifact.chunks.len()).map_err(|_| {
+            anyhow::anyhow!("general-compute artifact chunk count exceeds database range")
+        })?)
+        .bind(deadline)
+        .execute(&mut *tx)
+        .await?;
+        for chunk in &artifact.chunks {
+            sqlx::query(
+                "INSERT INTO general_compute_artifact_manifest_chunks
+                    (task_id, artifact_id, offset_bytes, size_bytes, sha256)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (task_id, artifact_id, offset_bytes) DO NOTHING",
+            )
+            .bind(task_id)
+            .bind(&artifact.artifact_id)
+            .bind(i64::try_from(chunk.offset).map_err(|_| {
+                anyhow::anyhow!("general-compute chunk offset exceeds database range")
+            })?)
+            .bind(i64::try_from(chunk.size_bytes).map_err(|_| {
+                anyhow::anyhow!("general-compute chunk size exceeds database range")
+            })?)
+            .bind(&chunk.sha256)
+            .execute(&mut *tx)
+            .await?;
+        }
+        let inline_source: Option<(Vec<u8>,)> =
+            sqlx::query_as(
+                "SELECT content
+             FROM general_compute_artifact_sources
+             WHERE task_id = $1 AND artifact_id = $2
+               AND sha256 = $3 AND size_bytes = $4
+               AND (expires_at IS NULL OR expires_at > NOW())",
+            )
+            .bind(task_id)
+            .bind(&artifact.artifact_id)
+            .bind(&artifact.sha256)
+            .bind(i64::try_from(artifact.size_bytes).map_err(|_| {
+                anyhow::anyhow!("general-compute artifact size exceeds database range")
+            })?)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let verified_inline = inline_source.as_ref().is_some_and(|(content,)| {
+            content.len() as u64 == artifact.size_bytes
+                && general_compute_runtime::sha256_digest(content) == artifact.sha256
+        });
+        let stored_chunks: Vec<(i64, i64, String, Vec<u8>)> = sqlx::query_as(
+            "SELECT offset_bytes, size_bytes, sha256, content
+             FROM general_compute_artifact_chunks
+             WHERE task_id = $1 AND artifact_id = $2
+             ORDER BY offset_bytes ASC",
+        )
+        .bind(task_id)
+        .bind(&artifact.artifact_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let verified_chunks = artifact.chunks.len() == stored_chunks.len()
+            && artifact.chunks.iter().zip(stored_chunks.iter()).all(
+                |(expected, (offset, size, sha256, content))| {
+                    u64::try_from(*offset).ok() == Some(expected.offset)
+                        && u64::try_from(*size).ok() == Some(expected.size_bytes)
+                        && sha256 == &expected.sha256
+                        && content.len() as u64 == expected.size_bytes
+                        && general_compute_runtime::sha256_digest(content) == expected.sha256
+                },
+            );
+        let verified_chunk_content = if verified_chunks {
+            let mut assembled = Vec::with_capacity(artifact.size_bytes as usize);
+            for (_, _, _, content) in &stored_chunks {
+                assembled.extend_from_slice(content);
+            }
+            assembled.len() as u64 == artifact.size_bytes
+                && general_compute_runtime::sha256_digest(&assembled) == artifact.sha256
+        } else {
+            false
+        };
+        if verified_inline || verified_chunk_content {
+            sqlx::query(
+                "UPDATE general_compute_artifacts
+                 SET availability_status = 'available', complete = true, updated_at = NOW()
+                 WHERE task_id = $1 AND artifact_id = $2",
+            )
+            .bind(task_id)
+            .bind(&artifact.artifact_id)
+            .execute(&mut *tx)
+            .await?;
+        }
         tx.commit().await?;
         Ok(())
     }
@@ -674,6 +917,18 @@ impl TaskRepository {
     ) -> Result<Option<String>> {
         let row = sqlx::query_as::<_, (Option<String>,)>(
             "SELECT general_compute_capabilities_json
+             FROM worker_nodes
+             WHERE worker_id = $1",
+        )
+        .bind(worker_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|(snapshot,)| snapshot))
+    }
+
+    pub async fn managed_dsl_capability_snapshot(&self, worker_id: &str) -> Result<Option<String>> {
+        let row = sqlx::query_as::<_, (Option<String>,)>(
+            "SELECT managed_dsl_capabilities_json
              FROM worker_nodes
              WHERE worker_id = $1",
         )
@@ -1101,6 +1356,7 @@ impl TaskRepository {
         .map_err(Into::into)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn complete_guarded(
         &self,
         task_id: &str,
@@ -1158,7 +1414,30 @@ impl TaskRepository {
         self.revoke_general_compute_transfer_lease(&mut tx, task_id)
             .await?;
 
-        let general_compute_settlement_source = if let Some(result_json) = general_compute_result {
+        let general_compute_settlement = if let Some(result_json) = general_compute_result {
+            let manifest = expected_manifest.ok_or_else(|| {
+                anyhow::anyhow!("general-compute settlement is missing its request manifest")
+            })?;
+            let request =
+                serde_json::from_slice::<GeneralComputeRequest>(manifest).map_err(|error| {
+                    anyhow::anyhow!("general-compute request is malformed: {error}")
+                })?;
+            let result = serde_json::from_slice::<GeneralComputeResult>(result_json)
+                .map_err(|error| anyhow::anyhow!("general-compute result is malformed: {error}"))?;
+            let worker_id = completed.worker_id.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("general-compute settlement requires an assigned worker")
+            })?;
+            Some(trusted_general_compute_settlement(
+                &request,
+                &result,
+                worker_id,
+                completed.max_cpt,
+            )?)
+        } else {
+            None
+        };
+
+        if let Some(result_json) = general_compute_result {
             sqlx::query(
                 "INSERT INTO general_compute_results (task_id, worker_id, result_json)
                  VALUES ($1, $2, $3)
@@ -1172,20 +1451,31 @@ impl TaskRepository {
             .bind(result_json)
             .execute(&mut *tx)
             .await?;
+        }
 
-            let result: GeneralComputeResult = serde_json::from_slice(result_json)
-                .map_err(|error| anyhow::anyhow!("general-compute result is malformed: {error}"))?;
-            let billing_fields = expected_manifest
-                .map(serde_json::from_slice::<GeneralComputeRequest>)
-                .transpose()
-                .map_err(|error| {
-                    anyhow::anyhow!("general-compute request is malformed: {error}")
-                })?;
-            billing_fields
-                .map(|request| (result, request.billing_version, request.cost_model_version))
-        } else {
-            None
-        };
+        if let Some(settlement) = general_compute_settlement {
+            sqlx::query(
+                "INSERT INTO general_compute_settlements (
+                    task_id, worker_id, execution_id, attempt_id, idempotency_key,
+                    request_digest, billing_version, cost_model_version,
+                    usage_claim_json, evidence_level, settlement_basis, amount_cpt
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+            )
+            .bind(task_id)
+            .bind(settlement.worker_id)
+            .bind(settlement.execution_id)
+            .bind(settlement.attempt_id)
+            .bind(settlement.idempotency_key)
+            .bind(settlement.request_digest)
+            .bind(settlement.billing_version)
+            .bind(settlement.cost_model_version)
+            .bind(settlement.usage_claim_json)
+            .bind(settlement.evidence_level)
+            .bind(settlement.basis)
+            .bind(settlement.amount_cpt)
+            .execute(&mut *tx)
+            .await?;
+        }
 
         if let Some(receipt) = managed_receipt {
             completed = sqlx::query_as::<_, Task>(
@@ -1285,21 +1575,6 @@ impl TaskRepository {
                 platform_fee_cpt,
             )
             .await?;
-
-            if let (Some(settlement_source), Some(worker_id)) = (
-                general_compute_settlement_source.as_ref(),
-                completed.worker_id.as_deref(),
-            ) {
-                insert_general_compute_settlement(
-                    &mut tx,
-                    task_id,
-                    worker_id,
-                    settlement_source,
-                    "fixed_reservation",
-                    billable_cpt,
-                )
-                .await?;
-            }
 
             let settled = sqlx::query_as::<_, Task>(
                 "UPDATE tasks SET billing_settled = true, billed_amount = $1, last_update = NOW()
@@ -1408,8 +1683,9 @@ impl TaskRepository {
         Ok(failed)
     }
 
-    /// Mark the active assignment terminal without treating a Nodepool-side
-    /// preparation failure as evidence against the Worker.
+    /// Mark an assigned task failed without attributing the failure to the
+    /// worker. This is used for operator-side admission failures such as a
+    /// CAS-only artifact that Nodepool cannot yet source.
     pub async fn fail_for_worker_without_penalty(
         &self,
         task_id: &str,
@@ -1428,7 +1704,6 @@ impl TaskRepository {
         .bind(worker_id)
         .fetch_one(&mut *tx)
         .await?;
-
         self.revoke_general_compute_transfer_lease(&mut tx, task_id)
             .await?;
         if let Some(result_json) = nodepool_general_compute_terminal_result(
@@ -1693,57 +1968,98 @@ async fn insert_ledger_entry(
     Ok(())
 }
 
-/// Persist Nodepool-owned settlement provenance for a general-compute
-/// completion. The amount is never derived from the Worker's own claim here:
-/// callers pass a Nodepool-computed `amount_cpt` (currently always the
-/// fixed reservation ceiling), and the Worker's `usage_claim_json` and
-/// `evidence_level` are recorded for audit only. `result.evidence.level` is
-/// trustworthy at this point because `validate_against` already rejected any
-/// non-`unverified` claim before a result reaches completion.
-async fn insert_general_compute_settlement(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    task_id: &str,
+fn trusted_general_compute_settlement(
+    request: &GeneralComputeRequest,
+    result: &GeneralComputeResult,
     worker_id: &str,
-    settlement_source: &(GeneralComputeResult, String, String),
-    settlement_basis: &str,
-    amount_cpt: i64,
-) -> Result<()> {
-    let (result, billing_version, cost_model_version) = settlement_source;
-    let usage_claim_json = serde_json::to_vec(&result.usage)?;
-    sqlx::query(
-        "INSERT INTO general_compute_settlements (
-            task_id, worker_id, execution_id, attempt_id, idempotency_key, request_digest,
-            billing_version, cost_model_version, usage_claim_json, evidence_level,
-            settlement_basis, amount_cpt
-         )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-         ON CONFLICT (task_id) DO NOTHING",
-    )
-    .bind(task_id)
-    .bind(worker_id)
-    .bind(&result.execution_id)
-    .bind(&result.attempt_id)
-    .bind(&result.idempotency_key)
-    .bind(&result.request_digest)
-    .bind(billing_version)
-    .bind(cost_model_version)
-    .bind(usage_claim_json)
-    .bind(evidence_level_str(result.evidence.level))
-    .bind(settlement_basis)
-    .bind(amount_cpt)
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
-}
-
-fn evidence_level_str(level: general_compute_runtime::EvidenceLevel) -> &'static str {
-    use general_compute_runtime::EvidenceLevel;
-    match level {
-        EvidenceLevel::Unverified => "unverified",
-        EvidenceLevel::Replicated => "replicated",
-        EvidenceLevel::TeeAttested => "tee_attested",
-        EvidenceLevel::ZkProved => "zk_proved",
+    reservation_cpt: i64,
+) -> Result<GeneralComputeSettlement> {
+    if worker_id.trim().is_empty() {
+        anyhow::bail!("general-compute settlement requires a worker identity");
     }
+    if reservation_cpt <= 0 {
+        anyhow::bail!("general-compute settlement reservation must be positive");
+    }
+    request.validate().map_err(|error| {
+        anyhow::anyhow!("general-compute request failed settlement validation: {error:?}")
+    })?;
+    if request.billing_version != GENERAL_COMPUTE_BILLING_VERSION
+        || request.cost_model_version != GENERAL_COMPUTE_COST_MODEL_VERSION
+    {
+        anyhow::bail!(
+            "general-compute billing/cost model is not Nodepool-approved: {}/{}",
+            request.billing_version,
+            request.cost_model_version
+        );
+    }
+    if result.status != ResultStatus::Completed
+        || result.exit_code != Some(0)
+        || result.error_code.is_some()
+    {
+        anyhow::bail!("only a successfully completed general-compute result can settle");
+    }
+    if result.execution_id != request.execution_id
+        || result.attempt_id != request.attempt_id
+        || result.idempotency_key != request.idempotency_key
+        || result.request_digest != request.request_digest
+        || result.runtime_version != request.runtime_version
+        || result.backend_id != request.backend_id
+        || result.guest_image_digest != request.guest_image_digest
+        || result.determinism != request.determinism
+    {
+        anyhow::bail!("general-compute result identity does not match the request");
+    }
+    if result.evidence.level != general_compute_runtime::EvidenceLevel::Unverified {
+        anyhow::bail!("worker general-compute evidence cannot establish trusted settlement");
+    }
+    if result.output_manifest_root
+        != general_compute_runtime::canonical_artifact_root(&result.output_artifacts)
+    {
+        anyhow::bail!("general-compute output manifest root is not canonical");
+    }
+    let output_artifact_bytes = result
+        .output_artifacts
+        .iter()
+        .try_fold(0u64, |total, artifact| {
+            if artifact.role != general_compute_runtime::ArtifactRole::Output {
+                return None;
+            }
+            artifact.validate().ok()?;
+            total.checked_add(artifact.size_bytes)
+        })
+        .ok_or_else(|| anyhow::anyhow!("general-compute output artifacts are invalid"))?;
+    let input_bytes = request
+        .input_artifacts
+        .iter()
+        .try_fold(0u64, |total, artifact| {
+            total.checked_add(artifact.size_bytes)
+        })
+        .ok_or_else(|| anyhow::anyhow!("general-compute input sizes overflow"))?;
+    if output_artifact_bytes > request.execution_policy.output_bytes
+        || result.usage.cpu_time_ms > request.execution_policy.cpu_millis
+        || result.usage.wall_time_ms > request.execution_policy.wall_time_ms
+        || result.usage.peak_memory_bytes > request.execution_policy.memory_bytes
+        || result.usage.output_bytes > request.execution_policy.output_bytes
+        || result.usage.input_bytes > input_bytes
+        || (!request.execution_policy.gpu_required
+            && (result.usage.gpu_time_ms != 0 || result.usage.gpu_memory_bytes != 0))
+    {
+        anyhow::bail!("general-compute usage claim exceeds the request policy");
+    }
+
+    Ok(GeneralComputeSettlement {
+        worker_id: worker_id.to_owned(),
+        execution_id: request.execution_id.clone(),
+        attempt_id: request.attempt_id.clone(),
+        idempotency_key: request.idempotency_key.clone(),
+        request_digest: request.request_digest.clone(),
+        billing_version: request.billing_version.clone(),
+        cost_model_version: request.cost_model_version.clone(),
+        usage_claim_json: serde_json::to_vec(&result.usage)?,
+        evidence_level: "unverified".into(),
+        basis: "fixed_reservation".into(),
+        amount_cpt: reservation_cpt,
+    })
 }
 
 fn managed_receipt_amount_cpt(task: &Task) -> i64 {
@@ -1763,9 +2079,7 @@ fn nodepool_general_compute_terminal_result(
     let manifest = task
         .general_compute_manifest_json
         .as_deref()
-        .ok_or_else(|| {
-            anyhow::anyhow!("general-compute task is missing its request manifest")
-        })?;
+        .ok_or_else(|| anyhow::anyhow!("general-compute task is missing its request manifest"))?;
     let request: GeneralComputeRequest = serde_json::from_slice(manifest)
         .map_err(|error| anyhow::anyhow!("general-compute request is malformed: {error}"))?;
     request
@@ -1839,7 +2153,10 @@ fn nodepool_general_compute_terminal_result(
 }
 
 fn billable_amount_cpt(task: &Task) -> i64 {
-    if task.runtime.as_deref() == Some("managed-function-v0") && task.managed_receipt_json.is_some()
+    if matches!(
+        task.runtime.as_deref(),
+        Some("managed-function-v0") | Some("production_sandboxed_dsl")
+    ) && task.managed_receipt_json.is_some()
     {
         managed_receipt_amount_cpt(task).min(task.max_cpt).max(0)
     } else {
@@ -1950,13 +2267,14 @@ async fn insert_task_attestation_pool(
 }
 
 #[cfg(test)]
+#[allow(clippy::type_complexity)]
 mod tests {
     use super::*;
     use chrono::Utc;
     use general_compute_runtime::{
         canonical_artifact_root, ArtifactManifest, ArtifactRole, DeterminismPolicy,
-        ExecutionPolicy, GeneralComputeRequest, GeneralComputeResult, ResultStatus,
-        GENERAL_COMPUTE_RUNTIME_VERSION,
+        EvidenceEnvelope, ExecutionPolicy, GeneralComputeRequest, GeneralComputeResult,
+        ResultStatus, UsageClaim, GENERAL_COMPUTE_RUNTIME_VERSION,
     };
     use hivemind_database::postgres::IsolatedTestPool;
 
@@ -2027,6 +2345,767 @@ mod tests {
         assert_eq!(billable_amount_cpt(&task), 10);
     }
 
+    #[test]
+    fn general_compute_settlement_uses_fixed_reservation_and_keeps_usage_unverified() {
+        let mut request = GeneralComputeRequest {
+            execution_id: "settlement-execution".into(),
+            attempt_id: "settlement-attempt".into(),
+            idempotency_key: "settlement-idempotency".into(),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "settlement-backend".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest::inline_json(
+                "source",
+                ArtifactRole::Source,
+                b"source",
+            ),
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+        let usage = UsageClaim {
+            cpu_time_ms: 17,
+            wall_time_ms: 23,
+            output_bytes: 5,
+            ..UsageClaim::default()
+        };
+        let result = GeneralComputeResult {
+            execution_id: request.execution_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+            request_digest: request.request_digest.clone(),
+            status: ResultStatus::Completed,
+            exit_code: Some(0),
+            error_code: None,
+            stdout: "ok".into(),
+            stderr: String::new(),
+            output_artifacts: vec![],
+            usage: usage.clone(),
+            runtime_version: request.runtime_version.clone(),
+            backend_id: request.backend_id.clone(),
+            guest_image_digest: request.guest_image_digest.clone(),
+            input_sha256: general_compute_runtime::canonical_input_digest(b"source", &[]),
+            determinism: request.determinism.clone(),
+            capability_summary: vec![],
+            gpu_selection: None,
+            output_manifest_root: canonical_artifact_root(&[]),
+            evidence: EvidenceEnvelope::default(),
+        };
+
+        let settlement =
+            trusted_general_compute_settlement(&request, &result, "settlement-worker", 42)
+                .expect("a validated general-compute result should produce a settlement record");
+
+        assert_eq!(settlement.amount_cpt, 42);
+        assert_eq!(settlement.basis, "fixed_reservation");
+        assert_eq!(settlement.evidence_level, "unverified");
+        assert_eq!(settlement.worker_id, "settlement-worker");
+        assert_eq!(
+            serde_json::from_slice::<UsageClaim>(&settlement.usage_claim_json).unwrap(),
+            usage
+        );
+
+        let mut forged_request = request.clone();
+        forged_request.cost_model_version = "worker-selected-cost".into();
+        forged_request.request_digest = forged_request.canonical_request_digest();
+        assert!(trusted_general_compute_settlement(
+            &forged_request,
+            &result,
+            "settlement-worker",
+            42,
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn general_compute_completion_persists_nodepool_settlement_provenance() {
+        let (p, fixture) = match pool("task_repository_general_compute_settlement").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("settlement-owner-{unique}");
+        let worker_id = format!("settlement-worker-{unique}");
+        let task_id = format!("settlement-task-{unique}");
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        )
+        .bind(&username)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        insert_worker(&repo.pool, &worker_id, &format!("provider-{unique}")).await;
+
+        let mut request = GeneralComputeRequest {
+            execution_id: format!("execution-{unique}"),
+            attempt_id: format!("attempt-{unique}"),
+            idempotency_key: format!("idempotency-{unique}"),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "settlement-backend".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest::inline_json(
+                "source",
+                ArtifactRole::Source,
+                b"source",
+            ),
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+        let result = GeneralComputeResult {
+            execution_id: request.execution_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+            request_digest: request.request_digest.clone(),
+            status: ResultStatus::Completed,
+            exit_code: Some(0),
+            error_code: None,
+            stdout: "settled".into(),
+            stderr: String::new(),
+            output_artifacts: vec![],
+            usage: UsageClaim {
+                cpu_time_ms: 7,
+                wall_time_ms: 9,
+                ..UsageClaim::default()
+            },
+            runtime_version: request.runtime_version.clone(),
+            backend_id: request.backend_id.clone(),
+            guest_image_digest: request.guest_image_digest.clone(),
+            input_sha256: general_compute_runtime::canonical_input_digest(b"source", &[]),
+            determinism: request.determinism.clone(),
+            capability_summary: vec![],
+            gpu_selection: None,
+            output_manifest_root: canonical_artifact_root(&[]),
+            evidence: EvidenceEnvelope::default(),
+        };
+        let manifest = serde_json::to_vec(&request).unwrap();
+        let result_json = serde_json::to_vec(&result).unwrap();
+
+        let mut task = make_task(&task_id, &username);
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.max_cpt = 42;
+        task.general_compute_manifest_json = Some(manifest.clone());
+        repo.create(&task).await.unwrap();
+        repo.assign_to_worker(&task_id, &worker_id, "10.0.0.77")
+            .await
+            .unwrap();
+
+        let completed = repo
+            .complete_general_compute_for_worker(
+                &task_id,
+                &worker_id,
+                &manifest,
+                &result_json,
+                Some("settled"),
+            )
+            .await
+            .unwrap();
+        assert!(completed.billing_settled);
+        assert_eq!(completed.billed_amount, 42);
+
+        let row: (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+            String,
+            String,
+            String,
+            Vec<u8>,
+        ) = sqlx::query_as(
+            "SELECT worker_id, execution_id, attempt_id, idempotency_key,
+                        request_digest, billing_version, amount_cpt,
+                        cost_model_version, settlement_basis, evidence_level,
+                        usage_claim_json
+                 FROM general_compute_settlements WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, worker_id);
+        assert_eq!(row.1, request.execution_id);
+        assert_eq!(row.2, request.attempt_id);
+        assert_eq!(row.3, request.idempotency_key);
+        assert_eq!(row.4, request.request_digest);
+        assert_eq!(row.5, "billing-v1");
+        assert_eq!(row.6, 42);
+        assert_eq!(row.7, "cost-v1");
+        assert_eq!(row.8, "fixed_reservation");
+        assert_eq!(row.9, "unverified");
+        assert_eq!(
+            serde_json::from_slice::<UsageClaim>(&row.10).unwrap(),
+            result.usage
+        );
+
+        cleanup_task_case(&repo.pool, &task_id, &username, Some(&row.0)).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn general_compute_failure_persists_typed_result_without_settlement() {
+        let (p, fixture) = match pool("task_repository_general_compute_failure").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("failure-owner-{unique}");
+        let worker_id = format!("failure-worker-{unique}");
+        let task_id = format!("failure-task-{unique}");
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        )
+        .bind(&username)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        insert_worker(&repo.pool, &worker_id, &format!("provider-{unique}")).await;
+
+        let mut request = GeneralComputeRequest {
+            execution_id: format!("execution-{unique}"),
+            attempt_id: format!("attempt-{unique}"),
+            idempotency_key: format!("idempotency-{unique}"),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "failure-backend".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest::inline_json(
+                "source",
+                ArtifactRole::Source,
+                b"source",
+            ),
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+        let result = GeneralComputeResult {
+            execution_id: request.execution_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+            request_digest: request.request_digest.clone(),
+            status: ResultStatus::BackendUnavailable,
+            exit_code: None,
+            error_code: Some("backend_unavailable".into()),
+            stdout: String::new(),
+            stderr: "network denied".into(),
+            output_artifacts: vec![],
+            usage: UsageClaim::default(),
+            runtime_version: request.runtime_version.clone(),
+            backend_id: request.backend_id.clone(),
+            guest_image_digest: request.guest_image_digest.clone(),
+            input_sha256: general_compute_runtime::canonical_input_digest(b"source", &[]),
+            determinism: request.determinism.clone(),
+            capability_summary: vec![],
+            gpu_selection: None,
+            output_manifest_root: canonical_artifact_root(&[]),
+            evidence: EvidenceEnvelope::default(),
+        };
+        let manifest = serde_json::to_vec(&request).unwrap();
+        let result_json = serde_json::to_vec(&result).unwrap();
+
+        let mut task = make_task(&task_id, &username);
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.max_cpt = 42;
+        task.general_compute_manifest_json = Some(manifest.clone());
+        repo.create(&task).await.unwrap();
+        repo.assign_to_worker(&task_id, &worker_id, "10.0.0.78")
+            .await
+            .unwrap();
+
+        let failed = repo
+            .fail_general_compute_for_worker(
+                &task_id,
+                &worker_id,
+                &manifest,
+                &result_json,
+                "backend_unavailable",
+            )
+            .await
+            .unwrap();
+        assert_eq!(failed.status, TaskStatus::Failed);
+        assert!(!failed.billing_settled);
+        let lease_state: String = sqlx::query_scalar(
+            "SELECT state FROM general_compute_transfer_leases WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(lease_state, "revoked");
+
+        let persisted: Vec<u8> = sqlx::query_scalar(
+            "SELECT result_json FROM general_compute_results WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        let persisted_result: GeneralComputeResult = serde_json::from_slice(&persisted).unwrap();
+        assert_eq!(persisted_result, result);
+
+        let settlement_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM general_compute_settlements WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(settlement_count, 0);
+
+        cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn general_compute_cancel_persists_nodepool_typed_result_without_settlement() {
+        let (p, fixture) = match pool("task_repository_general_compute_cancel").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("cancel-owner-{unique}");
+        let worker_id = format!("cancel-worker-{unique}");
+        let task_id = format!("cancel-task-{unique}");
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        )
+        .bind(&username)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        insert_worker(&repo.pool, &worker_id, &format!("provider-{unique}")).await;
+
+        let mut request = GeneralComputeRequest {
+            execution_id: format!("execution-{unique}"),
+            attempt_id: format!("attempt-{unique}"),
+            idempotency_key: format!("idempotency-{unique}"),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "cancel-backend".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest::inline_json(
+                "source",
+                ArtifactRole::Source,
+                b"source",
+            ),
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+        let manifest = serde_json::to_vec(&request).unwrap();
+
+        let mut task = make_task(&task_id, &username);
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.general_compute_manifest_json = Some(manifest);
+        repo.create(&task).await.unwrap();
+        repo.assign_to_worker(&task_id, &worker_id, "10.0.0.79")
+            .await
+            .unwrap();
+
+        let cancelled = repo.cancel(&task_id).await.unwrap();
+        assert_eq!(cancelled.status, TaskStatus::Cancelled);
+
+        let persisted: Vec<u8> = sqlx::query_scalar(
+            "SELECT result_json FROM general_compute_results WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        let result: GeneralComputeResult = serde_json::from_slice(&persisted).unwrap();
+        assert_eq!(result.status, ResultStatus::Cancelled);
+        assert_eq!(result.error_code.as_deref(), Some("task_cancelled"));
+        assert_eq!(result.execution_id, request.execution_id);
+        assert_eq!(result.attempt_id, request.attempt_id);
+        assert_eq!(result.request_digest, request.request_digest);
+        assert_eq!(
+            result.input_sha256,
+            general_compute_runtime::canonical_input_digest(b"source", &[])
+        );
+        assert_eq!(result.output_manifest_root, canonical_artifact_root(&[]));
+
+        let settlement_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM general_compute_settlements WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(settlement_count, 0);
+
+        cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn general_compute_stale_running_persists_nodepool_typed_timeout_without_settlement() {
+        let (p, fixture) = match pool("task_repository_general_compute_stale_timeout").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("timeout-owner-{unique}");
+        let worker_id = format!("timeout-worker-{unique}");
+        let task_id = format!("timeout-task-{unique}");
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        )
+        .bind(&username)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        insert_worker(&repo.pool, &worker_id, &format!("provider-{unique}")).await;
+
+        let mut request = GeneralComputeRequest {
+            execution_id: format!("execution-{unique}"),
+            attempt_id: format!("attempt-{unique}"),
+            idempotency_key: format!("idempotency-{unique}"),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "timeout-backend".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest::inline_json(
+                "source",
+                ArtifactRole::Source,
+                b"source",
+            ),
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+        let manifest = serde_json::to_vec(&request).unwrap();
+
+        let mut task = make_task(&task_id, &username);
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.general_compute_manifest_json = Some(manifest);
+        repo.create(&task).await.unwrap();
+        repo.assign_to_worker(&task_id, &worker_id, "10.0.0.80")
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE tasks
+             SET status = 'RUNNING', last_update = NOW() - INTERVAL '121 seconds'
+             WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+
+        assert_eq!(repo.mark_stale_running().await.unwrap(), 1);
+        let timed_out = repo.find_by_task_id(&task_id).await.unwrap().unwrap();
+        assert_eq!(timed_out.status, TaskStatus::TimedOut);
+        assert_eq!(
+            timed_out.status_message.as_deref(),
+            Some("Worker heartbeat lost")
+        );
+
+        let persisted: Vec<u8> = sqlx::query_scalar(
+            "SELECT result_json FROM general_compute_results WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        let result: GeneralComputeResult = serde_json::from_slice(&persisted).unwrap();
+        assert_eq!(result.status, ResultStatus::TimedOut);
+        assert_eq!(result.error_code.as_deref(), Some("worker_heartbeat_lost"));
+        assert_eq!(result.execution_id, request.execution_id);
+        assert_eq!(result.attempt_id, request.attempt_id);
+        assert_eq!(result.request_digest, request.request_digest);
+        assert_eq!(
+            result.input_sha256,
+            general_compute_runtime::canonical_input_digest(b"source", &[])
+        );
+        assert_eq!(result.output_manifest_root, canonical_artifact_root(&[]));
+
+        let settlement_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM general_compute_settlements WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(settlement_count, 0);
+
+        cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn general_compute_fail_for_worker_persists_nodepool_typed_failure_without_settlement() {
+        let (p, fixture) = match pool("task_repository_general_compute_nodepool_failure").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("nodepool-fail-owner-{unique}");
+        let worker_id = format!("nodepool-fail-worker-{unique}");
+        let task_id = format!("nodepool-fail-task-{unique}");
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        )
+        .bind(&username)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        insert_worker(&repo.pool, &worker_id, &format!("provider-{unique}")).await;
+
+        let mut request = GeneralComputeRequest {
+            execution_id: format!("execution-{unique}"),
+            attempt_id: format!("attempt-{unique}"),
+            idempotency_key: format!("idempotency-{unique}"),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "nodepool-fail-backend".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest::inline_json(
+                "source",
+                ArtifactRole::Source,
+                b"source",
+            ),
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+        let manifest = serde_json::to_vec(&request).unwrap();
+
+        let mut task = make_task(&task_id, &username);
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.general_compute_manifest_json = Some(manifest);
+        repo.create(&task).await.unwrap();
+        repo.assign_to_worker(&task_id, &worker_id, "10.0.0.82")
+            .await
+            .unwrap();
+
+        let reason = "Max redispatch attempts exceeded";
+        let failed = repo
+            .fail_for_worker(&task_id, &worker_id, reason)
+            .await
+            .unwrap();
+        assert_eq!(failed.status, TaskStatus::Failed);
+        assert_eq!(failed.status_message.as_deref(), Some(reason));
+        let lease_state: String = sqlx::query_scalar(
+            "SELECT state FROM general_compute_transfer_leases WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(lease_state, "revoked");
+
+        let persisted: Vec<u8> = sqlx::query_scalar(
+            "SELECT result_json FROM general_compute_results WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        let result: GeneralComputeResult = serde_json::from_slice(&persisted).unwrap();
+        assert_eq!(result.status, ResultStatus::Failed);
+        assert_eq!(result.error_code.as_deref(), Some("nodepool_task_failed"));
+        assert_eq!(result.stderr, reason);
+        assert_eq!(result.execution_id, request.execution_id);
+        assert_eq!(result.attempt_id, request.attempt_id);
+        assert_eq!(result.request_digest, request.request_digest);
+        assert_eq!(
+            result.input_sha256,
+            general_compute_runtime::canonical_input_digest(b"source", &[])
+        );
+        assert_eq!(result.output_manifest_root, canonical_artifact_root(&[]));
+
+        let settlement_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM general_compute_settlements WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(settlement_count, 0);
+
+        let reputation: (i64, i32) = sqlx::query_as(
+            "SELECT failed_tasks, score FROM worker_reputation WHERE worker_id = $1",
+        )
+        .bind(&worker_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(reputation, (1, 95));
+        let attestation_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM task_attestations
+             WHERE task_id = $1 AND worker_id = $2 AND verdict = 'rejected'",
+        )
+        .bind(&task_id)
+        .bind(&worker_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(attestation_count, 1);
+
+        cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn general_compute_fail_persists_nodepool_typed_failure_without_settlement() {
+        let (p, fixture) = match pool("task_repository_general_compute_fail").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("generic-fail-owner-{unique}");
+        let task_id = format!("generic-fail-task-{unique}");
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        )
+        .bind(&username)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+
+        let mut request = GeneralComputeRequest {
+            execution_id: format!("execution-{unique}"),
+            attempt_id: format!("attempt-{unique}"),
+            idempotency_key: format!("idempotency-{unique}"),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "generic-fail-backend".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest::inline_json(
+                "source",
+                ArtifactRole::Source,
+                b"source",
+            ),
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+        let manifest = serde_json::to_vec(&request).unwrap();
+
+        let mut task = make_task(&task_id, &username);
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.general_compute_manifest_json = Some(manifest);
+        repo.create(&task).await.unwrap();
+
+        let reason = "Nodepool rejected the task";
+        let failed = repo.fail(&task_id, reason).await.unwrap();
+        assert_eq!(failed.status, TaskStatus::Failed);
+        assert_eq!(failed.status_message.as_deref(), Some(reason));
+
+        let persisted: (String, Vec<u8>) = sqlx::query_as(
+            "SELECT worker_id, result_json FROM general_compute_results WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(persisted.0, "nodepool");
+        let result: GeneralComputeResult = serde_json::from_slice(&persisted.1).unwrap();
+        assert_eq!(result.status, ResultStatus::Failed);
+        assert_eq!(result.error_code.as_deref(), Some("nodepool_task_failed"));
+        assert_eq!(result.stderr, reason);
+        assert_eq!(result.execution_id, request.execution_id);
+        assert_eq!(result.attempt_id, request.attempt_id);
+        assert_eq!(result.request_digest, request.request_digest);
+        assert_eq!(
+            result.input_sha256,
+            general_compute_runtime::canonical_input_digest(b"source", &[])
+        );
+        assert_eq!(result.output_manifest_root, canonical_artifact_root(&[]));
+
+        let settlement_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM general_compute_settlements WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(settlement_count, 0);
+
+        cleanup_task_case(&repo.pool, &task_id, &username, None).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_fail_does_not_overwrite_completed_task() {
+        let (p, fixture) = match pool("task_repository_fail_completed_guard").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("fail-guard-owner-{unique}");
+        let task_id = format!("fail-guard-task-{unique}");
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        )
+        .bind(&username)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+
+        let mut task = make_task(&task_id, &username);
+        task.max_cpt = 0;
+        repo.create(&task).await.unwrap();
+        let completed = repo.complete(&task_id, None, Some("done")).await.unwrap();
+        assert_eq!(completed.status, TaskStatus::Completed);
+
+        let late_fail = repo.fail(&task_id, "late failure").await;
+        assert!(late_fail.is_err());
+        let stored = repo.find_by_task_id(&task_id).await.unwrap().unwrap();
+        assert_eq!(stored.status, TaskStatus::Completed);
+        assert_eq!(stored.output.as_deref(), Some("done"));
+
+        cleanup_task_case(&repo.pool, &task_id, &username, None).await;
+        fixture.cleanup().await.ok();
+    }
+
     #[tokio::test]
     async fn test_create_and_find_task() {
         let (p, fixture) = match pool("task_repository_create_and_find_task").await {
@@ -2049,6 +3128,8 @@ mod tests {
             runtime: None,
             task_source: None,
             general_compute_manifest_json: None,
+            managed_dsl_backend_id: None,
+            managed_dsl_semantics_manifest_sha256: None,
             expected_btih: None,
             cpu_usage: 0.0,
             memory_usage: 0.0,
@@ -2098,57 +3179,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn general_compute_creation_requires_a_valid_manifest_atomically() {
-        let (p, fixture) = match pool("task_repository_general_compute_manifest_required").await {
+    async fn general_compute_inline_artifacts_are_persisted_as_a_verified_source() {
+        let (p, fixture) = match pool("task_repository_general_compute_artifact_source").await {
             Some(parts) => parts,
             None => return,
         };
         let repo = TaskRepository::new(p);
         let unique = uuid::Uuid::new_v4().to_string();
-        let task_id = format!("general-compute-manifest-required-{unique}");
-        let mut task = make_task(&task_id, "manifest-required-owner");
+        let task_id = format!("general-compute-artifact-source-{unique}");
+        let bytes = b"trusted source bytes".to_vec();
+        let mut request = GeneralComputeRequest {
+            execution_id: format!("execution-{unique}"),
+            attempt_id: format!("attempt-{unique}"),
+            idempotency_key: format!("idempotency-{unique}"),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "python-cpython-312".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest::inline_json("source", ArtifactRole::Source, &bytes),
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+
+        let mut task = make_task(&task_id, "artifact-source-owner");
         task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
         task.torrent_source = None;
-
-        assert!(repo.create(&task).await.is_err());
-        assert!(repo.find_by_task_id(&task_id).await.unwrap().is_none());
-
-        fixture.cleanup().await.ok();
-    }
-
-    #[tokio::test]
-    async fn general_compute_inline_artifacts_are_persisted_as_verified_sources() {
-        let (p, fixture) = match pool("task_repository_general_compute_inline_source").await {
-            Some(parts) => parts,
-            None => return,
-        };
-        let repo = TaskRepository::new(p);
-        let unique = uuid::Uuid::new_v4().to_string();
-        let task_id = format!("general-compute-inline-source-{unique}");
-        let bytes = b"trusted source bytes";
-        let request = inline_general_compute_request(&unique, bytes);
-        let task = task_for_general_compute_request(&task_id, "inline-source-owner", &request);
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
         repo.create(&task).await.unwrap();
 
-        assert_eq!(
-            repo.general_compute_artifact_bytes(
+        let stored = repo
+            .general_compute_artifact_bytes(
                 &task_id,
                 "source",
                 &request.source_artifact.sha256,
                 request.source_artifact.size_bytes,
             )
             .await
-            .unwrap(),
-            Some(bytes.to_vec())
-        );
+            .unwrap();
+        assert_eq!(stored, Some(bytes.clone()));
 
+        let tampered = vec![b'x'; request.source_artifact.size_bytes as usize];
         sqlx::query(
             "UPDATE general_compute_artifact_sources
              SET content = $1
-             WHERE task_id = $2 AND artifact_id = 'source'",
+             WHERE task_id = $2 AND artifact_id = $3",
         )
-        .bind(vec![b'x'; bytes.len()])
+        .bind(&tampered)
         .bind(&task_id)
+        .bind("source")
         .execute(&repo.pool)
         .await
         .unwrap();
@@ -2162,7 +3246,7 @@ mod tests {
             .await
             .unwrap(),
             None,
-            "a persisted source row must be rehashed before use"
+            "content must be rehashed before it becomes a trusted source"
         );
 
         sqlx::query(
@@ -2171,7 +3255,7 @@ mod tests {
              WHERE task_id = $3 AND artifact_id = 'source'",
         )
         .bind(general_compute_runtime::sha256_digest(b"different bytes"))
-        .bind(bytes.as_slice())
+        .bind(&bytes)
         .bind(&task_id)
         .execute(&repo.pool)
         .await
@@ -2194,25 +3278,108 @@ mod tests {
             .execute(&repo.pool)
             .await
             .unwrap();
-        assert_eq!(
-            repo.general_compute_artifact_bytes(
+        let restored = repo
+            .general_compute_artifact_bytes(
                 &task_id,
                 "source",
                 &request.source_artifact.sha256,
                 request.source_artifact.size_bytes,
             )
             .await
-            .unwrap(),
-            Some(bytes.to_vec()),
-            "the Nodepool-owned persisted request may restore missing inline source state"
-        );
+            .unwrap();
+        assert_eq!(restored, Some(bytes));
 
-        cleanup_task_case(&repo.pool, &task_id, "inline-source-owner", None).await;
+        cleanup_task_case(&repo.pool, &task_id, "artifact-source-owner", None).await;
         fixture.cleanup().await.ok();
     }
 
     #[tokio::test]
-    async fn general_compute_chunk_upload_is_manifest_bound_and_idempotent() {
+    async fn general_compute_assignment_creates_and_rotates_transfer_lease() {
+        let (p, fixture) = match pool("task_repository_general_compute_transfer_lease").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let task_id = format!("general-compute-transfer-lease-{unique}");
+        let bytes = b"trusted transfer source";
+        let mut request = GeneralComputeRequest {
+            execution_id: format!("execution-{unique}"),
+            attempt_id: format!("attempt-{unique}"),
+            idempotency_key: format!("idempotency-{unique}"),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "python-cpython-312".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest::inline_json("source", ArtifactRole::Source, bytes),
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+
+        let mut task = make_task(&task_id, "transfer-lease-owner");
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.torrent_source = None;
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
+        repo.create(&task).await.unwrap();
+
+        repo.assign_to_worker(&task_id, "worker-a", "10.0.0.41")
+            .await
+            .unwrap();
+        let first = repo
+            .general_compute_transfer_lease(&task_id)
+            .await
+            .unwrap()
+            .expect("assignment must create an active transfer lease");
+        assert_eq!(first.worker_id, "worker-a");
+        assert_eq!(first.execution_id, request.execution_id);
+        assert_eq!(first.attempt_id, request.attempt_id);
+        assert_eq!(first.generation, 1);
+        assert_eq!(first.state, "active");
+
+        repo.reset_to_pending_for_worker(&task_id, "worker-a")
+            .await
+            .unwrap();
+        assert!(repo
+            .general_compute_transfer_lease(&task_id)
+            .await
+            .unwrap()
+            .is_none());
+
+        repo.assign_to_worker(&task_id, "worker-b", "10.0.0.42")
+            .await
+            .unwrap();
+        let second = repo
+            .general_compute_transfer_lease(&task_id)
+            .await
+            .unwrap()
+            .expect("reassignment must create a replacement lease");
+        assert_eq!(second.worker_id, "worker-b");
+        assert_eq!(second.generation, 2);
+        assert_ne!(second.attempt_id, first.attempt_id);
+
+        let revoked_state: String = sqlx::query_scalar(
+            "SELECT state FROM general_compute_transfer_leases
+             WHERE task_id = $1 AND generation = $2",
+        )
+        .bind(&task_id)
+        .bind(first.generation)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(revoked_state, "revoked");
+
+        cleanup_task_case(&repo.pool, &task_id, "transfer-lease-owner", None).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn general_compute_chunk_sources_are_idempotent_and_conflict_safe() {
         let (p, fixture) = match pool("task_repository_general_compute_chunk_source").await {
             Some(parts) => parts,
             None => return,
@@ -2220,41 +3387,64 @@ mod tests {
         let repo = TaskRepository::new(p);
         let unique = uuid::Uuid::new_v4().to_string();
         let task_id = format!("general-compute-chunk-source-{unique}");
+        let mut task = make_task(&task_id, "chunk-source-owner");
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.torrent_source = None;
         let bytes = b"abcd";
-        let request = chunked_general_compute_request(&unique, bytes);
-        let task = task_for_general_compute_request(&task_id, "chunk-source-owner", &request);
+        let mut request = GeneralComputeRequest {
+            execution_id: format!("execution-{unique}"),
+            attempt_id: format!("attempt-{unique}"),
+            idempotency_key: format!("idempotency-{unique}"),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "python-cpython-312".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest::inline_json("source", ArtifactRole::Source, bytes),
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.source_artifact.chunks = vec![general_compute_runtime::ArtifactChunk {
+            offset: 0,
+            size_bytes: bytes.len() as u64,
+            sha256: general_compute_runtime::sha256_digest(bytes),
+        }];
+        request.source_artifact.inline_bytes = None;
+        request.request_digest = request.canonical_request_digest();
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
         repo.create(&task).await.unwrap();
 
-        let chunk = &request.source_artifact.chunks[0];
-        for _ in 0..2 {
-            repo.put_general_compute_artifact_chunk(
-                &task_id,
-                "source",
-                chunk.offset,
-                chunk.size_bytes,
-                &chunk.sha256,
-                bytes,
-            )
-            .await
-            .unwrap();
-        }
+        let digest = general_compute_runtime::sha256_digest(bytes);
+        repo.put_general_compute_artifact_chunk(
+            &task_id,
+            "source",
+            0,
+            bytes.len() as u64,
+            &digest,
+            bytes,
+        )
+        .await
+        .unwrap();
+        repo.put_general_compute_artifact_chunk(
+            &task_id,
+            "source",
+            0,
+            bytes.len() as u64,
+            &digest,
+            bytes,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             repo.general_compute_artifact_chunks(&task_id, "source")
                 .await
                 .unwrap()
                 .len(),
             1
-        );
-        assert_eq!(
-            repo.general_compute_artifact_bytes(
-                &task_id,
-                "source",
-                &request.source_artifact.sha256,
-                request.source_artifact.size_bytes,
-            )
-            .await
-            .unwrap(),
-            Some(bytes.to_vec())
         );
 
         let conflict = repo
@@ -2325,17 +3515,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn general_compute_chunk_upload_rejects_an_unknown_artifact_identity() {
-        let (p, fixture) = match pool("task_repository_general_compute_chunk_identity").await {
+    async fn general_compute_chunk_source_rejects_an_unbound_manifest_coordinate() {
+        let (p, fixture) = match pool("task_repository_general_compute_chunk_binding").await {
             Some(parts) => parts,
             None => return,
         };
         let repo = TaskRepository::new(p);
         let unique = uuid::Uuid::new_v4().to_string();
-        let task_id = format!("general-compute-chunk-identity-{unique}");
+        let task_id = format!("general-compute-chunk-binding-{unique}");
+        let mut task = make_task(&task_id, "chunk-binding-owner");
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.torrent_source = None;
         let bytes = b"abcd";
-        let request = chunked_general_compute_request(&unique, bytes);
-        let task = task_for_general_compute_request(&task_id, "chunk-identity-owner", &request);
+        let mut request = GeneralComputeRequest {
+            execution_id: format!("execution-{unique}"),
+            attempt_id: format!("attempt-{unique}"),
+            idempotency_key: format!("idempotency-{unique}"),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "python-cpython-312".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest {
+                artifact_id: "source".into(),
+                role: ArtifactRole::Source,
+                size_bytes: bytes.len() as u64,
+                mime_type: "text/plain".into(),
+                sha256: general_compute_runtime::sha256_digest(bytes),
+                chunks: vec![general_compute_runtime::ArtifactChunk {
+                    offset: 0,
+                    size_bytes: bytes.len() as u64,
+                    sha256: general_compute_runtime::sha256_digest(bytes),
+                }],
+                inline_bytes: None,
+            },
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
         repo.create(&task).await.unwrap();
 
         let error = repo
@@ -2348,15 +3570,104 @@ mod tests {
                 bytes,
             )
             .await
-            .expect_err("an upload must bind to a persisted artifact identity");
-        assert!(error.to_string().contains("identity"));
+            .expect_err("chunk coordinates must be bound to the persisted manifest");
+        assert!(error.to_string().contains("manifest"));
 
-        cleanup_task_case(&repo.pool, &task_id, "chunk-identity-owner", None).await;
+        cleanup_task_case(&repo.pool, &task_id, "chunk-binding-owner", None).await;
         fixture.cleanup().await.ok();
     }
 
     #[tokio::test]
-    async fn general_compute_artifact_coordinates_and_expiry_are_fail_closed() {
+    async fn general_compute_chunk_source_survives_attempt_rotation() {
+        let (p, fixture) = match pool("task_repository_general_compute_chunk_retry").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let task_id = format!("general-compute-chunk-retry-{unique}");
+        let bytes = b"retryable source";
+        let mut request = GeneralComputeRequest {
+            execution_id: format!("execution-{unique}"),
+            attempt_id: format!("attempt-{unique}"),
+            idempotency_key: format!("idempotency-{unique}"),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "python-cpython-312".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest {
+                artifact_id: "source".into(),
+                role: ArtifactRole::Source,
+                size_bytes: bytes.len() as u64,
+                mime_type: "text/plain".into(),
+                sha256: general_compute_runtime::sha256_digest(bytes),
+                chunks: vec![general_compute_runtime::ArtifactChunk {
+                    offset: 0,
+                    size_bytes: bytes.len() as u64,
+                    sha256: general_compute_runtime::sha256_digest(bytes),
+                }],
+                inline_bytes: None,
+            },
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+        let mut task = make_task(&task_id, "chunk-retry-owner");
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.torrent_source = None;
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
+        repo.create(&task).await.unwrap();
+        let digest = general_compute_runtime::sha256_digest(bytes);
+        repo.put_general_compute_artifact_chunk(
+            &task_id,
+            "source",
+            0,
+            bytes.len() as u64,
+            &digest,
+            bytes,
+        )
+        .await
+        .unwrap();
+        let worker_id = "chunk-retry-worker";
+        insert_worker(&repo.pool, worker_id, "chunk-retry-provider").await;
+        repo.assign_to_worker(&task_id, worker_id, "10.0.0.70")
+            .await
+            .unwrap();
+        let reset = repo
+            .reset_to_pending_for_worker(&task_id, worker_id)
+            .await
+            .unwrap();
+        let rotated: GeneralComputeRequest =
+            serde_json::from_slice(reset.general_compute_manifest_json.as_deref().unwrap())
+                .unwrap();
+        assert_ne!(rotated.attempt_id, request.attempt_id);
+        assert_eq!(
+            rotated.source_artifact.sha256,
+            request.source_artifact.sha256
+        );
+        assert_eq!(
+            repo.general_compute_artifact_bytes(
+                &task_id,
+                "source",
+                &rotated.source_artifact.sha256,
+                rotated.source_artifact.size_bytes,
+            )
+            .await
+            .unwrap(),
+            Some(bytes.to_vec())
+        );
+
+        cleanup_task_case(&repo.pool, &task_id, "chunk-retry-owner", Some(worker_id)).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn general_compute_artifact_lifecycle_persists_identity_completeness_and_expiry() {
         let (p, fixture) = match pool("task_repository_general_compute_artifact_lifecycle").await {
             Some(parts) => parts,
             None => return,
@@ -2365,63 +3676,64 @@ mod tests {
         let unique = uuid::Uuid::new_v4().to_string();
         let task_id = format!("general-compute-artifact-lifecycle-{unique}");
         let bytes = b"durable lifecycle";
-        let request = chunked_general_compute_request(&unique, bytes);
-        let task = task_for_general_compute_request(&task_id, "artifact-lifecycle-owner", &request);
+        let digest = general_compute_runtime::sha256_digest(bytes);
+        let mut request = GeneralComputeRequest {
+            execution_id: format!("execution-{unique}"),
+            attempt_id: format!("attempt-{unique}"),
+            idempotency_key: format!("idempotency-{unique}"),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "python-cpython-312".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest {
+                artifact_id: "source".into(),
+                role: ArtifactRole::Source,
+                size_bytes: bytes.len() as u64,
+                mime_type: "text/plain".into(),
+                sha256: digest.clone(),
+                chunks: vec![general_compute_runtime::ArtifactChunk {
+                    offset: 0,
+                    size_bytes: bytes.len() as u64,
+                    sha256: digest.clone(),
+                }],
+                inline_bytes: None,
+            },
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+        let mut task = make_task(&task_id, "artifact-lifecycle-owner");
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.torrent_source = None;
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
         repo.create(&task).await.unwrap();
 
         let pending = repo
             .general_compute_artifact_state(&task_id, "source")
             .await
             .unwrap()
-            .unwrap();
+            .expect("task creation must persist immutable artifact identity");
+        assert_eq!(pending.sha256, digest);
+        assert_eq!(pending.size_bytes, bytes.len() as u64);
         assert_eq!(pending.availability_status, "pending");
         assert!(!pending.complete);
-        assert!(repo
-            .general_compute_artifact_coordinates_match(
-                &task_id,
-                "source",
-                request.source_artifact.size_bytes,
-                &request.source_artifact.sha256,
-                &request.source_artifact.chunks,
-            )
-            .await
-            .unwrap());
 
-        let split = bytes.len() / 2;
-        let drifted_chunks = vec![
-            general_compute_runtime::ArtifactChunk {
-                offset: 0,
-                size_bytes: split as u64,
-                sha256: general_compute_runtime::sha256_digest(&bytes[..split]),
-            },
-            general_compute_runtime::ArtifactChunk {
-                offset: split as u64,
-                size_bytes: (bytes.len() - split) as u64,
-                sha256: general_compute_runtime::sha256_digest(&bytes[split..]),
-            },
-        ];
-        assert!(!repo
-            .general_compute_artifact_coordinates_match(
-                &task_id,
-                "source",
-                request.source_artifact.size_bytes,
-                &request.source_artifact.sha256,
-                &drifted_chunks,
-            )
-            .await
-            .unwrap());
-
-        let chunk = &request.source_artifact.chunks[0];
         repo.put_general_compute_artifact_chunk(
             &task_id,
             "source",
-            chunk.offset,
-            chunk.size_bytes,
-            &chunk.sha256,
+            0,
+            bytes.len() as u64,
+            &general_compute_runtime::sha256_digest(bytes),
             bytes,
         )
         .await
         .unwrap();
+
         let ready = repo
             .general_compute_artifact_state(&task_id, "source")
             .await
@@ -2429,6 +3741,17 @@ mod tests {
             .unwrap();
         assert_eq!(ready.availability_status, "available");
         assert!(ready.complete);
+        assert_eq!(
+            repo.general_compute_artifact_bytes(
+                &task_id,
+                "source",
+                &ready.sha256,
+                ready.size_bytes
+            )
+            .await
+            .unwrap(),
+            Some(bytes.to_vec())
+        );
 
         sqlx::query(
             "UPDATE general_compute_artifacts
@@ -2455,21 +3778,168 @@ mod tests {
             )
             .await
             .unwrap(),
-            None
+            None,
+            "expired bytes must not be a trusted scheduler source"
         );
-        assert!(repo
+        let rejected = repo
             .put_general_compute_artifact_chunk(
                 &task_id,
                 "source",
-                chunk.offset,
-                chunk.size_bytes,
-                &chunk.sha256,
+                0,
+                bytes.len() as u64,
+                &general_compute_runtime::sha256_digest(bytes),
                 bytes,
             )
             .await
-            .is_err());
+            .expect_err("expired artifacts must reject new source uploads");
+        assert!(rejected.to_string().contains("expired"));
 
         cleanup_task_case(&repo.pool, &task_id, "artifact-lifecycle-owner", None).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn general_compute_artifact_coordinates_are_checked_against_immutable_identity() {
+        let (p, fixture) = match pool("task_repository_general_compute_artifact_coordinates").await
+        {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let task_id = format!("general-compute-artifact-coordinates-{unique}");
+        let bytes = b"coordinate binding";
+        let digest = general_compute_runtime::sha256_digest(bytes);
+        let mut request = GeneralComputeRequest {
+            execution_id: format!("execution-{unique}"),
+            attempt_id: format!("attempt-{unique}"),
+            idempotency_key: format!("idempotency-{unique}"),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "python-cpython-312".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest {
+                artifact_id: "source".into(),
+                role: ArtifactRole::Source,
+                size_bytes: bytes.len() as u64,
+                mime_type: "text/plain".into(),
+                sha256: digest.clone(),
+                chunks: vec![general_compute_runtime::ArtifactChunk {
+                    offset: 0,
+                    size_bytes: bytes.len() as u64,
+                    sha256: digest.clone(),
+                }],
+                inline_bytes: None,
+            },
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+        let mut task = make_task(&task_id, "artifact-coordinate-owner");
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.torrent_source = None;
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
+        repo.create(&task).await.unwrap();
+
+        assert!(repo
+            .general_compute_artifact_coordinates_match(
+                &task_id,
+                "source",
+                request.source_artifact.size_bytes,
+                &request.source_artifact.sha256,
+                &request.source_artifact.chunks,
+            )
+            .await
+            .unwrap());
+        let mut changed = request.source_artifact.chunks.clone();
+        changed[0].sha256 = general_compute_runtime::sha256_digest(b"different");
+        assert!(!repo
+            .general_compute_artifact_coordinates_match(
+                &task_id,
+                "source",
+                request.source_artifact.size_bytes,
+                &request.source_artifact.sha256,
+                &changed,
+            )
+            .await
+            .unwrap());
+
+        cleanup_task_case(&repo.pool, &task_id, "artifact-coordinate-owner", None).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn legacy_general_compute_source_backfill_preserves_verified_existing_bytes() {
+        let (p, fixture) = match pool("task_repository_general_compute_artifact_backfill").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let task_id = format!("general-compute-artifact-backfill-{unique}");
+        let bytes = b"legacy trusted source".to_vec();
+        let mut request = GeneralComputeRequest {
+            execution_id: format!("execution-{unique}"),
+            attempt_id: format!("attempt-{unique}"),
+            idempotency_key: format!("idempotency-{unique}"),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "python-cpython-312".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest::inline_json("source", ArtifactRole::Source, &bytes),
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+        let mut task = make_task(&task_id, "artifact-backfill-owner");
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.torrent_source = None;
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
+        repo.create(&task).await.unwrap();
+        sqlx::query("DELETE FROM general_compute_artifact_manifest_chunks WHERE task_id = $1")
+            .bind(&task_id)
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM general_compute_artifacts WHERE task_id = $1")
+            .bind(&task_id)
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+
+        assert!(repo
+            .general_compute_artifact_coordinates_match(
+                &task_id,
+                "source",
+                request.source_artifact.size_bytes,
+                &request.source_artifact.sha256,
+                &request.source_artifact.chunks,
+            )
+            .await
+            .unwrap());
+        assert_eq!(
+            repo.general_compute_artifact_bytes(
+                &task_id,
+                "source",
+                &request.source_artifact.sha256,
+                request.source_artifact.size_bytes,
+            )
+            .await
+            .unwrap(),
+            Some(bytes)
+        );
+
+        cleanup_task_case(&repo.pool, &task_id, "artifact-backfill-owner", None).await;
         fixture.cleanup().await.ok();
     }
 
@@ -3121,8 +4591,7 @@ mod tests {
         };
         request.request_digest = request.canonical_request_digest();
         let current_manifest = serde_json::to_vec(&request).unwrap();
-        let output = ArtifactManifest::inline_json("stdout", ArtifactRole::Output, b"42");
-        let typed_result = GeneralComputeResult {
+        let typed_result_json = serde_json::to_vec(&GeneralComputeResult {
             execution_id: request.execution_id.clone(),
             attempt_id: request.attempt_id.clone(),
             idempotency_key: request.idempotency_key.clone(),
@@ -3130,24 +4599,24 @@ mod tests {
             status: ResultStatus::Completed,
             exit_code: Some(0),
             error_code: None,
-            stdout: "42".into(),
+            stdout: "current output".into(),
             stderr: String::new(),
-            output_artifacts: vec![output.clone()],
-            usage: general_compute_runtime::UsageClaim {
+            output_artifacts: vec![],
+            usage: UsageClaim {
                 wall_time_ms: 1,
-                ..Default::default()
+                ..UsageClaim::default()
             },
             runtime_version: request.runtime_version.clone(),
             backend_id: request.backend_id.clone(),
             guest_image_digest: request.guest_image_digest.clone(),
-            input_sha256: general_compute_runtime::sha256_digest(b"source"),
+            input_sha256: general_compute_runtime::canonical_input_digest(b"source", &[]),
             determinism: request.determinism.clone(),
             capability_summary: vec![],
             gpu_selection: None,
-            output_manifest_root: canonical_artifact_root(&[output]),
-            evidence: general_compute_runtime::EvidenceEnvelope::default(),
-        };
-        let typed_result_json = serde_json::to_vec(&typed_result).unwrap();
+            output_manifest_root: canonical_artifact_root(&[]),
+            evidence: EvidenceEnvelope::default(),
+        })
+        .unwrap();
         let stale_result_json = br#"{"status":"stale"}"#;
 
         let mut task = make_task(&task_id, &username);
@@ -3210,146 +4679,6 @@ mod tests {
         .unwrap();
         assert_eq!(persisted.0, worker_id);
         assert_eq!(persisted.1, typed_result_json);
-
-        cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
-        fixture.cleanup().await.ok();
-    }
-
-    #[tokio::test]
-    async fn general_compute_completion_persists_fixed_reservation_settlement_provenance() {
-        let (p, fixture) = match pool("task_repository_general_compute_settlement").await {
-            Some(parts) => parts,
-            None => return,
-        };
-        let repo = TaskRepository::new(p);
-        let unique = uuid::Uuid::new_v4().to_string();
-        let username = format!("settlement-owner-{unique}");
-        let worker_id = format!("settlement-worker-{unique}");
-        let task_id = format!("settlement-task-{unique}");
-
-        sqlx::query(
-            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 5000)",
-        )
-        .bind(&username)
-        .execute(&repo.pool)
-        .await
-        .unwrap();
-        insert_worker(&repo.pool, &worker_id, "settlement-provider").await;
-
-        let mut request = GeneralComputeRequest {
-            execution_id: format!("execution-{unique}"),
-            attempt_id: "attempt-1".into(),
-            idempotency_key: format!("idempotency-{unique}"),
-            request_digest: String::new(),
-            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
-            guest_image_digest:
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-            backend_id: "python-cpython-312".into(),
-            entrypoint: "main".into(),
-            source_artifact: ArtifactManifest::inline_json(
-                "source",
-                ArtifactRole::Source,
-                b"source",
-            ),
-            input_artifacts: vec![],
-            execution_policy: ExecutionPolicy::default(),
-            determinism: DeterminismPolicy::default(),
-            billing_version: "billing-v1".into(),
-            cost_model_version: "cost-v1".into(),
-        };
-        request.request_digest = request.canonical_request_digest();
-        let manifest = serde_json::to_vec(&request).unwrap();
-
-        let output = ArtifactManifest::inline_json("stdout", ArtifactRole::Output, b"42");
-        let usage = general_compute_runtime::UsageClaim {
-            cpu_time_ms: 456,
-            wall_time_ms: 123,
-            ..Default::default()
-        };
-        let result = GeneralComputeResult {
-            execution_id: request.execution_id.clone(),
-            attempt_id: request.attempt_id.clone(),
-            idempotency_key: request.idempotency_key.clone(),
-            request_digest: request.request_digest.clone(),
-            status: ResultStatus::Completed,
-            exit_code: Some(0),
-            error_code: None,
-            stdout: "42".into(),
-            stderr: String::new(),
-            output_artifacts: vec![output.clone()],
-            usage: usage.clone(),
-            runtime_version: request.runtime_version.clone(),
-            backend_id: request.backend_id.clone(),
-            guest_image_digest: request.guest_image_digest.clone(),
-            input_sha256: general_compute_runtime::sha256_digest(b"source"),
-            determinism: request.determinism.clone(),
-            capability_summary: vec![],
-            gpu_selection: None,
-            output_manifest_root: canonical_artifact_root(&[output]),
-            evidence: general_compute_runtime::EvidenceEnvelope::default(),
-        };
-        let result_json = serde_json::to_vec(&result).unwrap();
-
-        let mut task = make_task(&task_id, &username);
-        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
-        task.general_compute_manifest_json = Some(manifest.clone());
-        repo.create(&task).await.unwrap();
-        repo.assign_to_worker(&task_id, &worker_id, "10.0.0.57")
-            .await
-            .unwrap();
-
-        let completed = repo
-            .complete_general_compute_for_worker(
-                &task_id,
-                &worker_id,
-                &manifest,
-                &result_json,
-                Some("42"),
-            )
-            .await
-            .unwrap();
-        assert_eq!(completed.status, TaskStatus::Completed);
-        assert!(completed.billing_settled);
-        assert_eq!(completed.billed_amount, 1000);
-
-        #[allow(clippy::type_complexity)]
-        let row: (
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            Vec<u8>,
-            i64,
-        ) = sqlx::query_as(
-            "SELECT worker_id, execution_id, attempt_id, idempotency_key, request_digest,
-                    billing_version, cost_model_version, evidence_level, settlement_basis,
-                    usage_claim_json, amount_cpt
-             FROM general_compute_settlements
-             WHERE task_id = $1",
-        )
-        .bind(&task_id)
-        .fetch_one(&repo.pool)
-        .await
-        .expect("a successful general-compute completion must persist settlement provenance");
-
-        assert_eq!(row.0, worker_id);
-        assert_eq!(row.1, request.execution_id);
-        assert_eq!(row.2, request.attempt_id);
-        assert_eq!(row.3, request.idempotency_key);
-        assert_eq!(row.4, request.request_digest);
-        assert_eq!(row.5, "billing-v1");
-        assert_eq!(row.6, "cost-v1");
-        assert_eq!(row.7, "unverified");
-        assert_eq!(row.8, "fixed_reservation");
-        let persisted_usage: general_compute_runtime::UsageClaim =
-            serde_json::from_slice(&row.9).unwrap();
-        assert_eq!(persisted_usage, usage);
-        assert_eq!(row.10, 1000);
 
         cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
         fixture.cleanup().await.ok();
@@ -4184,558 +5513,11 @@ mod tests {
             available_memory_gb: 16,
             queue_capacity: 4,
             general_compute_capabilities_json: None,
+            managed_dsl_capabilities_json: None,
             last_heartbeat: Utc::now(),
             registered_at: Utc::now(),
             updated_at: Utc::now(),
         }
-    }
-
-    #[tokio::test]
-    async fn general_compute_failure_persists_typed_result_without_settlement() {
-        let (p, fixture) = match pool("task_repository_general_compute_failure").await {
-            Some(parts) => parts,
-            None => return,
-        };
-        let repo = TaskRepository::new(p);
-        let unique = uuid::Uuid::new_v4().to_string();
-        let username = format!("failure-owner-{unique}");
-        let worker_id = format!("failure-worker-{unique}");
-        let task_id = format!("failure-task-{unique}");
-        sqlx::query(
-            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
-        )
-        .bind(&username)
-        .execute(&repo.pool)
-        .await
-        .unwrap();
-        insert_worker(&repo.pool, &worker_id, &format!("provider-{unique}")).await;
-
-        let mut request = GeneralComputeRequest {
-            execution_id: format!("execution-{unique}"),
-            attempt_id: format!("attempt-{unique}"),
-            idempotency_key: format!("idempotency-{unique}"),
-            request_digest: String::new(),
-            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
-            guest_image_digest:
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-            backend_id: "failure-backend".into(),
-            entrypoint: "main".into(),
-            source_artifact: ArtifactManifest::inline_json(
-                "source",
-                ArtifactRole::Source,
-                b"source",
-            ),
-            input_artifacts: vec![],
-            execution_policy: ExecutionPolicy::default(),
-            determinism: DeterminismPolicy::default(),
-            billing_version: "billing-v1".into(),
-            cost_model_version: "cost-v1".into(),
-        };
-        request.request_digest = request.canonical_request_digest();
-        let result = general_compute_runtime::GeneralComputeResult {
-            execution_id: request.execution_id.clone(),
-            attempt_id: request.attempt_id.clone(),
-            idempotency_key: request.idempotency_key.clone(),
-            request_digest: request.request_digest.clone(),
-            status: general_compute_runtime::ResultStatus::BackendUnavailable,
-            exit_code: None,
-            error_code: Some("backend_unavailable".into()),
-            stdout: String::new(),
-            stderr: "network denied".into(),
-            output_artifacts: vec![],
-            usage: general_compute_runtime::UsageClaim::default(),
-            runtime_version: request.runtime_version.clone(),
-            backend_id: request.backend_id.clone(),
-            guest_image_digest: request.guest_image_digest.clone(),
-            input_sha256: general_compute_runtime::canonical_input_digest(b"source", &[]),
-            determinism: request.determinism.clone(),
-            capability_summary: vec![],
-            gpu_selection: None,
-            output_manifest_root: general_compute_runtime::canonical_artifact_root(&[]),
-            evidence: general_compute_runtime::EvidenceEnvelope::default(),
-        };
-        let manifest = serde_json::to_vec(&request).unwrap();
-        let result_json = serde_json::to_vec(&result).unwrap();
-
-        let mut task = make_task(&task_id, &username);
-        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
-        task.max_cpt = 42;
-        task.general_compute_manifest_json = Some(manifest.clone());
-        repo.create(&task).await.unwrap();
-        repo.assign_to_worker(&task_id, &worker_id, "10.0.0.78")
-            .await
-            .unwrap();
-
-        let failed = repo
-            .fail_general_compute_for_worker(
-                &task_id,
-                &worker_id,
-                &manifest,
-                &result_json,
-                "backend_unavailable",
-            )
-            .await
-            .unwrap();
-        assert_eq!(failed.status, TaskStatus::Failed);
-        assert!(!failed.billing_settled);
-        let lease_state: String = sqlx::query_scalar(
-            "SELECT state FROM general_compute_transfer_leases WHERE task_id = $1",
-        )
-        .bind(&task_id)
-        .fetch_one(&repo.pool)
-        .await
-        .unwrap();
-        assert_eq!(lease_state, "revoked");
-
-        let persisted: Vec<u8> = sqlx::query_scalar(
-            "SELECT result_json FROM general_compute_results WHERE task_id = $1",
-        )
-        .bind(&task_id)
-        .fetch_one(&repo.pool)
-        .await
-        .unwrap();
-        let persisted_result: general_compute_runtime::GeneralComputeResult = serde_json::from_slice(&persisted).unwrap();
-        assert_eq!(persisted_result, result);
-
-        let settlement_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM general_compute_settlements WHERE task_id = $1",
-        )
-        .bind(&task_id)
-        .fetch_one(&repo.pool)
-        .await
-        .unwrap();
-        assert_eq!(settlement_count, 0);
-
-        cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
-        fixture.cleanup().await.ok();
-    }
-
-    #[tokio::test]
-    async fn general_compute_cancel_persists_nodepool_typed_result_without_settlement() {
-        let (p, fixture) = match pool("task_repository_general_compute_cancel").await {
-            Some(parts) => parts,
-            None => return,
-        };
-        let repo = TaskRepository::new(p);
-        let unique = uuid::Uuid::new_v4().to_string();
-        let username = format!("cancel-owner-{unique}");
-        let worker_id = format!("cancel-worker-{unique}");
-        let task_id = format!("cancel-task-{unique}");
-        sqlx::query(
-            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
-        )
-        .bind(&username)
-        .execute(&repo.pool)
-        .await
-        .unwrap();
-        insert_worker(&repo.pool, &worker_id, &format!("provider-{unique}")).await;
-
-        let mut request = GeneralComputeRequest {
-            execution_id: format!("execution-{unique}"),
-            attempt_id: format!("attempt-{unique}"),
-            idempotency_key: format!("idempotency-{unique}"),
-            request_digest: String::new(),
-            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
-            guest_image_digest:
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-            backend_id: "cancel-backend".into(),
-            entrypoint: "main".into(),
-            source_artifact: ArtifactManifest::inline_json(
-                "source",
-                ArtifactRole::Source,
-                b"source",
-            ),
-            input_artifacts: vec![],
-            execution_policy: ExecutionPolicy::default(),
-            determinism: DeterminismPolicy::default(),
-            billing_version: "billing-v1".into(),
-            cost_model_version: "cost-v1".into(),
-        };
-        request.request_digest = request.canonical_request_digest();
-        let manifest = serde_json::to_vec(&request).unwrap();
-
-        let mut task = make_task(&task_id, &username);
-        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
-        task.general_compute_manifest_json = Some(manifest);
-        repo.create(&task).await.unwrap();
-        repo.assign_to_worker(&task_id, &worker_id, "10.0.0.79")
-            .await
-            .unwrap();
-
-        let cancelled = repo.cancel(&task_id).await.unwrap();
-        assert_eq!(cancelled.status, TaskStatus::Cancelled);
-
-        let persisted: Vec<u8> = sqlx::query_scalar(
-            "SELECT result_json FROM general_compute_results WHERE task_id = $1",
-        )
-        .bind(&task_id)
-        .fetch_one(&repo.pool)
-        .await
-        .unwrap();
-        let result: GeneralComputeResult = serde_json::from_slice(&persisted).unwrap();
-        assert_eq!(result.status, ResultStatus::Cancelled);
-        assert_eq!(result.error_code.as_deref(), Some("task_cancelled"));
-        assert_eq!(result.execution_id, request.execution_id);
-        assert_eq!(result.attempt_id, request.attempt_id);
-        assert_eq!(result.request_digest, request.request_digest);
-        assert_eq!(
-            result.input_sha256,
-            general_compute_runtime::canonical_input_digest(b"source", &[])
-        );
-        assert_eq!(result.output_manifest_root, canonical_artifact_root(&[]));
-
-        let settlement_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM general_compute_settlements WHERE task_id = $1",
-        )
-        .bind(&task_id)
-        .fetch_one(&repo.pool)
-        .await
-        .unwrap();
-        assert_eq!(settlement_count, 0);
-
-        cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
-        fixture.cleanup().await.ok();
-    }
-
-    #[tokio::test]
-    async fn general_compute_stale_running_persists_nodepool_typed_timeout_without_settlement() {
-        let (p, fixture) = match pool("task_repository_general_compute_stale_timeout").await {
-            Some(parts) => parts,
-            None => return,
-        };
-        let repo = TaskRepository::new(p);
-        let unique = uuid::Uuid::new_v4().to_string();
-        let username = format!("timeout-owner-{unique}");
-        let worker_id = format!("timeout-worker-{unique}");
-        let task_id = format!("timeout-task-{unique}");
-        sqlx::query(
-            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
-        )
-        .bind(&username)
-        .execute(&repo.pool)
-        .await
-        .unwrap();
-        insert_worker(&repo.pool, &worker_id, &format!("provider-{unique}")).await;
-
-        let mut request = GeneralComputeRequest {
-            execution_id: format!("execution-{unique}"),
-            attempt_id: format!("attempt-{unique}"),
-            idempotency_key: format!("idempotency-{unique}"),
-            request_digest: String::new(),
-            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
-            guest_image_digest:
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-            backend_id: "timeout-backend".into(),
-            entrypoint: "main".into(),
-            source_artifact: ArtifactManifest::inline_json(
-                "source",
-                ArtifactRole::Source,
-                b"source",
-            ),
-            input_artifacts: vec![],
-            execution_policy: ExecutionPolicy::default(),
-            determinism: DeterminismPolicy::default(),
-            billing_version: "billing-v1".into(),
-            cost_model_version: "cost-v1".into(),
-        };
-        request.request_digest = request.canonical_request_digest();
-        let manifest = serde_json::to_vec(&request).unwrap();
-
-        let mut task = make_task(&task_id, &username);
-        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
-        task.general_compute_manifest_json = Some(manifest);
-        repo.create(&task).await.unwrap();
-        repo.assign_to_worker(&task_id, &worker_id, "10.0.0.80")
-            .await
-            .unwrap();
-        sqlx::query(
-            "UPDATE tasks
-             SET status = 'RUNNING', last_update = NOW() - INTERVAL '121 seconds'
-             WHERE task_id = $1",
-        )
-        .bind(&task_id)
-        .execute(&repo.pool)
-        .await
-        .unwrap();
-
-        assert_eq!(repo.mark_stale_running().await.unwrap(), 1);
-        let timed_out = repo.find_by_task_id(&task_id).await.unwrap().unwrap();
-        assert_eq!(timed_out.status, TaskStatus::TimedOut);
-        assert_eq!(
-            timed_out.status_message.as_deref(),
-            Some("Worker heartbeat lost")
-        );
-
-        let persisted: Vec<u8> = sqlx::query_scalar(
-            "SELECT result_json FROM general_compute_results WHERE task_id = $1",
-        )
-        .bind(&task_id)
-        .fetch_one(&repo.pool)
-        .await
-        .unwrap();
-        let result: GeneralComputeResult = serde_json::from_slice(&persisted).unwrap();
-        assert_eq!(result.status, ResultStatus::TimedOut);
-        assert_eq!(result.error_code.as_deref(), Some("worker_heartbeat_lost"));
-        assert_eq!(result.execution_id, request.execution_id);
-        assert_eq!(result.attempt_id, request.attempt_id);
-        assert_eq!(result.request_digest, request.request_digest);
-        assert_eq!(
-            result.input_sha256,
-            general_compute_runtime::canonical_input_digest(b"source", &[])
-        );
-        assert_eq!(result.output_manifest_root, canonical_artifact_root(&[]));
-
-        let settlement_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM general_compute_settlements WHERE task_id = $1",
-        )
-        .bind(&task_id)
-        .fetch_one(&repo.pool)
-        .await
-        .unwrap();
-        assert_eq!(settlement_count, 0);
-
-        cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
-        fixture.cleanup().await.ok();
-    }
-
-    #[tokio::test]
-    async fn general_compute_fail_for_worker_persists_nodepool_typed_failure_without_settlement() {
-        let (p, fixture) = match pool("task_repository_general_compute_nodepool_failure").await {
-            Some(parts) => parts,
-            None => return,
-        };
-        let repo = TaskRepository::new(p);
-        let unique = uuid::Uuid::new_v4().to_string();
-        let username = format!("nodepool-fail-owner-{unique}");
-        let worker_id = format!("nodepool-fail-worker-{unique}");
-        let task_id = format!("nodepool-fail-task-{unique}");
-        sqlx::query(
-            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
-        )
-        .bind(&username)
-        .execute(&repo.pool)
-        .await
-        .unwrap();
-        insert_worker(&repo.pool, &worker_id, &format!("provider-{unique}")).await;
-
-        let mut request = GeneralComputeRequest {
-            execution_id: format!("execution-{unique}"),
-            attempt_id: format!("attempt-{unique}"),
-            idempotency_key: format!("idempotency-{unique}"),
-            request_digest: String::new(),
-            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
-            guest_image_digest:
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-            backend_id: "nodepool-fail-backend".into(),
-            entrypoint: "main".into(),
-            source_artifact: ArtifactManifest::inline_json(
-                "source",
-                ArtifactRole::Source,
-                b"source",
-            ),
-            input_artifacts: vec![],
-            execution_policy: ExecutionPolicy::default(),
-            determinism: DeterminismPolicy::default(),
-            billing_version: "billing-v1".into(),
-            cost_model_version: "cost-v1".into(),
-        };
-        request.request_digest = request.canonical_request_digest();
-        let manifest = serde_json::to_vec(&request).unwrap();
-
-        let mut task = make_task(&task_id, &username);
-        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
-        task.general_compute_manifest_json = Some(manifest);
-        repo.create(&task).await.unwrap();
-        repo.assign_to_worker(&task_id, &worker_id, "10.0.0.82")
-            .await
-            .unwrap();
-
-        let reason = "Max redispatch attempts exceeded";
-        let failed = repo
-            .fail_for_worker(&task_id, &worker_id, reason)
-            .await
-            .unwrap();
-        assert_eq!(failed.status, TaskStatus::Failed);
-        assert_eq!(failed.status_message.as_deref(), Some(reason));
-        let lease_state: String = sqlx::query_scalar(
-            "SELECT state FROM general_compute_transfer_leases WHERE task_id = $1",
-        )
-        .bind(&task_id)
-        .fetch_one(&repo.pool)
-        .await
-        .unwrap();
-        assert_eq!(lease_state, "revoked");
-
-        let persisted: Vec<u8> = sqlx::query_scalar(
-            "SELECT result_json FROM general_compute_results WHERE task_id = $1",
-        )
-        .bind(&task_id)
-        .fetch_one(&repo.pool)
-        .await
-        .unwrap();
-        let result: GeneralComputeResult = serde_json::from_slice(&persisted).unwrap();
-        assert_eq!(result.status, ResultStatus::Failed);
-        assert_eq!(result.error_code.as_deref(), Some("nodepool_task_failed"));
-        assert_eq!(result.stderr, reason);
-        assert_eq!(result.execution_id, request.execution_id);
-        assert_eq!(result.attempt_id, request.attempt_id);
-        assert_eq!(result.request_digest, request.request_digest);
-        assert_eq!(
-            result.input_sha256,
-            general_compute_runtime::canonical_input_digest(b"source", &[])
-        );
-        assert_eq!(result.output_manifest_root, canonical_artifact_root(&[]));
-
-        let settlement_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM general_compute_settlements WHERE task_id = $1",
-        )
-        .bind(&task_id)
-        .fetch_one(&repo.pool)
-        .await
-        .unwrap();
-        assert_eq!(settlement_count, 0);
-
-        let reputation: (i64, i32) = sqlx::query_as(
-            "SELECT failed_tasks, score FROM worker_reputation WHERE worker_id = $1",
-        )
-        .bind(&worker_id)
-        .fetch_one(&repo.pool)
-        .await
-        .unwrap();
-        assert_eq!(reputation, (1, 95));
-        let attestation_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM task_attestations
-             WHERE task_id = $1 AND worker_id = $2 AND verdict = 'rejected'",
-        )
-        .bind(&task_id)
-        .bind(&worker_id)
-        .fetch_one(&repo.pool)
-        .await
-        .unwrap();
-        assert_eq!(attestation_count, 1);
-
-        cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
-        fixture.cleanup().await.ok();
-    }
-
-    #[tokio::test]
-    async fn general_compute_fail_persists_nodepool_typed_failure_without_settlement() {
-        let (p, fixture) = match pool("task_repository_general_compute_fail").await {
-            Some(parts) => parts,
-            None => return,
-        };
-        let repo = TaskRepository::new(p);
-        let unique = uuid::Uuid::new_v4().to_string();
-        let username = format!("generic-fail-owner-{unique}");
-        let task_id = format!("generic-fail-task-{unique}");
-        sqlx::query(
-            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
-        )
-        .bind(&username)
-        .execute(&repo.pool)
-        .await
-        .unwrap();
-
-        let mut request = GeneralComputeRequest {
-            execution_id: format!("execution-{unique}"),
-            attempt_id: format!("attempt-{unique}"),
-            idempotency_key: format!("idempotency-{unique}"),
-            request_digest: String::new(),
-            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
-            guest_image_digest:
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-            backend_id: "generic-fail-backend".into(),
-            entrypoint: "main".into(),
-            source_artifact: ArtifactManifest::inline_json(
-                "source",
-                ArtifactRole::Source,
-                b"source",
-            ),
-            input_artifacts: vec![],
-            execution_policy: ExecutionPolicy::default(),
-            determinism: DeterminismPolicy::default(),
-            billing_version: "billing-v1".into(),
-            cost_model_version: "cost-v1".into(),
-        };
-        request.request_digest = request.canonical_request_digest();
-        let manifest = serde_json::to_vec(&request).unwrap();
-
-        let mut task = make_task(&task_id, &username);
-        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
-        task.general_compute_manifest_json = Some(manifest);
-        repo.create(&task).await.unwrap();
-
-        let reason = "Nodepool rejected the task";
-        let failed = repo.fail(&task_id, reason).await.unwrap();
-        assert_eq!(failed.status, TaskStatus::Failed);
-        assert_eq!(failed.status_message.as_deref(), Some(reason));
-
-        let persisted: (String, Vec<u8>) = sqlx::query_as(
-            "SELECT worker_id, result_json FROM general_compute_results WHERE task_id = $1",
-        )
-        .bind(&task_id)
-        .fetch_one(&repo.pool)
-        .await
-        .unwrap();
-        assert_eq!(persisted.0, "nodepool");
-        let result: GeneralComputeResult = serde_json::from_slice(&persisted.1).unwrap();
-        assert_eq!(result.status, ResultStatus::Failed);
-        assert_eq!(result.error_code.as_deref(), Some("nodepool_task_failed"));
-        assert_eq!(result.stderr, reason);
-        assert_eq!(result.execution_id, request.execution_id);
-        assert_eq!(result.attempt_id, request.attempt_id);
-        assert_eq!(result.request_digest, request.request_digest);
-        assert_eq!(
-            result.input_sha256,
-            general_compute_runtime::canonical_input_digest(b"source", &[])
-        );
-        assert_eq!(result.output_manifest_root, canonical_artifact_root(&[]));
-
-        let settlement_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM general_compute_settlements WHERE task_id = $1",
-        )
-        .bind(&task_id)
-        .fetch_one(&repo.pool)
-        .await
-        .unwrap();
-        assert_eq!(settlement_count, 0);
-
-        cleanup_task_case(&repo.pool, &task_id, &username, None).await;
-        fixture.cleanup().await.ok();
-    }
-
-    #[tokio::test]
-    async fn test_fail_does_not_overwrite_completed_task() {
-        let (p, fixture) = match pool("task_repository_fail_completed_guard").await {
-            Some(parts) => parts,
-            None => return,
-        };
-        let repo = TaskRepository::new(p);
-        let unique = uuid::Uuid::new_v4().to_string();
-        let username = format!("fail-guard-owner-{unique}");
-        let task_id = format!("fail-guard-task-{unique}");
-        sqlx::query(
-            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
-        )
-        .bind(&username)
-        .execute(&repo.pool)
-        .await
-        .unwrap();
-
-        let mut task = make_task(&task_id, &username);
-        task.max_cpt = 0;
-        repo.create(&task).await.unwrap();
-        let completed = repo.complete(&task_id, None, Some("done")).await.unwrap();
-        assert_eq!(completed.status, TaskStatus::Completed);
-
-        let late_fail = repo.fail(&task_id, "late failure").await;
-        assert!(late_fail.is_err());
-        let stored = repo.find_by_task_id(&task_id).await.unwrap().unwrap();
-        assert_eq!(stored.status, TaskStatus::Completed);
-        assert_eq!(stored.output.as_deref(), Some("done"));
-
-        cleanup_task_case(&repo.pool, &task_id, &username, None).await;
-        fixture.cleanup().await.ok();
     }
 
     #[tokio::test]
@@ -5020,7 +5802,13 @@ mod tests {
         };
         let repo = TaskRepository::new(p);
 
-        for transition in ["complete", "cancel", "fail", "timeout"] {
+        for transition in [
+            "complete",
+            "cancel",
+            "fail",
+            "fail_without_penalty",
+            "timeout",
+        ] {
             let worker_id = format!("worker-{transition}");
             let (task_id, _) = create_assigned_general_compute_task(
                 &repo,
@@ -5039,6 +5827,15 @@ mod tests {
                 }
                 "fail" => {
                     repo.fail(&task_id, "terminal lease test").await.unwrap();
+                }
+                "fail_without_penalty" => {
+                    repo.fail_for_worker_without_penalty(
+                        &task_id,
+                        &worker_id,
+                        "operator admission failed",
+                    )
+                    .await
+                    .unwrap();
                 }
                 "timeout" => {
                     sqlx::query(
@@ -5204,6 +6001,8 @@ mod tests {
             runtime: None,
             task_source: None,
             general_compute_manifest_json: None,
+            managed_dsl_backend_id: None,
+            managed_dsl_semantics_manifest_sha256: None,
             expected_btih: None,
             cpu_usage: 0.0,
             memory_usage: 0.0,

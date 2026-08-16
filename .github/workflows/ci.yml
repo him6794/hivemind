@@ -116,5 +116,6 @@ jobs:
           POSTGRES_PASSWORD: ci-postgres-password
           JWT_SECRET: ci-jwt-secret-at-least-32-bytes
           WORKER_EXECUTION_PRIVATE_KEY_PEM: ci-worker-execution-private-key-placeholder
+          WORKER_EXECUTION_PUBLIC_KEY_PEM: ci-worker-execution-public-key-placeholder
           WORKER_NODEPOOL_TOKEN: ci-worker-nodepool-token-placeholder
         run: docker compose config

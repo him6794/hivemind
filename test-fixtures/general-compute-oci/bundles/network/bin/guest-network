@@ -1,0 +1,3 @@
+#!/bin/busybox sh
+/bin/busybox wget -T 1 -O - http://198.51.100.1/ >/dev/null 2>&1
+exit 1

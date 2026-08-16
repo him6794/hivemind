@@ -42,6 +42,8 @@
 
 `managed-function-v0` 的 runtime id、cost-model id 與 RISC Zero guest image 是同一個 proof binding；任何語義或計量改動都必須產生新 runtime／cost-model id、guest image、fixture、attestation 與 rollout，不能在 v0 原地擴充。若未來需要 richer deterministic DSL，另開 `managed-function-v1`，不要與完整 Python scientific backend 混為一談。
 
+本計畫另明確區分執行邊界：既有 v0 interpreter 可作為跨平台的 `production_sandboxed_dsl` backend。它只執行封閉自訂語法，沒有 filesystem、network、process、DLL 或 native API capability，並以 operation/CPT、usage、timeout、loop、call-depth、value/materialization、memory-accounting 與 output bounds fail closed；Windows DSL Worker 不需要 Windows Containers/HCS。真正需要 operator-owned runner、image、rootfs、artifact mounts 或外部程式的 general-compute workload，才分別使用 Linux `production_sandboxed_oci` 或 Windows `production_sandboxed_windows`/HCS，且各自的 provider prerequisite 不得套用到 DSL。
+
 Rust control plane 負責驗證請求、建立 sandbox、套用配額、串流 artifact、取消／kill／reap、收集 telemetry 與產生結果 envelope；guest/backend 負責執行使用者程式。
 
 第一個實用 backend 採用固定 digest 的 Linux OCI image：Python 3.12、固定版本的 NumPy/SciPy、BLAS/LAPACK、FFT backend 與必要的 native runtime。這能先提供科學使用者熟悉且完整的語言與函式庫；backend 介面保留給後續 WASI、Rust、Julia 或 GPU image，不把 Python 套件直接編進 Nodepool。
@@ -193,7 +195,7 @@ v1 延續目前 trust model：Nodepool 是唯一可信結算權威，Worker 的�
 | M4 GPU beta | CUDA/ROCm image、driver matrix、device artifact、CPU fallback | capability mismatch 不誤派；GPU/CPU 結果與成本標記正確 |
 | M5 可用性發布 | canary/migration、文件、SDK 範例、benchmark dashboard、signed image/SBOM、support matrix、回滾 | reproducibility、security、performance、compatibility 全簽核後才把 id升為 `general-compute-v1` |
 
-M3 trusted capability registry gate 已落地：Nodepool operator config 是 worker general-compute capability snapshot 的唯一來源；registration 以 owner binding 寫入 Postgres，untrusted heartbeat 不得覆蓋 snapshot，owner-authorized registration 可撤銷 snapshot，scheduler 對 `general-compute-v1alpha1` 僅依 persisted snapshot 與 request matching 做 admission。Attempt-bound request/result compatibility、inline artifact materialization、reference-only typed backend execution、bounded Worker typed-result RPC wiring 與 completion 後的完整 envelope persistence 已各自完成小 checkpoint；Nodepool 現在會在 completion 前驗證完整 typed result envelope。剩餘 gate 是 production OCI execution、CAS/chunk resume 與 Nodepool typed usage/billing settlement。
+M3 trusted capability registry gate 已落地：Nodepool operator config 是 worker general-compute capability snapshot 的唯一來源；registration 以 owner binding 寫入 Postgres，untrusted heartbeat 不得覆蓋 snapshot，owner-authorized registration 可撤銷 snapshot，scheduler 對 `general-compute-v1alpha1` 僅依 persisted snapshot 與 request matching 做 admission。Attempt-bound request/result compatibility、inline artifact materialization、reference-only typed backend execution、bounded Worker typed-result RPC wiring、immutable Nodepool artifact repository、generation-bound Prepare/resume/chunk transfer 與 completion 後的完整 envelope persistence 已各自完成小 checkpoint；Nodepool 現在會在 completion 前驗證完整 typed result envelope。剩餘 gate 包含 Nodepool-owned production input-digest validation、真實 rootless OCI execution/isolation、多進程 E2E 與 trusted usage/billing settlement。
 
 每個 milestone 必須提交：測試命令與結果、fixture/hash 清單、benchmark 原始資料、已知限制、rollback 方法與明確 owner。沒有這五項，只能算 prototype，不能標示為 production-ready。
 
@@ -252,3 +254,299 @@ The Nodepool trusted registry gate is now implemented. Operator configuration is
 ### M3 attempt-bound request/result compatibility checkpoint (2026-08-13)
 
 The alpha dispatch contract now carries immutable execution/attempt/idempotency/request-digest identity through the Worker RPC. Worker alpha responses echo the identity on success and failure, while legacy managed-function responses remain empty. Nodepool validates identity against the persisted request before completion; mismatches redispatch without settlement. Retry resets rotate only `attempt_id` and recompute the canonical request digest, preserving execution and idempotency identity. The repository completion guard compares the exact persisted manifest so stale attempts cannot settle directly. Verification: scheduler lib 89 passed/1 intentional ignored, DB-backed retry/stale-result/manifest-guard tests passed, and locked scheduler/Worker/proto checks passed. Worker test linking remains subject to the existing Windows MSVC/MinGW mixed-linker symbol; Worker library check is green.
+
+### M3 fixed-reservation settlement checkpoint (2026-08-14)
+
+Nodepool completion now persists a typed settlement provenance row for `general-compute-v1alpha1`. The row binds the accepted execution/attempt/idempotency/request-digest identity, approved `billing-v1` and `cost-v1` versions, the Worker usage claim, and Nodepool-derived `unverified` evidence. Alpha billing remains a fixed Nodepool reservation (`max_cpt`); usage claims are retained for audit and policy validation but cannot select variable pricing. Completion fails closed on malformed or mismatched result identity, non-completed status, non-unverified Worker evidence, non-canonical output artifacts, policy-exceeding usage, or an unapproved billing/cost version. Multi-process/container OCI E2E and operator deployment validation remain open, so this is not a production-readiness declaration.
+
+The Worker routing fixture now covers task-specific bundle materialization through an operator-owned pinned fake runner and catches canonical artifact-root spelling drift on Windows. It remains a process-level contract test only; real rootless OCI/container isolation and a Postgres-backed multi-process completion run are still required release gates.
+
+### GPU request-level contract checkpoint (2026-08-14)
+
+Commit `6400099` binds the typed `GpuRequirement` to `ExecutionPolicy` with
+fail-closed `gpu_required` consistency validation while preserving omission of
+the optional field in the default CPU request JSON. RED→GREEN evidence includes
+focused request tests (2), the full contracts suite (21), locked runtime serial
+and four-thread suites, runtime check, and GNU Worker/Task Scheduler/Bin checks.
+This completes only request validation; trusted Nodepool registration, selected
+device identity/result binding, actual CUDA/ROCm execution, OCI E2E, and trusted
+usage/billing settlement remain open.
+
+### Operator-owned Compose deployment boundary checkpoint (2026-08-14)
+
+The release Compose contract now exposes the production general-compute
+registry through the fixed in-container path
+`/etc/hivemind/general-compute/backends.json` on a named read-only volume, and
+keeps task bundles, materialized artifacts, and the durable CAS journal under a
+separate mutable state volume. The registry entries must carry absolute
+operator-owned bundle/rootfs/artifact paths; Compose does not infer host paths,
+and an absent registry still fails production routing closed. RED→GREEN coverage
+in `scripts/docker-compose-release.Tests.ps1` verifies the source contract and
+the resolved `docker compose config --format json` mount modes. This is only an
+operator packaging boundary; real rootless OCI/container E2E and trusted
+variable usage/billing settlement remain release gates.
+
+### Scheduler trusted GPU result identity checkpoint (2026-08-14)
+
+The scheduler now consumes the operator-owned typed GPU registration and
+requires the Worker result's `GpuSelection` to equal the deterministic trusted
+selection for the persisted request. The forged-device RED test is green, and
+the GNU scheduler library gate passes (118 passed, 1 ignored); commit
+`5be0e48 feat(scheduler): verify trusted GPU result identity` is local and not
+pushed. This is an
+authoritative comparison at result admission, not hardware attestation or GPU
+execution; Worker device discovery, CUDA/ROCm, OCI E2E, operator deployment,
+and trusted usage/billing settlement remain open.
+
+### Worker trusted GPU selection checkpoint (2026-08-14)
+
+Commit `0052444 feat(worker): bind trusted GPU selection to results` wires the
+operator-owned `TrustedWorkerCapabilityRegistration` through Worker admission
+and reference execution. Typed GPU requests fail closed without a compatible
+approved identity, and deterministic `GpuSelection` is bound into successful
+and failure `GeneralComputeResult` envelopes while CPU JSON stays compatible.
+Focused runtime GPU (1), Worker admission (2), GNU Worker test compile, and
+staged diff checks pass. This remains claim-level plumbing; CUDA/ROCm driver
+execution, hardware attestation, real OCI/container E2E, operator deployment,
+and trusted usage/billing settlement are still required.
+
+### Trusted GPU registration checkpoint (2026-08-14)
+
+Commit `b22aaab` extends the operator-owned worker registration with typed
+`GpuCapability` identities and a fail-closed deterministic selector. Legacy
+registration JSON without the optional list remains readable as an empty list.
+The focused registration suite (3 tests), locked runtime suites, and GNU
+cross-crate checks pass. Scheduler/Worker admission and result identity binding
+are the next integration gate; this does not claim hardware attestation or
+CUDA/ROCm execution.
+
+### GPU result identity checkpoint (2026-08-14)
+
+Commit `67bc1c9` binds the selected typed GPU identity to
+`GeneralComputeResult`. CPU results omit the optional field for JSON
+compatibility. GPU-required results now fail closed unless they carry a
+requirement-compatible `GpuCapability` or an explicitly requested CPU
+fallback; `validate_against` checks the vendor/runtime/driver/VRAM/stream/image
+identity before accepting the result contract. Focused result tests (3), the
+locked runtime serial/four-thread suites, runtime check, and GNU Worker/Task
+Scheduler/Bin checks pass. This is still a claim-level runtime contract:
+trusted Nodepool comparison against the operator-owned registration,
+scheduler/Worker admission wiring, actual CUDA/ROCm execution, OCI E2E, and
+usage/billing settlement remain open.
+
+### OCI E2E startup-guard checkpoint (2026-08-14)
+
+The reviewed multi-process OCI fixture now retries Master authentication while
+Nodepool gRPC becomes ready (`6166bff`) and the harness rejects a missing,
+relative, or non-regular canonical case-plan file before Compose startup
+(`34a91a5`). OCI harness, Compose release, runtime workspace, and diff-check
+gates pass. The complete M3/M4/M5 release gate is still open until an operator
+provides the pinned registry/rootfs/runner/seccomp material and case plan, then
+produces evidence for real rootless OCI isolation, typed result persistence,
+timeout/cancel cleanup, hostile workload denial, and Nodepool settlement.
+
+### Typed cancellation-result checkpoint (2026-08-14)
+
+Commit `f7495a3` closes the Nodepool persistence gap for accepted
+general-compute cancellation. Task status and the typed cancelled result are
+written in one transaction; the envelope is request/attempt/backend/image
+bound, uses canonical inline-input identity or a domain-separated immutable
+manifest-coordinate digest when CAS bytes were never materialized, and creates
+no settlement. DB-backed scheduler cancellation tests (4) and the Nodepool
+stop-task compatibility test pass on the current locked workspace. Real OCI
+timeout/cancel kill-reap evidence still requires operator-provided assets and
+the canonical case plan, so the overall M3/M4/M5 release gate remains open.
+
+### Typed stale-timeout result checkpoint (2026-08-14)
+
+Commit `0ec476c` makes the scheduler's stale-`RUNNING` sweep persist a typed
+Nodepool timeout result in the same transaction as the `TIMED_OUT` task state.
+The result is `timed_out`/`worker_heartbeat_lost`, is bound to the immutable
+request and backend/image identity, uses canonical inline-input identity or a
+timeout-specific domain-separated manifest-coordinate digest for unmaterialized
+CAS inputs, and creates no settlement. The DB regression was observed RED with
+`RowNotFound` and is now green (1/1); cancellation regressions (4/4), locked
+Scheduler/Nodepool checks, and Nodepool stop-task compatibility (1/1) also pass.
+This closes the typed persistence boundary only; real OCI timeout kill/reap,
+host isolation, operator deployment, and trusted settlement remain required.
+
+### Typed Nodepool failure-result checkpoint (2026-08-14)
+
+Commit `f186b4b` makes `fail_for_worker` atomically persist a Nodepool-generated
+typed `failed`/`nodepool_task_failed` envelope for general-compute tasks, which
+covers the HEAD-present max-redispatch terminal path. The envelope remains
+request/backend/image bound and non-settling; existing Worker reputation and
+rejected-attestation behavior is preserved. The DB test was observed RED with
+`RowNotFound` and is now green (1/1); focused failure compatibility (2/2),
+legacy managed-proof rejection (1/1), scoped formatting/diff checks, and locked
+Scheduler/Nodepool/Master checks pass. Real OCI execution/isolation and the
+operator-gated multi-process evidence remain open.
+
+### Guarded generic failure-result checkpoint (2026-08-14)
+
+Commit `c10b803` makes the public generic fail path terminal-safe and typed.
+Only active task states can transition to `FAILED`; a completed task can no
+longer be overwritten. General-compute task state and the Nodepool-generated
+`failed`/`nodepool_task_failed` envelope are persisted atomically without a
+settlement. Separate RED tests captured the missing result (`RowNotFound`) and
+terminal overwrite, and both are green; scoped format/diff and locked
+Scheduler/Nodepool/Master compatibility checks pass. Remaining M3 work includes
+the dirty CAS/immutable-artifact regressions and operator-gated OCI evidence.
+
+### Durable CAS transfer-state checkpoint (2026-08-14)
+
+Commit `ec44b65` persists immutable execution/artifact transfer state below the
+operator CAS root so a Worker restart or rotated attempt can resume verified
+chunks without allowing manifest redefinition. Create-new transfer manifests
+and completion markers fail closed on corruption and reconcile only from
+rehash-verified CAS objects. A clean-HEAD test-only probe was RED on the absent
+API; focused transfer tests are 4/4, the exact staged artifact suite is 9/9,
+the integrated runtime suite passes, and Worker/Scheduler/Bin compatibility
+checks pass. The current dirty Nodepool CAS slice is now scheduler-green
+(124 passed, 1 ignored), but its repository and dispatcher layers still need
+to be isolated into focused local commits before M3 CAS/resume can be claimed
+complete.
+
+### General-compute settlement schema recovery checkpoint (2026-08-14)
+
+Commit `9f1d332` restores the `general_compute_settlements` migration consumed
+by the committed typed terminal-result paths. Four DB-backed terminal tests
+first failed because the relation was absent; the focused migration and all
+four cancellation/timeout/failure regressions now pass. This restores the
+existing fixed-reservation provenance boundary only and does not establish
+variable usage settlement or production OCI evidence.
+
+### Nodepool immutable artifact repository checkpoint (2026-08-14)
+
+Commit `a13804b` persists task-bound artifact identity, immutable chunk
+coordinates, verified inline sources, uploaded chunks, completeness, and
+expiry. Task creation is atomic with manifest validation; source reads rehash
+content and fail closed on metadata drift; chunk retries are manifest-bound
+and byte-idempotent; chunk content and the completeness transition commit in
+one row-locked transaction. Focused repository tests pass 22/22, Database
+11/11, the validation-overlay Scheduler gate passes 107 tests with 1
+intentional ignore, and exact-commit Scheduler/Worker/Bin production checks
+pass. The next isolated unit is Nodepool transfer-lease lifecycle, followed by
+dispatcher preparation/chunk RPC; operator-gated OCI and trusted variable
+settlement gates remain open.
+
+### Nodepool transfer-lease lifecycle checkpoint (2026-08-14)
+
+Commit `5b22af8` persists a Nodepool-owned, monotonically generated transfer
+lease for each general-compute assignment. Assignment and claim atomically bind
+the lease to task/execution/attempt/Worker identity; redispatch and all committed
+terminal transitions revoke it, expiry is materialized, assignment drift fails
+closed, and legacy tasks receive no lease. Focused lease tests pass 5/5,
+Scheduler passes 113 with 1 intentional ignore, Database passes 12/12, and the
+Scheduler/Worker/Node Manager/Master/Bin production and validation-overlay test
+checks pass. The broader dirty transport slice remains Scheduler-green at 130
+passed with 1 intentional ignore after adding its no-penalty terminal revoke.
+The next isolated unit is the authenticated token/protobuf/Nodepool gRPC lease
+authority, followed by Worker enforcement and dispatcher chunk preparation;
+real rootless OCI and trusted variable settlement remain release gates.
+
+### Managed-runtime lockfile compatibility checkpoint (2026-08-14)
+
+Commit `b3abec8` repairs the committed lockfile's stale
+`managed-function-runtime` 0.0.7 entry to match the already committed 0.1.0
+workspace manifest. The clean RED was Cargo refusing `--locked --offline`
+before compilation; after deterministic offline regeneration, Scheduler,
+Worker, Node Manager, Master API, and Bin all pass locked offline checks. This
+build-gate repair is separate from the lease feature and does not change the
+next functional unit: authenticated Nodepool lease authority.
+
+### Worker execution-token transfer identity checkpoint (2026-08-14)
+
+Commit `b22fed5` extends Nodepool-issued Ed25519 Worker execution tokens with
+execution/attempt/idempotency/request-digest identity and a positive transfer
+generation. Invalid identities are rejected before signing, while legacy base
+claims remain decodable for managed-function compatibility. The missing API and
+invalid-identity acceptance were each observed RED before implementation. Auth
+passes 7/7 with strict clippy and scoped format checks; five production
+consumers pass locked offline checks. Next isolate the protobuf lease-validation
+RPC contract, then implement Nodepool database authority and Worker enforcement.
+
+### Bounded transfer-lease authority envelope checkpoint (2026-08-14)
+
+Commit `bae0207` freezes the bounded Worker-to-Nodepool lease-authority request
+and active/rejected response. The request binds the Nodepool-issued Ed25519
+execution token to task, Worker, execution, attempt, idempotency, canonical
+request digest, and positive generation; the shared validator enforces an 8 KiB
+token cap, 255-byte identity caps, valid SHA-256 syntax, and a 16 KiB encoded
+message cap. Compile and behavioral RED tests preceded the implementation; the
+isolated Proto suite passes 12/12, scoped format/clippy gates pass, and five
+production consumers pass locked offline checks. The next isolated unit adds
+the RPC method and Postgres-backed Nodepool token/active-lease authority; Worker
+enforcement remains a separate following unit.
+
+### Nodepool transfer-lease authority checkpoint (2026-08-15)
+
+Commits `f017606`, `b7d8e34`, `a9d2e35`, and `acc173a` independently refresh
+the test fixtures required by the evolved backend/capability schema. Commit
+`ecbbee4` then registers `ValidateGeneralComputeTransferLease` and makes
+Nodepool the live authority: the shared bounded validator runs before token or
+database work, the Ed25519 claims must match every request identity field, and
+the trusted repository must return the same active assignment/generation after
+materializing expiry and terminal/assignment drift. The real tonic/Postgres
+test covers valid authority, invalid token, all identity drifts, revocation,
+reassignment, attempt/generation rotation, replacement authority, and expiry.
+Isolated and integrated Scheduler, Proto, Auth, Worker, Node Manager, Master API,
+and Bin gates pass; the integrated Scheduler result is 130 passed with 1
+intentional environment-gated ignore. The next isolated unit is Worker
+production fail-closed enforcement for Prepare/Upload/Resume, followed by
+dispatcher authenticated chunk preparation. This checkpoint is not rootless
+OCI isolation, multi-process hostile-workload evidence, or trusted variable
+settlement.
+
+### Generation-bound chunk wire-contract checkpoint (2026-08-15)
+
+Commit `cacd0eb` binds chunk upload and resume to a positive Nodepool transfer
+generation and defines bounded Prepare request/response messages carrying the
+full lease identity. Compile RED tests preceded the minimal contract change;
+Proto passes 13/13 in the isolated worktree, focused GNU Worker chunk tests and
+Worker test-target compilation pass after four fixture-only compatibility
+updates, and Scheduler, Node Manager, Master API, and Bin pass locked/offline
+consumer checks. Integrated dirty-main Proto is 14/14 and focused Worker chunk
+verification is green. The service RPC and enforcement are deliberately the
+next TDD unit: Worker must consult Nodepool and fail closed before mutating
+prepared state or CAS for Prepare/Upload/Resume, with no production local-allow
+fallback. Dispatcher transfer and the remaining OCI/settlement gates follow.
+
+### Worker production transfer-authority checkpoint (2026-08-15)
+
+Commit `df48f19` makes Worker chunk preparation fail closed against the trusted
+Nodepool lease authority. `PrepareGeneralCompute`, upload, and resume bind the
+Nodepool-issued token to task/Worker/execution/attempt/idempotency/request-digest
+identity plus a positive generation, revalidate authority before prepared-state
+or CAS mutation, and distinguish denial from authority unavailability. The
+production binary must inject the real Nodepool client; the old no-authority
+constructor is protected by a compile-fail regression. RED compile/behavioral
+tests preceded the implementation. Integrated gates pass Proto 15/15, Worker
+GNU 107/107 plus chunk 9/9, GPU 2/2, admission 7/7 and doctest 1/1, real
+Postgres-backed Nodepool authority 2/2, Scheduler 130 with 1 intentional ignore,
+and locked checks for all five consumers. Next isolate the dirty dispatcher
+authenticated preparation/source-transfer path into its own TDD commit. This
+checkpoint does not prove rootless OCI isolation, hostile-workload E2E, operator
+deployment assets, or trusted variable settlement.
+
+### Dispatcher authenticated source-transfer checkpoint (2026-08-15)
+
+Commit `94576b6` completes the Nodepool dispatcher side of the authenticated
+transfer sequence. Before Worker execution it obtains the active assignment
+lease, signs task/Worker/execution/attempt/idempotency/request-digest/generation
+identity once, loads and rehashes immutable Nodepool source rows, always sends
+the bounded Prepare envelope, resumes per artifact, and uploads only Worker-
+reported descriptors that exactly match the Nodepool manifest. Inline manifest
+bytes never replace repository authority in production.
+
+The error paths are also bounded: missing, expired, or mismatched leases and
+transport failures rotate the attempt for no-penalty redispatch; signing or
+missing trusted source creates a typed Nodepool failure, revokes the lease, and
+creates neither settlement nor Worker reputation/attestation penalty. Compile
+and behavioral REDs preceded the implementation. Commit-local Scheduler is 125
+passed with 1 intentional ignore; integrated dirty-main Scheduler is 142 passed
+with 1 intentional ignore, Proto is 15/15, and Worker/Node Manager/Master API/
+Bin all-target checks pass. The commit was advanced locally with an empty index
+and no push. Next isolate production OCI input-digest verification against the
+same Nodepool-owned materialized bytes; real rootless OCI/hostile-workload E2E,
+operator assets, and trusted variable settlement remain release gates.

@@ -161,6 +161,7 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
             available_memory_gb INTEGER NOT NULL DEFAULT 0,
             queue_capacity INTEGER NOT NULL DEFAULT 0,
             general_compute_capabilities_json TEXT,
+            managed_dsl_capabilities_json TEXT,
             last_heartbeat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             registered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -184,6 +185,8 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
             runtime TEXT,
             task_source TEXT,
             general_compute_manifest_json BYTEA,
+            managed_dsl_backend_id VARCHAR(255),
+            managed_dsl_semantics_manifest_sha256 VARCHAR(71),
             expected_btih VARCHAR(64),
             cpu_usage DOUBLE PRECISION NOT NULL DEFAULT 0,
             memory_usage DOUBLE PRECISION NOT NULL DEFAULT 0,
@@ -268,6 +271,13 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     .await?;
 
     sqlx::query(
+        "ALTER TABLE general_compute_artifact_sources
+         ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_general_compute_artifact_sources_task
          ON general_compute_artifact_sources(task_id);",
     )
@@ -298,7 +308,9 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     .await?;
 
     // Immutable artifact identity and lifecycle state are separate from the
-    // mutable per-attempt request manifest and uploaded chunk content.
+    // mutable per-attempt request manifest and from uploaded chunk content.
+    // This lets retries/workers reuse the same artifact while preventing a
+    // later manifest edit from changing the bytes that Nodepool will trust.
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS general_compute_artifacts (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -350,6 +362,10 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // Nodepool-owned cross-worker transfer coordination. A lease is scoped to
+    // one immutable execution attempt and one Worker; reassignment revokes the
+    // previous active row and allocates the next monotonically increasing
+    // generation. Worker-local CAS state is never treated as shared storage.
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS general_compute_transfer_leases (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -380,9 +396,7 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
 
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_general_compute_transfer_leases_identity
-         ON general_compute_transfer_leases(
-             task_id, execution_id, attempt_id, worker_id, generation
-         );",
+         ON general_compute_transfer_leases(task_id, execution_id, attempt_id, worker_id, generation);",
     )
     .execute(pool)
     .await?;
@@ -615,6 +629,11 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await;
     let _ = sqlx::query(
+        "ALTER TABLE worker_nodes ADD COLUMN IF NOT EXISTS managed_dsl_capabilities_json TEXT;",
+    )
+    .execute(pool)
+    .await;
+    let _ = sqlx::query(
         "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS req_storage_gb BIGINT NOT NULL DEFAULT 0;",
     )
     .execute(pool)
@@ -627,6 +646,16 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
         .await;
     let _ = sqlx::query(
         "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS general_compute_manifest_json BYTEA;",
+    )
+    .execute(pool)
+    .await;
+    let _ = sqlx::query(
+        "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS managed_dsl_backend_id VARCHAR(255);",
+    )
+    .execute(pool)
+    .await;
+    let _ = sqlx::query(
+        "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS managed_dsl_semantics_manifest_sha256 VARCHAR(71);",
     )
     .execute(pool)
     .await;
@@ -811,37 +840,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_migrations_create_general_compute_artifact_tables() {
-        let fixture = match create_isolated_test_pool("database_general_compute_artifacts").await {
-            Ok(fixture) => fixture,
-            Err(_) => {
-                tracing::warn!("Skipping DB test");
-                return;
-            }
-        };
-
+    async fn task_migrations_create_general_compute_artifact_source_table() {
+        let fixture =
+            match create_isolated_test_pool("database_general_compute_artifact_sources").await {
+                Ok(fixture) => fixture,
+                Err(_) => {
+                    tracing::warn!("Skipping DB test");
+                    return;
+                }
+            };
         run_migrations(&fixture.pool).await.unwrap();
-
-        for table in [
-            "general_compute_artifacts",
-            "general_compute_artifact_manifest_chunks",
-            "general_compute_artifact_sources",
-            "general_compute_artifact_chunks",
-        ] {
-            let exists: bool = sqlx::query_scalar(
-                "SELECT EXISTS(
-                    SELECT 1 FROM information_schema.tables
-                    WHERE table_schema = $1 AND table_name = $2
-                )",
-            )
-            .bind(fixture.schema_name())
-            .bind(table)
-            .fetch_one(&fixture.pool)
-            .await
-            .unwrap();
-            assert!(exists, "migration must create {table}");
-        }
-
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM information_schema.tables
+                WHERE table_schema = $1 AND table_name = 'general_compute_artifact_sources'
+            )",
+        )
+        .bind(fixture.schema_name())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert!(exists);
+        let lifecycle_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM information_schema.tables
+                WHERE table_schema = $1 AND table_name = 'general_compute_artifacts'
+            )",
+        )
+        .bind(fixture.schema_name())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert!(lifecycle_exists);
+        let manifest_chunks_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM information_schema.tables
+                WHERE table_schema = $1 AND table_name = 'general_compute_artifact_manifest_chunks'
+            )",
+        )
+        .bind(fixture.schema_name())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert!(manifest_chunks_exists);
         fixture.cleanup().await.unwrap();
     }
 
@@ -902,7 +943,8 @@ mod tests {
 
     #[tokio::test]
     async fn task_migrations_create_general_compute_settlement_table() {
-        let fixture = match create_isolated_test_pool("database_general_compute_settlements").await {
+        let fixture = match create_isolated_test_pool("database_general_compute_settlements").await
+        {
             Ok(fixture) => fixture,
             Err(_) => {
                 tracing::warn!("Skipping DB test");
@@ -921,7 +963,10 @@ mod tests {
         .fetch_one(&fixture.pool)
         .await
         .unwrap();
-        assert!(exists, "Nodepool must persist settlement provenance");
+        assert!(
+            exists,
+            "Nodepool must persist general-compute settlement provenance"
+        );
 
         fixture.cleanup().await.unwrap();
     }

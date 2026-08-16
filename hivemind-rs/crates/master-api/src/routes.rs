@@ -1,6 +1,7 @@
 use super::handlers::AppState;
 use super::middleware as mw;
 use axum::{
+    extract::DefaultBodyLimit,
     http::{header, HeaderValue, Method},
     middleware,
     routing::{get, post, put},
@@ -73,6 +74,14 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/api/tasks/quote", post(super::handlers::quote_task))
         .route("/api/tasks", post(super::handlers::create_task))
+        .route(
+            "/api/tasks/:task_id/general-compute/artifacts/chunk",
+            post(super::handlers::upload_general_compute_artifact_chunk).layer(
+                DefaultBodyLimit::max(
+                    hivemind_proto::GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES * 4,
+                ),
+            ),
+        )
         .route("/api/tasks", get(super::handlers::list_tasks))
         .route("/api/workers", get(super::handlers::list_workers))
         .route(

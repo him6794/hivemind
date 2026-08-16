@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import './console.css';
 import { clearStoredSession, readStoredSession, saveStoredSession } from './authSession.mjs';
 import {
@@ -8,32 +8,6 @@ import {
   normalizeWorkerProfile,
   registrationOwnerUsername,
 } from './workerProfile.mjs';
-
-const panelStyle = {
-  border: '1px solid #d8e0e8',
-  borderRadius: 14,
-  background: '#fff',
-  padding: 18,
-  boxShadow: '0 12px 32px rgba(15, 23, 42, 0.06)',
-};
-
-const fieldStyle = {
-  width: '100%',
-  boxSizing: 'border-box',
-  padding: '10px 12px',
-  marginTop: 6,
-  border: '1px solid #cad5df',
-  borderRadius: 10,
-  background: '#fff',
-};
-
-const buttonStyle = {
-  padding: '10px 14px',
-  border: 'none',
-  borderRadius: 10,
-  cursor: 'pointer',
-  fontWeight: 700,
-};
 
 const IP_PATTERN = /^[\w.-]+:\d{1,5}$/;
 const SESSION_KEY = 'hivemind.worker.session.v1';
@@ -74,30 +48,6 @@ export default function WorkerApp() {
     } catch {
       return {};
     }
-  }
-
-  async function authedFetch(path, options = {}, authToken = token) {
-    let res;
-    try {
-      res = await fetch(`${apiBase}${path}`, {
-        ...options,
-        headers: {
-          ...(options.headers || {}),
-          Authorization: `Bearer ${authToken}`,
-        },
-      });
-    } catch {
-      throw new Error(`Cannot reach Hivemind API at ${apiBase}. Check VITE_API_BASE.`);
-    }
-    const data = await readJson(res);
-    if (!res.ok) {
-      if (res.status === 401) {
-        logout();
-        throw new Error('Session expired. Please log in again.');
-      }
-      throw new Error(data.message || data.status_message || `HTTP ${res.status}`);
-    }
-    return data;
   }
 
   async function refreshLocalProfile() {

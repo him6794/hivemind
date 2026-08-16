@@ -9,7 +9,8 @@ export type Route =
   | "register"
   | "account"
   | "security"
-  | "docs";
+  | "docs"
+  | "terms";
 
 export interface AuthUser {
   username: string;

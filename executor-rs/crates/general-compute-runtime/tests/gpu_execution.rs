@@ -5,8 +5,8 @@ use general_compute_runtime::gpu::{GpuCapability, GpuRuntime, GpuSelection, GpuV
 use general_compute_runtime::sandbox::BackendExecutionMode;
 use general_compute_runtime::{
     ArtifactManifest, ArtifactRole, BackendRegistration, DeterminismPolicy, ExecutionPolicy,
-    GeneralComputeRequest, ResultStatus, TrustedWorkerCapabilityRegistration, WorkerCapabilities,
-    GENERAL_COMPUTE_RUNTIME_VERSION,
+    GENERAL_COMPUTE_RUNTIME_VERSION, GeneralComputeRequest, ResultStatus,
+    TrustedWorkerCapabilityRegistration, WorkerCapabilities,
 };
 
 const IMAGE: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -42,10 +42,7 @@ fn reference_executor_writes_operator_selected_gpu_identity_into_result() {
         python_registry(),
         registration,
     );
-    let root = std::env::temp_dir().join(format!(
-        "hivemind-gpu-execution-{}",
-        std::process::id()
-    ));
+    let root = std::env::temp_dir().join(format!("hivemind-gpu-execution-{}", std::process::id()));
     let materializer = ArtifactMaterializer::new(&root).unwrap();
 
     let result = executor
@@ -53,10 +50,7 @@ fn reference_executor_writes_operator_selected_gpu_identity_into_result() {
         .expect("trusted GPU selection should be emitted with the result");
 
     assert_eq!(result.status, ResultStatus::Completed);
-    assert_eq!(
-        result.gpu_selection,
-        Some(GpuSelection::Gpu(selected))
-    );
+    assert_eq!(result.gpu_selection, Some(GpuSelection::Gpu(selected)));
     result.validate_against(&request, &capabilities).unwrap();
     let _ = std::fs::remove_dir_all(root);
 }
@@ -71,7 +65,11 @@ fn request() -> GeneralComputeRequest {
         guest_image_digest: IMAGE.into(),
         backend_id: "python-cpython-312".into(),
         entrypoint: "main".into(),
-        source_artifact: ArtifactManifest::inline_json("source", ArtifactRole::Source, b"result = 7"),
+        source_artifact: ArtifactManifest::inline_json(
+            "source",
+            ArtifactRole::Source,
+            b"result = 7",
+        ),
         input_artifacts: vec![],
         execution_policy: ExecutionPolicy::default(),
         determinism: DeterminismPolicy::default(),

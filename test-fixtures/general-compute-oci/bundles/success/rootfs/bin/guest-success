@@ -1,0 +1,2 @@
+#!/bin/busybox sh
+printf '%s\n' '{"protocol_version":"general-compute-result-v1","status":"completed","exit_code":0,"error_code":null,"stdout":"oci-fixture-success","stderr":"","output_artifacts":[],"usage":{"cpu_time_ms":1,"wall_time_ms":1,"peak_memory_bytes":1,"input_bytes":0,"output_bytes":0,"gpu_time_ms":0,"gpu_memory_bytes":0},"input_sha256":"sha256:8ee559c8b8d277c5cfaf564480dfbd053af18b199d5ec557debb84d353594250","output_manifest_root":"sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"}'

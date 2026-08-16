@@ -1,4 +1,194 @@
-# Hivemind ZK 函式計費證明實作計畫
+# Hivemind 工作計畫
+
+## 目前目標（2026-08-12）
+
+先以可重現的引用／建置／測試證據盤點並移除未使用的程式碼與檔案，再產出一份可執行的底層 runtime 路線圖，使 `managed-function-v0` 具備明確的圖靈完備語義與實用的科學運算能力，同時維持 Nodepool 信任邊界、決定性、資源計量與 ZK 證明鏈。
+
+## 目前階段
+
+階段 E：完成稽核（running）。清理證據、runtime 路線圖、README 契約、executor 全測試、Hivemind Windows GNU 全 workspace 測試、三個 frontend build 與 48 個 frontend tests 已完成；目前正在恢復兩次中斷留下的 release-test 子程序，並補齊 serial release gates、文件現況同步與最終 diff audit。既有大量未提交 general-compute／frontend 變更仍視為使用者／先前工作的資產，不覆寫、不還原。
+
+### 恢復狀態（2026-08-14）
+
+- **狀態：** running（release gates recovery）
+- **已確認：** 中斷中的臨時 `hivemind-docker-config-*` 目錄已由 `finally` 清除；沒有可採信的 Docker release gate 結果。
+- **背景狀態：** 先前平行 release smoke 留下受限沙箱無權終止的 PowerShell／Node 子程序；它們的輸出不可作為完成證據，必須等其退出後再 serial 重跑。
+- **下一動作：** 觀察子程序退出；以空白臨時 `DOCKER_CONFIG` serial 執行 Compose contract，再執行 frontend smoke、Windows package、release docs；其後同步 roadmap current-state、記錄所有 gate 並完成逐要求 audit。
+
+## 本輪成功標準
+
+- 對每個刪除項目記錄「為何未使用」、引用／入口點／manifest／建置證據與回歸驗證。
+- 不把尚未接線、平台特定、build script、測試 fixture、migration、generated input 或部署資產誤判為垃圾。
+- 實際移除已證明未使用的程式碼／檔案；若沒有任何項目達到刪除門檻，明確記錄零刪除及證據，不為了產生 diff 而刪除。
+- 新增一份 repository 內的實作路線圖，涵蓋語言語義、數值型別、陣列／張量、數學核心、決定性、sandbox、資源／成本模型、CPU/GPU backend、ZK 相容性、API/versioning、測試、benchmark、migration 與分階段交付 gates。
+- 核對並處理 README 的 Python `def main(...)` 與實際 DSL 契約不一致問題，避免路線圖建立在錯誤的公開介面上。
+- 執行與變更範圍相稱的格式、靜態檢查、測試及文件契約驗證，完成逐項 completion audit。
+
+## 本輪階段
+
+### 階段 A：現況與範圍恢復
+
+- [x] 讀取使用者附檔並還原 UTF-8 內容
+- [x] 讀取既有規劃檔、session catch-up、git status 與 diff stat
+- [x] 盤點 workspaces、入口點、manifest、忽略規則與既有 runtime 文件
+- **狀態：** complete
+
+### 2026-08-14 General-compute transport continuation
+
+#### Active slice: operator-owned Compose deployment boundary
+
+- [x] Add RED release contract for fixed production registry/CAS paths and
+  explicit named config/state volumes; observe the expected failure first.
+- [x] Wire the Worker Compose service and `.env.example` with a read-only
+  operator config volume and a separate mutable general-compute state volume.
+- [x] Verify resolved Compose JSON, release contract, and diff-check; keep
+  real rootless OCI/container E2E and trusted settlement explicitly open.
+- [x] Package the Worker runtime prerequisites (`runc`, `uidmap`, subordinate
+  UID/GID range, general-compute source staging, and state root) in the release
+  image; record commit `48069ea`.
+- [x] Verify the release contract, Docker image build, non-root image probe,
+  and staged diff-check.
+- [x] Add a fail-closed operator OCI E2E preflight harness for registry,
+  runner/rootfs, policy, isolated Compose project, and cleanup; record commit
+  `1e6d513`.
+- [x] Bind an operator-provided OCI runner state root through the production
+  registry, Worker launcher, and `runc --root`; reject missing/relative/symlink
+  roots; record commit `4dfe4b0`.
+- **status:** completed for packaging/wiring; next action remains an isolated
+  multi-process/container OCI run with operator-provisioned runner/rootfs.
+
+#### Active slice: operator-owned OCI seccomp profile binding
+
+- [x] Add RED coverage proving production materialization cannot proceed without
+  an operator-provided seccomp profile.
+- [x] Bind an absolute regular non-symlink profile path and SHA-256 pin through
+  `ProductionBackendConfig`; reject disabled policy, malformed JSON, unknown
+  fields, empty/duplicate syscall names, and non-allow syscall groups.
+- [x] Materialize the complete profile into `linux.seccomp` and validate the
+  full syscall allowlist again before an OCI runner starts.
+- [x] Extend the OCI preflight to verify profile path, regular-file status,
+  SHA-256, default-deny action, and non-empty `SCMP_ACT_ALLOW` syscall groups.
+- Local commit: `43dd537 feat(runtime): bind operator seccomp profiles`.
+- **status:** completed for fail-closed contract and scoped verification;
+  real rootless seccomp enforcement and multi-process OCI E2E remain open.
+
+#### Active slice: isolated OCI Compose project boundary
+
+- [x] Add RED contract rejecting fixed `container_name`, fixed network name,
+  fixed service IPv4, and fixed subnet from the OCI E2E Compose surface.
+- [x] Remove fixed container/network/IPAM bindings so Compose project names
+  allocate isolated resources; use service DNS for the internal torrent
+  advertise address.
+- [x] Make preflight apply temporary project-prefixed volume names, validate
+  resolved Compose JSON, and restore the caller's environment on every exit
+  path.
+- Local commit: `c24d036 fix(deploy): isolate OCI compose projects`.
+- **status:** completed for Compose resource isolation; the reviewed
+  Postgres-backed task fixture and real OCI execution remain open.
+
+#### Active slice: reviewed multi-process OCI fixture protocol
+
+- [x] Add RED contract rejecting the old `-Run` placeholder and requiring an
+  explicit fixture/evidence schema.
+- [x] Wire two-phase `provision`/`execute` fixture invocation, isolated host
+  ports, opt-in seeded credentials, Compose up/build, evidence validation, and
+  finally cleanup with retained evidence artifacts.
+- [x] Propagate optional Worker username/password and explicit default-user
+  seeding through release Compose without changing safe production defaults.
+- [x] Ship the reviewed fixture implementation that maps registry/rootfs/
+  runner/seccomp into named volumes, authenticates Master/Worker, submits a
+  caller-provided canonical manifest, and verifies Postgres result/settlement
+  plus timeout/cancel/network/filesystem case outcomes.
+- [ ] Provide operator rootfs/runner/profile and a real canonical case plan;
+  execute the fixture on a host that supports nested rootless OCI primitives.
+- **status:** fixture/orchestration contract completed; real operator execution
+  and host primitive evidence remain open.
+
+- [x] Persist immutable artifact identity and manifest chunk coordinates outside mutable attempt JSON.
+- [x] Persist artifact lifecycle (`pending` / `available` / `expired`), completeness, digest, size, expected chunk count, and task-deadline expiry.
+- [x] Enforce scheduler coordinate matching and fail-closed reads/uploads after expiry; retain one-time backfill for direct-manifest legacy rows.
+- [x] Verify lifecycle, coordinate drift, idempotency, Nodepool upload, migration, scheduler full-lib, scoped check, and diff-check gates.
+- [x] Durable per-Worker transfer journal across Worker restarts and retry attempts; cross-Worker transfer remains Nodepool-authenticated re-upload.
+- [x] Cross-Worker transfer coordination/lease evidence; production OCI routing and trusted usage/billing settlement remain outstanding.
+- **status:** running
+
+#### Active slice: Nodepool transfer lease/generation
+
+- [x] Persist a Nodepool-owned transfer lease generation for each active general-compute task/attempt/Worker assignment.
+- [x] Bind generation to worker-execution tokens and Prepare/Upload/Resume envelopes; reject stale generations fail closed.
+- [x] Add database, auth, proto, Worker, scheduler, and real Nodepool gRPC RED/GREEN evidence for same-lease idempotency, expiry/reassignment rotation, and stale replay rejection.
+- **status:** completed; remaining overall blockers are production OCI routing, multi-process/container E2E, and trusted usage/billing settlement.
+
+#### Active slice: bounded scientific reference kernels (2026-08-14)
+
+- [x] Add deterministic bounded f64 mean, population/sample variance, and linear-interpolated quantile APIs with finite-input and sample-count guards.
+- [x] Add RED→GREEN integration coverage and record commit `e450580`.
+- [x] Extend seeded RNG coverage with replayable standard-normal and parameterized normal sampling, including pinned output and fail-closed parameter/overflow guards; record commit `00c0ad7`.
+- [x] Add bounded adaptive scalar RK4 step-doubling with accepted/attempted-step metadata and minimum-step failure semantics; record commit `3a78b27`.
+- [x] Implement sparse row/column reductions, canonical CSR conversion, and bounded partial-pivot square solve with fail-closed singular/RHS/dimension checks; record commit `032ef80`.
+- [x] Add versioned optimized backend identity pin (backend/version/CPU features/exact threads/reference-vector digest) with fail-closed drift checks; record commit `c997898`.
+- [x] Extend the pin with optional operator-approved guest image SHA-256 binding and fail-closed image drift checks; record commit `838be9c`.
+- [x] Add typed GPU vendor/runtime/driver/VRAM/stream/image negotiation with deterministic selection and explicit CPU fallback; record commit `31f82ea`.
+- [x] Bind typed GPU requirements to `ExecutionPolicy` with fail-closed consistency validation and CPU JSON compatibility; record commit `6400099`.
+- [x] Persist operator-approved typed GPU capability identities in trusted worker registration with deterministic request selection and legacy JSON compatibility; record commit `b22aaab`.
+- [x] Bind the selected typed GPU identity to `GeneralComputeResult`, preserve CPU-result JSON compatibility, and reject missing or unauthorized fallback identities; record commit `67bc1c9`.
+- [x] Consume trusted registration in scheduler/Worker admission and have Nodepool compare the selected identity before accepting a result; record commit `5be0e48`.
+- [x] Wire operator-owned trusted registration through Worker admission/reference execution and bind deterministic `GpuSelection` to success/failure results; record commit `0052444`.
+- [x] Bind the pin to an operator-approved optimized image/backend and execute reference vectors; record commit `497f293`. This is a bounded reference-vector/claim-level gate, not real optimized BLAS/GPU execution.
+- **status:** running; all reference kernels remain bounded CPU contracts, not production backend or settlement evidence.
+
+### 階段 B：未使用項目稽核
+
+- [x] Rust：workspace members、crate/module/symbol、feature、dependency、binary 與 build/deploy references
+- [x] Frontend/scripts/docs/assets：imports、routes、package scripts、release packaging 與契約 references
+- [x] 將候選分為 confirmed-unused、intentionally-retained、generated/cache、uncertain；只刪第一類
+- **狀態：** complete
+
+### 階段 C：安全清理與驗證
+
+- [x] 以 focused commits／精確 working-tree hunks 的邏輯邊界移除 confirmed-unused 項目（未 push）
+- [ ] 搜尋殘留引用並執行 scoped build/test/lint/doc/release gates
+- [ ] 更新 findings/progress 與最終刪除／依賴證據表
+- **狀態：** running
+
+### 階段 D：圖靈完備與科學運算路線圖
+
+- [x] 從現行 parser/evaluator/value/limits/worker/zkVM 契約建立 gap analysis
+- [x] 決定凍結 v0、另建 `general-compute-v1alpha1` 的相容性策略，不把無界資源誤稱為圖靈完備
+- [x] 定義分階段 deliverables、API、威脅控制、測試矩陣、benchmark 與 exit criteria
+- [ ] 同步 `docs/MANAGED_RUNTIME_EVOLUTION_PLAN.md` 的 current-state，避免後續已完成 checkpoint 與舊 scaffold 描述矛盾
+- **狀態：** running
+
+### 階段 E：完成稽核
+
+- [ ] 逐項對照附檔要求、刪除清單、路線圖必備面向與驗證輸出
+- [ ] 檢查 git diff，確保未混入或覆寫既有不相關變更
+- [ ] 更新本計畫、findings、progress；只有全部證據充分才標記完成
+- **狀態：** running
+
+## 本輪遇到的錯誤
+
+| 錯誤 | 嘗試次數 | 解決方案 |
+|---|---:|---|
+| 將 `rg -C` 輸出的檔名／行號前綴誤當成 `findings.md` 原文，導致 append patch context 不匹配 | 1 | 不重試該 context；改以 `rg` 定位本輪唯一 section header，再以真實原文的小範圍 context 更新 |
+| PowerShell 將 `foreach (...) { ... }` 產出直接接 pipeline 時解析為 empty pipe element，平行 inventory call 整體失敗 | 1 | 改先賦值 `$rows = foreach (...) { ... }`，再單獨格式化 `$rows`；不重複原命令 |
+| `apply_patch` 以 Windows absolute path 更新 README 時回 `Failed to write file` | 1 | attributes/ACL 可寫且無 writer；改用 workspace-relative `README.md` 的同一最小 hunk後成功，未用 shell 繞過 |
+| 一個診斷 `rg` pattern在 PowerShell組合命令中因多餘參數／escape邊界成為 invalid regex | 1 | 已由同一輸出的 manifest與精確 symbol搜尋取得所需證據；不重跑壞 pattern，後續拆成 literal `rg -F` 查詢 |
+| 本機未安裝 `cargo machete` | 1 | 不新增未要求的全域工具；使用 Cargo metadata、manifest/direct symbol搜尋、feature matrix與 compiler gates交叉驗證 unused dependencies |
+| 平行 frontend reference audit因 `rg`「零匹配」的正常 exit 1被 orchestration視為失敗 | 1 | 零匹配本身是候選證據；後續以 PowerShell helper把 exit 1正規化為 `<none>`，保留真正 exit >1錯誤 |
+| 將含複雜 regex/quote 的 PowerShell helper直接嵌進 JavaScript tool source造成 JS `missing )` parse error | 1 | 命令未執行、無狀態變更；採用已回傳的 read-only audit evidence，後續 reference gate改成簡單 `rg -F`分開執行 |
+| `rg`預設 engine不支援 negative lookahead，roadmap wording audit pattern失敗 | 1 | 不原樣重跑；以簡單 literal `rg -n 'general-compute-v1'`列出全部命中後人工分類 alpha/stable語境 |
+| 以 PowerShell 預設 code page 讀取 UTF-8 文件，導致 `findings.md` append patch 使用了顯示層 mojibake context 而不匹配 | 1 | 改用 `Get-Content -Encoding utf8` 取得真實原文，再用最小 EOF context 更新；沒有改動錯誤檔案 |
+| 從 repository root 執行 `cargo metadata`，Cargo 找不到 `Cargo.toml` | 1 | 保留同一輪已完成的 static 零引用證據；改到 `hivemind-rs/` 重跑 locked metadata，確認 target graph 只選正式 `src/bin/*` |
+| Rust 1.95 Clippy 將 proto 測試中的常量 `assert!` 與 8/14 in-progress general-compute 結構警告提升為 `-D warnings` | 2 | proto 兩處依提示改為 const block，focused Clippy 通過；workspace 其餘 16 個 too-many-arguments/type-complexity/large-enum 等屬未提交接線工作，保留完整 blocker，不跨範圍重構 |
+| executor Windows 測試因 symlink 權限錯誤 1314 在 fixture setup 失敗 | 2 | 只在 Windows `ERROR_PRIVILEGE_NOT_HELD` 時跳過 symlink 子斷言，其他 OS／錯誤仍 fail；artifact 9、sandbox 22 與 executor workspace 全測試其後通過 |
+| executor `cargo fmt --check` 列出大量 8/14 新增 runtime／v0 既有格式差異 | 1 | 不為本輪清理批量重排使用者／先前未提交實作；本輪最小 hunks 經測試與 `git diff --check` 驗證，將此保留為非清理回歸 gate blocker |
+| 平行 release gate 的 Compose JSON 被受限沙箱無權讀取 `C:\Users\user\.docker\config.json` 的 `WARNING` 汙染，隨後兩次協調 turn 中斷 | 3 | 不再請求使用者 Docker config；中斷的輸出不採信。臨時空白 `DOCKER_CONFIG` 已由 `finally` 清除，待背景 smoke 子程序退出後 serial 重跑全部 release gates |
+| 受限沙箱拒絕停止由中斷 release smoke 留下的精確 PowerShell／Node PID | 1 | 未擴大 process kill 權限或碰其他進程；記錄為 recovery 狀態，等待其自然退出，之後以 serial gate 取代不可採信的平行結果 |
+
+---
+
+## 前一工作項目：ZK 函式計費證明
 
 ## 目標
 

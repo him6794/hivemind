@@ -442,3 +442,610 @@ bounded renderer 的 `managed-function-runtime/src/lib.rs`、`zkvm` 的 `Cargo.l
 - runner 直接以既有 `ReferenceProcessSupervisor` 傳遞 argv，沒有 shell interpolation；timeout、cancellation、combined output limit 與正常 leader exit 共用 process-tree kill/reap，並保留 bounded diagnostics。
 - focused `sandbox` suite：21 passed；`cargo test -p general-compute-runtime --locked`、`cargo test --workspace --locked`、`cargo check -p hivemind-worker-executor --locked`、Docker Compose release contract、Windows worker packaging contract、scoped rustfmt check 均通過。
 - 限制：這個單元驗證並執行 operator-pinned OCI runner，但 Linux rootless namespace/cgroup v2/seccomp/no_new_privs 的 host primitives 仍由外部 runner 實作；Worker/Nodepool runtime routing、artifact materialization 與 capability probe 尚未完成，不能宣稱 M1 或整體 M0–M5 完成。
+
+## 2026-08-14 General-compute artifact lifecycle
+
+- 先以 RED→GREEN 補上 Nodepool artifact lifecycle contract：每個 `(task_id, artifact_id)` 現在有 immutable digest/size/chunk-count、manifest chunk coordinate rows、`pending`/`available`/`expired` 狀態與 `complete` flag。
+- `TaskRepository::create` 會在同一 transaction 建立 identity/coordinate rows；inline source bytes 與 authenticated chunk upload 都更新可用性，task deadline 作為 expiry，讀取與 upload 會先 materialize expiry 並 fail closed。
+- Scheduler dispatch 會把 mutable attempt manifest 當 metadata，先用 immutable identity 比對 artifact coordinates，再從 Nodepool-owned bytes 取用；attempt rotation 不會改動 artifact identity。舊的 direct-manifest migration path 可一次性 backfill identity，不會覆寫既有 row。
+- 驗證：`cargo test -p hivemind-task-scheduler --lib --target x86_64-pc-windows-gnu --locked`（111 passed、1 intentional ignored）、Nodepool artifact upload focused test、database migration focused test、scoped `cargo check` 均通過；`git diff --check` 通過。
+- 剩餘 blocker：cross-Worker transfer coordination/lease、production OCI routing、trusted usage/billing settlement；Monty 不得恢復。
+
+## 2026-08-14 Worker durable transfer state
+
+- `CasChunkStore` 現在在 operator-configured CAS root 下建立 `.transfers` durable journal：以 stable `execution_id + artifact_id` 綁定 immutable artifact digest/size/chunk coordinates，並用 atomic completion marker 記錄已驗證 chunk。
+- authenticated Worker upload 會先驗證 manifest/bytes，再寫 CAS object 與 marker；`ResumeChunks` 重開 store 後重新 hash CAS、reconcile marker crash window，attempt rotation 不會遺失已完成 chunk。
+- journal root、manifest redefinition、marker corruption、symlink/non-directory state 都 fail closed；不接受 URL、任意 filesystem path 或 Worker 自稱 completed digest。
+- 這是每個 Worker 的 operator-owned durable state，不是跨 Worker shared cache；換 Worker 時由 Nodepool 依 immutable source rows 重新 authenticated upload。剩餘 blocker：cross-Worker lease/generation coordination、production OCI routing、trusted usage/billing settlement；Monty 不得恢復。
+- 驗證：runtime artifact transfer restart/attempt rotation/adapter recovery/manifest conflict/corrupt marker tests、`cargo test -p general-compute-runtime --locked`、Worker GNU chunk transport suite、Worker tests check、`git diff --check`。
+
+## 2026-08-14 Cross-Worker transfer coordination (active)
+
+- 已恢復 checkpoint：目前 Worker durable journal 只代表單一 Worker 的 operator-owned 狀態；Nodepool 尚未持久化 transfer generation/lease，因此 stale Worker 仍只能靠 task/attempt token 邊界間接阻擋。
+- 本輪目標：在 Nodepool 持久化 `(task_id, execution_id, attempt_id, worker_id, generation)` lease，將 generation 納入 Worker execution token 與 Prepare/Upload/Resume 驗證；重新分派時原子撤銷舊 lease、建立新 generation，保留 Nodepool source rows 作為跨 Worker 真實來源。
+- TDD next: 先新增 schema/repository 與 token/proto/Worker stale-replay RED 測試，再以最小實作 GREEN；不接受 Worker 自稱 generation、URL 或任意 filesystem path。
+- 狀態：running；OCI routing 與 trusted usage/billing settlement 仍未完成。
+- 已完成第一個 coordination slice：`general_compute_transfer_leases` migration、assignment/reset/reassignment generation lifecycle、JWT `transfer_generation` claim、Prepare/Upload/Resume protobuf binding、Worker admission/report/CAS stale-generation rejection。
+- RED/GREEN evidence：migration table test initially failed against the release Postgres, then passed after schema addition；lease lifecycle test、auth round-trip、proto suite (11)、Worker chunk adapter suite (9)、Worker chunk service suite (5)、scheduler Prepare/Resume client and token tests pass under `x86_64-pc-windows-gnu`。
+
+### 2026-08-14 authority integration continuation
+
+- 已修正 `TransferLeaseAuthority` 兩個 test mock 的 7→9 參數 trait signature；跨 Worker stale-replay regression 與 Worker executor lib 99 tests 全部通過。
+- 新增真正的 Nodepool generated gRPC client/server 整合測試：assignment 建立的 lease 可驗證；設定過期後 authority 將 active row materialize 成 `expired`，同一舊 token 會被拒絕。
+- expiry UPDATE 限定在被查詢的 `task_id`，避免 authority query 修改其他 task 的 lease。
+- 驗證：Nodepool lib 77 passed；Task Scheduler lib 114 passed、1 intentional ignored；Worker chunk transport 9 passed；Nodepool/Task Scheduler/Worker/bin scoped `cargo check` passed；`git diff --check` passed。
+- 本輪狀態維持 `running`，不可宣稱 production-ready。剩餘 blocker：multi-process/container E2E、OCI routing、trusted usage/billing settlement；Monty 永久移除。
+- Worker `WorkerGrpcState::new` 已限為 test-only；正式建構路徑要求注入 Nodepool `TransferLeaseAuthority`，避免未來 production caller 意外啟用 local fallback。Worker lib 99、doc/check gate 通過。
+- API boundary compile-fail doctest 已移到永遠可見的 `WorkerGrpcState` 文件，實際執行 1 個 compile-fail test 並通過。
+
+## 2026-08-14：bounded statistics reference
+
+- 以 RED→GREEN 新增 `general-compute-runtime` 的 deterministic statistics slice：`mean`、population/sample variance 與線性插值 `quantile`。
+- 所有輸入先做 finite/non-empty/count 上限驗證（`MAX_STATISTICS_SAMPLES = 1_000_000`）；moment reduction 使用 sequential Welford，quantile 只在 bounded local copy 排序，不修改 caller buffer。
+- 錯誤條件包含空輸入、非有限值、超過樣本上限、無效機率與 sample variance 樣本不足；不宣稱 distributed/optimized statistics backend。
+- 驗證：statistics integration tests 3/3 通過，`git diff --cached --check` 修正 staged `lib.rs` 的 mixed-CRLF trailing whitespace 後，提交 `e450580 feat(runtime): add bounded statistics reference`；production routing、OCI/container E2E、GPU capability、trusted usage/billing settlement 與 Monty 永久移除狀態不變。
+- 下一個數值 slice：broader seeded distribution/RNG coverage 或 adaptive/vector ODE；之後仍需 sparse solve/reduce 與 optimized backend pinning。
+
+## 2026-08-14：seeded normal-distribution reference
+
+- 依 TDD 先新增 standard-normal replay/pinned-vector 與 normal parameter/budget tests；RED 階段確認 API 與錯誤型別不存在。
+- `DeterministicRng` 現在提供 bounded `sample_standard_normal` 與 `sample_normal`，使用 open-interval Box–Muller；finite mean、non-negative finite standard deviation、sample cap 與 overflow 全部 fail closed，並沿用 seed/stream/subsequence replay contract。
+- 驗證：RNG focused 4/4、locked `general-compute-runtime` serial 與四執行緒 suite 全綠；runtime `cargo check`、GNU Worker/Task Scheduler/Bin checks 全綠；crate-wide strict clippy 仍只被既有 lint debt 阻擋，新增 RNG 檔案沒有 clippy 命中。
+- 本輪提交：`00c0ad7 feat(runtime): add deterministic normal sampling`（未 push）。下一步改為 adaptive/vector ODE reference，再處理 sparse solve/reduce、optimized backend pinning 與尚未完成的 OCI/GPU/settlement gates。
+
+## 2026-08-14：adaptive scalar ODE reference
+
+- 依 TDD 先加入 adaptive RK4 的完成/metadata 與 invalid-limit/unsatisfiable-step tests；RED 階段確認 `AdaptiveRk4Config` 與 `AdaptiveStepTooSmall` 尚不存在。
+- 新增 deterministic step-doubling controller：full step 與 two half-steps 的誤差估計、bounded shrink/grow factor、minimum step、attempt cap，以及 accepted/attempted step metadata；非有限狀態、導數與無法滿足 tolerance 的步驟全部 fail closed。
+- 驗證：ODE focused 4/4；locked runtime serial 與四執行緒 suite 全綠；一次同時執行 serial/parallel 的舊 production temp-root fixture race 在 standalone 與後續單獨四執行緒重跑均通過；runtime/GNU Worker/Task Scheduler/Bin checks 全綠。
+- 本輪提交：`3a78b27 feat(runtime): add adaptive RK4 reference`（未 push）。下一步為 sparse solve/reduce 與格式轉換，再處理 optimized backend pinning。
+
+## 2026-08-14：sparse solve/reduce/format reference
+
+- 依 TDD 先新增 sparse row/column reduction、canonical CSR conversion、square solve 與非方陣/RHS mismatch/singular tests；RED 階段確認新 API 與錯誤型別不存在。
+- `SparseF64Matrix` 現在提供 deterministic `row_sums`/`column_sums`、CSR/CSC/COO→row-major `CsrF64Matrix` conversion，以及 `MAX_REFERENCE_SPARSE_SOLVE_DIM = 2048` 內的 partial-pivot dense reference solve；duplicate entries 先依 validated entry list 累加，非有限/奇異/超出上限均 fail closed。
+- 驗證：sparse numeric focused 10/10；locked runtime serial 與四執行緒 suite 全綠；runtime/GNU Worker/Task Scheduler/Bin checks 全綠；scoped rustfmt/diff-check 通過。
+- 本輪提交：`032ef80 feat(runtime): add sparse solve and reductions`（未 push）。下一步為 optimized backend version/CPU-feature pinning，production OCI/container E2E、GPU capability、trusted settlement 仍未完成。
+
+## 2026-08-14：optimized backend identity pin contract
+
+- 依 TDD 先新增 exact backend/version/CPU-feature/thread/reference-vector identity tests；RED 階段確認 `backend` module 尚不存在。
+- 新增 versioned `OptimizedBackendPin`／`BackendRuntimeIdentity`：token、feature ordering/uniqueness、thread cap、SHA-256 reference-vector digest 與 exact identity matching 全部 fail closed；serde envelope deny unknown fields。此單元只做 admission/identity，不載入 native backend。
+- 驗證：backend focused 2/2；locked runtime serial 與四執行緒 suite 全綠；runtime/GNU Worker/Task Scheduler/Bin checks 全綠；scoped rustfmt/diff-check 通過。
+- 本輪提交：`c997898 feat(runtime): pin optimized backend identities`（未 push）。下一步是把 pin 接到實際 operator-approved optimized image/backend 並跑 reference vectors；GPU/OCI E2E、operator deployment、trusted settlement 仍未完成。
+
+## 2026-08-14：optimized backend image-digest binding extension
+
+- 在既有 identity pin 上新增 optional operator-approved guest image SHA-256 綁定；`new_with_image` 與 exact verification 會拒絕 malformed、缺漏或 drifted image digest，serde envelope 仍 deny unknown fields。
+- RED→GREEN：新增 image-bound identity、digest drift 與 invalid digest cases；backend focused suite 現在 3/3 通過，scoped rustfmt 與 backend-specific lint check 通過。
+- 本輪提交：`838be9c feat(runtime): bind backend pins to image digests`（未 push）。這仍只有 admission/identity contract；實際 approved backend/image 執行與 pinned reference vectors 尚未接線。extension 後完整 runtime serial/四執行緒 suite、runtime check 與 GNU Worker/Task Scheduler/Bin checks 均通過；scoped backend rustfmt、`git diff --check` 通過。crate-wide fmt/clippy 仍被既有 debt 阻擋；GPU/OCI E2E、operator deployment、trusted settlement 仍未完成。
+
+## 2026-08-14：optimized backend reference-vector registration gate
+
+- 依 TDD 先新增 `backend_registration.rs` RED 測試；初始編譯明確因 `OptimizedBackendRegistration` 與其 report/error API 尚不存在而失敗。
+- 新增 operator-approved registration：`OptimizedBackendPin` 必須與 backend id、guest image SHA-256、bounded reference-vector suite 完全綁定；suite 使用 canonical serde bytes 計算 SHA-256，並限制 vector 數量與 source/input 大小。
+- `verify_identity` 要求 runtime identity 與 pin 精確相等；`execute_reference_vectors` 只重播已註冊的 bounded reference interpreter；`verify_observations` 拒絕 suite digest drift、觀測數量不符與 observation mismatch。這是 reference-vector／claim-level gate，不宣稱已安裝真實 BLAS/GPU backend、OCI execution、hardware attestation 或 trusted settlement。
+- GREEN：registration focused 3/3、locked `general-compute-runtime` 全 suite、production 5/5、sandbox 21/21、Worker／Task Scheduler／Bin MSVC 與 GNU `cargo check --locked`、scoped rustfmt 與 `git diff --check` 全部通過；crate-wide strict clippy 仍受既有 lint debt 阻擋。
+- 本輪提交：`497f293 feat(runtime): gate optimized backend reference vectors`（本地、未 push）。下一步仍是 multi-process/container OCI E2E、operator deployment validation 與 trusted usage/billing settlement。
+
+## 2026-08-14：typed GPU capability negotiation
+
+- 依 TDD 先新增 GPU negotiation focused tests；RED 階段因 `general_compute_runtime::gpu` module 不存在而編譯失敗。
+- 新增 `GpuCapability`／`GpuRequirement`／`GpuSelection` 與 `negotiate_gpu`：嚴格驗證 vendor/runtime 配對（NVIDIA/CUDA、AMD/ROCm）、compute capability、driver ABI、VRAM、stream 上限、image SHA-256 與 protocol/unknown-field；候選裝置以 stable device id deterministic selection，沒有相容裝置時只有 requirement 明確允許才回 CPU fallback。
+- GREEN/compatibility：GPU focused 4/4；locked runtime serial 與四執行緒 suite、runtime check、GNU Worker/Task Scheduler/Bin checks、scoped rustfmt 與 diff-check 全部通過。
+- 本輪提交：`31f82ea feat(runtime): add typed GPU capability negotiation`（本地、未 push）。目前仍未把此 typed contract 接到 alpha request、Nodepool persisted registration、scheduler/Worker admission；也沒有宣稱實際 CUDA/ROCm device execution。
+
+## 2026-08-14：GPU requirement request binding
+
+- 依 TDD 先加入 `gpu_request.rs`；RED 階段確認 `ExecutionPolicy` 尚未有
+  typed `gpu_requirement` 欄位。
+- `ExecutionPolicy` 現在要求 `gpu_required` 與 `GpuRequirement` 一致，會
+  驗證 typed vendor/runtime/driver/VRAM/stream/image contract；CPU default
+  policy 仍省略 optional field，維持既有 JSON compatibility。
+- 驗證：focused request 2/2、contracts 21/21、locked runtime serial 與
+  four-thread suites、runtime check、GNU Worker/Task Scheduler/Bin checks
+  全部通過；staged diff check 通過。scoped rustfmt 只碰到既有 production
+  routing formatting 與 Rust 2024 let-chain parser limitation，未改動那些
+  dirty files。
+- 本輪提交：`6400099 feat(runtime): bind GPU requirements to execution policy`
+  （本地、未 push）。下一步是把 requirement/capability/selected-device
+  identity 接到 trusted Nodepool registration、scheduler/Worker admission
+  與 result binding；GPU execution、OCI E2E、operator deployment、trusted
+  usage/billing settlement 仍未完成。
+
+## 2026-08-14：trusted GPU capability registration
+
+- 依 TDD 先加入 `gpu_registration.rs`；RED 階段確認
+  `TrustedWorkerCapabilityRegistration` 沒有 typed GPU list 或 selection
+  helper。
+- Operator-owned registration 現在保存 `GpuCapability` rows，並提供
+  `select_gpu_for_request`：每一列先做 strict validation，再依 stable
+  `device_id` 選擇 deterministic identity；legacy JSON 缺欄位時 default 為
+  empty list，worker 的 boolean `gpu_available` 不再被當成 typed GPU proof。
+- 驗證：focused registration 3/3、locked runtime serial/four-thread suites、
+  GNU Worker/Task Scheduler/Bin checks 全部通過；staged diff check 通過。
+- 本輪提交：`b22aaab feat(runtime): persist trusted GPU capability identities`
+  （本地、未 push）。下一步是讓 trusted Nodepool snapshot、scheduler/Worker
+  admission 消費 typed registration，並把 selected GPU identity 綁到結果。
+
+## 2026-08-14：GPU result identity contract
+
+- RED→GREEN：`GeneralComputeResult` 新增 optional typed `GpuSelection`；CPU
+  result 維持 omission JSON compatibility，GPU-required result 必須帶符合
+  requirement 的 `GpuCapability`，或只在 request 明確允許時帶 `CpuFallback`。
+- `validate_against` 現在 fail closed 檢查 vendor、compute capability、runtime、
+  driver ABI、VRAM、stream capacity 與 image digest；Worker 自報 identity
+  不會因此升格成 trusted fact，Nodepool 對 operator-owned registration 的
+  比對留到下一個 integration slice。
+- 本地提交：`67bc1c9 feat(runtime): bind GPU identity to result contract`。
+  focused `gpu_result` 3/3、locked runtime serial/four-thread suites、runtime
+  check、GNU Worker/Task Scheduler/Bin checks 與 staged diff check 全綠。
+- 下一步：scheduler/Worker admission 讀取 trusted registration，將 selected
+  identity 綁到 attempt/result，Nodepool 在 settlement 前做 authoritative
+  comparison；CUDA/ROCm execution、OCI E2E、operator deployment 與 trusted
+  usage/billing settlement 仍未完成。
+
+## 2026-08-14：scheduler trusted GPU result identity
+
+- RED→GREEN：新增 forged GPU identity regression；Worker 回傳的
+  `GpuSelection` 若不等於 Nodepool 保存的 operator-owned registration
+  deterministic selection，scheduler 在 result admission fail closed。
+- 驗證：focused test 1/1、scheduler GNU lib 118 passed/1 ignored，
+  `git diff --cached --check` 全綠；本 slice 已提交為
+  `5be0e48 feat(scheduler): verify trusted GPU result identity`，其他 dirty
+  hunks 未混入。
+- 下一步：做 Worker 從 operator/trusted registration 產生並寫入 selected
+  GPU identity；
+  CUDA/ROCm execution、OCI E2E、operator deployment 與 trusted usage/billing
+  settlement 仍未完成。
+
+## 2026-08-14：Worker trusted GPU selection integration (GREEN)
+
+- RED→GREEN：Worker now loads the operator-owned
+  `TrustedWorkerCapabilityRegistration`, passes it into the reference executor,
+  and binds the deterministic selected `GpuSelection` into both successful and
+  failure result envelopes. Typed GPU admission fails closed when the
+  registration has no compatible identity; CPU JSON compatibility is retained.
+- Evidence：runtime GPU execution 1/1、Worker admission 2/2、GNU Worker
+  `cargo check --tests`、以及 `git diff --cached --check` 全部通過。
+- Local commit：`0052444 feat(worker): bind trusted GPU selection to results`
+  （full hash `0052444363b9829d603776a873df8258d901ce2e`，未 push）。
+- Boundary：此 slice 不代表 CUDA/ROCm driver execution、hardware attestation、
+  真正 OCI/container E2E、operator deployment 或 trusted usage/billing
+  settlement；整體演進狀態仍為 `running`。
+
+## 2026-08-14：operator-owned Compose deployment boundary
+
+- 依 TDD 先在 `scripts/docker-compose-release.Tests.ps1` 加入 RED contract：
+  release Compose 必須有固定的 production registry/CAS in-container paths、
+  named volumes、read-only config mount、mutable state mount，且不得推導 host
+  path。現況先因缺少 general-compute volumes 明確失敗。
+- 最小 GREEN wiring：Worker 使用
+  `/etc/hivemind/general-compute/backends.json` 與
+  `/var/lib/hivemind/general-compute/cas`；`worker-general-compute-config` 以
+  `read_only: true` 掛載，`worker-general-compute-state` 保存 task bundle、
+  artifacts 與 CAS journal；`.env.example` 提供兩個可替換 volume 名稱。
+- 相容性驗證：release contract 會解析 `docker compose config --format json`
+  並檢查 mount type/source/read-only 狀態；`powershell -NoProfile
+  -ExecutionPolicy Bypass -File scripts/docker-compose-release.Tests.ps1` 通過，
+  帶四個 required secrets 的 `docker compose config` 通過；`git diff --check`
+  通過。這只完成 deployment wiring，不宣稱 real rootless OCI/container E2E。
+
+## 2026-08-14：rootless OCI runner image packaging
+
+- RED：release contract 先鎖定 runtime image 必須包含 `runc`、`uidmap`、
+  `general-compute-runtime` source staging、`/app/general-compute` state root
+  與明確 subordinate UID/GID range；缺少任一項時觀察到預期失敗。
+- GREEN：`hivemind-rs/Dockerfile` 安裝 `runc`/`uidmap`，建立非 root
+  `hivemind` user 的 `hivemind:100000:65536` subuid/subgid，並只複製兩個
+  executor runtime crate；`.dockerignore` 精確恢復 general-compute runtime。
+- 本地 commit：`48069ea feat(deploy): package rootless OCI runner`，只包含
+  `.dockerignore`、`hivemind-rs/Dockerfile`、`scripts/docker-compose-release.Tests.ps1`。
+- 驗證：release contract 通過；Docker image build 成功；image probe 通過
+  UID/GID 10001、`runc 1.1.15`、subuid/subgid 與 state root；staged diff-check
+  通過。
+- 限制：尚未證明真實 rootless OCI namespace/cgroup/seccomp/network isolation，
+  也尚未完成 Worker→Nodepool→Postgres multi-process completion；下一個單元
+  先寫隔離 OCI E2E harness RED contract，overall status 維持 `running`。
+
+## 2026-08-14：operator OCI E2E preflight harness
+
+- RED：新增 `scripts/general-compute-oci-e2e.Tests.ps1`，先因缺少
+  `scripts/general-compute-oci-e2e.ps1` 而按預期失敗。
+- GREEN：harness 現在檢查 operator-owned production registry、absolute
+  bundle/rootfs/artifact/runner paths、runner SHA-256、rootless user/pid/mount/
+  network namespaces、cgroup v2、no-new-privileges、read-only root、deny-all
+  network、default-deny `SCMP_ACT_ERRNO` seccomp digest，以及隔離 Compose
+  project 的 config/cleanup 邊界；未知或缺失條件一律 fail closed。
+- `-CheckOnly` 為安全預設；`-Run` 必須同時設定
+  `HIVEMIND_ENABLE_REAL_OCI_E2E=1` 與 Postgres-backed task fixture，目前在
+  fixture 未接線時拒絕啟動容器，避免把 fake runner 或 preflight 誤報為 E2E。
+- 驗證：harness contract 通過；無 registry 的直接 `-CheckOnly` 按預期
+  fail closed；staged diff-check 通過。Commit：`1e6d513 test(deploy): add
+  OCI E2E preflight harness`。真正 rootless OCI 與 multi-process completion
+  仍是 open gate，overall status 為 `running`。
+
+## 2026-08-14：OCI runner state-root binding
+
+- RED：新增 production registry test 時觀察到
+  `ProductionBackendConfig` 沒有 `runner_state_root`；materialized launch
+  test 也先回 `InvalidBundle`，未能在缺少 runner state binding 時 fail closed。
+- GREEN：新增 operator-owned absolute `runner_state_root`，Worker 將它傳給
+  `ProductionSandboxLauncher`，materialized path 強制存在且非 symlink/directory
+  state，runner command 直接加入 `--root <state-root>`，不透過 shell。
+- 驗證：general-compute-runtime production 6/6、sandbox 22/22、locked
+  runtime 全 suite、Worker GNU `cargo check --tests`、Task Scheduler/Bin
+  `cargo check --locked` 與 staged diff-check 通過；scoped rustfmt 仍會顯示
+  既有 dirty files 的格式差異，未對不相關檔案做 bulk rewrite。
+- Commit：`4dfe4b0 feat(runtime): bind OCI runner state root`。這仍不是
+  真實 rootless OCI 或 Postgres multi-process E2E 證據；overall status 維持
+  `running`。
+
+## 2026-08-14：operator-owned OCI seccomp profile binding
+
+- RED：production materializer test 先因 `ProductionBackendConfig` 沒有
+  `seccomp_profile_path`、registry error 沒有 profile-unavailable 分支而按預期
+  編譯失敗，證明原本只寫入 `{"defaultAction":"SCMP_ACT_ERRNO"}` 的 bundle
+  沒有 operator syscall allowlist contract。
+- GREEN：新增 absolute operator profile path；profile 必須是 regular
+  non-symlink file、SHA-256 必須符合 `policy.seccomp.profile_sha256`，JSON
+  僅允許 defaultAction/architectures/syscalls，且 syscall groups 必須使用
+  `SCMP_ACT_ALLOW`、名稱非空且不可重複。materialized OCI bundle 會寫入完整
+  `linux.seccomp`，sandbox validator 在 production materialized path 再次
+  檢查同一 allowlist 形狀。
+- Preflight：`general-compute-oci-e2e.ps1` 現在同步檢查
+  `seccomp_profile_path`、regular/non-symlink、profile SHA-256、
+  `SCMP_ACT_ERRNO` default action 與非空 `SCMP_ACT_ALLOW` syscall groups；
+  contract test 先 RED 後 GREEN。
+- 驗證：production 7/7、sandbox 22/22、locked
+  `general-compute-runtime` 全 suite、Worker GNU test check、Task
+  Scheduler/Bin checks、OCI harness contract 與 scoped `git diff --check`
+  通過；Worker rustfmt check 仍只顯示既有 dirty-file formatting diff，未做
+  bulk rewrite。
+- Local commit：`43dd537 feat(runtime): bind operator seccomp profiles`。
+- 限制：profile schema/runner wiring 已 fail closed，但真實 rootless
+  namespace/cgroup/seccomp/network host primitives、Worker→Nodepool→Postgres
+  multi-process completion 與 trusted usage/billing settlement 仍未完成；
+  overall status 維持 `running`。
+
+## 2026-08-14：isolated OCI Compose project boundary
+
+- RED：OCI preflight 的隨機 project name 仍會被 release Compose 的固定
+  `container_name`、network name、nodepool IPv4 與 subnet 破壞；新增 contract
+  先按預期失敗。
+- GREEN：移除固定 container/network/IPAM bindings，nodepool torrent advertise
+  改用 Compose service DNS；preflight 在 config/check 與後續 run 期間暫時套用
+  project-prefixed volume names，解析 `docker compose config --format json` 並
+  拒絕任何未以 project prefix 命名的 volume，finally 一律還原 caller env。
+- 驗證：OCI harness contract、Compose release contract、Compose resolved
+  config 與 scoped `git diff --check` 通過。Local commit：`c24d036
+  fix(deploy): isolate OCI compose projects`。
+- 限制：這只修正 Compose resource isolation boundary；尚未啟動真正
+  Worker→Nodepool→Postgres task fixture，也未證明 rootless OCI primitives、
+  network/filesystem deny、timeout/cancel kill-reap 或 trusted settlement。
+
+## 2026-08-14：reviewed multi-process OCI fixture protocol
+
+- RED：先在 `scripts/general-compute-oci-e2e.Tests.ps1` 鎖定 `-Run` 必須
+  呼叫顯式 reviewed fixture，而不是保留「fixture execution is not yet
+  wired」placeholder；fixture 必須產生 versioned evidence，並包含
+  Worker registration、task completion、Postgres settlement、timeout/cancel、
+  network/filesystem deny 與 typed `general-compute-result-v1` 結果檢查。
+- GREEN：`general-compute-oci-e2e.ps1` 現在以兩階段 `provision`/`execute`
+  協定呼叫 `.ps1` fixture；先由 fixture 將 operator registry/rootfs/runner/
+  seccomp materialize 到 project-prefixed named volumes，再以
+  `docker compose up -d --build postgres redis nodepool master worker` 啟動
+  真實多進程服務，最後解析並 fail-closed 驗證 evidence JSON。
+- Harness 會為 Postgres/Redis/gRPC/HTTP 分配隔離 host ports、明確 opt-in
+  `HIVEMIND_SEED_DEFAULT_USER=1`，以 test user credentials 啟動 Worker
+  registration loop，並在所有成功/失敗路徑 `down --volumes --remove-orphans`
+  後檢查沒有殘留容器；evidence 保留在 `test_logs/` 或 caller 指定的絕對路徑。
+- 驗證：OCI harness contract、Compose release contract、resolved Compose
+  config、scoped `git diff --check` 通過。
+- Boundary：repository 現已提供 reviewed fixture implementation；但 operator
+  仍必須提供 registry/rootfs/runner/profile 與
+  `HIVEMIND_GENERAL_COMPUTE_OCI_E2E_CASES` manifest/case plan。該 plan 負責
+  釘住 canonical request digest 與 hostile guest 預期結果；缺少任一部署資產
+  或 plan 時 `-Run` 仍 fail closed，overall status 維持 `running`。
+
+## 2026-08-14：OCI E2E startup guards
+
+- `Login-Master` now retries boundedly while Master is listening before its
+  Nodepool gRPC dependency is ready; commit `6166bff`.
+- `-Run` now requires an absolute regular
+  `HIVEMIND_GENERAL_COMPUTE_OCI_E2E_CASES` file before Compose startup, with a
+  RED→GREEN ordering contract; commit `34a91a5`.
+- Verification: OCI harness contract, Compose release contract, runtime
+  workspace tests, and `git diff --check` pass. Real execution remains
+  awaiting operator registry/rootfs/runner/seccomp assets and canonical case
+  plan; status remains `running`.
+
+## 2026-08-14: typed general-compute cancellation persistence
+
+- Root cause: `TaskRepository::cancel` only changed `tasks.status`, so the OCI
+  `timeout_cancel` fixture could not find a typed result row.
+- RED->GREEN: cancellation now atomically persists a Nodepool-generated
+  `cancelled`/`task_cancelled` `GeneralComputeResult`, preserves request and
+  backend/image identity, binds inline inputs canonically or unmaterialized CAS
+  inputs by immutable manifest coordinates, and creates no settlement.
+- Evidence: scheduler cancellation/terminal-state tests 4/4 pass; Nodepool
+  stop-task cancellation compatibility 1/1 passes; staged diff check passed.
+- Local commit: `f7495a3 fix(scheduler): persist typed cancellation results`.
+- Status: `running`; real rootless OCI isolation, multi-process operator
+  evidence, hostile workloads, and trusted settlement remain open.
+
+## 2026-08-14: typed general-compute stale-timeout persistence
+
+- Root cause: `TaskRepository::mark_stale_running` bulk-updated task status but
+  never created the typed result row consumed by result APIs and deployment
+  evidence.
+- RED→GREEN: the DB regression first failed with `RowNotFound`. The sweep now
+  uses one transaction and `UPDATE ... RETURNING`, persists a Nodepool-generated
+  `timed_out`/`worker_heartbeat_lost` result for general-compute tasks, preserves
+  request/backend/image identity, and creates no settlement. Inline input
+  digests stay canonical; unmaterialized CAS coordinates use a distinct timeout
+  domain.
+- Evidence: focused timeout DB test 1/1, scheduler cancellation/terminal tests
+  4/4, locked Scheduler/Nodepool checks, and Nodepool stop-task compatibility
+  1/1 pass. `git diff --cached --check` passed before commit.
+- Local commit: `0ec476c fix(scheduler): persist typed timeout results`.
+- Status: `running`; real OCI timeout kill/reap, rootless host isolation,
+  operator assets/case plan, hostile workloads, and trusted settlement remain
+  open.
+
+## 2026-08-14: typed Nodepool failure persistence
+
+- Root cause: the max-redispatch path called HEAD's `fail_for_worker`, which
+  wrote `FAILED`, Worker reputation, and attestation but no typed
+  `general_compute_results` row.
+- RED→GREEN: the DB regression failed with `RowNotFound`; task transition and
+  Nodepool `failed`/`nodepool_task_failed` envelope now commit atomically while
+  existing reputation/attestation behavior remains intact and settlement stays
+  absent.
+- Evidence: focused new regression 1/1, `fail_for_worker` tests 2/2, legacy
+  managed-proof failure compatibility 1/1, scoped rustfmt/diff checks, and
+  locked Scheduler/Nodepool/Master checks pass.
+- Local commit: `f186b4b fix(scheduler): persist typed nodepool failures`.
+- Status: `running`; operator-provided real OCI isolation/E2E, hostile workload
+  evidence, and trusted settlement gates remain open.
+
+## 2026-08-14: guarded generic typed failures
+
+- RED 1: public generic fail produced `FAILED` but no typed result
+  (`RowNotFound`). RED 2: the same method overwrote an already completed task.
+- GREEN: `fail` now updates only active states and transactionally persists a
+  Nodepool `failed`/`nodepool_task_failed` result for general-compute; no
+  settlement is created and terminal states are immutable through this API.
+- Evidence: both focused DB tests pass (1/1 each), scoped rustfmt/diff checks
+  pass, and locked Scheduler/Nodepool/Master checks pass.
+- Local commit: `c10b803 fix(scheduler): persist guarded typed failures`.
+- Status: `running`; dirty CAS regressions, real OCI isolation/multi-process
+  evidence, hostile workloads, and trusted settlement remain open.
+
+## 2026-08-14: durable CAS transfer state
+
+- RED: an exact clean-HEAD test probe failed to compile because durable
+  transfer prepare/put/resume APIs did not exist.
+- GREEN: `CasChunkStore` now persists stable execution/artifact manifests and
+  verified completion markers, resumes across store recreation and attempt
+  rotation, reconciles marker loss from verified CAS objects, and rejects
+  manifest or marker corruption.
+- Evidence: focused transfer 4/4; exact staged artifact suite 9/9; integrated
+  runtime suite green; exact staged offline and integrated locked
+  Worker/Scheduler/Bin checks green.
+- Local commit: `ec44b65 feat(runtime): persist resumable CAS transfer state`.
+- Scheduler CAS fixture/root-cause fixes are GREEN and the scheduler library
+  gate is 124 passed, 1 ignored, but they remain in the uncommitted parent
+  DB/repository/dispatcher slice. Next action is to isolate that repository
+  layer without staging unrelated dirty work.
+- Status: `running`; production OCI isolation/E2E, operator evidence, hostile
+  workloads, and trusted settlement remain open.
+
+## 2026-08-14: general-compute settlement schema recovery
+
+- Root cause: committed typed cancellation/timeout/failure tests reached
+  `general_compute_settlements`, but HEAD had no migration for that table; four
+  DB tests failed with `relation does not exist`.
+- GREEN: restored the fixed-reservation settlement provenance table with
+  immutable task/worker/request identity, version, usage, evidence, basis, and
+  non-negative amount fields.
+- Evidence: focused migration 1/1 and the four affected terminal-result tests
+  all pass.
+- Local commit: `9f1d332 fix(database): restore general compute settlement
+  schema`.
+- Status: `running`; variable usage settlement and production OCI evidence are
+  still open.
+
+## 2026-08-14: Nodepool immutable artifact repository
+
+- RED 1: clean baseline lacked artifact identity/source tables and repository
+  APIs. RED 2: source metadata drift was treated as a missing row and fell back
+  to manifest bytes. RED 3: an injected completion-state failure left a chunk
+  committed independently of artifact completeness.
+- GREEN: general-compute task creation now transactionally persists immutable
+  artifact identities and manifest chunks; inline sources are rehash-verified;
+  missing sources can be restored only from the validated Nodepool task
+  manifest; CAS-only chunks must match immutable coordinates, size, upload cap,
+  and digest. Chunk insertion plus `complete/available` now commits atomically
+  under a row lock, and expiry fails closed.
+- Evidence: focused repository 22/22, Database 11/11, full Scheduler 107/107
+  plus 1 intentional ignore, validation-overlay Scheduler/Worker/Bin test
+  checks, and exact-commit Scheduler/Worker/Bin production checks pass.
+- Local commit: `a13804b feat(scheduler): persist immutable artifact sources`.
+- Baseline caveat: clean test compilation still contains unrelated old
+  `BackendRegistration.execution_mode`/typed GPU fixture drift and lockfile
+  drift; validation-only shims were excluded from the commit.
+- Next: isolate Nodepool transfer-lease lifecycle before dispatcher preparation
+  and chunk RPC. Status remains `running`; real OCI isolation/multi-process
+  evidence, hostile workloads, and trusted variable settlement remain open.
+
+## 2026-08-14: Nodepool transfer-lease lifecycle
+
+- RED: clean-HEAD probes failed because neither the lease migration nor the
+  repository authority API existed.
+- GREEN: assignment and claim now atomically allocate a Nodepool-owned
+  generation bound to task/execution/attempt/Worker identity. Redispatch and
+  terminal transitions revoke active authority; expiry and assignment drift are
+  materialized fail closed; legacy tasks receive no lease.
+- Evidence: isolated lease 5/5, typed-failure compatibility 1/1 each, Scheduler
+  113 passed plus 1 intentional ignore, Database 12/12, and five consumer
+  production/test-target checks green. Integrated dirty-slice lease tests are
+  6/6, full Scheduler is 130 passed plus 1 intentional ignore, and five locked
+  production checks pass.
+- Local commit: `5b22af8 feat(scheduler): persist transfer lease lifecycle`.
+- Caveat resolution: the feature commit did not bundle the existing
+  `managed-function-runtime` 0.0.7→0.1.0 lock drift; the separate `b3abec8`
+  build commit now restores clean locked validation.
+- Next: isolate authenticated token/protobuf/Nodepool gRPC lease validation,
+  then Worker enforcement and dispatcher preparation. Status remains `running`;
+  operator-gated OCI and trusted variable settlement evidence remain open.
+
+## 2026-08-14: managed-runtime lockfile compatibility
+
+- RED: clean Scheduler `cargo check --locked --offline` stopped before compile
+  because `Cargo.lock` named the path package as 0.0.7 while its committed
+  workspace manifest was already 0.1.0.
+- GREEN: Cargo's offline deterministic refresh changes only the package version
+  plus four formatting/order lines. Scheduler, Worker, Node Manager, Master API,
+  and Bin all pass locked offline checks; diff check passes.
+- Local commit: `b3abec8 fix(build): refresh managed runtime lockfile`.
+- The broader dirty dependency cleanup remains unstaged and preserved. Next is
+  authenticated lease-authority TDD; status remains `running`.
+
+## 2026-08-14: Worker execution-token transfer identity
+
+- RED 1: the focused roundtrip did not compile because typed execution identity
+  and extended token sign/decode methods were absent. RED 2: after the minimal
+  envelope existed, the signer accepted whitespace ids and nonpositive lease
+  generations.
+- GREEN: Nodepool can sign execution/attempt/idempotency/request-digest identity
+  plus transfer generation into Ed25519 claims; invalid identities fail before
+  signing. Legacy base token encode/decode remains compatible with extended
+  tokens.
+- Evidence: auth 7/7, scoped rustfmt, strict auth clippy, and locked offline
+  Scheduler/Worker/Node Manager/Master/Bin checks pass; integrated auth and
+  downstream production checks pass as well.
+- Local commit: `b22fed5 feat(auth): bind transfer identity to worker tokens`.
+- Next: isolate the lease-validation protobuf/RPC contract before Nodepool DB
+  authority, Worker enforcement, and dispatcher preparation. Status remains
+  `running`.
+
+## 2026-08-14: bounded transfer-lease authority envelope
+
+- RED 1: the roundtrip contract did not compile because the authority messages
+  and validator were absent. RED 2: the initial validator stub accepted an
+  unbound whitespace execution token.
+- GREEN: the request now binds token/task/Worker/execution/attempt/idempotency/
+  request-digest/generation identity and rejects blank, malformed, nonpositive,
+  or over-limit values before Nodepool authority work.
+- Evidence: isolated Proto 12/12, scoped rustfmt, strict clippy with only the
+  known constant-assertion lint allowed, and locked offline Scheduler/Worker/
+  Node Manager/Master/Bin checks pass. Integrated Proto is 13/13 and the same
+  five consumer checks pass in the broader dirty transport slice.
+- Local commit: `bae0207 feat(proto): add bounded transfer lease authority envelope`.
+- Next: isolate the Nodepool RPC plus Postgres-backed token/active-lease
+  authority, then Worker fail-closed enforcement and dispatcher preparation.
+  Status remains `running`.
+
+## 2026-08-15: Nodepool transfer-lease authority
+
+- Compatibility prerequisites remained independent commits: `f017606`
+  (Node Manager fixtures), `b7d8e34` (Worker fixtures), `a9d2e35` (Scheduler
+  result fixtures), and `acc173a` (three Scheduler admission JSON fixtures).
+  The latter began with two reproducible RED tests and closed with focused
+  2/2 plus the isolated full Scheduler gate at 113 passed, 1 ignored.
+- RED→GREEN for the authority RPC covered four distinct failures: absent
+  generated method, an unimplemented authority stub, bypass of the shared wire
+  validator, and missing claim-bound identity rejection. The final Nodepool
+  implementation verifies the Ed25519 token's complete identity and delegates
+  active-state/expiry/assignment checks to the trusted Scheduler repository.
+- Real tonic/Postgres coverage passes 2/2 and exercises active authorization,
+  invalid token, Worker/task/execution/attempt/generation/idempotency/digest
+  drift, revocation, reassignment, attempt/generation rotation, replacement
+  token acceptance, and expiry materialization.
+- Local commit: `ecbbee4 feat(nodepool): validate transfer lease authority`.
+  No push. Exact-commit Proto 12/12, Auth 7/7, Scheduler 113/113 plus 1 ignored,
+  Worker test-target compile, five locked/offline consumer checks, and scoped
+  strict clippy pass (allowing only five identified pre-existing Scheduler lint
+  hits).
+- Safe dirty-main integration kept the index empty. Integrated authority 2/2,
+  Proto 13/13, Auth 7/7, Scheduler 130/130 plus 1 ignored, and fresh-target
+  locked Scheduler/Worker-tests/Node-Manager/Master-API/Bin checks all pass.
+  A failed shared-target check was traced to protobuf outputs generated from
+  different worktrees; a dedicated clean target compiled the same source
+  successfully, so no source workaround was added.
+- Next: isolate and commit Worker production fail-closed Nodepool authority for
+  Prepare/Upload/Resume, proving denied/unavailable calls cannot mutate prepared
+  state or CAS and cannot fall back locally. Status remains `running`; real OCI
+  isolation/E2E, hostile workloads, operator assets, dispatcher transfer, and
+  trusted variable settlement remain open.
+
+## 2026-08-15: generation-bound chunk wire contract
+
+- RED: Proto contract tests did not compile because Prepare messages and
+  upload/resume generation fields were absent; after the Proto GREEN, Worker
+  compatibility exposed exactly four stale request fixtures.
+- GREEN: upload/resume now require a positive transfer generation and bounded
+  Prepare messages carry the complete authority identity without yet widening
+  the service surface.
+- Evidence: isolated Proto 13/13, focused GNU Worker chunk suites, Worker
+  test-target compilation, locked/offline Scheduler/Node Manager/Master/Bin
+  checks, scoped format/clippy/diff gates, integrated Proto 14/14, and
+  dedicated-target focused Worker chunk verification pass.
+- Local commit: `cacd0eb feat(proto): bind transfer generation to chunk
+  contracts`. No push; dirty-main index remained empty.
+- Next: TDD and commit Worker production fail-closed Nodepool authority for
+  Prepare/Upload/Resume. Status remains `running`; dispatcher transfer, real
+  rootless OCI isolation/E2E, hostile workloads, operator assets, and trusted
+  variable settlement remain open.
+
+## 2026-08-15: Worker production transfer authority
+
+- RED evidence covered the absent authority API/client, the production
+  no-authority constructor still compiling, and the missing shared Prepare wire
+  validator. The resulting checkpoint has no production local-allow fallback.
+- GREEN: Worker verifies complete signed identity and runtime/manifest admission,
+  then consults Nodepool before recording Prepare state or touching CAS on
+  upload/resume. Denial maps to `PermissionDenied`; malformed endpoints,
+  connect/RPC failures, and timeout map to `Unavailable`. A higher authorized
+  generation clears stale report state, while stale/redefined generations fail
+  closed.
+- Local commit: `df48f19 feat(worker): enforce nodepool transfer authority`.
+  No push. It was advanced into dirty `main` with an empty index and without
+  checking out or overwriting existing worktree edits.
+- Fresh integrated evidence: Proto 15/15; Worker GNU library 107/107, external
+  chunk transport 9/9, GPU selection 2/2, runtime admission 7/7; compile-fail
+  doctest 1/1; real Postgres-backed Nodepool authority 2/2; Scheduler 130 passed
+  with 1 intentional ignore; and locked Worker/Scheduler/Node Manager/Master
+  API/Bin checks all pass.
+- Next: isolate the existing dirty dispatcher authenticated preparation/source
+  transfer as the next TDD unit and focused local commit. Status remains
+  `running`; rootless OCI isolation/E2E, hostile workloads, operator assets, and
+  trusted variable settlement remain open.
+
+## 2026-08-15: dispatcher authenticated source transfer
+
+- TDD RED→GREEN covered generation-bound execution tokens, trusted-source-only
+  chunk planning, whole-artifact size/hash drift, bounded Prepare/Resume/Upload,
+  Worker descriptor widening, repository-only byte loading, full pre-execution
+  RPC ordering, inactive/mismatched leases, transport failure, signing failure,
+  and missing-source typed terminal behavior.
+- GREEN production behavior always calls Prepare before execution, signs one
+  complete attempt/generation identity, transfers only immutable Nodepool source
+  chunks requested by exact manifest descriptor, and never uses mutable inline
+  manifest bytes as a production source fallback. Control-plane failures do not
+  create settlements or unjustified Worker penalties.
+- Local commit: `94576b6 feat(scheduler): prepare authenticated chunk transfers`.
+  No push. The isolated worktree is clean and passes Scheduler 125/125 plus 1
+  intentional ignore, Proto 14/14, downstream all-target checks, and scoped
+  clippy with only five pre-existing Scheduler lint hits allowed.
+- Dirty-main integration first used a non-mutating three-way merge preview,
+  preserved both test suites with `apply_patch`, then advanced via
+  `update-ref`/`read-tree`; main index remains empty. The integrated source
+  passes Scheduler 142/142 plus 1 intentional ignore, Proto 15/15, downstream
+  Worker/Node Manager/Master API/Bin all-target checks, and scoped clippy with
+  only six identified pre-existing dirty-main lint hits allowed.
+- Next: isolate Nodepool-owned canonical input-digest validation for completed
+  production OCI results as the next TDD commit. Status remains `running`;
+  real rootless OCI isolation/E2E, hostile workloads, operator assets, and
+  trusted variable settlement remain open.

@@ -631,12 +631,6 @@ fn is_safe_worker_id(worker_id: &str) -> bool {
         && !worker_id.contains("..")
 }
 
-// Keep nodepool_client import surface used for endpoint normalization in tests/docs.
-#[allow(dead_code)]
-fn _nodepool_endpoint_helper(addr: &str) -> String {
-    nodepool_client::nodepool_endpoint(addr)
-}
-
 #[cfg(test)]
 mod tests {
     use axum::body::{to_bytes, Body};

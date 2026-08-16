@@ -198,6 +198,41 @@ pub fn validate_general_compute_transfer_lease_request(
     Ok(())
 }
 
+/// Validate the authenticated user-to-Nodepool source artifact upload
+/// envelope before authorization or persistence. This contract deliberately
+/// remains separate from the Worker execution-token chunk envelope.
+pub fn validate_general_compute_artifact_chunk_upload(
+    upload: &GeneralComputeArtifactChunkUpload,
+) -> Result<(), &'static str> {
+    if upload.token.trim().is_empty() {
+        return Err("artifact upload token is required");
+    }
+    if upload.task_id.trim().is_empty() || upload.task_id.len() > TASK_ID_MAX_BYTES {
+        return Err("artifact upload task id is invalid");
+    }
+    if upload.artifact_id.trim().is_empty() {
+        return Err("artifact upload artifact id is required");
+    }
+    if upload.offset < 0 {
+        return Err("artifact upload offset must not be negative");
+    }
+    if upload.size_bytes <= 0 {
+        return Err("artifact upload size must be positive");
+    }
+    let size =
+        usize::try_from(upload.size_bytes).map_err(|_| "artifact upload size is too large")?;
+    if size > GENERAL_COMPUTE_CHUNK_UPLOAD_MAX_BYTES {
+        return Err("artifact upload exceeds the upload byte limit");
+    }
+    if upload.bytes.len() != size {
+        return Err("artifact upload size does not match payload bytes");
+    }
+    if !is_sha256_digest(&upload.sha256) {
+        return Err("artifact upload digest must be a sha256 digest");
+    }
+    Ok(())
+}
+
 fn validate_chunk_identity(
     token: &str,
     execution_id: &str,
@@ -249,11 +284,12 @@ mod tests {
     use prost::Message;
 
     use super::{
+        validate_general_compute_artifact_chunk_upload,
         validate_general_compute_chunk_resume_request, validate_general_compute_chunk_upload,
         validate_general_compute_prepare_request, validate_general_compute_transfer_lease_request,
-        ExecuteTaskResponse, GeneralComputeChunkDescriptor, GeneralComputeChunkResumeRequest,
-        GeneralComputeChunkResumeResponse, GeneralComputeChunkUpload,
-        GeneralComputeChunkUploadResponse, GeneralComputePrepareRequest,
+        ExecuteTaskResponse, GeneralComputeArtifactChunkUpload, GeneralComputeChunkDescriptor,
+        GeneralComputeChunkResumeRequest, GeneralComputeChunkResumeResponse,
+        GeneralComputeChunkUpload, GeneralComputeChunkUploadResponse, GeneralComputePrepareRequest,
         GeneralComputePrepareResponse, ManagedProofEnvelope,
         ValidateGeneralComputeTransferLeaseRequest, ValidateGeneralComputeTransferLeaseResponse,
         GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES, GENERAL_COMPUTE_CHUNK_UPLOAD_MAX_BYTES,
@@ -553,6 +589,42 @@ mod tests {
     }
 
     #[test]
+    fn general_compute_artifact_upload_wire_validation_rejects_unbound_or_unbounded_payloads() {
+        let mut upload = GeneralComputeArtifactChunkUpload {
+            token: "user-token".into(),
+            task_id: "task-1".into(),
+            artifact_id: "source".into(),
+            offset: 0,
+            size_bytes: 3,
+            sha256: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .into(),
+            bytes: vec![1, 2, 3],
+        };
+        assert_eq!(
+            validate_general_compute_artifact_chunk_upload(&upload),
+            Ok(())
+        );
+
+        upload.bytes.pop();
+        assert_eq!(
+            validate_general_compute_artifact_chunk_upload(&upload),
+            Err("artifact upload size does not match payload bytes")
+        );
+        upload.bytes = vec![0; GENERAL_COMPUTE_CHUNK_UPLOAD_MAX_BYTES + 1];
+        upload.size_bytes = (GENERAL_COMPUTE_CHUNK_UPLOAD_MAX_BYTES + 1) as i64;
+        assert_eq!(
+            validate_general_compute_artifact_chunk_upload(&upload),
+            Err("artifact upload exceeds the upload byte limit")
+        );
+        upload.bytes.clear();
+        upload.size_bytes = 0;
+        assert_eq!(
+            validate_general_compute_artifact_chunk_upload(&upload),
+            Err("artifact upload size must be positive")
+        );
+    }
+
+    #[test]
     fn general_compute_chunk_resume_validation_binds_identity_and_digest_list() {
         let request = GeneralComputeChunkResumeRequest {
             token: "nodepool-token".into(),
@@ -674,10 +746,13 @@ mod tests {
                 .expect("chunk RPC response should decode");
 
         assert_eq!(decoded, response);
-        assert!(GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES > WORKER_RPC_MESSAGE_MAX_BYTES);
-        assert!(
-            GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES > GENERAL_COMPUTE_CHUNK_UPLOAD_MAX_BYTES
-        );
+        const {
+            assert!(GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES > WORKER_RPC_MESSAGE_MAX_BYTES);
+            assert!(
+                GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES
+                    > GENERAL_COMPUTE_CHUNK_UPLOAD_MAX_BYTES
+            );
+        }
     }
 
     #[test]

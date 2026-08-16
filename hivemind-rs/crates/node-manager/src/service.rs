@@ -9,6 +9,7 @@ pub struct WorkerRegistration {
     pub resources: ResourceSpec,
     pub location: String,
     pub general_compute_capabilities_json: Option<String>,
+    pub managed_dsl_capabilities_json: Option<String>,
 }
 
 pub struct NodeManagerService {
@@ -76,6 +77,7 @@ impl NodeManagerService {
             available_memory_gb: (reg.resources.memory_mb / 1024) as i32,
             queue_capacity: reg.resources.cpu_cores,
             general_compute_capabilities_json: reg.general_compute_capabilities_json.clone(),
+            managed_dsl_capabilities_json: reg.managed_dsl_capabilities_json.clone(),
             last_heartbeat: chrono::Utc::now(),
             registered_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),

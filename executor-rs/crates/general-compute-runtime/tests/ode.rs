@@ -1,5 +1,5 @@
 use general_compute_runtime::ode::{
-    AdaptiveRk4Config, OdeError, OdeStatus, Rk4Config, MAX_RK4_STEPS,
+    AdaptiveRk4Config, MAX_RK4_STEPS, OdeError, OdeStatus, Rk4Config,
 };
 
 #[test]
@@ -54,11 +54,7 @@ fn rk4_rejects_invalid_configuration_step_budget_and_nonfinite_derivatives() {
     let wide_step = Rk4Config::new(4.0, 1e-6, 1).unwrap();
     assert_eq!(
         wide_step.integrate(0.0, 1.0, 4.0, |_, value| {
-            if value.is_finite() {
-                f64::MAX
-            } else {
-                0.0
-            }
+            if value.is_finite() { f64::MAX } else { 0.0 }
         }),
         Err(OdeError::NonFiniteState { step: 0 })
     );

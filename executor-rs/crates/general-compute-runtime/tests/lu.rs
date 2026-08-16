@@ -1,4 +1,4 @@
-use general_compute_runtime::numeric::{F64Tensor, NumericError, MAX_REFERENCE_LU_DIM};
+use general_compute_runtime::numeric::{F64Tensor, MAX_REFERENCE_LU_DIM, NumericError};
 
 #[test]
 fn f64_lu_factorization_pivots_reconstructs_and_solves() {

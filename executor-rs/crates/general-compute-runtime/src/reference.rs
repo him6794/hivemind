@@ -26,7 +26,10 @@ impl fmt::Display for ProgramError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Empty => formatter.write_str("reference program must contain an instruction"),
-            Self::InvalidTarget { instruction, target } => write!(
+            Self::InvalidTarget {
+                instruction,
+                target,
+            } => write!(
                 formatter,
                 "instruction {instruction} targets missing instruction {target}"
             ),
@@ -53,7 +56,9 @@ impl MinskyProgram {
             let targets = match instruction {
                 Instruction::Inc { next, .. } => [*next, 0, 0],
                 Instruction::DecJump {
-                    if_nonzero, if_zero, ..
+                    if_nonzero,
+                    if_zero,
+                    ..
                 } => [*if_nonzero, *if_zero, 0],
                 Instruction::Halt => [0, 0, 0],
             };
@@ -75,7 +80,9 @@ impl MinskyProgram {
         let register_count = instructions
             .iter()
             .map(|instruction| match instruction {
-                Instruction::Inc { register, .. } | Instruction::DecJump { register, .. } => register.saturating_add(1),
+                Instruction::Inc { register, .. } | Instruction::DecJump { register, .. } => {
+                    register.saturating_add(1)
+                }
                 Instruction::Halt => 0,
             })
             .max()
@@ -164,7 +171,10 @@ pub struct HeapProgram {
 }
 
 impl HeapProgram {
-    pub fn new(instructions: Vec<HeapInstruction>, register_count: usize) -> Result<Self, HeapProgramError> {
+    pub fn new(
+        instructions: Vec<HeapInstruction>,
+        register_count: usize,
+    ) -> Result<Self, HeapProgramError> {
         if instructions.is_empty() {
             return Err(HeapProgramError::Empty);
         }
@@ -172,9 +182,14 @@ impl HeapProgram {
         for (index, instruction) in instructions.iter().enumerate() {
             let (registers, targets): (Vec<usize>, Vec<usize>) = match instruction {
                 HeapInstruction::Set { register, next, .. } => (vec![*register], vec![*next]),
-                HeapInstruction::Allocate { destination, next, .. } => (vec![*destination], vec![*next]),
+                HeapInstruction::Allocate {
+                    destination, next, ..
+                } => (vec![*destination], vec![*next]),
                 HeapInstruction::Store {
-                    pointer, source, next, ..
+                    pointer,
+                    source,
+                    next,
+                    ..
                 } => (vec![*pointer, *source], vec![*next]),
                 HeapInstruction::Load {
                     pointer,
@@ -184,13 +199,19 @@ impl HeapProgram {
                 } => (vec![*pointer, *destination], vec![*next]),
                 HeapInstruction::Halt => (Vec::new(), Vec::new()),
             };
-            if let Some(register) = registers.into_iter().find(|register| *register >= register_count) {
+            if let Some(register) = registers
+                .into_iter()
+                .find(|register| *register >= register_count)
+            {
                 return Err(HeapProgramError::RegisterOutOfRange {
                     instruction: index,
                     register,
                 });
             }
-            if let Some(target) = targets.into_iter().find(|target| *target >= instruction_count) {
+            if let Some(target) = targets
+                .into_iter()
+                .find(|target| *target >= instruction_count)
+            {
                 return Err(HeapProgramError::InvalidTarget {
                     instruction: index,
                     target,
@@ -212,7 +233,10 @@ pub struct HeapLimits {
 
 impl HeapLimits {
     pub fn new(max_steps: u64, max_cells: usize) -> Self {
-        Self { max_steps, max_cells }
+        Self {
+            max_steps,
+            max_cells,
+        }
     }
 }
 
@@ -280,7 +304,11 @@ impl HeapInterpreter {
             }
             steps += 1;
             match &self.program.instructions[pc] {
-                HeapInstruction::Set { register, value, next } => {
+                HeapInstruction::Set {
+                    register,
+                    value,
+                    next,
+                } => {
                     registers[*register] = HeapValue::integer(*value);
                     pc = *next;
                 }
@@ -319,7 +347,12 @@ impl HeapInterpreter {
                         return memory_error(steps, registers, heap.len(), "heap offset overflow");
                     };
                     let Some(slot) = heap.get_mut(index) else {
-                        return memory_error(steps, registers, heap.len(), "heap index out of bounds");
+                        return memory_error(
+                            steps,
+                            registers,
+                            heap.len(),
+                            "heap index out of bounds",
+                        );
                     };
                     *slot = registers[*source].clone();
                     pc = *next;
@@ -337,7 +370,12 @@ impl HeapInterpreter {
                         return memory_error(steps, registers, heap.len(), "heap offset overflow");
                     };
                     let Some(value) = heap.get(index) else {
-                        return memory_error(steps, registers, heap.len(), "heap index out of bounds");
+                        return memory_error(
+                            steps,
+                            registers,
+                            heap.len(),
+                            "heap index out of bounds",
+                        );
                     };
                     registers[*destination] = value.clone();
                     pc = *next;
@@ -356,7 +394,12 @@ impl HeapInterpreter {
     }
 }
 
-fn memory_error(steps: u64, registers: Vec<HeapValue>, heap_cells: usize, message: &str) -> HeapResult {
+fn memory_error(
+    steps: u64,
+    registers: Vec<HeapValue>,
+    heap_cells: usize,
+    message: &str,
+) -> HeapResult {
     HeapResult {
         status: HeapStatus::InvalidMemoryAccess,
         steps,
@@ -400,7 +443,10 @@ pub struct RecursionProgram {
 }
 
 impl RecursionProgram {
-    pub fn new(instructions: Vec<RecursionInstruction>, register_count: usize) -> Result<Self, RecursionProgramError> {
+    pub fn new(
+        instructions: Vec<RecursionInstruction>,
+        register_count: usize,
+    ) -> Result<Self, RecursionProgramError> {
         if instructions.is_empty() {
             return Err(RecursionProgramError::Empty);
         }
@@ -413,16 +459,26 @@ impl RecursionProgram {
                     if_nonzero,
                     if_zero,
                 } => (vec![*register], vec![*if_nonzero, *if_zero]),
-                RecursionInstruction::Call { target, return_pc } => (Vec::new(), vec![*target, *return_pc]),
-                RecursionInstruction::Return | RecursionInstruction::Halt => (Vec::new(), Vec::new()),
+                RecursionInstruction::Call { target, return_pc } => {
+                    (Vec::new(), vec![*target, *return_pc])
+                }
+                RecursionInstruction::Return | RecursionInstruction::Halt => {
+                    (Vec::new(), Vec::new())
+                }
             };
-            if let Some(register) = registers.into_iter().find(|register| *register >= register_count) {
+            if let Some(register) = registers
+                .into_iter()
+                .find(|register| *register >= register_count)
+            {
                 return Err(RecursionProgramError::RegisterOutOfRange {
                     instruction: index,
                     register,
                 });
             }
-            if let Some(target) = targets.into_iter().find(|target| *target >= instruction_count) {
+            if let Some(target) = targets
+                .into_iter()
+                .find(|target| *target >= instruction_count)
+            {
                 return Err(RecursionProgramError::InvalidTarget {
                     instruction: index,
                     target,
@@ -444,7 +500,10 @@ pub struct RecursionLimits {
 
 impl RecursionLimits {
     pub fn new(max_steps: u64, max_depth: usize) -> Self {
-        Self { max_steps, max_depth }
+        Self {
+            max_steps,
+            max_depth,
+        }
     }
 }
 
@@ -506,7 +565,11 @@ impl RecursionInterpreter {
             }
             steps += 1;
             match &self.program.instructions[pc] {
-                RecursionInstruction::Set { register, value, next } => {
+                RecursionInstruction::Set {
+                    register,
+                    value,
+                    next,
+                } => {
                     registers[*register] = HeapValue::integer(*value);
                     pc = *next;
                 }
@@ -551,7 +614,14 @@ impl RecursionInterpreter {
                     pc = return_pc;
                 }
                 RecursionInstruction::Halt => {
-                    return recursion_result(RecursionStatus::Halted, steps, registers, stack.len(), max_depth, None);
+                    return recursion_result(
+                        RecursionStatus::Halted,
+                        steps,
+                        registers,
+                        stack.len(),
+                        max_depth,
+                        None,
+                    );
                 }
             }
         }
@@ -608,7 +678,10 @@ impl SignalProgram {
                 | SignalInstruction::Jump { next } => vec![*next],
                 SignalInstruction::Halt => Vec::new(),
             };
-            if let Some(target) = targets.into_iter().find(|target| *target >= instruction_count) {
+            if let Some(target) = targets
+                .into_iter()
+                .find(|target| *target >= instruction_count)
+            {
                 return Err(SignalProgramError::InvalidTarget {
                     instruction: index,
                     target,

@@ -1,4 +1,4 @@
-use general_compute_runtime::numeric::{F64Tensor, NumericError, MAX_REFERENCE_SVD_DIM};
+use general_compute_runtime::numeric::{F64Tensor, MAX_REFERENCE_SVD_DIM, NumericError};
 
 fn assert_close(actual: &[f64], expected: &[f64], tolerance: f64) {
     assert_eq!(actual.len(), expected.len());

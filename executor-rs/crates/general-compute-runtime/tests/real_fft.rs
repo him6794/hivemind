@@ -1,5 +1,5 @@
 use general_compute_runtime::numeric::{
-    Complex128, Complex128Tensor, F64Tensor, NumericError, MAX_REFERENCE_FFT_LEN,
+    Complex128, Complex128Tensor, F64Tensor, MAX_REFERENCE_FFT_LEN, NumericError,
 };
 
 fn assert_complex_close(actual: &[Complex128], expected: &[Complex128], tolerance: f64) {

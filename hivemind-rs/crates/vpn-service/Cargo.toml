@@ -5,18 +5,15 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-tokio.workspace = true
 tonic.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 tracing.workspace = true
-thiserror.workspace = true
 anyhow.workspace = true
 sqlx.workspace = true
 reqwest.workspace = true
-x25519-dalek.workspace = true
 rand.workspace = true
 hex.workspace = true
 boringtun.workspace = true
@@ -25,3 +22,6 @@ hivemind-models = { path = "../models" }
 hivemind-database = { path = "../database" }
 hivemind-config = { path = "../config" }
 hivemind-auth = { path = "../auth" }
+
+[dev-dependencies]
+tokio.workspace = true

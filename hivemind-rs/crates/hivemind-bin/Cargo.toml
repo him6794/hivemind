@@ -53,9 +53,7 @@ required-features = ["worker"]
 [dependencies]
 tokio.workspace = true
 tonic.workspace = true
-axum.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 anyhow.workspace = true
 uuid.workspace = true
 serde.workspace = true
@@ -64,7 +62,6 @@ prost = { workspace = true, optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 hivemind-common = { path = "../common" }
 hivemind-proto = { path = "../proto" }
-hivemind-models = { path = "../models" }
 hivemind-config = { path = "../config" }
 hivemind-client-runtime = { path = "../client-runtime" }
 hivemind-database = { path = "../database", optional = true }

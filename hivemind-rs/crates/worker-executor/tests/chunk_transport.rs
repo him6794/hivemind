@@ -5,7 +5,9 @@ use general_compute_runtime::{
     sha256_digest, ArtifactChunk, ArtifactManifest, ArtifactRole, ExecutionPolicy,
     GeneralComputeRequest, GENERAL_COMPUTE_RUNTIME_VERSION,
 };
-use hivemind_auth::worker_execution::{WorkerExecutionSigner, WorkerExecutionVerifier};
+use hivemind_auth::worker_execution::{
+    WorkerExecutionIdentity, WorkerExecutionSigner, WorkerExecutionVerifier,
+};
 use hivemind_models::Claims;
 use hivemind_proto::{GeneralComputeChunkResumeRequest, GeneralComputeChunkUpload};
 use hivemind_worker_executor::chunk_transport::{
@@ -57,15 +59,24 @@ fn token() -> String {
     let (private_key, _public_key) = test_key_pair();
     WorkerExecutionSigner::from_pem(private_key)
         .expect("test signer should parse")
-        .encode_claims(&Claims {
-            sub: "owner-1".into(),
-            user_id: "owner-1".into(),
-            role: Some("worker-execution".into()),
-            task_id: Some(TASK_ID.into()),
-            worker_id: Some(WORKER_ID.into()),
-            exp: (Utc::now().timestamp() + 300) as usize,
-            iat: Utc::now().timestamp() as usize,
-        })
+        .encode_execution_claims(
+            &Claims {
+                sub: "owner-1".into(),
+                user_id: "owner-1".into(),
+                role: Some("worker-execution".into()),
+                task_id: Some(TASK_ID.into()),
+                worker_id: Some(WORKER_ID.into()),
+                exp: (Utc::now().timestamp() + 300) as usize,
+                iat: Utc::now().timestamp() as usize,
+            },
+            &WorkerExecutionIdentity {
+                execution_id: request().execution_id,
+                attempt_id: request().attempt_id,
+                idempotency_key: request().idempotency_key,
+                request_digest: request().request_digest,
+                transfer_generation: 1,
+            },
+        )
         .expect("test token should encode")
 }
 
@@ -148,6 +159,20 @@ fn adapter_rejects_stale_attempts_before_cas_ingest() {
             ChunkTransportError::IdentityMismatch
         ))
     );
+}
+
+#[test]
+fn adapter_rejects_a_chunk_from_a_revoked_transfer_generation() {
+    let request = request();
+    let (_root, store) = store();
+    let token = token();
+    let mut upload = upload(&request, &token);
+    upload.transfer_generation = 2;
+
+    let result =
+        ingest_general_compute_chunk(&store, &request, &upload, &verified_authorization(&token));
+
+    assert_eq!(result, Err(WorkerChunkIngestError::AuthorizationMismatch));
 }
 
 #[test]

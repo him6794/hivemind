@@ -20,14 +20,16 @@ use hivemind_database::DatabaseManager;
 use hivemind_master_api::MasterApiServer;
 #[cfg(feature = "nodepool")]
 use hivemind_node_manager::grpc::{
-    GrpcBatchRuntimeService, GrpcMasterNodeService, GrpcNodeManagerService, GrpcUserService,
-    NodepoolState,
+    GrpcBatchRuntimeService, GrpcGeneralComputeArtifactService, GrpcMasterNodeService,
+    GrpcNodeManagerService, GrpcUserService, NodepoolState,
 };
 #[cfg(feature = "nodepool")]
 use hivemind_node_manager::{heartbeat::HeartbeatHandler, NodeManager};
+use hivemind_proto::GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES;
 #[cfg(feature = "nodepool")]
 use hivemind_proto::{
     batch_runtime_service_server::BatchRuntimeServiceServer,
+    general_compute_artifact_service_server::GeneralComputeArtifactServiceServer,
     master_node_service_server::MasterNodeServiceServer,
     node_manager_service_server::NodeManagerServiceServer, user_service_server::UserServiceServer,
     vpn_service_server::VpnServiceServer,
@@ -35,8 +37,7 @@ use hivemind_proto::{
 #[cfg(feature = "worker")]
 use hivemind_proto::{
     general_compute_chunk_service_server::GeneralComputeChunkServiceServer,
-    worker_node_service_server::WorkerNodeServiceServer,
-    GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES, WORKER_RPC_MESSAGE_MAX_BYTES,
+    worker_node_service_server::WorkerNodeServiceServer, WORKER_RPC_MESSAGE_MAX_BYTES,
 };
 #[cfg(feature = "nodepool")]
 use hivemind_task_scheduler::{dispatcher::Dispatcher, TaskScheduler};
@@ -374,6 +375,11 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
         let user_svc = UserServiceServer::new(GrpcUserService::new(np_state.clone()));
         let node_svc = NodeManagerServiceServer::new(GrpcNodeManagerService::new(np_state.clone()));
         let master_svc = MasterNodeServiceServer::new(GrpcMasterNodeService::new(np_state.clone()));
+        let artifact_svc = GeneralComputeArtifactServiceServer::new(
+            GrpcGeneralComputeArtifactService::new(np_state.clone()),
+        )
+        .max_decoding_message_size(GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES)
+        .max_encoding_message_size(GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES);
         let batch_svc = BatchRuntimeServiceServer::new(GrpcBatchRuntimeService::new(np_state));
         let vpn_svc = VpnServiceServer::new(GrpcVpnService::new(vpn));
 
@@ -388,6 +394,7 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
                         .max_decoding_message_size(max_msg)
                         .max_encoding_message_size(max_msg),
                 )
+                .add_service(artifact_svc)
                 .add_service(batch_svc)
                 .add_service(vpn_svc)
                 .serve(np_addr.parse().unwrap())
@@ -457,19 +464,17 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
             .or_else(|_| std::env::var("HOSTNAME"))
             .unwrap_or_else(|_| format!("worker-{}", uuid::Uuid::new_v4()));
         let nodepool_addr = nodepool_client_addr(&config, run_nodepool)?;
-        let transfer_lease_authority = Arc::new(
-            nodepool_client::NodepoolTransferLeaseAuthority::new(nodepool_addr.clone()),
-        );
         let wk_state = Arc::new(WorkerGrpcState::new_with_transfer_lease_authority(
             config.clone(),
             executor.clone(),
             worker_id.clone(),
-            transfer_lease_authority,
+            hivemind_worker_executor::grpc_server::NodepoolTransferLeaseAuthority::new(
+                nodepool_addr.clone(),
+            ),
         ));
         let runtime_admission = WorkerRuntimeAdmission::from_environment()?;
         let wk_chunk_svc = GeneralComputeChunkServiceServer::new(
-            GrpcGeneralComputeChunkService::new(wk_state.clone())
-                .with_runtime_admission(runtime_admission.clone()),
+            GrpcGeneralComputeChunkService::new(wk_state.clone(), runtime_admission.clone()),
         )
         .max_decoding_message_size(GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES)
         .max_encoding_message_size(GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES);

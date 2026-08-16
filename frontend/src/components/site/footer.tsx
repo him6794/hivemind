@@ -22,8 +22,8 @@ export function Footer() {
             <HiveLogo withText />
             <p className="max-w-md text-sm leading-relaxed text-muted-foreground">
               {locale === "zh"
-                ? "Hivemind 讓團隊把繁重工作交給分散式算力處理，從提交、追蹤到取回結果，都留在同一個清楚的產品體驗裡。"
-                : "Hivemind helps teams send heavy work to distributed compute, then track progress and collect results through one clear product experience."}
+                ? "工作是一段原始碼加一份 JSON，跑在別人的機器上，用量由網路端查核。"
+                : "A job is source text plus a JSON document. It runs on someone else's machine, and the network checks what it used."}
             </p>
           </div>
 
@@ -71,7 +71,7 @@ export function Footer() {
 
         <div className="mt-12 flex flex-col items-start justify-between gap-4 border-t border-border/60 pt-6 text-xs text-muted-foreground sm:flex-row sm:items-center">
           <p>
-            © {new Date().getFullYear()} Hivemind. {locale === "zh" ? "分散式算力工作平台。" : "Distributed compute work platform."}
+            © {new Date().getFullYear()} Hivemind. {locale === "zh" ? "分散式算力市集。" : "A marketplace for distributed compute."}
           </p>
           <div className="flex items-center gap-4">
             <span className="inline-flex items-center gap-1.5">

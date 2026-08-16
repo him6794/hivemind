@@ -13,10 +13,10 @@ use std::collections::BTreeMap;
 pub struct NodeManager {
     repo: worker_repository::WorkerRepository,
     db: DatabaseManager,
-    trusted_general_compute_capabilities: BTreeMap<
-        String,
-        hivemind_config::TrustedGeneralComputeWorkerRegistration,
-    >,
+    trusted_general_compute_capabilities:
+        BTreeMap<String, hivemind_config::TrustedGeneralComputeWorkerRegistration>,
+    trusted_managed_dsl_capabilities:
+        BTreeMap<String, hivemind_config::TrustedManagedDslWorkerRegistration>,
 }
 
 impl NodeManager {
@@ -28,7 +28,30 @@ impl NodeManager {
                 .general_compute
                 .trusted_worker_capabilities
                 .clone(),
+            trusted_managed_dsl_capabilities: config
+                .general_compute
+                .trusted_managed_dsl_worker_capabilities
+                .clone(),
         }
+    }
+
+    pub fn trusted_managed_dsl_capabilities_json_for_owner(
+        &self,
+        worker_id: &str,
+        owner: &str,
+        is_admin: bool,
+    ) -> Result<Option<String>> {
+        let Some(registered) = self.trusted_managed_dsl_capabilities.get(worker_id) else {
+            return Ok(None);
+        };
+        if !is_admin && registered.owner != owner {
+            anyhow::bail!(
+                "managed DSL capability registration owner does not match authenticated owner"
+            );
+        }
+        serde_json::to_string(&registered.registrations)
+            .map(Some)
+            .map_err(Into::into)
     }
 
     pub async fn register_worker(&self, worker: &WorkerNode) -> Result<WorkerNode> {
@@ -45,7 +68,9 @@ impl NodeManager {
             return Ok(None);
         };
         if !is_admin && registered.owner != owner {
-            anyhow::bail!("worker capability registration owner does not match authenticated owner");
+            anyhow::bail!(
+                "worker capability registration owner does not match authenticated owner"
+            );
         }
         serde_json::to_string(&registered.registration)
             .map(Some)
@@ -130,8 +155,7 @@ mod tests {
                     gpu_capabilities: vec![],
                     backends: vec![BackendRegistration {
                         backend_id: "python-cpython-312".into(),
-                        execution_mode:
-                            general_compute_runtime::sandbox::BackendExecutionMode::ReferenceDirect,
+                        execution_mode: general_compute_runtime::sandbox::BackendExecutionMode::ReferenceDirect,
                         guest_image_digest:
                             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                                 .into(),

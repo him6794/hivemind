@@ -192,6 +192,7 @@ mod tests {
             available_memory_gb: 16,
             queue_capacity: 4,
             general_compute_capabilities_json: None,
+            managed_dsl_capabilities_json: None,
             last_heartbeat: chrono::Utc::now(),
             registered_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),

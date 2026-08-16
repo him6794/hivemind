@@ -59,6 +59,27 @@ impl TaskScheduler {
         self.repo.general_compute_transfer_lease(task_id).await
     }
 
+    pub async fn put_general_compute_artifact_chunk(
+        &self,
+        task_id: &str,
+        artifact_id: &str,
+        offset: u64,
+        size_bytes: u64,
+        sha256: &str,
+        content: &[u8],
+    ) -> Result<()> {
+        self.repo
+            .put_general_compute_artifact_chunk(
+                task_id,
+                artifact_id,
+                offset,
+                size_bytes,
+                sha256,
+                content,
+            )
+            .await
+    }
+
     pub async fn list_user_tasks(&self, owner: &str) -> Result<Vec<Task>> {
         self.repo.find_by_owner(owner).await
     }

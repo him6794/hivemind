@@ -3,9 +3,9 @@ use general_compute_runtime::cp_python::{PythonBackendRegistration, PythonBacken
 use general_compute_runtime::execution::ReferenceBackendExecutor;
 use general_compute_runtime::sandbox::BackendExecutionMode;
 use general_compute_runtime::{
-    sha256_digest, ArtifactChunk, ArtifactManifest, ArtifactRole, BackendRegistration,
-    CapabilityMatrix, DeterminismPolicy, ExecutionPolicy, GeneralComputeRequest, ResultStatus,
-    WorkerCapabilities, GENERAL_COMPUTE_RUNTIME_VERSION,
+    ArtifactChunk, ArtifactManifest, ArtifactRole, BackendRegistration, CapabilityMatrix,
+    DeterminismPolicy, ExecutionPolicy, GENERAL_COMPUTE_RUNTIME_VERSION, GeneralComputeRequest,
+    ResultStatus, WorkerCapabilities, sha256_digest,
 };
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -80,6 +80,25 @@ fn python_registry() -> PythonBackendRegistry {
         execution_mode: BackendExecutionMode::ReferenceDirect,
     }])
     .expect("reference registry should be valid")
+}
+
+#[test]
+fn reference_executor_rejects_a_production_registered_backend() {
+    let request = request();
+    let mut capability = capability_matrix(&request);
+    capability.backends[0].execution_mode = BackendExecutionMode::ProductionSandboxedOci;
+    let executor = ReferenceBackendExecutor::new(capability, worker(), python_registry());
+    let root = temp_root();
+    let materializer = general_compute_runtime::artifact::ArtifactMaterializer::new(&root)
+        .expect("materializer root should be usable");
+
+    let error = executor
+        .execute(&request, &materializer)
+        .expect_err("production registrations must never use the reference executor");
+    assert_eq!(
+        error,
+        general_compute_runtime::execution::ExecutionError::UnsupportedExecutionMode
+    );
 }
 
 fn temp_root() -> PathBuf {

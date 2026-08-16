@@ -53,7 +53,7 @@ export function AccountPage() {
   return (
     <PageSection
       eyebrow={locale === "zh" ? "帳號中心" : "Account Center"}
-      title={locale === "zh" ? "官方網站只顯示帳號、餘額與下一步。" : "The official site shows account state, balance, and next steps only."}
+      title={locale === "zh" ? "你的帳號與餘額都在這裡。" : "Your account and balance, in one place."}
       body={site.sections.account.summary}
       className="pt-32"
     >
@@ -70,8 +70,8 @@ export function AccountPage() {
               </h3>
               <p className="mt-2 text-sm text-muted-foreground">
                 {locale === "zh"
-                  ? "這裡不提供工作提交或 worker 控制，只保留官方網站該有的帳號能力。"
-                  : "This area intentionally excludes task submission and worker controls."}
+                  ? "工作從你的 Master 送出，再由排程器交給符合條件的網路 worker。"
+                  : "Work leaves through your Master, then the scheduler assigns it to an eligible network worker."}
               </p>
             </div>
             <Button variant="outline" onClick={() => navigate(token ? "docs" : "login")}>
@@ -85,12 +85,12 @@ export function AccountPage() {
               value={<span className="font-mono-tech text-3xl">{balance === null ? "..." : balance.toFixed(2)}</span>}
             />
             <KeyValue
-              label={locale === "zh" ? "網站角色" : "Website role"}
-              value={locale === "zh" ? "官方帳號中心" : "Official account center"}
+              label={locale === "zh" ? "工作在哪跑" : "Where work runs"}
+              value={locale === "zh" ? "符合條件的網路 worker" : "An eligible network worker"}
             />
             <KeyValue
-              label={locale === "zh" ? "操作入口" : "Operations handoff"}
-              value={locale === "zh" ? "Master / Worker 文件" : "Master / Worker docs"}
+              label={locale === "zh" ? "下一步" : "Next step"}
+              value={locale === "zh" ? "部署 Master 或 Worker" : "Deploy a Master or Worker"}
             />
           </div>
 
@@ -118,12 +118,12 @@ export function AccountPage() {
         <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div>
             <h3 className="text-lg font-semibold">
-              {locale === "zh" ? "需要真正的工作或節點操作？" : "Need real task or node operations?"}
+              {locale === "zh" ? "要送出工作，還是貢獻算力？" : "Send work, or contribute compute?"}
             </h3>
             <p className="mt-2 text-sm text-muted-foreground">
               {locale === "zh"
-                ? "請依文件部署 Master 節點來提交工作，或部署 Worker 節點來提供算力。"
-                : "Deploy a Master node for task operations or a Worker node for compute supply."}
+                ? "送工作部署 Master，貢獻算力部署 Worker。"
+                : "Deploy a Master node to send work. Deploy a Worker node to contribute compute."}
             </p>
           </div>
           <Button onClick={() => navigate("docs")} className="bg-honey text-honey-foreground hover:bg-honey/90">

@@ -26,8 +26,9 @@ impl WorkerRepository {
                  -- the Nodepool-owned snapshot unless an operator-approved
                  -- registration explicitly supplies a replacement.
                  general_compute_capabilities_json = COALESCE($16, general_compute_capabilities_json),
+                 managed_dsl_capabilities_json = COALESCE($17, managed_dsl_capabilities_json),
                  last_heartbeat = NOW(), updated_at = NOW()
-                 WHERE worker_id = $17 RETURNING *",
+                 WHERE worker_id = $18 RETURNING *",
             )
             .bind(&worker.username)
             .bind(&worker.ip)
@@ -45,6 +46,7 @@ impl WorkerRepository {
             .bind(worker.available_memory_gb)
             .bind(worker.queue_capacity)
             .bind(&worker.general_compute_capabilities_json)
+            .bind(&worker.managed_dsl_capabilities_json)
             .bind(&worker.worker_id)
             .fetch_one(&self.pool)
             .await
@@ -54,8 +56,9 @@ impl WorkerRepository {
                 "INSERT INTO worker_nodes (worker_id, username, ip, cpu_cores, memory_gb,
                  cpu_score, gpu_score, gpu_memory_gb,
                  gpu_name, vram_mb, storage_total_gb, storage_available_gb,
-                 location, status, available_memory_gb, queue_capacity, general_compute_capabilities_json)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING *",
+                 location, status, available_memory_gb, queue_capacity, general_compute_capabilities_json,
+                 managed_dsl_capabilities_json)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING *",
             )
             .bind(&worker.worker_id)
             .bind(&worker.username)
@@ -74,6 +77,7 @@ impl WorkerRepository {
             .bind(worker.available_memory_gb)
             .bind(worker.queue_capacity)
             .bind(&worker.general_compute_capabilities_json)
+            .bind(&worker.managed_dsl_capabilities_json)
             .fetch_one(&self.pool)
             .await
             .map_err(Into::into)
@@ -100,8 +104,9 @@ impl WorkerRepository {
              -- Owner-authorized registration is the source of truth and may
              -- explicitly revoke a previously persisted snapshot.
              general_compute_capabilities_json = $16,
+             managed_dsl_capabilities_json = $17,
              last_heartbeat = NOW(), updated_at = NOW()
-             WHERE worker_id = $17 AND (username = $18 OR $19)
+             WHERE worker_id = $18 AND (username = $19 OR $20)
              RETURNING *",
         )
         .bind(&worker.username)
@@ -120,6 +125,7 @@ impl WorkerRepository {
         .bind(worker.available_memory_gb)
         .bind(worker.queue_capacity)
         .bind(&worker.general_compute_capabilities_json)
+        .bind(&worker.managed_dsl_capabilities_json)
         .bind(&worker.worker_id)
         .bind(owner)
         .bind(is_admin)
@@ -136,8 +142,9 @@ impl WorkerRepository {
             "INSERT INTO worker_nodes (worker_id, username, ip, cpu_cores, memory_gb,
              cpu_score, gpu_score, gpu_memory_gb,
              gpu_name, vram_mb, storage_total_gb, storage_available_gb,
-             location, status, available_memory_gb, queue_capacity, general_compute_capabilities_json)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+             location, status, available_memory_gb, queue_capacity, general_compute_capabilities_json,
+             managed_dsl_capabilities_json)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
              RETURNING *",
         )
         .bind(&worker.worker_id)
@@ -157,6 +164,7 @@ impl WorkerRepository {
         .bind(worker.available_memory_gb)
         .bind(worker.queue_capacity)
         .bind(&worker.general_compute_capabilities_json)
+        .bind(&worker.managed_dsl_capabilities_json)
         .fetch_one(&self.pool)
         .await
         .map_err(Into::into)
@@ -294,6 +302,7 @@ mod tests {
             available_memory_gb: 16,
             queue_capacity: 4,
             general_compute_capabilities_json: None,
+            managed_dsl_capabilities_json: None,
             last_heartbeat: chrono::Utc::now(),
             registered_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -339,7 +348,10 @@ mod tests {
         let refreshed = repo.upsert(&heartbeat).await.unwrap();
 
         assert_eq!(refreshed.ip, "192.168.1.99");
-        assert_eq!(refreshed.general_compute_capabilities_json.as_deref(), Some(snapshot));
+        assert_eq!(
+            refreshed.general_compute_capabilities_json.as_deref(),
+            Some(snapshot)
+        );
 
         sqlx::query("DELETE FROM worker_nodes WHERE worker_id = $1")
             .bind(worker_id)
@@ -488,6 +500,7 @@ mod tests {
             available_memory_gb: 16,
             queue_capacity: 4,
             general_compute_capabilities_json: None,
+            managed_dsl_capabilities_json: None,
             last_heartbeat: chrono::Utc::now(),
             registered_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),

@@ -831,8 +831,13 @@ fn production_runner_rejects_symlinked_runner_executable() {
     std::os::unix::fs::symlink(&executable, &linked_runner)
         .expect("runner symlink should be created");
     #[cfg(windows)]
-    std::os::windows::fs::symlink_file(&executable, &linked_runner)
-        .expect("runner symlink should be created");
+    if let Err(error) = std::os::windows::fs::symlink_file(&executable, &linked_runner) {
+        if error.raw_os_error() == Some(1314) {
+            remove_bundle(&root);
+            return;
+        }
+        panic!("runner symlink should be created: {error}");
+    }
 
     let error = ProductionSandboxLauncher::with_oci_runner_command(linked_runner, prefix_args)
         .with_runner_sha256(runner_digest(&executable))

@@ -46,8 +46,8 @@ impl WorkerExecutor {
     pub fn try_new(config: HivemindConfig) -> Result<Self> {
         let runner_config = config.clone();
         let prover = Arc::new(managed_prover::ManagedProverExecutor::new(&config));
-        let admission = runtime_admission::WorkerRuntimeAdmission::from_environment()
-            .unwrap_or_default();
+        let admission =
+            runtime_admission::WorkerRuntimeAdmission::from_environment().unwrap_or_default();
         let trusted_registration = admission.trusted_registration();
         let reference_executor = executor::reference_executor_from_environment(&admission);
         let cas_store = executor::cas_store_from_environment();
@@ -82,7 +82,12 @@ impl WorkerExecutor {
                         Some(trusted_registration),
                     )
                     .await?;
-                    if result.success && task.runtime.as_deref() == Some("managed-function-v0") {
+                    if result.success
+                        && matches!(
+                            task.runtime.as_deref(),
+                            Some("managed-function-v0") | Some("production_sandboxed_dsl")
+                        )
+                    {
                         match prover.prove(&task, cancellation.clone()).await {
                             Ok(proof) if !*cancellation.borrow() => {
                                 result.managed_proof = Some(proof);

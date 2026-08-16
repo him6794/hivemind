@@ -153,37 +153,44 @@
     font-feature-settings: "tnum", "zero";
   }
 
+  /* One law in the type system: every number is monospaced and tabular, so
+     figures line up in a column the way a meter reading should. */
+  .tabular {
+    font-family: var(--font-geist-mono), ui-monospace, monospace;
+    font-feature-settings: "tnum", "zero";
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Display face. Named CJK families first so Chinese headlines are set in a
+     real UI face instead of whatever the browser falls back to. */
+  .font-display {
+    font-family: "PingFang TC", "PingFang SC", "Microsoft JhengHei",
+      "Noto Sans TC", var(--font-geist-sans);
+    letter-spacing: -0.028em;
+    font-weight: 700;
+  }
+
+  .eyebrow {
+    font-family: var(--font-geist-mono), ui-monospace, monospace;
+    font-size: 0.6875rem;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--muted-foreground);
+  }
+
+  /* The verification stamp: the one place the accent is allowed to shout. */
+  .stamp {
+    color: var(--honey);
+    border: 1px solid color-mix(in oklch, var(--honey) 55%, transparent);
+    background: color-mix(in oklch, var(--honey) 10%, transparent);
+    letter-spacing: 0.18em;
+  }
+
   .text-honey {
     color: var(--honey);
   }
   .bg-honey {
     background-color: var(--honey);
-  }
-
-  /* Monochrome gradient text (white → gray) */
-  .text-gradient-honey {
-    background: linear-gradient(
-      135deg,
-      oklch(0.99 0 0) 0%,
-      oklch(0.82 0 0) 50%,
-      oklch(0.55 0 0) 100%
-    );
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: transparent;
-    color: transparent;
-  }
-
-  .text-gradient-muted {
-    background: linear-gradient(
-      180deg,
-      oklch(0.97 0 0) 0%,
-      oklch(0.6 0 0) 100%
-    );
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: transparent;
-    color: transparent;
   }
 
   /* Glass surface */
@@ -193,148 +200,17 @@
     -webkit-backdrop-filter: blur(16px) saturate(120%);
     border: 1px solid oklch(1 0 0 / 0.08);
   }
+  /* The scrolled navbar sits over content, so it needs a real ground. At 6%
+     white the nav text and the cards underneath collided and both became
+     unreadable; backdrop-filter alone does not survive every renderer. */
   .glass-strong {
-    background: oklch(1 0 0 / 0.06);
-    backdrop-filter: blur(24px) saturate(120%);
-    -webkit-backdrop-filter: blur(24px) saturate(120%);
-    border: 1px solid oklch(1 0 0 / 0.12);
+    background: color-mix(in oklch, var(--background) 97%, transparent);
+    backdrop-filter: blur(24px) saturate(140%);
+    -webkit-backdrop-filter: blur(24px) saturate(140%);
+    border: 1px solid var(--border);
+    box-shadow: 0 12px 32px -18px oklch(0 0 0 / 0.9);
   }
 
-  /* Soft white glow */
-  .glow-honey {
-    box-shadow:
-      0 0 0 1px oklch(1 0 0 / 0.12),
-      0 0 40px -10px oklch(1 0 0 / 0.25),
-      0 0 80px -24px oklch(1 0 0 / 0.18);
-  }
-  .glow-honey-sm {
-    box-shadow: 0 0 22px -8px oklch(1 0 0 / 0.35);
-  }
-
-  /* Grid background pattern */
-  .bg-grid {
-    background-image:
-      linear-gradient(to right, oklch(1 0 0 / 0.04) 1px, transparent 1px),
-      linear-gradient(to bottom, oklch(1 0 0 / 0.04) 1px, transparent 1px);
-    background-size: 56px 56px;
-  }
-  .bg-grid-fade {
-    -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 30%, transparent 75%);
-    mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 30%, transparent 75%);
-  }
-
-  /* Dot matrix */
-  .bg-dots {
-    background-image: radial-gradient(oklch(1 0 0 / 0.07) 1px, transparent 1px);
-    background-size: 24px 24px;
-  }
-
-  /* Conic shimmer border (monochrome) */
-  .border-conic {
-    position: relative;
-  }
-  .border-conic::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    border-radius: inherit;
-    padding: 1px;
-    background: conic-gradient(
-      from 180deg at 50% 50%,
-      oklch(1 0 0 / 0.5),
-      transparent 30%,
-      transparent 70%,
-      oklch(1 0 0 / 0.35)
-    );
-    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-    mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-    -webkit-mask-composite: xor;
-    mask-composite: exclude;
-    pointer-events: none;
-  }
-
-  /* Animated gradient background blob */
-  .animate-blob {
-    animation: blob 18s ease-in-out infinite;
-  }
-  .animate-float-slow {
-    animation: float-slow 8s ease-in-out infinite;
-  }
-  .animate-shimmer {
-    background-size: 200% 100%;
-    animation: shimmer 2.5s linear infinite;
-  }
-  .animate-pulse-glow {
-    animation: pulse-glow 3s ease-in-out infinite;
-  }
-  .animate-marquee {
-    animation: marquee 40s linear infinite;
-  }
-  .animate-spin-slow {
-    animation: spin 24s linear infinite;
-  }
-  .animate-grid-pan {
-    animation: grid-pan 30s linear infinite;
-  }
-}
-
-@keyframes blob {
-  0%, 100% {
-    transform: translate(0, 0) scale(1);
-  }
-  33% {
-    transform: translate(30px, -40px) scale(1.08);
-  }
-  66% {
-    transform: translate(-25px, 25px) scale(0.94);
-  }
-}
-
-@keyframes float-slow {
-  0%, 100% {
-    transform: translateY(0);
-  }
-  50% {
-    transform: translateY(-12px);
-  }
-}
-
-@keyframes shimmer {
-  0% {
-    background-position: 200% 0;
-  }
-  100% {
-    background-position: -200% 0;
-  }
-}
-
-@keyframes pulse-glow {
-  0%, 100% {
-    opacity: 0.55;
-    transform: scale(1);
-  }
-  50% {
-    opacity: 1;
-    transform: scale(1.08);
-  }
-}
-
-@keyframes marquee {
-  0% {
-    transform: translateX(0);
-  }
-  100% {
-    transform: translateX(-50%);
-  }
-}
-
-@keyframes grid-pan {
-  0% {
-    background-position: 0 0;
-  }
-  100% {
-    background-position: 56px 56px;
-  }
 }
 
 /* Custom scrollbar (monochrome) */

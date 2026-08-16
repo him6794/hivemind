@@ -11,6 +11,7 @@ import { RegisterPage } from "@/components/pages/register-page";
 import { AccountPage } from "@/components/pages/account-page";
 import { SecurityPage } from "@/components/pages/security-page";
 import { DocsPage } from "@/components/pages/docs-page";
+import { TermsPage } from "@/components/pages/terms-page";
 import { useAppStore, type Route } from "@/store/app-store";
 
 const fullscreenRoutes: Route[] = ["login", "register"];
@@ -23,7 +24,7 @@ export default function Home() {
   useEffect(() => {
     const fromHash = () => {
       const raw = window.location.hash.replace(/^#\/?/, "");
-      const next = (["home", "login", "register", "account", "security", "docs"] as Route[])
+      const next = (["home", "login", "register", "account", "security", "docs", "terms"] as Route[])
         .find((entry) => entry === raw) || "home";
       navigate(next);
     };
@@ -73,6 +74,8 @@ function renderRoute(route: Route) {
       return <SecurityPage />;
     case "docs":
       return <DocsPage />;
+    case "terms":
+      return <TermsPage />;
     default:
       return <LandingPage />;
   }

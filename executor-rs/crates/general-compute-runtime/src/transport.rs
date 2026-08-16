@@ -148,7 +148,12 @@ pub fn ingest_chunk(
     }
 
     store
-        .put_chunk(&manifest_chunk.sha256, &envelope.bytes)
+        .put_transfer_chunk(
+            &envelope.execution_id,
+            artifact,
+            manifest_chunk,
+            &envelope.bytes,
+        )
         .map_err(|error| match error {
             ArtifactMaterializationError::ChunkChecksumMismatch => {
                 ChunkTransportError::ConflictingChunk

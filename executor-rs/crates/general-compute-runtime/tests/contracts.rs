@@ -1,20 +1,20 @@
-use general_compute_runtime::{
-    canonical_artifact_root, canonical_input_digest, sha256_digest, ArtifactChunk, ArtifactManifest, ArtifactRange,
-    ArtifactRole, BackendRegistration, CapabilityMatrix, EvidenceEnvelope, ExecutionPolicy,
-    GeneralComputeRequest, GeneralComputeResult, ResultStatus, ValidationErrorCode,
-    ProductionResultEnvelope, UsageClaim, WorkerCapabilities, GENERAL_COMPUTE_RUNTIME_VERSION,
-    PRODUCTION_RESULT_PROTOCOL_VERSION,
-};
 use general_compute_runtime::gpu::{GpuRequirement, GpuRuntime, GpuVendor};
 use general_compute_runtime::sandbox::BackendExecutionMode;
+use general_compute_runtime::{
+    ArtifactChunk, ArtifactManifest, ArtifactRange, ArtifactRole, BackendRegistration,
+    CapabilityMatrix, EvidenceEnvelope, ExecutionPolicy, GENERAL_COMPUTE_RUNTIME_VERSION,
+    GeneralComputeRequest, GeneralComputeResult, PRODUCTION_RESULT_PROTOCOL_VERSION,
+    ProductionResultEnvelope, ResultStatus, UsageClaim, ValidationErrorCode, WorkerCapabilities,
+    canonical_artifact_root, canonical_input_digest, sha256_digest,
+};
 
 #[test]
 fn production_windows_execution_mode_round_trips_as_a_distinct_contract() {
     let encoded = serde_json::to_string(&BackendExecutionMode::ProductionSandboxedWindows)
         .expect("execution mode should serialize");
     assert_eq!(encoded, "\"production_sandboxed_windows\"");
-    let decoded: BackendExecutionMode = serde_json::from_str(&encoded)
-        .expect("execution mode should deserialize");
+    let decoded: BackendExecutionMode =
+        serde_json::from_str(&encoded).expect("execution mode should deserialize");
     assert_eq!(decoded, BackendExecutionMode::ProductionSandboxedWindows);
 }
 
@@ -23,15 +23,16 @@ fn production_dsl_execution_mode_round_trips_as_a_distinct_contract() {
     let encoded = serde_json::to_string(&BackendExecutionMode::ProductionSandboxedDsl)
         .expect("execution mode should serialize");
     assert_eq!(encoded, "\"production_sandboxed_dsl\"");
-    let decoded: BackendExecutionMode = serde_json::from_str(&encoded)
-        .expect("execution mode should deserialize");
+    let decoded: BackendExecutionMode =
+        serde_json::from_str(&encoded).expect("execution mode should deserialize");
     assert_eq!(decoded, BackendExecutionMode::ProductionSandboxedDsl);
 }
 
 #[test]
 fn unknown_execution_mode_is_rejected_instead_of_downgraded() {
-    assert!(serde_json::from_str::<BackendExecutionMode>("\"production_sandboxed_unknown\"")
-        .is_err());
+    assert!(
+        serde_json::from_str::<BackendExecutionMode>("\"production_sandboxed_unknown\"").is_err()
+    );
 }
 
 fn valid_request() -> GeneralComputeRequest {
@@ -79,7 +80,11 @@ fn production_result_envelope_requires_version_and_verified_output_root() {
         output_manifest_root: canonical_artifact_root(std::slice::from_ref(&output)),
         output_artifacts: vec![output],
         usage: UsageClaim {
-            input_bytes: request.input_artifacts.iter().map(|artifact| artifact.size_bytes).sum(),
+            input_bytes: request
+                .input_artifacts
+                .iter()
+                .map(|artifact| artifact.size_bytes)
+                .sum(),
             output_bytes: 2,
             ..UsageClaim::default()
         },

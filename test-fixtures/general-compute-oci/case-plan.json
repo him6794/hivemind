@@ -1,0 +1,192 @@
+﻿{
+  "filesystem_denied": {
+    "expected_result_status": "backend_unavailable",
+    "expected_task_status": "FAILED",
+    "manifest": {
+      "attempt_id": "filesystem-attempt",
+      "backend_id": "oci-filesystem",
+      "billing_version": "billing-v1",
+      "cost_model_version": "cost-model-v1",
+      "determinism": {
+        "cpu_feature_set": "baseline",
+        "reproducibility": "reproducible",
+        "seed": 0,
+        "thread_count": 1
+      },
+      "entrypoint": "fixture:run",
+      "execution_id": "filesystem-execution",
+      "execution_policy": {
+        "cancellation_deadline_ms": 5000,
+        "cpu_millis": 60000,
+        "filesystem_read_only": true,
+        "gpu_required": false,
+        "max_processes": 1,
+        "max_threads": 1,
+        "memory_bytes": 536870912,
+        "network_allowed": false,
+        "output_bytes": 16777216,
+        "scratch_bytes": 268435456,
+        "wall_time_ms": 120000
+      },
+      "guest_image_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "idempotency_key": "filesystem-idempotency",
+      "input_artifacts": [],
+      "request_digest": "sha256:25cc91cf32b9fb81fe7573753d9c6e88ac3a18210addf1b97e7e4d2bc48e6cab",
+      "runtime_version": "general-compute-v1alpha1",
+      "source_artifact": {
+        "artifact_id": "source",
+        "chunks": [],
+        "inline_bytes": [
+          123,
+          125
+        ],
+        "mime_type": "application/json",
+        "role": "source",
+        "sha256": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "size_bytes": 2
+      }
+    }
+  },
+  "max_cpt": 1000,
+  "network_denied": {
+    "expected_result_status": "backend_unavailable",
+    "expected_task_status": "FAILED",
+    "manifest": {
+      "attempt_id": "network-attempt",
+      "backend_id": "oci-network",
+      "billing_version": "billing-v1",
+      "cost_model_version": "cost-model-v1",
+      "determinism": {
+        "cpu_feature_set": "baseline",
+        "reproducibility": "reproducible",
+        "seed": 0,
+        "thread_count": 1
+      },
+      "entrypoint": "fixture:run",
+      "execution_id": "network-execution",
+      "execution_policy": {
+        "cancellation_deadline_ms": 5000,
+        "cpu_millis": 60000,
+        "filesystem_read_only": true,
+        "gpu_required": false,
+        "max_processes": 1,
+        "max_threads": 1,
+        "memory_bytes": 536870912,
+        "network_allowed": false,
+        "output_bytes": 16777216,
+        "scratch_bytes": 268435456,
+        "wall_time_ms": 120000
+      },
+      "guest_image_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "idempotency_key": "network-idempotency",
+      "input_artifacts": [],
+      "request_digest": "sha256:d0d4617c213626a045a1204f0d6d40eb9a8a9a724d5394113544d1f333a65aab",
+      "runtime_version": "general-compute-v1alpha1",
+      "source_artifact": {
+        "artifact_id": "source",
+        "chunks": [],
+        "inline_bytes": [
+          123,
+          125
+        ],
+        "mime_type": "application/json",
+        "role": "source",
+        "sha256": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "size_bytes": 2
+      }
+    }
+  },
+  "primary_manifest": {
+    "attempt_id": "primary-attempt",
+    "backend_id": "oci-success",
+    "billing_version": "billing-v1",
+    "cost_model_version": "cost-model-v1",
+    "determinism": {
+      "cpu_feature_set": "baseline",
+      "reproducibility": "reproducible",
+      "seed": 0,
+      "thread_count": 1
+    },
+    "entrypoint": "fixture:run",
+    "execution_id": "primary-execution",
+    "execution_policy": {
+      "cancellation_deadline_ms": 5000,
+      "cpu_millis": 60000,
+      "filesystem_read_only": true,
+      "gpu_required": false,
+      "max_processes": 1,
+      "max_threads": 1,
+      "memory_bytes": 536870912,
+      "network_allowed": false,
+      "output_bytes": 16777216,
+      "scratch_bytes": 268435456,
+      "wall_time_ms": 120000
+    },
+    "guest_image_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "idempotency_key": "primary-idempotency",
+    "input_artifacts": [],
+    "request_digest": "sha256:ee494ff4427f354932990594b1d86fe0f7e1236f15426fa84db8218c42a2d93c",
+    "runtime_version": "general-compute-v1alpha1",
+    "source_artifact": {
+      "artifact_id": "source",
+      "chunks": [],
+      "inline_bytes": [
+        123,
+        125
+      ],
+      "mime_type": "application/json",
+      "role": "source",
+      "sha256": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "size_bytes": 2
+    }
+  },
+  "timeout_cancel": {
+    "cancel_after_seconds": 1,
+    "expected_result_status": "cancelled",
+    "expected_task_status": "CANCELLED",
+    "manifest": {
+      "attempt_id": "timeout-attempt",
+      "backend_id": "oci-timeout",
+      "billing_version": "billing-v1",
+      "cost_model_version": "cost-model-v1",
+      "determinism": {
+        "cpu_feature_set": "baseline",
+        "reproducibility": "reproducible",
+        "seed": 0,
+        "thread_count": 1
+      },
+      "entrypoint": "fixture:run",
+      "execution_id": "timeout-execution",
+      "execution_policy": {
+        "cancellation_deadline_ms": 5000,
+        "cpu_millis": 60000,
+        "filesystem_read_only": true,
+        "gpu_required": false,
+        "max_processes": 1,
+        "max_threads": 1,
+        "memory_bytes": 536870912,
+        "network_allowed": false,
+        "output_bytes": 16777216,
+        "scratch_bytes": 268435456,
+        "wall_time_ms": 120000
+      },
+      "guest_image_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "idempotency_key": "timeout-idempotency",
+      "input_artifacts": [],
+      "request_digest": "sha256:a80584f9f7f36fc711acefdd8f2a549a3983fb0f88d74c7d4cc70dd9d5460aa9",
+      "runtime_version": "general-compute-v1alpha1",
+      "source_artifact": {
+        "artifact_id": "source",
+        "chunks": [],
+        "inline_bytes": [
+          123,
+          125
+        ],
+        "mime_type": "application/json",
+        "role": "source",
+        "sha256": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "size_bytes": 2
+      }
+    }
+  }
+}

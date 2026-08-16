@@ -1,9 +1,9 @@
-use hivemind_worker_executor::runtime_admission::{
-    RuntimeAdmissionError, RuntimeRoute, WorkerRuntimeAdmission,
-};
 use general_compute_runtime::{
     ArtifactManifest, ArtifactRole, BackendRegistration, CapabilityMatrix, DeterminismPolicy,
     ExecutionPolicy, GeneralComputeRequest, WorkerCapabilities, GENERAL_COMPUTE_RUNTIME_VERSION,
+};
+use hivemind_worker_executor::runtime_admission::{
+    RuntimeAdmissionError, RuntimeRoute, WorkerRuntimeAdmission,
 };
 
 #[test]
@@ -56,7 +56,8 @@ fn managed_function_v0_keeps_its_existing_typed_route() {
 
 #[test]
 fn general_compute_v1alpha1_rejects_an_unregistered_backend() {
-    let request = request_manifest("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    let request =
+        request_manifest("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     let error = WorkerRuntimeAdmission::new(CapabilityMatrix::default(), worker_capabilities())
         .admit(
             GENERAL_COMPUTE_RUNTIME_VERSION,
@@ -75,11 +76,15 @@ fn general_compute_v1alpha1_rejects_an_unregistered_backend() {
 
 #[test]
 fn general_compute_v1alpha1_rejects_an_image_missing_from_worker_capabilities() {
-    let request = request_manifest("sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-    let error = WorkerRuntimeAdmission::new(registry_for(request.guest_image_digest.clone()), WorkerCapabilities {
-        guest_image_digests: vec![],
-        ..worker_capabilities()
-    })
+    let request =
+        request_manifest("sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    let error = WorkerRuntimeAdmission::new(
+        registry_for(request.guest_image_digest.clone()),
+        WorkerCapabilities {
+            guest_image_digests: vec![],
+            ..worker_capabilities()
+        },
+    )
     .admit(
         GENERAL_COMPUTE_RUNTIME_VERSION,
         &serde_json::to_vec(&request).unwrap(),
@@ -97,7 +102,8 @@ fn general_compute_v1alpha1_rejects_an_image_missing_from_worker_capabilities() 
 
 #[test]
 fn general_compute_v1alpha1_routes_a_registered_manifest() {
-    let request = request_manifest("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
+    let request =
+        request_manifest("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
     let route = WorkerRuntimeAdmission::new(
         registry_for(request.guest_image_digest.clone()),
         worker_capabilities_with_image(request.guest_image_digest.clone()),
@@ -108,7 +114,9 @@ fn general_compute_v1alpha1_routes_a_registered_manifest() {
     )
     .expect("registered backend and image should route");
 
-    assert!(matches!(route, RuntimeRoute::GeneralComputeV1Alpha1(r) if r.backend_id == "python-cpython-312"));
+    assert!(
+        matches!(route, RuntimeRoute::GeneralComputeV1Alpha1(r) if r.backend_id == "python-cpython-312")
+    );
 }
 
 fn request_manifest(image: &str) -> GeneralComputeRequest {

@@ -1,8 +1,8 @@
 use general_compute_runtime::reference::{
-    HeapInstruction, HeapInterpreter, HeapLimits, HeapProgram, HeapStatus, HeapValue, Instruction, InterpreterLimits,
-    InterpreterStatus, MinskyProgram, RecursionInstruction, RecursionInterpreter, RecursionLimits, RecursionProgram,
-    RecursionStatus, ReferenceInterpreter, SignalInstruction, SignalInterpreter, SignalLimits, SignalProgram,
-    SignalStatus,
+    HeapInstruction, HeapInterpreter, HeapLimits, HeapProgram, HeapStatus, HeapValue, Instruction,
+    InterpreterLimits, InterpreterStatus, MinskyProgram, RecursionInstruction,
+    RecursionInterpreter, RecursionLimits, RecursionProgram, RecursionStatus, ReferenceInterpreter,
+    SignalInstruction, SignalInterpreter, SignalLimits, SignalProgram, SignalStatus,
 };
 use general_compute_runtime::supervisor::Cancellation;
 use std::sync::Arc;
@@ -12,8 +12,14 @@ use std::time::Duration;
 #[test]
 fn minsky_machine_increments_and_decrements_to_zero() {
     let program = MinskyProgram::new(vec![
-        Instruction::Inc { register: 0, next: 1 },
-        Instruction::Inc { register: 0, next: 2 },
+        Instruction::Inc {
+            register: 0,
+            next: 1,
+        },
+        Instruction::Inc {
+            register: 0,
+            next: 2,
+        },
         Instruction::DecJump {
             register: 0,
             if_nonzero: 2,
@@ -23,7 +29,8 @@ fn minsky_machine_increments_and_decrements_to_zero() {
     ])
     .expect("fixture program should validate");
 
-    let result = ReferenceInterpreter::new(program).run(InterpreterLimits::new(32), &Cancellation::new());
+    let result =
+        ReferenceInterpreter::new(program).run(InterpreterLimits::new(32), &Cancellation::new());
 
     assert_eq!(result.status, InterpreterStatus::Halted);
     assert_eq!(result.steps, 6);
@@ -32,10 +39,14 @@ fn minsky_machine_increments_and_decrements_to_zero() {
 
 #[test]
 fn minsky_machine_stops_nonterminating_program_at_step_budget() {
-    let program =
-        MinskyProgram::new(vec![Instruction::Inc { register: 0, next: 0 }]).expect("loop fixture should validate");
+    let program = MinskyProgram::new(vec![Instruction::Inc {
+        register: 0,
+        next: 0,
+    }])
+    .expect("loop fixture should validate");
 
-    let result = ReferenceInterpreter::new(program).run(InterpreterLimits::new(7), &Cancellation::new());
+    let result =
+        ReferenceInterpreter::new(program).run(InterpreterLimits::new(7), &Cancellation::new());
 
     assert_eq!(result.status, InterpreterStatus::ResourceExhausted);
     assert_eq!(result.steps, 7);
@@ -44,8 +55,11 @@ fn minsky_machine_stops_nonterminating_program_at_step_budget() {
 
 #[test]
 fn reference_program_rejects_targets_outside_instruction_tape() {
-    let error = MinskyProgram::new(vec![Instruction::Inc { register: 0, next: 1 }])
-        .expect_err("out-of-range jump must be rejected");
+    let error = MinskyProgram::new(vec![Instruction::Inc {
+        register: 0,
+        next: 1,
+    }])
+    .expect_err("out-of-range jump must be rejected");
 
     assert!(matches!(
         error,
@@ -58,8 +72,11 @@ fn reference_program_rejects_targets_outside_instruction_tape() {
 
 #[test]
 fn reference_interpreter_stops_cooperatively_on_cancellation() {
-    let program =
-        MinskyProgram::new(vec![Instruction::Inc { register: 0, next: 0 }]).expect("loop fixture should validate");
+    let program = MinskyProgram::new(vec![Instruction::Inc {
+        register: 0,
+        next: 0,
+    }])
+    .expect("loop fixture should validate");
     let cancellation = Arc::new(Cancellation::new());
     let trigger = Arc::clone(&cancellation);
     let thread = thread::spawn(move || {
@@ -67,11 +84,15 @@ fn reference_interpreter_stops_cooperatively_on_cancellation() {
         trigger.cancel();
     });
 
-    let result = ReferenceInterpreter::new(program).run(InterpreterLimits::new(u64::MAX), &cancellation);
+    let result =
+        ReferenceInterpreter::new(program).run(InterpreterLimits::new(u64::MAX), &cancellation);
     thread.join().expect("cancellation trigger should finish");
 
     assert_eq!(result.status, InterpreterStatus::Cancelled);
-    assert!(result.steps > 0, "cancellation should observe executed work");
+    assert!(
+        result.steps > 0,
+        "cancellation should observe executed work"
+    );
 }
 
 #[test]
@@ -132,7 +153,10 @@ fn heap_fixture_returns_resource_exhausted_before_exceeding_cell_quota() {
 
     assert_eq!(result.status, HeapStatus::ResourceExhausted);
     assert_eq!(result.heap_cells, 0);
-    assert!(result.error.is_none(), "quota exhaustion is not a memory fault");
+    assert!(
+        result.error.is_none(),
+        "quota exhaustion is not a memory fault"
+    );
 }
 
 #[test]
@@ -164,7 +188,8 @@ fn recursion_fixture_calls_and_returns_deterministically() {
     )
     .expect("recursion fixture should validate");
 
-    let result = RecursionInterpreter::new(program).run(RecursionLimits::new(64, 8), &Cancellation::new());
+    let result =
+        RecursionInterpreter::new(program).run(RecursionLimits::new(64, 8), &Cancellation::new());
 
     assert_eq!(result.status, RecursionStatus::Halted);
     assert_eq!(result.max_depth, 4);
@@ -186,7 +211,8 @@ fn recursion_fixture_stops_before_exceeding_call_depth_quota() {
     )
     .expect("recursive loop should validate");
 
-    let result = RecursionInterpreter::new(program).run(RecursionLimits::new(64, 3), &Cancellation::new());
+    let result =
+        RecursionInterpreter::new(program).run(RecursionLimits::new(64, 3), &Cancellation::new());
 
     assert_eq!(result.status, RecursionStatus::ResourceExhausted);
     assert_eq!(result.max_depth, 3);
@@ -210,7 +236,8 @@ fn signal_fixture_distinguishes_user_exception_from_exit() {
     ])
     .expect("exit fixture should validate");
 
-    let exception = SignalInterpreter::new(exception_program).run(SignalLimits::new(8), &Cancellation::new());
+    let exception =
+        SignalInterpreter::new(exception_program).run(SignalLimits::new(8), &Cancellation::new());
     let exit = SignalInterpreter::new(exit_program).run(SignalLimits::new(8), &Cancellation::new());
 
     assert_eq!(exception.status, SignalStatus::Exception);
@@ -221,7 +248,8 @@ fn signal_fixture_distinguishes_user_exception_from_exit() {
 
 #[test]
 fn signal_fixture_reports_resource_exhaustion_before_unbounded_execution() {
-    let program = SignalProgram::new(vec![SignalInstruction::Jump { next: 0 }]).expect("loop fixture should validate");
+    let program = SignalProgram::new(vec![SignalInstruction::Jump { next: 0 }])
+        .expect("loop fixture should validate");
 
     let result = SignalInterpreter::new(program).run(SignalLimits::new(3), &Cancellation::new());
 

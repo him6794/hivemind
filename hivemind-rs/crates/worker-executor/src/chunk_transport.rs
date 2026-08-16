@@ -22,6 +22,7 @@ use hivemind_proto::{
 #[derive(Clone, PartialEq, Eq)]
 pub struct VerifiedWorkerExecution {
     token: String,
+    transfer_generation: Option<i64>,
 }
 
 impl std::fmt::Debug for VerifiedWorkerExecution {
@@ -57,9 +58,42 @@ impl VerifiedWorkerExecution {
         {
             return Err(WorkerChunkIngestError::AuthorizationMismatch);
         }
+        let transfer_generation = verifier
+            .decode_execution_claims(token)
+            .ok()
+            .and_then(|claims| claims.transfer_generation);
         Ok(Self {
             token: token.to_owned(),
+            transfer_generation,
         })
+    }
+
+    /// Verify the token's typed attempt identity in addition to its task and
+    /// worker binding. Legacy tokens remain accepted by the lower-level
+    /// adapter, but general-compute RPCs use this stricter check.
+    pub fn require_identity(
+        &self,
+        verifier: &WorkerExecutionVerifier,
+        request: &GeneralComputeRequest,
+    ) -> Result<(), WorkerChunkIngestError> {
+        let claims = verifier
+            .decode_execution_claims(&self.token)
+            .map_err(|_| WorkerChunkIngestError::AuthorizationInvalid)?;
+        if claims.execution_id.as_deref() != Some(request.execution_id.as_str())
+            || claims.attempt_id.as_deref() != Some(request.attempt_id.as_str())
+            || claims.idempotency_key.as_deref() != Some(request.idempotency_key.as_str())
+            || claims.request_digest.as_deref() != Some(request.request_digest.as_str())
+        {
+            return Err(WorkerChunkIngestError::AuthorizationMismatch);
+        }
+        Ok(())
+    }
+
+    pub fn require_generation(&self, generation: i64) -> Result<(), WorkerChunkIngestError> {
+        if self.transfer_generation != Some(generation) || generation <= 0 {
+            return Err(WorkerChunkIngestError::AuthorizationMismatch);
+        }
+        Ok(())
     }
 
     pub(crate) fn token(&self) -> &str {
@@ -111,6 +145,7 @@ pub fn ingest_general_compute_chunk(
     if upload.token != verified_execution.token() {
         return Err(WorkerChunkIngestError::TokenMismatch);
     }
+    verified_execution.require_generation(upload.transfer_generation)?;
     validate_general_compute_chunk_upload(upload).map_err(WorkerChunkIngestError::WireInvalid)?;
 
     let size_bytes = u64::try_from(upload.size_bytes)
@@ -143,6 +178,7 @@ pub fn resume_general_compute_chunks(
     if resume.token != verified_execution.token() {
         return Err(WorkerChunkIngestError::TokenMismatch);
     }
+    verified_execution.require_generation(resume.transfer_generation)?;
     validate_general_compute_chunk_resume_request(resume)
         .map_err(WorkerChunkIngestError::WireInvalid)?;
     let envelope = ChunkResumeEnvelope {
@@ -166,7 +202,7 @@ pub fn resume_general_compute_chunks(
     // actual missing set from the operator-owned CAS so a false claim cannot
     // suppress a required transfer.
     let actual_missing = store
-        .missing_chunks(artifact)
+        .missing_transfer_chunks(&resume.execution_id, artifact)
         .map_err(|error| WorkerChunkIngestError::Transport(ChunkTransportError::Storage(error)))?;
     Ok(actual_missing)
 }

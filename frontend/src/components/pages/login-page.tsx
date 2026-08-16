@@ -56,8 +56,8 @@ export function LoginPage() {
         </h1>
         <p className="mt-4 max-w-xl text-muted-foreground">
           {locale === "zh"
-            ? "登入後可查看帳號資訊、CPT 餘額，以及部署 Master 或 Worker 節點的下一步指引。"
-            : "After signing in, you can review account state, CPT balance, and the next steps for deploying a Master or Worker node."}
+            ? "登入後可以查看 CPT 餘額，以及部署節點的下一步。"
+            : "Sign in to check your CPT balance and your next step."}
         </p>
       </div>
 

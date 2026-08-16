@@ -2,9 +2,9 @@ use general_compute_runtime::gpu::{
     GpuCapability, GpuFallbackReason, GpuRequirement, GpuRuntime, GpuSelection, GpuVendor,
 };
 use general_compute_runtime::{
-    ArtifactManifest, ArtifactRole, EvidenceEnvelope, ExecutionPolicy, GeneralComputeRequest,
-    GeneralComputeResult, ResultStatus, UsageClaim, ValidationErrorCode,
-    GENERAL_COMPUTE_RUNTIME_VERSION,
+    ArtifactManifest, ArtifactRole, EvidenceEnvelope, ExecutionPolicy,
+    GENERAL_COMPUTE_RUNTIME_VERSION, GeneralComputeRequest, GeneralComputeResult, ResultStatus,
+    UsageClaim, ValidationErrorCode,
 };
 
 const IMAGE: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

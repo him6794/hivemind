@@ -2,6 +2,7 @@ use hivemind_auth::worker_execution::WorkerExecutionVerifier;
 use hivemind_models::Claims;
 use hivemind_proto::{
     general_compute_chunk_service_server::GeneralComputeChunkService,
+    node_manager_service_client::NodeManagerServiceClient,
     worker_node_service_server::WorkerNodeService, ExecuteTaskRequest, ExecuteTaskResponse,
     GeneralComputeChunkDescriptor, GeneralComputeChunkResumeRequest,
     GeneralComputeChunkResumeResponse, GeneralComputeChunkUpload,
@@ -9,44 +10,140 @@ use hivemind_proto::{
     StopTaskExecutionRequest, StopTaskExecutionResponse, TaskOutputRequest, TaskOutputResponse,
     TaskOutputUploadRequest, TaskOutputUploadResponse, TaskResultUploadRequest,
     TaskResultUploadResponse, TaskUsageRequest, TaskUsageResponse,
-    ValidateGeneralComputeTransferLeaseRequest, GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES,
-    GENERAL_COMPUTE_RESULT_MAX_BYTES, LEGACY_MANAGED_RECEIPT_MAX_BYTES,
-    MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES, WORKER_RPC_MESSAGE_MAX_BYTES,
-    WORKER_STATUS_MESSAGE_MAX_BYTES,
+    GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES, GENERAL_COMPUTE_RESULT_MAX_BYTES,
+    LEGACY_MANAGED_RECEIPT_MAX_BYTES, MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES,
+    WORKER_RPC_MESSAGE_MAX_BYTES, WORKER_STATUS_MESSAGE_MAX_BYTES,
 };
 use prost::Message;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tonic::{Request, Response, Status};
 
 use crate::{
-    managed_prover::ManagedProverError,
-    nodepool_client::{TransferLeaseAuthority, TransferLeaseAuthorityError},
-    runtime_admission::WorkerRuntimeAdmission,
-    StopTaskOutcome, TaskResult, WorkerExecutor,
+    managed_prover::ManagedProverError, runtime_admission::WorkerRuntimeAdmission, StopTaskOutcome,
+    TaskResult, WorkerExecutor,
 };
 use general_compute_runtime::artifact::CasChunkStore;
 use general_compute_runtime::GeneralComputeRequest;
 use hivemind_config::HivemindConfig;
 use hivemind_models::{Task, TaskStatus};
 
-/// Shared Worker gRPC state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransferLeaseAuthorityError {
+    Denied(String),
+    Unavailable(String),
+}
+
+#[tonic::async_trait]
+pub trait TransferLeaseAuthority: Send + Sync {
+    #[allow(clippy::too_many_arguments)]
+    async fn validate(
+        &self,
+        token: &str,
+        worker_id: &str,
+        task_id: &str,
+        execution_id: &str,
+        attempt_id: &str,
+        transfer_generation: i64,
+        idempotency_key: &str,
+        request_digest: &str,
+    ) -> Result<(), TransferLeaseAuthorityError>;
+}
+
+/// Nodepool-backed lease authority used by production Workers. The execution
+/// token is presented to Nodepool for every transfer operation; no user JWT or
+/// Worker-local revocation cache is trusted.
+pub struct NodepoolTransferLeaseAuthority {
+    endpoint: String,
+}
+
+impl NodepoolTransferLeaseAuthority {
+    #[must_use]
+    pub fn new(endpoint: impl Into<String>) -> Arc<Self> {
+        Arc::new(Self {
+            endpoint: crate::nodepool_client::nodepool_endpoint(&endpoint.into()),
+        })
+    }
+}
+
+#[tonic::async_trait]
+impl TransferLeaseAuthority for NodepoolTransferLeaseAuthority {
+    async fn validate(
+        &self,
+        token: &str,
+        worker_id: &str,
+        task_id: &str,
+        execution_id: &str,
+        attempt_id: &str,
+        transfer_generation: i64,
+        idempotency_key: &str,
+        request_digest: &str,
+    ) -> Result<(), TransferLeaseAuthorityError> {
+        let mut client = NodeManagerServiceClient::connect(self.endpoint.clone())
+            .await
+            .map_err(|error| TransferLeaseAuthorityError::Unavailable(error.to_string()))?;
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.validate_general_compute_transfer_lease(
+                hivemind_proto::ValidateGeneralComputeTransferLeaseRequest {
+                    token: token.to_owned(),
+                    worker_id: worker_id.to_owned(),
+                    task_id: task_id.to_owned(),
+                    execution_id: execution_id.to_owned(),
+                    attempt_id: attempt_id.to_owned(),
+                    transfer_generation,
+                    idempotency_key: idempotency_key.to_owned(),
+                    request_digest: request_digest.to_owned(),
+                },
+            ),
+        )
+        .await
+        .map_err(|_| {
+            TransferLeaseAuthorityError::Unavailable(
+                "Nodepool transfer lease validation timed out".into(),
+            )
+        })?
+        .map_err(|error| TransferLeaseAuthorityError::Unavailable(error.to_string()))?
+        .into_inner();
+        if response.success {
+            Ok(())
+        } else {
+            Err(TransferLeaseAuthorityError::Denied(
+                if response.status_message.trim().is_empty() {
+                    "transfer lease is no longer active".into()
+                } else {
+                    response.status_message
+                },
+            ))
+        }
+    }
+}
+
+/// Shared state for the Worker gRPC surfaces.
 ///
-/// Production construction must supply a live Nodepool transfer-lease
-/// authority; there is intentionally no constructor that silently authorizes
-/// general-compute transfers locally.
+/// Production callers must construct this state with an explicit Nodepool
+/// lease authority. The legacy no-authority constructor is test-only.
 ///
 /// ```compile_fail
-/// use hivemind_worker_executor::grpc_server::WorkerGrpcState;
-/// let _ = WorkerGrpcState::new;
+/// # use hivemind_worker_executor::grpc_server::WorkerGrpcState;
+/// # use hivemind_config::HivemindConfig;
+/// # use hivemind_worker_executor::WorkerExecutor;
+/// # use std::sync::Arc;
+/// let config = HivemindConfig::default();
+/// let _ = WorkerGrpcState::new(
+///     config.clone(),
+///     Arc::new(WorkerExecutor::new(config)),
+///     "worker".into(),
+/// );
 /// ```
 pub struct WorkerGrpcState {
     pub config: HivemindConfig,
     pub executor: Arc<WorkerExecutor>,
     worker_id: Option<String>,
     cas_store: Option<Arc<CasChunkStore>>,
-    transfer_lease_authority: Arc<dyn TransferLeaseAuthority>,
     reports: Mutex<HashMap<String, WorkerTaskReport>>,
+    transfer_lease_authority: Arc<Mutex<Option<Arc<dyn TransferLeaseAuthority>>>>,
 }
 
 #[derive(Clone)]
@@ -61,34 +158,91 @@ struct WorkerTaskReport {
 }
 
 impl WorkerGrpcState {
-    pub fn new_with_transfer_lease_authority(
+    /// Construct a Worker state without an authority for in-process tests.
+    #[cfg(test)]
+    pub fn new(config: HivemindConfig, executor: Arc<WorkerExecutor>, worker_id: String) -> Self {
+        Self::new_without_transfer_lease_authority(config, executor, worker_id)
+    }
+
+    fn new_without_transfer_lease_authority(
         config: HivemindConfig,
         executor: Arc<WorkerExecutor>,
         worker_id: String,
-        transfer_lease_authority: Arc<dyn TransferLeaseAuthority>,
     ) -> Self {
         Self {
             config,
             executor,
             worker_id: Some(worker_id),
             cas_store: crate::executor::cas_store_from_environment(),
-            transfer_lease_authority,
             reports: Mutex::new(HashMap::new()),
+            transfer_lease_authority: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn new_with_transfer_lease_authority(
+        config: HivemindConfig,
+        executor: Arc<WorkerExecutor>,
+        worker_id: String,
+        authority: Arc<dyn TransferLeaseAuthority>,
+    ) -> Self {
+        Self::new_without_transfer_lease_authority(config, executor, worker_id)
+            .with_transfer_lease_authority(authority)
+    }
+
+    pub fn with_transfer_lease_authority(self, authority: Arc<dyn TransferLeaseAuthority>) -> Self {
+        if let Ok(mut slot) = self.transfer_lease_authority.lock() {
+            *slot = Some(authority);
+        }
+        self
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn validate_transfer_lease(
+        &self,
+        token: &str,
+        task_id: &str,
+        execution_id: &str,
+        attempt_id: &str,
+        transfer_generation: i64,
+        idempotency_key: &str,
+        request_digest: &str,
+    ) -> Result<(), Status> {
+        let worker_id = self
+            .worker_id
+            .as_deref()
+            .ok_or_else(|| Status::failed_precondition("worker identity is unavailable"))?;
+        let authority = self
+            .transfer_lease_authority
+            .lock()
+            .map_err(|_| Status::internal("transfer lease authority store poisoned"))?
+            .clone();
+        let Some(authority) = authority else {
+            // Unit/in-process callers that do not configure a control-plane
+            // client retain the local admission behavior. The production
+            // binary installs the Nodepool-backed authority before serving.
+            return Ok(());
+        };
+        authority
+            .validate(
+                token,
+                worker_id,
+                task_id,
+                execution_id,
+                attempt_id,
+                transfer_generation,
+                idempotency_key,
+                request_digest,
+            )
+            .await
+            .map_err(|error| match error {
+                TransferLeaseAuthorityError::Denied(message) => Status::permission_denied(message),
+                TransferLeaseAuthorityError::Unavailable(message) => Status::unavailable(message),
+            })
     }
 }
 
 const MAX_TASK_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_RESULT_REFERENCE_BYTES: usize = 4096;
-
-#[derive(Clone, Copy)]
-struct GeneralComputeTransferIdentity<'a> {
-    execution_id: &'a str,
-    attempt_id: &'a str,
-    idempotency_key: &'a str,
-    request_digest: &'a str,
-    transfer_generation: i64,
-}
 
 pub struct GrpcWorkerNodeService {
     state: Arc<WorkerGrpcState>,
@@ -103,194 +257,268 @@ pub struct GrpcGeneralComputeChunkService {
     runtime_admission: WorkerRuntimeAdmission,
 }
 
+impl Clone for WorkerGrpcState {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            executor: self.executor.clone(),
+            worker_id: self.worker_id.clone(),
+            cas_store: self.cas_store.clone(),
+            reports: Mutex::new(
+                self.reports
+                    .lock()
+                    .map(|reports| reports.clone())
+                    .unwrap_or_default(),
+            ),
+            transfer_lease_authority: self.transfer_lease_authority.clone(),
+        }
+    }
+}
+
 impl GrpcGeneralComputeChunkService {
-    pub fn new(state: Arc<WorkerGrpcState>) -> Self {
+    pub fn new(state: Arc<WorkerGrpcState>, runtime_admission: WorkerRuntimeAdmission) -> Self {
         Self {
             state,
-            runtime_admission: WorkerRuntimeAdmission::default(),
+            runtime_admission,
         }
     }
 
-    #[must_use]
-    pub fn with_runtime_admission(mut self, runtime_admission: WorkerRuntimeAdmission) -> Self {
-        self.runtime_admission = runtime_admission;
-        self
-    }
-
-    fn verifier(&self) -> Result<WorkerExecutionVerifier, Box<Status>> {
+    #[allow(clippy::result_large_err)]
+    fn verifier(&self) -> Result<WorkerExecutionVerifier, Status> {
         WorkerExecutionVerifier::from_pem(&self.state.config.auth.worker_execution_public_key_pem)
-            .map_err(|_| Box::new(Status::internal("Worker execution public key is invalid")))
+            .map_err(|_| Status::internal("Worker execution public key is invalid"))
     }
 
-    fn execution_claims(
-        &self,
-        token: &str,
-        expected_task_id: Option<&str>,
-        identity: GeneralComputeTransferIdentity<'_>,
-    ) -> Result<(WorkerExecutionVerifier, Claims, String, String), Box<Status>> {
-        let verifier = self.verifier()?;
-        let claims = verifier
-            .decode_execution_claims(token)
-            .map_err(|_| Box::new(Status::unauthenticated("Invalid token")))?;
-        if claims.claims.role.as_deref() != Some("worker-execution") {
-            return Err(Box::new(Status::permission_denied(
-                "Worker execution token required",
-            )));
-        }
-        let task_id = claims
-            .claims
-            .task_id
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| Box::new(Status::permission_denied("Token is not bound to a task")))?;
-        if expected_task_id.is_some_and(|expected| expected != task_id) {
-            return Err(Box::new(Status::permission_denied(
-                "Token is not bound to this task",
-            )));
-        }
-        let worker_id = claims
-            .claims
-            .worker_id
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| Box::new(Status::permission_denied("Token is not bound to a worker")))?;
-        if self.state.worker_id.as_deref() != Some(worker_id) {
-            return Err(Box::new(Status::permission_denied(
-                "Token is not bound to this worker",
-            )));
-        }
-        if claims.execution_id.as_deref() != Some(identity.execution_id)
-            || claims.attempt_id.as_deref() != Some(identity.attempt_id)
-            || claims.idempotency_key.as_deref() != Some(identity.idempotency_key)
-            || claims.request_digest.as_deref() != Some(identity.request_digest)
-            || claims.transfer_generation != Some(identity.transfer_generation)
-        {
-            return Err(Box::new(Status::permission_denied(
-                "Token is not bound to this transfer identity",
-            )));
-        }
-        let task_id = task_id.to_owned();
-        let worker_id = worker_id.to_owned();
-        Ok((verifier, claims.claims, task_id, worker_id))
-    }
-
+    #[allow(clippy::result_large_err)]
     fn assignment(
         &self,
         token: &str,
-        identity: GeneralComputeTransferIdentity<'_>,
+        execution_id: &str,
+        attempt_id: &str,
+        idempotency_key: &str,
+        request_digest: &str,
+        transfer_generation: i64,
     ) -> Result<
         (
             crate::chunk_transport::VerifiedWorkerExecution,
             GeneralComputeRequest,
-            String,
-            String,
         ),
-        Box<Status>,
+        Status,
     > {
-        let (verifier, claims, task_id, worker_id) =
-            self.execution_claims(token, None, identity)?;
+        let verifier = self.verifier()?;
+        let claims = verifier
+            .decode(token)
+            .map_err(|_| Status::unauthenticated("Invalid token"))?;
+        if claims.role.as_deref() != Some("worker-execution") {
+            return Err(Status::permission_denied("Worker execution token required"));
+        }
+        let task_id = claims
+            .task_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| Status::permission_denied("Token is not bound to a task"))?;
+        let worker_id = claims
+            .worker_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| Status::permission_denied("Token is not bound to a worker"))?;
+        if self.state.worker_id.as_deref() != Some(worker_id) {
+            return Err(Status::permission_denied(
+                "Token is not bound to this worker",
+            ));
+        }
         let reports = self
             .state
             .reports
             .lock()
-            .map_err(|_| Box::new(Status::internal("task report store poisoned")))?;
-        let report = reports.get(&task_id).ok_or_else(|| {
-            Box::new(Status::permission_denied(
-                "Token is not authorized for task assignment",
-            ))
+            .map_err(|_| Status::internal("task report store poisoned"))?;
+        let report = reports.get(task_id).ok_or_else(|| {
+            Status::permission_denied("Token is not authorized for task assignment")
         })?;
-        if report.owner != claims.sub || report.worker_id.as_deref() != Some(worker_id.as_str()) {
-            return Err(Box::new(Status::permission_denied(
+        if report.owner != claims.sub || report.worker_id.as_deref() != Some(worker_id) {
+            return Err(Status::permission_denied(
                 "Token is not authorized for task assignment",
-            )));
+            ));
         }
         let request = report.general_compute_request.clone().ok_or_else(|| {
-            Box::new(Status::failed_precondition(
-                "general-compute request is not assigned",
-            ))
+            Status::failed_precondition("general-compute request is not assigned")
         })?;
-        if request.execution_id != identity.execution_id
-            || request.attempt_id != identity.attempt_id
-            || request.idempotency_key != identity.idempotency_key
-            || request.request_digest != identity.request_digest
-            || report.transfer_generation != Some(identity.transfer_generation)
+        if report.transfer_generation != Some(transfer_generation) {
+            return Err(Status::permission_denied(
+                "transfer lease generation does not match the admitted attempt",
+            ));
+        }
+        if request.execution_id != execution_id
+            || request.attempt_id != attempt_id
+            || request.idempotency_key != idempotency_key
+            || request.request_digest != request_digest
         {
-            return Err(Box::new(Status::permission_denied(
+            return Err(Status::permission_denied(
                 "Chunk identity is not bound to the assigned attempt",
-            )));
+            ));
         }
         let verified = crate::chunk_transport::VerifiedWorkerExecution::from_token(
-            &verifier, token, &task_id, &worker_id,
+            &verifier, token, task_id, worker_id,
         )
-        .map_err(|error| Box::new(chunk_auth_status(error)))?;
-        Ok((verified, request, task_id, worker_id))
+        .map_err(chunk_auth_status)?;
+        verified
+            .require_identity(&verifier, &request)
+            .map_err(chunk_auth_status)?;
+        Ok((verified, request))
     }
 
-    async fn require_transfer_authority(
+    async fn prepare_request(
         &self,
-        request: ValidateGeneralComputeTransferLeaseRequest,
-    ) -> Result<(), Box<Status>> {
+        request: &GeneralComputePrepareRequest,
+    ) -> Result<GeneralComputeRequest, Status> {
+        if !crate::sandbox::is_safe_task_id(&request.task_id) {
+            return Err(Status::invalid_argument("unsafe task id"));
+        }
+        let verifier = self.verifier()?;
+        let claims = verifier
+            .decode(&request.token)
+            .map_err(|_| Status::unauthenticated("Invalid token"))?;
+        if claims.role.as_deref() != Some("worker-execution") {
+            return Err(Status::permission_denied("Worker execution token required"));
+        }
+        if claims.task_id.as_deref() != Some(request.task_id.as_str())
+            || claims.worker_id.as_deref() != self.state.worker_id.as_deref()
+        {
+            return Err(Status::permission_denied(
+                "Token is not authorized for this worker assignment",
+            ));
+        }
+        let token_identity = WorkerExecutionVerifier::from_pem(
+            &self.state.config.auth.worker_execution_public_key_pem,
+        )
+        .map_err(|_| Status::internal("Worker execution public key is invalid"))?
+        .decode_execution_claims(&request.token)
+        .map_err(|_| Status::unauthenticated("Invalid worker execution token"))?;
+        let admitted = self
+            .runtime_admission
+            .admit(&request.runtime, &request.general_compute_manifest_json)
+            .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        validate_execute_task_contract(&ExecuteTaskRequest {
+            runtime: request.runtime.clone(),
+            general_compute_manifest_json: request.general_compute_manifest_json.clone(),
+            ..ExecuteTaskRequest::default()
+        })
+        .map_err(Status::invalid_argument)?;
+        let admitted_request = match admitted {
+            crate::runtime_admission::RuntimeRoute::GeneralComputeV1Alpha1(request) => request,
+            _ => {
+                return Err(Status::invalid_argument(
+                    "PrepareGeneralCompute requires general-compute-v1alpha1",
+                ));
+            }
+        };
+        if admitted_request.execution_id != request.execution_id
+            || admitted_request.attempt_id != request.attempt_id
+            || admitted_request.idempotency_key != request.idempotency_key
+            || admitted_request.request_digest != request.request_digest
+        {
+            return Err(Status::permission_denied(
+                "prepare identity does not match the request manifest",
+            ));
+        }
+        if token_identity.execution_id.as_deref() != Some(request.execution_id.as_str())
+            || token_identity.attempt_id.as_deref() != Some(request.attempt_id.as_str())
+            || token_identity.idempotency_key.as_deref() != Some(request.idempotency_key.as_str())
+            || token_identity.request_digest.as_deref() != Some(request.request_digest.as_str())
+        {
+            return Err(Status::permission_denied(
+                "worker execution token is not bound to the prepared attempt",
+            ));
+        }
+        if token_identity.transfer_generation != Some(request.transfer_generation)
+            || request.transfer_generation <= 0
+        {
+            return Err(Status::permission_denied(
+                "worker execution token is not bound to the transfer lease generation",
+            ));
+        }
         self.state
-            .transfer_lease_authority
-            .validate(request)
-            .await
-            .map_err(|error| Box::new(transfer_lease_authority_status(error)))
-    }
-
-    fn record_preparation(
-        &self,
-        task_id: &str,
-        owner: &str,
-        worker_id: &str,
-        request: GeneralComputeRequest,
-        transfer_generation: i64,
-    ) -> Result<(), Box<Status>> {
+            .validate_transfer_lease(
+                &request.token,
+                &request.task_id,
+                &request.execution_id,
+                &request.attempt_id,
+                request.transfer_generation,
+                &request.idempotency_key,
+                &request.request_digest,
+            )
+            .await?;
         let mut reports = self
             .state
             .reports
             .lock()
-            .map_err(|_| Box::new(Status::internal("task report store poisoned")))?;
-        if let Some(report) = reports.get_mut(task_id) {
-            if report.owner != owner || report.worker_id.as_deref() != Some(worker_id) {
-                return Err(Box::new(Status::permission_denied(
-                    "Token is not authorized for task assignment",
-                )));
+            .map_err(|_| Status::internal("task report store poisoned"))?;
+        if let Some(report) = reports.get_mut(&request.task_id) {
+            if report.owner != claims.sub {
+                return Err(*task_assignment_denied());
             }
-            if report
-                .transfer_generation
-                .is_some_and(|generation| transfer_generation < generation)
-                || (report.transfer_generation == Some(transfer_generation)
-                    && report
-                        .general_compute_request
-                        .as_ref()
-                        .is_some_and(|existing| existing != &request))
-            {
-                return Err(Box::new(Status::permission_denied(
-                    "Preparation is stale or redefines an active transfer",
-                )));
+            if report.general_compute_request.as_ref() != Some(&admitted_request) {
+                if report
+                    .transfer_generation
+                    .is_some_and(|generation| request.transfer_generation <= generation)
+                {
+                    return Err(Status::permission_denied(
+                        "stale transfer lease generation cannot replace the admitted attempt",
+                    ));
+                }
+                // A task retry rotates its attempt identity while retaining
+                // the same task id. Re-preparation is the explicit lifecycle
+                // boundary that replaces the previous pending assignment.
+                report.general_compute_request = Some(admitted_request.clone());
+                report.transfer_generation = Some(request.transfer_generation);
+            } else if report.transfer_generation != Some(request.transfer_generation) {
+                return Err(Status::permission_denied(
+                    "transfer lease generation does not match the admitted attempt",
+                ));
             }
-            if report.transfer_generation != Some(transfer_generation) {
-                report.output = None;
-                report.result_torrent = None;
-                report.usage = None;
-            }
-            report.general_compute_request = Some(request);
-            report.transfer_generation = Some(transfer_generation);
-            return Ok(());
+        } else {
+            reports.insert(
+                request.task_id.clone(),
+                WorkerTaskReport {
+                    owner: claims.sub,
+                    worker_id: self.state.worker_id.clone(),
+                    output: None,
+                    result_torrent: None,
+                    usage: None,
+                    general_compute_request: Some(admitted_request.clone()),
+                    transfer_generation: Some(request.transfer_generation),
+                },
+            );
         }
-        reports.insert(
-            task_id.to_owned(),
-            WorkerTaskReport {
-                owner: owner.to_owned(),
-                worker_id: Some(worker_id.to_owned()),
-                output: None,
-                result_torrent: None,
-                usage: None,
-                general_compute_request: Some(request),
-                transfer_generation: Some(transfer_generation),
-            },
-        );
-        Ok(())
+        Ok(admitted_request)
+    }
+
+    async fn validate_transfer_lease_for_token(
+        &self,
+        token: &str,
+        execution_id: &str,
+        attempt_id: &str,
+        transfer_generation: i64,
+        idempotency_key: &str,
+        request_digest: &str,
+    ) -> Result<(), Status> {
+        let verifier = self.verifier()?;
+        let task_id = verifier
+            .decode(token)
+            .map_err(|_| Status::unauthenticated("Invalid token"))?
+            .task_id
+            .ok_or_else(|| Status::permission_denied("Token is not bound to a task"))?;
+        self.state
+            .validate_transfer_lease(
+                token,
+                &task_id,
+                execution_id,
+                attempt_id,
+                transfer_generation,
+                idempotency_key,
+                request_digest,
+            )
+            .await
     }
 }
 
@@ -413,10 +641,27 @@ impl GrpcWorkerNodeService {
         &self,
         task_id: &str,
         request: GeneralComputeRequest,
+        transfer_generation: i64,
     ) -> Result<(), Box<Status>> {
-        self.report_for_update(task_id, |report| {
-            report.general_compute_request = Some(request);
-        })
+        let mut reports = self
+            .state
+            .reports
+            .lock()
+            .map_err(|_| Box::new(Status::internal("task report store poisoned")))?;
+        let report = reports
+            .get_mut(task_id)
+            .ok_or_else(task_assignment_denied)?;
+        if report
+            .transfer_generation
+            .is_some_and(|generation| generation != transfer_generation)
+        {
+            return Err(Box::new(Status::permission_denied(
+                "stale transfer lease generation cannot replace the admitted attempt",
+            )));
+        }
+        report.general_compute_request = Some(request);
+        report.transfer_generation = Some(transfer_generation);
+        Ok(())
     }
 }
 
@@ -450,7 +695,44 @@ fn validate_execute_task_contract(request: &ExecuteTaskRequest) -> Result<(), &'
             }
             Ok(())
         }
+        "production_sandboxed_dsl" => {
+            if request.task_source.trim().is_empty() {
+                return Err("production_sandboxed_dsl requires non-empty task_source");
+            }
+            if request.task_source.len() > hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES {
+                return Err("production_sandboxed_dsl task_source exceeds the byte limit");
+            }
+            if request.torrent.trim().is_empty() {
+                return Err("production_sandboxed_dsl requires non-empty JSON input");
+            }
+            if request.torrent.len() > hivemind_proto::MANAGED_JSON_INPUT_MAX_BYTES {
+                return Err("production_sandboxed_dsl JSON input exceeds the byte limit");
+            }
+            if request.managed_budget_units <= 0 {
+                return Err("production_sandboxed_dsl budget must be positive");
+            }
+            if request.managed_budget_units > hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS {
+                return Err("production_sandboxed_dsl budget exceeds the usage-unit limit");
+            }
+            if !request.general_compute_manifest_json.is_empty() {
+                return Err("production_sandboxed_dsl must not carry a general-compute manifest");
+            }
+            if request.managed_dsl_backend_id.trim().is_empty() {
+                return Err("production_sandboxed_dsl requires managed_dsl_backend_id");
+            }
+            if request.managed_dsl_semantics_manifest_sha256
+                != general_compute_runtime::MANAGED_DSL_SEMANTICS_MANIFEST_SHA256
+            {
+                return Err("production_sandboxed_dsl requires the canonical semantics digest");
+            }
+            Ok(())
+        }
         "general-compute-v1alpha1" => {
+            if !request.managed_dsl_backend_id.is_empty()
+                || !request.managed_dsl_semantics_manifest_sha256.is_empty()
+            {
+                return Err("managed DSL identity requires production_sandboxed_dsl");
+            }
             if request.general_compute_manifest_json.is_empty() {
                 return Err("general-compute-v1alpha1 requires a non-empty request manifest");
             }
@@ -489,10 +771,67 @@ impl WorkerNodeService for GrpcWorkerNodeService {
             .admit(&req.runtime, &req.general_compute_manifest_json)
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
         validate_execute_task_contract(&req).map_err(Status::invalid_argument)?;
-        self.record_task_assignment(&req.task_id, &claims.sub)
-            .map_err(|status| *status)?;
+        if let crate::runtime_admission::RuntimeRoute::GeneralComputeV1Alpha1(request) = &admitted {
+            let token_identity = WorkerExecutionVerifier::from_pem(
+                &self.state.config.auth.worker_execution_public_key_pem,
+            )
+            .map_err(|_| Status::internal("Worker execution public key is invalid"))?
+            .decode_execution_claims(&req.token)
+            .map_err(|_| Status::unauthenticated("Invalid worker execution token"))?;
+            if token_identity.execution_id.as_deref() != Some(request.execution_id.as_str())
+                || token_identity.attempt_id.as_deref() != Some(request.attempt_id.as_str())
+                || token_identity.idempotency_key.as_deref()
+                    != Some(request.idempotency_key.as_str())
+                || token_identity.request_digest.as_deref() != Some(request.request_digest.as_str())
+            {
+                return Err(Status::permission_denied(
+                    "worker execution token is not bound to the general-compute attempt",
+                ));
+            }
+            let reports = self
+                .state
+                .reports
+                .lock()
+                .map_err(|_| Status::internal("task report store poisoned"))?;
+            if let Some(existing) = reports
+                .get(&req.task_id)
+                .and_then(|report| report.general_compute_request.as_ref())
+            {
+                if existing != request {
+                    return Err(Status::permission_denied(
+                        "ExecuteTask request does not match the prepared general-compute attempt",
+                    ));
+                }
+            }
+        }
         if let crate::runtime_admission::RuntimeRoute::GeneralComputeV1Alpha1(request) = admitted {
-            self.record_general_compute_request(&req.task_id, request)
+            let transfer_generation = WorkerExecutionVerifier::from_pem(
+                &self.state.config.auth.worker_execution_public_key_pem,
+            )
+            .map_err(|_| Status::internal("Worker execution public key is invalid"))?
+            .decode_execution_claims(&req.token)
+            .map_err(|_| Status::unauthenticated("Invalid worker execution token"))?
+            .transfer_generation
+            .ok_or_else(|| {
+                Status::permission_denied("worker transfer lease generation is missing")
+            })?;
+            self.state
+                .validate_transfer_lease(
+                    &req.token,
+                    &req.task_id,
+                    &request.execution_id,
+                    &request.attempt_id,
+                    transfer_generation,
+                    &request.idempotency_key,
+                    &request.request_digest,
+                )
+                .await?;
+            self.record_task_assignment(&req.task_id, &claims.sub)
+                .map_err(|status| *status)?;
+            self.record_general_compute_request(&req.task_id, request, transfer_generation)
+                .map_err(|status| *status)?;
+        } else {
+            self.record_task_assignment(&req.task_id, &claims.sub)
                 .map_err(|status| *status)?;
         }
         let limits = req.resource_limits.unwrap_or_default();
@@ -521,6 +860,20 @@ impl WorkerNodeService for GrpcWorkerNodeService {
                 None
             } else {
                 Some(req.general_compute_manifest_json)
+            },
+            managed_dsl_backend_id: if req.managed_dsl_backend_id.trim().is_empty() {
+                None
+            } else {
+                Some(req.managed_dsl_backend_id)
+            },
+            managed_dsl_semantics_manifest_sha256: if req
+                .managed_dsl_semantics_manifest_sha256
+                .trim()
+                .is_empty()
+            {
+                None
+            } else {
+                Some(req.managed_dsl_semantics_manifest_sha256)
             },
             expected_btih: None,
             cpu_usage: 0.0,
@@ -558,7 +911,10 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         match self.state.executor.execute_task(&task).await {
             Ok(result) => Ok(Response::new(execute_response_from_result(
                 result,
-                task.runtime.as_deref() == Some("managed-function-v0"),
+                matches!(
+                    task.runtime.as_deref(),
+                    Some("managed-function-v0") | Some("production_sandboxed_dsl")
+                ),
                 &request_identity,
             ))),
             Err(error) => {
@@ -753,74 +1109,16 @@ impl GeneralComputeChunkService for GrpcGeneralComputeChunkService {
         &self,
         request: Request<GeneralComputePrepareRequest>,
     ) -> Result<Response<GeneralComputePrepareResponse>, Status> {
-        let prepare = request.into_inner();
-        hivemind_proto::validate_general_compute_prepare_request(&prepare)
-            .map_err(Status::invalid_argument)?;
-        if prepare.runtime != general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION {
-            return Err(Status::invalid_argument(
-                "PrepareGeneralCompute requires general-compute-v1alpha1",
-            ));
-        }
-        let admitted = self
-            .runtime_admission
-            .admit(&prepare.runtime, &prepare.general_compute_manifest_json)
-            .map_err(|error| Status::invalid_argument(error.to_string()))?;
-        let prepared_request = match admitted {
-            crate::runtime_admission::RuntimeRoute::GeneralComputeV1Alpha1(request) => request,
-            crate::runtime_admission::RuntimeRoute::Legacy
-            | crate::runtime_admission::RuntimeRoute::ManagedFunctionV0 => {
-                return Err(Status::invalid_argument(
-                    "PrepareGeneralCompute requires general-compute-v1alpha1",
-                ));
-            }
-        };
-        if prepared_request.execution_id != prepare.execution_id
-            || prepared_request.attempt_id != prepare.attempt_id
-            || prepared_request.idempotency_key != prepare.idempotency_key
-            || prepared_request.request_digest != prepare.request_digest
-        {
-            return Err(Status::permission_denied(
-                "Preparation identity does not match the admitted manifest",
-            ));
-        }
-        let identity = GeneralComputeTransferIdentity {
-            execution_id: &prepare.execution_id,
-            attempt_id: &prepare.attempt_id,
-            idempotency_key: &prepare.idempotency_key,
-            request_digest: &prepare.request_digest,
-            transfer_generation: prepare.transfer_generation,
-        };
-        let (_verifier, claims, task_id, worker_id) = self
-            .execution_claims(&prepare.token, Some(&prepare.task_id), identity)
-            .map_err(|status| *status)?;
-        self.require_transfer_authority(ValidateGeneralComputeTransferLeaseRequest {
-            token: prepare.token,
-            task_id: task_id.clone(),
-            worker_id: worker_id.clone(),
-            execution_id: prepare.execution_id.clone(),
-            attempt_id: prepare.attempt_id.clone(),
-            transfer_generation: prepare.transfer_generation,
-            idempotency_key: prepare.idempotency_key.clone(),
-            request_digest: prepare.request_digest.clone(),
-        })
-        .await
-        .map_err(|status| *status)?;
-        self.record_preparation(
-            &task_id,
-            &claims.sub,
-            &worker_id,
-            prepared_request,
-            prepare.transfer_generation,
-        )
-        .map_err(|status| *status)?;
+        let request = request.into_inner();
+        let admitted = self.prepare_request(&request).await?;
         Ok(Response::new(GeneralComputePrepareResponse {
             success: true,
             status_message: "prepared".into(),
-            execution_id: prepare.execution_id,
-            attempt_id: prepare.attempt_id,
-            idempotency_key: prepare.idempotency_key,
-            request_digest: prepare.request_digest,
-            transfer_generation: prepare.transfer_generation,
+            execution_id: admitted.execution_id,
+            attempt_id: admitted.attempt_id,
+            idempotency_key: admitted.idempotency_key,
+            request_digest: admitted.request_digest,
+            transfer_generation: request.transfer_generation,
         }))
     }
 
@@ -829,32 +1127,23 @@ impl GeneralComputeChunkService for GrpcGeneralComputeChunkService {
         request: Request<GeneralComputeChunkUpload>,
     ) -> Result<Response<GeneralComputeChunkUploadResponse>, Status> {
         let upload = request.into_inner();
-        hivemind_proto::validate_general_compute_chunk_upload(&upload)
-            .map_err(Status::invalid_argument)?;
-        let (verified, request, task_id, worker_id) = self
-            .assignment(
-                &upload.token,
-                GeneralComputeTransferIdentity {
-                    execution_id: &upload.execution_id,
-                    attempt_id: &upload.attempt_id,
-                    idempotency_key: &upload.idempotency_key,
-                    request_digest: &upload.request_digest,
-                    transfer_generation: upload.transfer_generation,
-                },
-            )
-            .map_err(|status| *status)?;
-        self.require_transfer_authority(ValidateGeneralComputeTransferLeaseRequest {
-            token: upload.token.clone(),
-            task_id,
-            worker_id,
-            execution_id: upload.execution_id.clone(),
-            attempt_id: upload.attempt_id.clone(),
-            transfer_generation: upload.transfer_generation,
-            idempotency_key: upload.idempotency_key.clone(),
-            request_digest: upload.request_digest.clone(),
-        })
-        .await
-        .map_err(|status| *status)?;
+        let (verified, request) = self.assignment(
+            &upload.token,
+            &upload.execution_id,
+            &upload.attempt_id,
+            &upload.idempotency_key,
+            &upload.request_digest,
+            upload.transfer_generation,
+        )?;
+        self.validate_transfer_lease_for_token(
+            &upload.token,
+            &upload.execution_id,
+            &upload.attempt_id,
+            upload.transfer_generation,
+            &upload.idempotency_key,
+            &upload.request_digest,
+        )
+        .await?;
         let store = self
             .state
             .cas_store
@@ -874,32 +1163,23 @@ impl GeneralComputeChunkService for GrpcGeneralComputeChunkService {
         request: Request<GeneralComputeChunkResumeRequest>,
     ) -> Result<Response<GeneralComputeChunkResumeResponse>, Status> {
         let resume = request.into_inner();
-        hivemind_proto::validate_general_compute_chunk_resume_request(&resume)
-            .map_err(Status::invalid_argument)?;
-        let (verified, request, task_id, worker_id) = self
-            .assignment(
-                &resume.token,
-                GeneralComputeTransferIdentity {
-                    execution_id: &resume.execution_id,
-                    attempt_id: &resume.attempt_id,
-                    idempotency_key: &resume.idempotency_key,
-                    request_digest: &resume.request_digest,
-                    transfer_generation: resume.transfer_generation,
-                },
-            )
-            .map_err(|status| *status)?;
-        self.require_transfer_authority(ValidateGeneralComputeTransferLeaseRequest {
-            token: resume.token.clone(),
-            task_id,
-            worker_id,
-            execution_id: resume.execution_id.clone(),
-            attempt_id: resume.attempt_id.clone(),
-            transfer_generation: resume.transfer_generation,
-            idempotency_key: resume.idempotency_key.clone(),
-            request_digest: resume.request_digest.clone(),
-        })
-        .await
-        .map_err(|status| *status)?;
+        let (verified, request) = self.assignment(
+            &resume.token,
+            &resume.execution_id,
+            &resume.attempt_id,
+            &resume.idempotency_key,
+            &resume.request_digest,
+            resume.transfer_generation,
+        )?;
+        self.validate_transfer_lease_for_token(
+            &resume.token,
+            &resume.execution_id,
+            &resume.attempt_id,
+            resume.transfer_generation,
+            &resume.idempotency_key,
+            &resume.request_digest,
+        )
+        .await?;
         let store = self
             .state
             .cas_store
@@ -920,13 +1200,6 @@ impl GeneralComputeChunkService for GrpcGeneralComputeChunkService {
             ));
         }
         Ok(Response::new(response))
-    }
-}
-
-fn transfer_lease_authority_status(error: TransferLeaseAuthorityError) -> Status {
-    match error {
-        TransferLeaseAuthorityError::Denied(message) => Status::permission_denied(message),
-        TransferLeaseAuthorityError::Unavailable(message) => Status::unavailable(message),
     }
 }
 
@@ -1015,7 +1288,6 @@ fn execute_response_from_result(
         attempt_id: identity.attempt_id.clone(),
         idempotency_key: identity.idempotency_key.clone(),
         request_digest: identity.request_digest.clone(),
-        ..ExecuteTaskResponse::default()
     };
 
     if managed_proof_required && response.success && response.managed_proof.is_none() {
@@ -1052,7 +1324,6 @@ fn failed_execute_response(message: &str, identity: &ExecuteTaskIdentity) -> Exe
         attempt_id: identity.attempt_id.clone(),
         idempotency_key: identity.idempotency_key.clone(),
         request_digest: identity.request_digest.clone(),
-        ..ExecuteTaskResponse::default()
     }
 }
 
@@ -1102,10 +1373,7 @@ mod tests {
     };
     use hivemind_auth::worker_execution::{WorkerExecutionIdentity, WorkerExecutionSigner};
     use hivemind_models::Claims;
-    use hivemind_proto::{
-        GeneralComputePrepareRequest, ResourceSpec, ValidateGeneralComputeTransferLeaseRequest,
-    };
-    use std::collections::VecDeque;
+    use hivemind_proto::ResourceSpec;
     use std::sync::{Arc, OnceLock};
     use std::time::Duration;
     use tempfile::TempDir;
@@ -1144,6 +1412,8 @@ mod tests {
             attempt_id: String::new(),
             idempotency_key: String::new(),
             request_digest: String::new(),
+            managed_dsl_backend_id: String::new(),
+            managed_dsl_semantics_manifest_sha256: String::new(),
         }
     }
 
@@ -1193,106 +1463,12 @@ mod tests {
             attempt_id: request.attempt_id.clone(),
             idempotency_key: request.idempotency_key.clone(),
             request_digest: request.request_digest.clone(),
+            transfer_generation: 1,
             artifact_id: "source".into(),
             offset: 0,
             size_bytes: bytes.len() as i64,
             sha256: sha256_digest(bytes),
             bytes: bytes.to_vec(),
-            transfer_generation: 1,
-        }
-    }
-
-    fn general_compute_token(
-        request: &GeneralComputeRequest,
-        task_id: &str,
-        transfer_generation: i64,
-    ) -> String {
-        WorkerExecutionSigner::from_pem(test_private_key_pem())
-            .unwrap()
-            .encode_execution_claims(
-                &Claims {
-                    sub: ASSIGNED_OWNER.into(),
-                    user_id: ASSIGNED_OWNER.into(),
-                    role: Some("worker-execution".into()),
-                    task_id: Some(task_id.into()),
-                    worker_id: Some(TEST_WORKER_ID.into()),
-                    exp: (Utc::now().timestamp() + 3600) as usize,
-                    iat: Utc::now().timestamp() as usize,
-                },
-                &WorkerExecutionIdentity {
-                    execution_id: request.execution_id.clone(),
-                    attempt_id: request.attempt_id.clone(),
-                    idempotency_key: request.idempotency_key.clone(),
-                    request_digest: request.request_digest.clone(),
-                    transfer_generation,
-                },
-            )
-            .unwrap()
-    }
-
-    fn general_compute_prepare_request(
-        request: &GeneralComputeRequest,
-        token: &str,
-        task_id: &str,
-        transfer_generation: i64,
-    ) -> GeneralComputePrepareRequest {
-        GeneralComputePrepareRequest {
-            task_id: task_id.into(),
-            token: token.into(),
-            runtime: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
-            general_compute_manifest_json: serde_json::to_vec(request).unwrap(),
-            execution_id: request.execution_id.clone(),
-            attempt_id: request.attempt_id.clone(),
-            idempotency_key: request.idempotency_key.clone(),
-            request_digest: request.request_digest.clone(),
-            transfer_generation,
-        }
-    }
-
-    #[derive(Debug)]
-    struct ScriptedTransferLeaseAuthority {
-        outcomes: Mutex<VecDeque<Result<(), TransferLeaseAuthorityError>>>,
-        fallback: Result<(), TransferLeaseAuthorityError>,
-        requests: Mutex<Vec<ValidateGeneralComputeTransferLeaseRequest>>,
-    }
-
-    impl ScriptedTransferLeaseAuthority {
-        fn always(outcome: Result<(), TransferLeaseAuthorityError>) -> Arc<Self> {
-            Arc::new(Self {
-                outcomes: Mutex::new(VecDeque::new()),
-                fallback: outcome,
-                requests: Mutex::new(Vec::new()),
-            })
-        }
-
-        fn sequence(
-            outcomes: impl IntoIterator<Item = Result<(), TransferLeaseAuthorityError>>,
-            fallback: Result<(), TransferLeaseAuthorityError>,
-        ) -> Arc<Self> {
-            Arc::new(Self {
-                outcomes: Mutex::new(outcomes.into_iter().collect()),
-                fallback,
-                requests: Mutex::new(Vec::new()),
-            })
-        }
-
-        fn captured(&self) -> Vec<ValidateGeneralComputeTransferLeaseRequest> {
-            self.requests.lock().unwrap().clone()
-        }
-    }
-
-    #[tonic::async_trait]
-    impl TransferLeaseAuthority for ScriptedTransferLeaseAuthority {
-        async fn validate(
-            &self,
-            request: ValidateGeneralComputeTransferLeaseRequest,
-        ) -> Result<(), TransferLeaseAuthorityError> {
-            self.requests.lock().unwrap().push(request);
-            self.outcomes
-                .lock()
-                .unwrap()
-                .pop_front()
-                .unwrap_or_else(|| self.fallback.clone())
         }
     }
 
@@ -1320,15 +1496,24 @@ mod tests {
         )
     }
 
-    fn chunk_test_components_with_authority(
+    fn chunk_test_components(
         base: &std::path::Path,
         cas_store: Option<Arc<CasChunkStore>>,
+    ) -> (GrpcWorkerNodeService, GrpcGeneralComputeChunkService) {
+        chunk_test_components_for(
+            base,
+            cas_store,
+            TEST_WORKER_ID,
+            Arc::new(AllowLocalTransferLeaseAuthority),
+        )
+    }
+
+    fn chunk_test_components_for(
+        base: &std::path::Path,
+        cas_store: Option<Arc<CasChunkStore>>,
+        worker_id: &str,
         authority: Arc<dyn TransferLeaseAuthority>,
-    ) -> (
-        Arc<WorkerGrpcState>,
-        GrpcWorkerNodeService,
-        GrpcGeneralComputeChunkService,
-    ) {
+    ) -> (GrpcWorkerNodeService, GrpcGeneralComputeChunkService) {
         let mut config = HivemindConfig::default();
         config.executor.sandbox_dir = base.join("sandbox").to_string_lossy().to_string();
         config.auth.jwt_secret = CONTROL_PLANE_SECRET.into();
@@ -1340,53 +1525,72 @@ mod tests {
         let state = Arc::new(WorkerGrpcState {
             config,
             executor,
-            worker_id: Some(TEST_WORKER_ID.into()),
+            worker_id: Some(worker_id.into()),
             cas_store,
-            transfer_lease_authority: authority,
             reports: Mutex::new(HashMap::new()),
+            transfer_lease_authority: Arc::new(Mutex::new(Some(authority))),
         });
         let worker = GrpcWorkerNodeService::new(state.clone())
             .with_runtime_admission(chunk_runtime_admission());
-        let chunk_service = GrpcGeneralComputeChunkService::new(state.clone())
-            .with_runtime_admission(chunk_runtime_admission());
-        (state, worker, chunk_service)
-    }
-
-    fn chunk_test_components(
-        base: &std::path::Path,
-        cas_store: Option<Arc<CasChunkStore>>,
-    ) -> (GrpcWorkerNodeService, GrpcGeneralComputeChunkService) {
-        let (_, worker, chunk_service) = chunk_test_components_with_authority(
-            base,
-            cas_store,
-            ScriptedTransferLeaseAuthority::always(Ok(())),
-        );
+        let chunk_service = GrpcGeneralComputeChunkService::new(state, chunk_runtime_admission());
         (worker, chunk_service)
     }
 
-    async fn prepare_general_compute_request(
-        chunk_service: &GrpcGeneralComputeChunkService,
+    fn general_compute_prepare_request(
+        request: &GeneralComputeRequest,
+        token: &str,
+        task_id: &str,
+    ) -> GeneralComputePrepareRequest {
+        general_compute_prepare_request_for(request, token, task_id, 1)
+    }
+
+    fn general_compute_prepare_request_for(
         request: &GeneralComputeRequest,
         token: &str,
         task_id: &str,
         transfer_generation: i64,
+    ) -> GeneralComputePrepareRequest {
+        GeneralComputePrepareRequest {
+            task_id: task_id.into(),
+            token: token.into(),
+            runtime: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            general_compute_manifest_json: serde_json::to_vec(request).unwrap(),
+            execution_id: request.execution_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+            request_digest: request.request_digest.clone(),
+            transfer_generation,
+        }
+    }
+
+    fn general_compute_execute_request(
+        request: &GeneralComputeRequest,
+        token: &str,
+        task_id: &str,
+    ) -> ExecuteTaskRequest {
+        ExecuteTaskRequest {
+            task_id: task_id.into(),
+            runtime: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            token: token.into(),
+            general_compute_manifest_json: serde_json::to_vec(request).unwrap(),
+            ..ExecuteTaskRequest::default()
+        }
+    }
+
+    async fn admit_general_compute_request(
+        worker: &GrpcWorkerNodeService,
+        request: &GeneralComputeRequest,
+        token: &str,
+        task_id: &str,
     ) {
-        let response = chunk_service
-            .prepare_general_compute(Request::new(general_compute_prepare_request(
-                request,
-                token,
-                task_id,
-                transfer_generation,
+        let response = worker
+            .execute_task(Request::new(general_compute_execute_request(
+                request, token, task_id,
             )))
             .await
-            .expect("general-compute preparation should succeed")
+            .expect("general-compute admission should execute")
             .into_inner();
-        assert!(response.success);
-        assert_eq!(response.execution_id, request.execution_id);
-        assert_eq!(response.attempt_id, request.attempt_id);
-        assert_eq!(response.idempotency_key, request.idempotency_key);
-        assert_eq!(response.request_digest, request.request_digest);
-        assert_eq!(response.transfer_generation, transfer_generation);
+        assert!(response.success, "admission runner should succeed");
     }
 
     #[test]
@@ -1695,6 +1899,8 @@ mod tests {
                 attempt_id: String::new(),
                 idempotency_key: String::new(),
                 request_digest: String::new(),
+                managed_dsl_backend_id: String::new(),
+                managed_dsl_semantics_manifest_sha256: String::new(),
             }))
             .await;
 
@@ -1740,6 +1946,8 @@ mod tests {
                 attempt_id: String::new(),
                 idempotency_key: String::new(),
                 request_digest: String::new(),
+                managed_dsl_backend_id: String::new(),
+                managed_dsl_semantics_manifest_sha256: String::new(),
             }))
             .await;
 
@@ -1765,6 +1973,8 @@ mod tests {
                 attempt_id: String::new(),
                 idempotency_key: String::new(),
                 request_digest: String::new(),
+                managed_dsl_backend_id: String::new(),
+                managed_dsl_semantics_manifest_sha256: String::new(),
             }))
             .await;
 
@@ -1790,6 +2000,8 @@ mod tests {
                 attempt_id: String::new(),
                 idempotency_key: String::new(),
                 request_digest: String::new(),
+                managed_dsl_backend_id: String::new(),
+                managed_dsl_semantics_manifest_sha256: String::new(),
             }))
             .await;
 
@@ -2229,6 +2441,8 @@ mod tests {
                     attempt_id: String::new(),
                     idempotency_key: String::new(),
                     request_digest: String::new(),
+                    managed_dsl_backend_id: String::new(),
+                    managed_dsl_semantics_manifest_sha256: String::new(),
                 }))
                 .await
                 .unwrap()
@@ -2277,205 +2491,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prepare_general_compute_forwards_complete_authority_identity_before_recording() {
-        let tmp = TempDir::new().unwrap();
-        let cas_root = TempDir::new().unwrap();
-        let store = Arc::new(CasChunkStore::new(cas_root.path()).unwrap());
-        let authority = ScriptedTransferLeaseAuthority::always(Ok(()));
-        let (state, _worker, chunk_service) =
-            chunk_test_components_with_authority(tmp.path(), Some(store), authority.clone());
-        let request = general_compute_request_for_chunk_tests();
-        let token = general_compute_token(&request, "chunk-task", 7);
-
-        prepare_general_compute_request(&chunk_service, &request, &token, "chunk-task", 7).await;
-
-        let captured = authority.captured();
-        assert_eq!(captured.len(), 1);
-        assert_eq!(
-            captured[0],
-            ValidateGeneralComputeTransferLeaseRequest {
-                token,
-                task_id: "chunk-task".into(),
-                worker_id: TEST_WORKER_ID.into(),
-                execution_id: request.execution_id.clone(),
-                attempt_id: request.attempt_id.clone(),
-                transfer_generation: 7,
-                idempotency_key: request.idempotency_key.clone(),
-                request_digest: request.request_digest.clone(),
-            }
-        );
-        let reports = state.reports.lock().unwrap();
-        let prepared = reports
-            .get("chunk-task")
-            .expect("preparation should be recorded");
-        assert_eq!(prepared.worker_id.as_deref(), Some(TEST_WORKER_ID));
-        assert_eq!(prepared.transfer_generation, Some(7));
-        assert_eq!(prepared.general_compute_request.as_ref(), Some(&request));
-    }
-
-    #[tokio::test]
-    async fn prepare_general_compute_denied_or_unavailable_does_not_record_or_touch_cas() {
-        for (outcome, expected_code) in [
-            (
-                TransferLeaseAuthorityError::Denied("lease revoked".into()),
-                Code::PermissionDenied,
-            ),
-            (
-                TransferLeaseAuthorityError::Unavailable("nodepool offline".into()),
-                Code::Unavailable,
-            ),
-        ] {
-            let tmp = TempDir::new().unwrap();
-            let cas_root = TempDir::new().unwrap();
-            let store = Arc::new(CasChunkStore::new(cas_root.path()).unwrap());
-            let authority = ScriptedTransferLeaseAuthority::always(Err(outcome));
-            let (state, _worker, chunk_service) = chunk_test_components_with_authority(
-                tmp.path(),
-                Some(store.clone()),
-                authority.clone(),
-            );
-            let request = general_compute_request_for_chunk_tests();
-            let token = general_compute_token(&request, "chunk-task", 3);
-
-            let status = chunk_service
-                .prepare_general_compute(Request::new(general_compute_prepare_request(
-                    &request,
-                    &token,
-                    "chunk-task",
-                    3,
-                )))
-                .await
-                .expect_err("inactive authority must reject preparation");
-
-            assert_eq!(status.code(), expected_code);
-            assert!(state.reports.lock().unwrap().get("chunk-task").is_none());
-            assert_eq!(authority.captured().len(), 1);
-            assert!(std::fs::read_dir(store.root().join(".transfers"))
-                .unwrap()
-                .next()
-                .is_none());
-            assert!(!store
-                .chunk_path(&sha256_digest(b"print(42)"))
-                .unwrap()
-                .exists());
-        }
-    }
-
-    #[tokio::test]
-    async fn upload_chunk_denied_or_unavailable_does_not_write_cas() {
-        for (outcome, expected_code) in [
-            (
-                TransferLeaseAuthorityError::Denied("lease revoked".into()),
-                Code::PermissionDenied,
-            ),
-            (
-                TransferLeaseAuthorityError::Unavailable("nodepool offline".into()),
-                Code::Unavailable,
-            ),
-        ] {
-            let tmp = TempDir::new().unwrap();
-            let cas_root = TempDir::new().unwrap();
-            let store = Arc::new(CasChunkStore::new(cas_root.path()).unwrap());
-            let authority = ScriptedTransferLeaseAuthority::sequence(
-                [Ok(()), Err(outcome.clone())],
-                Err(outcome),
-            );
-            let (_state, _worker, chunk_service) = chunk_test_components_with_authority(
-                tmp.path(),
-                Some(store.clone()),
-                authority.clone(),
-            );
-            let request = general_compute_request_for_chunk_tests();
-            let token = general_compute_token(&request, "chunk-task", 5);
-            prepare_general_compute_request(&chunk_service, &request, &token, "chunk-task", 5)
-                .await;
-
-            let mut upload = general_compute_upload(&request, &token, b"print(42)");
-            upload.transfer_generation = 5;
-            let status = chunk_service
-                .upload_chunk(Request::new(upload))
-                .await
-                .expect_err("inactive authority must reject upload");
-
-            assert_eq!(status.code(), expected_code);
-            assert_eq!(authority.captured().len(), 2);
-            assert!(!store
-                .chunk_path(&sha256_digest(b"print(42)"))
-                .unwrap()
-                .exists());
-            assert!(std::fs::read_dir(store.root().join(".transfers"))
-                .unwrap()
-                .next()
-                .is_none());
-        }
-    }
-
-    #[tokio::test]
-    async fn resume_chunks_denied_or_unavailable_does_not_touch_cas() {
-        for (outcome, expected_code) in [
-            (
-                TransferLeaseAuthorityError::Denied("lease revoked".into()),
-                Code::PermissionDenied,
-            ),
-            (
-                TransferLeaseAuthorityError::Unavailable("nodepool offline".into()),
-                Code::Unavailable,
-            ),
-        ] {
-            let tmp = TempDir::new().unwrap();
-            let cas_root = TempDir::new().unwrap();
-            let store = Arc::new(CasChunkStore::new(cas_root.path()).unwrap());
-            let authority = ScriptedTransferLeaseAuthority::sequence(
-                [Ok(()), Err(outcome.clone())],
-                Err(outcome),
-            );
-            let (_state, _worker, chunk_service) = chunk_test_components_with_authority(
-                tmp.path(),
-                Some(store.clone()),
-                authority.clone(),
-            );
-            let request = general_compute_request_for_chunk_tests();
-            let token = general_compute_token(&request, "chunk-task", 6);
-            prepare_general_compute_request(&chunk_service, &request, &token, "chunk-task", 6)
-                .await;
-            let resume = GeneralComputeChunkResumeRequest {
-                token,
-                execution_id: request.execution_id.clone(),
-                attempt_id: request.attempt_id.clone(),
-                idempotency_key: request.idempotency_key.clone(),
-                request_digest: request.request_digest.clone(),
-                artifact_id: "source".into(),
-                completed_sha256: Vec::new(),
-                transfer_generation: 6,
-            };
-
-            let status = chunk_service
-                .resume_chunks(Request::new(resume))
-                .await
-                .expect_err("inactive authority must reject resume");
-
-            assert_eq!(status.code(), expected_code);
-            assert_eq!(authority.captured().len(), 2);
-            assert!(!store
-                .chunk_path(&sha256_digest(b"print(42)"))
-                .unwrap()
-                .exists());
-            assert!(std::fs::read_dir(store.root().join(".transfers"))
-                .unwrap()
-                .next()
-                .is_none());
-        }
-    }
-
-    #[tokio::test]
     async fn chunk_service_accepts_only_an_assigned_verified_attempt_and_replays_idempotently() {
         let tmp = TempDir::new().unwrap();
         let cas_root = TempDir::new().unwrap();
         let store = Arc::new(CasChunkStore::new(cas_root.path()).unwrap());
-        let (_worker, chunk_service) = chunk_test_components(tmp.path(), Some(store.clone()));
+        let (worker, chunk_service) = chunk_test_components(tmp.path(), Some(store.clone()));
         let request = general_compute_request_for_chunk_tests();
-        let token = general_compute_token(&request, "chunk-task", 1);
-        prepare_general_compute_request(&chunk_service, &request, &token, "chunk-task", 1).await;
+        let token = bound_general_compute_token(ASSIGNED_OWNER, "chunk-task", &request);
+        admit_general_compute_request(&worker, &request, &token, "chunk-task").await;
         let upload = general_compute_upload(&request, &token, b"print(42)");
 
         let first = chunk_service
@@ -2519,12 +2542,12 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let cas_root = TempDir::new().unwrap();
         let store = Arc::new(CasChunkStore::new(cas_root.path()).unwrap());
-        let (_worker, chunk_service) = chunk_test_components(tmp.path(), Some(store));
+        let (worker, chunk_service) = chunk_test_components(tmp.path(), Some(store));
         let request = general_compute_request_for_chunk_tests();
-        let token = general_compute_token(&request, "chunk-task", 1);
-        prepare_general_compute_request(&chunk_service, &request, &token, "chunk-task", 1).await;
+        let token = bound_general_compute_token(ASSIGNED_OWNER, "chunk-task", &request);
+        admit_general_compute_request(&worker, &request, &token, "chunk-task").await;
 
-        let wrong_token = general_compute_token(&request, "other-task", 1);
+        let wrong_token = bound_general_compute_token(ASSIGNED_OWNER, "other-task", &request);
         let status = chunk_service
             .upload_chunk(Request::new(general_compute_upload(
                 &request,
@@ -2541,10 +2564,10 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let cas_root = TempDir::new().unwrap();
         let store = Arc::new(CasChunkStore::new(cas_root.path()).unwrap());
-        let (_worker, chunk_service) = chunk_test_components(tmp.path(), Some(store));
+        let (worker, chunk_service) = chunk_test_components(tmp.path(), Some(store));
         let request = general_compute_request_for_chunk_tests();
-        let token = general_compute_token(&request, "chunk-task", 1);
-        prepare_general_compute_request(&chunk_service, &request, &token, "chunk-task", 1).await;
+        let token = bound_general_compute_token(ASSIGNED_OWNER, "chunk-task", &request);
+        admit_general_compute_request(&worker, &request, &token, "chunk-task").await;
 
         let mut stale = general_compute_upload(&request, &token, b"print(42)");
         stale.attempt_id = "attempt-stale".into();
@@ -2570,7 +2593,7 @@ mod tests {
         let store = Arc::new(CasChunkStore::new(cas_root.path()).unwrap());
         let (worker, chunk_service) = chunk_test_components(tmp.path(), Some(store));
         let request = general_compute_request_for_chunk_tests();
-        let token = general_compute_token(&request, "chunk-task", 1);
+        let token = bound_general_compute_token(ASSIGNED_OWNER, "chunk-task", &request);
         worker
             .record_task_assignment("chunk-task", ASSIGNED_OWNER)
             .expect("assignment seed should succeed");
@@ -2589,10 +2612,10 @@ mod tests {
     #[tokio::test]
     async fn chunk_service_fails_closed_when_operator_cas_is_unavailable() {
         let tmp = TempDir::new().unwrap();
-        let (_worker, chunk_service) = chunk_test_components(tmp.path(), None);
+        let (worker, chunk_service) = chunk_test_components(tmp.path(), None);
         let request = general_compute_request_for_chunk_tests();
-        let token = general_compute_token(&request, "chunk-task", 1);
-        prepare_general_compute_request(&chunk_service, &request, &token, "chunk-task", 1).await;
+        let token = bound_general_compute_token(ASSIGNED_OWNER, "chunk-task", &request);
+        admit_general_compute_request(&worker, &request, &token, "chunk-task").await;
 
         let status = chunk_service
             .upload_chunk(Request::new(general_compute_upload(
@@ -2603,6 +2626,227 @@ mod tests {
             .await
             .expect_err("chunk upload must fail closed without an operator CAS");
         assert_eq!(status.code(), Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn prepare_general_compute_records_admission_before_chunk_transfer() {
+        let tmp = TempDir::new().unwrap();
+        let cas_root = TempDir::new().unwrap();
+        let store = Arc::new(CasChunkStore::new(cas_root.path()).unwrap());
+        let (_worker, chunk_service) = chunk_test_components(tmp.path(), Some(store));
+        let request = general_compute_request_for_chunk_tests();
+        let token = bound_general_compute_token(ASSIGNED_OWNER, "chunk-task", &request);
+
+        let prepared = chunk_service
+            .prepare_general_compute(Request::new(general_compute_prepare_request(
+                &request,
+                &token,
+                "chunk-task",
+            )))
+            .await
+            .expect("prepare should admit the request")
+            .into_inner();
+        assert!(prepared.success);
+
+        let uploaded = chunk_service
+            .upload_chunk(Request::new(general_compute_upload(
+                &request,
+                &token,
+                b"print(42)",
+            )))
+            .await
+            .expect("prepared assignment should accept chunks")
+            .into_inner();
+        assert!(uploaded.success);
+    }
+
+    #[tokio::test]
+    async fn execute_task_cannot_replace_a_prepared_general_compute_request() {
+        let tmp = TempDir::new().unwrap();
+        let (worker, chunk_service) = chunk_test_components(tmp.path(), None);
+        let request = general_compute_request_for_chunk_tests();
+        let token = bound_general_compute_token(ASSIGNED_OWNER, "chunk-task", &request);
+        chunk_service
+            .prepare_general_compute(Request::new(general_compute_prepare_request(
+                &request,
+                &token,
+                "chunk-task",
+            )))
+            .await
+            .expect("prepare should admit the request");
+
+        let mut replacement = request.clone();
+        replacement.attempt_id = "attempt-replacement".into();
+        replacement.request_digest = replacement.canonical_request_digest();
+        let status = worker
+            .execute_task(Request::new(general_compute_execute_request(
+                &replacement,
+                &token,
+                "chunk-task",
+            )))
+            .await
+            .expect_err("prepared request identity must not be replaced");
+        assert_eq!(status.code(), Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn execute_task_rejects_a_stale_transfer_generation_for_a_prepared_request() {
+        let tmp = TempDir::new().unwrap();
+        let (worker, chunk_service) = chunk_test_components(tmp.path(), None);
+        let request = general_compute_request_for_chunk_tests();
+        let current_token =
+            bound_general_compute_token_with_generation(ASSIGNED_OWNER, "chunk-task", &request, 2);
+        let mut prepare = general_compute_prepare_request(&request, &current_token, "chunk-task");
+        prepare.transfer_generation = 2;
+        chunk_service
+            .prepare_general_compute(Request::new(prepare))
+            .await
+            .expect("current transfer generation should be prepared");
+
+        let stale_token =
+            bound_general_compute_token_with_generation(ASSIGNED_OWNER, "chunk-task", &request, 1);
+        let status = worker
+            .execute_task(Request::new(general_compute_execute_request(
+                &request,
+                &stale_token,
+                "chunk-task",
+            )))
+            .await
+            .expect_err("a stale execution token must not replace the prepared lease generation");
+        assert_eq!(status.code(), Code::PermissionDenied);
+
+        let reports = worker.state.reports.lock().unwrap();
+        assert_eq!(
+            reports
+                .get("chunk-task")
+                .and_then(|report| report.transfer_generation),
+            Some(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn reassignment_revokes_old_worker_before_chunk_replay_and_allows_new_worker() {
+        let tmp_a = TempDir::new().unwrap();
+        let tmp_b = TempDir::new().unwrap();
+        let cas_root_a = TempDir::new().unwrap();
+        let cas_root_b = TempDir::new().unwrap();
+        let authority = Arc::new(MockTransferLeaseAuthority::new(
+            "chunk-task",
+            &general_compute_request_for_chunk_tests(),
+            "worker-a",
+            1,
+        ));
+        let request_a = general_compute_request_for_chunk_tests();
+        let mut request_b = request_a.clone();
+        request_b.attempt_id = "attempt-worker-b".into();
+        request_b.request_digest = request_b.canonical_request_digest();
+        let (worker_a, service_a) = chunk_test_components_for(
+            tmp_a.path(),
+            Some(Arc::new(CasChunkStore::new(cas_root_a.path()).unwrap())),
+            "worker-a",
+            authority.clone(),
+        );
+        let token_a = bound_general_compute_token_for_worker(
+            ASSIGNED_OWNER,
+            "chunk-task",
+            &request_a,
+            "worker-a",
+            1,
+        );
+        service_a
+            .prepare_general_compute(Request::new(general_compute_prepare_request_for(
+                &request_a,
+                &token_a,
+                "chunk-task",
+                1,
+            )))
+            .await
+            .expect("worker A should accept generation 1 while assigned");
+
+        authority.reassign(&request_b, "worker-b", 2);
+        let stale = service_a
+            .upload_chunk(Request::new(general_compute_upload_for(
+                &request_a, &token_a, 1,
+            )))
+            .await
+            .expect_err("worker A must fail closed after Nodepool reassignment");
+        assert_eq!(stale.code(), Code::PermissionDenied);
+
+        let (_worker_b, service_b) = chunk_test_components_for(
+            tmp_b.path(),
+            Some(Arc::new(CasChunkStore::new(cas_root_b.path()).unwrap())),
+            "worker-b",
+            authority,
+        );
+        let token_b = bound_general_compute_token_for_worker(
+            ASSIGNED_OWNER,
+            "chunk-task",
+            &request_b,
+            "worker-b",
+            2,
+        );
+        let prepared = service_b
+            .prepare_general_compute(Request::new(general_compute_prepare_request_for(
+                &request_b,
+                &token_b,
+                "chunk-task",
+                2,
+            )))
+            .await
+            .expect("worker B should accept the replacement generation")
+            .into_inner();
+        assert!(prepared.success);
+        let uploaded = service_b
+            .upload_chunk(Request::new(general_compute_upload_for(
+                &request_b, &token_b, 2,
+            )))
+            .await
+            .expect("worker B should accept the active generation")
+            .into_inner();
+        assert!(uploaded.success);
+        drop(worker_a);
+    }
+
+    #[tokio::test]
+    async fn execute_task_requires_the_token_to_match_the_general_compute_attempt() {
+        let tmp = TempDir::new().unwrap();
+        let (worker, _chunk_service) = chunk_test_components(tmp.path(), None);
+        let request = general_compute_request_for_chunk_tests();
+        let token = bound_general_compute_token(ASSIGNED_OWNER, "chunk-task", &request);
+        let mut replacement = request.clone();
+        replacement.attempt_id = "attempt-replacement".into();
+        replacement.request_digest = replacement.canonical_request_digest();
+
+        let status = worker
+            .execute_task(Request::new(general_compute_execute_request(
+                &replacement,
+                &token,
+                "chunk-task",
+            )))
+            .await
+            .expect_err("ExecuteTask must enforce the token-bound attempt identity");
+        assert_eq!(status.code(), Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn prepare_general_compute_rejects_a_token_bound_to_another_attempt() {
+        let tmp = TempDir::new().unwrap();
+        let (_worker, chunk_service) = chunk_test_components(tmp.path(), None);
+        let request = general_compute_request_for_chunk_tests();
+        let token = bound_general_compute_token(ASSIGNED_OWNER, "chunk-task", &request);
+        let mut replacement = request.clone();
+        replacement.attempt_id = "attempt-replacement".into();
+        replacement.request_digest = replacement.canonical_request_digest();
+
+        let status = chunk_service
+            .prepare_general_compute(Request::new(general_compute_prepare_request(
+                &replacement,
+                &token,
+                "chunk-task",
+            )))
+            .await
+            .expect_err("prepare must require token-bound attempt identity");
+        assert_eq!(status.code(), Code::PermissionDenied);
     }
 
     fn seed_assignment(
@@ -2684,8 +2928,8 @@ mod tests {
             executor,
             worker_id: Some(TEST_WORKER_ID.into()),
             cas_store: None,
-            transfer_lease_authority: ScriptedTransferLeaseAuthority::always(Ok(())),
             reports: Mutex::new(HashMap::new()),
+            transfer_lease_authority: Arc::new(Mutex::new(None)),
         }))
     }
 
@@ -2700,8 +2944,8 @@ mod tests {
             executor,
             worker_id: Some(TEST_WORKER_ID.into()),
             cas_store: None,
-            transfer_lease_authority: ScriptedTransferLeaseAuthority::always(Ok(())),
             reports: Mutex::new(HashMap::new()),
+            transfer_lease_authority: Arc::new(Mutex::new(None)),
         }))
     }
 
@@ -2722,6 +2966,167 @@ mod tests {
                 iat: Utc::now().timestamp() as usize,
             })
             .unwrap()
+    }
+
+    fn bound_general_compute_token(
+        subject: &str,
+        task_id: &str,
+        request: &GeneralComputeRequest,
+    ) -> String {
+        bound_general_compute_token_with_generation(subject, task_id, request, 1)
+    }
+
+    fn bound_general_compute_token_with_generation(
+        subject: &str,
+        task_id: &str,
+        request: &GeneralComputeRequest,
+        transfer_generation: i64,
+    ) -> String {
+        bound_general_compute_token_for_worker(
+            subject,
+            task_id,
+            request,
+            TEST_WORKER_ID,
+            transfer_generation,
+        )
+    }
+
+    fn bound_general_compute_token_for_worker(
+        subject: &str,
+        task_id: &str,
+        request: &GeneralComputeRequest,
+        worker_id: &str,
+        transfer_generation: i64,
+    ) -> String {
+        let now = Utc::now().timestamp();
+        WorkerExecutionSigner::from_pem(test_private_key_pem())
+            .unwrap()
+            .encode_execution_claims(
+                &Claims {
+                    sub: subject.into(),
+                    user_id: subject.into(),
+                    role: Some("worker-execution".into()),
+                    task_id: Some(task_id.into()),
+                    worker_id: Some(worker_id.into()),
+                    exp: (now + 3600) as usize,
+                    iat: now as usize,
+                },
+                &WorkerExecutionIdentity {
+                    execution_id: request.execution_id.clone(),
+                    attempt_id: request.attempt_id.clone(),
+                    idempotency_key: request.idempotency_key.clone(),
+                    request_digest: request.request_digest.clone(),
+                    transfer_generation,
+                },
+            )
+            .unwrap()
+    }
+
+    fn general_compute_upload_for(
+        request: &GeneralComputeRequest,
+        token: &str,
+        transfer_generation: i64,
+    ) -> GeneralComputeChunkUpload {
+        GeneralComputeChunkUpload {
+            token: token.into(),
+            execution_id: request.execution_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+            request_digest: request.request_digest.clone(),
+            artifact_id: "source".into(),
+            offset: 0,
+            size_bytes: b"print(42)".len() as i64,
+            sha256: sha256_digest(b"print(42)"),
+            bytes: b"print(42)".to_vec(),
+            transfer_generation,
+        }
+    }
+
+    struct AllowLocalTransferLeaseAuthority;
+
+    #[tonic::async_trait]
+    impl TransferLeaseAuthority for AllowLocalTransferLeaseAuthority {
+        async fn validate(
+            &self,
+            _token: &str,
+            _worker_id: &str,
+            _task_id: &str,
+            _execution_id: &str,
+            _attempt_id: &str,
+            _transfer_generation: i64,
+            _idempotency_key: &str,
+            _request_digest: &str,
+        ) -> Result<(), TransferLeaseAuthorityError> {
+            Ok(())
+        }
+    }
+
+    struct MockTransferLeaseAuthority {
+        current: Mutex<MockTransferLease>,
+    }
+
+    struct MockTransferLease {
+        task_id: String,
+        execution_id: String,
+        attempt_id: String,
+        worker_id: String,
+        generation: i64,
+    }
+
+    impl MockTransferLeaseAuthority {
+        fn new(
+            task_id: &str,
+            request: &GeneralComputeRequest,
+            worker_id: &str,
+            generation: i64,
+        ) -> Self {
+            Self {
+                current: Mutex::new(MockTransferLease {
+                    task_id: task_id.into(),
+                    execution_id: request.execution_id.clone(),
+                    attempt_id: request.attempt_id.clone(),
+                    worker_id: worker_id.into(),
+                    generation,
+                }),
+            }
+        }
+
+        fn reassign(&self, request: &GeneralComputeRequest, worker_id: &str, generation: i64) {
+            let mut current = self.current.lock().unwrap();
+            current.execution_id = request.execution_id.clone();
+            current.attempt_id = request.attempt_id.clone();
+            current.worker_id = worker_id.into();
+            current.generation = generation;
+        }
+    }
+
+    #[tonic::async_trait]
+    impl TransferLeaseAuthority for MockTransferLeaseAuthority {
+        async fn validate(
+            &self,
+            _token: &str,
+            worker_id: &str,
+            task_id: &str,
+            execution_id: &str,
+            attempt_id: &str,
+            transfer_generation: i64,
+            _idempotency_key: &str,
+            _request_digest: &str,
+        ) -> Result<(), TransferLeaseAuthorityError> {
+            let current = self.current.lock().unwrap();
+            if current.task_id == task_id
+                && current.execution_id == execution_id
+                && current.attempt_id == attempt_id
+                && current.worker_id == worker_id
+                && current.generation == transfer_generation
+            {
+                Ok(())
+            } else {
+                Err(TransferLeaseAuthorityError::Denied(
+                    "transfer lease is no longer active".into(),
+                ))
+            }
+        }
     }
 
     fn hmac_bound_token(secret: &str, subject: &str, task_id: &str) -> String {

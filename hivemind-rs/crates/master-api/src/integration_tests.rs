@@ -9,11 +9,12 @@ use hivemind_auth::AuthManager;
 use hivemind_config::HivemindConfig;
 use hivemind_database::{postgres::IsolatedTestPool, DatabaseManager};
 use hivemind_node_manager::grpc::{
-    artifact_root_for_config, GrpcMasterNodeService, GrpcNodeManagerService, GrpcUserService,
-    NodepoolState,
+    artifact_root_for_config, GrpcGeneralComputeArtifactService, GrpcMasterNodeService,
+    GrpcNodeManagerService, GrpcUserService, NodepoolState,
 };
 use hivemind_node_manager::NodeManager;
 use hivemind_proto::{
+    general_compute_artifact_service_server::GeneralComputeArtifactServiceServer,
     master_node_service_server::MasterNodeServiceServer,
     node_manager_service_server::NodeManagerServiceServer, user_service_server::UserServiceServer,
     ResourceSpec,
@@ -73,6 +74,9 @@ async fn nodepool_test_fixture() -> Option<NodepoolTestFixture> {
 
     let user_svc = UserServiceServer::new(GrpcUserService::new(state.clone()));
     let node_svc = NodeManagerServiceServer::new(GrpcNodeManagerService::new(state.clone()));
+    let artifact_svc = GeneralComputeArtifactServiceServer::new(
+        GrpcGeneralComputeArtifactService::new(state.clone()),
+    );
     let master_svc = MasterNodeServiceServer::new(GrpcMasterNodeService::new(state));
 
     let addr = reserve_loopback_addr()?;
@@ -81,6 +85,7 @@ async fn nodepool_test_fixture() -> Option<NodepoolTestFixture> {
         let _ = tonic::transport::Server::builder()
             .add_service(user_svc)
             .add_service(node_svc)
+            .add_service(artifact_svc)
             .add_service(master_svc)
             .serve_with_shutdown(addr, async move {
                 let _ = shutdown_rx.await;
@@ -213,6 +218,139 @@ async fn grpc_client_talks_to_nodepool_test_fixture_for_provider_flow() {
     assert!(removed.success);
 
     sqlx::query("DELETE FROM worker_reputation WHERE worker_id = $1")
+        .bind(&username)
+        .execute(&db.pool)
+        .await
+        .ok();
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn master_http_artifact_chunk_proxy_persists_a_manifest_bound_source() {
+    let mut fixture = match nodepool_test_fixture().await {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let mut client = match fixture.take_client() {
+        Some(client) => client,
+        None => return,
+    };
+    let db = fixture.db.clone();
+    let unique = uuid::Uuid::new_v4().to_string();
+    let username = format!("it-artifact-user-{unique}");
+    let password = "integration-pass-example";
+
+    let hash = bcrypt::hash(password, 12).unwrap();
+    sqlx::query("INSERT INTO users (username, password_hash, balance) VALUES ($1, $2, $3)")
+        .bind(&username)
+        .bind(&hash)
+        .bind(1000i64)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let login = client.login(&username, password).await.unwrap();
+    assert!(login.success);
+    let token = login.token;
+
+    let bytes = b"source";
+    let digest = general_compute_runtime::sha256_digest(bytes);
+    let mut manifest = general_compute_runtime::GeneralComputeRequest {
+        execution_id: format!("execution-{unique}"),
+        attempt_id: format!("attempt-{unique}"),
+        idempotency_key: format!("idempotency-{unique}"),
+        request_digest: String::new(),
+        runtime_version: general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+        guest_image_digest:
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        backend_id: "python-cpython-312".into(),
+        entrypoint: "main".into(),
+        source_artifact: general_compute_runtime::ArtifactManifest {
+            artifact_id: "source".into(),
+            role: general_compute_runtime::ArtifactRole::Source,
+            size_bytes: bytes.len() as u64,
+            mime_type: "text/plain".into(),
+            sha256: digest.clone(),
+            chunks: vec![general_compute_runtime::ArtifactChunk {
+                offset: 0,
+                size_bytes: bytes.len() as u64,
+                sha256: digest.clone(),
+            }],
+            inline_bytes: None,
+        },
+        input_artifacts: vec![],
+        execution_policy: general_compute_runtime::ExecutionPolicy::default(),
+        determinism: general_compute_runtime::DeterminismPolicy::default(),
+        billing_version: "billing-v1".into(),
+        cost_model_version: "cost-v1".into(),
+    };
+    manifest.request_digest = manifest.canonical_request_digest();
+    let manifest_json = serde_json::to_vec(&manifest).unwrap();
+    let task_id = format!("it-artifact-task-{unique}");
+    let created = client
+        .upload_task(
+            &task_id,
+            "",
+            ResourceSpec::default(),
+            "local",
+            1,
+            &token,
+            1,
+            general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION,
+            "",
+            &manifest_json,
+            "",
+            "",
+        )
+        .await
+        .unwrap();
+    assert!(created.success, "{}", created.status_message);
+
+    let config = HivemindConfig::for_test();
+    let state = crate::handlers::AppState {
+        grpc_client: client,
+        config,
+        task_submit_limiter: Arc::new(tokio::sync::Mutex::new(
+            crate::handlers::TaskSubmitRateLimiter::new(),
+        )),
+    };
+    let app = crate::routes::create_router(state);
+    let body = serde_json::json!({
+        "artifact_id": "source",
+        "offset": 0,
+        "size_bytes": bytes.len(),
+        "sha256": digest,
+        "bytes": bytes,
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/tasks/{task_id}/general-compute/artifacts/chunk"
+                ))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let persisted: (i64, String, Vec<u8>) = sqlx::query_as(
+        "SELECT size_bytes, sha256, content
+         FROM general_compute_artifact_chunks
+         WHERE task_id = $1 AND artifact_id = 'source' AND offset_bytes = 0",
+    )
+    .bind(&task_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(persisted.0, bytes.len() as i64);
+    assert_eq!(persisted.1, general_compute_runtime::sha256_digest(bytes));
+    assert_eq!(persisted.2, bytes);
+
+    sqlx::query("DELETE FROM users WHERE username = $1")
         .bind(&username)
         .execute(&db.pool)
         .await

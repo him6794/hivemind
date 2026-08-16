@@ -302,7 +302,10 @@ pub enum WindowsSandboxPolicyError {
 
 impl std::fmt::Display for WindowsSandboxPolicyError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "invalid Windows production sandbox policy: {self:?}")
+        write!(
+            formatter,
+            "invalid Windows production sandbox policy: {self:?}"
+        )
     }
 }
 
@@ -980,7 +983,10 @@ fn valid_materialized_seccomp_profile(
             return false;
         }
     }
-    let Some(syscalls) = profile.get("syscalls").and_then(serde_json::Value::as_array) else {
+    let Some(syscalls) = profile
+        .get("syscalls")
+        .and_then(serde_json::Value::as_array)
+    else {
         return false;
     };
     if syscalls.is_empty() {
@@ -991,14 +997,14 @@ fn valid_materialized_seccomp_profile(
         let Some(group) = group.as_object() else {
             return false;
         };
-        if group.keys().any(|key| !matches!(key.as_str(), "names" | "action"))
-            || group.get("action").and_then(serde_json::Value::as_str)
-                != Some("SCMP_ACT_ALLOW")
+        if group
+            .keys()
+            .any(|key| !matches!(key.as_str(), "names" | "action"))
+            || group.get("action").and_then(serde_json::Value::as_str) != Some("SCMP_ACT_ALLOW")
         {
             return false;
         }
-        let Some(syscall_names) = group.get("names").and_then(serde_json::Value::as_array)
-        else {
+        let Some(syscall_names) = group.get("names").and_then(serde_json::Value::as_array) else {
             return false;
         };
         if syscall_names.is_empty() {
