@@ -1444,7 +1444,7 @@ mod tests {
         };
         let python_registry = PythonBackendRegistry::new(vec![PythonBackendRegistration {
             backend_id: request.backend_id.clone(),
-            executable: "python".into(),
+            executable: python_executable().into(),
             runtime_version: "CPython 3.12.9".into(),
             guest_image_digest: image,
             protocol_version: "general-compute-wire-v1".into(),
@@ -1787,7 +1787,7 @@ mod tests {
         };
         let python_registry = PythonBackendRegistry::new(vec![PythonBackendRegistration {
             backend_id: request.backend_id.clone(),
-            executable: "python".into(),
+            executable: python_executable().into(),
             runtime_version: "CPython 3.12.9".into(),
             guest_image_digest: image,
             protocol_version: "general-compute-wire-v1".into(),
@@ -1831,6 +1831,14 @@ mod tests {
         assert!(result.success);
         assert_eq!(result.output.as_deref(), Some("5"));
         assert!(result.general_compute_result_json.is_some());
+    }
+
+    fn python_executable() -> &'static str {
+        if cfg!(windows) {
+            "python"
+        } else {
+            "python3"
+        }
     }
 
     fn test_config(sandbox_dir: &str) -> HivemindConfig {

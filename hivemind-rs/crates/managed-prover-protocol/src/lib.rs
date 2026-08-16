@@ -234,6 +234,10 @@ fn validate_version(protocol_version: u16) -> Result<(), ProtocolError> {
 }
 
 fn is_safe_task_id(task_id: &str) -> bool {
+    if let Some(digest) = task_id.strip_prefix("dsl-proof-v1:") {
+        return digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit());
+    }
+
     !task_id.is_empty()
         && task_id != "."
         && !task_id.contains("..")
@@ -336,6 +340,9 @@ mod tests {
                 limit: MAX_TASK_ID_BYTES,
             })
         );
+
+        request.task_id = format!("dsl-proof-v1:{}", "a".repeat(64));
+        assert!(request.validate().is_ok());
     }
 
     #[test]
