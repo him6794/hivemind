@@ -24,6 +24,11 @@ pub struct GeneralComputeConfig {
     /// Workers cannot populate this map through their registration RPC.
     #[serde(default)]
     pub trusted_worker_capabilities: BTreeMap<String, TrustedGeneralComputeWorkerRegistration>,
+    /// Nodepool operator-approved closed-DSL registrations keyed by immutable worker id.
+    /// This is deliberately separate from OCI/HCS capability snapshots.
+    #[serde(default)]
+    pub trusted_managed_dsl_worker_capabilities:
+        BTreeMap<String, TrustedManagedDslWorkerRegistration>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +38,14 @@ pub struct TrustedGeneralComputeWorkerRegistration {
     pub owner: String,
     #[serde(flatten)]
     pub registration: general_compute_runtime::TrustedWorkerCapabilityRegistration,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustedManagedDslWorkerRegistration {
+    /// Worker owner authorized to activate this exact DSL registration.
+    pub owner: String,
+    pub registrations: Vec<general_compute_runtime::production::ManagedDslBackendRegistration>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -467,6 +480,29 @@ impl HivemindConfig {
         if let Ok(mode) = std::env::var("MANAGED_PROOF_ROLLOUT_MODE") {
             self.managed_proof.rollout_mode = parse_env("MANAGED_PROOF_ROLLOUT_MODE", &mode)?;
         }
+        if let Ok(registrations) =
+            std::env::var("HIVEMIND_GENERAL_COMPUTE_TRUSTED_WORKER_CAPABILITIES")
+        {
+            if !registrations.trim().is_empty() {
+                self.general_compute.trusted_worker_capabilities =
+                    serde_json::from_str(&registrations).map_err(|error| {
+                        anyhow::anyhow!(
+                            "invalid HIVEMIND_GENERAL_COMPUTE_TRUSTED_WORKER_CAPABILITIES: {error}"
+                        )
+                    })?;
+            }
+        }
+        if let Ok(registrations) = std::env::var("HIVEMIND_MANAGED_DSL_TRUSTED_WORKER_CAPABILITIES")
+        {
+            if !registrations.trim().is_empty() {
+                self.general_compute.trusted_managed_dsl_worker_capabilities =
+                    serde_json::from_str(&registrations).map_err(|error| {
+                        anyhow::anyhow!(
+                            "invalid HIVEMIND_MANAGED_DSL_TRUSTED_WORKER_CAPABILITIES: {error}"
+                        )
+                    })?;
+            }
+        }
         if let Ok(dir) = std::env::var("EXECUTOR_SANDBOX_DIR") {
             self.executor.sandbox_dir = dir;
         }
@@ -765,7 +801,8 @@ mod tests {
         assert_eq!(registration.registration.worker.max_threads, 4);
 
         let mut json = serde_json::to_value(config).unwrap();
-        json["general_compute"]["trusted_worker_capabilities"]["worker-alpha"]["unexpected"] = serde_json::json!(true);
+        json["general_compute"]["trusted_worker_capabilities"]["worker-alpha"]["unexpected"] =
+            serde_json::json!(true);
         assert!(serde_json::from_value::<HivemindConfig>(json).is_err());
 
         let mut nested = serde_json::json!({
@@ -784,7 +821,9 @@ mod tests {
             "backends": []
         });
         wrapper["worker"]["unexpected"] = serde_json::json!(true);
-        assert!(serde_json::from_value::<TrustedGeneralComputeWorkerRegistration>(wrapper).is_err());
+        assert!(
+            serde_json::from_value::<TrustedGeneralComputeWorkerRegistration>(wrapper).is_err()
+        );
     }
 
     #[test]
@@ -829,6 +868,33 @@ mod tests {
             None => std::env::remove_var("MANAGED_PROOF_ROLLOUT_MODE"),
         }
         assert!(error.contains("MANAGED_PROOF_ROLLOUT_MODE"));
+    }
+
+    #[test]
+    fn trusted_worker_capabilities_load_from_environment() {
+        let _environment_lock = lock_environment();
+        let old = std::env::var_os("HIVEMIND_GENERAL_COMPUTE_TRUSTED_WORKER_CAPABILITIES");
+        std::env::set_var(
+            "HIVEMIND_GENERAL_COMPUTE_TRUSTED_WORKER_CAPABILITIES",
+            r#"{"oci-e2e-worker":{"owner":"testuser","worker":{"guest_image_digests":["sha256:image"],"capabilities":["cpu"],"max_threads":1,"gpu_available":false},"backends":[]}}"#,
+        );
+
+        let loaded = HivemindConfig::load_from_env();
+
+        match old {
+            Some(value) => std::env::set_var(
+                "HIVEMIND_GENERAL_COMPUTE_TRUSTED_WORKER_CAPABILITIES",
+                value,
+            ),
+            None => std::env::remove_var("HIVEMIND_GENERAL_COMPUTE_TRUSTED_WORKER_CAPABILITIES"),
+        }
+        let registration = loaded
+            .general_compute
+            .trusted_worker_capabilities
+            .get("oci-e2e-worker")
+            .expect("trusted worker registration");
+        assert_eq!(registration.owner, "testuser");
+        assert_eq!(registration.registration.worker.max_threads, 1);
     }
 
     #[test]

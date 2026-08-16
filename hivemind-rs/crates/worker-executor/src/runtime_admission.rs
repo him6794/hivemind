@@ -12,6 +12,7 @@ use general_compute_runtime::{
 };
 use std::fmt;
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeRoute {
     Legacy,

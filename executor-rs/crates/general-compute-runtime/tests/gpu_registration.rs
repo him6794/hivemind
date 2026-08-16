@@ -1,7 +1,7 @@
 use general_compute_runtime::gpu::{GpuCapability, GpuRuntime, GpuSelection, GpuVendor};
 use general_compute_runtime::{
-    ArtifactManifest, ArtifactRole, ExecutionPolicy, GeneralComputeRequest,
-    TrustedWorkerCapabilityRegistration, WorkerCapabilities, GENERAL_COMPUTE_RUNTIME_VERSION,
+    ArtifactManifest, ArtifactRole, ExecutionPolicy, GENERAL_COMPUTE_RUNTIME_VERSION,
+    GeneralComputeRequest, TrustedWorkerCapabilityRegistration, WorkerCapabilities,
 };
 
 const IMAGE: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -107,5 +107,8 @@ fn trusted_registration_rejects_a_malformed_gpu_capability_before_selection() {
     let error = registration
         .select_gpu_for_request(&request)
         .expect_err("malformed trusted GPU state must fail closed");
-    assert_eq!(error.code, general_compute_runtime::ValidationErrorCode::GpuUnavailable);
+    assert_eq!(
+        error.code,
+        general_compute_runtime::ValidationErrorCode::GpuUnavailable
+    );
 }

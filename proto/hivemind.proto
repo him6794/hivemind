@@ -119,8 +119,9 @@ message RunningStatusResponse {
     string status_message = 2;
 }
 
-// Worker -> Nodepool envelope for authoritative validation of one immutable
-// general-compute transfer lease identity.
+// Worker -> Nodepool: authoritative validation of one immutable
+// general-compute transfer lease identity. Workers must not treat their local
+// CAS/report state as revocation authority after a task is reassigned.
 message ValidateGeneralComputeTransferLeaseRequest {
     string token = 1; // Nodepool-issued Ed25519 worker-execution token
     string worker_id = 2;
@@ -153,6 +154,8 @@ message UploadTaskRequest {
     bytes package_data = 10;
     string package_filename = 11;
     bytes general_compute_manifest_json = 12; // canonical general-compute-v1alpha1 request manifest
+    string managed_dsl_backend_id = 13;
+    string managed_dsl_semantics_manifest_sha256 = 14;
 }
 
 message UploadTaskResponse {
@@ -186,6 +189,11 @@ message TaskInfo {
     double gpu_usage = 15;
     double gpu_memory_usage = 16;
     bool deterministic = 17;
+    string worker_id = 18;
+    string provider_user = 19;
+    string dispatch_status = 20;
+    int64 usage_units = 21;
+    int64 max_cpt = 22;
 }
 
 
@@ -378,6 +386,8 @@ message ExecuteTaskRequest {
     string attempt_id = 10; // immutable dispatch attempt identity
     string idempotency_key = 11; // Nodepool-owned result idempotency key
     string request_digest = 12; // canonical SHA-256 request digest
+    string managed_dsl_backend_id = 13;
+    string managed_dsl_semantics_manifest_sha256 = 14;
 }
 
 message ManagedProofEnvelope {
@@ -447,12 +457,31 @@ message GeneralComputeChunkResumeResponse {
     repeated GeneralComputeChunkDescriptor missing_chunks = 3;
 }
 
+// User/Master -> Nodepool: authenticated, task-bound source artifact upload.
+// This is intentionally separate from the Worker execution chunk service:
+// Nodepool persists these bytes as the trusted source for later dispatch.
+message GeneralComputeArtifactChunkUpload {
+    string token = 1; // user JWT issued by Nodepool
+    string task_id = 2;
+    string artifact_id = 3;
+    int64 offset = 4;
+    int64 size_bytes = 5;
+    string sha256 = 6;
+    bytes bytes = 7;
+}
+
+message GeneralComputeArtifactChunkUploadResponse {
+    bool success = 1;
+    string status_message = 2;
+    int64 accepted_chunks = 3;
+}
+
 // Nodepool -> Worker: authenticated admission/readiness for a
-// general-compute attempt. Chunk uploads happen only after this envelope has
-// established the assignment and immutable request identity.
+// general-compute attempt.  Chunk uploads must happen only after this
+// request has established the assignment and immutable request identity.
 message GeneralComputePrepareRequest {
     string task_id = 1;
-    string token = 2; // Nodepool-issued worker execution token
+    string token = 2; // nodepool-issued worker execution token
     string runtime = 3;
     bytes general_compute_manifest_json = 4;
     string execution_id = 5;
@@ -925,6 +954,13 @@ service GeneralComputeChunkService {
     rpc PrepareGeneralCompute(GeneralComputePrepareRequest) returns (GeneralComputePrepareResponse);
     rpc UploadChunk(GeneralComputeChunkUpload) returns (GeneralComputeChunkUploadResponse);
     rpc ResumeChunks(GeneralComputeChunkResumeRequest) returns (GeneralComputeChunkResumeResponse);
+}
+
+// Dedicated authenticated source-artifact persistence surface. Unlike the
+// Worker chunk service, this service is served by Nodepool and writes only
+// manifest-bound bytes owned by the task account.
+service GeneralComputeArtifactService {
+    rpc UploadChunk(GeneralComputeArtifactChunkUpload) returns (GeneralComputeArtifactChunkUploadResponse);
 }
 
 service BatchRuntimeService {

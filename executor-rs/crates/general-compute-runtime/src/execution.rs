@@ -11,9 +11,9 @@ use crate::cp_python::{PinnedPythonAdapter, PythonAdapterError, PythonBackendReg
 use crate::sandbox::BackendExecutionMode;
 use crate::supervisor::Cancellation;
 use crate::{
-    canonical_artifact_root, sha256_digest, ArtifactManifest, ArtifactRole, CapabilityMatrix,
-    GeneralComputeRequest, GeneralComputeResult, ResultStatus, TrustedWorkerCapabilityRegistration,
-    UsageClaim, WorkerCapabilities,
+    ArtifactManifest, ArtifactRole, CapabilityMatrix, GeneralComputeRequest, GeneralComputeResult,
+    ResultStatus, TrustedWorkerCapabilityRegistration, UsageClaim, WorkerCapabilities,
+    canonical_artifact_root, sha256_digest,
 };
 use std::fmt;
 use std::fs;

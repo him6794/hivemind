@@ -1,0 +1,446 @@
+﻿{
+  "name": "hivemind-oci-include-test",
+  "networks": {
+    "hivemind-network": {
+      "name": "hivemind-oci-include-test_hivemind-network",
+      "driver": "bridge",
+      "ipam": {}
+    }
+  },
+  "services": {
+    "master": {
+      "build": {
+        "context": "D:\\hivemind",
+        "dockerfile": "hivemind-rs/Dockerfile"
+      },
+      "command": [
+        "/app/hivemind-bin",
+        "master"
+      ],
+      "depends_on": {
+        "nodepool": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "entrypoint": null,
+      "environment": {
+        "JWT_SECRET": "test-jwt-secret",
+        "LOG_LEVEL": "info",
+        "MASTER_CORS_ALLOWED_ORIGINS": "",
+        "MASTER_HTTP_ADDR": "0.0.0.0:8082",
+        "NODEPOOL_GRPC_ENDPOINT": "nodepool:50051",
+        "TORRENT_ALLOW_LOCAL_TASK_ARTIFACTS": "false",
+        "TORRENT_ANNOUNCE_URL": "http://nodepool:6969/announce",
+        "TORRENT_API_DIR": "/app/api/torrents",
+        "TORRENT_BT_DIR": "/app/bt_torrents",
+        "TORRENT_TASK_ARTIFACT_BASE_URL": "http://master:8082/task-artifacts"
+      },
+      "networks": {
+        "hivemind-network": null
+      },
+      "ports": [
+        {
+          "mode": "ingress",
+          "target": 8082,
+          "published": "8082",
+          "protocol": "tcp"
+        }
+      ],
+      "restart": "unless-stopped",
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "master-task-references",
+          "target": "/app/api/torrents",
+          "volume": {}
+        },
+        {
+          "type": "volume",
+          "source": "master-torrents",
+          "target": "/app/bt_torrents",
+          "volume": {}
+        }
+      ]
+    },
+    "master-ui": {
+      "build": {
+        "context": "D:\\hivemind\\frontend\\master-ui",
+        "dockerfile": "Dockerfile",
+        "args": {
+          "VITE_API_BASE": "http://localhost:8082"
+        }
+      },
+      "command": null,
+      "depends_on": {
+        "master": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "entrypoint": null,
+      "networks": {
+        "hivemind-network": null
+      },
+      "ports": [
+        {
+          "mode": "ingress",
+          "target": 80,
+          "published": "3000",
+          "protocol": "tcp"
+        }
+      ],
+      "restart": "unless-stopped"
+    },
+    "nodepool": {
+      "build": {
+        "context": "D:\\hivemind",
+        "dockerfile": "hivemind-rs/Dockerfile"
+      },
+      "command": [
+        "/app/hivemind-bin",
+        "nodepool"
+      ],
+      "depends_on": {
+        "postgres": {
+          "condition": "service_healthy",
+          "required": true
+        },
+        "redis": {
+          "condition": "service_healthy",
+          "required": true
+        }
+      },
+      "entrypoint": null,
+      "environment": {
+        "DATABASE_URL": "postgres://hivemind:test-password@postgres:5432/hivemind",
+        "HIVEMIND_ADMIN_USERS": "testuser",
+        "HIVEMIND_SEED_DEFAULT_USER": "false",
+        "JWT_SECRET": "test-jwt-secret",
+        "LOG_LEVEL": "info",
+        "MANAGED_PROOF_ROLLOUT_MODE": "enforce",
+        "NODEPOOL_GRPC_ADDR": "0.0.0.0:50051",
+        "REDIS_URL": "redis://redis:6379",
+        "TORRENT_ALLOW_LOCAL_TASK_ARTIFACTS": "false",
+        "TORRENT_ANNOUNCE_URL": "http://nodepool:6969/announce",
+        "TORRENT_API_DIR": "/app/api/torrents",
+        "TORRENT_BT_DIR": "/app/bt_torrents",
+        "TORRENT_SEED_ADVERTISE_ADDR": "nodepool:6881",
+        "TORRENT_SEED_LISTEN_ADDR": "0.0.0.0:6881",
+        "WORKER_EXECUTION_PRIVATE_KEY_PEM": "test-private"
+      },
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "true"
+        ],
+        "timeout": "5s",
+        "interval": "30s",
+        "retries": 3,
+        "start_period": "10s"
+      },
+      "networks": {
+        "hivemind-network": null
+      },
+      "ports": [
+        {
+          "mode": "ingress",
+          "target": 50051,
+          "published": "50051",
+          "protocol": "tcp"
+        },
+        {
+          "mode": "ingress",
+          "target": 6969,
+          "published": "6969",
+          "protocol": "tcp"
+        },
+        {
+          "mode": "ingress",
+          "target": 6881,
+          "published": "6881",
+          "protocol": "tcp"
+        }
+      ],
+      "restart": "unless-stopped",
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "hivemind-data",
+          "target": "/app/data",
+          "volume": {}
+        },
+        {
+          "type": "volume",
+          "source": "nodepool-torrents",
+          "target": "/app/bt_torrents",
+          "volume": {}
+        },
+        {
+          "type": "volume",
+          "source": "nodepool-task-packages",
+          "target": "/app/api/torrents",
+          "volume": {}
+        }
+      ]
+    },
+    "postgres": {
+      "command": null,
+      "entrypoint": null,
+      "environment": {
+        "POSTGRES_DB": "hivemind",
+        "POSTGRES_PASSWORD": "test-password",
+        "POSTGRES_USER": "hivemind"
+      },
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "pg_isready -U hivemind"
+        ],
+        "timeout": "5s",
+        "interval": "10s",
+        "retries": 5
+      },
+      "image": "postgres:16-alpine",
+      "networks": {
+        "hivemind-network": null
+      },
+      "ports": [
+        {
+          "mode": "ingress",
+          "target": 5432,
+          "published": "5432",
+          "protocol": "tcp"
+        }
+      ],
+      "restart": "unless-stopped",
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "postgres-data",
+          "target": "/var/lib/postgresql/data",
+          "volume": {}
+        }
+      ]
+    },
+    "redis": {
+      "command": null,
+      "entrypoint": null,
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "redis-cli",
+          "ping"
+        ],
+        "timeout": "5s",
+        "interval": "10s",
+        "retries": 5
+      },
+      "image": "redis:7-alpine",
+      "networks": {
+        "hivemind-network": null
+      },
+      "ports": [
+        {
+          "mode": "ingress",
+          "target": 6379,
+          "published": "6379",
+          "protocol": "tcp"
+        }
+      ],
+      "restart": "unless-stopped",
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "redis-data",
+          "target": "/data",
+          "volume": {}
+        }
+      ]
+    },
+    "site": {
+      "build": {
+        "context": "D:\\hivemind",
+        "dockerfile": "frontend/Dockerfile"
+      },
+      "command": null,
+      "depends_on": {
+        "nodepool": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "entrypoint": null,
+      "environment": {
+        "WEBSITE_NODEPOOL_GRPC_ADDR": "nodepool:50051"
+      },
+      "networks": {
+        "hivemind-network": null
+      },
+      "ports": [
+        {
+          "mode": "ingress",
+          "target": 3000,
+          "published": "8080",
+          "protocol": "tcp"
+        }
+      ],
+      "restart": "unless-stopped"
+    },
+    "worker": {
+      "build": {
+        "context": "D:\\hivemind",
+        "dockerfile": "hivemind-rs/Dockerfile"
+      },
+      "cap_add": [
+        "SYS_ADMIN"
+      ],
+      "command": [
+        "/app/hivemind-bin",
+        "worker"
+      ],
+      "depends_on": {
+        "nodepool": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "entrypoint": null,
+      "environment": {
+        "EXECUTOR_NETWORK_EGRESS_ENABLED": "true",
+        "EXECUTOR_NETWORK_EGRESS_MODE": "allowlist",
+        "EXECUTOR_NETWORK_EGRESS_TARGETS": "172.28.0.0/24",
+        "EXECUTOR_SANDBOX_DIR": "/app/sandbox",
+        "HIVEMIND_GENERAL_COMPUTE_CAS_ROOT": "/var/lib/hivemind/general-compute/cas",
+        "HIVEMIND_GENERAL_COMPUTE_PRODUCTION_BACKENDS": "/etc/hivemind/general-compute/backends.json",
+        "JWT_SECRET": "test-jwt-secret",
+        "LOG_LEVEL": "info",
+        "MANAGED_PROVER_EXECUTABLE": "/app/prover/hivemind-managed-proof-prover",
+        "MANAGED_PROVER_TIMEOUT_SECS": "900",
+        "NODEPOOL_GRPC_ENDPOINT": "nodepool:50051",
+        "TORRENT_ANNOUNCE_URL": "http://nodepool:6969/announce",
+        "TORRENT_API_DIR": "/app/api/torrents",
+        "TORRENT_BT_DIR": "/app/bt_torrents",
+        "WORKER_ADVERTISE_ADDR": "worker:50053",
+        "WORKER_CONTROL_CORS_ALLOWED_ORIGINS": "",
+        "WORKER_CONTROL_HTTP_ADDR": "0.0.0.0:18080",
+        "WORKER_EXECUTION_PUBLIC_KEY_PEM": "test-public",
+        "WORKER_GRPC_ADDR": "0.0.0.0:50053",
+        "WORKER_NODEPOOL_PASSWORD": "",
+        "WORKER_NODEPOOL_TOKEN": "",
+        "WORKER_NODEPOOL_USERNAME": ""
+      },
+      "networks": {
+        "hivemind-network": null
+      },
+      "ports": [
+        {
+          "mode": "ingress",
+          "target": 50053,
+          "published": "50053",
+          "protocol": "tcp"
+        },
+        {
+          "mode": "ingress",
+          "target": 18080,
+          "published": "18080",
+          "protocol": "tcp"
+        }
+      ],
+      "restart": "unless-stopped",
+      "security_opt": [
+        "seccomp:unconfined"
+      ],
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "worker-task-downloads",
+          "target": "/app/api/torrents",
+          "volume": {}
+        },
+        {
+          "type": "volume",
+          "source": "worker-torrents",
+          "target": "/app/bt_torrents",
+          "volume": {}
+        },
+        {
+          "type": "volume",
+          "source": "worker-general-compute-config",
+          "target": "/etc/hivemind/general-compute",
+          "read_only": true
+        },
+        {
+          "type": "volume",
+          "source": "worker-general-compute-state",
+          "target": "/var/lib/hivemind/general-compute"
+        }
+      ]
+    },
+    "worker-ui": {
+      "build": {
+        "context": "D:\\hivemind\\frontend\\worker-ui",
+        "dockerfile": "Dockerfile",
+        "args": {
+          "VITE_API_BASE": "http://localhost:8082",
+          "VITE_WORKER_CONTROL_BASE": "http://localhost:18080"
+        }
+      },
+      "command": null,
+      "depends_on": {
+        "worker": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "entrypoint": null,
+      "networks": {
+        "hivemind-network": null
+      },
+      "ports": [
+        {
+          "mode": "ingress",
+          "target": 80,
+          "published": "3001",
+          "protocol": "tcp"
+        }
+      ],
+      "restart": "unless-stopped"
+    }
+  },
+  "volumes": {
+    "hivemind-data": {
+      "name": "hivemind-data"
+    },
+    "master-task-references": {
+      "name": "hivemind-master-task-references"
+    },
+    "master-torrents": {
+      "name": "hivemind-master-torrents"
+    },
+    "nodepool-task-packages": {
+      "name": "hivemind-nodepool-task-packages"
+    },
+    "nodepool-torrents": {
+      "name": "hivemind-nodepool-torrents"
+    },
+    "postgres-data": {
+      "name": "hivemind-postgres-data"
+    },
+    "redis-data": {
+      "name": "hivemind-redis-data"
+    },
+    "worker-general-compute-config": {
+      "name": "hivemind-worker-general-compute-config"
+    },
+    "worker-general-compute-state": {
+      "name": "hivemind-worker-general-compute-state"
+    },
+    "worker-task-downloads": {
+      "name": "hivemind-worker-task-downloads"
+    },
+    "worker-torrents": {
+      "name": "hivemind-worker-torrents"
+    }
+  }
+}

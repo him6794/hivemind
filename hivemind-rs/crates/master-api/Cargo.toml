@@ -6,18 +6,13 @@ license.workspace = true
 
 [dependencies]
 tokio.workspace = true
-tokio-util.workspace = true
 tonic.workspace = true
 axum.workspace = true
-tower.workspace = true
 tower-http.workspace = true
-hyper.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-uuid.workspace = true
 chrono.workspace = true
 tracing.workspace = true
-thiserror.workspace = true
 anyhow.workspace = true
 jsonwebtoken.workspace = true
 hivemind-proto = { path = "../proto" }
@@ -25,11 +20,10 @@ hivemind-models = { path = "../models" }
 hivemind-config = { path = "../config" }
 hivemind-client-runtime = { path = "../client-runtime" }
 general-compute-runtime = { path = "../../../executor-rs/crates/general-compute-runtime" }
-reqwest.workspace = true
 
 [dev-dependencies]
 tower.workspace = true
-tempfile.workspace = true
+uuid.workspace = true
 sqlx.workspace = true
 bcrypt.workspace = true
 hivemind-auth = { path = "../auth" }

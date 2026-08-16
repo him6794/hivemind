@@ -1,35 +1,10 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import './console.css';
 import { artifactFilenameFromContentDisposition } from './artifactDownloadPolicy.mjs';
 import { clearStoredSession, readStoredSession, saveStoredSession } from './authSession.mjs';
 import { createTaskId, validateTaskId } from './taskIdPolicy.mjs';
 import { taskRequestFailureText, taskResponseFailureMessage } from './taskResponsePolicy.mjs';
-
-const panelStyle = {
-  border: '1px solid #d8e0e8',
-  borderRadius: 14,
-  background: '#fff',
-  padding: 18,
-  boxShadow: '0 12px 32px rgba(15, 23, 42, 0.06)',
-};
-
-const fieldStyle = {
-  width: '100%',
-  boxSizing: 'border-box',
-  padding: '10px 12px',
-  marginTop: 6,
-  border: '1px solid #cad5df',
-  borderRadius: 10,
-  background: '#fff',
-};
-
-const buttonStyle = {
-  padding: '10px 14px',
-  border: 'none',
-  borderRadius: 10,
-  cursor: 'pointer',
-  fontWeight: 700,
-};
+import { normalizeTaskObservability } from './taskObservability.mjs';
 
 function toNumber(value) {
   const parsed = Number(value);
@@ -530,6 +505,14 @@ export default function MasterApp() {
                     const message = task.status_message || task.StatusMessage || '';
                     const wallTimeMs = Number(task.wall_time_ms || 0);
                     const billedAmount = Number(task.billed_amount || 0);
+                    const observability = normalizeTaskObservability({
+                      ...task,
+                      worker_id: task.worker_id,
+                      provider_user: task.provider_user,
+                      dispatch_status: task.dispatch_status,
+                      usage_units: task.usage_units,
+                      max_cpt: task.max_cpt,
+                    });
                     const terminal = isTerminalStatus(statusText);
 
                     const isLogLoading = logLoading === id;
@@ -546,9 +529,20 @@ export default function MasterApp() {
                         <div className="subtle" style={{ marginTop: 4, fontSize: 12 }}>{message}</div>
                         <div className="meta">
                           <span>wall {(wallTimeMs / 1000).toFixed(1)}s</span>
-                          <span>billed {billedAmount} CPT</span>
-                          {task.retry_count ? <span>retries {task.retry_count}</span> : null}
+                          <span>Final charge {observability.billedAmount || billedAmount} CPT</span>
+                          <span>{observability.billingSettled ? 'Billed / settled' : 'Billing pending'}</span>
+                          {observability.retryCount ? <span>retries {observability.retryCount}</span> : null}
                         </div>
+                        <dl className="observability-grid">
+                          <dt>Worker ID</dt>
+                          <dd>{observability.workerId || 'Not assigned yet'}</dd>
+                          <dt>Provider</dt>
+                          <dd>{observability.providerUser || 'Not settled yet'}</dd>
+                          <dt>Dispatch</dt>
+                          <dd>{observability.dispatchStatus}</dd>
+                          <dt>Usage / max CPT</dt>
+                          <dd>{observability.usageUnits} / {observability.maxCpt || '—'}</dd>
+                        </dl>
                         <div className="actions">
                           <button type="button" onClick={() => viewTaskLog(task)} disabled={isLogLoading} className="button">
                             {isLogLoading ? 'Loading...' : 'Log'}

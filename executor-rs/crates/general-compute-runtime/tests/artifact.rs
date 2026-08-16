@@ -1,7 +1,7 @@
 use general_compute_runtime::artifact::{
     ArtifactMaterializationError, ArtifactMaterializer, CasChunkStore,
 };
-use general_compute_runtime::{sha256_digest, ArtifactChunk, ArtifactManifest, ArtifactRole};
+use general_compute_runtime::{ArtifactChunk, ArtifactManifest, ArtifactRole, sha256_digest};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -60,7 +60,14 @@ fn inline_artifact_materializer_rejects_path_traversal_and_symlink_targets() {
     #[cfg(unix)]
     std::os::unix::fs::symlink(&target, &linked).unwrap();
     #[cfg(windows)]
-    std::os::windows::fs::symlink_file(&target, &linked).unwrap();
+    if let Err(error) = std::os::windows::fs::symlink_file(&target, &linked) {
+        if error.raw_os_error() == Some(1314) {
+            remove_root(&root);
+            remove_root(&outside);
+            return;
+        }
+        panic!("file symlink should be created: {error}");
+    }
 
     let artifact = ArtifactManifest::inline_json("linked", ArtifactRole::Input, b"inside");
     assert!(matches!(

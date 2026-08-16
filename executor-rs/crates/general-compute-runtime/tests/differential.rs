@@ -21,8 +21,14 @@ fn differential_case_replays_with_fixed_source_input_and_seed() {
     let runner = DifferentialRunner::new(case.clone());
 
     assert_eq!(runner.case(), &case);
-    assert_eq!(runner.run_reference().expect("case should run"), case.expected);
-    assert_eq!(runner.run_reference().expect("replay should run"), case.expected);
+    assert_eq!(
+        runner.run_reference().expect("case should run"),
+        case.expected
+    );
+    assert_eq!(
+        runner.run_reference().expect("replay should run"),
+        case.expected
+    );
 }
 
 #[test]

@@ -1,6 +1,7 @@
 use hivemind_config::{HivemindConfig, ManagedProofRolloutMode};
 use hivemind_proto::{
     batch_runtime_service_server::BatchRuntimeService,
+    general_compute_artifact_service_server::GeneralComputeArtifactService,
     master_node_service_server::MasterNodeService,
     node_manager_service_server::NodeManagerService,
     user_service_server::UserService,
@@ -14,6 +15,8 @@ use hivemind_proto::{
     DownloadTaskArtifactRequest,
     DownloadTaskArtifactResponse,
     ExecutionPackage,
+    GeneralComputeArtifactChunkUpload,
+    GeneralComputeArtifactChunkUploadResponse,
     GetAdminArtifactOverviewRequest,
     GetAdminArtifactOverviewResponse,
     // Admin RPC types
@@ -646,8 +649,10 @@ fn validate_runtime_contract_with_manifest(
             if manifest_json.len() > hivemind_proto::GENERAL_COMPUTE_MANIFEST_MAX_BYTES {
                 return Err("general-compute-v1alpha1 request manifest exceeds the byte limit");
             }
-            let request = serde_json::from_slice::<general_compute_runtime::GeneralComputeRequest>(manifest_json)
-                .map_err(|_| "general-compute-v1alpha1 request manifest is invalid")?;
+            let request = serde_json::from_slice::<general_compute_runtime::GeneralComputeRequest>(
+                manifest_json,
+            )
+            .map_err(|_| "general-compute-v1alpha1 request manifest is invalid")?;
             request
                 .validate()
                 .map_err(|_| "general-compute-v1alpha1 request manifest is invalid")?;
@@ -925,6 +930,11 @@ impl NodeManagerService for GrpcNodeManagerService {
             .node_manager
             .trusted_general_compute_capabilities_json_for_owner(&worker_id, &claims.sub, admin)
             .map_err(|e| Status::permission_denied(e.to_string()))?;
+        let managed_dsl_capabilities_json = self
+            .state
+            .node_manager
+            .trusted_managed_dsl_capabilities_json_for_owner(&worker_id, &claims.sub, admin)
+            .map_err(|e| Status::permission_denied(e.to_string()))?;
         let reg = WorkerRegistration {
             worker_id,
             username,
@@ -932,6 +942,7 @@ impl NodeManagerService for GrpcNodeManagerService {
             resources: proto_resource_spec_to_model(r),
             location: req.location,
             general_compute_capabilities_json,
+            managed_dsl_capabilities_json,
         };
         match svc
             .register_worker_for_owner(&reg, &claims.sub, admin)
@@ -1331,6 +1342,106 @@ impl GrpcMasterNodeService {
 pub struct GrpcBatchRuntimeService {
     state: Arc<NodepoolState>,
 }
+
+/// Nodepool-owned source artifact persistence for general-compute tasks.
+///
+/// This service accepts the user's Nodepool JWT, never a Worker execution
+/// token. It writes only chunks whose coordinates are already present in the
+/// task's persisted manifest, so the scheduler can later source bytes without
+/// trusting a Worker or an arbitrary path/URL.
+pub struct GrpcGeneralComputeArtifactService {
+    state: Arc<NodepoolState>,
+}
+
+impl GrpcGeneralComputeArtifactService {
+    pub fn new(state: Arc<NodepoolState>) -> Self {
+        Self { state }
+    }
+}
+
+#[tonic::async_trait]
+impl GeneralComputeArtifactService for GrpcGeneralComputeArtifactService {
+    async fn upload_chunk(
+        &self,
+        request: Request<GeneralComputeArtifactChunkUpload>,
+    ) -> Result<Response<GeneralComputeArtifactChunkUploadResponse>, Status> {
+        let req = request.into_inner();
+        if !is_safe_task_id(&req.task_id) {
+            return Err(Status::invalid_argument("Invalid task_id"));
+        }
+        hivemind_proto::validate_general_compute_artifact_chunk_upload(&req)
+            .map_err(Status::invalid_argument)?;
+        let size_bytes = u64::try_from(req.size_bytes)
+            .map_err(|_| Status::invalid_argument("artifact chunk size is invalid"))?;
+
+        let claims = self
+            .state
+            .auth
+            .validate_token(&req.token)
+            .map_err(|_| Status::unauthenticated("Invalid token"))?;
+        let task = self
+            .state
+            .scheduler
+            .get_task(&req.task_id)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?
+            .ok_or_else(|| Status::not_found("Task not found"))?;
+        if claims.sub != task.owner && !is_admin(&claims.sub) {
+            return Err(Status::permission_denied("Not authorized for task"));
+        }
+        if !matches!(
+            task.status,
+            TaskStatus::Pending | TaskStatus::Queued | TaskStatus::Assigned | TaskStatus::Running
+        ) {
+            return Err(Status::failed_precondition(
+                "task is not accepting artifact chunks",
+            ));
+        }
+        if task.runtime.as_deref() != Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION)
+        {
+            return Err(Status::failed_precondition(
+                "task is not a general-compute task",
+            ));
+        }
+
+        self.state
+            .scheduler
+            .put_general_compute_artifact_chunk(
+                &req.task_id,
+                &req.artifact_id,
+                u64::try_from(req.offset)
+                    .map_err(|_| Status::invalid_argument("artifact chunk offset is invalid"))?,
+                size_bytes,
+                &req.sha256,
+                &req.bytes,
+            )
+            .await
+            .map_err(|error| {
+                let message = error.to_string();
+                if message.contains("conflicts") {
+                    Status::already_exists(message)
+                } else if message.contains("expired") {
+                    Status::failed_precondition(message)
+                } else if message.contains("manifest")
+                    || message.contains("identity")
+                    || message.contains("coordinates")
+                    || message.contains("digest")
+                    || message.contains("size")
+                    || message.contains("limit")
+                {
+                    Status::invalid_argument(message)
+                } else {
+                    Status::internal(message)
+                }
+            })?;
+
+        Ok(Response::new(GeneralComputeArtifactChunkUploadResponse {
+            success: true,
+            status_message: "Chunk persisted".into(),
+            accepted_chunks: 1,
+        }))
+    }
+}
 impl GrpcBatchRuntimeService {
     pub fn new(state: Arc<NodepoolState>) -> Self {
         Self { state }
@@ -1355,18 +1466,42 @@ impl MasterNodeService for GrpcMasterNodeService {
                 status_message: "task_id is required and must be a safe file name".into(),
             }));
         }
-        if let Err(message) =
-            validate_runtime_contract_with_manifest(
-                &req.runtime,
-                &req.task_source,
-                &req.general_compute_manifest_json,
-                &req.torrent,
-                req.max_cpt,
-            )
-        {
+        if let Err(message) = validate_runtime_contract_with_manifest(
+            &req.runtime,
+            &req.task_source,
+            &req.general_compute_manifest_json,
+            &req.torrent,
+            req.max_cpt,
+        ) {
             return Ok(Response::new(UploadTaskResponse {
                 success: false,
                 status_message: message.into(),
+            }));
+        }
+        if req.runtime.trim() == "production_sandboxed_dsl" {
+            if req.managed_dsl_backend_id.trim().is_empty() {
+                return Ok(Response::new(UploadTaskResponse {
+                    success: false,
+                    status_message: "production_sandboxed_dsl requires managed_dsl_backend_id"
+                        .into(),
+                }));
+            }
+            if req.managed_dsl_semantics_manifest_sha256
+                != general_compute_runtime::MANAGED_DSL_SEMANTICS_MANIFEST_SHA256
+            {
+                return Ok(Response::new(UploadTaskResponse {
+                    success: false,
+                    status_message:
+                        "production_sandboxed_dsl requires the canonical semantics digest".into(),
+                }));
+            }
+        } else if !req.managed_dsl_backend_id.is_empty()
+            || !req.managed_dsl_semantics_manifest_sha256.is_empty()
+        {
+            return Ok(Response::new(UploadTaskResponse {
+                success: false,
+                status_message: "managed DSL identity requires runtime production_sandboxed_dsl"
+                    .into(),
             }));
         }
         if self
@@ -1469,6 +1604,20 @@ impl MasterNodeService for GrpcMasterNodeService {
             } else {
                 Some(req.general_compute_manifest_json)
             },
+            managed_dsl_backend_id: if req.managed_dsl_backend_id.trim().is_empty() {
+                None
+            } else {
+                Some(req.managed_dsl_backend_id)
+            },
+            managed_dsl_semantics_manifest_sha256: if req
+                .managed_dsl_semantics_manifest_sha256
+                .trim()
+                .is_empty()
+            {
+                None
+            } else {
+                Some(req.managed_dsl_semantics_manifest_sha256)
+            },
             expected_btih,
             cpu_usage: 0.0,
             memory_usage: 0.0,
@@ -1527,9 +1676,18 @@ impl MasterNodeService for GrpcMasterNodeService {
             .validate_token(&req.token)
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         match self.state.scheduler.list_user_tasks(&claims.sub).await {
-            Ok(tasks) => Ok(Response::new(GetAllUserTasksResponse {
-                tasks: tasks.into_iter().map(task_info_from_task).collect(),
-            })),
+            Ok(tasks) => {
+                let pool = &self.state.scheduler.database().pool;
+                let mut task_infos = Vec::with_capacity(tasks.len());
+                for task in tasks {
+                    task_infos.push(
+                        task_info_from_task(pool, task)
+                            .await
+                            .map_err(|e| Status::internal(e.to_string()))?,
+                    );
+                }
+                Ok(Response::new(GetAllUserTasksResponse { tasks: task_infos }))
+            }
             Err(e) => Err(Status::internal(e.to_string())),
         }
     }
@@ -2807,8 +2965,44 @@ fn task_lease_from_task(task: &Task) -> TaskLease {
     }
 }
 
-fn task_info_from_task(task: Task) -> TaskInfo {
-    TaskInfo {
+async fn task_info_from_task(pool: &sqlx::PgPool, task: Task) -> Result<TaskInfo, sqlx::Error> {
+    // Settlement records are the authoritative provider identity. For work
+    // that has not settled yet, the registered worker owner is the only
+    // trusted fallback available to the nodepool.
+    let provider_user: Option<String> = sqlx::query_scalar(
+        "SELECT COALESCE(
+            (SELECT provider_user
+             FROM ledger_entries
+             WHERE task_id = $1
+               AND kind = 'provider_credit'
+               AND status = 'settled'
+               AND provider_user IS NOT NULL
+             ORDER BY created_at DESC
+             LIMIT 1),
+            (SELECT username FROM worker_nodes WHERE worker_id = $2)
+        )",
+    )
+    .bind(&task.task_id)
+    .bind(&task.worker_id)
+    .fetch_one(pool)
+    .await?;
+
+    let dispatch_status = if task.retry_count > 0
+        || task
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.eq_ignore_ascii_case("Redispatched"))
+    {
+        "REDISPATCHED"
+    } else if task.worker_id.is_some() {
+        "DISPATCHED"
+    } else if matches!(task.status, TaskStatus::Pending | TaskStatus::Queued) {
+        "QUEUED"
+    } else {
+        "NOT_DISPATCHED"
+    };
+
+    Ok(TaskInfo {
         task_id: task.task_id,
         owner: task.owner,
         status: task.status.as_str().into(),
@@ -2826,7 +3020,12 @@ fn task_info_from_task(task: Task) -> TaskInfo {
         gpu_usage: task.gpu_usage,
         gpu_memory_usage: task.gpu_memory_usage,
         deterministic: task.deterministic,
-    }
+        worker_id: task.worker_id.unwrap_or_default(),
+        provider_user: provider_user.unwrap_or_default(),
+        dispatch_status: dispatch_status.into(),
+        usage_units: task.managed_executed_ops,
+        max_cpt: task.max_cpt,
+    })
 }
 
 fn proto_resource_spec_to_model(r: hivemind_proto::ResourceSpec) -> hivemind_models::ResourceSpec {
@@ -3083,14 +3282,14 @@ mod tests {
     use hivemind_config::HivemindConfig;
     use hivemind_models::Claims;
     use hivemind_proto::{
+        general_compute_artifact_service_server::GeneralComputeArtifactService,
         node_manager_service_client::NodeManagerServiceClient,
         node_manager_service_server::NodeManagerServiceServer,
         worker_node_service_server::{WorkerNodeService, WorkerNodeServiceServer},
-        ExecuteTaskRequest, ExecuteTaskResponse, GetAdminManagedProofMetricsRequest,
-        StopTaskExecutionRequest, StopTaskExecutionResponse, TaskOutputRequest, TaskOutputResponse,
-        TaskOutputUploadRequest, TaskOutputUploadResponse, TaskResultUploadRequest,
-        TaskResultUploadResponse, TaskUsageRequest, TaskUsageResponse,
-        ValidateGeneralComputeTransferLeaseRequest,
+        ExecuteTaskRequest, ExecuteTaskResponse, GeneralComputeArtifactChunkUpload,
+        GetAdminManagedProofMetricsRequest, StopTaskExecutionRequest, StopTaskExecutionResponse,
+        TaskOutputRequest, TaskOutputResponse, TaskOutputUploadRequest, TaskOutputUploadResponse,
+        TaskResultUploadRequest, TaskResultUploadResponse, TaskUsageRequest, TaskUsageResponse,
     };
     use std::net::SocketAddr;
     use std::sync::{Arc, OnceLock};
@@ -3477,7 +3676,8 @@ mod tests {
             idempotency_key: "idempotency-1".into(),
             request_digest: String::new(),
             runtime_version: general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION.into(),
-            guest_image_digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             backend_id: "python-cpython-312".into(),
             entrypoint: "main".into(),
             source_artifact: general_compute_runtime::ArtifactManifest::inline_json(
@@ -3493,6 +3693,108 @@ mod tests {
         };
         request.request_digest = request.canonical_request_digest();
         request
+    }
+
+    #[tokio::test]
+    async fn artifact_chunk_upload_requires_owner_and_allows_identical_replay() {
+        let Some((master, task_id, other_token, owner)) = test_service().await else {
+            return;
+        };
+        let service = GrpcGeneralComputeArtifactService::new(master.state.clone());
+        let owner_token = token_for(&service.state.auth, &owner);
+        let bytes = b"source".to_vec();
+        let mut request = valid_general_compute_request();
+        request.source_artifact.inline_bytes = None;
+        request.source_artifact.chunks = vec![general_compute_runtime::ArtifactChunk {
+            offset: 0,
+            size_bytes: bytes.len() as u64,
+            sha256: general_compute_runtime::sha256_digest(&bytes),
+        }];
+        request.source_artifact.size_bytes = bytes.len() as u64;
+        request.source_artifact.sha256 = general_compute_runtime::sha256_digest(&bytes);
+        request.request_digest = request.canonical_request_digest();
+        let manifest = serde_json::to_vec(&request).unwrap();
+        sqlx::query(
+            "UPDATE tasks
+             SET runtime = $1, general_compute_manifest_json = $2, status = 'PENDING'
+             WHERE task_id = $3",
+        )
+        .bind(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION)
+        .bind(&manifest)
+        .bind(&task_id)
+        .execute(&service.state.scheduler.database().pool)
+        .await
+        .unwrap();
+
+        let upload = |token: String, payload: Vec<u8>| GeneralComputeArtifactChunkUpload {
+            token,
+            task_id: task_id.clone(),
+            artifact_id: "source".into(),
+            offset: 0,
+            size_bytes: payload.len() as i64,
+            sha256: general_compute_runtime::sha256_digest(&payload),
+            bytes: payload,
+        };
+
+        let denied = service
+            .upload_chunk(Request::new(upload(other_token, bytes.clone())))
+            .await
+            .expect_err("a non-owner must not upload task artifacts");
+        assert_eq!(denied.code(), tonic::Code::PermissionDenied);
+
+        let first = service
+            .upload_chunk(Request::new(upload(owner_token.clone(), bytes.clone())))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(first.success);
+        let replay = service
+            .upload_chunk(Request::new(upload(owner_token, bytes.clone())))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(replay.success);
+
+        let conflict = service
+            .upload_chunk(Request::new(upload(
+                token_for(&service.state.auth, &owner),
+                b"tamper".to_vec(),
+            )))
+            .await
+            .expect_err("a conflicting payload must be rejected");
+        assert_eq!(conflict.code(), tonic::Code::AlreadyExists);
+
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+    }
+
+    #[tokio::test]
+    async fn artifact_chunk_upload_rejects_terminal_tasks() {
+        let Some((master, task_id, _other_token, owner)) = test_service().await else {
+            return;
+        };
+        let service = GrpcGeneralComputeArtifactService::new(master.state.clone());
+        let token = token_for(&service.state.auth, &owner);
+        sqlx::query("UPDATE tasks SET runtime = $1, status = 'COMPLETED' WHERE task_id = $2")
+            .bind(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION)
+            .bind(&task_id)
+            .execute(&service.state.scheduler.database().pool)
+            .await
+            .unwrap();
+
+        let error = service
+            .upload_chunk(Request::new(GeneralComputeArtifactChunkUpload {
+                token,
+                task_id: task_id.clone(),
+                artifact_id: "source".into(),
+                offset: 0,
+                size_bytes: 1,
+                sha256: general_compute_runtime::sha256_digest(b"x"),
+                bytes: b"x".to_vec(),
+            }))
+            .await
+            .expect_err("terminal tasks must not accept new source chunks");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
     }
 
     #[tokio::test]
@@ -3514,6 +3816,8 @@ mod tests {
                 package_data: Default::default(),
                 package_filename: String::new(),
                 general_compute_manifest_json: Vec::new(),
+                managed_dsl_backend_id: String::new(),
+                managed_dsl_semantics_manifest_sha256: String::new(),
             }))
             .await
             .unwrap()
@@ -3953,6 +4257,8 @@ mod tests {
                 package_data: Default::default(),
                 package_filename: String::new(),
                 general_compute_manifest_json: Vec::new(),
+                managed_dsl_backend_id: String::new(),
+                managed_dsl_semantics_manifest_sha256: String::new(),
             }))
             .await
             .unwrap()
@@ -4031,6 +4337,8 @@ mod tests {
                 package_data: Default::default(),
                 package_filename: String::new(),
                 general_compute_manifest_json: Vec::new(),
+                managed_dsl_backend_id: String::new(),
+                managed_dsl_semantics_manifest_sha256: String::new(),
             }))
             .await
             .unwrap()
@@ -4092,6 +4400,8 @@ mod tests {
                 package_data: Default::default(),
                 package_filename: String::new(),
                 general_compute_manifest_json: Vec::new(),
+                managed_dsl_backend_id: String::new(),
+                managed_dsl_semantics_manifest_sha256: String::new(),
             }))
             .await
             .unwrap()
@@ -4153,6 +4463,8 @@ mod tests {
                 package_data: Default::default(),
                 package_filename: String::new(),
                 general_compute_manifest_json: Vec::new(),
+                managed_dsl_backend_id: String::new(),
+                managed_dsl_semantics_manifest_sha256: String::new(),
             }))
             .await
             .unwrap()
@@ -4323,35 +4635,32 @@ mod tests {
         let worker_id = "grpc-trusted-capability-worker".to_string();
         let mut config = HivemindConfig::for_test();
         let image = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        config
-            .general_compute
-            .trusted_worker_capabilities
-            .insert(
-                worker_id.clone(),
-                hivemind_config::TrustedGeneralComputeWorkerRegistration {
-                    owner: owner.clone(),
-                    registration: general_compute_runtime::TrustedWorkerCapabilityRegistration {
-                        worker: general_compute_runtime::WorkerCapabilities {
-                            guest_image_digests: vec![image.into()],
-                            capabilities: vec!["cpu".into()],
-                            max_threads: 4,
-                            gpu_available: false,
-                        },
-                        gpu_capabilities: vec![],
-                        backends: vec![general_compute_runtime::BackendRegistration {
-                            backend_id: "python-cpython-312".into(),
-                            execution_mode:
-                                general_compute_runtime::sandbox::BackendExecutionMode::ReferenceDirect,
-                            guest_image_digest: image.into(),
-                            capabilities: vec!["cpu".into()],
-                            max_threads: 4,
-                            network_allowed: false,
-                            filesystem_read_only: true,
-                            gpu_allowed: false,
-                        }],
+        config.general_compute.trusted_worker_capabilities.insert(
+            worker_id.clone(),
+            hivemind_config::TrustedGeneralComputeWorkerRegistration {
+                owner: owner.clone(),
+                registration: general_compute_runtime::TrustedWorkerCapabilityRegistration {
+                    worker: general_compute_runtime::WorkerCapabilities {
+                        guest_image_digests: vec![image.into()],
+                        capabilities: vec!["cpu".into()],
+                        max_threads: 4,
+                        gpu_available: false,
                     },
+                    gpu_capabilities: vec![],
+                    backends: vec![general_compute_runtime::BackendRegistration {
+                        backend_id: "python-cpython-312".into(),
+                        execution_mode:
+                            general_compute_runtime::sandbox::BackendExecutionMode::ReferenceDirect,
+                        guest_image_digest: image.into(),
+                        capabilities: vec!["cpu".into()],
+                        max_threads: 4,
+                        network_allowed: false,
+                        filesystem_read_only: true,
+                        gpu_allowed: false,
+                    }],
                 },
-            );
+            },
+        );
         let (master_service, task_id, _other_token, owner) =
             match test_service_with_config_and_owner(config, Some(owner)).await {
                 Some(parts) => parts,
@@ -4408,25 +4717,22 @@ mod tests {
         let authenticated_owner = "grpc-wrong-capability-owner".to_string();
         let worker_id = "grpc-wrong-capability-worker".to_string();
         let mut config = HivemindConfig::for_test();
-        config
-            .general_compute
-            .trusted_worker_capabilities
-            .insert(
-                worker_id.clone(),
-                hivemind_config::TrustedGeneralComputeWorkerRegistration {
-                    owner: configured_owner,
-                    registration: general_compute_runtime::TrustedWorkerCapabilityRegistration {
-                        worker: general_compute_runtime::WorkerCapabilities {
-                            guest_image_digests: vec![],
-                            capabilities: vec!["cpu".into()],
-                            max_threads: 1,
-                            gpu_available: false,
-                        },
-                        gpu_capabilities: vec![],
-                        backends: vec![],
+        config.general_compute.trusted_worker_capabilities.insert(
+            worker_id.clone(),
+            hivemind_config::TrustedGeneralComputeWorkerRegistration {
+                owner: configured_owner,
+                registration: general_compute_runtime::TrustedWorkerCapabilityRegistration {
+                    worker: general_compute_runtime::WorkerCapabilities {
+                        guest_image_digests: vec![],
+                        capabilities: vec!["cpu".into()],
+                        max_threads: 1,
+                        gpu_available: false,
                     },
+                    gpu_capabilities: vec![],
+                    backends: vec![],
                 },
-            );
+            },
+        );
         let (master_service, task_id, _other_token, owner) =
             match test_service_with_config_and_owner(config, Some(authenticated_owner)).await {
                 Some(parts) => parts,
@@ -6760,6 +7066,8 @@ mod tests {
             runtime: None,
             task_source: None,
             general_compute_manifest_json: None,
+            managed_dsl_backend_id: None,
+            managed_dsl_semantics_manifest_sha256: None,
             expected_btih: None,
             cpu_usage: 0.0,
             memory_usage: 0.0,

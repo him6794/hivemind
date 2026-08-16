@@ -168,7 +168,8 @@ fn read_result_file(
     let read_limit = u64::try_from(max_output_bytes)
         .unwrap_or(u64::MAX)
         .saturating_add(1);
-    file.by_ref().take(read_limit)
+    file.by_ref()
+        .take(read_limit)
         .read_to_end(&mut bytes)
         .map_err(|error| WindowsHcsError::ResultUnavailable(error.to_string()))?;
     if bytes.len() > max_output_bytes {
@@ -188,10 +189,7 @@ enum HcsWaitOutcome {
 
 trait HcsLifecycleProvider {
     fn start(&mut self, timeout: Duration) -> Result<(), WindowsHcsError>;
-    fn wait_for_exit(
-        &mut self,
-        timeout: Duration,
-    ) -> Result<HcsWaitOutcome, WindowsHcsError>;
+    fn wait_for_exit(&mut self, timeout: Duration) -> Result<HcsWaitOutcome, WindowsHcsError>;
     fn terminate(&mut self, timeout: Duration);
     fn shutdown(&mut self, timeout: Duration);
 }
@@ -234,19 +232,20 @@ fn run_lifecycle<P: HcsLifecycleProvider>(
 #[cfg(windows)]
 mod hcs {
     use super::{
-        run_lifecycle, Cancellation, HcsLifecycleProvider, HcsWaitOutcome, RunResult,
-        WindowsHcsError,
+        Cancellation, HcsLifecycleProvider, HcsWaitOutcome, RunResult, WindowsHcsError,
+        run_lifecycle,
     };
     use crate::production::WindowsHcsContainerSpec;
     use serde_json::json;
-    use std::ffi::{c_void, OsStr};
+    use std::ffi::{OsStr, c_void};
     use std::os::windows::ffi::OsStrExt;
     use std::ptr;
     use std::time::Duration;
     use windows_sys::Win32::System::HostComputeSystem::{
-        HcsCloseComputeSystem, HcsCloseOperation, HcsCreateComputeSystem, HcsCreateOperation,
-        HcsShutDownComputeSystem, HcsStartComputeSystem, HcsTerminateComputeSystem,
-        HcsWaitForComputeSystemExit, HcsWaitForOperationResult, HCS_OPERATION, HCS_SYSTEM,
+        HCS_OPERATION, HCS_SYSTEM, HcsCloseComputeSystem, HcsCloseOperation,
+        HcsCreateComputeSystem, HcsCreateOperation, HcsShutDownComputeSystem,
+        HcsStartComputeSystem, HcsTerminateComputeSystem, HcsWaitForComputeSystemExit,
+        HcsWaitForOperationResult,
     };
 
     type HcsOperation = HCS_OPERATION;
@@ -333,10 +332,7 @@ mod hcs {
             start_wait
         }
 
-        fn wait_for_exit(
-            &mut self,
-            timeout: Duration,
-        ) -> Result<HcsWaitOutcome, WindowsHcsError> {
+        fn wait_for_exit(&mut self, timeout: Duration) -> Result<HcsWaitOutcome, WindowsHcsError> {
             let mut document = ptr::null_mut();
             let wait_ms = timeout.as_millis().max(1).min(u32::MAX as u128) as u32;
             let hr = unsafe { HcsWaitForComputeSystemExit(self.system, wait_ms, &mut document) };
@@ -423,7 +419,10 @@ mod hcs {
     }
 
     fn wide(value: &str) -> Vec<u16> {
-        OsStr::new(value).encode_wide().chain(std::iter::once(0)).collect()
+        OsStr::new(value)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
     }
 
     fn configuration_json(spec: &WindowsHcsContainerSpec) -> Result<String, WindowsHcsError> {
@@ -475,10 +474,7 @@ mod tests {
             Ok(())
         }
 
-        fn wait_for_exit(
-            &mut self,
-            _timeout: Duration,
-        ) -> Result<HcsWaitOutcome, WindowsHcsError> {
+        fn wait_for_exit(&mut self, _timeout: Duration) -> Result<HcsWaitOutcome, WindowsHcsError> {
             self.events.push("wait");
             Ok(self.wait_outcome)
         }
@@ -529,12 +525,8 @@ mod tests {
             wait_outcome: HcsWaitOutcome::Exited,
             start_error: false,
         };
-        let result = run_lifecycle(
-            &mut provider,
-            Duration::from_secs(1),
-            &Cancellation::new(),
-        )
-        .expect("mock HCS completion should succeed");
+        let result = run_lifecycle(&mut provider, Duration::from_secs(1), &Cancellation::new())
+            .expect("mock HCS completion should succeed");
         assert_eq!(result.status, RunStatus::Completed);
         assert_eq!(provider.events, ["start", "wait", "shutdown"]);
     }
@@ -546,12 +538,8 @@ mod tests {
             wait_outcome: HcsWaitOutcome::TimedOut,
             start_error: false,
         };
-        let error = run_lifecycle(
-            &mut timed_out,
-            Duration::ZERO,
-            &Cancellation::new(),
-        )
-        .expect_err("zero timeout must fail closed");
+        let error = run_lifecycle(&mut timed_out, Duration::ZERO, &Cancellation::new())
+            .expect_err("zero timeout must fail closed");
         assert_eq!(error, WindowsHcsError::TimedOut);
         assert_eq!(timed_out.events, ["start", "terminate"]);
 
@@ -575,12 +563,8 @@ mod tests {
             wait_outcome: HcsWaitOutcome::Exited,
             start_error: true,
         };
-        let error = run_lifecycle(
-            &mut provider,
-            Duration::from_secs(1),
-            &Cancellation::new(),
-        )
-        .expect_err("start failure must be returned");
+        let error = run_lifecycle(&mut provider, Duration::from_secs(1), &Cancellation::new())
+            .expect_err("start failure must be returned");
         assert!(matches!(error, WindowsHcsError::OperationFailed(_)));
         assert_eq!(provider.events, ["start"]);
     }

@@ -17,9 +17,15 @@ make dev
 
 ## User Guide
 
-If you want to upload a task and write the task program, start here:
+If you want to submit a task and write the task program, start here:
 
-- [docs/user-task-guide.md](docs/user-task-guide.md)
+- [docs/MANAGED_FUNCTION_RUNTIME.md](docs/MANAGED_FUNCTION_RUNTIME.md) — the
+  `managed-function-v0` syntax, metering model, and billing formula
+- [docs/PUBLIC_NETWORK_LIMITATIONS.md](docs/PUBLIC_NETWORK_LIMITATIONS.md) —
+  what the network does not do yet, including that CPT is an internal quota unit
+- The Docs and Usage rules pages on the official site render the same reference
+  from `frontend/src/lib/hivemind-site-data.mjs`; `frontend/site-contract.test.mjs`
+  checks the limits and failure codes it publishes against the enforcing source
 
 ## Architecture
 
@@ -312,7 +318,7 @@ curl -X POST http://localhost:8082/api/tasks \
   -d '{
     "task_id": "task-1",
     "runtime": "managed-function-v0",
-    "task_source": "def main(input):\n    return {\"sum\": input[\"a\"] + input[\"b\"]}\n",
+    "task_source": "fn sum(values) {\n  return get(values, \"a\") + get(values, \"b\");\n}\nsum(input);\n",
     "torrent": "{\"a\": 1, \"b\": 2}",
     "memory_gb": 4,
     "cpu_score": 100,

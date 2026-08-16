@@ -1,6 +1,6 @@
 use general_compute_runtime::numeric::{
-    BinaryOp, Complex128, Complex128Tensor, Complex64, Complex64Tensor, F32Tensor, F64Tensor,
-    NumericError, MAX_REFERENCE_FFT_LEN,
+    BinaryOp, Complex64, Complex64Tensor, Complex128, Complex128Tensor, F32Tensor, F64Tensor,
+    MAX_REFERENCE_FFT_LEN, NumericError,
 };
 
 #[test]

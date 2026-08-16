@@ -1,7 +1,7 @@
 use std::f64::consts::PI;
 
-use general_compute_runtime::monte_carlo::{estimate_unit_circle_pi, ConfidenceLevel};
-use general_compute_runtime::monte_carlo::{MonteCarloError, MAX_MONTE_CARLO_SAMPLES};
+use general_compute_runtime::monte_carlo::{ConfidenceLevel, estimate_unit_circle_pi};
+use general_compute_runtime::monte_carlo::{MAX_MONTE_CARLO_SAMPLES, MonteCarloError};
 
 #[test]
 fn unit_circle_pi_estimate_replays_a_pinned_confidence_fixture() {

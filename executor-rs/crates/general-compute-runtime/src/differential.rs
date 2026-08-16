@@ -1,4 +1,6 @@
-use crate::reference::{Instruction, InterpreterLimits, InterpreterStatus, MinskyProgram, ReferenceInterpreter};
+use crate::reference::{
+    Instruction, InterpreterLimits, InterpreterStatus, MinskyProgram, ReferenceInterpreter,
+};
 use crate::supervisor::Cancellation;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -73,9 +75,16 @@ impl DifferentialRunner {
                 "seed does not match the pinned fixture".into(),
             ));
         }
-        let program = MinskyProgram::new(vec![Instruction::Inc { register: 0, next: 1 }, Instruction::Halt])
-            .map_err(|error| DifferentialError::InvalidCase(error.to_string()))?;
-        let result = ReferenceInterpreter::new(program).run(InterpreterLimits::new(8), &Cancellation::new());
+        let program = MinskyProgram::new(vec![
+            Instruction::Inc {
+                register: 0,
+                next: 1,
+            },
+            Instruction::Halt,
+        ])
+        .map_err(|error| DifferentialError::InvalidCase(error.to_string()))?;
+        let result =
+            ReferenceInterpreter::new(program).run(InterpreterLimits::new(8), &Cancellation::new());
         let observation = ReferenceObservation {
             status: match result.status {
                 InterpreterStatus::Halted => "halted",
@@ -84,7 +93,11 @@ impl DifferentialRunner {
             }
             .into(),
             steps: result.steps,
-            output: result.registers.first().map(ToString::to_string).unwrap_or_default(),
+            output: result
+                .registers
+                .first()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
         };
         self.compare(&observation)?;
         Ok(observation)

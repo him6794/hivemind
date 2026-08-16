@@ -1,4 +1,6 @@
-use general_compute_runtime::{MAX_PROTOCOL_FRAME_BYTES, ProtocolError, decode_frame, encode_frame};
+use general_compute_runtime::{
+    MAX_PROTOCOL_FRAME_BYTES, ProtocolError, decode_frame, encode_frame,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,14 +30,16 @@ fn framed_json_round_trip_consumes_exactly_one_frame() {
 
     let mut stream = first.clone();
     stream.extend_from_slice(&second);
-    let (decoded, consumed) = decode_frame::<Envelope>(&stream, MAX_PROTOCOL_FRAME_BYTES).expect("first frame decodes");
+    let (decoded, consumed) =
+        decode_frame::<Envelope>(&stream, MAX_PROTOCOL_FRAME_BYTES).expect("first frame decodes");
 
     assert_eq!(decoded.kind, "request");
     assert_eq!(decoded.value, 42);
     assert_eq!(consumed, first.len());
 
     let (decoded_second, consumed_second) =
-        decode_frame::<Envelope>(&stream[consumed..], MAX_PROTOCOL_FRAME_BYTES).expect("second frame decodes");
+        decode_frame::<Envelope>(&stream[consumed..], MAX_PROTOCOL_FRAME_BYTES)
+            .expect("second frame decodes");
     assert_eq!(decoded_second.kind, "cancel");
     assert_eq!(consumed_second, second.len());
 }

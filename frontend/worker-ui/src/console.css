@@ -177,12 +177,6 @@ h2 {
   gap: 12px;
 }
 
-.metric-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(136px, 1fr));
-  gap: 12px;
-}
-
 label {
   display: block;
   color: rgb(255 255 255 / 0.72);
@@ -232,12 +226,6 @@ label {
   box-shadow: 0 0 26px -12px rgb(255 255 255 / 0.9);
 }
 
-.button.danger {
-  color: #ffd8d4;
-  border-color: rgb(255 139 127 / 0.35);
-  background: rgb(255 139 127 / 0.12);
-}
-
 .button.ghost {
   color: rgb(255 255 255 / 0.72);
 }
@@ -263,72 +251,11 @@ label {
   background: rgb(255 139 127 / 0.08);
 }
 
-.task-list {
-  display: grid;
-  gap: 12px;
-  padding: 0;
-  margin: 0;
-  list-style: none;
-}
-
-.task-row {
-  padding: 14px;
-  border: 1px solid rgb(255 255 255 / 0.1);
-  border-radius: 14px;
-  background: rgb(0 0 0 / 0.14);
-}
-
-.row-head {
-  display: flex;
-  gap: 12px;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.meta {
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin-top: 7px;
-  color: rgb(255 255 255 / 0.5);
-  font-size: 12px;
-}
-
 .actions {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
   margin-top: 12px;
-}
-
-.pill {
-  font-size: 12px;
-  font-weight: 760;
-  color: rgb(255 255 255 / 0.68);
-}
-
-.pill.completed {
-  color: #9effbd;
-}
-
-.pill.failed,
-.pill.cancelled {
-  color: #ffb1a8;
-}
-
-.pill.running {
-  color: #d5e5ff;
-}
-
-pre {
-  min-height: 160px;
-  overflow: auto;
-  padding: 14px;
-  border: 1px solid rgb(255 255 255 / 0.1);
-  border-radius: 14px;
-  color: rgb(255 255 255 / 0.74);
-  background: rgb(0 0 0 / 0.22);
-  white-space: pre-wrap;
 }
 
 dl {

@@ -218,6 +218,9 @@ pub struct WorkerNode {
     /// Nodepool-persisted, operator-approved general-compute registration.
     /// It is never accepted from a worker registration request.
     pub general_compute_capabilities_json: Option<String>,
+    /// Nodepool-persisted, operator-approved closed-DSL registration.
+    /// It is never accepted from a worker registration request.
+    pub managed_dsl_capabilities_json: Option<String>,
     pub last_heartbeat: DateTime<Utc>,
     pub registered_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -324,6 +327,8 @@ pub struct Task {
     pub runtime: Option<String>,
     pub task_source: Option<String>,
     pub general_compute_manifest_json: Option<Vec<u8>>,
+    pub managed_dsl_backend_id: Option<String>,
+    pub managed_dsl_semantics_manifest_sha256: Option<String>,
     pub expected_btih: Option<String>,
     pub cpu_usage: f64,
     pub memory_usage: f64,
@@ -458,11 +463,17 @@ pub struct TaskInfo {
     pub billed_amount: i64,
     pub billing_settled: bool,
     pub deterministic: bool,
+    pub worker_id: String,
+    pub provider_user: String,
+    pub dispatch_status: String,
+    pub usage_units: i64,
+    pub max_cpt: i64,
 }
 
 /// Conversion from Task to TaskInfo
 impl From<Task> for TaskInfo {
     fn from(t: Task) -> Self {
+        let has_worker = t.worker_id.is_some();
         Self {
             task_id: t.task_id,
             owner: t.owner,
@@ -479,6 +490,17 @@ impl From<Task> for TaskInfo {
             billed_amount: t.billed_amount,
             billing_settled: t.billing_settled,
             deterministic: t.deterministic,
+            worker_id: t.worker_id.unwrap_or_default(),
+            provider_user: String::new(),
+            dispatch_status: if t.retry_count > 0 {
+                "REDISPATCHED".into()
+            } else if has_worker {
+                "DISPATCHED".into()
+            } else {
+                "NOT_DISPATCHED".into()
+            },
+            usage_units: t.managed_executed_ops,
+            max_cpt: t.max_cpt,
         }
     }
 }

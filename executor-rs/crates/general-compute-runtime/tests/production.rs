@@ -3,12 +3,14 @@ use general_compute_runtime::production::{
     ProductionBackendRegistry, ProductionBackendRegistryError, WindowsProductionBackendConfig,
     WindowsProductionBackendRegistry,
 };
-use general_compute_runtime::{ArtifactManifest, ArtifactRole, DeterminismPolicy, ExecutionPolicy, GeneralComputeRequest, GENERAL_COMPUTE_RUNTIME_VERSION};
 use general_compute_runtime::sandbox::{
-    CgroupPolicy, LinuxNamespace, LinuxSandboxPolicy, OciPrivilegeMode,
-    PrivilegeEscalationPolicy, RootFilesystemPolicy, SandboxMount, SandboxNetworkPolicy,
-    SeccompPolicy, WindowsIsolationMode, WindowsRootFilesystemPolicy,
-    WindowsSandboxNetworkPolicy, WindowsSandboxPolicy,
+    CgroupPolicy, LinuxNamespace, LinuxSandboxPolicy, OciPrivilegeMode, PrivilegeEscalationPolicy,
+    RootFilesystemPolicy, SandboxMount, SandboxNetworkPolicy, SeccompPolicy, WindowsIsolationMode,
+    WindowsRootFilesystemPolicy, WindowsSandboxNetworkPolicy, WindowsSandboxPolicy,
+};
+use general_compute_runtime::{
+    ArtifactManifest, ArtifactRole, DeterminismPolicy, ExecutionPolicy,
+    GENERAL_COMPUTE_RUNTIME_VERSION, GeneralComputeRequest,
 };
 use std::path::PathBuf;
 
@@ -16,8 +18,8 @@ fn dsl_registration(backend_id: &str) -> ManagedDslBackendRegistration {
     ManagedDslBackendRegistration {
         backend_id: backend_id.into(),
         runtime_version: general_compute_runtime::MANAGED_DSL_RUNTIME_VERSION.into(),
-        semantics_manifest_sha256:
-            general_compute_runtime::MANAGED_DSL_SEMANTICS_MANIFEST_SHA256.into(),
+        semantics_manifest_sha256: general_compute_runtime::MANAGED_DSL_SEMANTICS_MANIFEST_SHA256
+            .into(),
         max_usage_units: 10_000,
         max_output_bytes: 4096,
     }
@@ -27,14 +29,20 @@ fn dsl_registration(backend_id: &str) -> ManagedDslBackendRegistration {
 fn managed_dsl_registry_round_trips_and_has_no_host_execution_fields() {
     let registration = dsl_registration("managed-default");
     let encoded = serde_json::to_value(&registration).expect("DSL registration serializes");
-    assert_eq!(registration.execution_mode(), general_compute_runtime::sandbox::BackendExecutionMode::ProductionSandboxedDsl);
+    assert_eq!(
+        registration.execution_mode(),
+        general_compute_runtime::sandbox::BackendExecutionMode::ProductionSandboxedDsl
+    );
     assert!(encoded.get("runner_executable").is_none());
     assert!(encoded.get("image_root").is_none());
     assert!(encoded.get("network").is_none());
     let decoded: ManagedDslBackendRegistration =
         serde_json::from_value(encoded).expect("DSL registration deserializes");
     assert_eq!(decoded, registration);
-    assert_eq!(ManagedDslBackendRegistry::new(vec![decoded]).unwrap().len(), 1);
+    assert_eq!(
+        ManagedDslBackendRegistry::new(vec![decoded]).unwrap().len(),
+        1
+    );
 }
 
 #[test]
@@ -170,14 +178,25 @@ fn windows_registry_round_trips_a_distinct_native_registration() {
     let decoded: WindowsProductionBackendConfig =
         serde_json::from_slice(&encoded).expect("Windows registration deserializes");
     assert_eq!(decoded, registration);
-    assert_eq!(decoded.execution_mode(), general_compute_runtime::sandbox::BackendExecutionMode::ProductionSandboxedWindows);
-    assert_eq!(WindowsProductionBackendRegistry::new(vec![decoded]).unwrap().len(), 1);
+    assert_eq!(
+        decoded.execution_mode(),
+        general_compute_runtime::sandbox::BackendExecutionMode::ProductionSandboxedWindows
+    );
+    assert_eq!(
+        WindowsProductionBackendRegistry::new(vec![decoded])
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]
 fn windows_registry_rejects_unknown_fields_and_duplicate_backend_ids() {
     let mut value = serde_json::to_value(windows_config("windows-python")).unwrap();
-    value.as_object_mut().unwrap().insert("bundle_root".into(), serde_json::json!("C:\\\\wrong"));
+    value
+        .as_object_mut()
+        .unwrap()
+        .insert("bundle_root".into(), serde_json::json!("C:\\\\wrong"));
     assert!(serde_json::from_value::<WindowsProductionBackendConfig>(value).is_err());
 
     let error = WindowsProductionBackendRegistry::new(vec![
@@ -185,7 +204,10 @@ fn windows_registry_rejects_unknown_fields_and_duplicate_backend_ids() {
         windows_config("windows-python"),
     ])
     .expect_err("duplicate Windows backend ids must fail closed");
-    assert_eq!(error, ProductionBackendRegistryError::DuplicateBackend("windows-python".into()));
+    assert_eq!(
+        error,
+        ProductionBackendRegistryError::DuplicateBackend("windows-python".into())
+    );
 }
 
 #[test]
@@ -225,12 +247,23 @@ fn windows_hcs_spec_uses_only_operator_roots_and_enforces_isolation_flags() {
     assert_eq!(spec.entrypoint, vec!["hivemind-runner.exe"]);
     assert_eq!(spec.mounts.len(), 2);
     assert!(spec.mounts[0].read_only);
-    assert!(spec.mounts[0].host_path.ends_with("artifacts\\task-123\\source"));
+    assert!(
+        spec.mounts[0]
+            .host_path
+            .ends_with("artifacts\\task-123\\source")
+    );
     assert_eq!(spec.mounts[0].container_path, "C:\\work\\source");
     assert!(!spec.mounts[1].read_only);
-    assert!(spec.mounts[1].host_path.ends_with("artifacts\\task-123\\scratch"));
+    assert!(
+        spec.mounts[1]
+            .host_path
+            .ends_with("artifacts\\task-123\\scratch")
+    );
     assert_eq!(spec.mounts[1].container_path, "C:\\work\\output");
-    assert!(spec.result_path.ends_with("artifacts\\task-123\\scratch\\result.json"));
+    assert!(
+        spec.result_path
+            .ends_with("artifacts\\task-123\\scratch\\result.json")
+    );
     assert_eq!(spec.result_container_path, "C:\\work\\output\\result.json");
     assert_eq!(spec.max_output_bytes, registration.max_output_bytes);
 }
@@ -309,7 +342,10 @@ fn production_registry_rejects_backend_mounts_that_do_not_match_the_entrypoint()
 
     let error = ProductionBackendRegistry::new(vec![registration])
         .expect_err("production registration must bind the source artifact mount");
-    assert_eq!(error, ProductionBackendRegistryError::SourceArtifactMountRequired);
+    assert_eq!(
+        error,
+        ProductionBackendRegistryError::SourceArtifactMountRequired
+    );
 }
 
 #[test]
@@ -326,7 +362,10 @@ fn production_task_root_rejects_path_traversal_and_materializes_bound_bundle() {
     write_seccomp_profile(&registration);
     let registry = ProductionBackendRegistry::new(vec![registration.clone()]).unwrap();
     assert!(matches!(
-        registry.get(&registration.backend_id).unwrap().task_root("../escape"),
+        registry
+            .get(&registration.backend_id)
+            .unwrap()
+            .task_root("../escape"),
         Err(ProductionBackendRegistryError::UnsafeTaskId)
     ));
 
@@ -353,14 +392,15 @@ fn production_task_root_rejects_path_traversal_and_materializes_bound_bundle() {
         .unwrap()
         .materialize_bundle(&request, "task-production-bundle")
         .unwrap();
-    let config: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(bundle.join("config.json")).unwrap(),
-    )
-    .unwrap();
+    let config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(bundle.join("config.json")).unwrap()).unwrap();
     let canonical_artifacts = std::fs::canonicalize(&artifacts).unwrap();
     assert_eq!(
         config["mounts"][0]["source"],
-        canonical_artifacts.join("source").to_string_lossy().to_string()
+        canonical_artifacts
+            .join("source")
+            .to_string_lossy()
+            .to_string()
     );
     let _ = std::fs::remove_dir_all(bundle);
     let _ = std::fs::remove_dir_all(artifacts);
@@ -385,7 +425,11 @@ fn production_registry_requires_mounts_for_every_request_artifact() {
         backend_id: registration.backend_id.clone(),
         entrypoint: "main".into(),
         source_artifact: ArtifactManifest::inline_json("source", ArtifactRole::Source, b"source"),
-        input_artifacts: vec![ArtifactManifest::inline_json("input", ArtifactRole::Input, b"input")],
+        input_artifacts: vec![ArtifactManifest::inline_json(
+            "input",
+            ArtifactRole::Input,
+            b"input",
+        )],
         execution_policy: ExecutionPolicy::default(),
         determinism: DeterminismPolicy::default(),
         billing_version: "billing-v1".into(),
@@ -406,10 +450,13 @@ fn production_registry_rejects_mounts_for_unrequested_artifacts() {
     registration.runner_executable = PathBuf::from("C:\\hivemind\\runc.exe");
     registration.runner_state_root = PathBuf::from("C:\\hivemind\\runner-state");
     registration.seccomp_profile_path = PathBuf::from("C:\\hivemind\\seccomp.json");
-    registration.policy.mounts.push(SandboxMount::ReadOnlyArtifact {
-        artifact_id: "unrequested".into(),
-        destination: "/work/unrequested".into(),
-    });
+    registration
+        .policy
+        .mounts
+        .push(SandboxMount::ReadOnlyArtifact {
+            artifact_id: "unrequested".into(),
+            destination: "/work/unrequested".into(),
+        });
     let registry = ProductionBackendRegistry::new(vec![registration.clone()]).unwrap();
     let request = request_for_mount_test(&registration, "execution-production-extra-mount");
 
@@ -470,7 +517,10 @@ fn production_materializer_rejects_a_symlinked_task_bundle_root() {
         .materialize_bundle(&request, "task-symlink")
         .expect_err("a task bundle symlink must not be followed");
 
-    assert!(matches!(error, ProductionBackendRegistryError::RootUnavailable(_)));
+    assert!(matches!(
+        error,
+        ProductionBackendRegistryError::RootUnavailable(_)
+    ));
     assert!(!redirected.join("config.json").exists());
     let _ = std::fs::remove_dir_all(root);
 }
@@ -492,7 +542,11 @@ fn production_materializer_rejects_a_symlinked_task_rootfs() {
     let redirected = root.join("redirected-rootfs");
     std::fs::create_dir_all(&redirected).unwrap();
     std::fs::create_dir_all(registration.bundle_root.join("task-rootfs")).unwrap();
-    symlink(&redirected, registration.bundle_root.join("task-rootfs/rootfs")).unwrap();
+    symlink(
+        &redirected,
+        registration.bundle_root.join("task-rootfs/rootfs"),
+    )
+    .unwrap();
 
     let registry = ProductionBackendRegistry::new(vec![registration.clone()]).unwrap();
     let request = request_for(&registration, "execution-task-rootfs");
@@ -502,7 +556,10 @@ fn production_materializer_rejects_a_symlinked_task_rootfs() {
         .materialize_bundle(&request, "task-rootfs")
         .expect_err("a task rootfs symlink must not be followed");
 
-    assert!(matches!(error, ProductionBackendRegistryError::RootUnavailable(_)));
+    assert!(matches!(
+        error,
+        ProductionBackendRegistryError::RootUnavailable(_)
+    ));
     assert!(!redirected.join("config.json").exists());
     let _ = std::fs::remove_dir_all(root);
 }
@@ -535,7 +592,10 @@ fn production_materializer_rejects_a_symlinked_task_config_before_writing() {
         .materialize_bundle(&request, "task-config")
         .expect_err("a task config symlink must not be followed");
 
-    assert!(matches!(error, ProductionBackendRegistryError::RootUnavailable(_)));
+    assert!(matches!(
+        error,
+        ProductionBackendRegistryError::RootUnavailable(_)
+    ));
     assert_eq!(std::fs::read(&redirected).unwrap(), b"sentinel");
     let _ = std::fs::remove_dir_all(root);
 }
@@ -563,7 +623,10 @@ fn test_root(name: &str) -> PathBuf {
 }
 
 #[cfg(unix)]
-fn request_for(registration: &ProductionBackendConfig, execution_id: &str) -> GeneralComputeRequest {
+fn request_for(
+    registration: &ProductionBackendConfig,
+    execution_id: &str,
+) -> GeneralComputeRequest {
     let mut request = GeneralComputeRequest {
         execution_id: execution_id.into(),
         attempt_id: "attempt-production-symlink".into(),

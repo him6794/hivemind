@@ -1,11 +1,11 @@
 use general_compute_runtime::sparse_numeric::{
-    SparseF64Matrix, SparseNumericError, MAX_REFERENCE_SPARSE_DIM,
+    MAX_REFERENCE_SPARSE_DIM, SparseF64Matrix, SparseNumericError,
 };
 use general_compute_runtime::tensor::{
-    ByteOrder, SparseFormat, SparseIndexDType, SparseTensorManifest, TensorDType,
-    SPARSE_TENSOR_ABI_VERSION,
+    ByteOrder, SPARSE_TENSOR_ABI_VERSION, SparseFormat, SparseIndexDType, SparseTensorManifest,
+    TensorDType,
 };
-use general_compute_runtime::{sha256_digest, ArtifactChunk, ArtifactManifest, ArtifactRole};
+use general_compute_runtime::{ArtifactChunk, ArtifactManifest, ArtifactRole, sha256_digest};
 
 fn artifact(id: &str, bytes: &[u8]) -> ArtifactManifest {
     ArtifactManifest {
@@ -251,9 +251,11 @@ fn sparse_matvec_reports_and_enforces_a_residual_tolerance() {
         .residual_inf_norm(&vector, &rhs)
         .expect("residual should be computable");
     assert_eq!(residual, 0.5);
-    assert!(matrix
-        .matvec_with_residual_tolerance(&vector, &rhs, 0.5)
-        .is_ok());
+    assert!(
+        matrix
+            .matvec_with_residual_tolerance(&vector, &rhs, 0.5)
+            .is_ok()
+    );
     assert_eq!(
         matrix.matvec_with_residual_tolerance(&vector, &rhs, 0.25),
         Err(SparseNumericError::ResidualExceeded)

@@ -1040,45 +1040,6 @@ pub async fn userspace_tcp_bridge(role: ClientRole, target: &str) -> Result<Stri
 }
 
 #[allow(dead_code)]
-fn resolve_tailscale_bins(role: ClientRole) -> Result<(PathBuf, PathBuf)> {
-    let mut roots = Vec::new();
-    if let Ok(root) = std::env::var("HIVEMIND_CLIENT_RUNTIME_DIR") {
-        roots.push(PathBuf::from(root));
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            roots.push(parent.join("vpn"));
-            roots.push(parent.to_path_buf());
-        }
-    }
-    roots.push(vpn_state_dir(role));
-
-    let exe_name = if cfg!(target_os = "windows") {
-        "tailscale.exe"
-    } else {
-        "tailscale"
-    };
-    let daemon_name = if cfg!(target_os = "windows") {
-        "tailscaled.exe"
-    } else {
-        "tailscaled"
-    };
-    for root in roots {
-        let cli = root.join(exe_name);
-        let daemon = root.join(daemon_name);
-        if cli.is_file() && daemon.is_file() {
-            return Ok((cli, daemon));
-        }
-    }
-    let cli = PathBuf::from(exe_name);
-    let daemon = PathBuf::from(daemon_name);
-    if which_on_path(&cli) && which_on_path(&daemon) {
-        return Ok((cli, daemon));
-    }
-    bail!("bundled Tailscale runtime not found; expected {exe_name} and {daemon_name} beside the client")
-}
-
-#[allow(dead_code)]
 fn endpoint_port_for_worker(_role: ClientRole) -> u16 {
     50053
 }
@@ -1184,16 +1145,6 @@ async fn start_libtailscale(
     })
     .await
     .context("embedded libtailscale worker stopped unexpectedly")?
-}
-
-#[allow(dead_code)]
-fn which_on_path(program: &PathBuf) -> bool {
-    if program.components().count() > 1 {
-        return program.is_file();
-    }
-    std::env::var_os("PATH")
-        .map(|path| std::env::split_paths(&path).any(|dir| dir.join(program).is_file()))
-        .unwrap_or(false)
 }
 
 #[cfg(target_os = "windows")]

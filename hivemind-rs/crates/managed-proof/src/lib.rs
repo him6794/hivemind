@@ -5,6 +5,14 @@ use thiserror::Error;
 pub const PROOF_PROTOCOL_VERSION: u16 = 1;
 pub const MANAGED_RUNTIME_ID: &str = "managed-function-v0";
 pub const COST_MODEL_ID: &str = "managed-function-v0-metering-v1";
+/// Domain separator for the authenticated production DSL proof identity.
+///
+/// The legacy guest already commits `task_id` into the RISC Zero journal. For
+/// production DSL proofs we use a domain-separated digest as that task ID,
+/// preserving every v0 guest/proof vector while making the authoritative task,
+/// execution mode, backend, and semantics manifest part of the authenticated
+/// claim.
+pub const DSL_PROOF_BINDING_DOMAIN: &str = "hivemind-managed-dsl-proof-binding-v1";
 #[cfg(feature = "risc0-verifier")]
 pub const RISC0_PROOF_SCHEME: &str = "risc0-zkvm-3.0.6";
 const RISC0_IMAGE_ID_WORDS: usize = 8;
@@ -358,6 +366,39 @@ fn sha256(value: &[u8]) -> [u8; 32] {
     Sha256::digest(value).into()
 }
 
+/// Returns the task identity that the legacy managed guest must prove for a
+/// production DSL task. Length-prefixing prevents delimiter ambiguity while
+/// the domain separator prevents cross-protocol reuse of this digest.
+pub fn dsl_proof_task_id(
+    task_id: &str,
+    execution_mode: &str,
+    backend_id: &str,
+    semantics_manifest_sha256: &str,
+) -> String {
+    let mut binding = Vec::new();
+    binding.extend_from_slice(DSL_PROOF_BINDING_DOMAIN.as_bytes());
+    for value in [
+        task_id,
+        execution_mode,
+        backend_id,
+        semantics_manifest_sha256,
+    ] {
+        binding.extend_from_slice(&(value.len() as u64).to_be_bytes());
+        binding.extend_from_slice(value.as_bytes());
+    }
+    format!("dsl-proof-v1:{}", hex_encode(&sha256(&binding)))
+}
+
+fn hex_encode(bytes: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ClaimError, ExecutionClaim, ExecutionMetrics, PROOF_PROTOCOL_VERSION};
@@ -367,6 +408,46 @@ mod tests {
     const INPUT: &[u8] = br#"{"value":"secret"}"#;
     const OUTPUT: &[u8] = br#"{"result":6}"#;
     const MAX_USAGE_UNITS: u64 = 100;
+
+    #[test]
+    fn production_dsl_proof_task_id_binds_every_authoritative_identity_field() {
+        let original = super::dsl_proof_task_id(
+            "task-a",
+            "production_sandboxed_dsl",
+            "managed-default",
+            "sha256:canonical",
+        );
+
+        assert_eq!(original.len(), "dsl-proof-v1:".len() + 64);
+        for changed in [
+            super::dsl_proof_task_id(
+                "task-b",
+                "production_sandboxed_dsl",
+                "managed-default",
+                "sha256:canonical",
+            ),
+            super::dsl_proof_task_id(
+                "task-a",
+                "production_sandboxed_oci",
+                "managed-default",
+                "sha256:canonical",
+            ),
+            super::dsl_proof_task_id(
+                "task-a",
+                "production_sandboxed_dsl",
+                "managed-other",
+                "sha256:canonical",
+            ),
+            super::dsl_proof_task_id(
+                "task-a",
+                "production_sandboxed_dsl",
+                "managed-default",
+                "sha256:changed",
+            ),
+        ] {
+            assert_ne!(original, changed);
+        }
+    }
 
     fn metrics() -> ExecutionMetrics {
         ExecutionMetrics {

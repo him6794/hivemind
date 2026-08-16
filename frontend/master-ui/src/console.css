@@ -294,6 +294,25 @@ label {
   font-size: 12px;
 }
 
+.observability-grid {
+  display: grid;
+  grid-template-columns: minmax(112px, 0.35fr) minmax(0, 1fr);
+  gap: 6px 12px;
+  margin: 12px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid rgb(255 255 255 / 0.08);
+  font-size: 12px;
+}
+
+.observability-grid dt {
+  color: rgb(255 255 255 / 0.46);
+}
+
+.observability-grid dd {
+  color: rgb(255 255 255 / 0.84);
+  overflow-wrap: anywhere;
+}
+
 .actions {
   display: flex;
   gap: 8px;

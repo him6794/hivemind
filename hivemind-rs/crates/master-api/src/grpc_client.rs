@@ -1,8 +1,10 @@
 use hivemind_proto::{
+    general_compute_artifact_service_client::GeneralComputeArtifactServiceClient,
     master_node_service_client::MasterNodeServiceClient,
     node_manager_service_client::NodeManagerServiceClient, user_service_client::UserServiceClient,
     CleanupAdminArtifactsRequest, CleanupAdminArtifactsResponse, DownloadTaskArtifactRequest,
-    DownloadTaskArtifactResponse, GetAdminArtifactOverviewRequest,
+    DownloadTaskArtifactResponse, GeneralComputeArtifactChunkUpload,
+    GeneralComputeArtifactChunkUploadResponse, GetAdminArtifactOverviewRequest,
     GetAdminArtifactOverviewResponse, GetAdminBillingOverviewRequest,
     GetAdminBillingOverviewResponse, GetAdminManagedProofMetricsRequest,
     GetAdminManagedProofMetricsResponse, GetAdminSchedulingCacheAlertRequest,
@@ -32,6 +34,7 @@ struct ConnectedClients {
     user: UserServiceClient<Channel>,
     master: MasterNodeServiceClient<Channel>,
     node_mgr: NodeManagerServiceClient<Channel>,
+    artifact: GeneralComputeArtifactServiceClient<Channel>,
 }
 
 /// Lazy nodepool gRPC client for user-deployed masters.
@@ -95,7 +98,14 @@ impl GrpcClient {
             master: MasterNodeServiceClient::new(channel.clone())
                 .max_decoding_message_size(max_msg)
                 .max_encoding_message_size(max_msg),
-            node_mgr: NodeManagerServiceClient::new(channel),
+            node_mgr: NodeManagerServiceClient::new(channel.clone()),
+            artifact: GeneralComputeArtifactServiceClient::new(channel)
+                .max_decoding_message_size(
+                    hivemind_proto::GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES,
+                )
+                .max_encoding_message_size(
+                    hivemind_proto::GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES,
+                ),
         });
         Ok(())
     }
@@ -215,6 +225,8 @@ impl GrpcClient {
         runtime: &str,
         task_source: &str,
         general_compute_manifest_json: &[u8],
+        managed_dsl_backend_id: &str,
+        managed_dsl_semantics_manifest_sha256: &str,
     ) -> Result<UploadTaskResponse, tonic::Status> {
         let task_id = task_id.to_string();
         let torrent = torrent.to_string();
@@ -223,6 +235,9 @@ impl GrpcClient {
         let runtime = runtime.to_string();
         let task_source = task_source.to_string();
         let general_compute_manifest_json = general_compute_manifest_json.to_vec();
+        let managed_dsl_backend_id = managed_dsl_backend_id.to_string();
+        let managed_dsl_semantics_manifest_sha256 =
+            managed_dsl_semantics_manifest_sha256.to_string();
         self.with_clients(|mut clients| async move {
             clients
                 .master
@@ -239,9 +254,44 @@ impl GrpcClient {
                     package_data: Vec::new(),
                     package_filename: String::new(),
                     general_compute_manifest_json,
+                    managed_dsl_backend_id,
+                    managed_dsl_semantics_manifest_sha256,
                 }))
                 .await
                 .map(|r| r.into_inner())
+        })
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upload_general_compute_artifact_chunk(
+        &mut self,
+        token: &str,
+        task_id: &str,
+        artifact_id: &str,
+        offset: i64,
+        size_bytes: i64,
+        sha256: &str,
+        bytes: Vec<u8>,
+    ) -> Result<GeneralComputeArtifactChunkUploadResponse, tonic::Status> {
+        let token = token.to_string();
+        let task_id = task_id.to_string();
+        let artifact_id = artifact_id.to_string();
+        let sha256 = sha256.to_string();
+        self.with_clients(|mut clients| async move {
+            clients
+                .artifact
+                .upload_chunk(Request::new(GeneralComputeArtifactChunkUpload {
+                    token,
+                    task_id,
+                    artifact_id,
+                    offset,
+                    size_bytes,
+                    sha256,
+                    bytes,
+                }))
+                .await
+                .map(|response| response.into_inner())
         })
         .await
     }

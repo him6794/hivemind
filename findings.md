@@ -1354,3 +1354,147 @@ sleep 也因 bounded 限制讓真實 managed function 在毫秒內結束而不�
 - 尚缺的 production components至少包括 backend adapter、rootless sandbox、cgroup/seccomp或平台等價隔離、CAS/chunk materialization、tensor ABI與 scientific image；current `WorkerCapabilities`是資料結構而非可信 attestation，`UsageClaim`仍是 Worker claim。
 - Current result contract直接內嵌 unbounded-semantics `String` stdout/stderr，雖 supervisor capture有 byte cap，schema本身尚未建立 inline-vs-artifact invariants。Roadmap須要求 output manifest/hash/cap與 validator gate，而非依呼叫者自律。
 - Unix process-group路徑能 kill descendants，但只直接 `wait` leader；正常 leader先退出而 descendant繼承 pipe時仍可能讓 capture join卡住。Windows `taskkill /T`不是 Job Object resource/kill boundary。這些要列為 M1 exit blockers，不能以現有 lifecycle tests概括 sandbox完成。
+
+### 2026-08-14 — GPU request-level contract (`6400099`)
+
+- RED→GREEN：先加入 `gpu_request.rs`，確認 `ExecutionPolicy` 沒有 typed
+  requirement 時編譯失敗；最小實作新增 optional `gpu_requirement`、GPU
+  flag/requirement consistency validation，以及 `Default` 的 `None`。
+- CPU compatibility：`gpu_requirement` 使用 `serde(default,
+  skip_serializing_if = "Option::is_none")`，所以預設 CPU policy 的 JSON
+  不會多出欄位；typed requirement 只有在 `gpu_required=true` 時接受，避免
+  舊 CPU request 的 canonical serialization 漂移。
+- 驗證：focused request 2/2、contracts 21/21、locked runtime serial 與
+  four-thread suites 全綠；`cargo check -p general-compute-runtime --locked`
+  與 GNU Worker/Task Scheduler/Bin checks 全綠；`git diff --cached --check`
+  全綠。
+- 本地提交：`6400099 feat(runtime): bind GPU requirements to execution policy`。
+  scoped rustfmt check 仍會觸及既有未格式化 `contracts.rs` production-routing
+  段落，且 `tensor.rs` 的 Rust 2024 let-chain 在目前 rustfmt edition 解析失敗；
+  未修改或重排那些不相關 dirty 內容。
+- 邊界：這個 commit 只完成 request validation；尚未把 selected device
+  identity 接到 trusted Nodepool registration、scheduler/Worker admission、
+  result identity，也沒有宣稱 CUDA/ROCm 執行或 trusted settlement。
+
+### 2026-08-14 — trusted GPU registration (`b22aaab`)
+
+- RED→GREEN：`gpu_registration.rs` 先驗證 typed registration round-trip、
+  legacy JSON compatibility、stable selected-device identity 與 malformed
+  capability rejection；在新增欄位/helper 前編譯失敗，實作後 3/3 通過。
+- `TrustedWorkerCapabilityRegistration` 現在保存 operator-approved
+  `GpuCapability` rows，`select_gpu_for_request` 會先驗證所有 rows，再呼叫
+  deterministic GPU negotiation；不接受單一 boolean `gpu_available` 作為
+  typed identity。缺少新欄位的舊 snapshot 反序列化為空 list。
+- Compatibility：runtime 全 suite serial/four-thread、runtime check 與 GNU
+  Worker/Task Scheduler/Bin checks 全綠；必要的 Hivemind registration
+  literals 已加入 empty list，沒有改動未相關 production dirty hunks。
+- 本地提交：`b22aaab feat(runtime): persist trusted GPU capability identities`。
+  目前仍未把 selected identity 傳入 scheduler/Worker admission 或 result
+  envelope，也未證明硬體 attestation、CUDA/ROCm execution、OCI E2E 或 billing
+  settlement。
+
+### 2026-08-14 — GPU result identity (`67bc1c9`)
+
+- RED→GREEN：`GeneralComputeResult` now carries an optional typed
+  `GpuSelection`. CPU results omit the field during JSON serialization so the
+  existing CPU contract remains stable. A GPU-required result must carry a
+  compatible `GpuCapability` or an explicit `CpuFallback` allowed by the
+  request; CPU requests cannot claim a GPU.
+- `validate_against` invokes the GPU identity validator, which checks vendor,
+  compute capability, runtime, driver ABI, VRAM, stream capacity, and image
+  digest against the request requirement. The validator deliberately does not
+  treat a Worker claim as trusted registration; Nodepool must compare the
+  selected device with its operator-owned snapshot in a later slice.
+- Evidence: focused `gpu_result` 3/3, locked runtime serial and four-thread
+  suites, runtime check, GNU Worker/Task Scheduler/Bin checks, and staged diff
+  check all pass. Existing CPU result constructors were updated with
+  `gpu_selection: None`.
+- Boundary: this commit does not wire scheduler/Worker admission, perform
+  CUDA/ROCm execution, attest hardware, run OCI/container E2E, or settle
+  trusted usage/billing. Overall status remains `running`.
+
+### 2026-08-14 — scheduler trusted GPU result identity
+
+- RED→GREEN：先加入 `general_compute_result_rejects_a_selected_gpu_not_in_the_trusted_snapshot`；在 scheduler 尚未比較 trusted selection 時該測試失敗，加入 comparison 後通過。
+- `decode_and_validate_general_compute_result` 現在從 persisted
+  `TrustedWorkerCapabilityRegistration` 呼叫 `select_gpu_for_request`，再對
+  Worker 回傳的 `GpuSelection` 做 exact equality；只要 device identity 不同
+  即拒絕，不接受僅欄位相容的 forged GPU。
+- Evidence：focused test 1/1、scheduler GNU lib 118 passed/1 ignored、
+  `git diff --cached --check` 全綠。已提交
+  `5be0e48 feat(scheduler): verify trusted GPU result identity`；commit 只
+  包含 scheduler production comparison 與該 regression test。
+- Boundary：尚未實作 Worker-side GPU discovery/selection、CUDA/ROCm
+  execution、hardware attestation、OCI/container E2E、operator deployment
+  或 trusted usage/billing settlement；整體狀態仍為 `running`。
+
+### 2026-08-14 — Worker trusted GPU selection integration
+
+- RED→GREEN：Worker admission consumes the operator-owned
+  `TrustedWorkerCapabilityRegistration`; typed GPU requests with no compatible
+  approved identity fail closed, while legacy CPU requests remain compatible.
+- The Worker reference executor receives the same trusted snapshot. The Worker
+  result wrapper deterministically binds the selected `GpuSelection` into both
+  successful and failure `GeneralComputeResult` envelopes rather than treating
+  the Worker's boolean `gpu_available` claim as proof.
+- Evidence：runtime GPU execution 1/1、Worker admission 2/2、GNU Worker
+  `cargo check --tests`、`git diff --cached --check` all pass. Local commit:
+  `0052444 feat(worker): bind trusted GPU selection to results`。
+- Boundary：CUDA/ROCm driver execution、hardware attestation、real
+  OCI/container E2E、operator deployment、and trusted usage/billing settlement
+  remain open; the overall evolution status is `running`。
+
+### 2026-08-14 — operator-owned OCI seccomp profile
+
+- RED→GREEN：原本 production materializer 只放置 `SCMP_ACT_ERRNO` default
+  action，沒有可執行 guest 所需的 operator syscall allowlist；新增 profile
+  path/error regression 後，materializer 現在要求 absolute regular
+  non-symlink file、pinned SHA-256、canonical JSON 與完整 allowlist。
+- Profile schema 僅允許 `defaultAction`、optional `architectures`、
+  `syscalls`；syscall groups 必須是 `SCMP_ACT_ALLOW`，名稱必須是非空且全域
+  唯一。materialized sandbox validator 與 OCI preflight 都重複檢查，避免
+  invalid profile 在 runner 前被接受。
+- Evidence：production 7/7、sandbox 22/22、locked runtime suite、Worker
+  GNU test check、Task Scheduler/Bin checks、preflight contract 與 scoped
+  diff-check pass。
+- Local commit：`43dd537 feat(runtime): bind operator seccomp profiles`。
+- Boundary：這是 operator policy/bundle contract，不是 host-level rootless
+  seccomp enforcement、real OCI/container E2E、multi-process completion 或
+  trusted usage/billing settlement；overall status remains `running`。
+
+### 2026-08-14 — isolated OCI Compose project boundary
+
+- RED→GREEN：隨機 Compose project 仍可能共用固定 container/network/IPAM
+  identifiers；contract test 先抓到固定 `container_name`，再抓到固定 IPv4/
+  subnet。移除固定 binding 後，network、container 與 service DNS 由 project
+  管理。
+- Preflight 會暫時把所有 named volume 映射成 project-prefixed names，對
+  `docker compose config --format json` 做 resolved-name assertion，並用
+  `finally` 還原原有環境變數，避免污染 caller。
+- Evidence：OCI harness contract、Compose release contract、resolved config
+  與 scoped diff-check pass。Local commit：`c24d036 fix(deploy): isolate OCI
+  compose projects`。
+- Boundary：仍未執行 Postgres-backed task fixture 或證明 host-level rootless
+  OCI/network/filesystem isolation；overall status remains `running`。
+
+### 2026-08-14 — reviewed multi-process OCI fixture protocol
+
+- The old `-Run` branch intentionally stopped before `docker compose up`; this
+  was useful fail-closed behavior but left no executable interface for the next
+  release gate. A RED contract now requires an explicit `.ps1` fixture and a
+  versioned evidence document rather than accepting an exit code as proof.
+- The harness invokes the fixture in `provision` and `execute` phases, passes
+  the generated Compose project, volume names, host endpoints, credentials,
+  registry path, task id, and evidence path, then validates service identity,
+  required checks, and `ProductionResultEnvelope` result metadata.
+- `docker compose up -d --build` is deliberately limited to the infrastructure
+  and runtime services needed for the path; randomized host ports avoid clashes
+  with a caller's stack. `finally` always runs `down --volumes --remove-orphans`
+  and checks `compose ps -q`; evidence is retained for audit.
+- The repository now includes the reviewed fixture implementation. It maps host
+  registry paths into fixed container paths, waits for authenticated Worker
+  registration, submits/polls through Master, queries trusted result/settlement
+  rows, and runs network/filesystem/timeout/cancel cases. The operator still
+  supplies the canonical manifest/case plan and real rootfs/runner/profile;
+  missing assets or unsupported host primitives keep `-Run` fail-closed and the
+  overall goal remains `running`.

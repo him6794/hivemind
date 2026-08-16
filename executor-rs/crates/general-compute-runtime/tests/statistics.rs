@@ -1,5 +1,5 @@
 use general_compute_runtime::statistics::{
-    mean, population_variance, quantile, sample_variance, StatisticsError, MAX_STATISTICS_SAMPLES,
+    MAX_STATISTICS_SAMPLES, StatisticsError, mean, population_variance, quantile, sample_variance,
 };
 
 fn assert_close(actual: f64, expected: f64, tolerance: f64) {

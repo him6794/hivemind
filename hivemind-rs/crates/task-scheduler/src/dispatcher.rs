@@ -3,7 +3,7 @@ use anyhow::Result;
 use hivemind_auth::worker_execution::{WorkerExecutionIdentity, WorkerExecutionSigner};
 use hivemind_config::ManagedProofRolloutMode;
 use hivemind_database::DatabaseManager;
-use hivemind_managed_proof::{ClaimError, ExecutionClaim};
+use hivemind_managed_proof::{dsl_proof_task_id, ClaimError, ExecutionClaim};
 use hivemind_models::{Claims, Task, TaskStatus, WorkerNode};
 use hivemind_proto::{
     general_compute_chunk_service_client::GeneralComputeChunkServiceClient,
@@ -355,7 +355,10 @@ fn build_execute_task_request_with_token(task: &Task, token: String) -> ExecuteT
         runtime: task.runtime.clone().unwrap_or_default(),
         task_source: task.task_source.clone().unwrap_or_default(),
         token,
-        managed_budget_units: if task.runtime.as_deref() == Some("managed-function-v0") {
+        managed_budget_units: if matches!(
+            task.runtime.as_deref(),
+            Some("managed-function-v0") | Some("production_sandboxed_dsl")
+        ) {
             task.max_cpt.max(0)
         } else {
             0
@@ -376,6 +379,20 @@ fn build_execute_task_request_with_token(task: &Task, token: String) -> ExecuteT
         request_digest: identity
             .as_ref()
             .map_or_else(String::new, |identity| identity.3.clone()),
+        managed_dsl_backend_id: if task.runtime.as_deref() == Some("production_sandboxed_dsl") {
+            task.managed_dsl_backend_id.clone().unwrap_or_default()
+        } else {
+            String::new()
+        },
+        managed_dsl_semantics_manifest_sha256: if task.runtime.as_deref()
+            == Some("production_sandboxed_dsl")
+        {
+            task.managed_dsl_semantics_manifest_sha256
+                .clone()
+                .unwrap_or_default()
+        } else {
+            String::new()
+        },
     }
 }
 
@@ -457,21 +474,50 @@ fn worker_execution_token(
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("Nodepool has no trusted source bytes for artifact {artifact_id}")]
-struct NodepoolArtifactSourceUnavailable {
+#[error(
+    "Nodepool has no trusted source bytes for artifact {artifact_id} (including CAS-only artifacts)"
+)]
+struct CasOnlyArtifactUnavailable {
     artifact_id: String,
 }
 
+/// Build a test source map from inline fixture bytes. Production dispatch never
+/// treats mutable manifest bytes as the source authority.
+#[cfg(test)]
+fn inline_general_compute_chunk_plan(
+    task: &Task,
+    token: &str,
+) -> anyhow::Result<Vec<GeneralComputeChunkUpload>> {
+    let manifest = task
+        .general_compute_manifest_json
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("general-compute request manifest is missing"))?;
+    let request: general_compute_runtime::GeneralComputeRequest = serde_json::from_slice(manifest)
+        .map_err(|error| anyhow::anyhow!("general-compute request is malformed: {error}"))?;
+    let source_bytes = std::iter::once(&request.source_artifact)
+        .chain(request.input_artifacts.iter())
+        .filter_map(|artifact| {
+            artifact
+                .inline_bytes
+                .clone()
+                .map(|bytes| (artifact.artifact_id.clone(), bytes))
+        })
+        .collect();
+    general_compute_chunk_plan(task, token, 1, &source_bytes)
+}
+
+/// Build authenticated uploads exclusively from Nodepool-owned artifact
+/// sources. The source map is never supplied by a Worker or Master; it is
+/// loaded from the task-bound persistence layer before dispatch.
 fn general_compute_chunk_plan(
     task: &Task,
     token: &str,
     transfer_generation: i64,
     source_bytes: &HashMap<String, Vec<u8>>,
 ) -> anyhow::Result<Vec<GeneralComputeChunkUpload>> {
-    let manifest = task
-        .general_compute_manifest_json
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("general-compute request manifest is missing"))?;
+    let Some(manifest) = task.general_compute_manifest_json.as_deref() else {
+        anyhow::bail!("general-compute request manifest is missing")
+    };
     let request: general_compute_runtime::GeneralComputeRequest = serde_json::from_slice(manifest)
         .map_err(|error| anyhow::anyhow!("general-compute request is malformed: {error}"))?;
     request
@@ -480,7 +526,6 @@ fn general_compute_chunk_plan(
     if transfer_generation <= 0 {
         anyhow::bail!("general-compute transfer lease generation must be positive");
     }
-
     let artifacts = std::iter::once(&request.source_artifact).chain(request.input_artifacts.iter());
     let mut uploads = Vec::new();
     for artifact in artifacts {
@@ -488,10 +533,9 @@ fn general_compute_chunk_plan(
             continue;
         }
         let bytes = source_bytes.get(&artifact.artifact_id).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Nodepool has no trusted source bytes for artifact {}",
-                artifact.artifact_id
-            )
+            anyhow::Error::new(CasOnlyArtifactUnavailable {
+                artifact_id: artifact.artifact_id.clone(),
+            })
         })?;
         if bytes.len() as u64 != artifact.size_bytes
             || general_compute_runtime::sha256_digest(bytes) != artifact.sha256
@@ -533,14 +577,18 @@ fn general_compute_chunk_plan(
     Ok(uploads)
 }
 
+/// Load the only trusted raw-byte source available to the scheduler for a
+/// general-compute attempt. Every artifact, including one originally submitted
+/// inline, must be read from the task-bound Nodepool persistence row. The
+/// mutable attempt manifest supplies coordinates only; it is never a raw-byte
+/// authority after task creation.
 async fn load_general_compute_artifact_sources(
     repo: &TaskRepository,
     task: &Task,
 ) -> anyhow::Result<HashMap<String, Vec<u8>>> {
-    let manifest = task
-        .general_compute_manifest_json
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("general-compute request manifest is missing"))?;
+    let Some(manifest) = task.general_compute_manifest_json.as_deref() else {
+        anyhow::bail!("general-compute request manifest is missing")
+    };
     let request: general_compute_runtime::GeneralComputeRequest = serde_json::from_slice(manifest)
         .map_err(|error| anyhow::anyhow!("general-compute request is malformed: {error}"))?;
     request
@@ -574,7 +622,7 @@ async fn load_general_compute_artifact_sources(
             )
             .await?
             .ok_or_else(|| {
-                anyhow::Error::new(NodepoolArtifactSourceUnavailable {
+                anyhow::Error::new(CasOnlyArtifactUnavailable {
                     artifact_id: artifact.artifact_id.clone(),
                 })
             })?;
@@ -596,6 +644,30 @@ async fn load_general_compute_artifact_sources(
     Ok(sources)
 }
 
+#[cfg(test)]
+async fn prepare_general_compute_on_worker(
+    channel: tonic::transport::Channel,
+    task: &Task,
+    token: &str,
+) -> anyhow::Result<()> {
+    let manifest = task
+        .general_compute_manifest_json
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("general-compute request manifest is missing"))?;
+    let request: general_compute_runtime::GeneralComputeRequest = serde_json::from_slice(manifest)
+        .map_err(|error| anyhow::anyhow!("general-compute request is malformed: {error}"))?;
+    let source_bytes = std::iter::once(&request.source_artifact)
+        .chain(request.input_artifacts.iter())
+        .filter_map(|artifact| {
+            artifact
+                .inline_bytes
+                .clone()
+                .map(|bytes| (artifact.artifact_id.clone(), bytes))
+        })
+        .collect();
+    prepare_general_compute_on_worker_with_sources(channel, task, token, 1, &source_bytes).await
+}
+
 async fn prepare_general_compute_on_worker_with_sources(
     channel: tonic::transport::Channel,
     task: &Task,
@@ -604,9 +676,8 @@ async fn prepare_general_compute_on_worker_with_sources(
     source_bytes: &HashMap<String, Vec<u8>>,
 ) -> anyhow::Result<()> {
     let uploads = general_compute_chunk_plan(task, token, transfer_generation, source_bytes)?;
-    let (execution_id, attempt_id, idempotency_key, request_digest) =
-        general_compute_identity(task)
-            .ok_or_else(|| anyhow::anyhow!("general-compute request identity is missing"))?;
+    let identity = general_compute_identity(task)
+        .ok_or_else(|| anyhow::anyhow!("general-compute request identity is missing"))?;
     let manifest = task
         .general_compute_manifest_json
         .clone()
@@ -619,10 +690,10 @@ async fn prepare_general_compute_on_worker_with_sources(
         token: token.to_owned(),
         runtime: general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION.into(),
         general_compute_manifest_json: manifest,
-        execution_id: execution_id.clone(),
-        attempt_id: attempt_id.clone(),
-        idempotency_key: idempotency_key.clone(),
-        request_digest: request_digest.clone(),
+        execution_id: identity.0.clone(),
+        attempt_id: identity.1.clone(),
+        idempotency_key: identity.2.clone(),
+        request_digest: identity.3.clone(),
         transfer_generation,
     };
     validate_general_compute_prepare_request(&prepare)
@@ -632,15 +703,14 @@ async fn prepare_general_compute_on_worker_with_sources(
         .await?
         .into_inner();
     if !prepared.success
-        || prepared.execution_id != execution_id
-        || prepared.attempt_id != attempt_id
-        || prepared.idempotency_key != idempotency_key
-        || prepared.request_digest != request_digest
+        || prepared.execution_id != identity.0
+        || prepared.attempt_id != identity.1
+        || prepared.idempotency_key != identity.2
+        || prepared.request_digest != identity.3
         || prepared.transfer_generation != transfer_generation
     {
         anyhow::bail!("worker general-compute prepare response did not match the request")
     }
-
     let mut artifact_ids = Vec::new();
     for upload in &uploads {
         if !artifact_ids.iter().any(|id| id == &upload.artifact_id) {
@@ -650,10 +720,10 @@ async fn prepare_general_compute_on_worker_with_sources(
     for artifact_id in artifact_ids {
         let resume = GeneralComputeChunkResumeRequest {
             token: token.to_owned(),
-            execution_id: execution_id.clone(),
-            attempt_id: attempt_id.clone(),
-            idempotency_key: idempotency_key.clone(),
-            request_digest: request_digest.clone(),
+            execution_id: identity.0.clone(),
+            attempt_id: identity.1.clone(),
+            idempotency_key: identity.2.clone(),
+            request_digest: identity.3.clone(),
             artifact_id: artifact_id.clone(),
             transfer_generation,
             completed_sha256: Vec::new(),
@@ -816,6 +886,10 @@ async fn execute_on_worker(
         Ok(token) => token,
         Err(error) => {
             let reason = error.to_string();
+            // A signing-key/configuration failure is a Nodepool control-plane
+            // fault, not evidence against the assigned Worker. Fail closed so
+            // the task cannot remain ASSIGNED forever or be redispatched with
+            // an unsigned request.
             repo.fail_for_worker_without_penalty(&task.task_id, &worker_id, &reason)
                 .await?;
             warn!(
@@ -832,29 +906,28 @@ async fn execute_on_worker(
             .await
         {
             Ok(source_bytes) => source_bytes,
-            Err(error)
-                if error
-                    .downcast_ref::<NodepoolArtifactSourceUnavailable>()
-                    .is_some() =>
-            {
-                let reason = error.to_string();
-                repo.fail_for_worker_without_penalty(&task.task_id, &worker_id, &reason)
-                    .await?;
-                warn!(
-                    "Task {} cannot load a Nodepool-owned artifact source for worker {}; failing without worker penalty: {}",
-                    task.task_id, worker_id, reason
-                );
-                return Ok(());
-            }
             Err(error) => {
-                reset_after_worker_rpc_failure(
-                    repo.as_ref(),
-                    &task.task_id,
-                    &worker_id,
-                    WorkerRpcFailureDisposition::RetryWithoutWorkerPenalty,
-                    &error,
-                )
-                .await?;
+                match general_compute_prepare_failure_disposition(&error) {
+                    GeneralComputePrepareFailureDisposition::FailTaskWithoutWorkerPenalty => {
+                        let reason = error.to_string();
+                        repo.fail_for_worker_without_penalty(&task.task_id, &worker_id, &reason)
+                            .await?;
+                        warn!(
+                            "Task {} cannot load Nodepool-owned general-compute artifacts for worker {}; failing without worker penalty: {}",
+                            task.task_id, worker_id, reason
+                        );
+                    }
+                    GeneralComputePrepareFailureDisposition::RetryWithoutWorkerPenalty => {
+                        reset_after_worker_rpc_failure(
+                            repo.as_ref(),
+                            &task.task_id,
+                            &worker_id,
+                            WorkerRpcFailureDisposition::RetryWithoutWorkerPenalty,
+                            &error,
+                        )
+                        .await?;
+                    }
+                }
                 return Ok(());
             }
         };
@@ -863,7 +936,7 @@ async fn execute_on_worker(
             .ok_or_else(|| anyhow::anyhow!("general-compute transfer lease is missing"))?
             .generation;
         if let Err(error) = prepare_general_compute_on_worker_with_sources(
-            channel,
+            channel.clone(),
             &current_task,
             &token,
             generation,
@@ -871,14 +944,27 @@ async fn execute_on_worker(
         )
         .await
         {
-            reset_after_worker_rpc_failure(
-                repo.as_ref(),
-                &task.task_id,
-                &worker_id,
-                WorkerRpcFailureDisposition::RetryWithoutWorkerPenalty,
-                &error,
-            )
-            .await?;
+            match general_compute_prepare_failure_disposition(&error) {
+                GeneralComputePrepareFailureDisposition::FailTaskWithoutWorkerPenalty => {
+                    let reason = error.to_string();
+                    repo.fail_for_worker_without_penalty(&task.task_id, &worker_id, &reason)
+                        .await?;
+                    warn!(
+                        "Task {} cannot be prepared for general-compute on worker {}; failing without worker penalty: {}",
+                        task.task_id, worker_id, reason
+                    );
+                }
+                GeneralComputePrepareFailureDisposition::RetryWithoutWorkerPenalty => {
+                    reset_after_worker_rpc_failure(
+                        repo.as_ref(),
+                        &task.task_id,
+                        &worker_id,
+                        WorkerRpcFailureDisposition::RetryWithoutWorkerPenalty,
+                        &error,
+                    )
+                    .await?;
+                }
+            }
             return Ok(());
         }
         Some(source_bytes)
@@ -937,9 +1023,46 @@ async fn execute_on_worker(
                     &current_task,
                     &response,
                     &capability_snapshot,
-                    general_compute_sources.as_ref(),
                 ) {
-                    Ok(result) => Some(result),
+                    Ok(result) => {
+                        let request = serde_json::from_slice::<
+                            general_compute_runtime::GeneralComputeRequest,
+                        >(
+                            current_task
+                                .general_compute_manifest_json
+                                .as_deref()
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!("general-compute request manifest is missing")
+                                })?,
+                        )
+                        .map_err(|error| {
+                            anyhow::anyhow!(
+                                "general-compute request manifest is malformed: {error}"
+                            )
+                        })?;
+                        let registration = serde_json::from_str::<
+                            general_compute_runtime::TrustedWorkerCapabilityRegistration,
+                        >(&capability_snapshot)
+                        .map_err(|error| {
+                            anyhow::anyhow!("trusted capability snapshot is malformed: {error}")
+                        })?;
+                        let matrix =
+                            general_compute_runtime::CapabilityMatrix::new(registration.backends);
+                        if let Some(sources) = general_compute_sources.as_ref() {
+                            if let Err(reason) = validate_production_input_digest(
+                                &request, &result, &matrix, sources,
+                            ) {
+                                repo.reset_to_pending_for_worker(&task.task_id, &worker_id)
+                                    .await?;
+                                warn!(
+                                    "Task {} returned an invalid production input digest from worker {}; redispatching: {}",
+                                    task.task_id, worker_id, reason
+                                );
+                                return Ok(());
+                            }
+                        }
+                        Some(result)
+                    }
                     Err(reason) => {
                         repo.reset_to_pending_for_worker(&task.task_id, &worker_id)
                             .await?;
@@ -1314,7 +1437,10 @@ fn managed_proof_for_completion_with_mode<'a>(
     task: &Task,
     response: &'a ExecuteTaskResponse,
 ) -> std::result::Result<Option<&'a ManagedProofEnvelope>, &'static str> {
-    if task.runtime.as_deref() != Some("managed-function-v0") {
+    if !matches!(
+        task.runtime.as_deref(),
+        Some("managed-function-v0") | Some("production_sandboxed_dsl")
+    ) {
         return Ok(None);
     }
 
@@ -1330,6 +1456,7 @@ fn managed_proof_for_completion_with_mode<'a>(
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[allow(clippy::enum_variant_names)]
 enum WorkerResponseSizeError {
     #[error("Worker status message exceeds the application limit")]
     StatusMessageTooLarge,
@@ -1358,7 +1485,6 @@ fn decode_and_validate_general_compute_result(
     task: &Task,
     response: &ExecuteTaskResponse,
     capability_snapshot_json: &str,
-    nodepool_sources: Option<&HashMap<String, Vec<u8>>>,
 ) -> std::result::Result<general_compute_runtime::GeneralComputeResult, String> {
     if response.general_compute_result_json.is_empty() {
         return Err("general-compute typed result is missing".into());
@@ -1401,7 +1527,6 @@ fn decode_and_validate_general_compute_result(
     if response.success != expected_success {
         return Err("worker success flag does not match typed result status".into());
     }
-    validate_production_input_digest(&request, &result, &matrix, nodepool_sources)?;
     Ok(result)
 }
 
@@ -1413,7 +1538,7 @@ fn validate_production_input_digest(
     request: &general_compute_runtime::GeneralComputeRequest,
     result: &general_compute_runtime::GeneralComputeResult,
     capabilities: &general_compute_runtime::CapabilityMatrix,
-    sources: Option<&HashMap<String, Vec<u8>>>,
+    sources: &HashMap<String, Vec<u8>>,
 ) -> Result<(), String> {
     let backend = capabilities
         .backends
@@ -1426,14 +1551,32 @@ fn validate_production_input_digest(
     {
         return Ok(());
     }
-    let Some(sources) = sources else {
-        return Err("production input digest has no Nodepool-owned source bytes".into());
-    };
 
-    let source = trusted_artifact_bytes(&request.source_artifact, sources)?;
+    let source = sources
+        .get(&request.source_artifact.artifact_id)
+        .ok_or_else(|| "production input digest source bytes are unavailable".to_string())?;
+    if source.len() as u64 != request.source_artifact.size_bytes
+        || general_compute_runtime::sha256_digest(source) != request.source_artifact.sha256
+    {
+        return Err("production input digest source bytes do not match the manifest".into());
+    }
     let mut inputs = Vec::with_capacity(request.input_artifacts.len());
     for artifact in &request.input_artifacts {
-        inputs.push(trusted_artifact_bytes(artifact, sources)?);
+        let bytes = sources.get(&artifact.artifact_id).ok_or_else(|| {
+            format!(
+                "production input digest bytes are unavailable for {}",
+                artifact.artifact_id
+            )
+        })?;
+        if bytes.len() as u64 != artifact.size_bytes
+            || general_compute_runtime::sha256_digest(bytes) != artifact.sha256
+        {
+            return Err(format!(
+                "production input digest bytes do not match the manifest for {}",
+                artifact.artifact_id
+            ));
+        }
+        inputs.push(bytes.as_slice());
     }
     let expected = general_compute_runtime::canonical_input_digest(source, &inputs);
     if result.input_sha256 != expected {
@@ -1442,29 +1585,6 @@ fn validate_production_input_digest(
         );
     }
     Ok(())
-}
-
-/// Re-verify a Nodepool-owned artifact row against the manifest it claims to
-/// satisfy. Bytes that drift in length or SHA-256 are never a trusted input.
-fn trusted_artifact_bytes<'a>(
-    artifact: &general_compute_runtime::ArtifactManifest,
-    sources: &'a HashMap<String, Vec<u8>>,
-) -> Result<&'a [u8], String> {
-    let bytes = sources.get(&artifact.artifact_id).ok_or_else(|| {
-        format!(
-            "production input digest bytes are unavailable for {}",
-            artifact.artifact_id
-        )
-    })?;
-    if bytes.len() as u64 != artifact.size_bytes
-        || general_compute_runtime::sha256_digest(bytes) != artifact.sha256
-    {
-        return Err(format!(
-            "production input digest bytes do not match the manifest for {}",
-            artifact.artifact_id
-        ));
-    }
-    Ok(bytes.as_slice())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1482,6 +1602,8 @@ enum ManagedCompletionError {
     InvalidBudget,
     #[error("Managed proof claim does not match the task")]
     ClaimBinding(#[source] ClaimError),
+    #[error("Managed DSL receipt identity does not match the task")]
+    DslReceiptBinding,
     #[error("Managed proof usage is outside the supported range")]
     UsageOutOfRange,
     #[error("Managed proof output length is outside the supported range")]
@@ -1508,6 +1630,22 @@ enum ManagedProofFailureDisposition {
 enum WorkerRpcFailureDisposition {
     RetryAfterResourceExhaustion,
     RetryWithoutWorkerPenalty,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GeneralComputePrepareFailureDisposition {
+    RetryWithoutWorkerPenalty,
+    FailTaskWithoutWorkerPenalty,
+}
+
+fn general_compute_prepare_failure_disposition(
+    error: &anyhow::Error,
+) -> GeneralComputePrepareFailureDisposition {
+    if error.downcast_ref::<CasOnlyArtifactUnavailable>().is_some() {
+        GeneralComputePrepareFailureDisposition::FailTaskWithoutWorkerPenalty
+    } else {
+        GeneralComputePrepareFailureDisposition::RetryWithoutWorkerPenalty
+    }
 }
 
 fn worker_rpc_failure_disposition(error: &tonic::Status) -> WorkerRpcFailureDisposition {
@@ -1592,9 +1730,52 @@ fn verified_managed_completion(
         .filter(|budget| *budget > 0)
         .ok_or(ManagedCompletionError::InvalidBudget)?;
 
+    if task.runtime.as_deref() == Some("production_sandboxed_dsl") {
+        let receipt: serde_json::Value = serde_json::from_str(&response.managed_receipt_json)
+            .map_err(|_| ManagedCompletionError::DslReceiptBinding)?;
+        let object = receipt
+            .as_object()
+            .ok_or(ManagedCompletionError::DslReceiptBinding)?;
+        if object.get("runtime").and_then(serde_json::Value::as_str) != Some("managed-function-v0")
+            || object
+                .get("execution_mode")
+                .and_then(serde_json::Value::as_str)
+                != Some("production_sandboxed_dsl")
+            || object.get("backend_id").and_then(serde_json::Value::as_str)
+                != task.managed_dsl_backend_id.as_deref()
+            || object
+                .get("semantics_manifest_sha256")
+                .and_then(serde_json::Value::as_str)
+                != task.managed_dsl_semantics_manifest_sha256.as_deref()
+        {
+            return Err(ManagedCompletionError::DslReceiptBinding);
+        }
+    }
+
+    let expected_proof_task_id = if task.runtime.as_deref() == Some("production_sandboxed_dsl") {
+        let backend_id = task
+            .managed_dsl_backend_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or(ManagedCompletionError::DslReceiptBinding)?;
+        let semantics_digest = task
+            .managed_dsl_semantics_manifest_sha256
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or(ManagedCompletionError::DslReceiptBinding)?;
+        dsl_proof_task_id(
+            &task.task_id,
+            "production_sandboxed_dsl",
+            backend_id,
+            semantics_digest,
+        )
+    } else {
+        task.task_id.clone()
+    };
+
     claim
         .validate_bindings(
-            &task.task_id,
+            &expected_proof_task_id,
             source.as_bytes(),
             input.as_bytes(),
             response.status_message.as_bytes(),
@@ -1627,9 +1808,9 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use general_compute_runtime::{
-        canonical_artifact_root, canonical_input_digest, sha256_digest, ArtifactManifest,
-        ArtifactRole, BackendRegistration, CapabilityMatrix, DeterminismPolicy, EvidenceEnvelope,
-        ExecutionPolicy, GeneralComputeRequest, GeneralComputeResult, ResultStatus,
+        canonical_artifact_root, sha256_digest, ArtifactManifest, ArtifactRole,
+        BackendRegistration, DeterminismPolicy, EvidenceEnvelope, ExecutionPolicy,
+        GeneralComputeRequest, GeneralComputeResult, ResultStatus,
         TrustedWorkerCapabilityRegistration, UsageClaim, WorkerCapabilities,
         GENERAL_COMPUTE_RUNTIME_VERSION,
     };
@@ -1646,7 +1827,7 @@ mod tests {
         worker_node_service_server::{WorkerNodeService, WorkerNodeServiceServer},
         ExecuteTaskRequest, ExecuteTaskResponse, GeneralComputeChunkDescriptor,
         GeneralComputeChunkResumeRequest, GeneralComputeChunkResumeResponse,
-        GeneralComputeChunkUploadResponse, GeneralComputePrepareRequest,
+        GeneralComputeChunkUpload, GeneralComputeChunkUploadResponse, GeneralComputePrepareRequest,
         GeneralComputePrepareResponse, StopTaskExecutionRequest, StopTaskExecutionResponse,
         TaskOutputRequest, TaskOutputResponse, TaskOutputUploadRequest, TaskOutputUploadResponse,
         TaskResultUploadRequest, TaskResultUploadResponse, TaskUsageRequest, TaskUsageResponse,
@@ -1724,122 +1905,6 @@ mod tests {
 
         assert_eq!(sources.get("source"), Some(&bytes));
         fixture.cleanup().await.ok();
-    }
-
-    fn make_task(id: &str, status: TaskStatus, retry_count: i32) -> Task {
-        Task {
-            id: uuid::Uuid::new_v4(),
-            task_id: id.into(),
-            owner: "example-user".into(),
-            worker_id: None,
-            worker_ip: None,
-            status,
-            status_message: None,
-            output: None,
-            result_torrent: None,
-            torrent_source: Some("example-btih".into()),
-            runtime: None,
-            task_source: None,
-            general_compute_manifest_json: None,
-            expected_btih: None,
-            cpu_usage: 0.0,
-            memory_usage: 0.0,
-            gpu_usage: 0.0,
-            gpu_memory_usage: 0.0,
-            req_cpu_score: 100,
-            req_gpu_score: 0,
-            req_memory_gb: 4,
-            req_gpu_memory_gb: 0,
-            req_storage_gb: 10,
-            host_count: 1,
-            max_cpt: 1000,
-            billing_settled: false,
-            billed_amount: 0,
-            managed_executed_ops: 0,
-            managed_output_bytes: 0,
-            managed_receipt_json: None,
-            retry_count,
-            max_retries: 3,
-            deadline: None,
-            deterministic: false,
-            side_effects: false,
-            priority: 0,
-            cpu_time_ms: 0,
-            wall_time_ms: 0,
-            peak_memory_mb: 0,
-            download_bytes: 0,
-            cache_hits: 0,
-            created_at: Utc::now(),
-            last_update: Utc::now(),
-            completed_at: None,
-        }
-    }
-
-    #[test]
-    fn build_execute_task_request_forwards_managed_runtime_source() {
-        let mut task = make_task("managed-dispatch", TaskStatus::Pending, 0);
-        task.runtime = Some("managed-function-v0".into());
-        task.task_source = Some("return get(input, \"value\") + 1;".into());
-        task.torrent_source = Some("{\"value\": 41}".into());
-
-        let request = build_execute_task_request(&task);
-
-        assert_eq!(request.runtime, "managed-function-v0");
-        assert_eq!(request.task_source, "return get(input, \"value\") + 1;");
-        assert_eq!(request.managed_budget_units, 1_000);
-        assert_eq!(request.torrent, "{\"value\": 41}");
-    }
-
-    #[test]
-    fn build_execute_task_request_forwards_general_compute_manifest_without_prefix_hack() {
-        let mut task = make_task("general-compute-dispatch", TaskStatus::Pending, 0);
-        task.runtime = Some("general-compute-v1alpha1".into());
-        task.general_compute_manifest_json =
-            Some(br#"{"runtime_version":"general-compute-v1alpha1"}"#.to_vec());
-
-        let request = build_execute_task_request(&task);
-
-        assert_eq!(request.task_source, "");
-        assert_eq!(
-            request.general_compute_manifest_json,
-            br#"{"runtime_version":"general-compute-v1alpha1"}"#
-        );
-    }
-
-    #[test]
-    fn build_execute_task_request_forwards_general_compute_attempt_identity() {
-        let mut task = make_task("general-compute-attempt-dispatch", TaskStatus::Pending, 0);
-        task.runtime = Some("general-compute-v1alpha1".into());
-        let mut manifest = GeneralComputeRequest {
-            execution_id: "execution-1".into(),
-            attempt_id: "attempt-2".into(),
-            idempotency_key: "idempotency-1".into(),
-            request_digest: String::new(),
-            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
-            guest_image_digest:
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-            backend_id: "python-cpython-312".into(),
-            entrypoint: "main".into(),
-            source_artifact: ArtifactManifest::inline_json(
-                "source",
-                ArtifactRole::Source,
-                b"source",
-            ),
-            input_artifacts: vec![],
-            execution_policy: ExecutionPolicy::default(),
-            determinism: DeterminismPolicy::default(),
-            billing_version: "billing-v1".into(),
-            cost_model_version: "cost-v1".into(),
-        };
-        manifest.request_digest = manifest.canonical_request_digest();
-        task.general_compute_manifest_json = Some(serde_json::to_vec(&manifest).unwrap());
-
-        let request = build_execute_task_request(&task);
-
-        assert_eq!(request.execution_id, "execution-1");
-        assert_eq!(request.attempt_id, "attempt-2");
-        assert_eq!(request.idempotency_key, "idempotency-1");
-        assert_eq!(request.request_digest, manifest.request_digest);
     }
 
     #[test]
@@ -2011,6 +2076,404 @@ mod tests {
         assert!(error
             .to_string()
             .contains("not present in the Nodepool manifest"));
+    }
+    #[tokio::test]
+    async fn scheduler_rejects_manifest_inline_bytes_without_a_matching_nodepool_source() {
+        let Some((db, fixture)) = test_db("dispatcher_source_boundary").await else {
+            return;
+        };
+        let repo = TaskRepository::new(db.pool.clone());
+        let task_id = format!("dispatcher-source-boundary-{}", uuid::Uuid::new_v4());
+        let original = b"trusted-source".to_vec();
+        let mut request = GeneralComputeRequest {
+            execution_id: "execution-source-boundary".into(),
+            attempt_id: "attempt-source-boundary".into(),
+            idempotency_key: "idempotency-source-boundary".into(),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "python-cpython-312".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest::inline_json(
+                "source",
+                ArtifactRole::Source,
+                &original,
+            ),
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.source_artifact.inline_bytes = None;
+        request.request_digest = request.canonical_request_digest();
+        let mut task = make_task(&task_id, TaskStatus::Pending, 0);
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.torrent_source = None;
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
+        repo.create(&task).await.unwrap();
+
+        request.source_artifact.inline_bytes = Some(original);
+        request.request_digest = request.canonical_request_digest();
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
+
+        let error = load_general_compute_artifact_sources(&repo, &task)
+            .await
+            .expect_err("manifest inline bytes must not bypass Nodepool source persistence");
+        assert!(error.to_string().contains("CAS-only"));
+
+        sqlx::query("DELETE FROM tasks WHERE task_id = $1")
+            .bind(&task_id)
+            .execute(&db.pool)
+            .await
+            .ok();
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn scheduler_rejects_attempt_chunk_coordinates_that_drift_from_immutable_artifact() {
+        let Some((db, fixture)) = test_db("dispatcher_immutable_artifact_coordinates").await else {
+            return;
+        };
+        let repo = TaskRepository::new(db.pool.clone());
+        let task_id = format!("dispatcher-immutable-coordinates-{}", uuid::Uuid::new_v4());
+        let bytes = b"immutable-source".to_vec();
+        let digest = sha256_digest(&bytes);
+        let mut request = GeneralComputeRequest {
+            execution_id: "execution-immutable-coordinates".into(),
+            attempt_id: "attempt-immutable-coordinates".into(),
+            idempotency_key: "idempotency-immutable-coordinates".into(),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "python-cpython-312".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest {
+                artifact_id: "source".into(),
+                role: ArtifactRole::Source,
+                size_bytes: bytes.len() as u64,
+                mime_type: "text/plain".into(),
+                sha256: digest.clone(),
+                chunks: vec![general_compute_runtime::ArtifactChunk {
+                    offset: 0,
+                    size_bytes: bytes.len() as u64,
+                    sha256: digest.clone(),
+                }],
+                inline_bytes: Some(bytes.clone()),
+            },
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        request.request_digest = request.canonical_request_digest();
+        let mut task = make_task(&task_id, TaskStatus::Pending, 0);
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        task.torrent_source = None;
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
+        repo.create(&task).await.unwrap();
+
+        let mut drifted = request.clone();
+        let split = bytes.len() / 2;
+        drifted.source_artifact.chunks = vec![
+            general_compute_runtime::ArtifactChunk {
+                offset: 0,
+                size_bytes: split as u64,
+                sha256: sha256_digest(&bytes[..split]),
+            },
+            general_compute_runtime::ArtifactChunk {
+                offset: split as u64,
+                size_bytes: (bytes.len() - split) as u64,
+                sha256: sha256_digest(&bytes[split..]),
+            },
+        ];
+        drifted.request_digest = drifted.canonical_request_digest();
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&drifted).unwrap());
+        let error = load_general_compute_artifact_sources(&repo, &task)
+            .await
+            .expect_err("attempt coordinates must remain bound to immutable artifact identity");
+        assert!(error.to_string().contains("coordinates"));
+
+        sqlx::query("DELETE FROM tasks WHERE task_id = $1")
+            .bind(&task_id)
+            .execute(&db.pool)
+            .await
+            .ok();
+        fixture.cleanup().await.ok();
+    }
+
+    fn make_task(id: &str, status: TaskStatus, retry_count: i32) -> Task {
+        Task {
+            id: uuid::Uuid::new_v4(),
+            task_id: id.into(),
+            owner: "example-user".into(),
+            worker_id: None,
+            worker_ip: None,
+            status,
+            status_message: None,
+            output: None,
+            result_torrent: None,
+            torrent_source: Some("example-btih".into()),
+            runtime: None,
+            task_source: None,
+            general_compute_manifest_json: None,
+            managed_dsl_backend_id: None,
+            managed_dsl_semantics_manifest_sha256: None,
+            expected_btih: None,
+            cpu_usage: 0.0,
+            memory_usage: 0.0,
+            gpu_usage: 0.0,
+            gpu_memory_usage: 0.0,
+            req_cpu_score: 100,
+            req_gpu_score: 0,
+            req_memory_gb: 4,
+            req_gpu_memory_gb: 0,
+            req_storage_gb: 10,
+            host_count: 1,
+            max_cpt: 1000,
+            billing_settled: false,
+            billed_amount: 0,
+            managed_executed_ops: 0,
+            managed_output_bytes: 0,
+            managed_receipt_json: None,
+            retry_count,
+            max_retries: 3,
+            deadline: None,
+            deterministic: false,
+            side_effects: false,
+            priority: 0,
+            cpu_time_ms: 0,
+            wall_time_ms: 0,
+            peak_memory_mb: 0,
+            download_bytes: 0,
+            cache_hits: 0,
+            created_at: Utc::now(),
+            last_update: Utc::now(),
+            completed_at: None,
+        }
+    }
+
+    #[test]
+    fn build_execute_task_request_forwards_managed_runtime_source() {
+        let mut task = make_task("managed-dispatch", TaskStatus::Pending, 0);
+        task.runtime = Some("managed-function-v0".into());
+        task.task_source = Some("return get(input, \"value\") + 1;".into());
+        task.torrent_source = Some("{\"value\": 41}".into());
+
+        let request = build_execute_task_request(&task);
+
+        assert_eq!(request.runtime, "managed-function-v0");
+        assert_eq!(request.task_source, "return get(input, \"value\") + 1;");
+        assert_eq!(request.managed_budget_units, 1_000);
+        assert_eq!(request.torrent, "{\"value\": 41}");
+    }
+
+    #[test]
+    fn build_execute_task_request_forwards_general_compute_manifest_without_prefix_hack() {
+        let mut task = make_task("general-compute-dispatch", TaskStatus::Pending, 0);
+        task.runtime = Some("general-compute-v1alpha1".into());
+        task.general_compute_manifest_json =
+            Some(br#"{"runtime_version":"general-compute-v1alpha1"}"#.to_vec());
+
+        let request = build_execute_task_request(&task);
+
+        assert_eq!(request.task_source, "");
+        assert_eq!(
+            request.general_compute_manifest_json,
+            br#"{"runtime_version":"general-compute-v1alpha1"}"#
+        );
+    }
+
+    #[test]
+    fn build_execute_task_request_forwards_general_compute_attempt_identity() {
+        let mut task = make_task("general-compute-attempt-dispatch", TaskStatus::Pending, 0);
+        task.runtime = Some("general-compute-v1alpha1".into());
+        let mut manifest = GeneralComputeRequest {
+            execution_id: "execution-1".into(),
+            attempt_id: "attempt-2".into(),
+            idempotency_key: "idempotency-1".into(),
+            request_digest: String::new(),
+            runtime_version: GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            backend_id: "python-cpython-312".into(),
+            entrypoint: "main".into(),
+            source_artifact: ArtifactManifest::inline_json(
+                "source",
+                ArtifactRole::Source,
+                b"source",
+            ),
+            input_artifacts: vec![],
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
+            billing_version: "billing-v1".into(),
+            cost_model_version: "cost-v1".into(),
+        };
+        manifest.request_digest = manifest.canonical_request_digest();
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&manifest).unwrap());
+
+        let request = build_execute_task_request(&task);
+
+        assert_eq!(request.execution_id, "execution-1");
+        assert_eq!(request.attempt_id, "attempt-2");
+        assert_eq!(request.idempotency_key, "idempotency-1");
+        assert_eq!(request.request_digest, manifest.request_digest);
+    }
+
+    #[test]
+    fn inline_general_compute_chunk_plan_rejects_cas_only_artifacts() {
+        let mut task = make_task("general-compute-cas-only", TaskStatus::Assigned, 0);
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        let mut request = alpha_result_request();
+        request.source_artifact.inline_bytes = None;
+        request.source_artifact.chunks = vec![general_compute_runtime::ArtifactChunk {
+            offset: 0,
+            size_bytes: 6,
+            sha256: sha256_digest(b"source"),
+        }];
+        request.source_artifact.size_bytes = 6;
+        request.source_artifact.sha256 = sha256_digest(b"source");
+        request.request_digest = request.canonical_request_digest();
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
+
+        let error = inline_general_compute_chunk_plan(&task, "token").unwrap_err();
+        assert!(error.to_string().contains("CAS-only"));
+    }
+
+    #[test]
+    fn general_compute_chunk_plan_accepts_a_verified_nodepool_source() {
+        let mut task = make_task("general-compute-persisted-source", TaskStatus::Assigned, 0);
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        let bytes = b"source".to_vec();
+        let mut request = alpha_result_request();
+        request.source_artifact.inline_bytes = None;
+        request.source_artifact.chunks = vec![general_compute_runtime::ArtifactChunk {
+            offset: 0,
+            size_bytes: bytes.len() as u64,
+            sha256: sha256_digest(&bytes),
+        }];
+        request.source_artifact.size_bytes = bytes.len() as u64;
+        request.source_artifact.sha256 = sha256_digest(&bytes);
+        request.request_digest = request.canonical_request_digest();
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
+
+        let mut source_bytes = HashMap::new();
+        source_bytes.insert("source".to_string(), bytes.clone());
+        let uploads = general_compute_chunk_plan(&task, "token", 1, &source_bytes).unwrap();
+        assert_eq!(uploads.len(), 1);
+        assert_eq!(uploads[0].bytes, bytes);
+        assert_eq!(uploads[0].sha256, request.source_artifact.sha256);
+    }
+
+    #[test]
+    fn inline_general_compute_chunk_plan_binds_each_manifest_chunk() {
+        let mut task = make_task("general-compute-inline-chunks", TaskStatus::Assigned, 0);
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        let mut request = alpha_result_request();
+        let bytes = b"source".to_vec();
+        request.source_artifact.inline_bytes = Some(bytes.clone());
+        request.source_artifact.chunks = vec![general_compute_runtime::ArtifactChunk {
+            offset: 0,
+            size_bytes: bytes.len() as u64,
+            sha256: sha256_digest(&bytes),
+        }];
+        request.source_artifact.size_bytes = bytes.len() as u64;
+        request.source_artifact.sha256 = sha256_digest(&bytes);
+        request.request_digest = request.canonical_request_digest();
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
+
+        let plan = inline_general_compute_chunk_plan(&task, "token").unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].token, "token");
+        assert_eq!(plan[0].artifact_id, "source");
+        assert_eq!(plan[0].bytes, bytes);
+        assert_eq!(plan[0].request_digest, request.request_digest);
+    }
+
+    #[test]
+    fn worker_missing_chunk_response_filters_uploads_to_manifest_descriptors() {
+        let mut task = make_task("general-compute-resume-filter", TaskStatus::Assigned, 0);
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        let bytes = b"sources".to_vec();
+        let mut request = alpha_result_request();
+        request.source_artifact.inline_bytes = Some(bytes.clone());
+        request.source_artifact.chunks = vec![
+            general_compute_runtime::ArtifactChunk {
+                offset: 0,
+                size_bytes: 6,
+                sha256: sha256_digest(b"source"),
+            },
+            general_compute_runtime::ArtifactChunk {
+                offset: 6,
+                size_bytes: 1,
+                sha256: sha256_digest(b"s"),
+            },
+        ];
+        request.source_artifact.size_bytes = bytes.len() as u64;
+        request.source_artifact.sha256 = sha256_digest(&bytes);
+        request.request_digest = request.canonical_request_digest();
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
+
+        let uploads = inline_general_compute_chunk_plan(&task, "token").unwrap();
+        let selected = select_missing_general_compute_chunks(
+            &uploads,
+            &[hivemind_proto::GeneralComputeChunkDescriptor {
+                offset: 6,
+                size_bytes: 1,
+                sha256: sha256_digest(b"s"),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].offset, 6);
+        assert_eq!(selected[0].bytes, b"s");
+    }
+
+    #[tokio::test]
+    async fn nodepool_prepare_client_uploads_inline_chunks_before_execution() {
+        let mut task = make_task("general-compute-client-transport", TaskStatus::Assigned, 0);
+        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
+        let bytes = b"source".to_vec();
+        let mut request = alpha_result_request();
+        request.source_artifact.inline_bytes = Some(bytes.clone());
+        request.source_artifact.chunks = vec![general_compute_runtime::ArtifactChunk {
+            offset: 0,
+            size_bytes: bytes.len() as u64,
+            sha256: sha256_digest(&bytes),
+        }];
+        request.source_artifact.size_bytes = bytes.len() as u64;
+        request.source_artifact.sha256 = sha256_digest(&bytes);
+        request.request_digest = request.canonical_request_digest();
+        task.general_compute_manifest_json = Some(serde_json::to_vec(&request).unwrap());
+
+        let (addr, mut prepares, mut resumes, mut uploads) =
+            fake_worker_execute_and_chunk_server().await.unwrap();
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        prepare_general_compute_on_worker(channel, &task, "nodepool-token")
+            .await
+            .expect("Nodepool should prepare and upload inline chunks");
+
+        let prepared = prepares.recv().await.unwrap();
+        assert_eq!(prepared.task_id, task.task_id);
+        assert_eq!(prepared.execution_id, request.execution_id);
+        assert_eq!(prepared.attempt_id, request.attempt_id);
+        assert_eq!(prepared.request_digest, request.request_digest);
+        let resumed = resumes.recv().await.unwrap();
+        assert_eq!(resumed.artifact_id, request.source_artifact.artifact_id);
+        assert_eq!(resumed.execution_id, request.execution_id);
+        let uploaded = uploads.recv().await.unwrap();
+        assert_eq!(uploaded.token, "nodepool-token");
+        assert_eq!(uploaded.artifact_id, "source");
+        assert_eq!(uploaded.bytes, bytes);
+        assert_eq!(uploaded.sha256, request.source_artifact.chunks[0].sha256);
     }
 
     #[test]
@@ -2295,126 +2758,6 @@ mod tests {
         assert_eq!(execute.token, prepared.token);
         assert_eq!(execute.request_digest, manifest.request_digest);
 
-        fixture.cleanup().await.ok();
-    }
-
-    #[tokio::test]
-    async fn execute_on_worker_redispatches_a_production_input_digest_mismatch() {
-        let lock = dispatcher_db_lock();
-        let _guard = lock.lock().await;
-        let Some((db, fixture)) = test_db("dispatcher_production_input_digest").await else {
-            return;
-        };
-        let dispatcher = Dispatcher::new(db.clone(), 30, 2);
-        let unique = uuid::Uuid::new_v4().to_string();
-        let username = format!("dispatch-digest-owner-{unique}");
-        let task_id = format!("dispatch-digest-task-{unique}");
-        let worker_id = format!("dispatch-digest-worker-{unique}");
-        let bytes = b"trusted-source".to_vec();
-        let mut manifest = alpha_result_request();
-        manifest.execution_id = format!("execution-{unique}");
-        manifest.idempotency_key = format!("idempotency-{unique}");
-        manifest.source_artifact = ArtifactManifest {
-            artifact_id: "source".into(),
-            role: ArtifactRole::Source,
-            size_bytes: bytes.len() as u64,
-            mime_type: "text/plain".into(),
-            sha256: sha256_digest(&bytes),
-            chunks: vec![general_compute_runtime::ArtifactChunk {
-                offset: 0,
-                size_bytes: bytes.len() as u64,
-                sha256: sha256_digest(&bytes),
-            }],
-            inline_bytes: Some(bytes.clone()),
-        };
-        manifest.request_digest = manifest.canonical_request_digest();
-
-        let mut result = alpha_result(&manifest);
-        result.input_sha256 = canonical_input_digest(b"worker-chosen-source", &[]);
-        let response = ExecuteTaskResponse {
-            success: true,
-            execution_id: manifest.execution_id.clone(),
-            attempt_id: manifest.attempt_id.clone(),
-            idempotency_key: manifest.idempotency_key.clone(),
-            request_digest: manifest.request_digest.clone(),
-            general_compute_result_json: serde_json::to_vec(&result).unwrap(),
-            ..ExecuteTaskResponse::default()
-        };
-        let Some((worker_addr, _execute_rx)) =
-            fake_worker_execute_server_with_response(response).await
-        else {
-            return;
-        };
-
-        sqlx::query(
-            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
-        )
-        .bind(&username)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO worker_nodes
-             (worker_id, username, ip, cpu_cores, memory_gb, general_compute_capabilities_json)
-             VALUES ($1, $2, '10.0.0.4', 4, 16, $3)",
-        )
-        .bind(&worker_id)
-        .bind(format!("provider-{unique}"))
-        .bind(production_capability_snapshot(&manifest))
-        .execute(&db.pool)
-        .await
-        .unwrap();
-
-        let mut task = make_task(&task_id, TaskStatus::Pending, 0);
-        task.owner = username.clone();
-        task.runtime = Some(GENERAL_COMPUTE_RUNTIME_VERSION.into());
-        task.torrent_source = None;
-        task.general_compute_manifest_json = Some(serde_json::to_vec(&manifest).unwrap());
-        dispatcher.repo.create(&task).await.unwrap();
-        dispatcher
-            .repo
-            .assign_to_worker(&task_id, &worker_id, &worker_addr.to_string())
-            .await
-            .unwrap();
-
-        let (private_key, _) = hivemind_config::generate_worker_execution_test_key_pair();
-        execute_on_worker(
-            dispatcher.repo.clone(),
-            task,
-            worker_id.clone(),
-            worker_addr.to_string(),
-            &private_key,
-            ManagedProofRolloutMode::Enforce,
-        )
-        .await
-        .unwrap();
-
-        let stored = dispatcher
-            .repo
-            .find_by_task_id(&task_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(stored.status, TaskStatus::Pending);
-        assert!(stored.worker_id.is_none());
-        assert!(stored.output.is_none());
-        assert!(!stored.billing_settled);
-
-        sqlx::query("DELETE FROM tasks WHERE task_id = $1")
-            .bind(&task_id)
-            .execute(&db.pool)
-            .await
-            .ok();
-        sqlx::query("DELETE FROM worker_nodes WHERE worker_id = $1")
-            .bind(&worker_id)
-            .execute(&db.pool)
-            .await
-            .ok();
-        sqlx::query("DELETE FROM users WHERE username = $1")
-            .bind(&username)
-            .execute(&db.pool)
-            .await
-            .ok();
         fixture.cleanup().await.ok();
     }
 
@@ -2902,7 +3245,6 @@ mod tests {
             &task,
             &response,
             &alpha_capability_snapshot(&request),
-            None,
         )
         .expect_err("alpha completion must carry a typed result envelope");
 
@@ -2921,7 +3263,6 @@ mod tests {
             &task,
             &response,
             &alpha_capability_snapshot(&request),
-            None,
         )
         .expect_err("malformed typed result must fail closed");
 
@@ -2943,7 +3284,6 @@ mod tests {
             &task,
             &response,
             &alpha_capability_snapshot(&request),
-            None,
         )
         .expect_err("a stale typed result must not settle the current attempt");
 
@@ -2981,13 +3321,9 @@ mod tests {
             ..ExecuteTaskResponse::default()
         };
 
-        let error = decode_and_validate_general_compute_result(
-            &task,
-            &response,
-            &mismatched_snapshot,
-            None,
-        )
-        .expect_err("result validation must use the persisted capability snapshot");
+        let error =
+            decode_and_validate_general_compute_result(&task, &response, &mismatched_snapshot)
+                .expect_err("result validation must use the persisted capability snapshot");
 
         assert!(error.contains("trusted capability snapshot"));
     }
@@ -3066,7 +3402,7 @@ mod tests {
             ..ExecuteTaskResponse::default()
         };
 
-        let error = decode_and_validate_general_compute_result(&task, &response, &snapshot, None)
+        let error = decode_and_validate_general_compute_result(&task, &response, &snapshot)
             .expect_err("a result must use the exact operator-selected GPU identity");
 
         assert!(error.contains("trusted GPU selection"));
@@ -3086,7 +3422,6 @@ mod tests {
             &task,
             &response,
             &alpha_capability_snapshot(&request),
-            None,
         )
         .expect("valid typed result should be accepted");
 
@@ -3096,156 +3431,24 @@ mod tests {
 
     #[test]
     fn production_result_input_digest_must_match_nodepool_owned_source_bytes() {
-        let request = alpha_result_request();
+        let (task, request) = alpha_result_task("general-compute-result-input-digest");
         let mut result = alpha_result(&request);
-        result.input_sha256 = sha256_digest(b"worker-chosen-bytes");
-
-        let error = validate_production_input_digest(
-            &request,
-            &result,
-            &production_capability_matrix(&request),
-            Some(&nodepool_owned_sources()),
-        )
-        .expect_err("a production result must bind its digest to Nodepool source bytes");
-
-        assert!(error.contains("input digest"), "unexpected error: {error}");
-    }
-
-    #[test]
-    fn production_result_input_digest_accepts_nodepool_owned_bytes() {
-        let request = alpha_result_request();
-        let mut result = alpha_result(&request);
-        result.input_sha256 = canonical_input_digest(b"source", &[]);
-
-        validate_production_input_digest(
-            &request,
-            &result,
-            &production_capability_matrix(&request),
-            Some(&nodepool_owned_sources()),
-        )
-        .expect("a digest over Nodepool-owned bytes must complete");
-    }
-
-    #[test]
-    fn production_result_input_digest_fails_closed_without_nodepool_source_bytes() {
-        let request = alpha_result_request();
-        let mut result = alpha_result(&request);
-        result.input_sha256 = canonical_input_digest(b"source", &[]);
-
-        let error = validate_production_input_digest(
-            &request,
-            &result,
-            &production_capability_matrix(&request),
-            Some(&HashMap::new()),
-        )
-        .expect_err("Nodepool must not settle a digest it cannot re-derive");
-
-        assert!(error.contains("unavailable"), "unexpected error: {error}");
-    }
-
-    #[test]
-    fn production_result_input_digest_fails_closed_without_a_loaded_source_map() {
-        let request = alpha_result_request();
-        let mut result = alpha_result(&request);
-        result.input_sha256 = canonical_input_digest(b"source", &[]);
-
-        let error = validate_production_input_digest(
-            &request,
-            &result,
-            &production_capability_matrix(&request),
-            None,
-        )
-        .expect_err("a production result without loaded Nodepool bytes must fail closed");
-
-        assert!(
-            error.contains("no Nodepool-owned source bytes"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[test]
-    fn production_result_input_digest_rejects_source_bytes_that_drift_from_the_manifest() {
-        let request = alpha_result_request();
-        let drifted = b"drifted".to_vec();
-        let mut result = alpha_result(&request);
-        result.input_sha256 = canonical_input_digest(&drifted, &[]);
-        let sources = HashMap::from([(request.source_artifact.artifact_id.clone(), drifted)]);
-
-        let error = validate_production_input_digest(
-            &request,
-            &result,
-            &production_capability_matrix(&request),
-            Some(&sources),
-        )
-        .expect_err("stored bytes that drift from the manifest are not a trusted source");
-
-        assert!(
-            error.contains("do not match the manifest"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[test]
-    fn production_result_input_digest_covers_every_input_artifact() {
-        let mut request = alpha_result_request();
-        request.input_artifacts = vec![ArtifactManifest::inline_json(
-            "input",
-            ArtifactRole::Input,
-            b"input",
-        )];
-        request.request_digest = request.canonical_request_digest();
-        let matrix = production_capability_matrix(&request);
-        let sources = HashMap::from([
-            (String::from("source"), b"source".to_vec()),
-            (String::from("input"), b"input".to_vec()),
-        ]);
-
-        let mut source_only = alpha_result(&request);
-        source_only.input_sha256 = canonical_input_digest(b"source", &[]);
-        let error =
-            validate_production_input_digest(&request, &source_only, &matrix, Some(&sources))
-                .expect_err("a digest that omits an input artifact must be rejected");
-        assert!(error.contains("input digest"), "unexpected error: {error}");
-
-        let mut complete = alpha_result(&request);
-        complete.input_sha256 = canonical_input_digest(b"source", &[b"input".as_slice()]);
-        validate_production_input_digest(&request, &complete, &matrix, Some(&sources))
-            .expect("input artifacts belong in the canonical digest");
-    }
-
-    #[test]
-    fn reference_direct_results_keep_their_legacy_input_digest_semantics() {
-        let request = alpha_result_request();
-        let result = alpha_result(&request);
-        let registration: TrustedWorkerCapabilityRegistration =
-            serde_json::from_str(&alpha_capability_snapshot(&request)).unwrap();
-
-        assert_ne!(result.input_sha256, canonical_input_digest(b"source", &[]));
-        validate_production_input_digest(
-            &request,
-            &result,
-            &CapabilityMatrix::new(registration.backends),
-            Some(&nodepool_owned_sources()),
-        )
-        .expect("reference-direct results predate the production digest protocol");
-    }
-
-    fn production_capability_snapshot(request: &GeneralComputeRequest) -> String {
         let mut registration: TrustedWorkerCapabilityRegistration =
-            serde_json::from_str(&alpha_capability_snapshot(request)).unwrap();
+            serde_json::from_str(&alpha_capability_snapshot(&request)).unwrap();
         registration.backends[0].execution_mode =
             general_compute_runtime::sandbox::BackendExecutionMode::ProductionSandboxedOci;
-        serde_json::to_string(&registration).unwrap()
-    }
+        let matrix = general_compute_runtime::CapabilityMatrix::new(registration.backends);
+        let sources = HashMap::from([(String::from("source"), b"source".to_vec())]);
 
-    fn production_capability_matrix(request: &GeneralComputeRequest) -> CapabilityMatrix {
-        let registration: TrustedWorkerCapabilityRegistration =
-            serde_json::from_str(&production_capability_snapshot(request)).unwrap();
-        CapabilityMatrix::new(registration.backends)
-    }
+        result.input_sha256 = sha256_digest(&[]);
+        let error = validate_production_input_digest(&request, &result, &matrix, &sources)
+            .expect_err("a production result must bind its digest to Nodepool source bytes");
 
-    fn nodepool_owned_sources() -> HashMap<String, Vec<u8>> {
-        HashMap::from([(String::from("source"), b"source".to_vec())])
+        assert!(error.contains("input digest"));
+        assert_eq!(
+            task.runtime.as_deref(),
+            Some(GENERAL_COMPUTE_RUNTIME_VERSION)
+        );
     }
 
     #[test]
@@ -3372,6 +3575,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cas_only_prepare_failure_is_terminal_without_worker_penalty() {
+        let error = anyhow::Error::new(CasOnlyArtifactUnavailable {
+            artifact_id: "source".into(),
+        });
+
+        assert_eq!(
+            general_compute_prepare_failure_disposition(&error),
+            GeneralComputePrepareFailureDisposition::FailTaskWithoutWorkerPenalty
+        );
+    }
+
+    #[test]
+    fn transport_prepare_failure_remains_redispatchable_without_worker_penalty() {
+        let error = anyhow::anyhow!("worker chunk endpoint unavailable");
+
+        assert_eq!(
+            general_compute_prepare_failure_disposition(&error),
+            GeneralComputePrepareFailureDisposition::RetryWithoutWorkerPenalty
+        );
+    }
+
     #[tokio::test]
     async fn connect_transport_error_is_redispatchable_without_worker_penalty() {
         let unavailable_addr = {
@@ -3418,6 +3643,94 @@ mod tests {
             managed_receipt_json: "{\"worker_selected\":true}".into(),
             managed_proof: Some(ManagedProofEnvelope::default()),
             ..ExecuteTaskResponse::default()
+        }
+    }
+
+    fn production_dsl_task_for_claim(task_id: &str) -> Task {
+        let mut task = managed_task_for_claim(task_id);
+        task.runtime = Some("production_sandboxed_dsl".into());
+        task.managed_dsl_backend_id = Some("managed-dsl-v0".into());
+        task.managed_dsl_semantics_manifest_sha256 =
+            Some(general_compute_runtime::MANAGED_DSL_SEMANTICS_MANIFEST_SHA256.into());
+        task
+    }
+
+    fn production_dsl_response(output: &str) -> ExecuteTaskResponse {
+        let mut response = managed_response(output);
+        response.managed_receipt_json = serde_json::json!({
+            "runtime": "managed-function-v0",
+            "execution_mode": "production_sandboxed_dsl",
+            "backend_id": "managed-dsl-v0",
+            "semantics_manifest_sha256":
+                general_compute_runtime::MANAGED_DSL_SEMANTICS_MANIFEST_SHA256,
+        })
+        .to_string();
+        response
+    }
+
+    #[test]
+    fn production_dsl_receipt_identity_is_required_for_settlement() {
+        let task = production_dsl_task_for_claim("managed-dsl-receipt-valid");
+        let response = production_dsl_response(MANAGED_OUTPUT);
+        let proof_task_id = dsl_proof_task_id(
+            &task.task_id,
+            "production_sandboxed_dsl",
+            task.managed_dsl_backend_id.as_deref().unwrap(),
+            task.managed_dsl_semantics_manifest_sha256
+                .as_deref()
+                .unwrap(),
+        );
+        let claim = managed_claim(
+            &proof_task_id,
+            MANAGED_SOURCE.as_bytes(),
+            MANAGED_INPUT.as_bytes(),
+            MANAGED_OUTPUT.as_bytes(),
+        );
+
+        assert!(verified_managed_completion(&task, &response, &claim).is_ok());
+    }
+
+    #[test]
+    fn production_dsl_receipt_rejects_identity_drift() {
+        let task = production_dsl_task_for_claim("managed-dsl-receipt-drift");
+        let proof_task_id = dsl_proof_task_id(
+            &task.task_id,
+            "production_sandboxed_dsl",
+            task.managed_dsl_backend_id.as_deref().unwrap(),
+            task.managed_dsl_semantics_manifest_sha256
+                .as_deref()
+                .unwrap(),
+        );
+        let claim = managed_claim(
+            &proof_task_id,
+            MANAGED_SOURCE.as_bytes(),
+            MANAGED_INPUT.as_bytes(),
+            MANAGED_OUTPUT.as_bytes(),
+        );
+        let cases = [
+            ("runtime", "other-runtime"),
+            ("execution_mode", "production_sandboxed_oci"),
+            ("backend_id", "other-backend"),
+            ("semantics_manifest_sha256", "sha256:wrong"),
+        ];
+
+        for (field, value) in cases {
+            let mut receipt = serde_json::json!({
+                "runtime": "managed-function-v0",
+                "execution_mode": "production_sandboxed_dsl",
+                "backend_id": "managed-dsl-v0",
+                "semantics_manifest_sha256":
+                    general_compute_runtime::MANAGED_DSL_SEMANTICS_MANIFEST_SHA256,
+            });
+            receipt[field] = serde_json::Value::String(value.into());
+            let mut response = production_dsl_response(MANAGED_OUTPUT);
+            response.managed_receipt_json = receipt.to_string();
+
+            assert_eq!(
+                verified_managed_completion(&task, &response, &claim).unwrap_err(),
+                ManagedCompletionError::DslReceiptBinding,
+                "receipt field {field} must be task-bound"
+            );
         }
     }
 
@@ -3749,6 +4062,7 @@ mod tests {
             available_memory_gb: mem,
             queue_capacity: cpu,
             general_compute_capabilities_json: None,
+            managed_dsl_capabilities_json: None,
             last_heartbeat: Utc::now(),
             registered_at: Utc::now(),
             updated_at: Utc::now(),
@@ -3812,6 +4126,42 @@ mod tests {
     }
 
     #[test]
+    fn general_compute_execution_token_is_bound_to_attempt_identity() {
+        let (mut task, request) = alpha_result_task("bound-general-compute-token");
+        task.status = TaskStatus::Assigned;
+        let (private_key, public_key) = hivemind_config::generate_worker_execution_test_key_pair();
+
+        let token = worker_execution_token(&private_key, &task, "worker-bound-7", Some(1)).unwrap();
+        let claims =
+            hivemind_auth::worker_execution::WorkerExecutionVerifier::from_pem(&public_key)
+                .unwrap()
+                .decode_execution_claims(&token)
+                .unwrap();
+
+        assert_eq!(
+            claims.claims.task_id.as_deref(),
+            Some(task.task_id.as_str())
+        );
+        assert_eq!(claims.claims.worker_id.as_deref(), Some("worker-bound-7"));
+        assert_eq!(
+            claims.execution_id.as_deref(),
+            Some(request.execution_id.as_str())
+        );
+        assert_eq!(
+            claims.attempt_id.as_deref(),
+            Some(request.attempt_id.as_str())
+        );
+        assert_eq!(
+            claims.idempotency_key.as_deref(),
+            Some(request.idempotency_key.as_str())
+        );
+        assert_eq!(
+            claims.request_digest.as_deref(),
+            Some(request.request_digest.as_str())
+        );
+    }
+
+    #[test]
     fn general_compute_execution_token_binds_attempt_and_transfer_generation() {
         let (mut task, request) = alpha_result_task("bound-general-compute-token");
         task.status = TaskStatus::Assigned;
@@ -3847,7 +4197,6 @@ mod tests {
         );
         assert_eq!(claims.transfer_generation, Some(7));
     }
-
     #[test]
     fn worker_execution_token_reports_private_key_boundary() {
         // Given: a dispatchable task and a missing worker-execution private key.
@@ -4105,6 +4454,112 @@ mod tests {
 
         sqlx::query("DELETE FROM tasks WHERE task_id = $1")
             .bind(&task_id)
+            .execute(&db.pool)
+            .await
+            .ok();
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_execute_on_worker_fails_closed_when_execution_token_signing_fails() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let (db, fixture) = match test_db("dispatcher_token_signing_failure").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let dispatcher = Dispatcher::new(db.clone(), 30, 2);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let username = format!("dispatch-token-owner-{unique}");
+        let worker_id = format!("dispatch-token-worker-{unique}");
+        let task_id = format!("dispatch-token-task-{unique}");
+        let (worker_addr, mut execute_rx) = match fake_worker_execute_server().await {
+            Some(parts) => parts,
+            None => return,
+        };
+
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        )
+        .bind(&username)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO worker_nodes (worker_id, username, ip, cpu_cores, memory_gb)
+             VALUES ($1, $2, '10.0.0.77', 4, 16)",
+        )
+        .bind(&worker_id)
+        .bind(format!("provider-{unique}"))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let mut task = make_task(&task_id, TaskStatus::Pending, 0);
+        task.owner = username.clone();
+        task.runtime = Some("managed-function-v0".into());
+        task.task_source = Some("return 7;".into());
+        dispatcher.repo.create(&task).await.unwrap();
+        dispatcher
+            .repo
+            .assign_to_worker(&task_id, &worker_id, &worker_addr.to_string())
+            .await
+            .unwrap();
+
+        let result = execute_on_worker(
+            dispatcher.repo.clone(),
+            task,
+            worker_id.clone(),
+            worker_addr.to_string(),
+            "not-a-valid-ed25519-private-key",
+            ManagedProofRolloutMode::Enforce,
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "signing failure must be contained: {result:?}"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), execute_rx.recv())
+                .await
+                .is_err(),
+            "worker must not receive an unsigned execution request"
+        );
+        let stored = dispatcher
+            .repo
+            .find_by_task_id(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, TaskStatus::Failed);
+        assert!(stored
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("WORKER_EXECUTION_PRIVATE_KEY_PEM")));
+
+        if let Some(failed_tasks) = sqlx::query_scalar::<_, i64>(
+            "SELECT failed_tasks FROM worker_reputation WHERE worker_id = $1",
+        )
+        .bind(&worker_id)
+        .fetch_optional(&db.pool)
+        .await
+        .unwrap()
+        {
+            assert_eq!(failed_tasks, 0);
+        }
+        sqlx::query("DELETE FROM tasks WHERE task_id = $1")
+            .bind(&task_id)
+            .execute(&db.pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM worker_nodes WHERE worker_id = $1")
+            .bind(&worker_id)
+            .execute(&db.pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM users WHERE username = $1")
+            .bind(&username)
             .execute(&db.pool)
             .await
             .ok();
@@ -4788,6 +5243,54 @@ mod tests {
         None
     }
 
+    async fn fake_worker_execute_and_chunk_server() -> Option<(
+        SocketAddr,
+        tokio::sync::mpsc::Receiver<GeneralComputePrepareRequest>,
+        tokio::sync::mpsc::Receiver<GeneralComputeChunkResumeRequest>,
+        tokio::sync::mpsc::Receiver<GeneralComputeChunkUpload>,
+    )> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.ok()?;
+        let addr = listener.local_addr().ok()?;
+        let (execute_tx, _execute_rx) = tokio::sync::mpsc::channel(1);
+        let (prepare_tx, prepare_rx) = tokio::sync::mpsc::channel(1);
+        let (resume_tx, resume_rx) = tokio::sync::mpsc::channel(1);
+        let (upload_tx, upload_rx) = tokio::sync::mpsc::channel(1);
+        let worker = WorkerNodeServiceServer::new(FakeWorkerExecuteService {
+            execute_tx,
+            response: ExecuteTaskResponse::default(),
+        });
+        let chunks = GeneralComputeChunkServiceServer::new(FakeGeneralComputeChunkService {
+            prepare_tx,
+            upload_tx,
+            resume_tx: Some(resume_tx),
+            resume_missing: vec![hivemind_proto::GeneralComputeChunkDescriptor {
+                offset: 0,
+                size_bytes: 6,
+                sha256: sha256_digest(b"source"),
+            }],
+        });
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(worker)
+                .add_service(chunks)
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await;
+        });
+
+        for _ in 0..30 {
+            if hivemind_proto::general_compute_chunk_service_client::GeneralComputeChunkServiceClient::connect(
+                format!("http://{addr}"),
+            )
+            .await
+            .is_ok()
+            {
+                return Some((addr, prepare_rx, resume_rx, upload_rx));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        None
+    }
+
     async fn fake_general_compute_chunk_server(
         resume_missing: Vec<GeneralComputeChunkDescriptor>,
     ) -> Option<(
@@ -4803,7 +5306,7 @@ mod tests {
         let (upload_tx, upload_rx) = tokio::sync::mpsc::channel(2);
         let service = GeneralComputeChunkServiceServer::new(FakeGeneralComputeChunkService {
             prepare_tx,
-            resume_tx,
+            resume_tx: Some(resume_tx),
             upload_tx,
             resume_missing,
         });
@@ -4830,9 +5333,9 @@ mod tests {
 
     struct FakeGeneralComputeChunkService {
         prepare_tx: tokio::sync::mpsc::Sender<GeneralComputePrepareRequest>,
-        resume_tx: tokio::sync::mpsc::Sender<GeneralComputeChunkResumeRequest>,
         upload_tx: tokio::sync::mpsc::Sender<GeneralComputeChunkUpload>,
-        resume_missing: Vec<GeneralComputeChunkDescriptor>,
+        resume_tx: Option<tokio::sync::mpsc::Sender<GeneralComputeChunkResumeRequest>>,
+        resume_missing: Vec<hivemind_proto::GeneralComputeChunkDescriptor>,
     }
 
     #[tonic::async_trait]
@@ -4877,10 +5380,12 @@ mod tests {
             &self,
             request: Request<GeneralComputeChunkResumeRequest>,
         ) -> Result<Response<GeneralComputeChunkResumeResponse>, Status> {
-            self.resume_tx
-                .send(request.into_inner())
-                .await
-                .map_err(|_| Status::internal("resume capture closed"))?;
+            if let Some(sender) = &self.resume_tx {
+                sender
+                    .send(request.into_inner())
+                    .await
+                    .map_err(|_| Status::internal("resume capture closed"))?;
+            }
             Ok(Response::new(GeneralComputeChunkResumeResponse {
                 success: true,
                 status_message: "resume".into(),
@@ -5097,7 +5602,6 @@ mod tests {
             }))
         }
     }
-
     struct FakeWorkerExecuteService {
         execute_tx: tokio::sync::mpsc::Sender<String>,
         response: ExecuteTaskResponse,

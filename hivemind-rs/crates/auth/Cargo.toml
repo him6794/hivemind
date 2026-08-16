@@ -5,17 +5,16 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-tokio.workspace = true
-serde.workspace = true
-serde_json.workspace = true
 jsonwebtoken.workspace = true
 bcrypt.workspace = true
 uuid.workspace = true
 chrono.workspace = true
-tracing.workspace = true
-thiserror.workspace = true
 anyhow.workspace = true
+serde.workspace = true
 sqlx.workspace = true
 hivemind-models = { path = "../models" }
 hivemind-database = { path = "../database" }
+
+[dev-dependencies]
 hivemind-config = { path = "../config" }
+tokio.workspace = true

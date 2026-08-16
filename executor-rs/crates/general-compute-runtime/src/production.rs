@@ -5,12 +5,12 @@
 //! operator-controlled file and every path is validated before it can reach
 //! the OCI launcher.
 
-use crate::{
-    GeneralComputeRequest, MANAGED_DSL_RUNTIME_VERSION, MANAGED_DSL_SEMANTICS_MANIFEST_SHA256,
-};
 use crate::sandbox::{
     BackendExecutionMode, ProductionSandboxLaunch, SandboxMount, WindowsNativeSandboxLaunch,
     WindowsSandboxPolicy,
+};
+use crate::{
+    GeneralComputeRequest, MANAGED_DSL_RUNTIME_VERSION, MANAGED_DSL_SEMANTICS_MANIFEST_SHA256,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -347,10 +347,7 @@ impl WindowsProductionBackendConfig {
                     container_path: windows_container_path(destination),
                     read_only: true,
                 },
-                SandboxMount::EphemeralScratch {
-                    destination,
-                    ..
-                } => WindowsHcsMountSpec {
+                SandboxMount::EphemeralScratch { destination, .. } => WindowsHcsMountSpec {
                     host_path: artifact_task_root.join("scratch"),
                     container_path: windows_container_path(destination),
                     read_only: false,
@@ -382,7 +379,11 @@ impl WindowsProductionBackendConfig {
         if self.max_output_bytes == 0 || self.timeout_ms == 0 {
             return Err(ProductionBackendRegistryError::WindowsResourceLimitRequired);
         }
-        for path in [&self.image_root, &self.artifact_root, &self.runner_executable] {
+        for path in [
+            &self.image_root,
+            &self.artifact_root,
+            &self.runner_executable,
+        ] {
             if !is_absolute_windows_path(path) {
                 return Err(ProductionBackendRegistryError::WindowsPathMustBeAbsolute);
             }
@@ -406,15 +407,16 @@ impl WindowsProductionBackendConfig {
 }
 
 fn windows_container_path(destination: &str) -> String {
-    format!("C:\\{}", destination.trim_start_matches('/').replace('/', "\\"))
+    format!(
+        "C:\\{}",
+        destination.trim_start_matches('/').replace('/', "\\")
+    )
 }
 
 fn is_absolute_windows_path(path: &std::path::Path) -> bool {
     let value = path.to_string_lossy();
     let bytes = value.as_bytes();
-    (bytes.len() >= 3
-        && bytes[1] == b':'
-        && (bytes[2] == b'\\' || bytes[2] == b'/'))
+    (bytes.len() >= 3 && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/'))
         || value.starts_with("\\\\")
 }
 
@@ -517,7 +519,9 @@ fn validate_seccomp_profile(profile: &serde_json::Value) -> Result<(), String> {
     {
         return Err("seccomp profile contains an unknown field".into());
     }
-    if object.get("defaultAction").and_then(serde_json::Value::as_str)
+    if object
+        .get("defaultAction")
+        .and_then(serde_json::Value::as_str)
         != Some("SCMP_ACT_ERRNO")
     {
         return Err("seccomp profile defaultAction must be SCMP_ACT_ERRNO".into());
@@ -546,7 +550,10 @@ fn validate_seccomp_profile(profile: &serde_json::Value) -> Result<(), String> {
         let group = group
             .as_object()
             .ok_or_else(|| "seccomp syscall groups must be objects".to_string())?;
-        if group.keys().any(|key| !matches!(key.as_str(), "names" | "action")) {
+        if group
+            .keys()
+            .any(|key| !matches!(key.as_str(), "names" | "action"))
+        {
             return Err("seccomp syscall group contains an unknown field".into());
         }
         if group.get("action").and_then(serde_json::Value::as_str) != Some("SCMP_ACT_ALLOW") {

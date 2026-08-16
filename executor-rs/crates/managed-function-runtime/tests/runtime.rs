@@ -1,18 +1,26 @@
 use std::collections::BTreeMap;
 
-use managed_function_runtime::{ExecutionLimits, ManagedExecutor, Status, Value, render_output, render_output_bounded};
+use managed_function_runtime::{
+    ExecutionLimits, ManagedExecutor, Status, Value, render_output, render_output_bounded,
+};
 
 #[test]
 fn renders_canonical_output_for_host_and_zk_guest() {
     let value = Value::Dict(
         [
             ("answer".to_string(), Value::Int(42)),
-            ("nested".to_string(), Value::List(vec![Value::Bool(true), Value::Null])),
+            (
+                "nested".to_string(),
+                Value::List(vec![Value::Bool(true), Value::Null]),
+            ),
         ]
         .into(),
     );
 
-    assert_eq!(render_output(&value), r#"{"answer":42,"nested":[true,null]}"#);
+    assert_eq!(
+        render_output(&value),
+        r#"{"answer":42,"nested":[true,null]}"#
+    );
     assert_eq!(render_output(&Value::String("raw".into())), "raw");
 }
 
@@ -39,7 +47,10 @@ fn bounded_canonical_renderer_preserves_output_and_stops_at_its_limit() {
                 "escaped\nkey".to_string(),
                 Value::String("quote: \"; snowman: ☃".into()),
             ),
-            ("nested".to_string(), Value::List(vec![Value::Bool(true), Value::Null])),
+            (
+                "nested".to_string(),
+                Value::List(vec![Value::Bool(true), Value::Null]),
+            ),
         ]
         .into(),
     );
@@ -51,7 +62,8 @@ fn bounded_canonical_renderer_preserves_output_and_stops_at_its_limit() {
     let err = render_output_bounded(&Value::String("abcdef".into()), 5).unwrap_err();
     assert_eq!(err.code(), "output_limit_exceeded");
 
-    let err = render_output_bounded(&Value::List(vec![Value::String("abcdef".into())]), 8).unwrap_err();
+    let err =
+        render_output_bounded(&Value::List(vec![Value::String("abcdef".into())]), 8).unwrap_err();
     assert_eq!(err.code(), "output_limit_exceeded");
 }
 
@@ -166,7 +178,10 @@ print({"a": 1});
         )
         .unwrap();
 
-    assert_eq!(result.output, "raw\n[Int(1), Bool(true), Null]\n{\"a\": Int(1)}\n");
+    assert_eq!(
+        result.output,
+        "raw\n[Int(1), Bool(true), Null]\n{\"a\": Int(1)}\n"
+    );
 }
 
 #[test]
@@ -221,8 +236,12 @@ fn unlimited_limits_allow_large_values_without_changing_usage_accounting() {
     assert_eq!(result.value, Value::String(operand.repeat(2)));
 
     let source = "return [1, 2, 3][1];";
-    let default = ManagedExecutor.execute(source, ExecutionLimits::default()).unwrap();
-    let unlimited = ManagedExecutor.execute(source, ExecutionLimits::unlimited()).unwrap();
+    let default = ManagedExecutor
+        .execute(source, ExecutionLimits::default())
+        .unwrap();
+    let unlimited = ManagedExecutor
+        .execute(source, ExecutionLimits::unlimited())
+        .unwrap();
     assert_eq!(default.receipt.executed_ops, unlimited.receipt.executed_ops);
     assert_eq!(default.receipt.usage_units, unlimited.receipt.usage_units);
 }
@@ -289,7 +308,10 @@ fn executes_function_with_branch_and_receipt_metering() {
 
     // Test indexing - dict
     let result = ManagedExecutor
-        .execute(r#"return {"a": 1, "b": 2}["b"];"#, ExecutionLimits::default())
+        .execute(
+            r#"return {"a": 1, "b": 2}["b"];"#,
+            ExecutionLimits::default(),
+        )
         .unwrap();
     assert_eq!(result.value, Value::Int(2));
 
@@ -302,7 +324,9 @@ fn executes_function_with_branch_and_receipt_metering() {
     }
     return foo(5);
     ";
-    let result = ManagedExecutor.execute(source, ExecutionLimits::default()).unwrap();
+    let result = ManagedExecutor
+        .execute(source, ExecutionLimits::default())
+        .unwrap();
     assert_eq!(result.value, Value::Int(12));
 
     // Test assignment with indexing
@@ -311,7 +335,9 @@ fn executes_function_with_branch_and_receipt_metering() {
     arr[1] = 99;
     return arr[1];
     ";
-    let result = ManagedExecutor.execute(source, ExecutionLimits::default()).unwrap();
+    let result = ManagedExecutor
+        .execute(source, ExecutionLimits::default())
+        .unwrap();
     assert_eq!(result.value, Value::Int(99));
 
     let source = r#"
@@ -324,7 +350,9 @@ print("priced");
 subtotal + 1;
 "#;
 
-    let result = ManagedExecutor.execute(source, ExecutionLimits::default()).unwrap();
+    let result = ManagedExecutor
+        .execute(source, ExecutionLimits::default())
+        .unwrap();
 
     assert_eq!(result.status, Status::Completed);
     assert_eq!(result.value, Value::Int(25));
@@ -412,7 +440,11 @@ details;
 "#;
 
     let result = ManagedExecutor
-        .execute_json_input(source, ExecutionLimits::default(), r#"{"numbers":[1,2,3,4]}"#)
+        .execute_json_input(
+            source,
+            ExecutionLimits::default(),
+            r#"{"numbers":[1,2,3,4]}"#,
+        )
         .unwrap();
 
     assert_eq!(
@@ -484,7 +516,10 @@ fn managed_function_templates_execute_successfully() {
         (
             include_str!("../../../../templates/managed-function-v0/02_weighted_score.hmf"),
             include_str!("../../../../templates/managed-function-v0/02_weighted_score.input.json"),
-            dict([("band", Value::String("gold".into())), ("score", Value::Int(860))]),
+            dict([
+                ("band", Value::String("gold".into())),
+                ("score", Value::Int(860)),
+            ]),
         ),
         (
             include_str!("../../../../templates/managed-function-v0/03_batch_sum.hmf"),
@@ -507,7 +542,10 @@ fn managed_function_templates_execute_successfully() {
         (
             include_str!("../../../../templates/managed-function-v0/05_route_task.hmf"),
             include_str!("../../../../templates/managed-function-v0/05_route_task.input.json"),
-            dict([("pool", Value::String("cpu_pool".into())), ("priority", Value::Int(10))]),
+            dict([
+                ("pool", Value::String("cpu_pool".into())),
+                ("priority", Value::Int(10)),
+            ]),
         ),
     ];
 
@@ -587,7 +625,10 @@ fn test_indexing() {
     assert_eq!(result.value, Value::String("b".to_string()));
 
     let result = ManagedExecutor
-        .execute(r#"return {"a": 1, "b": 2}["b"];"#, ExecutionLimits::default())
+        .execute(
+            r#"return {"a": 1, "b": 2}["b"];"#,
+            ExecutionLimits::default(),
+        )
         .unwrap();
     assert_eq!(result.value, Value::Int(2));
 }
@@ -602,7 +643,9 @@ fn test_multi_statement_function_body() {
     }
     return foo(5);
     ";
-    let result = ManagedExecutor.execute(source, ExecutionLimits::default()).unwrap();
+    let result = ManagedExecutor
+        .execute(source, ExecutionLimits::default())
+        .unwrap();
     assert_eq!(result.value, Value::Int(12));
 }
 
@@ -613,6 +656,8 @@ fn test_assignment_with_indexing() {
     arr[1] = 99;
     return arr[1];
     ";
-    let result = ManagedExecutor.execute(source, ExecutionLimits::default()).unwrap();
+    let result = ManagedExecutor
+        .execute(source, ExecutionLimits::default())
+        .unwrap();
     assert_eq!(result.value, Value::Int(99));
 }

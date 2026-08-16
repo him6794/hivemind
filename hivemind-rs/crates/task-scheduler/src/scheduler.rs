@@ -1,8 +1,8 @@
+use general_compute_runtime::production::ManagedDslBackendRegistration;
 use general_compute_runtime::{
     CapabilityMatrix, GeneralComputeRequest, TrustedWorkerCapabilityRegistration,
     GENERAL_COMPUTE_RUNTIME_VERSION,
 };
-use general_compute_runtime::production::ManagedDslBackendRegistration;
 
 use hivemind_models::{Task, WorkerNode, WorkerStatus};
 
@@ -16,9 +16,9 @@ pub fn worker_supports_managed_dsl_request(
     if requested_budget_units <= 0 {
         return false;
     }
-    let Ok(registrations) = serde_json::from_str::<Vec<ManagedDslBackendRegistration>>(
-        persisted_capabilities_json,
-    ) else {
+    let Ok(registrations) =
+        serde_json::from_str::<Vec<ManagedDslBackendRegistration>>(persisted_capabilities_json)
+    else {
         return false;
     };
     registrations.len() == 1
@@ -93,7 +93,7 @@ pub async fn find_best_worker(task: &Task, workers: &[WorkerNode]) -> Option<Wor
 
         let general_compute_compatible = match task.runtime.as_deref().map(str::trim) {
             Some("production_sandboxed_dsl") => worker_supports_managed_dsl_request(
-                w.general_compute_capabilities_json.as_deref(),
+                w.managed_dsl_capabilities_json.as_deref(),
                 task.max_cpt,
             ),
             Some(GENERAL_COMPUTE_RUNTIME_VERSION) => task
@@ -164,8 +164,8 @@ pub async fn find_best_worker(task: &Task, workers: &[WorkerNode]) -> Option<Wor
 mod tests {
     use super::*;
     use general_compute_runtime::{
-        ArtifactManifest, ArtifactRole, DeterminismPolicy, ExecutionPolicy,
-        GeneralComputeRequest, GENERAL_COMPUTE_RUNTIME_VERSION,
+        ArtifactManifest, ArtifactRole, DeterminismPolicy, ExecutionPolicy, GeneralComputeRequest,
+        GENERAL_COMPUTE_RUNTIME_VERSION,
     };
     use hivemind_models::WorkerStatus;
 
@@ -207,10 +207,26 @@ mod tests {
             available_memory_gb: mem,
             queue_capacity: cpu,
             general_compute_capabilities_json: None,
+            managed_dsl_capabilities_json: None,
             last_heartbeat: chrono::Utc::now(),
             registered_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
+    }
+
+    #[test]
+    fn managed_dsl_matching_uses_the_separate_snapshot() {
+        let registration = general_compute_runtime::production::ManagedDslBackendRegistration {
+            backend_id: "dsl-default".into(),
+            runtime_version: "managed-function-v0".into(),
+            semantics_manifest_sha256:
+                general_compute_runtime::MANAGED_DSL_SEMANTICS_MANIFEST_SHA256.into(),
+            max_usage_units: 10,
+            max_output_bytes: 1024,
+        };
+        let snapshot = serde_json::to_string(&vec![registration]).unwrap();
+        assert!(worker_supports_managed_dsl_request(Some(&snapshot), 10));
+        assert!(!worker_supports_managed_dsl_request(None, 10));
     }
 
     #[tokio::test]
@@ -235,6 +251,8 @@ mod tests {
             runtime: None,
             task_source: None,
             general_compute_manifest_json: None,
+            managed_dsl_backend_id: None,
+            managed_dsl_semantics_manifest_sha256: None,
             expected_btih: None,
             cpu_usage: 0.0,
             memory_usage: 0.0,
@@ -290,6 +308,8 @@ mod tests {
             runtime: None,
             task_source: None,
             general_compute_manifest_json: None,
+            managed_dsl_backend_id: None,
+            managed_dsl_semantics_manifest_sha256: None,
             expected_btih: None,
             cpu_usage: 0.0,
             memory_usage: 0.0,
@@ -373,8 +393,14 @@ mod tests {
             }]
         }"#;
 
-        assert!(worker_supports_general_compute_request(&request, Some(matching)));
-        assert!(!worker_supports_general_compute_request(&request, Some(wrong_image)));
+        assert!(worker_supports_general_compute_request(
+            &request,
+            Some(matching)
+        ));
+        assert!(!worker_supports_general_compute_request(
+            &request,
+            Some(wrong_image)
+        ));
     }
 
     #[tokio::test]
@@ -388,7 +414,10 @@ mod tests {
 
         let selected = find_best_worker(&task, &[unregistered, registered]).await;
 
-        assert_eq!(selected.map(|worker| worker.worker_id), Some("registered".into()));
+        assert_eq!(
+            selected.map(|worker| worker.worker_id),
+            Some("registered".into())
+        );
     }
 
     fn alpha_request() -> GeneralComputeRequest {
@@ -432,6 +461,8 @@ mod tests {
             runtime: Some(GENERAL_COMPUTE_RUNTIME_VERSION.into()),
             task_source: None,
             general_compute_manifest_json: Some(serde_json::to_vec(request).unwrap()),
+            managed_dsl_backend_id: None,
+            managed_dsl_semantics_manifest_sha256: None,
             expected_btih: None,
             cpu_usage: 0.0,
             memory_usage: 0.0,
@@ -521,6 +552,8 @@ mod tests {
             runtime: None,
             task_source: None,
             general_compute_manifest_json: None,
+            managed_dsl_backend_id: None,
+            managed_dsl_semantics_manifest_sha256: None,
             expected_btih: None,
             cpu_usage: 0.0,
             memory_usage: 0.0,
@@ -601,6 +634,8 @@ mod tests {
             runtime: None,
             task_source: None,
             general_compute_manifest_json: None,
+            managed_dsl_backend_id: None,
+            managed_dsl_semantics_manifest_sha256: None,
             expected_btih: None,
             cpu_usage: 0.0,
             memory_usage: 0.0,

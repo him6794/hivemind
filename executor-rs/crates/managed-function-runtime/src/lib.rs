@@ -41,7 +41,8 @@ pub enum Value {
 /// [`render_output_bounded`] and handle its structured error instead.
 #[must_use]
 pub fn render_output(value: &Value) -> String {
-    render_output_bounded(value, u64::MAX).expect("an unlimited canonical renderer can only fail on length overflow")
+    render_output_bounded(value, u64::MAX)
+        .expect("an unlimited canonical renderer can only fail on length overflow")
 }
 
 /// Render a managed value using the canonical task-output representation,
@@ -169,7 +170,11 @@ fn write_json_string(value: &str, output: &mut BoundedOutput) -> Result<(), Runt
 }
 
 fn hex_digit(value: u8) -> char {
-    char::from(if value < 10 { b'0' + value } else { b'a' + (value - 10) })
+    char::from(if value < 10 {
+        b'0' + value
+    } else {
+        b'a' + (value - 10)
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,7 +311,11 @@ impl Error for RuntimeError {}
 pub struct ManagedExecutor;
 
 impl ManagedExecutor {
-    pub fn execute(&self, source: &str, limits: ExecutionLimits) -> Result<ExecutionResult, RuntimeError> {
+    pub fn execute(
+        &self,
+        source: &str,
+        limits: ExecutionLimits,
+    ) -> Result<ExecutionResult, RuntimeError> {
         let tokens = Lexer::new(source).tokenize()?;
         let program = Parser::new(tokens).parse_program()?;
         Evaluator::new(limits).eval_program(&program)
@@ -355,10 +364,12 @@ impl Value {
         match value {
             serde_json::Value::Null => Ok(Self::Null),
             serde_json::Value::Bool(value) => Ok(Self::Bool(*value)),
-            serde_json::Value::Number(value) => value
-                .as_i64()
-                .map(Self::Int)
-                .ok_or_else(|| RuntimeError::new("input_error", "only signed 64-bit JSON integers are supported")),
+            serde_json::Value::Number(value) => value.as_i64().map(Self::Int).ok_or_else(|| {
+                RuntimeError::new(
+                    "input_error",
+                    "only signed 64-bit JSON integers are supported",
+                )
+            }),
             serde_json::Value::String(value) => Ok(Self::String(value.clone())),
             serde_json::Value::Array(values) => values
                 .iter()
@@ -780,7 +791,10 @@ impl<'a> Lexer<'a> {
 
     fn identifier(&mut self) -> Token {
         let start = self.pos;
-        while matches!(self.peek(), Some(b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_')) {
+        while matches!(
+            self.peek(),
+            Some(b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_')
+        ) {
             self.bump();
         }
         let text = String::from_utf8_lossy(&self.bytes[start..self.pos]);
@@ -827,7 +841,10 @@ impl<'a> Lexer<'a> {
                 b'"' => return Ok(Token::String(value)),
                 b'\\' => {
                     let Some(escaped) = self.peek() else {
-                        return Err(RuntimeError::new("parse_error", "unterminated string escape"));
+                        return Err(RuntimeError::new(
+                            "parse_error",
+                            "unterminated string escape",
+                        ));
                     };
                     self.bump();
                     let ch = match escaped {
@@ -837,7 +854,10 @@ impl<'a> Lexer<'a> {
                         b'r' => '\r',
                         b't' => '\t',
                         _ => {
-                            return Err(RuntimeError::new("parse_error", "unsupported string escape"));
+                            return Err(RuntimeError::new(
+                                "parse_error",
+                                "unsupported string escape",
+                            ));
                         }
                     };
                     value.push(ch);
@@ -1020,7 +1040,11 @@ impl Parser {
             body.push(self.statement()?);
         }
         self.expect(&Token::RBrace)?;
-        Ok(Stmt::For { item, iterable, body })
+        Ok(Stmt::For {
+            item,
+            iterable,
+            body,
+        })
     }
 
     fn function(&mut self) -> Result<Function, RuntimeError> {
@@ -1253,9 +1277,11 @@ impl Parser {
                 self.expect(&Token::RParen)?;
                 Ok(expr)
             }
-            token => {
-                Err(RuntimeError::new("parse_error", format!("expected expression, found {token:?}")).at(self.span()))
-            }
+            token => Err(RuntimeError::new(
+                "parse_error",
+                format!("expected expression, found {token:?}"),
+            )
+            .at(self.span())),
         }
     }
 
@@ -1330,9 +1356,11 @@ impl Parser {
                 self.advance();
                 Ok(name)
             }
-            token => {
-                Err(RuntimeError::new("parse_error", format!("expected identifier, found {token:?}")).at(self.span()))
-            }
+            token => Err(RuntimeError::new(
+                "parse_error",
+                format!("expected identifier, found {token:?}"),
+            )
+            .at(self.span())),
         }
     }
 
@@ -1342,7 +1370,11 @@ impl Parser {
             self.advance();
             Ok(())
         } else {
-            Err(RuntimeError::new("parse_error", format!("expected {expected:?}, found {actual:?}")).at(self.span()))
+            Err(RuntimeError::new(
+                "parse_error",
+                format!("expected {expected:?}, found {actual:?}"),
+            )
+            .at(self.span()))
         }
     }
 
@@ -1394,7 +1426,8 @@ impl<'a> Evaluator<'a> {
     fn eval_program(mut self, program: &Program) -> Result<ExecutionResult, RuntimeError> {
         for statement in &program.statements {
             if let Stmt::Fn(function) = statement {
-                self.functions.insert(function.name.clone(), function.clone());
+                self.functions
+                    .insert(function.name.clone(), function.clone());
             }
         }
 
@@ -1433,18 +1466,24 @@ impl<'a> Evaluator<'a> {
                 let value = self.eval_expr(expr)?;
                 Ok(Control::Return(value))
             }
-            Stmt::For { item, iterable, body } => {
+            Stmt::For {
+                item,
+                iterable,
+                body,
+            } => {
                 let iterable = self.eval_expr(iterable)?;
                 let Value::List(values) = iterable else {
                     return Err(RuntimeError::new("type_error", "for expects a list"));
                 };
                 let mut last = Value::Null;
                 for value in values {
-                    let next_iterations = self
-                        .receipt
-                        .loop_iterations
-                        .checked_add(1)
-                        .ok_or_else(|| RuntimeError::new("loop_limit_exceeded", "loop iteration limit exceeded"))?;
+                    let next_iterations =
+                        self.receipt.loop_iterations.checked_add(1).ok_or_else(|| {
+                            RuntimeError::new(
+                                "loop_limit_exceeded",
+                                "loop iteration limit exceeded",
+                            )
+                        })?;
                     if next_iterations > self.limits.max_loop_iterations {
                         return Err(RuntimeError::new(
                             "loop_limit_exceeded",
@@ -1469,7 +1508,11 @@ impl<'a> Evaluator<'a> {
                 self.receipt.output_bytes = self.output.len();
                 Ok(Control::Continue(Value::Null))
             }
-            Stmt::IndexAssign { target, index, value } => {
+            Stmt::IndexAssign {
+                target,
+                index,
+                value,
+            } => {
                 let value = self.eval_expr(value)?;
                 let index = self.eval_expr(index)?;
                 let Expr::Variable(name) = target else {
@@ -1610,13 +1653,19 @@ impl<'a> Evaluator<'a> {
             let value = self.eval_expr(expression)?;
             let value_metrics = value_metrics(&value)?;
             let separator_bytes = u64::from(index > 0);
-            let additional_bytes = checked_value_add(separator_bytes, value_metrics.canonical_bytes)?;
+            let additional_bytes =
+                checked_value_add(separator_bytes, value_metrics.canonical_bytes)?;
             metrics = ValueMetrics {
                 canonical_bytes: checked_value_add(metrics.canonical_bytes, additional_bytes)?,
-                depth: metrics
-                    .depth
-                    .max(value_metrics.depth.checked_add(1).ok_or_else(value_limit_error)?),
-                max_collection_items: metrics.max_collection_items.max(value_metrics.max_collection_items),
+                depth: metrics.depth.max(
+                    value_metrics
+                        .depth
+                        .checked_add(1)
+                        .ok_or_else(value_limit_error)?,
+                ),
+                max_collection_items: metrics
+                    .max_collection_items
+                    .max(value_metrics.max_collection_items),
             };
             self.validate_value_metrics(metrics)?;
             self.charge_value_materialization(additional_bytes)?;
@@ -1646,10 +1695,15 @@ impl<'a> Evaluator<'a> {
             )?;
             metrics = ValueMetrics {
                 canonical_bytes: checked_value_add(metrics.canonical_bytes, additional_bytes)?,
-                depth: metrics
-                    .depth
-                    .max(value_metrics.depth.checked_add(1).ok_or_else(value_limit_error)?),
-                max_collection_items: metrics.max_collection_items.max(value_metrics.max_collection_items),
+                depth: metrics.depth.max(
+                    value_metrics
+                        .depth
+                        .checked_add(1)
+                        .ok_or_else(value_limit_error)?,
+                ),
+                max_collection_items: metrics
+                    .max_collection_items
+                    .max(value_metrics.max_collection_items),
             };
             self.validate_value_metrics(metrics)?;
             self.charge_value_materialization(additional_bytes)?;
@@ -1658,15 +1712,25 @@ impl<'a> Evaluator<'a> {
         Ok(Value::Dict(values))
     }
 
-    fn eval_binary(&mut self, left: Value, op: BinaryOp, right: Value) -> Result<Value, RuntimeError> {
+    fn eval_binary(
+        &mut self,
+        left: Value,
+        op: BinaryOp,
+        right: Value,
+    ) -> Result<Value, RuntimeError> {
         match (op, left, right) {
-            (BinaryOp::Add, Value::String(left), Value::String(right)) => self.concat_strings(&left, &right),
+            (BinaryOp::Add, Value::String(left), Value::String(right)) => {
+                self.concat_strings(&left, &right)
+            }
             (op, left, right) => eval_binary(left, op, right),
         }
     }
 
     fn concat_strings(&mut self, left: &str, right: &str) -> Result<Value, RuntimeError> {
-        let raw_bytes = left.len().checked_add(right.len()).ok_or_else(value_limit_error)?;
+        let raw_bytes = left
+            .len()
+            .checked_add(right.len())
+            .ok_or_else(value_limit_error)?;
         let canonical_bytes = checked_value_add(json_string_len(left)?, json_string_len(right)?)?
             .checked_sub(2)
             .ok_or_else(value_limit_error)?;
@@ -1700,7 +1764,10 @@ impl<'a> Evaluator<'a> {
             }
             (Value::Dict(values), Value::String(key)) => match values.get(&key) {
                 Some(value) => self.clone_value(value),
-                None => Err(RuntimeError::new("key_error", format!("key '{key}' not found"))),
+                None => Err(RuntimeError::new(
+                    "key_error",
+                    format!("key '{key}' not found"),
+                )),
             },
             _ => Err(RuntimeError::new(
                 "type_error",
@@ -1709,7 +1776,12 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    fn assign_index(&mut self, target: &mut Value, index: Value, value: Value) -> Result<(), RuntimeError> {
+    fn assign_index(
+        &mut self,
+        target: &mut Value,
+        index: Value,
+        value: Value,
+    ) -> Result<(), RuntimeError> {
         match (target, index) {
             (Value::List(values), Value::Int(index)) => {
                 let index = normalize_index(index, values.len())?;
@@ -1742,11 +1814,10 @@ impl<'a> Evaluator<'a> {
         if let Some(value) = self.builtin_call(name, args)? {
             return Ok(value);
         }
-        let function = self
-            .functions
-            .get(name)
-            .cloned()
-            .ok_or_else(|| RuntimeError::new("name_error", format!("unknown function '{name}'")))?;
+        let function =
+            self.functions.get(name).cloned().ok_or_else(|| {
+                RuntimeError::new("name_error", format!("unknown function '{name}'"))
+            })?;
         if function.params.len() != args.len() {
             return Err(RuntimeError::new(
                 "arity_error",
@@ -1767,7 +1838,10 @@ impl<'a> Evaluator<'a> {
             .checked_add(1)
             .ok_or_else(|| RuntimeError::new("call_depth_exceeded", "call depth exceeded"))?;
         if next_call_depth > self.limits.max_call_depth {
-            return Err(RuntimeError::new("call_depth_exceeded", "call depth exceeded"));
+            return Err(RuntimeError::new(
+                "call_depth_exceeded",
+                "call depth exceeded",
+            ));
         }
         self.receipt.function_calls += 1;
         self.call_depth = next_call_depth;
@@ -1811,7 +1885,12 @@ impl<'a> Evaluator<'a> {
                     Value::String(value) => value.len(),
                     Value::List(value) => value.len(),
                     Value::Dict(value) => value.len(),
-                    _ => return Err(RuntimeError::new("type_error", "len expects string, list, or dict")),
+                    _ => {
+                        return Err(RuntimeError::new(
+                            "type_error",
+                            "len expects string, list, or dict",
+                        ));
+                    }
                 };
                 Ok(Some(Value::Int(i64::try_from(len).map_err(|_| {
                     RuntimeError::new("runtime_error", "length is out of range")
@@ -1829,10 +1908,9 @@ impl<'a> Evaluator<'a> {
                         None => Value::Null,
                     },
                     (Value::List(values), Value::Int(index)) if index >= 0 => {
-                        match values.get(
-                            usize::try_from(index)
-                                .map_err(|_| RuntimeError::new("runtime_error", "list index is out of range"))?,
-                        ) {
+                        match values.get(usize::try_from(index).map_err(|_| {
+                            RuntimeError::new("runtime_error", "list index is out of range")
+                        })?) {
                             Some(value) => self.clone_value(value)?,
                             None => Value::Null,
                         }
@@ -1848,7 +1926,10 @@ impl<'a> Evaluator<'a> {
             }
             "contains" => {
                 let [target, key] = args else {
-                    return Err(RuntimeError::new("arity_error", "contains expects 2 arguments"));
+                    return Err(RuntimeError::new(
+                        "arity_error",
+                        "contains expects 2 arguments",
+                    ));
                 };
                 let target = self.eval_expr(target)?;
                 let key = self.eval_expr(key)?;
@@ -1894,11 +1975,16 @@ impl<'a> Evaluator<'a> {
                 return Ok(());
             }
         }
-        Err(RuntimeError::new("name_error", format!("unknown variable '{name}'")))
+        Err(RuntimeError::new(
+            "name_error",
+            format!("unknown variable '{name}'"),
+        ))
     }
 
     fn current_scope(&mut self) -> &mut HashMap<String, Value> {
-        self.scopes.last_mut().expect("evaluator always has a current scope")
+        self.scopes
+            .last_mut()
+            .expect("evaluator always has a current scope")
     }
 
     fn charge(&mut self, cost: u64) -> Result<(), RuntimeError> {
@@ -1910,11 +1996,21 @@ impl<'a> Evaluator<'a> {
         }
         let next = self.receipt.executed_ops.saturating_add(cost);
         if next > self.limits.max_ops {
-            return Err(RuntimeError::new("op_limit_exceeded", "operation limit exceeded"));
+            return Err(RuntimeError::new(
+                "op_limit_exceeded",
+                "operation limit exceeded",
+            ));
         }
         let next_usage = self.receipt.usage_units.saturating_add(cost);
-        if self.limits.max_usage_units.is_some_and(|limit| next_usage > limit) {
-            return Err(RuntimeError::new("budget_exhausted", "execution budget exhausted"));
+        if self
+            .limits
+            .max_usage_units
+            .is_some_and(|limit| next_usage > limit)
+        {
+            return Err(RuntimeError::new(
+                "budget_exhausted",
+                "execution budget exhausted",
+            ));
         }
         self.receipt.executed_ops = next;
         self.receipt.usage_units = next_usage;
@@ -1931,12 +2027,17 @@ fn eval_binary(left: Value, op: BinaryOp, right: Value) -> Result<Value, Runtime
     match op {
         BinaryOp::Add => match (left, right) {
             (Value::Int(left), Value::Int(right)) => Ok(Value::Int(left + right)),
-            _ => Err(RuntimeError::new("type_error", "+ expects matching ints or strings")),
+            _ => Err(RuntimeError::new(
+                "type_error",
+                "+ expects matching ints or strings",
+            )),
         },
         BinaryOp::Sub => int_binary(left, right, "-", |left, right| left - right),
         BinaryOp::Mul => int_binary(left, right, "*", |left, right| left * right),
         BinaryOp::Div => match (left, right) {
-            (Value::Int(_), Value::Int(0)) => Err(RuntimeError::new("runtime_error", "division by zero")),
+            (Value::Int(_), Value::Int(0)) => {
+                Err(RuntimeError::new("runtime_error", "division by zero"))
+            }
             (Value::Int(left), Value::Int(right)) => Ok(Value::Int(left / right)),
             _ => Err(RuntimeError::new("type_error", "/ expects ints")),
         },
@@ -1967,13 +2068,14 @@ fn eval_unary(op: UnaryOp, value: &Value) -> Result<Value, RuntimeError> {
 }
 
 fn normalize_index(index: i64, len: usize) -> Result<usize, RuntimeError> {
-    let len_i64 =
-        i64::try_from(len).map_err(|_| RuntimeError::new("runtime_error", "collection is too large to index"))?;
+    let len_i64 = i64::try_from(len)
+        .map_err(|_| RuntimeError::new("runtime_error", "collection is too large to index"))?;
     let resolved = if index < 0 { index + len_i64 } else { index };
     if resolved < 0 || resolved >= len_i64 {
         return Err(RuntimeError::new("index_error", "index out of range"));
     }
-    usize::try_from(resolved).map_err(|_| RuntimeError::new("runtime_error", "index is out of range"))
+    usize::try_from(resolved)
+        .map_err(|_| RuntimeError::new("runtime_error", "index is out of range"))
 }
 
 fn int_binary(
@@ -1984,7 +2086,10 @@ fn int_binary(
 ) -> Result<Value, RuntimeError> {
     match (left, right) {
         (Value::Int(left), Value::Int(right)) => Ok(Value::Int(apply(left, right))),
-        _ => Err(RuntimeError::new("type_error", format!("{op} expects ints"))),
+        _ => Err(RuntimeError::new(
+            "type_error",
+            format!("{op} expects ints"),
+        )),
     }
 }
 
@@ -1996,11 +2101,18 @@ fn int_compare(
 ) -> Result<Value, RuntimeError> {
     match (left, right) {
         (Value::Int(left), Value::Int(right)) => Ok(Value::Bool(apply(left, right))),
-        _ => Err(RuntimeError::new("type_error", format!("{op} expects ints"))),
+        _ => Err(RuntimeError::new(
+            "type_error",
+            format!("{op} expects ints"),
+        )),
     }
 }
 
-fn append_debug_output(output: &mut String, max_bytes: u64, value: &Value) -> Result<(), RuntimeError> {
+fn append_debug_output(
+    output: &mut String,
+    max_bytes: u64,
+    value: &Value,
+) -> Result<(), RuntimeError> {
     let rendered_bytes = logical_usize(output.len())?;
     let mut writer = BoundedFmtWriter {
         output,
@@ -2028,7 +2140,10 @@ struct BoundedFmtWriter<'a> {
 impl Write for BoundedFmtWriter<'_> {
     fn write_str(&mut self, value: &str) -> std::fmt::Result {
         let value_bytes = u64::try_from(value.len()).map_err(|_| std::fmt::Error)?;
-        let next_len = self.rendered_bytes.checked_add(value_bytes).ok_or(std::fmt::Error)?;
+        let next_len = self
+            .rendered_bytes
+            .checked_add(value_bytes)
+            .ok_or(std::fmt::Error)?;
         if next_len > self.max_bytes {
             return Err(std::fmt::Error);
         }
@@ -2056,10 +2171,11 @@ mod tests {
             "snowman: ☃; line separator: \u{2028}",
         ] {
             let managed = Value::List(vec![Value::String(value.to_string())]);
-            let expected = serde_json::to_string(&serde_json::Value::Array(vec![serde_json::Value::String(
-                value.to_string(),
-            )]))
-            .unwrap();
+            let expected =
+                serde_json::to_string(&serde_json::Value::Array(vec![serde_json::Value::String(
+                    value.to_string(),
+                )]))
+                .unwrap();
             assert_eq!(render_output_bounded(&managed, u64::MAX).unwrap(), expected);
         }
     }

@@ -1,4 +1,4 @@
-use general_compute_runtime::gpu::{GpuCapability, GpuRuntime, GpuVendor, GpuSelection};
+use general_compute_runtime::gpu::{GpuCapability, GpuRuntime, GpuSelection, GpuVendor};
 use general_compute_runtime::{
     ArtifactManifest, ArtifactRole, BackendRegistration, DeterminismPolicy, ExecutionPolicy,
     GeneralComputeRequest, TrustedWorkerCapabilityRegistration, WorkerCapabilities,
@@ -13,10 +13,7 @@ fn worker_admission_uses_operator_registration_for_deterministic_gpu_selection()
     let request = gpu_request();
     let first = gpu("gpu-a");
     let second = gpu("gpu-b");
-    let registration = trusted_registration(
-        &request,
-        vec![second, first.clone()],
-    );
+    let registration = trusted_registration(&request, vec![second, first.clone()]);
     let admission = WorkerRuntimeAdmission::new_with_trusted_registration(registration);
 
     admission
@@ -69,7 +66,11 @@ fn gpu_request() -> GeneralComputeRequest {
         guest_image_digest: IMAGE.into(),
         backend_id: "python-cpython-312".into(),
         entrypoint: "main".into(),
-        source_artifact: ArtifactManifest::inline_json("source", ArtifactRole::Source, b"result = 7"),
+        source_artifact: ArtifactManifest::inline_json(
+            "source",
+            ArtifactRole::Source,
+            b"result = 7",
+        ),
         input_artifacts: vec![],
         execution_policy: ExecutionPolicy {
             gpu_required: true,

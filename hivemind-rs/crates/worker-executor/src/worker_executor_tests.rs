@@ -239,6 +239,8 @@ fn test_task(task_id: &str) -> Task {
         runtime: Some("managed-function-v0".into()),
         task_source: Some("return 1;".into()),
         general_compute_manifest_json: None,
+        managed_dsl_backend_id: None,
+        managed_dsl_semantics_manifest_sha256: None,
         expected_btih: None,
         cpu_usage: 0.0,
         memory_usage: 0.0,

@@ -112,6 +112,10 @@ pub struct CreateTaskBody {
     pub task_source: Option<String>,
     #[serde(default)]
     pub general_compute_manifest_json: Option<serde_json::Value>,
+    #[serde(default)]
+    pub managed_dsl_backend_id: Option<String>,
+    #[serde(default)]
+    pub managed_dsl_semantics_manifest_sha256: Option<String>,
     pub memory_gb: Option<i32>,
     pub cpu_score: Option<i32>,
     pub gpu_score: Option<i32>,
@@ -162,6 +166,44 @@ pub struct RegisterWorkerBody {
 #[derive(Debug, Deserialize)]
 pub struct RemoveWorkerBody {
     pub worker_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GeneralComputeArtifactChunkBody {
+    pub artifact_id: String,
+    pub offset: u64,
+    pub size_bytes: u64,
+    pub sha256: String,
+    /// Raw chunk bytes represented as JSON numbers so the HTTP contract does
+    /// not depend on an implicit base64 decoder.
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GeneralComputeArtifactChunkResponse {
+    pub success: bool,
+    pub message: String,
+    pub accepted_chunks: i64,
+}
+
+fn validate_artifact_chunk_http_body(
+    body: &GeneralComputeArtifactChunkBody,
+) -> Result<(), &'static str> {
+    if body.artifact_id.trim().is_empty() {
+        return Err("artifact_id is required");
+    }
+    let upload = hivemind_proto::GeneralComputeArtifactChunkUpload {
+        token: "http-authenticated".into(),
+        task_id: "task-id-placeholder".into(),
+        artifact_id: body.artifact_id.clone(),
+        offset: i64::try_from(body.offset).map_err(|_| "artifact upload offset is invalid")?,
+        size_bytes: i64::try_from(body.size_bytes)
+            .map_err(|_| "artifact upload size is too large")?,
+        sha256: body.sha256.clone(),
+        bytes: body.bytes.clone(),
+    };
+    hivemind_proto::validate_general_compute_artifact_chunk_upload(&upload)
 }
 
 struct TaskSubmission {
@@ -224,6 +266,12 @@ fn validate_runtime_contract(body: &CreateTaskBody) -> Result<(), &'static str> 
     if body.general_compute_manifest_json.is_some() && runtime != "general-compute-v1alpha1" {
         return Err("general-compute request manifest requires runtime general-compute-v1alpha1");
     }
+    if runtime != "production_sandboxed_dsl"
+        && (body.managed_dsl_backend_id.is_some()
+            || body.managed_dsl_semantics_manifest_sha256.is_some())
+    {
+        return Err("managed DSL identity requires runtime production_sandboxed_dsl");
+    }
     match runtime {
         "" => Ok(()),
         "managed-function-v0" => {
@@ -250,6 +298,41 @@ fn validate_runtime_contract(body: &CreateTaskBody) -> Result<(), &'static str> 
             }
             Ok(())
         }
+        "production_sandboxed_dsl" => {
+            let source = body.task_source.as_deref().unwrap_or_default();
+            if source.trim().is_empty() {
+                return Err("production_sandboxed_dsl requires non-empty task_source");
+            }
+            if source.len() > hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES {
+                return Err("production_sandboxed_dsl task_source exceeds the byte limit");
+            }
+            let input = body.torrent.as_deref().unwrap_or_default();
+            if input.trim().is_empty() {
+                return Err("production_sandboxed_dsl requires non-empty JSON input");
+            }
+            let budget = body.max_cpt.unwrap_or(0);
+            if budget <= 0 {
+                return Err("production_sandboxed_dsl budget must be positive");
+            }
+            if body
+                .managed_dsl_backend_id
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+            {
+                return Err("production_sandboxed_dsl requires managed_dsl_backend_id");
+            }
+            if body
+                .managed_dsl_semantics_manifest_sha256
+                .as_deref()
+                .unwrap_or_default()
+                != general_compute_runtime::MANAGED_DSL_SEMANTICS_MANIFEST_SHA256
+            {
+                return Err("production_sandboxed_dsl requires the canonical semantics digest");
+            }
+            Ok(())
+        }
         "general-compute-v1alpha1" => {
             let manifest = body
                 .general_compute_manifest_json
@@ -263,12 +346,17 @@ fn validate_runtime_contract(body: &CreateTaskBody) -> Result<(), &'static str> 
             if bytes.len() > hivemind_proto::GENERAL_COMPUTE_MANIFEST_MAX_BYTES {
                 return Err("general-compute-v1alpha1 request manifest exceeds the byte limit");
             }
-            let request = serde_json::from_slice::<general_compute_runtime::GeneralComputeRequest>(&bytes)
-                .map_err(|_| "general-compute-v1alpha1 request manifest is invalid")?;
+            let request =
+                serde_json::from_slice::<general_compute_runtime::GeneralComputeRequest>(&bytes)
+                    .map_err(|_| "general-compute-v1alpha1 request manifest is invalid")?;
             request
                 .validate()
                 .map_err(|_| "general-compute-v1alpha1 request manifest is invalid")?;
-            if body.torrent.as_deref().is_some_and(|input| !input.trim().is_empty()) {
+            if body
+                .torrent
+                .as_deref()
+                .is_some_and(|input| !input.trim().is_empty())
+            {
                 return Err("general-compute-v1alpha1 must carry input in its manifest");
             }
             Ok(())
@@ -623,6 +711,11 @@ pub struct TaskInfo {
     pub gpu_usage: f64,
     pub gpu_memory_usage: f64,
     pub deterministic: bool,
+    pub worker_id: String,
+    pub provider_user: String,
+    pub dispatch_status: String,
+    pub usage_units: i64,
+    pub max_cpt: i64,
 }
 
 impl From<hivemind_proto::PricingBreakdown> for PricingBreakdown {
@@ -966,6 +1059,89 @@ pub async fn create_task(
     create_task_from_submission(state, token, TaskSubmission { body }).await
 }
 
+/// POST /api/tasks/:task_id/general-compute/artifacts/chunk
+///
+/// Master is only an authenticated HTTP-to-gRPC proxy. Nodepool validates the
+/// user token, task ownership, mutable task state, and persisted manifest
+/// coordinates before writing any bytes.
+pub async fn upload_general_compute_artifact_chunk(
+    State(state): State<AppState>,
+    AxumPath(task_id): AxumPath<String>,
+    AuthUser { token, .. }: AuthUser,
+    Json(body): Json<GeneralComputeArtifactChunkBody>,
+) -> (StatusCode, Json<GeneralComputeArtifactChunkResponse>) {
+    if !is_safe_task_id(&task_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(GeneralComputeArtifactChunkResponse {
+                success: false,
+                message: "Invalid task_id".into(),
+                accepted_chunks: 0,
+            }),
+        );
+    }
+    if let Err(message) = validate_artifact_chunk_http_body(&body) {
+        let status = if body.size_bytes == 0
+            || body.size_bytes > hivemind_proto::GENERAL_COMPUTE_CHUNK_UPLOAD_MAX_BYTES as u64
+        {
+            StatusCode::PAYLOAD_TOO_LARGE
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        return (
+            status,
+            Json(GeneralComputeArtifactChunkResponse {
+                success: false,
+                message: message.into(),
+                accepted_chunks: 0,
+            }),
+        );
+    }
+    let offset = match i64::try_from(body.offset) {
+        Ok(offset) => offset,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(GeneralComputeArtifactChunkResponse {
+                    success: false,
+                    message: "artifact upload offset is invalid".into(),
+                    accepted_chunks: 0,
+                }),
+            )
+        }
+    };
+    let mut grpc = state.grpc_client.clone();
+    match grpc
+        .upload_general_compute_artifact_chunk(
+            &token,
+            &task_id,
+            &body.artifact_id,
+            offset,
+            i64::try_from(body.size_bytes).unwrap_or(i64::MAX),
+            &body.sha256,
+            body.bytes,
+        )
+        .await
+    {
+        Ok(response) => (
+            StatusCode::OK,
+            Json(GeneralComputeArtifactChunkResponse {
+                success: response.success,
+                message: response.status_message,
+                accepted_chunks: response.accepted_chunks,
+            }),
+        ),
+        Err(error) => (
+            artifact_grpc_error_status(&error),
+            Json(GeneralComputeArtifactChunkResponse {
+                success: false,
+                message: error.message().to_string(),
+                accepted_chunks: 0,
+            }),
+        ),
+    }
+}
+
 async fn create_task_from_submission(
     state: AppState,
     token: String,
@@ -1045,6 +1221,10 @@ async fn create_task_from_submission(
             body.runtime.as_deref().unwrap_or(""),
             body.task_source.as_deref().unwrap_or(""),
             &general_compute_manifest_json,
+            body.managed_dsl_backend_id.as_deref().unwrap_or_default(),
+            body.managed_dsl_semantics_manifest_sha256
+                .as_deref()
+                .unwrap_or_default(),
         )
         .await
     {
@@ -1107,6 +1287,11 @@ pub async fn list_tasks(
                     gpu_usage: t.gpu_usage,
                     gpu_memory_usage: t.gpu_memory_usage,
                     deterministic: t.deterministic,
+                    worker_id: t.worker_id,
+                    provider_user: t.provider_user,
+                    dispatch_status: t.dispatch_status,
+                    usage_units: t.usage_units,
+                    max_cpt: t.max_cpt,
                 })
                 .collect();
             (
@@ -2036,6 +2221,7 @@ fn artifact_grpc_error_status(error: &tonic::Status) -> StatusCode {
         tonic::Code::Unauthenticated => StatusCode::UNAUTHORIZED,
         tonic::Code::PermissionDenied => StatusCode::FORBIDDEN,
         tonic::Code::InvalidArgument => StatusCode::BAD_REQUEST,
+        tonic::Code::AlreadyExists => StatusCode::CONFLICT,
         tonic::Code::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
@@ -2267,6 +2453,8 @@ mod tests {
             runtime: runtime.map(str::to_owned),
             task_source: source,
             general_compute_manifest_json: None,
+            managed_dsl_backend_id: None,
+            managed_dsl_semantics_manifest_sha256: None,
             memory_gb: None,
             cpu_score: None,
             gpu_score: None,
@@ -2298,6 +2486,29 @@ mod tests {
             validate_runtime_contract(&oversized),
             Err("managed-function-v0 task_source exceeds the byte limit")
         );
+    }
+
+    #[test]
+    fn production_dsl_runtime_requires_task_bound_identity() {
+        let missing = task_body(
+            Some("production_sandboxed_dsl"),
+            Some("return input;".into()),
+            Some("{}".into()),
+            1,
+        );
+        assert_eq!(
+            validate_runtime_contract(&missing),
+            Err("production_sandboxed_dsl requires managed_dsl_backend_id")
+        );
+
+        let valid = CreateTaskBody {
+            managed_dsl_backend_id: Some("dsl-default".into()),
+            managed_dsl_semantics_manifest_sha256: Some(
+                general_compute_runtime::MANAGED_DSL_SEMANTICS_MANIFEST_SHA256.into(),
+            ),
+            ..missing
+        };
+        assert_eq!(validate_runtime_contract(&valid), Ok(()));
     }
 
     #[test]
@@ -2335,6 +2546,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn artifact_chunk_http_body_requires_exact_payload_size() {
+        let body = GeneralComputeArtifactChunkBody {
+            artifact_id: "source".into(),
+            offset: 0,
+            size_bytes: 4,
+            sha256: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .into(),
+            bytes: vec![1, 2, 3],
+        };
+        assert_eq!(
+            validate_artifact_chunk_http_body(&body),
+            Err("artifact upload size does not match payload bytes")
+        );
+    }
+
+    #[test]
+    fn artifact_chunk_http_body_rejects_zero_and_oversized_payloads() {
+        let mut body = GeneralComputeArtifactChunkBody {
+            artifact_id: "source".into(),
+            offset: 0,
+            size_bytes: 0,
+            sha256: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .into(),
+            bytes: vec![],
+        };
+        assert_eq!(
+            validate_artifact_chunk_http_body(&body),
+            Err("artifact upload size must be positive")
+        );
+        body.size_bytes = hivemind_proto::GENERAL_COMPUTE_CHUNK_UPLOAD_MAX_BYTES as u64 + 1;
+        body.bytes = vec![0];
+        assert_eq!(
+            validate_artifact_chunk_http_body(&body),
+            Err("artifact upload exceeds the upload byte limit")
+        );
+    }
+
     fn general_compute_request_json() -> serde_json::Value {
         let mut request = general_compute_runtime::GeneralComputeRequest {
             execution_id: "execution-1".into(),
@@ -2342,7 +2591,8 @@ mod tests {
             idempotency_key: "idempotency-1".into(),
             request_digest: String::new(),
             runtime_version: general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION.into(),
-            guest_image_digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            guest_image_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             backend_id: "python-cpython-312".into(),
             entrypoint: "main".into(),
             source_artifact: general_compute_runtime::ArtifactManifest::inline_json(

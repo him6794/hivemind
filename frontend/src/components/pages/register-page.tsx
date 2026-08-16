@@ -66,8 +66,8 @@ export function RegisterPage() {
         </h1>
         <p className="mt-4 max-w-xl text-muted-foreground">
           {locale === "zh"
-            ? "官方網站提供註冊、登入與餘額可見性；真正的工作提交與節點控制會在你部署的 Master 或 Worker 節點上進行。"
-            : "The official site handles registration, sign-in, and balance visibility. Real task and worker operations happen on the Master or Worker nodes you deploy."}
+            ? "一個帳號，送工作和貢獻算力都能用。"
+            : "One account works for sending work and for contributing compute."}
         </p>
       </div>
 

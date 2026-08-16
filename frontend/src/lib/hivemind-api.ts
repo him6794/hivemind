@@ -1,13 +1,5 @@
 const apiBase = "";
 
-export function getApiBase() {
-  return apiBase;
-}
-
-export function hasApiBase() {
-  return true;
-}
-
 type JsonValue = Record<string, unknown>;
 
 async function readJson(res: Response) {

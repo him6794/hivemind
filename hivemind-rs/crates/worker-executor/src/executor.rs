@@ -7,8 +7,8 @@ use general_compute_runtime::production::{
     WindowsProductionBackendConfig, WindowsProductionBackendRegistry,
 };
 use general_compute_runtime::sandbox::{BackendExecutionMode, ProductionSandboxLauncher};
-use general_compute_runtime::windows_hcs::WindowsHcsLauncher;
 use general_compute_runtime::supervisor::{Cancellation, RunResult, RunStatus};
+use general_compute_runtime::windows_hcs::WindowsHcsLauncher;
 use general_compute_runtime::{
     GeneralComputeRequest, GeneralComputeResult, ResultStatus, TrustedWorkerCapabilityRegistration,
 };
@@ -151,15 +151,23 @@ fn execute_managed_dsl_task(
     cancelled: &AtomicBool,
     registry: &ManagedDslBackendRegistry,
 ) -> Result<super::TaskResult> {
-    if registry.len() != 1 {
+    let backend_id = task
+        .managed_dsl_backend_id
+        .as_deref()
+        .filter(|backend_id| !backend_id.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("production_sandboxed_dsl backend_id is required"))?;
+    let backend = registry.get(backend_id).ok_or_else(|| {
+        anyhow::anyhow!("production_sandboxed_dsl backend is not operator-approved")
+    })?;
+    let semantics_digest = task
+        .managed_dsl_semantics_manifest_sha256
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("production_sandboxed_dsl semantics digest is required"))?;
+    if semantics_digest != backend.semantics_manifest_sha256 {
         return Err(anyhow::anyhow!(
-            "production_sandboxed_dsl requires exactly one operator-managed DSL backend"
+            "production_sandboxed_dsl semantics digest does not match operator registration"
         ));
     }
-    let backend = registry
-        .registrations()
-        .next()
-        .expect("registry length checked above");
     let source = task
         .task_source
         .as_deref()
@@ -179,47 +187,43 @@ fn execute_managed_dsl_task(
         max_output_bytes: backend.max_output_bytes as u64,
         ..ExecutionLimits::default()
     };
-    let execution = match ManagedExecutor.execute_json_input_with_cancel(
-        source,
-        limits,
-        input,
-        cancelled,
-    ) {
-        Ok(execution) => execution,
-        Err(error) => {
-            let error_message = if error.code() == "cancelled" {
-                "Task execution stopped".to_string()
-            } else {
-                error.to_string()
-            };
-            let receipt = json!({
-                "runtime": "managed-function-v0",
-                "execution_mode": "production_sandboxed_dsl",
-                "backend_id": backend.backend_id,
-                "semantics_manifest_sha256": backend.semantics_manifest_sha256,
-                "status": "failed",
-                "executed_ops": 0,
-                "output_bytes": 0,
-                "failure_code": error.code(),
-                "failure_message": error_message,
-            });
-            return Ok(super::TaskResult {
-                task_id: task.task_id.clone(),
-                success: false,
-                output: None,
-                error: Some(error_message),
-                exit_code: 1,
-                cpu_time_ms: 0,
-                wall_time_ms: elapsed_ms,
-                peak_memory_mb: 0,
-                managed_executed_ops: 0,
-                managed_output_bytes: 0,
-                managed_receipt_json: Some(receipt.to_string()),
-                managed_proof: None,
-                general_compute_result_json: None,
-            });
-        }
-    };
+    let execution =
+        match ManagedExecutor.execute_json_input_with_cancel(source, limits, input, cancelled) {
+            Ok(execution) => execution,
+            Err(error) => {
+                let error_message = if error.code() == "cancelled" {
+                    "Task execution stopped".to_string()
+                } else {
+                    error.to_string()
+                };
+                let receipt = json!({
+                    "runtime": "managed-function-v0",
+                    "execution_mode": "production_sandboxed_dsl",
+                    "backend_id": backend.backend_id,
+                    "semantics_manifest_sha256": backend.semantics_manifest_sha256,
+                    "status": "failed",
+                    "executed_ops": 0,
+                    "output_bytes": 0,
+                    "failure_code": error.code(),
+                    "failure_message": error_message,
+                });
+                return Ok(super::TaskResult {
+                    task_id: task.task_id.clone(),
+                    success: false,
+                    output: None,
+                    error: Some(error_message),
+                    exit_code: 1,
+                    cpu_time_ms: 0,
+                    wall_time_ms: elapsed_ms,
+                    peak_memory_mb: 0,
+                    managed_executed_ops: 0,
+                    managed_output_bytes: 0,
+                    managed_receipt_json: Some(receipt.to_string()),
+                    managed_proof: None,
+                    general_compute_result_json: None,
+                });
+            }
+        };
     let output = if execution.output.is_empty() {
         match render_output_bounded(&execution.value, backend.max_output_bytes as u64) {
             Ok(output) => output,
@@ -351,6 +355,7 @@ pub(crate) async fn run_task_with_cancel_and_backends(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_task_with_cancel_and_backends_and_trusted_registration(
     task: &Task,
     config: &HivemindConfig,
@@ -375,6 +380,7 @@ pub(crate) async fn run_task_with_cancel_and_backends_and_trusted_registration(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_task_with_cancel_and_backends_and_trusted_registration_and_windows(
     task: &Task,
     config: &HivemindConfig,
@@ -480,6 +486,7 @@ pub(crate) async fn run_task_with_cancel_and_backends_and_trusted_registration_a
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_general_compute_task(
     task: &Task,
     config: &HivemindConfig,
@@ -521,7 +528,9 @@ fn execute_general_compute_task(
     };
     let result = match backend_execution_mode(capability_matrix, &request.backend_id) {
         Some(BackendExecutionMode::ProductionSandboxedOci) => {
-            let Some(production) = production_backends.and_then(|registry| registry.get(&request.backend_id)) else {
+            let Some(production) =
+                production_backends.and_then(|registry| registry.get(&request.backend_id))
+            else {
                 return typed_task_result(
                     task,
                     failed_general_compute_result(
@@ -577,8 +586,8 @@ fn execute_general_compute_task(
         Some(BackendExecutionMode::ReferenceDirect) if reference_executor.is_some() => {
             let executor = reference_executor.expect("guarded by is_some");
             let root = absolute_runtime_root(config, &task.task_id)?;
-            let materializer =
-                ArtifactMaterializer::new(root).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            let materializer = ArtifactMaterializer::new(root)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
             match cas_store {
                 Some(store) => executor.execute_with_cas_with_cancellation(
                     &request,
@@ -592,8 +601,8 @@ fn execute_general_compute_task(
         None if reference_executor.is_some() && production_backends.is_none() => {
             let executor = reference_executor.expect("guarded by is_some");
             let root = absolute_runtime_root(config, &task.task_id)?;
-            let materializer =
-                ArtifactMaterializer::new(root).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            let materializer = ArtifactMaterializer::new(root)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
             match cas_store {
                 Some(store) => executor.execute_with_cas_with_cancellation(
                     &request,
@@ -620,11 +629,7 @@ fn execute_general_compute_task(
                 error = %error,
                 "general-compute execution failed"
             );
-            failed_general_compute_result_with_error(
-                &request,
-                &error,
-                trusted_gpu_selection,
-            )
+            failed_general_compute_result_with_error(&request, &error, trusted_gpu_selection)
         }
     };
     typed_task_result(task, typed)
@@ -638,17 +643,14 @@ fn trusted_gpu_selection(
         Some(registration) => registration
             .select_gpu_for_request(request)
             .map_err(|error| error.message),
-        None if request.execution_policy.gpu_required => Err(
-            "typed GPU request requires an operator-approved trusted registration".into(),
-        ),
+        None if request.execution_policy.gpu_required => {
+            Err("typed GPU request requires an operator-approved trusted registration".into())
+        }
         None => Ok(None),
     }
 }
 
-fn typed_task_result(
-    task: &Task,
-    typed: GeneralComputeResult,
-) -> Result<super::TaskResult> {
+fn typed_task_result(task: &Task, typed: GeneralComputeResult) -> Result<super::TaskResult> {
     let encoded = serde_json::to_vec(&typed)?;
     let completed = typed.status == ResultStatus::Completed;
     Ok(super::TaskResult {
@@ -673,6 +675,7 @@ fn typed_task_result(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_production_backend_task(
     request: &GeneralComputeRequest,
     task: &Task,
@@ -702,13 +705,15 @@ fn execute_production_backend_task(
     let materializer = ArtifactMaterializer::new(&artifact_root)
         .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
     let mut materialized_bytes = Vec::with_capacity(1 + request.input_artifacts.len());
-    for artifact in std::iter::once(&request.source_artifact).chain(request.input_artifacts.iter()) {
+    for artifact in std::iter::once(&request.source_artifact).chain(request.input_artifacts.iter())
+    {
         let materialized = match cas_store {
             Some(store) => materializer.materialize_with_cas(artifact, store),
             None => materializer.materialize(artifact),
         }
         .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
-        if materialized.size_bytes != artifact.size_bytes || materialized.sha256 != artifact.sha256 {
+        if materialized.size_bytes != artifact.size_bytes || materialized.sha256 != artifact.sha256
+        {
             return Err(ExecutionError::BackendUnavailable(
                 "materialized production artifact identity mismatch".into(),
             ));
@@ -739,7 +744,11 @@ fn execute_production_backend_task(
         .collect::<Vec<_>>();
     let input_sha256 = general_compute_runtime::canonical_input_digest(source_bytes, &input_bytes);
     for mount in &backend.policy.mounts {
-        if let general_compute_runtime::sandbox::SandboxMount::ReadOnlyArtifact { artifact_id, .. } = mount {
+        if let general_compute_runtime::sandbox::SandboxMount::ReadOnlyArtifact {
+            artifact_id,
+            ..
+        } = mount
+        {
             let path = artifact_root.join(artifact_id);
             let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
                 ExecutionError::BackendUnavailable(format!(
@@ -762,7 +771,10 @@ fn execute_production_backend_task(
     .with_timeout(std::time::Duration::from_millis(
         request.execution_policy.wall_time_ms,
     ))
-    .with_output_limits(backend.max_output_bytes, backend.max_output_bytes.saturating_mul(2));
+    .with_output_limits(
+        backend.max_output_bytes,
+        backend.max_output_bytes.saturating_mul(2),
+    );
     let launch = backend.launch();
     let result = launcher
         .run_materialized_bundle(
@@ -773,15 +785,10 @@ fn execute_production_backend_task(
             cancellation,
         )
         .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
-    production_result(
-        request,
-        result,
-        input_sha256,
-        config,
-        trusted_gpu_selection,
-    )
+    production_result(request, result, input_sha256, config, trusted_gpu_selection)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_windows_backend_task(
     request: &GeneralComputeRequest,
     task: &Task,
@@ -834,7 +841,8 @@ fn execute_windows_backend_task(
     let materializer = ArtifactMaterializer::new(&artifact_root)
         .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
     let mut materialized_bytes = Vec::with_capacity(1 + request.input_artifacts.len());
-    for artifact in std::iter::once(&request.source_artifact).chain(request.input_artifacts.iter()) {
+    for artifact in std::iter::once(&request.source_artifact).chain(request.input_artifacts.iter())
+    {
         let materialized = match cas_store {
             Some(store) => materializer.materialize_with_cas(artifact, store),
             None => materializer.materialize(artifact),
@@ -860,10 +868,17 @@ fn execute_windows_backend_task(
     };
     let input_sha256 = general_compute_runtime::canonical_input_digest(
         source_bytes,
-        &materialized_bytes.iter().skip(1).map(Vec::as_slice).collect::<Vec<_>>(),
+        &materialized_bytes
+            .iter()
+            .skip(1)
+            .map(Vec::as_slice)
+            .collect::<Vec<_>>(),
     );
     let launcher = WindowsHcsLauncher::new().with_timeout(std::time::Duration::from_millis(
-        request.execution_policy.wall_time_ms.min(backend.timeout_ms),
+        request
+            .execution_policy
+            .wall_time_ms
+            .min(backend.timeout_ms),
     ));
     let result = launcher
         .run(&spec, cancellation)
@@ -906,7 +921,10 @@ fn production_result(
     let mut typed = envelope
         .into_result_with_input_digest(request, &input_sha256)
         .map_err(|error| {
-        ExecutionError::BackendUnavailable(format!("production result validation failed: {}", error.message))
+            ExecutionError::BackendUnavailable(format!(
+                "production result validation failed: {}",
+                error.message
+            ))
         })?;
     typed.gpu_selection = trusted_gpu_selection;
     if typed.status != status {
@@ -992,12 +1010,14 @@ pub fn reference_executor_from_environment(
     let registrations =
         serde_json::from_str::<Vec<PythonBackendRegistration>>(&registrations).ok()?;
     let registry = PythonBackendRegistry::new(registrations).ok()?;
-    Some(Arc::new(ReferenceBackendExecutor::new_with_trusted_registration(
-        admission.capability_matrix(),
-        admission.worker_capabilities(),
-        registry,
-        admission.trusted_registration(),
-    )))
+    Some(Arc::new(
+        ReferenceBackendExecutor::new_with_trusted_registration(
+            admission.capability_matrix(),
+            admission.worker_capabilities(),
+            registry,
+            admission.trusted_registration(),
+        ),
+    ))
 }
 
 pub fn managed_dsl_backends_from_environment() -> anyhow::Result<ManagedDslBackendRegistry> {
@@ -1014,8 +1034,9 @@ pub fn managed_dsl_backends_from_environment() -> anyhow::Result<ManagedDslBacke
     let registrations = serde_json::from_slice(&bytes).map_err(|error| {
         anyhow::anyhow!("operator managed DSL backend registry is invalid: {error}")
     })?;
-    ManagedDslBackendRegistry::new(registrations)
-        .map_err(|error| anyhow::anyhow!("operator managed DSL backend registry is invalid: {error}"))
+    ManagedDslBackendRegistry::new(registrations).map_err(|error| {
+        anyhow::anyhow!("operator managed DSL backend registry is invalid: {error}")
+    })
 }
 
 pub fn production_backends_from_environment(
@@ -1025,16 +1046,18 @@ pub fn production_backends_from_environment(
         _ => return Ok(None),
     };
     let bytes = std::fs::read(&path).map_err(|error| {
-        anyhow::anyhow!(
-            "failed to read operator production backend registry {path:?}: {error}"
-        )
+        anyhow::anyhow!("failed to read operator production backend registry {path:?}: {error}")
     })?;
-    let registrations = serde_json::from_slice::<Vec<ProductionBackendConfig>>(&bytes)
-        .map_err(|error| anyhow::anyhow!("operator production backend registry is invalid: {error}"))?;
+    let registrations =
+        serde_json::from_slice::<Vec<ProductionBackendConfig>>(&bytes).map_err(|error| {
+            anyhow::anyhow!("operator production backend registry is invalid: {error}")
+        })?;
     ProductionBackendRegistry::new(registrations)
         .map(Arc::new)
         .map(Some)
-        .map_err(|error| anyhow::anyhow!("operator production backend registry is invalid: {error}"))
+        .map_err(|error| {
+            anyhow::anyhow!("operator production backend registry is invalid: {error}")
+        })
 }
 
 pub fn windows_production_backends_from_environment(
@@ -1044,12 +1067,12 @@ pub fn windows_production_backends_from_environment(
         _ => return Ok(None),
     };
     let bytes = std::fs::read(&path).map_err(|error| {
-        anyhow::anyhow!(
-            "failed to read operator Windows backend registry {path:?}: {error}"
-        )
+        anyhow::anyhow!("failed to read operator Windows backend registry {path:?}: {error}")
     })?;
     let registrations = serde_json::from_slice::<Vec<WindowsProductionBackendConfig>>(&bytes)
-        .map_err(|error| anyhow::anyhow!("operator Windows backend registry is invalid: {error}"))?;
+        .map_err(|error| {
+            anyhow::anyhow!("operator Windows backend registry is invalid: {error}")
+        })?;
     WindowsProductionBackendRegistry::new(registrations)
         .map(Arc::new)
         .map(Some)
@@ -1064,8 +1087,7 @@ pub fn runtime_capability_matrix_from_environment(
                 .ok()?
         }
         _ => {
-            let trusted =
-                std::env::var("HIVEMIND_GENERAL_COMPUTE_TRUSTED_REGISTRATION").ok()?;
+            let trusted = std::env::var("HIVEMIND_GENERAL_COMPUTE_TRUSTED_REGISTRATION").ok()?;
             serde_json::from_str::<TrustedWorkerCapabilityRegistration>(&trusted)
                 .ok()?
                 .backends
@@ -1139,7 +1161,10 @@ mod tests {
         let result = failed_general_compute_result_with_error(&request, &error, None);
 
         assert_eq!(result.error_code.as_deref(), Some("backend_unavailable"));
-        assert_eq!(result.stderr, "general-compute backend unavailable: runner stderr: permission denied");
+        assert_eq!(
+            result.stderr,
+            "general-compute backend unavailable: runner stderr: permission denied"
+        );
     }
 
     #[tokio::test]
@@ -1175,6 +1200,9 @@ mod tests {
                 .into(),
         );
         task.max_cpt = 1000;
+        task.managed_dsl_backend_id = Some("managed-default".into());
+        task.managed_dsl_semantics_manifest_sha256 =
+            Some(general_compute_runtime::MANAGED_DSL_SEMANTICS_MANIFEST_SHA256.into());
         let registry = ManagedDslBackendRegistry::new(vec![
             general_compute_runtime::production::ManagedDslBackendRegistration {
                 backend_id: "managed-default".into(),
@@ -1196,17 +1224,25 @@ mod tests {
             .expect("DSL receipt should be JSON");
         assert_eq!(receipt["execution_mode"], "production_sandboxed_dsl");
         assert_eq!(receipt["backend_id"], "managed-default");
+        assert_eq!(
+            receipt["semantics_manifest_sha256"],
+            general_compute_runtime::MANAGED_DSL_SEMANTICS_MANIFEST_SHA256
+        );
     }
 
     #[test]
     fn production_sandboxed_dsl_requires_an_operator_backend() {
-        let task = test_task_with_source("null");
+        let mut task = test_task_with_source("null");
+        task.runtime = Some("production_sandboxed_dsl".into());
+        task.managed_dsl_backend_id = Some("managed-default".into());
+        task.managed_dsl_semantics_manifest_sha256 =
+            Some(general_compute_runtime::MANAGED_DSL_SEMANTICS_MANIFEST_SHA256.into());
         let registry = ManagedDslBackendRegistry::new(Vec::new()).unwrap();
         let error = execute_managed_dsl_task(&task, 0, &AtomicBool::new(false), &registry)
             .expect_err("closed DSL must fail closed without operator configuration");
         assert!(error
             .to_string()
-            .contains("requires exactly one operator-managed DSL backend"));
+            .contains("production_sandboxed_dsl backend is not operator-approved"));
     }
 
     #[tokio::test]
@@ -1362,7 +1398,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn production_capability_without_production_configuration_never_uses_reference_executor() {
+    async fn production_capability_without_production_configuration_never_uses_reference_executor()
+    {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path().join("sandbox").to_str().unwrap());
         let image = format!("sha256:{}", "a".repeat(64));
@@ -1452,9 +1489,7 @@ mod tests {
         let image = format!("sha256:{}", "b".repeat(64));
         let registration = production_registration(tmp.path().join("production"), &image);
         let backend_id = registration.backend_id.clone();
-        let production = Arc::new(
-            ProductionBackendRegistry::new(vec![registration]).unwrap(),
-        );
+        let production = Arc::new(ProductionBackendRegistry::new(vec![registration]).unwrap());
         let request = production_request(&backend_id, &image, "execution-production-rootfs");
         let capabilities = production_capabilities(&backend_id, &image);
         let mut task = test_task_with_source("null");
@@ -1491,9 +1526,7 @@ mod tests {
         let registration = production_registration(root.clone(), &image);
         std::fs::create_dir_all(registration.bundle_root.join("rootfs")).unwrap();
         let backend_id = registration.backend_id.clone();
-        let production = Arc::new(
-            ProductionBackendRegistry::new(vec![registration]).unwrap(),
-        );
+        let production = Arc::new(ProductionBackendRegistry::new(vec![registration]).unwrap());
         let request = production_request(&backend_id, &image, "execution-production-runner");
         let capabilities = production_capabilities(&backend_id, &image);
         let mut task = test_task_with_source("null");
@@ -1565,11 +1598,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             let runner = root.join("fake-runc.sh");
             let result_literal = result_path.to_string_lossy().replace('\'', "'\\''");
-            std::fs::write(
-                &runner,
-                format!("#!/bin/sh\ncat '{result_literal}'\n"),
-            )
-            .unwrap();
+            std::fs::write(&runner, format!("#!/bin/sh\ncat '{result_literal}'\n")).unwrap();
             let mut permissions = std::fs::metadata(&runner).unwrap().permissions();
             permissions.set_mode(0o700);
             std::fs::set_permissions(&runner, permissions).unwrap();
@@ -1619,13 +1648,11 @@ mod tests {
         assert!(
             result.success,
             "production runner fixture failed: {:?} {:?}",
-            result.error,
-            result.general_compute_result_json
+            result.error, result.general_compute_result_json
         );
         assert_eq!(result.output.as_deref(), Some("operator runner output"));
         let typed: GeneralComputeResult =
-            serde_json::from_slice(result.general_compute_result_json.as_deref().unwrap())
-                .unwrap();
+            serde_json::from_slice(result.general_compute_result_json.as_deref().unwrap()).unwrap();
         assert_eq!(typed.status, ResultStatus::Completed);
         assert_eq!(
             typed.input_sha256,
@@ -1742,7 +1769,8 @@ mod tests {
         let capabilities = general_compute_runtime::CapabilityMatrix::new(vec![
             general_compute_runtime::BackendRegistration {
                 backend_id: request.backend_id.clone(),
-                execution_mode: general_compute_runtime::sandbox::BackendExecutionMode::ReferenceDirect,
+                execution_mode:
+                    general_compute_runtime::sandbox::BackendExecutionMode::ReferenceDirect,
                 guest_image_digest: image.clone(),
                 capabilities: vec!["cpu".into()],
                 max_threads: 2,
@@ -1813,10 +1841,7 @@ mod tests {
         config
     }
 
-    fn production_registration(
-        root: std::path::PathBuf,
-        image: &str,
-    ) -> ProductionBackendConfig {
+    fn production_registration(root: std::path::PathBuf, image: &str) -> ProductionBackendConfig {
         ProductionBackendConfig {
             backend_id: "python-cpython-312".into(),
             guest_image_digest: image.into(),
@@ -1846,10 +1871,12 @@ mod tests {
                     general_compute_runtime::sandbox::PrivilegeEscalationPolicy::NoNewPrivileges,
                 root_filesystem: general_compute_runtime::sandbox::RootFilesystemPolicy::ReadOnly,
                 network: general_compute_runtime::sandbox::SandboxNetworkPolicy::DenyAll,
-                mounts: vec![general_compute_runtime::sandbox::SandboxMount::ReadOnlyArtifact {
-                    artifact_id: "source".into(),
-                    destination: "/work/source".into(),
-                }],
+                mounts: vec![
+                    general_compute_runtime::sandbox::SandboxMount::ReadOnlyArtifact {
+                        artifact_id: "source".into(),
+                        destination: "/work/source".into(),
+                    },
+                ],
             },
             max_output_bytes: 1024,
         }
@@ -1922,6 +1949,8 @@ mod tests {
             runtime: None,
             task_source: None,
             general_compute_manifest_json: None,
+            managed_dsl_backend_id: None,
+            managed_dsl_semantics_manifest_sha256: None,
             expected_btih: None,
             cpu_usage: 0.0,
             memory_usage: 0.0,
