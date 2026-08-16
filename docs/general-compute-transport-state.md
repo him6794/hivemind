@@ -86,7 +86,7 @@
   - `cargo test -p hivemind-task-scheduler --lib inline_general_compute_chunk_plan --target x86_64-pc-windows-gnu --locked` passed (2 tests).
   - `cargo test -p hivemind-task-scheduler --lib test_execute_on_worker_ignores_stale_general_compute_response_without_settlement --target x86_64-pc-windows-gnu --locked` passed.
   - `cargo check -p hivemind-bin --locked` passed after the new generated RPC surface was mounted.
-- The default MSVC integration-test linker still has the known mixed MSVC/MinGW `libtailscale` symbol mismatch; the scoped adapter suite passes under the configured GNU target.
+- The MSVC static-link mismatch is avoided without symbol shims: MSVC consumers dynamically load the validated `libtailscale.dll`, while GNU consumers retain the existing static archive. A live VPN integration run still requires the configured overlay and credentials.
 - Blockers: durable Worker resume state is implemented per Worker but cross-worker/container E2E and trusted usage/billing settlement remain. A metadata-only/CAS-only manifest is still terminally rejected when no exact Nodepool-owned source row exists; it does not enter a redispatch loop. Production runner isolation primitives remain operator-owned and require deployment validation.
 - Scope guard: preserve unrelated dirty frontend/API/Cargo/proto changes; do not reset, checkout, or bulk-stage them.
 

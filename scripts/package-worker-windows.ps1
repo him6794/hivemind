@@ -1,5 +1,7 @@
 param(
     [string]$Configuration = "release",
+    [ValidateSet("x86_64-pc-windows-msvc", "x86_64-pc-windows-gnu")]
+    [string]$RustTarget = "x86_64-pc-windows-msvc",
     [string]$OutputDir = "dist\windows-worker",
     [string]$NodepoolGrpcAddr = "nodepool.example.com:50051",
     [string]$WorkerGrpcAddr = "0.0.0.0:50053",
@@ -16,15 +18,30 @@ if ($Configuration -ne "release" -and $Configuration -ne "debug") {
     throw "Configuration must be 'release' or 'debug'."
 }
 
+$artifactDir = if ($RustTarget -eq "x86_64-pc-windows-msvc") {
+    Join-Path $repoRoot "vendor\libtailscale\windows-x86_64-msvc"
+} else {
+    Join-Path $repoRoot "vendor\libtailscale\windows-x86_64"
+}
+$archiveName = if ($RustTarget -eq "x86_64-pc-windows-msvc") { "libtailscale.dll" } else { "libtailscale.a" }
+$archive = Join-Path $artifactDir $archiveName
+$header = Join-Path $artifactDir "tailscale.h"
+if (!(Test-Path -LiteralPath $archive) -or !(Test-Path -LiteralPath $header)) {
+    throw "Missing ABI-specific libtailscale artifact for $RustTarget. Expected $archive and $header. Run scripts/fetch_libtailscale_windows.sh with the matching target before packaging."
+}
+
 Push-Location $rustRoot
 try {
+    $cargoArgs = @("build", "--locked", "--target", $RustTarget, "--bin", "hivemind-bin")
     if ($Configuration -eq "release") {
-        cargo build --release --bin hivemind-bin
-        $binary = Join-Path $rustRoot "target\release\hivemind-bin.exe"
-    } else {
-        cargo build --bin hivemind-bin
-        $binary = Join-Path $rustRoot "target\debug\hivemind-bin.exe"
+        $cargoArgs += "--release"
     }
+    & cargo @cargoArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "Cargo failed for target $RustTarget with exit code $LASTEXITCODE."
+    }
+    $profile = if ($Configuration -eq "release") { "release" } else { "debug" }
+    $binary = Join-Path $rustRoot "target\$RustTarget\$profile\hivemind-bin.exe"
 } finally {
     Pop-Location
 }
@@ -36,6 +53,19 @@ if (!(Test-Path $binary)) {
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 $packagedBinary = Join-Path $out "hivemind-bin.exe"
 Copy-Item -Force $binary $packagedBinary
+if ($RustTarget -eq "x86_64-pc-windows-msvc") {
+    Copy-Item -Force $archive (Join-Path $out "libtailscale.dll")
+}
+
+$provenance = [ordered]@{
+    rustTarget = $RustTarget
+    configuration = $Configuration
+    libtailscaleArchive = $archiveName
+    libtailscaleArchiveSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+    libtailscaleHeaderSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $header).Hash.ToLowerInvariant()
+    binarySha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $packagedBinary).Hash.ToLowerInvariant()
+}
+$provenance | ConvertTo-Json | Set-Content -Encoding ASCII (Join-Path $out "native-dependency-provenance.json")
 
 $envTemplate = @"
 # Hivemind Windows worker configuration
