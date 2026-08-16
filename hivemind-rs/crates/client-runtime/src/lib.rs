@@ -1367,6 +1367,7 @@ async fn ensure_userspace_bridge(session: &VpnSession, _peer_ip: &str) -> Result
 }
 
 /// Get the VPN state directory for a role
+#[cfg(target_os = "windows")]
 fn vpn_state_dir(role: ClientRole) -> PathBuf {
     let base = dirs::data_dir()
         .or_else(dirs::home_dir)
