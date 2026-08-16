@@ -37,5 +37,5 @@ complete
 
 ## Constraints
 
-- Windows Rust validation uses target `x86_64-pc-windows-gnu` because the vendored tailscale archive is MinGW-compatible.
-- No changes were pushed and no pull request was created.
+- Windows Rust builds now keep the MinGW static archive on `x86_64-pc-windows-gnu` and use an ABI-neutral dynamically loaded `libtailscale.dll` on `x86_64-pc-windows-msvc`. The MSVC package ships the DLL beside the executable and fails closed when it is absent or missing required exports.
+- The MSVC build was verified locally with `cargo build --release --locked --target x86_64-pc-windows-msvc -p hivemind-bin --bins`; this proves compilation/linking and CLI startup, not a live VPN or Windows HCS isolation run.

@@ -151,38 +151,338 @@ impl Drop for LibtailscaleSession {
 #[cfg(target_os = "windows")]
 #[allow(dead_code)]
 mod libtailscale_ffi {
+    #[cfg(target_env = "msvc")]
+    use std::ffi::OsStr;
+    #[cfg(target_env = "msvc")]
+    use std::os::raw::c_void;
     use std::os::raw::{c_char, c_int};
-    extern "C" {
-        pub fn tailscale_new() -> c_int;
-        pub fn tailscale_set_dir(sd: c_int, dir: *const c_char) -> c_int;
-        pub fn tailscale_set_hostname(sd: c_int, hostname: *const c_char) -> c_int;
-        pub fn tailscale_set_authkey(sd: c_int, authkey: *const c_char) -> c_int;
-        pub fn tailscale_set_control_url(sd: c_int, control_url: *const c_char) -> c_int;
-        pub fn tailscale_up(sd: c_int) -> c_int;
-        pub fn tailscale_close(sd: c_int) -> c_int;
-        pub fn tailscale_loopback(
+    #[cfg(target_env = "msvc")]
+    use std::os::windows::ffi::OsStrExt;
+    #[cfg(target_env = "msvc")]
+    use std::path::PathBuf;
+    #[cfg(target_env = "msvc")]
+    use std::sync::OnceLock;
+
+    type TailscaleNew = unsafe extern "C" fn() -> c_int;
+    type TailscaleSetString = unsafe extern "C" fn(c_int, *const c_char) -> c_int;
+    type TailscaleUp = unsafe extern "C" fn(c_int) -> c_int;
+    type TailscaleClose = unsafe extern "C" fn(c_int) -> c_int;
+    type TailscaleLoopback =
+        unsafe extern "C" fn(c_int, *mut c_char, usize, *mut c_char, *mut c_char) -> c_int;
+    type TailscaleBuffer = unsafe extern "C" fn(c_int, *mut c_char, usize) -> c_int;
+    type TailscaleListenForward =
+        unsafe extern "C" fn(c_int, *const c_char, *const c_char, *const c_char) -> c_int;
+
+    #[cfg(target_env = "gnu")]
+    mod static_link {
+        use super::{c_char, c_int};
+        extern "C" {
+            pub fn tailscale_new() -> c_int;
+            pub fn tailscale_set_dir(sd: c_int, dir: *const c_char) -> c_int;
+            pub fn tailscale_set_hostname(sd: c_int, hostname: *const c_char) -> c_int;
+            pub fn tailscale_set_authkey(sd: c_int, authkey: *const c_char) -> c_int;
+            pub fn tailscale_set_control_url(sd: c_int, control_url: *const c_char) -> c_int;
+            pub fn tailscale_up(sd: c_int) -> c_int;
+            pub fn tailscale_close(sd: c_int) -> c_int;
+            pub fn tailscale_loopback(
+                sd: c_int,
+                addr_out: *mut c_char,
+                addrlen: usize,
+                proxy_cred_out: *mut c_char,
+                local_api_cred_out: *mut c_char,
+            ) -> c_int;
+            pub fn tailscale_getips(sd: c_int, buf: *mut c_char, buflen: usize) -> c_int;
+            pub fn tailscale_listen_forward(
+                sd: c_int,
+                network: *const c_char,
+                tailnet_addr: *const c_char,
+                local_addr: *const c_char,
+            ) -> c_int;
+            pub fn tailscale_errmsg(sd: c_int, buf: *mut c_char, buflen: usize) -> c_int;
+        }
+
+        pub(super) fn ensure_loaded() -> Result<(), String> {
+            Ok(())
+        }
+
+        pub(super) unsafe fn new() -> c_int {
+            tailscale_new()
+        }
+        pub(super) unsafe fn set_dir(sd: c_int, value: *const c_char) -> c_int {
+            tailscale_set_dir(sd, value)
+        }
+        pub(super) unsafe fn set_hostname(sd: c_int, value: *const c_char) -> c_int {
+            tailscale_set_hostname(sd, value)
+        }
+        pub(super) unsafe fn set_authkey(sd: c_int, value: *const c_char) -> c_int {
+            tailscale_set_authkey(sd, value)
+        }
+        pub(super) unsafe fn set_control_url(sd: c_int, value: *const c_char) -> c_int {
+            tailscale_set_control_url(sd, value)
+        }
+        pub(super) unsafe fn up(sd: c_int) -> c_int {
+            tailscale_up(sd)
+        }
+        pub(super) unsafe fn close(sd: c_int) -> c_int {
+            tailscale_close(sd)
+        }
+        pub(super) unsafe fn loopback(
             sd: c_int,
-            addr_out: *mut c_char,
-            addrlen: usize,
-            proxy_cred_out: *mut c_char,
-            local_api_cred_out: *mut c_char,
-        ) -> c_int;
-        pub fn tailscale_getips(sd: c_int, buf: *mut c_char, buflen: usize) -> c_int;
-        pub fn tailscale_listen_forward(
+            addr: *mut c_char,
+            addr_len: usize,
+            proxy: *mut c_char,
+            local_api: *mut c_char,
+        ) -> c_int {
+            tailscale_loopback(sd, addr, addr_len, proxy, local_api)
+        }
+        pub(super) unsafe fn getips(sd: c_int, buf: *mut c_char, len: usize) -> c_int {
+            tailscale_getips(sd, buf, len)
+        }
+        pub(super) unsafe fn listen_forward(
             sd: c_int,
             network: *const c_char,
-            tailnet_addr: *const c_char,
-            local_addr: *const c_char,
-        ) -> c_int;
-        pub fn tailscale_errmsg(sd: c_int, buf: *mut c_char, buflen: usize) -> c_int;
+            tailnet: *const c_char,
+            local: *const c_char,
+        ) -> c_int {
+            tailscale_listen_forward(sd, network, tailnet, local)
+        }
+        pub(super) unsafe fn errmsg(sd: c_int, buf: *mut c_char, len: usize) -> c_int {
+            tailscale_errmsg(sd, buf, len)
+        }
+    }
+
+    #[cfg(target_env = "msvc")]
+    mod dynamic_link {
+        use super::*;
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn LoadLibraryW(name: *const u16) -> *mut c_void;
+            fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
+        }
+
+        struct Api {
+            _module: *mut c_void,
+            new: TailscaleNew,
+            set_dir: TailscaleSetString,
+            set_hostname: TailscaleSetString,
+            set_authkey: TailscaleSetString,
+            set_control_url: TailscaleSetString,
+            up: TailscaleUp,
+            close: TailscaleClose,
+            loopback: TailscaleLoopback,
+            getips: TailscaleBuffer,
+            listen_forward: TailscaleListenForward,
+            errmsg: TailscaleBuffer,
+        }
+
+        unsafe impl Send for Api {}
+        unsafe impl Sync for Api {}
+
+        static API: OnceLock<Result<Api, String>> = OnceLock::new();
+
+        fn dll_path() -> PathBuf {
+            if let Ok(path) = std::env::var("HIVEMIND_LIBTAILSCALE_DLL") {
+                return PathBuf::from(path);
+            }
+            std::env::current_exe()
+                .ok()
+                .and_then(|path| path.parent().map(PathBuf::from))
+                .unwrap_or_default()
+                .join("libtailscale.dll")
+        }
+
+        unsafe fn symbol<T>(module: *mut c_void, name: &'static [u8]) -> Result<T, String> {
+            let pointer = GetProcAddress(module, name.as_ptr());
+            if pointer.is_null() {
+                return Err(format!(
+                    "libtailscale.dll is missing exported symbol {}",
+                    String::from_utf8_lossy(&name[..name.len() - 1])
+                ));
+            }
+            Ok(std::mem::transmute_copy(&pointer))
+        }
+
+        fn load() -> Result<Api, String> {
+            let path = dll_path();
+            let wide: Vec<u16> = OsStr::new(&path).encode_wide().chain(Some(0)).collect();
+            let module = unsafe { LoadLibraryW(wide.as_ptr()) };
+            if module.is_null() {
+                return Err(format!(
+                    "failed to load {}. Set HIVEMIND_LIBTAILSCALE_DLL to an explicit DLL path",
+                    path.display()
+                ));
+            }
+            unsafe {
+                Ok(Api {
+                    _module: module,
+                    new: symbol(module, b"tailscale_new\\0")?,
+                    set_dir: symbol(module, b"tailscale_set_dir\\0")?,
+                    set_hostname: symbol(module, b"tailscale_set_hostname\\0")?,
+                    set_authkey: symbol(module, b"tailscale_set_authkey\\0")?,
+                    set_control_url: symbol(module, b"tailscale_set_control_url\\0")?,
+                    up: symbol(module, b"tailscale_up\\0")?,
+                    close: symbol(module, b"tailscale_close\\0")?,
+                    loopback: symbol(module, b"tailscale_loopback\\0")?,
+                    getips: symbol(module, b"tailscale_getips\\0")?,
+                    listen_forward: symbol(module, b"tailscale_listen_forward\\0")?,
+                    errmsg: symbol(module, b"tailscale_errmsg\\0")?,
+                })
+            }
+        }
+
+        fn api() -> Result<&'static Api, String> {
+            match API.get_or_init(load) {
+                Ok(api) => Ok(api),
+                Err(error) => Err(error.clone()),
+            }
+        }
+
+        pub(super) fn ensure_loaded() -> Result<(), String> {
+            api().map(|_| ())
+        }
+        pub(super) unsafe fn new() -> c_int {
+            (api().expect("libtailscale must be loaded before use").new)()
+        }
+        pub(super) unsafe fn set_dir(sd: c_int, value: *const c_char) -> c_int {
+            (api()
+                .expect("libtailscale must be loaded before use")
+                .set_dir)(sd, value)
+        }
+        pub(super) unsafe fn set_hostname(sd: c_int, value: *const c_char) -> c_int {
+            (api()
+                .expect("libtailscale must be loaded before use")
+                .set_hostname)(sd, value)
+        }
+        pub(super) unsafe fn set_authkey(sd: c_int, value: *const c_char) -> c_int {
+            (api()
+                .expect("libtailscale must be loaded before use")
+                .set_authkey)(sd, value)
+        }
+        pub(super) unsafe fn set_control_url(sd: c_int, value: *const c_char) -> c_int {
+            (api()
+                .expect("libtailscale must be loaded before use")
+                .set_control_url)(sd, value)
+        }
+        pub(super) unsafe fn up(sd: c_int) -> c_int {
+            (api().expect("libtailscale must be loaded before use").up)(sd)
+        }
+        pub(super) unsafe fn close(sd: c_int) -> c_int {
+            (api().expect("libtailscale must be loaded before use").close)(sd)
+        }
+        pub(super) unsafe fn loopback(
+            sd: c_int,
+            addr: *mut c_char,
+            addr_len: usize,
+            proxy: *mut c_char,
+            local_api: *mut c_char,
+        ) -> c_int {
+            (api()
+                .expect("libtailscale must be loaded before use")
+                .loopback)(sd, addr, addr_len, proxy, local_api)
+        }
+        pub(super) unsafe fn getips(sd: c_int, buf: *mut c_char, len: usize) -> c_int {
+            (api()
+                .expect("libtailscale must be loaded before use")
+                .getips)(sd, buf, len)
+        }
+        pub(super) unsafe fn listen_forward(
+            sd: c_int,
+            network: *const c_char,
+            tailnet: *const c_char,
+            local: *const c_char,
+        ) -> c_int {
+            (api()
+                .expect("libtailscale must be loaded before use")
+                .listen_forward)(sd, network, tailnet, local)
+        }
+        pub(super) unsafe fn errmsg(sd: c_int, buf: *mut c_char, len: usize) -> c_int {
+            (api()
+                .expect("libtailscale must be loaded before use")
+                .errmsg)(sd, buf, len)
+        }
+    }
+
+    pub(super) fn ensure_loaded() -> Result<(), String> {
+        #[cfg(target_env = "gnu")]
+        {
+            static_link::ensure_loaded()
+        }
+        #[cfg(target_env = "msvc")]
+        {
+            dynamic_link::ensure_loaded()
+        }
+    }
+
+    pub(super) unsafe fn tailscale_new() -> c_int {
+        #[cfg(target_env = "gnu")]
+        {
+            static_link::new()
+        }
+        #[cfg(target_env = "msvc")]
+        {
+            dynamic_link::new()
+        }
+    }
+    macro_rules! delegate {
+        ($name:ident, $gnu:ident, $msvc:ident, ($($arg:ident: $ty:ty),*)) => {
+            pub(super) unsafe fn $name($($arg: $ty),*) -> c_int {
+                #[cfg(target_env = "gnu")]
+                { static_link::$gnu($($arg),*) }
+                #[cfg(target_env = "msvc")]
+                { dynamic_link::$msvc($($arg),*) }
+            }
+        };
+    }
+    delegate!(tailscale_set_dir, set_dir, set_dir, (sd: c_int, value: *const c_char));
+    delegate!(tailscale_set_hostname, set_hostname, set_hostname, (sd: c_int, value: *const c_char));
+    delegate!(tailscale_set_authkey, set_authkey, set_authkey, (sd: c_int, value: *const c_char));
+    delegate!(tailscale_set_control_url, set_control_url, set_control_url, (sd: c_int, value: *const c_char));
+    delegate!(tailscale_up, up, up, (sd: c_int));
+    delegate!(tailscale_close, close, close, (sd: c_int));
+    delegate!(tailscale_getips, getips, getips, (sd: c_int, buf: *mut c_char, len: usize));
+    delegate!(tailscale_errmsg, errmsg, errmsg, (sd: c_int, buf: *mut c_char, len: usize));
+
+    pub(super) unsafe fn tailscale_loopback(
+        sd: c_int,
+        addr: *mut c_char,
+        addr_len: usize,
+        proxy: *mut c_char,
+        local_api: *mut c_char,
+    ) -> c_int {
+        #[cfg(target_env = "gnu")]
+        {
+            static_link::loopback(sd, addr, addr_len, proxy, local_api)
+        }
+        #[cfg(target_env = "msvc")]
+        {
+            dynamic_link::loopback(sd, addr, addr_len, proxy, local_api)
+        }
+    }
+
+    pub(super) unsafe fn tailscale_listen_forward(
+        sd: c_int,
+        network: *const c_char,
+        tailnet: *const c_char,
+        local: *const c_char,
+    ) -> c_int {
+        #[cfg(target_env = "gnu")]
+        {
+            static_link::listen_forward(sd, network, tailnet, local)
+        }
+        #[cfg(target_env = "msvc")]
+        {
+            dynamic_link::listen_forward(sd, network, tailnet, local)
+        }
     }
 }
 
 #[cfg(target_os = "windows")]
 use libtailscale_ffi::{
-    tailscale_close, tailscale_errmsg, tailscale_getips, tailscale_listen_forward,
-    tailscale_loopback, tailscale_new, tailscale_set_authkey, tailscale_set_control_url,
-    tailscale_set_dir, tailscale_set_hostname, tailscale_up,
+    ensure_loaded as ensure_libtailscale_loaded, tailscale_close, tailscale_errmsg,
+    tailscale_getips, tailscale_listen_forward, tailscale_loopback, tailscale_new,
+    tailscale_set_authkey, tailscale_set_control_url, tailscale_set_dir, tailscale_set_hostname,
+    tailscale_up,
 };
 
 impl VpnSession {
@@ -958,6 +1258,7 @@ async fn bring_up_vpn_windows(
     hostname: &str,
     configured_endpoint: &str,
 ) -> Result<Arc<VpnSession>> {
+    ensure_libtailscale_loaded().map_err(|error| anyhow::anyhow!(error))?;
     let hostname = sanitize_hostname(hostname);
     let state_dir = vpn_state_dir(role);
     std::fs::create_dir_all(&state_dir).with_context(|| {
