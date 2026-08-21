@@ -537,6 +537,7 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
         )
         .max_decoding_message_size(GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES)
         .max_encoding_message_size(GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES);
+        let worker_identity = wk_state.worker_identity_handle();
         let wk_svc = WorkerNodeServiceServer::new(
             GrpcWorkerNodeService::new(wk_state).with_runtime_admission(runtime_admission),
         )
@@ -570,6 +571,7 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
             nodepool_addr: nodepool_addr_state.clone(),
             config: config.clone(),
             executor: executor.clone(),
+            worker_identity,
             registration_shutdown: std::sync::Arc::new(std::sync::Mutex::new(None)),
         };
         let control_addr = config.server.worker_control_http_addr.clone();

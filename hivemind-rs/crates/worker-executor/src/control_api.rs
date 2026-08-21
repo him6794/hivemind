@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::ServeDir;
 
+use crate::grpc_server::WorkerIdentityHandle;
 use crate::nodepool_client::{self, login_to_nodepool, register_once};
 use crate::WorkerExecutor;
 
@@ -79,6 +80,7 @@ pub struct ControlApiState {
     pub nodepool_addr: std::sync::Arc<std::sync::Mutex<String>>,
     pub config: HivemindConfig,
     pub executor: std::sync::Arc<WorkerExecutor>,
+    pub worker_identity: WorkerIdentityHandle,
     pub registration_shutdown:
         std::sync::Arc<std::sync::Mutex<Option<tokio::sync::watch::Sender<bool>>>>,
 }
@@ -106,6 +108,21 @@ impl ControlApiState {
             .lock()
             .unwrap_or_else(|err| err.into_inner());
         *guard = endpoint;
+    }
+
+    fn set_worker_identity(&self, worker_id: &str) {
+        let mut identity = self
+            .worker_identity
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        *identity = Some(worker_id.to_string());
+    }
+
+    fn current_worker_identity(&self) -> Option<String> {
+        self.worker_identity
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
     }
 
     fn ensure_registration_loop(&self, username: &str, worker_id: &str, token: &str) {
@@ -194,6 +211,9 @@ pub fn router(profile: WorkerProfile) -> Router {
             )),
             config: config.clone(),
             executor: std::sync::Arc::new(WorkerExecutor::new(config.clone())),
+            worker_identity: std::sync::Arc::new(std::sync::Mutex::new(Some(
+                profile.worker_id.clone(),
+            ))),
             registration_shutdown: std::sync::Arc::new(std::sync::Mutex::new(None)),
         },
         &config.server.worker_control_cors_allowed_origins,
@@ -219,6 +239,9 @@ pub fn router_with_profile_and_allowed_origins(
             )),
             config: config.clone(),
             executor: std::sync::Arc::new(WorkerExecutor::new(config.clone())),
+            worker_identity: std::sync::Arc::new(std::sync::Mutex::new(Some(
+                profile.worker_id.clone(),
+            ))),
             registration_shutdown: std::sync::Arc::new(std::sync::Mutex::new(None)),
         },
         allowed_origins,
@@ -272,6 +295,9 @@ pub async fn serve(addr: &str, profile: WorkerProfile) -> Result<()> {
             )),
             config: config.clone(),
             executor: std::sync::Arc::new(WorkerExecutor::new(config.clone())),
+            worker_identity: std::sync::Arc::new(std::sync::Mutex::new(Some(
+                profile.worker_id.clone(),
+            ))),
             registration_shutdown: std::sync::Arc::new(std::sync::Mutex::new(None)),
         },
         &config.server.worker_control_cors_allowed_origins,
@@ -297,6 +323,9 @@ pub async fn serve_with_allowed_origins(
 
 async fn worker_info(State(state): State<ControlApiState>) -> Json<WorkerInfoResponse> {
     let mut profile = state.profile.clone();
+    if let Some(worker_id) = state.current_worker_identity() {
+        profile.worker_id = worker_id;
+    }
     if let Some(session) = client_runtime::current_vpn_session(ClientRole::Worker).await {
         if let Some(ip) = session.overlay_ip.as_deref() {
             let port = profile.ip.rsplit(':').next().unwrap_or("50053");
@@ -718,6 +747,7 @@ async fn register_worker(
     .await
     {
         Ok(()) => {
+            state.set_worker_identity(&profile.worker_id);
             state.set_worker_addr(profile.ip.clone());
             // UI-authenticated workers do not start the pre-provisioned
             // registration loop during process startup. Start it after the
@@ -838,6 +868,7 @@ mod tests {
             nodepool_addr: std::sync::Arc::new(std::sync::Mutex::new("127.0.0.1:50051".into())),
             config: HivemindConfig::default(),
             executor: std::sync::Arc::new(super::WorkerExecutor::new(HivemindConfig::default())),
+            worker_identity: std::sync::Arc::new(std::sync::Mutex::new(Some("worker-1".into()))),
             registration_shutdown: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }

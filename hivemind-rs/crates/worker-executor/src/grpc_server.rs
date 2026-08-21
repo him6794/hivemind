@@ -146,10 +146,12 @@ impl TransferLeaseAuthority for NodepoolTransferLeaseAuthority {
 ///     "worker".into(),
 /// );
 /// ```
+pub type WorkerIdentityHandle = Arc<Mutex<Option<String>>>;
+
 pub struct WorkerGrpcState {
     pub config: HivemindConfig,
     pub executor: Arc<WorkerExecutor>,
-    worker_id: Option<String>,
+    worker_id: WorkerIdentityHandle,
     cas_store: Option<Arc<CasChunkStore>>,
     reports: Mutex<HashMap<String, WorkerTaskReport>>,
     transfer_lease_authority: Arc<Mutex<Option<Arc<dyn TransferLeaseAuthority>>>>,
@@ -181,11 +183,35 @@ impl WorkerGrpcState {
         Self {
             config,
             executor,
-            worker_id: Some(worker_id),
+            worker_id: Arc::new(Mutex::new(Some(worker_id))),
             cas_store: crate::executor::cas_store_from_environment(),
             reports: Mutex::new(HashMap::new()),
             transfer_lease_authority: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Return the shared identity handle used by the gRPC and control APIs.
+    #[must_use]
+    pub fn worker_identity_handle(&self) -> WorkerIdentityHandle {
+        self.worker_id.clone()
+    }
+
+    /// Read the currently registered Worker identity.
+    #[must_use]
+    pub fn current_worker_id(&self) -> Option<String> {
+        self.worker_id
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    /// Update the identity after Nodepool accepts a registration.
+    pub fn set_worker_id(&self, worker_id: impl Into<String>) {
+        let mut identity = self
+            .worker_id
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *identity = Some(worker_id.into());
     }
 
     pub fn new_with_transfer_lease_authority(
@@ -217,8 +243,7 @@ impl WorkerGrpcState {
         request_digest: &str,
     ) -> Result<(), Status> {
         let worker_id = self
-            .worker_id
-            .as_deref()
+            .current_worker_id()
             .ok_or_else(|| Status::failed_precondition("worker identity is unavailable"))?;
         let authority = self
             .transfer_lease_authority
@@ -234,7 +259,7 @@ impl WorkerGrpcState {
         authority
             .validate(
                 token,
-                worker_id,
+                &worker_id,
                 task_id,
                 execution_id,
                 attempt_id,
@@ -331,7 +356,7 @@ impl GrpcGeneralComputeChunkService {
             .as_deref()
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| Status::permission_denied("Token is not bound to a worker"))?;
-        if self.state.worker_id.as_deref() != Some(worker_id) {
+        if self.state.current_worker_id().as_deref() != Some(worker_id) {
             return Err(Status::permission_denied(
                 "Token is not bound to this worker",
             ));
@@ -391,7 +416,7 @@ impl GrpcGeneralComputeChunkService {
             return Err(Status::permission_denied("Worker execution token required"));
         }
         if claims.task_id.as_deref() != Some(request.task_id.as_str())
-            || claims.worker_id.as_deref() != self.state.worker_id.as_deref()
+            || claims.worker_id.as_deref() != self.state.current_worker_id().as_deref()
         {
             return Err(Status::permission_denied(
                 "Token is not authorized for this worker assignment",
@@ -490,7 +515,7 @@ impl GrpcGeneralComputeChunkService {
                 request.task_id.clone(),
                 WorkerTaskReport {
                     owner: claims.sub,
-                    worker_id: self.state.worker_id.clone(),
+                    worker_id: self.state.current_worker_id(),
                     output: None,
                     result_torrent: None,
                     usage: None,
@@ -578,7 +603,7 @@ impl GrpcWorkerNodeService {
             task_id.to_string(),
             WorkerTaskReport {
                 owner: owner.to_string(),
-                worker_id: self.state.worker_id.clone(),
+                worker_id: self.state.current_worker_id(),
                 output: None,
                 result_torrent: None,
                 usage: None,
@@ -771,7 +796,7 @@ impl WorkerNodeService for GrpcWorkerNodeService {
             return Err(Status::invalid_argument("unsafe task id"));
         }
         if claims.task_id.as_deref() != Some(req.task_id.as_str())
-            || claims.worker_id.as_deref() != self.state.worker_id.as_deref()
+            || claims.worker_id.as_deref() != self.state.current_worker_id().as_deref()
         {
             return Err(*task_assignment_denied());
         }
@@ -848,7 +873,7 @@ impl WorkerNodeService for GrpcWorkerNodeService {
             id: uuid::Uuid::new_v4(),
             task_id: req.task_id.clone(),
             owner: claims.sub,
-            worker_id: self.state.worker_id.clone(),
+            worker_id: self.state.current_worker_id(),
             worker_ip: None,
             status: TaskStatus::Running,
             status_message: None,
@@ -1534,7 +1559,7 @@ mod tests {
         let state = Arc::new(WorkerGrpcState {
             config,
             executor,
-            worker_id: Some(worker_id.into()),
+            worker_id: Arc::new(Mutex::new(Some(worker_id.into()))),
             cas_store,
             reports: Mutex::new(HashMap::new()),
             transfer_lease_authority: Arc::new(Mutex::new(Some(authority))),
@@ -1887,6 +1912,34 @@ mod tests {
 
         assert!(response.is_err());
         assert_eq!(response.unwrap_err().code(), tonic::Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn execute_task_accepts_identity_updated_after_custom_registration() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service_with_successful_runner(tmp.path());
+        let custom_worker_id = "e2e-custom-worker";
+        let task_id = "custom-worker-execution";
+
+        // Registration is accepted by Nodepool before the control API updates
+        // the shared identity used by the gRPC admission path.
+        service.state.set_worker_id(custom_worker_id);
+        let mut request = execute_request("", "return 42;".into(), "{}".into(), 0);
+        request.task_id = task_id.into();
+        request.token = bound_token_for_worker(
+            test_private_key_pem(),
+            ASSIGNED_OWNER,
+            task_id,
+            custom_worker_id,
+        );
+
+        let response = service
+            .execute_task(Request::new(request))
+            .await
+            .expect("custom registered worker identity should be admitted")
+            .into_inner();
+
+        assert!(response.success, "{}", response.status_message);
     }
 
     #[tokio::test]
@@ -2902,6 +2955,29 @@ mod tests {
         }
     }
 
+    fn test_service_with_successful_runner(base: &std::path::Path) -> GrpcWorkerNodeService {
+        let mut config = HivemindConfig::default();
+        config.executor.sandbox_dir = base.join("sandbox").to_string_lossy().to_string();
+        config.auth.jwt_secret = CONTROL_PLANE_SECRET.into();
+        config.auth.worker_execution_public_key_pem = test_key_pair().1.clone();
+        let executor = Arc::new(WorkerExecutor::new_with_task_runner(
+            config.clone(),
+            |task: hivemind_models::Task, _cancellation: tokio::sync::watch::Receiver<bool>| async move {
+                let mut result = successful_task_result(None);
+                result.task_id = task.task_id;
+                Ok(result)
+            },
+        ));
+        GrpcWorkerNodeService::new(Arc::new(WorkerGrpcState {
+            config,
+            executor,
+            worker_id: Arc::new(Mutex::new(Some(TEST_WORKER_ID.into()))),
+            cas_store: None,
+            reports: Mutex::new(HashMap::new()),
+            transfer_lease_authority: Arc::new(Mutex::new(None)),
+        }))
+    }
+
     fn test_service_with_cancellable_runner(base: &std::path::Path) -> GrpcWorkerNodeService {
         let mut config = HivemindConfig::default();
         config.executor.sandbox_dir = base.join("sandbox").to_string_lossy().to_string();
@@ -2935,7 +3011,7 @@ mod tests {
         GrpcWorkerNodeService::new(Arc::new(WorkerGrpcState {
             config,
             executor,
-            worker_id: Some(TEST_WORKER_ID.into()),
+            worker_id: Arc::new(Mutex::new(Some(TEST_WORKER_ID.into()))),
             cas_store: None,
             reports: Mutex::new(HashMap::new()),
             transfer_lease_authority: Arc::new(Mutex::new(None)),
@@ -2951,7 +3027,7 @@ mod tests {
         GrpcWorkerNodeService::new(Arc::new(WorkerGrpcState {
             config,
             executor,
-            worker_id: Some(TEST_WORKER_ID.into()),
+            worker_id: Arc::new(Mutex::new(Some(TEST_WORKER_ID.into()))),
             cas_store: None,
             reports: Mutex::new(HashMap::new()),
             transfer_lease_authority: Arc::new(Mutex::new(None)),
@@ -2963,6 +3039,15 @@ mod tests {
     }
 
     fn bound_token(_private_key_pem: &str, subject: &str, task_id: &str) -> String {
+        bound_token_for_worker(_private_key_pem, subject, task_id, TEST_WORKER_ID)
+    }
+
+    fn bound_token_for_worker(
+        _private_key_pem: &str,
+        subject: &str,
+        task_id: &str,
+        worker_id: &str,
+    ) -> String {
         WorkerExecutionSigner::from_pem(test_private_key_pem())
             .unwrap()
             .encode_claims(&Claims {
@@ -2970,7 +3055,7 @@ mod tests {
                 user_id: subject.into(),
                 role: Some("worker-execution".into()),
                 task_id: Some(task_id.into()),
-                worker_id: Some(TEST_WORKER_ID.into()),
+                worker_id: Some(worker_id.into()),
                 exp: (Utc::now().timestamp() + 3600) as usize,
                 iat: Utc::now().timestamp() as usize,
             })
