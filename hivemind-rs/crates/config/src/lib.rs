@@ -254,6 +254,9 @@ pub struct VpnConfig {
     /// This is the nodepool's WireGuard listen address.
     #[serde(default)]
     pub wireguard_platform_endpoint: String,
+    /// Maximum time a keyed client startup may wait for the VPN/Nodepool path.
+    #[serde(default = "default_vpn_startup_timeout_secs")]
+    pub startup_timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -336,6 +339,7 @@ impl Default for HivemindConfig {
                 base_virtual_ip: "100.64.0.0".into(),
                 wireguard_platform_public_key: String::new(),
                 wireguard_platform_endpoint: String::new(),
+                startup_timeout_secs: default_vpn_startup_timeout_secs(),
                 vpn_network: "100.64.0.0/10".into(),
             },
             executor: ExecutorConfig {
@@ -407,10 +411,14 @@ impl HivemindConfig {
             self.redis.url = url;
         }
         if let Ok(addr) = std::env::var("NODEPOOL_GRPC_ADDR") {
-            self.server.nodepool_grpc_addr = addr;
+            if !addr.trim().is_empty() {
+                self.server.nodepool_grpc_addr = addr;
+            }
         }
         if let Ok(endpoint) = std::env::var("NODEPOOL_GRPC_ENDPOINT") {
-            self.server.nodepool_grpc_endpoint = Some(endpoint);
+            if !endpoint.trim().is_empty() {
+                self.server.nodepool_grpc_endpoint = Some(endpoint);
+            }
         }
         if let Ok(addr) = std::env::var("MASTER_HTTP_ADDR") {
             self.server.master_http_addr = addr;
@@ -431,7 +439,9 @@ impl HivemindConfig {
             self.server.worker_control_http_addr = addr;
         }
         if let Ok(addr) = std::env::var("WORKER_ADVERTISE_ADDR") {
-            self.server.worker_advertise_addr = Some(addr);
+            if !addr.trim().is_empty() {
+                self.server.worker_advertise_addr = Some(addr);
+            }
         }
         if let Ok(token) = std::env::var("WORKER_NODEPOOL_TOKEN") {
             self.server.worker_nodepool_token = Some(token);
@@ -583,6 +593,10 @@ impl HivemindConfig {
         if let Ok(network) = std::env::var("VPN_NETWORK") {
             self.vpn.vpn_network = network;
         }
+        if let Ok(value) = std::env::var("VPN_STARTUP_TIMEOUT_SECS") {
+            self.vpn.startup_timeout_secs = parse_env("VPN_STARTUP_TIMEOUT_SECS", &value)?;
+        }
+        validate_vpn_startup_timeout(self.vpn.startup_timeout_secs)?;
         Ok(())
     }
 
@@ -647,6 +661,17 @@ mod test_config_tests {
 
 fn default_torrent_announce_url() -> String {
     "http://localhost:6969/announce".into()
+}
+
+fn default_vpn_startup_timeout_secs() -> u64 {
+    30
+}
+
+fn validate_vpn_startup_timeout(value: u64) -> anyhow::Result<()> {
+    if !(1..=300).contains(&value) {
+        anyhow::bail!("VPN_STARTUP_TIMEOUT_SECS must be between 1 and 300 seconds (got {value})");
+    }
+    Ok(())
 }
 
 fn default_torrent_tracker_listen_addr() -> String {
@@ -1252,7 +1277,7 @@ mod tests {
         std::env::set_var("MASTER_HTTP_ADDR", "env-master:8082");
         std::env::set_var("MASTER_UI_DIR", "./env/master-ui");
         std::env::set_var("WORKER_UI_DIR", "./env/worker-ui");
-        std::env::remove_var("WORKER_ADVERTISE_ADDR");
+        std::env::set_var("WORKER_ADVERTISE_ADDR", "");
         std::env::remove_var("EXECUTOR_SANDBOX_MODE");
 
         // When: the runtime loads the configuration through its public entry point.
@@ -1293,6 +1318,35 @@ mod tests {
             Some("file-worker:50053")
         );
         assert_eq!(loaded.executor.sandbox_mode, "file-sandbox");
+    }
+
+    #[test]
+    fn blank_endpoint_environment_values_preserve_file_configuration() {
+        let _environment_lock = lock_environment();
+        let old_endpoint = std::env::var_os("NODEPOOL_GRPC_ENDPOINT");
+        let old_addr = std::env::var_os("NODEPOOL_GRPC_ADDR");
+        std::env::set_var("NODEPOOL_GRPC_ENDPOINT", "   ");
+        std::env::set_var("NODEPOOL_GRPC_ADDR", "");
+
+        let mut config = HivemindConfig::default();
+        config.server.nodepool_grpc_endpoint = Some("file-nodepool:50051".into());
+        config.server.nodepool_grpc_addr = "file-bind:50051".into();
+        config.apply_env_overrides().unwrap();
+
+        match old_endpoint {
+            Some(value) => std::env::set_var("NODEPOOL_GRPC_ENDPOINT", value),
+            None => std::env::remove_var("NODEPOOL_GRPC_ENDPOINT"),
+        }
+        match old_addr {
+            Some(value) => std::env::set_var("NODEPOOL_GRPC_ADDR", value),
+            None => std::env::remove_var("NODEPOOL_GRPC_ADDR"),
+        }
+
+        assert_eq!(
+            config.server.nodepool_grpc_endpoint.as_deref(),
+            Some("file-nodepool:50051")
+        );
+        assert_eq!(config.server.nodepool_grpc_addr, "file-bind:50051");
     }
 
     #[test]
@@ -1387,5 +1441,54 @@ mod tests {
 
         // When/Then: workers can verify with the default public key.
         auth.validate_worker_execution_public_key().unwrap();
+    }
+
+    #[test]
+    fn vpn_startup_timeout_defaults_and_loads_from_environment() {
+        let _environment_lock = lock_environment();
+        let old = std::env::var_os("VPN_STARTUP_TIMEOUT_SECS");
+        std::env::set_var("VPN_STARTUP_TIMEOUT_SECS", "17");
+
+        let loaded = HivemindConfig::load_from_env();
+
+        match old {
+            Some(value) => std::env::set_var("VPN_STARTUP_TIMEOUT_SECS", value),
+            None => std::env::remove_var("VPN_STARTUP_TIMEOUT_SECS"),
+        }
+
+        assert_eq!(HivemindConfig::default().vpn.startup_timeout_secs, 30);
+        assert_eq!(loaded.vpn.startup_timeout_secs, 17);
+    }
+
+    #[test]
+    fn vpn_startup_timeout_rejects_invalid_environment_values() {
+        let _environment_lock = lock_environment();
+        for value in ["0", "301", "not-a-duration"] {
+            let old = std::env::var_os("VPN_STARTUP_TIMEOUT_SECS");
+            std::env::set_var("VPN_STARTUP_TIMEOUT_SECS", value);
+
+            let error = HivemindConfig::default()
+                .apply_env_overrides()
+                .expect_err("invalid VPN startup timeout must fail configuration loading");
+
+            match old {
+                Some(value) => std::env::set_var("VPN_STARTUP_TIMEOUT_SECS", value),
+                None => std::env::remove_var("VPN_STARTUP_TIMEOUT_SECS"),
+            }
+            assert!(error.to_string().contains("VPN_STARTUP_TIMEOUT_SECS"));
+        }
+    }
+
+    #[test]
+    fn json_config_omitting_vpn_startup_timeout_uses_default() {
+        let mut json = serde_json::to_value(HivemindConfig::default()).unwrap();
+        json["vpn"]
+            .as_object_mut()
+            .unwrap()
+            .remove("startup_timeout_secs");
+
+        let config: HivemindConfig = serde_json::from_value(json).unwrap();
+
+        assert_eq!(config.vpn.startup_timeout_secs, 30);
     }
 }

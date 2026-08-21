@@ -10,17 +10,19 @@
 
 use anyhow::{bail, Context, Result};
 use hivemind_config::HivemindConfig;
+use rand::{rngs::OsRng, RngCore};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::error::Error as _;
 #[cfg(target_os = "windows")]
 use std::ffi::{CStr, CString};
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 #[cfg(target_os = "windows")]
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 #[cfg(target_os = "windows")]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(target_os = "windows")]
@@ -28,6 +30,11 @@ use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex as TokioMutex;
 use tokio::time::sleep;
+use tonic::client::Grpc;
+use tonic::codec::ProstCodec;
+use tonic::codegen::http::uri::PathAndQuery;
+use tonic::transport::Endpoint;
+use tonic::Request;
 
 /// Official public product endpoints baked into downloaded clients.
 pub const DEFAULT_WEBSITE_API_BASE: &str = "https://hivemind.justin0711.com";
@@ -44,6 +51,12 @@ pub const DEFAULT_PLATFORM_WG_PUBLIC_KEY: &str = "";
 const WEBSITE_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const WEBSITE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const NODEPOOL_PROBE_TIMEOUT: Duration = Duration::from_millis(800);
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct TransportProbeRequest {}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct TransportProbeResponse {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ClientRole {
@@ -77,6 +90,57 @@ pub enum VpnBootstrapPlan {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VpnBootstrapState {
+    Disabled,
+    AwaitingLogin,
+    Joining,
+    Ready,
+    RetryableFailure,
+    ReauthenticationRequired,
+}
+
+impl VpnBootstrapState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::AwaitingLogin => "awaiting_login",
+            Self::Joining => "joining",
+            Self::Ready => "ready",
+            Self::RetryableFailure => "retryable_failure",
+            Self::ReauthenticationRequired => "reauthentication_required",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VpnBootstrapStatus {
+    pub state: VpnBootstrapState,
+    pub endpoint: Option<String>,
+    pub overlay_ip: Option<String>,
+    pub message: Option<String>,
+}
+
+impl VpnBootstrapStatus {
+    pub fn ready(endpoint: impl Into<String>, overlay_ip: Option<&str>) -> Self {
+        Self {
+            state: VpnBootstrapState::Ready,
+            endpoint: Some(endpoint.into()),
+            overlay_ip: overlay_ip.map(str::to_string),
+            message: None,
+        }
+    }
+
+    fn new(state: VpnBootstrapState, message: Option<String>) -> Self {
+        Self {
+            state,
+            endpoint: None,
+            overlay_ip: None,
+            message,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct WebsiteLoginResponse {
     success: bool,
@@ -89,13 +153,9 @@ struct WebsiteLoginResponse {
 struct WebsiteVpnConfigResponse {
     success: bool,
     #[serde(default)]
-    message: String,
-    #[serde(default)]
     login_server: String,
     #[serde(default)]
     auth_key: String,
-    #[serde(default)]
-    client_id: String,
 }
 
 /// VPN transport type - WireGuard only
@@ -316,17 +376,17 @@ mod libtailscale_ffi {
             unsafe {
                 Ok(Api {
                     _module: module,
-                    new: symbol(module, b"tailscale_new\\0")?,
-                    set_dir: symbol(module, b"tailscale_set_dir\\0")?,
-                    set_hostname: symbol(module, b"tailscale_set_hostname\\0")?,
-                    set_authkey: symbol(module, b"tailscale_set_authkey\\0")?,
-                    set_control_url: symbol(module, b"tailscale_set_control_url\\0")?,
-                    up: symbol(module, b"tailscale_up\\0")?,
-                    close: symbol(module, b"tailscale_close\\0")?,
-                    loopback: symbol(module, b"tailscale_loopback\\0")?,
-                    getips: symbol(module, b"tailscale_getips\\0")?,
-                    listen_forward: symbol(module, b"tailscale_listen_forward\\0")?,
-                    errmsg: symbol(module, b"tailscale_errmsg\\0")?,
+                    new: symbol(module, b"tailscale_new\0")?,
+                    set_dir: symbol(module, b"tailscale_set_dir\0")?,
+                    set_hostname: symbol(module, b"tailscale_set_hostname\0")?,
+                    set_authkey: symbol(module, b"tailscale_set_authkey\0")?,
+                    set_control_url: symbol(module, b"tailscale_set_control_url\0")?,
+                    up: symbol(module, b"tailscale_up\0")?,
+                    close: symbol(module, b"tailscale_close\0")?,
+                    loopback: symbol(module, b"tailscale_loopback\0")?,
+                    getips: symbol(module, b"tailscale_getips\0")?,
+                    listen_forward: symbol(module, b"tailscale_listen_forward\0")?,
+                    errmsg: symbol(module, b"tailscale_errmsg\0")?,
                 })
             }
         }
@@ -494,9 +554,42 @@ impl VpnSession {
 
 /// Global VPN session storage
 static VPN_SESSIONS: OnceLock<StdMutex<HashMap<ClientRole, Arc<VpnSession>>>> = OnceLock::new();
+static VPN_STATUSES: OnceLock<StdMutex<HashMap<ClientRole, VpnBootstrapStatus>>> = OnceLock::new();
+static VPN_BOOTSTRAP_LOCKS: OnceLock<StdMutex<HashMap<ClientRole, Arc<TokioMutex<()>>>>> =
+    OnceLock::new();
 
 fn sessions_map() -> &'static StdMutex<HashMap<ClientRole, Arc<VpnSession>>> {
     VPN_SESSIONS.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+fn statuses_map() -> &'static StdMutex<HashMap<ClientRole, VpnBootstrapStatus>> {
+    VPN_STATUSES.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+fn bootstrap_locks_map() -> &'static StdMutex<HashMap<ClientRole, Arc<TokioMutex<()>>>> {
+    VPN_BOOTSTRAP_LOCKS.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+fn bootstrap_lock(role: ClientRole) -> Arc<TokioMutex<()>> {
+    let mut locks = bootstrap_locks_map().lock().unwrap();
+    locks
+        .entry(role)
+        .or_insert_with(|| Arc::new(TokioMutex::new(())))
+        .clone()
+}
+
+fn set_vpn_status(role: ClientRole, status: VpnBootstrapStatus) {
+    statuses_map().lock().unwrap().insert(role, status);
+}
+
+/// Return the non-secret current bootstrap state for a client role.
+pub fn current_vpn_status(role: ClientRole) -> VpnBootstrapStatus {
+    statuses_map()
+        .lock()
+        .unwrap()
+        .get(&role)
+        .cloned()
+        .unwrap_or_else(|| VpnBootstrapStatus::new(VpnBootstrapState::AwaitingLogin, None))
 }
 
 /// Store a VPN session
@@ -556,11 +649,48 @@ pub fn plan_vpn_bootstrap(
     }
 }
 
+fn worker_grpc_addr_for_role(config: &HivemindConfig, role: ClientRole) -> Option<&str> {
+    match role {
+        ClientRole::Worker => Some(config.server.worker_grpc_addr.as_str()),
+        ClientRole::Master => None,
+    }
+}
+
 /// Best-effort startup bootstrap when an operator already provisioned an auth key.
 ///
 /// This is intentionally a no-op for typical downloaded clients. Those obtain a
 /// preauth key automatically during login via website-api.
-pub async fn ensure_env_vpn(config: &HivemindConfig, role: ClientRole) -> Result<()> {
+pub async fn ensure_env_vpn(config: &HivemindConfig, role: ClientRole) -> Result<Option<String>> {
+    let configured_endpoint = resolve_nodepool_grpc_endpoint(config);
+    ensure_env_vpn_for_endpoint(config, role, &configured_endpoint).await
+}
+
+/// Bootstrap a role-specific Headscale session for a selected Nodepool endpoint.
+///
+/// Returning the effective endpoint is important on Windows: embedded libtailscale
+/// exposes a local SOCKS bridge because ordinary gRPC sockets cannot route through
+/// the userspace TUN directly. `None` means no explicit auth key was configured.
+pub async fn ensure_env_vpn_for_endpoint(
+    config: &HivemindConfig,
+    role: ClientRole,
+    configured_endpoint: &str,
+) -> Result<Option<String>> {
+    let worker_grpc_addr = worker_grpc_addr_for_role(config, role);
+    ensure_env_vpn_for_endpoint_with_worker_addr(
+        config,
+        role,
+        configured_endpoint,
+        worker_grpc_addr,
+    )
+    .await
+}
+
+async fn ensure_env_vpn_for_endpoint_with_worker_addr(
+    config: &HivemindConfig,
+    role: ClientRole,
+    configured_endpoint: &str,
+    worker_grpc_addr: Option<&str>,
+) -> Result<Option<String>> {
     let prefix = role.env_prefix();
     let auth_key = first_nonempty(&[
         env_trim(&format!("{prefix}_VPN_AUTHKEY")),
@@ -593,35 +723,70 @@ pub async fn ensure_env_vpn(config: &HivemindConfig, role: ClientRole) -> Result
                 role.as_str(),
                 prefix
             );
-            Ok(())
+            Ok(None)
         }
         VpnBootstrapPlan::Join {
             auth_key,
             login_server,
             hostname,
         } => {
-            join_and_confirm_nodepool(
-                role,
-                &auth_key,
-                &login_server,
-                &hostname,
-                &resolve_nodepool_grpc_endpoint(config),
-            )
-            .await?;
-            Ok(())
+            let endpoint = if has_persisted_vpn_state(role) {
+                match join_and_confirm_nodepool(
+                    role,
+                    None,
+                    &login_server,
+                    &hostname,
+                    configured_endpoint,
+                    worker_grpc_addr,
+                    Duration::from_secs(config.vpn.startup_timeout_secs),
+                )
+                .await
+                {
+                    Ok(endpoint) => endpoint,
+                    Err(err) => {
+                        clear_vpn_session(role).await;
+                        tracing::warn!(
+                            "{} persisted VPN state could not rehydrate for explicit auth-key startup; resetting local state: {}",
+                            role.as_str(),
+                            err
+                        );
+                        reset_libtailscale_state_for_new_auth_key(role)?;
+                        join_and_confirm_nodepool(
+                            role,
+                            Some(&auth_key),
+                            &login_server,
+                            &hostname,
+                            configured_endpoint,
+                            worker_grpc_addr,
+                            Duration::from_secs(config.vpn.startup_timeout_secs),
+                        )
+                        .await?
+                    }
+                }
+            } else {
+                reset_libtailscale_state_for_new_auth_key(role)?;
+                join_and_confirm_nodepool(
+                    role,
+                    Some(&auth_key),
+                    &login_server,
+                    &hostname,
+                    configured_endpoint,
+                    worker_grpc_addr,
+                    Duration::from_secs(config.vpn.startup_timeout_secs),
+                )
+                .await?
+            };
+            set_ready_vpn_status(role, &endpoint).await;
+            Ok(Some(endpoint))
         }
     }
 }
 
 /// Automatic VPN join for a logged-in user using the official website-api.
 ///
-/// Flow:
-/// 1. Prefer the JWT already returned by nodepool when reachable.
-/// 2. Otherwise login to website-api with the same credentials.
-/// 3. POST `/api/vpn/config` to obtain WireGuard config (login_server + auth_key with embedded WireGuard keys).
-/// 4. Join WireGuard VPN and return.
-///
-/// Returns `Ok(None)` only when website-api bootstrap is explicitly disabled.
+/// This compatibility wrapper accepts credentials for the initial login path,
+/// then delegates the actual enrollment to the token-only helper. Passwords
+/// never enter the VPN config request.
 pub async fn ensure_user_vpn(
     config: &HivemindConfig,
     role: ClientRole,
@@ -629,17 +794,47 @@ pub async fn ensure_user_vpn(
     password: &str,
     existing_token: Option<&str>,
 ) -> Result<Option<String>> {
-    let configured_endpoint = resolve_nodepool_grpc_endpoint(config);
+    let lock = bootstrap_lock(role);
+    let _guard = lock.lock().await;
+    ensure_user_vpn_inner(config, role, username, password, existing_token).await
+}
 
-    // Explicit env key still wins and does not need website-api.
+/// Rehydrate or enroll a role using an already-issued Nodepool JWT.
+///
+/// The JWT is sent only to the protected Website API. The returned Headscale
+/// auth key is consumed by this process and is never returned to the caller.
+pub async fn ensure_user_vpn_for_token(
+    config: &HivemindConfig,
+    role: ClientRole,
+    token: &str,
+) -> Result<Option<String>> {
+    let lock = bootstrap_lock(role);
+    let _guard = lock.lock().await;
+    ensure_user_vpn_for_token_inner(config, role, token).await
+}
+
+async fn ensure_user_vpn_inner(
+    config: &HivemindConfig,
+    role: ClientRole,
+    username: &str,
+    password: &str,
+    existing_token: Option<&str>,
+) -> Result<Option<String>> {
     if env_auth_key_present(role) {
-        ensure_env_vpn(config, role).await?;
-        let endpoint = resolve_reachable_nodepool_endpoint(role, &configured_endpoint).await?;
-        wait_for_nodepool_endpoint(&endpoint).await;
+        let endpoint =
+            ensure_env_vpn_for_endpoint(config, role, &resolve_nodepool_grpc_endpoint(config))
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("explicit VPN auth key disappeared during bootstrap")
+                })?;
         return Ok(Some(endpoint));
     }
 
     let Some(website_base) = website_api_base(config, role) else {
+        set_vpn_status(
+            role,
+            VpnBootstrapStatus::new(VpnBootstrapState::Disabled, None),
+        );
         tracing::debug!(
             "{} website-api base disabled; skipping automatic website VPN bootstrap",
             role.as_str()
@@ -647,71 +842,185 @@ pub async fn ensure_user_vpn(
         return Ok(None);
     };
 
-    // If the overlay control plane is already reachable, do not re-issue keys.
-    if let Some(endpoint) = first_reachable_nodepool_endpoint(role, &configured_endpoint).await {
-        tracing::info!(
-            "{} nodepool already reachable at {}; skipping VPN re-join",
-            role.as_str(),
-            endpoint
-        );
-        return Ok(Some(endpoint));
-    }
-
     let token = match existing_token.map(str::trim).filter(|v| !v.is_empty()) {
         Some(token) => token.to_string(),
         None => website_login(&website_base, username, password).await?,
     };
+    ensure_user_vpn_for_token_inner(config, role, &token).await
+}
 
-    let hostname = first_nonempty(&[
-        env_trim(&format!("{}_VPN_HOSTNAME", role.env_prefix())),
-        env_trim("HOSTNAME"),
-        env_trim("COMPUTERNAME"),
-        Some(format!("{}-{}", role.as_str(), sanitize_hostname(username))),
-    ])
-    .unwrap_or_else(|| format!("{}-{}", role.as_str(), short_host_id()));
+async fn ensure_user_vpn_for_token_inner(
+    config: &HivemindConfig,
+    role: ClientRole,
+    token: &str,
+) -> Result<Option<String>> {
+    let token = token.trim();
+    if token.is_empty() {
+        set_vpn_status(
+            role,
+            VpnBootstrapStatus::new(
+                VpnBootstrapState::ReauthenticationRequired,
+                Some("a non-empty bearer token is required".into()),
+            ),
+        );
+        bail!("a non-empty bearer token is required for VPN bootstrap");
+    }
 
-    let vpn = website_issue_vpn_config(&website_base, &token, &hostname).await?;
-    // NODEPOOL_GRPC_ENDPOINT/config is authoritative. The public website-api
-    // must not redirect a client to an internal or stale endpoint from the
-    // VPN response.
+    if env_auth_key_present(role) {
+        let endpoint =
+            ensure_env_vpn_for_endpoint(config, role, &resolve_nodepool_grpc_endpoint(config))
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("explicit VPN auth key disappeared during bootstrap")
+                })?;
+        return Ok(Some(endpoint));
+    }
+
+    let Some(website_base) = website_api_base(config, role) else {
+        set_vpn_status(
+            role,
+            VpnBootstrapStatus::new(VpnBootstrapState::Disabled, None),
+        );
+        return Ok(None);
+    };
+
+    let configured_endpoint = resolve_nodepool_grpc_endpoint(config);
+    if let Some(endpoint) = first_reachable_nodepool_endpoint(role, &configured_endpoint).await {
+        set_ready_vpn_status(role, &endpoint).await;
+        return Ok(Some(endpoint));
+    }
+
+    let device_name = client_device_name(role)?;
     let login_server = first_nonempty(&[
-        Some(vpn.login_server.clone()).filter(|v| !v.trim().is_empty()),
         env_trim(&format!("{}_VPN_LOGIN_SERVER", role.env_prefix())),
         env_trim("HEADSCALE_LOGIN_SERVER"),
         Some(config.vpn.headscale_login_server.clone()).filter(|v| !v.trim().is_empty()),
         Some(config.vpn.headscale_url.clone()).filter(|v| !v.trim().is_empty()),
         Some(DEFAULT_HEADSCALE_LOGIN_SERVER.to_string()),
     ])
-    .ok_or_else(|| {
-        anyhow::anyhow!(
-            "website-api VPN config did not include login_server and no HEADSCALE_LOGIN_SERVER fallback is set"
-        )
-    })?;
+    .ok_or_else(|| anyhow::anyhow!("no Headscale login server is configured"))?;
+    let hostname = first_nonempty(&[
+        env_trim(&format!("{}_VPN_HOSTNAME", role.env_prefix())),
+        env_trim("HOSTNAME"),
+        env_trim("COMPUTERNAME"),
+        Some(device_name.clone()),
+    ])
+    .unwrap_or_else(|| device_name.clone());
 
-    if vpn.auth_key.trim().is_empty() {
-        bail!(
-            "website-api VPN config did not include auth_key: {}",
-            vpn.message
-        );
+    set_vpn_status(
+        role,
+        VpnBootstrapStatus::new(VpnBootstrapState::Joining, None),
+    );
+
+    // A successful libtailscale state can reconnect without issuing another
+    // one-time key. If that state is stale or revoked, fall through to the
+    // authenticated Website API issuance path below.
+    if has_persisted_vpn_state(role) {
+        match join_and_confirm_nodepool(
+            role,
+            None,
+            &login_server,
+            &hostname,
+            &configured_endpoint,
+            worker_grpc_addr_for_role(config, role),
+            Duration::from_secs(config.vpn.startup_timeout_secs),
+        )
+        .await
+        {
+            Ok(endpoint) => {
+                set_ready_vpn_status(role, &endpoint).await;
+                return Ok(Some(endpoint));
+            }
+            Err(err) => {
+                clear_vpn_session(role).await;
+                tracing::warn!(
+                    "{} persisted VPN state could not rehydrate; requesting a fresh enrollment key: {}",
+                    role.as_str(),
+                    err
+                );
+            }
+        }
     }
 
-    // website-api may return hierarchical client ids like `user:name:role`.
-    // WireGuard hostnames must be valid, so always sanitize before joining.
-    let join_hostname = sanitize_hostname(if vpn.client_id.trim().is_empty() {
-        hostname.as_str()
-    } else {
-        vpn.client_id.trim()
-    });
+    let vpn = match website_issue_vpn_config(&website_base, token, &device_name).await {
+        Ok(vpn) => vpn,
+        Err(err) => {
+            let message = err.to_string();
+            let state = if message.contains("401")
+                || message.to_ascii_lowercase().contains("unauthorized")
+                || message.to_ascii_lowercase().contains("token")
+            {
+                VpnBootstrapState::ReauthenticationRequired
+            } else {
+                VpnBootstrapState::RetryableFailure
+            };
+            set_vpn_status(role, VpnBootstrapStatus::new(state, Some(message.clone())));
+            return Err(err);
+        }
+    };
 
-    let endpoint = join_and_confirm_nodepool(
+    if vpn.auth_key.trim().is_empty() {
+        let err = anyhow::anyhow!("website-api VPN config did not include an auth_key");
+        set_vpn_status(
+            role,
+            VpnBootstrapStatus::new(VpnBootstrapState::RetryableFailure, Some(err.to_string())),
+        );
+        return Err(err);
+    }
+
+    let login_server = first_nonempty(&[
+        Some(vpn.login_server.clone()).filter(|v| !v.trim().is_empty()),
+        Some(login_server),
+    ])
+    .ok_or_else(|| anyhow::anyhow!("website-api VPN config did not include login_server"))?;
+    // The Website API client ID is user-scoped and can exceed Headscale's
+    // 63-character DNS-label limit once sanitized. The persisted role/device
+    // label is already stable and bounded, so use it for the actual node name.
+    let join_hostname = bounded_hostname(&device_name);
+
+    // A newly issued key must not be ignored by tsnet because a previous
+    // failed/revoked session left a NeedsLogin state file behind.
+    reset_libtailscale_state_for_new_auth_key(role)?;
+
+    match join_and_confirm_nodepool(
         role,
-        vpn.auth_key.trim(),
+        Some(vpn.auth_key.trim()),
         login_server.trim_end_matches('/'),
         &join_hostname,
         &configured_endpoint,
+        worker_grpc_addr_for_role(config, role),
+        Duration::from_secs(config.vpn.startup_timeout_secs),
     )
-    .await?;
-    Ok(Some(endpoint))
+    .await
+    {
+        Ok(endpoint) => {
+            set_ready_vpn_status(role, &endpoint).await;
+            Ok(Some(endpoint))
+        }
+        Err(err) => {
+            let message = err.to_string();
+            set_vpn_status(
+                role,
+                VpnBootstrapStatus::new(VpnBootstrapState::RetryableFailure, Some(message)),
+            );
+            Err(err)
+        }
+    }
+}
+
+async fn set_ready_vpn_status(role: ClientRole, endpoint: &str) {
+    let overlay_ip = current_vpn_session(role)
+        .await
+        .and_then(|session| session.overlay_ip.clone());
+    set_vpn_status(
+        role,
+        VpnBootstrapStatus {
+            state: VpnBootstrapState::Ready,
+            endpoint: Some(endpoint.to_string()),
+            overlay_ip,
+            message: None,
+        },
+    );
 }
 
 pub fn website_api_base(config: &HivemindConfig, role: ClientRole) -> Option<String> {
@@ -762,7 +1071,18 @@ pub fn resolve_nodepool_grpc_endpoint(config: &HivemindConfig) -> String {
     DEFAULT_NODEPOOL_GRPC_ENDPOINT.to_string()
 }
 
-/// Resolve a nodepool endpoint that is reachable after VPN join.
+/// Normalize a configured nodepool host/port for consumers that add their own
+/// transport scheme, such as the Windows userspace SOCKS bridge.
+pub fn normalize_nodepool_endpoint(endpoint: &str) -> String {
+    endpoint
+        .trim()
+        .strip_prefix("http://")
+        .or_else(|| endpoint.trim().strip_prefix("https://"))
+        .unwrap_or(endpoint.trim())
+        .trim_end_matches('/')
+        .to_string()
+}
+
 ///
 /// Explicit operator overrides still win when they answer TCP. Otherwise the
 /// client looks up the platform nodepool WireGuard peer and uses its overlay IP.
@@ -841,16 +1161,18 @@ async fn nodepool_endpoint_candidates(
     };
 
     // Local userspace TCP bridge first: ordinary gRPC sockets cannot use the
-    // userspace TUN, so we expose nodepool on a localhost forwarder.
+    // userspace TUN, so we expose nodepool on a localhost forwarder. Once a
+    // bridge exists, never bypass it with the raw endpoint after a keyed join.
     if let Some(session) = session {
         if let Some(bridge) = session.bridge_endpoint() {
             push_unique(bridge);
+            return candidates;
         }
     }
 
-    // The configured endpoint is authoritative. Do not guess alternate
-    // hostnames/IPs: deployments may intentionally expose nodepool at a
-    // private or user-selected address.
+    // The configured endpoint is authoritative when the active transport does
+    // not require a userspace bridge (for example, a future kernel WireGuard
+    // integration or direct/no-key local development).
     push_unique(configured_endpoint.to_string());
     candidates
 }
@@ -997,22 +1319,18 @@ async fn website_issue_vpn_config(
     let status = response.status();
     let raw = response.text().await?;
     let body: WebsiteVpnConfigResponse = serde_json::from_str(&raw).with_context(|| {
-        format!(
-            "website-api VPN config returned HTTP {} with invalid JSON: {}",
-            status,
-            truncate_response_body(&raw)
-        )
+        format!("website-api VPN config returned HTTP {status} with invalid JSON")
     })?;
     if !status.is_success() || !body.success {
-        bail!("website-api VPN config failed: {}", body.message);
+        bail!("website-api VPN config failed with HTTP {status}");
     }
     Ok(body)
 }
 
 fn truncate_response_body(body: &str) -> String {
     let compact = body.trim().replace(['\r', '\n'], " ");
-    if compact.len() > 240 {
-        format!("{}…", &compact[..240])
+    if compact.chars().count() > 240 {
+        format!("{}…", compact.chars().take(240).collect::<String>())
     } else {
         compact
     }
@@ -1026,46 +1344,124 @@ fn website_http_client() -> Result<reqwest::Client> {
         .context("failed to create website-api HTTP client")
 }
 
-async fn join_and_confirm_nodepool(
+async fn bring_up_vpn_bounded(
     role: ClientRole,
-    auth_key: &str,
+    auth_key: Option<&str>,
     login_server: &str,
     hostname: &str,
     configured_endpoint: &str,
-) -> Result<String> {
-    let session = bring_up_vpn(role, auth_key, login_server, hostname, configured_endpoint).await?;
-    spawn_vpn_keepalive(role, auth_key, login_server, hostname, configured_endpoint);
+    worker_grpc_addr: Option<&str>,
+    startup_timeout: Duration,
+) -> Result<Arc<VpnSession>> {
+    tokio::time::timeout(
+        startup_timeout.max(Duration::from_secs(1)),
+        bring_up_vpn(
+            role,
+            auth_key,
+            login_server,
+            hostname,
+            configured_endpoint,
+            worker_grpc_addr,
+        ),
+    )
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "{} VPN startup exceeded the configured timeout of {:?}",
+            role.as_str(),
+            startup_timeout
+        )
+    })?
+}
 
-    // Do not block login on a TCP health probe or try alternate endpoints.
-    // gRPC connects directly to the configured nodepool endpoint below and
-    // reports a bounded connection error if the VPN/control plane is down.
-    Ok(session
-        .bridge_endpoint()
-        .unwrap_or_else(|| configured_endpoint.to_string()))
+async fn join_and_confirm_nodepool(
+    role: ClientRole,
+    auth_key: Option<&str>,
+    login_server: &str,
+    hostname: &str,
+    configured_endpoint: &str,
+    worker_grpc_addr: Option<&str>,
+    startup_timeout: Duration,
+) -> Result<String> {
+    let startup_timeout = startup_timeout.max(Duration::from_secs(1));
+    let hostname = bounded_hostname(hostname);
+    let startup_deadline = Instant::now() + startup_timeout;
+    let session = bring_up_vpn_bounded(
+        role,
+        auth_key,
+        login_server,
+        &hostname,
+        configured_endpoint,
+        worker_grpc_addr,
+        startup_timeout,
+    )
+    .await?;
+    let remaining = startup_deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        bail!(
+            "{} VPN startup exceeded the configured timeout of {:?} before Nodepool readiness",
+            role.as_str(),
+            startup_timeout
+        );
+    }
+    let endpoint =
+        wait_for_nodepool_after_join(role, session.as_ref(), configured_endpoint, remaining)
+            .await?;
+    if let Err(err) = mark_persisted_vpn_state(role, login_server, &hostname) {
+        tracing::warn!(
+            "{} VPN joined but its local state marker could not be persisted: {}",
+            role.as_str(),
+            err
+        );
+    }
+    spawn_vpn_keepalive(
+        role,
+        auth_key,
+        login_server,
+        &hostname,
+        configured_endpoint,
+        worker_grpc_addr,
+        startup_timeout,
+    );
+    Ok(endpoint)
 }
 
 fn spawn_vpn_keepalive(
     role: ClientRole,
-    auth_key: &str,
+    auth_key: Option<&str>,
     login_server: &str,
     hostname: &str,
     configured_endpoint: &str,
+    worker_grpc_addr: Option<&str>,
+    startup_timeout: Duration,
 ) {
-    let auth_key = auth_key.to_string();
+    let auth_key = auth_key.map(str::to_string);
     let login_server = login_server.to_string();
     let hostname = hostname.to_string();
     let configured_endpoint = configured_endpoint.to_string();
+    let worker_grpc_addr = worker_grpc_addr.map(str::to_string);
     tokio::spawn(async move {
-        vpn_keepalive_loop(role, auth_key, login_server, hostname, configured_endpoint).await;
+        vpn_keepalive_loop(
+            role,
+            auth_key,
+            login_server,
+            hostname,
+            configured_endpoint,
+            worker_grpc_addr,
+            startup_timeout,
+        )
+        .await;
     });
 }
 
 async fn vpn_keepalive_loop(
     role: ClientRole,
-    auth_key: String,
+    auth_key: Option<String>,
     login_server: String,
     hostname: String,
     configured_endpoint: String,
+    worker_grpc_addr: Option<String>,
+    startup_timeout: Duration,
 ) {
     let mut failures = 0u32;
     loop {
@@ -1077,25 +1473,65 @@ async fn vpn_keepalive_loop(
                     "{} VPN keepalive: session missing; re-joining",
                     role.as_str()
                 );
-                let _ = bring_up_vpn(
+                match bring_up_vpn_bounded(
                     role,
-                    &auth_key,
+                    auth_key.as_deref(),
                     &login_server,
                     &hostname,
                     &configured_endpoint,
+                    worker_grpc_addr.as_deref(),
+                    startup_timeout,
                 )
-                .await;
+                .await
+                {
+                    Ok(session) => {
+                        match wait_for_nodepool_after_join(
+                            role,
+                            session.as_ref(),
+                            &configured_endpoint,
+                            startup_timeout,
+                        )
+                        .await
+                        {
+                            Ok(endpoint) => set_ready_vpn_status(role, &endpoint).await,
+                            Err(err) => {
+                                set_vpn_status(
+                                    role,
+                                    VpnBootstrapStatus::new(
+                                        VpnBootstrapState::RetryableFailure,
+                                        Some(err.to_string()),
+                                    ),
+                                );
+                                tracing::warn!(
+                                    "{} VPN rejoin nodepool readiness failed: {err}",
+                                    role.as_str()
+                                );
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        set_vpn_status(
+                            role,
+                            VpnBootstrapStatus::new(
+                                VpnBootstrapState::RetryableFailure,
+                                Some(err.to_string()),
+                            ),
+                        );
+                        tracing::warn!("{} VPN rejoin failed: {err}", role.as_str());
+                    }
+                }
                 continue;
             }
         };
 
-        // Check WireGuard tunnel connectivity
         let ping_ok = wireguard_is_up(session.as_ref()).await.unwrap_or(false);
         let endpoint_ok = first_reachable_nodepool_endpoint(role, &configured_endpoint)
             .await
             .is_some();
 
-        if ping_ok || endpoint_ok {
+        // A live tunnel alone is not sufficient; Nodepool must complete the
+        // same gRPC transport probe used during startup.
+        if endpoint_ok {
             if failures > 0 {
                 tracing::info!(
                     "{} VPN keepalive restored (ping_ok={ping_ok}, endpoint_ok={endpoint_ok})",
@@ -1107,31 +1543,64 @@ async fn vpn_keepalive_loop(
         }
 
         failures = failures.saturating_add(1);
+        set_vpn_status(
+            role,
+            VpnBootstrapStatus::new(
+                VpnBootstrapState::RetryableFailure,
+                Some("Nodepool readiness lost; reconnecting VPN".into()),
+            ),
+        );
         tracing::warn!(
             "{} VPN keepalive missed nodepool (streak={failures}); forcing reconnect",
             role.as_str()
         );
-        if let Err(err) = bring_up_vpn(
+        match bring_up_vpn_bounded(
             role,
-            &auth_key,
+            auth_key.as_deref(),
             &login_server,
             &hostname,
             &configured_endpoint,
+            worker_grpc_addr.as_deref(),
+            startup_timeout,
         )
         .await
         {
-            tracing::warn!("{} VPN reconnect failed: {err}", role.as_str());
-            continue;
-        }
-        let _ = wait_for_nodepool_after_join(
-            role,
-            current_vpn_session(role)
+            Ok(new_session) => {
+                match wait_for_nodepool_after_join(
+                    role,
+                    new_session.as_ref(),
+                    &configured_endpoint,
+                    startup_timeout,
+                )
                 .await
-                .as_deref()
-                .unwrap_or(session.as_ref()),
-            &configured_endpoint,
-        )
-        .await;
+                {
+                    Ok(endpoint) => set_ready_vpn_status(role, &endpoint).await,
+                    Err(err) => {
+                        set_vpn_status(
+                            role,
+                            VpnBootstrapStatus::new(
+                                VpnBootstrapState::RetryableFailure,
+                                Some(err.to_string()),
+                            ),
+                        );
+                        tracing::warn!(
+                            "{} VPN reconnect nodepool readiness failed: {err}",
+                            role.as_str()
+                        );
+                    }
+                }
+            }
+            Err(err) => {
+                set_vpn_status(
+                    role,
+                    VpnBootstrapStatus::new(
+                        VpnBootstrapState::RetryableFailure,
+                        Some(err.to_string()),
+                    ),
+                );
+                tracing::warn!("{} VPN reconnect failed: {err}", role.as_str());
+            }
+        }
     }
 }
 
@@ -1139,17 +1608,28 @@ async fn wait_for_nodepool_after_join(
     role: ClientRole,
     session: &VpnSession,
     configured_endpoint: &str,
+    startup_timeout: Duration,
 ) -> Result<String> {
+    let timeout = startup_timeout;
+    let deadline = Instant::now() + timeout;
     let mut last_err = None;
-    for attempt in 1..=40 {
+    let mut attempt = 0u32;
+
+    loop {
+        if Instant::now() >= deadline {
+            break;
+        }
+        attempt = attempt.saturating_add(1);
         if attempt == 1 {
             tracing::info!(
-                "{} probing nodepool TCP/gRPC reachability after VPN join (configured endpoint: {})",
+                "{} probing nodepool gRPC reachability after VPN join (configured endpoint: {}, timeout: {:?})",
                 role.as_str(),
-                configured_endpoint
+                configured_endpoint,
+                timeout
             );
         }
-        // Check WireGuard tunnel is up
+        // Check WireGuard tunnel is up periodically without making it the only
+        // readiness signal; the protocol probe below is authoritative.
         if attempt == 1 || attempt % 4 == 0 {
             let _ = wireguard_is_up(session).await;
         }
@@ -1185,37 +1665,34 @@ async fn wait_for_nodepool_after_join(
                     );
                 }
                 tracing::info!(
-                    "{} nodepool connectivity probe succeeded: {}",
+                    "{} nodepool gRPC connectivity probe succeeded: {}",
                     role.as_str(),
                     endpoint
                 );
                 return Ok(endpoint);
             }
             None => {
-                last_err = Some(anyhow::anyhow!("no candidate accepted TCP"));
-                // Every few failures, re-run VPN up to heal flaky joins.
-                if attempt % 8 == 0 {
-                    tracing::warn!(
-                        "{} nodepool still down after {attempt} probes; re-running VPN up",
-                        role.as_str()
-                    );
-                    let _ = bring_up_vpn(
-                        role,
-                        &session.auth_key,
-                        &session.login_server,
-                        &session.hostname,
-                        configured_endpoint,
-                    )
-                    .await;
+                last_err = Some(anyhow::anyhow!(
+                    "no candidate completed the gRPC transport handshake"
+                ));
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
                 }
-                sleep(Duration::from_millis(500)).await;
+                sleep(remaining.min(Duration::from_millis(500))).await;
             }
         }
     }
 
-    let candidates = nodepool_endpoint_candidates(role, configured_endpoint, Some(session)).await;
+    let current_session = current_vpn_session(role).await;
+    let candidates = nodepool_endpoint_candidates(
+        role,
+        configured_endpoint,
+        current_session.as_deref().or(Some(session)),
+    )
+    .await;
     bail!(
-        "nodepool endpoint is still unreachable after VPN bootstrap (tried: {}). Check that WireGuard is connected and that the platform nodepool VPN sidecar ({}) is online{}",
+        "nodepool endpoint is still unreachable after VPN bootstrap (tried: {}). Check that the Headscale session is online and that the platform nodepool VPN sidecar ({}) is online{}",
         if candidates.is_empty() {
             configured_endpoint.to_string()
         } else {
@@ -1233,30 +1710,47 @@ async fn wait_for_nodepool_after_join(
 /// does not install a kernel route for ordinary gRPC sockets.
 async fn bring_up_vpn(
     role: ClientRole,
-    auth_key: &str,
+    auth_key: Option<&str>,
     login_server: &str,
     hostname: &str,
     configured_endpoint: &str,
+    worker_grpc_addr: Option<&str>,
 ) -> Result<Arc<VpnSession>> {
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (role, auth_key, login_server, hostname, configured_endpoint);
+        let _ = (
+            role,
+            auth_key,
+            login_server,
+            hostname,
+            configured_endpoint,
+            worker_grpc_addr,
+        );
         bail!("embedded libtailscale is currently only packaged for Windows");
     }
 
     #[cfg(target_os = "windows")]
     {
-        bring_up_vpn_windows(role, auth_key, login_server, hostname, configured_endpoint).await
+        bring_up_vpn_windows(
+            role,
+            auth_key,
+            login_server,
+            hostname,
+            configured_endpoint,
+            worker_grpc_addr,
+        )
+        .await
     }
 }
 
 #[cfg(target_os = "windows")]
 async fn bring_up_vpn_windows(
     role: ClientRole,
-    auth_key: &str,
+    auth_key: Option<&str>,
     login_server: &str,
     hostname: &str,
     configured_endpoint: &str,
+    worker_grpc_addr: Option<&str>,
 ) -> Result<Arc<VpnSession>> {
     ensure_libtailscale_loaded().map_err(|error| anyhow::anyhow!(error))?;
     let hostname = sanitize_hostname(hostname);
@@ -1275,9 +1769,15 @@ async fn bring_up_vpn_windows(
     #[cfg(target_os = "windows")]
     let network = CString::new("tcp")?;
     #[cfg(target_os = "windows")]
-    let tailnet_addr = CString::new(format!(":{}", endpoint_port_for_worker(role)))?;
+    let tailnet_addr = CString::new(format!(
+        ":{}",
+        endpoint_port_for_worker(role, worker_grpc_addr)
+    ))?;
     #[cfg(target_os = "windows")]
-    let local_addr = CString::new(format!("127.0.0.1:{}", endpoint_port_for_worker(role)))?;
+    let local_addr = CString::new(format!(
+        "127.0.0.1:{}",
+        endpoint_port_for_worker(role, worker_grpc_addr)
+    ))?;
     #[cfg(target_os = "windows")]
     if role == ClientRole::Worker
         && unsafe {
@@ -1296,7 +1796,8 @@ async fn bring_up_vpn_windows(
         role.as_str(),
         configured_endpoint
     );
-    let bridge_addr = start_socks_bridge(&loopback_addr, &proxy_cred, configured_endpoint).await?;
+    let bridge_target = normalize_nodepool_endpoint(configured_endpoint);
+    let bridge_addr = start_socks_bridge(&loopback_addr, &proxy_cred, &bridge_target).await?;
 
     let session = VpnSession {
         role,
@@ -1308,7 +1809,10 @@ async fn bring_up_vpn_windows(
         userspace_socks_addr: Some(loopback_addr),
         #[cfg(target_os = "windows")]
         userspace_proxy_cred: Some(proxy_cred),
-        auth_key: auth_key.to_string(),
+        // A freshly issued key is retained only in process memory for the
+        // keepalive path. Rehydrated sessions intentionally carry an empty
+        // value and rely on the next authenticated bootstrap if rejoin fails.
+        auth_key: auth_key.unwrap_or_default().to_string(),
         login_server: login_server.to_string(),
         hostname: hostname.to_string(),
         wg_private_key: None,
@@ -1333,7 +1837,10 @@ pub async fn userspace_tcp_bridge(role: ClientRole, target: &str) -> Result<Stri
         session.userspace_socks_addr.as_deref(),
         session.userspace_proxy_cred.as_deref(),
     ) {
-        return Ok(start_socks_bridge(socks, cred, target).await?.to_string());
+        let bridge_target = normalize_nodepool_endpoint(target);
+        return Ok(start_socks_bridge(socks, cred, &bridge_target)
+            .await?
+            .to_string());
     }
     #[cfg(not(target_os = "windows"))]
     let _ = session;
@@ -1341,20 +1848,34 @@ pub async fn userspace_tcp_bridge(role: ClientRole, target: &str) -> Result<Stri
 }
 
 #[allow(dead_code)]
-fn endpoint_port_for_worker(_role: ClientRole) -> u16 {
-    50053
+fn endpoint_port_for_worker(role: ClientRole, configured_worker_addr: Option<&str>) -> u16 {
+    if role != ClientRole::Worker {
+        return 50053;
+    }
+    let configured_worker_addr = configured_worker_addr
+        .map(str::to_string)
+        .or_else(|| std::env::var("WORKER_GRPC_ADDR").ok());
+    configured_worker_addr
+        .as_deref()
+        .and_then(|addr| {
+            normalize_nodepool_endpoint(&addr)
+                .rsplit_once(':')
+                .map(|(_, port)| port.to_string())
+        })
+        .and_then(|port| port.parse().ok())
+        .unwrap_or(50053)
 }
 
 #[cfg(target_os = "windows")]
 async fn start_libtailscale(
     state_dir: &Path,
     hostname: &str,
-    auth_key: &str,
+    auth_key: Option<&str>,
     login_server: &str,
 ) -> Result<(Arc<LibtailscaleSession>, String, String, Option<String>)> {
     let state_dir = state_dir.to_path_buf();
     let hostname = CString::new(hostname)?;
-    let auth_key = CString::new(auth_key)?;
+    let auth_key = auth_key.map(CString::new).transpose()?;
     let login_server = CString::new(login_server)?;
     tokio::task::spawn_blocking(move || unsafe {
         let handle = tailscale_new();
@@ -1384,14 +1905,6 @@ async fn start_libtailscale(
                 tailscale_set_hostname(handle, hostname.as_ptr()),
                 "set hostname",
             ),
-            (
-                tailscale_set_authkey(handle, auth_key.as_ptr()),
-                "set auth key",
-            ),
-            (
-                tailscale_set_control_url(handle, login_server.as_ptr()),
-                "set control URL",
-            ),
         ] {
             if ok != 0 {
                 let err = fail(name);
@@ -1399,8 +1912,20 @@ async fn start_libtailscale(
                 return Err(err);
             }
         }
+        if let Some(auth_key) = auth_key.as_ref() {
+            if tailscale_set_authkey(handle, auth_key.as_ptr()) != 0 {
+                let err = fail("set auth key");
+                tailscale_close(handle);
+                return Err(err);
+            }
+        }
+        if tailscale_set_control_url(handle, login_server.as_ptr()) != 0 {
+            let err = fail("set control URL");
+            tailscale_close(handle);
+            return Err(err);
+        }
         tracing::info!(
-            "worker embedded libtailscale starting Headscale login at {}",
+            "embedded libtailscale starting Headscale {}",
             login_server.to_string_lossy()
         );
         if tailscale_up(handle) != 0 {
@@ -1478,6 +2003,26 @@ async fn start_socks_bridge(
 }
 
 #[cfg(target_os = "windows")]
+fn socks5_target_parts(target: &str) -> Result<(String, u16)> {
+    let target = normalize_nodepool_endpoint(target);
+    let (host, port) = if let Some(rest) = target.strip_prefix('[') {
+        let (host, port) = rest
+            .split_once(']')
+            .ok_or_else(|| anyhow::anyhow!("invalid nodepool endpoint: {target}"))?;
+        let port = port
+            .strip_prefix(':')
+            .ok_or_else(|| anyhow::anyhow!("invalid nodepool endpoint: {target}"))?;
+        (host.to_string(), port)
+    } else {
+        let (host, port) = target
+            .rsplit_once(':')
+            .ok_or_else(|| anyhow::anyhow!("invalid nodepool endpoint: {target}"))?;
+        (host.to_string(), port)
+    };
+    Ok((host, port.parse()?))
+}
+
+#[cfg(target_os = "windows")]
 async fn proxy_socks5(
     mut client: TcpStream,
     socks_addr: &str,
@@ -1505,19 +2050,23 @@ async fn proxy_socks5(
     if auth_response != [1, 0] {
         bail!("libtailscale SOCKS5 authentication failed");
     }
-    let (host, port) = target
-        .rsplit_once(':')
-        .ok_or_else(|| anyhow::anyhow!("invalid nodepool endpoint: {target}"))?;
-    let port: u16 = port.parse()?;
-    let ip = host.parse::<Ipv4Addr>();
+    let (host, port) = socks5_target_parts(target)?;
+    let ip = host.parse::<IpAddr>();
     let mut request = vec![5, 1, 0];
-    if let Ok(ip) = ip {
-        request.push(1);
-        request.extend_from_slice(&ip.octets());
-    } else {
-        request.push(3);
-        request.push(host.len().try_into()?);
-        request.extend_from_slice(host.as_bytes());
+    match ip {
+        Ok(IpAddr::V4(ip)) => {
+            request.push(1);
+            request.extend_from_slice(&ip.octets());
+        }
+        Ok(IpAddr::V6(ip)) => {
+            request.push(4);
+            request.extend_from_slice(&ip.octets());
+        }
+        Err(_) => {
+            request.push(3);
+            request.push(host.len().try_into()?);
+            request.extend_from_slice(host.as_bytes());
+        }
     }
     request.extend_from_slice(&port.to_be_bytes());
     proxy.write_all(&request).await?;
@@ -1609,20 +2158,57 @@ async fn ping_nodepool_over_wireguard(session: &VpnSession) -> Result<bool> {
     }
 }
 
-async fn wait_for_nodepool_endpoint(endpoint: &str) {
-    for _ in 0..30 {
-        if nodepool_endpoint_reachable(endpoint).await {
-            return;
-        }
-        sleep(Duration::from_millis(500)).await;
+fn nodepool_http_endpoint(endpoint: &str) -> Option<String> {
+    let endpoint = endpoint.trim().trim_end_matches('/');
+    if endpoint.is_empty() {
+        return None;
+    }
+    if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        Some(endpoint.to_string())
+    } else {
+        Some(format!("http://{endpoint}"))
     }
 }
 
-/// Check if a nodepool endpoint is reachable via TCP
+/// Check whether a nodepool endpoint completes the same HTTP/2 transport
+/// handshake used by the tonic clients. A TCP-open but non-gRPC listener is not
+/// considered ready.
 async fn nodepool_endpoint_reachable(endpoint: &str) -> bool {
-    tokio::time::timeout(NODEPOOL_PROBE_TIMEOUT, TcpStream::connect(endpoint))
+    let Some(endpoint) = nodepool_http_endpoint(endpoint) else {
+        return false;
+    };
+    let Ok(endpoint) = Endpoint::from_shared(endpoint) else {
+        return false;
+    };
+    let endpoint = endpoint.connect_timeout(NODEPOOL_PROBE_TIMEOUT);
+    let Ok(Ok(channel)) = tokio::time::timeout(NODEPOOL_PROBE_TIMEOUT, endpoint.connect()).await
+    else {
+        return false;
+    };
+
+    // `Endpoint::connect` only establishes the underlying socket. Send a small
+    // unary gRPC request so an accept-and-stall listener cannot be reported ready.
+    // The path is intentionally unknown to the application: an immediate gRPC
+    // status (including UNIMPLEMENTED) still proves the HTTP/2 transport works.
+    let mut grpc = Grpc::new(channel);
+    if !tokio::time::timeout(NODEPOOL_PROBE_TIMEOUT, grpc.ready())
         .await
-        .is_ok_and(|r| r.is_ok())
+        .is_ok_and(|result| result.is_ok())
+    {
+        return false;
+    }
+    let probe = grpc.unary(
+        Request::new(TransportProbeRequest {}),
+        PathAndQuery::from_static("/hivemind.client_runtime.TransportProbe/Probe"),
+        ProstCodec::<TransportProbeRequest, TransportProbeResponse>::default(),
+    );
+    match tokio::time::timeout(NODEPOOL_PROBE_TIMEOUT, probe).await {
+        Ok(Ok(_)) => true,
+        // A gRPC status means the HTTP/2 server answered. A tonic transport
+        // error carries a source and must not count as Nodepool readiness.
+        Ok(Err(status)) => status.source().is_none(),
+        Err(_) => false,
+    }
 }
 
 /// Extract host from endpoint string
@@ -1667,14 +2253,108 @@ async fn ensure_userspace_bridge(session: &VpnSession, _peer_ip: &str) -> Result
     Ok(())
 }
 
-/// Get the VPN state directory for a role
-#[cfg(target_os = "windows")]
+/// Get the VPN state directory for a role.
 fn vpn_state_dir(role: ClientRole) -> PathBuf {
     let base = dirs::data_dir()
         .or_else(dirs::home_dir)
         .unwrap_or_else(|| PathBuf::from("."));
     base.join(".hivemind")
         .join(format!("{}-vpn", role.as_str()))
+}
+
+fn device_id_path(role: ClientRole) -> PathBuf {
+    vpn_state_dir(role).join("device-id")
+}
+
+fn state_marker_path(role: ClientRole) -> PathBuf {
+    vpn_state_dir(role).join("state-ready")
+}
+
+fn persisted_device_id(role: ClientRole) -> Result<String> {
+    let state_dir = vpn_state_dir(role);
+    std::fs::create_dir_all(&state_dir)
+        .with_context(|| format!("failed to create VPN state dir {}", state_dir.display()))?;
+    let path = device_id_path(role);
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let existing = existing.trim();
+        if !existing.is_empty()
+            && existing.len() <= 64
+            && existing.chars().all(|c| c.is_ascii_hexdigit())
+        {
+            return Ok(existing.to_string());
+        }
+    }
+
+    let mut bytes = [0u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    let generated = hex::encode(bytes);
+    let temporary = path.with_extension("tmp");
+    std::fs::write(&temporary, format!("{generated}\n")).with_context(|| {
+        format!(
+            "failed to write VPN device identity {}",
+            temporary.display()
+        )
+    })?;
+    std::fs::rename(&temporary, &path)
+        .with_context(|| format!("failed to persist VPN device identity {}", path.display()))?;
+    Ok(generated)
+}
+
+fn client_device_name(role: ClientRole) -> Result<String> {
+    Ok(client_name_for_device(role, &persisted_device_id(role)?))
+}
+
+#[cfg(target_os = "windows")]
+fn reset_libtailscale_state_for_new_auth_key(role: ClientRole) -> Result<()> {
+    let state_dir = vpn_state_dir(role);
+    for path in [state_dir.join("tailscaled.state"), state_marker_path(role)] {
+        match std::fs::remove_file(&path) {
+            Ok(()) => tracing::info!(
+                "{} removed stale local VPN state {} before fresh auth-key join",
+                role.as_str(),
+                path.display()
+            ),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "failed to remove stale {} VPN state {} before fresh auth-key join",
+                        role.as_str(),
+                        path.display()
+                    )
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn reset_libtailscale_state_for_new_auth_key(_role: ClientRole) -> Result<()> {
+    Ok(())
+}
+
+fn has_persisted_vpn_state(role: ClientRole) -> bool {
+    state_marker_path(role).is_file()
+}
+
+fn mark_persisted_vpn_state(role: ClientRole, login_server: &str, hostname: &str) -> Result<()> {
+    let state_dir = vpn_state_dir(role);
+    std::fs::create_dir_all(&state_dir)
+        .with_context(|| format!("failed to create VPN state dir {}", state_dir.display()))?;
+    let marker = serde_json::json!({
+        "version": 1,
+        "role": role.as_str(),
+        "login_server": login_server,
+        "hostname": hostname,
+    });
+    let path = state_marker_path(role);
+    let temporary = path.with_extension("tmp");
+    std::fs::write(&temporary, serde_json::to_vec(&marker)?)
+        .with_context(|| format!("failed to write VPN state marker {}", temporary.display()))?;
+    std::fs::rename(&temporary, &path)
+        .with_context(|| format!("failed to persist VPN state marker {}", path.display()))?;
+    Ok(())
 }
 
 /// Generate a short host identifier
@@ -1703,6 +2383,26 @@ fn sanitize_hostname(hostname: &str) -> String {
         .collect::<String>()
         .trim_matches('-')
         .to_string()
+}
+
+fn bounded_hostname(hostname: &str) -> String {
+    const MAX_HOSTNAME_LEN: usize = 63;
+    let sanitized = sanitize_hostname(hostname);
+    let bounded = sanitized.chars().take(MAX_HOSTNAME_LEN).collect::<String>();
+    let bounded = bounded.trim_matches('-').to_string();
+    if bounded.is_empty() {
+        "hivemind-node".to_string()
+    } else {
+        bounded
+    }
+}
+
+fn client_name_for_device(role: ClientRole, device_id: &str) -> String {
+    let device_id = sanitize_hostname(device_id);
+    let prefix = format!("hivemind-{}-", role.as_str());
+    let max_device_len = 48usize.saturating_sub(prefix.len());
+    let device_id = device_id.chars().take(max_device_len).collect::<String>();
+    format!("{prefix}{device_id}")
 }
 
 /// Check if an environment variable is truthy
@@ -2288,6 +2988,22 @@ mod tests {
     }
 
     #[test]
+    fn worker_forward_port_uses_configured_listener_address() {
+        assert_eq!(
+            endpoint_port_for_worker(ClientRole::Worker, Some("0.0.0.0:60053")),
+            60053
+        );
+        assert_eq!(
+            endpoint_port_for_worker(ClientRole::Worker, Some("[::]:60054")),
+            60054
+        );
+        assert_eq!(
+            endpoint_port_for_worker(ClientRole::Master, Some("0.0.0.0:60055")),
+            50053
+        );
+    }
+
+    #[test]
     fn format_host_port_handles_ipv6() {
         assert_eq!(format_host_port("100.64.0.4", 50051), "100.64.0.4:50051");
         assert_eq!(format_host_port("fd7a::1", 50051), "[fd7a::1]:50051");
@@ -2309,6 +3025,24 @@ mod tests {
     }
 
     #[test]
+    fn bounded_hostname_stays_within_headscale_label_limit() {
+        let hostname = bounded_hostname(
+            "user-e2e-d3a85169f0-hivemind-worker-a2137eb8728763c3d15ccd763222a58e",
+        );
+        assert!(hostname.len() <= 63);
+        assert!(!hostname.starts_with('-'));
+        assert!(!hostname.ends_with('-'));
+        assert!(hostname
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-'));
+    }
+
+    #[test]
+    fn empty_hostname_gets_safe_fallback() {
+        assert_eq!(bounded_hostname("---"), "hivemind-node");
+    }
+
+    #[test]
     fn endpoint_host_parses_ipv4_ipv6_and_schemes() {
         assert_eq!(
             endpoint_host("100.64.0.4:50051").as_deref(),
@@ -2323,5 +3057,41 @@ mod tests {
             endpoint_host("https://[fd7a::1]:50051/").as_deref(),
             Some("fd7a::1")
         );
+    }
+
+    #[tokio::test]
+    async fn nodepool_endpoint_probe_requires_http2_handshake() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("loopback listener should report an address");
+
+        tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.expect("probe should connect");
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        });
+
+        assert!(!nodepool_endpoint_reachable(&address.to_string()).await);
+    }
+
+    #[test]
+    fn device_client_name_is_stable_and_role_scoped() {
+        assert_eq!(
+            client_name_for_device(ClientRole::Master, "0123456789abcdef"),
+            "hivemind-master-0123456789abcdef"
+        );
+        assert_eq!(
+            client_name_for_device(ClientRole::Worker, "0123456789abcdef"),
+            "hivemind-worker-0123456789abcdef"
+        );
+    }
+
+    #[test]
+    fn vpn_status_never_contains_auth_key() {
+        let status = VpnBootstrapStatus::ready("127.0.0.1:1234", Some("100.64.0.9"));
+        assert_eq!(status.state, VpnBootstrapState::Ready);
+        assert!(!format!("{status:?}").contains("tskey-auth"));
     }
 }

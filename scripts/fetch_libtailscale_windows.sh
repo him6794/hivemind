@@ -11,14 +11,22 @@ case "${TARGET_KIND}" in
     OUT_DIR="${LIBTAILSCALE_WINDOWS_DIR:-${ROOT_DIR}/vendor/libtailscale/windows-x86_64}"
     ARTIFACT_NAME="libtailscale.a"
     CC_NAME="${CC:-x86_64-w64-mingw32-gcc}"
+    GOARCH_NAME="amd64"
     ;;
   msvc)
     OUT_DIR="${LIBTAILSCALE_WINDOWS_DIR:-${ROOT_DIR}/vendor/libtailscale/windows-x86_64-msvc}"
     ARTIFACT_NAME="libtailscale.dll"
     CC_NAME="${CC:-x86_64-w64-mingw32-gcc}"
+    GOARCH_NAME="amd64"
+    ;;
+  arm64-msvc)
+    OUT_DIR="${LIBTAILSCALE_WINDOWS_DIR:-${ROOT_DIR}/vendor/libtailscale/windows-aarch64-msvc}"
+    ARTIFACT_NAME="libtailscale.dll"
+    CC_NAME="${CC:-aarch64-w64-mingw32-gcc}"
+    GOARCH_NAME="arm64"
     ;;
   *)
-    echo "LIBTAILSCALE_TARGET must be 'gnu' or 'msvc'" >&2
+    echo "LIBTAILSCALE_TARGET must be 'gnu', 'msvc', or 'arm64-msvc'" >&2
     exit 1
     ;;
 esac
@@ -26,9 +34,13 @@ esac
 SRC_DIR="${ROOT_DIR}/.cache/libtailscale-${VERSION//\//_}"
 if [[ ! -d "${SRC_DIR}/.git" ]]; then
   mkdir -p "${ROOT_DIR}/.cache"
-  git clone --depth 1 https://github.com/tailscale/libtailscale.git "${SRC_DIR}"
-  git -C "${SRC_DIR}" checkout --detach "${VERSION}"
+  git clone --filter=blob:none --no-checkout --no-tags \
+    https://github.com/tailscale/libtailscale.git "${SRC_DIR}"
 fi
+if ! git -C "${SRC_DIR}" cat-file -e "${VERSION}^{commit}" 2>/dev/null; then
+  git -C "${SRC_DIR}" fetch --depth 1 origin "${VERSION}"
+fi
+git -C "${SRC_DIR}" checkout --detach "${VERSION}"
 
 # The upstream C archive currently uses Unix socketpair/FD-passing code. The Windows client only needs tsnet.Up and tsnet.Loopback, so select the small Windows backend that exposes those APIs without Unix syscalls.
 if ! head -n 1 "${SRC_DIR}/tailscale.go" | grep -q 'go:build !windows'; then
@@ -47,12 +59,12 @@ mkdir -p "${OUT_DIR}"
 (
   cd "${SRC_DIR}"
   if [[ "${TARGET_KIND}" == "gnu" ]]; then
-    GOOS=windows GOARCH=amd64 CGO_ENABLED=1 \
+    GOOS=windows GOARCH="${GOARCH_NAME}" CGO_ENABLED=1 \
       CC="${CC_NAME}" \
       go build -buildmode=c-archive -trimpath -o "${OUT_DIR}/${ARTIFACT_NAME}" .
   else
     temporary_archive="${OUT_DIR}/libtailscale-c-archive.a"
-    GOOS=windows GOARCH=amd64 CGO_ENABLED=1 \
+    GOOS=windows GOARCH="${GOARCH_NAME}" CGO_ENABLED=1 \
       CC="${CC_NAME}" \
       go build -buildmode=c-archive -trimpath -o "${temporary_archive}" .
     "${CC_NAME}" -shared -o "${OUT_DIR}/${ARTIFACT_NAME}" \
@@ -68,4 +80,4 @@ LIBTAILSCALE_TARGET="${TARGET_KIND}" \
 LIBTAILSCALE_WINDOWS_DIR="${OUT_DIR}" \
   bash "${SCRIPT_DIR}/validate_libtailscale_windows.sh"
 
-echo "Built ${TARGET_KIND} artifact ${OUT_DIR}/${ARCHIVE_NAME} from libtailscale ${VERSION}"
+echo "Built ${TARGET_KIND} artifact ${OUT_DIR}/${ARTIFACT_NAME} from libtailscale ${VERSION}"

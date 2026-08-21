@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -101,13 +102,86 @@ impl TransferLeaseAuthority for NodepoolTransferLeaseAuthority {
 }
 
 pub fn advertise_addr(listen_addr: &str, configured: Option<String>) -> anyhow::Result<String> {
+    advertise_addr_for_vpn(listen_addr, configured, None)
+}
+
+pub fn validate_advertise_addr(addr: &str) -> anyhow::Result<String> {
+    let addr = addr.trim();
+    if addr.is_empty() {
+        anyhow::bail!("Worker advertise address must not be blank");
+    }
+    if addr.contains("://") {
+        anyhow::bail!("Worker advertise address must be host:port, not a URL");
+    }
+
+    let (host, port) = if let Some(rest) = addr.strip_prefix('[') {
+        let (host, port) = rest
+            .split_once(']')
+            .ok_or_else(|| anyhow::anyhow!("invalid Worker advertise address: {addr}"))?;
+        let port = port
+            .strip_prefix(':')
+            .ok_or_else(|| anyhow::anyhow!("invalid Worker advertise address: {addr}"))?;
+        (host, port)
+    } else {
+        addr.rsplit_once(':').ok_or_else(|| {
+            anyhow::anyhow!("Worker advertise address must include a port: {addr}")
+        })?
+    };
+    if host.trim().is_empty() {
+        anyhow::bail!("Worker advertise address must include a host");
+    }
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| anyhow::anyhow!("invalid Worker advertise port in {addr}"))?;
+    if port == 0 {
+        anyhow::bail!("Worker advertise port must be non-zero");
+    }
+    let host = host.trim().trim_start_matches('[').trim_end_matches(']');
+    if host.eq_ignore_ascii_case("localhost") {
+        anyhow::bail!("Worker advertise address must not use localhost");
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if ip.is_loopback() || ip.is_unspecified() {
+            anyhow::bail!("Worker advertise address must be reachable from Nodepool, not {host}");
+        }
+    }
+    Ok(addr.to_string())
+}
+
+/// Resolve the address the Nodepool should use to call the Worker.
+///
+/// A keyed Headscale worker commonly binds `0.0.0.0` locally. In that mode the
+/// overlay address is the only safe implicit advertisement; never register the
+/// process-local worker id as if it were network-reachable.
+pub fn advertise_addr_for_vpn(
+    listen_addr: &str,
+    configured: Option<String>,
+    overlay_ip: Option<&str>,
+) -> anyhow::Result<String> {
     if let Some(addr) = configured.filter(|addr| !addr.trim().is_empty()) {
-        return Ok(addr);
+        return validate_advertise_addr(&addr);
     }
 
     if has_unspecified_host(listen_addr) {
+        if let Some(ip) = overlay_ip.map(str::trim).filter(|ip| !ip.is_empty()) {
+            let port = listen_addr
+                .rsplit_once(':')
+                .map(|(_, port)| port)
+                .filter(|port| !port.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "WORKER_GRPC_ADDR must include a port when deriving the Headscale advertise address ({listen_addr})"
+                    )
+                })?;
+            let host = if ip.contains(':') && !ip.starts_with('[') {
+                format!("[{ip}]")
+            } else {
+                ip.to_string()
+            };
+            return Ok(format!("{host}:{port}"));
+        }
         anyhow::bail!(
-            "WORKER_ADVERTISE_ADDR must be set when WORKER_GRPC_ADDR listens on an unspecified host ({listen_addr}); use an address reachable by the nodepool"
+            "WORKER_ADVERTISE_ADDR or a connected Headscale overlay IP is required when WORKER_GRPC_ADDR listens on an unspecified host ({listen_addr})"
         );
     }
 
@@ -322,10 +396,10 @@ pub async fn report_task_usage_once(
 }
 
 pub struct RegistrationLoopConfig {
-    pub nodepool_addr: String,
+    pub nodepool_addr: Arc<std::sync::Mutex<String>>,
     pub worker_id: String,
     pub username: String,
-    pub worker_addr: String,
+    pub worker_addr: Arc<std::sync::Mutex<String>>,
     pub location: String,
     pub token: String,
     pub interval: Duration,
@@ -337,47 +411,106 @@ pub fn start_registration_loop(
 ) -> watch::Sender<bool> {
     let (tx, mut rx) = watch::channel(false);
     tokio::spawn(async move {
-        let endpoint = nodepool_endpoint(&registration.nodepool_addr);
+        let mut endpoint = String::new();
         let mut client: Option<NodeManagerServiceClient<Channel>> = None;
+        let mut registered_worker_addr: Option<String> = None;
         let mut tick = tokio::time::interval(registration.interval);
 
         loop {
             tokio::select! {
                 _ = tick.tick() => {
+                    if let Some(session) = hivemind_client_runtime::current_vpn_session(
+                        hivemind_client_runtime::ClientRole::Worker,
+                    ).await {
+                        if let Some(bridge) = session.bridge_endpoint() {
+                            let mut guard = registration
+                                .nodepool_addr
+                                .lock()
+                                .unwrap_or_else(|err| err.into_inner());
+                            if *guard != bridge {
+                                *guard = bridge;
+                                client = None;
+                            }
+                        }
+                    }
+                    let configured_addr = registration
+                        .nodepool_addr
+                        .lock()
+                        .unwrap_or_else(|err| err.into_inner())
+                        .clone();
+                    let current_endpoint = nodepool_endpoint(&configured_addr);
+                    if endpoint != current_endpoint {
+                        endpoint = current_endpoint.clone();
+                        client = None;
+                    }
+
+                    let worker_addr = registration
+                        .worker_addr
+                        .lock()
+                        .unwrap_or_else(|err| err.into_inner())
+                        .clone();
+                    if registered_worker_addr.as_deref() != Some(worker_addr.as_str()) {
+                        // A changed callback address must be persisted through a fresh
+                        // registration; a heartbeat alone leaves Nodepool's old address.
+                        client = None;
+                    }
+
                     if client.is_none() {
-                        match NodeManagerServiceClient::connect(endpoint.clone()).await {
-                            Ok(mut connected) => {
+                        match tokio::time::timeout(
+                            Duration::from_secs(10),
+                            NodeManagerServiceClient::connect(current_endpoint.clone()),
+                        )
+                        .await
+                        {
+                            Ok(Ok(mut connected)) => {
                                 let request = build_register_request(
                                     &registration.worker_id,
                                     &registration.username,
-                                    &registration.worker_addr,
+                                    &worker_addr,
                                     executor.get_resource_spec(),
                                     &registration.location,
                                     &registration.token,
                                 );
-                                match connected.register_worker_node(request).await {
-                                    Ok(response) if response.get_ref().success => {
-                                        info!("Worker {} registered with nodepool {}", registration.worker_id, endpoint);
+                                match tokio::time::timeout(
+                                    Duration::from_secs(10),
+                                    connected.register_worker_node(request),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(response)) if response.get_ref().success => {
+                                        info!("Worker {} registered with nodepool {}", registration.worker_id, current_endpoint);
+                                        registered_worker_addr = Some(worker_addr.clone());
                                         client = Some(connected);
                                     }
-                                    Ok(response) => warn!("Worker registration rejected: {}", response.get_ref().status_message),
-                                    Err(e) => warn!("Worker registration failed: {}", e),
+                                    Ok(Ok(response)) => warn!("Worker registration rejected: {}", response.get_ref().status_message),
+                                    Ok(Err(e)) => warn!("Worker registration failed: {}", e),
+                                    Err(_) => warn!("Worker registration timed out after 10 seconds"),
                                 }
                             }
-                            Err(e) => warn!("Nodepool connection failed: {}", e),
+                            Ok(Err(e)) => warn!("Nodepool connection failed: {}", e),
+                            Err(_) => warn!("Nodepool connection timed out after 10 seconds"),
                         }
                     }
 
                     if let Some(connected) = client.as_mut() {
                         let request = build_status_request(&registration.worker_id, "IDLE", executor.get_resource_usage(), &registration.token);
-                        match connected.report_status(request).await {
-                            Ok(response) if response.get_ref().success => {}
-                            Ok(response) => {
+                        match tokio::time::timeout(
+                            Duration::from_secs(10),
+                            connected.report_status(request),
+                        )
+                        .await
+                        {
+                            Ok(Ok(response)) if response.get_ref().success => {}
+                            Ok(Ok(response)) => {
                                 warn!("Worker heartbeat rejected: {}", response.get_ref().status_message);
                                 client = None;
                             }
-                            Err(e) => {
+                            Ok(Err(e)) => {
                                 warn!("Worker heartbeat failed: {}", e);
+                                client = None;
+                            }
+                            Err(_) => {
+                                warn!("Worker heartbeat timed out after 10 seconds");
                                 client = None;
                             }
                         }
@@ -923,5 +1056,22 @@ mod tests {
                 status_message: "OK".into(),
             }))
         }
+    }
+
+    #[test]
+    fn advertise_addr_uses_overlay_ip_before_unspecified_listener_fallback() {
+        assert_eq!(
+            super::advertise_addr_for_vpn("0.0.0.0:50053", None, Some("100.64.0.42")).unwrap(),
+            "100.64.0.42:50053"
+        );
+        assert_eq!(
+            super::advertise_addr_for_vpn(
+                "0.0.0.0:50053",
+                Some("worker.example:50053".to_string()),
+                Some("100.64.0.42"),
+            )
+            .unwrap(),
+            "worker.example:50053"
+        );
     }
 }

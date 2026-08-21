@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"sync"
 	"unsafe"
 
@@ -84,9 +83,10 @@ func TsnetUp(sd C.int) C.int {
 	if s == nil {
 		return C.EBADF
 	}
-	// Each website login issues a fresh short-lived preauth key. Do not let a
-	// stale tsnet state suppress that key on a downloaded client.
-	_ = os.Setenv("TSNET_FORCE_LOGIN", "1")
+	// tsnet's TSNET_FORCE_LOGIN path starts an interactive login flow; it does
+	// not apply the AuthKey supplied by the embedding process. Fresh auth-key
+	// joins reset stale state in the Rust coordinator before reaching this
+	// method, while blank keys intentionally rehydrate the persisted state.
 	_, err := s.s.Up(context.Background())
 	if err == nil {
 		s.started = true

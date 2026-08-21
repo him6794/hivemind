@@ -3,14 +3,16 @@ use std::path::{Path, PathBuf};
 
 const GNU_TARGET: &str = "x86_64-pc-windows-gnu";
 const MSVC_TARGET: &str = "x86_64-pc-windows-msvc";
+const ARM64_MSVC_TARGET: &str = "aarch64-pc-windows-msvc";
 
 fn artifact_dir(root: &Path, target: &str) -> Result<PathBuf, String> {
     let relative = match target {
         GNU_TARGET => "vendor/libtailscale/windows-x86_64",
         MSVC_TARGET => "vendor/libtailscale/windows-x86_64-msvc",
+        ARM64_MSVC_TARGET => "vendor/libtailscale/windows-aarch64-msvc",
         _ if target.contains("windows") => {
             return Err(format!(
-                "unsupported Windows target '{target}'; supported targets are {GNU_TARGET} and {MSVC_TARGET}"
+                "unsupported Windows target '{target}'; supported targets are {GNU_TARGET}, {MSVC_TARGET}, and {ARM64_MSVC_TARGET}"
             ));
         }
         _ => return Err(format!("target '{target}' is not a Windows target")),
@@ -19,7 +21,7 @@ fn artifact_dir(root: &Path, target: &str) -> Result<PathBuf, String> {
 }
 
 fn validate_artifact_dir(dir: &Path, target: &str) -> Result<(), String> {
-    let artifact = if target == MSVC_TARGET {
+    let artifact = if target == MSVC_TARGET || target == ARM64_MSVC_TARGET {
         dir.join("libtailscale.dll")
     } else {
         dir.join("libtailscale.a")
@@ -52,6 +54,16 @@ fn main() {
         let target = env::var("TARGET").expect("Cargo must provide TARGET to build scripts");
         let lib_dir = artifact_dir(&root, &target).unwrap_or_else(|error| panic!("{error}"));
         validate_artifact_dir(&lib_dir, &target).unwrap_or_else(|error| panic!("{error}"));
+        let artifact = if target == GNU_TARGET {
+            lib_dir.join("libtailscale.a")
+        } else {
+            lib_dir.join("libtailscale.dll")
+        };
+        println!("cargo:rerun-if-changed={}", artifact.display());
+        println!(
+            "cargo:rerun-if-changed={}",
+            lib_dir.join("tailscale.h").display()
+        );
         if target == GNU_TARGET {
             println!("cargo:rustc-link-search=native={}", lib_dir.display());
             println!("cargo:rustc-link-lib=static=tailscale");
@@ -63,7 +75,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{artifact_dir, validate_artifact_dir, GNU_TARGET, MSVC_TARGET};
+    use super::{artifact_dir, validate_artifact_dir, ARM64_MSVC_TARGET, GNU_TARGET, MSVC_TARGET};
     use std::fs;
 
     #[test]
@@ -77,12 +89,16 @@ mod tests {
             artifact_dir(root, MSVC_TARGET).unwrap(),
             root.join("vendor/libtailscale/windows-x86_64-msvc")
         );
+        assert_eq!(
+            artifact_dir(root, ARM64_MSVC_TARGET).unwrap(),
+            root.join("vendor/libtailscale/windows-aarch64-msvc")
+        );
     }
 
     #[test]
     fn rejects_unsupported_windows_targets() {
         let error =
-            artifact_dir(std::path::Path::new("repo"), "aarch64-pc-windows-msvc").unwrap_err();
+            artifact_dir(std::path::Path::new("repo"), "aarch64-pc-windows-gnu").unwrap_err();
         assert!(error.contains("unsupported Windows target"));
     }
 

@@ -52,6 +52,7 @@ required-features = ["worker"]
 
 [dependencies]
 tokio.workspace = true
+tokio-stream.workspace = true
 tonic.workspace = true
 tracing.workspace = true
 anyhow.workspace = true

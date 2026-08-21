@@ -75,6 +75,7 @@ impl WorkerProfile {
 #[derive(Clone)]
 pub struct ControlApiState {
     pub profile: WorkerProfile,
+    pub worker_addr: std::sync::Arc<std::sync::Mutex<String>>,
     pub nodepool_addr: std::sync::Arc<std::sync::Mutex<String>>,
     pub config: HivemindConfig,
     pub executor: std::sync::Arc<WorkerExecutor>,
@@ -83,6 +84,14 @@ pub struct ControlApiState {
 }
 
 impl ControlApiState {
+    fn set_worker_addr(&self, addr: impl Into<String>) {
+        let mut guard = self
+            .worker_addr
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        *guard = addr.into();
+    }
+
     fn nodepool_addr(&self) -> String {
         self.nodepool_addr
             .lock()
@@ -99,7 +108,7 @@ impl ControlApiState {
         *guard = endpoint;
     }
 
-    fn ensure_registration_loop(&self, username: &str, token: &str) {
+    fn ensure_registration_loop(&self, username: &str, worker_id: &str, token: &str) {
         let mut guard = self
             .registration_shutdown
             .lock()
@@ -110,10 +119,10 @@ impl ControlApiState {
         let shutdown = nodepool_client::start_registration_loop(
             self.executor.clone(),
             nodepool_client::RegistrationLoopConfig {
-                nodepool_addr: self.nodepool_addr(),
-                worker_id: self.profile.worker_id.clone(),
+                nodepool_addr: self.nodepool_addr.clone(),
+                worker_id: worker_id.to_string(),
                 username: username.to_string(),
-                worker_addr: self.profile.ip.clone(),
+                worker_addr: self.worker_addr.clone(),
                 location: self.profile.location.clone(),
                 token: token.to_string(),
                 interval: std::time::Duration::from_secs(10),
@@ -157,7 +166,15 @@ struct RegisterWorkerBody {
     storage_total_gb: Option<i64>,
     storage_available_gb: Option<i64>,
     location: Option<String>,
-    token: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct VpnBootstrapResponse {
+    success: bool,
+    state: String,
+    endpoint: Option<String>,
+    overlay_ip: Option<String>,
+    message: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -170,7 +187,8 @@ pub fn router(profile: WorkerProfile) -> Router {
     let config = HivemindConfig::default();
     router_with_allowed_origins(
         ControlApiState {
-            profile,
+            profile: profile.clone(),
+            worker_addr: std::sync::Arc::new(std::sync::Mutex::new(profile.ip.clone())),
             nodepool_addr: std::sync::Arc::new(std::sync::Mutex::new(
                 client_runtime::resolve_nodepool_grpc_endpoint(&config),
             )),
@@ -194,7 +212,8 @@ pub fn router_with_profile_and_allowed_origins(
     let config = HivemindConfig::default();
     router_with_allowed_origins(
         ControlApiState {
-            profile,
+            profile: profile.clone(),
+            worker_addr: std::sync::Arc::new(std::sync::Mutex::new(profile.ip.clone())),
             nodepool_addr: std::sync::Arc::new(std::sync::Mutex::new(
                 client_runtime::resolve_nodepool_grpc_endpoint(&config),
             )),
@@ -215,6 +234,8 @@ pub fn router_with_ui_dir(
 
     let app = Router::new()
         .route("/api/worker-info", get(worker_info))
+        .route("/api/vpn/bootstrap", post(bootstrap_vpn))
+        .route("/api/vpn/status", get(vpn_status))
         .route("/api/login", post(login))
         .route("/api/register-worker", post(register_worker))
         .with_state(state)
@@ -244,7 +265,8 @@ pub async fn serve(addr: &str, profile: WorkerProfile) -> Result<()> {
     serve_with_allowed_origins(
         addr,
         ControlApiState {
-            profile,
+            profile: profile.clone(),
+            worker_addr: std::sync::Arc::new(std::sync::Mutex::new(profile.ip.clone())),
             nodepool_addr: std::sync::Arc::new(std::sync::Mutex::new(
                 client_runtime::resolve_nodepool_grpc_endpoint(&config),
             )),
@@ -281,10 +303,103 @@ async fn worker_info(State(state): State<ControlApiState>) -> Json<WorkerInfoRes
             profile.ip = format!("{ip}:{port}");
         }
     }
+    state.set_worker_addr(profile.ip.clone());
     Json(WorkerInfoResponse {
         success: true,
         profile,
     })
+}
+
+async fn bootstrap_vpn(
+    State(state): State<ControlApiState>,
+    headers: axum::http::HeaderMap,
+) -> (StatusCode, Json<VpnBootstrapResponse>) {
+    let Some(token) = bearer_token(&headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(vpn_bootstrap_response(
+                client_runtime::current_vpn_status(ClientRole::Worker),
+                Some("missing bearer token".into()),
+            )),
+        );
+    };
+
+    match client_runtime::ensure_user_vpn_for_token(&state.config, ClientRole::Worker, &token).await
+    {
+        Ok(Some(endpoint)) => {
+            state.set_nodepool_addr(endpoint);
+            (
+                StatusCode::OK,
+                Json(vpn_bootstrap_response(
+                    client_runtime::current_vpn_status(ClientRole::Worker),
+                    None,
+                )),
+            )
+        }
+        Ok(None) => (
+            StatusCode::OK,
+            Json(vpn_bootstrap_response(
+                client_runtime::current_vpn_status(ClientRole::Worker),
+                None,
+            )),
+        ),
+        Err(err) => {
+            tracing::warn!("Worker VPN bootstrap failed: {err}");
+            let status = client_runtime::current_vpn_status(ClientRole::Worker);
+            let http_status = vpn_bootstrap_http_status(status.state);
+            (
+                http_status,
+                Json(vpn_bootstrap_response(
+                    status,
+                    Some("VPN/Nodepool bootstrap failed".into()),
+                )),
+            )
+        }
+    }
+}
+
+async fn vpn_status(headers: axum::http::HeaderMap) -> (StatusCode, Json<VpnBootstrapResponse>) {
+    if bearer_token(&headers).is_none() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(vpn_bootstrap_response(
+                client_runtime::current_vpn_status(ClientRole::Worker),
+                Some("missing bearer token".into()),
+            )),
+        );
+    }
+    (
+        StatusCode::OK,
+        Json(vpn_bootstrap_response(
+            client_runtime::current_vpn_status(ClientRole::Worker),
+            None,
+        )),
+    )
+}
+
+fn vpn_bootstrap_response(
+    status: client_runtime::VpnBootstrapStatus,
+    fallback_message: Option<String>,
+) -> VpnBootstrapResponse {
+    let success = matches!(
+        status.state,
+        client_runtime::VpnBootstrapState::Ready | client_runtime::VpnBootstrapState::Disabled
+    );
+    VpnBootstrapResponse {
+        success,
+        state: status.state.as_str().to_string(),
+        endpoint: status.endpoint,
+        overlay_ip: status.overlay_ip,
+        message: status.message.or(fallback_message),
+    }
+}
+
+fn vpn_bootstrap_http_status(state: client_runtime::VpnBootstrapState) -> StatusCode {
+    match state {
+        client_runtime::VpnBootstrapState::ReauthenticationRequired => StatusCode::UNAUTHORIZED,
+        client_runtime::VpnBootstrapState::RetryableFailure => StatusCode::BAD_GATEWAY,
+        _ => StatusCode::SERVICE_UNAVAILABLE,
+    }
 }
 
 async fn login(
@@ -458,15 +573,7 @@ async fn register_worker(
     headers: axum::http::HeaderMap,
     Json(body): Json<RegisterWorkerBody>,
 ) -> (StatusCode, Json<StatusResponse>) {
-    let token = bearer_token(&headers)
-        .or_else(|| {
-            body.token
-                .as_deref()
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-                .map(str::to_string)
-        })
-        .unwrap_or_default();
+    let token = bearer_token(&headers).unwrap_or_default();
     if token.is_empty() {
         return (
             StatusCode::UNAUTHORIZED,
@@ -477,16 +584,41 @@ async fn register_worker(
         );
     }
 
-    let endpoint = body.ip.trim();
-    if endpoint.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(StatusResponse {
-                success: false,
-                status_message: "ip is required".into(),
-            }),
-        );
+    match client_runtime::ensure_user_vpn_for_token(&state.config, ClientRole::Worker, &token).await
+    {
+        Ok(Some(endpoint)) => state.set_nodepool_addr(endpoint),
+        Ok(None) => {}
+        Err(err) => {
+            let vpn_status = client_runtime::current_vpn_status(ClientRole::Worker);
+            tracing::warn!(
+                "Worker registration VPN readiness gate failed (state={}): {}",
+                vpn_status.state.as_str(),
+                err
+            );
+            return (
+                vpn_bootstrap_http_status(vpn_status.state),
+                Json(StatusResponse {
+                    success: false,
+                    status_message: vpn_status
+                        .message
+                        .unwrap_or_else(|| "VPN/Nodepool bootstrap failed".into()),
+                }),
+            );
+        }
     }
+
+    let endpoint = match effective_worker_advertise_addr(&state, body.ip.trim()).await {
+        Ok(endpoint) => endpoint,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(StatusResponse {
+                    success: false,
+                    status_message: err.to_string(),
+                }),
+            )
+        }
+    };
 
     let owner = body
         .username
@@ -586,11 +718,12 @@ async fn register_worker(
     .await
     {
         Ok(()) => {
+            state.set_worker_addr(profile.ip.clone());
             // UI-authenticated workers do not start the pre-provisioned
             // registration loop during process startup. Start it after the
             // first successful registration so the node remains online and
             // the dispatcher can continue seeing it after 30 seconds.
-            state.ensure_registration_loop(owner, &token);
+            state.ensure_registration_loop(owner, &profile.worker_id, &token);
             (
                 StatusCode::OK,
                 Json(StatusResponse {
@@ -607,6 +740,46 @@ async fn register_worker(
             }),
         ),
     }
+}
+
+async fn effective_worker_advertise_addr(
+    state: &ControlApiState,
+    requested: &str,
+) -> Result<String> {
+    let requested = requested.trim();
+    if requested.is_empty() {
+        anyhow::bail!("ip is required");
+    }
+
+    if let Some(configured) = state
+        .config
+        .server
+        .worker_advertise_addr
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return nodepool_client::validate_advertise_addr(configured);
+    }
+
+    let Some(overlay_ip) = client_runtime::current_vpn_session(ClientRole::Worker)
+        .await
+        .and_then(|session| session.overlay_ip.clone())
+    else {
+        return Ok(requested.to_string());
+    };
+
+    let port = requested
+        .rsplit_once(':')
+        .map(|(_, port)| port.trim_matches(']'))
+        .filter(|port| !port.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("worker endpoint must include a port"))?;
+    let host = if overlay_ip.contains(':') && !overlay_ip.starts_with('[') {
+        format!("[{overlay_ip}]")
+    } else {
+        overlay_ip
+    };
+    nodepool_client::validate_advertise_addr(&format!("{host}:{port}"))
 }
 
 fn bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
@@ -661,6 +834,7 @@ mod tests {
     fn sample_state() -> super::ControlApiState {
         super::ControlApiState {
             profile: sample_profile(),
+            worker_addr: std::sync::Arc::new(std::sync::Mutex::new("127.0.0.1:50053".into())),
             nodepool_addr: std::sync::Arc::new(std::sync::Mutex::new("127.0.0.1:50051".into())),
             config: HivemindConfig::default(),
             executor: std::sync::Arc::new(super::WorkerExecutor::new(HivemindConfig::default())),
@@ -809,6 +983,33 @@ mod tests {
             .is_none());
     }
 
+    #[tokio::test]
+    async fn vpn_routes_require_bearer_and_return_no_secret_fields() {
+        let app = super::router_with_allowed_origins(sample_state(), &[]);
+        for (method, path) in [("POST", "/api/vpn/bootstrap"), ("GET", "/api/vpn/status")] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "{method} {path}"
+            );
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let json: Value = serde_json::from_slice(&body).unwrap();
+            assert!(json.get("auth_key").is_none());
+            assert!(!json.to_string().contains("tskey-auth"));
+            assert!(!json.to_string().contains("HEADSCALE_API_KEY"));
+        }
+    }
     #[tokio::test]
     async fn register_worker_requires_bearer_token() {
         let app = super::router_with_allowed_origins(sample_state(), &[]);
