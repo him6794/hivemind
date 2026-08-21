@@ -46,10 +46,11 @@ Authenticated (Bearer user JWT from login):
 | `MASTER_HTTP_ADDR` | Local HTTP bind (default `0.0.0.0:8082`) |
 | `NODEPOOL_GRPC_ENDPOINT` | Reachable nodepool gRPC host:port (usually over VPN) |
 | `MASTER_UI_DIR` | Bundled master-ui asset directory |
-| `MASTER_WEBSITE_API_BASE` | Official website-api base for automatic VPN issue on login |
-| `MASTER_VPN_AUTHKEY` | Optional operator override; skips website-api issue when set |
+| `MASTER_WEBSITE_API_BASE` / `WEBSITE_API_BASE` | HTTPS origin of the deployed Rust Website API; must expose `/api/login` and protected `/api/vpn/config` for automatic enrollment |
+| `MASTER_VPN_AUTHKEY` | Optional role-scoped Headscale preauth key; keyed startup joins before Nodepool-dependent work proceeds |
 | `MASTER_VPN_LOGIN_SERVER` / `HEADSCALE_LOGIN_SERVER` | Headscale login server for VPN join |
 | `MASTER_VPN_HOSTNAME` | Optional Tailscale hostname |
+| `VPN_STARTUP_TIMEOUT_SECS` | Bounded keyed VPN/Nodepool startup deadline (1-300 seconds; default 120) |
 | `MASTER_VPN_STATE_DIR` | Optional userspace Tailscale state dir |
 | `MASTER_VPN_TAILSCALE_BIN` | Optional path to `tailscale` binary |
 | `MASTER_CORS_ALLOWED_ORIGINS` | Explicit CORS allow-list (no wildcard) |
@@ -58,17 +59,44 @@ Master does **not** need `JWT_SECRET`.
 
 ## VPN bootstrap
 
-For a downloaded remote master:
+Master and Worker are user-deployed processes on a local suitable host. The
+Orange Pi platform host is reserved for Nodepool, Website API, Headscale,
+PostgreSQL, and Redis; it must not also host the downloaded Master or Worker.
 
-1. Set `MASTER_WEBSITE_API_BASE` to the public website-api.
-2. Set `NODEPOOL_GRPC_ENDPOINT` to the nodepool address reachable over the VPN.
-3. Start master; UI comes up immediately (nodepool connect is lazy).
-4. Operator logs in with website credentials.
-5. Master calls website-api `/api/vpn/config`, joins Headscale automatically, then
-   logs into nodepool and returns the user JWT to the UI.
+For an operator-provisioned remote Master:
 
-Local compose can omit `MASTER_WEBSITE_API_BASE` when master and nodepool already
-share a network.
+1. Set `NODEPOOL_GRPC_ENDPOINT` to the Nodepool gRPC address reachable through
+   Headscale.
+2. Set `MASTER_VPN_AUTHKEY` to a role-scoped Headscale preauth key and, when
+   needed, set `MASTER_VPN_LOGIN_SERVER` or `HEADSCALE_LOGIN_SERVER`.
+3. Start Master. It joins Headscale, waits for the Nodepool gRPC transport
+   handshake, and only then exposes the startup path that depends on Nodepool.
+4. Master uses the validated effective endpoint; on Windows this can be the
+   localhost bridge exposed by the embedded `libtailscale.dll` client.
+5. Log in with website credentials when the Nodepool application token is not
+   pre-provisioned. User-driven enrollment remains available in this mode.
+
+For interactive enrollment without `MASTER_VPN_AUTHKEY`, configure
+`MASTER_WEBSITE_API_BASE` or `WEBSITE_API_BASE` with the HTTPS origin of the
+deployed Rust Website API. That service must expose `POST /api/login` and the
+protected `POST /api/vpn/config`; the official Next BFF is not a substitute
+unless it explicitly serves that route. After login, the local `/api/vpn/bootstrap`
+route forwards the bearer JWT to the Website API, consumes the one-time
+Headscale key in process memory, joins the overlay, and waits for Nodepool
+protocol readiness before updating the Master gRPC endpoint. The same flow is
+used for a restored session; persisted libtailscale state is attempted before
+issuing a new key. An expired JWT requires login again.
+
+If `MASTER_VPN_AUTHKEY` is absent, Master keeps the local UI available while
+remote operations remain gated until authenticated enrollment is ready. The
+local status route exposes only nonsecret state. `HEADSCALE_API_KEY` is a
+platform-side secret and is never placed in a Master package, browser storage,
+or status response. Automatic update/download behavior is not implemented by
+this startup slice.
+
+Local compose can omit `MASTER_WEBSITE_API_BASE` when Master and Nodepool already
+share a development network, but that is not evidence of the external Headscale
+Master/Worker topology.
 
 ## Build / test
 

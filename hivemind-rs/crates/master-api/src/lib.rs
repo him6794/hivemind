@@ -24,11 +24,14 @@ impl MasterApiServer {
     pub async fn new(nodepool_grpc_addr: String, config: HivemindConfig) -> Result<Self> {
         // Optional operator-provisioned VPN auth key bootstrap. Downloaded masters
         // typically skip this and auto-issue a preauth key via website-api on login.
-        crate::vpn_bootstrap::ensure_master_vpn(&config).await?;
+        let effective_nodepool_addr =
+            crate::vpn_bootstrap::ensure_master_vpn(&config, &nodepool_grpc_addr)
+                .await?
+                .unwrap_or(nodepool_grpc_addr);
 
-        // Do not block UI startup on nodepool reachability. Remote masters often
-        // need login-driven VPN bootstrap before the overlay path exists.
-        let grpc = GrpcClient::new(nodepool_grpc_addr);
+        // Do not block UI startup on nodepool reachability in no-key mode. Remote
+        // masters can still use login-driven VPN bootstrap before the overlay path exists.
+        let grpc = GrpcClient::new(effective_nodepool_addr);
         let state = handlers::AppState {
             grpc_client: grpc,
             config,

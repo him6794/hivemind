@@ -664,7 +664,9 @@ fn default_torrent_announce_url() -> String {
 }
 
 fn default_vpn_startup_timeout_secs() -> u64 {
-    30
+    // A first authenticated Headscale join may spend several seconds creating
+    // the userspace session before the Nodepool gRPC probe can begin.
+    120
 }
 
 fn validate_vpn_startup_timeout(value: u64) -> anyhow::Result<()> {
@@ -1456,7 +1458,7 @@ mod tests {
             None => std::env::remove_var("VPN_STARTUP_TIMEOUT_SECS"),
         }
 
-        assert_eq!(HivemindConfig::default().vpn.startup_timeout_secs, 30);
+        assert_eq!(HivemindConfig::default().vpn.startup_timeout_secs, 120);
         assert_eq!(loaded.vpn.startup_timeout_secs, 17);
     }
 
@@ -1489,6 +1491,6 @@ mod tests {
 
         let config: HivemindConfig = serde_json::from_value(json).unwrap();
 
-        assert_eq!(config.vpn.startup_timeout_secs, 30);
+        assert_eq!(config.vpn.startup_timeout_secs, 120);
     }
 }

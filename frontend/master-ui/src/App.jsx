@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import './console.css';
 import { artifactFilenameFromContentDisposition } from './artifactDownloadPolicy.mjs';
 import { clearStoredSession, readStoredSession, saveStoredSession } from './authSession.mjs';
@@ -29,6 +29,7 @@ export default function MasterApp() {
   const [downloadLoading, setDownloadLoading] = useState(null);
   const [lastRefresh, setLastRefresh] = useState(null);
   const [sourceError, setSourceError] = useState(null);
+  const vpnReadyToken = useRef('');
 
   const [taskId, setTaskId] = useState('');
   const [taskSource, setTaskSource] = useState('');
@@ -97,15 +98,42 @@ export default function MasterApp() {
     }
   }
 
+  async function bootstrapVpn(authToken = token) {
+    if (!authToken) throw new Error('Login is required before VPN bootstrap');
+    if (vpnReadyToken.current === authToken) return { success: true, state: 'ready' };
+
+    setStatus('Connecting to Hivemind network...');
+    const { ok, data } = await api('POST', '/api/vpn/bootstrap', undefined, authToken);
+    const state = String(data.state || '').trim();
+    if (!ok || !data.success || !['ready', 'disabled'].includes(state)) {
+      throw new Error(data.message || `VPN is not ready (${state || 'unknown'})`);
+    }
+    vpnReadyToken.current = authToken;
+    setStatus(state === 'disabled' ? 'Connected in local mode' : 'Connected to Hivemind network');
+    return data;
+  }
+
   useEffect(() => {
     if (!token) return undefined;
-    refreshTasks()
-      .then(() => setLastRefresh(Date.now()))
-      .catch((err) => setStatus(`Task load failed: ${err.message}`));
+    let cancelled = false;
+    (async () => {
+      try {
+        await bootstrapVpn(token);
+        if (cancelled) return;
+        await refreshTasks(token);
+        if (!cancelled) setLastRefresh(Date.now());
+      } catch (err) {
+        if (!cancelled) setStatus(`Connection failed: ${err.message}`);
+      }
+    })();
     const id = setInterval(() => {
-      refreshTasks().then(() => setLastRefresh(Date.now())).catch(() => {});
+      if (cancelled || vpnReadyToken.current !== token) return;
+      refreshTasks(token).then(() => setLastRefresh(Date.now())).catch(() => {});
     }, 5000);
-    return () => clearInterval(id);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
   }, [token]);
 
   async function handleLogin(e) {
@@ -127,7 +155,7 @@ export default function MasterApp() {
       });
       setToken(data.token);
       setUsername(ownerUsername);
-      setStatus('Logged in successfully');
+      await bootstrapVpn(data.token);
       await refreshTasks(data.token);
       setLastRefresh(Date.now());
     } catch (err) {
@@ -146,12 +174,13 @@ export default function MasterApp() {
       if (!taskSource.trim()) {
         throw new Error('Function source is required');
       }
-      if (taskInput.trim()) {
-        try {
-          JSON.parse(taskInput);
-        } catch {
-          throw new Error('Input must be valid JSON');
-        }
+      if (!taskInput.trim()) {
+        throw new Error('Input JSON is required');
+      }
+      try {
+        JSON.parse(taskInput);
+      } catch {
+        throw new Error('Input must be valid JSON');
       }
       if (toNumber(maxCpt) <= 0) {
         throw new Error('Max CPT must be greater than 0 for managed-function tasks');
@@ -330,6 +359,7 @@ export default function MasterApp() {
 
   function logout() {
     clearStoredSession(window.localStorage, SESSION_KEY);
+    vpnReadyToken.current = '';
     setToken('');
     setTasks([]);
     setSelectedTask('');
@@ -438,7 +468,7 @@ export default function MasterApp() {
                   <textarea
                     value={taskInput}
                     onChange={(e) => setTaskInput(e.target.value)}
-                    placeholder='optional, e.g. {"n": 42}'
+                    placeholder='required, e.g. {"n": 42}'
                     rows={4}
                     className="field"
                   />

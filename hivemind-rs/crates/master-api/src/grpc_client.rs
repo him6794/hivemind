@@ -82,12 +82,14 @@ impl GrpcClient {
 
     /// Connect if needed. Safe to call repeatedly after VPN bootstrap.
     pub async fn ensure_connected(&self) -> Result<(), tonic::transport::Error> {
+        self.refresh_endpoint_from_vpn().await;
         let mut guard = self.inner.lock().await;
         if guard.is_some() {
             return Ok(());
         }
         let endpoint = self.endpoint.lock().await.clone();
-        let endpoint = Endpoint::from_shared(format!("http://{}", endpoint))?
+        let endpoint = hivemind_client_runtime::normalize_nodepool_endpoint(&endpoint);
+        let endpoint = Endpoint::from_shared(format!("http://{endpoint}"))?
             .connect_timeout(Duration::from_secs(5))
             .http2_adaptive_window(true);
         let channel = endpoint.connect().await?;
@@ -127,6 +129,26 @@ impl GrpcClient {
                 *guard = endpoint;
             }
         }
+        self.reset().await;
+    }
+
+    async fn refresh_endpoint_from_vpn(&self) {
+        let Some(session) = hivemind_client_runtime::current_vpn_session(
+            hivemind_client_runtime::ClientRole::Master,
+        )
+        .await
+        else {
+            return;
+        };
+        let Some(endpoint) = session.bridge_endpoint() else {
+            return;
+        };
+        let mut endpoint_guard = self.endpoint.lock().await;
+        if *endpoint_guard == endpoint {
+            return;
+        }
+        *endpoint_guard = endpoint;
+        drop(endpoint_guard);
         self.reset().await;
     }
 

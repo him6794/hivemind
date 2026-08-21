@@ -51,6 +51,50 @@ Worker execution composes:
   - proto contracts
 ```
 
+## Deployment topology
+
+The formal external deployment separates the platform control plane from
+user-deployed compute clients:
+
+```text
+Orange Pi ARM64
+  - Nodepool
+  - Website API
+  - Headscale
+  - PostgreSQL
+  - Redis
+
+Local suitable host
+  - Master
+  - Worker
+  - native managed prover only where that host/provider is validated
+```
+
+Master and Worker use the Headscale overlay to reach Nodepool and, for Worker
+execution, to advertise a reachable overlay address. The Orange Pi does not
+host Master, Worker, or a managed prover. The root all-in-one Compose stack is
+for local development/release smoke only, and `infra/docker-compose.vpn.yml`
+is legacy; neither is formal external Headscale evidence.
+
+On local Windows startup, an operator-provisioned role-scoped Headscale auth
+key (`MASTER_VPN_AUTHKEY` or `WORKER_VPN_AUTHKEY`) still provides unattended
+startup. The client joins the overlay before Nodepool-dependent work, waits for
+a real gRPC transport handshake, propagates the effective userspace bridge
+endpoint when required, and fails closed on a bounded timeout.
+
+For interactive enrollment, set `WEBSITE_API_BASE` (or
+`MASTER_WEBSITE_API_BASE` / `WORKER_WEBSITE_API_BASE`) to the HTTPS origin of
+the deployed Rust Website API. It must expose `POST /api/login` and the
+protected `POST /api/vpn/config`; the official Next BFF is not implicitly a
+VPN-config service. A user signs in through the local UI, then the local Master
+or Worker forwards only the bearer JWT to that Website API. The one-time
+Headscale key is consumed in process memory, the process waits for Nodepool
+protocol readiness, and only then enables remote operations or registration.
+Persisted libtailscale state is attempted first on restart; an expired JWT
+requires explicit login again. No password, reusable Headscale key, or
+`HEADSCALE_API_KEY` is distributed to clients or browser storage. Automatic
+update/download remains out of scope.
+
 ## Main Service Roles
 
 ### Official Site

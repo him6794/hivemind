@@ -90,6 +90,15 @@ pub struct LoginResponse {
     pub token: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct VpnBootstrapResponse {
+    pub success: bool,
+    pub state: String,
+    pub endpoint: Option<String>,
+    pub overlay_ip: Option<String>,
+    pub message: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RegisterBody {
     pub username: String,
@@ -808,6 +817,83 @@ pub async fn health_check() -> &'static str {
     "OK"
 }
 
+/// POST /api/vpn/bootstrap
+///
+/// Rehydrate or enroll the local Master VPN using the authenticated bearer
+/// token. The one-time Headscale key is consumed inside client-runtime and is
+/// never included in this response.
+pub async fn bootstrap_vpn(
+    State(state): State<AppState>,
+    AuthUser { token, .. }: AuthUser,
+) -> (StatusCode, Json<VpnBootstrapResponse>) {
+    match crate::vpn_bootstrap::ensure_master_vpn_for_token(&state.config, &token).await {
+        Ok(Some(endpoint)) => {
+            state.grpc_client.set_endpoint(endpoint).await;
+            let status = hivemind_client_runtime::current_vpn_status(
+                hivemind_client_runtime::ClientRole::Master,
+            );
+            (StatusCode::OK, Json(vpn_bootstrap_response(status, None)))
+        }
+        Ok(None) => {
+            let status = hivemind_client_runtime::current_vpn_status(
+                hivemind_client_runtime::ClientRole::Master,
+            );
+            (StatusCode::OK, Json(vpn_bootstrap_response(status, None)))
+        }
+        Err(err) => {
+            tracing::warn!("Master VPN bootstrap failed: {err}");
+            let status = hivemind_client_runtime::current_vpn_status(
+                hivemind_client_runtime::ClientRole::Master,
+            );
+            let http_status = vpn_bootstrap_http_status(status.state);
+            (
+                http_status,
+                Json(vpn_bootstrap_response(
+                    status,
+                    Some("VPN/Nodepool bootstrap failed".to_string()),
+                )),
+            )
+        }
+    }
+}
+
+/// GET /api/vpn/status
+///
+/// Return only non-secret local readiness information.
+pub async fn vpn_status(AuthUser { .. }: AuthUser) -> (StatusCode, Json<VpnBootstrapResponse>) {
+    let status =
+        hivemind_client_runtime::current_vpn_status(hivemind_client_runtime::ClientRole::Master);
+    (StatusCode::OK, Json(vpn_bootstrap_response(status, None)))
+}
+
+fn vpn_bootstrap_response(
+    status: hivemind_client_runtime::VpnBootstrapStatus,
+    fallback_message: Option<String>,
+) -> VpnBootstrapResponse {
+    let success = matches!(
+        status.state,
+        hivemind_client_runtime::VpnBootstrapState::Ready
+            | hivemind_client_runtime::VpnBootstrapState::Disabled
+    );
+    VpnBootstrapResponse {
+        success,
+        state: status.state.as_str().to_string(),
+        endpoint: status.endpoint,
+        overlay_ip: status.overlay_ip,
+        message: status.message.or(fallback_message),
+    }
+}
+
+fn vpn_bootstrap_http_status(state: hivemind_client_runtime::VpnBootstrapState) -> StatusCode {
+    match state {
+        hivemind_client_runtime::VpnBootstrapState::ReauthenticationRequired => {
+            StatusCode::UNAUTHORIZED
+        }
+        hivemind_client_runtime::VpnBootstrapState::RetryableFailure => StatusCode::BAD_GATEWAY,
+        _ => StatusCode::SERVICE_UNAVAILABLE,
+    }
+}
+
 /// POST /api/login
 ///
 /// User-deployed master requestor login:
@@ -873,6 +959,14 @@ pub async fn login(
                 Ok(None) => {}
                 Err(err) => {
                     tracing::warn!("Master VPN bootstrap after login failed: {}", err);
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(LoginResponse {
+                            success: false,
+                            message: format!("VPN/nodepool bootstrap failed after login: {err}"),
+                            token: None,
+                        }),
+                    );
                 }
             }
 
@@ -2248,6 +2342,41 @@ mod tests {
     fn admin_users_env_lock() -> &'static std::sync::Mutex<()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    #[test]
+    fn vpn_bootstrap_response_is_non_secret_and_marks_ready_success() {
+        let response = vpn_bootstrap_response(
+            hivemind_client_runtime::VpnBootstrapStatus {
+                state: hivemind_client_runtime::VpnBootstrapState::Ready,
+                endpoint: Some("127.0.0.1:18051".into()),
+                overlay_ip: Some("100.64.0.9".into()),
+                message: Some("ready".into()),
+            },
+            None,
+        );
+        let value = serde_json::to_value(response).unwrap();
+
+        assert_eq!(value["success"], true);
+        assert_eq!(value["state"], "ready");
+        assert_eq!(value["endpoint"], "127.0.0.1:18051");
+        assert!(value.get("auth_key").is_none());
+        assert!(!value.to_string().contains("tskey-auth"));
+        assert!(!value.to_string().contains("HEADSCALE_API_KEY"));
+    }
+
+    #[test]
+    fn vpn_bootstrap_http_status_maps_reauthentication_and_retry() {
+        assert_eq!(
+            vpn_bootstrap_http_status(
+                hivemind_client_runtime::VpnBootstrapState::ReauthenticationRequired
+            ),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            vpn_bootstrap_http_status(hivemind_client_runtime::VpnBootstrapState::RetryableFailure),
+            StatusCode::BAD_GATEWAY
+        );
     }
 
     #[test]
