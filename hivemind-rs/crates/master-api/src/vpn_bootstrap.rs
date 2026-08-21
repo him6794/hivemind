@@ -22,9 +22,16 @@ pub fn plan_master_vpn_bootstrap(
     )
 }
 
-/// Best-effort startup bootstrap when an operator already provisioned an auth key.
-pub async fn ensure_master_vpn(config: &HivemindConfig) -> Result<()> {
-    client_runtime::ensure_env_vpn(config, ClientRole::Master).await
+/// Startup bootstrap when an operator already provisioned a role-scoped auth key.
+///
+/// `Some` contains the validated Nodepool endpoint, which may be a localhost
+/// userspace bridge on Windows. `None` preserves the deferred UI-login mode.
+pub async fn ensure_master_vpn(
+    config: &HivemindConfig,
+    configured_endpoint: &str,
+) -> Result<Option<String>> {
+    client_runtime::ensure_env_vpn_for_endpoint(config, ClientRole::Master, configured_endpoint)
+        .await
 }
 
 /// Automatic VPN join for a logged-in user using the official website-api.
@@ -45,6 +52,16 @@ pub async fn ensure_master_vpn_for_user(
         existing_token,
     )
     .await
+}
+
+/// Bootstrap an already-authenticated local session without accepting or
+/// storing a password. The raw JWT is forwarded only to the protected
+/// Website API by the shared runtime helper.
+pub async fn ensure_master_vpn_for_token(
+    config: &HivemindConfig,
+    token: &str,
+) -> Result<Option<String>> {
+    client_runtime::ensure_user_vpn_for_token(config, ClientRole::Master, token).await
 }
 
 pub fn website_api_base(config: &HivemindConfig) -> Option<String> {

@@ -18,6 +18,8 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/login", post(super::handlers::login));
 
     let protected = Router::new()
+        .route("/api/vpn/bootstrap", post(super::handlers::bootstrap_vpn))
+        .route("/api/vpn/status", get(super::handlers::vpn_status))
         .route("/api/balance", get(super::handlers::get_balance))
         .route(
             "/api/admin/billing/overview",
@@ -128,11 +130,42 @@ pub fn build_cors_layer(allowed_origins: &[String]) -> CorsLayer {
 
 #[cfg(test)]
 mod tests {
+    use crate::grpc_client::GrpcClient;
+    use crate::handlers::{AppState, TaskSubmitRateLimiter};
     use axum::body::Body;
     use axum::http::{header, Request, StatusCode};
     use axum::{routing::get, Router};
+    use std::sync::Arc;
     use tower::ServiceExt;
 
+    #[tokio::test]
+    async fn vpn_routes_reject_missing_bearer_before_bootstrap() {
+        let config = hivemind_config::HivemindConfig::default();
+        let app = super::create_router(AppState {
+            grpc_client: GrpcClient::new("127.0.0.1:50051"),
+            config,
+            task_submit_limiter: Arc::new(tokio::sync::Mutex::new(TaskSubmitRateLimiter::new())),
+        });
+
+        for (method, path) in [("POST", "/api/vpn/bootstrap"), ("GET", "/api/vpn/status")] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "{method} {path}"
+            );
+        }
+    }
     #[tokio::test]
     async fn cors_allows_only_configured_origins_without_wildcard() {
         let app = Router::new()

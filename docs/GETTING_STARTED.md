@@ -53,7 +53,55 @@ collision-free ephemeral host ports when `REDIS_HOST_PORT` and
 `POSTGRES_HOST_PORT` are unset. The five product/API ports listed above remain
 fixed and must be free.
 
-## Build
+## External operator topology
+
+For the deployed platform topology, keep the Orange Pi limited to the control
+plane and persistent services:
+
+```text
+Orange Pi ARM64
+  Nodepool + Website API + Headscale + PostgreSQL + Redis
+
+Local suitable host
+  Master + Worker
+```
+
+Master and Worker connect to the Orange Pi Nodepool through the Headscale
+overlay. Do not deploy either downloaded client, a managed prover, or the
+platform `HEADSCALE_API_KEY` on the Orange Pi as a substitute for that topology.
+The API key remains server-side and is never distributed in client packages.
+
+To make a local Windows Master or Worker enroll automatically, set
+`WEBSITE_API_BASE` (or the role-specific `MASTER_WEBSITE_API_BASE` /
+`WORKER_WEBSITE_API_BASE`) to the HTTPS origin of the deployed Rust Website API.
+That origin must expose both `POST /api/login` and the protected
+`POST /api/vpn/config`; the official Next BFF is not a VPN-config endpoint unless
+that route is explicitly added there. The downloaded Worker package exposes
+`WEBSITE_API_BASE` in `.env.worker.example`; the runtime also has a baked-in
+public default for deployments that intentionally use it.
+
+After the local Master or Worker starts, its local UI/control surface is available
+without a VPN key. On the first authenticated login, the local process forwards
+the bearer JWT to the Website API, consumes the returned one-time Headscale key
+in memory, joins Headscale, and waits for the Nodepool gRPC protocol probe. Only
+then do Master remote operations or Worker registration proceed. The browser and
+client package never receive `HEADSCALE_API_KEY`, and no password or reusable
+Headscale key is persisted.
+
+On restart, the process first attempts to rehydrate its persisted libtailscale
+state. A restored valid UI session can request a fresh one-time key if that state
+was revoked or expired. An expired JWT returns to explicit login rather than
+falling back to stored credentials. For unattended operator startup, an optional
+role-scoped `MASTER_VPN_AUTHKEY` or `WORKER_VPN_AUTHKEY` remains supported; set
+`HEADSCALE_LOGIN_SERVER` and `NODEPOOL_GRPC_ENDPOINT` as needed. Keyed startup waits for the Nodepool gRPC transport handshake and fails closed if the overlay
+path is unavailable. Set `VPN_STARTUP_TIMEOUT_SECS` between 1 and 300 seconds
+when the default 120-second readiness deadline needs adjustment. A login-server-only setting does not auto-enroll.
+
+Automatic update/download behavior is not implemented yet. The current startup
+slice only adds authenticated Headscale enrollment, persisted-state rehydration,
+and readiness ordering. The root all-in-one Compose stack and
+`infra/docker-compose.vpn.yml` are local/legacy development configurations, not
+formal external Headscale evidence.
 
 ```bash
 cd hivemind-rs
