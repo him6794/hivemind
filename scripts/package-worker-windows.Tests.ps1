@@ -102,8 +102,13 @@ Assert-Contains `
 
 Assert-Contains `
     -Haystack $scriptText `
-    -Needle 'Assert-RequiredEnv -Names @("NODEPOOL_GRPC_ADDR", "WORKER_GRPC_ADDR", "WORKER_CONTROL_HTTP_ADDR", "WORKER_NODEPOOL_TOKEN")' `
-    -Message "start-worker launcher must require the worker nodepool token but not require WORKER_ADVERTISE_ADDR or JWT_SECRET."
+    -Needle 'Assert-RequiredEnv -Names @("WORKER_GRPC_ADDR", "WORKER_CONTROL_HTTP_ADDR")' `
+    -Message "start-worker launcher must require worker listen/control addresses without requiring a pre-provisioned token."
+
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle 'NODEPOOL_GRPC_ENDPOINT or NODEPOOL_GRPC_ADDR' `
+    -Message "start-worker launcher must accept either the new or compatibility Nodepool endpoint setting."
 
 Assert-Contains `
     -Haystack $scriptText `
@@ -153,6 +158,7 @@ $note = $packagedReadme.Substring($noteStart)
 # Match on prose, not on where the template happens to wrap: re-flowing a
 # paragraph must not turn a documented guarantee into a red test.
 $flowedNote = [regex]::Replace($note, '\s+', ' ')
+$flowedReadme = [regex]::Replace($packagedReadme, '\s+', ' ')
 
 Assert-Contains `
     -Haystack $flowedNote `
@@ -208,6 +214,96 @@ if (!$envMatch.Success) {
     throw "windows worker package must build .env.worker.example from a here-string."
 }
 $packagedEnv = $envMatch.Groups[1].Value
+
+if ([regex]::IsMatch($packagedEnv, '(?m)^\s*HEADSCALE_API_KEY\s*=')) {
+    throw "worker package must never distribute the server-side HEADSCALE_API_KEY."
+}
+
+foreach ($expected in @(
+        "NODEPOOL_GRPC_ENDPOINT",
+        "WEBSITE_API_BASE",
+        "HEADSCALE_LOGIN_SERVER",
+        "WORKER_VPN_AUTHKEY",
+        "WORKER_VPN_HOSTNAME",
+        "VPN_STARTUP_TIMEOUT_SECS"
+    )) {
+    Assert-Contains `
+        -Haystack $packagedEnv `
+        -Needle $expected `
+        -Message "worker package template must expose optional Headscale startup setting '$expected'."
+}
+
+if ($scriptText -match 'Assert-RequiredEnv[^\r\n]*WORKER_VPN_AUTHKEY') {
+    throw "worker launcher must not require WORKER_VPN_AUTHKEY; UI-login/direct-endpoint mode remains supported."
+}
+
+if ($scriptText -match 'Assert-RequiredEnv[^\r\n]*WORKER_NODEPOOL_TOKEN') {
+    throw "worker launcher must not require WORKER_NODEPOOL_TOKEN; UI registration remains supported."
+}
+
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle "NODEPOOL_GRPC_ENDPOINT or NODEPOOL_GRPC_ADDR" `
+    -Message "worker launcher must accept either the new or compatibility Nodepool endpoint setting."
+
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle '$workerExitCode' `
+    -Message "worker launcher must propagate the native worker exit code."
+
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle 'name = "libtailscale.dll"' `
+    -Message "MSVC package manifest must include the shipped libtailscale DLL hash."
+
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle 'name = "vcruntime140.dll"' `
+    -Message "MSVC package must ship the matching Visual C++ runtime dependency."
+
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle '$packageArtifacts | ForEach-Object' `
+    -Message "package SHA256SUMS must cover every shipped artifact, including native DLLs."
+
+if ($scriptText -match 'WORKER_ID=\$env:COMPUTERNAME') {
+    throw "worker package must not bake the packaging host COMPUTERNAME into the target worker identity."
+}
+
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle 'WORKER_ID=' `
+    -Message "worker package template must leave WORKER_ID runtime-selected on the target host."
+
+Assert-Contains `
+    -Haystack $flowedReadme `
+    -Needle "WEBSITE_API_BASE" `
+    -Message "packaged README must document the Website API base used for authenticated VPN enrollment."
+
+Assert-Contains `
+    -Haystack $flowedReadme `
+    -Needle "/api/vpn/config" `
+    -Message "packaged README must identify the protected Rust Website API VPN-config contract."
+
+Assert-Contains `
+    -Haystack $flowedReadme `
+    -Needle "one-time Headscale key" `
+    -Message "packaged README must explain that interactive enrollment consumes a one-time Headscale key locally."
+
+Assert-Contains `
+    -Haystack $flowedReadme `
+    -Needle "persisted VPN state" `
+    -Message "packaged README must document restart state rehydration."
+
+Assert-Contains `
+    -Haystack $flowedReadme `
+    -Needle "HEADSCALE_API_KEY" `
+    -Message "packaged README must state that the platform Headscale API key is not shipped."
+
+Assert-Contains `
+    -Haystack $flowedReadme `
+    -Needle "Orange Pi" `
+    -Message "packaged README must keep Master and Worker off the Orange Pi platform host."
 
 if ([regex]::IsMatch($packagedEnv, '(?m)^\s*MANAGED_PROVER_EXECUTABLE\s*=\s*\S')) {
     throw "windows worker template must not point MANAGED_PROVER_EXECUTABLE at a native Windows path; managed proving must fail closed."

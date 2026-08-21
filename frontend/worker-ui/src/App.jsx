@@ -79,6 +79,29 @@ export default function WorkerApp() {
     return normalized;
   }
 
+  async function bootstrapVpn(authToken = token) {
+    if (!authToken) throw new Error('Login is required before VPN bootstrap');
+    let res;
+    try {
+      res = await fetch(`${workerControlBase}/api/vpn/bootstrap`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
+    } catch {
+      throw new Error(`Cannot reach Worker Control at ${workerControlBase}.`);
+    }
+    const data = await readJson(res);
+    if (res.status === 401) {
+      logout();
+      throw new Error('Session expired. Please log in again.');
+    }
+    if (!res.ok || !data.success || !['ready', 'disabled'].includes(String(data.state || ''))) {
+      throw new Error(data.message || `VPN is not ready (${data.state || 'unknown'})`);
+    }
+    setStatus(data.state === 'disabled' ? 'Connected in local mode' : 'Connected to Hivemind network');
+    return data;
+  }
+
   async function registerWorker(authToken = token, workerProfile = profile, endpoint = workerIp) {
     const ownerUsername = registrationOwnerUsername(authenticatedUsername, username);
     if (!authToken || !ownerUsername) return;
@@ -158,7 +181,8 @@ export default function WorkerApp() {
       setToken(authToken);
       setUsername(ownerUsername);
       setAuthenticatedUsername(ownerUsername);
-      setStatus('Logged in. Fetching local worker info...');
+      await bootstrapVpn(authToken);
+      setStatus('Connected. Fetching local worker info...');
       const localProfile = await refreshLocalProfile();
       await registerWorker(authToken, localProfile, localProfile.ip);
     } catch (err) {
@@ -210,20 +234,25 @@ export default function WorkerApp() {
   useEffect(() => {
     setProfileLoading(true);
     setProfileError(null);
-    refreshLocalProfile()
-      .then((localProfile) => {
+    (async () => {
+      try {
         if (initialSession.token && initialSession.username) {
-          setStatus('Session restored. Registering local worker...');
-          return registerWorker(initialSession.token, localProfile, localProfile.ip);
+          setStatus('Session restored. Connecting to Hivemind network...');
+          await bootstrapVpn(initialSession.token);
+          const localProfile = await refreshLocalProfile();
+          setStatus('Connected. Registering local worker...');
+          await registerWorker(initialSession.token, localProfile, localProfile.ip);
+        } else {
+          await refreshLocalProfile();
+          setStatus('Local worker profile loaded');
         }
-        setStatus('Local worker profile loaded');
-        return undefined;
-      })
-      .catch((err) => {
+      } catch (err) {
         setProfileError(err.message);
-        setStatus(`Cannot reach local worker agent: ${err.message}`);
-      })
-      .finally(() => setProfileLoading(false));
+        setStatus(`Cannot initialize worker: ${err.message}`);
+      } finally {
+        setProfileLoading(false);
+      }
+    })();
   }, []);
 
   return (

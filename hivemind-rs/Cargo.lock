@@ -1477,6 +1477,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tracing",
  "uuid",
@@ -1491,11 +1492,13 @@ dependencies = [
  "dirs",
  "hex",
  "hivemind-config",
+ "prost",
  "rand 0.8.7",
  "reqwest",
  "serde",
  "serde_json",
  "tokio",
+ "tonic",
  "tracing",
 ]
 

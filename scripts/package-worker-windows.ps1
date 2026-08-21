@@ -1,9 +1,15 @@
 param(
     [string]$Configuration = "release",
-    [ValidateSet("x86_64-pc-windows-msvc", "x86_64-pc-windows-gnu")]
+    [ValidateSet("x86_64-pc-windows-msvc", "x86_64-pc-windows-gnu", "aarch64-pc-windows-msvc")]
     [string]$RustTarget = "x86_64-pc-windows-msvc",
     [string]$OutputDir = "dist\windows-worker",
     [string]$NodepoolGrpcAddr = "nodepool.example.com:50051",
+    [string]$NodepoolGrpcEndpoint = "",
+    [string]$HeadscaleLoginServer = "",
+    [string]$WebsiteApiBase = "",
+    [string]$WorkerVpnAuthkey = "",
+    [string]$WorkerVpnHostname = "",
+    [ValidateRange(1, 300)][int]$VpnStartupTimeoutSecs = 30,
     [string]$WorkerGrpcAddr = "0.0.0.0:50053",
     [string]$WorkerControlHttpAddr = "127.0.0.1:18080"
 )
@@ -18,16 +24,33 @@ if ($Configuration -ne "release" -and $Configuration -ne "debug") {
     throw "Configuration must be 'release' or 'debug'."
 }
 
-$artifactDir = if ($RustTarget -eq "x86_64-pc-windows-msvc") {
-    Join-Path $repoRoot "vendor\libtailscale\windows-x86_64-msvc"
-} else {
-    Join-Path $repoRoot "vendor\libtailscale\windows-x86_64"
+$artifactDir = switch ($RustTarget) {
+    "x86_64-pc-windows-msvc" { Join-Path $repoRoot "vendor\libtailscale\windows-x86_64-msvc"; break }
+    "aarch64-pc-windows-msvc" { Join-Path $repoRoot "vendor\libtailscale\windows-aarch64-msvc"; break }
+    default { Join-Path $repoRoot "vendor\libtailscale\windows-x86_64" }
 }
-$archiveName = if ($RustTarget -eq "x86_64-pc-windows-msvc") { "libtailscale.dll" } else { "libtailscale.a" }
+$archiveName = if ($RustTarget -eq "x86_64-pc-windows-gnu") { "libtailscale.a" } else { "libtailscale.dll" }
 $archive = Join-Path $artifactDir $archiveName
 $header = Join-Path $artifactDir "tailscale.h"
 if (!(Test-Path -LiteralPath $archive) -or !(Test-Path -LiteralPath $header)) {
     throw "Missing ABI-specific libtailscale artifact for $RustTarget. Expected $archive and $header. Run scripts/fetch_libtailscale_windows.sh with the matching target before packaging."
+}
+$vcRuntimeSource = $null
+if ($RustTarget -like "*-pc-windows-msvc") {
+    $runtimeArchitecture = if ($RustTarget.StartsWith("aarch64-")) { "arm64" } else { "x64" }
+    $redistRoot = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\2022\BuildTools\VC\Redist\MSVC"
+    if (!(Test-Path -LiteralPath $redistRoot)) {
+        throw "Visual C++ redistributable directory is required for ${RustTarget}: $redistRoot"
+    }
+    $vcRuntimeSource = Get-ChildItem -Path $redistRoot -Recurse -File -Filter "vcruntime140.dll" |
+        Where-Object {
+            $_.FullName -match "\\$runtimeArchitecture\\Microsoft\.VC[0-9]+\.CRT\\vcruntime140\.dll$"
+        } |
+        Sort-Object FullName -Descending |
+        Select-Object -First 1
+    if ($null -eq $vcRuntimeSource) {
+        throw "Matching vcruntime140.dll was not found for ${RustTarget} below $redistRoot"
+    }
 }
 
 Push-Location $rustRoot
@@ -36,7 +59,26 @@ try {
     if ($Configuration -eq "release") {
         $cargoArgs += "--release"
     }
-    & cargo @cargoArgs
+    if ($RustTarget -like "*-pc-windows-msvc") {
+        $vsDevCmd = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat"
+        if (!(Test-Path -LiteralPath $vsDevCmd)) {
+            throw "Visual Studio Build Tools VsDevCmd.bat is required for ${RustTarget}: $vsDevCmd"
+        }
+        $targetArch = if ($RustTarget.StartsWith("aarch64-")) { "arm64" } else { "x64" }
+        $llvmBin = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages\MartinStorsjo.LLVM-MinGW.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\llvm-mingw-20260616-ucrt-x86_64\bin"
+        $cargoCommand = "cargo build --locked --target $RustTarget --bin hivemind-bin"
+        if ($Configuration -eq "release") {
+            $cargoCommand += " --release"
+        }
+        $cmdLine = "call `"$vsDevCmd`" -arch=$targetArch -host_arch=x64 && set GOTELEMETRY=off"
+        if (Test-Path -LiteralPath (Join-Path $llvmBin "clang.exe")) {
+            $cmdLine += " && set PATH=$llvmBin;%PATH%"
+        }
+        $cmdLine += " && $cargoCommand"
+        & cmd.exe /d /s /c $cmdLine
+    } else {
+        & cargo @cargoArgs
+    }
     if ($LASTEXITCODE -ne 0) {
         throw "Cargo failed for target $RustTarget with exit code $LASTEXITCODE."
     }
@@ -53,8 +95,30 @@ if (!(Test-Path $binary)) {
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 $packagedBinary = Join-Path $out "hivemind-bin.exe"
 Copy-Item -Force $binary $packagedBinary
-if ($RustTarget -eq "x86_64-pc-windows-msvc") {
-    Copy-Item -Force $archive (Join-Path $out "libtailscale.dll")
+$packageArtifacts = @(
+    [ordered]@{
+        name = "hivemind-bin.exe"
+        sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $packagedBinary).Hash.ToLowerInvariant()
+        source = $binary
+    }
+)
+if ($RustTarget -like "*-pc-windows-msvc") {
+    $packagedLibtailscale = Join-Path $out "libtailscale.dll"
+    Copy-Item -Force $archive $packagedLibtailscale
+    $packageArtifacts += [ordered]@{
+        name = "libtailscale.dll"
+        sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $packagedLibtailscale).Hash.ToLowerInvariant()
+        source = $archive
+    }
+    $packagedVcRuntime = Join-Path $out "vcruntime140.dll"
+    Copy-Item -Force $vcRuntimeSource.FullName $packagedVcRuntime
+    $packageArtifacts += [ordered]@{
+        name = "vcruntime140.dll"
+        sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $packagedVcRuntime).Hash.ToLowerInvariant()
+        source = $vcRuntimeSource.FullName
+    }
+} else {
+    $packagedVcRuntime = $null
 }
 
 $provenance = [ordered]@{
@@ -63,18 +127,33 @@ $provenance = [ordered]@{
     libtailscaleArchive = $archiveName
     libtailscaleArchiveSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
     libtailscaleHeaderSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $header).Hash.ToLowerInvariant()
-    binarySha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $packagedBinary).Hash.ToLowerInvariant()
+    binarySha256 = $packageArtifacts[0].sha256
+    vcruntime140Sha256 = if ($null -ne $packagedVcRuntime) {
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $packagedVcRuntime).Hash.ToLowerInvariant()
+    } else {
+        $null
+    }
 }
 $provenance | ConvertTo-Json | Set-Content -Encoding ASCII (Join-Path $out "native-dependency-provenance.json")
 
 $envTemplate = @"
 # Hivemind Windows worker configuration
+# NODEPOOL_GRPC_ADDR is retained for local/backward-compatible deployments.
 NODEPOOL_GRPC_ADDR=$NodepoolGrpcAddr
+NODEPOOL_GRPC_ENDPOINT=$NodepoolGrpcEndpoint
+# HTTPS origin of the deployed Rust Website API. It must expose /api/login and /api/vpn/config.
+# Leave blank only when using the built-in public default or an explicit role-specific override.
+WEBSITE_API_BASE=$WebsiteApiBase
+HEADSCALE_LOGIN_SERVER=$HeadscaleLoginServer
+WORKER_VPN_AUTHKEY=$WorkerVpnAuthkey
+WORKER_VPN_HOSTNAME=$WorkerVpnHostname
+VPN_STARTUP_TIMEOUT_SECS=$VpnStartupTimeoutSecs
 WORKER_GRPC_ADDR=$WorkerGrpcAddr
 WORKER_CONTROL_HTTP_ADDR=$WorkerControlHttpAddr
 WORKER_ADVERTISE_ADDR=
 WORKER_NODEPOOL_TOKEN=
-WORKER_ID=$env:COMPUTERNAME
+# Leave blank to use the target machine's COMPUTERNAME.
+WORKER_ID=
 WORKER_LOCATION=windows
 
 JWT_SECRET=
@@ -321,9 +400,17 @@ if (!(Test-Path $envFile)) {
 
 Import-DotEnv -Path $envFile
 Ensure-JwtSecret -Path $envFile
-Assert-RequiredEnv -Names @("NODEPOOL_GRPC_ADDR", "WORKER_GRPC_ADDR", "WORKER_CONTROL_HTTP_ADDR", "WORKER_NODEPOOL_TOKEN")
+Assert-RequiredEnv -Names @("WORKER_GRPC_ADDR", "WORKER_CONTROL_HTTP_ADDR")
+if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable("NODEPOOL_GRPC_ENDPOINT", "Process")) -and
+    [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable("NODEPOOL_GRPC_ADDR", "Process"))) {
+    throw "Required setting NODEPOOL_GRPC_ENDPOINT or NODEPOOL_GRPC_ADDR is missing or blank in .env.worker."
+}
 
 & (Join-Path $PSScriptRoot "hivemind-bin.exe") worker
+$workerExitCode = $LASTEXITCODE
+if ($workerExitCode -ne 0) {
+    exit $workerExitCode
+}
 '@
 $launcher | Set-Content -Encoding ASCII (Join-Path $out "start-worker.ps1")
 
@@ -334,17 +421,22 @@ $readme = @'
 # Hivemind Windows Worker Package
 
 1. Copy `.env.worker.example` to `.env.worker`.
-2. Set `NODEPOOL_GRPC_ADDR` to the reachable nodepool gRPC address.
-3. Set `WORKER_NODEPOOL_TOKEN` to a nodepool JWT whose subject matches `WORKER_ID`, or to an admin token that is allowed to register this worker.
-4. Optionally set `WORKER_ADVERTISE_ADDR` to the address other machines can use to reach this worker, for example `203.0.113.10:50053` or a Tailscale address. If you leave it blank, the worker will derive it from `WORKER_GRPC_ADDR`.
-5. `JWT_SECRET` will be generated automatically on first launch if it is blank. Set it explicitly if you need a fixed deployment secret.
-6. Run PowerShell as the provider user and execute:
+2. Set `NODEPOOL_GRPC_ENDPOINT` to the nodepool gRPC address reachable through Headscale. `NODEPOOL_GRPC_ADDR` remains available for backward-compatible local deployments.
+3. Set `WEBSITE_API_BASE` to the HTTPS origin of the deployed Rust Website API. That origin must expose `POST /api/login` and the protected `POST /api/vpn/config`; the official Next BFF is not a substitute unless it explicitly serves that contract. `WORKER_WEBSITE_API_BASE` can override it for this role.
+4. For interactive enrollment, leave `WORKER_VPN_AUTHKEY` blank and sign in through Worker UI. The local worker sends the bearer JWT to the Website API, consumes the returned one-time Headscale key in memory, joins the overlay, and waits for the Nodepool gRPC transport before registration. A valid persisted VPN state is rehydrated first on restart.
+5. For unattended operator startup, optionally set `WORKER_VPN_AUTHKEY` to a role-scoped preauth key. `HEADSCALE_LOGIN_SERVER` and `WORKER_VPN_HOSTNAME` are optional overrides; keyed startup fails closed until the VPN and Nodepool transport are ready.
+6. Optionally set `WORKER_NODEPOOL_TOKEN` to a nodepool JWT whose subject matches `WORKER_ID`, or set `WORKER_NODEPOOL_USERNAME` and `WORKER_NODEPOOL_PASSWORD`; when these are blank, the local Worker UI can perform registration after startup.
+7. Optionally set `WORKER_ADVERTISE_ADDR` to an address other machines can use to reach this worker. When Headscale startup is keyed and the worker listens on `0.0.0.0`, the connected overlay IP is used automatically.
+8. `JWT_SECRET` will be generated automatically on first launch if it is blank. Set it explicitly if you need a fixed deployment secret.
+9. Run PowerShell as the provider user and execute:
 
 ```powershell
 .\start-worker.ps1
 ```
 
-The worker starts its gRPC server, local control API, hardware profile reporting, and nodepool registration loop.
+The worker joins Headscale before startup-dependent registration, waits for the Nodepool gRPC transport, then starts its gRPC server, local control API, hardware profile reporting, and registration loop. Without `WORKER_VPN_AUTHKEY`, the local UI remains available while enrollment waits for an authenticated login. If the JWT expires or the device state is revoked, sign in again; no password, `HEADSCALE_API_KEY`, or reusable Headscale key is written to the package or browser storage.
+
+The downloaded Worker runs on the provider's local suitable host. Orange Pi is reserved for Nodepool, Website API, Headscale, PostgreSQL, and Redis; do not deploy this Worker package there.
 
 ## Managed proving
 
@@ -374,7 +466,6 @@ $readme | Set-Content -Encoding ASCII (Join-Path $out "README.md")
 
 $shaFile = Join-Path $out "SHA256SUMS"
 $manifestFile = Join-Path $out "manifest.json"
-$artifactHash = (Get-FileHash -LiteralPath $packagedBinary -Algorithm SHA256).Hash.ToLowerInvariant()
 $gitCommit = try { (git -C $repoRoot rev-parse HEAD 2>$null).Trim() } catch { "unknown" }
 $gitDirty = $true
 try {
@@ -383,7 +474,9 @@ try {
     $gitDirty = $true
 }
 
-("{0} *{1}" -f $artifactHash, "hivemind-bin.exe") | Set-Content -Encoding ASCII -Path $shaFile
+$packageArtifacts | ForEach-Object {
+    "{0} *{1}" -f $_.sha256, $_.name
+} | Set-Content -Encoding ASCII -Path $shaFile
 
 $manifest = [ordered]@{
     package = "hivemind-windows-worker"
@@ -391,13 +484,7 @@ $manifest = [ordered]@{
     generated_at_utc = (Get-Date).ToUniversalTime().ToString("o")
     git_commit = $gitCommit
     git_dirty = $gitDirty
-    artifacts = @(
-        [ordered]@{
-            name = "hivemind-bin.exe"
-            sha256 = $artifactHash
-            source = $binary
-        }
-    )
+    artifacts = $packageArtifacts
 }
 $manifest | ConvertTo-Json -Depth 5 | Set-Content -Encoding ASCII -Path $manifestFile
 

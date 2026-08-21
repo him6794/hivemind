@@ -55,15 +55,18 @@ pub trait TransferLeaseAuthority: Send + Sync {
 /// token is presented to Nodepool for every transfer operation; no user JWT or
 /// Worker-local revocation cache is trusted.
 pub struct NodepoolTransferLeaseAuthority {
-    endpoint: String,
+    endpoint: Arc<Mutex<String>>,
 }
 
 impl NodepoolTransferLeaseAuthority {
     #[must_use]
     pub fn new(endpoint: impl Into<String>) -> Arc<Self> {
-        Arc::new(Self {
-            endpoint: crate::nodepool_client::nodepool_endpoint(&endpoint.into()),
-        })
+        Self::new_shared(Arc::new(Mutex::new(endpoint.into())))
+    }
+
+    #[must_use]
+    pub fn new_shared(endpoint: Arc<Mutex<String>>) -> Arc<Self> {
+        Arc::new(Self { endpoint })
     }
 }
 
@@ -80,9 +83,15 @@ impl TransferLeaseAuthority for NodepoolTransferLeaseAuthority {
         idempotency_key: &str,
         request_digest: &str,
     ) -> Result<(), TransferLeaseAuthorityError> {
-        let mut client = NodeManagerServiceClient::connect(self.endpoint.clone())
-            .await
-            .map_err(|error| TransferLeaseAuthorityError::Unavailable(error.to_string()))?;
+        let endpoint = self
+            .endpoint
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let mut client =
+            NodeManagerServiceClient::connect(crate::nodepool_client::nodepool_endpoint(&endpoint))
+                .await
+                .map_err(|error| TransferLeaseAuthorityError::Unavailable(error.to_string()))?;
         let response = tokio::time::timeout(
             Duration::from_secs(5),
             client.validate_general_compute_transfer_lease(

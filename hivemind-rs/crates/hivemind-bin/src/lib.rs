@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 #[cfg(any(feature = "master", feature = "worker"))]
 use hivemind_client_runtime as client_runtime;
 use hivemind_config::HivemindConfig;
@@ -7,6 +7,8 @@ use prost::Message;
 #[cfg(feature = "nodepool")]
 use std::io::{Read, Write};
 use tokio::sync::watch;
+#[cfg(feature = "worker")]
+use tokio_stream::wrappers::TcpListenerStream;
 use tracing::info;
 
 #[cfg(feature = "cli")]
@@ -264,6 +266,15 @@ fn nodepool_client_addr(config: &HivemindConfig, run_nodepool: bool) -> Result<S
         return Ok(client_runtime::resolve_nodepool_grpc_endpoint(config));
     }
 
+    if run_nodepool {
+        if let Some(port) = addr.strip_prefix("0.0.0.0:") {
+            return Ok(format!("127.0.0.1:{port}"));
+        }
+        if let Some(port) = addr.strip_prefix("[::]:") {
+            return Ok(format!("[::1]:{port}"));
+        }
+    }
+
     if !run_nodepool && (addr.starts_with("0.0.0.0:") || addr.starts_with("[::]:")) {
         anyhow::bail!(
             "NODEPOOL_GRPC_ENDPOINT must be set when this process does not run nodepool and NODEPOOL_GRPC_ADDR is a bind address ({})",
@@ -447,9 +458,19 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
 
     #[cfg(feature = "worker")]
     if run_worker {
-        // Optional operator-provisioned VPN auth key bootstrap. Downloaded workers
-        // typically skip this and auto-issue a preauth key via website-api on login.
-        client_runtime::ensure_env_vpn(&config, client_runtime::ClientRole::Worker).await?;
+        let configured_nodepool_addr = nodepool_client_addr(&config, run_nodepool)?;
+        // An explicit role-scoped Headscale key makes VPN and Nodepool readiness
+        // part of startup. Without one, preserve deferred UI-login enrollment.
+        let vpn_endpoint = client_runtime::ensure_env_vpn_for_endpoint(
+            &config,
+            client_runtime::ClientRole::Worker,
+            &configured_nodepool_addr,
+        )
+        .await?;
+        let nodepool_addr = vpn_endpoint
+            .clone()
+            .unwrap_or_else(|| configured_nodepool_addr.clone());
+        let nodepool_addr_state = std::sync::Arc::new(std::sync::Mutex::new(nodepool_addr.clone()));
 
         let executor = Arc::new(WorkerExecutor::try_new(config.clone())?);
         let resources = executor.get_system_resources();
@@ -459,17 +480,55 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
         );
 
         let wk_addr = config.server.worker_grpc_addr.clone();
+        // Bind before resolving credentials or scheduling registration. A worker
+        // must never advertise/register before its control plane can accept RPCs.
+        let wk_listener = tokio::net::TcpListener::bind(&wk_addr).await?;
         let worker_id = std::env::var("WORKER_ID")
             .or_else(|_| std::env::var("COMPUTERNAME"))
             .or_else(|_| std::env::var("HOSTNAME"))
             .unwrap_or_else(|_| format!("worker-{}", uuid::Uuid::new_v4()));
-        let nodepool_addr = nodepool_client_addr(&config, run_nodepool)?;
+        let overlay_ip = if vpn_endpoint.is_some() {
+            client_runtime::current_vpn_session(client_runtime::ClientRole::Worker)
+                .await
+                .and_then(|session| session.overlay_ip.clone())
+        } else {
+            None
+        };
+        let worker_advertise_addr = match nodepool_client::advertise_addr_for_vpn(
+            &wk_addr,
+            config.server.worker_advertise_addr.clone(),
+            overlay_ip.as_deref(),
+        ) {
+            Ok(addr) => addr,
+            Err(err) if vpn_endpoint.is_some() => {
+                return Err(err.context(
+                    "keyed Worker startup cannot determine a Headscale-reachable advertise address",
+                ));
+            }
+            Err(err) => {
+                // Preserve compatibility for no-key local/UI deployments. The
+                // address is replaced by the real overlay address after login.
+                let port = wk_addr.rsplit(':').next().unwrap_or("50053");
+                let fallback = format!("{worker_id}:{port}");
+                tracing::warn!(
+                    "WORKER_ADVERTISE_ADDR unset ({err}); using fallback advertise addr {fallback} until UI login"
+                );
+                fallback
+            }
+        };
+        let worker_advertise_addr = if vpn_endpoint.is_some() {
+            nodepool_client::validate_advertise_addr(&worker_advertise_addr).context(
+                "keyed Worker startup requires a Nodepool-reachable WORKER_ADVERTISE_ADDR",
+            )?
+        } else {
+            worker_advertise_addr
+        };
         let wk_state = Arc::new(WorkerGrpcState::new_with_transfer_lease_authority(
             config.clone(),
             executor.clone(),
             worker_id.clone(),
-            hivemind_worker_executor::grpc_server::NodepoolTransferLeaseAuthority::new(
-                nodepool_addr.clone(),
+            hivemind_worker_executor::grpc_server::NodepoolTransferLeaseAuthority::new_shared(
+                nodepool_addr_state.clone(),
             ),
         ));
         let runtime_admission = WorkerRuntimeAdmission::from_environment()?;
@@ -483,28 +542,22 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
         )
         .max_decoding_message_size(WORKER_RPC_MESSAGE_MAX_BYTES)
         .max_encoding_message_size(WORKER_RPC_MESSAGE_MAX_BYTES);
-        let worker_advertise_addr = match nodepool_client::advertise_addr(
-            &config.server.worker_grpc_addr,
-            config.server.worker_advertise_addr.clone(),
-        ) {
-            Ok(addr) => addr,
-            Err(err) => {
-                // Downloaded workers often listen on 0.0.0.0 and learn a stable
-                // advertise address after VPN join. Fall back to worker_id:port
-                // so the control UI can still start; operators can override.
-                let port = config
-                    .server
-                    .worker_grpc_addr
-                    .rsplit(':')
-                    .next()
-                    .unwrap_or("50053");
-                let fallback = format!("{worker_id}:{port}");
-                tracing::warn!(
-                    "WORKER_ADVERTISE_ADDR unset ({err}); using fallback advertise addr {fallback}"
-                );
-                fallback
+
+        let wk_incoming = TcpListenerStream::new(wk_listener);
+        tokio::spawn(async move {
+            if let Err(e) = tonic::transport::Server::builder()
+                .add_service(wk_svc)
+                .add_service(wk_chunk_svc)
+                .serve_with_incoming(wk_incoming)
+                .await
+            {
+                tracing::error!("Worker gRPC server error: {}", e);
             }
-        };
+        });
+        info!("Worker gRPC server started on {}", wk_addr);
+
+        let worker_addr_state =
+            std::sync::Arc::new(std::sync::Mutex::new(worker_advertise_addr.clone()));
         let control_profile = WorkerProfile::from_resource_spec(
             worker_id.clone(),
             worker_advertise_addr.clone(),
@@ -513,7 +566,8 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
         );
         let control_state = hivemind_worker_executor::control_api::ControlApiState {
             profile: control_profile,
-            nodepool_addr: std::sync::Arc::new(std::sync::Mutex::new(nodepool_addr.clone())),
+            worker_addr: worker_addr_state.clone(),
+            nodepool_addr: nodepool_addr_state.clone(),
             config: config.clone(),
             executor: executor.clone(),
             registration_shutdown: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -577,10 +631,10 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
             let reg_shutdown = nodepool_client::start_registration_loop(
                 executor.clone(),
                 nodepool_client::RegistrationLoopConfig {
-                    nodepool_addr: nodepool_addr.clone(),
+                    nodepool_addr: nodepool_addr_state.clone(),
                     worker_id: worker_id.clone(),
                     username: worker_username,
-                    worker_addr: worker_advertise_addr,
+                    worker_addr: worker_addr_state.clone(),
                     location: std::env::var("WORKER_LOCATION").unwrap_or_else(|_| "local".into()),
                     token: worker_nodepool_token,
                     interval: std::time::Duration::from_secs(10),
@@ -592,21 +646,6 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
                 "Worker registration loop deferred until UI login (no WORKER_NODEPOOL_TOKEN/USERNAME/PASSWORD)"
             );
         }
-
-        tokio::spawn(async move {
-            if let Err(e) = tonic::transport::Server::builder()
-                .add_service(wk_svc)
-                .add_service(wk_chunk_svc)
-                .serve(wk_addr.parse().unwrap())
-                .await
-            {
-                tracing::error!("Worker gRPC server error: {}", e);
-            }
-        });
-        info!(
-            "Worker gRPC server started on {}",
-            config.server.worker_grpc_addr
-        );
     }
 
     info!("Hivemind running. Press Ctrl+C to stop.");
@@ -833,15 +872,18 @@ mod tests {
 
     #[cfg(any(feature = "master", feature = "worker", feature = "website"))]
     #[test]
-    fn colocated_all_mode_can_use_nodepool_bind_addr() {
+    fn colocated_all_mode_normalizes_nodepool_bind_addr() {
         let mut config = HivemindConfig::default();
         config.server.nodepool_grpc_addr = "0.0.0.0:50051".into();
         config.server.nodepool_grpc_endpoint = None;
 
         assert_eq!(
             nodepool_client_addr(&config, true).unwrap(),
-            "0.0.0.0:50051"
+            "127.0.0.1:50051"
         );
+
+        config.server.nodepool_grpc_addr = "[::]:50052".into();
+        assert_eq!(nodepool_client_addr(&config, true).unwrap(), "[::1]:50052");
     }
 
     #[cfg(feature = "worker")]
