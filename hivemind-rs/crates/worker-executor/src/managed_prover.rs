@@ -220,11 +220,11 @@ impl ManagedProverExecutor {
         let request_json = request
             .to_json_bytes()
             .map_err(|_| ManagedProverError::Failed)?;
-        let remaining = remaining_until(request.deadline_unix_ms)?;
-        let mut client = connect_remote_provider(remote, self.timeout.min(remaining)).await?;
+        let mut client =
+            connect_remote_provider(remote, self.timeout, request.deadline_unix_ms).await?;
 
         let capabilities = rpc_with_deadline(
-            remaining,
+            request.deadline_unix_ms,
             client.get_capabilities(Request::new(GetCapabilitiesRequest {})),
         )
         .await
@@ -235,17 +235,20 @@ impl ManagedProverExecutor {
 
         let mut submit = Request::new(SubmitManagedProofRequest { request_json });
         add_authorization(&mut submit, &context.authorization_token)?;
-        let submitted = rpc_with_deadline(remaining, client.submit_managed_proof(submit))
-            .await
-            .map_err(|_| ManagedProverError::Failed)?
-            .map_err(|status| {
-                if status.code() == tonic::Code::ResourceExhausted {
-                    ManagedProverError::QueueFull
-                } else {
-                    ManagedProverError::Failed
-                }
-            })?
-            .into_inner();
+        let submitted = rpc_with_deadline(
+            request.deadline_unix_ms,
+            client.submit_managed_proof(submit),
+        )
+        .await
+        .map_err(|_| ManagedProverError::Failed)?
+        .map_err(|status| {
+            if status.code() == tonic::Code::ResourceExhausted {
+                ManagedProverError::QueueFull
+            } else {
+                ManagedProverError::Failed
+            }
+        })?
+        .into_inner();
         validate_job_id(&submitted.job_id)?;
 
         let mut state = submitted.state;
@@ -255,7 +258,7 @@ impl ManagedProverExecutor {
                     &mut client,
                     &submitted.job_id,
                     &context.authorization_token,
-                    remaining,
+                    request.deadline_unix_ms,
                 )
                 .await;
                 return Err(ManagedProverError::Failed);
@@ -268,11 +271,12 @@ impl ManagedProverExecutor {
                 job_id: submitted.job_id.clone(),
             });
             add_authorization(&mut get, &context.authorization_token)?;
-            let response = rpc_with_deadline(remaining, client.get_managed_proof(get))
-                .await
-                .map_err(|_| ManagedProverError::Failed)?
-                .map_err(|_| ManagedProverError::Failed)?
-                .into_inner();
+            let response =
+                rpc_with_deadline(request.deadline_unix_ms, client.get_managed_proof(get))
+                    .await
+                    .map_err(|_| ManagedProverError::Failed)?
+                    .map_err(|_| ManagedProverError::Failed)?
+                    .into_inner();
             validate_job_id(&response.job_id)?;
             if response.job_id != submitted.job_id {
                 return Err(ManagedProverError::Failed);
@@ -298,7 +302,7 @@ impl ManagedProverExecutor {
                         &mut client,
                         &submitted.job_id,
                         &context.authorization_token,
-                        remaining,
+                        request.deadline_unix_ms,
                     ).await;
                     return Err(ManagedProverError::Failed);
                 }
@@ -327,6 +331,7 @@ impl ManagedProverExecutor {
 async fn connect_remote_provider(
     remote: &RemoteProviderConfig,
     timeout: Duration,
+    deadline_unix_ms: i64,
 ) -> Result<ManagedProofProviderClient<tonic::transport::Channel>, ManagedProverError> {
     if !remote.endpoint.starts_with("https://") {
         return Err(ManagedProverError::Failed);
@@ -345,10 +350,11 @@ async fn connect_remote_provider(
     let tls = ClientTlsConfig::new()
         .ca_certificate(Certificate::from_pem(ca))
         .identity(Identity::from_pem(certificate, private_key));
+    let connect_timeout = timeout.min(remaining_until(deadline_unix_ms)?);
     let endpoint = Endpoint::from_shared(remote.endpoint.clone())
         .map_err(|_| ManagedProverError::Failed)?
-        .connect_timeout(timeout)
-        .timeout(timeout)
+        .connect_timeout(connect_timeout)
+        .timeout(connect_timeout)
         .tls_config(tls)
         .map_err(|_| ManagedProverError::Failed)?;
     ManagedProofProviderClient::connect(endpoint)
@@ -406,13 +412,13 @@ async fn cancel_remote_job(
     client: &mut ManagedProofProviderClient<tonic::transport::Channel>,
     job_id: &str,
     token: &str,
-    timeout: Duration,
+    deadline_unix_ms: i64,
 ) -> Result<(), ManagedProverError> {
     let mut request = Request::new(CancelManagedProofRequest {
         job_id: job_id.to_string(),
     });
     add_authorization(&mut request, token)?;
-    rpc_with_deadline(timeout, client.cancel_managed_proof(request))
+    rpc_with_deadline(deadline_unix_ms, client.cancel_managed_proof(request))
         .await
         .map_err(|_| ManagedProverError::Failed)?
         .map_err(|_| ManagedProverError::Failed)?;
@@ -420,13 +426,16 @@ async fn cancel_remote_job(
 }
 
 async fn rpc_with_deadline<T, F>(
-    timeout: Duration,
+    deadline_unix_ms: i64,
     future: F,
-) -> Result<Result<T, tonic::Status>, tokio::time::error::Elapsed>
+) -> Result<Result<T, tonic::Status>, ManagedProverError>
 where
     F: std::future::Future<Output = Result<T, tonic::Status>>,
 {
-    tokio::time::timeout(timeout, future).await
+    let timeout = remaining_until(deadline_unix_ms)?;
+    tokio::time::timeout(timeout, future)
+        .await
+        .map_err(|_| ManagedProverError::Failed)
 }
 
 enum ProverCompletion {
@@ -575,8 +584,15 @@ fn remote_request_for_task(
 }
 
 fn remaining_until(deadline_unix_ms: i64) -> Result<Duration, ManagedProverError> {
+    remaining_until_at(deadline_unix_ms, chrono::Utc::now().timestamp_millis())
+}
+
+fn remaining_until_at(
+    deadline_unix_ms: i64,
+    now_unix_ms: i64,
+) -> Result<Duration, ManagedProverError> {
     let remaining_ms = deadline_unix_ms
-        .checked_sub(chrono::Utc::now().timestamp_millis())
+        .checked_sub(now_unix_ms)
         .filter(|remaining| *remaining > 0)
         .ok_or(ManagedProverError::Failed)?;
     let remaining_ms = u64::try_from(remaining_ms).map_err(|_| ManagedProverError::Failed)?;
@@ -719,11 +735,28 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        envelope_from_response, read_stdout_capped, request_for_task, ManagedProverError,
-        ManagedProverExecutor,
+        envelope_from_response, read_stdout_capped, remaining_until_at, request_for_task,
+        ManagedProverError, ManagedProverExecutor,
     };
 
     const VALID_RESPONSE: &str = r#"{"protocol_version":1,"proof_scheme":"test-proof","image_id":[1,2,3,4,5,6,7,8],"journal":[4,5,6],"receipt_json":"{\"seal\":\"ok\"}"}"#;
+
+    #[test]
+    fn absolute_deadline_remaining_time_is_checked_at_call_time() {
+        assert_eq!(remaining_until_at(2_000, 1_000), Ok(Duration::from_secs(1)));
+        assert_eq!(
+            remaining_until_at(2_000, 2_000),
+            Err(ManagedProverError::Failed)
+        );
+        assert_eq!(
+            remaining_until_at(2_000, 2_001),
+            Err(ManagedProverError::Failed)
+        );
+        assert_eq!(
+            remaining_until_at(i64::MAX, i64::MIN),
+            Err(ManagedProverError::Failed)
+        );
+    }
 
     #[test]
     fn builds_a_validated_request_from_the_task_contract() {
