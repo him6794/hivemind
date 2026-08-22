@@ -4,7 +4,13 @@ use general_compute_runtime::{
     GENERAL_COMPUTE_RUNTIME_VERSION, MANAGED_DSL_RUNTIME_VERSION,
 };
 
-use hivemind_models::{Task, WorkerNode, WorkerStatus};
+use hivemind_models::{
+    Task, WorkerCapabilityReport, WorkerNode, WorkerRuntimeCapability, WorkerStatus,
+    PRIVATE_STATIC_ADMISSION_MODE, PUBLIC_DYNAMIC_ADMISSION_MODE, WORKER_CAPABILITY_REPORT_VERSION,
+};
+use sha2::{Digest, Sha256};
+
+pub const PUBLIC_DYNAMIC_CAPABILITY_MAX_AGE_SECS: i64 = 30;
 
 /// Check a Nodepool-persisted, operator-approved managed DSL capability snapshot
 /// against the exact task identity that will be executed.
@@ -26,23 +32,54 @@ pub fn worker_supports_managed_dsl_request(
     if requested_budget_units <= 0 {
         return false;
     }
-    let Ok(registrations) =
+    if let Ok(registrations) =
         serde_json::from_str::<Vec<ManagedDslBackendRegistration>>(persisted_capabilities_json)
+    {
+        return registrations.iter().any(|registration| {
+            registration.validate().is_ok()
+                && registration.runtime_version == MANAGED_DSL_RUNTIME_VERSION
+                && requested_budget_units as u64 <= registration.max_usage_units
+                && match runtime {
+                    "managed-function-v0" => true,
+                    "production_sandboxed_dsl" => {
+                        requested_backend_id.is_some_and(|backend_id| {
+                            !backend_id.trim().is_empty() && backend_id == registration.backend_id
+                        }) && requested_semantics_manifest_sha256.is_some_and(|semantics| {
+                            semantics == registration.semantics_manifest_sha256
+                        })
+                    }
+                    _ => false,
+                }
+        });
+    }
+
+    let Ok(capabilities) =
+        serde_json::from_str::<Vec<WorkerRuntimeCapability>>(persisted_capabilities_json)
     else {
         return false;
     };
-    registrations.iter().any(|registration| {
-        registration.validate().is_ok()
-            && registration.runtime_version == MANAGED_DSL_RUNTIME_VERSION
-            && requested_budget_units as u64 <= registration.max_usage_units
+    let report = WorkerCapabilityReport {
+        protocol_version: WORKER_CAPABILITY_REPORT_VERSION,
+        capabilities,
+        ready: true,
+        readiness_reason: String::new(),
+    };
+    if report.validate_public_dynamic().is_err() {
+        return false;
+    }
+    report.capabilities.iter().any(|capability| {
+        capability.runtime == runtime
+            && requested_budget_units as u64 <= capability.max_usage_units
             && match runtime {
-                "managed-function-v0" => true,
+                "managed-function-v0" => {
+                    requested_backend_id.is_none_or(str::is_empty)
+                        && requested_semantics_manifest_sha256.is_none_or(str::is_empty)
+                }
                 "production_sandboxed_dsl" => {
                     requested_backend_id.is_some_and(|backend_id| {
-                        !backend_id.trim().is_empty() && backend_id == registration.backend_id
-                    }) && requested_semantics_manifest_sha256.is_some_and(|semantics| {
-                        semantics == registration.semantics_manifest_sha256
-                    })
+                        backend_id == capability.backend_id && !backend_id.trim().is_empty()
+                    }) && requested_semantics_manifest_sha256
+                        .is_some_and(|semantics| semantics == capability.semantics_manifest_sha256)
                 }
                 _ => false,
             }
@@ -64,6 +101,41 @@ pub fn worker_supports_general_compute_request(
     CapabilityMatrix::new(registration.backends)
         .validate_request(request, &registration.worker)
         .is_ok()
+}
+
+pub fn public_dynamic_managed_dsl_snapshot(worker: &WorkerNode) -> Option<&str> {
+    if worker.admission_mode != PUBLIC_DYNAMIC_ADMISSION_MODE || !worker.dynamic_admission_ready {
+        return None;
+    }
+    let observed_at = worker.dynamic_observed_at?;
+    let age = chrono::Utc::now().signed_duration_since(observed_at);
+    if age < chrono::Duration::zero()
+        || age > chrono::Duration::seconds(PUBLIC_DYNAMIC_CAPABILITY_MAX_AGE_SECS)
+    {
+        return None;
+    }
+    let capabilities_json = worker.dynamic_capabilities_json.as_deref()?;
+    let expected_digest = format!("sha256:{:x}", Sha256::digest(capabilities_json.as_bytes()));
+    if worker.dynamic_capabilities_digest.as_deref() != Some(expected_digest.as_str()) {
+        return None;
+    }
+    Some(capabilities_json)
+}
+
+pub fn general_compute_snapshot_for_worker(worker: &WorkerNode) -> Option<&str> {
+    (worker.admission_mode == PRIVATE_STATIC_ADMISSION_MODE)
+        .then_some(worker.general_compute_capabilities_json.as_deref())
+        .flatten()
+}
+
+pub fn managed_dsl_snapshot_for_worker(worker: &WorkerNode) -> Option<&str> {
+    if worker.admission_mode == PUBLIC_DYNAMIC_ADMISSION_MODE {
+        public_dynamic_managed_dsl_snapshot(worker)
+    } else if worker.admission_mode == PRIVATE_STATIC_ADMISSION_MODE {
+        worker.managed_dsl_capabilities_json.as_deref()
+    } else {
+        None
+    }
 }
 
 /// Find the best worker for a given task based on resource requirements and availability.
@@ -117,7 +189,7 @@ pub async fn find_best_worker(task: &Task, workers: &[WorkerNode]) -> Option<Wor
         let general_compute_compatible = match task.runtime.as_deref().map(str::trim) {
             Some("managed-function-v0") | Some("production_sandboxed_dsl") => {
                 worker_supports_managed_dsl_request(
-                    w.managed_dsl_capabilities_json.as_deref(),
+                    managed_dsl_snapshot_for_worker(w),
                     task.runtime.as_deref().unwrap_or_default(),
                     task.managed_dsl_backend_id.as_deref(),
                     task.managed_dsl_semantics_manifest_sha256.as_deref(),
@@ -131,7 +203,7 @@ pub async fn find_best_worker(task: &Task, workers: &[WorkerNode]) -> Option<Wor
                 .is_some_and(|request| {
                     worker_supports_general_compute_request(
                         &request,
-                        w.general_compute_capabilities_json.as_deref(),
+                        general_compute_snapshot_for_worker(w),
                     )
                 }),
             Some(_) | None => true,
@@ -236,6 +308,12 @@ mod tests {
             queue_capacity: cpu,
             general_compute_capabilities_json: None,
             managed_dsl_capabilities_json: None,
+            admission_mode: hivemind_models::PRIVATE_STATIC_ADMISSION_MODE.into(),
+            dynamic_capabilities_json: None,
+            dynamic_capabilities_digest: None,
+            dynamic_admission_ready: false,
+            dynamic_readiness_reason: None,
+            dynamic_observed_at: None,
             last_heartbeat: chrono::Utc::now(),
             registered_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -354,6 +432,88 @@ mod tests {
             None,
             11,
         ));
+    }
+
+    #[test]
+    fn public_dynamic_snapshot_requires_fresh_matching_digest() {
+        let mut worker = make_worker("public-worker", 4, 16, 0.0, WorkerStatus::Idle);
+        let report = WorkerCapabilityReport::public_managed_dsl();
+        let capabilities_json = report.capabilities_json().unwrap();
+        let digest = format!("sha256:{:x}", Sha256::digest(capabilities_json.as_bytes()));
+        worker.admission_mode = PUBLIC_DYNAMIC_ADMISSION_MODE.into();
+        worker.dynamic_capabilities_json = Some(capabilities_json.clone());
+        worker.dynamic_capabilities_digest = Some(digest);
+        worker.dynamic_admission_ready = true;
+        worker.dynamic_observed_at = Some(chrono::Utc::now());
+
+        assert_eq!(
+            public_dynamic_managed_dsl_snapshot(&worker),
+            Some(capabilities_json.as_str())
+        );
+        assert!(worker_supports_managed_dsl_request(
+            managed_dsl_snapshot_for_worker(&worker),
+            "managed-function-v0",
+            None,
+            None,
+            1,
+        ));
+
+        worker.dynamic_capabilities_digest = Some("sha256:tampered".into());
+        assert!(public_dynamic_managed_dsl_snapshot(&worker).is_none());
+
+        worker.dynamic_capabilities_digest = Some(format!(
+            "sha256:{:x}",
+            Sha256::digest(capabilities_json.as_bytes())
+        ));
+        worker.dynamic_observed_at = Some(
+            chrono::Utc::now()
+                - chrono::Duration::seconds(PUBLIC_DYNAMIC_CAPABILITY_MAX_AGE_SECS + 1),
+        );
+        assert!(public_dynamic_managed_dsl_snapshot(&worker).is_none());
+
+        worker.dynamic_observed_at = Some(chrono::Utc::now());
+        worker.dynamic_admission_ready = false;
+        assert!(public_dynamic_managed_dsl_snapshot(&worker).is_none());
+    }
+
+    #[test]
+    fn private_static_snapshot_remains_separate_from_dynamic_observation() {
+        let mut worker = make_worker("private-worker", 4, 16, 0.0, WorkerStatus::Idle);
+        worker.managed_dsl_capabilities_json = Some(
+            serde_json::to_string(&vec![ManagedDslBackendRegistration {
+                backend_id: "private-backend".into(),
+                runtime_version: MANAGED_DSL_RUNTIME_VERSION.into(),
+                semantics_manifest_sha256:
+                    general_compute_runtime::MANAGED_DSL_SEMANTICS_MANIFEST_SHA256.into(),
+                max_usage_units: 10,
+                max_output_bytes: 1024,
+            }])
+            .unwrap(),
+        );
+        worker.dynamic_capabilities_json = Some("[]".into());
+        worker.dynamic_capabilities_digest = Some("sha256:ignored".into());
+        worker.dynamic_admission_ready = true;
+        worker.dynamic_observed_at = Some(chrono::Utc::now());
+
+        assert_eq!(
+            managed_dsl_snapshot_for_worker(&worker),
+            worker.managed_dsl_capabilities_json.as_deref()
+        );
+    }
+
+    #[test]
+    fn public_workers_never_use_general_compute_static_snapshot() {
+        let mut worker = make_worker("public-worker", 4, 16, 0.0, WorkerStatus::Idle);
+        worker.admission_mode = PUBLIC_DYNAMIC_ADMISSION_MODE.into();
+        worker.general_compute_capabilities_json = Some("operator-snapshot".into());
+
+        assert!(general_compute_snapshot_for_worker(&worker).is_none());
+
+        worker.admission_mode = PRIVATE_STATIC_ADMISSION_MODE.into();
+        assert_eq!(
+            general_compute_snapshot_for_worker(&worker),
+            Some("operator-snapshot")
+        );
     }
 
     #[tokio::test]

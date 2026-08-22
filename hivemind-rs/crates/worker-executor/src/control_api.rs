@@ -13,7 +13,9 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::ServeDir;
 
 use crate::grpc_server::WorkerIdentityHandle;
-use crate::nodepool_client::{self, login_to_nodepool, register_once};
+use crate::nodepool_client::{
+    self, capability_report_to_proto, login_to_nodepool, register_once_with_capability_report,
+};
 use crate::WorkerExecutor;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -735,7 +737,20 @@ async fn register_worker(
             .unwrap_or_else(|| state.profile.gpu_name.clone()),
     };
 
-    match register_once(
+    let capability_report =
+        match capability_report_to_proto(&state.executor.dynamic_capability_report()) {
+            Ok(report) => Some(report),
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(StatusResponse {
+                        success: false,
+                        status_message: error.to_string(),
+                    }),
+                );
+            }
+        };
+    match register_once_with_capability_report(
         &state.nodepool_addr(),
         &profile.worker_id,
         owner,
@@ -743,6 +758,7 @@ async fn register_worker(
         profile.to_resource_spec(),
         &profile.location,
         &token,
+        capability_report,
     )
     .await
     {

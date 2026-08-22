@@ -10,7 +10,7 @@ pub mod sandbox;
 
 use anyhow::Result;
 use hivemind_config::HivemindConfig;
-use hivemind_models::Task;
+use hivemind_models::{Task, WorkerCapabilityReport};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -42,6 +42,7 @@ type TaskRunner = dyn Fn(
 pub struct WorkerExecutor {
     active_tasks: ActiveTaskMap,
     task_runner: Arc<TaskRunner>,
+    dynamic_capability_report: WorkerCapabilityReport,
 }
 
 impl WorkerExecutor {
@@ -52,8 +53,14 @@ impl WorkerExecutor {
     pub fn try_new(config: HivemindConfig) -> Result<Self> {
         let runner_config = config.clone();
         let prover = Arc::new(managed_prover::ManagedProverExecutor::new(&config));
-        let admission =
-            runtime_admission::WorkerRuntimeAdmission::from_environment().unwrap_or_default();
+        let admission = runtime_admission::WorkerRuntimeAdmission::from_environment()?;
+        let mut dynamic_capability_report = admission.public_capability_report();
+        if !prover.has_configured_route() {
+            dynamic_capability_report.ready = false;
+            dynamic_capability_report.capabilities.clear();
+            dynamic_capability_report.readiness_reason =
+                "managed proof provider is not configured".into();
+        }
         let trusted_registration = admission.trusted_registration();
         let reference_executor = executor::reference_executor_from_environment(&admission);
         let cas_store = executor::cas_store_from_environment();
@@ -117,6 +124,7 @@ impl WorkerExecutor {
                     Ok(result)
                 })
             }),
+            dynamic_capability_report,
         })
     }
 
@@ -131,6 +139,7 @@ impl WorkerExecutor {
             task_runner: Arc::new(move |task, cancellation, _proof_context| {
                 Box::pin(task_runner(task, cancellation))
             }),
+            dynamic_capability_report: WorkerCapabilityReport::public_managed_dsl(),
         }
     }
     pub async fn execute_task(&self, task: &Task) -> Result<TaskResult> {
@@ -198,6 +207,11 @@ impl WorkerExecutor {
     }
     pub fn get_resource_usage(&self) -> hivemind_models::ResourceUsage {
         resource_monitor::to_resource_usage(&self.get_system_resources())
+    }
+
+    #[must_use]
+    pub fn dynamic_capability_report(&self) -> WorkerCapabilityReport {
+        self.dynamic_capability_report.clone()
     }
 }
 

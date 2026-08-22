@@ -88,6 +88,16 @@ message ResourceUsage {
     float storage_percent = 5;
 }
 
+// Bounded public capability/readiness observation. The JSON payload is a
+// canonical, versioned list validated by Nodepool; it is never an operator
+// trust list or a typed hardware attestation.
+message WorkerCapabilityReport {
+    uint32 protocol_version = 1;
+    string capabilities_json = 2;
+    bool ready = 3;
+    string readiness_reason = 4;
+}
+
 // ============================================================
 // Worker Registration & Status
 // ============================================================
@@ -99,6 +109,7 @@ message RegisterWorkerNodeRequest {
     string location = 4;
     string worker_id = 5;
     string token = 6;
+    WorkerCapabilityReport capability_report = 7;
 }
 
 message StatusResponse {
@@ -112,6 +123,7 @@ message RunningStatusRequest {
     ResourceUsage usage = 3;
     string token = 4;
     string worker_id = 5;
+    WorkerCapabilityReport capability_report = 6;
 }
 
 message RunningStatusResponse {

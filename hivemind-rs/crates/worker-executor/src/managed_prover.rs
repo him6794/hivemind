@@ -91,7 +91,11 @@ impl ManagedProverExecutor {
         }
     }
 
-    /// Legacy/local-provider entry point retained for tests and in-process callers.
+    #[must_use]
+    pub fn has_configured_route(&self) -> bool {
+        self.remote.is_some() || !self.executable.trim().is_empty()
+    }
+
     pub async fn prove(
         &self,
         task: &Task,

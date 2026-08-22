@@ -17,6 +17,7 @@ pub struct NodeManager {
         BTreeMap<String, hivemind_config::TrustedGeneralComputeWorkerRegistration>,
     trusted_managed_dsl_capabilities:
         BTreeMap<String, hivemind_config::TrustedManagedDslWorkerRegistration>,
+    admission_mode: hivemind_config::WorkerAdmissionMode,
 }
 
 impl NodeManager {
@@ -32,7 +33,19 @@ impl NodeManager {
                 .general_compute
                 .trusted_managed_dsl_worker_capabilities
                 .clone(),
+            admission_mode: config.general_compute.admission_mode,
         }
+    }
+
+    pub fn admission_mode(&self) -> hivemind_config::WorkerAdmissionMode {
+        self.admission_mode
+    }
+
+    pub fn is_public_dynamic_admission(&self) -> bool {
+        matches!(
+            self.admission_mode,
+            hivemind_config::WorkerAdmissionMode::PublicDynamic
+        )
     }
 
     pub fn trusted_managed_dsl_capabilities_json_for_owner(
@@ -55,7 +68,14 @@ impl NodeManager {
     }
 
     pub async fn register_worker(&self, worker: &WorkerNode) -> Result<WorkerNode> {
-        self.repo.upsert(worker).await
+        self.repo.upsert(worker).await?;
+        self.repo
+            .replace_static_capabilities(
+                &worker.worker_id,
+                worker.general_compute_capabilities_json.as_deref(),
+                worker.managed_dsl_capabilities_json.as_deref(),
+            )
+            .await
     }
 
     pub fn trusted_general_compute_capabilities_json_for_owner(
@@ -111,11 +131,65 @@ impl NodeManager {
         self.repo
             .update_heartbeat(
                 worker_id,
+                &self.admission_mode.to_string(),
                 status,
                 cpu_usage,
                 memory_usage,
                 gpu_usage,
                 gpu_memory_usage,
+            )
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_heartbeat_with_dynamic_capabilities(
+        &self,
+        worker_id: &str,
+        status: &str,
+        cpu_usage: f64,
+        memory_usage: f64,
+        gpu_usage: f64,
+        gpu_memory_usage: f64,
+        capabilities_json: &str,
+        capabilities_digest: &str,
+        ready: bool,
+        readiness_reason: Option<&str>,
+    ) -> Result<()> {
+        self.repo
+            .update_heartbeat_with_dynamic_capabilities(
+                worker_id,
+                &self.admission_mode.to_string(),
+                status,
+                cpu_usage,
+                memory_usage,
+                gpu_usage,
+                gpu_memory_usage,
+                capabilities_json,
+                capabilities_digest,
+                ready,
+                readiness_reason,
+            )
+            .await
+    }
+
+    pub async fn update_dynamic_capabilities(
+        &self,
+        worker_id: &str,
+        capabilities_json: &str,
+        capabilities_digest: &str,
+        ready: bool,
+        readiness_reason: Option<&str>,
+    ) -> Result<()> {
+        if !self.is_public_dynamic_admission() {
+            anyhow::bail!("dynamic capability observations require public admission mode");
+        }
+        self.repo
+            .update_dynamic_capabilities(
+                worker_id,
+                capabilities_json,
+                capabilities_digest,
+                ready,
+                readiness_reason,
             )
             .await
     }

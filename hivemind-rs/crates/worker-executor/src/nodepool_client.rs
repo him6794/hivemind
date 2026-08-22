@@ -2,12 +2,15 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use hivemind_models::{ResourceSpec, ResourceUsage};
+use hivemind_models::{
+    ResourceSpec, ResourceUsage, WorkerCapabilityReport as ModelWorkerCapabilityReport,
+};
 use hivemind_proto::{
     node_manager_service_client::NodeManagerServiceClient, user_service_client::UserServiceClient,
     LoginRequest, RegisterWorkerNodeRequest, ResourceSpec as ProtoResourceSpec,
     ResourceUsage as ProtoResourceUsage, RunningStatusRequest, TaskOutputUploadRequest,
     TaskResultUploadRequest, TaskUsageRequest, ValidateGeneralComputeTransferLeaseRequest,
+    WorkerCapabilityReport as ProtoWorkerCapabilityReport,
 };
 use tokio::sync::watch;
 use tonic::transport::{Channel, Endpoint};
@@ -259,13 +262,27 @@ pub async fn resolve_nodepool_token(
     login_to_nodepool(nodepool_addr, &username, password).await
 }
 
-pub fn build_register_request(
+pub fn capability_report_to_proto(
+    report: &ModelWorkerCapabilityReport,
+) -> anyhow::Result<ProtoWorkerCapabilityReport> {
+    Ok(ProtoWorkerCapabilityReport {
+        protocol_version: report.protocol_version,
+        capabilities_json: report
+            .capabilities_json()
+            .map_err(|error| anyhow::anyhow!(error))?,
+        ready: report.ready,
+        readiness_reason: report.readiness_reason.clone(),
+    })
+}
+
+pub fn build_register_request_with_capability_report(
     worker_id: &str,
     username: &str,
     worker_addr: &str,
     resources: ResourceSpec,
     location: &str,
     token: &str,
+    capability_report: Option<ProtoWorkerCapabilityReport>,
 ) -> RegisterWorkerNodeRequest {
     RegisterWorkerNodeRequest {
         username: username.to_string(),
@@ -274,6 +291,43 @@ pub fn build_register_request(
         resources: Some(resource_spec_to_proto(resources)),
         location: location.to_string(),
         token: token.to_string(),
+        capability_report,
+    }
+}
+
+pub fn build_register_request(
+    worker_id: &str,
+    username: &str,
+    worker_addr: &str,
+    resources: ResourceSpec,
+    location: &str,
+    token: &str,
+) -> RegisterWorkerNodeRequest {
+    build_register_request_with_capability_report(
+        worker_id,
+        username,
+        worker_addr,
+        resources,
+        location,
+        token,
+        None,
+    )
+}
+
+pub fn build_status_request_with_capability_report(
+    worker_id: &str,
+    status: &str,
+    usage: ResourceUsage,
+    token: &str,
+    capability_report: Option<ProtoWorkerCapabilityReport>,
+) -> RunningStatusRequest {
+    RunningStatusRequest {
+        username: worker_id.to_string(),
+        worker_id: worker_id.to_string(),
+        status: status.to_string(),
+        usage: Some(resource_usage_to_proto(usage)),
+        token: token.to_string(),
+        capability_report,
     }
 }
 
@@ -283,13 +337,7 @@ pub fn build_status_request(
     usage: ResourceUsage,
     token: &str,
 ) -> RunningStatusRequest {
-    RunningStatusRequest {
-        username: worker_id.to_string(),
-        worker_id: worker_id.to_string(),
-        status: status.to_string(),
-        usage: Some(resource_usage_to_proto(usage)),
-        token: token.to_string(),
-    }
+    build_status_request_with_capability_report(worker_id, status, usage, token, None)
 }
 
 pub async fn register_once(
@@ -301,6 +349,30 @@ pub async fn register_once(
     location: &str,
     token: &str,
 ) -> anyhow::Result<()> {
+    register_once_with_capability_report(
+        endpoint,
+        worker_id,
+        username,
+        worker_addr,
+        resources,
+        location,
+        token,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn register_once_with_capability_report(
+    endpoint: &str,
+    worker_id: &str,
+    username: &str,
+    worker_addr: &str,
+    resources: ResourceSpec,
+    location: &str,
+    token: &str,
+    capability_report: Option<ProtoWorkerCapabilityReport>,
+) -> anyhow::Result<()> {
     let channel = Endpoint::from_shared(nodepool_endpoint(endpoint))?
         .connect_timeout(Duration::from_secs(5))
         .connect()
@@ -308,13 +380,14 @@ pub async fn register_once(
     let mut client = NodeManagerServiceClient::new(channel);
     let response = tokio::time::timeout(
         Duration::from_secs(10),
-        client.register_worker_node(build_register_request(
+        client.register_worker_node(build_register_request_with_capability_report(
             worker_id,
             username,
             worker_addr,
             resources,
             location,
             token,
+            capability_report,
         )),
     )
     .await
@@ -449,6 +522,15 @@ pub fn start_registration_loop(
                         .lock()
                         .unwrap_or_else(|err| err.into_inner())
                         .clone();
+                    let capability_report = match capability_report_to_proto(
+                        &executor.dynamic_capability_report(),
+                    ) {
+                        Ok(report) => report,
+                        Err(error) => {
+                            warn!("Worker capability report is invalid: {error}");
+                            continue;
+                        }
+                    };
                     if registered_worker_addr.as_deref() != Some(worker_addr.as_str()) {
                         // A changed callback address must be persisted through a fresh
                         // registration; a heartbeat alone leaves Nodepool's old address.
@@ -463,13 +545,14 @@ pub fn start_registration_loop(
                         .await
                         {
                             Ok(Ok(mut connected)) => {
-                                let request = build_register_request(
+                                let request = build_register_request_with_capability_report(
                                     &registration.worker_id,
                                     &registration.username,
                                     &worker_addr,
                                     executor.get_resource_spec(),
                                     &registration.location,
                                     &registration.token,
+                                    Some(capability_report.clone()),
                                 );
                                 match tokio::time::timeout(
                                     Duration::from_secs(10),
@@ -493,7 +576,13 @@ pub fn start_registration_loop(
                     }
 
                     if let Some(connected) = client.as_mut() {
-                        let request = build_status_request(&registration.worker_id, "IDLE", executor.get_resource_usage(), &registration.token);
+                        let request = build_status_request_with_capability_report(
+                            &registration.worker_id,
+                            "IDLE",
+                            executor.get_resource_usage(),
+                            &registration.token,
+                            Some(capability_report),
+                        );
                         match tokio::time::timeout(
                             Duration::from_secs(10),
                             connected.report_status(request),

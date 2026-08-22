@@ -8,6 +8,7 @@ license.workspace = true
 tokio.workspace = true
 tonic.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 tracing.workspace = true

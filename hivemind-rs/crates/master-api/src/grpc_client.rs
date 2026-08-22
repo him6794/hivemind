@@ -756,6 +756,7 @@ impl GrpcClient {
                     resources: Some(resources),
                     location,
                     token,
+                    capability_report: None,
                 }))
                 .await
                 .map(|r| r.into_inner())

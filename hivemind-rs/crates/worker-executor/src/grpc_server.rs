@@ -28,7 +28,7 @@ use crate::{
 };
 use general_compute_runtime::artifact::CasChunkStore;
 use general_compute_runtime::GeneralComputeRequest;
-use hivemind_config::HivemindConfig;
+use hivemind_config::{HivemindConfig, ManagedProofRolloutMode};
 use hivemind_models::{Task, TaskStatus};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -799,7 +799,9 @@ fn managed_proof_context_for_request(
 
     // Local sidecar callers retain the legacy contract. Once a remote endpoint
     // is configured, every managed attempt must carry the Nodepool proof grant.
-    if config.managed_proof.provider_endpoint.trim().is_empty() {
+    if config.managed_proof.rollout_mode == ManagedProofRolloutMode::Off
+        || config.managed_proof.provider_endpoint.trim().is_empty()
+    {
         return Ok(None);
     }
     let token = request.managed_proof_authorization_token.trim();
