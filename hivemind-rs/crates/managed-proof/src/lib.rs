@@ -13,7 +13,6 @@ pub const COST_MODEL_ID: &str = "managed-function-v0-metering-v1";
 /// execution mode, backend, and semantics manifest part of the authenticated
 /// claim.
 pub const DSL_PROOF_BINDING_DOMAIN: &str = "hivemind-managed-dsl-proof-binding-v1";
-#[cfg(feature = "risc0-verifier")]
 pub const RISC0_PROOF_SCHEME: &str = "risc0-zkvm-3.0.6";
 const RISC0_IMAGE_ID_WORDS: usize = 8;
 #[cfg(feature = "risc0-verifier")]

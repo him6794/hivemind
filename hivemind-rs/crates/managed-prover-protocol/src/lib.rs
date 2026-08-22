@@ -1,4 +1,5 @@
 use serde::{de::IgnoredAny, Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const MANAGED_PROVER_PROTOCOL_VERSION: u16 = 1;
@@ -222,6 +223,28 @@ pub enum ProtocolError {
     InvalidResponseJson,
     #[error("managed prover response JSON is too large: {received} bytes exceeds {limit}")]
     ResponseJsonTooLarge { received: usize, limit: usize },
+    #[error("remote managed proof protocol version is unsupported: {received}")]
+    UnsupportedRemoteVersion { received: u16 },
+    #[error("remote managed proof identity field is empty: {field}")]
+    EmptyRemoteIdentity { field: &'static str },
+    #[error("remote managed proof identity field is too large: {field}")]
+    RemoteIdentityTooLarge { field: &'static str },
+    #[error("remote managed proof request has an invalid digest")]
+    InvalidRemoteDigest,
+    #[error("remote managed proof request digest does not match its canonical fields")]
+    RemoteDigestMismatch,
+    #[error("remote managed proof request has an invalid lease generation")]
+    InvalidRemoteLeaseGeneration,
+    #[error("remote managed proof request has an invalid runtime binding")]
+    InvalidRemoteRuntime,
+    #[error("remote managed proof production DSL binding is incomplete")]
+    InvalidRemoteDslBinding,
+    #[error("remote managed proof image id must contain eight words")]
+    InvalidRemoteImageId,
+    #[error("remote managed proof deadline is invalid")]
+    InvalidRemoteDeadline,
+    #[error("remote managed proof request JSON is too large: {received} bytes exceeds {limit}")]
+    RemoteRequestJsonTooLarge { received: usize, limit: usize },
 }
 
 fn validate_version(protocol_version: u16) -> Result<(), ProtocolError> {
@@ -249,6 +272,302 @@ fn is_safe_task_id(task_id: &str) -> bool {
 fn is_valid_json(json: &str) -> bool {
     let mut deserializer = serde_json::Deserializer::from_str(json);
     IgnoredAny::deserialize(&mut deserializer).is_ok() && deserializer.end().is_ok()
+}
+
+/// Versioned, authenticated-provider payload layered around the local v1
+/// sidecar request. The authorization token is deliberately not part of this
+/// structure; it is transported in gRPC metadata and binds this digest.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteManagedProofRequest {
+    pub protocol_version: u16,
+    pub task_id: String,
+    pub proof_task_id: String,
+    pub owner: String,
+    pub worker_id: String,
+    pub execution_id: String,
+    pub attempt_id: String,
+    pub idempotency_key: String,
+    pub request_digest: String,
+    pub lease_generation: i64,
+    pub runtime: String,
+    pub backend_id: String,
+    pub semantics_manifest_sha256: String,
+    pub source: String,
+    pub input: String,
+    pub max_usage_units: u64,
+    pub proof_scheme: String,
+    pub image_id: [u32; 8],
+    pub deadline_unix_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct UnsignedRemoteManagedProofRequest<'a> {
+    protocol_version: u16,
+    task_id: &'a str,
+    proof_task_id: &'a str,
+    owner: &'a str,
+    worker_id: &'a str,
+    execution_id: &'a str,
+    attempt_id: &'a str,
+    idempotency_key: &'a str,
+    lease_generation: i64,
+    runtime: &'a str,
+    backend_id: &'a str,
+    semantics_manifest_sha256: &'a str,
+    source: &'a str,
+    input: &'a str,
+    max_usage_units: u64,
+    proof_scheme: &'a str,
+    image_id: [u32; 8],
+    deadline_unix_ms: i64,
+}
+
+pub const REMOTE_MANAGED_PROOF_PROTOCOL_VERSION: u16 = 1;
+pub const REMOTE_MANAGED_PROOF_DOMAIN: &str = "hivemind-managed-proof-remote-request-v1";
+pub const MAX_REMOTE_IDENTITY_BYTES: usize = 255;
+pub const MAX_REMOTE_RUNTIME_BYTES: usize = 64;
+pub const MAX_REMOTE_BACKEND_BYTES: usize = 255;
+pub const MAX_REMOTE_SEMANTICS_DIGEST_BYTES: usize = 71;
+pub const MAX_REMOTE_REQUEST_JSON_BYTES: usize = 8 * 1024 * 1024;
+
+impl RemoteManagedProofRequest {
+    /// Fill the digest after all unsigned fields have been constructed.
+    pub fn with_computed_digest(mut self) -> Result<Self, ProtocolError> {
+        self.request_digest = self.compute_digest()?;
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub fn compute_digest(&self) -> Result<String, ProtocolError> {
+        let unsigned = UnsignedRemoteManagedProofRequest {
+            protocol_version: self.protocol_version,
+            task_id: &self.task_id,
+            proof_task_id: &self.proof_task_id,
+            owner: &self.owner,
+            worker_id: &self.worker_id,
+            execution_id: &self.execution_id,
+            attempt_id: &self.attempt_id,
+            idempotency_key: &self.idempotency_key,
+            lease_generation: self.lease_generation,
+            runtime: &self.runtime,
+            backend_id: &self.backend_id,
+            semantics_manifest_sha256: &self.semantics_manifest_sha256,
+            source: &self.source,
+            input: &self.input,
+            max_usage_units: self.max_usage_units,
+            proof_scheme: &self.proof_scheme,
+            image_id: self.image_id,
+            deadline_unix_ms: self.deadline_unix_ms,
+        };
+        let encoded =
+            serde_json::to_vec(&unsigned).map_err(|_| ProtocolError::InvalidRequestJson)?;
+        let mut hasher = Sha256::new();
+        hasher.update(REMOTE_MANAGED_PROOF_DOMAIN.as_bytes());
+        hasher.update([0]);
+        hasher.update(encoded);
+        Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
+    }
+
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.protocol_version != REMOTE_MANAGED_PROOF_PROTOCOL_VERSION {
+            return Err(ProtocolError::UnsupportedRemoteVersion {
+                received: self.protocol_version,
+            });
+        }
+        for (field, value) in [
+            ("task_id", self.task_id.as_str()),
+            ("proof_task_id", self.proof_task_id.as_str()),
+            ("owner", self.owner.as_str()),
+            ("worker_id", self.worker_id.as_str()),
+            ("execution_id", self.execution_id.as_str()),
+            ("attempt_id", self.attempt_id.as_str()),
+            ("idempotency_key", self.idempotency_key.as_str()),
+        ] {
+            validate_remote_identity(field, value)?;
+        }
+        if !is_safe_task_id(&self.task_id) || !is_safe_task_id(&self.proof_task_id) {
+            return Err(ProtocolError::UnsafeTaskId);
+        }
+        if self.runtime.len() > MAX_REMOTE_RUNTIME_BYTES
+            || self.runtime.trim().is_empty()
+            || !matches!(
+                self.runtime.as_str(),
+                "managed-function-v0" | "production_sandboxed_dsl"
+            )
+        {
+            return Err(ProtocolError::InvalidRemoteRuntime);
+        }
+        if self.runtime == "production_sandboxed_dsl" {
+            if self.backend_id.trim().is_empty()
+                || self.semantics_manifest_sha256.trim().is_empty()
+                || !is_sha256_digest(&self.semantics_manifest_sha256)
+            {
+                return Err(ProtocolError::InvalidRemoteDslBinding);
+            }
+        } else if !self.backend_id.is_empty() || !self.semantics_manifest_sha256.is_empty() {
+            return Err(ProtocolError::InvalidRemoteDslBinding);
+        }
+        if self.backend_id.len() > MAX_REMOTE_BACKEND_BYTES
+            || self.semantics_manifest_sha256.len() > MAX_REMOTE_SEMANTICS_DIGEST_BYTES
+        {
+            return Err(ProtocolError::RemoteIdentityTooLarge {
+                field: "backend/semantics",
+            });
+        }
+        if self.lease_generation <= 0 {
+            return Err(ProtocolError::InvalidRemoteLeaseGeneration);
+        }
+        if self.deadline_unix_ms <= 0 {
+            return Err(ProtocolError::InvalidRemoteDeadline);
+        }
+        let sidecar_request = ManagedProverRequest {
+            protocol_version: MANAGED_PROVER_PROTOCOL_VERSION,
+            task_id: self.proof_task_id.clone(),
+            source: self.source.clone(),
+            input: self.input.clone(),
+            max_usage_units: self.max_usage_units,
+        };
+        sidecar_request.validate()?;
+        if self.proof_scheme.trim().is_empty() || self.proof_scheme.len() > MAX_PROOF_SCHEME_BYTES {
+            return Err(ProtocolError::EmptyProofScheme);
+        }
+        if self.image_id.len() != 8 {
+            return Err(ProtocolError::InvalidRemoteImageId);
+        }
+        if !is_sha256_digest(&self.request_digest) {
+            return Err(ProtocolError::InvalidRemoteDigest);
+        }
+        if self.request_digest != self.compute_digest()? {
+            return Err(ProtocolError::RemoteDigestMismatch);
+        }
+        Ok(())
+    }
+
+    pub fn to_json_bytes(&self) -> Result<Vec<u8>, ProtocolError> {
+        self.validate()?;
+        let encoded = serde_json::to_vec(self).map_err(|_| ProtocolError::InvalidRequestJson)?;
+        if encoded.len() > MAX_REMOTE_REQUEST_JSON_BYTES {
+            return Err(ProtocolError::RemoteRequestJsonTooLarge {
+                received: encoded.len(),
+                limit: MAX_REMOTE_REQUEST_JSON_BYTES,
+            });
+        }
+        Ok(encoded)
+    }
+
+    pub fn from_json_bytes(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        if bytes.len() > MAX_REMOTE_REQUEST_JSON_BYTES {
+            return Err(ProtocolError::RemoteRequestJsonTooLarge {
+                received: bytes.len(),
+                limit: MAX_REMOTE_REQUEST_JSON_BYTES,
+            });
+        }
+        let request: Self =
+            serde_json::from_slice(bytes).map_err(|_| ProtocolError::InvalidRequestJson)?;
+        request.validate()?;
+        Ok(request)
+    }
+}
+
+fn validate_remote_identity(field: &'static str, value: &str) -> Result<(), ProtocolError> {
+    if value.trim().is_empty() {
+        return Err(ProtocolError::EmptyRemoteIdentity { field });
+    }
+    if value.len() > MAX_REMOTE_IDENTITY_BYTES {
+        return Err(ProtocolError::RemoteIdentityTooLarge { field });
+    }
+    Ok(())
+}
+
+fn is_sha256_digest(value: &str) -> bool {
+    let Some(hex_value) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex_value.len() == 64 && hex_value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+#[cfg(test)]
+mod remote_request_tests {
+    use super::{RemoteManagedProofRequest, REMOTE_MANAGED_PROOF_PROTOCOL_VERSION};
+
+    fn valid_request() -> RemoteManagedProofRequest {
+        RemoteManagedProofRequest {
+            protocol_version: REMOTE_MANAGED_PROOF_PROTOCOL_VERSION,
+            task_id: "task-1".into(),
+            proof_task_id: "task-1".into(),
+            owner: "owner-1".into(),
+            worker_id: "worker-1".into(),
+            execution_id: "execution-1".into(),
+            attempt_id: "attempt-1".into(),
+            idempotency_key: "proof-1".into(),
+            request_digest: String::new(),
+            lease_generation: 1,
+            runtime: "managed-function-v0".into(),
+            backend_id: String::new(),
+            semantics_manifest_sha256: String::new(),
+            source: "return input;".into(),
+            input: r#"{"value":42}"#.into(),
+            max_usage_units: 100,
+            proof_scheme: "risc0-zkvm-3.0.6".into(),
+            image_id: [1; 8],
+            deadline_unix_ms: 4_000_000_000_000,
+        }
+    }
+
+    #[test]
+    fn canonical_digest_round_trip_binds_all_fields() {
+        let request = valid_request()
+            .with_computed_digest()
+            .expect("valid request");
+        let encoded = request.to_json_bytes().expect("request encodes");
+        let decoded =
+            RemoteManagedProofRequest::from_json_bytes(&encoded).expect("request decodes");
+        assert_eq!(decoded, request);
+
+        let mut changed = request.clone();
+        changed.worker_id = "worker-2".into();
+        assert!(changed.validate().is_err());
+    }
+
+    #[test]
+    fn digest_cannot_be_self_declared_or_unknown_fields_added() {
+        let request = valid_request()
+            .with_computed_digest()
+            .expect("valid request");
+        let mut value = serde_json::to_value(request).expect("value");
+        value["request_digest"] =
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into();
+        assert!(RemoteManagedProofRequest::from_json_bytes(
+            &serde_json::to_vec(&value).expect("json")
+        )
+        .is_err());
+
+        let request = valid_request()
+            .with_computed_digest()
+            .expect("valid request");
+        let mut value = serde_json::to_value(request).expect("value");
+        value["unexpected"] = true.into();
+        assert!(RemoteManagedProofRequest::from_json_bytes(
+            &serde_json::to_vec(&value).expect("json")
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn production_dsl_requires_backend_and_semantics_binding() {
+        let mut request = valid_request();
+        request.runtime = "production_sandboxed_dsl".into();
+        assert!(request.clone().with_computed_digest().is_err());
+
+        request.backend_id = "managed-default".into();
+        request.semantics_manifest_sha256 =
+            "sha256:8ed716dc07c7bc9abcfc5338b1888e71dd041c3fb397c45d0efb1ff76af1deee".into();
+        request.proof_task_id =
+            "dsl-proof-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into();
+        assert!(request.with_computed_digest().is_ok());
+    }
 }
 
 #[cfg(test)]

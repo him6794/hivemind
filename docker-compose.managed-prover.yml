@@ -1,0 +1,38 @@
+services:
+  managed-prover:
+    build:
+      context: .
+      dockerfile: packaging/managed-prover-service/Dockerfile
+    image: hivemind-managed-prover:local-amd64
+    platform: linux/amd64
+    restart: unless-stopped
+    env_file:
+      - ${MANAGED_PROVER_ENV_FILE:-./tmp/managed-prover/provider.env}
+    environment:
+      MANAGED_PROVER_SERVICE_ADDR: 0.0.0.0:50054
+      MANAGED_PROVER_SERVICE_EXECUTABLE: /app/prover/hivemind-managed-proof-prover
+      MANAGED_PROVER_STATE_DIR: /var/lib/hivemind-managed-prover
+      MANAGED_PROVER_TLS_SERVER_CERT_PATH: /etc/hivemind-managed-prover/server.crt
+      MANAGED_PROVER_TLS_SERVER_KEY_PATH: /etc/hivemind-managed-prover/server.key
+      MANAGED_PROVER_TLS_CLIENT_CA_PATH: /etc/hivemind-managed-prover/worker-client-ca.crt
+      MANAGED_PROVER_QUEUE_CAPACITY: ${MANAGED_PROVER_QUEUE_CAPACITY:-1}
+      MANAGED_PROVER_TIMEOUT_SECS: ${MANAGED_PROVER_TIMEOUT_SECS:-1200}
+      HOME: /tmp
+    ports:
+      - "${MANAGED_PROVER_HOST_PORT:-50054}:50054"
+    volumes:
+      - managed-prover-state:/var/lib/hivemind-managed-prover
+      - ${MANAGED_PROVER_TLS_DIR:-./tmp/managed-prover/tls}:/etc/hivemind-managed-prover:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    mem_limit: ${MANAGED_PROVER_MEMORY_LIMIT:-8g}
+
+volumes:
+  managed-prover-state:
+    name: ${MANAGED_PROVER_STATE_VOLUME_NAME:-hivemind-managed-prover-state}

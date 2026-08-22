@@ -388,6 +388,9 @@ message ExecuteTaskRequest {
     string request_digest = 12; // canonical SHA-256 request digest
     string managed_dsl_backend_id = 13;
     string managed_dsl_semantics_manifest_sha256 = 14;
+    string managed_proof_authorization_token = 15; // Nodepool proof-production authorization; memory-only on Worker
+    int64 managed_proof_lease_generation = 16; // active Nodepool lease generation
+    int64 managed_proof_deadline_unix_ms = 17; // absolute proof request deadline
 }
 
 message ManagedProofEnvelope {

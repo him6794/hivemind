@@ -1,9 +1,17 @@
 use crate::managed_proof_verifier::{verify_managed_proof, ManagedProofVerifierError};
 use anyhow::Result;
+use chrono::{Duration as ChronoDuration, Utc};
+use hivemind_auth::managed_proof::{new_claims, ManagedProofAuthorizationSigner};
 use hivemind_auth::worker_execution::{WorkerExecutionIdentity, WorkerExecutionSigner};
 use hivemind_config::ManagedProofRolloutMode;
 use hivemind_database::DatabaseManager;
-use hivemind_managed_proof::{dsl_proof_task_id, ClaimError, ExecutionClaim};
+use hivemind_managed_proof::{
+    dsl_proof_task_id, ClaimError, ExecutionClaim, RISC0_MANAGED_GUEST_ID, RISC0_PROOF_SCHEME,
+};
+use hivemind_managed_prover_protocol::{
+    ManagedProverRequest, RemoteManagedProofRequest, MANAGED_PROVER_PROTOCOL_VERSION,
+    REMOTE_MANAGED_PROOF_PROTOCOL_VERSION,
+};
 use hivemind_models::{Claims, Task, TaskStatus, WorkerNode};
 use hivemind_proto::{
     general_compute_chunk_service_client::GeneralComputeChunkServiceClient,
@@ -15,6 +23,7 @@ use hivemind_proto::{
     GENERAL_COMPUTE_RESULT_MAX_BYTES, LEGACY_MANAGED_RECEIPT_MAX_BYTES,
     WORKER_RPC_MESSAGE_MAX_BYTES, WORKER_STATUS_MESSAGE_MAX_BYTES,
 };
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
@@ -23,7 +32,7 @@ use tracing::{error, info, warn};
 
 use crate::managed_proof_metrics::{self, ManagedProofMetricEvent};
 use crate::scheduler;
-use crate::task_repository::TaskRepository;
+use crate::task_repository::{ManagedProofAuthorizationRecord, TaskRepository};
 
 pub struct Dispatcher {
     repo: Arc<TaskRepository>,
@@ -31,6 +40,15 @@ pub struct Dispatcher {
     task_timeout_secs: u64,
     max_redispatch: i32,
     worker_execution_private_key_pem: String,
+    managed_proof_authorization_private_key_pem: String,
+    managed_proof_provider_configured: bool,
+    managed_proof_rollout_mode: ManagedProofRolloutMode,
+}
+
+struct WorkerExecutionOptions {
+    worker_execution_private_key_pem: String,
+    managed_proof_authorization_private_key_pem: String,
+    managed_proof_provider_configured: bool,
     managed_proof_rollout_mode: ManagedProofRolloutMode,
 }
 
@@ -43,12 +61,27 @@ impl Dispatcher {
             max_redispatch,
             worker_execution_private_key_pem: std::env::var("WORKER_EXECUTION_PRIVATE_KEY_PEM")
                 .unwrap_or_default(),
+            managed_proof_authorization_private_key_pem: std::env::var(
+                "MANAGED_PROOF_AUTH_PRIVATE_KEY_PEM",
+            )
+            .unwrap_or_default(),
+            managed_proof_provider_configured: false,
             managed_proof_rollout_mode: ManagedProofRolloutMode::Enforce,
         }
     }
 
     pub fn with_worker_execution_private_key(mut self, private_key_pem: String) -> Self {
         self.worker_execution_private_key_pem = private_key_pem;
+        self
+    }
+
+    pub fn with_managed_proof_authorization_private_key(mut self, private_key_pem: String) -> Self {
+        self.managed_proof_authorization_private_key_pem = private_key_pem;
+        self
+    }
+
+    pub fn with_managed_proof_provider_configured(mut self, configured: bool) -> Self {
+        self.managed_proof_provider_configured = configured;
         self
     }
 
@@ -136,17 +169,21 @@ impl Dispatcher {
                 dispatched += 1;
                 let repo = self.repo.clone();
                 let task = task.clone();
-                let worker_execution_private_key_pem =
-                    self.worker_execution_private_key_pem.clone();
-                let managed_proof_rollout_mode = self.managed_proof_rollout_mode;
+                let execution_options = WorkerExecutionOptions {
+                    worker_execution_private_key_pem: self.worker_execution_private_key_pem.clone(),
+                    managed_proof_authorization_private_key_pem: self
+                        .managed_proof_authorization_private_key_pem
+                        .clone(),
+                    managed_proof_provider_configured: self.managed_proof_provider_configured,
+                    managed_proof_rollout_mode: self.managed_proof_rollout_mode,
+                };
                 tokio::spawn(async move {
-                    if let Err(e) = execute_on_worker(
+                    if let Err(e) = execute_on_worker_with_managed_proof_key(
                         repo,
                         task,
                         worker_id,
                         worker_addr,
-                        &worker_execution_private_key_pem,
-                        managed_proof_rollout_mode,
+                        execution_options,
                     )
                     .await
                     {
@@ -332,12 +369,36 @@ pub fn worker_endpoint(addr: &str) -> Result<String> {
     }
 }
 
+#[derive(Clone)]
+struct ManagedProofDispatch {
+    token: String,
+    execution_id: String,
+    attempt_id: String,
+    idempotency_key: String,
+    request_digest: String,
+    lease_generation: i64,
+    deadline_unix_ms: i64,
+}
+
 pub fn build_execute_task_request(task: &Task) -> ExecuteTaskRequest {
     build_execute_task_request_with_token(task, String::new())
 }
 
 fn build_execute_task_request_with_token(task: &Task, token: String) -> ExecuteTaskRequest {
+    build_execute_task_request_with_credentials(task, token, None)
+}
+
+fn build_execute_task_request_with_credentials(
+    task: &Task,
+    token: String,
+    managed_proof: Option<&ManagedProofDispatch>,
+) -> ExecuteTaskRequest {
     let identity = general_compute_identity(task);
+    let managed_identity = if is_managed_runtime(task.runtime.as_deref()) {
+        managed_proof_attempt_identity(task).ok()
+    } else {
+        None
+    };
     ExecuteTaskRequest {
         task_id: task.task_id.clone(),
         torrent: task.torrent_source.clone().unwrap_or_default(),
@@ -367,18 +428,25 @@ fn build_execute_task_request_with_token(task: &Task, token: String) -> ExecuteT
             .general_compute_manifest_json
             .clone()
             .unwrap_or_default(),
-        execution_id: identity
-            .as_ref()
-            .map_or_else(String::new, |identity| identity.0.clone()),
-        attempt_id: identity
-            .as_ref()
-            .map_or_else(String::new, |identity| identity.1.clone()),
-        idempotency_key: identity
-            .as_ref()
-            .map_or_else(String::new, |identity| identity.2.clone()),
-        request_digest: identity
-            .as_ref()
-            .map_or_else(String::new, |identity| identity.3.clone()),
+        execution_id: managed_proof
+            .map(|proof| proof.execution_id.clone())
+            .or_else(|| managed_identity.as_ref().map(|identity| identity.0.clone()))
+            .or_else(|| identity.as_ref().map(|identity| identity.0.clone()))
+            .unwrap_or_default(),
+        attempt_id: managed_proof
+            .map(|proof| proof.attempt_id.clone())
+            .or_else(|| managed_identity.as_ref().map(|identity| identity.1.clone()))
+            .or_else(|| identity.as_ref().map(|identity| identity.1.clone()))
+            .unwrap_or_default(),
+        idempotency_key: managed_proof
+            .map(|proof| proof.idempotency_key.clone())
+            .or_else(|| managed_identity.as_ref().map(|identity| identity.2.clone()))
+            .or_else(|| identity.as_ref().map(|identity| identity.2.clone()))
+            .unwrap_or_default(),
+        request_digest: managed_proof
+            .map(|proof| proof.request_digest.clone())
+            .or_else(|| identity.as_ref().map(|identity| identity.3.clone()))
+            .unwrap_or_default(),
         managed_dsl_backend_id: if task.runtime.as_deref() == Some("production_sandboxed_dsl") {
             task.managed_dsl_backend_id.clone().unwrap_or_default()
         } else {
@@ -393,6 +461,15 @@ fn build_execute_task_request_with_token(task: &Task, token: String) -> ExecuteT
         } else {
             String::new()
         },
+        managed_proof_authorization_token: managed_proof
+            .map(|proof| proof.token.clone())
+            .unwrap_or_default(),
+        managed_proof_lease_generation: managed_proof
+            .map(|proof| proof.lease_generation)
+            .unwrap_or_default(),
+        managed_proof_deadline_unix_ms: managed_proof
+            .map(|proof| proof.deadline_unix_ms)
+            .unwrap_or_default(),
     }
 }
 
@@ -429,6 +506,46 @@ fn validate_general_compute_response_identity(
         return Err("general-compute response identity does not match the persisted request");
     }
     Ok(())
+}
+
+fn validate_managed_proof_response_identity(
+    task: &Task,
+    response: &ExecuteTaskResponse,
+    dispatch: Option<&ManagedProofDispatch>,
+) -> std::result::Result<(), &'static str> {
+    if !is_managed_runtime(task.runtime.as_deref()) {
+        return Ok(());
+    }
+    let Ok((execution_id, attempt_id, idempotency_key)) = managed_proof_attempt_identity(task)
+    else {
+        return Err("managed proof attempt identity is invalid");
+    };
+    if response.execution_id != execution_id
+        || response.attempt_id != attempt_id
+        || response.idempotency_key != idempotency_key
+    {
+        return Err("managed proof response identity does not match the current task attempt");
+    }
+    match dispatch {
+        Some(dispatch)
+            if response.request_digest != dispatch.request_digest
+                || response.execution_id != dispatch.execution_id
+                || response.attempt_id != dispatch.attempt_id
+                || response.idempotency_key != dispatch.idempotency_key =>
+        {
+            Err("managed proof response identity does not match the dispatched attempt")
+        }
+        Some(_) => Ok(()),
+        None if response.request_digest.is_empty() => Ok(()),
+        None => Err("local managed proof response unexpectedly contains a request digest"),
+    }
+}
+
+fn same_active_task_attempt(expected: &Task, current: &Task, worker_id: &str) -> bool {
+    expected.id == current.id
+        && expected.retry_count == current.retry_count
+        && current.worker_id.as_deref() == Some(worker_id)
+        && matches!(current.status, TaskStatus::Assigned | TaskStatus::Running)
 }
 
 fn worker_execution_token(
@@ -471,6 +588,219 @@ fn worker_execution_token(
     } else {
         signer.encode_claims(&claims)
     }
+}
+
+async fn mint_managed_proof_dispatch(
+    repo: &TaskRepository,
+    task: &Task,
+    worker_id: &str,
+    transfer_generation: Option<i64>,
+    authorization_private_key_pem: &str,
+) -> Result<Option<ManagedProofDispatch>> {
+    if !is_managed_runtime(task.runtime.as_deref()) {
+        return Ok(None);
+    }
+    if authorization_private_key_pem.trim().is_empty() {
+        anyhow::bail!("managed proof authorization private key is required");
+    }
+
+    let runtime = task.runtime.as_deref().unwrap_or_default();
+    let capability_snapshot = repo.managed_dsl_capability_snapshot(worker_id).await?;
+    if !scheduler::worker_supports_managed_dsl_request(
+        capability_snapshot.as_deref(),
+        runtime,
+        task.managed_dsl_backend_id.as_deref(),
+        task.managed_dsl_semantics_manifest_sha256.as_deref(),
+        task.max_cpt,
+    ) {
+        anyhow::bail!("assigned Worker lacks the operator-approved managed DSL capability");
+    }
+
+    let lease_generation = if task.runtime.as_deref()
+        == Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION)
+    {
+        transfer_generation
+            .filter(|generation| *generation > 0)
+            .ok_or_else(|| anyhow::anyhow!("managed proof transfer lease is missing"))?
+    } else {
+        i64::from(task.retry_count)
+            .checked_add(1)
+            .filter(|generation| *generation > 0)
+            .ok_or_else(|| anyhow::anyhow!("managed proof attempt generation is invalid"))?
+    };
+
+    let (deadline_unix_ms, lifetime) = managed_proof_deadline(task)?;
+    let (execution_id, attempt_id, idempotency_key) = managed_proof_attempt_identity(task)?;
+    let request = managed_proof_request(
+        task,
+        worker_id,
+        &execution_id,
+        &attempt_id,
+        &idempotency_key,
+        lease_generation,
+        deadline_unix_ms,
+    )?;
+    let signer = ManagedProofAuthorizationSigner::from_pem(authorization_private_key_pem)?;
+    let jti = uuid::Uuid::new_v4().to_string();
+    let claims = new_claims(&request, jti.clone(), Utc::now(), lifetime)?;
+    let token = signer.encode(&claims)?;
+    let token_sha256 = sha256_prefixed(token.as_bytes());
+    let image_id_json = serde_json::to_string(&request.image_id)?;
+
+    repo.record_managed_proof_authorization(&ManagedProofAuthorizationRecord {
+        task_id: request.task_id.clone(),
+        owner: request.owner.clone(),
+        worker_id: request.worker_id.clone(),
+        execution_id: request.execution_id.clone(),
+        attempt_id: request.attempt_id.clone(),
+        idempotency_key: request.idempotency_key.clone(),
+        request_digest: request.request_digest.clone(),
+        lease_generation: request.lease_generation,
+        runtime: request.runtime.clone(),
+        backend_id: request.backend_id.clone(),
+        semantics_manifest_sha256: request.semantics_manifest_sha256.clone(),
+        proof_scheme: request.proof_scheme.clone(),
+        image_id_json,
+        deadline_unix_ms: request.deadline_unix_ms,
+        token_jti: jti,
+        token_sha256,
+    })
+    .await?;
+
+    Ok(Some(ManagedProofDispatch {
+        token,
+        execution_id,
+        attempt_id,
+        idempotency_key,
+        request_digest: request.request_digest,
+        lease_generation,
+        deadline_unix_ms,
+    }))
+}
+
+fn is_managed_runtime(runtime: Option<&str>) -> bool {
+    matches!(
+        runtime,
+        Some("managed-function-v0") | Some("production_sandboxed_dsl")
+    )
+}
+
+fn managed_proof_attempt_identity(task: &Task) -> Result<(String, String, String)> {
+    let attempt_number = u32::try_from(task.retry_count)
+        .map_err(|_| anyhow::anyhow!("managed proof retry count is invalid"))?;
+    let stable_task = task.id.simple().to_string();
+    Ok((
+        format!("managed-execution-v1:{stable_task}"),
+        format!("managed-attempt-v1:{stable_task}:{attempt_number}"),
+        format!("managed-proof-v1:{stable_task}:{attempt_number}"),
+    ))
+}
+
+fn managed_proof_deadline(task: &Task) -> Result<(i64, ChronoDuration)> {
+    let now = Utc::now();
+    let rpc_deadline = now
+        .checked_add_signed(
+            ChronoDuration::from_std(WORKER_EXECUTE_RPC_TIMEOUT)
+                .map_err(|_| anyhow::anyhow!("worker execute timeout is invalid"))?,
+        )
+        .ok_or_else(|| anyhow::anyhow!("managed proof deadline overflowed"))?;
+    let deadline = task.deadline.map_or(rpc_deadline, |deadline| {
+        if deadline < rpc_deadline {
+            deadline
+        } else {
+            rpc_deadline
+        }
+    });
+    let remaining_ms = deadline.timestamp_millis() - now.timestamp_millis();
+    if remaining_ms <= 0 {
+        anyhow::bail!("managed proof deadline has expired");
+    }
+    let lifetime_seconds = (remaining_ms + 999) / 1_000 + 5;
+    Ok((
+        deadline.timestamp_millis(),
+        ChronoDuration::seconds(lifetime_seconds),
+    ))
+}
+
+fn managed_proof_request(
+    task: &Task,
+    worker_id: &str,
+    execution_id: &str,
+    attempt_id: &str,
+    idempotency_key: &str,
+    lease_generation: i64,
+    deadline_unix_ms: i64,
+) -> Result<RemoteManagedProofRequest> {
+    let runtime = task
+        .runtime
+        .as_deref()
+        .filter(|runtime| is_managed_runtime(Some(runtime)))
+        .ok_or_else(|| anyhow::anyhow!("managed proof runtime is unsupported"))?;
+    let proof_task_id = if runtime == "production_sandboxed_dsl" {
+        let backend_id = task
+            .managed_dsl_backend_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("managed DSL backend identity is missing"))?;
+        let semantics_digest = task
+            .managed_dsl_semantics_manifest_sha256
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("managed DSL semantics identity is missing"))?;
+        dsl_proof_task_id(task.task_id.as_str(), runtime, backend_id, semantics_digest)
+    } else {
+        task.task_id.clone()
+    };
+    let sidecar_request = ManagedProverRequest {
+        protocol_version: MANAGED_PROVER_PROTOCOL_VERSION,
+        task_id: proof_task_id.clone(),
+        source: task.task_source.clone().unwrap_or_default(),
+        input: task.torrent_source.clone().unwrap_or_default(),
+        max_usage_units: u64::try_from(task.max_cpt)
+            .map_err(|_| anyhow::anyhow!("managed proof budget is invalid"))?,
+    };
+    sidecar_request
+        .validate()
+        .map_err(|error| anyhow::anyhow!("managed proof request is invalid: {error}"))?;
+
+    let request = RemoteManagedProofRequest {
+        protocol_version: REMOTE_MANAGED_PROOF_PROTOCOL_VERSION,
+        task_id: task.task_id.clone(),
+        proof_task_id,
+        owner: task.owner.clone(),
+        worker_id: worker_id.to_string(),
+        execution_id: execution_id.to_string(),
+        attempt_id: attempt_id.to_string(),
+        idempotency_key: idempotency_key.to_string(),
+        request_digest: String::new(),
+        lease_generation,
+        runtime: runtime.to_string(),
+        backend_id: if runtime == "production_sandboxed_dsl" {
+            task.managed_dsl_backend_id.clone().unwrap_or_default()
+        } else {
+            String::new()
+        },
+        semantics_manifest_sha256: if runtime == "production_sandboxed_dsl" {
+            task.managed_dsl_semantics_manifest_sha256
+                .clone()
+                .unwrap_or_default()
+        } else {
+            String::new()
+        },
+        source: sidecar_request.source,
+        input: sidecar_request.input,
+        max_usage_units: sidecar_request.max_usage_units,
+        proof_scheme: RISC0_PROOF_SCHEME.to_string(),
+        image_id: RISC0_MANAGED_GUEST_ID,
+        deadline_unix_ms,
+    };
+    request
+        .with_computed_digest()
+        .map_err(|error| anyhow::anyhow!("managed proof request binding is invalid: {error}"))
+}
+
+fn sha256_prefixed(value: &[u8]) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(value)))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -780,6 +1110,7 @@ fn select_missing_general_compute_chunks(
     Ok(selected)
 }
 
+#[cfg(test)]
 async fn execute_on_worker(
     repo: Arc<TaskRepository>,
     task: Task,
@@ -788,6 +1119,34 @@ async fn execute_on_worker(
     worker_execution_private_key_pem: &str,
     managed_proof_rollout_mode: ManagedProofRolloutMode,
 ) -> Result<()> {
+    execute_on_worker_with_managed_proof_key(
+        repo,
+        task,
+        worker_id,
+        worker_addr,
+        WorkerExecutionOptions {
+            worker_execution_private_key_pem: worker_execution_private_key_pem.to_owned(),
+            managed_proof_authorization_private_key_pem: String::new(),
+            managed_proof_provider_configured: false,
+            managed_proof_rollout_mode,
+        },
+    )
+    .await
+}
+
+async fn execute_on_worker_with_managed_proof_key(
+    repo: Arc<TaskRepository>,
+    task: Task,
+    worker_id: String,
+    worker_addr: String,
+    options: WorkerExecutionOptions,
+) -> Result<()> {
+    let WorkerExecutionOptions {
+        worker_execution_private_key_pem,
+        managed_proof_authorization_private_key_pem,
+        managed_proof_provider_configured,
+        managed_proof_rollout_mode,
+    } = options;
     let Some(current_task) = repo.find_by_task_id(&task.task_id).await? else {
         warn!("Task {} disappeared before worker execution", task.task_id);
         return Ok(());
@@ -804,6 +1163,17 @@ async fn execute_on_worker(
         );
         return Ok(());
     }
+
+    let Some(current_task) = repo
+        .mark_worker_execution_running(&task.task_id, &worker_id)
+        .await?
+    else {
+        info!(
+            "Skipping worker execution for task {} because its assignment changed before execution started",
+            task.task_id
+        );
+        return Ok(());
+    };
 
     let endpoint = match worker_transport_endpoint(&worker_addr) {
         Ok(endpoint) => endpoint,
@@ -878,7 +1248,7 @@ async fn execute_on_worker(
         None
     };
     let token = match worker_execution_token(
-        worker_execution_private_key_pem,
+        &worker_execution_private_key_pem,
         &current_task,
         &worker_id,
         transfer_lease.as_ref().map(|lease| lease.generation),
@@ -898,6 +1268,36 @@ async fn execute_on_worker(
             );
             return Ok(());
         }
+    };
+    let managed_proof = if managed_proof_provider_configured
+        && managed_proof_rollout_mode != ManagedProofRolloutMode::Off
+    {
+        match mint_managed_proof_dispatch(
+            repo.as_ref(),
+            &current_task,
+            &worker_id,
+            transfer_lease.as_ref().map(|lease| lease.generation),
+            &managed_proof_authorization_private_key_pem,
+        )
+        .await
+        {
+            Ok(dispatch) => dispatch,
+            Err(error) => {
+                let reason = error.to_string();
+                if is_managed_runtime(current_task.runtime.as_deref()) {
+                    repo.fail_for_worker_without_penalty(&task.task_id, &worker_id, &reason)
+                        .await?;
+                    warn!(
+                        "Task {} could not create managed proof authorization; failing without worker penalty: {}",
+                        task.task_id, reason
+                    );
+                    return Ok(());
+                }
+                return Err(error);
+            }
+        }
+    } else {
+        None
     };
     let general_compute_sources = if current_task.runtime.as_deref()
         == Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION)
@@ -971,12 +1371,106 @@ async fn execute_on_worker(
     } else {
         None
     };
-    let mut request =
-        tonic::Request::new(build_execute_task_request_with_token(&current_task, token));
+    if let Err(error) = update_managed_proof_dispatch_state(
+        repo.as_ref(),
+        &task.task_id,
+        managed_proof.as_ref(),
+        "submitted",
+    )
+    .await
+    {
+        warn!(
+            task_id = %task.task_id,
+            error = %error,
+            "managed proof authorization was no longer active before submission"
+        );
+        return Ok(());
+    }
+    if let Err(error) = update_managed_proof_dispatch_state(
+        repo.as_ref(),
+        &task.task_id,
+        managed_proof.as_ref(),
+        "running",
+    )
+    .await
+    {
+        warn!(
+            task_id = %task.task_id,
+            error = %error,
+            "managed proof authorization was no longer active before worker execution"
+        );
+        return Ok(());
+    }
+    let mut request = tonic::Request::new(build_execute_task_request_with_credentials(
+        &current_task,
+        token,
+        managed_proof.as_ref(),
+    ));
     request.set_timeout(WORKER_EXECUTE_RPC_TIMEOUT);
-    match client.execute_task(request).await {
+    let response = {
+        let execute = client.execute_task(request);
+        tokio::pin!(execute);
+        let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(20));
+        loop {
+            tokio::select! {
+                response = &mut execute => break response,
+                _ = heartbeat.tick() => {
+                    if let Err(error) = repo
+                        .refresh_worker_endpoint(&task.task_id, &worker_id, &worker_addr)
+                        .await
+                    {
+                        warn!(
+                            task_id = %task.task_id,
+                            error = %error,
+                            "failed to refresh the running Worker execution heartbeat"
+                        );
+                    }
+                }
+            }
+        }
+    };
+    match response {
         Ok(response) => {
             let response = response.into_inner();
+            let Some(response_task) = repo.find_by_task_id(&task.task_id).await? else {
+                warn!(
+                    "Ignoring a response for task {} because the task no longer exists",
+                    task.task_id
+                );
+                return Ok(());
+            };
+            if !same_active_task_attempt(&current_task, &response_task, &worker_id) {
+                warn!(
+                    "Ignoring a stale response for task {} from worker {} because the active attempt changed",
+                    task.task_id, worker_id
+                );
+                return Ok(());
+            }
+            let current_task = response_task;
+            if let Err(reason) = validate_managed_proof_response_identity(
+                &current_task,
+                &response,
+                managed_proof.as_ref(),
+            ) {
+                repo.reset_to_pending_for_worker(&task.task_id, &worker_id)
+                    .await?;
+                warn!(
+                    "Task {} returned a managed proof attempt identity mismatch from worker {}; redispatching: {}",
+                    task.task_id, worker_id, reason
+                );
+                return Ok(());
+            }
+            if let Err(reason) =
+                validate_general_compute_response_identity(&current_task, &response)
+            {
+                repo.reset_to_pending_for_worker(&task.task_id, &worker_id)
+                    .await?;
+                warn!(
+                    "Task {} returned an attempt identity mismatch from worker {}; redispatching: {}",
+                    task.task_id, worker_id, reason
+                );
+                return Ok(());
+            }
             if let Err(reason) = validate_worker_response_sizes(&response) {
                 let reason = reason.to_string();
                 if current_task.runtime.as_deref()
@@ -990,17 +1484,6 @@ async fn execute_on_worker(
                 }
                 warn!(
                     "Task {} returned an oversized response from worker {}: {}",
-                    task.task_id, worker_id, reason
-                );
-                return Ok(());
-            }
-            if let Err(reason) =
-                validate_general_compute_response_identity(&current_task, &response)
-            {
-                repo.reset_to_pending_for_worker(&task.task_id, &worker_id)
-                    .await?;
-                warn!(
-                    "Task {} returned an attempt identity mismatch from worker {}; redispatching: {}",
                     task.task_id, worker_id, reason
                 );
                 return Ok(());
@@ -1103,6 +1586,7 @@ async fn execute_on_worker(
                         return Ok(());
                     }
                 };
+                let mut observed_verified = false;
                 let managed_completion = if let Some(proof) = managed_proof {
                     match resolve_verified_managed_completion(
                         &current_task,
@@ -1113,35 +1597,9 @@ async fn execute_on_worker(
                     {
                         Ok(completion) => {
                             if managed_proof_rollout_mode == ManagedProofRolloutMode::Observe {
-                                managed_proof_metrics::record(ManagedProofMetricEvent::Verified);
-                                managed_proof_metrics::record(
-                                    ManagedProofMetricEvent::ObserveFallback,
-                                );
-                                record_managed_proof_audit(
-                                    repo.as_ref(),
-                                    &task.task_id,
-                                    &worker_id,
-                                    managed_proof_rollout_mode,
-                                    "observed_verified",
-                                    None,
-                                )
-                                .await;
-                                info!(
-                                    task_id = %task.task_id,
-                                    "Managed proof observation verified successfully"
-                                );
-                                None
+                                observed_verified = true;
+                                Some(completion)
                             } else {
-                                managed_proof_metrics::record(ManagedProofMetricEvent::Verified);
-                                record_managed_proof_audit(
-                                    repo.as_ref(),
-                                    &task.task_id,
-                                    &worker_id,
-                                    managed_proof_rollout_mode,
-                                    "verified",
-                                    None,
-                                )
-                                .await;
                                 Some(completion)
                             }
                         }
@@ -1223,69 +1681,100 @@ async fn execute_on_worker(
                     None
                 };
                 if let Some(completion) = managed_completion {
-                    repo.complete_for_worker_with_managed_receipt(
-                        &task.task_id,
-                        &worker_id,
-                        Some(&response.status_message),
-                        completion.usage_units,
-                        completion.output_bytes,
-                        &completion.claim_json,
-                    )
-                    .await?;
-                } else {
-                    if current_task.runtime.as_deref() == Some("managed-function-v0") {
-                        if managed_proof_rollout_mode == ManagedProofRolloutMode::Observe
-                            && response.managed_proof.is_none()
-                        {
-                            managed_proof_metrics::record(ManagedProofMetricEvent::ObserveFallback);
-                            record_managed_proof_audit(
-                                repo.as_ref(),
-                                &task.task_id,
-                                &worker_id,
-                                managed_proof_rollout_mode,
-                                "observed_missing",
-                                Some("Managed proof was not returned by the worker"),
-                            )
-                            .await;
-                        }
-                        if managed_proof_rollout_mode != ManagedProofRolloutMode::Enforce {
-                            managed_proof_metrics::record(
-                                ManagedProofMetricEvent::LegacySettlement,
-                            );
-                            record_managed_proof_audit(
-                                repo.as_ref(),
-                                &task.task_id,
-                                &worker_id,
-                                managed_proof_rollout_mode,
-                                "legacy_settlement",
-                                None,
-                            )
-                            .await;
-                        }
-                    }
-                    if let Some(result) = general_compute_result.as_ref() {
-                        repo.complete_general_compute_for_worker(
+                    if observed_verified {
+                        repo.complete_for_worker_observed_verified(
                             &task.task_id,
                             &worker_id,
-                            current_task
-                                .general_compute_manifest_json
-                                .as_deref()
-                                .ok_or_else(|| {
-                                    anyhow::anyhow!("general-compute request manifest is missing")
-                                })?,
-                            &response.general_compute_result_json,
-                            (!result.stdout.is_empty()).then_some(result.stdout.as_str()),
-                        )
-                        .await?;
-                    } else {
-                        repo.complete_for_worker(
-                            &task.task_id,
-                            &worker_id,
-                            None,
                             Some(&response.status_message),
                         )
                         .await?;
+                        managed_proof_metrics::record(ManagedProofMetricEvent::Verified);
+                        managed_proof_metrics::record(ManagedProofMetricEvent::ObserveFallback);
+                        record_managed_proof_audit(
+                            repo.as_ref(),
+                            &task.task_id,
+                            &worker_id,
+                            managed_proof_rollout_mode,
+                            "observed_verified",
+                            None,
+                        )
+                        .await;
+                    } else {
+                        repo.complete_for_worker_with_managed_receipt(
+                            &task.task_id,
+                            &worker_id,
+                            Some(&response.status_message),
+                            completion.usage_units,
+                            completion.output_bytes,
+                            &completion.claim_json,
+                        )
+                        .await?;
+                        managed_proof_metrics::record(ManagedProofMetricEvent::Verified);
+                        record_managed_proof_audit(
+                            repo.as_ref(),
+                            &task.task_id,
+                            &worker_id,
+                            managed_proof_rollout_mode,
+                            "verified",
+                            None,
+                        )
+                        .await;
                     }
+                } else if let Some(result) = general_compute_result.as_ref() {
+                    repo.complete_general_compute_for_worker(
+                        &task.task_id,
+                        &worker_id,
+                        current_task
+                            .general_compute_manifest_json
+                            .as_deref()
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("general-compute request manifest is missing")
+                            })?,
+                        &response.general_compute_result_json,
+                        (!result.stdout.is_empty()).then_some(result.stdout.as_str()),
+                    )
+                    .await?;
+                } else if is_managed_runtime(current_task.runtime.as_deref()) {
+                    repo.complete_for_worker_legacy_managed(
+                        &task.task_id,
+                        &worker_id,
+                        Some(&response.status_message),
+                    )
+                    .await?;
+                    if managed_proof_rollout_mode == ManagedProofRolloutMode::Observe
+                        && response.managed_proof.is_none()
+                    {
+                        managed_proof_metrics::record(ManagedProofMetricEvent::ObserveFallback);
+                        record_managed_proof_audit(
+                            repo.as_ref(),
+                            &task.task_id,
+                            &worker_id,
+                            managed_proof_rollout_mode,
+                            "observed_missing",
+                            Some("Managed proof was not returned by the worker"),
+                        )
+                        .await;
+                    }
+                    if managed_proof_rollout_mode != ManagedProofRolloutMode::Enforce {
+                        managed_proof_metrics::record(ManagedProofMetricEvent::LegacySettlement);
+                        record_managed_proof_audit(
+                            repo.as_ref(),
+                            &task.task_id,
+                            &worker_id,
+                            managed_proof_rollout_mode,
+                            "legacy_settlement",
+                            None,
+                        )
+                        .await;
+                    }
+                } else {
+                    repo.complete_for_worker(
+                        &task.task_id,
+                        &worker_id,
+                        None,
+                        Some(&response.status_message),
+                    )
+                    .await?;
                 }
                 info!("Task {} completed by worker {}", task.task_id, worker_id);
             } else {
@@ -1343,6 +1832,12 @@ async fn complete_legacy_worker_result(
     worker_id: &str,
     response: &ExecuteTaskResponse,
 ) -> Result<()> {
+    repo.complete_for_worker_legacy_managed(
+        &task.task_id,
+        worker_id,
+        Some(&response.status_message),
+    )
+    .await?;
     managed_proof_metrics::record(ManagedProofMetricEvent::LegacySettlement);
     record_managed_proof_audit(
         repo,
@@ -1353,19 +1848,30 @@ async fn complete_legacy_worker_result(
         None,
     )
     .await;
-    repo.complete_for_worker(
-        &task.task_id,
-        worker_id,
-        None,
-        Some(&response.status_message),
-    )
-    .await?;
     info!(
         task_id = %task.task_id,
         worker_id = %worker_id,
         "Managed proof observation retained legacy settlement"
     );
     Ok(())
+}
+
+async fn update_managed_proof_dispatch_state(
+    repo: &TaskRepository,
+    task_id: &str,
+    dispatch: Option<&ManagedProofDispatch>,
+    state: &str,
+) -> Result<()> {
+    let Some(dispatch) = dispatch else {
+        return Ok(());
+    };
+    repo.update_managed_proof_authorization_state(
+        task_id,
+        dispatch.lease_generation,
+        &dispatch.attempt_id,
+        state,
+    )
+    .await
 }
 
 async fn record_managed_proof_audit(
@@ -2269,6 +2775,99 @@ mod tests {
         assert_eq!(request.task_source, "return get(input, \"value\") + 1;");
         assert_eq!(request.managed_budget_units, 1_000);
         assert_eq!(request.torrent, "{\"value\": 41}");
+    }
+
+    #[test]
+    fn managed_proof_attempt_identity_is_stable_per_retry() {
+        let mut task = make_task("managed-attempt-identity", TaskStatus::Pending, 0);
+        let first = managed_proof_attempt_identity(&task).expect("attempt identity");
+        assert!(first.0.starts_with("managed-execution-v1:"));
+        assert!(first.1.ends_with(":0"));
+        assert!(first.2.ends_with(":0"));
+
+        task.retry_count = 1;
+        let second = managed_proof_attempt_identity(&task).expect("retry identity");
+        assert_eq!(first.0, second.0);
+        assert_ne!(first.1, second.1);
+        assert_ne!(first.2, second.2);
+        assert!(second.1.ends_with(":1"));
+        assert!(second.2.ends_with(":1"));
+    }
+
+    #[test]
+    fn managed_proof_request_binds_production_dsl_identity_and_digest() {
+        let mut task = make_task("managed-request-binding", TaskStatus::Pending, 0);
+        task.runtime = Some("production_sandboxed_dsl".into());
+        task.task_source = Some("return get(input, \"value\");".into());
+        task.torrent_source = Some(r#"{"value": 41}"#.into());
+        task.managed_dsl_backend_id = Some("managed-default".into());
+        task.managed_dsl_semantics_manifest_sha256 =
+            Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into());
+
+        let request = managed_proof_request(
+            &task,
+            "worker-binding",
+            "execution-binding",
+            "attempt-binding",
+            "idempotency-binding",
+            7,
+            Utc::now().timestamp_millis() + 60_000,
+        )
+        .expect("canonical managed proof request");
+
+        assert_eq!(
+            request.proof_task_id,
+            hivemind_managed_proof::dsl_proof_task_id(
+                &task.task_id,
+                "production_sandboxed_dsl",
+                "managed-default",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+        );
+        assert_eq!(request.request_digest, request.compute_digest().unwrap());
+        assert!(request.validate().is_ok());
+
+        let mut changed = request;
+        changed.max_usage_units += 1;
+        assert!(changed.validate().is_err());
+    }
+
+    #[test]
+    fn managed_proof_credentials_fill_execute_identity_fields() {
+        let task = make_task("managed-credentials", TaskStatus::Pending, 0);
+        let dispatch = ManagedProofDispatch {
+            token: "proof-token".into(),
+            execution_id: "execution-1".into(),
+            attempt_id: "attempt-1".into(),
+            idempotency_key: "idempotency-1".into(),
+            request_digest:
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            lease_generation: 3,
+            deadline_unix_ms: 4_000_000_000_000,
+        };
+
+        let request = build_execute_task_request_with_credentials(
+            &task,
+            "worker-token".into(),
+            Some(&dispatch),
+        );
+
+        assert_eq!(request.token, "worker-token");
+        assert_eq!(request.managed_proof_authorization_token, "proof-token");
+        assert_eq!(request.execution_id, "execution-1");
+        assert_eq!(request.attempt_id, "attempt-1");
+        assert_eq!(request.idempotency_key, "idempotency-1");
+        assert_eq!(request.request_digest, dispatch.request_digest);
+        assert_eq!(request.managed_proof_lease_generation, 3);
+        assert_eq!(request.managed_proof_deadline_unix_ms, 4_000_000_000_000);
+    }
+
+    #[test]
+    fn managed_proof_deadline_rejects_expired_tasks() {
+        let mut task = make_task("managed-expired", TaskStatus::Pending, 0);
+        task.deadline = Some(Utc::now() - chrono::Duration::seconds(1));
+        let error = managed_proof_deadline(&task).expect_err("expired task must fail closed");
+        assert!(error.to_string().contains("expired"));
     }
 
     #[test]

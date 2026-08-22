@@ -4,18 +4,30 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use hivemind_auth::managed_proof::MANAGED_PROOF_AUTH_TOKEN_MAX_BYTES;
 use hivemind_config::HivemindConfig;
 use hivemind_managed_proof::dsl_proof_task_id;
+use hivemind_managed_proof::{RISC0_MANAGED_GUEST_ID, RISC0_PROOF_SCHEME};
 use hivemind_managed_prover_protocol::{
-    ManagedProverRequest, ManagedProverResponse, MANAGED_PROVER_PROTOCOL_VERSION,
-    MAX_RESPONSE_JSON_BYTES,
+    ManagedProverRequest, ManagedProverResponse, RemoteManagedProofRequest,
+    MANAGED_PROVER_PROTOCOL_VERSION, MAX_RESPONSE_JSON_BYTES,
+    REMOTE_MANAGED_PROOF_PROTOCOL_VERSION,
 };
 use hivemind_models::Task;
-use hivemind_proto::{ManagedProofEnvelope, MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES};
+use hivemind_proto::{
+    managedprover::{
+        managed_proof_provider_client::ManagedProofProviderClient, CancelManagedProofRequest,
+        GetCapabilitiesRequest, GetManagedProofRequest, SubmitManagedProofRequest,
+    },
+    ManagedProofEnvelope, MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES,
+};
 use prost::Message;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
+use tonic::metadata::MetadataValue;
+use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
+use tonic::Request;
 
 static PROCESS_PROVER_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
@@ -28,7 +40,30 @@ pub enum ManagedProverError {
     Failed,
 }
 
-/// Bounded adapter for the isolated managed-prover sidecar.
+/// Context that Nodepool binds to one managed-proof attempt. The bearer token
+/// is kept only in memory while the Worker forwards the request to the provider.
+#[derive(Clone, Debug)]
+pub struct ManagedProofTaskContext {
+    pub owner: String,
+    pub worker_id: String,
+    pub execution_id: String,
+    pub attempt_id: String,
+    pub idempotency_key: String,
+    pub request_digest: String,
+    pub lease_generation: i64,
+    pub authorization_token: String,
+    pub deadline_unix_ms: i64,
+}
+
+#[derive(Clone, Debug)]
+struct RemoteProviderConfig {
+    endpoint: String,
+    ca_path: String,
+    client_cert_path: String,
+    client_key_path: String,
+}
+
+/// Bounded adapter for the isolated managed-prover sidecar or remote provider.
 ///
 /// The executable is treated as a single program path: no shell or implicit
 /// argument splitting is involved. The process-wide semaphore ensures a worker
@@ -37,18 +72,53 @@ pub struct ManagedProverExecutor {
     executable: String,
     timeout: Duration,
     semaphore: Arc<Semaphore>,
+    remote: Option<RemoteProviderConfig>,
 }
 
 impl ManagedProverExecutor {
     pub fn new(config: &HivemindConfig) -> Self {
-        Self::with_parts(
-            config.executor.managed_prover_executable.clone(),
-            Duration::from_secs(config.executor.managed_prover_timeout_secs),
-            process_prover_semaphore(),
-        )
+        let endpoint = config.managed_proof.provider_endpoint.trim();
+        Self {
+            executable: config.executor.managed_prover_executable.clone(),
+            timeout: Duration::from_secs(config.executor.managed_prover_timeout_secs),
+            semaphore: process_prover_semaphore(),
+            remote: (!endpoint.is_empty()).then(|| RemoteProviderConfig {
+                endpoint: endpoint.to_string(),
+                ca_path: config.managed_proof.provider_tls_ca_path.clone(),
+                client_cert_path: config.managed_proof.provider_tls_client_cert_path.clone(),
+                client_key_path: config.managed_proof.provider_tls_client_key_path.clone(),
+            }),
+        }
     }
 
+    /// Legacy/local-provider entry point retained for tests and in-process callers.
     pub async fn prove(
+        &self,
+        task: &Task,
+        cancellation: watch::Receiver<bool>,
+    ) -> Result<ManagedProofEnvelope, ManagedProverError> {
+        self.prove_with_context(task, cancellation, None).await
+    }
+
+    /// Prove a managed task through the explicitly configured provider.
+    ///
+    /// An explicitly configured remote provider is authoritative: failures do
+    /// not fall back to a local executable, because doing so would bypass the
+    /// operator-approved capability and task authorization boundary.
+    pub async fn prove_with_context(
+        &self,
+        task: &Task,
+        cancellation: watch::Receiver<bool>,
+        context: Option<ManagedProofTaskContext>,
+    ) -> Result<ManagedProofEnvelope, ManagedProverError> {
+        if let Some(remote) = &self.remote {
+            let context = context.ok_or(ManagedProverError::Failed)?;
+            return self.prove_remote(remote, task, context, cancellation).await;
+        }
+        self.prove_local(task, cancellation).await
+    }
+
+    async fn prove_local(
         &self,
         task: &Task,
         mut cancellation: watch::Receiver<bool>,
@@ -136,11 +206,113 @@ impl ManagedProverExecutor {
         envelope_from_response(response)
     }
 
+    async fn prove_remote(
+        &self,
+        remote: &RemoteProviderConfig,
+        task: &Task,
+        context: ManagedProofTaskContext,
+        mut cancellation: watch::Receiver<bool>,
+    ) -> Result<ManagedProofEnvelope, ManagedProverError> {
+        if is_cancelled(&cancellation) {
+            return Err(ManagedProverError::Failed);
+        }
+        let request = remote_request_for_task(task, &context)?;
+        let request_json = request
+            .to_json_bytes()
+            .map_err(|_| ManagedProverError::Failed)?;
+        let remaining = remaining_until(request.deadline_unix_ms)?;
+        let mut client = connect_remote_provider(remote, self.timeout.min(remaining)).await?;
+
+        let capabilities = rpc_with_deadline(
+            remaining,
+            client.get_capabilities(Request::new(GetCapabilitiesRequest {})),
+        )
+        .await
+        .map_err(|_| ManagedProverError::Failed)?
+        .map_err(|_| ManagedProverError::Failed)?
+        .into_inner();
+        validate_capabilities(&capabilities, &request)?;
+
+        let mut submit = Request::new(SubmitManagedProofRequest { request_json });
+        add_authorization(&mut submit, &context.authorization_token)?;
+        let submitted = rpc_with_deadline(remaining, client.submit_managed_proof(submit))
+            .await
+            .map_err(|_| ManagedProverError::Failed)?
+            .map_err(|status| {
+                if status.code() == tonic::Code::ResourceExhausted {
+                    ManagedProverError::QueueFull
+                } else {
+                    ManagedProverError::Failed
+                }
+            })?
+            .into_inner();
+        validate_job_id(&submitted.job_id)?;
+
+        let mut state = submitted.state;
+        loop {
+            if is_cancelled(&cancellation) {
+                let _ = cancel_remote_job(
+                    &mut client,
+                    &submitted.job_id,
+                    &context.authorization_token,
+                    remaining,
+                )
+                .await;
+                return Err(ManagedProverError::Failed);
+            }
+            if state == "failed" || state == "cancelled" {
+                return Err(ManagedProverError::Failed);
+            }
+
+            let mut get = Request::new(GetManagedProofRequest {
+                job_id: submitted.job_id.clone(),
+            });
+            add_authorization(&mut get, &context.authorization_token)?;
+            let response = rpc_with_deadline(remaining, client.get_managed_proof(get))
+                .await
+                .map_err(|_| ManagedProverError::Failed)?
+                .map_err(|_| ManagedProverError::Failed)?
+                .into_inner();
+            validate_job_id(&response.job_id)?;
+            if response.job_id != submitted.job_id {
+                return Err(ManagedProverError::Failed);
+            }
+            state = response.state;
+            match state.as_str() {
+                "succeeded" => {
+                    let proof = ManagedProverResponse::from_json_bytes(&response.response_json)
+                        .map_err(|_| ManagedProverError::Failed)?;
+                    return envelope_from_response(proof);
+                }
+                "failed" | "cancelled" => return Err(ManagedProverError::Failed),
+                "pending" | "running" => {}
+                _ => return Err(ManagedProverError::Failed),
+            }
+
+            let sleep_for =
+                remaining_until(request.deadline_unix_ms)?.min(Duration::from_millis(250));
+            tokio::select! {
+                _ = tokio::time::sleep(sleep_for) => {}
+                _ = wait_for_cancellation(&mut cancellation) => {
+                    let _ = cancel_remote_job(
+                        &mut client,
+                        &submitted.job_id,
+                        &context.authorization_token,
+                        remaining,
+                    ).await;
+                    return Err(ManagedProverError::Failed);
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
     fn with_parts(executable: String, timeout: Duration, semaphore: Arc<Semaphore>) -> Self {
         Self {
             executable,
             timeout,
             semaphore,
+            remote: None,
         }
     }
 
@@ -150,6 +322,111 @@ impl ManagedProverExecutor {
             .try_acquire_owned()
             .map_err(|_| ManagedProverError::QueueFull)
     }
+}
+
+async fn connect_remote_provider(
+    remote: &RemoteProviderConfig,
+    timeout: Duration,
+) -> Result<ManagedProofProviderClient<tonic::transport::Channel>, ManagedProverError> {
+    if !remote.endpoint.starts_with("https://") {
+        return Err(ManagedProverError::Failed);
+    }
+    if remote.ca_path.trim().is_empty()
+        || remote.client_cert_path.trim().is_empty()
+        || remote.client_key_path.trim().is_empty()
+    {
+        return Err(ManagedProverError::Failed);
+    }
+    let ca = std::fs::read(&remote.ca_path).map_err(|_| ManagedProverError::Failed)?;
+    let certificate =
+        std::fs::read(&remote.client_cert_path).map_err(|_| ManagedProverError::Failed)?;
+    let private_key =
+        std::fs::read(&remote.client_key_path).map_err(|_| ManagedProverError::Failed)?;
+    let tls = ClientTlsConfig::new()
+        .ca_certificate(Certificate::from_pem(ca))
+        .identity(Identity::from_pem(certificate, private_key));
+    let endpoint = Endpoint::from_shared(remote.endpoint.clone())
+        .map_err(|_| ManagedProverError::Failed)?
+        .connect_timeout(timeout)
+        .timeout(timeout)
+        .tls_config(tls)
+        .map_err(|_| ManagedProverError::Failed)?;
+    ManagedProofProviderClient::connect(endpoint)
+        .await
+        .map_err(|_| ManagedProverError::Failed)
+}
+
+fn add_authorization<T>(request: &mut Request<T>, token: &str) -> Result<(), ManagedProverError> {
+    if token.trim().is_empty() || token.len() > MANAGED_PROOF_AUTH_TOKEN_MAX_BYTES {
+        return Err(ManagedProverError::Failed);
+    }
+    let value = MetadataValue::try_from(format!("Bearer {token}"))
+        .map_err(|_| ManagedProverError::Failed)?;
+    request.metadata_mut().insert("authorization", value);
+    Ok(())
+}
+
+fn validate_capabilities(
+    response: &hivemind_proto::managedprover::GetCapabilitiesResponse,
+    request: &RemoteManagedProofRequest,
+) -> Result<(), ManagedProverError> {
+    if response.protocol_version != REMOTE_MANAGED_PROOF_PROTOCOL_VERSION as u32
+        || response.proof_scheme != RISC0_PROOF_SCHEME
+        || response.image_id != RISC0_MANAGED_GUEST_ID
+        || response.max_source_bytes < request.source.len() as u64
+        || response.max_input_bytes < request.input.len() as u64
+        || response.max_response_bytes < MAX_RESPONSE_JSON_BYTES as u64
+        || !response.cancellation_supported
+    {
+        return Err(ManagedProverError::Failed);
+    }
+    let matching = response.capabilities.iter().any(|capability| {
+        capability.runtime == request.runtime
+            && capability.max_usage_units >= request.max_usage_units
+            && if request.runtime == "production_sandboxed_dsl" {
+                (capability.backend_id == "*" || capability.backend_id == request.backend_id)
+                    && (capability.semantics_manifest_sha256 == "*"
+                        || capability.semantics_manifest_sha256
+                            == request.semantics_manifest_sha256)
+            } else {
+                capability.backend_id.is_empty() && capability.semantics_manifest_sha256.is_empty()
+            }
+    });
+    matching.then_some(()).ok_or(ManagedProverError::Failed)
+}
+
+fn validate_job_id(job_id: &str) -> Result<(), ManagedProverError> {
+    if job_id.trim().is_empty() || job_id.len() > 255 {
+        return Err(ManagedProverError::Failed);
+    }
+    Ok(())
+}
+
+async fn cancel_remote_job(
+    client: &mut ManagedProofProviderClient<tonic::transport::Channel>,
+    job_id: &str,
+    token: &str,
+    timeout: Duration,
+) -> Result<(), ManagedProverError> {
+    let mut request = Request::new(CancelManagedProofRequest {
+        job_id: job_id.to_string(),
+    });
+    add_authorization(&mut request, token)?;
+    rpc_with_deadline(timeout, client.cancel_managed_proof(request))
+        .await
+        .map_err(|_| ManagedProverError::Failed)?
+        .map_err(|_| ManagedProverError::Failed)?;
+    Ok(())
+}
+
+async fn rpc_with_deadline<T, F>(
+    timeout: Duration,
+    future: F,
+) -> Result<Result<T, tonic::Status>, tokio::time::error::Elapsed>
+where
+    F: std::future::Future<Output = Result<T, tonic::Status>>,
+{
+    tokio::time::timeout(timeout, future).await
 }
 
 enum ProverCompletion {
@@ -250,6 +527,60 @@ fn process_prover_semaphore() -> Arc<Semaphore> {
     PROCESS_PROVER_SEMAPHORE
         .get_or_init(|| Arc::new(Semaphore::new(1)))
         .clone()
+}
+
+fn remote_request_for_task(
+    task: &Task,
+    context: &ManagedProofTaskContext,
+) -> Result<RemoteManagedProofRequest, ManagedProverError> {
+    if context.owner != task.owner
+        || task.worker_id.as_deref() != Some(context.worker_id.as_str())
+        || context.authorization_token.trim().is_empty()
+        || context.authorization_token.len() > MANAGED_PROOF_AUTH_TOKEN_MAX_BYTES
+    {
+        return Err(ManagedProverError::Failed);
+    }
+    let sidecar_request = request_for_task(task)?;
+    let request = RemoteManagedProofRequest {
+        protocol_version: REMOTE_MANAGED_PROOF_PROTOCOL_VERSION,
+        task_id: task.task_id.clone(),
+        proof_task_id: sidecar_request.task_id,
+        owner: context.owner.clone(),
+        worker_id: context.worker_id.clone(),
+        execution_id: context.execution_id.clone(),
+        attempt_id: context.attempt_id.clone(),
+        idempotency_key: context.idempotency_key.clone(),
+        request_digest: String::new(),
+        lease_generation: context.lease_generation,
+        runtime: task.runtime.clone().unwrap_or_default(),
+        backend_id: task.managed_dsl_backend_id.clone().unwrap_or_default(),
+        semantics_manifest_sha256: task
+            .managed_dsl_semantics_manifest_sha256
+            .clone()
+            .unwrap_or_default(),
+        source: sidecar_request.source,
+        input: sidecar_request.input,
+        max_usage_units: sidecar_request.max_usage_units,
+        proof_scheme: RISC0_PROOF_SCHEME.into(),
+        image_id: RISC0_MANAGED_GUEST_ID,
+        deadline_unix_ms: context.deadline_unix_ms,
+    };
+    let request = request
+        .with_computed_digest()
+        .map_err(|_| ManagedProverError::Failed)?;
+    if context.request_digest != request.request_digest {
+        return Err(ManagedProverError::Failed);
+    }
+    Ok(request)
+}
+
+fn remaining_until(deadline_unix_ms: i64) -> Result<Duration, ManagedProverError> {
+    let remaining_ms = deadline_unix_ms
+        .checked_sub(chrono::Utc::now().timestamp_millis())
+        .filter(|remaining| *remaining > 0)
+        .ok_or(ManagedProverError::Failed)?;
+    let remaining_ms = u64::try_from(remaining_ms).map_err(|_| ManagedProverError::Failed)?;
+    Ok(Duration::from_millis(remaining_ms))
 }
 
 fn request_for_task(task: &Task) -> Result<ManagedProverRequest, ManagedProverError> {

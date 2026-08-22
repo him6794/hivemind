@@ -31,7 +31,13 @@ struct ActiveTaskEntry {
 
 type ActiveTaskMap = Arc<Mutex<HashMap<String, ActiveTaskEntry>>>;
 type TaskRunnerFuture = Pin<Box<dyn Future<Output = Result<TaskResult>> + Send>>;
-type TaskRunner = dyn Fn(Task, watch::Receiver<bool>) -> TaskRunnerFuture + Send + Sync;
+type TaskRunner = dyn Fn(
+        Task,
+        watch::Receiver<bool>,
+        Option<managed_prover::ManagedProofTaskContext>,
+    ) -> TaskRunnerFuture
+    + Send
+    + Sync;
 
 pub struct WorkerExecutor {
     active_tasks: ActiveTaskMap,
@@ -60,7 +66,7 @@ impl WorkerExecutor {
         };
         Ok(Self {
             active_tasks: Arc::new(Mutex::new(HashMap::new())),
-            task_runner: Arc::new(move |task, cancellation| {
+            task_runner: Arc::new(move |task, cancellation, proof_context| {
                 let config = runner_config.clone();
                 let prover = Arc::clone(&prover);
                 let reference_executor = reference_executor.clone();
@@ -88,7 +94,10 @@ impl WorkerExecutor {
                             Some("managed-function-v0") | Some("production_sandboxed_dsl")
                         )
                     {
-                        match prover.prove(&task, cancellation.clone()).await {
+                        match prover
+                            .prove_with_context(&task, cancellation.clone(), proof_context)
+                            .await
+                        {
                             Ok(proof) if !*cancellation.borrow() => {
                                 result.managed_proof = Some(proof);
                             }
@@ -119,12 +128,20 @@ impl WorkerExecutor {
     {
         Self {
             active_tasks: Arc::new(Mutex::new(HashMap::new())),
-            task_runner: Arc::new(move |task, cancellation| {
+            task_runner: Arc::new(move |task, cancellation, _proof_context| {
                 Box::pin(task_runner(task, cancellation))
             }),
         }
     }
     pub async fn execute_task(&self, task: &Task) -> Result<TaskResult> {
+        self.execute_task_with_context(task, None).await
+    }
+
+    pub async fn execute_task_with_context(
+        &self,
+        task: &Task,
+        proof_context: Option<managed_prover::ManagedProofTaskContext>,
+    ) -> Result<TaskResult> {
         let (cancellation_tx, cancellation_rx) = watch::channel(false);
         {
             let mut active_tasks = self
@@ -150,7 +167,7 @@ impl WorkerExecutor {
         let task = task.clone();
         tokio::spawn(async move {
             let _active_task_guard = ActiveTaskGuard::new(active_tasks, task_id);
-            let result = task_runner(task, cancellation_rx).await;
+            let result = task_runner(task, cancellation_rx, proof_context).await;
             let _ = result_tx.send(result);
         });
 

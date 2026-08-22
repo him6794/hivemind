@@ -361,6 +361,12 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
                 .with_worker_execution_private_key(
                     config.auth.worker_execution_private_key_pem.clone(),
                 )
+                .with_managed_proof_authorization_private_key(
+                    config.managed_proof.authorization_private_key_pem.clone(),
+                )
+                .with_managed_proof_provider_configured(
+                    !config.managed_proof.provider_endpoint.trim().is_empty(),
+                )
                 .with_managed_proof_rollout_mode(config.managed_proof.rollout_mode),
         );
 

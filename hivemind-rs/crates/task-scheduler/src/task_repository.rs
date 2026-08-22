@@ -56,6 +56,29 @@ impl GeneralComputeTransferLease {
     }
 }
 
+/// Nodepool-owned metadata for one managed-proof authorization. The bearer
+/// token and task payload are intentionally not represented here; only the
+/// binding and non-reusable audit hash are persisted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedProofAuthorizationRecord {
+    pub task_id: String,
+    pub owner: String,
+    pub worker_id: String,
+    pub execution_id: String,
+    pub attempt_id: String,
+    pub idempotency_key: String,
+    pub request_digest: String,
+    pub lease_generation: i64,
+    pub runtime: String,
+    pub backend_id: String,
+    pub semantics_manifest_sha256: String,
+    pub proof_scheme: String,
+    pub image_id_json: String,
+    pub deadline_unix_ms: i64,
+    pub token_jti: String,
+    pub token_sha256: String,
+}
+
 const PLATFORM_FEE_BPS: i64 = 1000; // 10%
 const MANAGED_BASE_INVOCATION_CPT: i64 = 1;
 const GENERAL_COMPUTE_BILLING_VERSION: &str = "billing-v1";
@@ -66,6 +89,19 @@ struct ManagedCompletionReceipt<'a> {
     executed_ops: i64,
     output_bytes: i64,
     receipt_json: &'a str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManagedCompletionEvidence {
+    /// The Nodepool dispatcher independently verified and persisted a receipt.
+    VerifiedReceipt,
+    /// Observe mode verified a receipt but intentionally settles through the
+    /// legacy path; this is recorded separately from receipt-backed settlement.
+    ObservedVerified,
+    /// An explicitly selected compatibility path settled without a receipt.
+    LegacyFallback,
+    /// Generic repository completion has no managed-proof authority.
+    Untrusted,
 }
 
 /// Nodepool-owned settlement evidence for an alpha general-compute result.
@@ -1033,6 +1069,136 @@ impl TaskRepository {
         Ok(lease)
     }
 
+    /// Persist only the binding and token fingerprint for a managed-proof
+    /// attempt. A conflicting binding for the same task/generation/attempt is
+    /// rejected instead of being silently overwritten.
+    pub async fn record_managed_proof_authorization(
+        &self,
+        record: &ManagedProofAuthorizationRecord,
+    ) -> Result<()> {
+        let row = sqlx::query(
+            "WITH active_task AS (
+                 SELECT task_id
+                 FROM tasks
+                 WHERE task_id = $1
+                   AND owner = $2
+                   AND worker_id = $3
+                   AND status IN ('ASSIGNED', 'RUNNING')
+                   AND retry_count = $8 - 1
+                   AND runtime = $9
+                 FOR UPDATE
+             )
+             INSERT INTO managed_proof_authorizations (
+                task_id, owner, worker_id, execution_id, attempt_id, idempotency_key,
+                request_digest, lease_generation, runtime, backend_id,
+                semantics_manifest_sha256, proof_scheme, image_id_json,
+                deadline_unix_ms, token_jti, token_sha256, state
+             )
+             SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, 'issued'
+             FROM active_task
+             ON CONFLICT (task_id, lease_generation, attempt_id) DO NOTHING
+             RETURNING id",
+        )
+        .bind(&record.task_id)
+        .bind(&record.owner)
+        .bind(&record.worker_id)
+        .bind(&record.execution_id)
+        .bind(&record.attempt_id)
+        .bind(&record.idempotency_key)
+        .bind(&record.request_digest)
+        .bind(record.lease_generation)
+        .bind(&record.runtime)
+        .bind(&record.backend_id)
+        .bind(&record.semantics_manifest_sha256)
+        .bind(&record.proof_scheme)
+        .bind(&record.image_id_json)
+        .bind(record.deadline_unix_ms)
+        .bind(&record.token_jti)
+        .bind(&record.token_sha256)
+        .fetch_optional(&self.pool)
+        .await?;
+        if row.is_none() {
+            anyhow::bail!(
+                "managed-proof authorization conflicts with the existing attempt binding"
+            );
+        }
+        Ok(())
+    }
+
+    pub async fn update_managed_proof_authorization_state(
+        &self,
+        task_id: &str,
+        lease_generation: i64,
+        attempt_id: &str,
+        state: &str,
+    ) -> Result<()> {
+        if !matches!(
+            state,
+            "issued"
+                | "submitted"
+                | "running"
+                | "succeeded"
+                | "failed"
+                | "cancelled"
+                | "expired"
+                | "revoked"
+        ) {
+            anyhow::bail!("managed-proof authorization state is invalid");
+        }
+        let query = match state {
+            "issued" => {
+                "UPDATE managed_proof_authorizations
+                 SET state = 'issued', updated_at = NOW()
+                 WHERE task_id = $1 AND lease_generation = $2 AND attempt_id = $3
+                   AND state = 'issued'"
+            }
+            "submitted" => {
+                "UPDATE managed_proof_authorizations
+                 SET state = 'submitted', updated_at = NOW()
+                 WHERE task_id = $1 AND lease_generation = $2 AND attempt_id = $3
+                   AND state = 'issued'"
+            }
+            "running" => {
+                "UPDATE managed_proof_authorizations
+                 SET state = 'running', updated_at = NOW()
+                 WHERE task_id = $1 AND lease_generation = $2 AND attempt_id = $3
+                   AND state = 'submitted'"
+            }
+            "succeeded" | "failed" | "cancelled" | "expired" | "revoked" => {
+                "UPDATE managed_proof_authorizations
+                 SET state = $4, updated_at = NOW()
+                 WHERE task_id = $1 AND lease_generation = $2 AND attempt_id = $3
+                   AND state IN ('issued', 'submitted', 'running')"
+            }
+            _ => unreachable!("managed-proof state was validated above"),
+        };
+        let result = if matches!(
+            state,
+            "succeeded" | "failed" | "cancelled" | "expired" | "revoked"
+        ) {
+            sqlx::query(query)
+                .bind(task_id)
+                .bind(lease_generation)
+                .bind(attempt_id)
+                .bind(state)
+                .execute(&self.pool)
+                .await?
+        } else {
+            sqlx::query(query)
+                .bind(task_id)
+                .bind(lease_generation)
+                .bind(attempt_id)
+                .execute(&self.pool)
+                .await?
+        };
+        if result.rows_affected() == 0 {
+            anyhow::bail!(
+                "managed-proof authorization lifecycle transition was stale or already terminal"
+            );
+        }
+        Ok(())
+    }
+
     async fn activate_general_compute_transfer_lease(
         &self,
         tx: &mut Transaction<'_, Postgres>,
@@ -1101,6 +1267,25 @@ impl TaskRepository {
         .execute(&mut **tx)
         .await?;
         Ok(())
+    }
+
+    pub async fn mark_worker_execution_running(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+    ) -> Result<Option<Task>> {
+        sqlx::query_as::<_, Task>(
+            "UPDATE tasks
+             SET status = 'RUNNING', last_update = NOW()
+             WHERE task_id = $1 AND worker_id = $2
+               AND status IN ('ASSIGNED', 'RUNNING')
+             RETURNING *",
+        )
+        .bind(task_id)
+        .bind(worker_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Into::into)
     }
 
     pub async fn refresh_worker_endpoint(
@@ -1190,8 +1375,17 @@ impl TaskRepository {
         result_torrent: Option<&str>,
         output: Option<&str>,
     ) -> Result<Task> {
-        self.complete_guarded(task_id, None, result_torrent, output, None, None, None)
-            .await
+        self.complete_guarded(
+            task_id,
+            None,
+            result_torrent,
+            output,
+            None,
+            None,
+            None,
+            ManagedCompletionEvidence::Untrusted,
+        )
+        .await
     }
 
     pub async fn complete_for_worker(
@@ -1209,6 +1403,51 @@ impl TaskRepository {
             None,
             None,
             None,
+            ManagedCompletionEvidence::Untrusted,
+        )
+        .await
+    }
+
+    /// Explicitly selected observe/off compatibility completion for a managed
+    /// task. This is never used by the generic Worker result APIs, which must
+    /// not bypass the enforce proof gate.
+    pub async fn complete_for_worker_legacy_managed(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        output: Option<&str>,
+    ) -> Result<Task> {
+        self.complete_guarded(
+            task_id,
+            Some(worker_id),
+            None,
+            output,
+            None,
+            None,
+            None,
+            ManagedCompletionEvidence::LegacyFallback,
+        )
+        .await
+    }
+
+    /// Observe mode retains legacy settlement after a proof was independently
+    /// verified. The authorization row records `observed_verified` so audit
+    /// consumers can distinguish this from receipt-backed settlement.
+    pub async fn complete_for_worker_observed_verified(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        output: Option<&str>,
+    ) -> Result<Task> {
+        self.complete_guarded(
+            task_id,
+            Some(worker_id),
+            None,
+            output,
+            None,
+            None,
+            None,
+            ManagedCompletionEvidence::ObservedVerified,
         )
         .await
     }
@@ -1229,6 +1468,7 @@ impl TaskRepository {
             None,
             Some(expected_manifest),
             Some(result_json),
+            ManagedCompletionEvidence::Untrusted,
         )
         .await
     }
@@ -1321,6 +1561,7 @@ impl TaskRepository {
             }),
             None,
             None,
+            ManagedCompletionEvidence::VerifiedReceipt,
         )
         .await
     }
@@ -1366,8 +1607,23 @@ impl TaskRepository {
         managed_receipt: Option<ManagedCompletionReceipt<'_>>,
         expected_manifest: Option<&[u8]>,
         general_compute_result: Option<&[u8]>,
+        managed_evidence: ManagedCompletionEvidence,
     ) -> Result<Task> {
         let mut tx = self.pool.begin().await?;
+        let runtime: Option<String> =
+            sqlx::query_scalar("SELECT runtime FROM tasks WHERE task_id = $1")
+                .bind(task_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        let managed_runtime = matches!(
+            runtime.as_deref(),
+            Some("managed-function-v0") | Some("production_sandboxed_dsl")
+        );
+        if managed_runtime && managed_evidence == ManagedCompletionEvidence::Untrusted {
+            anyhow::bail!(
+                "managed task completion requires a Nodepool-verified proof or an explicit rollout compatibility path"
+            );
+        }
         let deterministic: bool =
             sqlx::query_scalar("SELECT deterministic FROM tasks WHERE task_id = $1")
                 .bind(task_id)
@@ -1514,7 +1770,29 @@ impl TaskRepository {
             }
         }
 
+        let managed_proof_state = if managed_runtime {
+            Some(match managed_evidence {
+                ManagedCompletionEvidence::VerifiedReceipt => "succeeded",
+                ManagedCompletionEvidence::ObservedVerified => "observed_verified",
+                ManagedCompletionEvidence::LegacyFallback
+                | ManagedCompletionEvidence::Untrusted => "failed",
+            })
+        } else {
+            None
+        };
+
+        let managed_attempt_id = managed_proof_attempt_id(&completed);
+
         if completed.max_cpt <= 0 || completed.billing_settled {
+            if let Some(state) = managed_proof_state {
+                update_active_managed_proof_state(
+                    &mut tx,
+                    task_id,
+                    managed_attempt_id.as_deref(),
+                    state,
+                )
+                .await?;
+            }
             tx.commit().await?;
             return Ok(completed);
         }
@@ -1584,6 +1862,15 @@ impl TaskRepository {
             .bind(task_id)
             .fetch_one(&mut *tx)
             .await?;
+            if let Some(state) = managed_proof_state {
+                update_active_managed_proof_state(
+                    &mut tx,
+                    task_id,
+                    managed_attempt_id.as_deref(),
+                    state,
+                )
+                .await?;
+            }
             tx.commit().await?;
             Ok(settled)
         } else {
@@ -1593,6 +1880,15 @@ impl TaskRepository {
                 completed.owner,
                 billable_cpt
             );
+            if let Some(state) = managed_proof_state {
+                update_active_managed_proof_state(
+                    &mut tx,
+                    task_id,
+                    managed_attempt_id.as_deref(),
+                    state,
+                )
+                .await?;
+            }
             tx.commit().await?;
             Ok(completed)
         }
@@ -1613,6 +1909,13 @@ impl TaskRepository {
 
         self.revoke_general_compute_transfer_lease(&mut tx, task_id)
             .await?;
+        update_active_managed_proof_state(
+            &mut tx,
+            task_id,
+            managed_proof_attempt_id(&failed).as_deref(),
+            "failed",
+        )
+        .await?;
 
         if let Some(result_json) = nodepool_general_compute_terminal_result(
             &failed,
@@ -1657,6 +1960,13 @@ impl TaskRepository {
 
         self.revoke_general_compute_transfer_lease(&mut tx, task_id)
             .await?;
+        update_active_managed_proof_state(
+            &mut tx,
+            task_id,
+            managed_proof_attempt_id(&failed).as_deref(),
+            "failed",
+        )
+        .await?;
 
         if let Some(result_json) = nodepool_general_compute_terminal_result(
             &failed,
@@ -1706,6 +2016,13 @@ impl TaskRepository {
         .await?;
         self.revoke_general_compute_transfer_lease(&mut tx, task_id)
             .await?;
+        update_active_managed_proof_state(
+            &mut tx,
+            task_id,
+            managed_proof_attempt_id(&failed).as_deref(),
+            "failed",
+        )
+        .await?;
         if let Some(result_json) = nodepool_general_compute_terminal_result(
             &failed,
             ResultStatus::Failed,
@@ -1742,6 +2059,13 @@ impl TaskRepository {
 
         self.revoke_general_compute_transfer_lease(&mut tx, task_id)
             .await?;
+        update_active_managed_proof_state(
+            &mut tx,
+            task_id,
+            managed_proof_attempt_id(&cancelled).as_deref(),
+            "cancelled",
+        )
+        .await?;
 
         if let Some(result_json) = nodepool_general_compute_terminal_result(
             &cancelled,
@@ -1777,6 +2101,13 @@ impl TaskRepository {
         for task in &timed_out {
             self.revoke_general_compute_transfer_lease(&mut tx, &task.task_id)
                 .await?;
+            update_active_managed_proof_state(
+                &mut tx,
+                &task.task_id,
+                managed_proof_attempt_id(task).as_deref(),
+                "expired",
+            )
+            .await?;
             if let Some(result_json) = nodepool_general_compute_terminal_result(
                 task,
                 ResultStatus::TimedOut,
@@ -1840,6 +2171,13 @@ impl TaskRepository {
         let rotated_manifest = rotate_general_compute_attempt(&current)?;
         self.revoke_general_compute_transfer_lease(&mut tx, task_id)
             .await?;
+        update_active_managed_proof_state(
+            &mut tx,
+            task_id,
+            managed_proof_attempt_id(&current).as_deref(),
+            "revoked",
+        )
+        .await?;
         let updated = sqlx::query_as::<_, Task>(
             "UPDATE tasks
              SET status = 'PENDING', status_message = 'Redispatched', worker_id = NULL, worker_ip = NULL,
@@ -1937,6 +2275,44 @@ impl TaskRepository {
         .await
         .map_err(Into::into)
     }
+}
+
+async fn update_active_managed_proof_state(
+    tx: &mut Transaction<'_, Postgres>,
+    task_id: &str,
+    attempt_id: Option<&str>,
+    state: &str,
+) -> Result<()> {
+    let Some(attempt_id) = attempt_id else {
+        return Ok(());
+    };
+    sqlx::query(
+        "UPDATE managed_proof_authorizations
+         SET state = $1, updated_at = NOW()
+         WHERE task_id = $2
+           AND attempt_id = $3
+           AND state IN ('issued', 'submitted', 'running')",
+    )
+    .bind(state)
+    .bind(task_id)
+    .bind(attempt_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+fn managed_proof_attempt_id(task: &Task) -> Option<String> {
+    if !matches!(
+        task.runtime.as_deref(),
+        Some("managed-function-v0") | Some("production_sandboxed_dsl")
+    ) {
+        return None;
+    }
+    let attempt_number = u32::try_from(task.retry_count).ok()?;
+    Some(format!(
+        "managed-attempt-v1:{}:{attempt_number}",
+        task.id.simple()
+    ))
 }
 
 async fn insert_ledger_entry(

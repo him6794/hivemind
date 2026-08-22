@@ -52,12 +52,57 @@ pub struct TrustedManagedDslWorkerRegistration {
 pub struct ManagedProofConfig {
     #[serde(default)]
     pub rollout_mode: ManagedProofRolloutMode,
+    /// Nodepool-only Ed25519 key used to mint proof-production authorizations.
+    #[serde(default)]
+    pub authorization_private_key_pem: String,
+    /// Provider-side Ed25519 verification key. This is public and may be
+    /// distributed to the provider, but never replaces the task JWT.
+    #[serde(default)]
+    pub authorization_public_key_pem: String,
+    /// Worker-side remote provider endpoint. Empty means no remote provider.
+    #[serde(default)]
+    pub provider_endpoint: String,
+    #[serde(default)]
+    pub provider_tls_ca_path: String,
+    #[serde(default)]
+    pub provider_tls_client_cert_path: String,
+    #[serde(default)]
+    pub provider_tls_client_key_path: String,
+    /// Service-side server certificate, private key, and client CA paths.
+    #[serde(default)]
+    pub provider_tls_server_cert_path: String,
+    #[serde(default)]
+    pub provider_tls_server_key_path: String,
+    #[serde(default)]
+    pub provider_tls_client_ca_path: String,
+    /// Service-side bind address, state directory, and staged prover path.
+    #[serde(default = "default_managed_prover_service_addr")]
+    pub provider_service_addr: String,
+    #[serde(default = "default_managed_prover_state_dir")]
+    pub provider_state_dir: String,
+    #[serde(default)]
+    pub provider_executable: String,
+    #[serde(default = "default_managed_prover_queue_capacity")]
+    pub provider_queue_capacity: usize,
 }
 
 impl Default for ManagedProofConfig {
     fn default() -> Self {
         Self {
             rollout_mode: ManagedProofRolloutMode::Enforce,
+            authorization_private_key_pem: String::new(),
+            authorization_public_key_pem: String::new(),
+            provider_endpoint: String::new(),
+            provider_tls_ca_path: String::new(),
+            provider_tls_client_cert_path: String::new(),
+            provider_tls_client_key_path: String::new(),
+            provider_tls_server_cert_path: String::new(),
+            provider_tls_server_key_path: String::new(),
+            provider_tls_client_ca_path: String::new(),
+            provider_service_addr: default_managed_prover_service_addr(),
+            provider_state_dir: default_managed_prover_state_dir(),
+            provider_executable: String::new(),
+            provider_queue_capacity: default_managed_prover_queue_capacity(),
         }
     }
 }
@@ -490,6 +535,46 @@ impl HivemindConfig {
         if let Ok(mode) = std::env::var("MANAGED_PROOF_ROLLOUT_MODE") {
             self.managed_proof.rollout_mode = parse_env("MANAGED_PROOF_ROLLOUT_MODE", &mode)?;
         }
+        if let Ok(key) = std::env::var("MANAGED_PROOF_AUTH_PRIVATE_KEY_PEM") {
+            self.managed_proof.authorization_private_key_pem = key;
+        }
+        if let Ok(key) = std::env::var("MANAGED_PROOF_AUTH_PUBLIC_KEY_PEM") {
+            self.managed_proof.authorization_public_key_pem = key;
+        }
+        if let Ok(endpoint) = std::env::var("MANAGED_PROVER_SERVICE_ENDPOINT") {
+            self.managed_proof.provider_endpoint = endpoint;
+        }
+        if let Ok(path) = std::env::var("MANAGED_PROVER_TLS_CA_PATH") {
+            self.managed_proof.provider_tls_ca_path = path;
+        }
+        if let Ok(path) = std::env::var("MANAGED_PROVER_TLS_CLIENT_CERT_PATH") {
+            self.managed_proof.provider_tls_client_cert_path = path;
+        }
+        if let Ok(path) = std::env::var("MANAGED_PROVER_TLS_CLIENT_KEY_PATH") {
+            self.managed_proof.provider_tls_client_key_path = path;
+        }
+        if let Ok(path) = std::env::var("MANAGED_PROVER_TLS_SERVER_CERT_PATH") {
+            self.managed_proof.provider_tls_server_cert_path = path;
+        }
+        if let Ok(path) = std::env::var("MANAGED_PROVER_TLS_SERVER_KEY_PATH") {
+            self.managed_proof.provider_tls_server_key_path = path;
+        }
+        if let Ok(path) = std::env::var("MANAGED_PROVER_TLS_CLIENT_CA_PATH") {
+            self.managed_proof.provider_tls_client_ca_path = path;
+        }
+        if let Ok(addr) = std::env::var("MANAGED_PROVER_SERVICE_ADDR") {
+            self.managed_proof.provider_service_addr = addr;
+        }
+        if let Ok(dir) = std::env::var("MANAGED_PROVER_STATE_DIR") {
+            self.managed_proof.provider_state_dir = dir;
+        }
+        if let Ok(exec) = std::env::var("MANAGED_PROVER_SERVICE_EXECUTABLE") {
+            self.managed_proof.provider_executable = exec;
+        }
+        if let Ok(capacity) = std::env::var("MANAGED_PROVER_QUEUE_CAPACITY") {
+            self.managed_proof.provider_queue_capacity =
+                parse_env("MANAGED_PROVER_QUEUE_CAPACITY", &capacity)?;
+        }
         if let Ok(registrations) =
             std::env::var("HIVEMIND_GENERAL_COMPUTE_TRUSTED_WORKER_CAPABILITIES")
         {
@@ -690,6 +775,18 @@ fn default_sandbox_mode() -> String {
 
 fn default_managed_prover_timeout_secs() -> u64 {
     900
+}
+
+fn default_managed_prover_service_addr() -> String {
+    "0.0.0.0:50054".into()
+}
+
+fn default_managed_prover_state_dir() -> String {
+    "./managed-prover-state".into()
+}
+
+fn default_managed_prover_queue_capacity() -> usize {
+    1
 }
 
 fn default_network_egress_enabled() -> bool {

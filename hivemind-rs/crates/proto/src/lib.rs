@@ -1,5 +1,19 @@
 tonic::include_proto!("nodepool");
 
+pub mod managedprover {
+    tonic::include_proto!("managedprover");
+}
+
+/// Maximum encoded size of one remote managed-proof request or response RPC
+/// message. The proof envelope itself remains bounded by the stricter
+/// `MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES` limit below.
+pub const MANAGED_PROVER_RPC_MESSAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+pub use managedprover::managed_proof_provider_client::ManagedProofProviderClient;
+pub use managedprover::managed_proof_provider_server::{
+    ManagedProofProvider, ManagedProofProviderServer,
+};
+
 /// Maximum UTF-8 byte length accepted for any task identifier at an admission boundary.
 pub const TASK_ID_MAX_BYTES: usize = 255;
 

@@ -1,3 +1,4 @@
+use hivemind_auth::managed_proof::MANAGED_PROOF_AUTH_TOKEN_MAX_BYTES;
 use hivemind_auth::worker_execution::WorkerExecutionVerifier;
 use hivemind_models::Claims;
 use hivemind_proto::{
@@ -21,8 +22,9 @@ use std::time::Duration;
 use tonic::{Request, Response, Status};
 
 use crate::{
-    managed_prover::ManagedProverError, runtime_admission::WorkerRuntimeAdmission, StopTaskOutcome,
-    TaskResult, WorkerExecutor,
+    managed_prover::{ManagedProofTaskContext, ManagedProverError},
+    runtime_admission::WorkerRuntimeAdmission,
+    StopTaskOutcome, TaskResult, WorkerExecutor,
 };
 use general_compute_runtime::artifact::CasChunkStore;
 use general_compute_runtime::GeneralComputeRequest;
@@ -781,6 +783,84 @@ fn validate_execute_task_contract(request: &ExecuteTaskRequest) -> Result<(), &'
     }
 }
 
+fn managed_proof_context_for_request(
+    config: &HivemindConfig,
+    request: &ExecuteTaskRequest,
+    claims: &Claims,
+    worker_id: Option<&str>,
+) -> Result<Option<ManagedProofTaskContext>, Box<Status>> {
+    let is_managed = matches!(
+        request.runtime.trim(),
+        "managed-function-v0" | "production_sandboxed_dsl"
+    );
+    if !is_managed {
+        return Ok(None);
+    }
+
+    // Local sidecar callers retain the legacy contract. Once a remote endpoint
+    // is configured, every managed attempt must carry the Nodepool proof grant.
+    if config.managed_proof.provider_endpoint.trim().is_empty() {
+        return Ok(None);
+    }
+    let token = request.managed_proof_authorization_token.trim();
+    if token.is_empty() || token.len() > MANAGED_PROOF_AUTH_TOKEN_MAX_BYTES {
+        return Err(Box::new(Status::permission_denied(
+            "managed proof authorization is required",
+        )));
+    }
+    let worker_id = worker_id
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            Box::new(Status::failed_precondition(
+                "worker identity is unavailable",
+            ))
+        })?;
+    for value in [
+        request.execution_id.as_str(),
+        request.attempt_id.as_str(),
+        request.idempotency_key.as_str(),
+    ] {
+        if value.trim().is_empty() || value.len() > hivemind_proto::TASK_ID_MAX_BYTES {
+            return Err(Box::new(Status::invalid_argument(
+                "managed proof attempt identity is invalid",
+            )));
+        }
+    }
+    if !is_sha256_digest(&request.request_digest) {
+        return Err(Box::new(Status::invalid_argument(
+            "managed proof request digest is invalid",
+        )));
+    }
+    if request.managed_proof_lease_generation <= 0 {
+        return Err(Box::new(Status::permission_denied(
+            "managed proof lease generation is invalid",
+        )));
+    }
+    if request.managed_proof_deadline_unix_ms <= chrono::Utc::now().timestamp_millis() {
+        return Err(Box::new(Status::deadline_exceeded(
+            "managed proof deadline has expired",
+        )));
+    }
+    Ok(Some(ManagedProofTaskContext {
+        owner: claims.sub.clone(),
+        worker_id: worker_id.to_string(),
+        execution_id: request.execution_id.clone(),
+        attempt_id: request.attempt_id.clone(),
+        idempotency_key: request.idempotency_key.clone(),
+        request_digest: request.request_digest.clone(),
+        lease_generation: request.managed_proof_lease_generation,
+        authorization_token: token.to_string(),
+        deadline_unix_ms: request.managed_proof_deadline_unix_ms,
+    }))
+}
+
+fn is_sha256_digest(value: &str) -> bool {
+    let Some(hex_value) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex_value.len() == 64 && hex_value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 #[tonic::async_trait]
 impl WorkerNodeService for GrpcWorkerNodeService {
     async fn execute_task(
@@ -805,6 +885,13 @@ impl WorkerNodeService for GrpcWorkerNodeService {
             .admit(&req.runtime, &req.general_compute_manifest_json)
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
         validate_execute_task_contract(&req).map_err(Status::invalid_argument)?;
+        let proof_context = managed_proof_context_for_request(
+            &self.state.config,
+            &req,
+            &claims,
+            self.state.current_worker_id().as_deref(),
+        )
+        .map_err(|status| *status)?;
         if let crate::runtime_admission::RuntimeRoute::GeneralComputeV1Alpha1(request) = &admitted {
             let token_identity = WorkerExecutionVerifier::from_pem(
                 &self.state.config.auth.worker_execution_public_key_pem,
@@ -942,7 +1029,12 @@ impl WorkerNodeService for GrpcWorkerNodeService {
             completed_at: None,
         };
         tracing::info!("Worker executing task {}", req.task_id);
-        match self.state.executor.execute_task(&task).await {
+        match self
+            .state
+            .executor
+            .execute_task_with_context(&task, proof_context)
+            .await
+        {
             Ok(result) => Ok(Response::new(execute_response_from_result(
                 result,
                 matches!(
@@ -1371,7 +1463,10 @@ struct ExecuteTaskIdentity {
 
 impl ExecuteTaskIdentity {
     fn from_request(request: &ExecuteTaskRequest) -> Self {
-        if request.runtime.trim() != "general-compute-v1alpha1" {
+        if !matches!(
+            request.runtime.trim(),
+            "general-compute-v1alpha1" | "managed-function-v0" | "production_sandboxed_dsl"
+        ) {
             return Self::default();
         }
         Self {
@@ -1448,6 +1543,9 @@ mod tests {
             request_digest: String::new(),
             managed_dsl_backend_id: String::new(),
             managed_dsl_semantics_manifest_sha256: String::new(),
+            managed_proof_authorization_token: String::new(),
+            managed_proof_lease_generation: 0,
+            managed_proof_deadline_unix_ms: 0,
         }
     }
 
@@ -1685,13 +1783,13 @@ mod tests {
     }
 
     #[test]
-    fn worker_legacy_execute_response_keeps_attempt_identity_empty() {
+    fn worker_managed_execute_response_echoes_attempt_identity() {
         let mut request =
             execute_request("managed-function-v0", "return 42;".into(), "{}".into(), 10);
-        request.execution_id = "execution-legacy-should-not-echo".into();
-        request.attempt_id = "attempt-legacy-should-not-echo".into();
-        request.idempotency_key = "idempotency-legacy-should-not-echo".into();
-        request.request_digest = "sha256:legacy-should-not-echo".into();
+        request.execution_id = "execution-managed".into();
+        request.attempt_id = "attempt-managed".into();
+        request.idempotency_key = "idempotency-managed".into();
+        request.request_digest = "sha256:managed-attempt".into();
 
         let response = execute_response_from_result(
             successful_task_result(None),
@@ -1699,10 +1797,10 @@ mod tests {
             &ExecuteTaskIdentity::from_request(&request),
         );
 
-        assert!(response.execution_id.is_empty());
-        assert!(response.attempt_id.is_empty());
-        assert!(response.idempotency_key.is_empty());
-        assert!(response.request_digest.is_empty());
+        assert_eq!(response.execution_id, request.execution_id);
+        assert_eq!(response.attempt_id, request.attempt_id);
+        assert_eq!(response.idempotency_key, request.idempotency_key);
+        assert_eq!(response.request_digest, request.request_digest);
     }
 
     #[test]
@@ -1963,6 +2061,9 @@ mod tests {
                 request_digest: String::new(),
                 managed_dsl_backend_id: String::new(),
                 managed_dsl_semantics_manifest_sha256: String::new(),
+                managed_proof_authorization_token: String::new(),
+                managed_proof_lease_generation: 0,
+                managed_proof_deadline_unix_ms: 0,
             }))
             .await;
 
@@ -2010,6 +2111,9 @@ mod tests {
                 request_digest: String::new(),
                 managed_dsl_backend_id: String::new(),
                 managed_dsl_semantics_manifest_sha256: String::new(),
+                managed_proof_authorization_token: String::new(),
+                managed_proof_lease_generation: 0,
+                managed_proof_deadline_unix_ms: 0,
             }))
             .await;
 
@@ -2037,6 +2141,9 @@ mod tests {
                 request_digest: String::new(),
                 managed_dsl_backend_id: String::new(),
                 managed_dsl_semantics_manifest_sha256: String::new(),
+                managed_proof_authorization_token: String::new(),
+                managed_proof_lease_generation: 0,
+                managed_proof_deadline_unix_ms: 0,
             }))
             .await;
 
@@ -2064,6 +2171,9 @@ mod tests {
                 request_digest: String::new(),
                 managed_dsl_backend_id: String::new(),
                 managed_dsl_semantics_manifest_sha256: String::new(),
+                managed_proof_authorization_token: String::new(),
+                managed_proof_lease_generation: 0,
+                managed_proof_deadline_unix_ms: 0,
             }))
             .await;
 
@@ -2505,6 +2615,9 @@ mod tests {
                     request_digest: String::new(),
                     managed_dsl_backend_id: String::new(),
                     managed_dsl_semantics_manifest_sha256: String::new(),
+                    managed_proof_authorization_token: String::new(),
+                    managed_proof_lease_generation: 0,
+                    managed_proof_deadline_unix_ms: 0,
                 }))
                 .await
                 .unwrap()

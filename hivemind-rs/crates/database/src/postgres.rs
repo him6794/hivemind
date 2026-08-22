@@ -401,6 +401,44 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // Nodepool-owned, metadata-only authorization evidence for managed proof
+    // attempts. Source, input, receipt bytes, private keys, and bearer tokens
+    // are deliberately absent from this table.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS managed_proof_authorizations (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            task_id VARCHAR(255) NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+            owner VARCHAR(255) NOT NULL,
+            worker_id VARCHAR(255) NOT NULL,
+            execution_id VARCHAR(255) NOT NULL,
+            attempt_id VARCHAR(255) NOT NULL,
+            idempotency_key VARCHAR(255) NOT NULL,
+            request_digest VARCHAR(71) NOT NULL,
+            lease_generation BIGINT NOT NULL CHECK (lease_generation > 0),
+            runtime VARCHAR(64) NOT NULL,
+            backend_id VARCHAR(255) NOT NULL DEFAULT '',
+            semantics_manifest_sha256 VARCHAR(71) NOT NULL DEFAULT '',
+            proof_scheme VARCHAR(64) NOT NULL,
+            image_id_json TEXT NOT NULL,
+            deadline_unix_ms BIGINT NOT NULL CHECK (deadline_unix_ms > 0),
+            token_jti VARCHAR(255) NOT NULL,
+            token_sha256 VARCHAR(71) NOT NULL,
+            state VARCHAR(32) NOT NULL DEFAULT 'issued',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE (task_id, lease_generation, attempt_id)
+        );",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_managed_proof_authorizations_identity
+         ON managed_proof_authorizations(task_id, worker_id, execution_id, attempt_id, lease_generation);",
+    )
+    .execute(pool)
+    .await?;
+
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS vpn_peers (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
