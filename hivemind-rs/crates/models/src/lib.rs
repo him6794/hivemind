@@ -184,6 +184,137 @@ pub type ResourceRequirements = ResourceSpec;
 
 // --- Worker/Node Models ---
 
+pub const PUBLIC_DYNAMIC_ADMISSION_MODE: &str = "public_dynamic";
+pub const PRIVATE_STATIC_ADMISSION_MODE: &str = "private_static";
+pub const WORKER_CAPABILITY_REPORT_VERSION: u32 = 1;
+pub const WORKER_CAPABILITY_REPORT_MAX_BYTES: usize = 16 * 1024;
+pub const WORKER_CAPABILITY_MAX_ENTRIES: usize = 32;
+pub const WORKER_CAPABILITY_MAX_USAGE_UNITS: u64 = 1_000_000;
+pub const WORKER_CAPABILITY_MAX_OUTPUT_BYTES: u64 = 1024 * 1024;
+pub const WORKER_CAPABILITY_MAX_READINESS_REASON_BYTES: usize = 255;
+
+/// A bounded, self-reported capability used only for public dynamic admission.
+/// It carries no typed GPU identity, executable path, image trust, or host
+/// command; those remain private/operator-owned capabilities.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerRuntimeCapability {
+    pub runtime: String,
+    #[serde(default)]
+    pub backend_id: String,
+    #[serde(default)]
+    pub semantics_manifest_sha256: String,
+    pub max_usage_units: u64,
+    pub max_output_bytes: u64,
+}
+
+/// Versioned public capability/readiness observation sent by a Worker.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerCapabilityReport {
+    pub protocol_version: u32,
+    pub capabilities: Vec<WorkerRuntimeCapability>,
+    pub ready: bool,
+    #[serde(default)]
+    pub readiness_reason: String,
+}
+
+impl WorkerCapabilityReport {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.protocol_version != WORKER_CAPABILITY_REPORT_VERSION {
+            return Err("worker capability report protocol version is unsupported".into());
+        }
+        if self.capabilities.len() > WORKER_CAPABILITY_MAX_ENTRIES {
+            return Err("worker capability report has too many entries".into());
+        }
+        if self.readiness_reason.len() > WORKER_CAPABILITY_MAX_READINESS_REASON_BYTES {
+            return Err("worker capability readiness reason is too long".into());
+        }
+        if self.ready && self.capabilities.is_empty() {
+            return Err("ready worker capability report has no capabilities".into());
+        }
+        if !self.ready && self.readiness_reason.trim().is_empty() {
+            return Err("not-ready worker capability report needs a reason".into());
+        }
+        let mut previous: Option<(&str, &str, &str)> = None;
+        for capability in &self.capabilities {
+            if capability.runtime != "managed-function-v0"
+                && capability.runtime != "production_sandboxed_dsl"
+            {
+                return Err("worker capability report contains an unsupported runtime".into());
+            }
+            if capability.runtime == "managed-function-v0"
+                && (!capability.backend_id.is_empty()
+                    || !capability.semantics_manifest_sha256.is_empty())
+            {
+                return Err("managed-function-v0 capability identity is invalid".into());
+            }
+            if capability.runtime == "production_sandboxed_dsl"
+                && (capability.backend_id.trim().is_empty()
+                    || capability.semantics_manifest_sha256.trim().is_empty())
+            {
+                return Err("production DSL capability identity is incomplete".into());
+            }
+            if capability.runtime.len() > 64
+                || capability.backend_id.len() > 255
+                || capability.semantics_manifest_sha256.len() > 71
+                || !(1..=WORKER_CAPABILITY_MAX_USAGE_UNITS).contains(&capability.max_usage_units)
+                || !(1..=WORKER_CAPABILITY_MAX_OUTPUT_BYTES).contains(&capability.max_output_bytes)
+            {
+                return Err("worker capability report entry is outside its bounds".into());
+            }
+            let key = (
+                capability.runtime.as_str(),
+                capability.backend_id.as_str(),
+                capability.semantics_manifest_sha256.as_str(),
+            );
+            if previous.is_some_and(|prior| prior >= key) {
+                return Err("worker capability report is not canonical or has duplicates".into());
+            }
+            previous = Some(key);
+        }
+        Ok(())
+    }
+
+    pub fn validate_public_dynamic(&self) -> Result<(), String> {
+        self.validate()?;
+        if self
+            .capabilities
+            .iter()
+            .any(|capability| capability.runtime != "managed-function-v0")
+        {
+            return Err(
+                "public dynamic admission supports only managed-function-v0 capabilities".into(),
+            );
+        }
+        Ok(())
+    }
+
+    pub fn capabilities_json(&self) -> Result<String, String> {
+        self.validate()?;
+        serde_json::to_string(&self.capabilities)
+            .map_err(|error| format!("serialize worker capabilities: {error}"))
+    }
+
+    /// The default public closed-DSL claim. It expresses only interpreter
+    /// capability; Nodepool still controls task budget, liveness, reputation,
+    /// and per-attempt proof authorization.
+    pub fn public_managed_dsl() -> Self {
+        Self {
+            protocol_version: WORKER_CAPABILITY_REPORT_VERSION,
+            capabilities: vec![WorkerRuntimeCapability {
+                runtime: "managed-function-v0".into(),
+                backend_id: String::new(),
+                semantics_manifest_sha256: String::new(),
+                max_usage_units: WORKER_CAPABILITY_MAX_USAGE_UNITS,
+                max_output_bytes: WORKER_CAPABILITY_MAX_OUTPUT_BYTES,
+            }],
+            ready: true,
+            readiness_reason: String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct WorkerNode {
     pub id: Uuid,
@@ -221,6 +352,15 @@ pub struct WorkerNode {
     /// Nodepool-persisted, operator-approved closed-DSL registration.
     /// It is never accepted from a worker registration request.
     pub managed_dsl_capabilities_json: Option<String>,
+    /// Admission mode selected by Nodepool for this Worker record.
+    pub admission_mode: String,
+    /// Bounded public capability observation, kept separate from trusted
+    /// operator snapshots and used only when admission_mode is public_dynamic.
+    pub dynamic_capabilities_json: Option<String>,
+    pub dynamic_capabilities_digest: Option<String>,
+    pub dynamic_admission_ready: bool,
+    pub dynamic_readiness_reason: Option<String>,
+    pub dynamic_observed_at: Option<DateTime<Utc>>,
     pub last_heartbeat: DateTime<Utc>,
     pub registered_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

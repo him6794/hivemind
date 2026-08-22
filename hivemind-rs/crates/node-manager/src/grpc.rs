@@ -93,6 +93,7 @@ use hivemind_proto::{
     ValidateGeneralComputeTransferLeaseRequest,
     ValidateGeneralComputeTransferLeaseResponse,
     WorkerCacheAffinityMetric,
+    WorkerCapabilityReport,
     WorkerInfo,
     WorkerNodeServiceClient,
     WorkerTrustProfile,
@@ -103,16 +104,57 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
-use crate::service::{NodeManagerService as NmSvc, WorkerRegistration};
+use crate::service::{
+    dynamic_capability_observation, NodeManagerService as NmSvc, WorkerRegistration,
+};
 use crate::NodeManager;
 use hivemind_auth::AuthManager;
 use hivemind_database::postgres;
-use hivemind_models::{Claims, Task, TaskStatus, WorkerNode};
+use hivemind_models::{
+    Claims, Task, TaskStatus, WorkerCapabilityReport as ModelWorkerCapabilityReport, WorkerNode,
+    WORKER_CAPABILITY_REPORT_MAX_BYTES,
+};
 use hivemind_task_scheduler::{dispatcher::worker_endpoint, BatchTaskReport, TaskScheduler};
 
 const MAX_TASK_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_RESULT_REFERENCE_BYTES: usize = 4096;
 const MAX_DOWNLOAD_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
+
+fn parse_worker_capability_report(
+    report: Option<WorkerCapabilityReport>,
+    required: bool,
+) -> Result<Option<ModelWorkerCapabilityReport>, String> {
+    let Some(report) = report else {
+        return if required {
+            Err("public dynamic admission requires a capability report".into())
+        } else {
+            Ok(None)
+        };
+    };
+    let report_bytes = report
+        .capabilities_json
+        .len()
+        .saturating_add(report.readiness_reason.len());
+    if report_bytes > WORKER_CAPABILITY_REPORT_MAX_BYTES {
+        return Err(format!(
+            "worker capability report exceeds {WORKER_CAPABILITY_REPORT_MAX_BYTES} byte limit"
+        ));
+    }
+    let capabilities = serde_json::from_str(&report.capabilities_json)
+        .map_err(|error| format!("worker capability list is invalid JSON: {error}"))?;
+    let model = ModelWorkerCapabilityReport {
+        protocol_version: report.protocol_version,
+        capabilities,
+        ready: report.ready,
+        readiness_reason: report.readiness_reason,
+    };
+    model.validate_public_dynamic()?;
+    let canonical = model.capabilities_json()?;
+    if canonical != report.capabilities_json {
+        return Err("worker capability list must use canonical JSON".into());
+    }
+    Ok(Some(model))
+}
 
 pub struct NodepoolState {
     pub auth: AuthManager,
@@ -642,6 +684,27 @@ fn validate_runtime_contract_with_manifest(
             }
             Ok(())
         }
+        "production_sandboxed_dsl" => {
+            if task_source.trim().is_empty() {
+                return Err("production_sandboxed_dsl requires non-empty task_source");
+            }
+            if task_source.len() > hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES {
+                return Err("production_sandboxed_dsl task_source exceeds the byte limit");
+            }
+            if input.trim().is_empty() {
+                return Err("production_sandboxed_dsl requires non-empty JSON input");
+            }
+            if input.len() > hivemind_proto::MANAGED_JSON_INPUT_MAX_BYTES {
+                return Err("production_sandboxed_dsl JSON input exceeds the byte limit");
+            }
+            if budget <= 0 {
+                return Err("production_sandboxed_dsl budget must be positive");
+            }
+            if budget > hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS {
+                return Err("production_sandboxed_dsl budget exceeds the usage-unit limit");
+            }
+            Ok(())
+        }
         "general-compute-v1alpha1" => {
             if manifest_json.is_empty() {
                 return Err("general-compute-v1alpha1 requires a non-empty request manifest");
@@ -924,17 +987,39 @@ impl NodeManagerService for GrpcNodeManagerService {
                 status_message: message.into(),
             }));
         }
+        let public_dynamic = self.state.node_manager.is_public_dynamic_admission();
+        let dynamic_capability_report = if public_dynamic {
+            match parse_worker_capability_report(req.capability_report, true) {
+                Ok(report) => report,
+                Err(message) => {
+                    return Ok(Response::new(StatusResponse {
+                        success: false,
+                        status_message: message,
+                    }));
+                }
+            }
+        } else {
+            None
+        };
         let svc = NmSvc::new((*self.state.node_manager).clone());
-        let general_compute_capabilities_json = self
-            .state
-            .node_manager
-            .trusted_general_compute_capabilities_json_for_owner(&worker_id, &claims.sub, admin)
-            .map_err(|e| Status::permission_denied(e.to_string()))?;
-        let managed_dsl_capabilities_json = self
-            .state
-            .node_manager
-            .trusted_managed_dsl_capabilities_json_for_owner(&worker_id, &claims.sub, admin)
-            .map_err(|e| Status::permission_denied(e.to_string()))?;
+        let (general_compute_capabilities_json, managed_dsl_capabilities_json) = if public_dynamic {
+            (None, None)
+        } else {
+            (
+                self.state
+                    .node_manager
+                    .trusted_general_compute_capabilities_json_for_owner(
+                        &worker_id,
+                        &claims.sub,
+                        admin,
+                    )
+                    .map_err(|e| Status::permission_denied(e.to_string()))?,
+                self.state
+                    .node_manager
+                    .trusted_managed_dsl_capabilities_json_for_owner(&worker_id, &claims.sub, admin)
+                    .map_err(|e| Status::permission_denied(e.to_string()))?,
+            )
+        };
         let reg = WorkerRegistration {
             worker_id,
             username,
@@ -943,6 +1028,8 @@ impl NodeManagerService for GrpcNodeManagerService {
             location: req.location,
             general_compute_capabilities_json,
             managed_dsl_capabilities_json,
+            admission_mode: self.state.node_manager.admission_mode().to_string(),
+            dynamic_capability_report,
         };
         match svc
             .register_worker_for_owner(&reg, &claims.sub, admin)
@@ -988,19 +1075,65 @@ impl NodeManagerService for GrpcNodeManagerService {
                 }));
             }
         }
-        match self
-            .state
-            .node_manager
-            .update_heartbeat(
-                &worker_id,
-                &req.status,
-                u.cpu_percent as f64,
-                u.memory_percent as f64,
-                u.gpu_percent as f64,
-                u.vram_percent as f64,
-            )
-            .await
+        let public_dynamic = self.state.node_manager.is_public_dynamic_admission();
+        let dynamic_capability_report = if public_dynamic {
+            match parse_worker_capability_report(req.capability_report, true) {
+                Ok(report) => report,
+                Err(message) => {
+                    return Ok(Response::new(RunningStatusResponse {
+                        success: false,
+                        status_message: message,
+                    }));
+                }
+            }
+        } else {
+            None
+        };
+        let dynamic_observation = match dynamic_capability_report
+            .as_ref()
+            .map(dynamic_capability_observation)
+            .transpose()
         {
+            Ok(observation) => observation,
+            Err(error) => {
+                return Ok(Response::new(RunningStatusResponse {
+                    success: false,
+                    status_message: error.to_string(),
+                }));
+            }
+        };
+        let heartbeat_result = if let Some((capabilities_json, digest, ready, readiness_reason)) =
+            dynamic_observation.as_ref()
+        {
+            self.state
+                .node_manager
+                .update_heartbeat_with_dynamic_capabilities(
+                    &worker_id,
+                    &req.status,
+                    u.cpu_percent as f64,
+                    u.memory_percent as f64,
+                    u.gpu_percent as f64,
+                    u.vram_percent as f64,
+                    capabilities_json,
+                    digest,
+                    *ready,
+                    readiness_reason.as_deref(),
+                )
+                .await
+        } else {
+            self.state
+                .node_manager
+                .update_heartbeat(
+                    &worker_id,
+                    &req.status,
+                    u.cpu_percent as f64,
+                    u.memory_percent as f64,
+                    u.gpu_percent as f64,
+                    u.vram_percent as f64,
+                )
+                .await
+        };
+        match heartbeat_result {
             Ok(_) => Ok(Response::new(RunningStatusResponse {
                 success: true,
                 status_message: "OK".into(),
@@ -3355,6 +3488,93 @@ mod tests {
         );
     }
 
+    #[test]
+    fn public_capability_report_parser_requires_bounded_canonical_reports() {
+        let model = hivemind_models::WorkerCapabilityReport::public_managed_dsl();
+        let canonical = model.capabilities_json().unwrap();
+        let proto = WorkerCapabilityReport {
+            protocol_version: model.protocol_version,
+            capabilities_json: canonical.clone(),
+            ready: model.ready,
+            readiness_reason: model.readiness_reason.clone(),
+        };
+        let parsed = parse_worker_capability_report(Some(proto), true)
+            .unwrap()
+            .expect("valid public report should parse");
+        assert_eq!(parsed, model);
+
+        assert!(parse_worker_capability_report(None, true)
+            .unwrap_err()
+            .contains("requires a capability report"));
+        assert!(parse_worker_capability_report(
+            Some(WorkerCapabilityReport {
+                protocol_version: model.protocol_version,
+                capabilities_json: "not-json".into(),
+                ready: true,
+                readiness_reason: String::new(),
+            }),
+            true,
+        )
+        .unwrap_err()
+        .contains("invalid JSON"));
+        assert!(parse_worker_capability_report(
+            Some(WorkerCapabilityReport {
+                protocol_version: model.protocol_version,
+                capabilities_json: format!(" {canonical}"),
+                ready: true,
+                readiness_reason: String::new(),
+            }),
+            true,
+        )
+        .unwrap_err()
+        .contains("canonical JSON"));
+        assert!(parse_worker_capability_report(
+            Some(WorkerCapabilityReport {
+                protocol_version: model.protocol_version + 1,
+                capabilities_json: canonical.clone(),
+                ready: true,
+                readiness_reason: String::new(),
+            }),
+            true,
+        )
+        .unwrap_err()
+        .contains("protocol version"));
+        assert!(parse_worker_capability_report(
+            Some(WorkerCapabilityReport {
+                protocol_version: model.protocol_version,
+                capabilities_json: "[]".into(),
+                ready: false,
+                readiness_reason: "initializing".into(),
+            }),
+            true,
+        )
+        .unwrap()
+        .is_some_and(|report| !report.ready));
+        assert!(parse_worker_capability_report(
+            Some(WorkerCapabilityReport {
+                protocol_version: model.protocol_version,
+                capabilities_json: "[]".into(),
+                ready: false,
+                readiness_reason: String::new(),
+            }),
+            true,
+        )
+        .unwrap_err()
+        .contains("needs a reason"));
+        assert!(parse_worker_capability_report(
+            Some(WorkerCapabilityReport {
+                protocol_version: model.protocol_version,
+                capabilities_json: "x"
+                    .repeat(hivemind_models::WORKER_CAPABILITY_REPORT_MAX_BYTES + 1),
+                ready: true,
+                readiness_reason: String::new(),
+            }),
+            true,
+        )
+        .unwrap_err()
+        .contains("byte limit"));
+    }
+
     async fn test_service() -> Option<(GrpcMasterNodeService, String, String, String)> {
         test_service_with_config_and_owner(HivemindConfig::for_test(), None).await
     }
@@ -3633,6 +3853,13 @@ mod tests {
         assert_eq!(validate_runtime_contract("", "", "btih:input", 0), Ok(()));
     }
 
+    #[test]
+    fn production_sandboxed_dsl_runtime_accepts_valid_task_contract() {
+        assert_eq!(
+            validate_runtime_contract("production_sandboxed_dsl", "return input;", "{}", 1,),
+            Ok(())
+        );
+    }
     #[test]
     fn general_compute_runtime_requires_manifest_bytes() {
         assert_eq!(
@@ -4496,6 +4723,7 @@ mod tests {
 
         let response = node_service
             .register_worker_node(Request::new(RegisterWorkerNodeRequest {
+                capability_report: None,
                 username: owner.clone(),
                 worker_id: ".".into(),
                 ip: "10.77.9.10:50053".into(),
@@ -4544,6 +4772,7 @@ mod tests {
 
         let response = node_service
             .register_worker_node(Request::new(RegisterWorkerNodeRequest {
+                capability_report: None,
                 username: owner.clone(),
                 worker_id: worker_id.clone(),
                 ip: "10.77.9.10:50053".into(),
@@ -4592,6 +4821,7 @@ mod tests {
 
         let response = node_service
             .register_worker_node(Request::new(RegisterWorkerNodeRequest {
+                capability_report: None,
                 username: owner.clone(),
                 worker_id: worker_id.clone(),
                 ip: "10.77.9.10:50053".into(),
@@ -4625,6 +4855,78 @@ mod tests {
         assert!(!response.success);
         assert_eq!(response.status_message, "Not authorized");
         assert!(stored.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_public_dynamic_registration_does_not_require_static_worker_map() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let owner = "grpc-public-dynamic-owner".to_string();
+        let worker_id = "grpc-public-dynamic-worker".to_string();
+        let mut config = HivemindConfig::for_test();
+        config.general_compute.admission_mode = hivemind_config::WorkerAdmissionMode::PublicDynamic;
+        let (master_service, task_id, _other_token, owner) =
+            match test_service_with_config_and_owner(config, Some(owner)).await {
+                Some(parts) => parts,
+                None => return,
+            };
+        let node_service = GrpcNodeManagerService::new(master_service.state.clone());
+        let owner_token = token_for(&master_service.state.auth, &owner);
+        let report = hivemind_models::WorkerCapabilityReport::public_managed_dsl();
+        let capabilities_json = report.capabilities_json().unwrap();
+
+        let response = node_service
+            .register_worker_node(Request::new(RegisterWorkerNodeRequest {
+                capability_report: Some(WorkerCapabilityReport {
+                    protocol_version: report.protocol_version,
+                    capabilities_json: capabilities_json.clone(),
+                    ready: report.ready,
+                    readiness_reason: report.readiness_reason.clone(),
+                }),
+                username: owner.clone(),
+                worker_id: worker_id.clone(),
+                ip: "10.77.12.10:50053".into(),
+                resources: Some(ProtoResourceSpec {
+                    cpu_cores: 4,
+                    memory_mb: 16 * 1024,
+                    gpu_count: 0,
+                    gpu_name: String::new(),
+                    vram_mb: 0,
+                    cpu_score: 400,
+                    gpu_score: 0,
+                    storage_total_gb: 500,
+                    storage_available_gb: 250,
+                }),
+                location: "public".into(),
+                token: owner_token,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let stored = master_service
+            .state
+            .node_manager
+            .get_worker(&worker_id)
+            .await
+            .unwrap();
+        cleanup_report_worker(&master_service, &worker_id).await;
+        cleanup(&master_service.state.scheduler, &task_id, &owner).await;
+
+        assert!(response.success, "{}", response.status_message);
+        let stored = stored.expect("public worker registration should persist");
+        assert_eq!(
+            stored.admission_mode,
+            hivemind_models::PUBLIC_DYNAMIC_ADMISSION_MODE
+        );
+        assert!(stored.general_compute_capabilities_json.is_none());
+        assert!(stored.managed_dsl_capabilities_json.is_none());
+        assert_eq!(
+            stored.dynamic_capabilities_json.as_deref(),
+            Some(capabilities_json.as_str())
+        );
+        assert!(stored.dynamic_capabilities_digest.is_some());
+        assert!(stored.dynamic_admission_ready);
     }
 
     #[tokio::test]
@@ -4671,6 +4973,7 @@ mod tests {
 
         let response = node_service
             .register_worker_node(Request::new(RegisterWorkerNodeRequest {
+                capability_report: None,
                 username: owner.clone(),
                 worker_id: worker_id.clone(),
                 ip: "10.77.10.10:50053".into(),
@@ -4743,6 +5046,7 @@ mod tests {
 
         let error = node_service
             .register_worker_node(Request::new(RegisterWorkerNodeRequest {
+                capability_report: None,
                 username: owner.clone(),
                 worker_id: worker_id.clone(),
                 ip: "10.77.11.10:50053".into(),
@@ -5127,6 +5431,7 @@ mod tests {
 
         node_service
             .register_worker_node(Request::new(RegisterWorkerNodeRequest {
+                capability_report: None,
                 username: owner.clone(),
                 worker_id: worker_id.clone(),
                 ip: "10.77.1.10:50053".into(),
@@ -5264,6 +5569,7 @@ mod tests {
 
         node_service
             .register_worker_node(Request::new(RegisterWorkerNodeRequest {
+                capability_report: None,
                 username: owner.clone(),
                 worker_id: worker_id.clone(),
                 ip: "10.77.2.10:50053".into(),
@@ -5792,6 +6098,7 @@ mod tests {
 
         let registered = node_service
             .register_worker_node(Request::new(RegisterWorkerNodeRequest {
+                capability_report: None,
                 username: owner.clone(),
                 worker_id: worker_id.clone(),
                 ip: "10.77.0.10:50053".into(),
@@ -5861,6 +6168,7 @@ mod tests {
         register_report_worker(&node_service, &owner, &owner_worker_id).await;
         node_service
             .register_worker_node(Request::new(RegisterWorkerNodeRequest {
+                capability_report: None,
                 username: other_user.clone(),
                 worker_id: other_worker_id.clone(),
                 ip: "10.77.0.11:50053".into(),
@@ -6879,6 +7187,7 @@ mod tests {
     ) {
         let registered = node_service
             .register_worker_node(Request::new(RegisterWorkerNodeRequest {
+                capability_report: None,
                 username: owner.to_string(),
                 worker_id: worker_id.to_string(),
                 ip: "10.77.99.10:50053".into(),

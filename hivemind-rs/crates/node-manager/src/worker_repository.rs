@@ -13,6 +13,9 @@ impl WorkerRepository {
     }
 
     pub async fn upsert(&self, worker: &WorkerNode) -> Result<WorkerNode> {
+        let dynamic_ready = worker
+            .dynamic_observed_at
+            .map(|_| worker.dynamic_admission_ready);
         let existing = self.find_by_worker_id(&worker.worker_id).await?;
         if existing.is_some() {
             sqlx::query_as::<_, WorkerNode>(
@@ -22,13 +25,16 @@ impl WorkerRepository {
                  storage_total_gb = $10, storage_available_gb = $11,
                  location = $12, status = $13,
                  available_memory_gb = $14, queue_capacity = $15,
-                 -- A worker refresh carries no trusted capability claim. Keep
-                 -- the Nodepool-owned snapshot unless an operator-approved
-                 -- registration explicitly supplies a replacement.
-                 general_compute_capabilities_json = COALESCE($16, general_compute_capabilities_json),
-                 managed_dsl_capabilities_json = COALESCE($17, managed_dsl_capabilities_json),
+                 admission_mode = $16,
+                 general_compute_capabilities_json = COALESCE($17, general_compute_capabilities_json),
+                 managed_dsl_capabilities_json = COALESCE($18, managed_dsl_capabilities_json),
+                 dynamic_capabilities_json = COALESCE($19, dynamic_capabilities_json),
+                 dynamic_capabilities_digest = COALESCE($20, dynamic_capabilities_digest),
+                 dynamic_admission_ready = COALESCE($21, dynamic_admission_ready),
+                 dynamic_readiness_reason = COALESCE($22, dynamic_readiness_reason),
+                 dynamic_observed_at = COALESCE($23, dynamic_observed_at),
                  last_heartbeat = NOW(), updated_at = NOW()
-                 WHERE worker_id = $18 RETURNING *",
+                 WHERE worker_id = $24 RETURNING *",
             )
             .bind(&worker.username)
             .bind(&worker.ip)
@@ -45,8 +51,14 @@ impl WorkerRepository {
             .bind(worker.status.as_str())
             .bind(worker.available_memory_gb)
             .bind(worker.queue_capacity)
+            .bind(&worker.admission_mode)
             .bind(&worker.general_compute_capabilities_json)
             .bind(&worker.managed_dsl_capabilities_json)
+            .bind(&worker.dynamic_capabilities_json)
+            .bind(&worker.dynamic_capabilities_digest)
+            .bind(dynamic_ready)
+            .bind(&worker.dynamic_readiness_reason)
+            .bind(worker.dynamic_observed_at)
             .bind(&worker.worker_id)
             .fetch_one(&self.pool)
             .await
@@ -56,9 +68,13 @@ impl WorkerRepository {
                 "INSERT INTO worker_nodes (worker_id, username, ip, cpu_cores, memory_gb,
                  cpu_score, gpu_score, gpu_memory_gb,
                  gpu_name, vram_mb, storage_total_gb, storage_available_gb,
-                 location, status, available_memory_gb, queue_capacity, general_compute_capabilities_json,
-                 managed_dsl_capabilities_json)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING *",
+                 location, status, available_memory_gb, queue_capacity,
+                admission_mode, general_compute_capabilities_json,
+                managed_dsl_capabilities_json, dynamic_capabilities_json,
+                dynamic_capabilities_digest, dynamic_admission_ready,
+                dynamic_readiness_reason, dynamic_observed_at)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+                         $17,$18,$19,$20,$21,$22,$23,$24) RETURNING *",
             )
             .bind(&worker.worker_id)
             .bind(&worker.username)
@@ -76,15 +92,42 @@ impl WorkerRepository {
             .bind(worker.status.as_str())
             .bind(worker.available_memory_gb)
             .bind(worker.queue_capacity)
+            .bind(&worker.admission_mode)
             .bind(&worker.general_compute_capabilities_json)
             .bind(&worker.managed_dsl_capabilities_json)
+            .bind(&worker.dynamic_capabilities_json)
+            .bind(&worker.dynamic_capabilities_digest)
+            .bind(worker.dynamic_admission_ready)
+            .bind(&worker.dynamic_readiness_reason)
+            .bind(worker.dynamic_observed_at)
             .fetch_one(&self.pool)
             .await
             .map_err(Into::into)
         }
     }
 
-    /// Register a worker on behalf of an authenticated owner. Existing worker
+    pub async fn replace_static_capabilities(
+        &self,
+        worker_id: &str,
+        general_compute_capabilities_json: Option<&str>,
+        managed_dsl_capabilities_json: Option<&str>,
+    ) -> Result<WorkerNode> {
+        sqlx::query_as::<_, WorkerNode>(
+            "UPDATE worker_nodes
+             SET general_compute_capabilities_json = $1,
+                 managed_dsl_capabilities_json = $2,
+                 updated_at = NOW()
+             WHERE worker_id = $3
+             RETURNING *",
+        )
+        .bind(general_compute_capabilities_json)
+        .bind(managed_dsl_capabilities_json)
+        .bind(worker_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
     /// records may only be refreshed by their current owner (or an admin).
     /// The owner predicate is part of the UPDATE so a concurrent request
     /// cannot overwrite a worker after an earlier read/check.
@@ -94,6 +137,9 @@ impl WorkerRepository {
         owner: &str,
         is_admin: bool,
     ) -> Result<WorkerNode> {
+        let dynamic_ready = worker
+            .dynamic_observed_at
+            .map(|_| worker.dynamic_admission_ready);
         let updated = sqlx::query_as::<_, WorkerNode>(
             "UPDATE worker_nodes SET username = $1, ip = $2, cpu_cores = $3, memory_gb = $4,
              cpu_score = $5, gpu_score = $6, gpu_memory_gb = $7,
@@ -101,12 +147,16 @@ impl WorkerRepository {
              storage_total_gb = $10, storage_available_gb = $11,
              location = $12, status = $13,
              available_memory_gb = $14, queue_capacity = $15,
-             -- Owner-authorized registration is the source of truth and may
-             -- explicitly revoke a previously persisted snapshot.
-             general_compute_capabilities_json = $16,
-             managed_dsl_capabilities_json = $17,
+             admission_mode = $16,
+             general_compute_capabilities_json = $17,
+             managed_dsl_capabilities_json = $18,
+             dynamic_capabilities_json = $19,
+             dynamic_capabilities_digest = $20,
+             dynamic_admission_ready = COALESCE($21, dynamic_admission_ready),
+             dynamic_readiness_reason = $22,
+             dynamic_observed_at = $23,
              last_heartbeat = NOW(), updated_at = NOW()
-             WHERE worker_id = $18 AND (username = $19 OR $20)
+             WHERE worker_id = $24 AND (username = $25 OR $26)
              RETURNING *",
         )
         .bind(&worker.username)
@@ -124,8 +174,14 @@ impl WorkerRepository {
         .bind(worker.status.as_str())
         .bind(worker.available_memory_gb)
         .bind(worker.queue_capacity)
+        .bind(&worker.admission_mode)
         .bind(&worker.general_compute_capabilities_json)
         .bind(&worker.managed_dsl_capabilities_json)
+        .bind(&worker.dynamic_capabilities_json)
+        .bind(&worker.dynamic_capabilities_digest)
+        .bind(dynamic_ready)
+        .bind(&worker.dynamic_readiness_reason)
+        .bind(worker.dynamic_observed_at)
         .bind(&worker.worker_id)
         .bind(owner)
         .bind(is_admin)
@@ -142,9 +198,13 @@ impl WorkerRepository {
             "INSERT INTO worker_nodes (worker_id, username, ip, cpu_cores, memory_gb,
              cpu_score, gpu_score, gpu_memory_gb,
              gpu_name, vram_mb, storage_total_gb, storage_available_gb,
-             location, status, available_memory_gb, queue_capacity, general_compute_capabilities_json,
-             managed_dsl_capabilities_json)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+             location, status, available_memory_gb, queue_capacity,
+             admission_mode, general_compute_capabilities_json,
+             managed_dsl_capabilities_json, dynamic_capabilities_json,
+             dynamic_capabilities_digest, dynamic_admission_ready,
+             dynamic_readiness_reason, dynamic_observed_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+                     $17,$18,$19,$20,$21,$22,$23,$24)
              RETURNING *",
         )
         .bind(&worker.worker_id)
@@ -163,8 +223,14 @@ impl WorkerRepository {
         .bind(worker.status.as_str())
         .bind(worker.available_memory_gb)
         .bind(worker.queue_capacity)
+        .bind(&worker.admission_mode)
         .bind(&worker.general_compute_capabilities_json)
         .bind(&worker.managed_dsl_capabilities_json)
+        .bind(&worker.dynamic_capabilities_json)
+        .bind(&worker.dynamic_capabilities_digest)
+        .bind(worker.dynamic_admission_ready)
+        .bind(&worker.dynamic_readiness_reason)
+        .bind(worker.dynamic_observed_at)
         .fetch_one(&self.pool)
         .await
         .map_err(Into::into)
@@ -199,9 +265,11 @@ impl WorkerRepository {
             .map_err(Into::into)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_heartbeat(
         &self,
         worker_id: &str,
+        admission_mode: &str,
         status: &str,
         cpu_usage: f64,
         memory_usage: f64,
@@ -210,14 +278,78 @@ impl WorkerRepository {
     ) -> Result<()> {
         sqlx::query(
             "UPDATE worker_nodes SET status = $1, cpu_usage = $2, memory_usage = $3,
-             gpu_usage = $4, gpu_memory_usage = $5,
-             last_heartbeat = NOW(), updated_at = NOW() WHERE worker_id = $6",
+             gpu_usage = $4, gpu_memory_usage = $5, admission_mode = $6,
+             last_heartbeat = NOW(), updated_at = NOW() WHERE worker_id = $7",
         )
         .bind(status)
         .bind(cpu_usage)
         .bind(memory_usage)
         .bind(gpu_usage)
         .bind(gpu_memory_usage)
+        .bind(admission_mode)
+        .bind(worker_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_heartbeat_with_dynamic_capabilities(
+        &self,
+        worker_id: &str,
+        admission_mode: &str,
+        status: &str,
+        cpu_usage: f64,
+        memory_usage: f64,
+        gpu_usage: f64,
+        gpu_memory_usage: f64,
+        capabilities_json: &str,
+        capabilities_digest: &str,
+        ready: bool,
+        readiness_reason: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE worker_nodes SET status = $1, cpu_usage = $2, memory_usage = $3,
+             gpu_usage = $4, gpu_memory_usage = $5, admission_mode = $6,
+             dynamic_capabilities_json = $7, dynamic_capabilities_digest = $8,
+             dynamic_admission_ready = $9, dynamic_readiness_reason = $10,
+             dynamic_observed_at = NOW(), last_heartbeat = NOW(), updated_at = NOW()
+             WHERE worker_id = $11",
+        )
+        .bind(status)
+        .bind(cpu_usage)
+        .bind(memory_usage)
+        .bind(gpu_usage)
+        .bind(gpu_memory_usage)
+        .bind(admission_mode)
+        .bind(capabilities_json)
+        .bind(capabilities_digest)
+        .bind(ready)
+        .bind(readiness_reason)
+        .bind(worker_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn update_dynamic_capabilities(
+        &self,
+        worker_id: &str,
+        capabilities_json: &str,
+        capabilities_digest: &str,
+        ready: bool,
+        readiness_reason: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE worker_nodes SET dynamic_capabilities_json = $1,
+             dynamic_capabilities_digest = $2, dynamic_admission_ready = $3,
+             dynamic_readiness_reason = $4, dynamic_observed_at = NOW(),
+             updated_at = NOW() WHERE worker_id = $5",
+        )
+        .bind(capabilities_json)
+        .bind(capabilities_digest)
+        .bind(ready)
+        .bind(readiness_reason)
         .bind(worker_id)
         .execute(&self.pool)
         .await?;
@@ -303,6 +435,12 @@ mod tests {
             queue_capacity: 4,
             general_compute_capabilities_json: None,
             managed_dsl_capabilities_json: None,
+            admission_mode: hivemind_models::PRIVATE_STATIC_ADMISSION_MODE.into(),
+            dynamic_capabilities_json: None,
+            dynamic_capabilities_digest: None,
+            dynamic_admission_ready: false,
+            dynamic_readiness_reason: None,
+            dynamic_observed_at: None,
             last_heartbeat: chrono::Utc::now(),
             registered_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -501,6 +639,12 @@ mod tests {
             queue_capacity: 4,
             general_compute_capabilities_json: None,
             managed_dsl_capabilities_json: None,
+            admission_mode: hivemind_models::PRIVATE_STATIC_ADMISSION_MODE.into(),
+            dynamic_capabilities_json: None,
+            dynamic_capabilities_digest: None,
+            dynamic_admission_ready: false,
+            dynamic_readiness_reason: None,
+            dynamic_observed_at: None,
             last_heartbeat: chrono::Utc::now(),
             registered_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),

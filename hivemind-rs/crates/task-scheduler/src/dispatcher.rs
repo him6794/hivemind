@@ -1359,6 +1359,21 @@ async fn execute_on_worker_with_managed_proof_key(
             Err(error) => {
                 let reason = error.to_string();
                 if is_managed_runtime(current_task.runtime.as_deref()) {
+                    if managed_proof_dispatch_should_redispatch(&error) {
+                        reset_after_worker_rpc_failure(
+                            repo.as_ref(),
+                            &task.task_id,
+                            &worker_id,
+                            WorkerRpcFailureDisposition::RetryWithoutWorkerPenalty,
+                            &error,
+                        )
+                        .await?;
+                        warn!(
+                            "Task {} no longer matches worker {} managed capability; resetting for redispatch: {}",
+                            task.task_id, worker_id, reason
+                        );
+                        return Ok(());
+                    }
                     repo.fail_for_worker_without_penalty(&task.task_id, &worker_id, &reason)
                         .await?;
                     warn!(
@@ -2271,6 +2286,12 @@ async fn reset_after_worker_rpc_failure(
         }
     }
     Ok(())
+}
+
+fn managed_proof_dispatch_should_redispatch(error: &anyhow::Error) -> bool {
+    error
+        .to_string()
+        .contains("assigned Worker lacks the operator-approved managed DSL capability")
 }
 
 fn managed_proof_failure_disposition(
@@ -4743,6 +4764,12 @@ mod tests {
             queue_capacity: cpu,
             general_compute_capabilities_json: None,
             managed_dsl_capabilities_json: None,
+            admission_mode: hivemind_models::PRIVATE_STATIC_ADMISSION_MODE.into(),
+            dynamic_capabilities_json: None,
+            dynamic_capabilities_digest: None,
+            dynamic_admission_ready: false,
+            dynamic_readiness_reason: None,
+            dynamic_observed_at: None,
             last_heartbeat: Utc::now(),
             registered_at: Utc::now(),
             updated_at: Utc::now(),

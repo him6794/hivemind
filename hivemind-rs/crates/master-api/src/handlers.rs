@@ -1466,6 +1466,18 @@ pub async fn register_worker(
     AuthUser { claims, token }: AuthUser,
     Json(body): Json<RegisterWorkerBody>,
 ) -> (StatusCode, Json<StatusResponse>) {
+    if state.config.general_compute.admission_mode
+        != hivemind_config::WorkerAdmissionMode::PrivateStatic
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(StatusResponse {
+                success: false,
+                status_message:
+                    "manual worker registration is available only in private_static admission mode; public workers must use authenticated enrollment".into(),
+            }),
+        );
+    }
     if body.ip.trim().is_empty() {
         return (
             StatusCode::BAD_REQUEST,

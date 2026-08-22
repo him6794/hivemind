@@ -10,6 +10,7 @@ use general_compute_runtime::{
     TrustedWorkerCapabilityRegistration, ValidationError, ValidationErrorCode, WorkerCapabilities,
     GENERAL_COMPUTE_RUNTIME_VERSION,
 };
+use hivemind_models::WorkerCapabilityReport;
 use std::fmt;
 
 #[allow(clippy::large_enum_variant)]
@@ -168,6 +169,13 @@ impl WorkerRuntimeAdmission {
     #[must_use]
     pub fn trusted_registration(&self) -> TrustedWorkerCapabilityRegistration {
         self.trusted_registration.clone()
+    }
+
+    /// Public admission advertises only the bounded closed-DSL capability.
+    /// Typed GPU/image/backend identities remain operator-owned private data.
+    #[must_use]
+    pub fn public_capability_report(&self) -> WorkerCapabilityReport {
+        WorkerCapabilityReport::public_managed_dsl()
     }
 
     /// Select the concrete operator-approved device for a request. Typed GPU

@@ -17,9 +17,42 @@ pub struct HivemindConfig {
     pub managed_proof: ManagedProofConfig,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerAdmissionMode {
+    #[default]
+    PublicDynamic,
+    PrivateStatic,
+}
+
+impl std::fmt::Display for WorkerAdmissionMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::PublicDynamic => "public_dynamic",
+            Self::PrivateStatic => "private_static",
+        })
+    }
+}
+
+impl FromStr for WorkerAdmissionMode {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "public_dynamic" | "public" => Ok(Self::PublicDynamic),
+            "private_static" | "private" => Ok(Self::PrivateStatic),
+            _ => Err("expected public_dynamic or private_static"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GeneralComputeConfig {
+    /// Public enrollment accepts bounded Worker capability/readiness reports;
+    /// private mode retains the operator-owned worker-id maps below.
+    #[serde(default)]
+    pub admission_mode: WorkerAdmissionMode,
     /// Nodepool operator-approved registrations keyed by immutable worker id.
     /// Workers cannot populate this map through their registration RPC.
     #[serde(default)]
@@ -409,6 +442,7 @@ impl Default for HivemindConfig {
 impl HivemindConfig {
     pub fn for_test() -> Self {
         let mut config = Self::default();
+        config.general_compute.admission_mode = WorkerAdmissionMode::PrivateStatic;
         let (private_key, public_key) = generate_worker_execution_test_key_pair();
         config.torrent.allow_local_task_artifacts = true;
         config.auth.worker_execution_private_key_pem = private_key;
@@ -574,6 +608,10 @@ impl HivemindConfig {
         if let Ok(capacity) = std::env::var("MANAGED_PROVER_QUEUE_CAPACITY") {
             self.managed_proof.provider_queue_capacity =
                 parse_env("MANAGED_PROVER_QUEUE_CAPACITY", &capacity)?;
+        }
+        if let Ok(mode) = std::env::var("HIVEMIND_WORKER_ADMISSION_MODE") {
+            self.general_compute.admission_mode =
+                parse_env("HIVEMIND_WORKER_ADMISSION_MODE", &mode)?;
         }
         if let Ok(registrations) =
             std::env::var("HIVEMIND_GENERAL_COMPUTE_TRUSTED_WORKER_CAPABILITIES")
@@ -896,6 +934,36 @@ mod tests {
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[test]
+    fn worker_admission_defaults_to_public_dynamic() {
+        assert_eq!(
+            HivemindConfig::default().general_compute.admission_mode,
+            WorkerAdmissionMode::PublicDynamic
+        );
+        assert_eq!(
+            WorkerAdmissionMode::from_str("private"),
+            Ok(WorkerAdmissionMode::PrivateStatic)
+        );
+    }
+
+    #[test]
+    fn worker_admission_mode_loads_from_environment() {
+        let _environment_lock = lock_environment();
+        let old = std::env::var_os("HIVEMIND_WORKER_ADMISSION_MODE");
+        std::env::set_var("HIVEMIND_WORKER_ADMISSION_MODE", "private");
+
+        let loaded = HivemindConfig::load_from_env();
+
+        match old {
+            Some(value) => std::env::set_var("HIVEMIND_WORKER_ADMISSION_MODE", value),
+            None => std::env::remove_var("HIVEMIND_WORKER_ADMISSION_MODE"),
+        }
+        assert_eq!(
+            loaded.general_compute.admission_mode,
+            WorkerAdmissionMode::PrivateStatic
+        );
     }
 
     #[test]

@@ -1,11 +1,12 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use general_compute_runtime::{GeneralComputeRequest, GeneralComputeResult, ResultStatus};
-use hivemind_models::{Task, TaskStatus, WorkerNode};
+use hivemind_models::{Task, TaskStatus, WorkerNode, PUBLIC_DYNAMIC_ADMISSION_MODE};
 use sha1::{Digest, Sha1};
+use sha2::Sha256;
 use sqlx::{FromRow, PgPool, Postgres, Row, Transaction};
 
-use crate::BatchTaskReport;
+use crate::{scheduler::PUBLIC_DYNAMIC_CAPABILITY_MAX_AGE_SECS, BatchTaskReport};
 
 pub struct TaskRepository {
     pub pool: PgPool,
@@ -983,7 +984,9 @@ impl TaskRepository {
         worker_id: &str,
     ) -> Result<Option<String>> {
         let row = sqlx::query_as::<_, (Option<String>,)>(
-            "SELECT general_compute_capabilities_json
+            "SELECT CASE WHEN admission_mode = 'private_static'
+                         THEN general_compute_capabilities_json
+                         ELSE NULL END
              FROM worker_nodes
              WHERE worker_id = $1",
         )
@@ -994,15 +997,47 @@ impl TaskRepository {
     }
 
     pub async fn managed_dsl_capability_snapshot(&self, worker_id: &str) -> Result<Option<String>> {
-        let row = sqlx::query_as::<_, (Option<String>,)>(
-            "SELECT managed_dsl_capabilities_json
+        let row = sqlx::query_as::<_, (Option<String>, Option<String>, String)>(
+            "SELECT CASE
+                         WHEN admission_mode = 'public_dynamic'
+                              AND dynamic_admission_ready
+                              AND dynamic_observed_at IS NOT NULL
+                              AND dynamic_observed_at <= NOW()
+                              AND dynamic_observed_at >= NOW() - ($2 * INTERVAL '1 second')
+                           THEN dynamic_capabilities_json
+                         WHEN admission_mode = 'private_static'
+                           THEN managed_dsl_capabilities_json
+                         ELSE NULL
+                       END,
+                       CASE WHEN admission_mode = 'public_dynamic'
+                            THEN dynamic_capabilities_digest
+                            ELSE NULL
+                       END,
+                       admission_mode
              FROM worker_nodes
              WHERE worker_id = $1",
         )
         .bind(worker_id)
+        .bind(PUBLIC_DYNAMIC_CAPABILITY_MAX_AGE_SECS)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.and_then(|(snapshot,)| snapshot))
+        let Some((snapshot, digest, admission_mode)) =
+            row.and_then(|(snapshot, digest, admission_mode)| {
+                snapshot.map(|value| (value, digest, admission_mode))
+            })
+        else {
+            return Ok(None);
+        };
+        if admission_mode == PUBLIC_DYNAMIC_ADMISSION_MODE {
+            let Some(digest) = digest else {
+                return Ok(None);
+            };
+            let expected_digest = format!("sha256:{:x}", Sha256::digest(snapshot.as_bytes()));
+            if digest != expected_digest {
+                return Ok(None);
+            }
+        }
+        Ok(Some(snapshot))
     }
 
     pub async fn find_by_owner(&self, owner: &str) -> Result<Vec<Task>> {
@@ -6301,6 +6336,12 @@ mod tests {
             queue_capacity: 4,
             general_compute_capabilities_json: None,
             managed_dsl_capabilities_json: None,
+            admission_mode: hivemind_models::PRIVATE_STATIC_ADMISSION_MODE.into(),
+            dynamic_capabilities_json: None,
+            dynamic_capabilities_digest: None,
+            dynamic_admission_ready: false,
+            dynamic_readiness_reason: None,
+            dynamic_observed_at: None,
             last_heartbeat: Utc::now(),
             registered_at: Utc::now(),
             updated_at: Utc::now(),

@@ -162,6 +162,12 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
             queue_capacity INTEGER NOT NULL DEFAULT 0,
             general_compute_capabilities_json TEXT,
             managed_dsl_capabilities_json TEXT,
+            admission_mode VARCHAR(32) NOT NULL DEFAULT 'private_static',
+            dynamic_capabilities_json TEXT,
+            dynamic_capabilities_digest VARCHAR(71),
+            dynamic_admission_ready BOOLEAN NOT NULL DEFAULT false,
+            dynamic_readiness_reason VARCHAR(255),
+            dynamic_observed_at TIMESTAMPTZ,
             last_heartbeat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             registered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -685,6 +691,36 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     .await;
     let _ = sqlx::query(
         "ALTER TABLE worker_nodes ADD COLUMN IF NOT EXISTS managed_dsl_capabilities_json TEXT;",
+    )
+    .execute(pool)
+    .await;
+    let _ = sqlx::query(
+        "ALTER TABLE worker_nodes ADD COLUMN IF NOT EXISTS admission_mode VARCHAR(32) NOT NULL DEFAULT 'private_static';",
+    )
+    .execute(pool)
+    .await;
+    let _ = sqlx::query(
+        "ALTER TABLE worker_nodes ADD COLUMN IF NOT EXISTS dynamic_capabilities_json TEXT;",
+    )
+    .execute(pool)
+    .await;
+    let _ = sqlx::query(
+        "ALTER TABLE worker_nodes ADD COLUMN IF NOT EXISTS dynamic_capabilities_digest VARCHAR(71);",
+    )
+    .execute(pool)
+    .await;
+    let _ = sqlx::query(
+        "ALTER TABLE worker_nodes ADD COLUMN IF NOT EXISTS dynamic_admission_ready BOOLEAN NOT NULL DEFAULT false;",
+    )
+    .execute(pool)
+    .await;
+    let _ = sqlx::query(
+        "ALTER TABLE worker_nodes ADD COLUMN IF NOT EXISTS dynamic_readiness_reason VARCHAR(255);",
+    )
+    .execute(pool)
+    .await;
+    let _ = sqlx::query(
+        "ALTER TABLE worker_nodes ADD COLUMN IF NOT EXISTS dynamic_observed_at TIMESTAMPTZ;",
     )
     .execute(pool)
     .await;

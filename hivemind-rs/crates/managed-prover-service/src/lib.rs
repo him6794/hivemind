@@ -2,10 +2,11 @@ use anyhow::{Context, Result};
 use hivemind_auth::managed_proof::{
     ManagedProofAuthorizationBinding, ManagedProofAuthorizationVerifier,
 };
-use hivemind_config::{HivemindConfig, TrustedManagedDslWorkerRegistration};
+use hivemind_config::{HivemindConfig, TrustedManagedDslWorkerRegistration, WorkerAdmissionMode};
 use hivemind_managed_proof::{RISC0_MANAGED_GUEST_ID, RISC0_PROOF_SCHEME};
 use hivemind_managed_prover_protocol::{
-    ManagedProverRequest, ManagedProverResponse, RemoteManagedProofRequest, MAX_RESPONSE_JSON_BYTES,
+    ManagedProverRequest, ManagedProverResponse, RemoteManagedProofRequest,
+    MAX_RESPONSE_JSON_BYTES, MAX_USAGE_UNITS,
 };
 use hivemind_proto::managedprover::managed_proof_provider_server::ManagedProofProvider;
 use hivemind_proto::managedprover::{
@@ -39,6 +40,7 @@ pub struct ManagedProverService {
 
 struct ServiceState {
     verifier: ManagedProofAuthorizationVerifier,
+    admission_mode: WorkerAdmissionMode,
     executable: String,
     timeout: Duration,
     queue_capacity: usize,
@@ -95,6 +97,7 @@ impl ManagedProverService {
         let service = Self {
             state: Arc::new(ServiceState {
                 verifier,
+                admission_mode: config.general_compute.admission_mode,
                 executable: executable.to_string(),
                 timeout: Duration::from_secs(config.executor.managed_prover_timeout_secs),
                 queue_capacity,
@@ -379,12 +382,15 @@ MANAGED_PROVER_TLS_SERVER_KEY_PATH, and MANAGED_PROVER_TLS_CLIENT_CA_PATH"
     }
 
     fn approved_managed_dsl_capability(&self, payload: &RemoteManagedProofRequest) -> bool {
-        approved_managed_dsl_capability(
-            self.state
-                .trusted_managed_dsl_capabilities
-                .get(&payload.worker_id),
-            payload,
-        )
+        match self.state.admission_mode {
+            WorkerAdmissionMode::PrivateStatic => approved_managed_dsl_capability(
+                self.state
+                    .trusted_managed_dsl_capabilities
+                    .get(&payload.worker_id),
+                payload,
+            ),
+            WorkerAdmissionMode::PublicDynamic => approved_public_managed_dsl_capability(payload),
+        }
     }
 
     fn authorize_binding<T>(
@@ -426,9 +432,12 @@ impl ManagedProofProvider for ManagedProverService {
                 hivemind_managed_prover_protocol::REMOTE_MANAGED_PROOF_PROTOCOL_VERSION as u32,
             proof_scheme: RISC0_PROOF_SCHEME.into(),
             image_id: RISC0_MANAGED_GUEST_ID.to_vec(),
-            capabilities: advertised_managed_dsl_capabilities(
-                &self.state.trusted_managed_dsl_capabilities,
-            ),
+            capabilities: match self.state.admission_mode {
+                WorkerAdmissionMode::PrivateStatic => advertised_managed_dsl_capabilities(
+                    &self.state.trusted_managed_dsl_capabilities,
+                ),
+                WorkerAdmissionMode::PublicDynamic => advertised_public_managed_dsl_capabilities(),
+            },
             max_source_bytes: hivemind_managed_prover_protocol::MAX_SOURCE_BYTES as u64,
             max_input_bytes: hivemind_managed_prover_protocol::MAX_INPUT_BYTES as u64,
             max_response_bytes: hivemind_managed_prover_protocol::MAX_RESPONSE_JSON_BYTES as u64,
@@ -652,6 +661,13 @@ where
     Ok(output)
 }
 
+fn approved_public_managed_dsl_capability(payload: &RemoteManagedProofRequest) -> bool {
+    payload.runtime == "managed-function-v0"
+        && payload.backend_id.is_empty()
+        && payload.semantics_manifest_sha256.is_empty()
+        && (1..=MAX_USAGE_UNITS).contains(&payload.max_usage_units)
+}
+
 fn approved_managed_dsl_capability(
     registration: Option<&TrustedManagedDslWorkerRegistration>,
     payload: &RemoteManagedProofRequest,
@@ -676,6 +692,15 @@ fn approved_managed_dsl_capability(
                 _ => false,
             }
     })
+}
+
+fn advertised_public_managed_dsl_capabilities() -> Vec<ManagedProofCapability> {
+    vec![ManagedProofCapability {
+        runtime: "managed-function-v0".into(),
+        backend_id: String::new(),
+        semantics_manifest_sha256: String::new(),
+        max_usage_units: MAX_USAGE_UNITS,
+    }]
 }
 
 fn advertised_managed_dsl_capabilities(
@@ -758,8 +783,13 @@ mod tests {
         config.managed_proof.provider_executable = "test-prover".into();
         config.managed_proof.provider_state_dir = state_dir.to_string_lossy().into_owned();
         config.managed_proof.provider_queue_capacity = 3;
+        config.general_compute.admission_mode = WorkerAdmissionMode::PrivateStatic;
 
         let service = ManagedProverService::from_config(&config).unwrap();
+        assert_eq!(
+            service.state.admission_mode,
+            WorkerAdmissionMode::PrivateStatic
+        );
         assert_eq!(service.state.queue_capacity, 3);
         assert_eq!(service.state.semaphore.available_permits(), 3);
 
@@ -806,6 +836,58 @@ mod tests {
             Some(&registration),
             &wrong_owner
         ));
+    }
+
+    #[test]
+    fn public_dynamic_provider_policy_does_not_require_worker_registration() {
+        let mut request = remote_request("unregistered-owner", "managed-function-v0", "", "");
+        request.worker_id = "worker-not-in-any-map".into();
+        assert!(approved_public_managed_dsl_capability(&request));
+
+        request.runtime = "production_sandboxed_dsl".into();
+        request.backend_id = "operator-backend".into();
+        request.semantics_manifest_sha256 =
+            general_compute_runtime::MANAGED_DSL_SEMANTICS_MANIFEST_SHA256.into();
+        assert!(!approved_public_managed_dsl_capability(&request));
+
+        request.runtime = "managed-function-v0".into();
+        request.backend_id.clear();
+        request.semantics_manifest_sha256.clear();
+        request.max_usage_units = MAX_USAGE_UNITS + 1;
+        assert!(!approved_public_managed_dsl_capability(&request));
+    }
+
+    #[test]
+    fn public_dynamic_capabilities_advertise_provider_policy_only() {
+        let registration = TrustedManagedDslWorkerRegistration {
+            owner: "owner".into(),
+            registrations: vec![
+                general_compute_runtime::production::ManagedDslBackendRegistration {
+                    backend_id: "worker-specific-backend".into(),
+                    runtime_version: "managed-function-v0".into(),
+                    semantics_manifest_sha256:
+                        general_compute_runtime::MANAGED_DSL_SEMANTICS_MANIFEST_SHA256.into(),
+                    max_usage_units: 10,
+                    max_output_bytes: 1024,
+                },
+            ],
+        };
+        let mut registrations = BTreeMap::new();
+        registrations.insert("worker-1".into(), registration);
+
+        assert_eq!(
+            advertised_public_managed_dsl_capabilities(),
+            vec![ManagedProofCapability {
+                runtime: "managed-function-v0".into(),
+                backend_id: String::new(),
+                semantics_manifest_sha256: String::new(),
+                max_usage_units: MAX_USAGE_UNITS,
+            }]
+        );
+        assert_ne!(
+            advertised_public_managed_dsl_capabilities(),
+            advertised_managed_dsl_capabilities(&registrations)
+        );
     }
 
     #[test]
