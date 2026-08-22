@@ -257,12 +257,24 @@ pub fn new_claims(
     now: chrono::DateTime<Utc>,
     lifetime: chrono::Duration,
 ) -> Result<ManagedProofAuthorizationClaims> {
-    request.validate().map_err(|error| anyhow::anyhow!(error))?;
-    let iat = usize::try_from(now.timestamp()).context("authorization issue time is invalid")?;
     let exp_time = now
         .checked_add_signed(lifetime)
         .context("authorization lifetime is invalid")?;
-    let exp = usize::try_from(exp_time.timestamp()).context("authorization expiry is invalid")?;
+    claims_with_issuance(request, jti, now.timestamp(), exp_time.timestamp())
+}
+
+/// Reconstruct claims from the issuance metadata persisted by Nodepool.
+/// Persisting the JTI and fixed timestamps lets a retry regenerate the same
+/// bearer token without ever storing the bearer token itself.
+pub fn claims_with_issuance(
+    request: &RemoteManagedProofRequest,
+    jti: impl Into<String>,
+    iat_unix_seconds: i64,
+    exp_unix_seconds: i64,
+) -> Result<ManagedProofAuthorizationClaims> {
+    request.validate().map_err(|error| anyhow::anyhow!(error))?;
+    let iat = usize::try_from(iat_unix_seconds).context("authorization issue time is invalid")?;
+    let exp = usize::try_from(exp_unix_seconds).context("authorization expiry is invalid")?;
     let claims = ManagedProofAuthorizationClaims {
         iss: MANAGED_PROOF_AUTH_ISSUER.into(),
         aud: MANAGED_PROOF_AUTH_AUDIENCE.into(),
@@ -288,7 +300,7 @@ pub fn new_claims(
         exp,
         iat,
     };
-    claims.validate_shape()?;
+    claims.binds_request(request)?;
     Ok(claims)
 }
 
@@ -340,6 +352,26 @@ mod tests {
         assert_eq!(decoded.purpose, MANAGED_PROOF_AUTH_PURPOSE);
     }
 
+    #[test]
+    fn persisted_issuance_recreates_identical_token() {
+        let request = request();
+        let (private_key, public_key) = generate_worker_execution_test_key_pair();
+        let signer = ManagedProofAuthorizationSigner::from_pem(&private_key).unwrap();
+        let verifier = ManagedProofAuthorizationVerifier::from_pem(&public_key).unwrap();
+        let iat = Utc::now().timestamp() + 1;
+        let first = claims_with_issuance(&request, "jti-fixed", iat, iat + 1_000).unwrap();
+        let second = claims_with_issuance(&request, "jti-fixed", iat, iat + 1_000).unwrap();
+        let first_token = signer.encode(&first).unwrap();
+        let second_token = signer.encode(&second).unwrap();
+        assert_eq!(first_token, second_token);
+        assert_eq!(
+            verifier
+                .decode_for_request(&second_token, &request)
+                .unwrap()
+                .jti,
+            "jti-fixed"
+        );
+    }
     #[test]
     fn token_rejects_wrong_audience_and_request_binding() {
         let request = request();

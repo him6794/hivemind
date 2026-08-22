@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use general_compute_runtime::{GeneralComputeRequest, GeneralComputeResult, ResultStatus};
 use hivemind_models::{Task, TaskStatus, WorkerNode};
 use sha1::{Digest, Sha1};
-use sqlx::{FromRow, PgPool, Postgres, Transaction};
+use sqlx::{FromRow, PgPool, Postgres, Row, Transaction};
 
 use crate::BatchTaskReport;
 
@@ -58,10 +58,13 @@ impl GeneralComputeTransferLease {
 
 /// Nodepool-owned metadata for one managed-proof authorization. The bearer
 /// token and task payload are intentionally not represented here; only the
-/// binding and non-reusable audit hash are persisted.
+/// immutable binding, issuance metadata, and non-reusable audit hash are
+/// persisted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedProofAuthorizationRecord {
     pub task_id: String,
+    pub protocol_version: u16,
+    pub proof_task_id: String,
     pub owner: String,
     pub worker_id: String,
     pub execution_id: String,
@@ -76,7 +79,35 @@ pub struct ManagedProofAuthorizationRecord {
     pub image_id_json: String,
     pub deadline_unix_ms: i64,
     pub token_jti: String,
+    pub token_iat: i64,
+    pub token_exp: i64,
     pub token_sha256: String,
+}
+
+/// The issuance metadata selected for an authorization attempt. Callers use
+/// this to reconstruct the token in memory and compare its hash with the
+/// Nodepool-owned fingerprint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedProofAuthorizationIssuance {
+    pub token_jti: String,
+    pub token_iat: i64,
+    pub token_exp: i64,
+    pub token_sha256: String,
+}
+
+/// Complete identity and target state for one authorization lifecycle update.
+/// Keeping these fields together prevents callers from accidentally mixing
+/// identity from one attempt with the state of another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ManagedProofAuthorizationStateUpdate<'a> {
+    pub task_id: &'a str,
+    pub lease_generation: i64,
+    pub attempt_id: &'a str,
+    pub worker_id: &'a str,
+    pub execution_id: &'a str,
+    pub idempotency_key: &'a str,
+    pub request_digest: &'a str,
+    pub state: &'a str,
 }
 
 const PLATFORM_FEE_BPS: i64 = 1000; // 10%
@@ -1069,37 +1100,148 @@ impl TaskRepository {
         Ok(lease)
     }
 
-    /// Persist only the binding and token fingerprint for a managed-proof
-    /// attempt. A conflicting binding for the same task/generation/attempt is
-    /// rejected instead of being silently overwritten.
+    /// Persist only the immutable binding, issuance metadata, and token
+    /// fingerprint for a managed-proof attempt. Repeating the exact binding is
+    /// idempotent and returns the original issuance metadata; a conflicting
+    /// binding for the same task/generation/attempt is rejected.
     pub async fn record_managed_proof_authorization(
         &self,
         record: &ManagedProofAuthorizationRecord,
-    ) -> Result<()> {
-        let row = sqlx::query(
-            "WITH active_task AS (
-                 SELECT task_id
-                 FROM tasks
-                 WHERE task_id = $1
-                   AND owner = $2
-                   AND worker_id = $3
-                   AND status IN ('ASSIGNED', 'RUNNING')
-                   AND retry_count = $8 - 1
-                   AND runtime = $9
-                 FOR UPDATE
-             )
-             INSERT INTO managed_proof_authorizations (
-                task_id, owner, worker_id, execution_id, attempt_id, idempotency_key,
-                request_digest, lease_generation, runtime, backend_id,
-                semantics_manifest_sha256, proof_scheme, image_id_json,
-                deadline_unix_ms, token_jti, token_sha256, state
-             )
-             SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, 'issued'
-             FROM active_task
-             ON CONFLICT (task_id, lease_generation, attempt_id) DO NOTHING
-             RETURNING id",
+    ) -> Result<ManagedProofAuthorizationIssuance> {
+        if record.protocol_version == 0
+            || record.proof_task_id.trim().is_empty()
+            || record.token_jti.trim().is_empty()
+            || record.token_iat <= 0
+            || record.token_exp < record.token_iat
+            || record.token_sha256.trim().is_empty()
+        {
+            anyhow::bail!("managed-proof authorization metadata is invalid");
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let active_task = sqlx::query(
+            "SELECT t.task_id
+             FROM tasks t
+             WHERE t.task_id = $1
+               AND t.owner = $2
+               AND t.worker_id = $3
+               AND t.status IN ('ASSIGNED', 'RUNNING')
+               AND t.runtime = $7
+               AND (
+                   ($7 = 'general-compute-v1alpha1' AND EXISTS (
+                       SELECT 1
+                       FROM general_compute_transfer_leases l
+                       WHERE l.task_id = t.task_id
+                         AND l.execution_id = $4
+                         AND l.attempt_id = $5
+                         AND l.worker_id = $3
+                         AND l.generation = $6
+                         AND l.state = 'active'
+                         AND (l.expires_at IS NULL OR l.expires_at > NOW())
+                   ))
+                   OR ($7 <> 'general-compute-v1alpha1' AND t.retry_count = $6 - 1)
+               )
+             FOR UPDATE",
         )
         .bind(&record.task_id)
+        .bind(&record.owner)
+        .bind(&record.worker_id)
+        .bind(&record.execution_id)
+        .bind(&record.attempt_id)
+        .bind(record.lease_generation)
+        .bind(&record.runtime)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if active_task.is_none() {
+            anyhow::bail!(
+                "managed-proof authorization targets a stale or inactive task assignment"
+            );
+        }
+
+        let existing = sqlx::query(
+            "SELECT protocol_version, proof_task_id, owner, worker_id,
+                    execution_id, attempt_id, idempotency_key, request_digest,
+                    lease_generation, runtime, backend_id,
+                    semantics_manifest_sha256, proof_scheme, image_id_json,
+                    deadline_unix_ms, token_jti, token_iat, token_exp,
+                    token_sha256
+             FROM managed_proof_authorizations
+             WHERE task_id = $1 AND lease_generation = $2 AND attempt_id = $3
+             FOR UPDATE",
+        )
+        .bind(&record.task_id)
+        .bind(record.lease_generation)
+        .bind(&record.attempt_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        if let Some(existing) = existing {
+            let protocol_version = existing.try_get::<Option<i32>, _>("protocol_version")?;
+            let proof_task_id = existing.try_get::<Option<String>, _>("proof_task_id")?;
+            let binding_matches = protocol_version == Some(i32::from(record.protocol_version))
+                && proof_task_id.as_deref() == Some(record.proof_task_id.as_str())
+                && existing.try_get::<String, _>("owner")? == record.owner
+                && existing.try_get::<String, _>("worker_id")? == record.worker_id
+                && existing.try_get::<String, _>("execution_id")? == record.execution_id
+                && existing.try_get::<String, _>("attempt_id")? == record.attempt_id
+                && existing.try_get::<String, _>("idempotency_key")? == record.idempotency_key
+                && existing.try_get::<String, _>("request_digest")? == record.request_digest
+                && existing.try_get::<i64, _>("lease_generation")? == record.lease_generation
+                && existing.try_get::<String, _>("runtime")? == record.runtime
+                && existing.try_get::<String, _>("backend_id")? == record.backend_id
+                && existing.try_get::<String, _>("semantics_manifest_sha256")?
+                    == record.semantics_manifest_sha256
+                && existing.try_get::<String, _>("proof_scheme")? == record.proof_scheme
+                && existing.try_get::<String, _>("image_id_json")? == record.image_id_json
+                && existing.try_get::<i64, _>("deadline_unix_ms")? == record.deadline_unix_ms;
+            if !binding_matches {
+                anyhow::bail!(
+                    "managed-proof authorization conflicts with the existing attempt binding"
+                );
+            }
+
+            let token_iat = existing
+                .try_get::<Option<i64>, _>("token_iat")?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "existing managed-proof authorization cannot be regenerated safely"
+                    )
+                })?;
+            let token_exp = existing
+                .try_get::<Option<i64>, _>("token_exp")?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "existing managed-proof authorization cannot be regenerated safely"
+                    )
+                })?;
+            if token_iat <= 0 || token_exp < token_iat {
+                anyhow::bail!("existing managed-proof authorization has invalid issuance metadata");
+            }
+            let issuance = ManagedProofAuthorizationIssuance {
+                token_jti: existing.try_get("token_jti")?,
+                token_iat,
+                token_exp,
+                token_sha256: existing.try_get("token_sha256")?,
+            };
+            tx.commit().await?;
+            return Ok(issuance);
+        }
+
+        sqlx::query(
+            "INSERT INTO managed_proof_authorizations (
+                task_id, protocol_version, proof_task_id, owner, worker_id,
+                execution_id, attempt_id, idempotency_key, request_digest,
+                lease_generation, runtime, backend_id,
+                semantics_manifest_sha256, proof_scheme, image_id_json,
+                deadline_unix_ms, token_jti, token_iat, token_exp,
+                token_sha256, state
+             )
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                     $12, $13, $14, $15, $16, $17, $18, $19, $20, 'issued')",
+        )
+        .bind(&record.task_id)
+        .bind(i32::from(record.protocol_version))
+        .bind(&record.proof_task_id)
         .bind(&record.owner)
         .bind(&record.worker_id)
         .bind(&record.execution_id)
@@ -1114,30 +1256,50 @@ impl TaskRepository {
         .bind(&record.image_id_json)
         .bind(record.deadline_unix_ms)
         .bind(&record.token_jti)
+        .bind(record.token_iat)
+        .bind(record.token_exp)
         .bind(&record.token_sha256)
-        .fetch_optional(&self.pool)
+        .execute(&mut *tx)
         .await?;
-        if row.is_none() {
-            anyhow::bail!(
-                "managed-proof authorization conflicts with the existing attempt binding"
-            );
-        }
-        Ok(())
+        tx.commit().await?;
+        Ok(ManagedProofAuthorizationIssuance {
+            token_jti: record.token_jti.clone(),
+            token_iat: record.token_iat,
+            token_exp: record.token_exp,
+            token_sha256: record.token_sha256.clone(),
+        })
     }
 
-    pub async fn update_managed_proof_authorization_state(
+    pub async fn managed_proof_authorization_deadline(
         &self,
         task_id: &str,
         lease_generation: i64,
         attempt_id: &str,
-        state: &str,
+    ) -> Result<Option<i64>> {
+        sqlx::query_scalar(
+            "SELECT deadline_unix_ms
+             FROM managed_proof_authorizations
+             WHERE task_id = $1 AND lease_generation = $2 AND attempt_id = $3",
+        )
+        .bind(task_id)
+        .bind(lease_generation)
+        .bind(attempt_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    pub async fn update_managed_proof_authorization_state(
+        &self,
+        update: &ManagedProofAuthorizationStateUpdate<'_>,
     ) -> Result<()> {
         if !matches!(
-            state,
+            update.state,
             "issued"
                 | "submitted"
                 | "running"
                 | "succeeded"
+                | "observed_verified"
                 | "failed"
                 | "cancelled"
                 | "expired"
@@ -1145,52 +1307,34 @@ impl TaskRepository {
         ) {
             anyhow::bail!("managed-proof authorization state is invalid");
         }
-        let query = match state {
-            "issued" => {
-                "UPDATE managed_proof_authorizations
-                 SET state = 'issued', updated_at = NOW()
-                 WHERE task_id = $1 AND lease_generation = $2 AND attempt_id = $3
-                   AND state = 'issued'"
-            }
-            "submitted" => {
-                "UPDATE managed_proof_authorizations
-                 SET state = 'submitted', updated_at = NOW()
-                 WHERE task_id = $1 AND lease_generation = $2 AND attempt_id = $3
-                   AND state = 'issued'"
-            }
-            "running" => {
-                "UPDATE managed_proof_authorizations
-                 SET state = 'running', updated_at = NOW()
-                 WHERE task_id = $1 AND lease_generation = $2 AND attempt_id = $3
-                   AND state = 'submitted'"
-            }
-            "succeeded" | "failed" | "cancelled" | "expired" | "revoked" => {
-                "UPDATE managed_proof_authorizations
-                 SET state = $4, updated_at = NOW()
-                 WHERE task_id = $1 AND lease_generation = $2 AND attempt_id = $3
-                   AND state IN ('issued', 'submitted', 'running')"
-            }
-            _ => unreachable!("managed-proof state was validated above"),
-        };
-        let result = if matches!(
-            state,
-            "succeeded" | "failed" | "cancelled" | "expired" | "revoked"
-        ) {
-            sqlx::query(query)
-                .bind(task_id)
-                .bind(lease_generation)
-                .bind(attempt_id)
-                .bind(state)
-                .execute(&self.pool)
-                .await?
-        } else {
-            sqlx::query(query)
-                .bind(task_id)
-                .bind(lease_generation)
-                .bind(attempt_id)
-                .execute(&self.pool)
-                .await?
-        };
+        let result = sqlx::query(
+            "UPDATE managed_proof_authorizations
+             SET state = $8, updated_at = NOW()
+             WHERE task_id = $1 AND lease_generation = $2 AND attempt_id = $3
+               AND worker_id = $4
+               AND execution_id = $5
+               AND idempotency_key = $6
+               AND request_digest = $7
+               AND (
+                   state = $8
+                   OR ($8 = 'submitted' AND state = 'issued')
+                   OR ($8 = 'running' AND state IN ('submitted', 'running'))
+                   OR ($8 IN (
+                       'succeeded', 'observed_verified', 'failed',
+                       'cancelled', 'expired', 'revoked'
+                   ) AND state IN ('issued', 'submitted', 'running'))
+               )",
+        )
+        .bind(update.task_id)
+        .bind(update.lease_generation)
+        .bind(update.attempt_id)
+        .bind(update.worker_id)
+        .bind(update.execution_id)
+        .bind(update.idempotency_key)
+        .bind(update.request_digest)
+        .bind(update.state)
+        .execute(&self.pool)
+        .await?;
         if result.rows_affected() == 0 {
             anyhow::bail!(
                 "managed-proof authorization lifecycle transition was stale or already terminal"
@@ -1667,9 +1811,6 @@ impl TaskRepository {
             .await?
         };
 
-        self.revoke_general_compute_transfer_lease(&mut tx, task_id)
-            .await?;
-
         let general_compute_settlement = if let Some(result_json) = general_compute_result {
             let manifest = expected_manifest.ok_or_else(|| {
                 anyhow::anyhow!("general-compute settlement is missing its request manifest")
@@ -1793,6 +1934,8 @@ impl TaskRepository {
                 )
                 .await?;
             }
+            self.revoke_general_compute_transfer_lease(&mut tx, task_id)
+                .await?;
             tx.commit().await?;
             return Ok(completed);
         }
@@ -1871,6 +2014,8 @@ impl TaskRepository {
                 )
                 .await?;
             }
+            self.revoke_general_compute_transfer_lease(&mut tx, task_id)
+                .await?;
             tx.commit().await?;
             Ok(settled)
         } else {
@@ -1889,6 +2034,8 @@ impl TaskRepository {
                 )
                 .await?;
             }
+            self.revoke_general_compute_transfer_lease(&mut tx, task_id)
+                .await?;
             tx.commit().await?;
             Ok(completed)
         }
@@ -1907,8 +2054,6 @@ impl TaskRepository {
         .fetch_one(&mut *tx)
         .await?;
 
-        self.revoke_general_compute_transfer_lease(&mut tx, task_id)
-            .await?;
         update_active_managed_proof_state(
             &mut tx,
             task_id,
@@ -1916,6 +2061,8 @@ impl TaskRepository {
             "failed",
         )
         .await?;
+        self.revoke_general_compute_transfer_lease(&mut tx, task_id)
+            .await?;
 
         if let Some(result_json) = nodepool_general_compute_terminal_result(
             &failed,
@@ -1958,8 +2105,6 @@ impl TaskRepository {
         .fetch_one(&mut *tx)
         .await?;
 
-        self.revoke_general_compute_transfer_lease(&mut tx, task_id)
-            .await?;
         update_active_managed_proof_state(
             &mut tx,
             task_id,
@@ -1967,6 +2112,8 @@ impl TaskRepository {
             "failed",
         )
         .await?;
+        self.revoke_general_compute_transfer_lease(&mut tx, task_id)
+            .await?;
 
         if let Some(result_json) = nodepool_general_compute_terminal_result(
             &failed,
@@ -2014,8 +2161,6 @@ impl TaskRepository {
         .bind(worker_id)
         .fetch_one(&mut *tx)
         .await?;
-        self.revoke_general_compute_transfer_lease(&mut tx, task_id)
-            .await?;
         update_active_managed_proof_state(
             &mut tx,
             task_id,
@@ -2023,6 +2168,8 @@ impl TaskRepository {
             "failed",
         )
         .await?;
+        self.revoke_general_compute_transfer_lease(&mut tx, task_id)
+            .await?;
         if let Some(result_json) = nodepool_general_compute_terminal_result(
             &failed,
             ResultStatus::Failed,
@@ -2057,8 +2204,6 @@ impl TaskRepository {
         .fetch_one(&mut *tx)
         .await?;
 
-        self.revoke_general_compute_transfer_lease(&mut tx, task_id)
-            .await?;
         update_active_managed_proof_state(
             &mut tx,
             task_id,
@@ -2066,6 +2211,8 @@ impl TaskRepository {
             "cancelled",
         )
         .await?;
+        self.revoke_general_compute_transfer_lease(&mut tx, task_id)
+            .await?;
 
         if let Some(result_json) = nodepool_general_compute_terminal_result(
             &cancelled,
@@ -2099,8 +2246,6 @@ impl TaskRepository {
         .fetch_all(&mut *tx)
         .await?;
         for task in &timed_out {
-            self.revoke_general_compute_transfer_lease(&mut tx, &task.task_id)
-                .await?;
             update_active_managed_proof_state(
                 &mut tx,
                 &task.task_id,
@@ -2108,6 +2253,8 @@ impl TaskRepository {
                 "expired",
             )
             .await?;
+            self.revoke_general_compute_transfer_lease(&mut tx, &task.task_id)
+                .await?;
             if let Some(result_json) = nodepool_general_compute_terminal_result(
                 task,
                 ResultStatus::TimedOut,
@@ -2286,12 +2433,38 @@ async fn update_active_managed_proof_state(
     let Some(attempt_id) = attempt_id else {
         return Ok(());
     };
+    if !matches!(
+        state,
+        "succeeded" | "observed_verified" | "failed" | "cancelled" | "expired" | "revoked"
+    ) {
+        anyhow::bail!("managed-proof terminal state is invalid");
+    }
     sqlx::query(
-        "UPDATE managed_proof_authorizations
+        "UPDATE managed_proof_authorizations AS authorization
          SET state = $1, updated_at = NOW()
-         WHERE task_id = $2
-           AND attempt_id = $3
-           AND state IN ('issued', 'submitted', 'running')",
+         FROM tasks AS task
+         WHERE authorization.task_id = $2
+           AND task.task_id = authorization.task_id
+           AND authorization.attempt_id = $3
+           AND authorization.state IN ('issued', 'submitted', 'running')
+           AND (
+               (
+                   authorization.runtime = 'general-compute-v1alpha1'
+                   AND EXISTS (
+                       SELECT 1
+                       FROM general_compute_transfer_leases lease
+                       WHERE lease.task_id = authorization.task_id
+                         AND lease.attempt_id = authorization.attempt_id
+                         AND lease.generation = authorization.lease_generation
+                         AND lease.state = 'active'
+                         AND (lease.expires_at IS NULL OR lease.expires_at > NOW())
+                   )
+               )
+               OR (
+                   authorization.runtime <> 'general-compute-v1alpha1'
+                   AND authorization.lease_generation = task.retry_count + 1
+               )
+           )",
     )
     .bind(state)
     .bind(task_id)
@@ -2690,6 +2863,244 @@ mod tests {
         fixture.cleanup().await.ok();
     }
 
+    #[tokio::test]
+    async fn managed_proof_authorization_duplicate_is_idempotent_and_conflict_safe() {
+        let (p, fixture) = match pool("managed_proof_authorization_duplicate").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let task_id = format!("managed-auth-task-{unique}");
+        let owner = format!("managed-auth-owner-{unique}");
+        let worker_id = format!("managed-auth-worker-{unique}");
+        let mut task = make_task(&task_id, &owner);
+        task.runtime = Some("managed-function-v0".into());
+        repo.create(&task).await.unwrap();
+        repo.assign_to_worker(&task_id, &worker_id, "10.0.0.20")
+            .await
+            .unwrap();
+
+        let now = Utc::now().timestamp();
+        let record = ManagedProofAuthorizationRecord {
+            task_id: task_id.clone(),
+            protocol_version: 1,
+            proof_task_id: task_id.clone(),
+            owner: owner.clone(),
+            worker_id: worker_id.clone(),
+            execution_id: "managed-execution-1".into(),
+            attempt_id: "managed-attempt-1".into(),
+            idempotency_key: "managed-idempotency-1".into(),
+            request_digest: format!("sha256:{}", "a".repeat(64)),
+            lease_generation: 1,
+            runtime: "managed-function-v0".into(),
+            backend_id: String::new(),
+            semantics_manifest_sha256: String::new(),
+            proof_scheme: "risc0-zkvm-3.0.6".into(),
+            image_id_json: "[1,1,1,1,1,1,1,1]".into(),
+            deadline_unix_ms: (now + 300) * 1_000,
+            token_jti: "jti-original".into(),
+            token_iat: now,
+            token_exp: now + 600,
+            token_sha256: format!("sha256:{}", "b".repeat(64)),
+        };
+        let first = repo
+            .record_managed_proof_authorization(&record)
+            .await
+            .unwrap();
+
+        let mut retry = record.clone();
+        retry.token_jti = "jti-retry-must-not-win".into();
+        retry.token_iat = now + 1;
+        retry.token_exp = now + 601;
+        retry.token_sha256 = format!("sha256:{}", "c".repeat(64));
+        let second = repo
+            .record_managed_proof_authorization(&retry)
+            .await
+            .unwrap();
+        assert_eq!(first, second);
+
+        let row_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM managed_proof_authorizations WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(row_count, 1);
+
+        let mut conflict = record.clone();
+        conflict.backend_id = "different-backend".into();
+        assert!(repo
+            .record_managed_proof_authorization(&conflict)
+            .await
+            .is_err());
+        let persisted: (String, String, i64, i64, String) = sqlx::query_as(
+            "SELECT token_jti, token_sha256, token_iat, token_exp, backend_id
+             FROM managed_proof_authorizations WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(persisted.0, "jti-original");
+        assert_eq!(persisted.1, format!("sha256:{}", "b".repeat(64)));
+        assert_eq!(persisted.2, now);
+        assert_eq!(persisted.3, now + 600);
+        assert_eq!(persisted.4, "");
+
+        cleanup_task_case(&repo.pool, &task_id, &owner, None).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn managed_proof_authorization_duplicate_race_converges_to_one_row() {
+        let (p, fixture) = match pool("managed_proof_authorization_duplicate_race").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let task_id = format!("managed-auth-race-task-{unique}");
+        let owner = format!("managed-auth-race-owner-{unique}");
+        let worker_id = format!("managed-auth-race-worker-{unique}");
+        let mut task = make_task(&task_id, &owner);
+        task.runtime = Some("managed-function-v0".into());
+        repo.create(&task).await.unwrap();
+        repo.assign_to_worker(&task_id, &worker_id, "10.0.0.21")
+            .await
+            .unwrap();
+
+        let now = Utc::now().timestamp();
+        let record = ManagedProofAuthorizationRecord {
+            task_id: task_id.clone(),
+            protocol_version: 1,
+            proof_task_id: task_id.clone(),
+            owner: owner.clone(),
+            worker_id: worker_id.clone(),
+            execution_id: "managed-execution-race".into(),
+            attempt_id: "managed-attempt-race".into(),
+            idempotency_key: "managed-idempotency-race".into(),
+            request_digest: format!("sha256:{}", "d".repeat(64)),
+            lease_generation: 1,
+            runtime: "managed-function-v0".into(),
+            backend_id: String::new(),
+            semantics_manifest_sha256: String::new(),
+            proof_scheme: "risc0-zkvm-3.0.6".into(),
+            image_id_json: "[2,2,2,2,2,2,2,2]".into(),
+            deadline_unix_ms: (now + 300) * 1_000,
+            token_jti: "jti-race".into(),
+            token_iat: now,
+            token_exp: now + 600,
+            token_sha256: format!("sha256:{}", "e".repeat(64)),
+        };
+        let left_repo = TaskRepository::new(repo.pool.clone());
+        let right_repo = TaskRepository::new(repo.pool.clone());
+        let (left, right) = tokio::join!(
+            left_repo.record_managed_proof_authorization(&record),
+            right_repo.record_managed_proof_authorization(&record)
+        );
+        assert_eq!(left.unwrap(), right.unwrap());
+
+        let row_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM managed_proof_authorizations WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(row_count, 1);
+
+        cleanup_task_case(&repo.pool, &task_id, &format!("unused-{unique}"), None).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn managed_proof_authorization_state_transitions_are_idempotent_and_generation_bound() {
+        let (p, fixture) = match pool("managed_proof_authorization_state").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let task_id = format!("managed-state-task-{unique}");
+        let owner = format!("managed-state-owner-{unique}");
+        let worker_id = format!("managed-state-worker-{unique}");
+        let mut task = make_task(&task_id, &owner);
+        task.runtime = Some("managed-function-v0".into());
+        repo.create(&task).await.unwrap();
+        repo.assign_to_worker(&task_id, &worker_id, "10.0.0.22")
+            .await
+            .unwrap();
+        let now = Utc::now().timestamp();
+        let record = ManagedProofAuthorizationRecord {
+            task_id: task_id.clone(),
+            protocol_version: 1,
+            proof_task_id: task_id.clone(),
+            owner: owner.clone(),
+            worker_id: worker_id.clone(),
+            execution_id: "managed-execution-state".into(),
+            attempt_id: "managed-attempt-state".into(),
+            idempotency_key: "managed-idempotency-state".into(),
+            request_digest: format!("sha256:{}", "f".repeat(64)),
+            lease_generation: 1,
+            runtime: "managed-function-v0".into(),
+            backend_id: String::new(),
+            semantics_manifest_sha256: String::new(),
+            proof_scheme: "risc0-zkvm-3.0.6".into(),
+            image_id_json: "[3,3,3,3,3,3,3,3]".into(),
+            deadline_unix_ms: (now + 300) * 1_000,
+            token_jti: "jti-state".into(),
+            token_iat: now,
+            token_exp: now + 600,
+            token_sha256: format!("sha256:{}", "1".repeat(64)),
+        };
+        repo.record_managed_proof_authorization(&record)
+            .await
+            .unwrap();
+        for state in ["issued", "submitted", "running", "observed_verified"] {
+            let update = ManagedProofAuthorizationStateUpdate {
+                task_id: &task_id,
+                lease_generation: 1,
+                attempt_id: "managed-attempt-state",
+                worker_id: &worker_id,
+                execution_id: "managed-execution-state",
+                idempotency_key: "managed-idempotency-state",
+                request_digest: &format!("sha256:{}", "f".repeat(64)),
+                state,
+            };
+            repo.update_managed_proof_authorization_state(&update)
+                .await
+                .unwrap();
+            repo.update_managed_proof_authorization_state(&update)
+                .await
+                .unwrap();
+        }
+        let stale_update = ManagedProofAuthorizationStateUpdate {
+            task_id: &task_id,
+            lease_generation: 2,
+            attempt_id: "managed-attempt-state",
+            worker_id: &worker_id,
+            execution_id: "managed-execution-state",
+            idempotency_key: "managed-idempotency-state",
+            request_digest: &format!("sha256:{}", "f".repeat(64)),
+            state: "failed",
+        };
+        assert!(repo
+            .update_managed_proof_authorization_state(&stale_update)
+            .await
+            .is_err());
+        let persisted: String =
+            sqlx::query_scalar("SELECT state FROM managed_proof_authorizations WHERE task_id = $1")
+                .bind(&task_id)
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap();
+        assert_eq!(persisted, "observed_verified");
+
+        cleanup_task_case(&repo.pool, &task_id, &format!("unused-{unique}"), None).await;
+        fixture.cleanup().await.ok();
+    }
     #[test]
     fn managed_v0_billing_formula_matches_frozen_manifest() {
         let manifest: serde_json::Value = serde_json::from_str(include_str!(
