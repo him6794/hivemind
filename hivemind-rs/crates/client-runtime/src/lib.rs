@@ -11,7 +11,7 @@
 use anyhow::{bail, Context, Result};
 use hivemind_config::HivemindConfig;
 use rand::{rngs::OsRng, RngCore};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error as _;
 #[cfg(target_os = "windows")]
@@ -156,6 +156,42 @@ struct WebsiteVpnConfigResponse {
     login_server: String,
     #[serde(default)]
     auth_key: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WebsiteEnrollmentCredentialRequest {
+    role: String,
+    client_instance_id: String,
+}
+
+#[derive(Clone, Deserialize)]
+struct WebsiteEnrollmentCredentialResponse {
+    success: bool,
+    credential: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+struct WebsiteRedeemEnrollmentRequest {
+    credential: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WebsiteRedeemEnrollmentResponse {
+    success: bool,
+    identity_id: Option<String>,
+    owner: Option<String>,
+    role: Option<String>,
+    client_instance_id: Option<String>,
+    worker_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientEnrollment {
+    pub identity_id: String,
+    pub owner: String,
+    pub role: ClientRole,
+    pub client_instance_id: String,
+    pub worker_id: Option<String>,
 }
 
 /// VPN transport type - WireGuard only
@@ -813,6 +849,38 @@ pub async fn ensure_user_vpn_for_token(
     ensure_user_vpn_for_token_inner(config, role, token).await
 }
 
+/// Obtain and immediately redeem a short-lived server enrollment credential.
+///
+/// The credential is held only in this call's stack and is never written to
+/// the local VPN state. Nodepool assigns or recovers the client identity.
+pub async fn ensure_client_enrollment(
+    config: &HivemindConfig,
+    role: ClientRole,
+    token: &str,
+) -> Result<ClientEnrollment> {
+    let token = token.trim();
+    if token.is_empty() {
+        bail!("a non-empty bearer token is required for enrollment");
+    }
+    let website_base = website_api_base(config, role)
+        .ok_or_else(|| anyhow::anyhow!("website-api enrollment is disabled"))?;
+    let client_instance_id = persisted_device_id(role)?;
+    let credential =
+        website_issue_enrollment_credential(&website_base, token, role, &client_instance_id)
+            .await?;
+    let enrollment = website_redeem_enrollment_credential(&website_base, &credential).await?;
+    if enrollment.role != role {
+        bail!("enrollment credential role does not match client role");
+    }
+    if enrollment.client_instance_id != client_instance_id {
+        bail!("enrollment credential is bound to a different client instance");
+    }
+    if role == ClientRole::Worker && enrollment.worker_id.is_none() {
+        bail!("worker enrollment did not return a server-assigned worker identity");
+    }
+    Ok(enrollment)
+}
+
 async fn ensure_user_vpn_inner(
     config: &HivemindConfig,
     role: ClientRole,
@@ -1299,6 +1367,81 @@ async fn website_login(base: &str, username: &str, password: &str) -> Result<Str
     }
     body.token
         .ok_or_else(|| anyhow::anyhow!("login succeeded but no token returned"))
+}
+
+async fn website_issue_enrollment_credential(
+    base: &str,
+    token: &str,
+    role: ClientRole,
+    client_instance_id: &str,
+) -> Result<String> {
+    let client = website_http_client()?;
+    let response = client
+        .post(format!("{base}/api/enrollment/credential"))
+        .bearer_auth(token)
+        .json(&WebsiteEnrollmentCredentialRequest {
+            role: role.as_str().into(),
+            client_instance_id: client_instance_id.into(),
+        })
+        .send()
+        .await
+        .context("website-api enrollment credential request failed")?;
+    let status = response.status();
+    let raw = response.text().await?;
+    let body: WebsiteEnrollmentCredentialResponse =
+        serde_json::from_str(&raw).with_context(|| {
+            format!("website-api enrollment returned HTTP {status} with invalid JSON")
+        })?;
+    if !status.is_success() || !body.success {
+        bail!("website-api enrollment credential request was rejected");
+    }
+    body.credential
+        .filter(|credential| !credential.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("enrollment succeeded but no credential returned"))
+}
+
+async fn website_redeem_enrollment_credential(
+    base: &str,
+    credential: &str,
+) -> Result<ClientEnrollment> {
+    let client = website_http_client()?;
+    let response = client
+        .post(format!("{base}/api/enrollment/redeem"))
+        .json(&WebsiteRedeemEnrollmentRequest {
+            credential: credential.to_string(),
+        })
+        .send()
+        .await
+        .context("website-api enrollment redemption request failed")?;
+    let status = response.status();
+    let raw = response.text().await?;
+    let body: WebsiteRedeemEnrollmentResponse = serde_json::from_str(&raw).with_context(|| {
+        format!("website-api enrollment redemption returned HTTP {status} with invalid JSON")
+    })?;
+    if !status.is_success() || !body.success {
+        bail!("website-api enrollment redemption was rejected");
+    }
+    let role = match body.role.as_deref() {
+        Some("master") => ClientRole::Master,
+        Some("worker") => ClientRole::Worker,
+        _ => bail!("enrollment redemption returned an invalid role"),
+    };
+    Ok(ClientEnrollment {
+        identity_id: body
+            .identity_id
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("enrollment redemption returned no identity"))?,
+        owner: body
+            .owner
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("enrollment redemption returned no owner"))?,
+        role,
+        client_instance_id: body
+            .client_instance_id
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("enrollment redemption returned no client identity"))?,
+        worker_id: body.worker_id.filter(|value| !value.trim().is_empty()),
+    })
 }
 
 async fn website_issue_vpn_config(

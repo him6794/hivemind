@@ -64,6 +64,41 @@ message RefreshTokenResponse {
     string new_token = 3;
 }
 
+// Short-lived, single-use enrollment handoff issued by Nodepool after an
+// authenticated Website login. The credential is opaque to clients and its
+// raw value must remain in memory only until redemption.
+message IssueEnrollmentCredentialRequest {
+    string token = 1;
+    string role = 2;
+    string client_instance_id = 3;
+}
+
+message IssueEnrollmentCredentialResponse {
+    bool success = 1;
+    string status_message = 2;
+    string credential = 3;
+    string credential_id = 4;
+    string owner = 5;
+    string role = 6;
+    int64 expires_at_unix = 7;
+}
+
+message RedeemEnrollmentCredentialRequest {
+    string credential = 1;
+}
+
+message RedeemEnrollmentCredentialResponse {
+    bool success = 1;
+    string status_message = 2;
+    string credential_id = 3;
+    string identity_id = 4;
+    string owner = 5;
+    string role = 6;
+    string client_instance_id = 7;
+    string worker_id = 8;
+    int64 expires_at_unix = 9;
+}
+
 // ============================================================
 // Resource Model: CPU / GPU / RAM / VRAM / Storage
 // ============================================================
@@ -917,6 +952,8 @@ service UserService {
     rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse);
     rpc TransferCpt(TransferCptRequest) returns (TransferCptResponse);
     rpc RefreshToken(RefreshTokenRequest) returns (RefreshTokenResponse);
+    rpc IssueEnrollmentCredential(IssueEnrollmentCredentialRequest) returns (IssueEnrollmentCredentialResponse);
+    rpc RedeemEnrollmentCredential(RedeemEnrollmentCredentialRequest) returns (RedeemEnrollmentCredentialResponse);
 }
 
 service NodeManagerService {

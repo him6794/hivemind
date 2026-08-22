@@ -1,8 +1,10 @@
 use hivemind_proto::{
     user_service_client::UserServiceClient, vpn_service_client::VpnServiceClient,
-    GetBalanceRequest, GetBalanceResponse, IssueUserVpnConfigRequest, IssueUserVpnConfigResponse,
-    LoginRequest, LoginResponse, RegisterUserRequest, RegisterUserResponse, TransferCptRequest,
-    TransferCptResponse,
+    GetBalanceRequest, GetBalanceResponse, IssueEnrollmentCredentialRequest,
+    IssueEnrollmentCredentialResponse, IssueUserVpnConfigRequest, IssueUserVpnConfigResponse,
+    LoginRequest, LoginResponse, RedeemEnrollmentCredentialRequest,
+    RedeemEnrollmentCredentialResponse, RegisterUserRequest, RegisterUserResponse,
+    TransferCptRequest, TransferCptResponse,
 };
 use tokio::time::{sleep, Duration};
 use tonic::transport::{Channel, Endpoint};
@@ -69,6 +71,34 @@ impl GrpcClient {
             }))
             .await
             .map(|r| r.into_inner())
+    }
+
+    pub async fn issue_enrollment_credential(
+        &mut self,
+        token: &str,
+        role: &str,
+        client_instance_id: &str,
+    ) -> Result<IssueEnrollmentCredentialResponse, tonic::Status> {
+        self.user
+            .issue_enrollment_credential(Request::new(IssueEnrollmentCredentialRequest {
+                token: token.to_string(),
+                role: role.to_string(),
+                client_instance_id: client_instance_id.to_string(),
+            }))
+            .await
+            .map(|response| response.into_inner())
+    }
+
+    pub async fn redeem_enrollment_credential(
+        &mut self,
+        credential: &str,
+    ) -> Result<RedeemEnrollmentCredentialResponse, tonic::Status> {
+        self.user
+            .redeem_enrollment_credential(Request::new(RedeemEnrollmentCredentialRequest {
+                credential: credential.to_string(),
+            }))
+            .await
+            .map(|response| response.into_inner())
     }
 
     pub async fn get_balance(

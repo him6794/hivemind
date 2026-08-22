@@ -177,6 +177,37 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     .await?;
 
     sqlx::query(
+        "CREATE TABLE IF NOT EXISTS enrollment_credentials (
+            credential_id UUID PRIMARY KEY,
+            owner VARCHAR(255) NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+            role VARCHAR(16) NOT NULL CHECK (role IN ('master', 'worker')),
+            client_instance_id VARCHAR(128) NOT NULL,
+            token_sha256 VARCHAR(64) NOT NULL UNIQUE,
+            issued_at TIMESTAMPTZ NOT NULL,
+            expires_at TIMESTAMPTZ NOT NULL,
+            redeemed_at TIMESTAMPTZ,
+            redeemed_identity_id UUID
+        );",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS client_identities (
+            identity_id UUID PRIMARY KEY,
+            owner VARCHAR(255) NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+            role VARCHAR(16) NOT NULL CHECK (role IN ('master', 'worker')),
+            client_instance_id VARCHAR(128) NOT NULL,
+            worker_id VARCHAR(255) UNIQUE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE (owner, role, client_instance_id)
+        );",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
         "CREATE TABLE IF NOT EXISTS tasks (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             task_id VARCHAR(255) NOT NULL UNIQUE,
@@ -617,6 +648,18 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_worker_nodes_username ON worker_nodes(username);")
         .execute(pool)
         .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_enrollment_credentials_owner
+         ON enrollment_credentials(owner, expires_at);",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_client_identities_owner
+         ON client_identities(owner, role);",
+    )
+    .execute(pool)
+    .await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_vpn_peers_worker_id ON vpn_peers(worker_id);")
         .execute(pool)
         .await?;
@@ -848,6 +891,64 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(users_schema, fixture.schema_name());
+
+        for table_name in ["enrollment_credentials", "client_identities"] {
+            let table_exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_schema = $1 AND table_name = $2
+                )",
+            )
+            .bind(fixture.schema_name())
+            .bind(table_name)
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+            assert!(table_exists, "missing enrollment table {table_name}");
+        }
+        let enrollment_columns: Vec<String> = sqlx::query_scalar(
+            "SELECT column_name
+             FROM information_schema.columns
+             WHERE table_schema = $1 AND table_name = 'enrollment_credentials'",
+        )
+        .bind(fixture.schema_name())
+        .fetch_all(&fixture.pool)
+        .await
+        .unwrap();
+        for column in [
+            "credential_id",
+            "owner",
+            "role",
+            "client_instance_id",
+            "token_sha256",
+            "expires_at",
+            "redeemed_at",
+            "redeemed_identity_id",
+        ] {
+            assert!(enrollment_columns.iter().any(|value| value == column));
+        }
+        let enrollment_indexes: Vec<String> = sqlx::query_scalar(
+            "SELECT indexname FROM pg_indexes
+             WHERE schemaname = $1 AND tablename = 'enrollment_credentials'",
+        )
+        .bind(fixture.schema_name())
+        .fetch_all(&fixture.pool)
+        .await
+        .unwrap();
+        assert!(enrollment_indexes
+            .iter()
+            .any(|value| value == "idx_enrollment_credentials_owner"));
+        let identity_indexes: Vec<String> = sqlx::query_scalar(
+            "SELECT indexname FROM pg_indexes
+             WHERE schemaname = $1 AND tablename = 'client_identities'",
+        )
+        .bind(fixture.schema_name())
+        .fetch_all(&fixture.pool)
+        .await
+        .unwrap();
+        assert!(identity_indexes
+            .iter()
+            .any(|value| value == "idx_client_identities_owner"));
 
         let public_fixture_users_exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(
