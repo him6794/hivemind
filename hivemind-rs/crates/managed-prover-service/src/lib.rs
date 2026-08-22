@@ -91,13 +91,14 @@ impl ManagedProverService {
             )
         })?;
         let verifier = ManagedProofAuthorizationVerifier::from_pem(public_key)?;
+        let queue_capacity = config.managed_proof.provider_queue_capacity.max(1);
         let service = Self {
             state: Arc::new(ServiceState {
                 verifier,
                 executable: executable.to_string(),
                 timeout: Duration::from_secs(config.executor.managed_prover_timeout_secs),
-                queue_capacity: config.managed_proof.provider_queue_capacity.max(1),
-                semaphore: Arc::new(Semaphore::new(1)),
+                queue_capacity,
+                semaphore: Arc::new(Semaphore::new(queue_capacity)),
                 state_dir,
                 jobs: Mutex::new(HashMap::new()),
                 trusted_managed_dsl_capabilities: config
@@ -745,6 +746,25 @@ mod tests {
             .metadata_mut()
             .insert("authorization", "Bearer test-token".parse().unwrap());
         assert_eq!(authorization_token(&request).unwrap(), "test-token");
+    }
+
+    #[test]
+    fn configured_queue_capacity_controls_provider_concurrency() {
+        let (_private_key, public_key) = hivemind_config::generate_worker_execution_test_key_pair();
+        let state_dir =
+            std::env::temp_dir().join(format!("hivemind-managed-prover-test-{}", Uuid::new_v4()));
+        let mut config = HivemindConfig::default();
+        config.managed_proof.authorization_public_key_pem = public_key;
+        config.managed_proof.provider_executable = "test-prover".into();
+        config.managed_proof.provider_state_dir = state_dir.to_string_lossy().into_owned();
+        config.managed_proof.provider_queue_capacity = 3;
+
+        let service = ManagedProverService::from_config(&config).unwrap();
+        assert_eq!(service.state.queue_capacity, 3);
+        assert_eq!(service.state.semaphore.available_permits(), 3);
+
+        drop(service);
+        let _ = std::fs::remove_dir_all(state_dir);
     }
 
     #[test]
