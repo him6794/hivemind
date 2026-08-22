@@ -1,7 +1,9 @@
 use crate::managed_proof_verifier::{verify_managed_proof, ManagedProofVerifierError};
 use anyhow::Result;
 use chrono::{Duration as ChronoDuration, Utc};
-use hivemind_auth::managed_proof::{new_claims, ManagedProofAuthorizationSigner};
+use hivemind_auth::managed_proof::{
+    claims_with_issuance, new_claims, ManagedProofAuthorizationSigner,
+};
 use hivemind_auth::worker_execution::{WorkerExecutionIdentity, WorkerExecutionSigner};
 use hivemind_config::ManagedProofRolloutMode;
 use hivemind_database::DatabaseManager;
@@ -32,7 +34,9 @@ use tracing::{error, info, warn};
 
 use crate::managed_proof_metrics::{self, ManagedProofMetricEvent};
 use crate::scheduler;
-use crate::task_repository::{ManagedProofAuthorizationRecord, TaskRepository};
+use crate::task_repository::{
+    ManagedProofAuthorizationRecord, ManagedProofAuthorizationStateUpdate, TaskRepository,
+};
 
 pub struct Dispatcher {
     repo: Arc<TaskRepository>,
@@ -629,43 +633,108 @@ async fn mint_managed_proof_dispatch(
             .ok_or_else(|| anyhow::anyhow!("managed proof attempt generation is invalid"))?
     };
 
-    let (deadline_unix_ms, lifetime) = managed_proof_deadline(task)?;
     let (execution_id, attempt_id, idempotency_key) = managed_proof_attempt_identity(task)?;
-    let request = managed_proof_request(
-        task,
-        worker_id,
-        &execution_id,
-        &attempt_id,
-        &idempotency_key,
-        lease_generation,
-        deadline_unix_ms,
-    )?;
+    let mut deadline_unix_ms = match repo
+        .managed_proof_authorization_deadline(&task.task_id, lease_generation, &attempt_id)
+        .await?
+    {
+        Some(deadline) => deadline,
+        None => managed_proof_deadline(task)?.0,
+    };
+    if deadline_unix_ms <= Utc::now().timestamp_millis() {
+        anyhow::bail!("managed proof deadline has expired");
+    }
+
     let signer = ManagedProofAuthorizationSigner::from_pem(authorization_private_key_pem)?;
-    let jti = uuid::Uuid::new_v4().to_string();
-    let claims = new_claims(&request, jti.clone(), Utc::now(), lifetime)?;
+    // A concurrent first mint can win the task-row lock between the lookup and
+    // insert. If that happens, retry once using the persisted deadline; the
+    // deadline participates in the canonical request digest and must not be
+    // regenerated for the same attempt.
+    let mut retried_with_persisted_deadline = false;
+    let (request, persisted) = loop {
+        let lifetime = managed_proof_lifetime(deadline_unix_ms)?;
+        let request = managed_proof_request(
+            task,
+            worker_id,
+            &execution_id,
+            &attempt_id,
+            &idempotency_key,
+            lease_generation,
+            deadline_unix_ms,
+        )?;
+        let candidate_claims = new_claims(
+            &request,
+            uuid::Uuid::new_v4().to_string(),
+            Utc::now(),
+            lifetime,
+        )?;
+        let candidate_token = signer.encode(&candidate_claims)?;
+        let image_id_json = serde_json::to_string(&request.image_id)?;
+        let result = repo
+            .record_managed_proof_authorization(&ManagedProofAuthorizationRecord {
+                task_id: request.task_id.clone(),
+                protocol_version: request.protocol_version,
+                proof_task_id: request.proof_task_id.clone(),
+                owner: request.owner.clone(),
+                worker_id: request.worker_id.clone(),
+                execution_id: request.execution_id.clone(),
+                attempt_id: request.attempt_id.clone(),
+                idempotency_key: request.idempotency_key.clone(),
+                request_digest: request.request_digest.clone(),
+                lease_generation: request.lease_generation,
+                runtime: request.runtime.clone(),
+                backend_id: request.backend_id.clone(),
+                semantics_manifest_sha256: request.semantics_manifest_sha256.clone(),
+                proof_scheme: request.proof_scheme.clone(),
+                image_id_json,
+                deadline_unix_ms: request.deadline_unix_ms,
+                token_jti: candidate_claims.jti.clone(),
+                token_iat: i64::try_from(candidate_claims.iat)
+                    .map_err(|_| anyhow::anyhow!("managed proof issue time is out of range"))?,
+                token_exp: i64::try_from(candidate_claims.exp)
+                    .map_err(|_| anyhow::anyhow!("managed proof expiry is out of range"))?,
+                token_sha256: sha256_prefixed(candidate_token.as_bytes()),
+            })
+            .await;
+        match result {
+            Ok(persisted) => break (request, persisted),
+            Err(error) if !retried_with_persisted_deadline => {
+                let Some(persisted_deadline) = repo
+                    .managed_proof_authorization_deadline(
+                        &task.task_id,
+                        lease_generation,
+                        &attempt_id,
+                    )
+                    .await?
+                else {
+                    return Err(error);
+                };
+                if persisted_deadline == deadline_unix_ms {
+                    return Err(error);
+                }
+                if persisted_deadline <= Utc::now().timestamp_millis() {
+                    anyhow::bail!("persisted managed proof deadline has expired");
+                }
+                deadline_unix_ms = persisted_deadline;
+                retried_with_persisted_deadline = true;
+            }
+            Err(error) => return Err(error),
+        }
+    };
+
+    let claims = claims_with_issuance(
+        &request,
+        persisted.token_jti.clone(),
+        persisted.token_iat,
+        persisted.token_exp,
+    )?;
     let token = signer.encode(&claims)?;
     let token_sha256 = sha256_prefixed(token.as_bytes());
-    let image_id_json = serde_json::to_string(&request.image_id)?;
-
-    repo.record_managed_proof_authorization(&ManagedProofAuthorizationRecord {
-        task_id: request.task_id.clone(),
-        owner: request.owner.clone(),
-        worker_id: request.worker_id.clone(),
-        execution_id: request.execution_id.clone(),
-        attempt_id: request.attempt_id.clone(),
-        idempotency_key: request.idempotency_key.clone(),
-        request_digest: request.request_digest.clone(),
-        lease_generation: request.lease_generation,
-        runtime: request.runtime.clone(),
-        backend_id: request.backend_id.clone(),
-        semantics_manifest_sha256: request.semantics_manifest_sha256.clone(),
-        proof_scheme: request.proof_scheme.clone(),
-        image_id_json,
-        deadline_unix_ms: request.deadline_unix_ms,
-        token_jti: jti,
-        token_sha256,
-    })
-    .await?;
+    if token_sha256 != persisted.token_sha256 {
+        anyhow::bail!(
+            "managed proof authorization cannot be regenerated with the configured signing key"
+        );
+    }
 
     Ok(Some(ManagedProofDispatch {
         token,
@@ -674,7 +743,7 @@ async fn mint_managed_proof_dispatch(
         idempotency_key,
         request_digest: request.request_digest,
         lease_generation,
-        deadline_unix_ms,
+        deadline_unix_ms: request.deadline_unix_ms,
     }))
 }
 
@@ -711,15 +780,20 @@ fn managed_proof_deadline(task: &Task) -> Result<(i64, ChronoDuration)> {
             rpc_deadline
         }
     });
-    let remaining_ms = deadline.timestamp_millis() - now.timestamp_millis();
-    if remaining_ms <= 0 {
-        anyhow::bail!("managed proof deadline has expired");
-    }
-    let lifetime_seconds = (remaining_ms + 999) / 1_000 + 5;
-    Ok((
-        deadline.timestamp_millis(),
-        ChronoDuration::seconds(lifetime_seconds),
-    ))
+    let deadline_unix_ms = deadline.timestamp_millis();
+    Ok((deadline_unix_ms, managed_proof_lifetime(deadline_unix_ms)?))
+}
+
+fn managed_proof_lifetime(deadline_unix_ms: i64) -> Result<ChronoDuration> {
+    let remaining_ms = deadline_unix_ms
+        .checked_sub(Utc::now().timestamp_millis())
+        .filter(|remaining| *remaining > 0)
+        .ok_or_else(|| anyhow::anyhow!("managed proof deadline has expired"))?;
+    let lifetime_ms = remaining_ms
+        .checked_add(999)
+        .ok_or_else(|| anyhow::anyhow!("managed proof lifetime overflowed"))?;
+    let lifetime_seconds = lifetime_ms / 1_000 + 5;
+    Ok(ChronoDuration::seconds(lifetime_seconds))
 }
 
 fn managed_proof_request(
@@ -1374,6 +1448,7 @@ async fn execute_on_worker_with_managed_proof_key(
     if let Err(error) = update_managed_proof_dispatch_state(
         repo.as_ref(),
         &task.task_id,
+        &worker_id,
         managed_proof.as_ref(),
         "submitted",
     )
@@ -1389,6 +1464,7 @@ async fn execute_on_worker_with_managed_proof_key(
     if let Err(error) = update_managed_proof_dispatch_state(
         repo.as_ref(),
         &task.task_id,
+        &worker_id,
         managed_proof.as_ref(),
         "running",
     )
@@ -1859,19 +1935,24 @@ async fn complete_legacy_worker_result(
 async fn update_managed_proof_dispatch_state(
     repo: &TaskRepository,
     task_id: &str,
+    worker_id: &str,
     dispatch: Option<&ManagedProofDispatch>,
     state: &str,
 ) -> Result<()> {
     let Some(dispatch) = dispatch else {
         return Ok(());
     };
-    repo.update_managed_proof_authorization_state(
+    let update = ManagedProofAuthorizationStateUpdate {
         task_id,
-        dispatch.lease_generation,
-        &dispatch.attempt_id,
+        lease_generation: dispatch.lease_generation,
+        attempt_id: &dispatch.attempt_id,
+        worker_id,
+        execution_id: &dispatch.execution_id,
+        idempotency_key: &dispatch.idempotency_key,
+        request_digest: &dispatch.request_digest,
         state,
-    )
-    .await
+    };
+    repo.update_managed_proof_authorization_state(&update).await
 }
 
 async fn record_managed_proof_audit(
