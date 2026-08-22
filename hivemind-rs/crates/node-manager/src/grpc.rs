@@ -42,6 +42,8 @@ use hivemind_proto::{
     GetWorkerTrustProfileResponse,
     HeartbeatRequest,
     HeartbeatResponse,
+    IssueEnrollmentCredentialRequest,
+    IssueEnrollmentCredentialResponse,
     ListAdminAuditLogsRequest,
     ListAdminAuditLogsResponse,
     ListAdminSchedulingCacheAnomaliesRequest,
@@ -59,6 +61,8 @@ use hivemind_proto::{
     PullBatchResponse,
     QuoteTaskRequest,
     QuoteTaskResponse,
+    RedeemEnrollmentCredentialRequest,
+    RedeemEnrollmentCredentialResponse,
     RefreshTokenRequest,
     RefreshTokenResponse,
     RegisterUserRequest,
@@ -108,7 +112,7 @@ use crate::service::{
     dynamic_capability_observation, NodeManagerService as NmSvc, WorkerRegistration,
 };
 use crate::NodeManager;
-use hivemind_auth::AuthManager;
+use hivemind_auth::{enrollment, AuthManager};
 use hivemind_database::postgres;
 use hivemind_models::{
     Claims, Task, TaskStatus, WorkerCapabilityReport as ModelWorkerCapabilityReport, WorkerNode,
@@ -272,6 +276,123 @@ impl UserService for GrpcUserService {
             })),
         }
     }
+    async fn issue_enrollment_credential(
+        &self,
+        request: Request<IssueEnrollmentCredentialRequest>,
+    ) -> Result<Response<IssueEnrollmentCredentialResponse>, Status> {
+        let req = request.into_inner();
+        let claims = self
+            .state
+            .auth
+            .validate_token(&req.token)
+            .map_err(|_| Status::unauthenticated("Invalid token"))?;
+        let role = match enrollment::EnrollmentRole::parse(&req.role) {
+            Ok(role) => role,
+            Err(error) => {
+                return Ok(Response::new(IssueEnrollmentCredentialResponse {
+                    success: false,
+                    status_message: error.to_string(),
+                    credential: String::new(),
+                    credential_id: String::new(),
+                    owner: String::new(),
+                    role: String::new(),
+                    expires_at_unix: 0,
+                }))
+            }
+        };
+        let client_instance_id =
+            match enrollment::validate_client_instance_id(&req.client_instance_id) {
+                Ok(value) => value,
+                Err(error) => {
+                    return Ok(Response::new(IssueEnrollmentCredentialResponse {
+                        success: false,
+                        status_message: error.to_string(),
+                        credential: String::new(),
+                        credential_id: String::new(),
+                        owner: String::new(),
+                        role: String::new(),
+                        expires_at_unix: 0,
+                    }))
+                }
+            };
+        let active: Option<bool> =
+            sqlx::query_scalar("SELECT is_active FROM users WHERE username = $1")
+                .bind(&claims.sub)
+                .fetch_optional(&self.state.scheduler.database().pool)
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+        if active != Some(true) {
+            return Err(Status::unauthenticated("User is not active"));
+        }
+
+        let issued = enrollment::issue_credential(&claims.sub, role, &client_instance_id)
+            .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        if enrollment::store_credential(&self.state.scheduler.database().pool, &issued)
+            .await
+            .is_err()
+        {
+            return Ok(Response::new(IssueEnrollmentCredentialResponse {
+                success: false,
+                status_message: "failed to create enrollment credential".into(),
+                credential: String::new(),
+                credential_id: String::new(),
+                owner: String::new(),
+                role: String::new(),
+                expires_at_unix: 0,
+            }));
+        }
+        Ok(Response::new(IssueEnrollmentCredentialResponse {
+            success: true,
+            status_message: "OK".into(),
+            credential: issued.token,
+            credential_id: issued.credential_id.to_string(),
+            owner: issued.owner,
+            role: issued.role.as_str().into(),
+            expires_at_unix: issued.expires_at.timestamp(),
+        }))
+    }
+
+    async fn redeem_enrollment_credential(
+        &self,
+        request: Request<RedeemEnrollmentCredentialRequest>,
+    ) -> Result<Response<RedeemEnrollmentCredentialResponse>, Status> {
+        let token = request.into_inner().credential;
+        let failure = || RedeemEnrollmentCredentialResponse {
+            success: false,
+            status_message: "invalid, expired, or already redeemed enrollment credential".into(),
+            credential_id: String::new(),
+            identity_id: String::new(),
+            owner: String::new(),
+            role: String::new(),
+            client_instance_id: String::new(),
+            worker_id: String::new(),
+            expires_at_unix: 0,
+        };
+        if token.trim().is_empty() || token.len() > enrollment::ENROLLMENT_CREDENTIAL_MAX_BYTES {
+            return Ok(Response::new(failure()));
+        }
+        let redeemed = match enrollment::redeem_credential(
+            &self.state.scheduler.database().pool,
+            &token,
+        )
+        .await
+        {
+            Ok(redeemed) => redeemed,
+            Err(_) => return Ok(Response::new(failure())),
+        };
+        Ok(Response::new(RedeemEnrollmentCredentialResponse {
+            success: true,
+            status_message: "OK".into(),
+            credential_id: redeemed.credential_id.to_string(),
+            identity_id: redeemed.identity_id.to_string(),
+            owner: redeemed.owner,
+            role: redeemed.role.as_str().into(),
+            client_instance_id: redeemed.client_instance_id,
+            worker_id: redeemed.worker_id.unwrap_or_default(),
+            expires_at_unix: redeemed.expires_at.timestamp(),
+        }))
+    }
+
     async fn get_balance(
         &self,
         request: Request<GetBalanceRequest>,
@@ -4367,6 +4488,131 @@ mod tests {
         assert_eq!(response.status_message, "invalid transfer lease request");
     }
 
+    #[tokio::test]
+    async fn enrollment_rpcs_assign_and_recover_server_identity() {
+        let lock = grpc_db_lock();
+        let _lock_guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        sqlx::query("INSERT INTO users (username, password_hash) VALUES ($1, 'hash')")
+            .bind(&owner)
+            .execute(&service.state.scheduler.database().pool)
+            .await
+            .unwrap();
+        let user_service = GrpcUserService::new(service.state.clone());
+        let token = token_for(&service.state.auth, &owner);
+
+        let issued = user_service
+            .issue_enrollment_credential(Request::new(IssueEnrollmentCredentialRequest {
+                token,
+                role: "worker".into(),
+                client_instance_id: "device-rpc-1".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(issued.success, "{}", issued.status_message);
+        assert!(!issued.credential.is_empty());
+        assert_eq!(issued.owner, owner);
+        assert_eq!(issued.role, "worker");
+        let credential = issued.credential.clone();
+
+        let redeemed = user_service
+            .redeem_enrollment_credential(Request::new(RedeemEnrollmentCredentialRequest {
+                credential,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(redeemed.success, "{}", redeemed.status_message);
+        assert_eq!(redeemed.owner, owner);
+        assert_eq!(redeemed.role, "worker");
+        assert_eq!(redeemed.client_instance_id, "device-rpc-1");
+        assert!(redeemed.worker_id.starts_with("hm-worker-"));
+
+        let mut tampered = issued.credential.clone();
+        let last = tampered.pop().expect("issued credential has a secret");
+        tampered.push(if last == '0' { '1' } else { '0' });
+        let tampered_response = user_service
+            .redeem_enrollment_credential(Request::new(RedeemEnrollmentCredentialRequest {
+                credential: tampered,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!tampered_response.success);
+        assert!(tampered_response.credential_id.is_empty());
+        assert!(tampered_response.identity_id.is_empty());
+        assert!(tampered_response.owner.is_empty());
+        assert!(tampered_response.role.is_empty());
+        assert!(tampered_response.client_instance_id.is_empty());
+        assert!(tampered_response.worker_id.is_empty());
+        assert_eq!(tampered_response.expires_at_unix, 0);
+
+        let replay = user_service
+            .redeem_enrollment_credential(Request::new(RedeemEnrollmentCredentialRequest {
+                credential: issued.credential,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!replay.success);
+        assert!(replay.credential_id.is_empty());
+        assert!(replay.worker_id.is_empty());
+        assert!(!replay.status_message.contains("hm-enroll-v1"));
+
+        sqlx::query("DELETE FROM users WHERE username = $1")
+            .bind(&owner)
+            .execute(&service.state.scheduler.database().pool)
+            .await
+            .unwrap();
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+    }
+
+    #[tokio::test]
+    async fn enrollment_issuance_rejects_inactive_users_without_returning_credential() {
+        let lock = grpc_db_lock();
+        let _lock_guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, is_active) VALUES ($1, 'hash', false)",
+        )
+        .bind(&owner)
+        .execute(&service.state.scheduler.database().pool)
+        .await
+        .unwrap();
+        let user_service = GrpcUserService::new(service.state.clone());
+        let token = token_for(&service.state.auth, &owner);
+
+        let error = user_service
+            .issue_enrollment_credential(Request::new(IssueEnrollmentCredentialRequest {
+                token,
+                role: "worker".into(),
+                client_instance_id: "device-inactive".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unauthenticated);
+
+        let persisted: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM enrollment_credentials WHERE owner = $1")
+                .bind(&owner)
+                .fetch_one(&service.state.scheduler.database().pool)
+                .await
+                .unwrap();
+        assert_eq!(persisted, 0);
+        sqlx::query("DELETE FROM users WHERE username = $1")
+            .bind(&owner)
+            .execute(&service.state.scheduler.database().pool)
+            .await
+            .unwrap();
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+    }
     #[tokio::test]
     async fn register_user_rejects_configured_admin_username() {
         // Given: a configured admin username and a real isolated registration database.

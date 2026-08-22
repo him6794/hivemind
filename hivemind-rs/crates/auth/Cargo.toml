@@ -12,6 +12,9 @@ chrono.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 sqlx.workspace = true
+sha2.workspace = true
+hex.workspace = true
+rand.workspace = true
 hivemind-models = { path = "../models" }
 hivemind-database = { path = "../database" }
 hivemind-managed-prover-protocol = { path = "../managed-prover-protocol" }

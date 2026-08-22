@@ -14,12 +14,20 @@ pub fn create_router(state: AppState) -> Router {
     let public = Router::new()
         .route("/health", get(super::handlers::health_check))
         .route("/api/register", post(super::handlers::register))
-        .route("/api/login", post(super::handlers::login));
+        .route("/api/login", post(super::handlers::login))
+        .route(
+            "/api/enrollment/redeem",
+            post(super::handlers::redeem_enrollment_credential),
+        );
 
     let protected = Router::new()
         .route("/api/balance", get(super::handlers::get_balance))
         .route("/api/transfer", post(super::handlers::transfer_cpt))
         .route("/api/vpn/config", post(super::handlers::issue_vpn_config))
+        .route(
+            "/api/enrollment/credential",
+            post(super::handlers::issue_enrollment_credential),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             mw::auth_middleware,

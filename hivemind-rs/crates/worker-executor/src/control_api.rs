@@ -6,7 +6,7 @@ use axum::{
     Json, Router,
 };
 use hivemind_client_runtime::{self as client_runtime, ClientRole};
-use hivemind_config::HivemindConfig;
+use hivemind_config::{HivemindConfig, WorkerAdmissionMode};
 use hivemind_models::ResourceSpec;
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -638,6 +638,27 @@ async fn register_worker(
         }
     }
 
+    let server_enrollment = if state.config.general_compute.admission_mode
+        == WorkerAdmissionMode::PublicDynamic
+    {
+        match client_runtime::ensure_client_enrollment(&state.config, ClientRole::Worker, &token)
+            .await
+        {
+            Ok(enrollment) => Some(enrollment),
+            Err(error) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(StatusResponse {
+                        success: false,
+                        status_message: format!("automatic Worker enrollment failed: {error}"),
+                    }),
+                )
+            }
+        }
+    } else {
+        None
+    };
+
     let endpoint = match effective_worker_advertise_addr(&state, body.ip.trim()).await {
         Ok(endpoint) => endpoint,
         Err(err) => {
@@ -651,12 +672,16 @@ async fn register_worker(
         }
     };
 
-    let owner = body
-        .username
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_default();
+    let owner = if let Some(enrollment) = server_enrollment.as_ref() {
+        enrollment.owner.clone()
+    } else {
+        body.username
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_default()
+            .to_string()
+    };
     if owner.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -667,13 +692,29 @@ async fn register_worker(
         );
     }
 
-    let worker_id = body
-        .worker_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(owner);
-    if !is_safe_worker_id(worker_id) {
+    let worker_id = if let Some(enrollment) = server_enrollment.as_ref() {
+        match enrollment.worker_id.clone() {
+            Some(worker_id) => worker_id,
+            None => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(StatusResponse {
+                        success: false,
+                        status_message: "automatic enrollment did not return a worker identity"
+                            .into(),
+                    }),
+                )
+            }
+        }
+    } else {
+        body.worker_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&owner)
+            .to_string()
+    };
+    if !is_safe_worker_id(&worker_id) {
         return (
             StatusCode::BAD_REQUEST,
             Json(StatusResponse {
@@ -753,7 +794,7 @@ async fn register_worker(
     match register_once_with_capability_report(
         &state.nodepool_addr(),
         &profile.worker_id,
-        owner,
+        &owner,
         &profile.ip,
         profile.to_resource_spec(),
         &profile.location,
@@ -769,7 +810,7 @@ async fn register_worker(
             // registration loop during process startup. Start it after the
             // first successful registration so the node remains online and
             // the dispatcher can continue seeing it after 30 seconds.
-            state.ensure_registration_loop(owner, &profile.worker_id, &token);
+            state.ensure_registration_loop(&owner, &profile.worker_id, &token);
             (
                 StatusCode::OK,
                 Json(StatusResponse {

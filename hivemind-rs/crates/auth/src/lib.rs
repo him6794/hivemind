@@ -1,3 +1,4 @@
+pub mod enrollment;
 pub mod jwt_service;
 pub mod managed_proof;
 pub mod user_repository;

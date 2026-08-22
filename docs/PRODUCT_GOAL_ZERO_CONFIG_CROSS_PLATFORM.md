@@ -216,8 +216,14 @@ Headscale 可以保留為選配：
 ### 仍未達到最終目標
 
 1. **Enrollment 還不是完整零設定流程**
-   - 現有流程仍可能需要 endpoint、TLS path、Worker ID 或環境變數。
-   - 登入後自動取得 identity、連線與 Provider 設定尚未完全打通。
+   - **Task #5 已完成：** Website API 現在可在已驗證登入後簽發
+     10 分鐘、角色限定、單次使用的 enrollment credential；只保存
+     SHA-256 hash，並由 Nodepool 建立或恢復 owner/device/role identity。
+   - Worker public dynamic registration 會使用 server-assigned owner 與
+     Worker ID；重播、過期、錯誤角色/裝置與並發 redemption 會 fail closed。
+   - **仍未完成：** outbound session、各平台 secure storage，以及移除
+     Headscale/VPN compatibility path 對現有部署的依賴；因此這一項不代表
+     最終「完全零設定」產品已驗收。
 
 2. **Public dynamic admission is implemented; private static mode remains optional**
    - Public Nodepool registration now accepts bounded, canonical Worker
