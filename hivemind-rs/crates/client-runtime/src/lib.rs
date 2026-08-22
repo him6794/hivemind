@@ -1630,7 +1630,7 @@ async fn wait_for_nodepool_after_join(
         }
         // Check WireGuard tunnel is up periodically without making it the only
         // readiness signal; the protocol probe below is authoritative.
-        if attempt == 1 || attempt % 4 == 0 {
+        if attempt == 1 || attempt.is_multiple_of(4) {
             let _ = wireguard_is_up(session).await;
         }
         match first_reachable_nodepool_endpoint(role, configured_endpoint).await {
@@ -1858,7 +1858,7 @@ fn endpoint_port_for_worker(role: ClientRole, configured_worker_addr: Option<&st
     configured_worker_addr
         .as_deref()
         .and_then(|addr| {
-            normalize_nodepool_endpoint(&addr)
+            normalize_nodepool_endpoint(addr)
                 .rsplit_once(':')
                 .map(|(_, port)| port.to_string())
         })

@@ -1,13 +1,23 @@
 use general_compute_runtime::production::ManagedDslBackendRegistration;
 use general_compute_runtime::{
     CapabilityMatrix, GeneralComputeRequest, TrustedWorkerCapabilityRegistration,
-    GENERAL_COMPUTE_RUNTIME_VERSION,
+    GENERAL_COMPUTE_RUNTIME_VERSION, MANAGED_DSL_RUNTIME_VERSION,
 };
 
 use hivemind_models::{Task, WorkerNode, WorkerStatus};
 
+/// Check a Nodepool-persisted, operator-approved managed DSL capability snapshot
+/// against the exact task identity that will be executed.
+///
+/// `managed-function-v0` predates the explicit backend identity fields, so an
+/// approved registration for that runtime is sufficient. The
+/// `production_sandboxed_dsl` runtime must bind both the selected backend and
+/// the canonical semantics manifest to the approved registration.
 pub fn worker_supports_managed_dsl_request(
     persisted_capabilities_json: Option<&str>,
+    runtime: &str,
+    requested_backend_id: Option<&str>,
+    requested_semantics_manifest_sha256: Option<&str>,
     requested_budget_units: i64,
 ) -> bool {
     let Some(persisted_capabilities_json) = persisted_capabilities_json else {
@@ -21,9 +31,22 @@ pub fn worker_supports_managed_dsl_request(
     else {
         return false;
     };
-    registrations.len() == 1
-        && registrations[0].validate().is_ok()
-        && requested_budget_units as u64 <= registrations[0].max_usage_units
+    registrations.iter().any(|registration| {
+        registration.validate().is_ok()
+            && registration.runtime_version == MANAGED_DSL_RUNTIME_VERSION
+            && requested_budget_units as u64 <= registration.max_usage_units
+            && match runtime {
+                "managed-function-v0" => true,
+                "production_sandboxed_dsl" => {
+                    requested_backend_id.is_some_and(|backend_id| {
+                        !backend_id.trim().is_empty() && backend_id == registration.backend_id
+                    }) && requested_semantics_manifest_sha256.is_some_and(|semantics| {
+                        semantics == registration.semantics_manifest_sha256
+                    })
+                }
+                _ => false,
+            }
+    })
 }
 
 pub fn worker_supports_general_compute_request(
@@ -92,10 +115,15 @@ pub async fn find_best_worker(task: &Task, workers: &[WorkerNode]) -> Option<Wor
         };
 
         let general_compute_compatible = match task.runtime.as_deref().map(str::trim) {
-            Some("production_sandboxed_dsl") => worker_supports_managed_dsl_request(
-                w.managed_dsl_capabilities_json.as_deref(),
-                task.max_cpt,
-            ),
+            Some("managed-function-v0") | Some("production_sandboxed_dsl") => {
+                worker_supports_managed_dsl_request(
+                    w.managed_dsl_capabilities_json.as_deref(),
+                    task.runtime.as_deref().unwrap_or_default(),
+                    task.managed_dsl_backend_id.as_deref(),
+                    task.managed_dsl_semantics_manifest_sha256.as_deref(),
+                    task.max_cpt,
+                )
+            }
             Some(GENERAL_COMPUTE_RUNTIME_VERSION) => task
                 .general_compute_manifest_json
                 .as_deref()
@@ -225,8 +253,107 @@ mod tests {
             max_output_bytes: 1024,
         };
         let snapshot = serde_json::to_string(&vec![registration]).unwrap();
-        assert!(worker_supports_managed_dsl_request(Some(&snapshot), 10));
-        assert!(!worker_supports_managed_dsl_request(None, 10));
+        assert!(worker_supports_managed_dsl_request(
+            Some(&snapshot),
+            "production_sandboxed_dsl",
+            Some("dsl-default"),
+            Some(general_compute_runtime::MANAGED_DSL_SEMANTICS_MANIFEST_SHA256),
+            10,
+        ));
+        assert!(!worker_supports_managed_dsl_request(
+            None,
+            "production_sandboxed_dsl",
+            Some("dsl-default"),
+            Some(general_compute_runtime::MANAGED_DSL_SEMANTICS_MANIFEST_SHA256),
+            10,
+        ));
+    }
+
+    #[test]
+    fn managed_dsl_matching_rejects_wrong_backend_and_semantics() {
+        let registration = ManagedDslBackendRegistration {
+            backend_id: "dsl-default".into(),
+            runtime_version: MANAGED_DSL_RUNTIME_VERSION.into(),
+            semantics_manifest_sha256:
+                general_compute_runtime::MANAGED_DSL_SEMANTICS_MANIFEST_SHA256.into(),
+            max_usage_units: 10,
+            max_output_bytes: 1024,
+        };
+        let snapshot = serde_json::to_string(&vec![registration]).unwrap();
+        let semantics = general_compute_runtime::MANAGED_DSL_SEMANTICS_MANIFEST_SHA256;
+
+        assert!(!worker_supports_managed_dsl_request(
+            Some(&snapshot),
+            "production_sandboxed_dsl",
+            Some("other-backend"),
+            Some(semantics),
+            10,
+        ));
+        assert!(!worker_supports_managed_dsl_request(
+            Some(&snapshot),
+            "production_sandboxed_dsl",
+            Some("dsl-default"),
+            Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            10,
+        ));
+    }
+
+    #[test]
+    fn managed_dsl_matching_accepts_one_of_multiple_approved_backends() {
+        let semantics = general_compute_runtime::MANAGED_DSL_SEMANTICS_MANIFEST_SHA256;
+        let registrations = vec![
+            ManagedDslBackendRegistration {
+                backend_id: "dsl-first".into(),
+                runtime_version: MANAGED_DSL_RUNTIME_VERSION.into(),
+                semantics_manifest_sha256: semantics.into(),
+                max_usage_units: 10,
+                max_output_bytes: 1024,
+            },
+            ManagedDslBackendRegistration {
+                backend_id: "dsl-second".into(),
+                runtime_version: MANAGED_DSL_RUNTIME_VERSION.into(),
+                semantics_manifest_sha256: semantics.into(),
+                max_usage_units: 20,
+                max_output_bytes: 1024,
+            },
+        ];
+        let snapshot = serde_json::to_string(&registrations).unwrap();
+
+        assert!(worker_supports_managed_dsl_request(
+            Some(&snapshot),
+            "production_sandboxed_dsl",
+            Some("dsl-second"),
+            Some(semantics),
+            20,
+        ));
+    }
+
+    #[test]
+    fn legacy_managed_dsl_matching_uses_an_approved_registration() {
+        let registration = ManagedDslBackendRegistration {
+            backend_id: "dsl-default".into(),
+            runtime_version: MANAGED_DSL_RUNTIME_VERSION.into(),
+            semantics_manifest_sha256:
+                general_compute_runtime::MANAGED_DSL_SEMANTICS_MANIFEST_SHA256.into(),
+            max_usage_units: 10,
+            max_output_bytes: 1024,
+        };
+        let snapshot = serde_json::to_string(&vec![registration]).unwrap();
+
+        assert!(worker_supports_managed_dsl_request(
+            Some(&snapshot),
+            "managed-function-v0",
+            None,
+            None,
+            10,
+        ));
+        assert!(!worker_supports_managed_dsl_request(
+            Some(&snapshot),
+            "managed-function-v0",
+            None,
+            None,
+            11,
+        ));
     }
 
     #[tokio::test]

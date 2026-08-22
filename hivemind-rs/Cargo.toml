@@ -13,6 +13,7 @@ members = [
     "crates/worker-executor",
     "crates/managed-proof",
     "crates/managed-prover-protocol",
+    "crates/managed-prover-service",
     "crates/client-runtime",
     "crates/vpn-service",
     "crates/hivemind-bin",

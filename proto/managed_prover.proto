@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+package managedprover;
+
+message GetCapabilitiesRequest {}
+
+message ManagedProofCapability {
+    string runtime = 1;
+    string backend_id = 2;
+    string semantics_manifest_sha256 = 3;
+    uint64 max_usage_units = 4;
+}
+
+message GetCapabilitiesResponse {
+    uint32 protocol_version = 1;
+    string proof_scheme = 2;
+    repeated fixed32 image_id = 3 [packed = true];
+    repeated ManagedProofCapability capabilities = 4;
+    uint64 max_source_bytes = 5;
+    uint64 max_input_bytes = 6;
+    uint64 max_response_bytes = 7;
+    uint32 queue_capacity = 8;
+    bool cancellation_supported = 9;
+}
+
+message SubmitManagedProofRequest {
+    // Canonical RemoteManagedProofRequest JSON. Authorization is carried in
+    // the per-RPC authorization metadata, never in durable job state.
+    bytes request_json = 1;
+}
+
+message SubmitManagedProofResponse {
+    string job_id = 1;
+    string state = 2;
+    string status_message = 3;
+}
+
+message GetManagedProofRequest {
+    string job_id = 1;
+}
+
+message GetManagedProofResponse {
+    string job_id = 1;
+    string state = 2;
+    string status_message = 3;
+    bytes response_json = 4;
+    bool retryable = 5;
+}
+
+message CancelManagedProofRequest {
+    string job_id = 1;
+}
+
+message CancelManagedProofResponse {
+    string job_id = 1;
+    string state = 2;
+    string status_message = 3;
+}
+
+service ManagedProofProvider {
+    rpc GetCapabilities(GetCapabilitiesRequest) returns (GetCapabilitiesResponse);
+    rpc SubmitManagedProof(SubmitManagedProofRequest) returns (SubmitManagedProofResponse);
+    rpc GetManagedProof(GetManagedProofRequest) returns (GetManagedProofResponse);
+    rpc CancelManagedProof(CancelManagedProofRequest) returns (CancelManagedProofResponse);
+}

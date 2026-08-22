@@ -1446,6 +1446,7 @@ dependencies = [
  "chrono",
  "hivemind-config",
  "hivemind-database",
+ "hivemind-managed-prover-protocol",
  "hivemind-models",
  "jsonwebtoken",
  "serde",
@@ -1557,9 +1558,33 @@ dependencies = [
 name = "hivemind-managed-prover-protocol"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "hivemind-managed-prover-service"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "general-compute-runtime",
+ "hivemind-auth",
+ "hivemind-config",
+ "hivemind-managed-proof",
+ "hivemind-managed-prover-protocol",
+ "hivemind-proto",
+ "prost",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tonic",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -1638,10 +1663,12 @@ dependencies = [
  "anyhow",
  "chrono",
  "general-compute-runtime",
+ "hex",
  "hivemind-auth",
  "hivemind-config",
  "hivemind-database",
  "hivemind-managed-proof",
+ "hivemind-managed-prover-protocol",
  "hivemind-models",
  "hivemind-proto",
  "jsonwebtoken",
@@ -1650,6 +1677,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1 0.10.6",
+ "sha2 0.10.9",
  "sqlx",
  "thiserror 1.0.69",
  "tokio",
