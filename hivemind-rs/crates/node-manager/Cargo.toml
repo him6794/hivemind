@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 tokio.workspace = true
+prost.workspace = true
 tonic.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -20,4 +21,6 @@ hivemind-database = { path = "../database" }
 hivemind-config = { path = "../config" }
 hivemind-auth = { path = "../auth" }
 hivemind-task-scheduler = { path = "../task-scheduler" }
+hivemind-client-core = { path = "../client-core" }
 general-compute-runtime = { path = "../../../executor-rs/crates/general-compute-runtime" }
+tokio-stream.workspace = true

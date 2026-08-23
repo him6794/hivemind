@@ -15,6 +15,7 @@ members = [
     "crates/managed-prover-protocol",
     "crates/managed-prover-service",
     "crates/client-runtime",
+    "crates/client-core",
     "crates/vpn-service",
     "crates/hivemind-bin",
 ]

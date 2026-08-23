@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::ServeDir;
 
-use crate::grpc_server::WorkerIdentityHandle;
+use crate::grpc_server::{GrpcWorkerNodeService, WorkerIdentityHandle};
 use crate::nodepool_client::{
     self, capability_report_to_proto, login_to_nodepool, register_once_with_capability_report,
 };
@@ -82,8 +82,11 @@ pub struct ControlApiState {
     pub nodepool_addr: std::sync::Arc<std::sync::Mutex<String>>,
     pub config: HivemindConfig,
     pub executor: std::sync::Arc<WorkerExecutor>,
+    pub worker_service: Option<std::sync::Arc<GrpcWorkerNodeService>>,
     pub worker_identity: WorkerIdentityHandle,
     pub registration_shutdown:
+        std::sync::Arc<std::sync::Mutex<Option<tokio::sync::watch::Sender<bool>>>>,
+    pub session_shutdown:
         std::sync::Arc<std::sync::Mutex<Option<tokio::sync::watch::Sender<bool>>>>,
 }
 
@@ -145,6 +148,40 @@ impl ControlApiState {
                 location: self.profile.location.clone(),
                 token: token.to_string(),
                 interval: std::time::Duration::from_secs(10),
+            },
+        );
+        *guard = Some(shutdown);
+    }
+
+    fn ensure_session_loop(&self, username: &str, worker_id: &str, token: &str) {
+        let client_instance_id = match client_runtime::client_instance_id(ClientRole::Worker) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!("Worker session identity is unavailable: {error}");
+                return;
+            }
+        };
+        let mut guard = self
+            .session_shutdown
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if guard.as_ref().is_some_and(|shutdown| !shutdown.is_closed()) {
+            return;
+        }
+        let Some(worker_service) = self.worker_service.clone() else {
+            tracing::warn!("Worker session service is unavailable");
+            return;
+        };
+        let shutdown = nodepool_client::start_session_loop(
+            self.executor.clone(),
+            nodepool_client::SessionLoopConfig {
+                nodepool_addr: self.nodepool_addr.clone(),
+                worker_id: worker_id.to_string(),
+                username: username.to_string(),
+                client_instance_id,
+                token: token.to_string(),
+                interval: std::time::Duration::from_secs(10),
+                service: worker_service,
             },
         );
         *guard = Some(shutdown);
@@ -213,10 +250,12 @@ pub fn router(profile: WorkerProfile) -> Router {
             )),
             config: config.clone(),
             executor: std::sync::Arc::new(WorkerExecutor::new(config.clone())),
+            worker_service: None,
             worker_identity: std::sync::Arc::new(std::sync::Mutex::new(Some(
                 profile.worker_id.clone(),
             ))),
             registration_shutdown: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            session_shutdown: std::sync::Arc::new(std::sync::Mutex::new(None)),
         },
         &config.server.worker_control_cors_allowed_origins,
     )
@@ -241,10 +280,12 @@ pub fn router_with_profile_and_allowed_origins(
             )),
             config: config.clone(),
             executor: std::sync::Arc::new(WorkerExecutor::new(config.clone())),
+            worker_service: None,
             worker_identity: std::sync::Arc::new(std::sync::Mutex::new(Some(
                 profile.worker_id.clone(),
             ))),
             registration_shutdown: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            session_shutdown: std::sync::Arc::new(std::sync::Mutex::new(None)),
         },
         allowed_origins,
     )
@@ -297,10 +338,12 @@ pub async fn serve(addr: &str, profile: WorkerProfile) -> Result<()> {
             )),
             config: config.clone(),
             executor: std::sync::Arc::new(WorkerExecutor::new(config.clone())),
+            worker_service: None,
             worker_identity: std::sync::Arc::new(std::sync::Mutex::new(Some(
                 profile.worker_id.clone(),
             ))),
             registration_shutdown: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            session_shutdown: std::sync::Arc::new(std::sync::Mutex::new(None)),
         },
         &config.server.worker_control_cors_allowed_origins,
         Some(&config.server.worker_ui_dir),
@@ -811,6 +854,7 @@ async fn register_worker(
             // first successful registration so the node remains online and
             // the dispatcher can continue seeing it after 30 seconds.
             state.ensure_registration_loop(&owner, &profile.worker_id, &token);
+            state.ensure_session_loop(&owner, &profile.worker_id, &token);
             (
                 StatusCode::OK,
                 Json(StatusResponse {
@@ -925,8 +969,10 @@ mod tests {
             nodepool_addr: std::sync::Arc::new(std::sync::Mutex::new("127.0.0.1:50051".into())),
             config: HivemindConfig::default(),
             executor: std::sync::Arc::new(super::WorkerExecutor::new(HivemindConfig::default())),
+            worker_service: None,
             worker_identity: std::sync::Arc::new(std::sync::Mutex::new(Some("worker-1".into()))),
             registration_shutdown: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            session_shutdown: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 

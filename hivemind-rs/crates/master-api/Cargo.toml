@@ -29,4 +29,5 @@ bcrypt.workspace = true
 hivemind-auth = { path = "../auth" }
 hivemind-database = { path = "../database" }
 hivemind-node-manager = { path = "../node-manager" }
+hivemind-client-core = { path = "../client-core" }
 hivemind-task-scheduler = { path = "../task-scheduler" }

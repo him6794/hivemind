@@ -7,15 +7,22 @@ use hivemind_models::{
 };
 use hivemind_proto::{
     node_manager_service_client::NodeManagerServiceClient, user_service_client::UserServiceClient,
-    LoginRequest, RegisterWorkerNodeRequest, ResourceSpec as ProtoResourceSpec,
-    ResourceUsage as ProtoResourceUsage, RunningStatusRequest, TaskOutputUploadRequest,
-    TaskResultUploadRequest, TaskUsageRequest, ValidateGeneralComputeTransferLeaseRequest,
-    WorkerCapabilityReport as ProtoWorkerCapabilityReport,
+    worker_node_service_server::WorkerNodeService, worker_session_client_frame,
+    worker_session_server_frame, worker_session_service_client::WorkerSessionServiceClient,
+    ExecuteTaskRequest, ExecuteTaskResponse, LoginRequest, RegisterWorkerNodeRequest,
+    ResourceSpec as ProtoResourceSpec, ResourceUsage as ProtoResourceUsage, RunningStatusRequest,
+    TaskOutputUploadRequest, TaskResultUploadRequest, TaskUsageRequest,
+    ValidateGeneralComputeTransferLeaseRequest,
+    WorkerCapabilityReport as ProtoWorkerCapabilityReport, WorkerSessionAck,
+    WorkerSessionCancelAck, WorkerSessionClientFrame, WorkerSessionClose, WorkerSessionHeartbeat,
+    WorkerSessionHello, WorkerSessionResult,
 };
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::{Channel, Endpoint};
 use tracing::{info, warn};
 
+use crate::grpc_server::GrpcWorkerNodeService;
 use crate::WorkerExecutor;
 
 pub fn nodepool_endpoint(addr: &str) -> String {
@@ -615,6 +622,409 @@ pub fn start_registration_loop(
         }
     });
     tx
+}
+
+#[derive(Clone)]
+pub struct SessionLoopConfig {
+    pub nodepool_addr: Arc<std::sync::Mutex<String>>,
+    pub worker_id: String,
+    pub username: String,
+    pub client_instance_id: String,
+    pub token: String,
+    pub interval: Duration,
+    pub service: Arc<GrpcWorkerNodeService>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionRunOutcome {
+    Reconnect,
+    Terminal,
+    Shutdown,
+}
+
+pub fn start_session_loop(
+    executor: Arc<WorkerExecutor>,
+    config: SessionLoopConfig,
+) -> watch::Sender<bool> {
+    let (tx, mut shutdown) = watch::channel(false);
+    tokio::spawn(async move {
+        let mut resume_token = None;
+        let mut last_received_sequence = 0;
+        let mut backoff = Duration::from_secs(1);
+        loop {
+            let result = run_worker_session(
+                executor.clone(),
+                &config,
+                &mut resume_token,
+                &mut last_received_sequence,
+                &mut shutdown,
+            )
+            .await;
+            match result {
+                Ok(SessionRunOutcome::Shutdown) | Ok(SessionRunOutcome::Terminal) => break,
+                Ok(SessionRunOutcome::Reconnect) | Err(_) => {
+                    backoff = if matches!(result, Ok(SessionRunOutcome::Reconnect)) {
+                        Duration::from_secs(1)
+                    } else {
+                        (backoff + backoff).min(Duration::from_secs(30))
+                    };
+                    tokio::select! {
+                        _ = tokio::time::sleep(backoff) => {}
+                        changed = shutdown.changed() => {
+                            if changed.is_ok() && *shutdown.borrow() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        info!(worker_id = %config.worker_id, "Worker outbound session loop stopped");
+    });
+    tx
+}
+
+async fn run_worker_session(
+    executor: Arc<WorkerExecutor>,
+    config: &SessionLoopConfig,
+    resume_token: &mut Option<String>,
+    last_received_sequence: &mut u64,
+    shutdown: &mut watch::Receiver<bool>,
+) -> anyhow::Result<SessionRunOutcome> {
+    refresh_nodepool_bridge(&config.nodepool_addr).await;
+    let configured_addr = config
+        .nodepool_addr
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    let endpoint = nodepool_endpoint(&configured_addr);
+    let endpoint_builder =
+        Endpoint::from_shared(endpoint.clone())?.connect_timeout(Duration::from_secs(10));
+    let channel =
+        match tokio::time::timeout(Duration::from_secs(10), endpoint_builder.connect()).await {
+            Ok(Ok(channel)) => channel,
+            Ok(Err(error)) => anyhow::bail!("Worker session connection failed: {error}"),
+            Err(_) => anyhow::bail!("Worker session connection timed out"),
+        };
+    let mut client = WorkerSessionServiceClient::new(channel)
+        .max_decoding_message_size(hivemind_proto::WORKER_SESSION_FRAME_MAX_BYTES)
+        .max_encoding_message_size(hivemind_proto::WORKER_SESSION_FRAME_MAX_BYTES);
+    let (sender, receiver) = mpsc::channel(64);
+    let capability_report = capability_report_to_proto(&executor.dynamic_capability_report())?;
+    send_client_frame(
+        &sender,
+        WorkerSessionClientFrame {
+            frame: Some(worker_session_client_frame::Frame::Hello(
+                WorkerSessionHello {
+                    protocol_version: hivemind_proto::WORKER_SESSION_PROTOCOL_VERSION,
+                    token: config.token.clone(),
+                    worker_id: config.worker_id.clone(),
+                    owner: config.username.clone(),
+                    client_instance_id: config.client_instance_id.clone(),
+                    capability_report: Some(capability_report),
+                    resume_token: resume_token.clone().unwrap_or_default(),
+                    last_received_sequence: *last_received_sequence,
+                },
+            )),
+        },
+    )
+    .await?;
+    let response = match tokio::time::timeout(
+        Duration::from_secs(10),
+        client.open_session(tonic::Request::new(ReceiverStream::new(receiver))),
+    )
+    .await
+    {
+        Ok(Ok(response)) => response,
+        Ok(Err(status)) if is_terminal_session_status(&status) => {
+            warn!(worker_id = %config.worker_id, "Worker session authentication was rejected");
+            return Ok(SessionRunOutcome::Terminal);
+        }
+        Ok(Err(status)) => anyhow::bail!("Worker session open failed: {status}"),
+        Err(_) => anyhow::bail!("Worker session open timed out"),
+    };
+    let mut inbound = response.into_inner();
+    let welcome = tokio::time::timeout(Duration::from_secs(10), inbound.message())
+        .await
+        .map_err(|_| anyhow::anyhow!("Worker session welcome timed out"))??
+        .ok_or_else(|| anyhow::anyhow!("Worker session closed before welcome"))?;
+    hivemind_proto::validate_worker_session_server_frame(&welcome)
+        .map_err(|message| anyhow::anyhow!(message))?;
+    let Some(worker_session_server_frame::Frame::Welcome(welcome)) = welcome.frame else {
+        anyhow::bail!("Worker session did not return a welcome frame");
+    };
+    if !welcome.success
+        || welcome.worker_id != config.worker_id
+        || welcome.owner != config.username
+        || welcome.client_instance_id != config.client_instance_id
+    {
+        anyhow::bail!("Worker session welcome identity was rejected");
+    }
+    if welcome.resume_token.trim().is_empty() {
+        anyhow::bail!("Worker session welcome did not include resume state");
+    }
+    *resume_token = Some(welcome.resume_token);
+
+    let mut heartbeat = tokio::time::interval(config.interval.max(Duration::from_secs(1)));
+    loop {
+        tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_ok() && *shutdown.borrow() {
+                    let _ = send_client_frame(
+                        &sender,
+                        WorkerSessionClientFrame {
+                            frame: Some(worker_session_client_frame::Frame::Close(
+                                WorkerSessionClose { reason: "shutdown".into() },
+                            )),
+                        },
+                    ).await;
+                    return Ok(SessionRunOutcome::Shutdown);
+                }
+            }
+            message = inbound.message() => {
+                let Some(frame) = message? else {
+                    return Ok(SessionRunOutcome::Reconnect);
+                };
+                hivemind_proto::validate_worker_session_server_frame(&frame)
+                    .map_err(|message| anyhow::anyhow!(message))?;
+                match frame.frame {
+                    Some(worker_session_server_frame::Frame::Task(task)) => {
+                        let Some(request) = task.request else {
+                            anyhow::bail!("Worker session task is missing its request");
+                        };
+                        *last_received_sequence = (*last_received_sequence).max(task.delivery_sequence);
+                        let task_sender = sender.clone();
+                        let service = config.service.clone();
+                        tokio::spawn(async move {
+                            process_session_task(service, task_sender, task.delivery_sequence, request).await;
+                        });
+                    }
+                    Some(worker_session_server_frame::Frame::Cancel(cancel)) => {
+                        let Some(request) = cancel.request else {
+                            anyhow::bail!("Worker session cancellation is missing its request");
+                        };
+                        *last_received_sequence =
+                            (*last_received_sequence).max(cancel.delivery_sequence);
+                        let task_id = request.task_id.clone();
+                        let attempt_id = request.attempt_id.clone();
+                        let idempotency_key = request.idempotency_key.clone();
+                        let task_sender = sender.clone();
+                        let service = config.service.clone();
+                        tokio::spawn(async move {
+                            match WorkerNodeService::stop_task_execution(
+                                service.as_ref(),
+                                tonic::Request::new(request),
+                            )
+                            .await
+                            {
+                                Ok(_) => {
+                                    let _ = send_client_frame(
+                                        &task_sender,
+                                        WorkerSessionClientFrame {
+                                            frame: Some(
+                                                worker_session_client_frame::Frame::CancelAck(
+                                                    WorkerSessionCancelAck {
+                                                        delivery_sequence: cancel.delivery_sequence,
+                                                        task_id,
+                                                        attempt_id,
+                                                        idempotency_key,
+                                                    },
+                                                ),
+                                            ),
+                                        },
+                                    )
+                                    .await;
+                                }
+                                Err(status) => {
+                                    warn!(
+                                        task_id = %task_id,
+                                        code = ?status.code(),
+                                        "Worker session cancellation could not be applied"
+                                    );
+                                    let _ = send_client_frame(
+                                        &task_sender,
+                                        WorkerSessionClientFrame {
+                                            frame: Some(worker_session_client_frame::Frame::Close(
+                                                WorkerSessionClose {
+                                                    reason: "cancellation request failed".into(),
+                                                },
+                                            )),
+                                        },
+                                    )
+                                    .await;
+                                }
+                            }
+                        });
+                    }
+                    Some(worker_session_server_frame::Frame::Heartbeat(heartbeat)) => {
+                        *last_received_sequence = (*last_received_sequence).max(heartbeat.last_received_sequence);
+                    }
+                    Some(worker_session_server_frame::Frame::Error(error)) => {
+                        if error.terminal {
+                            return Ok(SessionRunOutcome::Terminal);
+                        }
+                    }
+                    Some(worker_session_server_frame::Frame::Close(_)) => {
+                        return Ok(SessionRunOutcome::Reconnect);
+                    }
+                    Some(worker_session_server_frame::Frame::Welcome(_)) => {
+                        anyhow::bail!("Worker session returned a duplicate welcome frame");
+                    }
+                    None => anyhow::bail!("Worker session returned an empty frame"),
+                }
+            }
+            _ = heartbeat.tick() => {
+                refresh_nodepool_bridge(&config.nodepool_addr).await;
+                let current_addr = config
+                    .nodepool_addr
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone();
+                if nodepool_endpoint(&current_addr) != endpoint {
+                    return Ok(SessionRunOutcome::Reconnect);
+                }
+                send_client_frame(
+                    &sender,
+                    WorkerSessionClientFrame {
+                        frame: Some(worker_session_client_frame::Frame::Heartbeat(
+                            WorkerSessionHeartbeat {
+                                last_received_sequence: *last_received_sequence,
+                            },
+                        )),
+                    },
+                )
+                .await?;
+            }
+        }
+    }
+}
+
+async fn process_session_task(
+    service: Arc<GrpcWorkerNodeService>,
+    sender: mpsc::Sender<WorkerSessionClientFrame>,
+    delivery_sequence: u64,
+    request: ExecuteTaskRequest,
+) {
+    if request.task_id.trim().is_empty()
+        || request.execution_id.trim().is_empty()
+        || request.attempt_id.trim().is_empty()
+        || request.idempotency_key.trim().is_empty()
+        || request.request_digest.trim().is_empty()
+    {
+        tracing::warn!(
+            task_id = %request.task_id,
+            "Worker session task has invalid execution identity"
+        );
+        if !request.task_id.trim().is_empty() {
+            let _ = send_client_frame(
+                &sender,
+                WorkerSessionClientFrame {
+                    frame: Some(worker_session_client_frame::Frame::Result(
+                        WorkerSessionResult {
+                            delivery_sequence,
+                            task_id: request.task_id.clone(),
+                            response: Some(failed_session_response(&request)),
+                        },
+                    )),
+                },
+            )
+            .await;
+        }
+        return;
+    }
+    if send_client_frame(
+        &sender,
+        WorkerSessionClientFrame {
+            frame: Some(worker_session_client_frame::Frame::Ack(WorkerSessionAck {
+                delivery_sequence,
+                task_id: request.task_id.clone(),
+                attempt_id: request.attempt_id.clone(),
+                idempotency_key: request.idempotency_key.clone(),
+            })),
+        },
+    )
+    .await
+    .is_err()
+    {
+        return;
+    }
+    let response = match WorkerNodeService::execute_task(
+        service.as_ref(),
+        tonic::Request::new(request.clone()),
+    )
+    .await
+    {
+        Ok(response) => response.into_inner(),
+        Err(status) => {
+            tracing::warn!(
+                task_id = %request.task_id,
+                code = ?status.code(),
+                "Worker session task execution was rejected"
+            );
+            failed_session_response(&request)
+        }
+    };
+    let _ = send_client_frame(
+        &sender,
+        WorkerSessionClientFrame {
+            frame: Some(worker_session_client_frame::Frame::Result(
+                WorkerSessionResult {
+                    delivery_sequence,
+                    task_id: request.task_id,
+                    response: Some(response),
+                },
+            )),
+        },
+    )
+    .await;
+}
+
+fn failed_session_response(request: &ExecuteTaskRequest) -> ExecuteTaskResponse {
+    ExecuteTaskResponse {
+        success: false,
+        status_message: "Worker execution failed".into(),
+        execution_id: request.execution_id.clone(),
+        attempt_id: request.attempt_id.clone(),
+        idempotency_key: request.idempotency_key.clone(),
+        request_digest: request.request_digest.clone(),
+        ..ExecuteTaskResponse::default()
+    }
+}
+
+async fn send_client_frame(
+    sender: &mpsc::Sender<WorkerSessionClientFrame>,
+    frame: WorkerSessionClientFrame,
+) -> anyhow::Result<()> {
+    hivemind_proto::validate_worker_session_client_frame(&frame)
+        .map_err(|message| anyhow::anyhow!(message))?;
+    sender
+        .send(frame)
+        .await
+        .map_err(|_| anyhow::anyhow!("Worker session stream is closed"))
+}
+
+async fn refresh_nodepool_bridge(nodepool_addr: &Arc<std::sync::Mutex<String>>) {
+    if let Some(session) =
+        hivemind_client_runtime::current_vpn_session(hivemind_client_runtime::ClientRole::Worker)
+            .await
+    {
+        if let Some(bridge) = session.bridge_endpoint() {
+            let mut guard = nodepool_addr
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            *guard = bridge;
+        }
+    }
+}
+
+fn is_terminal_session_status(status: &tonic::Status) -> bool {
+    matches!(
+        status.code(),
+        tonic::Code::Unauthenticated
+            | tonic::Code::PermissionDenied
+            | tonic::Code::InvalidArgument
+            | tonic::Code::Unimplemented
+    )
 }
 
 fn replace_unspecified_host_for_local_client(addr: &str) -> String {

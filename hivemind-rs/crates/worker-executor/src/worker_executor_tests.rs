@@ -1,11 +1,12 @@
 use std::fs;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
 use hivemind_models::TaskStatus;
 use tempfile::TempDir;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Notify};
 use uuid::Uuid;
 
 use super::*;
@@ -192,6 +193,83 @@ async fn dropped_execute_future_keeps_supervisor_cleanup_alive() {
     })
     .await
     .expect("supervisor removes the active task after cancellation");
+}
+
+#[tokio::test]
+async fn concurrent_duplicate_execution_waits_for_the_original_result() {
+    let (started_tx, started_rx) = oneshot::channel();
+    let started_tx = Arc::new(Mutex::new(Some(started_tx)));
+    let release = Arc::new(Notify::new());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let executor = Arc::new(WorkerExecutor::new_with_task_runner(
+        HivemindConfig::default(),
+        {
+            let started_tx = Arc::clone(&started_tx);
+            let release = Arc::clone(&release);
+            let calls = Arc::clone(&calls);
+            move |task, _cancellation| {
+                let started_tx = Arc::clone(&started_tx);
+                let release = Arc::clone(&release);
+                let calls = Arc::clone(&calls);
+                Box::pin(async move {
+                    if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        started_tx
+                            .lock()
+                            .expect("runner start sender poisoned")
+                            .take()
+                            .expect("runner starts once")
+                            .send(())
+                            .expect("runner start receiver remains active");
+                        release.notified().await;
+                    }
+                    Ok(TaskResult {
+                        task_id: task.task_id,
+                        success: true,
+                        output: Some("deduplicated".into()),
+                        error: None,
+                        exit_code: 0,
+                        cpu_time_ms: 0,
+                        wall_time_ms: 0,
+                        peak_memory_mb: 0,
+                        managed_executed_ops: 0,
+                        managed_output_bytes: 0,
+                        managed_receipt_json: None,
+                        managed_proof: None,
+                        general_compute_result_json: None,
+                    })
+                })
+            }
+        },
+    ));
+    let task = test_task("session-redelivery");
+    let first = {
+        let executor = Arc::clone(&executor);
+        let task = task.clone();
+        tokio::spawn(async move { executor.execute_task(&task).await })
+    };
+    started_rx.await.expect("original execution starts");
+
+    let second = {
+        let executor = Arc::clone(&executor);
+        let task = task.clone();
+        tokio::spawn(async move { executor.execute_task(&task).await })
+    };
+    tokio::task::yield_now().await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    release.notify_one();
+    let first_result = first
+        .await
+        .expect("original execution task does not panic")
+        .expect("original execution succeeds");
+    let second_result = second
+        .await
+        .expect("duplicate execution task does not panic")
+        .expect("duplicate execution receives the original result");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(first_result.task_id, second_result.task_id);
+    assert_eq!(first_result.success, second_result.success);
+    assert_eq!(first_result.output, second_result.output);
 }
 
 #[cfg(unix)]

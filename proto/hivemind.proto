@@ -586,6 +586,10 @@ message TaskOutputResponse {
 message StopTaskExecutionRequest {
     string task_id = 1;
     string token = 2;
+    // Optional attempt identity for session-delivered cancellation. Legacy
+    // direct callers may leave this empty and retain task-bound validation.
+    string attempt_id = 3;
+    string idempotency_key = 4;
 }
 
 message StopTaskExecutionResponse {
@@ -942,6 +946,111 @@ message GetAdminManagedProofMetricsResponse {
     int64 observe_fallbacks = 8;
     int64 legacy_settlements = 9;
 }
+// ============================================================
+// Platform-neutral outbound Worker session
+// ============================================================
+
+// The session is an application-layer, client-initiated channel. It does not
+// change the existing unary WorkerNodeService or GeneralComputeChunkService
+// identity/lease contracts; those fields remain authoritative when a task is
+// dispatched or reported.
+message WorkerSessionHello {
+    uint32 protocol_version = 1;
+    string token = 2; // short-lived control-plane bearer, memory-only
+    string worker_id = 3;
+    string owner = 4;
+    string client_instance_id = 5;
+    WorkerCapabilityReport capability_report = 6;
+    string resume_token = 7; // opaque, short-lived, memory-only
+    uint64 last_received_sequence = 8;
+}
+
+message WorkerSessionAck {
+    uint64 delivery_sequence = 1;
+    string task_id = 2;
+    string attempt_id = 3;
+    string idempotency_key = 4;
+}
+
+message WorkerSessionResult {
+    uint64 delivery_sequence = 1;
+    string task_id = 2;
+    ExecuteTaskResponse response = 3;
+}
+
+message WorkerSessionHeartbeat {
+    uint64 last_received_sequence = 1;
+}
+
+message WorkerSessionClose {
+    string reason = 1;
+}
+
+message WorkerSessionCancelAck {
+    uint64 delivery_sequence = 1;
+    string task_id = 2;
+    string attempt_id = 3;
+    string idempotency_key = 4;
+}
+
+message WorkerSessionClientFrame {
+    oneof frame {
+        WorkerSessionHello hello = 1;
+        WorkerSessionAck ack = 2;
+        WorkerSessionResult result = 3;
+        WorkerSessionHeartbeat heartbeat = 4;
+        WorkerSessionClose close = 5;
+        WorkerSessionCancelAck cancel_ack = 6;
+    }
+}
+
+message WorkerSessionWelcome {
+    bool success = 1;
+    string status_message = 2;
+    uint32 protocol_version = 3;
+    string session_id = 4;
+    string worker_id = 5;
+    string owner = 6;
+    string client_instance_id = 7;
+    string resume_token = 8; // opaque, short-lived, memory-only
+    uint64 next_delivery_sequence = 9;
+    uint64 resume_after_sequence = 10;
+}
+
+message WorkerSessionTask {
+    uint64 delivery_sequence = 1;
+    ExecuteTaskRequest request = 2;
+}
+
+message WorkerSessionCancel {
+    uint64 delivery_sequence = 1;
+    StopTaskExecutionRequest request = 2;
+}
+
+message WorkerSessionServerHeartbeat {
+    uint64 last_received_sequence = 1;
+}
+
+message WorkerSessionError {
+    string status_message = 1;
+    bool terminal = 2;
+}
+
+message WorkerSessionServerFrame {
+    oneof frame {
+        WorkerSessionWelcome welcome = 1;
+        WorkerSessionTask task = 2;
+        WorkerSessionCancel cancel = 3;
+        WorkerSessionServerHeartbeat heartbeat = 4;
+        WorkerSessionError error = 5;
+        WorkerSessionClose close = 6;
+    }
+}
+
+service WorkerSessionService {
+    rpc OpenSession(stream WorkerSessionClientFrame) returns (stream WorkerSessionServerFrame);
+}
+
 // ============================================================
 // Services
 // ============================================================

@@ -292,6 +292,145 @@ pub use vpn_service_client::VpnServiceClient;
 pub use vpn_service_server::{VpnService, VpnServiceServer};
 pub use worker_node_service_client::WorkerNodeServiceClient;
 pub use worker_node_service_server::{WorkerNodeService, WorkerNodeServiceServer};
+pub use worker_session_service_client::WorkerSessionServiceClient;
+pub use worker_session_service_server::{WorkerSessionService, WorkerSessionServiceServer};
+
+pub const WORKER_SESSION_PROTOCOL_VERSION: u32 = 1;
+pub const WORKER_SESSION_FRAME_MAX_BYTES: usize = 4 * 1024 * 1024;
+pub const WORKER_SESSION_CLIENT_INSTANCE_MAX_BYTES: usize = 128;
+pub const WORKER_SESSION_RESUME_TOKEN_MAX_BYTES: usize = 256;
+
+/// Validate a client hello before it can mutate the Nodepool session registry.
+/// Bearer and resume material is intentionally bounded and callers must not
+/// log the raw values.
+pub fn validate_worker_session_hello(hello: &WorkerSessionHello) -> Result<(), &'static str> {
+    if hello.protocol_version != WORKER_SESSION_PROTOCOL_VERSION {
+        return Err("unsupported Worker session protocol version");
+    }
+    if hello.token.trim().is_empty() {
+        return Err("Worker session token is required");
+    }
+    for value in [hello.worker_id.as_str(), hello.owner.as_str()] {
+        if value.trim().is_empty() || value.len() > GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES {
+            return Err("Worker session identity is invalid");
+        }
+    }
+    if hello.client_instance_id.trim().is_empty()
+        || hello.client_instance_id.len() > WORKER_SESSION_CLIENT_INSTANCE_MAX_BYTES
+    {
+        return Err("Worker session client instance is invalid");
+    }
+    if hello.token.len() > WORKER_EXECUTION_TOKEN_MAX_BYTES
+        || hello.capability_report.as_ref().is_some_and(|report| {
+            prost::Message::encoded_len(report) > WORKER_SESSION_FRAME_MAX_BYTES
+        })
+        || hello.resume_token.len() > WORKER_SESSION_RESUME_TOKEN_MAX_BYTES
+        || prost::Message::encoded_len(hello) > WORKER_SESSION_FRAME_MAX_BYTES
+    {
+        return Err("Worker session hello exceeds the byte limit");
+    }
+    Ok(())
+}
+
+/// Validate one client-to-Nodepool frame and all identity-bearing subfields.
+pub fn validate_worker_session_client_frame(
+    frame: &WorkerSessionClientFrame,
+) -> Result<(), &'static str> {
+    if prost::Message::encoded_len(frame) > WORKER_SESSION_FRAME_MAX_BYTES {
+        return Err("Worker session frame exceeds the byte limit");
+    }
+    match frame.frame.as_ref() {
+        Some(worker_session_client_frame::Frame::Hello(hello)) => {
+            validate_worker_session_hello(hello)
+        }
+        Some(worker_session_client_frame::Frame::Ack(ack)) => {
+            if ack.delivery_sequence == 0
+                || ack.task_id.trim().is_empty()
+                || ack.attempt_id.trim().is_empty()
+                || ack.idempotency_key.trim().is_empty()
+            {
+                return Err("Worker session acknowledgement identity is invalid");
+            }
+            Ok(())
+        }
+        Some(worker_session_client_frame::Frame::CancelAck(ack)) => {
+            if ack.delivery_sequence == 0
+                || ack.task_id.trim().is_empty()
+                || ack.attempt_id.trim().is_empty()
+                || ack.idempotency_key.trim().is_empty()
+            {
+                return Err("Worker session cancellation acknowledgement identity is invalid");
+            }
+            Ok(())
+        }
+        Some(worker_session_client_frame::Frame::Result(result)) => {
+            if result.delivery_sequence == 0
+                || result.task_id.trim().is_empty()
+                || result.response.is_none()
+            {
+                return Err("Worker session result identity is invalid");
+            }
+            Ok(())
+        }
+        Some(worker_session_client_frame::Frame::Heartbeat(_)) => Ok(()),
+        Some(worker_session_client_frame::Frame::Close(close)) => {
+            if close.reason.len() > GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES {
+                return Err("Worker session close reason is too long");
+            }
+            Ok(())
+        }
+        None => Err("Worker session frame is empty"),
+    }
+}
+
+/// Validate one Nodepool-to-Worker frame before it is placed on a stream.
+pub fn validate_worker_session_server_frame(
+    frame: &WorkerSessionServerFrame,
+) -> Result<(), &'static str> {
+    if prost::Message::encoded_len(frame) > WORKER_SESSION_FRAME_MAX_BYTES {
+        return Err("Worker session frame exceeds the byte limit");
+    }
+    match frame.frame.as_ref() {
+        Some(worker_session_server_frame::Frame::Welcome(welcome)) => {
+            if welcome.protocol_version != WORKER_SESSION_PROTOCOL_VERSION
+                || welcome.session_id.trim().is_empty()
+                || welcome.worker_id.trim().is_empty()
+                || welcome.owner.trim().is_empty()
+                || welcome.client_instance_id.trim().is_empty()
+                || welcome.resume_token.len() > WORKER_SESSION_RESUME_TOKEN_MAX_BYTES
+            {
+                return Err("Worker session welcome is invalid");
+            }
+            Ok(())
+        }
+        Some(worker_session_server_frame::Frame::Task(task)) => {
+            if task.delivery_sequence == 0 || task.request.is_none() {
+                return Err("Worker session task is invalid");
+            }
+            Ok(())
+        }
+        Some(worker_session_server_frame::Frame::Cancel(cancel)) => {
+            if cancel.delivery_sequence == 0 || cancel.request.is_none() {
+                return Err("Worker session cancellation is invalid");
+            }
+            Ok(())
+        }
+        Some(worker_session_server_frame::Frame::Heartbeat(_)) => Ok(()),
+        Some(worker_session_server_frame::Frame::Error(error)) => {
+            if error.status_message.len() > WORKER_STATUS_MESSAGE_MAX_BYTES {
+                return Err("Worker session error is too long");
+            }
+            Ok(())
+        }
+        Some(worker_session_server_frame::Frame::Close(close)) => {
+            if close.reason.len() > GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES {
+                return Err("Worker session close reason is too long");
+            }
+            Ok(())
+        }
+        None => Err("Worker session frame is empty"),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -301,11 +440,15 @@ mod tests {
         validate_general_compute_artifact_chunk_upload,
         validate_general_compute_chunk_resume_request, validate_general_compute_chunk_upload,
         validate_general_compute_prepare_request, validate_general_compute_transfer_lease_request,
+        validate_worker_session_client_frame, validate_worker_session_server_frame,
+        worker_session_client_frame, worker_session_server_frame, ExecuteTaskRequest,
         ExecuteTaskResponse, GeneralComputeArtifactChunkUpload, GeneralComputeChunkDescriptor,
         GeneralComputeChunkResumeRequest, GeneralComputeChunkResumeResponse,
         GeneralComputeChunkUpload, GeneralComputeChunkUploadResponse, GeneralComputePrepareRequest,
         GeneralComputePrepareResponse, ManagedProofEnvelope,
         ValidateGeneralComputeTransferLeaseRequest, ValidateGeneralComputeTransferLeaseResponse,
+        WorkerCapabilityReport, WorkerSessionCancelAck, WorkerSessionClientFrame,
+        WorkerSessionHello, WorkerSessionServerFrame, WorkerSessionTask,
         GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES, GENERAL_COMPUTE_CHUNK_UPLOAD_MAX_BYTES,
         GENERAL_COMPUTE_MANIFEST_MAX_BYTES, GENERAL_COMPUTE_RESULT_MAX_BYTES,
         GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES,
@@ -785,5 +928,101 @@ mod tests {
             GeneralComputeChunkResumeResponse::decode(response.encode_to_vec().as_slice())
                 .expect("chunk resume response should decode");
         assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn worker_session_frames_round_trip_and_preserve_identity() {
+        let hello = WorkerSessionHello {
+            protocol_version: super::WORKER_SESSION_PROTOCOL_VERSION,
+            token: "jwt-in-memory".into(),
+            worker_id: "hm-worker-1".into(),
+            owner: "alice".into(),
+            client_instance_id: "device-1".into(),
+            capability_report: Some(WorkerCapabilityReport {
+                protocol_version: 1,
+                capabilities_json: "{}".into(),
+                ready: true,
+                readiness_reason: String::new(),
+            }),
+            resume_token: String::new(),
+            last_received_sequence: 0,
+        };
+        let frame = WorkerSessionClientFrame {
+            frame: Some(worker_session_client_frame::Frame::Hello(hello.clone())),
+        };
+        validate_worker_session_client_frame(&frame).expect("valid hello should pass");
+        let decoded = WorkerSessionClientFrame::decode(frame.encode_to_vec().as_slice())
+            .expect("session frame should decode");
+        assert_eq!(decoded, frame);
+        assert!(matches!(
+            decoded.frame,
+            Some(worker_session_client_frame::Frame::Hello(decoded_hello))
+                if decoded_hello.worker_id == hello.worker_id
+                    && decoded_hello.client_instance_id == hello.client_instance_id
+        ));
+
+        let server_frame = WorkerSessionServerFrame {
+            frame: Some(worker_session_server_frame::Frame::Task(WorkerSessionTask {
+                delivery_sequence: 1,
+                request: Some(ExecuteTaskRequest {
+                    task_id: "task-1".into(),
+                    execution_id: "execution-1".into(),
+                    attempt_id: "attempt-1".into(),
+                    idempotency_key: "idempotency-1".into(),
+                    request_digest:
+                        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                            .into(),
+                    ..ExecuteTaskRequest::default()
+                }),
+            })),
+        };
+        validate_worker_session_server_frame(&server_frame).expect("valid task frame should pass");
+        assert_eq!(
+            WorkerSessionServerFrame::decode(server_frame.encode_to_vec().as_slice()).unwrap(),
+            server_frame
+        );
+
+        let cancel_ack = WorkerSessionClientFrame {
+            frame: Some(worker_session_client_frame::Frame::CancelAck(
+                WorkerSessionCancelAck {
+                    delivery_sequence: 1,
+                    task_id: "task-1".into(),
+                    attempt_id: "attempt-1".into(),
+                    idempotency_key: "idempotency-1".into(),
+                },
+            )),
+        };
+        validate_worker_session_client_frame(&cancel_ack)
+            .expect("valid cancellation acknowledgement should pass");
+        assert_eq!(
+            WorkerSessionClientFrame::decode(cancel_ack.encode_to_vec().as_slice()).unwrap(),
+            cancel_ack
+        );
+    }
+
+    #[test]
+    fn worker_session_validation_rejects_empty_and_oversized_frames() {
+        assert!(
+            validate_worker_session_client_frame(&WorkerSessionClientFrame::default()).is_err()
+        );
+        let oversized = WorkerSessionClientFrame {
+            frame: Some(worker_session_client_frame::Frame::Hello(
+                WorkerSessionHello {
+                    protocol_version: super::WORKER_SESSION_PROTOCOL_VERSION,
+                    token: "jwt".into(),
+                    worker_id: "worker".into(),
+                    owner: "alice".into(),
+                    client_instance_id: "device".into(),
+                    capability_report: Some(WorkerCapabilityReport {
+                        protocol_version: 1,
+                        capabilities_json: "x".repeat(super::WORKER_SESSION_FRAME_MAX_BYTES),
+                        ready: false,
+                        readiness_reason: String::new(),
+                    }),
+                    ..WorkerSessionHello::default()
+                },
+            )),
+        };
+        assert!(validate_worker_session_client_frame(&oversized).is_err());
     }
 }

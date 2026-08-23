@@ -1,5 +1,6 @@
 pub mod grpc;
 pub mod heartbeat;
+pub mod outbound_session;
 pub mod service;
 pub mod worker_repository;
 
@@ -192,6 +193,42 @@ impl NodeManager {
                 readiness_reason,
             )
             .await
+    }
+
+    pub async fn client_instance_id_for_worker(
+        &self,
+        worker_id: &str,
+        owner: &str,
+    ) -> Result<Option<String>> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT client_instance_id
+             FROM client_identities
+             WHERE worker_id = $1 AND owner = $2 AND role = 'worker'
+             LIMIT 1",
+        )
+        .bind(worker_id)
+        .bind(owner)
+        .fetch_optional(&self.db.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    pub async fn refresh_session_tasks(&self, worker_id: &str, task_ids: &[String]) -> Result<()> {
+        if task_ids.is_empty() {
+            return Ok(());
+        }
+        sqlx::query(
+            "UPDATE tasks
+             SET last_update = NOW()
+             WHERE worker_id = $1
+               AND task_id = ANY($2)
+               AND status IN ('ASSIGNED', 'RUNNING')",
+        )
+        .bind(worker_id)
+        .bind(task_ids)
+        .execute(&self.db.pool)
+        .await?;
+        Ok(())
     }
 
     pub async fn mark_offline_stale(&self, stale_threshold_secs: u64) -> Result<u64> {
