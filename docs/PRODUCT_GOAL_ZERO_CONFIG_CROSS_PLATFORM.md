@@ -276,9 +276,18 @@ Headscale 可以保留為選配：
      verification → usage/billing/settlement 的完整證據尚未完成。
 
 6. **Provider 部署仍有手動 operator 工作**
-   - Provider env、TLS 憑證與 staged Linux x86_64 prover 仍需 operator 建立。
-   - 這些設定不應暴露給一般 Worker 使用者，但必須有可重現的 operator
-     deployment workflow。
+   - **Task #9 已完成（可驗證的 release artifact workflow）：** Provider
+     image 只從 source 編譯 service 執行檔；pinned RISC Zero sidecar 由
+     `scripts/build-managed-prover.sh` 在已驗證環境建置(guest pin 檢查
+     fail-fast),再以 `scripts/verify-staged-prover.sh` 對照
+     `docs/zk-managed-proof-build-attestation.md` 的 attested digest 後才可
+     進入 release image。fresh checkout 缺少 staged sidecar 時,Dockerfile
+     COPY 會明確失敗而非靜默產出無 prover 的 image;容器內建 prover 被明文
+     禁止,因為 guest image ID 取決於 risc0 工具鏈而非 source。
+     `provider.env.example` 已把 static Worker-ID map 降級為僅 private_static
+     相容模式的註解範例。
+   - 這些設定不應暴露給一般 Worker 使用者；operator deployment workflow
+     已文件化於 `packaging/managed-prover-service/README.md`。
 
 7. **目前 dist package 不能當成正式 release**
    - 舊 package 可能有固定 Worker ID 或缺少設定。

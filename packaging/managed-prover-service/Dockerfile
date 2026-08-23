@@ -1,5 +1,18 @@
 # syntax=docker/dockerfile:1.7
 
+# The pinned RISC Zero sidecar cannot be compiled inside this image: the guest
+# image ID depends on the exact risc0 guest toolchain that produced the Nodepool
+# trust pin, and a container-built toolchain produces a different guest whose
+# every proof the Nodepool rejects (see
+# docs/zk-managed-proof-build-attestation.md). The operator therefore builds the
+# sidecar once with scripts/build-managed-prover.sh — which refuses to stage a
+# binary unless its environment reproduces the pinned guest image ID — and
+# passes the staged file to this build:
+#
+#   docker build \
+#     --build-arg MANAGED_PROVER_SIDECAR=publish/hivemind-managed-proof-prover \
+#     -f packaging/managed-prover-service/Dockerfile .
+#
 FROM rust:1.96-bookworm AS builder
 
 RUN apt-get update \
@@ -39,6 +52,9 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY --from=builder /app/provider-bin/bin/hivemind-managed-prover-service /app/bin/hivemind-managed-prover-service
+# BuildKit fails this COPY with an explicit "not found" when the operator has
+# not staged the sidecar yet, instead of silently shipping a provider without
+# a prover. A missing sidecar must never look like a successful build.
 COPY packaging/managed-prover/hivemind-managed-proof-prover /app/prover/hivemind-managed-proof-prover
 
 RUN chmod 0755 /app/bin/hivemind-managed-prover-service /app/prover/hivemind-managed-proof-prover \
