@@ -23,6 +23,7 @@ complete
 - Windows ARM64 cross-target check: `cargo check --target aarch64-pc-windows-msvc --workspace` passed under the VS arm64 dev environment (2026-08-23), proving the whole workspace compiles for ARM64 Windows.
 - Linux target check: `cargo check --target x86_64-unknown-linux-gnu -p hivemind-client-core` passes; full-workspace Linux/macOS checks stay blocked in this environment because no `x86_64-linux-gnu-gcc` toolchain exists for the `ring` build script. This is a local toolchain blocker, not a source-compatibility failure.
 - PowerShell release contracts: all 11 `scripts/*.Tests.ps1` files pass, including zero-config package assertions (no required endpoint/Worker-ID/token settings, session-only default documented) and the zh-tw architecture doc contract.
+- Managed proof live E2E harness: `scripts/managed-proof-live-e2e.ps1` and its contract test exist and pass statically (phase order, fail-closed settlement gates, redaction guard, no local-substitute endpoints). The harness itself has NOT been executed against external infrastructure; live proof-to-settlement evidence remains blocked in this environment because no real external Website API/Nodepool/Provider host is reachable from here.
 
 ## Regressions fixed
 

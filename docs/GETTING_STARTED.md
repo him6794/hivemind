@@ -185,6 +185,31 @@ raw Compose can require placeholder values for its configuration parser during
 `docker compose down`; the values do not alter the already-created project's
 identity.
 
+### Managed proof live E2E (protected environment only)
+
+`scripts/managed-proof-live-e2e.ps1` exercises the full external chain —
+Website login, enrollment credential redemption with the server-assigned
+Worker identity, managed task submission, remote proof, independent Nodepool
+verification, billing/settlement, and result/log retrieval — in enforce mode.
+It runs only against a real external deployment that can reach the Website API,
+Nodepool transport, and Provider. Local Compose, Docker, WSL, SSH, socat, or
+direct-host reachability are not substitutes for that evidence:
+
+```powershell
+scripts/managed-proof-live-e2e.ps1 `
+  -WebsiteApiBase https://<website-origin> `
+  -MasterApiBase http://<master-api> `
+  -Username <account> -Password <password> `
+  -TaskSourcePath examples/managed-add.hdsl `
+  -TaskInputJson '{"left":20,"right":22}'
+```
+
+Evidence lands in `test_logs\managed-proof-live-e2e\` and is redacted by
+construction: identifiers, states, timings, policy decisions, verification
+outcomes, settlement amounts, and digests — never passwords, JWTs,
+enrollment credentials, Headscale keys, proof tokens, source, input, or raw
+proof envelopes.
+
 ### Development and manual runtime
 
 The repository root `README.md` documents the other development and runtime
