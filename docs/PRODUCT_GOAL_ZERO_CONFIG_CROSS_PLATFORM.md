@@ -272,8 +272,22 @@ Headscale 可以保留為選配：
      Linux/macOS packaging 定義尚未建立。
 
 5. **Remote proof 完整鏈路尚未完成 live 驗證**
-   - Windows/Linux/macOS/Android Worker → Provider → Nodepool receipt
-     verification → usage/billing/settlement 的完整證據尚未完成。
+   - **Task #10 已交付 harness（外部證據仍 blocked）：**
+     `scripts/managed-proof-live-e2e.ps1` 是 redacted、enforce-mode 的
+     protected E2E harness,依序驗證 Website login、enrollment credential
+     redemption 與 server-assigned Worker identity、managed 任務提交、終端
+     狀態、`billing_settled`、verified usage、result/log retrieval,並以
+     fail-closed gate 拒絕任何未結算或未驗證的「成功」。evidence 只含
+     identifiers、states、timings、policy decisions、verification outcomes
+     與 settlement 金額;password、JWT、enrollment credential、proof token、
+     source/input 與 raw proof envelope 由建構排除,redaction guard 會在
+     寫入前攔截。契約測試鎖定 phase 順序、fail-closed gates、redaction,
+     並禁止 docker compose/localhost/observe-mode 等本機替代品。
+   - **Blocked:** 實際執行需要真實外部 host（Website API、Nodepool
+     transport、Provider）與足夠餘額的帳號。本環境沒有這些資源,依計畫
+     不得以 Docker/WSL/VM/SSH/socat/direct-host reachability 取代,也不得
+     從本機測試宣稱 live proof-to-settlement 已驗收。對應命令與輸出必須在
+     protected/manual 環境產生後記錄於 validation state 文件。
 
 6. **Provider 部署仍有手動 operator 工作**
    - **Task #9 已完成（可驗證的 release artifact workflow）：** Provider

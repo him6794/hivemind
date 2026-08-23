@@ -70,6 +70,7 @@ Assert-Contains -DocumentName "docs/GETTING_STARTED.md" -DocumentText $gettingSt
     "npm ci",
     "npm run test:e2e",
     "HIVEMIND_E2E_EVIDENCE_DIR",
+    "managed-proof-live-e2e.ps1",
     "docker compose down",
     "collision-free ephemeral",
     "preserves user-supplied",
