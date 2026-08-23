@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $readmePath = Join-Path $repoRoot "README.md"
@@ -13,11 +13,11 @@ foreach ($path in @($readmePath, $gettingStartedPath, $architecturePath, $envExa
     }
 }
 
-$readme = Get-Content -LiteralPath $readmePath -Raw
-$gettingStarted = Get-Content -LiteralPath $gettingStartedPath -Raw
-$architecture = Get-Content -LiteralPath $architecturePath -Raw
-$envExample = Get-Content -LiteralPath $envExamplePath -Raw
-$proverStaging = Get-Content -LiteralPath $proverStagingPath -Raw
+$readme = Get-Content -LiteralPath $readmePath -Raw -Encoding UTF8
+$gettingStarted = Get-Content -LiteralPath $gettingStartedPath -Raw -Encoding UTF8
+$architecture = Get-Content -LiteralPath $architecturePath -Raw -Encoding UTF8
+$envExample = Get-Content -LiteralPath $envExamplePath -Raw -Encoding UTF8
+$proverStaging = Get-Content -LiteralPath $proverStagingPath -Raw -Encoding UTF8
 
 function Assert-Contains {
     param(
@@ -79,18 +79,18 @@ Assert-Contains -DocumentName "docs/GETTING_STARTED.md" -DocumentText $gettingSt
 Assert-Contains -DocumentName "docs/ARCHITECTURE.md" -DocumentText $architecture -ExpectedValues @(
     "Official Site",
     "8080",
-    "account center",
+    "帳號中心",
     "Master UI",
     "3000",
     "Worker UI",
     "3001",
     "Master API",
     "8082",
-    "worker control",
+    "Worker control",
     "18080",
-    "Nodepool is the only trusted authority",
-    "must never",
-    "connect directly to nodepool"
+    "唯一平台 authority",
+    "不得暴露給 Worker、Provider、browser 或下載的 package",
+    "Browser 不直接連線 Nodepool"
 )
 
 # The managed-prover host contract has to read the same way everywhere an
