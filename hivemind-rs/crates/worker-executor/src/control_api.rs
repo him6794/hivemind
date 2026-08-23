@@ -172,6 +172,10 @@ impl ControlApiState {
             tracing::warn!("Worker session service is unavailable");
             return;
         };
+        tracing::info!(
+            worker_id = %worker_id,
+            "Starting Worker outbound session loop"
+        );
         let shutdown = nodepool_client::start_session_loop(
             self.executor.clone(),
             nodepool_client::SessionLoopConfig {
@@ -684,13 +688,23 @@ async fn register_worker(
         }
     }
 
-    let server_enrollment = if state.config.general_compute.admission_mode
-        == WorkerAdmissionMode::PublicDynamic
-    {
+    let mut server_enrollment = None;
+    if state.config.general_compute.admission_mode == WorkerAdmissionMode::PublicDynamic {
         match client_runtime::ensure_client_enrollment(&state.config, ClientRole::Worker, &token)
             .await
         {
-            Ok(enrollment) => Some(enrollment),
+            Ok(enrollment) => server_enrollment = Some(enrollment),
+            // A deployment without a reachable Website API (private/local mode
+            // sets HIVEMIND_DISABLE_WEBSITE_VPN=1) still supports direct
+            // owner registration against the Nodepool. Only fall through when
+            // website-api is disabled; real enrollment failures stay fatal so
+            // public onboarding keeps failing closed.
+            Err(error) if error.to_string().contains("enrollment is disabled") => {
+                tracing::info!(
+                    "website-api enrollment disabled; registering directly with Nodepool as {}",
+                    body.username.as_deref().unwrap_or_default()
+                );
+            }
             Err(error) => {
                 return (
                     StatusCode::BAD_GATEWAY,
@@ -701,9 +715,7 @@ async fn register_worker(
                 )
             }
         }
-    } else {
-        None
-    };
+    }
 
     let endpoint = match body
         .ip

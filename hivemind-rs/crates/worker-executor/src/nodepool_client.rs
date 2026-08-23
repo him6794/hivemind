@@ -666,6 +666,13 @@ pub fn start_session_loop(
                     backoff = if matches!(result, Ok(SessionRunOutcome::Reconnect)) {
                         Duration::from_secs(1)
                     } else {
+                        if let Err(error) = result.as_ref() {
+                            warn!(
+                                worker_id = %config.worker_id,
+                                error = %error,
+                                "Worker outbound session attempt failed; retrying with backoff"
+                            );
+                        }
                         (backoff + backoff).min(Duration::from_secs(30))
                     };
                     tokio::select! {

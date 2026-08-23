@@ -322,11 +322,17 @@ impl GrpcWorkerSessionService {
                 .client_instance_id_for_worker(&hello.worker_id, &claims.sub)
                 .await
                 .map_err(|error| Status::internal(error.to_string()))?;
-            if bound_instance.as_deref() != Some(hello.client_instance_id.as_str()) {
-                return Err(Status::permission_denied(
-                    "Worker session client identity does not match enrollment",
-                ));
+            if let Some(bound_instance) = bound_instance {
+                if bound_instance != hello.client_instance_id {
+                    return Err(Status::permission_denied(
+                        "Worker session client identity does not match enrollment",
+                    ));
+                }
             }
+            // No enrolled client identity: this Worker registered directly as
+            // its owner (private/local mode without a Website API). The owner
+            // binding above already authenticated it; bind the reported
+            // instance id for the rest of this session's reconnect checks.
         }
         let report = if self.state.node_manager.is_public_dynamic_admission() {
             Some(
