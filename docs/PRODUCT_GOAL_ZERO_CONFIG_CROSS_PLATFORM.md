@@ -221,9 +221,19 @@ Headscale 可以保留為選配：
      SHA-256 hash，並由 Nodepool 建立或恢復 owner/device/role identity。
    - Worker public dynamic registration 會使用 server-assigned owner 與
      Worker ID；重播、過期、錯誤角色/裝置與並發 redemption 會 fail closed。
-   - **仍未完成：** outbound session、各平台 secure storage，以及移除
-     Headscale/VPN compatibility path 對現有部署的依賴；因此這一項不代表
-     最終「完全零設定」產品已驗收。
+   - **Task #6 已完成（wire contract + Nodepool routing）：** 新增
+     `hivemind-client-core` 純 Rust session 核心（bounded hello/welcome/
+     resume token、monotonic delivery sequence、ACK/result/cancellation
+     idempotency、heartbeat expiry、redelivery）與 `WorkerSessionService`
+     bidirectional streaming RPC。Nodepool 只保存 hashed resume token；
+     Worker 透過短期 attempt-bound execution token 接收任務，斷線後以
+     resume token 重連並 redeliver 未 ACK 任務；使用者取消任務會透過
+     session cancel frame 傳遞並由 Worker 回報 cancellation ACK。
+     Managed/general-compute runtime 仍走權威 unary path。
+   - **仍未完成：** 一般 client 公開路徑改用 outbound session 作為預設
+     transport（Task #7）、各平台 secure storage 與 adapter（Task #8），
+     以及移除 Headscale/VPN compatibility path 對現有部署的依賴；因此
+     這一項不代表最終「完全零設定」產品已驗收。
 
 2. **Public dynamic admission is implemented; private static mode remains optional**
    - Public Nodepool registration now accepts bounded, canonical Worker
@@ -237,8 +247,13 @@ Headscale 可以保留為選配：
      for explicitly selected private static deployments.
 
 3. **Client 連線仍偏向 Headscale/平台特定實作**
+   - **Task #6 已完成部分：** outbound session wire contract 與 Nodepool
+     routing 已存在（TLS/HTTP2/tonic bidirectional streaming），Worker 端
+     session loop 支援重連/backoff/resume，註冊 loop 與 UI login 後的
+     session 啟動已整合。
    - Windows 使用 libtailscale/native DLL 的建置與部署路徑。
-   - Android client、背景服務與跨平台 outbound channel 尚未完成。
+   - Android client、背景服務尚未完成；outbound session 尚未成為一般
+     client 的預設公開路徑（Task #7）。
    - 需要將核心 protocol 與 OS/network adapter 分離。
 
 4. **Linux/macOS/Android client 尚未達到一致產品體驗**

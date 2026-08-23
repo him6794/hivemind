@@ -68,6 +68,8 @@ async fn nodepool_test_fixture() -> Option<NodepoolTestFixture> {
         worker_execution_public_key_pem: config.auth.worker_execution_public_key_pem.clone(),
         managed_proof_rollout_mode: config.managed_proof.rollout_mode,
         node_manager,
+        session_registry: hivemind_client_core::SessionRegistry::shared(Default::default()),
+        dispatcher: None,
         scheduler,
         artifact_root: artifact_root_for_config(&config),
     });

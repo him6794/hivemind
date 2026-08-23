@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use tokio::sync::{oneshot, watch};
+use tokio::sync::watch;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopTaskOutcome {
@@ -25,11 +25,14 @@ pub enum StopTaskOutcome {
 }
 
 struct ActiveTaskEntry {
+    attempt_id: String,
     cancellation_tx: watch::Sender<bool>,
     stop_requested: bool,
+    result_rx: watch::Receiver<Option<TaskResultMessage>>,
 }
 
 type ActiveTaskMap = Arc<Mutex<HashMap<String, ActiveTaskEntry>>>;
+type TaskResultMessage = Result<TaskResult, String>;
 type TaskRunnerFuture = Pin<Box<dyn Future<Output = Result<TaskResult>> + Send>>;
 type TaskRunner = dyn Fn(
         Task,
@@ -151,40 +154,80 @@ impl WorkerExecutor {
         task: &Task,
         proof_context: Option<managed_prover::ManagedProofTaskContext>,
     ) -> Result<TaskResult> {
+        self.execute_task_with_context_and_attempt(task, proof_context, "")
+            .await
+    }
+
+    pub async fn execute_task_with_context_and_attempt(
+        &self,
+        task: &Task,
+        proof_context: Option<managed_prover::ManagedProofTaskContext>,
+        attempt_id: &str,
+    ) -> Result<TaskResult> {
         let (cancellation_tx, cancellation_rx) = watch::channel(false);
-        {
+        let (result_tx, result_rx) = watch::channel(None);
+        let existing_result_rx = {
             let mut active_tasks = self
                 .active_tasks
                 .lock()
                 .map_err(|_| anyhow::anyhow!("active task registry is unavailable"))?;
-            if active_tasks.contains_key(&task.task_id) {
-                anyhow::bail!("task {} is already running", task.task_id);
+            if let Some(active_task) = active_tasks.get(&task.task_id) {
+                Some(active_task.result_rx.clone())
+            } else {
+                active_tasks.insert(
+                    task.task_id.clone(),
+                    ActiveTaskEntry {
+                        attempt_id: attempt_id.to_owned(),
+                        cancellation_tx,
+                        stop_requested: false,
+                        result_rx: result_rx.clone(),
+                    },
+                );
+                None
             }
-            active_tasks.insert(
-                task.task_id.clone(),
-                ActiveTaskEntry {
-                    cancellation_tx,
-                    stop_requested: false,
-                },
-            );
+        };
+
+        if let Some(result_rx) = existing_result_rx {
+            return Self::await_task_result(result_rx).await;
         }
 
-        let (result_tx, result_rx) = oneshot::channel();
         let task_id = task.task_id.clone();
         let task_runner = Arc::clone(&self.task_runner);
         let active_tasks = Arc::clone(&self.active_tasks);
         let task = task.clone();
         tokio::spawn(async move {
             let _active_task_guard = ActiveTaskGuard::new(active_tasks, task_id);
-            let result = task_runner(task, cancellation_rx, proof_context).await;
-            let _ = result_tx.send(result);
+            let result = task_runner(task, cancellation_rx, proof_context)
+                .await
+                .map_err(|error| error.to_string());
+            let _ = result_tx.send(Some(result));
         });
 
-        result_rx
-            .await
-            .map_err(|_| anyhow::anyhow!("task supervisor ended before returning a result"))?
+        Self::await_task_result(result_rx).await
     }
+    async fn await_task_result(
+        mut result_rx: watch::Receiver<Option<TaskResultMessage>>,
+    ) -> Result<TaskResult> {
+        loop {
+            if let Some(result) = result_rx.borrow().as_ref().cloned() {
+                return result.map_err(anyhow::Error::msg);
+            }
+            result_rx
+                .changed()
+                .await
+                .map_err(|_| anyhow::anyhow!("task supervisor ended before returning a result"))?;
+        }
+    }
+
     pub fn stop_task_execution(&self, task_id: &str) -> StopTaskOutcome {
+        self.stop_task_execution_for_attempt(task_id, None)
+    }
+
+    pub fn stop_task_execution_for_attempt(
+        &self,
+        task_id: &str,
+        attempt_id: Option<&str>,
+    ) -> StopTaskOutcome {
         let mut active_tasks = self
             .active_tasks
             .lock()
@@ -192,6 +235,11 @@ impl WorkerExecutor {
         let Some(entry) = active_tasks.get_mut(task_id) else {
             return StopTaskOutcome::NotRunning;
         };
+        if let Some(attempt_id) = attempt_id {
+            if entry.attempt_id != attempt_id {
+                return StopTaskOutcome::NotRunning;
+            }
+        }
         if entry.stop_requested {
             return StopTaskOutcome::AlreadyStopping;
         }

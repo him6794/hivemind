@@ -113,18 +113,21 @@ use crate::service::{
 };
 use crate::NodeManager;
 use hivemind_auth::{enrollment, AuthManager};
+use hivemind_client_core::SharedSessionRegistry;
 use hivemind_database::postgres;
 use hivemind_models::{
     Claims, Task, TaskStatus, WorkerCapabilityReport as ModelWorkerCapabilityReport, WorkerNode,
     WORKER_CAPABILITY_REPORT_MAX_BYTES,
 };
-use hivemind_task_scheduler::{dispatcher::worker_endpoint, BatchTaskReport, TaskScheduler};
+use hivemind_task_scheduler::{
+    dispatcher::worker_endpoint, dispatcher::Dispatcher, BatchTaskReport, TaskScheduler,
+};
 
 const MAX_TASK_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_RESULT_REFERENCE_BYTES: usize = 4096;
 const MAX_DOWNLOAD_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 
-fn parse_worker_capability_report(
+pub(crate) fn parse_worker_capability_report(
     report: Option<WorkerCapabilityReport>,
     required: bool,
 ) -> Result<Option<ModelWorkerCapabilityReport>, String> {
@@ -166,6 +169,8 @@ pub struct NodepoolState {
     pub worker_execution_public_key_pem: String,
     pub managed_proof_rollout_mode: ManagedProofRolloutMode,
     pub node_manager: Arc<NodeManager>,
+    pub session_registry: SharedSessionRegistry,
+    pub dispatcher: Option<Arc<Dispatcher>>,
     pub scheduler: TaskScheduler,
     pub artifact_root: PathBuf,
 }
@@ -2014,6 +2019,9 @@ impl MasterNodeService for GrpcMasterNodeService {
         }
         match self.state.scheduler.cancel_task(&req.task_id).await {
             Ok(task) => {
+                if let Some(dispatcher) = self.state.dispatcher.as_ref() {
+                    dispatcher.cancel_session_delivery(&task);
+                }
                 let now = chrono::Utc::now().timestamp() as usize;
                 let worker_token = encode_worker_execution_claims(
                     &self.state.worker_execution_private_key_pem,
@@ -3498,6 +3506,8 @@ async fn request_worker_stop(task: &Task, token: &str) -> WorkerStopDispatch {
         .stop_task_execution(StopTaskExecutionRequest {
             task_id: task.task_id.clone(),
             token: token.to_string(),
+            attempt_id: String::new(),
+            idempotency_key: String::new(),
         })
         .await
     {
@@ -3729,6 +3739,8 @@ mod tests {
             worker_execution_public_key_pem: config.auth.worker_execution_public_key_pem.clone(),
             managed_proof_rollout_mode: config.managed_proof.rollout_mode,
             node_manager,
+            session_registry: hivemind_client_core::SessionRegistry::shared(Default::default()),
+            dispatcher: None,
             scheduler: scheduler.clone(),
             artifact_root: artifact_root_for_config(&config),
         });
@@ -3905,6 +3917,8 @@ mod tests {
             worker_execution_public_key_pem: config.auth.worker_execution_public_key_pem.clone(),
             managed_proof_rollout_mode: config.managed_proof.rollout_mode,
             node_manager,
+            session_registry: hivemind_client_core::SessionRegistry::shared(Default::default()),
+            dispatcher: None,
             scheduler,
             artifact_root: artifact_root_for_config(&config),
         })

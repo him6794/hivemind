@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 tokio.workspace = true
+tokio-stream.workspace = true
 tonic.workspace = true
 prost.workspace = true
 axum.workspace = true

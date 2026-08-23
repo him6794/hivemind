@@ -26,6 +26,8 @@ use hivemind_node_manager::grpc::{
     GrpcNodeManagerService, GrpcUserService, NodepoolState,
 };
 #[cfg(feature = "nodepool")]
+use hivemind_node_manager::outbound_session::GrpcWorkerSessionService;
+#[cfg(feature = "nodepool")]
 use hivemind_node_manager::{heartbeat::HeartbeatHandler, NodeManager};
 use hivemind_proto::GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES;
 #[cfg(feature = "nodepool")]
@@ -35,6 +37,7 @@ use hivemind_proto::{
     master_node_service_server::MasterNodeServiceServer,
     node_manager_service_server::NodeManagerServiceServer, user_service_server::UserServiceServer,
     vpn_service_server::VpnServiceServer,
+    worker_session_service_server::WorkerSessionServiceServer,
 };
 #[cfg(feature = "worker")]
 use hivemind_proto::{
@@ -356,6 +359,7 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
 
         let task_timeout = 30u64;
         let max_redispatch = 2i32;
+        let session_registry = hivemind_client_core::SessionRegistry::shared(Default::default());
         let dispatcher = Arc::new(
             Dispatcher::new(db.clone(), task_timeout, max_redispatch)
                 .with_worker_execution_private_key(
@@ -367,7 +371,8 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
                 .with_managed_proof_provider_configured(
                     !config.managed_proof.provider_endpoint.trim().is_empty(),
                 )
-                .with_managed_proof_rollout_mode(config.managed_proof.rollout_mode),
+                .with_managed_proof_rollout_mode(config.managed_proof.rollout_mode)
+                .with_session_registry(session_registry.clone()),
         );
 
         let disp_shutdown = dispatcher
@@ -375,7 +380,9 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
             .start_registered_dispatch_loop(std::time::Duration::from_secs(5));
         shutdown_handles.push(disp_shutdown);
 
-        let timeout_shutdown = dispatcher.start_timeout_loop(std::time::Duration::from_secs(10));
+        let timeout_shutdown = dispatcher
+            .clone()
+            .start_timeout_loop(std::time::Duration::from_secs(10));
         shutdown_handles.push(timeout_shutdown);
 
         // Build gRPC servers
@@ -385,6 +392,8 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
             worker_execution_public_key_pem: config.auth.worker_execution_public_key_pem.clone(),
             managed_proof_rollout_mode: config.managed_proof.rollout_mode,
             node_manager: node_mgr.clone(),
+            session_registry: session_registry.clone(),
+            dispatcher: Some(dispatcher.clone()),
             scheduler: scheduler.clone(),
             artifact_root: hivemind_node_manager::grpc::artifact_root_for_config(&config),
         });
@@ -397,7 +406,12 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
         )
         .max_decoding_message_size(GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES)
         .max_encoding_message_size(GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES);
-        let batch_svc = BatchRuntimeServiceServer::new(GrpcBatchRuntimeService::new(np_state));
+        let session_svc =
+            WorkerSessionServiceServer::new(GrpcWorkerSessionService::new(np_state.clone()))
+                .max_decoding_message_size(hivemind_proto::WORKER_SESSION_FRAME_MAX_BYTES)
+                .max_encoding_message_size(hivemind_proto::WORKER_SESSION_FRAME_MAX_BYTES);
+        let batch_svc =
+            BatchRuntimeServiceServer::new(GrpcBatchRuntimeService::new(np_state.clone()));
         let vpn_svc = VpnServiceServer::new(GrpcVpnService::new(vpn));
 
         let np_addr = config.server.nodepool_grpc_addr.clone();
@@ -413,6 +427,7 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
                 )
                 .add_service(artifact_svc)
                 .add_service(batch_svc)
+                .add_service(session_svc)
                 .add_service(vpn_svc)
                 .serve(np_addr.parse().unwrap())
                 .await
@@ -544,11 +559,12 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
         .max_decoding_message_size(GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES)
         .max_encoding_message_size(GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES);
         let worker_identity = wk_state.worker_identity_handle();
-        let wk_svc = WorkerNodeServiceServer::new(
-            GrpcWorkerNodeService::new(wk_state).with_runtime_admission(runtime_admission),
-        )
-        .max_decoding_message_size(WORKER_RPC_MESSAGE_MAX_BYTES)
-        .max_encoding_message_size(WORKER_RPC_MESSAGE_MAX_BYTES);
+        let worker_node_service =
+            GrpcWorkerNodeService::new(wk_state).with_runtime_admission(runtime_admission);
+        let session_worker_service = Arc::new(worker_node_service.clone());
+        let wk_svc = WorkerNodeServiceServer::new(worker_node_service)
+            .max_decoding_message_size(WORKER_RPC_MESSAGE_MAX_BYTES)
+            .max_encoding_message_size(WORKER_RPC_MESSAGE_MAX_BYTES);
 
         let wk_incoming = TcpListenerStream::new(wk_listener);
         tokio::spawn(async move {
@@ -577,8 +593,10 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
             nodepool_addr: nodepool_addr_state.clone(),
             config: config.clone(),
             executor: executor.clone(),
+            worker_service: Some(session_worker_service.clone()),
             worker_identity,
             registration_shutdown: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            session_shutdown: std::sync::Arc::new(std::sync::Mutex::new(None)),
         };
         let control_addr = config.server.worker_control_http_addr.clone();
         let worker_control_allowed_origins =
@@ -636,19 +654,34 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| worker_id.clone());
+            let client_instance_id =
+                client_runtime::client_instance_id(client_runtime::ClientRole::Worker)?;
             let reg_shutdown = nodepool_client::start_registration_loop(
                 executor.clone(),
                 nodepool_client::RegistrationLoopConfig {
                     nodepool_addr: nodepool_addr_state.clone(),
                     worker_id: worker_id.clone(),
-                    username: worker_username,
+                    username: worker_username.clone(),
                     worker_addr: worker_addr_state.clone(),
                     location: std::env::var("WORKER_LOCATION").unwrap_or_else(|_| "local".into()),
-                    token: worker_nodepool_token,
+                    token: worker_nodepool_token.clone(),
                     interval: std::time::Duration::from_secs(10),
                 },
             );
             shutdown_handles.push(reg_shutdown);
+            let session_shutdown = nodepool_client::start_session_loop(
+                executor.clone(),
+                nodepool_client::SessionLoopConfig {
+                    nodepool_addr: nodepool_addr_state.clone(),
+                    worker_id: worker_id.clone(),
+                    username: worker_username,
+                    client_instance_id,
+                    token: worker_nodepool_token,
+                    interval: std::time::Duration::from_secs(10),
+                    service: session_worker_service.clone(),
+                },
+            );
+            shutdown_handles.push(session_shutdown);
         } else {
             info!(
                 "Worker registration loop deferred until UI login (no WORKER_NODEPOOL_TOKEN/USERNAME/PASSWORD)"
@@ -903,5 +936,322 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(token, "worker-token");
+    }
+
+    #[cfg(all(feature = "nodepool", feature = "worker"))]
+    mod outbound_session_integration {
+        use super::*;
+        use chrono::Utc;
+        use hivemind_client_core::SessionRegistry;
+        use hivemind_database::{
+            postgres::{create_isolated_test_pool, run_migrations},
+            DatabaseManager,
+        };
+        use hivemind_models::{Task, TaskStatus, WorkerNode, WorkerStatus};
+        use hivemind_node_manager::outbound_session::GrpcWorkerSessionService;
+        use hivemind_proto::{
+            user_service_client::UserServiceClient, user_service_server::UserServiceServer,
+            worker_session_service_server::WorkerSessionServiceServer, LoginRequest,
+            RegisterUserRequest,
+        };
+        use hivemind_task_scheduler::{dispatcher::Dispatcher, TaskScheduler};
+        use hivemind_worker_executor::{
+            grpc_server::{
+                GrpcWorkerNodeService, TransferLeaseAuthority, TransferLeaseAuthorityError,
+                WorkerGrpcState,
+            },
+            nodepool_client::{start_session_loop, SessionLoopConfig},
+            WorkerExecutor,
+        };
+        use std::{
+            net::TcpListener,
+            sync::{Arc, Mutex},
+            time::Duration,
+        };
+        use tonic::transport::Server;
+        use uuid::Uuid;
+
+        #[derive(Clone)]
+        struct AllowTransferLease;
+
+        #[tonic::async_trait]
+        impl TransferLeaseAuthority for AllowTransferLease {
+            async fn validate(
+                &self,
+                _token: &str,
+                _worker_id: &str,
+                _task_id: &str,
+                _execution_id: &str,
+                _attempt_id: &str,
+                _transfer_generation: i64,
+                _idempotency_key: &str,
+                _request_digest: &str,
+            ) -> Result<(), TransferLeaseAuthorityError> {
+                Ok(())
+            }
+        }
+
+        #[tokio::test]
+        async fn outbound_session_delivers_ack_and_result_through_dispatcher() {
+            let config = HivemindConfig::for_test();
+            let fixture = match create_isolated_test_pool("hivemind_bin_session_fixture").await {
+                Ok(fixture) => fixture,
+                Err(_) => return,
+            };
+            run_migrations(&fixture.pool).await.unwrap();
+            let db = DatabaseManager {
+                pool: fixture.pool.clone(),
+            };
+            let auth = hivemind_auth::AuthManager::new(
+                &db,
+                &config.auth.jwt_secret,
+                config.auth.token_expiry_hours,
+            );
+            let scheduler = TaskScheduler::new(db.clone(), auth.clone());
+            let node_manager =
+                Arc::new(hivemind_node_manager::NodeManager::new(&config, db.clone()));
+            let session_registry = SessionRegistry::shared(Default::default());
+            let dispatcher = Arc::new(
+                Dispatcher::new(db.clone(), 300, 3)
+                    .with_worker_execution_private_key(
+                        config.auth.worker_execution_private_key_pem.clone(),
+                    )
+                    .with_session_registry(session_registry.clone()),
+            );
+            let state = Arc::new(hivemind_node_manager::grpc::NodepoolState {
+                auth,
+                worker_execution_private_key_pem: config
+                    .auth
+                    .worker_execution_private_key_pem
+                    .clone(),
+                worker_execution_public_key_pem: config
+                    .auth
+                    .worker_execution_public_key_pem
+                    .clone(),
+                managed_proof_rollout_mode: config.managed_proof.rollout_mode,
+                node_manager: node_manager.clone(),
+                session_registry: session_registry.clone(),
+                dispatcher: Some(dispatcher.clone()),
+                scheduler: scheduler.clone(),
+                artifact_root: hivemind_node_manager::grpc::artifact_root_for_config(&config),
+            });
+
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            drop(listener);
+            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+            let user_service = UserServiceServer::new(
+                hivemind_node_manager::grpc::GrpcUserService::new(state.clone()),
+            );
+            let session_service =
+                WorkerSessionServiceServer::new(GrpcWorkerSessionService::new(state));
+            let server = tokio::spawn(async move {
+                Server::builder()
+                    .add_service(user_service)
+                    .add_service(session_service)
+                    .serve_with_shutdown(addr, async move {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await
+                    .unwrap();
+            });
+
+            let endpoint = format!("http://{addr}");
+            let mut user_client = loop {
+                match UserServiceClient::connect(endpoint.clone()).await {
+                    Ok(client) => break client,
+                    Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
+                }
+            };
+            let username = format!("session-user-{}", Uuid::new_v4());
+            let password = "session-test-password";
+            let registration = user_client
+                .register_user(RegisterUserRequest {
+                    username: username.clone(),
+                    password: password.into(),
+                })
+                .await
+                .unwrap()
+                .into_inner();
+            assert!(registration.success, "{}", registration.status_message);
+            let token = user_client
+                .login(LoginRequest {
+                    username: username.clone(),
+                    password: password.into(),
+                })
+                .await
+                .unwrap()
+                .into_inner()
+                .token;
+
+            let worker_id = format!("session-worker-{}", Uuid::new_v4());
+            node_manager
+                .register_worker(&WorkerNode {
+                    id: Uuid::new_v4(),
+                    worker_id: worker_id.clone(),
+                    username: username.clone(),
+                    ip: "127.0.0.1:1".into(),
+                    virtual_ip: None,
+                    hostname: Some("session-test-worker".into()),
+                    cpu_cores: 4,
+                    memory_gb: 16,
+                    cpu_score: 400,
+                    gpu_score: 0,
+                    gpu_memory_gb: 0,
+                    gpu_name: None,
+                    vram_mb: 0,
+                    storage_total_gb: 100,
+                    storage_available_gb: 100,
+                    provider_enabled: true,
+                    cpu_cores_limit: 4,
+                    memory_gb_limit: 16,
+                    gpu_memory_gb_limit: 0,
+                    storage_gb_limit: 100,
+                    min_cpt_per_hour: 0,
+                    location: "test".into(),
+                    status: WorkerStatus::Active,
+                    cpu_usage: 0.0,
+                    memory_usage: 0.0,
+                    gpu_usage: 0.0,
+                    gpu_memory_usage: 0.0,
+                    available_memory_gb: 16,
+                    queue_capacity: 4,
+                    general_compute_capabilities_json: None,
+                    managed_dsl_capabilities_json: None,
+                    admission_mode: config.general_compute.admission_mode.to_string(),
+                    dynamic_capabilities_json: None,
+                    dynamic_capabilities_digest: None,
+                    dynamic_admission_ready: false,
+                    dynamic_readiness_reason: None,
+                    dynamic_observed_at: None,
+                    last_heartbeat: Utc::now(),
+                    registered_at: Utc::now(),
+                    updated_at: Utc::now(),
+                })
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO worker_reputation
+                    (worker_id, successful_tasks, failed_tasks, score, banned)
+                 VALUES ($1, 0, 0, 100, false)",
+            )
+            .bind(&worker_id)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+
+            let task_id = format!("session-task-{}", Uuid::new_v4());
+            scheduler
+                .create_task(&Task {
+                    id: Uuid::new_v4(),
+                    task_id: task_id.clone(),
+                    owner: username.clone(),
+                    worker_id: None,
+                    worker_ip: None,
+                    status: TaskStatus::Pending,
+                    status_message: None,
+                    output: None,
+                    result_torrent: None,
+                    torrent_source: Some("null".into()),
+                    runtime: Some("managed-function-v0".into()),
+                    task_source: Some("return 1;".into()),
+                    general_compute_manifest_json: None,
+                    managed_dsl_backend_id: None,
+                    managed_dsl_semantics_manifest_sha256: None,
+                    expected_btih: None,
+                    cpu_usage: 0.0,
+                    memory_usage: 0.0,
+                    gpu_usage: 0.0,
+                    gpu_memory_usage: 0.0,
+                    req_cpu_score: 1,
+                    req_gpu_score: 0,
+                    req_memory_gb: 1,
+                    req_gpu_memory_gb: 0,
+                    req_storage_gb: 1,
+                    host_count: 1,
+                    max_cpt: 100,
+                    billing_settled: false,
+                    billed_amount: 0,
+                    managed_executed_ops: 0,
+                    managed_output_bytes: 0,
+                    managed_receipt_json: None,
+                    retry_count: 0,
+                    max_retries: 3,
+                    deadline: None,
+                    deterministic: false,
+                    side_effects: false,
+                    priority: 0,
+                    cpu_time_ms: 0,
+                    wall_time_ms: 0,
+                    peak_memory_mb: 0,
+                    download_bytes: 0,
+                    cache_hits: 0,
+                    created_at: Utc::now(),
+                    last_update: Utc::now(),
+                    completed_at: None,
+                })
+                .await
+                .unwrap();
+
+            let executor = Arc::new(WorkerExecutor::new(config.clone()));
+            let worker_state = Arc::new(WorkerGrpcState::new_with_transfer_lease_authority(
+                config.clone(),
+                executor.clone(),
+                worker_id.clone(),
+                Arc::new(AllowTransferLease),
+            ));
+            let session_shutdown = start_session_loop(
+                executor,
+                SessionLoopConfig {
+                    nodepool_addr: Arc::new(Mutex::new(endpoint)),
+                    worker_id: worker_id.clone(),
+                    username: username.clone(),
+                    client_instance_id: "session-test-client".into(),
+                    token,
+                    interval: Duration::from_millis(50),
+                    service: Arc::new(GrpcWorkerNodeService::new(worker_state)),
+                },
+            );
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if session_registry
+                        .lock()
+                        .unwrap()
+                        .active_identity_for_worker(&worker_id)
+                        .is_some()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await
+            .expect("Worker session connects");
+
+            assert_eq!(
+                dispatcher
+                    .dispatch_pending_from_registered_workers_and_execute()
+                    .await
+                    .unwrap(),
+                1
+            );
+            let completed = tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    let task = scheduler.get_task(&task_id).await.unwrap().unwrap();
+                    if matches!(task.status, TaskStatus::Completed | TaskStatus::Failed) {
+                        break task;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("session result reaches the dispatcher");
+            assert_eq!(completed.status, TaskStatus::Completed);
+
+            let _ = session_shutdown.send(true);
+            let _ = shutdown_tx.send(());
+            let _ = server.await;
+            fixture.cleanup().await.unwrap();
+        }
     }
 }

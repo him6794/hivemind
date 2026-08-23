@@ -13,6 +13,7 @@ pub mod cp_python;
 pub mod differential;
 pub mod execution;
 pub mod gpu;
+pub mod gpu_tensor;
 pub mod monte_carlo;
 pub mod numeric;
 pub mod ode;

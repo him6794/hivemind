@@ -5,6 +5,7 @@ use hivemind_auth::managed_proof::{
     claims_with_issuance, new_claims, ManagedProofAuthorizationSigner,
 };
 use hivemind_auth::worker_execution::{WorkerExecutionIdentity, WorkerExecutionSigner};
+use hivemind_client_core::{SessionError, SessionTask, SharedSessionRegistry};
 use hivemind_config::ManagedProofRolloutMode;
 use hivemind_database::DatabaseManager;
 use hivemind_managed_proof::{
@@ -47,6 +48,7 @@ pub struct Dispatcher {
     managed_proof_authorization_private_key_pem: String,
     managed_proof_provider_configured: bool,
     managed_proof_rollout_mode: ManagedProofRolloutMode,
+    session_registry: Option<SharedSessionRegistry>,
 }
 
 struct WorkerExecutionOptions {
@@ -71,6 +73,7 @@ impl Dispatcher {
             .unwrap_or_default(),
             managed_proof_provider_configured: false,
             managed_proof_rollout_mode: ManagedProofRolloutMode::Enforce,
+            session_registry: None,
         }
     }
 
@@ -94,6 +97,11 @@ impl Dispatcher {
         rollout_mode: ManagedProofRolloutMode,
     ) -> Self {
         self.managed_proof_rollout_mode = rollout_mode;
+        self
+    }
+
+    pub fn with_session_registry(mut self, session_registry: SharedSessionRegistry) -> Self {
+        self.session_registry = Some(session_registry);
         self
     }
 
@@ -126,6 +134,202 @@ impl Dispatcher {
             Err(e) => {
                 error!("Failed to dispatch task {}: {}", task.task_id, e);
                 None
+            }
+        }
+    }
+
+    pub async fn handle_worker_session_ack(
+        &self,
+        worker_id: &str,
+        owner: &str,
+        task_id: &str,
+        attempt_id: &str,
+        idempotency_key: &str,
+        request_digest: &str,
+    ) -> Result<()> {
+        let Some(task) = self.repo.find_by_task_id(task_id).await? else {
+            anyhow::bail!("Worker session ACK references an unknown task");
+        };
+        if task.worker_id.as_deref() != Some(worker_id) || task.owner != owner {
+            anyhow::bail!("Worker session ACK does not match the current assignment");
+        }
+        if !matches!(task.status, TaskStatus::Assigned | TaskStatus::Running) {
+            anyhow::bail!("Worker session ACK references a non-running task");
+        }
+        let expected_identity = legacy_execution_identity(&task);
+        if attempt_id != expected_identity.1
+            || idempotency_key != expected_identity.2
+            || request_digest != expected_identity.3
+        {
+            anyhow::bail!("Worker session ACK belongs to a stale task attempt");
+        }
+        if task.status == TaskStatus::Assigned
+            && self
+                .repo
+                .mark_worker_execution_running(task_id, worker_id)
+                .await?
+                .is_none()
+        {
+            anyhow::bail!("Worker session ACK could not transition the task to RUNNING");
+        }
+        Ok(())
+    }
+
+    pub async fn handle_worker_session_result(
+        &self,
+        worker_id: &str,
+        task_id: &str,
+        request: ExecuteTaskRequest,
+        response: ExecuteTaskResponse,
+    ) -> Result<()> {
+        let Some(task) = self.repo.find_by_task_id(task_id).await? else {
+            return Ok(());
+        };
+        if task.worker_id.as_deref() != Some(worker_id)
+            || !matches!(task.status, TaskStatus::Assigned | TaskStatus::Running)
+        {
+            return Ok(());
+        }
+        if request.task_id != task_id {
+            anyhow::bail!("Worker session request task identity does not match delivery");
+        }
+        if request.token.trim().is_empty() {
+            anyhow::bail!("Worker session request is missing its execution token");
+        }
+        if response.execution_id != request.execution_id
+            || response.attempt_id != request.attempt_id
+            || response.idempotency_key != request.idempotency_key
+            || response.request_digest != request.request_digest
+        {
+            anyhow::bail!("Worker session result identity does not match the delivered request");
+        }
+        validate_worker_response_sizes(&response)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        if is_managed_runtime(task.runtime.as_deref())
+            || task.runtime.as_deref()
+                == Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION)
+        {
+            anyhow::bail!("session result requires the authoritative execution path");
+        }
+        let expected_identity = legacy_execution_identity(&task);
+        if (
+            request.execution_id.as_str(),
+            request.attempt_id.as_str(),
+            request.idempotency_key.as_str(),
+            request.request_digest.as_str(),
+        ) != (
+            expected_identity.0.as_str(),
+            expected_identity.1.as_str(),
+            expected_identity.2.as_str(),
+            expected_identity.3.as_str(),
+        ) {
+            anyhow::bail!("Worker session result belongs to a stale task attempt");
+        }
+        if response.success {
+            self.repo
+                .complete_for_worker(task_id, worker_id, None, Some(&response.status_message))
+                .await?;
+        } else {
+            self.repo
+                .fail_for_worker(task_id, worker_id, &response.status_message)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn enqueue_worker_session_task(&self, snapshot: &Task, worker_id: &str) -> Result<bool> {
+        let Some(task) = self.repo.find_by_task_id(&snapshot.task_id).await? else {
+            return Ok(false);
+        };
+        if task.worker_id.as_deref() != Some(worker_id)
+            || !matches!(task.status, TaskStatus::Assigned | TaskStatus::Running)
+        {
+            return Ok(false);
+        }
+        if !session_compatible_runtime(task.runtime.as_deref()) {
+            return Ok(false);
+        }
+        let Some(registry) = self.session_registry.as_ref() else {
+            return Ok(false);
+        };
+        let Some(identity) = registry
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Worker session registry is unavailable"))?
+            .active_identity_for_worker(worker_id)
+        else {
+            return Ok(false);
+        };
+        if identity.owner != task.owner {
+            warn!(
+                task_id = %task.task_id,
+                worker_id,
+                "Ignoring an active Worker session owned by another user"
+            );
+            return Ok(false);
+        }
+        let token = worker_session_execution_token_with_lifetime(
+            &self.worker_execution_private_key_pem,
+            &task,
+            worker_id,
+            SESSION_WORKER_EXECUTION_TOKEN_TTL_SECS,
+        )?;
+        let request = build_execute_task_request_with_credentials(&task, token, None);
+        let delivery = SessionTask {
+            task_id: task.task_id.clone(),
+            execution_id: request.execution_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+            request_digest: request.request_digest.clone(),
+            payload: prost::Message::encode_to_vec(&request),
+        };
+        let outcome = match registry
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Worker session registry is unavailable"))?
+            .enqueue(&identity, delivery)
+        {
+            Ok(outcome) => outcome,
+            Err(SessionError::QueueFull) => {
+                warn!(
+                    task_id = %task.task_id,
+                    worker_id,
+                    "Worker session delivery queue is full; retaining assignment for timeout retry"
+                );
+                return Ok(true);
+            }
+            Err(SessionError::InactiveSession | SessionError::InvalidResumeToken) => {
+                return Ok(false);
+            }
+            Err(other) => return Err(anyhow::anyhow!(other.to_string())),
+        };
+        info!(
+            task_id = %task.task_id,
+            worker_id,
+            delivery_sequence = outcome.delivery.delivery_sequence,
+            duplicate = outcome.duplicate,
+            "Queued task on outbound Worker session"
+        );
+        Ok(true)
+    }
+
+    pub fn cancel_session_delivery(&self, task: &Task) {
+        if !session_compatible_runtime(task.runtime.as_deref()) {
+            return;
+        }
+        let Some(registry) = self.session_registry.as_ref() else {
+            return;
+        };
+        let Some(worker_id) = task.worker_id.as_deref() else {
+            return;
+        };
+        let attempt_id = legacy_execution_identity(task).1;
+        if let Ok(mut registry) = registry.lock() {
+            let removed = registry.cancel_task_attempt(&task.task_id, &attempt_id);
+            if removed > 0 {
+                info!(
+                    task_id = %task.task_id,
+                    worker_id,
+                    "Invalidated outbound session delivery during task reset"
+                );
             }
         }
     }
@@ -171,6 +375,22 @@ impl Dispatcher {
             {
                 reserve_worker_for_batch(&mut available_workers, &worker_id);
                 dispatched += 1;
+                let session_enqueued =
+                    match self.enqueue_worker_session_task(task, &worker_id).await {
+                        Ok(enqueued) => enqueued,
+                        Err(error) => {
+                            warn!(
+                                task_id = %task.task_id,
+                                worker_id = %worker_id,
+                                error = %error,
+                                "Outbound Worker session enqueue failed; using unary fallback"
+                            );
+                            false
+                        }
+                    };
+                if session_enqueued {
+                    continue;
+                }
                 let repo = self.repo.clone();
                 let task = task.clone();
                 let execution_options = WorkerExecutionOptions {
@@ -276,6 +496,7 @@ impl Dispatcher {
         for task in &stale {
             if task.retry_count >= self.max_redispatch {
                 if let Some(worker_id) = task.worker_id.as_deref() {
+                    self.cancel_session_delivery(task);
                     match self
                         .repo
                         .fail_for_worker(
@@ -296,6 +517,7 @@ impl Dispatcher {
                     }
                 }
             } else if let Some(worker_id) = task.worker_id.as_deref() {
+                self.cancel_session_delivery(task);
                 match self
                     .repo
                     .reset_to_pending_for_worker(&task.task_id, worker_id)
@@ -403,6 +625,7 @@ fn build_execute_task_request_with_credentials(
     } else {
         None
     };
+    let legacy_identity = legacy_execution_identity(task);
     ExecuteTaskRequest {
         task_id: task.task_id.clone(),
         torrent: task.torrent_source.clone().unwrap_or_default(),
@@ -436,20 +659,24 @@ fn build_execute_task_request_with_credentials(
             .map(|proof| proof.execution_id.clone())
             .or_else(|| managed_identity.as_ref().map(|identity| identity.0.clone()))
             .or_else(|| identity.as_ref().map(|identity| identity.0.clone()))
+            .or_else(|| Some(legacy_identity.0.clone()))
             .unwrap_or_default(),
         attempt_id: managed_proof
             .map(|proof| proof.attempt_id.clone())
             .or_else(|| managed_identity.as_ref().map(|identity| identity.1.clone()))
             .or_else(|| identity.as_ref().map(|identity| identity.1.clone()))
+            .or_else(|| Some(legacy_identity.1.clone()))
             .unwrap_or_default(),
         idempotency_key: managed_proof
             .map(|proof| proof.idempotency_key.clone())
             .or_else(|| managed_identity.as_ref().map(|identity| identity.2.clone()))
             .or_else(|| identity.as_ref().map(|identity| identity.2.clone()))
+            .or_else(|| Some(legacy_identity.2.clone()))
             .unwrap_or_default(),
         request_digest: managed_proof
             .map(|proof| proof.request_digest.clone())
             .or_else(|| identity.as_ref().map(|identity| identity.3.clone()))
+            .or_else(|| Some(legacy_identity.3.clone()))
             .unwrap_or_default(),
         managed_dsl_backend_id: if task.runtime.as_deref() == Some("production_sandboxed_dsl") {
             task.managed_dsl_backend_id.clone().unwrap_or_default()
@@ -475,6 +702,21 @@ fn build_execute_task_request_with_credentials(
             .map(|proof| proof.deadline_unix_ms)
             .unwrap_or_default(),
     }
+}
+
+fn legacy_execution_identity(task: &Task) -> (String, String, String, String) {
+    let stable_task = task.id.simple().to_string();
+    let execution_id = format!("legacy-execution-v1:{stable_task}");
+    let attempt_id = format!("legacy-attempt-v1:{stable_task}:{}", task.retry_count);
+    let idempotency_key = format!("legacy-result-v1:{stable_task}:{}", task.retry_count);
+    let request_digest =
+        sha256_prefixed(format!("{execution_id}\n{attempt_id}\n{idempotency_key}").as_bytes());
+    (execution_id, attempt_id, idempotency_key, request_digest)
+}
+
+fn session_compatible_runtime(runtime: Option<&str>) -> bool {
+    !is_managed_runtime(runtime)
+        && runtime != Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION)
 }
 
 fn general_compute_identity(task: &Task) -> Option<(String, String, String, String)> {
@@ -552,11 +794,29 @@ fn same_active_task_attempt(expected: &Task, current: &Task, worker_id: &str) ->
         && matches!(current.status, TaskStatus::Assigned | TaskStatus::Running)
 }
 
+const SESSION_WORKER_EXECUTION_TOKEN_TTL_SECS: i64 = 15 * 60;
+
 fn worker_execution_token(
     private_key_pem: &str,
     task: &Task,
     worker_id: &str,
     transfer_generation: Option<i64>,
+) -> anyhow::Result<String> {
+    worker_execution_token_with_lifetime(
+        private_key_pem,
+        task,
+        worker_id,
+        transfer_generation,
+        5 * 60,
+    )
+}
+
+fn worker_execution_token_with_lifetime(
+    private_key_pem: &str,
+    task: &Task,
+    worker_id: &str,
+    transfer_generation: Option<i64>,
+    lifetime_seconds: i64,
 ) -> anyhow::Result<String> {
     if private_key_pem.trim().is_empty() {
         anyhow::bail!("WORKER_EXECUTION_PRIVATE_KEY_PEM is required for worker execution dispatch")
@@ -568,7 +828,7 @@ fn worker_execution_token(
         role: Some("worker-execution".into()),
         task_id: Some(task.task_id.clone()),
         worker_id: Some(worker_id.to_string()),
-        exp: (now + 300) as usize,
+        exp: (now + lifetime_seconds) as usize,
         iat: now as usize,
     };
     let signer = WorkerExecutionSigner::from_pem(private_key_pem)?;
@@ -592,6 +852,29 @@ fn worker_execution_token(
     } else {
         signer.encode_claims(&claims)
     }
+}
+
+fn worker_session_execution_token_with_lifetime(
+    private_key_pem: &str,
+    task: &Task,
+    worker_id: &str,
+    lifetime_seconds: i64,
+) -> anyhow::Result<String> {
+    if private_key_pem.trim().is_empty() {
+        anyhow::bail!("WORKER_EXECUTION_PRIVATE_KEY_PEM is required for worker execution dispatch")
+    }
+    let (_, attempt_id, _, _) = legacy_execution_identity(task);
+    let now = chrono::Utc::now().timestamp();
+    let claims = Claims {
+        sub: task.owner.clone(),
+        user_id: task.owner.clone(),
+        role: Some("worker-execution".into()),
+        task_id: Some(task.task_id.clone()),
+        worker_id: Some(worker_id.to_string()),
+        exp: (now + lifetime_seconds) as usize,
+        iat: now as usize,
+    };
+    WorkerExecutionSigner::from_pem(private_key_pem)?.encode_attempt_claims(&claims, &attempt_id)
 }
 
 async fn mint_managed_proof_dispatch(

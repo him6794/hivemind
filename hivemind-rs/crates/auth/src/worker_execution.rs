@@ -82,6 +82,29 @@ impl WorkerExecutionSigner {
             .context("Failed to encode worker execution token")
     }
 
+    /// Bind a legacy task execution token to an attempt without adding the
+    /// general-compute transfer lease fields required by the extended path.
+    pub fn encode_attempt_claims(&self, claims: &Claims, attempt_id: &str) -> Result<String> {
+        if attempt_id.trim().is_empty() {
+            anyhow::bail!("worker execution attempt id must not be empty");
+        }
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.typ = Some("JWT".into());
+        encode(
+            &header,
+            &WorkerExecutionClaims {
+                claims: claims.clone(),
+                execution_id: None,
+                attempt_id: Some(attempt_id.to_owned()),
+                idempotency_key: None,
+                request_digest: None,
+                transfer_generation: None,
+            },
+            &self.encoding_key,
+        )
+        .context("Failed to encode worker execution token")
+    }
+
     pub fn encode_execution_claims(
         &self,
         claims: &Claims,

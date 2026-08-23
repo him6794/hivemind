@@ -1463,13 +1463,16 @@ name = "hivemind-bin"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "hivemind-auth",
+ "hivemind-client-core",
  "hivemind-client-runtime",
  "hivemind-common",
  "hivemind-config",
  "hivemind-database",
  "hivemind-managed-proof",
  "hivemind-master-api",
+ "hivemind-models",
  "hivemind-node-manager",
  "hivemind-proto",
  "hivemind-task-scheduler",
@@ -1480,11 +1483,23 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sqlx",
  "tokio",
  "tokio-stream",
  "tonic",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "hivemind-client-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "rand 0.8.7",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -1600,6 +1615,7 @@ dependencies = [
  "chrono",
  "general-compute-runtime",
  "hivemind-auth",
+ "hivemind-client-core",
  "hivemind-client-runtime",
  "hivemind-config",
  "hivemind-database",
@@ -1638,15 +1654,18 @@ dependencies = [
  "chrono",
  "general-compute-runtime",
  "hivemind-auth",
+ "hivemind-client-core",
  "hivemind-config",
  "hivemind-database",
  "hivemind-models",
  "hivemind-proto",
  "hivemind-task-scheduler",
+ "prost",
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tracing",
  "uuid",
@@ -1670,6 +1689,7 @@ dependencies = [
  "general-compute-runtime",
  "hex",
  "hivemind-auth",
+ "hivemind-client-core",
  "hivemind-config",
  "hivemind-database",
  "hivemind-managed-proof",
@@ -1758,6 +1778,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tower",
  "tower-http 0.5.2",

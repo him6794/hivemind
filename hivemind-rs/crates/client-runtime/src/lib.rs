@@ -849,6 +849,12 @@ pub async fn ensure_user_vpn_for_token(
     ensure_user_vpn_for_token_inner(config, role, token).await
 }
 
+/// Return the stable, non-secret client instance identifier used for enrollment
+/// and outbound session binding.
+pub fn client_instance_id(role: ClientRole) -> Result<String> {
+    persisted_device_id(role)
+}
+
 /// Obtain and immediately redeem a short-lived server enrollment credential.
 ///
 /// The credential is held only in this call's stack and is never written to

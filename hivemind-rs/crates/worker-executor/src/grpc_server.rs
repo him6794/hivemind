@@ -280,6 +280,7 @@ impl WorkerGrpcState {
 const MAX_TASK_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_RESULT_REFERENCE_BYTES: usize = 4096;
 
+#[derive(Clone)]
 pub struct GrpcWorkerNodeService {
     state: Arc<WorkerGrpcState>,
     runtime_admission: WorkerRuntimeAdmission,
@@ -645,6 +646,25 @@ impl GrpcWorkerNodeService {
             if report.worker_id.as_deref() != Some(worker_id) {
                 return Err(task_assignment_denied());
             }
+        }
+        Ok(())
+    }
+
+    fn validate_task_attempt_assignment(
+        &self,
+        token: &str,
+        task_id: &str,
+        attempt_id: &str,
+    ) -> Result<(), Box<Status>> {
+        self.validate_task_assignment(token, task_id, None)?;
+        let claims = WorkerExecutionVerifier::from_pem(
+            &self.state.config.auth.worker_execution_public_key_pem,
+        )
+        .map_err(|_| Box::new(Status::internal("Worker execution public key is invalid")))?
+        .decode_execution_claims(token)
+        .map_err(|_| Box::new(Status::unauthenticated("Invalid token")))?;
+        if claims.attempt_id.as_deref() != Some(attempt_id) {
+            return Err(task_assignment_denied());
         }
         Ok(())
     }
@@ -1034,7 +1054,11 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         match self
             .state
             .executor
-            .execute_task_with_context(&task, proof_context)
+            .execute_task_with_context_and_attempt(
+                &task,
+                proof_context,
+                &request_identity.attempt_id,
+            )
             .await
         {
             Ok(result) => Ok(Response::new(execute_response_from_result(
@@ -1171,14 +1195,21 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         request: Request<StopTaskExecutionRequest>,
     ) -> Result<Response<StopTaskExecutionResponse>, Status> {
         let req = request.into_inner();
-        self.validate_task_assignment(&req.token, &req.task_id, None)
-            .map_err(|status| *status)?;
+        if req.attempt_id.trim().is_empty() {
+            self.validate_task_assignment(&req.token, &req.task_id, None)
+                .map_err(|status| *status)?;
+        } else {
+            self.validate_task_attempt_assignment(&req.token, &req.task_id, &req.attempt_id)
+                .map_err(|status| *status)?;
+        }
         if !crate::sandbox::is_safe_task_id(&req.task_id) {
             return Err(Status::invalid_argument("unsafe task id"));
         }
         tracing::info!("Stop task {}", req.task_id);
-        let (success, status_message) = match self.state.executor.stop_task_execution(&req.task_id)
-        {
+        let (success, status_message) = match self.state.executor.stop_task_execution_for_attempt(
+            &req.task_id,
+            (!req.attempt_id.trim().is_empty()).then_some(req.attempt_id.as_str()),
+        ) {
             StopTaskOutcome::StopRequested => (true, "Stop requested"),
             StopTaskOutcome::AlreadyStopping => (true, "Stop already requested"),
             StopTaskOutcome::NotRunning => (false, "Task not running"),
@@ -1465,12 +1496,6 @@ struct ExecuteTaskIdentity {
 
 impl ExecuteTaskIdentity {
     fn from_request(request: &ExecuteTaskRequest) -> Self {
-        if !matches!(
-            request.runtime.trim(),
-            "general-compute-v1alpha1" | "managed-function-v0" | "production_sandboxed_dsl"
-        ) {
-            return Self::default();
-        }
         Self {
             execution_id: request.execution_id.clone(),
             attempt_id: request.attempt_id.clone(),
@@ -1989,6 +2014,8 @@ mod tests {
             .stop_task_execution(Request::new(StopTaskExecutionRequest {
                 task_id: "missing-task".into(),
                 token: bound_token(test_private_key_pem(), ASSIGNED_OWNER, "missing-task"),
+                attempt_id: String::new(),
+                idempotency_key: String::new(),
             }))
             .await
             .unwrap()
@@ -2268,6 +2295,8 @@ mod tests {
             .stop_task_execution(Request::new(StopTaskExecutionRequest {
                 task_id: "assigned-stop".into(),
                 token: test_user_token(test_private_key_pem(), ASSIGNED_OWNER),
+                attempt_id: String::new(),
+                idempotency_key: String::new(),
             }))
             .await;
 
@@ -2395,6 +2424,8 @@ mod tests {
             .stop_task_execution(Request::new(StopTaskExecutionRequest {
                 task_id: "owner-stop".into(),
                 token: test_token(test_private_key_pem(), OTHER_OWNER),
+                attempt_id: String::new(),
+                idempotency_key: String::new(),
             }))
             .await;
 
@@ -2634,6 +2665,8 @@ mod tests {
                 .stop_task_execution(Request::new(StopTaskExecutionRequest {
                     task_id: task_id.clone(),
                     token: bound_token(test_private_key_pem(), ASSIGNED_OWNER, &task_id),
+                    attempt_id: String::new(),
+                    idempotency_key: String::new(),
                 }))
                 .await
             {
