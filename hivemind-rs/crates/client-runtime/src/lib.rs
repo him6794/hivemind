@@ -2979,6 +2979,19 @@ fn extract_nodepool_peer_ips(status: &serde_json::Value, hostnames: &[String]) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+    use std::sync::OnceLock;
+
+    /// Serializes tests that mutate process environment variables. Cargo runs
+    /// the tests in one binary on parallel threads, and two of these tests
+    /// toggle `HIVEMIND_DISABLE_WEBSITE_VPN` in opposite directions, which
+    /// previously raced.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     #[test]
     fn plan_skips_without_bootstrap_settings() {
@@ -3042,6 +3055,7 @@ mod tests {
 
     #[test]
     fn website_api_base_defaults_to_official_endpoint() {
+        let _env = env_lock();
         let config = HivemindConfig::default();
         // Ensure disable flags are unset for this process.
         let orig_disable_vpn = std::env::var("HIVEMIND_DISABLE_WEBSITE_VPN").ok();
@@ -3078,6 +3092,7 @@ mod tests {
 
     #[test]
     fn website_api_base_can_be_disabled() {
+        let _env = env_lock();
         let config = HivemindConfig::default();
         let orig_disable_vpn = std::env::var("HIVEMIND_DISABLE_WEBSITE_VPN").ok();
         std::env::set_var("HIVEMIND_DISABLE_WEBSITE_VPN", "1");

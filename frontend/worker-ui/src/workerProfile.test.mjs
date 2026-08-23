@@ -111,7 +111,7 @@ describe('worker profile registration payload', () => {
     assert.equal(body.username, 'alice');
   });
 
-  it('normalizes endpoint and rejects blank endpoint before registration', () => {
+  it('normalizes endpoint and registers session-only when the endpoint is blank', () => {
     const body = buildRegisterWorkerBody(
       'provider',
       {
@@ -122,10 +122,29 @@ describe('worker profile registration payload', () => {
     );
 
     assert.equal(body.ip, 'localhost:50053');
-    assert.throws(
-      () => buildRegisterWorkerBody('provider', { worker_id: 'local-worker-42' }, '   '),
-      /worker endpoint is required/,
+
+    const sessionOnly = buildRegisterWorkerBody(
+      'provider',
+      { worker_id: 'local-worker-42', location: 'taipei' },
+      '',
     );
+    assert.equal('ip' in sessionOnly, false);
+
+    const blankSessionOnly = buildRegisterWorkerBody(
+      'provider',
+      { worker_id: 'local-worker-42', location: 'taipei' },
+      '   ',
+    );
+    assert.equal('ip' in blankSessionOnly, false);
+  });
+
+  it('keeps a provided callback endpoint on the registration payload', () => {
+    const body = buildRegisterWorkerBody(
+      'provider',
+      { worker_id: 'local-worker-42', location: 'taipei' },
+      '10.42.0.9:50053',
+    );
+    assert.equal(body.ip, '10.42.0.9:50053');
   });
 
   it('rejects negative worker capacity values before registration', () => {

@@ -19,7 +19,9 @@ impl WorkerRepository {
         let existing = self.find_by_worker_id(&worker.worker_id).await?;
         if existing.is_some() {
             sqlx::query_as::<_, WorkerNode>(
-                "UPDATE worker_nodes SET username = $1, ip = $2, cpu_cores = $3, memory_gb = $4,
+                "UPDATE worker_nodes SET username = $1,
+                 ip = CASE WHEN $2 = '' THEN worker_nodes.ip ELSE $2 END,
+                 cpu_cores = $3, memory_gb = $4,
                  cpu_score = $5, gpu_score = $6, gpu_memory_gb = $7,
                  gpu_name = $8, vram_mb = $9,
                  storage_total_gb = $10, storage_available_gb = $11,
@@ -141,7 +143,9 @@ impl WorkerRepository {
             .dynamic_observed_at
             .map(|_| worker.dynamic_admission_ready);
         let updated = sqlx::query_as::<_, WorkerNode>(
-            "UPDATE worker_nodes SET username = $1, ip = $2, cpu_cores = $3, memory_gb = $4,
+            "UPDATE worker_nodes SET username = $1,
+             ip = CASE WHEN $2 = '' THEN worker_nodes.ip ELSE $2 END,
+             cpu_cores = $3, memory_gb = $4,
              cpu_score = $5, gpu_score = $6, gpu_memory_gb = $7,
              gpu_name = $8, vram_mb = $9,
              storage_total_gb = $10, storage_available_gb = $11,
@@ -490,6 +494,51 @@ mod tests {
             refreshed.general_compute_capabilities_json.as_deref(),
             Some(snapshot)
         );
+
+        sqlx::query("DELETE FROM worker_nodes WHERE worker_id = $1")
+            .bind(worker_id)
+            .execute(&repo.pool)
+            .await
+            .ok();
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_session_only_registration_preserves_the_stored_callback_address() {
+        let fixture = match pool("worker_repository_session_only_ip").await {
+            Some(fixture) => fixture,
+            None => return,
+        };
+        let repo = WorkerRepository::new(fixture.pool.clone());
+        let worker_id = "session-only-ip-worker";
+        sqlx::query("DELETE FROM worker_nodes WHERE worker_id = $1")
+            .bind(worker_id)
+            .execute(&repo.pool)
+            .await
+            .ok();
+
+        let mut registered = test_worker(worker_id, WorkerStatus::Active);
+        registered.ip = "10.42.0.9:50053".into();
+        repo.upsert(&registered).await.unwrap();
+
+        // A session-only re-registration reports no callback address; the
+        // stored address must survive so legacy direct callers keep working.
+        let mut session_only = registered.clone();
+        session_only.ip = String::new();
+        let updated = repo.upsert(&session_only).await.unwrap();
+        assert_eq!(updated.ip, "10.42.0.9:50053");
+
+        let updated_for_owner = repo
+            .upsert_for_owner(&session_only, "example-user", false)
+            .await
+            .unwrap();
+        assert_eq!(updated_for_owner.ip, "10.42.0.9:50053");
+
+        // A real address update still replaces the stored value.
+        let mut new_addr = registered.clone();
+        new_addr.ip = "10.42.0.10:50053".into();
+        let replaced = repo.upsert(&new_addr).await.unwrap();
+        assert_eq!(replaced.ip, "10.42.0.10:50053");
 
         sqlx::query("DELETE FROM worker_nodes WHERE worker_id = $1")
             .bind(worker_id)

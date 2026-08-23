@@ -49,10 +49,10 @@ function validateWorkerCapacity(values) {
 
 export function buildRegisterWorkerBody(username, workerProfile, endpoint) {
   const workerId = String(workerProfile.worker_id || '').trim();
+  // The callback endpoint is optional: workers that deliver results through
+  // the outbound session register without one. A blank value registers the
+  // worker as session-only instead of failing.
   const workerEndpoint = String(endpoint || '').trim();
-  if (!workerEndpoint) {
-    throw new Error('worker endpoint is required');
-  }
   const capacity = {
     cpu_cores: toNumber(workerProfile.cpu_cores),
     memory_gb: toNumber(workerProfile.memory_gb),
@@ -66,7 +66,7 @@ export function buildRegisterWorkerBody(username, workerProfile, endpoint) {
   return {
     username: username.trim(),
     ...(workerId ? { worker_id: workerId } : {}),
-    ip: workerEndpoint,
+    ...(workerEndpoint ? { ip: workerEndpoint } : {}),
     cpu_cores: capacity.cpu_cores,
     memory_gb: capacity.memory_gb,
     cpu_score: capacity.cpu_score,

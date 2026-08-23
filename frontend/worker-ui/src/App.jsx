@@ -13,8 +13,9 @@ const IP_PATTERN = /^[\w.-]+:\d{1,5}$/;
 const SESSION_KEY = 'hivemind.worker.session.v1';
 
 function validateWorkerEndpoint(value) {
-  if (!value || !value.trim()) return 'Worker endpoint is required';
-  if (!IP_PATTERN.test(value.trim())) return 'Invalid format. Expected host:port (e.g. 127.0.0.1:50053)';
+  const endpoint = String(value || '').trim();
+  if (!endpoint) return null; // blank = session-only registration
+  if (!IP_PATTERN.test(endpoint)) return 'Invalid format. Expected host:port (e.g. 127.0.0.1:50053)';
   return null;
 }
 
@@ -23,7 +24,7 @@ export default function WorkerApp() {
   const workerControlBase = String(import.meta.env.VITE_WORKER_CONTROL_BASE || '')
     .trim()
     .replace(/\/$/, '');
-  const initialSession = readStoredSession(window.localStorage, SESSION_KEY);
+  const initialSession = readStoredSession(window.sessionStorage, SESSION_KEY);
 
   const [username, setUsername] = useState(initialSession.username);
   const [password, setPassword] = useState('');
@@ -35,7 +36,7 @@ export default function WorkerApp() {
   const [profileError, setProfileError] = useState(null);
   const [registerLoading, setRegisterLoading] = useState(false);
   const [refreshLoading, setRefreshLoading] = useState(false);
-  const [workerIp, setWorkerIp] = useState(`${window.location.hostname || '127.0.0.1'}:50053`);
+  const [workerIp, setWorkerIp] = useState('');
   const [workerIpError, setWorkerIpError] = useState(null);
   const [profile, setProfile] = useState(emptyProfile);
   const [registration, setRegistration] = useState(null);
@@ -75,7 +76,11 @@ export default function WorkerApp() {
 
     const normalized = normalizeWorkerProfile(data.profile, workerIp);
     setProfile(normalized);
-    setWorkerIp(normalized.ip);
+    // Keep a detected callback address editable but never mandatory; a blank
+    // field registers this worker as session-only.
+    if (!workerIp.trim() && normalized.ip) {
+      setWorkerIp(normalized.ip);
+    }
     return normalized;
   }
 
@@ -147,7 +152,6 @@ export default function WorkerApp() {
       setRegisterLoading(false);
     }
   }
-
   async function handleLogin(e) {
     e.preventDefault();
     setLoginLoading(true);
@@ -174,7 +178,10 @@ export default function WorkerApp() {
 
       const authToken = data.token || '';
       const ownerUsername = username.trim();
-      saveStoredSession(window.localStorage, SESSION_KEY, {
+      // The bearer JWT lives only in tab session storage: closing the Worker
+      // console discards it, so no reusable credential persists in the
+      // browser profile.
+      saveStoredSession(window.sessionStorage, SESSION_KEY, {
         token: authToken,
         username: ownerUsername,
       });
@@ -193,7 +200,7 @@ export default function WorkerApp() {
   }
 
   function logout() {
-    clearStoredSession(window.localStorage, SESSION_KEY);
+    clearStoredSession(window.sessionStorage, SESSION_KEY);
     setToken('');
     setAuthenticatedUsername('');
     setRegistration(null);
@@ -318,10 +325,11 @@ export default function WorkerApp() {
           <section className="surface">
             <h2>Local Capacity</h2>
             <label>
-              Worker endpoint
+              Callback endpoint (optional)
               <input
                 value={workerIp}
                 onChange={(e) => handleWorkerIpChange(e.target.value)}
+                placeholder="blank = session-only (outbound)"
                 className={`field ${workerIpError ? 'error' : ''}`}
               />
             </label>
