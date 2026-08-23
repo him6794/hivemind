@@ -105,10 +105,26 @@ Assert-Contains `
     -Needle 'Assert-RequiredEnv -Names @("WORKER_GRPC_ADDR", "WORKER_CONTROL_HTTP_ADDR")' `
     -Message "start-worker launcher must require worker listen/control addresses without requiring a pre-provisioned token."
 
+# Zero-config onboarding: neither the launcher nor the template may require a
+# Nodepool endpoint, a static Worker ID, or a reusable nodepool token.
+if ($scriptText -match 'Required setting NODEPOOL_GRPC_ENDPOINT') {
+    throw "start-worker launcher must not require NODEPOOL_GRPC_ENDPOINT/NODEPOOL_GRPC_ADDR; public onboarding discovers the transport after login."
+}
+
+foreach ($forbiddenRequirement in @(
+        'Assert-RequiredEnv[^\r\n]*WORKER_ID',
+        'Assert-RequiredEnv[^\r\n]*NODEPOOL',
+        'Assert-RequiredEnv[^\r\n]*WORKER_ADVERTISE_ADDR'
+    )) {
+    if ($scriptText -match $forbiddenRequirement) {
+        throw "worker launcher must not require a static identity/endpoint setting matched by '$forbiddenRequirement'."
+    }
+}
+
 Assert-Contains `
     -Haystack $scriptText `
-    -Needle 'NODEPOOL_GRPC_ENDPOINT or NODEPOOL_GRPC_ADDR' `
-    -Message "start-worker launcher must accept either the new or compatibility Nodepool endpoint setting."
+    -Needle 'NODEPOOL_GRPC_ADDR and NODEPOOL_GRPC_ENDPOINT are' `
+    -Message "worker package template must mark both Nodepool endpoint settings as optional compatibility settings."
 
 Assert-Contains `
     -Haystack $scriptText `
@@ -242,9 +258,9 @@ if ($scriptText -match 'Assert-RequiredEnv[^\r\n]*WORKER_NODEPOOL_TOKEN') {
 }
 
 Assert-Contains `
-    -Haystack $scriptText `
-    -Needle "NODEPOOL_GRPC_ENDPOINT or NODEPOOL_GRPC_ADDR" `
-    -Message "worker launcher must accept either the new or compatibility Nodepool endpoint setting."
+    -Haystack $packagedEnv `
+    -Needle "session-only" `
+    -Message "worker package template must document the session-only (no inbound address) registration default."
 
 Assert-Contains `
     -Haystack $scriptText `
@@ -299,6 +315,21 @@ Assert-Contains `
     -Haystack $flowedReadme `
     -Needle "HEADSCALE_API_KEY" `
     -Message "packaged README must state that the platform Headscale API key is not shipped."
+
+Assert-Contains `
+    -Haystack $flowedReadme `
+    -Needle "session-only" `
+    -Message "packaged README must document that workers without an inbound address register session-only."
+
+Assert-Contains `
+    -Haystack $flowedReadme `
+    -Needle "server-assigned at enrollment" `
+    -Message "packaged README must state that Worker identity is server-assigned at enrollment."
+
+Assert-Contains `
+    -Haystack $flowedReadme `
+    -Needle "No static Worker ID or reusable nodepool token is required" `
+    -Message "packaged README must state that no static Worker ID or reusable nodepool token is required."
 
 Assert-Contains `
     -Haystack $flowedReadme `

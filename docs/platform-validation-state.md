@@ -20,6 +20,9 @@ complete
 - Release Docker stack smoke: official site, Master UI, Worker UI, Master API, and Worker Control passed on collision-free host ports.
 - Playwright release flow: 2 passed, covering account registration/login/logout, worker registration, task cancellation/completion, log/result inspection, artifact download, and controlled failure surfaces.
 - Rust gates passed: `cargo fmt --all -- --check`, GNU workspace `cargo check`, and GNU all-target/all-feature `cargo clippy -D warnings`.
+- Windows ARM64 cross-target check: `cargo check --target aarch64-pc-windows-msvc --workspace` passed under the VS arm64 dev environment (2026-08-23), proving the whole workspace compiles for ARM64 Windows.
+- Linux target check: `cargo check --target x86_64-unknown-linux-gnu -p hivemind-client-core` passes; full-workspace Linux/macOS checks stay blocked in this environment because no `x86_64-linux-gnu-gcc` toolchain exists for the `ring` build script. This is a local toolchain blocker, not a source-compatibility failure.
+- PowerShell release contracts: all 11 `scripts/*.Tests.ps1` files pass, including zero-config package assertions (no required endpoint/Worker-ID/token settings, session-only default documented) and the zh-tw architecture doc contract.
 
 ## Regressions fixed
 

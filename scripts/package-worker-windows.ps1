@@ -138,7 +138,9 @@ $provenance | ConvertTo-Json | Set-Content -Encoding ASCII (Join-Path $out "nati
 
 $envTemplate = @"
 # Hivemind Windows worker configuration
-# NODEPOOL_GRPC_ADDR is retained for local/backward-compatible deployments.
+# NODEPOOL_GRPC_ADDR and NODEPOOL_GRPC_ENDPOINT are compatibility settings for
+# private deployments. Public onboarding discovers the transport automatically
+# after website login, so both may stay blank.
 NODEPOOL_GRPC_ADDR=$NodepoolGrpcAddr
 NODEPOOL_GRPC_ENDPOINT=$NodepoolGrpcEndpoint
 # HTTPS origin of the deployed Rust Website API. It must expose /api/login and /api/vpn/config.
@@ -151,7 +153,12 @@ VPN_STARTUP_TIMEOUT_SECS=$VpnStartupTimeoutSecs
 WORKER_GRPC_ADDR=$WorkerGrpcAddr
 WORKER_CONTROL_HTTP_ADDR=$WorkerControlHttpAddr
 WORKER_ADVERTISE_ADDR=
+# WORKER_ADVERTISE_ADDR is optional. Leave it blank for a session-only worker:
+# tasks are delivered and results returned through the outbound worker session,
+# so no inbound address is required.
 WORKER_NODEPOOL_TOKEN=
+# No static Worker ID or reusable nodepool token is required; identity is
+# server-assigned at enrollment. These remain only as legacy/private overrides.
 # Leave blank to use the target machine's COMPUTERNAME.
 WORKER_ID=
 WORKER_LOCATION=windows
@@ -401,10 +408,8 @@ if (!(Test-Path $envFile)) {
 Import-DotEnv -Path $envFile
 Ensure-JwtSecret -Path $envFile
 Assert-RequiredEnv -Names @("WORKER_GRPC_ADDR", "WORKER_CONTROL_HTTP_ADDR")
-if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable("NODEPOOL_GRPC_ENDPOINT", "Process")) -and
-    [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable("NODEPOOL_GRPC_ADDR", "Process"))) {
-    throw "Required setting NODEPOOL_GRPC_ENDPOINT or NODEPOOL_GRPC_ADDR is missing or blank in .env.worker."
-}
+# NODEPOOL_GRPC_ENDPOINT/NODEPOOL_GRPC_ADDR are optional: public onboarding
+# discovers the platform transport after website login.
 
 & (Join-Path $PSScriptRoot "hivemind-bin.exe") worker
 $workerExitCode = $LASTEXITCODE
@@ -421,12 +426,12 @@ $readme = @'
 # Hivemind Windows Worker Package
 
 1. Copy `.env.worker.example` to `.env.worker`.
-2. Set `NODEPOOL_GRPC_ENDPOINT` to the nodepool gRPC address reachable through Headscale. `NODEPOOL_GRPC_ADDR` remains available for backward-compatible local deployments.
-3. Set `WEBSITE_API_BASE` to the HTTPS origin of the deployed Rust Website API. That origin must expose `POST /api/login` and the protected `POST /api/vpn/config`; the official Next BFF is not a substitute unless it explicitly serves that contract. `WORKER_WEBSITE_API_BASE` can override it for this role.
+2. `NODEPOOL_GRPC_ENDPOINT` and `NODEPOOL_GRPC_ADDR` are optional compatibility settings for private deployments. The default public onboarding needs neither: the worker discovers the platform transport automatically after website login.
+3. Set `WEBSITE_API_BASE` to the HTTPS origin of the deployed Rust Website API. That origin must expose `POST /api/login` and the protected `POST /api/vpn/config`; the official Next BFF is not a substitute unless it explicitly serves that contract. `WORKER_WEBSITE_API_BASE` can override it for this role. Leave it blank to use the built-in public default.
 4. For interactive enrollment, leave `WORKER_VPN_AUTHKEY` blank and sign in through Worker UI. The local worker sends the bearer JWT to the Website API, consumes the returned one-time Headscale key in memory, joins the overlay, and waits for the Nodepool gRPC transport before registration. A valid persisted VPN state is rehydrated first on restart.
 5. For unattended operator startup, optionally set `WORKER_VPN_AUTHKEY` to a role-scoped preauth key. `HEADSCALE_LOGIN_SERVER` and `WORKER_VPN_HOSTNAME` are optional overrides; keyed startup fails closed until the VPN and Nodepool transport are ready.
-6. Optionally set `WORKER_NODEPOOL_TOKEN` to a nodepool JWT whose subject matches `WORKER_ID`, or set `WORKER_NODEPOOL_USERNAME` and `WORKER_NODEPOOL_PASSWORD`; when these are blank, the local Worker UI can perform registration after startup.
-7. Optionally set `WORKER_ADVERTISE_ADDR` to an address other machines can use to reach this worker. When Headscale startup is keyed and the worker listens on `0.0.0.0`, the connected overlay IP is used automatically.
+6. No static Worker ID or reusable nodepool token is required. Worker identity is server-assigned at enrollment; `WORKER_NODEPOOL_TOKEN`, `WORKER_NODEPOOL_USERNAME`, and `WORKER_NODEPOOL_PASSWORD` remain only as explicit legacy/private-deployment overrides.
+7. `WORKER_ADVERTISE_ADDR` is optional. Workers without any inbound address register session-only: task delivery flows through the outbound worker session instead of a Nodepool-to-worker callback.
 8. `JWT_SECRET` will be generated automatically on first launch if it is blank. Set it explicitly if you need a fixed deployment secret.
 9. Run PowerShell as the provider user and execute:
 
@@ -434,7 +439,7 @@ $readme = @'
 .\start-worker.ps1
 ```
 
-The worker joins Headscale before startup-dependent registration, waits for the Nodepool gRPC transport, then starts its gRPC server, local control API, hardware profile reporting, and registration loop. Without `WORKER_VPN_AUTHKEY`, the local UI remains available while enrollment waits for an authenticated login. If the JWT expires or the device state is revoked, sign in again; no password, `HEADSCALE_API_KEY`, or reusable Headscale key is written to the package or browser storage.
+The worker joins Headscale before startup-dependent registration, waits for the Nodepool gRPC transport, then starts its gRPC server, local control API, hardware profile reporting, registration loop, and the outbound session loop that receives tasks and returns results. Without `WORKER_VPN_AUTHKEY`, the local UI remains available while enrollment waits for an authenticated login. If the JWT expires or the device state is revoked, sign in again; no password, `HEADSCALE_API_KEY`, or reusable Headscale key is written to the package or browser storage.
 
 The downloaded Worker runs on the provider's local suitable host. Orange Pi is reserved for Nodepool, Website API, Headscale, PostgreSQL, and Redis; do not deploy this Worker package there.
 

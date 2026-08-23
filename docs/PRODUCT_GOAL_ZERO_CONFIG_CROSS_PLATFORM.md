@@ -262,8 +262,14 @@ Headscale 可以保留為選配：
    - 需要將核心 protocol 與 OS/network adapter 分離。
 
 4. **Linux/macOS/Android client 尚未達到一致產品體驗**
+   - **Task #8 部分完成：** Windows x64/ARM64 package 契約已更新——package
+     不要求 endpoint、static Worker ID 或 reusable nodepool token,並記錄
+     session-only 預設行為；全工作區 `aarch64-pc-windows-msvc` cross-check
+     通過。Linux/macOS 全工作區 cross-check 因本機缺少 Linux gcc 工具鏈而
+     blocked(`hivemind-client-core` 純 Rust 核心已通過 Linux target check)。
    - 需要一致的下載、登入、enrollment、背景執行、更新與錯誤回報流程。
-   - Android 需要獨立的 app/foreground-service adapter。
+   - Android 需要獨立的 app/foreground-service adapter;Android FFI 與
+     Linux/macOS packaging 定義尚未建立。
 
 5. **Remote proof 完整鏈路尚未完成 live 驗證**
    - Windows/Linux/macOS/Android Worker → Provider → Nodepool receipt
