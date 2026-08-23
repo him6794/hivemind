@@ -16,15 +16,53 @@ Build the pinned sidecar on the approved Linux proving host:
 
 ```bash
 bash scripts/build-managed-prover.sh
+```
+
+The build script refuses to stage anything unless its environment reproduces the
+pinned guest image ID, because a prover built with a different risc0 toolchain
+embeds a different guest and the Nodepool rejects every proof it produces.
+
+Then verify the staged binary against the attested digest before any release
+image includes it:
+
+```bash
+bash scripts/verify-staged-prover.sh [path/to/hivemind-managed-proof-prover]
+```
+
+The verifier checks the ELF x86_64 format and compares the SHA-256 against the
+digest recorded in `docs/zk-managed-proof-build-attestation.md`. A mismatch is a
+release blocker: rebuild with `scripts/build-managed-prover.sh`, record the new
+guest image ID, binary digest, and build inputs in that attestation, then restage.
+
+### Building the provider image
+
+The provider image compiles only `hivemind-managed-prover-service` from source;
+the pinned sidecar is copied in from the verified staging directory. From the
+repository root:
+
+```bash
+docker build \
+  -f packaging/managed-prover-service/Dockerfile \
+  -t hivemind-managed-prover:local-amd64 .
+```
+
+A fresh checkout without the staged sidecar fails this build with an explicit
+missing-file error at the sidecar COPY — never ship a provider image whose
+prover is absent, and never point the COPY at an unverified artifact path.
+
+Alternatively run the service directly on the proving host:
+
+```bash
 cargo build --release --locked \
   --manifest-path hivemind-rs/Cargo.toml \
   -p hivemind-managed-prover-service
 ```
 
 The service executable is `target/release/hivemind-managed-prover-service` (the
-package's default binary target name). Copy the executable and the staged
-`hivemind-managed-proof-prover` to the operator host. Do not copy a Nodepool
-private key, database credential, Headscale key, or reusable proof token.
+package's default binary target name). Copy the executable and the staged,
+digest-verified `hivemind-managed-proof-prover` to the operator host. Do not
+copy a Nodepool private key, database credential, Headscale key, or reusable
+proof token.
 
 ## Required configuration
 
