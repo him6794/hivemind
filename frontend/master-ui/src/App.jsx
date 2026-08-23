@@ -15,7 +15,7 @@ const SESSION_KEY = 'hivemind.master.session.v1';
 
 export default function MasterApp() {
   const apiBase = String(import.meta.env.VITE_API_BASE || '').trim().replace(/\/$/, '');
-  const initialSession = readStoredSession(window.localStorage, SESSION_KEY);
+  const initialSession = readStoredSession(window.sessionStorage, SESSION_KEY);
 
   const [username, setUsername] = useState(initialSession.username);
   const [password, setPassword] = useState('');
@@ -149,7 +149,10 @@ export default function MasterApp() {
       }
 
       const ownerUsername = username.trim();
-      saveStoredSession(window.localStorage, SESSION_KEY, {
+      // The bearer JWT lives only in tab session storage: closing the Master
+      // console discards it, so no reusable credential persists in the
+      // browser profile.
+      saveStoredSession(window.sessionStorage, SESSION_KEY, {
         token: data.token,
         username: ownerUsername,
       });
@@ -358,7 +361,7 @@ export default function MasterApp() {
   }
 
   function logout() {
-    clearStoredSession(window.localStorage, SESSION_KEY);
+    clearStoredSession(window.sessionStorage, SESSION_KEY);
     vpnReadyToken.current = '';
     setToken('');
     setTasks([]);

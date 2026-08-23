@@ -230,10 +230,15 @@ Headscale 可以保留為選配：
      resume token 重連並 redeliver 未 ACK 任務；使用者取消任務會透過
      session cancel frame 傳遞並由 Worker 回報 cancellation ACK。
      Managed/general-compute runtime 仍走權威 unary path。
-   - **仍未完成：** 一般 client 公開路徑改用 outbound session 作為預設
-     transport（Task #7）、各平台 secure storage 與 adapter（Task #8），
-     以及移除 Headscale/VPN compatibility path 對現有部署的依賴；因此
-     這一項不代表最終「完全零設定」產品已驗收。
+   - **Task #7 已完成（zero-config client migration）：** Worker UI 登入後
+     自動完成 VPN/enrollment/registration/session 啟動；註冊不再要求可達的
+     callback endpoint——空白 endpoint 會註冊為 session-only Worker，
+     Nodepool 保留既有 callback address，任務透過 outbound session 派送與
+     回報。兩個 UI 的 bearer JWT 改存 sessionStorage（關閉分頁即清除，
+     不寫入持久 localStorage），並以 contract tests 鎖定此邊界。
+   - **仍未完成：** 各平台 secure storage 與 adapter（Task #8），以及移除
+     Headscale/VPN compatibility path 對現有部署的依賴；因此這一項不代表
+     最終「完全零設定」產品已驗收。
 
 2. **Public dynamic admission is implemented; private static mode remains optional**
    - Public Nodepool registration now accepts bounded, canonical Worker
@@ -247,13 +252,13 @@ Headscale 可以保留為選配：
      for explicitly selected private static deployments.
 
 3. **Client 連線仍偏向 Headscale/平台特定實作**
-   - **Task #6 已完成部分：** outbound session wire contract 與 Nodepool
-     routing 已存在（TLS/HTTP2/tonic bidirectional streaming），Worker 端
-     session loop 支援重連/backoff/resume，註冊 loop 與 UI login 後的
-     session 啟動已整合。
+   - **Task #6/#7 已完成部分：** outbound session wire contract 與 Nodepool
+     routing 已存在（TLS/HTTP2/tonic bidirectional streaming）；Worker 端
+     session loop 支援重連/backoff/resume；註冊 loop、UI login、enrollment
+     與 session 啟動已整合，且註冊不再強制要求 callback endpoint。
    - Windows 使用 libtailscale/native DLL 的建置與部署路徑。
-   - Android client、背景服務尚未完成；outbound session 尚未成為一般
-     client 的預設公開路徑（Task #7）。
+   - Android client 與背景服務尚未完成；Headscale 仍是現有部署的
+     transport 依賴，尚未降級為純 optional overlay。
    - 需要將核心 protocol 與 OS/network adapter 分離。
 
 4. **Linux/macOS/Android client 尚未達到一致產品體驗**

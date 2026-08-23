@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { readFile } from 'node:fs/promises';
 
 import {
   clearStoredSession,
@@ -45,5 +46,13 @@ describe('auth session storage', () => {
     clearStoredSession(storage, 'session-key');
 
     assert.deepEqual(readStoredSession(storage, 'session-key'), { token: '', username: '' });
+  });
+});
+
+describe('master UI durable secret policy', () => {
+  it('never persists the bearer session in window.localStorage', async () => {
+    const appSource = await readFile(new URL('./App.jsx', import.meta.url), 'utf8');
+    assert.equal(appSource.includes('window.localStorage'), false);
+    assert.ok(appSource.includes('window.sessionStorage'));
   });
 });

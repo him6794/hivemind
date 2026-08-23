@@ -212,7 +212,10 @@ struct LoginResponse {
 struct RegisterWorkerBody {
     username: Option<String>,
     worker_id: Option<String>,
-    ip: String,
+    /// Optional callback address. Workers that deliver results only through
+    /// the outbound session may omit it; legacy direct callers keep sending
+    /// a reachable host:port.
+    ip: Option<String>,
     cpu_cores: i32,
     memory_gb: i64,
     cpu_score: i32,
@@ -702,17 +705,27 @@ async fn register_worker(
         None
     };
 
-    let endpoint = match effective_worker_advertise_addr(&state, body.ip.trim()).await {
-        Ok(endpoint) => endpoint,
-        Err(err) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(StatusResponse {
-                    success: false,
-                    status_message: err.to_string(),
-                }),
-            )
-        }
+    let endpoint = match body
+        .ip
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(requested) => match effective_worker_advertise_addr(&state, requested).await {
+            Ok(endpoint) => Some(endpoint),
+            Err(err) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(StatusResponse {
+                        success: false,
+                        status_message: err.to_string(),
+                    }),
+                )
+            }
+        },
+        // Session-only registration: the outbound session carries task
+        // delivery and results, so no inbound callback address is required.
+        None => None,
     };
 
     let owner = if let Some(enrollment) = server_enrollment.as_ref() {
@@ -801,7 +814,10 @@ async fn register_worker(
 
     let profile = WorkerProfile {
         worker_id: worker_id.to_string(),
-        ip: endpoint.to_string(),
+        // An empty address marks a session-only registration; Nodepool keeps
+        // the previous callback address for re-registrations of an existing
+        // Worker and the dispatcher relies on the outbound session instead.
+        ip: endpoint.unwrap_or_default(),
         location: body
             .location
             .as_deref()
@@ -848,7 +864,9 @@ async fn register_worker(
     {
         Ok(()) => {
             state.set_worker_identity(&profile.worker_id);
-            state.set_worker_addr(profile.ip.clone());
+            if !profile.ip.is_empty() {
+                state.set_worker_addr(profile.ip.clone());
+            }
             // UI-authenticated workers do not start the pre-provisioned
             // registration loop during process startup. Start it after the
             // first successful registration so the node remains online and
@@ -1161,6 +1179,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn register_worker_body_accepts_a_session_only_registration_without_ip() {
+        let body: super::RegisterWorkerBody = serde_json::from_str(
+            r#"{"username":"alice","cpu_cores":1,"memory_gb":1,"cpu_score":1}"#,
+        )
+        .expect("session-only registration omits the callback address");
+        assert!(body.ip.is_none());
+
+        let body: super::RegisterWorkerBody = serde_json::from_str(
+            r#"{"username":"alice","ip":"","cpu_cores":1,"memory_gb":1,"cpu_score":1}"#,
+        )
+        .expect("a blank ip is treated the same as an omitted one");
+        assert_eq!(body.ip.as_deref().unwrap_or_default(), "");
     }
 
     #[test]
