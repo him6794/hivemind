@@ -171,14 +171,14 @@ jobs:
           test -n "$guest_cargo"
           guest_root="${guest_cargo%/bin/cargo}"
           test -x "$guest_root/bin/rustc"
-          rustup toolchain link risc0 "$guest_root"
-          cargo +risc0 --version | grep -Eq '1\.97\.0'
           risc0_home="$RUNNER_TEMP/risc0-home"
           risc0_toolchain="$risc0_home/toolchains/v1.97.0-rust-x86_64-unknown-linux-gnu"
           rm -rf "$risc0_home"
           mkdir -p "$risc0_home/toolchains"
+          mv "$guest_root" "$risc0_toolchain"
           : > "$risc0_home/.rzup"
-          ln -s "$guest_root" "$risc0_toolchain"
+          rustup toolchain link risc0 "$risc0_toolchain"
+          cargo +risc0 --version | grep -Eq '1\.97\.0'
           printf '[default_versions]\nrust = "1.97.0"\n' > "$risc0_home/settings.toml"
           printf 'RISC0_HOME=%s\n' "$risc0_home" >> "$GITHUB_ENV"
       - name: Set canonical proof source remapping
