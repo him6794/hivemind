@@ -295,6 +295,7 @@ impl ReferenceProcessSupervisor {
         }
     }
 
+    #[cfg_attr(unix, expect(clippy::trivially_copy_pass_by_ref))]
     fn terminate_and_reap(
         process_tree: &ProcessTreeGuard,
         mut child: Child,
@@ -496,14 +497,17 @@ struct ProcessTreeGuard;
 
 #[cfg(unix)]
 impl ProcessTreeGuard {
+    #[cfg_attr(unix, expect(clippy::unnecessary_wraps))]
     fn after_spawn(_child: &mut Child) -> io::Result<Self> {
         Ok(Self)
     }
 
+    #[cfg_attr(unix, expect(clippy::unused_self, clippy::trivially_copy_pass_by_ref))]
     fn terminate(&self, child: &mut Child) -> io::Result<()> {
         kill_process_tree(child)
     }
 
+    #[cfg_attr(unix, expect(clippy::unused_self, clippy::trivially_copy_pass_by_ref))]
     fn terminate_after_leader_exit(&self, child: &mut Child) -> io::Result<()> {
         kill_process_tree(child)
     }
@@ -519,10 +523,12 @@ impl ProcessTreeGuard {
         WindowsJob::for_child(child).map(Self)
     }
 
+    #[cfg_attr(unix, expect(clippy::unused_self, clippy::trivially_copy_pass_by_ref))]
     fn terminate(&self, child: &mut Child) -> io::Result<()> {
         self.0.terminate(child)
     }
 
+    #[cfg_attr(unix, expect(clippy::unused_self, clippy::trivially_copy_pass_by_ref))]
     fn terminate_after_leader_exit(&self, child: &mut Child) -> io::Result<()> {
         self.0.terminate(child)
     }
@@ -530,7 +536,7 @@ impl ProcessTreeGuard {
 
 #[cfg(unix)]
 fn kill_process_tree(child: &mut Child) -> io::Result<()> {
-    let process_group = -(child.id() as i32);
+    let process_group = -child.id().cast_signed();
     // SAFETY: process_group is the negative PID of the group created in the
     // pre-exec hook, so the signal is scoped to this runtime invocation.
     let result = unsafe { kill(process_group, SIGKILL) };
@@ -595,6 +601,7 @@ impl WindowsJob {
         }
     }
 
+    #[cfg_attr(unix, expect(clippy::unused_self, clippy::trivially_copy_pass_by_ref))]
     fn terminate(&self, child: &mut Child) -> io::Result<()> {
         use windows_sys::Win32::System::JobObjects::TerminateJobObject;
 

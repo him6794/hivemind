@@ -125,7 +125,7 @@ impl DeviceBuffer {
         let mut pointer = ptr::null_mut();
         // SAFETY: `pointer` is valid mutable storage for CUDA to initialize, and
         // `bytes` is nonzero and bounded by the GPU-v1 tensor limit.
-        let error = unsafe { cuda_malloc(&mut pointer, bytes) };
+        let error = unsafe { cuda_malloc(&raw mut pointer, bytes) };
         check_cuda(error, "cudaMalloc")?;
         // SAFETY: `pointer` is the live allocation returned by `cudaMalloc` and
         // `data` contains at least `bytes` initialized bytes for the synchronous
@@ -247,7 +247,7 @@ impl CudaGpuBackend {
         let mut actual_uuid = CudaUuid { bytes: [0; 16] };
         // SAFETY: `actual_uuid` is valid writable storage for CUDA, and the
         // ordinal was selected successfully immediately above.
-        let error = unsafe { cuda_device_get_uuid(&mut actual_uuid, device_ordinal) };
+        let error = unsafe { cuda_device_get_uuid(&raw mut actual_uuid, device_ordinal) };
         check_cuda_initialization(error, "cudaDeviceGetUuid")?;
         let actual_cuda_uuid = canonical_cuda_uuid(&actual_uuid);
         if actual_uuid.bytes != expected_cuda_uuid_bytes {
@@ -257,7 +257,7 @@ impl CudaGpuBackend {
         }
         let mut handle = ptr::null_mut();
         // SAFETY: `handle` is valid mutable storage for cuBLAS to initialize.
-        let status = unsafe { cublas_create(&mut handle) };
+        let status = unsafe { cublas_create(&raw mut handle) };
         check_cublas_initialization(status, "cublasCreate_v2")?;
         // SAFETY: `handle` was returned by the successful cuBLAS create call.
         let status = unsafe { cublas_set_math_mode(handle, CUBLAS_DEFAULT_MATH) };
@@ -287,7 +287,7 @@ impl CudaGpuBackend {
         let mut actual_uuid = CudaUuid { bytes: [0; 16] };
         // SAFETY: `actual_uuid` is valid writable storage for CUDA, and the
         // ordinal was selected successfully immediately above.
-        let error = unsafe { cuda_device_get_uuid(&mut actual_uuid, self.device_ordinal) };
+        let error = unsafe { cuda_device_get_uuid(&raw mut actual_uuid, self.device_ordinal) };
         check_cuda(error, "cudaDeviceGetUuid")?;
         if actual_uuid.bytes != self.cuda_uuid_bytes {
             return Err(GpuBackendError::unavailable(format!(
@@ -327,7 +327,7 @@ impl CudaGpuBackend {
             cublas_saxpy(
                 self.handle,
                 count,
-                &alpha,
+                &raw const alpha,
                 right.pointer,
                 1,
                 left.pointer,
@@ -351,7 +351,8 @@ impl CudaGpuBackend {
         // SAFETY: `value.pointer` is a live device allocation with `count` f32
         // elements, `scalar` is a valid host f32, and the cuBLAS handle is
         // initialized for the selected device.
-        let status = unsafe { cublas_sscal(self.handle, count, &scalar, value.pointer, 1) };
+        let status =
+            unsafe { cublas_sscal(self.handle, count, &raw const scalar, value.pointer, 1) };
         check_cublas(status, "cublasSscal_v2")?;
         synchronize()?;
         GpuTensor::new(inputs[0].shape.clone(), value.to_f32()?)
@@ -414,12 +415,12 @@ impl CudaGpuBackend {
                 m,
                 n,
                 k,
-                &alpha,
+                &raw const alpha,
                 right.pointer,
                 lda,
                 left.pointer,
                 ldb,
-                &beta,
+                &raw const beta,
                 output.pointer,
                 ldc,
             )
@@ -489,6 +490,7 @@ fn hex_value(value: u8) -> Option<u8> {
     }
 }
 
+#[cfg(test)]
 fn valid_cuda_uuid(value: &str) -> bool {
     parse_cuda_uuid(value).is_some()
 }
@@ -509,42 +511,6 @@ fn canonical_cuda_uuid_bytes(bytes: &[u8; 16]) -> String {
         value.push(HEX[(byte & 0x0f) as usize] as char);
     }
     value
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        CudaUuid, canonical_cuda_uuid, canonical_cuda_uuid_bytes, parse_cuda_uuid, valid_cuda_uuid,
-    };
-
-    #[test]
-    fn canonical_cuda_uuid_uses_the_trusted_gpu_token_format() {
-        let uuid = CudaUuid { bytes: [0xab; 16] };
-        assert_eq!(
-            canonical_cuda_uuid(&uuid),
-            "GPU-abababab-abab-abab-abab-abababababab"
-        );
-    }
-
-    #[test]
-    fn cuda_uuid_validation_rejects_noncanonical_values() {
-        assert!(valid_cuda_uuid("GPU-01234567-89ab-cdef-0123-456789abcdef"));
-        assert!(!valid_cuda_uuid("GPU-0123456789abcdef0123456789abcdef"));
-        assert!(!valid_cuda_uuid("GPU-test"));
-        assert!(!valid_cuda_uuid("GPU-0123"));
-        assert!(!valid_cuda_uuid(
-            "uuid-01234567-89ab-cdef-0123-456789abcdef"
-        ));
-    }
-
-    #[test]
-    fn cuda_uuid_parser_normalizes_hex_case() {
-        let upper = parse_cuda_uuid("GPU-01234567-89AB-CDEF-0123-456789ABCDEF").unwrap();
-        assert_eq!(
-            canonical_cuda_uuid_bytes(&upper),
-            "GPU-01234567-89ab-cdef-0123-456789abcdef"
-        );
-    }
 }
 
 fn check_cuda_initialization(error: c_int, operation: &str) -> Result<(), GpuBackendError> {
@@ -599,5 +565,41 @@ fn check_cublas(status: c_int, operation: &str) -> Result<(), GpuBackendError> {
         Err(GpuBackendError::execution(format!(
             "{operation} failed with cuBLAS status {status}"
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CudaUuid, canonical_cuda_uuid, canonical_cuda_uuid_bytes, parse_cuda_uuid, valid_cuda_uuid,
+    };
+
+    #[test]
+    fn canonical_cuda_uuid_uses_the_trusted_gpu_token_format() {
+        let uuid = CudaUuid { bytes: [0xab; 16] };
+        assert_eq!(
+            canonical_cuda_uuid(&uuid),
+            "GPU-abababab-abab-abab-abab-abababababab"
+        );
+    }
+
+    #[test]
+    fn cuda_uuid_validation_rejects_noncanonical_values() {
+        assert!(valid_cuda_uuid("GPU-01234567-89ab-cdef-0123-456789abcdef"));
+        assert!(!valid_cuda_uuid("GPU-0123456789abcdef0123456789abcdef"));
+        assert!(!valid_cuda_uuid("GPU-test"));
+        assert!(!valid_cuda_uuid("GPU-0123"));
+        assert!(!valid_cuda_uuid(
+            "uuid-01234567-89ab-cdef-0123-456789abcdef"
+        ));
+    }
+
+    #[test]
+    fn cuda_uuid_parser_normalizes_hex_case() {
+        let upper = parse_cuda_uuid("GPU-01234567-89AB-CDEF-0123-456789ABCDEF").unwrap();
+        assert_eq!(
+            canonical_cuda_uuid_bytes(&upper),
+            "GPU-01234567-89ab-cdef-0123-456789abcdef"
+        );
     }
 }
