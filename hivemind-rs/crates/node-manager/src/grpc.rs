@@ -6425,7 +6425,7 @@ mod tests {
             None => return,
         };
         let owner_token = token_for(&service.state.auth, &owner);
-        sqlx::query("UPDATE tasks SET status = 'COMPLETED' WHERE task_id = $1")
+        sqlx::query("UPDATE tasks SET status = 'COMPLETED', result_torrent = 'private-result' WHERE task_id = $1")
             .bind(&task_id)
             .execute(&service.state.scheduler.database().pool)
             .await
