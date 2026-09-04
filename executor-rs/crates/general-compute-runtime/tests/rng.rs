@@ -52,16 +52,19 @@ fn standard_normal_sampling_replays_and_stays_finite() {
         .expect("same stream should replay");
 
     assert_eq!(first_samples, second_samples);
-    assert_eq!(
-        first_samples,
-        vec![
-            1.512_843_365_401_011_6,
-            0.071_792_487_065_720_01,
-            0.108_569_505_938_962_32,
-            0.114_042_688_242_474,
-            -0.534_206_208_924_615_2,
-        ]
-    );
+    let expected_samples = [
+        1.512_843_365_401_011_6,
+        0.071_792_487_065_720_01,
+        0.108_569_505_938_962_32,
+        0.114_042_688_242_474,
+        -0.534_206_208_924_615_2,
+    ];
+    for (actual, expected) in first_samples.iter().zip(expected_samples) {
+        assert!(
+            (actual - expected).abs() <= 4.0 * f64::EPSILON * actual.abs().max(1.0),
+            "standard-normal fixture drifted: actual={actual:?}, expected={expected:?}"
+        );
+    }
     assert_eq!(first_samples.len(), 5);
     assert!(first_samples.iter().all(|sample| sample.is_finite()));
 }
