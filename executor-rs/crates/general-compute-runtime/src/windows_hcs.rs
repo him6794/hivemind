@@ -106,13 +106,16 @@ fn validate_spec(spec: &WindowsHcsContainerSpec) -> Result<(), WindowsHcsError> 
             "result transport and output limit are required".into(),
         ));
     }
-    let result_parent = spec.result_path.parent();
+    let result_parent = windows_path_parent(&spec.result_path);
+    let result_container_path = normalize_windows_path(&spec.result_container_path);
     let result_mount = spec.mounts.iter().any(|mount| {
+        let mount_host_path = normalize_windows_path(&mount.host_path.to_string_lossy());
+        let mount_container_path = normalize_windows_path(&mount.container_path);
         !mount.read_only
-            && result_parent == Some(mount.host_path.as_path())
-            && spec.result_container_path.starts_with(&format!(
+            && result_parent.as_deref() == Some(mount_host_path.as_str())
+            && result_container_path.starts_with(&format!(
                 "{}\\",
-                mount.container_path.trim_end_matches('\\')
+                mount_container_path.trim_end_matches('\\')
             ))
     });
     if !result_mount {
@@ -146,6 +149,17 @@ fn validate_spec(spec: &WindowsHcsContainerSpec) -> Result<(), WindowsHcsError> 
         ));
     }
     Ok(())
+}
+
+fn normalize_windows_path(value: &str) -> String {
+    value.replace('/', "\\")
+}
+
+fn windows_path_parent(path: &std::path::Path) -> Option<String> {
+    let normalized = normalize_windows_path(&path.to_string_lossy());
+    normalized
+        .rsplit_once('\\')
+        .map(|(parent, _)| parent.to_owned())
 }
 
 #[cfg(any(windows, test))]

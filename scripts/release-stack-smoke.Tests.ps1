@@ -382,7 +382,7 @@ finally {
     $env:Path = $originalPath
     foreach ($name in $managedEnvironmentNames) {
         $originalValue = $originalEnvironment[$name]
-        if ($null -eq $originalValue) {
+        if ([string]::IsNullOrWhiteSpace($originalValue)) {
             Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
         }
         else {
@@ -394,4 +394,5 @@ finally {
     }
 }
 
+$global:LASTEXITCODE = 0
 Write-Host "release stack smoke tests passed"

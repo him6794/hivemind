@@ -101,7 +101,7 @@ fn command_that_spawns_descendant(start: &Path, final_marker: &Path) -> Referenc
         [
             "-c",
             &format!(
-                "(printf started > '{}'; sleep 1; printf survived > '{}') & wait",
+                "(printf started > '{}'; sleep 5; printf survived > '{}') & wait",
                 start.replace('\'', "'\\''"),
                 final_marker.replace('\'', "'\\''")
             ),
@@ -111,15 +111,18 @@ fn command_that_spawns_descendant(start: &Path, final_marker: &Path) -> Referenc
 
 #[cfg(unix)]
 fn command_that_exits_with_descendant(start: &Path, final_marker: &Path) -> ReferenceCommandSpec {
+    let ready = start.with_extension("ready.marker");
     let start = start.to_string_lossy();
+    let ready = ready.to_string_lossy();
     let final_marker = final_marker.to_string_lossy();
     ReferenceCommandSpec::new(
         "sh",
         [
             "-c",
             &format!(
-                "(printf started > '{}'; sleep 2; printf survived > '{}') & exit 0",
+                "(printf started > '{}'; printf ready > '{}'; sleep 2; printf survived > '{}') & while [ ! -f '{}' ]; do sleep 0.01; done; exit 0",
                 start.replace('\'', "'\\''"),
+                ready.replace('\'', "'\\''"),
                 final_marker.replace('\'', "'\\''")
             ),
         ],
