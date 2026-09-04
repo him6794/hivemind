@@ -194,14 +194,14 @@ jobs:
           fi
           cat >> "$guest_manifest" <<EOF
 
-[package.metadata.risc0]
-rustc-flags = [
-  "--remap-path-prefix=$GITHUB_WORKSPACE/executor-rs/crates/managed-function-runtime-v0/src/lib.rs=$canonical_guest_source_root/executor-rs/crates/managed-function-runtime/src/lib.rs",
-  "--remap-path-prefix=$GITHUB_WORKSPACE=$canonical_guest_source_root",
-  "--remap-path-prefix=$HOME/.cargo/registry/src/$cargo_registry_index/no_std_strings-0.1.3=/home/remi/.cargo/registry/src/$cargo_registry_index/no_std_strings-0.1.3",
-  "--remap-path-prefix=$HOME/.cargo=/root/.cargo",
-]
-EOF
+          [package.metadata.risc0]
+          rustc-flags = [
+            "--remap-path-prefix=$GITHUB_WORKSPACE/executor-rs/crates/managed-function-runtime-v0/src/lib.rs=$canonical_guest_source_root/executor-rs/crates/managed-function-runtime/src/lib.rs",
+            "--remap-path-prefix=$GITHUB_WORKSPACE=$canonical_guest_source_root",
+            "--remap-path-prefix=$HOME/.cargo/registry/src/$cargo_registry_index/no_std_strings-0.1.3=/home/remi/.cargo/registry/src/$cargo_registry_index/no_std_strings-0.1.3",
+            "--remap-path-prefix=$HOME/.cargo=/root/.cargo",
+          ]
+          EOF
           printf 'RUSTFLAGS=\n' >> "$GITHUB_ENV"
           printf 'CARGO_ENCODED_RUSTFLAGS=\n' >> "$GITHUB_ENV"
           grep -F '[package.metadata.risc0]' "$guest_manifest"
