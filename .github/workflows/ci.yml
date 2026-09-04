@@ -60,6 +60,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
       - name: Set up pinned Rust
         uses: dtolnay/rust-toolchain@1.90.0
+        with:
+          components: rustfmt
       - name: Verify pinned Rust
         shell: bash
         run: test "$(rustc --version | cut -d' ' -f2)" = '1.90.0'
@@ -92,6 +94,8 @@ jobs:
         uses: actions/checkout@v4
       - name: Set up pinned Rust
         uses: dtolnay/rust-toolchain@1.90.0
+        with:
+          components: rustfmt
       - name: Verify pinned Rust
         shell: bash
         run: test "$(rustc --version | cut -d' ' -f2)" = '1.90.0'
@@ -130,13 +134,28 @@ jobs:
         uses: actions/checkout@v4
       - name: Set up pinned host Rust
         uses: dtolnay/rust-toolchain@1.90.0
+        with:
+          components: rustfmt
       - name: Install pinned RISC Zero guest toolchain
         shell: bash
         run: |
           set -euo pipefail
-          cargo install rzup --version 0.5.2 --locked
-          rzup install rust 1.97.0
-          rzup use rust 1.97.0
+          guest_archive="$RUNNER_TEMP/rust-toolchain-x86_64-unknown-linux-gnu.tar.gz"
+          guest_url='https://github.com/risc0/rust/releases/download/r0.1.97.0/rust-toolchain-x86_64-unknown-linux-gnu.tar.gz'
+          guest_sha256='100b597d605b706bec94e1d32bfaaf5851df8d75173f986d4b56a3e90916be53'
+          curl --fail --location --retry 5 --retry-all-errors --connect-timeout 30 \
+            --output "$guest_archive" "$guest_url"
+          printf '%s  %s\n' "$guest_sha256" "$guest_archive" | sha256sum --check --strict
+          guest_extract="$RUNNER_TEMP/risc0-rust-toolchain"
+          rm -rf "$guest_extract"
+          mkdir -p "$guest_extract"
+          tar --extract --gzip --file "$guest_archive" --directory "$guest_extract"
+          guest_cargo="$(find "$guest_extract" \( -type f -o -type l \) -path '*/bin/cargo' -print -quit)"
+          test -n "$guest_cargo"
+          guest_root="${guest_cargo%/bin/cargo}"
+          test -x "$guest_root/bin/rustc"
+          rustup toolchain link risc0 "$guest_root"
+          cargo +risc0 --version | grep -Eq '1\.97\.0'
       - name: Set canonical proof source remapping
         shell: bash
         run: |
