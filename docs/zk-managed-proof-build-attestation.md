@@ -4,11 +4,11 @@
 
 This document is a provenance record, not a claim that the current branch has a
 reproducible prover. The current branch changes the Worker runtime by adding a
-separate GPU-capable implementation and isolates the proof dependency in the
-independent frozen crate
-`executor-rs/crates/managed-function-runtime-v0`. That frozen crate must
-reproduce the existing Nodepool trust pin before a prover can be staged or
-released.
+separate GPU-capable implementation and isolates the guest's proof dependencies
+in independent frozen crates:
+`executor-rs/crates/managed-function-runtime-v0` and
+`hivemind-rs/crates/managed-proof-v0`. Those frozen crates must reproduce the
+existing Nodepool trust pin before a prover can be staged or released.
 
 The Nodepool trust pin is unchanged:
 
@@ -73,18 +73,23 @@ substitute for this equality check.
 ## Source and runtime boundary
 
 `managed-function-v0` is a frozen proof identity, not a floating alias for the
-Worker runtime. The proof host and guest depend on the independent frozen crate
-`executor-rs/crates/managed-function-runtime-v0`, whose crate-root source is
-kept separate from the default Worker crate. The default Worker build compiles
-the separate GPU-capable runtime. GPU operations therefore cannot silently
-change the guest semantics, and the proof path cannot silently inherit GPU
-code.
+Worker runtime. The proof guest depends on independent frozen crates
+`executor-rs/crates/managed-function-runtime-v0` and
+`hivemind-rs/crates/managed-proof-v0`; their crate-root sources are kept
+separate from the default Worker and protocol crates. The proof host continues
+to use the current `hivemind-managed-proof` protocol/verifier crate while
+loading the guest methods built from those frozen inputs. GPU operations and
+later proof-binding APIs therefore cannot silently change the guest semantics,
+and the proof path cannot silently inherit GPU code or mutable proof metadata.
 
 The proof build scripts remap
 `executor-rs/crates/managed-function-runtime-v0/src/lib.rs` to the canonical
 historical path
 `/run/desktop/mnt/host/d/hivemind/executor-rs/crates/managed-function-runtime/src/lib.rs`,
-while the repository-wide remap covers the remaining source paths.
+and remap
+`hivemind-rs/crates/managed-proof-v0/src/lib.rs` to
+`/run/desktop/mnt/host/d/hivemind/hivemind-rs/crates/managed-proof/src/lib.rs`.
+The repository-wide remap covers the remaining source paths.
 
 The proof build also requires the pinned RISC Zero scheme and guest toolchain
 used by the trusted build. The native Linux/macOS/WSL path is supported; native
@@ -102,7 +107,9 @@ bafe9a1b15c87662ab9040fa8a6e8965cb7477df3696addfc117030a492d8961  zkvm/managed-p
 cd8de5cde2ba5638ac72428b5a4b95724ffb3473246697cbdad56842f03fa2c5  executor-rs/crates/managed-function-runtime-v0/Cargo.lock
 a647d2f2c0b4e3b99dc72ba99ae2f3ead00a57e864de05a557491bd37085f7ed  executor-rs/crates/managed-function-runtime-v0/Cargo.toml
 57a543a55e5d49916c810e6fd9665bdbfcfb4bdb1d4752e3b241561626f5bb96  zkvm/managed-proof/host/Cargo.toml
-92e636ce329041594911473a5aa7ab355fa0c10664816626e149b27434dbcbb2  zkvm/managed-proof/methods/guest/Cargo.toml
+ddd6bc88556eda67cce25be8f4ac3800a6b2d080cea9dd3c1996e81e9696532b  zkvm/managed-proof/methods/guest/Cargo.toml
+a4fa58fad6397e5527f785130049f89335ee8e970763f234308c3cfe1d71c1f3  hivemind-rs/crates/managed-proof-v0/Cargo.toml
+4e2e209e45082fe5e6f5f5daffc1cd98d0fcd15c3d57e6a0c6f3556a91ebb907  hivemind-rs/crates/managed-proof-v0/src/lib.rs
 ```
 
 The pinned WSL invocation uses the following D-backed environment paths:
