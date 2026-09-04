@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use hivemind_config::{HivemindConfig, ManagedProofRolloutMode};
 use hivemind_proto::{
     batch_runtime_service_server::BatchRuntimeService,

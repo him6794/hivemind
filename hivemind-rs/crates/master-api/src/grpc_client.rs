@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use hivemind_proto::{
     general_compute_artifact_service_client::GeneralComputeArtifactServiceClient,
     master_node_service_client::MasterNodeServiceClient,

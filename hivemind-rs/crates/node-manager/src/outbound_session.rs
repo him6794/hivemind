@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use crate::grpc::NodepoolState;
 use anyhow::Context;
 use hivemind_client_core::{

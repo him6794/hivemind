@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use hivemind_auth::managed_proof::MANAGED_PROOF_AUTH_TOKEN_MAX_BYTES;
 use hivemind_auth::worker_execution::WorkerExecutionVerifier;
 use hivemind_models::Claims;
