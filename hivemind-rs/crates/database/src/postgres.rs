@@ -1723,7 +1723,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(run_migrations(&fixture.pool).await.is_err());
+        assert!(run_migrations_inner(&fixture.pool).await.is_err());
 
         let quarantine_table_exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(
