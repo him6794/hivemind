@@ -1095,7 +1095,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn outbound_session_delivers_ack_and_result_through_dispatcher() {
+        async fn outbound_session_delivers_ack_and_failed_result_through_dispatcher() {
             let config = HivemindConfig::for_test();
             let fixture = match create_isolated_test_pool("hivemind_bin_session_fixture").await {
                 Ok(fixture) => fixture,
@@ -1220,7 +1220,9 @@ mod tests {
                     available_memory_gb: 16,
                     queue_capacity: 4,
                     general_compute_capabilities_json: None,
-                    managed_dsl_capabilities_json: None,
+                    managed_dsl_capabilities_json: Some(
+                        r#"[{"backend_id":"session-test-managed-dsl","runtime_version":"managed-function-v0","semantics_manifest_sha256":"sha256:8ed716dc07c7bc9abcfc5338b1888e71dd041c3fb397c45d0efb1ff76af1deee","max_usage_units":1000,"max_output_bytes":1048576}]"#.into(),
+                    ),
                     admission_mode: config.general_compute.admission_mode.to_string(),
                     dynamic_capabilities_json: None,
                     dynamic_capabilities_digest: None,
@@ -1350,7 +1352,11 @@ mod tests {
             })
             .await
             .expect("session result reaches the dispatcher");
-            assert_eq!(completed.status, TaskStatus::Completed);
+            assert_eq!(completed.status, TaskStatus::Failed);
+            assert_eq!(
+                completed.status_message.as_deref(),
+                Some("Managed proof generation failed")
+            );
 
             let _ = session_shutdown.send(true);
             let _ = shutdown_tx.send(());

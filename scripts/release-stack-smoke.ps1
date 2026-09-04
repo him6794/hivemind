@@ -409,7 +409,7 @@ finally {
 
     foreach ($name in $restoreEnvironmentNames) {
         $originalValue = $originalEnvironment[$name]
-        if ($null -eq $originalValue) {
+        if ([string]::IsNullOrWhiteSpace($originalValue)) {
             Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
         }
         else {

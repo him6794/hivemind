@@ -39,6 +39,10 @@ fn operator_path(name: &str) -> PathBuf {
     }
 }
 
+fn windows_style_path(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('/', "\\")
+}
+
 #[test]
 fn managed_dsl_registry_round_trips_and_has_no_host_execution_fields() {
     let registration = dsl_registration("managed-default");
@@ -320,21 +324,15 @@ fn windows_hcs_spec_uses_only_operator_roots_and_enforces_isolation_flags() {
     assert_eq!(spec.entrypoint, vec!["hivemind-runner.exe"]);
     assert_eq!(spec.mounts.len(), 2);
     assert!(spec.mounts[0].read_only);
-    assert!(
-        spec.mounts[0]
-            .host_path
-            .ends_with("artifacts\\task-123\\source")
-    );
+    assert!(windows_style_path(&spec.mounts[0].host_path).ends_with("artifacts\\task-123\\source"));
     assert_eq!(spec.mounts[0].container_path, "C:\\work\\source");
     assert!(!spec.mounts[1].read_only);
     assert!(
-        spec.mounts[1]
-            .host_path
-            .ends_with("artifacts\\task-123\\scratch")
+        windows_style_path(&spec.mounts[1].host_path).ends_with("artifacts\\task-123\\scratch")
     );
     assert_eq!(spec.mounts[1].container_path, "C:\\work\\output");
     assert!(
-        spec.result_path
+        windows_style_path(&spec.result_path)
             .ends_with("artifacts\\task-123\\scratch\\result.json")
     );
     assert_eq!(spec.result_container_path, "C:\\work\\output\\result.json");

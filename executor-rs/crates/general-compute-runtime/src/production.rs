@@ -752,12 +752,7 @@ impl WindowsProductionBackendConfig {
             if !is_absolute_windows_path(path) {
                 return Err(ProductionBackendRegistryError::WindowsPathMustBeAbsolute);
             }
-            if path.components().any(|component| {
-                matches!(
-                    component,
-                    std::path::Component::ParentDir | std::path::Component::CurDir
-                )
-            }) {
+            if windows_path_has_traversal(path) {
                 return Err(ProductionBackendRegistryError::WindowsPathTraversal);
             }
         }
@@ -783,6 +778,12 @@ fn is_absolute_windows_path(path: &std::path::Path) -> bool {
     let bytes = value.as_bytes();
     (bytes.len() >= 3 && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/'))
         || value.starts_with("\\\\")
+}
+
+fn windows_path_has_traversal(path: &std::path::Path) -> bool {
+    path.to_string_lossy()
+        .split(['\\', '/'])
+        .any(|component| matches!(component, ".." | "."))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
