@@ -40,7 +40,7 @@ jobs:
       - name: Set up pinned Rust
         uses: dtolnay/rust-toolchain@1.90.0
         with:
-          components: rustfmt
+          components: rustfmt, clippy
       - name: Verify pinned Rust
         shell: bash
         run: test "$(rustc --version | cut -d' ' -f2)" = '1.90.0'
