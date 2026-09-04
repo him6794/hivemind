@@ -1355,7 +1355,7 @@ mod tests {
             assert_eq!(completed.status, TaskStatus::Failed);
             assert_eq!(
                 completed.status_message.as_deref(),
-                Some("Worker execution failed")
+                Some("Task execution failed")
             );
 
             let _ = session_shutdown.send(true);
