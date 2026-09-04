@@ -23,6 +23,7 @@ foreach ($expected in @(
     "RISC0_BUILD_LOCKED=1",
     "canonical_guest_source_root",
     "managed-function-runtime-v0/src/lib.rs",
+    "managed-proof-v0/src/lib.rs",
     "--remap-path-prefix=",
     "no_std_strings-0.1.3",
     "tests::generated_guest_id_matches_nodepool_trust_pin"

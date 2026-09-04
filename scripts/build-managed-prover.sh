@@ -81,15 +81,16 @@ export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
 
 # RISC Zero includes source locations in the guest ELF (and therefore in the
 # image ID). The trusted v0 guest was built from the canonical WSL checkout;
-# remap the frozen v0 crate source and dependency registry paths so a
+# remap both frozen v0 crate sources and dependency registry paths so a
 # supported proving host reproduces that exact guest rather than merely the
-# same source text. The specific v0 mapping must precede the repository-wide
+# same source text. The specific v0 mappings must precede the repository-wide
 # mapping for toolchains that apply remaps in declaration order.
 canonical_guest_source_root="/run/desktop/mnt/host/d/hivemind"
 cargo_home="${CARGO_HOME:-$HOME/.cargo}"
 cargo_registry_index="index.crates.io-1949cf8c6b5b557f"
 path_remap_flags=(
   "--remap-path-prefix=$repo_root/executor-rs/crates/managed-function-runtime-v0/src/lib.rs=$canonical_guest_source_root/executor-rs/crates/managed-function-runtime/src/lib.rs"
+  "--remap-path-prefix=$repo_root/hivemind-rs/crates/managed-proof-v0/src/lib.rs=$canonical_guest_source_root/hivemind-rs/crates/managed-proof/src/lib.rs"
   "--remap-path-prefix=$repo_root=$canonical_guest_source_root"
   "--remap-path-prefix=$cargo_home/registry/src/$cargo_registry_index/no_std_strings-0.1.3=/home/remi/.cargo/registry/src/$cargo_registry_index/no_std_strings-0.1.3"
   "--remap-path-prefix=$cargo_home=/root/.cargo"

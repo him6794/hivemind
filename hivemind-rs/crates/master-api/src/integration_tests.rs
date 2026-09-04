@@ -47,7 +47,13 @@ impl NodepoolTestFixture {
 
 // Test-only nodepool fixture: spins up an in-process gRPC server against a throwaway test DB.
 async fn nodepool_test_fixture() -> Option<NodepoolTestFixture> {
-    let config = HivemindConfig::for_test();
+    let addr = reserve_loopback_addr()?;
+    let endpoint = addr.to_string();
+    let mut config = HivemindConfig::for_test();
+    // The in-process nodepool is the test transport authority. Advertising its
+    // reachable endpoint lets the production VPN gate validate local transport
+    // without contacting an external Website API or Headscale instance.
+    config.server.nodepool_grpc_endpoint = Some(endpoint.clone());
     let fixture =
         hivemind_database::postgres::create_isolated_test_pool("master_api_nodepool_fixture")
             .await
@@ -81,7 +87,6 @@ async fn nodepool_test_fixture() -> Option<NodepoolTestFixture> {
     );
     let master_svc = MasterNodeServiceServer::new(GrpcMasterNodeService::new(state));
 
-    let addr = reserve_loopback_addr()?;
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let _ = tonic::transport::Server::builder()
@@ -95,7 +100,6 @@ async fn nodepool_test_fixture() -> Option<NodepoolTestFixture> {
             .await;
     });
 
-    let endpoint = addr.to_string();
     for _ in 0..30 {
         if let Ok(client) = GrpcClient::connect(&endpoint).await {
             return Some(NodepoolTestFixture {

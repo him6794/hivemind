@@ -198,6 +198,7 @@ jobs:
           [package.metadata.risc0]
           rustc-flags = [
             "--remap-path-prefix=$GITHUB_WORKSPACE/executor-rs/crates/managed-function-runtime-v0/src/lib.rs=$canonical_guest_source_root/executor-rs/crates/managed-function-runtime/src/lib.rs",
+            "--remap-path-prefix=$GITHUB_WORKSPACE/hivemind-rs/crates/managed-proof-v0/src/lib.rs=$canonical_guest_source_root/hivemind-rs/crates/managed-proof/src/lib.rs",
             "--remap-path-prefix=$GITHUB_WORKSPACE=$canonical_guest_source_root",
             "--remap-path-prefix=$HOME/.cargo/registry/src/$cargo_registry_index/no_std_strings-0.1.3=/home/remi/.cargo/registry/src/$cargo_registry_index/no_std_strings-0.1.3",
             "--remap-path-prefix=$HOME/.cargo=/root/.cargo",
@@ -230,6 +231,8 @@ jobs:
           test -f "$RISC0_HOME/settings.toml"
           test -f "$RISC0_HOME/.rzup"
           test -x "$RISC0_HOME/toolchains/v1.97.0-rust-x86_64-unknown-linux-gnu/bin/rustc"
+          test -f "$GITHUB_WORKSPACE/hivemind-rs/crates/managed-proof-v0/Cargo.toml"
+          test -f "$GITHUB_WORKSPACE/hivemind-rs/crates/managed-proof-v0/src/lib.rs"
           test -z "${RUSTFLAGS:-}"
           test -z "${CARGO_ENCODED_RUSTFLAGS:-}"
           guest_manifest="$GITHUB_WORKSPACE/zkvm/managed-proof/methods/guest/Cargo.toml"
