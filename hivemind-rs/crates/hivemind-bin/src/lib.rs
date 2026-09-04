@@ -1095,7 +1095,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn outbound_session_delivers_ack_and_failed_result_through_dispatcher() {
+        async fn outbound_session_delivers_ack_and_failure_through_dispatcher() {
             let config = HivemindConfig::for_test();
             let fixture = match create_isolated_test_pool("hivemind_bin_session_fixture").await {
                 Ok(fixture) => fixture,
@@ -1258,7 +1258,7 @@ mod tests {
                     output: None,
                     result_torrent: None,
                     torrent_source: Some("null".into()),
-                    runtime: Some("managed-function-v0".into()),
+                    runtime: None,
                     task_source: Some("return 1;".into()),
                     general_compute_manifest_json: None,
                     managed_gpu_manifest_json: None,
@@ -1355,7 +1355,7 @@ mod tests {
             assert_eq!(completed.status, TaskStatus::Failed);
             assert_eq!(
                 completed.status_message.as_deref(),
-                Some("Managed proof generation failed")
+                Some("Worker execution failed")
             );
 
             let _ = session_shutdown.send(true);
