@@ -10,7 +10,7 @@ fn unit_circle_pi_estimate_replays_a_pinned_confidence_fixture() {
 
     assert_eq!(estimate.samples, 10_000);
     assert_eq!(estimate.hits, 7_813);
-    assert_eq!(estimate.estimate, 3.1252);
+    assert!((estimate.estimate - 3.1252).abs() < 1e-12);
     assert!(estimate.confidence_interval.0 <= PI);
     assert!(PI <= estimate.confidence_interval.1);
     assert!(estimate.standard_error.is_finite());
@@ -48,7 +48,7 @@ fn wider_confidence_levels_have_no_narrower_intervals() {
     let ninety_nine = estimate_unit_circle_pi(1, 2, 3, 2_000, ConfidenceLevel::NinetyNine)
         .expect("ninety-nine percent estimate should succeed");
 
-    assert_eq!(ConfidenceLevel::NinetyFive.probability(), 0.95);
+    assert!((ConfidenceLevel::NinetyFive.probability() - 0.95).abs() < 1e-12);
     let ninety_width = ninety.confidence_interval.1 - ninety.confidence_interval.0;
     let ninety_nine_width = ninety_nine.confidence_interval.1 - ninety_nine.confidence_interval.0;
     assert!(ninety_nine_width >= ninety_width);

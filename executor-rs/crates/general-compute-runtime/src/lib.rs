@@ -14,9 +14,11 @@ pub mod differential;
 pub mod execution;
 pub mod gpu;
 pub mod gpu_tensor;
+pub mod managed_gpu;
 pub mod monte_carlo;
 pub mod numeric;
 pub mod ode;
+pub mod onnx;
 pub mod production;
 pub mod reference;
 pub mod rng;
@@ -61,12 +63,13 @@ pub fn encode_frame<T: Serialize>(
     max_payload_bytes: usize,
 ) -> Result<Vec<u8>, ProtocolError> {
     let payload = serde_json::to_vec(value).map_err(|_| ProtocolError::InvalidJson)?;
-    if payload.len() > max_payload_bytes || payload.len() > u32::MAX as usize {
+    if payload.len() > max_payload_bytes {
         return Err(ProtocolError::PayloadTooLarge);
     }
+    let payload_len = u32::try_from(payload.len()).map_err(|_| ProtocolError::PayloadTooLarge)?;
 
     let mut frame = Vec::with_capacity(4 + payload.len());
-    frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    frame.extend_from_slice(&payload_len.to_be_bytes());
     frame.extend_from_slice(&payload);
     Ok(frame)
 }
@@ -121,6 +124,13 @@ impl GeneralComputeRequest {
     ///
     /// The field order is fixed by `CanonicalRequest`, so every verifier hashes the
     /// same bytes without relying on a map serializer's ordering.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the canonical request representation cannot be
+    /// serialized, which indicates a programming error rather than invalid
+    /// task input.
+    #[must_use]
     pub fn canonical_request_digest(&self) -> String {
         let canonical = CanonicalRequest::from(self);
         let bytes =
@@ -177,6 +187,13 @@ impl GeneralComputeRequest {
             ));
         }
 
+        let mut artifact_ids = std::collections::BTreeSet::new();
+        if !artifact_ids.insert(self.source_artifact.artifact_id.as_str()) {
+            return Err(ValidationError::new(
+                ValidationErrorCode::ArtifactInvalid,
+                "artifact ids must be unique",
+            ));
+        }
         if self.source_artifact.role != ArtifactRole::Source {
             return Err(ValidationError::new(
                 ValidationErrorCode::ArtifactInvalid,
@@ -190,6 +207,12 @@ impl GeneralComputeRequest {
             ));
         }
         for artifact in &self.input_artifacts {
+            if !artifact_ids.insert(artifact.artifact_id.as_str()) {
+                return Err(ValidationError::new(
+                    ValidationErrorCode::ArtifactInvalid,
+                    "artifact ids must be unique",
+                ));
+            }
             if artifact.role != ArtifactRole::Input {
                 return Err(ValidationError::new(
                     ValidationErrorCode::ArtifactInvalid,
@@ -300,6 +323,12 @@ impl ProductionResultEnvelope {
                 return Err(ValidationError::new(
                     ValidationErrorCode::ArtifactInvalid,
                     "production output artifacts must have the output role",
+                ));
+            }
+            if self.status == ResultStatus::Completed && artifact.inline_bytes.is_none() {
+                return Err(ValidationError::new(
+                    ValidationErrorCode::ArtifactInvalid,
+                    "completed production output artifacts must include inline bytes",
                 ));
             }
             artifact.validate().map_err(|message| {
@@ -461,6 +490,12 @@ impl GeneralComputeResult {
                     "result output artifacts must have the output role",
                 ));
             }
+            if self.status == ResultStatus::Completed && artifact.inline_bytes.is_none() {
+                return Err(ValidationError::new(
+                    ValidationErrorCode::ArtifactInvalid,
+                    "completed results must include inline output bytes",
+                ));
+            }
             artifact.validate().map_err(|message| {
                 ValidationError::new(ValidationErrorCode::ArtifactInvalid, message)
             })?;
@@ -516,6 +551,11 @@ impl GeneralComputeResult {
     /// Validate the typed GPU identity claimed by a result against the
     /// request. Nodepool must additionally compare a concrete GPU selection
     /// with its operator-owned registration before treating it as trusted.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called with a request that fails its own validation while
+    /// claiming a required GPU; callers should pass admitted requests.
     pub fn validate_gpu_selection(
         &self,
         request: &GeneralComputeRequest,
@@ -821,6 +861,7 @@ pub enum ValidationErrorCode {
     RequestInvalid,
     RequestDigestInvalid,
     RequestDigestMismatch,
+    RequestBindingMismatch,
     ResultBindingMismatch,
     ResultStatusInvalid,
     UsageExceedsPolicy,
@@ -923,6 +964,11 @@ pub struct TrustedWorkerCapabilityRegistration {
     /// vendor/runtime/driver/image mismatch.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gpu_capabilities: Vec<gpu::GpuCapability>,
+    /// Operator-approved registrations for the independent managed GPU DSL.
+    /// Legacy general-compute registrations omit this field and therefore do
+    /// not enable the managed GPU route.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub managed_gpu_backends: Vec<managed_gpu::ManagedGpuBackendRegistration>,
     pub backends: Vec<BackendRegistration>,
 }
 
@@ -930,6 +976,11 @@ impl TrustedWorkerCapabilityRegistration {
     /// Validate the operator-owned GPU snapshot and select a deterministic
     /// device for a request.  The worker's boolean `gpu_available` claim is
     /// never sufficient for a typed GPU request.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called with a request that fails its own validation while
+    /// claiming a required GPU; callers should pass admitted requests.
     pub fn select_gpu_for_request(
         &self,
         request: &GeneralComputeRequest,
@@ -960,6 +1011,16 @@ impl TrustedWorkerCapabilityRegistration {
                 )
             })
     }
+
+    /// Select a concrete operator-approved CUDA device for the independent
+    /// managed GPU-v1 route. This path never returns a CPU fallback and also
+    /// requires the stable UUID/ordinal binding needed by the Worker backend.
+    pub fn select_managed_gpu_for_request(
+        &self,
+        request: &managed_gpu::ManagedGpuRequest,
+    ) -> Result<managed_gpu::ManagedGpuCapability, ValidationError> {
+        managed_gpu::select_trusted_gpu(self, request)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -968,6 +1029,7 @@ pub struct CapabilityMatrix {
 }
 
 impl CapabilityMatrix {
+    #[must_use]
     pub fn new(backends: Vec<BackendRegistration>) -> Self {
         Self { backends }
     }
@@ -1064,6 +1126,22 @@ pub struct ArtifactManifest {
     pub inline_bytes: Option<Vec<u8>>,
 }
 
+/// Validate the single path component used to identify an artifact. Artifact
+/// ids are materialized below an operator-owned root, so separators, rooted
+/// paths, drive prefixes, and traversal components are never valid ids.
+pub fn validate_artifact_id(value: &str) -> Result<(), String> {
+    if value.trim().is_empty()
+        || value == "."
+        || value == ".."
+        || value.chars().any(|character| {
+            !character.is_ascii_alphanumeric() && !matches!(character, '-' | '_' | '.')
+        })
+    {
+        return Err("artifact id must be a safe single path component".into());
+    }
+    Ok(())
+}
+
 impl ArtifactManifest {
     pub fn inline_json(artifact_id: impl Into<String>, role: ArtifactRole, bytes: &[u8]) -> Self {
         Self {
@@ -1078,9 +1156,7 @@ impl ArtifactManifest {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.artifact_id.trim().is_empty() {
-            return Err("artifact id must not be empty".into());
-        }
+        validate_artifact_id(&self.artifact_id)?;
         if self.size_bytes > MAX_ARTIFACT_BYTES {
             return Err("artifact size exceeds the runtime limit".into());
         }
@@ -1113,9 +1189,14 @@ impl ArtifactManifest {
                 return Err("artifact chunk checksum is invalid".into());
             }
             if let Some(bytes) = &self.inline_bytes {
-                let start = chunk.offset as usize;
-                let end = end as usize;
-                if chunk.sha256 != sha256_digest(&bytes[start..end]) {
+                let start = usize::try_from(chunk.offset)
+                    .map_err(|_| "artifact chunk offset does not fit in the host address space")?;
+                let end = usize::try_from(end)
+                    .map_err(|_| "artifact chunk end does not fit in the host address space")?;
+                let chunk_bytes = bytes
+                    .get(start..end)
+                    .ok_or_else(|| "artifact chunk range is outside inline bytes".to_string())?;
+                if chunk.sha256 != sha256_digest(chunk_bytes) {
                     return Err("chunk checksum does not match inline bytes".into());
                 }
             }
@@ -1156,8 +1237,7 @@ impl ArtifactManifest {
             .collect();
         let selected_end = selected
             .last()
-            .map(|chunk| chunk.offset + chunk.size_bytes)
-            .unwrap_or(range.offset);
+            .map_or(range.offset, |chunk| chunk.offset + chunk.size_bytes);
         if selected.is_empty()
             || selected[0].offset != range.offset
             || selected_end != end
@@ -1196,6 +1276,7 @@ impl ArtifactManifest {
     }
 }
 
+#[must_use]
 pub fn sha256_digest(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     format!("sha256:{digest:x}")
@@ -1204,6 +1285,7 @@ pub fn sha256_digest(bytes: &[u8]) -> String {
 /// Compute the canonical digest for the bytes mounted into a production
 /// execution.  Source bytes are framed first, followed by input artifacts in
 /// manifest order; length prefixes prevent concatenation ambiguity.
+#[must_use]
 pub fn canonical_input_digest(source: &[u8], inputs: &[&[u8]]) -> String {
     let mut canonical = Vec::with_capacity(
         GENERAL_COMPUTE_INPUT_DIGEST_PROTOCOL_VERSION.len()
@@ -1255,6 +1337,11 @@ fn canonical_input_digest_for_request(
     Ok(canonical_input_digest(source, &inputs))
 }
 
+///
+/// # Panics
+///
+/// Panics only if a canonical artifact manifest cannot be serialized, which
+/// indicates a programming error rather than invalid task input.
 pub fn canonical_artifact_root(artifacts: &[ArtifactManifest]) -> String {
     let canonical: Vec<_> = artifacts
         .iter()

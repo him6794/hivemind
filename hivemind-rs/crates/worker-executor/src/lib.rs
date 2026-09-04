@@ -24,14 +24,28 @@ pub enum StopTaskOutcome {
     NotRunning,
 }
 
-struct ActiveTaskEntry {
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ActiveTaskKey {
+    task_id: String,
     attempt_id: String,
+}
+
+impl ActiveTaskKey {
+    fn new(task_id: &str, attempt_id: &str) -> Self {
+        Self {
+            task_id: task_id.to_owned(),
+            attempt_id: attempt_id.to_owned(),
+        }
+    }
+}
+
+struct ActiveTaskEntry {
     cancellation_tx: watch::Sender<bool>,
     stop_requested: bool,
     result_rx: watch::Receiver<Option<TaskResultMessage>>,
 }
 
-type ActiveTaskMap = Arc<Mutex<HashMap<String, ActiveTaskEntry>>>;
+type ActiveTaskMap = Arc<Mutex<HashMap<ActiveTaskKey, ActiveTaskEntry>>>;
 type TaskResultMessage = Result<TaskResult, String>;
 type TaskRunnerFuture = Pin<Box<dyn Future<Output = Result<TaskResult>> + Send>>;
 type TaskRunner = dyn Fn(
@@ -65,9 +79,22 @@ impl WorkerExecutor {
                 "managed proof provider is not configured".into();
         }
         let trusted_registration = admission.trusted_registration();
-        let reference_executor = executor::reference_executor_from_environment(&admission);
+        // ReferenceDirect is a test-only backend. Production workers must never
+        // load the Python reference executor from environment configuration.
+        let reference_executor = {
+            #[cfg(test)]
+            {
+                executor::reference_executor_from_environment(&admission)
+            }
+            #[cfg(not(test))]
+            {
+                None
+            }
+        };
         let cas_store = executor::cas_store_from_environment();
         let production_backends = executor::production_backends_from_environment()?;
+        let managed_gpu_production_backends =
+            executor::managed_gpu_production_backends_from_environment()?;
         let windows_backends = executor::windows_production_backends_from_environment()?;
         let capability_matrix = if admission.capability_matrix().backends.is_empty() {
             executor::runtime_capability_matrix_from_environment()
@@ -82,17 +109,19 @@ impl WorkerExecutor {
                 let reference_executor = reference_executor.clone();
                 let cas_store = cas_store.clone();
                 let production_backends = production_backends.clone();
+                let managed_gpu_production_backends = managed_gpu_production_backends.clone();
                 let windows_backends = windows_backends.clone();
                 let capability_matrix = capability_matrix.clone();
                 let trusted_registration = trusted_registration.clone();
                 Box::pin(async move {
-                    let mut result = executor::run_task_with_cancel_and_backends_and_trusted_registration_and_windows(
+                    let mut result = executor::run_task_with_cancel_and_backends_and_trusted_registration_and_windows_and_managed_gpu(
                         &task,
                         &config,
                         cancellation.clone(),
                         reference_executor,
                         cas_store,
                         production_backends,
+                        managed_gpu_production_backends,
                         windows_backends,
                         capability_matrix,
                         Some(trusted_registration),
@@ -166,18 +195,18 @@ impl WorkerExecutor {
     ) -> Result<TaskResult> {
         let (cancellation_tx, cancellation_rx) = watch::channel(false);
         let (result_tx, result_rx) = watch::channel(None);
+        let active_task_key = ActiveTaskKey::new(&task.task_id, attempt_id);
         let existing_result_rx = {
             let mut active_tasks = self
                 .active_tasks
                 .lock()
                 .map_err(|_| anyhow::anyhow!("active task registry is unavailable"))?;
-            if let Some(active_task) = active_tasks.get(&task.task_id) {
+            if let Some(active_task) = active_tasks.get(&active_task_key) {
                 Some(active_task.result_rx.clone())
             } else {
                 active_tasks.insert(
-                    task.task_id.clone(),
+                    active_task_key.clone(),
                     ActiveTaskEntry {
-                        attempt_id: attempt_id.to_owned(),
                         cancellation_tx,
                         stop_requested: false,
                         result_rx: result_rx.clone(),
@@ -191,12 +220,11 @@ impl WorkerExecutor {
             return Self::await_task_result(result_rx).await;
         }
 
-        let task_id = task.task_id.clone();
         let task_runner = Arc::clone(&self.task_runner);
         let active_tasks = Arc::clone(&self.active_tasks);
         let task = task.clone();
         tokio::spawn(async move {
-            let _active_task_guard = ActiveTaskGuard::new(active_tasks, task_id);
+            let _active_task_guard = ActiveTaskGuard::new(active_tasks, active_task_key);
             let result = task_runner(task, cancellation_rx, proof_context)
                 .await
                 .map_err(|error| error.to_string());
@@ -232,14 +260,10 @@ impl WorkerExecutor {
             .active_tasks
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let Some(entry) = active_tasks.get_mut(task_id) else {
+        let key = ActiveTaskKey::new(task_id, attempt_id.unwrap_or_default());
+        let Some(entry) = active_tasks.get_mut(&key) else {
             return StopTaskOutcome::NotRunning;
         };
-        if let Some(attempt_id) = attempt_id {
-            if entry.attempt_id != attempt_id {
-                return StopTaskOutcome::NotRunning;
-            }
-        }
         if entry.stop_requested {
             return StopTaskOutcome::AlreadyStopping;
         }
@@ -282,6 +306,10 @@ pub struct TaskResult {
     /// Legacy managed-function results leave this unset.
     #[serde(default)]
     pub general_compute_result_json: Option<Vec<u8>>,
+    /// Serialized typed result for `managed-function-gpu-v1`.
+    /// GPU-v1 results never enter the proof or legacy result-torrent routes.
+    #[serde(default)]
+    pub managed_gpu_result_json: Option<Vec<u8>>,
 }
 
 /// Preserves `TaskResult`'s public serde contract without omitting a proof.
@@ -382,15 +410,12 @@ fn managed_proof_failure(mut result: TaskResult, message: &str) -> TaskResult {
 
 struct ActiveTaskGuard {
     active_tasks: ActiveTaskMap,
-    task_id: String,
+    key: ActiveTaskKey,
 }
 
 impl ActiveTaskGuard {
-    fn new(active_tasks: ActiveTaskMap, task_id: String) -> Self {
-        Self {
-            active_tasks,
-            task_id,
-        }
+    fn new(active_tasks: ActiveTaskMap, key: ActiveTaskKey) -> Self {
+        Self { active_tasks, key }
     }
 }
 
@@ -400,7 +425,7 @@ impl Drop for ActiveTaskGuard {
             .active_tasks
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        active_tasks.remove(&self.task_id);
+        active_tasks.remove(&self.key);
     }
 }
 

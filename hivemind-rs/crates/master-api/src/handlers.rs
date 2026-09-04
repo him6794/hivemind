@@ -122,6 +122,8 @@ pub struct CreateTaskBody {
     #[serde(default)]
     pub general_compute_manifest_json: Option<serde_json::Value>,
     #[serde(default)]
+    pub managed_gpu_manifest_json: Option<serde_json::Value>,
+    #[serde(default)]
     pub managed_dsl_backend_id: Option<String>,
     #[serde(default)]
     pub managed_dsl_semantics_manifest_sha256: Option<String>,
@@ -272,8 +274,16 @@ fn validate_task_resources(body: &CreateTaskBody) -> Result<(), &'static str> {
 
 fn validate_runtime_contract(body: &CreateTaskBody) -> Result<(), &'static str> {
     let runtime = body.runtime.as_deref().map(str::trim).unwrap_or_default();
+    if body.general_compute_manifest_json.is_some() && body.managed_gpu_manifest_json.is_some() {
+        return Err("general-compute and managed GPU manifests cannot be combined");
+    }
     if body.general_compute_manifest_json.is_some() && runtime != "general-compute-v1alpha1" {
         return Err("general-compute request manifest requires runtime general-compute-v1alpha1");
+    }
+    if body.managed_gpu_manifest_json.is_some()
+        && runtime != general_compute_runtime::managed_gpu::MANAGED_GPU_RUNTIME_VERSION
+    {
+        return Err("managed GPU request manifest requires runtime managed-function-gpu-v1");
     }
     if runtime != "production_sandboxed_dsl"
         && (body.managed_dsl_backend_id.is_some()
@@ -367,6 +377,42 @@ fn validate_runtime_contract(body: &CreateTaskBody) -> Result<(), &'static str> 
                 .is_some_and(|input| !input.trim().is_empty())
             {
                 return Err("general-compute-v1alpha1 must carry input in its manifest");
+            }
+            Ok(())
+        }
+        general_compute_runtime::managed_gpu::MANAGED_GPU_RUNTIME_VERSION => {
+            if body
+                .task_source
+                .as_deref()
+                .is_some_and(|source| !source.trim().is_empty())
+                || body
+                    .torrent
+                    .as_deref()
+                    .is_some_and(|input| !input.trim().is_empty())
+            {
+                return Err("managed-function-gpu-v1 uses manifest source and input only");
+            }
+            let manifest = body
+                .managed_gpu_manifest_json
+                .as_ref()
+                .ok_or("managed-function-gpu-v1 requires a non-empty request manifest")?;
+            let bytes = serde_json::to_vec(manifest)
+                .map_err(|_| "managed-function-gpu-v1 request manifest is invalid")?;
+            if bytes.is_empty() {
+                return Err("managed-function-gpu-v1 requires a non-empty request manifest");
+            }
+            if bytes.len() > hivemind_proto::MANAGED_GPU_MANIFEST_MAX_BYTES {
+                return Err("managed-function-gpu-v1 request manifest exceeds the byte limit");
+            }
+            let request = serde_json::from_slice::<
+                general_compute_runtime::managed_gpu::ManagedGpuRequest,
+            >(&bytes)
+            .map_err(|_| "managed-function-gpu-v1 request manifest is invalid")?;
+            request
+                .validate()
+                .map_err(|_| "managed-function-gpu-v1 request manifest is invalid")?;
+            if u64::try_from(body.max_cpt.unwrap_or(0)).ok() != Some(request.reservation_cpt) {
+                return Err("managed-function-gpu-v1 max_cpt must equal reservation_cpt");
             }
             Ok(())
         }
@@ -725,6 +771,7 @@ pub struct TaskInfo {
     pub dispatch_status: String,
     pub usage_units: i64,
     pub max_cpt: i64,
+    pub runtime: String,
 }
 
 impl From<hivemind_proto::PricingBreakdown> for PricingBreakdown {
@@ -1292,6 +1339,13 @@ async fn create_task_from_submission(
         .transpose()
         .unwrap_or_default()
         .unwrap_or_default();
+    let managed_gpu_manifest_json = body
+        .managed_gpu_manifest_json
+        .as_ref()
+        .map(serde_json::to_vec)
+        .transpose()
+        .unwrap_or_default()
+        .unwrap_or_default();
     let req = ProtoResourceSpec {
         cpu_cores: 0,
         memory_mb: body.memory_gb.unwrap_or(0) as i64 * 1024,
@@ -1319,6 +1373,7 @@ async fn create_task_from_submission(
             body.managed_dsl_semantics_manifest_sha256
                 .as_deref()
                 .unwrap_or_default(),
+            &managed_gpu_manifest_json,
         )
         .await
     {
@@ -1386,6 +1441,7 @@ pub async fn list_tasks(
                     dispatch_status: t.dispatch_status,
                     usage_units: t.usage_units,
                     max_cpt: t.max_cpt,
+                    runtime: t.runtime,
                 })
                 .collect();
             (
@@ -1396,7 +1452,14 @@ pub async fn list_tasks(
                 }),
             )
         }
-        Err(_e) => (
+        Err(error) if error.code() == tonic::Code::Unauthenticated => (
+            StatusCode::UNAUTHORIZED,
+            Json(TaskListResponse {
+                success: false,
+                tasks: vec![],
+            }),
+        ),
+        Err(_error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(TaskListResponse {
                 success: false,
@@ -1599,7 +1662,11 @@ pub async fn get_task_log(
             Json(serde_json::json!({"success":resp.success,"task_id":task_id,"log":resp.log})),
         ),
         Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            if e.code() == tonic::Code::Unauthenticated {
+                StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            },
             Json(serde_json::json!({"success":false,"message":format!("gRPC error: {}",e)})),
         ),
     }
@@ -1619,14 +1686,64 @@ pub async fn get_task_result(
     };
     let mut grpc = state.grpc_client.clone();
     match grpc.get_task_result(&task_id, &token).await {
-        Ok(resp) => (
-            StatusCode::OK,
-            Json(
-                serde_json::json!({"success":resp.success,"task_id":task_id,"result_torrent":resp.result_torrent,"status_message":resp.status_message}),
-            ),
-        ),
+        Ok(resp) => {
+            if resp.managed_gpu_result_json.is_empty() {
+                return (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "success": resp.success,
+                        "task_id": task_id,
+                        "result_torrent": resp.result_torrent,
+                        "status_message": resp.status_message,
+                    })),
+                );
+            }
+            if resp.managed_gpu_result_json.len() > hivemind_proto::MANAGED_GPU_RESULT_MAX_BYTES {
+                tracing::error!(
+                    task_id = %task_id,
+                    bytes = resp.managed_gpu_result_json.len(),
+                    "Nodepool returned an oversized managed GPU result"
+                );
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "success": false,
+                        "message": "managed GPU result exceeds the byte limit",
+                    })),
+                );
+            }
+            match serde_json::from_slice::<serde_json::Value>(&resp.managed_gpu_result_json) {
+                Ok(managed_gpu_result) if managed_gpu_result.is_object() => (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "success": resp.success,
+                        "task_id": task_id,
+                        "result_torrent": resp.result_torrent,
+                        "status_message": resp.status_message,
+                        "managed_gpu_result": managed_gpu_result,
+                    })),
+                ),
+                Ok(_) | Err(_) => {
+                    tracing::error!(
+                        task_id = %task_id,
+                        "Nodepool returned a non-object managed GPU result"
+                    );
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "success": false,
+                            "message": "managed GPU result is malformed",
+                        })),
+                    )
+                }
+            }
+        }
         Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            if e.code() == tonic::Code::Unauthenticated {
+                StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            },
             Json(serde_json::json!({"success":false,"message":format!("gRPC error: {}",e)})),
         ),
     }
@@ -2594,6 +2711,7 @@ mod tests {
             runtime: runtime.map(str::to_owned),
             task_source: source,
             general_compute_manifest_json: None,
+            managed_gpu_manifest_json: None,
             managed_dsl_backend_id: None,
             managed_dsl_semantics_manifest_sha256: None,
             memory_gb: None,
@@ -2688,6 +2806,103 @@ mod tests {
     }
 
     #[test]
+    fn managed_gpu_runtime_accepts_a_valid_manifest_with_matching_reservation() {
+        let body = CreateTaskBody {
+            managed_gpu_manifest_json: Some(managed_gpu_request_json(1_000)),
+            ..task_body(
+                Some(general_compute_runtime::managed_gpu::MANAGED_GPU_RUNTIME_VERSION),
+                None,
+                None,
+                1_000,
+            )
+        };
+
+        assert_eq!(validate_runtime_contract(&body), Ok(()));
+    }
+
+    #[test]
+    fn managed_gpu_runtime_rejects_cross_route_and_legacy_input_channels() {
+        let manifest = managed_gpu_request_json(1_000);
+        let cross_route = CreateTaskBody {
+            general_compute_manifest_json: Some(general_compute_request_json()),
+            managed_gpu_manifest_json: Some(manifest.clone()),
+            ..task_body(
+                Some(general_compute_runtime::managed_gpu::MANAGED_GPU_RUNTIME_VERSION),
+                None,
+                None,
+                1_000,
+            )
+        };
+        assert_eq!(
+            validate_runtime_contract(&cross_route),
+            Err("general-compute and managed GPU manifests cannot be combined")
+        );
+
+        for (source, input) in [(Some("return 1;".into()), None), (None, Some("{}".into()))] {
+            let body = CreateTaskBody {
+                managed_gpu_manifest_json: Some(manifest.clone()),
+                ..task_body(
+                    Some(general_compute_runtime::managed_gpu::MANAGED_GPU_RUNTIME_VERSION),
+                    source,
+                    input,
+                    1_000,
+                )
+            };
+            assert_eq!(
+                validate_runtime_contract(&body),
+                Err("managed-function-gpu-v1 uses manifest source and input only")
+            );
+        }
+    }
+
+    #[test]
+    fn managed_gpu_runtime_rejects_malformed_oversized_and_mismatched_manifests() {
+        let malformed = CreateTaskBody {
+            managed_gpu_manifest_json: Some(serde_json::json!({"not": "a managed GPU request"})),
+            ..task_body(
+                Some(general_compute_runtime::managed_gpu::MANAGED_GPU_RUNTIME_VERSION),
+                None,
+                None,
+                1_000,
+            )
+        };
+        assert_eq!(
+            validate_runtime_contract(&malformed),
+            Err("managed-function-gpu-v1 request manifest is invalid")
+        );
+
+        let oversized = CreateTaskBody {
+            managed_gpu_manifest_json: Some(serde_json::json!({
+                "padding": "x".repeat(hivemind_proto::MANAGED_GPU_MANIFEST_MAX_BYTES + 1)
+            })),
+            ..task_body(
+                Some(general_compute_runtime::managed_gpu::MANAGED_GPU_RUNTIME_VERSION),
+                None,
+                None,
+                1_000,
+            )
+        };
+        assert_eq!(
+            validate_runtime_contract(&oversized),
+            Err("managed-function-gpu-v1 request manifest exceeds the byte limit")
+        );
+
+        let mismatched = CreateTaskBody {
+            managed_gpu_manifest_json: Some(managed_gpu_request_json(1_000)),
+            ..task_body(
+                Some(general_compute_runtime::managed_gpu::MANAGED_GPU_RUNTIME_VERSION),
+                None,
+                None,
+                999,
+            )
+        };
+        assert_eq!(
+            validate_runtime_contract(&mismatched),
+            Err("managed-function-gpu-v1 max_cpt must equal reservation_cpt")
+        );
+    }
+
+    #[test]
     fn artifact_chunk_http_body_requires_exact_payload_size() {
         let body = GeneralComputeArtifactChunkBody {
             artifact_id: "source".into(),
@@ -2723,6 +2938,50 @@ mod tests {
             validate_artifact_chunk_http_body(&body),
             Err("artifact upload exceeds the upload byte limit")
         );
+    }
+
+    fn managed_gpu_request_json(reservation_cpt: u64) -> serde_json::Value {
+        let image_digest =
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let requirement = general_compute_runtime::managed_gpu::ManagedGpuRequirement::new(
+            "8.9",
+            "12.4",
+            "550",
+            8 * 1024 * 1024 * 1024,
+            1,
+            image_digest,
+        )
+        .unwrap();
+        let mut request = general_compute_runtime::managed_gpu::ManagedGpuRequest {
+            protocol_version:
+                general_compute_runtime::managed_gpu::MANAGED_GPU_REQUEST_PROTOCOL_VERSION.into(),
+            execution_id: "master-handler-execution".into(),
+            attempt_id: "master-handler-attempt".into(),
+            idempotency_key: "master-handler-idempotency".into(),
+            request_digest: String::new(),
+            runtime_version: general_compute_runtime::managed_gpu::MANAGED_GPU_RUNTIME_VERSION
+                .into(),
+            semantics_manifest_sha256:
+                general_compute_runtime::managed_gpu::MANAGED_GPU_SEMANTICS_MANIFEST_SHA256.into(),
+            operation_registry_version:
+                general_compute_runtime::managed_gpu::MANAGED_GPU_OPERATION_REGISTRY_VERSION.into(),
+            backend_id: "managed-cuda-test".into(),
+            guest_image_digest: image_digest.into(),
+            source: "gpu_add_f32([1.0], [2.0])".into(),
+            input_json: "{}".into(),
+            gpu_requirement: requirement,
+            limits: general_compute_runtime::managed_gpu::ManagedGpuLimits::default(),
+            reservation_cpt,
+            billing_version: general_compute_runtime::managed_gpu::MANAGED_GPU_BILLING_VERSION
+                .into(),
+            cost_model_version:
+                general_compute_runtime::managed_gpu::MANAGED_GPU_COST_MODEL_VERSION.into(),
+            settlement_basis: general_compute_runtime::managed_gpu::MANAGED_GPU_SETTLEMENT_BASIS
+                .into(),
+            proof_policy: general_compute_runtime::managed_gpu::ManagedGpuProofPolicy::None,
+        };
+        request.request_digest = request.canonical_request_digest();
+        serde_json::to_value(request).unwrap()
     }
 
     fn general_compute_request_json() -> serde_json::Value {

@@ -46,7 +46,9 @@ fn framed_json_round_trip_consumes_exactly_one_frame() {
 
 #[test]
 fn protocol_rejects_oversized_payload_before_deserialization() {
-    let oversized = (MAX_PROTOCOL_FRAME_BYTES as u32 + 1).to_be_bytes();
+    let oversized =
+        (u32::try_from(MAX_PROTOCOL_FRAME_BYTES).expect("protocol frame limit fits in u32") + 1)
+            .to_be_bytes();
     let error = decode_frame::<Envelope>(&oversized, MAX_PROTOCOL_FRAME_BYTES)
         .expect_err("declared oversized frame must fail closed");
     assert_eq!(error, ProtocolError::PayloadTooLarge);

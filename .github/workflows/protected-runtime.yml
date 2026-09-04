@@ -1,0 +1,227 @@
+name: Protected Runtime Validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: Runtime gate to execute on an operator-owned protected runner
+        required: true
+        type: choice
+        default: all
+        options:
+          - all
+          - cuda
+          - onnx
+          - oci
+          - hcs
+          - settlement
+
+permissions:
+  contents: read
+
+concurrency:
+  group: protected-runtime-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  protected-cuda:
+    name: CUDA hardware runtime
+    if: inputs.scope == 'all' || inputs.scope == 'cuda'
+    runs-on: [self-hosted, linux, x64, nvidia, cuda]
+    timeout-minutes: 30
+    environment: protected-cuda
+    env:
+      HIVEMIND_RUN_CUDA_TESTS: '1'
+      HIVEMIND_CUDA_TEST_DEVICE_ORDINAL: ${{ vars.HIVEMIND_CUDA_TEST_DEVICE_ORDINAL }}
+      HIVEMIND_CUDA_TEST_UUID: ${{ secrets.HIVEMIND_CUDA_TEST_UUID }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Require the configured physical GPU
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$HIVEMIND_RUN_CUDA_TESTS" = 1
+          test -n "$HIVEMIND_CUDA_TEST_DEVICE_ORDINAL"
+          test -n "$HIVEMIND_CUDA_TEST_UUID"
+          [[ "$HIVEMIND_CUDA_TEST_DEVICE_ORDINAL" =~ ^[0-9]+$ ]]
+          expected="${HIVEMIND_CUDA_TEST_DEVICE_ORDINAL},${HIVEMIND_CUDA_TEST_UUID}"
+          actual="$(nvidia-smi --query-gpu=index,uuid --format=csv,noheader | sed 's/, */,/')"
+          printf '%s\n' "$actual" | grep -F -x "$expected" >/dev/null
+      - name: Execute CUDA backend tests
+        working-directory: executor-rs
+        run: cargo test -p managed-function-runtime --features cuda --test gpu_cuda --locked -- --nocapture
+
+  protected-onnx:
+    name: ONNX provider activation
+    if: inputs.scope == 'all' || inputs.scope == 'onnx'
+    runs-on: [self-hosted, linux, x64, nvidia, cuda]
+    timeout-minutes: 30
+    environment: protected-onnx
+    env:
+      HIVEMIND_ONNX_IMAGE: ${{ vars.HIVEMIND_ONNX_IMAGE }}
+      HIVEMIND_ONNX_PROVIDER: ${{ vars.HIVEMIND_ONNX_PROVIDER }}
+      HIVEMIND_ONNX_MODEL_PATH: ${{ vars.HIVEMIND_ONNX_MODEL_PATH }}
+      HIVEMIND_ONNX_INPUT_DIR: ${{ vars.HIVEMIND_ONNX_INPUT_DIR }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Require pinned provider image and operator fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$HIVEMIND_ONNX_IMAGE"
+          test -n "$HIVEMIND_ONNX_PROVIDER"
+          test -n "$HIVEMIND_ONNX_MODEL_PATH"
+          test -n "$HIVEMIND_ONNX_INPUT_DIR"
+          [[ "$HIVEMIND_ONNX_IMAGE" =~ @sha256:[0-9a-f]{64}$ ]]
+          [[ "$HIVEMIND_ONNX_PROVIDER" =~ ^(cuda|tensorrt)$ ]]
+          test -f "$HIVEMIND_ONNX_MODEL_PATH"
+          test -d "$HIVEMIND_ONNX_INPUT_DIR"
+          docker image inspect "$HIVEMIND_ONNX_IMAGE" >/dev/null
+          test -n "$(find "$HIVEMIND_ONNX_INPUT_DIR" -maxdepth 1 -type f -name 'input-*' -print -quit)"
+      - name: Execute the pinned ONNX provider
+        shell: bash
+        run: |
+          set -euo pipefail
+          input_mounts=()
+          mapfile -t input_paths < <(find "$HIVEMIND_ONNX_INPUT_DIR" -maxdepth 1 -type f -name 'input-*' -printf '%f\n' | sort -V)
+          test "${#input_paths[@]}" -gt 0
+          expected_index=0
+          for name in "${input_paths[@]}"; do
+            [[ "$name" =~ ^input-[0-9]+$ ]]
+            index="${name#input-}"
+            test "$index" = "$expected_index"
+            input_mounts+=(--mount "type=bind,src=$HIVEMIND_ONNX_INPUT_DIR/$name,dst=/work/$name,readonly")
+            expected_index=$((expected_index + 1))
+          done
+          result="$(docker run --rm --gpus all --network none --read-only \
+            --user 65532:65532 --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --mount "type=bind,src=$HIVEMIND_ONNX_MODEL_PATH,dst=/work/source,readonly" \
+            "${input_mounts[@]}" \
+            "$HIVEMIND_ONNX_IMAGE")"
+          test -n "$result"
+          printf '%s' "$result" | python3 -c '
+          import json
+          import sys
+          value = json.load(sys.stdin)
+          if value.get("kind") != "general-compute-result-v1":
+              raise SystemExit("ONNX runner returned an unexpected result protocol")
+          '
+
+  protected-oci:
+    name: Production rootless OCI workload
+    if: inputs.scope == 'all' || inputs.scope == 'oci'
+    runs-on: [self-hosted, linux, x64, production-oci]
+    timeout-minutes: 45
+    environment: protected-production-oci
+    env:
+      HIVEMIND_ENABLE_REAL_OCI_E2E: '1'
+      HIVEMIND_GENERAL_COMPUTE_OCI_E2E_TASK_FIXTURE: ${{ vars.HIVEMIND_GENERAL_COMPUTE_OCI_E2E_TASK_FIXTURE }}
+      HIVEMIND_GENERAL_COMPUTE_OCI_E2E_CASES: ${{ vars.HIVEMIND_GENERAL_COMPUTE_OCI_E2E_CASES }}
+      HIVEMIND_GENERAL_COMPUTE_OCI_E2E_EVIDENCE: ${{ github.workspace }}/test_logs/general-compute-oci-e2e/evidence.json
+      HIVEMIND_GENERAL_COMPUTE_OCI_E2E_USERNAME: ${{ secrets.HIVEMIND_GENERAL_COMPUTE_OCI_E2E_USERNAME }}
+      HIVEMIND_GENERAL_COMPUTE_OCI_E2E_PASSWORD: ${{ secrets.HIVEMIND_GENERAL_COMPUTE_OCI_E2E_PASSWORD }}
+      HIVEMIND_GENERAL_COMPUTE_OCI_E2E_WORKER_ID: ${{ vars.HIVEMIND_GENERAL_COMPUTE_OCI_E2E_WORKER_ID }}
+      HIVEMIND_GENERAL_COMPUTE_PRODUCTION_BACKENDS: ${{ secrets.HIVEMIND_GENERAL_COMPUTE_PRODUCTION_BACKENDS }}
+      HIVEMIND_GENERAL_COMPUTE_BACKENDS: ${{ secrets.HIVEMIND_GENERAL_COMPUTE_BACKENDS }}
+      HIVEMIND_GENERAL_COMPUTE_WORKER_CAPABILITIES: ${{ secrets.HIVEMIND_GENERAL_COMPUTE_WORKER_CAPABILITIES }}
+      HIVEMIND_GENERAL_COMPUTE_OCI_E2E_COMPOSE_FILE: ${{ vars.HIVEMIND_GENERAL_COMPUTE_OCI_E2E_COMPOSE_FILE }}
+      HIVEMIND_GENERAL_COMPUTE_OCI_E2E_REGISTRY: ${{ vars.HIVEMIND_GENERAL_COMPUTE_OCI_E2E_REGISTRY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Require protected OCI prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v docker >/dev/null
+          command -v pwsh >/dev/null
+          test "$HIVEMIND_ENABLE_REAL_OCI_E2E" = 1
+          test -n "$HIVEMIND_GENERAL_COMPUTE_OCI_E2E_TASK_FIXTURE"
+          test -n "$HIVEMIND_GENERAL_COMPUTE_OCI_E2E_CASES"
+          test -n "$HIVEMIND_GENERAL_COMPUTE_OCI_E2E_USERNAME"
+          test -n "$HIVEMIND_GENERAL_COMPUTE_OCI_E2E_PASSWORD"
+          test -n "$HIVEMIND_GENERAL_COMPUTE_OCI_E2E_WORKER_ID"
+          test -n "$HIVEMIND_GENERAL_COMPUTE_PRODUCTION_BACKENDS"
+          test -f "$HIVEMIND_GENERAL_COMPUTE_OCI_E2E_TASK_FIXTURE"
+          test -f "$HIVEMIND_GENERAL_COMPUTE_OCI_E2E_CASES"
+          test -f "$HIVEMIND_GENERAL_COMPUTE_OCI_E2E_COMPOSE_FILE"
+          test -f "$HIVEMIND_GENERAL_COMPUTE_OCI_E2E_REGISTRY"
+      - name: Run the reviewed OCI fixture and settlement checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          pwsh -NoProfile -File scripts/general-compute-oci-e2e.ps1 \
+            -Run \
+            -RegistryPath "$HIVEMIND_GENERAL_COMPUTE_OCI_E2E_REGISTRY" \
+            -ComposeFile "$HIVEMIND_GENERAL_COMPUTE_OCI_E2E_COMPOSE_FILE" \
+            -ProjectName "hivemind-protected-oci-${GITHUB_RUN_ID}"
+
+  protected-hcs:
+    name: Native Windows HCS prerequisites
+    if: inputs.scope == 'all' || inputs.scope == 'hcs'
+    runs-on: [self-hosted, windows, x64, native-hcs]
+    timeout-minutes: 20
+    environment: protected-native-hcs
+    env:
+      HIVEMIND_WINDOWS_WORKER_EXECUTABLE: ${{ vars.HIVEMIND_WINDOWS_WORKER_EXECUTABLE }}
+      HIVEMIND_WINDOWS_HCS_BACKEND_REGISTRY: ${{ vars.HIVEMIND_WINDOWS_HCS_BACKEND_REGISTRY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Run the native HCS gate
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:HIVEMIND_WINDOWS_WORKER_EXECUTABLE)) { throw 'HIVEMIND_WINDOWS_WORKER_EXECUTABLE is required' }
+          if ([string]::IsNullOrWhiteSpace($env:HIVEMIND_WINDOWS_HCS_BACKEND_REGISTRY)) { throw 'HIVEMIND_WINDOWS_HCS_BACKEND_REGISTRY is required' }
+          & ./scripts/windows-hcs-e2e.ps1 `
+            -WorkerExecutable $env:HIVEMIND_WINDOWS_WORKER_EXECUTABLE `
+            -BackendRegistry $env:HIVEMIND_WINDOWS_HCS_BACKEND_REGISTRY `
+            -EvidenceDirectory (Join-Path $env:GITHUB_WORKSPACE 'test_logs/windows-hcs-e2e')
+          if (!$?) { throw 'native HCS gate failed' }
+
+  protected-settlement:
+    name: Managed proof live settlement
+    if: inputs.scope == 'all' || inputs.scope == 'settlement'
+    runs-on: [self-hosted, windows, x64, managed-proof]
+    timeout-minutes: 45
+    environment: protected-managed-proof-settlement
+    env:
+      HIVEMIND_LIVE_WEBSITE_API_BASE: ${{ secrets.HIVEMIND_LIVE_WEBSITE_API_BASE }}
+      HIVEMIND_LIVE_MASTER_API_BASE: ${{ secrets.HIVEMIND_LIVE_MASTER_API_BASE }}
+      HIVEMIND_LIVE_USERNAME: ${{ secrets.HIVEMIND_LIVE_USERNAME }}
+      HIVEMIND_LIVE_PASSWORD: ${{ secrets.HIVEMIND_LIVE_PASSWORD }}
+      HIVEMIND_LIVE_TASK_SOURCE_PATH: ${{ vars.HIVEMIND_LIVE_TASK_SOURCE_PATH }}
+      HIVEMIND_LIVE_TASK_INPUT_JSON: ${{ secrets.HIVEMIND_LIVE_TASK_INPUT_JSON }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Require protected deployment and task fixture
+        shell: pwsh
+        run: |
+          foreach ($name in @('HIVEMIND_LIVE_WEBSITE_API_BASE', 'HIVEMIND_LIVE_MASTER_API_BASE', 'HIVEMIND_LIVE_USERNAME', 'HIVEMIND_LIVE_PASSWORD', 'HIVEMIND_LIVE_TASK_SOURCE_PATH', 'HIVEMIND_LIVE_TASK_INPUT_JSON')) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if ([string]::IsNullOrWhiteSpace($value)) { throw "$name is required" }
+          }
+          foreach ($name in @('HIVEMIND_LIVE_WEBSITE_API_BASE', 'HIVEMIND_LIVE_MASTER_API_BASE')) {
+            $uri = [Uri][Environment]::GetEnvironmentVariable($name)
+            if ($uri.Scheme -ne 'https') { throw "$name must use HTTPS" }
+          }
+          if (!(Test-Path -LiteralPath $env:HIVEMIND_LIVE_TASK_SOURCE_PATH -PathType Leaf)) { throw 'managed proof task source is missing' }
+          $null = $env:HIVEMIND_LIVE_TASK_INPUT_JSON | ConvertFrom-Json
+      - name: Execute proof-to-settlement flow
+        shell: pwsh
+        run: |
+          & ./scripts/managed-proof-live-e2e.ps1 `
+            -WebsiteApiBase $env:HIVEMIND_LIVE_WEBSITE_API_BASE `
+            -MasterApiBase $env:HIVEMIND_LIVE_MASTER_API_BASE `
+            -Username $env:HIVEMIND_LIVE_USERNAME `
+            -Password $env:HIVEMIND_LIVE_PASSWORD `
+            -TaskSourcePath $env:HIVEMIND_LIVE_TASK_SOURCE_PATH `
+            -TaskInputJson $env:HIVEMIND_LIVE_TASK_INPUT_JSON `
+            -OutputDir (Join-Path $env:GITHUB_WORKSPACE 'test_logs/managed-proof-live-e2e')
+          if (!$?) { throw 'managed proof live settlement failed' }

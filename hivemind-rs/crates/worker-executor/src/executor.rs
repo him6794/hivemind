@@ -1,16 +1,23 @@
 use anyhow::Result;
 use general_compute_runtime::artifact::{ArtifactMaterializer, CasChunkStore};
+#[cfg(test)]
 use general_compute_runtime::cp_python::{PythonBackendRegistration, PythonBackendRegistry};
 use general_compute_runtime::execution::{ExecutionError, ReferenceBackendExecutor};
+use general_compute_runtime::managed_gpu::{
+    ManagedGpuCapability, ManagedGpuEvidence, ManagedGpuRequest, ManagedGpuResult,
+    ManagedGpuStatus, ManagedGpuUsage, MANAGED_GPU_OPERATION_COST_UNITS,
+    MANAGED_GPU_RUNTIME_VERSION,
+};
 use general_compute_runtime::production::{
-    ManagedDslBackendRegistry, ProductionBackendConfig, ProductionBackendRegistry,
-    WindowsProductionBackendConfig, WindowsProductionBackendRegistry,
+    ManagedDslBackendRegistry, ManagedGpuProductionBackendRegistry, ProductionBackendConfig,
+    ProductionBackendRegistry, WindowsProductionBackendConfig, WindowsProductionBackendRegistry,
 };
 use general_compute_runtime::sandbox::{BackendExecutionMode, ProductionSandboxLauncher};
 use general_compute_runtime::supervisor::{Cancellation, RunResult, RunStatus};
 use general_compute_runtime::windows_hcs::WindowsHcsLauncher;
 use general_compute_runtime::{
-    GeneralComputeRequest, GeneralComputeResult, ResultStatus, TrustedWorkerCapabilityRegistration,
+    ArtifactManifest, ArtifactRole, DeterminismPolicy, ExecutionPolicy, GeneralComputeRequest,
+    GeneralComputeResult, ResultStatus, TrustedWorkerCapabilityRegistration,
 };
 use hivemind_config::HivemindConfig;
 use hivemind_models::Task;
@@ -25,6 +32,10 @@ use tokio::sync::watch;
 
 fn is_managed_function_task(task: &Task) -> bool {
     task.runtime.as_deref() == Some("managed-function-v0")
+}
+
+fn is_managed_gpu_task(task: &Task) -> bool {
+    task.runtime.as_deref() == Some(MANAGED_GPU_RUNTIME_VERSION)
 }
 
 fn execute_managed_function_task(
@@ -78,6 +89,7 @@ fn execute_managed_function_task(
                     managed_receipt_json: Some(receipt.to_string()),
                     managed_proof: None,
                     general_compute_result_json: None,
+                    managed_gpu_result_json: None,
                 });
             }
         };
@@ -108,6 +120,7 @@ fn execute_managed_function_task(
                     managed_receipt_json: Some(receipt.to_string()),
                     managed_proof: None,
                     general_compute_result_json: None,
+                    managed_gpu_result_json: None,
                 });
             }
         }
@@ -142,6 +155,7 @@ fn execute_managed_function_task(
         managed_receipt_json: Some(receipt.to_string()),
         managed_proof: None,
         general_compute_result_json: None,
+        managed_gpu_result_json: None,
     })
 }
 
@@ -221,6 +235,7 @@ fn execute_managed_dsl_task(
                     managed_receipt_json: Some(receipt.to_string()),
                     managed_proof: None,
                     general_compute_result_json: None,
+                    managed_gpu_result_json: None,
                 });
             }
         };
@@ -254,6 +269,7 @@ fn execute_managed_dsl_task(
                     managed_receipt_json: Some(receipt.to_string()),
                     managed_proof: None,
                     general_compute_result_json: None,
+                    managed_gpu_result_json: None,
                 });
             }
         }
@@ -288,6 +304,7 @@ fn execute_managed_dsl_task(
         managed_receipt_json: Some(receipt.to_string()),
         managed_proof: None,
         general_compute_result_json: None,
+        managed_gpu_result_json: None,
     })
 }
 
@@ -301,9 +318,19 @@ pub async fn run_task_with_cancel(
     config: &HivemindConfig,
     cancel_rx: watch::Receiver<bool>,
 ) -> Result<super::TaskResult> {
-    run_task_with_cancel_and_reference(task, config, cancel_rx, None).await
+    run_task_with_cancel_and_backends(
+        task,
+        config,
+        cancel_rx,
+        None,
+        None,
+        production_backends_from_environment()?,
+        runtime_capability_matrix_from_environment(),
+    )
+    .await
 }
 
+#[cfg(test)]
 pub async fn run_task_with_cancel_and_reference(
     task: &Task,
     config: &HivemindConfig,
@@ -314,6 +341,7 @@ pub async fn run_task_with_cancel_and_reference(
         .await
 }
 
+#[cfg(test)]
 pub async fn run_task_with_cancel_and_reference_and_cas(
     task: &Task,
     config: &HivemindConfig,
@@ -384,10 +412,38 @@ pub(crate) async fn run_task_with_cancel_and_backends_and_trusted_registration(
 pub(crate) async fn run_task_with_cancel_and_backends_and_trusted_registration_and_windows(
     task: &Task,
     config: &HivemindConfig,
+    cancel_rx: watch::Receiver<bool>,
+    reference_executor: Option<Arc<ReferenceBackendExecutor>>,
+    cas_store: Option<Arc<CasChunkStore>>,
+    production_backends: Option<Arc<ProductionBackendRegistry>>,
+    windows_backends: Option<Arc<WindowsProductionBackendRegistry>>,
+    capability_matrix: Option<Arc<general_compute_runtime::CapabilityMatrix>>,
+    trusted_registration: Option<TrustedWorkerCapabilityRegistration>,
+) -> Result<super::TaskResult> {
+    run_task_with_cancel_and_backends_and_trusted_registration_and_windows_and_managed_gpu(
+        task,
+        config,
+        cancel_rx,
+        reference_executor,
+        cas_store,
+        production_backends,
+        None,
+        windows_backends,
+        capability_matrix,
+        trusted_registration,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_task_with_cancel_and_backends_and_trusted_registration_and_windows_and_managed_gpu(
+    task: &Task,
+    config: &HivemindConfig,
     mut cancel_rx: watch::Receiver<bool>,
     reference_executor: Option<Arc<ReferenceBackendExecutor>>,
     cas_store: Option<Arc<CasChunkStore>>,
     production_backends: Option<Arc<ProductionBackendRegistry>>,
+    managed_gpu_production_backends: Option<Arc<ManagedGpuProductionBackendRegistry>>,
     windows_backends: Option<Arc<WindowsProductionBackendRegistry>>,
     capability_matrix: Option<Arc<general_compute_runtime::CapabilityMatrix>>,
     trusted_registration: Option<TrustedWorkerCapabilityRegistration>,
@@ -443,6 +499,33 @@ pub(crate) async fn run_task_with_cancel_and_backends_and_trusted_registration_a
         };
     }
 
+    if is_managed_gpu_task(task) {
+        let task = task.clone();
+        let trusted_registration = trusted_registration.clone();
+        let managed_gpu_production_backends = managed_gpu_production_backends.clone();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let runtime_cancellation = Arc::new(Cancellation::new());
+        let execution_cancelled = cancelled.clone();
+        let execution_runtime_cancellation = runtime_cancellation.clone();
+        let mut execution = tokio::task::spawn_blocking(move || {
+            execute_managed_gpu_task(
+                &task,
+                trusted_registration.as_ref(),
+                managed_gpu_production_backends.as_deref(),
+                &execution_cancelled,
+                &execution_runtime_cancellation,
+            )
+        });
+        return tokio::select! {
+            result = &mut execution => result.map_err(anyhow::Error::from)?,
+            _ = wait_for_cancellation(&mut cancel_rx) => {
+                cancelled.store(true, Ordering::Release);
+                runtime_cancellation.cancel();
+                execution.await.map_err(anyhow::Error::from)?
+            }
+        };
+    }
+
     if task.runtime.as_deref() == Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION) {
         let task = task.clone();
         let reference_executor = reference_executor.clone();
@@ -486,6 +569,492 @@ pub(crate) async fn run_task_with_cancel_and_backends_and_trusted_registration_a
     ))
 }
 
+fn execute_managed_gpu_task(
+    task: &Task,
+    trusted_registration: Option<&TrustedWorkerCapabilityRegistration>,
+    managed_gpu_production_backends: Option<&ManagedGpuProductionBackendRegistry>,
+    cancelled: &AtomicBool,
+    cancellation: &Cancellation,
+) -> Result<super::TaskResult> {
+    let request = task
+        .managed_gpu_manifest_json
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("managed-function-gpu-v1 request manifest is required"))
+        .and_then(|manifest| {
+            serde_json::from_slice::<ManagedGpuRequest>(manifest).map_err(|error| {
+                anyhow::anyhow!("managed-function-gpu-v1 request manifest is malformed: {error}")
+            })
+        })?;
+    if let Err(error) = request.validate() {
+        return Ok(failed_managed_gpu_task(
+            task,
+            format!("managed-function-gpu-v1 request rejected: {error:?}"),
+        ));
+    }
+    let Some(trusted_registration) = trusted_registration else {
+        return Ok(failed_managed_gpu_task(
+            task,
+            "managed-function-gpu-v1 requires an operator-approved trusted registration".into(),
+        ));
+    };
+    let selected_gpu = match trusted_registration.select_managed_gpu_for_request(&request) {
+        Ok(selection) => selection,
+        Err(error) => {
+            return Ok(failed_managed_gpu_task(
+                task,
+                format!("managed-function-gpu-v1 GPU admission failed: {error:?}"),
+            ));
+        }
+    };
+    if cancelled.load(Ordering::Acquire) {
+        return typed_managed_gpu_task_result(
+            task,
+            managed_gpu_result(
+                &request,
+                selected_gpu,
+                ManagedGpuStatus::Cancelled,
+                Some("cancelled"),
+                String::new(),
+                gpu_usage(&request, 0, 0, 0),
+            )?,
+        );
+    }
+
+    let Some(registry) = managed_gpu_production_backends else {
+        return typed_managed_gpu_task_result(
+            task,
+            managed_gpu_result(
+                &request,
+                selected_gpu,
+                ManagedGpuStatus::BackendUnavailable,
+                Some("backend_unavailable"),
+                String::new(),
+                gpu_usage(&request, 0, 0, 0),
+            )?,
+        );
+    };
+    let Some(backend) = registry.get(&request.backend_id) else {
+        return typed_managed_gpu_task_result(
+            task,
+            managed_gpu_result(
+                &request,
+                selected_gpu,
+                ManagedGpuStatus::BackendUnavailable,
+                Some("backend_unavailable"),
+                String::new(),
+                gpu_usage(&request, 0, 0, 0),
+            )?,
+        );
+    };
+    if backend.backend_id != request.backend_id
+        || backend.guest_image_digest != request.guest_image_digest
+    {
+        return typed_managed_gpu_task_result(
+            task,
+            managed_gpu_result(
+                &request,
+                selected_gpu,
+                ManagedGpuStatus::BackendUnavailable,
+                Some("backend_unavailable"),
+                String::new(),
+                gpu_usage(&request, 0, 0, 0),
+            )?,
+        );
+    }
+
+    let bundle_request = managed_gpu_bundle_request(&request, &selected_gpu)?;
+    let launch = match backend.launch_for_managed_gpu_capability(&selected_gpu) {
+        Ok(launch) => launch,
+        Err(error) => {
+            tracing::warn!(
+                task_id = %task.task_id,
+                backend_id = %request.backend_id,
+                error = %error,
+                "managed GPU production launch rejected"
+            );
+            return typed_managed_gpu_task_result(
+                task,
+                managed_gpu_result(
+                    &request,
+                    selected_gpu,
+                    ManagedGpuStatus::BackendUnavailable,
+                    Some("backend_unavailable"),
+                    String::new(),
+                    gpu_usage(&request, 0, 0, 0),
+                )?,
+            );
+        }
+    };
+    let (bundle_root, artifact_root) =
+        match backend.materialize_bundle_for_launch(&bundle_request, &task.task_id, &launch) {
+            Ok(paths) => paths,
+            Err(error) => {
+                tracing::warn!(
+                    task_id = %task.task_id,
+                    backend_id = %request.backend_id,
+                    error = %error,
+                    "managed GPU production bundle materialization failed"
+                );
+                return typed_managed_gpu_task_result(
+                    task,
+                    managed_gpu_result(
+                        &request,
+                        selected_gpu,
+                        ManagedGpuStatus::BackendUnavailable,
+                        Some("backend_unavailable"),
+                        String::new(),
+                        gpu_usage(&request, 0, 0, 0),
+                    )?,
+                );
+            }
+        };
+
+    let materializer = ArtifactMaterializer::new(&artifact_root)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let artifacts = std::iter::once(&bundle_request.source_artifact)
+        .chain(bundle_request.input_artifacts.iter());
+    for artifact in artifacts {
+        let materialized = materializer
+            .materialize(artifact)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let bytes = std::fs::read(&materialized.path).map_err(|error| {
+            anyhow::anyhow!("managed GPU materialized artifact cannot be read: {error}")
+        })?;
+        if materialized.size_bytes != artifact.size_bytes
+            || materialized.sha256 != artifact.sha256
+            || bytes.len() as u64 != artifact.size_bytes
+            || general_compute_runtime::sha256_digest(&bytes) != artifact.sha256
+        {
+            return typed_managed_gpu_task_result(
+                task,
+                managed_gpu_result(
+                    &request,
+                    selected_gpu,
+                    ManagedGpuStatus::BackendUnavailable,
+                    Some("backend_unavailable"),
+                    String::new(),
+                    gpu_usage(&request, 0, 0, 0),
+                )?,
+            );
+        }
+    }
+
+    let launcher = ProductionSandboxLauncher::with_oci_runner_command(
+        backend.runner_executable.clone(),
+        backend.runner_prefix_args.clone(),
+    )
+    .with_runner_state_root(backend.runner_state_root.clone())
+    .with_runner_sha256(backend.runner_sha256.clone())
+    .with_timeout(std::time::Duration::from_millis(
+        request.limits.max_wall_time_ms,
+    ))
+    .with_output_limits(
+        backend.max_output_bytes,
+        backend.max_output_bytes.saturating_mul(2),
+    );
+    let started = Instant::now();
+    let run = match launcher.run_materialized_bundle(
+        &launch,
+        &bundle_root,
+        &artifact_root,
+        &task.task_id,
+        cancellation,
+    ) {
+        Ok(run) => run,
+        Err(error) => {
+            tracing::warn!(
+                task_id = %task.task_id,
+                backend_id = %request.backend_id,
+                error = %error,
+                "managed GPU production runner failed to start"
+            );
+            return typed_managed_gpu_task_result(
+                task,
+                managed_gpu_result(
+                    &request,
+                    selected_gpu,
+                    ManagedGpuStatus::BackendUnavailable,
+                    Some("backend_unavailable"),
+                    String::new(),
+                    gpu_usage(&request, 0, 0, 0),
+                )?,
+            );
+        }
+    };
+    let elapsed_ms = bounded_elapsed_ms(started, request.limits.max_wall_time_ms);
+    let typed = match run.status {
+        RunStatus::Completed => {
+            let parsed = match serde_json::from_slice::<ManagedGpuResult>(&run.stdout) {
+                Ok(result) => result,
+                Err(error) => {
+                    tracing::warn!(
+                        task_id = %task.task_id,
+                        backend_id = %request.backend_id,
+                        error = %error,
+                        "managed GPU runner returned an invalid typed result"
+                    );
+                    managed_gpu_result(
+                        &request,
+                        selected_gpu.clone(),
+                        ManagedGpuStatus::BackendUnavailable,
+                        Some("backend_unavailable"),
+                        String::new(),
+                        gpu_usage(&request, 0, elapsed_ms, 0),
+                    )?
+                }
+            };
+            if !managed_gpu_process_result_exit_is_valid(run.exit_code, &parsed) {
+                managed_gpu_result(
+                    &request,
+                    selected_gpu.clone(),
+                    ManagedGpuStatus::BackendUnavailable,
+                    Some("backend_unavailable"),
+                    String::new(),
+                    gpu_usage(&request, 0, elapsed_ms, 0),
+                )?
+            } else {
+                parsed
+            }
+        }
+        RunStatus::Failed => {
+            let status = if run.exit_code.is_some_and(|code| code != 0) {
+                ManagedGpuStatus::Failed
+            } else {
+                ManagedGpuStatus::BackendUnavailable
+            };
+            managed_gpu_result(
+                &request,
+                selected_gpu.clone(),
+                status,
+                Some(if status == ManagedGpuStatus::Failed {
+                    "runner_failed"
+                } else {
+                    "backend_unavailable"
+                }),
+                String::new(),
+                gpu_usage(&request, 0, elapsed_ms, 0),
+            )?
+        }
+        RunStatus::TimedOut => managed_gpu_result(
+            &request,
+            selected_gpu.clone(),
+            ManagedGpuStatus::TimedOut,
+            Some("wall_time_exceeded"),
+            String::new(),
+            gpu_usage(&request, 0, request.limits.max_wall_time_ms, 0),
+        )?,
+        RunStatus::Cancelled => managed_gpu_result(
+            &request,
+            selected_gpu.clone(),
+            ManagedGpuStatus::Cancelled,
+            Some("cancelled"),
+            String::new(),
+            gpu_usage(&request, 0, elapsed_ms, 0),
+        )?,
+        RunStatus::OutputLimitExceeded => managed_gpu_result(
+            &request,
+            selected_gpu.clone(),
+            ManagedGpuStatus::ResourceExhausted,
+            Some("resource_exhausted"),
+            String::new(),
+            gpu_usage(&request, 0, elapsed_ms, 0),
+        )?,
+    };
+
+    if let Err(error) = typed.validate_against(&request, trusted_registration) {
+        tracing::warn!(
+            task_id = %task.task_id,
+            backend_id = %request.backend_id,
+            error = ?error,
+            "managed GPU runner result failed Worker validation"
+        );
+        return typed_managed_gpu_task_result(
+            task,
+            managed_gpu_result(
+                &request,
+                selected_gpu,
+                ManagedGpuStatus::BackendUnavailable,
+                Some("backend_unavailable"),
+                String::new(),
+                gpu_usage(&request, 0, elapsed_ms, 0),
+            )?,
+        );
+    }
+    typed_managed_gpu_task_result(task, typed)
+}
+
+fn managed_gpu_bundle_request(
+    request: &ManagedGpuRequest,
+    selected_gpu: &ManagedGpuCapability,
+) -> Result<GeneralComputeRequest> {
+    let manifest_bytes = serde_json::to_vec(request)?;
+    let selection_bytes = serde_json::to_vec(selected_gpu)?;
+    let mut bundle_request = GeneralComputeRequest {
+        execution_id: request.execution_id.clone(),
+        attempt_id: request.attempt_id.clone(),
+        idempotency_key: request.idempotency_key.clone(),
+        request_digest: String::new(),
+        runtime_version: general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION.into(),
+        guest_image_digest: request.guest_image_digest.clone(),
+        backend_id: request.backend_id.clone(),
+        entrypoint: MANAGED_GPU_RUNTIME_VERSION.into(),
+        source_artifact: ArtifactManifest::inline_json(
+            "source",
+            ArtifactRole::Source,
+            request.source.as_bytes(),
+        ),
+        input_artifacts: vec![
+            ArtifactManifest::inline_json(
+                "input",
+                ArtifactRole::Input,
+                request.input_json.as_bytes(),
+            ),
+            ArtifactManifest::inline_json("manifest", ArtifactRole::Input, &manifest_bytes),
+            ArtifactManifest::inline_json("selection", ArtifactRole::Input, &selection_bytes),
+        ],
+        execution_policy: ExecutionPolicy {
+            wall_time_ms: request.limits.max_wall_time_ms,
+            output_bytes: request.limits.max_output_bytes,
+            ..ExecutionPolicy::default()
+        },
+        determinism: DeterminismPolicy::default(),
+        billing_version: request.billing_version.clone(),
+        cost_model_version: request.cost_model_version.clone(),
+    };
+    bundle_request.request_digest = bundle_request.canonical_request_digest();
+    Ok(bundle_request)
+}
+
+fn bounded_elapsed_ms(started: Instant, max_ms: u64) -> u64 {
+    let elapsed = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    elapsed.min(max_ms)
+}
+
+fn managed_gpu_process_result_exit_is_valid(
+    process_exit_code: Option<i32>,
+    result: &ManagedGpuResult,
+) -> bool {
+    if process_exit_code != Some(0) {
+        return false;
+    }
+    match result.status {
+        ManagedGpuStatus::Completed => result.exit_code == Some(0),
+        ManagedGpuStatus::Failed => false,
+        ManagedGpuStatus::Cancelled
+        | ManagedGpuStatus::TimedOut
+        | ManagedGpuStatus::ResourceExhausted
+        | ManagedGpuStatus::BackendUnavailable => result.exit_code.is_none(),
+    }
+}
+
+fn gpu_usage(
+    request: &ManagedGpuRequest,
+    executed_operations: u64,
+    wall_time_ms: u64,
+    output_bytes: u64,
+) -> ManagedGpuUsage {
+    ManagedGpuUsage {
+        source_bytes: request.source.len() as u64,
+        input_bytes: request.input_json.len() as u64,
+        output_bytes,
+        executed_operations,
+        operation_cost_units: executed_operations.saturating_mul(MANAGED_GPU_OPERATION_COST_UNITS),
+        wall_time_ms,
+        gpu_time_ms: wall_time_ms.min(request.limits.max_gpu_time_ms),
+        gpu_memory_bytes: 0,
+    }
+}
+
+fn managed_gpu_result(
+    request: &ManagedGpuRequest,
+    selected_gpu: ManagedGpuCapability,
+    status: ManagedGpuStatus,
+    error_code: Option<&str>,
+    output: String,
+    usage: ManagedGpuUsage,
+) -> Result<ManagedGpuResult> {
+    let output_sha256 = general_compute_runtime::sha256_digest(output.as_bytes());
+    Ok(ManagedGpuResult {
+        protocol_version: general_compute_runtime::managed_gpu::MANAGED_GPU_RESULT_PROTOCOL_VERSION
+            .into(),
+        execution_id: request.execution_id.clone(),
+        attempt_id: request.attempt_id.clone(),
+        idempotency_key: request.idempotency_key.clone(),
+        request_digest: request.request_digest.clone(),
+        runtime_version: request.runtime_version.clone(),
+        semantics_manifest_sha256: request.semantics_manifest_sha256.clone(),
+        operation_registry_version: request.operation_registry_version.clone(),
+        backend_id: request.backend_id.clone(),
+        guest_image_digest: request.guest_image_digest.clone(),
+        source_sha256: request.source_sha256(),
+        input_sha256: request.input_sha256(),
+        reservation_cpt: request.reservation_cpt,
+        status,
+        exit_code: match status {
+            ManagedGpuStatus::Completed => Some(0),
+            ManagedGpuStatus::Failed => Some(1),
+            ManagedGpuStatus::Cancelled
+            | ManagedGpuStatus::TimedOut
+            | ManagedGpuStatus::ResourceExhausted
+            | ManagedGpuStatus::BackendUnavailable => None,
+        },
+        error_code: error_code.map(str::to_owned),
+        output,
+        output_sha256,
+        selected_gpu,
+        usage,
+        evidence: ManagedGpuEvidence::default(),
+    })
+}
+
+fn typed_managed_gpu_task_result(
+    task: &Task,
+    typed: ManagedGpuResult,
+) -> Result<super::TaskResult> {
+    let encoded = serde_json::to_vec(&typed)?;
+    let completed = typed.status == ManagedGpuStatus::Completed;
+    Ok(super::TaskResult {
+        task_id: task.task_id.clone(),
+        success: completed,
+        output: completed.then(|| typed.output.clone()),
+        error: (!completed).then(|| {
+            typed
+                .error_code
+                .clone()
+                .unwrap_or_else(|| "backend_unavailable".into())
+        }),
+        exit_code: typed.exit_code.unwrap_or(1),
+        cpu_time_ms: 0,
+        wall_time_ms: typed.usage.wall_time_ms.min(i64::MAX as u64) as i64,
+        peak_memory_mb: (typed.usage.gpu_memory_bytes / (1024 * 1024)).min(i64::MAX as u64) as i64,
+        managed_executed_ops: typed.usage.executed_operations.min(i64::MAX as u64) as i64,
+        managed_output_bytes: typed.usage.output_bytes.min(i64::MAX as u64) as i64,
+        managed_receipt_json: None,
+        managed_proof: None,
+        general_compute_result_json: None,
+        managed_gpu_result_json: Some(encoded),
+    })
+}
+
+fn failed_managed_gpu_task(task: &Task, error: String) -> super::TaskResult {
+    super::TaskResult {
+        task_id: task.task_id.clone(),
+        success: false,
+        output: None,
+        error: Some(error),
+        exit_code: 1,
+        cpu_time_ms: 0,
+        wall_time_ms: 0,
+        peak_memory_mb: 0,
+        managed_executed_ops: 0,
+        managed_output_bytes: 0,
+        managed_receipt_json: None,
+        managed_proof: None,
+        general_compute_result_json: None,
+        managed_gpu_result_json: None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_general_compute_task(
     task: &Task,
@@ -499,6 +1068,9 @@ fn execute_general_compute_task(
     cancelled: &AtomicBool,
     cancellation: &Cancellation,
 ) -> Result<super::TaskResult> {
+    #[cfg(not(test))]
+    let _ = reference_executor;
+
     let request = task
         .general_compute_manifest_json
         .as_deref()
@@ -583,6 +1155,7 @@ fn execute_general_compute_task(
                 trusted_gpu_selection.clone(),
             )
         }
+        #[cfg(test)]
         Some(BackendExecutionMode::ReferenceDirect) if reference_executor.is_some() => {
             let executor = reference_executor.expect("guarded by is_some");
             let root = absolute_runtime_root(config, &task.task_id)?;
@@ -598,6 +1171,7 @@ fn execute_general_compute_task(
                 None => executor.execute_with_cancellation(&request, &materializer, cancellation),
             }
         }
+        #[cfg(test)]
         None if reference_executor.is_some() && production_backends.is_none() => {
             let executor = reference_executor.expect("guarded by is_some");
             let root = absolute_runtime_root(config, &task.task_id)?;
@@ -672,6 +1246,7 @@ fn typed_task_result(task: &Task, typed: GeneralComputeResult) -> Result<super::
         managed_receipt_json: None,
         managed_proof: None,
         general_compute_result_json: Some(encoded),
+        managed_gpu_result_json: None,
     })
 }
 
@@ -699,8 +1274,11 @@ fn execute_production_backend_task(
     backend
         .validate_request_mounts(request)
         .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
+    let launch = backend
+        .launch_for_gpu_selection(trusted_gpu_selection.as_ref())
+        .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
     let (bundle_root, artifact_root) = backend
-        .materialize_bundle(request, &task.task_id)
+        .materialize_bundle_for_launch(request, &task.task_id, &launch)
         .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
     let materializer = ArtifactMaterializer::new(&artifact_root)
         .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
@@ -742,6 +1320,10 @@ fn execute_production_backend_task(
         .skip(1)
         .map(Vec::as_slice)
         .collect::<Vec<_>>();
+    if let Some(onnx) = &backend.onnx {
+        onnx.validate_input_tensors(&input_bytes)
+            .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
+    }
     let input_sha256 = general_compute_runtime::canonical_input_digest(source_bytes, &input_bytes);
     for mount in &backend.policy.mounts {
         if let general_compute_runtime::sandbox::SandboxMount::ReadOnlyArtifact {
@@ -775,7 +1357,6 @@ fn execute_production_backend_task(
         backend.max_output_bytes,
         backend.max_output_bytes.saturating_mul(2),
     );
-    let launch = backend.launch();
     let result = launcher
         .run_materialized_bundle(
             &launch,
@@ -804,6 +1385,14 @@ fn execute_windows_backend_task(
     {
         return Err(ExecutionError::BackendUnavailable(
             "Windows production backend registration does not match request".into(),
+        ));
+    }
+    if matches!(
+        trusted_gpu_selection.as_ref(),
+        Some(general_compute_runtime::gpu::GpuSelection::Gpu(_))
+    ) {
+        return Err(ExecutionError::BackendUnavailable(
+            "Windows production backend does not provide GPU passthrough".into(),
         ));
     }
     if cancelled.load(Ordering::Acquire) {
@@ -893,25 +1482,61 @@ fn production_result(
     _config: &HivemindConfig,
     trusted_gpu_selection: Option<general_compute_runtime::gpu::GpuSelection>,
 ) -> Result<GeneralComputeResult, ExecutionError> {
-    let status = match result.status {
+    let run_status = result.status;
+    let status = match run_status {
         RunStatus::Completed if result.exit_code == Some(0) => ResultStatus::Completed,
         RunStatus::Cancelled => ResultStatus::Cancelled,
         RunStatus::TimedOut => ResultStatus::TimedOut,
         RunStatus::OutputLimitExceeded => ResultStatus::ResourceExhausted,
         RunStatus::Completed | RunStatus::Failed => ResultStatus::Failed,
     };
-    let stdout_bytes = result.stdout;
-    let _stdout = String::from_utf8(stdout_bytes.clone())
-        .map_err(|_| ExecutionError::BackendUnavailable("production stdout is not UTF-8".into()))?;
     let stderr = String::from_utf8(result.stderr)
         .map_err(|_| ExecutionError::BackendUnavailable("production stderr is not UTF-8".into()))?;
-    let exit_code = match status {
-        ResultStatus::Completed => Some(0),
-        ResultStatus::Failed => result.exit_code.or(Some(1)),
-        _ => None,
-    };
-    let envelope: general_compute_runtime::ProductionResultEnvelope = serde_json::from_slice(&stdout_bytes)
-        .map_err(|error| {
+
+    // A killed or truncated runner cannot emit a complete envelope. Preserve
+    // the supervisor's terminal status instead of converting timeout,
+    // cancellation, or output-limit failures into BackendUnavailable.
+    if run_status != RunStatus::Completed {
+        let exit_code = match status {
+            ResultStatus::Failed => result.exit_code.filter(|code| *code != 0).or(Some(1)),
+            _ => None,
+        };
+        let error_code = match status {
+            ResultStatus::Cancelled => "cancelled",
+            ResultStatus::TimedOut => "wall_time_exceeded",
+            ResultStatus::ResourceExhausted => "resource_exhausted",
+            ResultStatus::Failed => "backend_failed",
+            ResultStatus::Completed | ResultStatus::BackendUnavailable => "backend_unavailable",
+        };
+        let envelope = general_compute_runtime::ProductionResultEnvelope {
+            protocol_version: general_compute_runtime::PRODUCTION_RESULT_PROTOCOL_VERSION.into(),
+            status,
+            exit_code,
+            error_code: Some(error_code.into()),
+            stdout: String::new(),
+            stderr: String::new(),
+            output_artifacts: Vec::new(),
+            usage: Default::default(),
+            input_sha256,
+            output_manifest_root: general_compute_runtime::canonical_artifact_root(&[]),
+        };
+        let expected_input_sha256 = envelope.input_sha256.clone();
+        let mut typed = envelope
+            .into_result_with_input_digest(request, &expected_input_sha256)
+            .map_err(|error| {
+                ExecutionError::BackendUnavailable(format!(
+                    "production terminal result validation failed: {}",
+                    error.message
+                ))
+            })?;
+        typed.gpu_selection = trusted_gpu_selection;
+        typed.stderr = stderr;
+        return Ok(typed);
+    }
+
+    let stdout_bytes = result.stdout;
+    let envelope: general_compute_runtime::ProductionResultEnvelope =
+        serde_json::from_slice(&stdout_bytes).map_err(|error| {
             ExecutionError::BackendUnavailable(format!(
                 "production result decoder rejected stdout: {error}; runner exit_code={:?}; runner stderr: {}",
                 result.exit_code,
@@ -933,10 +1558,15 @@ fn production_result(
         ));
     }
     typed.stderr = stderr;
-    typed.exit_code = exit_code;
+    typed.exit_code = match status {
+        ResultStatus::Completed => Some(0),
+        ResultStatus::Failed => result.exit_code.or(Some(1)),
+        _ => None,
+    };
     Ok(typed)
 }
 
+#[cfg(test)]
 fn absolute_runtime_root(config: &HivemindConfig, task_id: &str) -> Result<std::path::PathBuf> {
     if !crate::sandbox::is_safe_task_id(task_id) {
         anyhow::bail!("unsafe task id for general-compute artifact root");
@@ -1003,6 +1633,7 @@ fn failed_general_compute_result(
     }
 }
 
+#[cfg(test)]
 pub fn reference_executor_from_environment(
     admission: &crate::runtime_admission::WorkerRuntimeAdmission,
 ) -> Option<Arc<ReferenceBackendExecutor>> {
@@ -1037,6 +1668,28 @@ pub fn managed_dsl_backends_from_environment() -> anyhow::Result<ManagedDslBacke
     ManagedDslBackendRegistry::new(registrations).map_err(|error| {
         anyhow::anyhow!("operator managed DSL backend registry is invalid: {error}")
     })
+}
+
+pub fn managed_gpu_production_backends_from_environment(
+) -> anyhow::Result<Option<Arc<ManagedGpuProductionBackendRegistry>>> {
+    let path = match std::env::var("HIVEMIND_MANAGED_GPU_PRODUCTION_BACKENDS") {
+        Ok(path) if !path.trim().is_empty() => path,
+        _ => return Ok(None),
+    };
+    let bytes = std::fs::read(&path).map_err(|error| {
+        anyhow::anyhow!(
+            "failed to read operator managed GPU production backend registry {path:?}: {error}"
+        )
+    })?;
+    let registrations = serde_json::from_slice(&bytes).map_err(|error| {
+        anyhow::anyhow!("operator managed GPU production backend registry is invalid: {error}")
+    })?;
+    ManagedGpuProductionBackendRegistry::new(registrations)
+        .map(Arc::new)
+        .map(Some)
+        .map_err(|error| {
+            anyhow::anyhow!("operator managed GPU production backend registry is invalid: {error}")
+        })
 }
 
 pub fn production_backends_from_environment(
@@ -1143,6 +1796,10 @@ async fn wait_for_cancellation(cancellation: &mut watch::Receiver<bool>) {
 mod tests {
     use super::*;
     use chrono::Utc;
+    use general_compute_runtime::managed_gpu::{
+        ManagedGpuBackendRegistration, ManagedGpuLimits, ManagedGpuProofPolicy,
+        ManagedGpuRequirement, MANAGED_GPU_RUNTIME_VERSION,
+    };
     use hivemind_models::TaskStatus;
     use managed_function_runtime::V0_SEMANTICS_MANIFEST_JSON;
     use serde_json::Value;
@@ -1661,6 +2318,35 @@ mod tests {
     }
 
     #[test]
+    fn production_result_preserves_terminal_supervisor_status_without_an_envelope() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path().join("sandbox").to_str().unwrap());
+        let image = format!("sha256:{}", "f".repeat(64));
+        let request = production_request(
+            "python-cpython-312",
+            &image,
+            "execution-production-result-timeout",
+        );
+        let run = RunResult {
+            status: RunStatus::TimedOut,
+            exit_code: None,
+            reaped: true,
+            stdout: Vec::new(),
+            stderr: b"runner stopped after deadline".to_vec(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        };
+        let expected = general_compute_runtime::canonical_input_digest(b"result = 1", &[]);
+
+        let typed = production_result(&request, run, expected, &config, None)
+            .expect("a supervisor timeout should become a typed result");
+        assert_eq!(typed.status, ResultStatus::TimedOut);
+        assert_eq!(typed.error_code.as_deref(), Some("wall_time_exceeded"));
+        assert_eq!(typed.exit_code, None);
+        assert_eq!(typed.stderr, "runner stopped after deadline");
+    }
+
+    #[test]
     fn production_result_rejects_a_digest_not_bound_to_materialized_source_bytes() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path().join("sandbox").to_str().unwrap());
@@ -1833,6 +2519,386 @@ mod tests {
         assert!(result.general_compute_result_json.is_some());
     }
 
+    #[tokio::test]
+    async fn managed_gpu_worker_requires_the_dedicated_production_registry() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path().join("sandbox").to_str().unwrap());
+        let (request, _capability, trusted_registration) = managed_gpu_worker_fixture();
+        let mut task = test_task_with_source("null");
+        task.task_id = "managed-gpu-no-registry".into();
+        task.runtime = Some(MANAGED_GPU_RUNTIME_VERSION.into());
+        task.managed_gpu_manifest_json = Some(serde_json::to_vec(&request).unwrap());
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+
+        let result =
+            run_task_with_cancel_and_backends_and_trusted_registration_and_windows_and_managed_gpu(
+                &task,
+                &config,
+                cancel_rx,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(trusted_registration.clone()),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.success);
+        assert!(result.output.is_none());
+        assert!(result.general_compute_result_json.is_none());
+        assert!(result.managed_proof.is_none());
+        let typed: ManagedGpuResult =
+            serde_json::from_slice(result.managed_gpu_result_json.as_deref().unwrap()).unwrap();
+        assert_eq!(typed.status, ManagedGpuStatus::BackendUnavailable);
+        assert_eq!(typed.error_code.as_deref(), Some("backend_unavailable"));
+        assert!(typed
+            .validate_against(&request, &trusted_registration)
+            .is_ok());
+    }
+
+    #[test]
+    fn managed_gpu_runner_process_exit_contract_keeps_typed_terminal_statuses() {
+        let (request, capability, _trusted_registration) = managed_gpu_worker_fixture();
+        let cases = [
+            (ManagedGpuStatus::Completed, None, true),
+            (ManagedGpuStatus::Failed, Some("execution_failed"), false),
+            (ManagedGpuStatus::Cancelled, Some("cancelled"), true),
+            (ManagedGpuStatus::TimedOut, Some("wall_time_exceeded"), true),
+            (
+                ManagedGpuStatus::ResourceExhausted,
+                Some("resource_exhausted"),
+                true,
+            ),
+            (
+                ManagedGpuStatus::BackendUnavailable,
+                Some("backend_unavailable"),
+                true,
+            ),
+        ];
+
+        for (status, error_code, valid_on_zero_process_exit) in cases {
+            let result = managed_gpu_result(
+                &request,
+                capability.clone(),
+                status,
+                error_code,
+                if status == ManagedGpuStatus::Completed {
+                    "ok".into()
+                } else {
+                    String::new()
+                },
+                gpu_usage(
+                    &request,
+                    0,
+                    0,
+                    if status == ManagedGpuStatus::Completed {
+                        2
+                    } else {
+                        0
+                    },
+                ),
+            )
+            .unwrap();
+
+            assert_eq!(
+                managed_gpu_process_result_exit_is_valid(Some(0), &result),
+                valid_on_zero_process_exit,
+                "unexpected zero-exit compatibility for {status:?}"
+            );
+            assert!(!managed_gpu_process_result_exit_is_valid(None, &result));
+            assert!(!managed_gpu_process_result_exit_is_valid(Some(1), &result));
+        }
+
+        let mut completed_without_logical_exit = managed_gpu_result(
+            &request,
+            capability.clone(),
+            ManagedGpuStatus::Completed,
+            None,
+            "ok".into(),
+            gpu_usage(&request, 0, 0, 2),
+        )
+        .unwrap();
+        completed_without_logical_exit.exit_code = None;
+        assert!(!managed_gpu_process_result_exit_is_valid(
+            Some(0),
+            &completed_without_logical_exit
+        ));
+
+        let mut unavailable_with_logical_exit = managed_gpu_result(
+            &request,
+            capability,
+            ManagedGpuStatus::BackendUnavailable,
+            Some("backend_unavailable"),
+            String::new(),
+            gpu_usage(&request, 0, 0, 0),
+        )
+        .unwrap();
+        unavailable_with_logical_exit.exit_code = Some(1);
+        assert!(!managed_gpu_process_result_exit_is_valid(
+            Some(0),
+            &unavailable_with_logical_exit
+        ));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn managed_gpu_worker_routes_through_the_production_runner_boundary() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path().join("sandbox").to_str().unwrap());
+        let image = format!("sha256:{}", "d".repeat(64));
+        let (mut request, capability, trusted_registration) =
+            managed_gpu_worker_fixture_with_image(&image);
+        let root = tmp.path().join("managed-gpu-production");
+        let bundle_root = root.join("bundles");
+        let runner_state_root = root.join("runner-state");
+        let seccomp_profile_path = root.join("seccomp.json");
+        std::fs::create_dir_all(bundle_root.join("rootfs")).unwrap();
+        std::fs::create_dir_all(&runner_state_root).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&seccomp_profile_path, test_seccomp_profile_bytes()).unwrap();
+
+        let typed_runner_result = managed_gpu_result(
+            &request,
+            capability.clone(),
+            ManagedGpuStatus::Completed,
+            None,
+            "runner output".into(),
+            gpu_usage(&request, 0, 0, "runner output".len() as u64),
+        )
+        .unwrap();
+        let result_path = root.join("runner-result.json");
+        std::fs::write(
+            &result_path,
+            serde_json::to_vec(&typed_runner_result).unwrap(),
+        )
+        .unwrap();
+        let mut registration =
+            managed_gpu_production_registration(root.clone(), &request, capability.clone());
+        #[cfg(windows)]
+        {
+            let script = root.join("fake-runc.cmd");
+            std::fs::write(
+                &script,
+                format!(
+                    "@echo off\r\ntype \"{}\"\r\nexit /b 0\r\n",
+                    result_path.display()
+                ),
+            )
+            .unwrap();
+            registration.runner_executable =
+                std::path::PathBuf::from(std::env::var("ComSpec").unwrap());
+            registration.runner_prefix_args =
+                vec!["/C".into(), script.to_string_lossy().into_owned()];
+        }
+        registration.runner_sha256 = general_compute_runtime::sha256_digest(
+            &std::fs::read(&registration.runner_executable).unwrap(),
+        );
+        let production =
+            Arc::new(ManagedGpuProductionBackendRegistry::new(vec![registration]).unwrap());
+        request.request_digest = request.canonical_request_digest();
+        let mut task = test_task_with_source("null");
+        task.task_id = "managed-gpu-production-runner".into();
+        task.runtime = Some(MANAGED_GPU_RUNTIME_VERSION.into());
+        task.managed_gpu_manifest_json = Some(serde_json::to_vec(&request).unwrap());
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+
+        let result =
+            run_task_with_cancel_and_backends_and_trusted_registration_and_windows_and_managed_gpu(
+                &task,
+                &config,
+                cancel_rx,
+                None,
+                None,
+                None,
+                Some(production),
+                None,
+                None,
+                Some(trusted_registration),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            result.success,
+            "managed GPU runner failed: {:?}",
+            result.error
+        );
+        let typed: ManagedGpuResult =
+            serde_json::from_slice(result.managed_gpu_result_json.as_deref().unwrap()).unwrap();
+        assert_eq!(typed.status, ManagedGpuStatus::Completed);
+        assert_eq!(typed.output, "runner output");
+        assert!(result.managed_receipt_json.is_none());
+        assert!(result.general_compute_result_json.is_none());
+        assert!(result.managed_proof.is_none());
+    }
+
+    fn managed_gpu_worker_fixture() -> (
+        ManagedGpuRequest,
+        ManagedGpuCapability,
+        TrustedWorkerCapabilityRegistration,
+    ) {
+        managed_gpu_worker_fixture_with_image(
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+    }
+
+    fn managed_gpu_worker_fixture_with_image(
+        image: &str,
+    ) -> (
+        ManagedGpuRequest,
+        ManagedGpuCapability,
+        TrustedWorkerCapabilityRegistration,
+    ) {
+        let requirement =
+            ManagedGpuRequirement::new("8.9", "12.4", "550", 8 * 1024 * 1024 * 1024, 1, image)
+                .unwrap();
+        let capability = ManagedGpuCapability::new(
+            "managed-gpu-test-0",
+            "8.9",
+            "12.4",
+            "550",
+            16 * 1024 * 1024 * 1024,
+            32,
+            image,
+            0,
+            "GPU-0123456789abcdef",
+        )
+        .unwrap();
+        let mut request = ManagedGpuRequest {
+            protocol_version:
+                general_compute_runtime::managed_gpu::MANAGED_GPU_REQUEST_PROTOCOL_VERSION.into(),
+            execution_id: "managed-gpu-worker-execution".into(),
+            attempt_id: "managed-gpu-worker-attempt".into(),
+            idempotency_key: "managed-gpu-worker-idempotency".into(),
+            request_digest: String::new(),
+            runtime_version: MANAGED_GPU_RUNTIME_VERSION.into(),
+            semantics_manifest_sha256:
+                general_compute_runtime::managed_gpu::MANAGED_GPU_SEMANTICS_MANIFEST_SHA256.into(),
+            operation_registry_version:
+                general_compute_runtime::managed_gpu::MANAGED_GPU_OPERATION_REGISTRY_VERSION.into(),
+            backend_id: "managed-gpu-test-backend".into(),
+            guest_image_digest: image.into(),
+            source: "return 1".into(),
+            input_json: "null".into(),
+            gpu_requirement: requirement,
+            limits: ManagedGpuLimits::default(),
+            reservation_cpt: 10,
+            billing_version: general_compute_runtime::managed_gpu::MANAGED_GPU_BILLING_VERSION
+                .into(),
+            cost_model_version:
+                general_compute_runtime::managed_gpu::MANAGED_GPU_COST_MODEL_VERSION.into(),
+            settlement_basis: general_compute_runtime::managed_gpu::MANAGED_GPU_SETTLEMENT_BASIS
+                .into(),
+            proof_policy: ManagedGpuProofPolicy::None,
+        };
+        request.request_digest = request.canonical_request_digest();
+        let trusted_registration = TrustedWorkerCapabilityRegistration {
+            worker: general_compute_runtime::WorkerCapabilities {
+                guest_image_digests: vec![image.into()],
+                capabilities: vec![MANAGED_GPU_RUNTIME_VERSION.into()],
+                max_threads: 4,
+                gpu_available: true,
+            },
+            gpu_capabilities: Vec::new(),
+            managed_gpu_backends: vec![ManagedGpuBackendRegistration {
+                backend_id: request.backend_id.clone(),
+                runtime_version: MANAGED_GPU_RUNTIME_VERSION.into(),
+                semantics_manifest_sha256:
+                    general_compute_runtime::managed_gpu::MANAGED_GPU_SEMANTICS_MANIFEST_SHA256
+                        .into(),
+                operation_registry_version:
+                    general_compute_runtime::managed_gpu::MANAGED_GPU_OPERATION_REGISTRY_VERSION
+                        .into(),
+                guest_image_digest: image.into(),
+                billing_version: general_compute_runtime::managed_gpu::MANAGED_GPU_BILLING_VERSION
+                    .into(),
+                cost_model_version:
+                    general_compute_runtime::managed_gpu::MANAGED_GPU_COST_MODEL_VERSION.into(),
+                reservation_cpt: request.reservation_cpt,
+                max_source_bytes: 256 * 1024,
+                max_input_bytes: 16 * 1024 * 1024,
+                max_output_bytes: 16 * 1024 * 1024,
+                max_operations: 1_000_000,
+                max_gpu_time_ms: 120_000,
+                capabilities: vec![capability.clone()],
+            }],
+            backends: Vec::new(),
+        };
+        (request, capability, trusted_registration)
+    }
+
+    #[cfg(windows)]
+    fn managed_gpu_production_registration(
+        root: std::path::PathBuf,
+        request: &ManagedGpuRequest,
+        capability: ManagedGpuCapability,
+    ) -> general_compute_runtime::production::ManagedGpuProductionBackendConfig {
+        general_compute_runtime::production::ManagedGpuProductionBackendConfig {
+            backend_id: request.backend_id.clone(),
+            guest_image_digest: request.guest_image_digest.clone(),
+            bundle_root: root.join("bundles"),
+            artifact_root: root.join("artifacts"),
+            runner_executable: root.join("runner.exe"),
+            runner_state_root: root.join("runner-state"),
+            seccomp_profile_path: root.join("seccomp.json"),
+            runner_prefix_args: Vec::new(),
+            runner_sha256: format!("sha256:{}", "0".repeat(64)),
+            entrypoint: vec!["/usr/local/bin/managed-gpu-runner".into()],
+            policy: general_compute_runtime::sandbox::LinuxSandboxPolicy {
+                oci_privilege: general_compute_runtime::sandbox::OciPrivilegeMode::Rootless,
+                namespaces: vec![
+                    general_compute_runtime::sandbox::LinuxNamespace::User,
+                    general_compute_runtime::sandbox::LinuxNamespace::Pid,
+                    general_compute_runtime::sandbox::LinuxNamespace::Mount,
+                    general_compute_runtime::sandbox::LinuxNamespace::Network,
+                ],
+                cgroup: general_compute_runtime::sandbox::CgroupPolicy::V2,
+                seccomp: general_compute_runtime::sandbox::SeccompPolicy::DefaultDeny {
+                    profile_sha256: general_compute_runtime::sha256_digest(
+                        test_seccomp_profile_bytes(),
+                    ),
+                },
+                privilege_escalation:
+                    general_compute_runtime::sandbox::PrivilegeEscalationPolicy::NoNewPrivileges,
+                root_filesystem: general_compute_runtime::sandbox::RootFilesystemPolicy::ReadOnly,
+                network: general_compute_runtime::sandbox::SandboxNetworkPolicy::DenyAll,
+                mounts: vec![
+                    general_compute_runtime::sandbox::SandboxMount::ReadOnlyArtifact {
+                        artifact_id: "source".into(),
+                        destination: "/work/source".into(),
+                    },
+                    general_compute_runtime::sandbox::SandboxMount::ReadOnlyArtifact {
+                        artifact_id: "input".into(),
+                        destination: "/work/input".into(),
+                    },
+                    general_compute_runtime::sandbox::SandboxMount::ReadOnlyArtifact {
+                        artifact_id: "manifest".into(),
+                        destination: "/work/manifest".into(),
+                    },
+                    general_compute_runtime::sandbox::SandboxMount::ReadOnlyArtifact {
+                        artifact_id: "selection".into(),
+                        destination: "/work/selection".into(),
+                    },
+                ],
+                devices: Vec::new(),
+            },
+            gpu_device_mappings: vec![general_compute_runtime::production::GpuDeviceMapping {
+                device_id: capability.device_id,
+                devices: vec![general_compute_runtime::sandbox::SandboxDevice {
+                    path: "/dev/nvidiactl".into(),
+                    device_type: general_compute_runtime::sandbox::SandboxDeviceType::Char,
+                    major: 195,
+                    minor: 255,
+                    access: "rw".into(),
+                }],
+            }],
+            max_output_bytes: 16 * 1024 * 1024,
+        }
+    }
+
     fn python_executable() -> &'static str {
         if cfg!(windows) {
             "python"
@@ -1885,7 +2951,10 @@ mod tests {
                         destination: "/work/source".into(),
                     },
                 ],
+                devices: Vec::new(),
             },
+            gpu_device_mappings: Vec::new(),
+            onnx: None,
             max_output_bytes: 1024,
         }
     }
@@ -1957,6 +3026,7 @@ mod tests {
             runtime: None,
             task_source: None,
             general_compute_manifest_json: None,
+            managed_gpu_manifest_json: None,
             managed_dsl_backend_id: None,
             managed_dsl_semantics_manifest_sha256: None,
             expected_btih: None,

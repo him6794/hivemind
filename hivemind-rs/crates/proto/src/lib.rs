@@ -41,7 +41,15 @@ pub const GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES: usize =
 /// Maximum encoded size accepted for one transfer-lease authority request.
 pub const GENERAL_COMPUTE_TRANSFER_LEASE_RPC_MESSAGE_MAX_BYTES: usize = 16 * 1024;
 
-/// Maximum byte length of a Nodepool-issued Worker execution JWT in an
+/// Maximum byte length accepted for a managed-function-gpu-v1 request manifest.
+/// The manifest carries bounded source and JSON input, so it is intentionally
+/// separate from the general-compute artifact manifest cap.
+pub const MANAGED_GPU_MANIFEST_MAX_BYTES: usize = 20 * 1024 * 1024;
+
+/// Maximum serialized size accepted for a managed-function-gpu-v1 result.
+pub const MANAGED_GPU_RESULT_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// Maximum byte length accepted for a Nodepool-issued Worker execution JWT in an
 /// authority request.
 pub const WORKER_EXECUTION_TOKEN_MAX_BYTES: usize = 8 * 1024;
 
@@ -61,13 +69,18 @@ pub const LEGACY_MANAGED_RECEIPT_MAX_BYTES: usize = 64 * 1024;
 /// Maximum encoded managed-proof protobuf message accepted across the verifier RPC boundary.
 pub const MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES: usize = 2_166_784;
 
+/// Maximum gRPC message size used by the frozen managed-function-v0 contract.
+///
+/// This value remains in the v0 semantics manifest even though the shared Worker
+/// service now has a larger cap for the separately versioned GPU-v1 route.
+pub const LEGACY_WORKER_RPC_MESSAGE_MAX_BYTES: usize = 4 * 1024 * 1024;
+
 /// Maximum gRPC message size for Worker RPCs.
 ///
-/// A managed `ExecuteTaskResponse` can include a 2,166,784-byte proof envelope,
-/// a 1 MiB status/output payload, a legacy receipt, and protobuf field overhead.
-/// This explicit 4 MiB cap matches tonic's default whole-message ceiling while
-/// keeping the Worker client symmetric for request encoding and response decoding.
-pub const WORKER_RPC_MESSAGE_MAX_BYTES: usize = 4 * 1024 * 1024;
+/// The cap must cover the largest admitted managed-GPU manifest or result, in
+/// addition to the bounded status, proof, receipt, and protobuf field overhead.
+/// Keep the Worker client and server symmetric when changing this value.
+pub const WORKER_RPC_MESSAGE_MAX_BYTES: usize = 22 * 1024 * 1024;
 
 /// Validate the identity, digest syntax, and size binding of one typed upload.
 pub fn validate_general_compute_chunk_upload(
@@ -445,7 +458,7 @@ mod tests {
         ExecuteTaskResponse, GeneralComputeArtifactChunkUpload, GeneralComputeChunkDescriptor,
         GeneralComputeChunkResumeRequest, GeneralComputeChunkResumeResponse,
         GeneralComputeChunkUpload, GeneralComputeChunkUploadResponse, GeneralComputePrepareRequest,
-        GeneralComputePrepareResponse, ManagedProofEnvelope,
+        GeneralComputePrepareResponse, ManagedProofEnvelope, UploadTaskRequest,
         ValidateGeneralComputeTransferLeaseRequest, ValidateGeneralComputeTransferLeaseResponse,
         WorkerCapabilityReport, WorkerSessionCancelAck, WorkerSessionClientFrame,
         WorkerSessionHello, WorkerSessionServerFrame, WorkerSessionTask,
@@ -453,7 +466,8 @@ mod tests {
         GENERAL_COMPUTE_MANIFEST_MAX_BYTES, GENERAL_COMPUTE_RESULT_MAX_BYTES,
         GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES,
         GENERAL_COMPUTE_TRANSFER_LEASE_RPC_MESSAGE_MAX_BYTES, LEGACY_MANAGED_RECEIPT_MAX_BYTES,
-        MANAGED_BUDGET_MAX_USAGE_UNITS, MANAGED_JSON_INPUT_MAX_BYTES,
+        MANAGED_BUDGET_MAX_USAGE_UNITS, MANAGED_GPU_MANIFEST_MAX_BYTES,
+        MANAGED_GPU_RESULT_MAX_BYTES, MANAGED_JSON_INPUT_MAX_BYTES,
         MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES, MANAGED_TASK_SOURCE_MAX_BYTES, TASK_ID_MAX_BYTES,
         WORKER_EXECUTION_TOKEN_MAX_BYTES, WORKER_RPC_MESSAGE_MAX_BYTES,
         WORKER_STATUS_MESSAGE_MAX_BYTES,
@@ -466,6 +480,8 @@ mod tests {
         assert_eq!(MANAGED_JSON_INPUT_MAX_BYTES, 1024 * 1024);
         assert_eq!(GENERAL_COMPUTE_MANIFEST_MAX_BYTES, 4 * 1024 * 1024);
         assert_eq!(GENERAL_COMPUTE_RESULT_MAX_BYTES, 2 * 1024 * 1024);
+        assert_eq!(MANAGED_GPU_MANIFEST_MAX_BYTES, 20 * 1024 * 1024);
+        assert_eq!(MANAGED_GPU_RESULT_MAX_BYTES, 16 * 1024 * 1024);
         assert_eq!(MANAGED_BUDGET_MAX_USAGE_UNITS, 1_000_000);
         assert_eq!(MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES, 2_166_784);
         assert_eq!(WORKER_STATUS_MESSAGE_MAX_BYTES, 1024 * 1024);
@@ -500,8 +516,25 @@ mod tests {
                     + WORKER_STATUS_MESSAGE_MAX_BYTES
                     + LEGACY_MANAGED_RECEIPT_MAX_BYTES
         );
-        assert!(worker_rpc_message_max_bytes <= 4 * WORKER_STATUS_MESSAGE_MAX_BYTES);
+        assert_eq!(worker_rpc_message_max_bytes, 22 * 1024 * 1024);
         assert!(response.encoded_len() <= worker_rpc_message_max_bytes);
+    }
+
+    #[test]
+    fn worker_rpc_message_cap_covers_managed_gpu_payloads() {
+        let request = ExecuteTaskRequest {
+            managed_gpu_manifest_json: vec![0; MANAGED_GPU_MANIFEST_MAX_BYTES],
+            ..ExecuteTaskRequest::default()
+        };
+        let response = ExecuteTaskResponse {
+            managed_gpu_result_json: vec![0; MANAGED_GPU_RESULT_MAX_BYTES],
+            status_message: "x".repeat(WORKER_STATUS_MESSAGE_MAX_BYTES),
+            managed_receipt_json: "x".repeat(LEGACY_MANAGED_RECEIPT_MAX_BYTES),
+            ..ExecuteTaskResponse::default()
+        };
+
+        assert!(request.encoded_len() <= WORKER_RPC_MESSAGE_MAX_BYTES);
+        assert!(response.encoded_len() <= WORKER_RPC_MESSAGE_MAX_BYTES);
     }
 
     #[test]
@@ -528,6 +561,36 @@ mod tests {
         assert_eq!(proof.image_id, vec![1, 2, 3, 4, 5, 6, 7, 8]);
         assert_eq!(proof.journal, br#"{"usage_units":17}"#);
         assert_eq!(proof.receipt_json, br#"{"inner":{}}"#);
+    }
+
+    #[test]
+    fn managed_gpu_request_and_result_json_fields_round_trip() {
+        let manifest = br#"{\"runtime_version\":\"managed-function-gpu-v1\"}"#.to_vec();
+        let result = br#"{\"status\":\"completed\"}"#.to_vec();
+
+        let execute = ExecuteTaskRequest {
+            managed_gpu_manifest_json: manifest.clone(),
+            ..ExecuteTaskRequest::default()
+        };
+        let decoded_execute = ExecuteTaskRequest::decode(execute.encode_to_vec().as_slice())
+            .expect("GPU manifest field should survive ExecuteTaskRequest encoding");
+        assert_eq!(decoded_execute.managed_gpu_manifest_json, manifest);
+
+        let upload = UploadTaskRequest {
+            managed_gpu_manifest_json: decoded_execute.managed_gpu_manifest_json.clone(),
+            ..UploadTaskRequest::default()
+        };
+        let decoded_upload = UploadTaskRequest::decode(upload.encode_to_vec().as_slice())
+            .expect("GPU manifest field should survive UploadTaskRequest encoding");
+        assert_eq!(decoded_upload.managed_gpu_manifest_json, manifest);
+
+        let response = ExecuteTaskResponse {
+            managed_gpu_result_json: result.clone(),
+            ..ExecuteTaskResponse::default()
+        };
+        let decoded_response = ExecuteTaskResponse::decode(response.encode_to_vec().as_slice())
+            .expect("GPU result field should survive ExecuteTaskResponse encoding");
+        assert_eq!(decoded_response.managed_gpu_result_json, result);
     }
 
     #[test]
@@ -904,7 +967,6 @@ mod tests {
 
         assert_eq!(decoded, response);
         const {
-            assert!(GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES > WORKER_RPC_MESSAGE_MAX_BYTES);
             assert!(
                 GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES
                     > GENERAL_COMPUTE_CHUNK_UPLOAD_MAX_BYTES

@@ -94,6 +94,7 @@ impl MinskyProgram {
         })
     }
 
+    #[must_use]
     pub fn register_count(&self) -> usize {
         self.register_count
     }
@@ -105,6 +106,7 @@ pub struct InterpreterLimits {
 }
 
 impl InterpreterLimits {
+    #[must_use]
     pub fn new(max_steps: u64) -> Self {
         Self { max_steps }
     }
@@ -232,6 +234,7 @@ pub struct HeapLimits {
 }
 
 impl HeapLimits {
+    #[must_use]
     pub fn new(max_steps: u64, max_cells: usize) -> Self {
         Self {
             max_steps,
@@ -244,6 +247,7 @@ impl HeapLimits {
 pub struct HeapValue(BigUint);
 
 impl HeapValue {
+    #[must_use]
     pub fn integer(value: u64) -> Self {
         Self(BigUint::from(value))
     }
@@ -272,10 +276,12 @@ pub struct HeapInterpreter {
 }
 
 impl HeapInterpreter {
+    #[must_use]
     pub fn new(program: HeapProgram) -> Self {
         Self { program }
     }
 
+    #[must_use]
     pub fn run(&self, limits: HeapLimits, cancellation: &Cancellation) -> HeapResult {
         let mut registers = vec![HeapValue::integer(0); self.program.register_count];
         let mut heap = Vec::<HeapValue>::new();
@@ -499,6 +505,7 @@ pub struct RecursionLimits {
 }
 
 impl RecursionLimits {
+    #[must_use]
     pub fn new(max_steps: u64, max_depth: usize) -> Self {
         Self {
             max_steps,
@@ -531,10 +538,12 @@ pub struct RecursionInterpreter {
 }
 
 impl RecursionInterpreter {
+    #[must_use]
     pub fn new(program: RecursionProgram) -> Self {
         Self { program }
     }
 
+    #[must_use]
     pub fn run(&self, limits: RecursionLimits, cancellation: &Cancellation) -> RecursionResult {
         let mut registers = vec![HeapValue::integer(0); self.program.register_count];
         let mut stack = Vec::<usize>::new();
@@ -698,6 +707,7 @@ pub struct SignalLimits {
 }
 
 impl SignalLimits {
+    #[must_use]
     pub fn new(max_steps: u64) -> Self {
         Self { max_steps }
     }
@@ -725,10 +735,12 @@ pub struct SignalInterpreter {
 }
 
 impl SignalInterpreter {
+    #[must_use]
     pub fn new(program: SignalProgram) -> Self {
         Self { program }
     }
 
+    #[must_use]
     pub fn run(&self, limits: SignalLimits, cancellation: &Cancellation) -> SignalResult {
         let mut pc = 0usize;
         let mut steps = 0u64;
@@ -777,10 +789,12 @@ impl SignalInterpreter {
 }
 
 impl ReferenceInterpreter {
+    #[must_use]
     pub fn new(program: MinskyProgram) -> Self {
         Self { program }
     }
 
+    #[must_use]
     pub fn run(&self, limits: InterpreterLimits, cancellation: &Cancellation) -> InterpreterResult {
         let mut registers = vec![BigUint::from(0u8); self.program.register_count];
         let mut program_counter = 0usize;

@@ -1,12 +1,15 @@
+use general_compute_runtime::gpu::{GpuCapability, GpuRuntime, GpuSelection, GpuVendor};
+use general_compute_runtime::onnx::{OnnxBackendConfig, OnnxExecutionProvider};
 use general_compute_runtime::production::{
-    ManagedDslBackendRegistration, ManagedDslBackendRegistry, ProductionBackendConfig,
-    ProductionBackendRegistry, ProductionBackendRegistryError, WindowsProductionBackendConfig,
-    WindowsProductionBackendRegistry,
+    GpuDeviceMapping, ManagedDslBackendRegistration, ManagedDslBackendRegistry,
+    ProductionBackendConfig, ProductionBackendRegistry, ProductionBackendRegistryError,
+    WindowsProductionBackendConfig, WindowsProductionBackendRegistry,
 };
 use general_compute_runtime::sandbox::{
     CgroupPolicy, LinuxNamespace, LinuxSandboxPolicy, OciPrivilegeMode, PrivilegeEscalationPolicy,
-    RootFilesystemPolicy, SandboxMount, SandboxNetworkPolicy, SeccompPolicy, WindowsIsolationMode,
-    WindowsRootFilesystemPolicy, WindowsSandboxNetworkPolicy, WindowsSandboxPolicy,
+    RootFilesystemPolicy, SandboxDevice, SandboxDeviceType, SandboxMount, SandboxNetworkPolicy,
+    SeccompPolicy, WindowsIsolationMode, WindowsRootFilesystemPolicy, WindowsSandboxNetworkPolicy,
+    WindowsSandboxPolicy,
 };
 use general_compute_runtime::{
     ArtifactManifest, ArtifactRole, DeterminismPolicy, ExecutionPolicy,
@@ -109,6 +112,7 @@ fn policy() -> LinuxSandboxPolicy {
             artifact_id: "source".into(),
             destination: "/work/source".into(),
         }],
+        devices: Vec::new(),
     }
 }
 
@@ -129,8 +133,66 @@ fn config() -> ProductionBackendConfig {
         runner_sha256: format!("sha256:{}", "c".repeat(64)),
         entrypoint: vec!["python".into(), "/runtime/runner.py".into()],
         policy: policy(),
+        gpu_device_mappings: Vec::new(),
+        onnx: None,
         max_output_bytes: 1024,
     }
+}
+
+#[test]
+fn gpu_selection_resolves_only_operator_device_mapping() {
+    let mut registration = config();
+    registration.gpu_device_mappings = vec![GpuDeviceMapping {
+        device_id: "gpu-0".into(),
+        devices: vec![SandboxDevice {
+            path: "/dev/nvidia0".into(),
+            device_type: SandboxDeviceType::Char,
+            major: 195,
+            minor: 0,
+            access: "rw".into(),
+        }],
+    }];
+    registration.onnx =
+        Some(OnnxBackendConfig::new("source", Vec::new(), OnnxExecutionProvider::Cuda).unwrap());
+    assert_eq!(
+        registration.launch_for_gpu_selection(None).unwrap_err(),
+        ProductionBackendRegistryError::OnnxGpuSelectionRequired
+    );
+    let capability = GpuCapability::new(
+        GpuVendor::Nvidia,
+        "gpu-0",
+        "sm_80",
+        GpuRuntime::Cuda,
+        "12.4",
+        "550.54",
+        16 * 1024 * 1024 * 1024,
+        8,
+        registration.guest_image_digest.clone(),
+    )
+    .unwrap();
+    let launch = registration
+        .launch_for_gpu_selection(Some(&GpuSelection::Gpu(capability)))
+        .unwrap();
+    assert_eq!(launch.policy.devices[0].path, "/dev/nvidia0");
+
+    let unknown = GpuCapability::new(
+        GpuVendor::Nvidia,
+        "gpu-1",
+        "sm_80",
+        GpuRuntime::Cuda,
+        "12.4",
+        "550.54",
+        16 * 1024 * 1024 * 1024,
+        8,
+        registration.guest_image_digest.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        registration
+            .launch_for_gpu_selection(Some(&GpuSelection::Gpu(unknown)))
+            .unwrap_err(),
+        ProductionBackendRegistryError::GpuDeviceMappingMissing("gpu-1".into())
+    );
 }
 
 fn windows_policy() -> WindowsSandboxPolicy {
@@ -396,12 +458,209 @@ fn production_task_root_rejects_path_traversal_and_materializes_bound_bundle() {
         serde_json::from_slice(&std::fs::read(bundle.join("config.json")).unwrap()).unwrap();
     let canonical_artifacts = std::fs::canonicalize(&artifacts).unwrap();
     assert_eq!(
-        config["mounts"][0]["source"],
+        config["mounts"][3]["source"],
         canonical_artifacts
             .join("source")
             .to_string_lossy()
             .to_string()
     );
+    let _ = std::fs::remove_dir_all(bundle);
+    let _ = std::fs::remove_dir_all(artifacts);
+}
+
+#[test]
+fn materialize_bundle_for_gpu_launch_emits_exact_device_and_cgroup_entries() {
+    let root = std::env::temp_dir().join(format!(
+        "hivemind-production-gpu-materialized-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let mut registration = config();
+    registration.bundle_root = root.join("bundles");
+    registration.artifact_root = root.join("artifacts");
+    registration.runner_executable = root.join("runc");
+    registration.runner_state_root = root.join("runner-state");
+    registration.seccomp_profile_path = root.join("seccomp.json");
+    registration.gpu_device_mappings = vec![GpuDeviceMapping {
+        device_id: "gpu-0".into(),
+        devices: vec![
+            SandboxDevice {
+                path: "/dev/nvidia0".into(),
+                device_type: SandboxDeviceType::Char,
+                major: 195,
+                minor: 0,
+                access: "rw".into(),
+            },
+            SandboxDevice {
+                path: "/dev/nvidiactl".into(),
+                device_type: SandboxDeviceType::Char,
+                major: 195,
+                minor: 255,
+                access: "rwm".into(),
+            },
+        ],
+    }];
+    std::fs::create_dir_all(registration.bundle_root.join("rootfs")).unwrap();
+    write_seccomp_profile(&registration);
+
+    let registry = ProductionBackendRegistry::new(vec![registration.clone()]).unwrap();
+    let request = request_for_mount_test(&registration, "execution-gpu-materialized");
+    let capability = GpuCapability::new(
+        GpuVendor::Nvidia,
+        "gpu-0",
+        "sm_89",
+        GpuRuntime::Cuda,
+        "12.4",
+        "550.54",
+        16 * 1024 * 1024 * 1024,
+        8,
+        registration.guest_image_digest.clone(),
+    )
+    .unwrap();
+    let launch = registry
+        .get(&registration.backend_id)
+        .unwrap()
+        .launch_for_gpu_selection(Some(&GpuSelection::Gpu(capability)))
+        .unwrap();
+    let (bundle, artifacts) = registry
+        .get(&registration.backend_id)
+        .unwrap()
+        .materialize_bundle_for_launch(&request, "task-gpu-materialized", &launch)
+        .unwrap();
+
+    let config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(bundle.join("config.json")).unwrap()).unwrap();
+    assert_eq!(
+        config["linux"]["devices"],
+        serde_json::json!([
+            {"path": "/dev/null", "type": "c", "major": 1, "minor": 3},
+            {"path": "/dev/zero", "type": "c", "major": 1, "minor": 5},
+            {"path": "/dev/full", "type": "c", "major": 1, "minor": 7},
+            {"path": "/dev/random", "type": "c", "major": 1, "minor": 8},
+            {"path": "/dev/urandom", "type": "c", "major": 1, "minor": 9},
+            {"path": "/dev/tty", "type": "c", "major": 5, "minor": 0},
+            {"path": "/dev/nvidia0", "type": "c", "major": 195, "minor": 0},
+            {"path": "/dev/nvidiactl", "type": "c", "major": 195, "minor": 255}
+        ])
+    );
+    assert_eq!(
+        config["linux"]["resources"]["devices"],
+        serde_json::json!([
+            {"allow": true, "type": "c", "major": 1, "minor": 3, "access": "rwm"},
+            {"allow": true, "type": "c", "major": 1, "minor": 5, "access": "rwm"},
+            {"allow": true, "type": "c", "major": 1, "minor": 7, "access": "rwm"},
+            {"allow": true, "type": "c", "major": 1, "minor": 8, "access": "rwm"},
+            {"allow": true, "type": "c", "major": 1, "minor": 9, "access": "rwm"},
+            {"allow": true, "type": "c", "major": 5, "minor": 0, "access": "rwm"},
+            {"allow": true, "type": "c", "major": 195, "minor": 0, "access": "rw"},
+            {"allow": true, "type": "c", "major": 195, "minor": 255, "access": "rwm"}
+        ])
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(bundle);
+    let _ = std::fs::remove_dir_all(artifacts);
+}
+
+#[test]
+fn onnx_backend_requires_fixed_source_and_numbered_input_mounts() {
+    let mut registration = config();
+    registration.bundle_root = PathBuf::from("C:\\hivemind\\bundle");
+    registration.artifact_root = PathBuf::from("C:\\hivemind\\artifacts");
+    registration.runner_executable = PathBuf::from("C:\\hivemind\\runc.exe");
+    registration.runner_state_root = PathBuf::from("C:\\hivemind\\runner-state");
+    registration.seccomp_profile_path = PathBuf::from("C:\\hivemind\\seccomp.json");
+    registration.onnx = Some(
+        OnnxBackendConfig::new(
+            "source",
+            vec!["tensor-0".into(), "tensor-1".into()],
+            OnnxExecutionProvider::Cpu,
+        )
+        .unwrap(),
+    );
+    registration.policy.mounts.extend([
+        SandboxMount::ReadOnlyArtifact {
+            artifact_id: "tensor-0".into(),
+            destination: "/work/input-0".into(),
+        },
+        SandboxMount::ReadOnlyArtifact {
+            artifact_id: "tensor-1".into(),
+            destination: "/work/input-1".into(),
+        },
+    ]);
+    ProductionBackendRegistry::new(vec![registration.clone()])
+        .expect("numbered ONNX mounts should be accepted");
+
+    registration.policy.mounts[1] = SandboxMount::ReadOnlyArtifact {
+        artifact_id: "tensor-0".into(),
+        destination: "/work/input-2".into(),
+    };
+    assert_eq!(
+        ProductionBackendRegistry::new(vec![registration]).unwrap_err(),
+        ProductionBackendRegistryError::OnnxInputMountInvalid(0)
+    );
+}
+
+#[test]
+fn onnx_backend_binds_verified_artifacts_and_runner_annotations() {
+    let root = std::env::temp_dir().join(format!(
+        "hivemind-production-onnx-materialized-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let mut registration = config();
+    registration.bundle_root = root.join("bundles");
+    registration.artifact_root = root.join("artifacts");
+    registration.runner_executable = root.join("runc");
+    registration.runner_state_root = root.join("runner-state");
+    registration.seccomp_profile_path = root.join("seccomp.json");
+    registration.onnx =
+        Some(OnnxBackendConfig::new("source", Vec::new(), OnnxExecutionProvider::Cpu).unwrap());
+    std::fs::create_dir_all(registration.bundle_root.join("rootfs")).unwrap();
+    write_seccomp_profile(&registration);
+
+    let registry = ProductionBackendRegistry::new(vec![registration.clone()]).unwrap();
+    let request = request_for_mount_test(&registration, "execution-onnx-materialized");
+    let launch = registry
+        .get(&registration.backend_id)
+        .unwrap()
+        .launch_for_gpu_selection(None)
+        .unwrap();
+    let (bundle, artifacts) = registry
+        .get(&registration.backend_id)
+        .unwrap()
+        .materialize_bundle_for_launch(&request, "task-onnx-materialized", &launch)
+        .unwrap();
+    let config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(bundle.join("config.json")).unwrap()).unwrap();
+
+    assert_eq!(config["annotations"]["org.hivemind.workload"], "onnx");
+    assert_eq!(
+        config["annotations"]["org.hivemind.onnx.protocol"],
+        "general-compute-onnx-v1"
+    );
+    assert_eq!(
+        config["annotations"]["org.hivemind.onnx.execution-provider"],
+        "cpu"
+    );
+    assert_eq!(
+        config["annotations"]["org.hivemind.onnx.model-artifact-id"],
+        "source"
+    );
+    assert_eq!(
+        config["linux"]["devices"],
+        serde_json::json!([
+            {"path": "/dev/null", "type": "c", "major": 1, "minor": 3},
+            {"path": "/dev/zero", "type": "c", "major": 1, "minor": 5},
+            {"path": "/dev/full", "type": "c", "major": 1, "minor": 7},
+            {"path": "/dev/random", "type": "c", "major": 1, "minor": 8},
+            {"path": "/dev/urandom", "type": "c", "major": 1, "minor": 9},
+            {"path": "/dev/tty", "type": "c", "major": 5, "minor": 0}
+        ])
+    );
+    assert!(config["linux"]["resources"]["devices"].is_array());
+
+    let _ = std::fs::remove_dir_all(root);
     let _ = std::fs::remove_dir_all(bundle);
     let _ = std::fs::remove_dir_all(artifacts);
 }

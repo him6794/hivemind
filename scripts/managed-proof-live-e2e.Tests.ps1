@@ -86,7 +86,13 @@ foreach ($forbidden in @(
 
 # Evidence records digests/sizes/states, not payloads or credentials.
 Assert-Contains `
-    -Needle "result_json_sha256" `
-    -Message "live E2E harness evidence must record result digests rather than payloads."
+    -Needle "result_json_sha256 = `$resultJsonSha256" `
+    -Message "live E2E harness must store the computed result JSON digest, not a placeholder."
+Assert-Contains `
+    -Needle "Get-Sha256Hex -Bytes ([System.Text.Encoding]::UTF8.GetBytes(`$resultJson))" `
+    -Message "live E2E harness must hash the exact retrieved result JSON bytes."
+Assert-Contains `
+    -Needle "`$resultJsonSha256 -notmatch '^[0-9a-f]{64}$'" `
+    -Message "live E2E harness must reject missing or malformed result digests."
 
 Write-Host "managed proof live E2E harness contract tests passed"

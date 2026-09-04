@@ -95,6 +95,16 @@ function Assert-Redacted {
     }
 }
 
+function Get-Sha256Hex {
+    param([Parameter(Mandatory = $true)][byte[]]$Bytes)
+    $hasher = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($hasher.ComputeHash($Bytes)) -replace "-", "").ToLowerInvariant()
+    } finally {
+        $hasher.Dispose()
+    }
+}
+
 if (!(Test-Path -LiteralPath $TaskSourcePath -PathType Leaf)) {
     Fail-Closed "TaskSourcePath is missing: $TaskSourcePath"
 }
@@ -291,6 +301,10 @@ try {
 }
 $resultJson = $resultResponse | ConvertTo-Json -Depth 12
 Assert-Redacted $resultJson "task result"
+$resultJsonSha256 = Get-Sha256Hex -Bytes ([System.Text.Encoding]::UTF8.GetBytes($resultJson))
+if ([string]::IsNullOrWhiteSpace($resultJsonSha256) -or $resultJsonSha256 -notmatch '^[0-9a-f]{64}$') {
+    Fail-Closed "task result digest is missing or is not a SHA-256 value."
+}
 
 try {
     $logResponse = Invoke-RestMethod -Method Get `
@@ -304,7 +318,7 @@ Assert-Redacted $logText "task log"
 Write-Evidence "05-result-log.json" ([ordered]@{
     task_id = $taskId
     result_success = [bool]$resultResponse.success
-    result_json_sha256 = $null
+    result_json_sha256 = $resultJsonSha256
     result_bytes = $resultJson.Length
     log_bytes = $logText.Length
     log_empty = [string]::IsNullOrWhiteSpace($logText)

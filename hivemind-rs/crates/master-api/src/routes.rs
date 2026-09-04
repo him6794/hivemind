@@ -75,7 +75,12 @@ pub fn create_router(state: AppState) -> Router {
             get(super::handlers::list_admin_audit_logs),
         )
         .route("/api/tasks/quote", post(super::handlers::quote_task))
-        .route("/api/tasks", post(super::handlers::create_task))
+        .route(
+            "/api/tasks",
+            post(super::handlers::create_task).layer(DefaultBodyLimit::max(
+                hivemind_proto::MANAGED_GPU_MANIFEST_MAX_BYTES + 1024 * 1024,
+            )),
+        )
         .route(
             "/api/tasks/:task_id/general-compute/artifacts/chunk",
             post(super::handlers::upload_general_compute_artifact_chunk).layer(
@@ -132,9 +137,12 @@ pub fn build_cors_layer(allowed_origins: &[String]) -> CorsLayer {
 mod tests {
     use crate::grpc_client::GrpcClient;
     use crate::handlers::{AppState, TaskSubmitRateLimiter};
+    use crate::middleware::RawToken;
     use axum::body::Body;
+    use axum::extract::DefaultBodyLimit;
     use axum::http::{header, Request, StatusCode};
     use axum::{routing::get, Router};
+    use hivemind_models::Claims;
     use std::sync::Arc;
     use tower::ServiceExt;
 
@@ -206,5 +214,91 @@ mod tests {
             .headers()
             .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
             .is_none());
+    }
+
+    fn authenticated_claims() -> Claims {
+        Claims {
+            sub: "route-size-test-user".into(),
+            user_id: "route-size-test-user".into(),
+            role: None,
+            task_id: None,
+            worker_id: None,
+            exp: usize::MAX,
+            iat: 0,
+        }
+    }
+
+    fn task_route_app() -> Router {
+        let state = AppState {
+            grpc_client: GrpcClient::new("127.0.0.1:50051"),
+            config: hivemind_config::HivemindConfig::default(),
+            task_submit_limiter: Arc::new(tokio::sync::Mutex::new(TaskSubmitRateLimiter::new())),
+        };
+        Router::new()
+            .route(
+                "/api/tasks",
+                axum::routing::post(super::super::handlers::create_task).layer(
+                    DefaultBodyLimit::max(
+                        hivemind_proto::MANAGED_GPU_MANIFEST_MAX_BYTES + 1024 * 1024,
+                    ),
+                ),
+            )
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn task_route_rejects_body_over_route_limit_with_413() {
+        let route_limit = hivemind_proto::MANAGED_GPU_MANIFEST_MAX_BYTES + 1024 * 1024;
+        let response = task_route_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .extension(authenticated_claims())
+                    .extension(RawToken("route-test-token".into()))
+                    .body(Body::from(vec![b'x'; route_limit + 1]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn task_route_rejects_manifest_over_gpu_cap_before_nodepool_rpc() {
+        let route_limit = hivemind_proto::MANAGED_GPU_MANIFEST_MAX_BYTES + 1024 * 1024;
+        let body = serde_json::json!({
+            "task_id": "route-managed-gpu-too-large",
+            "runtime": general_compute_runtime::managed_gpu::MANAGED_GPU_RUNTIME_VERSION,
+            "managed_gpu_manifest_json": {
+                "padding": "x".repeat(hivemind_proto::MANAGED_GPU_MANIFEST_MAX_BYTES + 1)
+            },
+            "max_cpt": 1
+        })
+        .to_string();
+        assert!(body.len() <= route_limit);
+
+        let response = task_route_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .extension(authenticated_claims())
+                    .extension(RawToken("route-test-token".into()))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body)
+            .contains("managed-function-gpu-v1 request manifest exceeds the byte limit"));
     }
 }

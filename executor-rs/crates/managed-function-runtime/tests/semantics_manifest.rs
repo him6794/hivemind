@@ -91,11 +91,11 @@ fn managed_function_v0_manifest_matches_runtime_defaults_and_cost_vectors() {
         );
         assert_eq!(
             result.receipt.max_call_depth,
-            expected["max_call_depth"].as_u64().unwrap() as usize
+            usize::try_from(expected["max_call_depth"].as_u64().unwrap()).unwrap()
         );
         assert_eq!(
             result.receipt.output_bytes,
-            expected["receipt_output_bytes"].as_u64().unwrap() as usize
+            usize::try_from(expected["receipt_output_bytes"].as_u64().unwrap()).unwrap()
         );
         assert_eq!(result.output, expected["stdout"].as_str().unwrap());
         assert_eq!(

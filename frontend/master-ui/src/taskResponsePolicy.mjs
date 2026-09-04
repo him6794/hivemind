@@ -24,3 +24,27 @@ export function taskRequestFailureText(operation, error, fallbackMessage) {
   const detail = usableText(error?.message) || usableText(fallbackMessage) || 'Task request failed';
   return `${label} failed: ${detail}`;
 }
+
+/// Managed tasks deliberately persist output as a task log instead of the
+/// legacy result torrent; the result endpoint answers success=false with
+/// stable guidance. Callers should show the task log inline instead of
+/// treating that contract response as an error.
+export function isManagedLogGuidanceResult(response) {
+  return (
+    response?.success === false &&
+    !usableText(response?.result_torrent) &&
+    /task log/i.test(usableText(response?.status_message))
+  );
+}
+
+/// Managed GPU-v1 results are typed JSON returned by Nodepool. They are not
+/// legacy result torrents and must be shown even when the typed status failed.
+export function isManagedGpuResult(response) {
+  const result = response?.managed_gpu_result;
+  return (
+    result !== null &&
+    typeof result === 'object' &&
+    !Array.isArray(result) &&
+    result.runtime_version === 'managed-function-gpu-v1'
+  );
+}

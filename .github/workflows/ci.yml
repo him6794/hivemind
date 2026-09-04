@@ -2,120 +2,290 @@ name: CI
 
 on:
   push:
-    branches: [main, master, develop]
+    branches:
+      - '**'
   pull_request:
     branches: [main, master, develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: '1'
 
 jobs:
-  rust:
-    name: Rust Workspace
+  rust-hivemind:
+    name: Rust Hivemind workspace
     runs-on: ubuntu-latest
-
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: hivemind_test
+          POSTGRES_USER: hivemind
+          POSTGRES_PASSWORD: hivemind
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U hivemind -d hivemind_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      HIVEMIND_TEST_DATABASE_URL: postgres://hivemind:hivemind@127.0.0.1:5432/hivemind_test
+      HIVEMIND_REQUIRE_TEST_DATABASE: '1'
+      DATABASE_URL: postgres://hivemind:hivemind@127.0.0.1:5432/hivemind_test
+      REDIS_URL: redis://127.0.0.1:6379
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
-
       - name: Install protobuf compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo
+      - name: Cache Hivemind Cargo build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: hivemind-rs
-
       - name: Check formatting
         working-directory: hivemind-rs
         run: cargo fmt --all -- --check
-
-      - name: Clippy lints
+      - name: Compile all targets
         working-directory: hivemind-rs
-        run: cargo clippy --workspace -- -D warnings
-
-      - name: Run tests
+        run: cargo check --workspace --all-targets --locked
+      - name: Run strict Clippy
         working-directory: hivemind-rs
-        run: cargo test --workspace -- --nocapture
-
-      - name: Check binary crate
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Run full workspace tests with required database
         working-directory: hivemind-rs
-        run: cargo check -p hivemind-bin
+        run: cargo test --workspace --all-targets --locked -- --nocapture
+      - name: Verify the pinned managed-proof contract
+        working-directory: hivemind-rs
+        run: cargo test -p hivemind-managed-proof --features risc0-verifier --test v0_semantics_manifest --locked
+
+  rust-executor:
+    name: Rust executor workspace
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache executor Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: executor-rs
+      - name: Check formatting
+        working-directory: executor-rs
+        run: cargo fmt --all -- --check
+      - name: Compile all targets
+        working-directory: executor-rs
+        run: cargo check --workspace --all-targets --locked
+      - name: Compile every feature
+        working-directory: executor-rs
+        run: cargo check --workspace --all-features --all-targets --locked
+      - name: Run strict Clippy
+        working-directory: executor-rs
+        run: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
+      - name: Run full executor tests without hardware-only CUDA linking
+        working-directory: executor-rs
+        run: cargo test --workspace --all-targets --locked -- --nocapture
+      - name: Build executor release artifacts
+        working-directory: executor-rs
+        run: cargo build --workspace --locked --release
+
+  managed-proof:
+    name: Managed proof host and guest
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache managed-proof Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            zkvm/managed-proof
+            hivemind-rs
+      - name: Check managed-proof workspace
+        run: cargo check --manifest-path zkvm/managed-proof/Cargo.toml --workspace --all-targets --locked
+      - name: Test managed-proof workspace
+        run: cargo test --manifest-path zkvm/managed-proof/Cargo.toml --workspace --all-targets --locked -- --nocapture
+      - name: Build the RISC Zero guest
+        run: cargo build --manifest-path zkvm/managed-proof/methods/guest/Cargo.toml --release --locked
+      - name: Build the prover host
+        run: cargo build --manifest-path zkvm/managed-proof/host/Cargo.toml --release --locked
 
   frontend:
-    name: Frontend Builds
+    name: Frontend app ${{ matrix.app }}
     runs-on: ubuntu-latest
-
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         app:
           - frontend/master-ui
           - frontend/worker-ui
-
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
-
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
           cache-dependency-path: ${{ matrix.app }}/package-lock.json
-
       - name: Install dependencies
         working-directory: ${{ matrix.app }}
         run: npm ci
-
-      - name: Run tests
+      - name: Run all app tests
         working-directory: ${{ matrix.app }}
         run: npm test
-
-      - name: Build
+      - name: Build app
         working-directory: ${{ matrix.app }}
         run: npm run build
 
   official-site:
-    name: Official Site
+    name: Official site tests and build
     runs-on: ubuntu-latest
-
+    timeout-minutes: 25
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
-
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-
       - name: Install dependencies
         working-directory: frontend
         run: npm ci
-
-      - name: Run contract tests
+      - name: Run the complete site test suite
         working-directory: frontend
-        run: node --test site-contract.test.mjs
-
-      - name: Build
+        run: npm test
+      - name: Build the official site
         working-directory: frontend
         run: npm run build
 
   docker:
-    name: Docker Compose
+    name: Docker images and Compose contract
     runs-on: ubuntu-latest
-
+    timeout-minutes: 60
+    env:
+      POSTGRES_PASSWORD: ci-postgres-password
+      JWT_SECRET: ci-jwt-secret-at-least-32-bytes
+      WORKER_EXECUTION_PRIVATE_KEY_PEM: ci-worker-execution-private-key-placeholder
+      WORKER_EXECUTION_PUBLIC_KEY_PEM: ci-worker-execution-public-key-placeholder
+      WORKER_NODEPOOL_TOKEN: ci-worker-nodepool-token-placeholder
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Validate Compose configuration
+        run: docker compose config --quiet
+      - name: Build the release Compose images
+        run: docker compose build --pull=false
 
-      - name: Validate compose file
-        env:
-          POSTGRES_PASSWORD: ci-postgres-password
-          JWT_SECRET: ci-jwt-secret-at-least-32-bytes
-          WORKER_EXECUTION_PRIVATE_KEY_PEM: ci-worker-execution-private-key-placeholder
-          WORKER_EXECUTION_PUBLIC_KEY_PEM: ci-worker-execution-public-key-placeholder
-          WORKER_NODEPOOL_TOKEN: ci-worker-nodepool-token-placeholder
-        run: docker compose config
+  powershell-contracts:
+    name: Windows and release contract tests
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            frontend/master-ui/package-lock.json
+            frontend/worker-ui/package-lock.json
+      - name: Install frontend dependencies
+        shell: pwsh
+        run: |
+          npm.cmd ci --prefix frontend
+          npm.cmd ci --prefix frontend/master-ui
+          npm.cmd ci --prefix frontend/worker-ui
+      - name: Build release frontend artifacts
+        shell: pwsh
+        run: ./scripts/build-release-frontends.ps1
+      - name: Run packaging, sandbox, and release contract tests
+        shell: pwsh
+        run: |
+          $tests = @(
+            'scripts/package-worker-windows.Tests.ps1',
+            'scripts/windows-hcs-e2e.Tests.ps1',
+            'scripts/general-compute-oci-e2e.Tests.ps1',
+            'scripts/docker-compose-release.Tests.ps1',
+            'scripts/release-docs.Tests.ps1',
+            'scripts/build-release-frontends.Tests.ps1',
+            'scripts/release-frontend-smoke.Tests.ps1',
+            'scripts/build-managed-prover.Tests.ps1',
+            'scripts/onnx-runner.Tests.ps1',
+            'scripts/managed-proof-live-e2e.Tests.ps1',
+            'scripts/release-stack-smoke.Tests.ps1'
+          )
+          foreach ($test in $tests) {
+            & $test
+            if (!$?) { throw "Contract test failed: $test" }
+          }
+
+  protected-frontend-e2e:
+    name: Protected frontend Playwright E2E (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: protected-release-e2e
+    env:
+      HIVEMIND_SITE_URL: ${{ secrets.HIVEMIND_SITE_URL }}
+      HIVEMIND_MASTER_UI_URL: ${{ secrets.HIVEMIND_MASTER_UI_URL }}
+      HIVEMIND_WORKER_UI_URL: ${{ secrets.HIVEMIND_WORKER_UI_URL }}
+    steps:
+      - name: Require protected HTTPS endpoints
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in HIVEMIND_SITE_URL HIVEMIND_MASTER_UI_URL HIVEMIND_WORKER_UI_URL; do
+            value="${!name:-}"
+            test -n "$value" || { echo "$name is required for protected E2E" >&2; exit 1; }
+            case "$value" in https://*) ;; *) echo "$name must use HTTPS" >&2; exit 1 ;; esac
+          done
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies and browser
+        working-directory: frontend
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Run protected browser flow
+        working-directory: frontend
+        run: npm run test:e2e

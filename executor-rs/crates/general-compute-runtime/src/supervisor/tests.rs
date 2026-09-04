@@ -307,7 +307,7 @@ fn supervisor_passes_bounded_stdin_without_putting_payload_in_arguments() {
         ReferenceCommandSpec::new("sh", ["-c", "cat"])
     };
     let result = ReferenceProcessSupervisor::new()
-        .run_with_stdin(command, b"framed-input", &Cancellation::new())
+        .run_with_stdin(&command, b"framed-input", &Cancellation::new())
         .expect("stdin child should execute");
 
     assert_eq!(result.status, RunStatus::Completed);
