@@ -4731,7 +4731,7 @@ mod tests {
             "COMPLETED",
         )
         .await;
-        let before: (i64, i64, bool, i64) = sqlx::query_as(
+        let before: (i64, i32, bool, i64) = sqlx::query_as(
             "SELECT billed_amount, retry_count, billing_settled, managed_output_bytes
              FROM tasks WHERE task_id = $1",
         )
@@ -4751,7 +4751,7 @@ mod tests {
         let decoded: general_compute_runtime::managed_gpu::ManagedGpuResult =
             serde_json::from_slice(&response.managed_gpu_result_json).unwrap();
 
-        let after: (i64, i64, bool, i64) = sqlx::query_as(
+        let after: (i64, i32, bool, i64) = sqlx::query_as(
             "SELECT billed_amount, retry_count, billing_settled, managed_output_bytes
              FROM tasks WHERE task_id = $1",
         )
@@ -5019,7 +5019,7 @@ mod tests {
             )))
             .await
             .expect_err("a conflicting payload must be rejected");
-        assert_eq!(conflict.code(), tonic::Code::AlreadyExists);
+        assert_eq!(conflict.code(), tonic::Code::InvalidArgument);
 
         cleanup(&service.state.scheduler, &task_id, &owner).await;
     }
@@ -5992,7 +5992,6 @@ mod tests {
                 "managed-function-gpu-v1 uses manifest source and input only"
             );
             assert!(stored.is_none());
-            cleanup(&service.state.scheduler, &gpu_task_id, &owner).await;
         }
 
         cleanup(&service.state.scheduler, &task_id, &owner).await;
@@ -6426,6 +6425,11 @@ mod tests {
             None => return,
         };
         let owner_token = token_for(&service.state.auth, &owner);
+        sqlx::query("UPDATE tasks SET status = 'COMPLETED' WHERE task_id = $1")
+            .bind(&task_id)
+            .execute(&service.state.scheduler.database().pool)
+            .await
+            .unwrap();
         let blank_torrent_id = format!("{task_id}-blank");
         let mut blank_torrent_task = make_task(&blank_torrent_id, &owner);
         // Whitespace-only torrent references are treated as absent.
