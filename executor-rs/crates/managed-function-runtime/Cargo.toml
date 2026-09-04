@@ -15,6 +15,12 @@ repository = { workspace = true }
 name = "managed_function_runtime"
 path = "src/lib.rs"
 
+[features]
+default = []
+# Enables the operator-owned Linux CUDA/cuBLAS adapter. The normal v0 and
+# proof builds intentionally do not enable this feature.
+cuda = []
+
 [dependencies]
 serde_json = "1.0"
 

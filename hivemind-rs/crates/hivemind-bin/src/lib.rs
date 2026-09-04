@@ -1,4 +1,6 @@
-use anyhow::{Context, Result};
+#[cfg(feature = "worker")]
+use anyhow::Context;
+use anyhow::Result;
 #[cfg(any(feature = "master", feature = "worker"))]
 use hivemind_client_runtime as client_runtime;
 use hivemind_config::HivemindConfig;
@@ -302,6 +304,108 @@ async fn worker_nodepool_token(
         config.server.worker_nodepool_password.as_deref(),
     )
     .await
+}
+
+/// Resolve the owner identity used for both registration and the outbound
+/// session loop.
+///
+/// Nodepool binds a Worker to its owning account, and the outbound session
+/// must present the same owner as the JWT subject. An explicit
+/// `WORKER_NODEPOOL_USERNAME`/`WORKER_USERNAME` always wins (trimmed). A
+/// pre-provisioned token without an explicit username fails safely instead
+/// of silently claiming `worker_id` as the owner — that mismatch is exactly
+/// what Nodepool rejects with "owner does not match token". The Worker-ID
+/// fallback remains only for the password-based compatibility path, where
+/// login itself proves the Worker ID is the account name.
+#[cfg(feature = "worker")]
+fn resolve_worker_owner(config: &HivemindConfig, worker_id: &str) -> Result<String> {
+    let explicit = config
+        .server
+        .worker_nodepool_username
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(owner) = explicit {
+        return Ok(owner.to_string());
+    }
+    let has_token = config
+        .server
+        .worker_nodepool_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some();
+    if has_token {
+        anyhow::bail!(
+            "WORKER_NODEPOOL_TOKEN requires an explicit WORKER_NODEPOOL_USERNAME (or WORKER_USERNAME): \
+             Nodepool validates the session owner against the token subject"
+        );
+    }
+    Ok(worker_id.trim().to_string())
+}
+
+#[cfg(all(test, feature = "worker"))]
+mod worker_owner_tests {
+    use super::*;
+    use hivemind_config::HivemindConfig;
+
+    fn worker_config(
+        token: Option<&str>,
+        username: Option<&str>,
+        password: Option<&str>,
+    ) -> HivemindConfig {
+        let mut config = HivemindConfig::for_test();
+        config.server.worker_nodepool_token = token.map(str::to_string);
+        config.server.worker_nodepool_username = username.map(str::to_string);
+        config.server.worker_nodepool_password = password.map(str::to_string);
+        config
+    }
+
+    #[test]
+    fn explicit_username_wins_and_is_trimmed_with_a_token() {
+        let config = worker_config(Some("jwt-token"), Some("  alice  "), None);
+
+        assert_eq!(resolve_worker_owner(&config, "worker-1").unwrap(), "alice");
+    }
+
+    #[test]
+    fn token_without_explicit_owner_fails_safely() {
+        let config = worker_config(Some("jwt-token"), None, None);
+
+        let error = resolve_worker_owner(&config, "worker-1")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("WORKER_NODEPOOL_USERNAME"));
+        // The failure must not echo credential material or leak it via the id.
+        assert!(!error.contains("jwt-token"));
+    }
+
+    #[test]
+    fn blank_username_with_a_token_fails_like_a_missing_username() {
+        let config = worker_config(Some("jwt-token"), Some("   "), None);
+
+        assert!(resolve_worker_owner(&config, "worker-1").is_err());
+    }
+
+    #[test]
+    fn password_path_falls_back_to_the_worker_id() {
+        let config = worker_config(None, None, Some("password"));
+
+        assert_eq!(
+            resolve_worker_owner(&config, "worker-test").unwrap(),
+            "worker-test"
+        );
+    }
+
+    #[test]
+    fn no_credentials_still_defaults_to_worker_id_for_ui_login_flow() {
+        let config = worker_config(None, None, None);
+
+        assert_eq!(
+            resolve_worker_owner(&config, "worker-1").unwrap(),
+            "worker-1"
+        );
+    }
 }
 
 async fn run_service_inner(role: ServiceRole) -> Result<()> {
@@ -647,13 +751,12 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
         if has_preprovisioned_auth {
             let worker_nodepool_token =
                 worker_nodepool_token(&config, &nodepool_addr, &worker_id).await?;
-            let worker_username = config
-                .server
-                .worker_nodepool_username
-                .as_ref()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| worker_id.clone());
+            let worker_username = resolve_worker_owner(&config, &worker_id)?;
+            info!(
+                worker_id = %worker_id,
+                owner_set = !worker_username.is_empty(),
+                "Worker registration and session owner resolved"
+            );
             let client_instance_id =
                 client_runtime::client_instance_id(client_runtime::ClientRole::Worker)?;
             let reg_shutdown = nodepool_client::start_registration_loop(
@@ -1156,6 +1259,7 @@ mod tests {
                     runtime: Some("managed-function-v0".into()),
                     task_source: Some("return 1;".into()),
                     general_compute_manifest_json: None,
+                    managed_gpu_manifest_json: None,
                     managed_dsl_backend_id: None,
                     managed_dsl_semantics_manifest_sha256: None,
                     expected_btih: None,

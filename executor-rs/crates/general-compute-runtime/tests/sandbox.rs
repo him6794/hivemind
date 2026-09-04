@@ -1,9 +1,11 @@
+use general_compute_runtime::onnx::{OnnxBackendConfig, OnnxExecutionProvider};
 use general_compute_runtime::sandbox::{
     CgroupPolicy, LinuxNamespace, LinuxSandboxPolicy, OciPrivilegeMode, PrivilegeEscalationPolicy,
     ProductionSandboxError, ProductionSandboxLaunch, ProductionSandboxLauncher,
-    RootFilesystemPolicy, SandboxMount, SandboxNetworkPolicy, SandboxPolicyError, SeccompPolicy,
-    WindowsIsolationMode, WindowsNativeSandboxLaunch, WindowsRootFilesystemPolicy,
-    WindowsSandboxNetworkPolicy, WindowsSandboxPolicy,
+    RootFilesystemPolicy, SandboxDevice, SandboxDeviceType, SandboxMount, SandboxNetworkPolicy,
+    SandboxPolicyError, SeccompPolicy, WindowsIsolationMode, WindowsNativeSandboxLaunch,
+    WindowsRootFilesystemPolicy, WindowsSandboxNetworkPolicy, WindowsSandboxPolicy,
+    rootless_id_mappings,
 };
 use general_compute_runtime::sha256_digest;
 use general_compute_runtime::supervisor::Cancellation;
@@ -37,6 +39,7 @@ fn valid_policy() -> LinuxSandboxPolicy {
                 max_bytes: 1024,
             },
         ],
+        devices: Vec::new(),
     }
 }
 
@@ -100,6 +103,7 @@ fn valid_launch() -> ProductionSandboxLaunch {
         guest_image_digest: format!("sha256:{}", "a".repeat(64)),
         entrypoint: vec!["python".into(), "/runtime/runner.py".into()],
         policy: valid_policy(),
+        onnx: None,
     }
 }
 
@@ -116,38 +120,62 @@ fn temporary_bundle_root() -> PathBuf {
 
 fn write_valid_bundle(root: &Path, launch: &ProductionSandboxLaunch) {
     fs::create_dir_all(root.join("rootfs")).expect("bundle rootfs should be created");
-    let mounts = launch
-        .policy
-        .mounts
-        .iter()
-        .map(|mount| match mount {
-            SandboxMount::ReadOnlyArtifact {
-                artifact_id,
-                destination,
-            } => serde_json::json!({
-                "destination": destination,
-                "type": "bind",
-                "source": format!("/hivemind/artifacts/{artifact_id}"),
-                "options": ["ro", "nodev", "nosuid", "noexec"]
-            }),
-            SandboxMount::EphemeralScratch {
-                destination,
-                max_bytes,
-            } => serde_json::json!({
-                "destination": destination,
-                "type": "tmpfs",
-                "source": "tmpfs",
-                "options": [
-                    "rw",
-                    "nodev",
-                    "nosuid",
-                    "noexec",
-                    format!("size={max_bytes}")
-                ]
-            }),
-        })
-        .collect::<Vec<_>>();
-    let config = serde_json::json!({
+    let mut mounts = vec![
+        serde_json::json!({
+            "destination": "/proc",
+            "type": "proc",
+            "source": "proc",
+            "options": ["nosuid", "nodev", "noexec"]
+        }),
+        serde_json::json!({
+            "destination": "/dev",
+            "type": "tmpfs",
+            "source": "tmpfs",
+            "options": ["nosuid", "strictatime", "mode=755", "size=65536k"]
+        }),
+        serde_json::json!({
+            "destination": "/dev/pts",
+            "type": "devpts",
+            "source": "devpts",
+            "options": ["nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620", "gid=5"]
+        }),
+    ];
+    mounts.extend(
+        launch
+            .policy
+            .mounts
+            .iter()
+            .map(|mount| match mount {
+                SandboxMount::ReadOnlyArtifact {
+                    artifact_id,
+                    destination,
+                } => serde_json::json!({
+                    "destination": destination,
+                    "type": "bind",
+                    "source": format!("/hivemind/artifacts/{artifact_id}"),
+                    "options": ["bind", "ro", "nodev", "nosuid", "noexec"]
+                }),
+                SandboxMount::EphemeralScratch {
+                    destination,
+                    max_bytes,
+                } => serde_json::json!({
+                    "destination": destination,
+                    "type": "tmpfs",
+                    "source": "tmpfs",
+                    "options": [
+                        "rw",
+                        "nodev",
+                        "nosuid",
+                        "noexec",
+                        format!("size={max_bytes}")
+                    ]
+                }),
+            })
+            .collect::<Vec<_>>(),
+    );
+    let (uid_mappings, gid_mappings) =
+        rootless_id_mappings().expect("the test host must provide rootless id mappings");
+    let mut config = serde_json::json!({
         "ociVersion": "1.0.2",
         "process": {
             "args": launch.entrypoint,
@@ -164,6 +192,38 @@ fn write_valid_bundle(root: &Path, launch: &ProductionSandboxLaunch) {
                 {"type": "mount"},
                 {"type": "network"}
             ],
+            "uidMappings": uid_mappings
+                .iter()
+                .map(|mapping| serde_json::json!({
+                    "containerID": mapping.container_id,
+                    "hostID": mapping.host_id,
+                    "size": mapping.size,
+                }))
+                .collect::<Vec<_>>(),
+            "gidMappings": gid_mappings
+                .iter()
+                .map(|mapping| serde_json::json!({
+                    "containerID": mapping.container_id,
+                    "hostID": mapping.host_id,
+                    "size": mapping.size,
+                }))
+                .collect::<Vec<_>>(),
+            "devices": [
+                {"path": "/dev/null", "type": "c", "major": 1, "minor": 3},
+                {"path": "/dev/zero", "type": "c", "major": 1, "minor": 5},
+                {"path": "/dev/full", "type": "c", "major": 1, "minor": 7},
+                {"path": "/dev/random", "type": "c", "major": 1, "minor": 8},
+                {"path": "/dev/urandom", "type": "c", "major": 1, "minor": 9},
+                {"path": "/dev/tty", "type": "c", "major": 5, "minor": 0}
+            ],
+            "resources": {"devices": [
+                {"allow": true, "type": "c", "major": 1, "minor": 3, "access": "rwm"},
+                {"allow": true, "type": "c", "major": 1, "minor": 5, "access": "rwm"},
+                {"allow": true, "type": "c", "major": 1, "minor": 7, "access": "rwm"},
+                {"allow": true, "type": "c", "major": 1, "minor": 8, "access": "rwm"},
+                {"allow": true, "type": "c", "major": 1, "minor": 9, "access": "rwm"},
+                {"allow": true, "type": "c", "major": 5, "minor": 0, "access": "rwm"}
+            ]},
             "seccomp": {"defaultAction": "SCMP_ACT_ERRNO"}
         },
         "annotations": {
@@ -174,6 +234,19 @@ fn write_valid_bundle(root: &Path, launch: &ProductionSandboxLaunch) {
             "org.hivemind.seccomp-profile-sha256": launch.policy.seccomp_profile_sha256()
         }
     });
+    if let Some(onnx) = &launch.onnx {
+        config["annotations"]["org.hivemind.workload"] = serde_json::json!("onnx");
+        config["annotations"]["org.hivemind.onnx.protocol"] =
+            serde_json::json!(onnx.protocol_version);
+        config["annotations"]["org.hivemind.onnx.execution-provider"] =
+            serde_json::json!(onnx.execution_provider.as_str());
+        config["annotations"]["org.hivemind.onnx.model-artifact-id"] =
+            serde_json::json!(onnx.model_artifact_id);
+        config["annotations"]["org.hivemind.onnx.input-artifact-ids"] = serde_json::json!(
+            serde_json::to_string(&onnx.input_artifact_ids)
+                .expect("ONNX input artifact IDs serialize infallibly")
+        );
+    }
     fs::write(
         root.join("config.json"),
         serde_json::to_vec(&config).expect("bundle config should serialize"),
@@ -286,6 +359,62 @@ fn production_policy_requires_cgroup_seccomp_and_no_new_privileges() {
     assert_eq!(
         policy.validate(),
         Err(SandboxPolicyError::NoNewPrivilegesRequired)
+    );
+}
+
+#[test]
+fn device_policy_validates_paths_types_and_access() {
+    fn nvidia_device(path: &str) -> SandboxDevice {
+        SandboxDevice {
+            path: path.into(),
+            device_type: SandboxDeviceType::Char,
+            major: 195,
+            minor: 0,
+            access: "rw".into(),
+        }
+    }
+
+    let mut policy = valid_policy();
+    policy.devices = vec![nvidia_device("/dev/nvidia0")];
+    assert!(policy.validate().is_ok());
+
+    // Only absolute /dev/ paths without traversal or colons are allowed.
+    for hostile in ["/etc/passwd", "/dev/../..", "/dev/", "dev/nvidia0"] {
+        let mut policy = valid_policy();
+        policy.devices = vec![nvidia_device(hostile)];
+        assert_eq!(
+            policy.validate(),
+            Err(SandboxPolicyError::InvalidDevicePath),
+            "hostile device path {hostile}"
+        );
+    }
+
+    let mut policy = valid_policy();
+    policy.devices = vec![SandboxDevice {
+        access: "rwx".into(),
+        ..nvidia_device("/dev/nvidia0")
+    }];
+    assert_eq!(
+        policy.validate(),
+        Err(SandboxPolicyError::InvalidDeviceAccess)
+    );
+
+    let mut policy = valid_policy();
+    policy.devices = vec![SandboxDevice {
+        major: -1,
+        ..nvidia_device("/dev/nvidia0")
+    }];
+    assert_eq!(
+        policy.validate(),
+        Err(SandboxPolicyError::InvalidDeviceSpec)
+    );
+
+    // Duplicate paths fail closed.
+    let mut policy = valid_policy();
+    policy.devices = vec![nvidia_device("/dev/nvidia0"), nvidia_device("/dev/nvidia0")];
+    assert_eq!(
+        policy.validate(),
+        Err(SandboxPolicyError::DuplicateDevicePath)
     );
 }
 
@@ -404,7 +533,7 @@ fn production_runner_executes_only_a_bound_and_validated_oci_bundle() {
     let runner_sha256 = runner_digest(&executable);
 
     let result = ProductionSandboxLauncher::with_oci_runner_command(executable, prefix_args)
-        .with_runner_sha256(runner_sha256.clone())
+        .with_runner_sha256(runner_sha256)
         .with_runner_state_root(&runner_state_root)
         .run_bundle(
             &launch,
@@ -428,6 +557,57 @@ fn production_runner_executes_only_a_bound_and_validated_oci_bundle() {
 }
 
 #[test]
+fn production_runner_accepts_only_matching_onnx_annotations() {
+    let root = temporary_bundle_root();
+    fs::create_dir_all(&root).expect("temporary runner root should be created");
+    let runner_state_root = root.join("runner-state");
+    fs::create_dir_all(&runner_state_root).expect("runner state root should be created");
+    let mut launch = valid_launch();
+    launch.onnx =
+        Some(OnnxBackendConfig::new("source", Vec::new(), OnnxExecutionProvider::Cpu).unwrap());
+    write_valid_bundle(&root, &launch);
+    let (executable, _marker, prefix_args) = fake_runner(&root);
+
+    let result =
+        ProductionSandboxLauncher::with_oci_runner_command(executable.clone(), prefix_args)
+            .with_runner_sha256(runner_digest(&executable))
+            .with_runner_state_root(&runner_state_root)
+            .run_bundle(
+                &launch,
+                &root,
+                "hivemind-onnx-container",
+                &Cancellation::new(),
+            )
+            .expect("matching ONNX annotations should reach the pinned runner");
+    assert_eq!(
+        result.status,
+        general_compute_runtime::supervisor::RunStatus::Completed
+    );
+
+    let mut config: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("config.json")).unwrap()).unwrap();
+    config["annotations"]["org.hivemind.onnx.execution-provider"] = serde_json::json!("cuda");
+    fs::write(
+        root.join("config.json"),
+        serde_json::to_vec(&config).unwrap(),
+    )
+    .unwrap();
+    let (executable, _marker, prefix_args) = fake_runner(&root);
+    let error = ProductionSandboxLauncher::with_oci_runner_command(executable.clone(), prefix_args)
+        .with_runner_sha256(runner_digest(&executable))
+        .with_runner_state_root(&runner_state_root)
+        .run_bundle(
+            &launch,
+            &root,
+            "hivemind-onnx-container-tampered",
+            &Cancellation::new(),
+        )
+        .expect_err("provider annotation drift must fail before runner spawn");
+    assert_eq!(error, ProductionSandboxError::BundleMetadataMismatch);
+    remove_bundle(&root);
+}
+
+#[test]
 fn production_runner_rejects_bundle_identity_or_process_mismatch_before_spawn() {
     let root = temporary_bundle_root();
     fs::create_dir_all(&root).expect("temporary runner root should be created");
@@ -447,7 +627,7 @@ fn production_runner_rejects_bundle_identity_or_process_mismatch_before_spawn() 
     )
     .expect("tampered config should be written");
 
-    let error = ProductionSandboxLauncher::with_oci_runner_command(executable, prefix_args.clone())
+    let error = ProductionSandboxLauncher::with_oci_runner_command(executable, prefix_args)
         .with_runner_sha256(runner_sha256_for_platform(&root))
         .run_bundle(
             &launch,
@@ -473,7 +653,7 @@ fn production_runner_requires_an_absolute_operator_pinned_executable() {
     write_valid_bundle(&root, &launch);
     let (executable, marker, prefix_args) = fake_runner(&root);
 
-    let error = ProductionSandboxLauncher::with_oci_runner_command(executable, prefix_args.clone())
+    let error = ProductionSandboxLauncher::with_oci_runner_command(executable, prefix_args)
         .run_bundle(
             &launch,
             &root,
@@ -558,7 +738,7 @@ fn production_runner_cancellation_kills_and_reaps_runner_tree() {
     let cancellation = Cancellation::new();
     let worker_cancellation = cancellation.clone();
     let worker_root = root.clone();
-    let worker_launch = launch.clone();
+    let worker_launch = launch;
     let handle = std::thread::spawn(move || {
         ProductionSandboxLauncher::with_oci_runner_command(executable, prefix_args)
             .with_runner_sha256(runner_sha256)

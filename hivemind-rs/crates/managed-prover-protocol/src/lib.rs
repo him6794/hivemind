@@ -563,7 +563,7 @@ mod remote_request_tests {
 
         request.backend_id = "managed-default".into();
         request.semantics_manifest_sha256 =
-            "sha256:8ed716dc07c7bc9abcfc5338b1888e71dd041c3fb397c45d0efb1ff76af1deee".into();
+            "sha256:506699a93ac3242a06e2d73ce64901ad0e57cb001c89408469ba79457025c66f".into();
         request.proof_task_id =
             "dsl-proof-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into();
         assert!(request.with_computed_digest().is_ok());

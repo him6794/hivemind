@@ -95,6 +95,273 @@ impl SandboxMount {
     }
 }
 
+/// One host device node exposed to the sandbox through the OCI
+/// `linux.devices` array plus its cgroup device rule.
+///
+/// Every field is explicit: a wildcard or "let runc decide" entry would let a
+/// bundle widen its own hardware access, so the operator registration must
+/// enumerate exact nodes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxDevice {
+    pub path: String,
+    pub device_type: SandboxDeviceType,
+    pub major: i64,
+    pub minor: i64,
+    /// OCI access string, e.g. "rwm". Only read/write/mknod are expressible.
+    pub access: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxDeviceType {
+    Block,
+    Char,
+}
+
+impl SandboxDevice {
+    pub fn validate(&self) -> Result<(), SandboxPolicyError> {
+        if !self.path.starts_with("/dev/")
+            || self.path.len() <= "/dev/".len()
+            || self.path.split('/').any(|component| component == "..")
+            || self.path.contains(':')
+        {
+            return Err(SandboxPolicyError::InvalidDevicePath);
+        }
+        if !matches!(
+            self.device_type,
+            SandboxDeviceType::Char | SandboxDeviceType::Block
+        ) {
+            return Err(SandboxPolicyError::InvalidDeviceSpec);
+        }
+        if self.major < 0
+            || self.minor < 0
+            || self.major > i64::MAX / 2
+            || self.minor > i64::MAX / 2
+        {
+            return Err(SandboxPolicyError::InvalidDeviceSpec);
+        }
+        if self.access.is_empty()
+            || self.access.len() > 3
+            || !self
+                .access
+                .bytes()
+                .all(|byte| matches!(byte, b'r' | b'w' | b'm'))
+            || {
+                let bytes = self.access.as_bytes();
+                bytes.iter().collect::<BTreeSet<_>>().len() != bytes.len()
+            }
+        {
+            return Err(SandboxPolicyError::InvalidDeviceAccess);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn cgroup_rule(&self) -> serde_json::Value {
+        let kind = match self.device_type {
+            SandboxDeviceType::Char => "c",
+            SandboxDeviceType::Block => "b",
+        };
+        serde_json::json!({
+            "allow": true,
+            "type": kind,
+            "major": self.major,
+            "minor": self.minor,
+            "access": self.access,
+        })
+    }
+
+    /// Render the OCI device object. The access mask belongs to the cgroup
+    /// rule, not to an OCI `linux.devices` entry.
+    pub(crate) fn oci_spec(&self) -> serde_json::Value {
+        let kind = match self.device_type {
+            SandboxDeviceType::Char => "c",
+            SandboxDeviceType::Block => "b",
+        };
+        serde_json::json!({
+            "path": self.path,
+            "type": kind,
+            "major": self.major,
+            "minor": self.minor,
+        })
+    }
+}
+
+/// The default character devices required by the OCI runtime for a
+/// non-interactive process. `/dev/ptmx` is supplied by the fixed devpts mount
+/// and is intentionally not listed as a host device.
+pub(crate) fn standard_linux_devices() -> Vec<SandboxDevice> {
+    [
+        ("/dev/null", 1, 3),
+        ("/dev/zero", 1, 5),
+        ("/dev/full", 1, 7),
+        ("/dev/random", 1, 8),
+        ("/dev/urandom", 1, 9),
+        ("/dev/tty", 5, 0),
+    ]
+    .into_iter()
+    .map(|(path, major, minor)| SandboxDevice {
+        path: path.into(),
+        device_type: SandboxDeviceType::Char,
+        major,
+        minor,
+        access: "rwm".into(),
+    })
+    .collect()
+}
+
+/// Fixed mounts needed by the OCI runtime itself. They are not part of the
+/// operator artifact policy and cannot be supplied or overridden by a task.
+pub(crate) fn standard_linux_mounts() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "destination": "/proc",
+            "type": "proc",
+            "source": "proc",
+            "options": ["nosuid", "nodev", "noexec"]
+        }),
+        serde_json::json!({
+            "destination": "/dev",
+            "type": "tmpfs",
+            "source": "tmpfs",
+            "options": ["nosuid", "strictatime", "mode=755", "size=65536k"]
+        }),
+        serde_json::json!({
+            "destination": "/dev/pts",
+            "type": "devpts",
+            "source": "devpts",
+            "options": ["nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620", "gid=5"]
+        }),
+    ]
+}
+
+/// One segment of the rootless OCI user/group mapping.
+///
+/// The first segment maps the invoking operator identity to container root;
+/// the second segment maps the operator's subordinate range. A mapping that
+/// starts at the subordinate range without the invoking identity makes runc
+/// attempt to chown its synchronization pipe to an unmapped host id and fails
+/// before the container starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinuxIdMapping {
+    pub container_id: u32,
+    pub host_id: u32,
+    pub size: u32,
+}
+
+impl LinuxIdMapping {
+    pub(crate) fn oci_spec(&self) -> serde_json::Value {
+        serde_json::json!({
+            "containerID": self.container_id,
+            "hostID": self.host_id,
+            "size": self.size,
+        })
+    }
+}
+
+/// Resolve the host-specific rootless mapping used by both bundle materializer
+/// and preflight validator. The result is operator/host state, never task
+/// input, and is deliberately unavailable when subordinate ids are missing.
+pub fn rootless_id_mappings() -> Result<(Vec<LinuxIdMapping>, Vec<LinuxIdMapping>), String> {
+    #[cfg(unix)]
+    {
+        let uid = current_linux_id("Uid")?;
+        let gid = current_linux_id("Gid")?;
+        let uid_range = subordinate_id_range("/etc/subuid", uid)?;
+        let gid_range = subordinate_id_range("/etc/subgid", gid)?;
+        let uid_mappings = rootless_mapping(uid, uid_range)?;
+        let gid_mappings = rootless_mapping(gid, gid_range)?;
+        Ok((uid_mappings, gid_mappings))
+    }
+    #[cfg(not(unix))]
+    {
+        let mapping = vec![LinuxIdMapping {
+            container_id: 0,
+            host_id: 100_000,
+            size: 65_536,
+        }];
+        Ok((mapping.clone(), mapping))
+    }
+}
+
+#[cfg(unix)]
+fn current_linux_id(field: &str) -> Result<u32, String> {
+    let status = fs::read_to_string("/proc/self/status")
+        .map_err(|error| format!("cannot read current process identity: {error}"))?;
+    let value = status
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("{field}:")))
+        .and_then(|line| line.split_whitespace().next())
+        .ok_or_else(|| format!("current process identity field {field} is unavailable"))?;
+    value
+        .parse::<u32>()
+        .map_err(|_| format!("current process identity field {field} is invalid"))
+}
+
+#[cfg(unix)]
+fn subordinate_id_range(path: &str, id: u32) -> Result<(u32, u32), String> {
+    let contents = fs::read_to_string(path)
+        .map_err(|error| format!("subordinate id database {path} is unavailable: {error}"))?;
+    let numeric_id = id.to_string();
+    let username = fs::read_to_string("/etc/passwd").ok().and_then(|passwd| {
+        passwd.lines().find_map(|line| {
+            let fields = line.split(':').collect::<Vec<_>>();
+            (fields.len() > 3 && fields[2] == numeric_id).then(|| fields[0].to_owned())
+        })
+    });
+    for line in contents.lines() {
+        let fields = line.split(':').collect::<Vec<_>>();
+        if fields.len() != 3 || (fields[0] != numeric_id && username.as_deref() != Some(fields[0]))
+        {
+            continue;
+        }
+        let start = fields[1]
+            .parse::<u32>()
+            .map_err(|_| format!("subordinate id start in {path} is invalid"))?;
+        let size = fields[2]
+            .parse::<u32>()
+            .map_err(|_| format!("subordinate id size in {path} is invalid"))?;
+        if size < 65_535 || start == id || start.checked_add(size).is_none() {
+            return Err(format!(
+                "subordinate id range in {path} cannot map the sandbox"
+            ));
+        }
+        return Ok((start, size));
+    }
+    Err(format!(
+        "no subordinate id range for the current identity in {path}"
+    ))
+}
+
+#[cfg(unix)]
+fn rootless_mapping(id: u32, range: (u32, u32)) -> Result<Vec<LinuxIdMapping>, String> {
+    let (start, size) = range;
+    if start == id || start.checked_add(size).is_none() {
+        return Err("rootless id mappings overlap or overflow".into());
+    }
+    Ok(vec![
+        LinuxIdMapping {
+            container_id: 0,
+            host_id: id,
+            size: 1,
+        },
+        LinuxIdMapping {
+            container_id: 1,
+            host_id: start,
+            size: 65_535.min(size),
+        },
+    ])
+}
+
+/// Runtime-owned mount points cannot be shadowed by an artifact or scratch
+/// mount. This includes descendants because mount ordering would otherwise
+/// let the policy alter the runtime's pseudo-filesystems.
+pub(crate) fn conflicts_with_standard_linux_mount(destination: &str) -> bool {
+    ["/proc", "/dev", "/dev/pts"]
+        .into_iter()
+        .any(|reserved| destination == reserved || destination.starts_with(&format!("{reserved}/")))
+}
+
 /// Required policy envelope for a Linux production OCI sandbox.
 ///
 /// Validation is deliberately stricter than an OCI runtime's defaults: an
@@ -110,6 +377,8 @@ pub struct LinuxSandboxPolicy {
     pub root_filesystem: RootFilesystemPolicy,
     pub network: SandboxNetworkPolicy,
     pub mounts: Vec<SandboxMount>,
+    #[serde(default)]
+    pub devices: Vec<SandboxDevice>,
 }
 
 impl LinuxSandboxPolicy {
@@ -161,15 +430,15 @@ impl LinuxSandboxPolicy {
             if !valid_mount_destination(destination) {
                 return Err(SandboxPolicyError::InvalidMountDestination);
             }
+            if conflicts_with_standard_linux_mount(destination) {
+                return Err(SandboxPolicyError::ReservedMountDestination);
+            }
             if !destinations.insert(destination) {
                 return Err(SandboxPolicyError::DuplicateMountDestination);
             }
             match mount {
                 SandboxMount::ReadOnlyArtifact { artifact_id, .. }
-                    if artifact_id.trim().is_empty()
-                        || artifact_id.split('/').any(|component| component == "..")
-                        || artifact_id.split('\\').any(|component| component == "..")
-                        || artifact_id.contains(':') =>
+                    if crate::validate_artifact_id(artifact_id).is_err() =>
                 {
                     return Err(SandboxPolicyError::InvalidMountSource);
                 }
@@ -177,6 +446,20 @@ impl LinuxSandboxPolicy {
                     return Err(SandboxPolicyError::InvalidMountSource);
                 }
                 _ => {}
+            }
+        }
+
+        let mut device_paths = BTreeSet::new();
+        for device in &self.devices {
+            device.validate()?;
+            if standard_linux_devices()
+                .iter()
+                .any(|standard| standard.path == device.path)
+            {
+                return Err(SandboxPolicyError::ReservedDevicePath);
+            }
+            if !device_paths.insert(device.path.as_str()) {
+                return Err(SandboxPolicyError::DuplicateDevicePath);
             }
         }
         Ok(())
@@ -259,11 +542,7 @@ impl WindowsSandboxPolicy {
             }
             match mount {
                 SandboxMount::ReadOnlyArtifact { artifact_id, .. }
-                    if artifact_id.trim().is_empty()
-                        || artifact_id.split('/').any(|component| component == "..")
-                        || artifact_id.split('\\').any(|component| component == "..")
-                        || artifact_id.contains(':')
-                        || artifact_id.contains('\\') =>
+                    if crate::validate_artifact_id(artifact_id).is_err() =>
                 {
                     return Err(WindowsSandboxPolicyError::InvalidMountSource);
                 }
@@ -352,6 +631,12 @@ pub enum SandboxPolicyError {
     InvalidMountDestination,
     DuplicateMountDestination,
     InvalidMountSource,
+    ReservedMountDestination,
+    InvalidDevicePath,
+    InvalidDeviceSpec,
+    InvalidDeviceAccess,
+    ReservedDevicePath,
+    DuplicateDevicePath,
 }
 
 impl std::fmt::Display for SandboxPolicyError {
@@ -369,6 +654,8 @@ pub struct ProductionSandboxLaunch {
     pub guest_image_digest: String,
     pub entrypoint: Vec<String>,
     pub policy: LinuxSandboxPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onnx: Option<crate::onnx::OnnxBackendConfig>,
 }
 
 impl ProductionSandboxLaunch {
@@ -384,6 +671,13 @@ impl ProductionSandboxLaunch {
         }
         if self.entrypoint.is_empty() || self.entrypoint.iter().any(|part| part.trim().is_empty()) {
             return Err(ProductionSandboxError::InvalidEntrypoint);
+        }
+        if let Some(onnx) = &self.onnx {
+            onnx.validate()
+                .map_err(|_| ProductionSandboxError::BundleMetadataMismatch)?;
+            if onnx.model_artifact_id != "source" {
+                return Err(ProductionSandboxError::BundleMetadataMismatch);
+            }
         }
         Ok(())
     }
@@ -408,6 +702,7 @@ pub enum ProductionSandboxError {
     RunnerUnavailable,
     RunnerSpawn,
     RunnerSpawnDetail(String),
+    DeviceUnavailable(String),
 }
 
 impl std::fmt::Display for ProductionSandboxError {
@@ -544,6 +839,8 @@ impl ProductionSandboxLauncher {
             return Err(ProductionSandboxError::RunnerDigestMismatch);
         }
         validate_oci_bundle(bundle_root, launch)?;
+        #[cfg(unix)]
+        validate_host_device_sources(launch)?;
 
         self.run_validated_bundle(launch, bundle_root, container_id, cancellation)
     }
@@ -567,6 +864,8 @@ impl ProductionSandboxLauncher {
             .ok_or(ProductionSandboxError::RunnerStateRootUnavailable)
             .and_then(validate_runner_state_root)?;
         validate_oci_bundle_with_artifact_root(bundle_root, launch, artifact_root)?;
+        #[cfg(unix)]
+        validate_host_device_sources(launch)?;
         self.run_validated_bundle(launch, bundle_root, container_id, cancellation)
     }
 
@@ -628,7 +927,7 @@ impl ProductionSandboxLauncher {
         // boundary explicit. The supervisor passes every argument directly to
         // Command and owns process-group/job cleanup.
         let result = ReferenceProcessSupervisor::new()
-            .run_with_stdin(command, &[], cancellation)
+            .run_with_stdin(&command, &[], cancellation)
             .map_err(|error| ProductionSandboxError::RunnerSpawnDetail(format!("{error:?}")))?;
         Ok(result)
     }
@@ -662,6 +961,84 @@ fn valid_container_id(value: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
+
+#[cfg(unix)]
+fn validate_host_device_sources(
+    launch: &ProductionSandboxLaunch,
+) -> Result<(), ProductionSandboxError> {
+    let mut devices = standard_linux_devices();
+    devices.extend(launch.policy.devices.iter().cloned());
+    validate_host_device_sources_inner(&devices)
+}
+
+#[cfg(unix)]
+fn validate_host_device_sources_inner(
+    devices: &[SandboxDevice],
+) -> Result<(), ProductionSandboxError> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+    for device in devices {
+        let metadata = fs::symlink_metadata(&device.path).map_err(|error| {
+            ProductionSandboxError::DeviceUnavailable(format!(
+                "device source {} is unavailable: {error}",
+                device.path
+            ))
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(ProductionSandboxError::DeviceUnavailable(format!(
+                "device source {} is a symlink",
+                device.path
+            )));
+        }
+        let type_matches = match device.device_type {
+            SandboxDeviceType::Char => metadata.file_type().is_char_device(),
+            SandboxDeviceType::Block => metadata.file_type().is_block_device(),
+        };
+        let raw_device = metadata.rdev();
+        if !type_matches
+            || linux_device_major(raw_device) as i64 != device.major
+            || linux_device_minor(raw_device) as i64 != device.minor
+        {
+            return Err(ProductionSandboxError::DeviceUnavailable(format!(
+                "device source {} does not match the pinned type or identity",
+                device.path
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn linux_device_major(device: u64) -> u64 {
+    ((device >> 8) & 0x0fff) | ((device >> 32) & 0xfffff000)
+}
+
+#[cfg(unix)]
+fn linux_device_minor(device: u64) -> u64 {
+    (device & 0x00ff) | ((device >> 12) & 0xffffff00)
+}
+
+const ALLOWED_OCI_ROOT_KEYS: &[&str] = &[
+    "ociVersion",
+    "process",
+    "root",
+    "mounts",
+    "linux",
+    "annotations",
+];
+const ALLOWED_OCI_PROCESS_KEYS: &[&str] = &["args", "cwd", "noNewPrivileges", "user"];
+const ALLOWED_OCI_ANNOTATIONS: &[&str] = &[
+    "org.hivemind.guest-image-digest",
+    "org.hivemind.backend-id",
+    "org.hivemind.cgroup-version",
+    "org.hivemind.network-policy",
+    "org.hivemind.seccomp-profile-sha256",
+    "org.hivemind.workload",
+    "org.hivemind.onnx.protocol",
+    "org.hivemind.onnx.execution-provider",
+    "org.hivemind.onnx.model-artifact-id",
+    "org.hivemind.onnx.input-artifact-ids",
+];
 
 fn validate_oci_bundle(
     bundle_root: &Path,
@@ -723,17 +1100,9 @@ fn validate_oci_bundle_inner(
     let Some(object) = config.as_object() else {
         return Err(ProductionSandboxError::InvalidBundle);
     };
-    const ALLOWED_ROOT_KEYS: &[&str] = &[
-        "ociVersion",
-        "process",
-        "root",
-        "mounts",
-        "linux",
-        "annotations",
-    ];
     if object
         .keys()
-        .any(|key| !ALLOWED_ROOT_KEYS.contains(&key.as_str()))
+        .any(|key| !ALLOWED_OCI_ROOT_KEYS.contains(&key.as_str()))
     {
         return Err(ProductionSandboxError::InvalidBundle);
     }
@@ -744,10 +1113,9 @@ fn validate_oci_bundle_inner(
         .get("process")
         .and_then(serde_json::Value::as_object)
         .ok_or(ProductionSandboxError::InvalidBundle)?;
-    const ALLOWED_PROCESS_KEYS: &[&str] = &["args", "cwd", "noNewPrivileges", "user"];
     if process
         .keys()
-        .any(|key| !ALLOWED_PROCESS_KEYS.contains(&key.as_str()))
+        .any(|key| !ALLOWED_OCI_PROCESS_KEYS.contains(&key.as_str()))
     {
         return Err(ProductionSandboxError::InvalidBundle);
     }
@@ -809,11 +1177,37 @@ fn validate_oci_bundle_inner(
         .get("linux")
         .and_then(serde_json::Value::as_object)
         .ok_or(ProductionSandboxError::InvalidBundle)?;
-    if linux
-        .keys()
-        .any(|key| !["namespaces", "uidMappings", "gidMappings", "seccomp"].contains(&key.as_str()))
-    {
+    if linux.keys().any(|key| {
+        ![
+            "namespaces",
+            "uidMappings",
+            "gidMappings",
+            "seccomp",
+            "devices",
+            "resources",
+        ]
+        .contains(&key.as_str())
+    }) {
         return Err(ProductionSandboxError::InvalidBundle);
+    }
+    let (expected_uid_mappings, expected_gid_mappings) =
+        rootless_id_mappings().map_err(|_| ProductionSandboxError::BundleMetadataMismatch)?;
+    let expected_uid_mapping = serde_json::Value::Array(
+        expected_uid_mappings
+            .iter()
+            .map(LinuxIdMapping::oci_spec)
+            .collect(),
+    );
+    let expected_gid_mapping = serde_json::Value::Array(
+        expected_gid_mappings
+            .iter()
+            .map(LinuxIdMapping::oci_spec)
+            .collect(),
+    );
+    if linux.get("uidMappings") != Some(&expected_uid_mapping)
+        || linux.get("gidMappings") != Some(&expected_gid_mapping)
+    {
+        return Err(ProductionSandboxError::BundleMetadataMismatch);
     }
     let namespaces = linux
         .get("namespaces")
@@ -862,59 +1256,84 @@ fn validate_oci_bundle_inner(
         .get("mounts")
         .and_then(serde_json::Value::as_array)
         .ok_or(ProductionSandboxError::BundleMetadataMismatch)?;
-    let expected_mounts = launch
-        .policy
-        .mounts
-        .iter()
-        .map(|mount| match mount {
-            crate::sandbox::SandboxMount::ReadOnlyArtifact {
-                artifact_id,
-                destination,
-            } => {
-                let source = artifact_root
-                    .map(|root| root.join(artifact_id).to_string_lossy().into_owned())
-                    .unwrap_or_else(|| format!("/hivemind/artifacts/{artifact_id}"));
-                serde_json::json!({
+    let mut expected_mounts = standard_linux_mounts();
+    expected_mounts.extend(
+        launch
+            .policy
+            .mounts
+            .iter()
+            .map(|mount| match mount {
+                crate::sandbox::SandboxMount::ReadOnlyArtifact {
+                    artifact_id,
+                    destination,
+                } => {
+                    let source = artifact_root.map_or_else(
+                        || format!("/hivemind/artifacts/{artifact_id}"),
+                        |root| root.join(artifact_id).to_string_lossy().into_owned(),
+                    );
+                    serde_json::json!({
+                        "destination": destination,
+                        "type": "bind",
+                        "source": source,
+                        "options": ["bind", "ro", "nodev", "nosuid", "noexec"]
+                    })
+                }
+                crate::sandbox::SandboxMount::EphemeralScratch {
+                    destination,
+                    max_bytes,
+                } => serde_json::json!({
                     "destination": destination,
-                    "type": "bind",
-                    "source": source,
-                    "options": ["ro", "nodev", "nosuid", "noexec"]
-                })
-            }
-            crate::sandbox::SandboxMount::EphemeralScratch {
-                destination,
-                max_bytes,
-            } => serde_json::json!({
-                "destination": destination,
-                "type": "tmpfs",
-                "source": "tmpfs",
-                "options": [
-                    "rw",
-                    "nodev",
-                    "nosuid",
-                    "noexec",
-                    format!("size={max_bytes}")
-                ]
-            }),
-        })
-        .collect::<Vec<_>>();
+                    "type": "tmpfs",
+                    "source": "tmpfs",
+                    "options": [
+                        "rw",
+                        "nodev",
+                        "nosuid",
+                        "noexec",
+                        format!("size={max_bytes}")
+                    ]
+                }),
+            })
+            .collect::<Vec<_>>(),
+    );
     if mounts != expected_mounts.as_slice() {
         return Err(ProductionSandboxError::BundleMetadataMismatch);
+    }
+    // Runtime-owned character devices are always present. Operator devices
+    // are appended only after trusted GPU selection and remain exact.
+    let mut expected_device_specs = standard_linux_devices();
+    expected_device_specs.extend(launch.policy.devices.iter().cloned());
+    let expected_devices: Vec<serde_json::Value> = expected_device_specs
+        .iter()
+        .map(SandboxDevice::oci_spec)
+        .collect();
+    let expected_cgroup_rules: Vec<serde_json::Value> = expected_device_specs
+        .iter()
+        .map(SandboxDevice::cgroup_rule)
+        .collect();
+    let bundle_devices = linux.get("devices").and_then(serde_json::Value::as_array);
+    let bundle_resources_devices = linux
+        .get("resources")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|resources| resources.get("devices"))
+        .and_then(serde_json::Value::as_array);
+    match (bundle_devices, bundle_resources_devices) {
+        (Some(bundle_devices), Some(bundle_resources_devices)) => {
+            if bundle_devices != &expected_devices
+                || bundle_resources_devices != &expected_cgroup_rules
+            {
+                return Err(ProductionSandboxError::BundleMetadataMismatch);
+            }
+        }
+        _ => return Err(ProductionSandboxError::BundleMetadataMismatch),
     }
     let annotations = config
         .get("annotations")
         .and_then(serde_json::Value::as_object)
         .ok_or(ProductionSandboxError::InvalidBundle)?;
-    const ALLOWED_ANNOTATIONS: &[&str] = &[
-        "org.hivemind.guest-image-digest",
-        "org.hivemind.backend-id",
-        "org.hivemind.cgroup-version",
-        "org.hivemind.network-policy",
-        "org.hivemind.seccomp-profile-sha256",
-    ];
     if annotations
         .keys()
-        .any(|key| !ALLOWED_ANNOTATIONS.contains(&key.as_str()))
+        .any(|key| !ALLOWED_OCI_ANNOTATIONS.contains(&key.as_str()))
     {
         return Err(ProductionSandboxError::InvalidBundle);
     }
@@ -940,6 +1359,49 @@ fn validate_oci_bundle_inner(
             != Some(expected_seccomp_profile(&launch.policy).as_str())
     {
         return Err(ProductionSandboxError::BundleMetadataMismatch);
+    }
+    match &launch.onnx {
+        None => {
+            if [
+                "org.hivemind.workload",
+                "org.hivemind.onnx.protocol",
+                "org.hivemind.onnx.execution-provider",
+                "org.hivemind.onnx.model-artifact-id",
+                "org.hivemind.onnx.input-artifact-ids",
+            ]
+            .iter()
+            .any(|key| annotations.contains_key(*key))
+            {
+                return Err(ProductionSandboxError::BundleMetadataMismatch);
+            }
+        }
+        Some(onnx) => {
+            let expected_input_ids = serde_json::json!(
+                serde_json::to_string(&onnx.input_artifact_ids)
+                    .expect("ONNX input artifact IDs serialize infallibly")
+            );
+            if annotations
+                .get("org.hivemind.workload")
+                .and_then(serde_json::Value::as_str)
+                != Some("onnx")
+                || annotations
+                    .get("org.hivemind.onnx.protocol")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(onnx.protocol_version.as_str())
+                || annotations
+                    .get("org.hivemind.onnx.execution-provider")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(onnx.execution_provider.as_str())
+                || annotations
+                    .get("org.hivemind.onnx.model-artifact-id")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(onnx.model_artifact_id.as_str())
+                || annotations.get("org.hivemind.onnx.input-artifact-ids")
+                    != Some(&expected_input_ids)
+            {
+                return Err(ProductionSandboxError::BundleMetadataMismatch);
+            }
+        }
     }
     Ok(())
 }

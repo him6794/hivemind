@@ -104,7 +104,7 @@ fn gpu_tensor_rejects_a_buffer_that_exceeds_the_devices_vram_budget() {
 #[test]
 fn gpu_tensor_delegates_metadata_validation_to_the_wrapped_tensor() {
     let bytes = vec![0u8; 31];
-    let mut manifest = gpu_tensor(vec![2, 2], &vec![0u8; 32], "gpu-a");
+    let mut manifest = gpu_tensor(vec![2, 2], &[0u8; 32], "gpu-a");
     manifest.tensor.data_artifact = binary_artifact(&bytes);
 
     let error = manifest

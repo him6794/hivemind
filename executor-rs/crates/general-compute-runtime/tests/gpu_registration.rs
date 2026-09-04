@@ -1,27 +1,30 @@
 use general_compute_runtime::gpu::{GpuCapability, GpuRuntime, GpuSelection, GpuVendor};
 use general_compute_runtime::{
-    ArtifactManifest, ArtifactRole, ExecutionPolicy, GENERAL_COMPUTE_RUNTIME_VERSION,
-    GeneralComputeRequest, TrustedWorkerCapabilityRegistration, WorkerCapabilities,
+    ArtifactManifest, ArtifactRole, DeterminismPolicy, ExecutionPolicy,
+    GENERAL_COMPUTE_RUNTIME_VERSION, GeneralComputeRequest, TrustedWorkerCapabilityRegistration,
+    WorkerCapabilities,
 };
 
 const IMAGE: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 fn request_with_gpu_requirement() -> GeneralComputeRequest {
-    let mut execution_policy = ExecutionPolicy::default();
-    execution_policy.gpu_required = true;
-    execution_policy.gpu_requirement = Some(
-        general_compute_runtime::gpu::GpuRequirement::new(
-            GpuVendor::Nvidia,
-            "sm_80",
-            GpuRuntime::Cuda,
-            "550.54",
-            16 * 1024 * 1024 * 1024,
-            8,
-            IMAGE,
-            false,
-        )
-        .expect("valid GPU requirement"),
-    );
+    let execution_policy = ExecutionPolicy {
+        gpu_required: true,
+        gpu_requirement: Some(
+            general_compute_runtime::gpu::GpuRequirement::new(
+                GpuVendor::Nvidia,
+                "sm_80",
+                GpuRuntime::Cuda,
+                "550.54",
+                16 * 1024 * 1024 * 1024,
+                8,
+                IMAGE,
+                false,
+            )
+            .expect("valid GPU requirement"),
+        ),
+        ..ExecutionPolicy::default()
+    };
     let mut request = GeneralComputeRequest {
         execution_id: "execution-gpu".into(),
         attempt_id: "attempt-gpu".into(),
@@ -34,7 +37,7 @@ fn request_with_gpu_requirement() -> GeneralComputeRequest {
         source_artifact: ArtifactManifest::inline_json("source", ArtifactRole::Source, b"{}"),
         input_artifacts: vec![],
         execution_policy,
-        determinism: Default::default(),
+        determinism: DeterminismPolicy::default(),
         billing_version: "billing-v1".into(),
         cost_model_version: "cost-v1".into(),
     };
@@ -66,6 +69,7 @@ fn registration(gpu_capabilities: Vec<GpuCapability>) -> TrustedWorkerCapability
             gpu_available: true,
         },
         gpu_capabilities,
+        managed_gpu_backends: vec![],
         backends: vec![],
     }
 }

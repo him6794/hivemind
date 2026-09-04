@@ -5,12 +5,14 @@
 //! operator-controlled file and every path is validated before it can reach
 //! the OCI launcher.
 
+use crate::onnx::OnnxBackendConfig;
 use crate::sandbox::{
-    BackendExecutionMode, ProductionSandboxLaunch, SandboxMount, WindowsNativeSandboxLaunch,
-    WindowsSandboxPolicy,
+    BackendExecutionMode, ProductionSandboxLaunch, SandboxDevice, SandboxMount,
+    WindowsNativeSandboxLaunch, WindowsSandboxPolicy,
 };
 use crate::{
     GeneralComputeRequest, MANAGED_DSL_RUNTIME_VERSION, MANAGED_DSL_SEMANTICS_MANIFEST_SHA256,
+    gpu::GpuSelection, managed_gpu::ManagedGpuCapability,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,6 +34,7 @@ pub struct ManagedDslBackendRegistration {
 }
 
 impl ManagedDslBackendRegistration {
+    #[must_use]
     pub fn execution_mode(&self) -> BackendExecutionMode {
         BackendExecutionMode::ProductionSandboxedDsl
     }
@@ -76,6 +79,7 @@ impl ManagedDslBackendRegistry {
         Ok(Self { backends })
     }
 
+    #[must_use]
     pub fn get(&self, backend_id: &str) -> Option<&ManagedDslBackendRegistration> {
         self.backends.get(backend_id)
     }
@@ -84,10 +88,221 @@ impl ManagedDslBackendRegistry {
         self.backends.values()
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.backends.len()
     }
 
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.backends.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GpuDeviceMapping {
+    /// Stable operator-owned device identity from `GpuCapability.device_id`.
+    pub device_id: String,
+    /// Exact host device nodes exposed for this GPU selection.
+    pub devices: Vec<SandboxDevice>,
+}
+
+impl GpuDeviceMapping {
+    fn validate(&self) -> Result<(), ProductionBackendRegistryError> {
+        if self.device_id.trim().is_empty()
+            || self.device_id.len() > 128
+            || !self.device_id.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'+')
+            })
+        {
+            return Err(ProductionBackendRegistryError::GpuDeviceMappingInvalid);
+        }
+        if self.devices.is_empty() {
+            return Err(ProductionBackendRegistryError::GpuDeviceMappingEmpty);
+        }
+        for device in &self.devices {
+            device
+                .validate()
+                .map_err(|_| ProductionBackendRegistryError::GpuDeviceMappingInvalid)?;
+        }
+        Ok(())
+    }
+}
+
+/// Operator-owned production registration for the independent managed GPU
+/// runtime.  It intentionally has its own registry and environment boundary;
+/// a general-compute backend must never be reinterpreted as a managed GPU
+/// runner merely because the backend IDs happen to match.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedGpuProductionBackendConfig {
+    pub backend_id: String,
+    pub guest_image_digest: String,
+    pub bundle_root: PathBuf,
+    pub artifact_root: PathBuf,
+    pub runner_executable: PathBuf,
+    pub runner_state_root: PathBuf,
+    pub seccomp_profile_path: PathBuf,
+    pub runner_prefix_args: Vec<String>,
+    pub runner_sha256: String,
+    pub entrypoint: Vec<String>,
+    pub policy: crate::sandbox::LinuxSandboxPolicy,
+    pub gpu_device_mappings: Vec<GpuDeviceMapping>,
+    pub max_output_bytes: usize,
+}
+
+impl ManagedGpuProductionBackendConfig {
+    /// The fixed file contract used by the Rust managed-GPU guest runner.
+    /// These files are all operator-created beneath the task artifact root;
+    /// the task cannot add, remove, or rename mounts.
+    const REQUIRED_MOUNTS: [(&'static str, &'static str); 4] = [
+        ("source", "/work/source"),
+        ("input", "/work/input"),
+        ("manifest", "/work/manifest"),
+        ("selection", "/work/selection"),
+    ];
+
+    #[must_use]
+    pub fn execution_mode(&self) -> BackendExecutionMode {
+        BackendExecutionMode::ProductionSandboxedOci
+    }
+
+    pub fn launch_for_managed_gpu_capability(
+        &self,
+        capability: &ManagedGpuCapability,
+    ) -> Result<ProductionSandboxLaunch, ProductionBackendRegistryError> {
+        self.validate()?;
+        capability
+            .validate()
+            .map_err(ProductionBackendRegistryError::ManagedGpuCapabilityInvalid)?;
+        if capability.image_digest != self.guest_image_digest {
+            return Err(ProductionBackendRegistryError::GuestImageMismatch);
+        }
+        let mapping = self
+            .gpu_device_mappings
+            .iter()
+            .find(|mapping| mapping.device_id == capability.device_id)
+            .ok_or_else(|| {
+                ProductionBackendRegistryError::GpuDeviceMappingMissing(
+                    capability.device_id.clone(),
+                )
+            })?;
+        let mut policy = self.policy.clone();
+        policy.devices.clone_from(&mapping.devices);
+        let launch = ProductionSandboxLaunch {
+            backend_id: self.backend_id.clone(),
+            guest_image_digest: self.guest_image_digest.clone(),
+            entrypoint: self.entrypoint.clone(),
+            policy,
+            onnx: None,
+        };
+        launch
+            .validate()
+            .map_err(ProductionBackendRegistryError::LaunchInvalid)?;
+        Ok(launch)
+    }
+
+    /// Materialize through the already-reviewed rootless OCI implementation.
+    /// The request is a synthetic general-compute envelope used only for the
+    /// shared artifact/bundle writer; the managed-GPU manifest remains the
+    /// authoritative protocol and is mounted separately as `/work/manifest`.
+    pub fn materialize_bundle_for_launch(
+        &self,
+        request: &GeneralComputeRequest,
+        task_id: &str,
+        launch: &ProductionSandboxLaunch,
+    ) -> Result<(PathBuf, PathBuf), ProductionBackendRegistryError> {
+        self.validate_mount_contract()?;
+        self.as_general_compute_config()
+            .materialize_bundle_for_launch(request, task_id, launch)
+    }
+
+    pub fn validate(&self) -> Result<(), ProductionBackendRegistryError> {
+        self.validate_mount_contract()?;
+        if self.gpu_device_mappings.is_empty() {
+            return Err(ProductionBackendRegistryError::ManagedGpuDeviceMappingRequired);
+        }
+        self.as_general_compute_config().validate()
+    }
+
+    fn validate_mount_contract(&self) -> Result<(), ProductionBackendRegistryError> {
+        let mut actual = BTreeMap::new();
+        for mount in &self.policy.mounts {
+            let SandboxMount::ReadOnlyArtifact {
+                artifact_id,
+                destination,
+            } = mount
+            else {
+                return Err(ProductionBackendRegistryError::ManagedGpuMountContractInvalid);
+            };
+            if actual
+                .insert(artifact_id.as_str(), destination.as_str())
+                .is_some()
+            {
+                return Err(ProductionBackendRegistryError::ManagedGpuMountContractInvalid);
+            }
+        }
+        let expected = Self::REQUIRED_MOUNTS
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        if actual != expected {
+            return Err(ProductionBackendRegistryError::ManagedGpuMountContractInvalid);
+        }
+        Ok(())
+    }
+
+    fn as_general_compute_config(&self) -> ProductionBackendConfig {
+        ProductionBackendConfig {
+            backend_id: self.backend_id.clone(),
+            guest_image_digest: self.guest_image_digest.clone(),
+            bundle_root: self.bundle_root.clone(),
+            artifact_root: self.artifact_root.clone(),
+            runner_executable: self.runner_executable.clone(),
+            runner_state_root: self.runner_state_root.clone(),
+            seccomp_profile_path: self.seccomp_profile_path.clone(),
+            runner_prefix_args: self.runner_prefix_args.clone(),
+            runner_sha256: self.runner_sha256.clone(),
+            entrypoint: self.entrypoint.clone(),
+            policy: self.policy.clone(),
+            gpu_device_mappings: self.gpu_device_mappings.clone(),
+            onnx: None,
+            max_output_bytes: self.max_output_bytes,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ManagedGpuProductionBackendRegistry {
+    backends: BTreeMap<String, ManagedGpuProductionBackendConfig>,
+}
+
+impl ManagedGpuProductionBackendRegistry {
+    pub fn new(
+        registrations: Vec<ManagedGpuProductionBackendConfig>,
+    ) -> Result<Self, ProductionBackendRegistryError> {
+        let mut backends = BTreeMap::new();
+        for registration in registrations {
+            registration.validate()?;
+            let backend_id = registration.backend_id.clone();
+            if backends.insert(backend_id.clone(), registration).is_some() {
+                return Err(ProductionBackendRegistryError::DuplicateBackend(backend_id));
+            }
+        }
+        Ok(Self { backends })
+    }
+
+    #[must_use]
+    pub fn get(&self, backend_id: &str) -> Option<&ManagedGpuProductionBackendConfig> {
+        self.backends.get(backend_id)
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.backends.len()
+    }
+
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.backends.is_empty()
     }
@@ -113,21 +328,80 @@ pub struct ProductionBackendConfig {
     pub runner_sha256: String,
     pub entrypoint: Vec<String>,
     pub policy: crate::sandbox::LinuxSandboxPolicy,
+    /// Optional per-device mapping. When present, GPU requests must resolve to
+    /// one of these mappings before any device node reaches the OCI bundle.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gpu_device_mappings: Vec<GpuDeviceMapping>,
+    /// Optional operator-pinned ONNX runner contract. The actual ONNX Runtime
+    /// or TensorRT library remains inside the guest image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onnx: Option<OnnxBackendConfig>,
     pub max_output_bytes: usize,
 }
 
 impl ProductionBackendConfig {
+    #[must_use]
     pub fn execution_mode(&self) -> BackendExecutionMode {
         BackendExecutionMode::ProductionSandboxedOci
     }
 
+    #[must_use]
     pub fn launch(&self) -> ProductionSandboxLaunch {
         ProductionSandboxLaunch {
             backend_id: self.backend_id.clone(),
             guest_image_digest: self.guest_image_digest.clone(),
             entrypoint: self.entrypoint.clone(),
             policy: self.policy.clone(),
+            onnx: self.onnx.clone(),
         }
+    }
+
+    /// Build the sandbox launch envelope for the scheduler's trusted GPU
+    /// selection. Device nodes are selected only from this operator-owned
+    /// mapping; a task cannot provide paths or widen the policy itself.
+    pub fn launch_for_gpu_selection(
+        &self,
+        selection: Option<&GpuSelection>,
+    ) -> Result<ProductionSandboxLaunch, ProductionBackendRegistryError> {
+        let mut launch = self.launch();
+        match selection {
+            None | Some(GpuSelection::CpuFallback { .. }) => {
+                // A missing selection or explicit CPU fallback must never carry
+                // static device nodes into the OCI bundle. GPU access is valid
+                // only after a typed selection resolves an operator mapping.
+                launch.policy.devices.clear();
+                if let Some(onnx) = &self.onnx
+                    && onnx.execution_provider.requires_cuda_gpu()
+                    && matches!(selection, None | Some(GpuSelection::CpuFallback { .. }))
+                {
+                    return Err(ProductionBackendRegistryError::OnnxGpuSelectionRequired);
+                }
+            }
+            Some(GpuSelection::Gpu(capability)) => {
+                if let Some(onnx) = &self.onnx {
+                    if !onnx.execution_provider.requires_cuda_gpu() {
+                        return Err(ProductionBackendRegistryError::OnnxCpuSelectionMismatch);
+                    }
+                    if !matches!(capability.runtime, crate::gpu::GpuRuntime::Cuda) {
+                        return Err(ProductionBackendRegistryError::OnnxGpuRuntimeMismatch);
+                    }
+                }
+                let mapping = self
+                    .gpu_device_mappings
+                    .iter()
+                    .find(|mapping| mapping.device_id == capability.device_id)
+                    .ok_or_else(|| {
+                        ProductionBackendRegistryError::GpuDeviceMappingMissing(
+                            capability.device_id.clone(),
+                        )
+                    })?;
+                launch.policy.devices.clone_from(&mapping.devices);
+            }
+        }
+        launch
+            .validate()
+            .map_err(ProductionBackendRegistryError::LaunchInvalid)?;
+        Ok(launch)
     }
 
     /// Return the operator-owned task directory after validating that the
@@ -195,6 +469,58 @@ impl ProductionBackendConfig {
                 ));
             }
         }
+        if let Some(onnx) = &self.onnx {
+            onnx.validate_request_artifacts(
+                &request.source_artifact.artifact_id,
+                request
+                    .input_artifacts
+                    .iter()
+                    .map(|artifact| artifact.artifact_id.as_str()),
+            )
+            .map_err(ProductionBackendRegistryError::OnnxConfigInvalid)?;
+            self.validate_onnx_mount_contract(onnx)?;
+        }
+        Ok(())
+    }
+
+    fn validate_onnx_mount_contract(
+        &self,
+        onnx: &OnnxBackendConfig,
+    ) -> Result<(), ProductionBackendRegistryError> {
+        let mut model_mounts = 0usize;
+        let mut input_mounts = vec![0usize; onnx.input_artifact_ids.len()];
+        for mount in &self.policy.mounts {
+            let SandboxMount::ReadOnlyArtifact {
+                artifact_id,
+                destination,
+            } = mount
+            else {
+                continue;
+            };
+            if artifact_id == &onnx.model_artifact_id {
+                model_mounts += 1;
+                if destination != "/work/source" {
+                    return Err(ProductionBackendRegistryError::OnnxModelMountInvalid);
+                }
+                continue;
+            }
+            if let Some(index) = onnx
+                .input_artifact_ids
+                .iter()
+                .position(|id| id == artifact_id)
+            {
+                input_mounts[index] += 1;
+                if destination != &format!("/work/input-{index}") {
+                    return Err(ProductionBackendRegistryError::OnnxInputMountInvalid(index));
+                }
+            }
+        }
+        if model_mounts != 1 {
+            return Err(ProductionBackendRegistryError::OnnxModelMountInvalid);
+        }
+        if let Some(index) = input_mounts.iter().position(|count| *count != 1) {
+            return Err(ProductionBackendRegistryError::OnnxInputMountInvalid(index));
+        }
         Ok(())
     }
 
@@ -227,9 +553,46 @@ impl ProductionBackendConfig {
         if !is_sha256_digest(&self.runner_sha256) {
             return Err(ProductionBackendRegistryError::RunnerDigestInvalid);
         }
+        if self
+            .runner_prefix_args
+            .iter()
+            .enumerate()
+            .any(|(index, arg)| {
+                (arg.starts_with("--rootless=") && arg != "--rootless=true")
+                    || (arg == "--rootless"
+                        && self
+                            .runner_prefix_args
+                            .get(index + 1)
+                            .is_some_and(|value| value != "true"))
+            })
+        {
+            return Err(ProductionBackendRegistryError::RunnerPrefixInvalid);
+        }
         self.launch()
             .validate()
             .map_err(ProductionBackendRegistryError::LaunchInvalid)?;
+        let mut mapping_ids = BTreeSet::new();
+        for mapping in &self.gpu_device_mappings {
+            mapping.validate()?;
+            if !mapping_ids.insert(mapping.device_id.as_str()) {
+                return Err(ProductionBackendRegistryError::GpuDeviceMappingDuplicate(
+                    mapping.device_id.clone(),
+                ));
+            }
+        }
+        if !self.gpu_device_mappings.is_empty() && !self.policy.devices.is_empty() {
+            return Err(ProductionBackendRegistryError::GpuDevicePolicyConflict);
+        }
+        if let Some(onnx) = &self.onnx {
+            onnx.validate()
+                .map_err(ProductionBackendRegistryError::OnnxConfigInvalid)?;
+            if onnx.model_artifact_id != "source" {
+                return Err(ProductionBackendRegistryError::OnnxConfigInvalid(
+                    crate::onnx::OnnxBackendError::ModelMustBeSourceArtifact,
+                ));
+            }
+            self.validate_onnx_mount_contract(onnx)?;
+        }
         let source_mount = self.policy.mounts.iter().find_map(|mount| match mount {
             SandboxMount::ReadOnlyArtifact {
                 artifact_id,
@@ -292,10 +655,12 @@ pub struct WindowsHcsContainerSpec {
 }
 
 impl WindowsProductionBackendConfig {
+    #[must_use]
     pub fn execution_mode(&self) -> BackendExecutionMode {
         BackendExecutionMode::ProductionSandboxedWindows
     }
 
+    #[must_use]
     pub fn launch(&self) -> WindowsNativeSandboxLaunch {
         WindowsNativeSandboxLaunch {
             backend_id: self.backend_id.clone(),
@@ -428,6 +793,7 @@ pub enum ProductionBackendRegistryError {
     PathMustBeAbsolute,
     PathTraversal,
     RunnerDigestInvalid,
+    RunnerPrefixInvalid,
     SeccompProfileUnavailable(String),
     LaunchInvalid(crate::sandbox::ProductionSandboxError),
     SourceArtifactMountRequired,
@@ -447,6 +813,21 @@ pub enum ProductionBackendRegistryError {
     ManagedDslSemanticsMismatch,
     ManagedDslUsageLimitRequired,
     ManagedDslOutputLimitRequired,
+    GpuDeviceMappingInvalid,
+    GpuDeviceMappingEmpty,
+    GpuDeviceMappingDuplicate(String),
+    GpuDeviceMappingMissing(String),
+    GpuDevicePolicyConflict,
+    ManagedGpuCapabilityInvalid(String),
+    GuestImageMismatch,
+    ManagedGpuDeviceMappingRequired,
+    ManagedGpuMountContractInvalid,
+    OnnxConfigInvalid(crate::onnx::OnnxBackendError),
+    OnnxModelMountInvalid,
+    OnnxInputMountInvalid(usize),
+    OnnxGpuSelectionRequired,
+    OnnxGpuRuntimeMismatch,
+    OnnxCpuSelectionMismatch,
 }
 
 fn ensure_contained(
@@ -587,6 +968,11 @@ impl ProductionBackendConfig {
     /// Build a minimal task-specific OCI bundle envelope. The rootfs itself
     /// belongs to the operator's pinned backend installation; only the
     /// verified artifact bind sources are selected per task.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the operator-owned ONNX input-artifact list cannot be
+    /// serialized, which would indicate a programming error.
     pub fn materialize_bundle(
         &self,
         request: &GeneralComputeRequest,
@@ -642,32 +1028,57 @@ impl ProductionBackendConfig {
                 ));
             }
         }
-        let mounts = self
-            .policy
-            .mounts
-            .iter()
-            .map(|mount| match mount {
-                SandboxMount::ReadOnlyArtifact {
-                    artifact_id,
-                    destination,
-                } => serde_json::json!({
-                    "destination": destination,
-                    "type": "bind",
-                    "source": canonical_artifact_root.join(artifact_id).to_string_lossy(),
-                    "options": ["ro", "nodev", "nosuid", "noexec"]
-                }),
-                SandboxMount::EphemeralScratch {
-                    destination,
-                    max_bytes,
-                } => serde_json::json!({
-                    "destination": destination,
-                    "type": "tmpfs",
-                    "source": "tmpfs",
-                    "options": ["rw", "nodev", "nosuid", "noexec", format!("size={max_bytes}")]
-                }),
-            })
-            .collect::<Vec<_>>();
-        let config = serde_json::json!({
+        let mut mounts = crate::sandbox::standard_linux_mounts();
+        mounts.extend(
+            self.policy
+                .mounts
+                .iter()
+                .map(|mount| match mount {
+                    SandboxMount::ReadOnlyArtifact {
+                        artifact_id,
+                        destination,
+                    } => serde_json::json!({
+                        "destination": destination,
+                        "type": "bind",
+                        "source": canonical_artifact_root.join(artifact_id).to_string_lossy(),
+                        "options": ["bind", "ro", "nodev", "nosuid", "noexec"]
+                    }),
+                    SandboxMount::EphemeralScratch {
+                        destination,
+                        max_bytes,
+                    } => serde_json::json!({
+                        "destination": destination,
+                        "type": "tmpfs",
+                        "source": "tmpfs",
+                        "options": ["rw", "nodev", "nosuid", "noexec", format!("size={max_bytes}")]
+                    }),
+                })
+                .collect::<Vec<_>>(),
+        );
+        let mut devices = crate::sandbox::standard_linux_devices();
+        devices.extend(self.policy.devices.iter().cloned());
+        let (uid_mappings, gid_mappings) = crate::sandbox::rootless_id_mappings()
+            .map_err(ProductionBackendRegistryError::RootUnavailable)?;
+        let linux = serde_json::json!({
+            "namespaces": [
+                {"type": "user"}, {"type": "pid"},
+                {"type": "mount"}, {"type": "network"}
+            ],
+            "uidMappings": uid_mappings
+                .iter()
+                .map(crate::sandbox::LinuxIdMapping::oci_spec)
+                .collect::<Vec<_>>(),
+            "gidMappings": gid_mappings
+                .iter()
+                .map(crate::sandbox::LinuxIdMapping::oci_spec)
+                .collect::<Vec<_>>(),
+            "seccomp": seccomp_profile,
+            "devices": devices.iter().map(SandboxDevice::oci_spec).collect::<Vec<_>>(),
+            "resources": {
+                "devices": devices.iter().map(SandboxDevice::cgroup_rule).collect::<Vec<_>>()
+            }
+        });
+        let mut config = serde_json::json!({
             "ociVersion": "1.0.2",
             "process": {
                 "args": self.entrypoint,
@@ -677,15 +1088,7 @@ impl ProductionBackendConfig {
             },
             "root": {"path": "rootfs", "readonly": true},
             "mounts": mounts,
-            "linux": {
-                "namespaces": [
-                    {"type": "user"}, {"type": "pid"},
-                    {"type": "mount"}, {"type": "network"}
-                ],
-                "uidMappings": [{"containerID": 0, "hostID": 100000, "size": 65536}],
-                "gidMappings": [{"containerID": 0, "hostID": 100000, "size": 65536}],
-                "seccomp": seccomp_profile
-            },
+            "linux": linux,
             "annotations": {
                 "org.hivemind.guest-image-digest": self.guest_image_digest,
                 "org.hivemind.backend-id": self.backend_id,
@@ -697,6 +1100,21 @@ impl ProductionBackendConfig {
                 }
             }
         });
+        if let Some(onnx) = &self.onnx {
+            config["annotations"]["org.hivemind.workload"] = serde_json::json!("onnx");
+            config["annotations"]["org.hivemind.onnx.protocol"] =
+                serde_json::json!(onnx.protocol_version);
+            config["annotations"]["org.hivemind.onnx.execution-provider"] =
+                serde_json::json!(onnx.execution_provider.as_str());
+            config["annotations"]["org.hivemind.onnx.model-artifact-id"] =
+                serde_json::json!(onnx.model_artifact_id);
+            // OCI annotations are string-valued; preserve the ordered artifact
+            // IDs as canonical JSON inside the annotation value.
+            config["annotations"]["org.hivemind.onnx.input-artifact-ids"] = serde_json::json!(
+                serde_json::to_string(&onnx.input_artifact_ids)
+                    .expect("ONNX input artifact IDs serialize infallibly")
+            );
+        }
         let config_path = bundle_root.join("config.json");
         if let Ok(metadata) = std::fs::symlink_metadata(&config_path) {
             if metadata.file_type().is_symlink() {
@@ -713,6 +1131,76 @@ impl ProductionBackendConfig {
         let bytes = serde_json::to_vec(&config)
             .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
         std::fs::write(&config_path, bytes)
+            .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
+        Ok((bundle_root, artifact_root))
+    }
+
+    /// Materialize a bundle using the exact device set selected by trusted
+    /// admission. The legacy two-argument method remains available for CPU
+    /// callers and static operator policies.
+    pub fn materialize_bundle_for_launch(
+        &self,
+        request: &GeneralComputeRequest,
+        task_id: &str,
+        launch: &ProductionSandboxLaunch,
+    ) -> Result<(PathBuf, PathBuf), ProductionBackendRegistryError> {
+        if launch.backend_id != self.backend_id
+            || launch.guest_image_digest != self.guest_image_digest
+        {
+            return Err(ProductionBackendRegistryError::LaunchInvalid(
+                crate::sandbox::ProductionSandboxError::BundleMetadataMismatch,
+            ));
+        }
+        launch
+            .validate()
+            .map_err(ProductionBackendRegistryError::LaunchInvalid)?;
+        let mut expected_policy = self.policy.clone();
+        expected_policy.devices.clone_from(&launch.policy.devices);
+        if launch.entrypoint != self.entrypoint
+            || launch.onnx != self.onnx
+            || launch.policy != expected_policy
+        {
+            return Err(ProductionBackendRegistryError::LaunchInvalid(
+                crate::sandbox::ProductionSandboxError::BundleMetadataMismatch,
+            ));
+        }
+        if launch.policy.devices != self.policy.devices
+            && !self
+                .gpu_device_mappings
+                .iter()
+                .any(|mapping| mapping.devices == launch.policy.devices)
+        {
+            return Err(ProductionBackendRegistryError::GpuDevicePolicyConflict);
+        }
+        let (bundle_root, artifact_root) = self.materialize_bundle(request, task_id)?;
+        let config_path = bundle_root.join("config.json");
+        let bytes = std::fs::read(&config_path)
+            .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
+        let mut config: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
+        let linux = config
+            .get_mut("linux")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| {
+                ProductionBackendRegistryError::RootUnavailable(
+                    "materialized OCI config has no linux object".into(),
+                )
+            })?;
+        let mut devices = crate::sandbox::standard_linux_devices();
+        devices.extend(launch.policy.devices.iter().cloned());
+        linux.insert(
+            "devices".into(),
+            serde_json::Value::Array(devices.iter().map(SandboxDevice::oci_spec).collect()),
+        );
+        linux.insert(
+            "resources".into(),
+            serde_json::json!({
+                "devices": devices.iter().map(SandboxDevice::cgroup_rule).collect::<Vec<_>>()
+            }),
+        );
+        let canonical = serde_json::to_vec(&config)
+            .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
+        std::fs::write(config_path, canonical)
             .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
         Ok((bundle_root, artifact_root))
     }
@@ -766,6 +1254,15 @@ fn copy_directory_no_symlinks(
     source: &std::path::Path,
     destination: &std::path::Path,
 ) -> Result<(), ProductionBackendRegistryError> {
+    let mut hardlinks = std::collections::HashMap::new();
+    copy_directory_no_symlinks_inner(source, destination, &mut hardlinks)
+}
+
+fn copy_directory_no_symlinks_inner(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+    hardlinks: &mut std::collections::HashMap<(u64, u64), PathBuf>,
+) -> Result<(), ProductionBackendRegistryError> {
     ensure_no_symlink_ancestors(destination)?;
     std::fs::create_dir_all(destination)
         .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
@@ -778,12 +1275,12 @@ fn copy_directory_no_symlinks(
         let metadata = std::fs::symlink_metadata(entry.path())
             .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
         let target = destination.join(entry.file_name());
-        if let Ok(target_metadata) = std::fs::symlink_metadata(&target) {
-            if target_metadata.file_type().is_symlink() {
-                return Err(ProductionBackendRegistryError::RootUnavailable(
-                    "task bundle destination contains a symlink".into(),
-                ));
-            }
+        if let Ok(target_metadata) = std::fs::symlink_metadata(&target)
+            && target_metadata.file_type().is_symlink()
+        {
+            return Err(ProductionBackendRegistryError::RootUnavailable(
+                "task bundle destination contains a symlink".into(),
+            ));
         }
         if metadata.file_type().is_symlink() {
             return Err(ProductionBackendRegistryError::RootUnavailable(
@@ -791,11 +1288,34 @@ fn copy_directory_no_symlinks(
             ));
         }
         if metadata.is_dir() {
-            copy_directory_no_symlinks(&entry.path(), &target)?;
+            copy_directory_no_symlinks_inner(&entry.path(), &target, hardlinks)?;
         } else if metadata.is_file() {
-            std::fs::copy(entry.path(), target).map_err(|error| {
-                ProductionBackendRegistryError::RootUnavailable(error.to_string())
-            })?;
+            #[cfg(unix)]
+            let hardlink_key = {
+                use std::os::unix::fs::MetadataExt;
+                Some((metadata.dev(), metadata.ino()))
+            };
+            #[cfg(not(unix))]
+            let hardlink_key = None;
+
+            if let Some(key) = hardlink_key {
+                if let Some(existing) = hardlinks.get(&key) {
+                    if std::fs::hard_link(existing, &target).is_err() {
+                        std::fs::copy(entry.path(), &target).map_err(|error| {
+                            ProductionBackendRegistryError::RootUnavailable(error.to_string())
+                        })?;
+                    }
+                } else {
+                    std::fs::copy(entry.path(), &target).map_err(|error| {
+                        ProductionBackendRegistryError::RootUnavailable(error.to_string())
+                    })?;
+                    hardlinks.insert(key, target);
+                }
+            } else {
+                std::fs::copy(entry.path(), &target).map_err(|error| {
+                    ProductionBackendRegistryError::RootUnavailable(error.to_string())
+                })?;
+            }
         } else {
             return Err(ProductionBackendRegistryError::RootUnavailable(
                 "operator bundle template contains an unsupported filesystem entry".into(),
@@ -823,6 +1343,7 @@ impl ProductionBackendRegistry {
         Ok(Self { backends })
     }
 
+    #[must_use]
     pub fn get(&self, backend_id: &str) -> Option<&ProductionBackendConfig> {
         self.backends.get(backend_id)
     }
@@ -831,10 +1352,12 @@ impl ProductionBackendRegistry {
         self.backends.values()
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.backends.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.backends.is_empty()
     }
@@ -863,6 +1386,7 @@ impl WindowsProductionBackendRegistry {
         Ok(Self { backends })
     }
 
+    #[must_use]
     pub fn get(&self, backend_id: &str) -> Option<&WindowsProductionBackendConfig> {
         self.backends.get(backend_id)
     }
@@ -871,8 +1395,14 @@ impl WindowsProductionBackendRegistry {
         self.backends.values()
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.backends.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.backends.is_empty()
     }
 }
 

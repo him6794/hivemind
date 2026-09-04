@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 
 import {
   clearStoredSession,
+  isExpiredJwt,
   readStoredSession,
   saveStoredSession,
 } from './authSession.mjs';
@@ -46,6 +47,53 @@ describe('auth session storage', () => {
     clearStoredSession(storage, 'session-key');
 
     assert.deepEqual(readStoredSession(storage, 'session-key'), { token: '', username: '' });
+  });
+
+  it('drops an expired JWT instead of restoring it', () => {
+    const storage = memoryStorage();
+    const expired = makeJwt({ exp: 1000 });
+    const live = makeJwt({ exp: Math.floor(Date.now() / 1000) + 3600 });
+
+    saveStoredSession(storage, 'expired-key', { token: expired, username: 'worker-owner' });
+    saveStoredSession(storage, 'live-key', { token: live, username: 'worker-owner' });
+
+    assert.deepEqual(readStoredSession(storage, 'expired-key'), { token: '', username: '' });
+    assert.equal(storage.getItem('expired-key'), null, 'expired session is removed');
+    assert.deepEqual(readStoredSession(storage, 'live-key'), {
+      token: live,
+      username: 'worker-owner',
+    });
+  });
+});
+
+function base64Url(value) {
+  return Buffer.from(JSON.stringify(value)).toString('base64url');
+}
+
+function makeJwt(payload) {
+  return `header.${base64Url(payload)}.signature`;
+}
+
+describe('JWT expiry detection', () => {
+  const future = Math.floor(Date.now() / 1000) + 3600;
+
+  it('matches the server expiration leeway under clock skew', () => {
+    const nowMs = 1_700_000_000_000;
+    const nowSeconds = nowMs / 1000;
+    assert.equal(isExpiredJwt(makeJwt({ exp: nowSeconds - 30 }), nowMs), false);
+    assert.equal(isExpiredJwt(makeJwt({ exp: nowSeconds - 60 }), nowMs), false);
+    assert.equal(isExpiredJwt(makeJwt({ exp: nowSeconds - 61 }), nowMs), true);
+  });
+
+  it('keeps live and opaque tokens', () => {
+    assert.equal(isExpiredJwt(makeJwt({ exp: future })), false);
+    // Not a decodable three-part JWT: leave the verdict to the server.
+    assert.equal(isExpiredJwt('opaque-session-token'), false);
+  });
+
+  it('treats missing or malformed exp as not expired', () => {
+    assert.equal(isExpiredJwt(makeJwt({})), false);
+    assert.equal(isExpiredJwt(`header.${Buffer.from('not json').toString('base64url')}.sig`), false);
   });
 });
 

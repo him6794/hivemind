@@ -1,10 +1,119 @@
+use general_compute_runtime::managed_gpu::{
+    ManagedGpuBackendRegistration, ManagedGpuCapability, ManagedGpuLimits, ManagedGpuProofPolicy,
+    ManagedGpuRequest, ManagedGpuRequirement, MANAGED_GPU_BILLING_VERSION,
+    MANAGED_GPU_COST_MODEL_VERSION, MANAGED_GPU_OPERATION_REGISTRY_VERSION,
+    MANAGED_GPU_REQUEST_PROTOCOL_VERSION, MANAGED_GPU_RUNTIME_VERSION,
+    MANAGED_GPU_SEMANTICS_MANIFEST_SHA256, MANAGED_GPU_SETTLEMENT_BASIS,
+};
 use general_compute_runtime::{
     ArtifactManifest, ArtifactRole, BackendRegistration, CapabilityMatrix, DeterminismPolicy,
-    ExecutionPolicy, GeneralComputeRequest, WorkerCapabilities, GENERAL_COMPUTE_RUNTIME_VERSION,
+    ExecutionPolicy, GeneralComputeRequest, TrustedWorkerCapabilityRegistration,
+    WorkerCapabilities, GENERAL_COMPUTE_RUNTIME_VERSION,
 };
 use hivemind_worker_executor::runtime_admission::{
     RuntimeAdmissionError, RuntimeRoute, WorkerRuntimeAdmission,
 };
+
+#[test]
+fn managed_function_gpu_v1_requires_its_dedicated_manifest() {
+    let error = WorkerRuntimeAdmission::default()
+        .admit_with_manifests(MANAGED_GPU_RUNTIME_VERSION, &[], &[])
+        .expect_err("GPU-v1 must not be admitted without its dedicated manifest");
+
+    assert!(matches!(error, RuntimeAdmissionError::ManifestRequired));
+}
+
+#[test]
+fn managed_function_gpu_v1_rejects_cross_route_manifest_channels() {
+    let request = managed_gpu_request();
+    let managed_gpu_manifest = serde_json::to_vec(&request).unwrap();
+    let error = WorkerRuntimeAdmission::default()
+        .admit_with_manifests(MANAGED_GPU_RUNTIME_VERSION, br#"{}"#, &managed_gpu_manifest)
+        .expect_err("GPU-v1 must not accept a general-compute manifest channel");
+
+    assert!(matches!(
+        error,
+        RuntimeAdmissionError::ManifestRuntimeMismatch
+    ));
+}
+
+#[test]
+fn managed_function_gpu_v1_routes_a_valid_operator_registered_manifest() {
+    let request = managed_gpu_request();
+    let capability = managed_gpu_capability(&request, 0, "GPU-0123456789abcdef");
+    let admission = WorkerRuntimeAdmission::new_with_trusted_registration(
+        managed_gpu_registration(&request, vec![capability.clone()]),
+    );
+
+    let route = admission
+        .admit_with_manifests(
+            MANAGED_GPU_RUNTIME_VERSION,
+            &[],
+            &serde_json::to_vec(&request).unwrap(),
+        )
+        .expect("operator-approved GPU registration should admit the route");
+
+    assert!(matches!(
+        route,
+        RuntimeRoute::ManagedFunctionGpuV1(admitted)
+            if admitted == request
+    ));
+}
+
+#[test]
+fn managed_function_gpu_v1_rejects_missing_or_incompatible_trusted_device() {
+    let request = managed_gpu_request();
+    let empty_registration = TrustedWorkerCapabilityRegistration {
+        worker: managed_gpu_worker_capabilities(),
+        gpu_capabilities: vec![],
+        managed_gpu_backends: vec![],
+        backends: vec![],
+    };
+    let error = WorkerRuntimeAdmission::new_with_trusted_registration(empty_registration)
+        .admit_with_manifests(
+            MANAGED_GPU_RUNTIME_VERSION,
+            &[],
+            &serde_json::to_vec(&request).unwrap(),
+        )
+        .expect_err("a GPU boolean without a typed device must fail closed");
+    assert!(matches!(
+        error,
+        RuntimeAdmissionError::ManifestRejected {
+            code: general_compute_runtime::ValidationErrorCode::BackendUnavailable,
+            ..
+        }
+    ));
+
+    let incompatible_device = ManagedGpuCapability::new(
+        "gpu-incompatible",
+        "7.5",
+        request.gpu_requirement.runtime_version.clone(),
+        request.gpu_requirement.driver_abi.clone(),
+        16 * 1024 * 1024 * 1024,
+        32,
+        request.guest_image_digest.clone(),
+        0,
+        "GPU-bbbbbbbbbbbbbbbb",
+    )
+    .unwrap();
+    let error = WorkerRuntimeAdmission::new_with_trusted_registration(managed_gpu_registration(
+        &request,
+        vec![incompatible_device],
+    ))
+    .admit_with_manifests(
+        MANAGED_GPU_RUNTIME_VERSION,
+        &[],
+        &serde_json::to_vec(&request).unwrap(),
+    )
+    .expect_err("a trusted device with incompatible compute capability must fail closed");
+    assert!(matches!(
+        error,
+        RuntimeAdmissionError::ManifestRejected {
+            code: general_compute_runtime::ValidationErrorCode::GpuUnavailable,
+            ..
+        }
+    ));
+}
 
 #[test]
 fn general_compute_v1alpha1_requires_an_explicit_request_manifest() {
@@ -117,6 +226,99 @@ fn general_compute_v1alpha1_routes_a_registered_manifest() {
     assert!(
         matches!(route, RuntimeRoute::GeneralComputeV1Alpha1(r) if r.backend_id == "python-cpython-312")
     );
+}
+
+const MANAGED_GPU_IMAGE: &str =
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+fn managed_gpu_request() -> ManagedGpuRequest {
+    let requirement = ManagedGpuRequirement::new(
+        "8.9",
+        "12.4",
+        "550",
+        8 * 1024 * 1024 * 1024,
+        1,
+        MANAGED_GPU_IMAGE,
+    )
+    .unwrap();
+    let mut request = ManagedGpuRequest {
+        protocol_version: MANAGED_GPU_REQUEST_PROTOCOL_VERSION.into(),
+        execution_id: "runtime-admission-execution".into(),
+        attempt_id: "runtime-admission-attempt".into(),
+        idempotency_key: "runtime-admission-idempotency".into(),
+        request_digest: String::new(),
+        runtime_version: MANAGED_GPU_RUNTIME_VERSION.into(),
+        semantics_manifest_sha256: MANAGED_GPU_SEMANTICS_MANIFEST_SHA256.into(),
+        operation_registry_version: MANAGED_GPU_OPERATION_REGISTRY_VERSION.into(),
+        backend_id: "managed-cuda-test".into(),
+        guest_image_digest: MANAGED_GPU_IMAGE.into(),
+        source: "gpu_add_f32([1.0], [2.0])".into(),
+        input_json: "{}".into(),
+        gpu_requirement: requirement,
+        limits: ManagedGpuLimits::default(),
+        reservation_cpt: 10,
+        billing_version: MANAGED_GPU_BILLING_VERSION.into(),
+        cost_model_version: MANAGED_GPU_COST_MODEL_VERSION.into(),
+        settlement_basis: MANAGED_GPU_SETTLEMENT_BASIS.into(),
+        proof_policy: ManagedGpuProofPolicy::None,
+    };
+    request.request_digest = request.canonical_request_digest();
+    request
+}
+
+fn managed_gpu_worker_capabilities() -> WorkerCapabilities {
+    WorkerCapabilities {
+        guest_image_digests: vec![MANAGED_GPU_IMAGE.into()],
+        capabilities: vec![MANAGED_GPU_RUNTIME_VERSION.into()],
+        max_threads: 4,
+        gpu_available: true,
+    }
+}
+
+fn managed_gpu_capability(
+    request: &ManagedGpuRequest,
+    ordinal: i32,
+    uuid: &str,
+) -> ManagedGpuCapability {
+    ManagedGpuCapability::new(
+        "cuda-runtime-admission-0",
+        request.gpu_requirement.compute_capability.clone(),
+        request.gpu_requirement.runtime_version.clone(),
+        request.gpu_requirement.driver_abi.clone(),
+        16 * 1024 * 1024 * 1024,
+        32,
+        request.guest_image_digest.clone(),
+        ordinal,
+        uuid,
+    )
+    .unwrap()
+}
+
+fn managed_gpu_registration(
+    request: &ManagedGpuRequest,
+    capabilities: Vec<ManagedGpuCapability>,
+) -> TrustedWorkerCapabilityRegistration {
+    TrustedWorkerCapabilityRegistration {
+        worker: managed_gpu_worker_capabilities(),
+        gpu_capabilities: vec![],
+        managed_gpu_backends: vec![ManagedGpuBackendRegistration {
+            backend_id: request.backend_id.clone(),
+            runtime_version: MANAGED_GPU_RUNTIME_VERSION.into(),
+            semantics_manifest_sha256: MANAGED_GPU_SEMANTICS_MANIFEST_SHA256.into(),
+            operation_registry_version: MANAGED_GPU_OPERATION_REGISTRY_VERSION.into(),
+            guest_image_digest: request.guest_image_digest.clone(),
+            billing_version: MANAGED_GPU_BILLING_VERSION.into(),
+            cost_model_version: MANAGED_GPU_COST_MODEL_VERSION.into(),
+            reservation_cpt: request.reservation_cpt,
+            max_source_bytes: 256 * 1024,
+            max_input_bytes: 16 * 1024 * 1024,
+            max_output_bytes: 16 * 1024 * 1024,
+            max_operations: 1_000_000,
+            max_gpu_time_ms: 120_000,
+            capabilities,
+        }],
+        backends: vec![],
+    }
 }
 
 fn request_manifest(image: &str) -> GeneralComputeRequest {

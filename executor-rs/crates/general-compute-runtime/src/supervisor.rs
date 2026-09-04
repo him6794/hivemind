@@ -29,6 +29,7 @@ const DEFAULT_INPUT_LIMIT: usize = 16 * 1024 * 1024;
 pub struct Cancellation(Arc<AtomicBool>);
 
 impl Cancellation {
+    #[must_use]
     pub fn new() -> Self {
         Self(Arc::new(AtomicBool::new(false)))
     }
@@ -37,6 +38,7 @@ impl Cancellation {
         self.0.store(true, Ordering::Release);
     }
 
+    #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Acquire)
     }
@@ -164,17 +166,18 @@ impl ReferenceProcessSupervisor {
     }
 
     #[cfg(test)]
+    #[expect(clippy::needless_pass_by_value)]
     pub(crate) fn run(
         &self,
         command: ReferenceCommandSpec,
         cancellation: &Cancellation,
     ) -> Result<RunResult, SupervisorError> {
-        self.run_with_stdin(command, &[], cancellation)
+        self.run_with_stdin(&command, &[], cancellation)
     }
 
     pub(crate) fn run_with_stdin(
         &self,
-        command: ReferenceCommandSpec,
+        command: &ReferenceCommandSpec,
         input: &[u8],
         cancellation: &Cancellation,
     ) -> Result<RunResult, SupervisorError> {
@@ -233,14 +236,14 @@ impl ReferenceProcessSupervisor {
 
         loop {
             if output_budget.exceeded() {
-                return self.terminate_and_reap(
+                return Self::terminate_and_reap(
                     &process_tree,
                     child,
                     stdin_writer,
                     stdout_reader,
                     stderr_reader,
                     RunStatus::OutputLimitExceeded,
-                    output_budget,
+                    &output_budget,
                 );
             }
             if let Some(status) = child.try_wait().map_err(SupervisorError::Wait)? {
@@ -251,7 +254,7 @@ impl ReferenceProcessSupervisor {
                 process_tree
                     .terminate_after_leader_exit(&mut child)
                     .map_err(SupervisorError::Kill)?;
-                return self.result_after_reap(
+                return Self::result_after_reap(
                     if status.success() {
                         RunStatus::Completed
                     } else {
@@ -261,30 +264,30 @@ impl ReferenceProcessSupervisor {
                     stdin_writer,
                     stdout_reader,
                     stderr_reader,
-                    output_budget,
+                    &output_budget,
                 );
             }
 
             if cancellation.is_cancelled() {
-                return self.terminate_and_reap(
+                return Self::terminate_and_reap(
                     &process_tree,
                     child,
                     stdin_writer,
                     stdout_reader,
                     stderr_reader,
                     RunStatus::Cancelled,
-                    output_budget,
+                    &output_budget,
                 );
             }
             if Instant::now() >= deadline {
-                return self.terminate_and_reap(
+                return Self::terminate_and_reap(
                     &process_tree,
                     child,
                     stdin_writer,
                     stdout_reader,
                     stderr_reader,
                     RunStatus::TimedOut,
-                    output_budget,
+                    &output_budget,
                 );
             }
 
@@ -293,20 +296,19 @@ impl ReferenceProcessSupervisor {
     }
 
     fn terminate_and_reap(
-        &self,
         process_tree: &ProcessTreeGuard,
         mut child: Child,
         stdin_writer: JoinHandle<io::Result<()>>,
         stdout_reader: JoinHandle<io::Result<CapturedOutput>>,
         stderr_reader: JoinHandle<io::Result<CapturedOutput>>,
         status: RunStatus,
-        output_budget: Arc<OutputBudget>,
+        output_budget: &Arc<OutputBudget>,
     ) -> Result<RunResult, SupervisorError> {
         process_tree
             .terminate(&mut child)
             .map_err(SupervisorError::Kill)?;
         let exit_status = child.wait().map_err(SupervisorError::Wait)?;
-        self.result_after_reap(
+        Self::result_after_reap(
             status,
             exit_status.code(),
             stdin_writer,
@@ -317,13 +319,12 @@ impl ReferenceProcessSupervisor {
     }
 
     fn result_after_reap(
-        &self,
         status: RunStatus,
         exit_code: Option<i32>,
         stdin_writer: JoinHandle<io::Result<()>>,
         stdout_reader: JoinHandle<io::Result<CapturedOutput>>,
         stderr_reader: JoinHandle<io::Result<CapturedOutput>>,
-        output_budget: Arc<OutputBudget>,
+        output_budget: &OutputBudget,
     ) -> Result<RunResult, SupervisorError> {
         join_stdin(stdin_writer)?;
         let stdout = join_capture(stdout_reader)?;
@@ -560,6 +561,8 @@ impl WindowsJob {
 
         // The job is created and assigned before the supervisor observes any
         // completion. Descendants inherit the job membership automatically.
+        // SAFETY: The Win32 calls use null optional attributes, initialized
+        // stack-owned job limits, and handles obtained from the child process.
         unsafe {
             let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
             if job.is_null() || job == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
@@ -584,10 +587,9 @@ impl WindowsJob {
                 windows_sys::Win32::Foundation::CloseHandle(job);
                 return Err(io::Error::last_os_error());
             }
-            resume_suspended_child(child.id()).map_err(|error| {
+            resume_suspended_child(child.id()).inspect_err(|_error| {
                 windows_sys::Win32::System::JobObjects::TerminateJobObject(job, 1);
                 windows_sys::Win32::Foundation::CloseHandle(job);
-                error
             })?;
             Ok(Self(job))
         }
@@ -596,6 +598,8 @@ impl WindowsJob {
     fn terminate(&self, child: &mut Child) -> io::Result<()> {
         use windows_sys::Win32::System::JobObjects::TerminateJobObject;
 
+        // SAFETY: self.0 is a live job handle owned by this guard, and the
+        // child handle is only queried if termination reports failure.
         unsafe {
             let result = TerminateJobObject(self.0, 1);
             if result == 0 && child.try_wait()?.is_none() {
@@ -614,6 +618,8 @@ fn resume_suspended_child(pid: u32) -> io::Result<()> {
     };
     use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
 
+    // SAFETY: The snapshot and thread handles are checked before use; the
+    // enumeration structure is initialized and passed as a mutable pointer.
     unsafe {
         let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
         if snapshot.is_null() || snapshot == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
@@ -625,7 +631,7 @@ fn resume_suspended_child(pid: u32) -> io::Result<()> {
             ..THREADENTRY32::default()
         };
         let mut found = false;
-        if Thread32First(snapshot, &mut entry) != 0 {
+        if Thread32First(snapshot, &raw mut entry) != 0 {
             loop {
                 if entry.th32OwnerProcessID == pid {
                     found = true;
@@ -642,7 +648,7 @@ fn resume_suspended_child(pid: u32) -> io::Result<()> {
                     }
                     break;
                 }
-                if Thread32Next(snapshot, &mut entry) == 0 {
+                if Thread32Next(snapshot, &raw mut entry) == 0 {
                     break;
                 }
             }
@@ -662,6 +668,8 @@ fn resume_suspended_child(pid: u32) -> io::Result<()> {
 #[cfg(windows)]
 impl Drop for WindowsJob {
     fn drop(&mut self) {
+        // SAFETY: self.0 is the valid job handle created by for_child and is
+        // closed exactly once when this guard is dropped.
         unsafe {
             windows_sys::Win32::Foundation::CloseHandle(self.0);
         }

@@ -1145,6 +1145,7 @@ mod tests {
             runtime: Some("managed-function-v0".into()),
             task_source: Some("return input;".into()),
             general_compute_manifest_json: None,
+            managed_gpu_manifest_json: None,
             managed_dsl_backend_id: None,
             managed_dsl_semantics_manifest_sha256: None,
             expected_btih: None,

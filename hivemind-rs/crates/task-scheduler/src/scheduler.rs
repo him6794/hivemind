@@ -1,5 +1,6 @@
 use general_compute_runtime::production::ManagedDslBackendRegistration;
 use general_compute_runtime::{
+    managed_gpu::{ManagedGpuRequest, MANAGED_GPU_RUNTIME_VERSION},
     CapabilityMatrix, GeneralComputeRequest, TrustedWorkerCapabilityRegistration,
     GENERAL_COMPUTE_RUNTIME_VERSION, MANAGED_DSL_RUNTIME_VERSION,
 };
@@ -98,9 +99,35 @@ pub fn worker_supports_general_compute_request(
     else {
         return false;
     };
-    CapabilityMatrix::new(registration.backends)
+    if CapabilityMatrix::new(registration.backends.clone())
         .validate_request(request, &registration.worker)
-        .is_ok()
+        .is_err()
+    {
+        return false;
+    }
+
+    // The boolean `gpu_available` field is only a coarse scheduling hint. A
+    // typed GPU request must also resolve against the Nodepool-persisted,
+    // operator-approved capability identities before dispatch.
+    registration.select_gpu_for_request(request).is_ok()
+}
+
+pub fn worker_supports_managed_gpu_request(
+    request: &ManagedGpuRequest,
+    persisted_capabilities_json: Option<&str>,
+) -> bool {
+    if request.validate().is_err() || request.reservation_cpt == 0 {
+        return false;
+    }
+    let Some(persisted_capabilities_json) = persisted_capabilities_json else {
+        return false;
+    };
+    let Ok(registration) =
+        serde_json::from_str::<TrustedWorkerCapabilityRegistration>(persisted_capabilities_json)
+    else {
+        return false;
+    };
+    registration.select_managed_gpu_for_request(request).is_ok()
 }
 
 pub fn public_dynamic_managed_dsl_snapshot(worker: &WorkerNode) -> Option<&str> {
@@ -205,6 +232,17 @@ pub async fn find_best_worker(task: &Task, workers: &[WorkerNode]) -> Option<Wor
                         &request,
                         general_compute_snapshot_for_worker(w),
                     )
+                }),
+            Some(MANAGED_GPU_RUNTIME_VERSION) => task
+                .managed_gpu_manifest_json
+                .as_deref()
+                .and_then(|manifest| serde_json::from_slice::<ManagedGpuRequest>(manifest).ok())
+                .is_some_and(|request| {
+                    u64::try_from(task.max_cpt).ok() == Some(request.reservation_cpt)
+                        && worker_supports_managed_gpu_request(
+                            &request,
+                            general_compute_snapshot_for_worker(w),
+                        )
                 }),
             Some(_) | None => true,
         };
@@ -538,6 +576,7 @@ mod tests {
             runtime: None,
             task_source: None,
             general_compute_manifest_json: None,
+            managed_gpu_manifest_json: None,
             managed_dsl_backend_id: None,
             managed_dsl_semantics_manifest_sha256: None,
             expected_btih: None,
@@ -595,6 +634,7 @@ mod tests {
             runtime: None,
             task_source: None,
             general_compute_manifest_json: None,
+            managed_gpu_manifest_json: None,
             managed_dsl_backend_id: None,
             managed_dsl_semantics_manifest_sha256: None,
             expected_btih: None,
@@ -690,6 +730,59 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn alpha_gpu_admission_requires_a_typed_persisted_identity() {
+        use general_compute_runtime::gpu::{GpuCapability, GpuRequirement, GpuRuntime, GpuVendor};
+        use general_compute_runtime::TrustedWorkerCapabilityRegistration;
+
+        let image = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let requirement = GpuRequirement::new(
+            GpuVendor::Nvidia,
+            "sm_80",
+            GpuRuntime::Cuda,
+            "550.54",
+            8 * 1024 * 1024 * 1024,
+            4,
+            image,
+            false,
+        )
+        .unwrap();
+        let capability = GpuCapability::new(
+            GpuVendor::Nvidia,
+            "gpu-0",
+            "sm_80",
+            GpuRuntime::Cuda,
+            "12.4",
+            "550.54",
+            16 * 1024 * 1024 * 1024,
+            8,
+            image,
+        )
+        .unwrap();
+        let mut request = alpha_request();
+        request.execution_policy.gpu_required = true;
+        request.execution_policy.gpu_requirement = Some(requirement);
+        request.request_digest = request.canonical_request_digest();
+
+        let mut registration: TrustedWorkerCapabilityRegistration =
+            serde_json::from_str(&matching_capability_snapshot()).unwrap();
+        registration.worker.gpu_available = true;
+        registration.backends[0].gpu_allowed = true;
+        registration.gpu_capabilities = vec![capability];
+        let snapshot = serde_json::to_string(&registration).unwrap();
+        assert!(worker_supports_general_compute_request(
+            &request,
+            Some(&snapshot)
+        ));
+
+        registration.gpu_capabilities.clear();
+        let snapshot = serde_json::to_string(&registration).unwrap();
+        assert!(!worker_supports_general_compute_request(
+            &request,
+            Some(&snapshot)
+        ));
+    }
+
     #[tokio::test]
     async fn alpha_task_is_scheduled_only_to_a_worker_with_the_nodepool_snapshot() {
         let request = alpha_request();
@@ -748,6 +841,7 @@ mod tests {
             runtime: Some(GENERAL_COMPUTE_RUNTIME_VERSION.into()),
             task_source: None,
             general_compute_manifest_json: Some(serde_json::to_vec(request).unwrap()),
+            managed_gpu_manifest_json: None,
             managed_dsl_backend_id: None,
             managed_dsl_semantics_manifest_sha256: None,
             expected_btih: None,
@@ -839,6 +933,7 @@ mod tests {
             runtime: None,
             task_source: None,
             general_compute_manifest_json: None,
+            managed_gpu_manifest_json: None,
             managed_dsl_backend_id: None,
             managed_dsl_semantics_manifest_sha256: None,
             expected_btih: None,
@@ -921,6 +1016,7 @@ mod tests {
             runtime: None,
             task_source: None,
             general_compute_manifest_json: None,
+            managed_gpu_manifest_json: None,
             managed_dsl_backend_id: None,
             managed_dsl_semantics_manifest_sha256: None,
             expected_btih: None,

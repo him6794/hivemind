@@ -102,6 +102,7 @@ fn task_result_serializes_proofs_without_losing_legacy_compatibility() {
         managed_receipt_json: Some("{}".into()),
         managed_proof: Some(proof.clone()),
         general_compute_result_json: None,
+        managed_gpu_result_json: None,
     };
 
     let serialized = serde_json::to_string(&result)
@@ -164,6 +165,7 @@ async fn dropped_execute_future_keeps_supervisor_cleanup_alive() {
                     managed_receipt_json: None,
                     managed_proof: None,
                     general_compute_result_json: None,
+                    managed_gpu_result_json: None,
                 })
             })
         },
@@ -236,6 +238,7 @@ async fn concurrent_duplicate_execution_waits_for_the_original_result() {
                         managed_receipt_json: None,
                         managed_proof: None,
                         general_compute_result_json: None,
+                        managed_gpu_result_json: None,
                     })
                 })
             }
@@ -270,6 +273,116 @@ async fn concurrent_duplicate_execution_waits_for_the_original_result() {
     assert_eq!(first_result.task_id, second_result.task_id);
     assert_eq!(first_result.success, second_result.success);
     assert_eq!(first_result.output, second_result.output);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn overlapping_attempts_keep_execution_and_cancellation_isolated() {
+    let started = Arc::new(tokio::sync::Barrier::new(2));
+    let first_release = Arc::new(Notify::new());
+    let second_release = Arc::new(Notify::new());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let executor = Arc::new(WorkerExecutor::new_with_task_runner(
+        HivemindConfig::default(),
+        {
+            let started = Arc::clone(&started);
+            let first_release = Arc::clone(&first_release);
+            let second_release = Arc::clone(&second_release);
+            let calls = Arc::clone(&calls);
+            move |task, _cancellation| {
+                let index = calls.fetch_add(1, Ordering::SeqCst);
+                assert!(index < 2, "only the two distinct attempts should execute");
+                let started = Arc::clone(&started);
+                let release = if index == 0 {
+                    Arc::clone(&first_release)
+                } else {
+                    Arc::clone(&second_release)
+                };
+                Box::pin(async move {
+                    started.wait().await;
+                    release.notified().await;
+                    Ok(TaskResult {
+                        task_id: task.task_id,
+                        success: true,
+                        output: Some(format!("attempt-{index}")),
+                        error: None,
+                        exit_code: 0,
+                        cpu_time_ms: 0,
+                        wall_time_ms: 0,
+                        peak_memory_mb: 0,
+                        managed_executed_ops: 0,
+                        managed_output_bytes: 0,
+                        managed_receipt_json: None,
+                        managed_proof: None,
+                        general_compute_result_json: None,
+                        managed_gpu_result_json: None,
+                    })
+                })
+            }
+        },
+    ));
+    let task = test_task("overlapping-attempts");
+    let first = {
+        let executor = Arc::clone(&executor);
+        let task = task.clone();
+        tokio::spawn(async move {
+            executor
+                .execute_task_with_context_and_attempt(&task, None, "attempt-a")
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while calls.load(Ordering::SeqCst) != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first attempt should start before the second attempt");
+    let second = {
+        let executor = Arc::clone(&executor);
+        let task = task.clone();
+        tokio::spawn(async move {
+            executor
+                .execute_task_with_context_and_attempt(&task, None, "attempt-b")
+                .await
+        })
+    };
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while calls.load(Ordering::SeqCst) != 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("distinct attempts must execute concurrently");
+    assert_eq!(
+        executor.stop_task_execution_for_attempt(&task.task_id, Some("attempt-a")),
+        StopTaskOutcome::StopRequested
+    );
+    assert_eq!(
+        executor.stop_task_execution_for_attempt(&task.task_id, Some("wrong-attempt")),
+        StopTaskOutcome::NotRunning
+    );
+
+    first_release.notify_one();
+    let first_result = tokio::time::timeout(Duration::from_secs(2), first)
+        .await
+        .expect("first attempt should finish")
+        .expect("first attempt task should not panic")
+        .expect("first attempt should succeed");
+    assert_eq!(first_result.output.as_deref(), Some("attempt-0"));
+    assert_eq!(
+        executor.stop_task_execution_for_attempt(&task.task_id, Some("attempt-b")),
+        StopTaskOutcome::StopRequested
+    );
+
+    second_release.notify_one();
+    let second_result = tokio::time::timeout(Duration::from_secs(2), second)
+        .await
+        .expect("second attempt should finish")
+        .expect("second attempt task should not panic")
+        .expect("second attempt should succeed");
+    assert_eq!(second_result.output.as_deref(), Some("attempt-1"));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
 #[cfg(unix)]
@@ -317,6 +430,7 @@ fn test_task(task_id: &str) -> Task {
         runtime: Some("managed-function-v0".into()),
         task_source: Some("return 1;".into()),
         general_compute_manifest_json: None,
+        managed_gpu_manifest_json: None,
         managed_dsl_backend_id: None,
         managed_dsl_semantics_manifest_sha256: None,
         expected_btih: None,

@@ -249,6 +249,7 @@ impl GrpcClient {
         general_compute_manifest_json: &[u8],
         managed_dsl_backend_id: &str,
         managed_dsl_semantics_manifest_sha256: &str,
+        managed_gpu_manifest_json: &[u8],
     ) -> Result<UploadTaskResponse, tonic::Status> {
         let task_id = task_id.to_string();
         let torrent = torrent.to_string();
@@ -260,6 +261,7 @@ impl GrpcClient {
         let managed_dsl_backend_id = managed_dsl_backend_id.to_string();
         let managed_dsl_semantics_manifest_sha256 =
             managed_dsl_semantics_manifest_sha256.to_string();
+        let managed_gpu_manifest_json = managed_gpu_manifest_json.to_vec();
         self.with_clients(|mut clients| async move {
             clients
                 .master
@@ -278,6 +280,7 @@ impl GrpcClient {
                     general_compute_manifest_json,
                     managed_dsl_backend_id,
                     managed_dsl_semantics_manifest_sha256,
+                    managed_gpu_manifest_json,
                 }))
                 .await
                 .map(|r| r.into_inner())

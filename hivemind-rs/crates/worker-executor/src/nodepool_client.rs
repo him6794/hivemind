@@ -406,13 +406,32 @@ pub async fn register_once_with_capability_report(
     Ok(())
 }
 
+/// Classify a Nodepool RPC failure for HTTP callers.
+///
+/// The Worker control API forwards registration failures to the browser UI,
+/// which only redirects to login on HTTP 401. A rejected or expired bearer
+/// token must therefore survive the `anyhow` boundary as an authentication
+/// failure instead of collapsing into a generic bad gateway. Ownership and
+/// authorization rejections arrive as `success=false` responses, not gRPC
+/// errors, so they keep their distinct messages.
+pub fn is_nodepool_authentication_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<tonic::Status>())
+        .any(|status| status.code() == tonic::Code::Unauthenticated)
+}
+
 pub async fn report_task_output_once(
     endpoint: &str,
     worker_id: &str,
     token: &str,
     task_id: &str,
+    retry_count: i32,
     output: &str,
 ) -> anyhow::Result<()> {
+    if retry_count < 0 {
+        anyhow::bail!("retry_count must not be negative");
+    }
     let mut client = NodeManagerServiceClient::connect(nodepool_endpoint(endpoint)).await?;
     let response = client
         .task_output_upload(TaskOutputUploadRequest {
@@ -420,6 +439,7 @@ pub async fn report_task_output_once(
             output: output.to_string(),
             token: token.to_string(),
             worker_id: worker_id.to_string(),
+            retry_count,
         })
         .await?
         .into_inner();
@@ -434,8 +454,12 @@ pub async fn report_task_result_once(
     worker_id: &str,
     token: &str,
     task_id: &str,
+    retry_count: i32,
     result_torrent: &str,
 ) -> anyhow::Result<()> {
+    if retry_count < 0 {
+        anyhow::bail!("retry_count must not be negative");
+    }
     let mut client = NodeManagerServiceClient::connect(nodepool_endpoint(endpoint)).await?;
     let response = client
         .task_result_upload(TaskResultUploadRequest {
@@ -443,6 +467,7 @@ pub async fn report_task_result_once(
             result_torrent: result_torrent.to_string(),
             token: token.to_string(),
             worker_id: worker_id.to_string(),
+            retry_count,
         })
         .await?
         .into_inner();
@@ -457,8 +482,12 @@ pub async fn report_task_usage_once(
     worker_id: &str,
     token: &str,
     task_id: &str,
+    retry_count: i32,
     usage: ResourceUsage,
 ) -> anyhow::Result<()> {
+    if retry_count < 0 {
+        anyhow::bail!("retry_count must not be negative");
+    }
     let mut client = NodeManagerServiceClient::connect(nodepool_endpoint(endpoint)).await?;
     let response = client
         .task_usage(TaskUsageRequest {
@@ -466,6 +495,7 @@ pub async fn report_task_usage_once(
             usage: Some(resource_usage_to_proto(usage)),
             token: token.to_string(),
             worker_id: worker_id.to_string(),
+            retry_count,
         })
         .await?
         .into_inner();
@@ -744,7 +774,12 @@ async fn run_worker_session(
     {
         Ok(Ok(response)) => response,
         Ok(Err(status)) if is_terminal_session_status(&status) => {
-            warn!(worker_id = %config.worker_id, "Worker session authentication was rejected");
+            warn!(
+                worker_id = %config.worker_id,
+                code = ?status.code(),
+                reason = %sanitize_status_reason(status.message(), &config.token),
+                "Worker outbound session was rejected by Nodepool; not retrying"
+            );
             return Ok(SessionRunOutcome::Terminal);
         }
         Ok(Err(status)) => anyhow::bail!("Worker session open failed: {status}"),
@@ -1024,6 +1059,48 @@ async fn refresh_nodepool_bridge(nodepool_addr: &Arc<std::sync::Mutex<String>>) 
     }
 }
 
+const SESSION_REJECTION_REASON_MAX_CHARS: usize = 160;
+
+/// Bounded, credential-free reason for a terminal session rejection.
+///
+/// The configured bearer token never appears in the result, control
+/// characters and newlines are collapsed so log injectors cannot forge
+/// lines, and the message is capped so Nodepool error text cannot flood
+/// the Worker log. `Status` display/debug output and metadata are never
+/// included; callers log the tonic code separately.
+fn sanitize_status_reason(status_message: &str, token: &str) -> String {
+    let collapsed = status_message
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let mut collapsed = collapsed.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed_token = token.trim();
+    if !trimmed_token.is_empty() && !collapsed.is_empty() {
+        // Remove any accidental echo of the credential before bounding.
+        collapsed = collapsed.replace(trimmed_token, "<redacted>");
+    }
+    let truncated: String = collapsed
+        .chars()
+        .take(SESSION_REJECTION_REASON_MAX_CHARS)
+        .collect();
+    let bounded = if truncated.chars().count() < collapsed.chars().count() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    };
+    if bounded.trim().is_empty() {
+        "(no reason provided)".to_string()
+    } else {
+        bounded
+    }
+}
+
 fn is_terminal_session_status(status: &tonic::Status) -> bool {
     matches!(
         status.code(),
@@ -1096,6 +1173,65 @@ mod tests {
         assert_eq!(
             super::nodepool_endpoint("http://nodepool:50051"),
             "http://nodepool:50051"
+        );
+    }
+
+    #[test]
+    fn sanitize_status_reason_redacts_the_configured_token() {
+        let reason = super::sanitize_status_reason(
+            "Invalid Worker session token eyJabc.def.ghi was rejected",
+            "eyJabc.def.ghi",
+        );
+        assert!(!reason.contains("eyJabc.def.ghi"));
+        assert!(reason.contains("<redacted>"));
+    }
+
+    #[test]
+    fn nodepool_authentication_errors_survive_the_anyhow_boundary() {
+        let unauthenticated: anyhow::Error = tonic::Status::unauthenticated("Invalid token").into();
+        let unavailable: anyhow::Error = tonic::Status::unavailable("nodepool is down").into();
+        let plain = anyhow::anyhow!("worker registration timed out after 10 seconds");
+
+        assert!(super::is_nodepool_authentication_error(&unauthenticated));
+        // Transport and timeout failures must keep their generic mapping so
+        // the UI does not log users out during a Nodepool outage.
+        assert!(!super::is_nodepool_authentication_error(&unavailable));
+        assert!(!super::is_nodepool_authentication_error(&plain));
+
+        let wrapped = anyhow::Error::new(tonic::Status::unauthenticated("Invalid token"))
+            .context("register_worker_node rpc failed");
+        assert!(super::is_nodepool_authentication_error(&wrapped));
+    }
+
+    #[test]
+    fn sanitize_status_reason_collapses_control_characters_and_newlines() {
+        let reason = super::sanitize_status_reason("line one\r\nline two\u{0007}END", "");
+        assert!(!reason.contains('\r'));
+        assert!(!reason.contains('\n'));
+        assert!(!reason.contains('\u{0007}'));
+        assert_eq!(reason, "line one line two END");
+    }
+
+    #[test]
+    fn sanitize_status_reason_bounds_long_messages() {
+        let long = "x".repeat(super::SESSION_REJECTION_REASON_MAX_CHARS + 200);
+        let reason = super::sanitize_status_reason(&long, "");
+        assert_eq!(
+            reason.chars().count(),
+            super::SESSION_REJECTION_REASON_MAX_CHARS + 1
+        );
+        assert!(reason.ends_with('…'));
+    }
+
+    #[test]
+    fn sanitize_status_reason_reports_placeholder_for_empty_input() {
+        assert_eq!(
+            super::sanitize_status_reason("", ""),
+            "(no reason provided)"
+        );
+        assert_eq!(
+            super::sanitize_status_reason("   \n\t ", ""),
+            "(no reason provided)"
         );
     }
 
@@ -1181,6 +1317,7 @@ mod tests {
             "worker-report-1",
             "worker-token-1",
             "task-report-1",
+            0,
             "stdout payload",
         )
         .await
@@ -1193,6 +1330,7 @@ mod tests {
         assert_eq!(request.worker_id, "worker-report-1");
         assert_eq!(request.task_id, "task-report-1");
         assert_eq!(request.token, "worker-token-1");
+        assert_eq!(request.retry_count, 0);
         assert_eq!(request.output, "stdout payload");
     }
 
@@ -1208,6 +1346,7 @@ mod tests {
             "worker-report-2",
             "worker-token-2",
             "task-report-2",
+            0,
             "btih:result-ref",
         )
         .await
@@ -1220,6 +1359,7 @@ mod tests {
         assert_eq!(request.worker_id, "worker-report-2");
         assert_eq!(request.task_id, "task-report-2");
         assert_eq!(request.token, "worker-token-2");
+        assert_eq!(request.retry_count, 0);
         assert_eq!(request.result_torrent, "btih:result-ref");
     }
 
@@ -1235,6 +1375,7 @@ mod tests {
             "worker-report-3",
             "worker-token-3",
             "task-report-3",
+            0,
             ResourceUsage {
                 cpu_percent: 11.0,
                 memory_percent: 22.0,
@@ -1254,6 +1395,7 @@ mod tests {
         assert_eq!(request.worker_id, "worker-report-3");
         assert_eq!(request.task_id, "task-report-3");
         assert_eq!(request.token, "worker-token-3");
+        assert_eq!(request.retry_count, 0);
         assert_eq!(usage.cpu_percent, 11.0);
         assert_eq!(usage.vram_percent, 44.0);
     }

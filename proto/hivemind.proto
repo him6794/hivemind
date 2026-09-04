@@ -203,6 +203,7 @@ message UploadTaskRequest {
     bytes general_compute_manifest_json = 12; // canonical general-compute-v1alpha1 request manifest
     string managed_dsl_backend_id = 13;
     string managed_dsl_semantics_manifest_sha256 = 14;
+    bytes managed_gpu_manifest_json = 15; // canonical managed-function-gpu-v1 request manifest
 }
 
 message UploadTaskResponse {
@@ -241,6 +242,7 @@ message TaskInfo {
     string dispatch_status = 20;
     int64 usage_units = 21;
     int64 max_cpt = 22;
+    string runtime = 23;
 }
 
 
@@ -380,6 +382,7 @@ message GetTaskResultResponse {
     bool success = 1;
     string status_message = 2;
     string result_torrent = 3;
+    bytes managed_gpu_result_json = 4; // Nodepool-validated managed-function-gpu-v1 result
 }
 
 message StopTaskRequest {
@@ -438,6 +441,7 @@ message ExecuteTaskRequest {
     string managed_proof_authorization_token = 15; // Nodepool proof-production authorization; memory-only on Worker
     int64 managed_proof_lease_generation = 16; // active Nodepool lease generation
     int64 managed_proof_deadline_unix_ms = 17; // absolute proof request deadline
+    bytes managed_gpu_manifest_json = 18; // canonical managed-function-gpu-v1 request manifest
 }
 
 message ManagedProofEnvelope {
@@ -459,6 +463,7 @@ message ExecuteTaskResponse {
     string idempotency_key = 9;
     string request_digest = 10;
     bytes general_compute_result_json = 11; // validated general-compute-v1alpha1 result envelope
+    bytes managed_gpu_result_json = 12; // validated managed-function-gpu-v1 result envelope
 }
 
 // Nodepool -> Worker: authenticated, attempt-bound general-compute artifact
@@ -556,6 +561,9 @@ message TaskOutputUploadRequest {
     string output = 2;
     string token = 3;
     string worker_id = 4;
+    // The retry generation returned by PullBatch. Legacy callers that do not
+    // provide it are accepted only for the initial assignment (generation 0).
+    int32 retry_count = 5;
 }
 message TaskOutputUploadResponse {
     bool success = 1;
@@ -567,6 +575,9 @@ message TaskResultUploadRequest {
     string result_torrent = 2;
     string token = 3;
     string worker_id = 4;
+    // The retry generation returned by PullBatch. Legacy callers that do not
+    // provide it are accepted only for the initial assignment (generation 0).
+    int32 retry_count = 5;
 }
 message TaskResultUploadResponse {
     bool success = 1;
@@ -602,6 +613,9 @@ message TaskUsageRequest {
     ResourceUsage usage = 2;
     string token = 3;
     string worker_id = 4;
+    // The retry generation returned by PullBatch. Legacy callers that do not
+    // provide it are accepted only for the initial assignment (generation 0).
+    int32 retry_count = 5;
 }
 message TaskUsageResponse {
     bool success = 1;
@@ -682,6 +696,8 @@ message TaskLease {
     ResourceSpec resource_limits = 4;
     int64 deadline_unix = 5;
     int32 priority = 6;
+    // Echo this generation in every legacy report for this lease.
+    int32 retry_count = 7;
 }
 
 message PullBatchResponse {
@@ -706,6 +722,8 @@ message CompletedTask {
     string stderr_artifact_ref = 4;
     repeated string result_artifact_refs = 5;
     ExecutionMetrics metrics = 6;
+    // The retry generation carried by the corresponding TaskLease.
+    int32 retry_count = 7;
 }
 
 message CompleteBatchRequest {

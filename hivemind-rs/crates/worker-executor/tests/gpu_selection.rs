@@ -112,6 +112,7 @@ fn trusted_registration(
             gpu_available: true,
         },
         gpu_capabilities,
+        managed_gpu_backends: vec![],
         backends: vec![BackendRegistration {
             backend_id: request.backend_id.clone(),
             execution_mode: general_compute_runtime::sandbox::BackendExecutionMode::ReferenceDirect,
