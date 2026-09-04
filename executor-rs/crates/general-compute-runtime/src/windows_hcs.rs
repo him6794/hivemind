@@ -5,7 +5,10 @@
 //! ComputeCore.dll; non-Windows builds fail closed with `UnsupportedPlatform`.
 
 use crate::production::WindowsHcsContainerSpec;
-use crate::supervisor::{Cancellation, RunResult, RunStatus};
+#[cfg(any(windows, test))]
+use crate::supervisor::RunStatus;
+use crate::supervisor::{Cancellation, RunResult};
+#[cfg(any(windows, test))]
 use std::io::Read;
 use std::time::Duration;
 
@@ -61,6 +64,7 @@ impl WindowsHcsLauncher {
     }
 
     #[cfg(not(windows))]
+    #[expect(clippy::unused_self)]
     fn run_platform(
         &self,
         _spec: &WindowsHcsContainerSpec,
@@ -144,6 +148,7 @@ fn validate_spec(spec: &WindowsHcsContainerSpec) -> Result<(), WindowsHcsError> 
     Ok(())
 }
 
+#[cfg(any(windows, test))]
 fn read_result_file(
     path: &std::path::Path,
     max_output_bytes: usize,
@@ -181,12 +186,14 @@ fn read_result_file(
     Ok(bytes)
 }
 
+#[cfg(any(windows, test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HcsWaitOutcome {
     Exited,
     TimedOut,
 }
 
+#[cfg(any(windows, test))]
 trait HcsLifecycleProvider {
     fn start(&mut self, timeout: Duration) -> Result<(), WindowsHcsError>;
     fn wait_for_exit(&mut self, timeout: Duration) -> Result<HcsWaitOutcome, WindowsHcsError>;
@@ -194,6 +201,7 @@ trait HcsLifecycleProvider {
     fn shutdown(&mut self, timeout: Duration);
 }
 
+#[cfg(any(windows, test))]
 fn run_lifecycle<P: HcsLifecycleProvider>(
     provider: &mut P,
     timeout: Duration,

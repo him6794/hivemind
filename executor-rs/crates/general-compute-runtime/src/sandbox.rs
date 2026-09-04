@@ -996,8 +996,8 @@ fn validate_host_device_sources_inner(
         };
         let raw_device = metadata.rdev();
         if !type_matches
-            || linux_device_major(raw_device) as i64 != device.major
-            || linux_device_minor(raw_device) as i64 != device.minor
+            || linux_device_major(raw_device).cast_signed() != device.major
+            || linux_device_minor(raw_device).cast_signed() != device.minor
         {
             return Err(ProductionSandboxError::DeviceUnavailable(format!(
                 "device source {} does not match the pinned type or identity",
@@ -1010,12 +1010,12 @@ fn validate_host_device_sources_inner(
 
 #[cfg(unix)]
 fn linux_device_major(device: u64) -> u64 {
-    ((device >> 8) & 0x0fff) | ((device >> 32) & 0xfffff000)
+    ((device >> 8) & 0x0fff) | ((device >> 32) & 0xffff_f000)
 }
 
 #[cfg(unix)]
 fn linux_device_minor(device: u64) -> u64 {
-    (device & 0x00ff) | ((device >> 12) & 0xffffff00)
+    (device & 0x00ff) | ((device >> 12) & 0xffff_ff00)
 }
 
 const ALLOWED_OCI_ROOT_KEYS: &[&str] = &[
