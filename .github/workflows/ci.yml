@@ -80,7 +80,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Run full workspace tests with required database
         working-directory: hivemind-rs
-        run: cargo test --workspace --all-targets --locked -- --nocapture
+        run: cargo test --workspace --all-targets --locked -- --nocapture --test-threads=1
       - name: Verify the pinned managed-proof contract
         working-directory: hivemind-rs
         run: cargo test -p hivemind-managed-proof --features risc0-verifier --test v0_semantics_manifest --locked
@@ -117,7 +117,7 @@ jobs:
         run: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
       - name: Run full executor tests without hardware-only CUDA linking
         working-directory: executor-rs
-        run: cargo test --workspace --all-targets --locked -- --nocapture
+        run: cargo test --workspace --all-targets --locked -- --nocapture --test-threads=1
       - name: Build executor release artifacts
         working-directory: executor-rs
         run: cargo build --workspace --locked --release
@@ -169,6 +169,17 @@ jobs:
             "--remap-path-prefix=$HOME/.cargo=/root/.cargo"
           )
           printf 'RUSTFLAGS=%s\n' "${RUSTFLAGS:-} ${remaps[*]}" >> "$GITHUB_ENV"
+      - name: Download and verify pinned recursion artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          recursion_archive="$RUNNER_TEMP/recursion_zkr.zip"
+          recursion_url='https://risc0-artifacts.s3.us-west-2.amazonaws.com/zkr/744b999f0a35b3c86753311c7efb2a0054be21727095cf105af6ee7d3f4d8849.zip'
+          recursion_sha256='744b999f0a35b3c86753311c7efb2a0054be21727095cf105af6ee7d3f4d8849'
+          curl --fail --location --retry 5 --retry-all-errors --connect-timeout 30 \
+            --output "$recursion_archive" "$recursion_url"
+          printf '%s  %s\n' "$recursion_sha256" "$recursion_archive" | sha256sum --check --strict
+          printf 'RECURSION_SRC_PATH=%s\n' "$recursion_archive" >> "$GITHUB_ENV"
       - name: Verify proof build inputs
         shell: bash
         run: |
