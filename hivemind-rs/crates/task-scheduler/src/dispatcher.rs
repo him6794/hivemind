@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use crate::managed_proof_verifier::{verify_managed_proof, ManagedProofVerifierError};
 use anyhow::Result;
 use chrono::{Duration as ChronoDuration, Utc};

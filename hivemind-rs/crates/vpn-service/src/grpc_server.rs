@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use hivemind_proto::{
     vpn_service_server::VpnService, GetTaskPeersRequest, GetTaskPeersResponse,
     IssueUserVpnConfigRequest, IssueUserVpnConfigResponse, JoinVpnRequest, JoinVpnResponse,

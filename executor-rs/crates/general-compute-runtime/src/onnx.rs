@@ -337,16 +337,15 @@ impl OnnxTensorEnvelope {
 fn validate_scalar_bytes(dtype: OnnxTensorDType, bytes: &[u8]) -> Result<(), OnnxTensorError> {
     match dtype {
         OnnxTensorDType::Float32 => {
-            for chunk in bytes.chunks_exact(4) {
-                if !f32::from_le_bytes(chunk.try_into().expect("chunk width is four")).is_finite() {
+            for chunk in bytes.as_chunks::<4>().0 {
+                if !f32::from_le_bytes(*chunk).is_finite() {
                     return Err(OnnxTensorError::NonFiniteValue);
                 }
             }
         }
         OnnxTensorDType::Float64 => {
-            for chunk in bytes.chunks_exact(8) {
-                if !f64::from_le_bytes(chunk.try_into().expect("chunk width is eight")).is_finite()
-                {
+            for chunk in bytes.as_chunks::<8>().0 {
+                if !f64::from_le_bytes(*chunk).is_finite() {
                     return Err(OnnxTensorError::NonFiniteValue);
                 }
             }
@@ -382,7 +381,9 @@ fn decode_hex(value: &str) -> Result<Vec<u8>, OnnxTensorError> {
     }
     value
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let high = hex_digit(pair[0]).ok_or(OnnxTensorError::DataEncodingInvalid)?;
             let low = hex_digit(pair[1]).ok_or(OnnxTensorError::DataEncodingInvalid)?;

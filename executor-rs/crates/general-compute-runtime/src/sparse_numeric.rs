@@ -476,11 +476,10 @@ fn checked_dimension(dimension: u64) -> Result<usize, SparseNumericError> {
 
 fn decode_values(bytes: &[u8], byte_order: ByteOrder) -> Vec<f64> {
     let mut values = Vec::with_capacity(bytes.len() / 8);
-    for chunk in bytes.chunks_exact(8) {
-        let raw: [u8; 8] = chunk.try_into().expect("chunks_exact produces eight bytes");
+    for chunk in bytes.as_chunks::<8>().0 {
         values.push(match byte_order {
-            ByteOrder::Little => f64::from_le_bytes(raw),
-            ByteOrder::Big => f64::from_be_bytes(raw),
+            ByteOrder::Little => f64::from_le_bytes(*chunk),
+            ByteOrder::Big => f64::from_be_bytes(*chunk),
         });
     }
     values
