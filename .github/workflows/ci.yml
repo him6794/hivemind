@@ -58,13 +58,13 @@ jobs:
         uses: actions/checkout@v4
       - name: Install protobuf compiler
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
-      - name: Set up pinned Rust
-        uses: dtolnay/rust-toolchain@1.90.0
+      - name: Set up pinned Hivemind Rust
+        uses: dtolnay/rust-toolchain@1.98.1
         with:
-          components: rustfmt
-      - name: Verify pinned Rust
+          components: rustfmt, clippy
+      - name: Verify pinned Hivemind Rust
         shell: bash
-        run: test "$(rustc --version | cut -d' ' -f2)" = '1.90.0'
+        run: test "$(rustc --version | cut -d' ' -f2)" = '1.98.1'
       - name: Cache Hivemind Cargo build
         uses: Swatinem/rust-cache@v2
         with:
@@ -95,7 +95,7 @@ jobs:
       - name: Set up pinned Rust
         uses: dtolnay/rust-toolchain@1.90.0
         with:
-          components: rustfmt
+          components: rustfmt, clippy
       - name: Verify pinned Rust
         shell: bash
         run: test "$(rustc --version | cut -d' ' -f2)" = '1.90.0'
@@ -135,7 +135,7 @@ jobs:
       - name: Set up pinned host Rust
         uses: dtolnay/rust-toolchain@1.90.0
         with:
-          components: rustfmt
+          components: rustfmt, clippy
       - name: Install pinned RISC Zero guest toolchain
         shell: bash
         run: |
@@ -294,26 +294,39 @@ jobs:
       - name: Build release frontend artifacts
         shell: pwsh
         run: ./scripts/build-release-frontends.ps1
-      - name: Run packaging, sandbox, and release contract tests
+      - name: Run package worker contract
         shell: pwsh
-        run: |
-          $tests = @(
-            'scripts/package-worker-windows.Tests.ps1',
-            'scripts/windows-hcs-e2e.Tests.ps1',
-            'scripts/general-compute-oci-e2e.Tests.ps1',
-            'scripts/docker-compose-release.Tests.ps1',
-            'scripts/release-docs.Tests.ps1',
-            'scripts/build-release-frontends.Tests.ps1',
-            'scripts/release-frontend-smoke.Tests.ps1',
-            'scripts/build-managed-prover.Tests.ps1',
-            'scripts/onnx-runner.Tests.ps1',
-            'scripts/managed-proof-live-e2e.Tests.ps1',
-            'scripts/release-stack-smoke.Tests.ps1'
-          )
-          foreach ($test in $tests) {
-            & $test
-            if (!$?) { throw "Contract test failed: $test" }
-          }
+        run: ./scripts/package-worker-windows.Tests.ps1
+      - name: Run native HCS contract
+        shell: pwsh
+        run: ./scripts/windows-hcs-e2e.Tests.ps1
+      - name: Run general-compute OCI contract
+        shell: pwsh
+        run: ./scripts/general-compute-oci-e2e.Tests.ps1
+      - name: Run Docker Compose contract
+        shell: pwsh
+        run: ./scripts/docker-compose-release.Tests.ps1
+      - name: Run release documentation contract
+        shell: pwsh
+        run: ./scripts/release-docs.Tests.ps1
+      - name: Run release frontend build contract
+        shell: pwsh
+        run: ./scripts/build-release-frontends.Tests.ps1
+      - name: Run release frontend smoke contract
+        shell: pwsh
+        run: ./scripts/release-frontend-smoke.Tests.ps1
+      - name: Run managed prover build contract
+        shell: pwsh
+        run: ./scripts/build-managed-prover.Tests.ps1
+      - name: Run ONNX runner contract
+        shell: pwsh
+        run: ./scripts/onnx-runner.Tests.ps1
+      - name: Run managed proof live E2E contract
+        shell: pwsh
+        run: ./scripts/managed-proof-live-e2e.Tests.ps1
+      - name: Run release stack smoke contract
+        shell: pwsh
+        run: ./scripts/release-stack-smoke.Tests.ps1
 
   protected-frontend-e2e:
     name: Protected frontend Playwright E2E (manual)
