@@ -38,6 +38,12 @@ impl NodepoolTestFixture {
         self.client.take()
     }
 
+    fn api_config(&self) -> HivemindConfig {
+        let mut config = HivemindConfig::for_test();
+        config.server.nodepool_grpc_endpoint = Some(self.endpoint.clone());
+        config
+    }
+
     async fn cleanup(self) {
         let _ = self.shutdown.send(());
         let _ = self.server.await;
@@ -312,7 +318,7 @@ async fn master_http_artifact_chunk_proxy_persists_a_manifest_bound_source() {
         .unwrap();
     assert!(created.success, "{}", created.status_message);
 
-    let config = HivemindConfig::for_test();
+    let config = fixture.api_config();
     let state = crate::handlers::AppState {
         grpc_client: client,
         config,
@@ -396,7 +402,7 @@ async fn master_http_managed_gpu_submission_persists_manifest_without_legacy_tor
     let manifest = managed_gpu_request_for_http_test(&unique);
     let manifest_value = serde_json::to_value(&manifest).unwrap();
     let response = {
-        let config = HivemindConfig::for_test();
+        let config = fixture.api_config();
         let state = crate::handlers::AppState {
             grpc_client: client,
             config,
@@ -582,7 +588,7 @@ async fn master_http_managed_gpu_result_returns_typed_json_without_legacy_torren
     .await
     .unwrap();
 
-    let config = HivemindConfig::for_test();
+    let config = fixture.api_config();
     let state = crate::handlers::AppState {
         grpc_client: client,
         config,
@@ -804,7 +810,7 @@ async fn worker_path_routes_reject_unsafe_worker_ids_before_grpc() {
     assert!(login.success);
     let token = login.token;
 
-    let config = HivemindConfig::for_test();
+    let config = fixture.api_config();
     let state = crate::handlers::AppState {
         grpc_client: client,
         config,
@@ -894,7 +900,7 @@ async fn task_path_routes_reject_unsafe_task_ids_before_grpc() {
     assert!(login.success);
     let token = login.token;
 
-    let config = HivemindConfig::for_test();
+    let config = fixture.api_config();
     let state = crate::handlers::AppState {
         grpc_client: client,
         config,
@@ -969,7 +975,7 @@ async fn task_submission_routes_reject_invalid_resource_values_before_grpc() {
     assert!(login.success);
     let token = login.token;
 
-    let config = HivemindConfig::for_test();
+    let config = fixture.api_config();
     let state = crate::handlers::AppState {
         grpc_client: client,
         config,
