@@ -123,7 +123,8 @@ fn command_that_exits_with_descendant(start: &Path, final_marker: &Path) -> Refe
                 "(printf started > '{}'; printf ready > '{}'; sleep 2; printf survived > '{}') & while [ ! -f '{}' ]; do sleep 0.01; done; exit 0",
                 start.replace('\'', "'\\''"),
                 ready.replace('\'', "'\\''"),
-                final_marker.replace('\'', "'\\''")
+                final_marker.replace('\'', "'\\''"),
+                ready.replace('\'', "'\\''")
             ),
         ],
     )
