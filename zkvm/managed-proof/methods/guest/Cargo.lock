@@ -719,7 +719,7 @@ dependencies = [
 
 [[package]]
 name = "managed-function-runtime"
-version = "0.1.0"
+version = "0.0.7"
 dependencies = [
  "serde_json",
 ]

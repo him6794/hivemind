@@ -12,7 +12,7 @@ anyhow = "1"
 hivemind-managed-proof = { path = "../../../hivemind-rs/crates/managed-proof" }
 hivemind-managed-prover-protocol = { path = "../../../hivemind-rs/crates/managed-prover-protocol" }
 hivemind-managed-proof-methods = { path = "../methods" }
-managed-function-runtime = { path = "../../../executor-rs/crates/managed-function-runtime" }
+managed-function-runtime = { path = "../../../executor-rs/crates/managed-function-runtime-v0" }
 risc0-zkvm = { version = "=3.0.6", default-features = false, features = ["prove", "disable-dev-mode"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
