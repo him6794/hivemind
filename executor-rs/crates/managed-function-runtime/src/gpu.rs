@@ -646,6 +646,7 @@ fn gpu_error_to_runtime(error: &GpuBackendError) -> RuntimeError {
 }
 
 #[cfg(all(feature = "cuda", target_os = "linux"))]
+#[path = "gpu/cuda.rs"]
 mod cuda;
 
 #[cfg(all(feature = "cuda", target_os = "linux"))]

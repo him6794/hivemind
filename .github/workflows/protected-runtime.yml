@@ -37,8 +37,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up pinned Rust
+        uses: dtolnay/rust-toolchain@1.90.0
+      - name: Verify pinned Rust
+        shell: bash
+        run: test "$(rustc --version | cut -d' ' -f2)" = '1.90.0'
       - name: Require the configured physical GPU
         shell: bash
         run: |

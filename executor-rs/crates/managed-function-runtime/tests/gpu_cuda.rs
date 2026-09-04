@@ -20,10 +20,10 @@ fn cuda_test_backend() -> (CudaGpuBackend, String) {
 
 #[test]
 fn cuda_backend_executes_fixed_operations_on_the_selected_device() {
-    if std::env::var_os("HIVEMIND_RUN_CUDA_TESTS").is_none() {
-        eprintln!("skipping CUDA hardware test; set HIVEMIND_RUN_CUDA_TESTS=1 to enable");
-        return;
-    }
+    assert!(
+        std::env::var_os("HIVEMIND_RUN_CUDA_TESTS").is_some(),
+        "CUDA hardware tests require HIVEMIND_RUN_CUDA_TESTS=1"
+    );
 
     let (mut backend, expected_device_id) = cuda_test_backend();
     assert_eq!(backend.device_id(), expected_device_id);
@@ -66,10 +66,10 @@ fn cuda_backend_executes_fixed_operations_on_the_selected_device() {
 
 #[test]
 fn cuda_backend_runs_the_managed_gpu_interpreter_without_exposing_device_state() {
-    if std::env::var_os("HIVEMIND_RUN_CUDA_TESTS").is_none() {
-        eprintln!("skipping CUDA interpreter test; set HIVEMIND_RUN_CUDA_TESTS=1 to enable");
-        return;
-    }
+    assert!(
+        std::env::var_os("HIVEMIND_RUN_CUDA_TESTS").is_some(),
+        "CUDA hardware tests require HIVEMIND_RUN_CUDA_TESTS=1"
+    );
 
     let (mut backend, _) = cuda_test_backend();
     let mut executor = ManagedGpuExecutor::new(&mut backend);

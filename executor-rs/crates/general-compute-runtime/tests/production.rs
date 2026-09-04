@@ -28,6 +28,17 @@ fn dsl_registration(backend_id: &str) -> ManagedDslBackendRegistration {
     }
 }
 
+fn operator_path(name: &str) -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from(r"C:\hivemind").join(name)
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/hivemind").join(name)
+    }
+}
+
 #[test]
 fn managed_dsl_registry_round_trips_and_has_no_host_execution_fields() {
     let registration = dsl_registration("managed-default");
@@ -349,9 +360,9 @@ fn production_registry_rejects_unpinned_or_relative_operator_paths() {
 #[test]
 fn production_registry_requires_a_dedicated_runner_state_root() {
     let mut registration = config();
-    registration.bundle_root = PathBuf::from("C:\\hivemind\\bundle");
-    registration.artifact_root = PathBuf::from("C:\\hivemind\\artifacts");
-    registration.runner_executable = PathBuf::from("C:\\hivemind\\runc.exe");
+    registration.bundle_root = operator_path("bundle");
+    registration.artifact_root = operator_path("artifacts");
+    registration.runner_executable = operator_path("runc.exe");
     registration.runner_state_root = PathBuf::from("relative-runner-state");
 
     let error = ProductionBackendRegistry::new(vec![registration])
@@ -392,11 +403,11 @@ fn production_materializer_requires_an_operator_seccomp_profile() {
 #[test]
 fn production_registry_rejects_backend_mounts_that_do_not_match_the_entrypoint() {
     let mut registration = config();
-    registration.bundle_root = PathBuf::from("C:\\hivemind\\bundle");
-    registration.artifact_root = PathBuf::from("C:\\hivemind\\artifacts");
-    registration.runner_executable = PathBuf::from("C:\\hivemind\\runc.exe");
-    registration.runner_state_root = PathBuf::from("C:\\hivemind\\runner-state");
-    registration.seccomp_profile_path = PathBuf::from("C:\\hivemind\\seccomp.json");
+    registration.bundle_root = operator_path("bundle");
+    registration.artifact_root = operator_path("artifacts");
+    registration.runner_executable = operator_path("runc.exe");
+    registration.runner_state_root = operator_path("runner-state");
+    registration.seccomp_profile_path = operator_path("seccomp.json");
     registration.policy.mounts[0] = SandboxMount::ReadOnlyArtifact {
         artifact_id: "different-source".into(),
         destination: "/work/source".into(),
@@ -415,7 +426,7 @@ fn production_task_root_rejects_path_traversal_and_materializes_bound_bundle() {
     let mut registration = config();
     registration.bundle_root = std::env::temp_dir().join("hivemind-production-bundles");
     registration.artifact_root = std::env::temp_dir().join("hivemind-production-artifacts");
-    registration.runner_executable = PathBuf::from("C:\\hivemind\\runc.exe");
+    registration.runner_executable = operator_path("runc.exe");
     registration.runner_state_root = std::env::temp_dir().join("hivemind-production-runner-state");
     registration.seccomp_profile_path = registration.bundle_root.join("seccomp.json");
     let _ = std::fs::remove_dir_all(&registration.bundle_root);
@@ -565,11 +576,11 @@ fn materialize_bundle_for_gpu_launch_emits_exact_device_and_cgroup_entries() {
 #[test]
 fn onnx_backend_requires_fixed_source_and_numbered_input_mounts() {
     let mut registration = config();
-    registration.bundle_root = PathBuf::from("C:\\hivemind\\bundle");
-    registration.artifact_root = PathBuf::from("C:\\hivemind\\artifacts");
-    registration.runner_executable = PathBuf::from("C:\\hivemind\\runc.exe");
-    registration.runner_state_root = PathBuf::from("C:\\hivemind\\runner-state");
-    registration.seccomp_profile_path = PathBuf::from("C:\\hivemind\\seccomp.json");
+    registration.bundle_root = operator_path("bundle");
+    registration.artifact_root = operator_path("artifacts");
+    registration.runner_executable = operator_path("runc.exe");
+    registration.runner_state_root = operator_path("runner-state");
+    registration.seccomp_profile_path = operator_path("seccomp.json");
     registration.onnx = Some(
         OnnxBackendConfig::new(
             "source",
@@ -668,11 +679,11 @@ fn onnx_backend_binds_verified_artifacts_and_runner_annotations() {
 #[test]
 fn production_registry_requires_mounts_for_every_request_artifact() {
     let mut registration = config();
-    registration.bundle_root = PathBuf::from("C:\\hivemind\\bundle");
-    registration.artifact_root = PathBuf::from("C:\\hivemind\\artifacts");
-    registration.runner_executable = PathBuf::from("C:\\hivemind\\runc.exe");
-    registration.runner_state_root = PathBuf::from("C:\\hivemind\\runner-state");
-    registration.seccomp_profile_path = PathBuf::from("C:\\hivemind\\seccomp.json");
+    registration.bundle_root = operator_path("bundle");
+    registration.artifact_root = operator_path("artifacts");
+    registration.runner_executable = operator_path("runc.exe");
+    registration.runner_state_root = operator_path("runner-state");
+    registration.seccomp_profile_path = operator_path("seccomp.json");
     let registry = ProductionBackendRegistry::new(vec![registration.clone()]).unwrap();
     let mut request = GeneralComputeRequest {
         execution_id: "execution-production-input-mount".into(),
@@ -704,11 +715,11 @@ fn production_registry_requires_mounts_for_every_request_artifact() {
 #[test]
 fn production_registry_rejects_mounts_for_unrequested_artifacts() {
     let mut registration = config();
-    registration.bundle_root = PathBuf::from("C:\\hivemind\\bundle");
-    registration.artifact_root = PathBuf::from("C:\\hivemind\\artifacts");
-    registration.runner_executable = PathBuf::from("C:\\hivemind\\runc.exe");
-    registration.runner_state_root = PathBuf::from("C:\\hivemind\\runner-state");
-    registration.seccomp_profile_path = PathBuf::from("C:\\hivemind\\seccomp.json");
+    registration.bundle_root = operator_path("bundle");
+    registration.artifact_root = operator_path("artifacts");
+    registration.runner_executable = operator_path("runc.exe");
+    registration.runner_state_root = operator_path("runner-state");
+    registration.seccomp_profile_path = operator_path("seccomp.json");
     registration
         .policy
         .mounts
