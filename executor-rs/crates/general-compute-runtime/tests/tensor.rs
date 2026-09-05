@@ -148,7 +148,7 @@ fn tensor_rejects_pickle_and_object_payloads() {
 #[test]
 fn tensor_rejects_unknown_fields_and_tampered_logical_hash() {
     let json = serde_json::to_value(valid_f64_tensor()).expect("tensor serializes");
-    let mut unknown = json.clone();
+    let mut unknown = json;
     unknown["secret"] = serde_json::json!("leak");
     assert!(serde_json::from_value::<TensorManifest>(unknown).is_err());
 

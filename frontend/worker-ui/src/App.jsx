@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import './console.css';
-import { clearStoredSession, readStoredSession, saveStoredSession } from './authSession.mjs';
+import { clearStoredSession, isExpiredJwt, readStoredSession, saveStoredSession } from './authSession.mjs';
 import {
   buildRegisterWorkerBody,
   buildRegisterWorkerRequest,
@@ -110,6 +110,14 @@ export default function WorkerApp() {
   async function registerWorker(authToken = token, workerProfile = profile, endpoint = workerIp) {
     const ownerUsername = registrationOwnerUsername(authenticatedUsername, username);
     if (!authToken || !ownerUsername) return;
+    // The token may expire while this tab sits open; fail toward login
+    // instead of sending a request Nodepool must reject.
+    if (isExpiredJwt(authToken)) {
+      logout();
+      setStatus('Session expired. Please log in again.');
+      setRegistration({ success: false, message: 'Session expired. Please log in again.' });
+      return;
+    }
     setRegisterLoading(true);
     setStatus('Registering worker with nodepool...');
 

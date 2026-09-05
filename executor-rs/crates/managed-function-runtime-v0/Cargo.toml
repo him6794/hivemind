@@ -1,0 +1,17 @@
+[package]
+name = "managed-function-runtime"
+version = "0.0.7"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+authors = ["Samuel Colvin <samuel@pydantic.dev>"]
+description = "Frozen managed-function-v0 runtime for proof guests."
+
+[lib]
+name = "managed_function_runtime"
+path = "src/lib.rs"
+
+[dependencies]
+serde_json = "1.0"
+
+[workspace]

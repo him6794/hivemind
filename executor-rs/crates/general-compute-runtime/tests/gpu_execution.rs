@@ -34,6 +34,7 @@ fn reference_executor_writes_operator_selected_gpu_identity_into_result() {
     let registration = TrustedWorkerCapabilityRegistration {
         worker: worker(),
         gpu_capabilities: vec![selected.clone()],
+        managed_gpu_backends: vec![],
         backends: capabilities.backends.clone(),
     };
     let executor = ReferenceBackendExecutor::new_with_trusted_registration(

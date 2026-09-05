@@ -213,21 +213,31 @@ impl NodeManager {
         .map_err(Into::into)
     }
 
-    pub async fn refresh_session_tasks(&self, worker_id: &str, task_ids: &[String]) -> Result<()> {
-        if task_ids.is_empty() {
+    pub async fn refresh_session_tasks(
+        &self,
+        worker_id: &str,
+        task_attempts: &[hivemind_client_core::SessionTask],
+    ) -> Result<()> {
+        if task_attempts.is_empty() {
             return Ok(());
         }
-        sqlx::query(
-            "UPDATE tasks
-             SET last_update = NOW()
-             WHERE worker_id = $1
-               AND task_id = ANY($2)
-               AND status IN ('ASSIGNED', 'RUNNING')",
-        )
-        .bind(worker_id)
-        .bind(task_ids)
-        .execute(&self.db.pool)
-        .await?;
+        let mut tx = self.db.pool.begin().await?;
+        for task in task_attempts {
+            sqlx::query(
+                "UPDATE tasks
+                 SET last_update = NOW()
+                 WHERE worker_id = $1
+                   AND task_id = $2
+                   AND retry_count = $3
+                   AND status IN ('ASSIGNED', 'RUNNING')",
+            )
+            .bind(worker_id)
+            .bind(&task.task_id)
+            .bind(task.retry_count)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -264,6 +274,7 @@ mod tests {
                         gpu_available: false,
                     },
                     gpu_capabilities: vec![],
+                    managed_gpu_backends: vec![],
                     backends: vec![BackendRegistration {
                         backend_id: "python-cpython-312".into(),
                         execution_mode: general_compute_runtime::sandbox::BackendExecutionMode::ReferenceDirect,

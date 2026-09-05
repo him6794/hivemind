@@ -50,17 +50,52 @@ if ! command -v cargo >/dev/null 2>&1; then
   exit 69
 fi
 
+if ! command -v rustc >/dev/null 2>&1; then
+  echo "error: rustc is not on PATH" >&2
+  exit 69
+fi
+if ! rustc --version | grep -Eq '^rustc 1\.90\.0([[:space:]]|$)'; then
+  echo "error: the host Rust compiler must be exactly 1.90.0." >&2
+  echo "       Refusing to build a prover with an unverified host compiler." >&2
+  exit 69
+fi
+
 # risc0-build shells out to the RISC Zero guest toolchain. Without it the guest
 # ELF cannot be produced and the build fails deep inside a build script, so
 # check up front and say what to install.
-if ! rustup toolchain list 2>/dev/null | grep -q '^risc0'; then
+if ! cargo +risc0 --version >/dev/null 2>&1; then
   echo "error: the RISC Zero guest Rust toolchain is not installed." >&2
-  echo "       Install rzup, then run: rzup install rust" >&2
+  echo "       Install rzup, then run: rzup install rust 1.97.0" >&2
   echo "       See https://dev.risczero.com/api/zkvm/install" >&2
+  exit 69
+fi
+if ! cargo +risc0 --version | grep -Eq '1\.97\.0'; then
+  echo "error: the RISC Zero guest Rust toolchain must be exactly 1.97.0." >&2
+  echo "       Refusing to build a prover with an unverified guest compiler." >&2
   exit 69
 fi
 
 export HIVEMIND_ZKVM_USE_DOCKER=0
+export RISC0_BUILD_LOCKED=1
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
+
+# RISC Zero includes source locations in the guest ELF (and therefore in the
+# image ID). The trusted v0 guest was built from the canonical WSL checkout;
+# remap both frozen v0 crate sources and dependency registry paths so a
+# supported proving host reproduces that exact guest rather than merely the
+# same source text. The specific v0 mappings must precede the repository-wide
+# mapping for toolchains that apply remaps in declaration order.
+canonical_guest_source_root="/run/desktop/mnt/host/d/hivemind"
+cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+cargo_registry_index="index.crates.io-1949cf8c6b5b557f"
+path_remap_flags=(
+  "--remap-path-prefix=$repo_root/executor-rs/crates/managed-function-runtime-v0/src/lib.rs=$canonical_guest_source_root/executor-rs/crates/managed-function-runtime/src/lib.rs"
+  "--remap-path-prefix=$repo_root/hivemind-rs/crates/managed-proof-v0/src/lib.rs=$canonical_guest_source_root/hivemind-rs/crates/managed-proof/src/lib.rs"
+  "--remap-path-prefix=$repo_root=$canonical_guest_source_root"
+  "--remap-path-prefix=$cargo_home/registry/src/$cargo_registry_index/no_std_strings-0.1.3=/home/remi/.cargo/registry/src/$cargo_registry_index/no_std_strings-0.1.3"
+  "--remap-path-prefix=$cargo_home=/root/.cargo"
+)
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }${path_remap_flags[*]}"
 
 # RISC Zero's recursion circuit build downloads this artifact from its public
 # bucket. The upstream build script supports RECURSION_SRC_PATH as the official
@@ -137,8 +172,9 @@ resolve_recursion_artifact
 echo "checking that this environment reproduces the trusted guest image ID"
 (
   cd "$prover_workspace"
-  cargo test --locked -p hivemind-managed-proof-zkvm \
-    tests::generated_guest_id_matches_nodepool_trust_pin -- --exact
+  output="$(cargo test --locked -p hivemind-managed-proof-zkvm \
+    tests::generated_guest_id_matches_nodepool_trust_pin -- --exact --nocapture 2>&1 | tee /dev/stderr)"
+  grep -Eq 'test tests::generated_guest_id_matches_nodepool_trust_pin[[:space:]].*ok' <<<"$output"
 ) || {
   echo "error: this environment does not reproduce the pinned guest image ID." >&2
   echo "       A prover built here would have every proof rejected." >&2

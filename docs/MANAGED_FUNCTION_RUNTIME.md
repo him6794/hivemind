@@ -152,6 +152,31 @@ Forbidden in v0:
 - unbounded recursion
 - unbounded loops
 
+## GPU-v1 extension
+
+GPU-enabled managed functions use a separate runtime identity,
+`managed-function-gpu-v1`, and the canonical
+`executor-rs/crates/managed-function-runtime/managed-function-gpu-v1-semantics.json`
+manifest. This keeps floating-point and GPU behavior out of the frozen v0
+proof contract.
+
+GPU-v1 adds only fixed, Rust-owned operations:
+
+- `gpu_add_f32(lhs, rhs)`
+- `gpu_scale_f32(value, scalar)`
+- `gpu_matmul_f32(lhs, rhs)`
+
+The DSL receives bounded host-side numeric values. It cannot provide CUDA C,
+PTX, pointers, device handles, kernel source, dynamic libraries, or an
+executable. The operator-selected backend owns CUDA/cuBLAS resources, and a
+GPU-required request fails closed when a trusted compatible GPU is unavailable;
+it never silently uses the CPU reference backend.
+
+GPU-v1 also permits the separately declared floating-point and math surface
+only inside its explicit GPU execution context. GPU-v1 uses `proof = none` and
+must remain on the authoritative typed result and settlement path rather than
+falling back to the v0 proof guest or legacy result-torrent completion.
+
 ## Metering v0
 
 Every executed statement and expression consumes at least one operation.

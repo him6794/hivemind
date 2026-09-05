@@ -7,15 +7,15 @@ fn splitmix64_v1_replays_a_pinned_vector_and_separates_streams() {
     assert_eq!(RNG_ALGORITHM_VERSION, "splitmix64-v1");
 
     let mut rng = DeterministicRng::new(42, 7, 3);
-    assert_eq!(rng.next_u64(), 0x514f05fe1e8c18a7);
-    assert_eq!(rng.next_u64(), 0x1ee9b246bd16ac0);
-    assert_eq!(rng.next_u64(), 0xfcd8986fb3993738);
-    assert_eq!(rng.next_u64(), 0x210064362f5f167f);
+    assert_eq!(rng.next_u64(), 0x514f_05fe_1e8c_18a7);
+    assert_eq!(rng.next_u64(), 0x01ee_9b24_6bd1_6ac0);
+    assert_eq!(rng.next_u64(), 0xfcd8_986f_b399_3738);
+    assert_eq!(rng.next_u64(), 0x2100_6436_2f5f_167f);
 
     let mut different_stream = DeterministicRng::new(42, 8, 3);
     let mut different_subsequence = DeterministicRng::new(42, 7, 4);
-    assert_ne!(different_stream.next_u64(), 0x514f05fe1e8c18a7);
-    assert_ne!(different_subsequence.next_u64(), 0x514f05fe1e8c18a7);
+    assert_ne!(different_stream.next_u64(), 0x514f_05fe_1e8c_18a7);
+    assert_ne!(different_subsequence.next_u64(), 0x514f_05fe_1e8c_18a7);
 }
 
 #[test]
@@ -52,16 +52,19 @@ fn standard_normal_sampling_replays_and_stays_finite() {
         .expect("same stream should replay");
 
     assert_eq!(first_samples, second_samples);
-    assert_eq!(
-        first_samples,
-        vec![
-            1.5128433654010116,
-            0.07179248706572001,
-            0.10856950593896232,
-            0.114042688242474,
-            -0.5342062089246152,
-        ]
-    );
+    let expected_samples = [
+        1.512_843_365_401_011_6,
+        0.071_792_487_065_720_01,
+        0.108_569_505_938_962_32,
+        0.114_042_688_242_474,
+        -0.534_206_208_924_615_2,
+    ];
+    for (actual, expected) in first_samples.iter().zip(expected_samples) {
+        assert!(
+            (actual - expected).abs() <= 4.0 * f64::EPSILON * actual.abs().max(1.0),
+            "standard-normal fixture drifted: actual={actual:?}, expected={expected:?}"
+        );
+    }
     assert_eq!(first_samples.len(), 5);
     assert!(first_samples.iter().all(|sample| sample.is_finite()));
 }

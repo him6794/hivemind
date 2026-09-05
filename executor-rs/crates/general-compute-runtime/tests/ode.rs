@@ -2,6 +2,13 @@ use general_compute_runtime::ode::{
     AdaptiveRk4Config, MAX_RK4_STEPS, OdeError, OdeStatus, Rk4Config,
 };
 
+fn assert_close(actual: f64, expected: f64, tolerance: f64) {
+    assert!(
+        (actual - expected).abs() <= tolerance,
+        "{actual} is not within {tolerance} of {expected}"
+    );
+}
+
 #[test]
 fn rk4_integrates_exponential_growth_with_bounded_fixed_steps() {
     let config = Rk4Config::new(0.25, 1e-6, 16).expect("fixed-step config should validate");
@@ -11,8 +18,8 @@ fn rk4_integrates_exponential_growth_with_bounded_fixed_steps() {
 
     assert_eq!(result.status, OdeStatus::Completed);
     assert_eq!(result.steps, 4);
-    assert_eq!(result.final_time, 1.0);
-    assert_eq!(result.tolerance, 1e-6);
+    assert_close(result.final_time, 1.0, 1e-15);
+    assert_close(result.tolerance, 1e-6, 1e-15);
     assert!((result.final_value - std::f64::consts::E).abs() < 1e-4);
 }
 
@@ -69,8 +76,8 @@ fn adaptive_rk4_reaches_target_and_reports_error_control_metadata() {
         .expect("adaptive exponential solve should complete");
 
     assert_eq!(result.status, OdeStatus::Completed);
-    assert_eq!(result.final_time, 1.0);
-    assert_eq!(result.tolerance, 1e-8);
+    assert_close(result.final_time, 1.0, 1e-15);
+    assert_close(result.tolerance, 1e-8, 1e-15);
     assert!(result.accepted_steps > 0);
     assert!(result.attempted_steps >= result.accepted_steps);
     assert!(result.last_step_size >= 1e-6);

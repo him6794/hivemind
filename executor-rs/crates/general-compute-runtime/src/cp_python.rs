@@ -128,6 +128,7 @@ impl PinnedPythonAdapter {
         })
     }
 
+    #[must_use]
     pub fn registration(&self) -> &PythonBackendRegistration {
         &self.registration
     }
@@ -214,8 +215,8 @@ impl PinnedPythonAdapter {
                 .with_timeout(timeout)
                 .with_output_limit(self.registration.max_output_bytes);
         let result = ReferenceProcessSupervisor::new()
-            .run_with_stdin(command, &input, cancellation)
-            .map_err(|error| PythonAdapterError::Supervisor(supervisor_error_message(error)))?;
+            .run_with_stdin(&command, &input, cancellation)
+            .map_err(|error| PythonAdapterError::Supervisor(supervisor_error_message(&error)))?;
         if result.status != RunStatus::Completed {
             let status = match result.status {
                 RunStatus::TimedOut => "timed out",
@@ -237,7 +238,7 @@ impl PinnedPythonAdapter {
     }
 }
 
-const PYTHON_RUNNER: &str = r#"
+const PYTHON_RUNNER: &str = r"
 import json, struct, sys
 frame = sys.stdin.buffer.read()
 if len(frame) < 4:
@@ -259,9 +260,9 @@ except Exception as error:
 response = json.dumps({'status': status, 'steps': 1, 'output': output}, separators=(',', ':')).encode()
 sys.stdout.buffer.write(struct.pack('>I', len(response)) + response)
 sys.stdout.buffer.flush()
-"#;
+";
 
-fn supervisor_error_message(error: SupervisorError) -> String {
+fn supervisor_error_message(error: &SupervisorError) -> String {
     error.to_string()
 }
 

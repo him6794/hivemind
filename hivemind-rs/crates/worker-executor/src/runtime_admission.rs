@@ -6,7 +6,7 @@
 //! strings.
 
 use general_compute_runtime::{
-    BackendRegistration, CapabilityMatrix, GeneralComputeRequest,
+    managed_gpu::ManagedGpuRequest, BackendRegistration, CapabilityMatrix, GeneralComputeRequest,
     TrustedWorkerCapabilityRegistration, ValidationError, ValidationErrorCode, WorkerCapabilities,
     GENERAL_COMPUTE_RUNTIME_VERSION,
 };
@@ -20,6 +20,7 @@ pub enum RuntimeRoute {
     ManagedFunctionV0,
     ProductionSandboxedDsl,
     GeneralComputeV1Alpha1(GeneralComputeRequest),
+    ManagedFunctionGpuV1(ManagedGpuRequest),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,21 +69,21 @@ impl std::fmt::Display for RuntimeAdmissionError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ManifestRequired => {
-                formatter.write_str("general-compute-v1alpha1 request manifest is required")
+                formatter.write_str("typed runtime request manifest is required")
             }
-            Self::ManifestRuntimeMismatch => formatter.write_str(
-                "general-compute request manifest requires runtime general-compute-v1alpha1",
-            ),
+            Self::ManifestRuntimeMismatch => {
+                formatter.write_str("request manifest does not match the selected runtime")
+            }
             Self::ManifestMalformed(message) => {
                 write!(
                     formatter,
-                    "general-compute-v1alpha1 request manifest is malformed: {message}"
+                    "typed runtime request manifest is malformed: {message}"
                 )
             }
             Self::ManifestRejected { code, message } => {
                 write!(
                     formatter,
-                    "general-compute-v1alpha1 request was rejected ({code:?}): {message}"
+                    "typed runtime request was rejected ({code:?}): {message}"
                 )
             }
             Self::UnsupportedRuntime(runtime) => {
@@ -120,6 +121,7 @@ impl Default for WorkerRuntimeAdmission {
                     gpu_available: false,
                 },
                 gpu_capabilities: Vec::new(),
+                managed_gpu_backends: Vec::new(),
                 backends: Vec::new(),
             },
         }
@@ -133,6 +135,7 @@ impl WorkerRuntimeAdmission {
             trusted_registration: TrustedWorkerCapabilityRegistration {
                 worker: worker.clone(),
                 gpu_capabilities: Vec::new(),
+                managed_gpu_backends: Vec::new(),
                 backends: registry.backends.clone(),
             },
             registry,
@@ -226,19 +229,59 @@ impl WorkerRuntimeAdmission {
         runtime: &str,
         manifest_json: &[u8],
     ) -> Result<RuntimeRoute, RuntimeAdmissionError> {
-        if !manifest_json.is_empty() && runtime.trim() != GENERAL_COMPUTE_RUNTIME_VERSION {
+        self.admit_with_manifests(runtime, manifest_json, &[])
+    }
+
+    /// Admit a typed runtime using its route-specific manifest channel. The
+    /// channels are deliberately separate so a general-compute envelope cannot
+    /// be reinterpreted as managed GPU-v1 (or vice versa).
+    pub fn admit_with_manifests(
+        &self,
+        runtime: &str,
+        general_compute_manifest_json: &[u8],
+        managed_gpu_manifest_json: &[u8],
+    ) -> Result<RuntimeRoute, RuntimeAdmissionError> {
+        let runtime = runtime.trim();
+        if !general_compute_manifest_json.is_empty() && !managed_gpu_manifest_json.is_empty() {
             return Err(RuntimeAdmissionError::ManifestRuntimeMismatch);
         }
-        match runtime.trim() {
-            "" => Ok(RuntimeRoute::Legacy),
-            "managed-function-v0" => Ok(RuntimeRoute::ManagedFunctionV0),
-            "production_sandboxed_dsl" => Ok(RuntimeRoute::ProductionSandboxedDsl),
+        match runtime {
+            "" => {
+                if !general_compute_manifest_json.is_empty()
+                    || !managed_gpu_manifest_json.is_empty()
+                {
+                    return Err(RuntimeAdmissionError::ManifestRuntimeMismatch);
+                }
+                Ok(RuntimeRoute::Legacy)
+            }
+            "managed-function-v0" => {
+                if !general_compute_manifest_json.is_empty()
+                    || !managed_gpu_manifest_json.is_empty()
+                {
+                    return Err(RuntimeAdmissionError::ManifestRuntimeMismatch);
+                }
+                Ok(RuntimeRoute::ManagedFunctionV0)
+            }
+            "production_sandboxed_dsl" => {
+                if !general_compute_manifest_json.is_empty()
+                    || !managed_gpu_manifest_json.is_empty()
+                {
+                    return Err(RuntimeAdmissionError::ManifestRuntimeMismatch);
+                }
+                Ok(RuntimeRoute::ProductionSandboxedDsl)
+            }
             GENERAL_COMPUTE_RUNTIME_VERSION => {
-                if manifest_json.is_empty() {
+                if general_compute_manifest_json.is_empty() {
                     return Err(RuntimeAdmissionError::ManifestRequired);
                 }
-                let request = serde_json::from_slice::<GeneralComputeRequest>(manifest_json)
-                    .map_err(|error| RuntimeAdmissionError::ManifestMalformed(error.to_string()))?;
+                if !managed_gpu_manifest_json.is_empty() {
+                    return Err(RuntimeAdmissionError::ManifestRuntimeMismatch);
+                }
+                let request =
+                    serde_json::from_slice::<GeneralComputeRequest>(general_compute_manifest_json)
+                        .map_err(|error| {
+                            RuntimeAdmissionError::ManifestMalformed(error.to_string())
+                        })?;
                 self.registry
                     .validate_request(&request, &self.worker)
                     .map_err(rejected)?;
@@ -247,7 +290,32 @@ impl WorkerRuntimeAdmission {
                     .map_err(rejected)?;
                 Ok(RuntimeRoute::GeneralComputeV1Alpha1(request))
             }
-            other => Err(RuntimeAdmissionError::UnsupportedRuntime(other.into())),
+            general_compute_runtime::managed_gpu::MANAGED_GPU_RUNTIME_VERSION => {
+                if managed_gpu_manifest_json.is_empty() {
+                    return Err(RuntimeAdmissionError::ManifestRequired);
+                }
+                if !general_compute_manifest_json.is_empty() {
+                    return Err(RuntimeAdmissionError::ManifestRuntimeMismatch);
+                }
+                let request =
+                    serde_json::from_slice::<ManagedGpuRequest>(managed_gpu_manifest_json)
+                        .map_err(|error| {
+                            RuntimeAdmissionError::ManifestMalformed(error.to_string())
+                        })?;
+                request.validate().map_err(rejected)?;
+                self.trusted_registration
+                    .select_managed_gpu_for_request(&request)
+                    .map_err(rejected)?;
+                Ok(RuntimeRoute::ManagedFunctionGpuV1(request))
+            }
+            other => {
+                if !general_compute_manifest_json.is_empty()
+                    || !managed_gpu_manifest_json.is_empty()
+                {
+                    return Err(RuntimeAdmissionError::ManifestRuntimeMismatch);
+                }
+                Err(RuntimeAdmissionError::UnsupportedRuntime(other.into()))
+            }
         }
     }
 }

@@ -16,7 +16,9 @@ use std::collections::HashMap;
 use std::error::Error as _;
 #[cfg(target_os = "windows")]
 use std::ffi::{CStr, CString};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+#[cfg(target_os = "windows")]
+use std::net::IpAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 #[cfg(target_os = "windows")]
 use std::path::Path;
 use std::path::PathBuf;
@@ -27,6 +29,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(target_os = "windows")]
 use tokio::net::TcpListener;
+#[cfg(target_os = "windows")]
 use tokio::net::TcpStream;
 use tokio::sync::Mutex as TokioMutex;
 use tokio::time::sleep;

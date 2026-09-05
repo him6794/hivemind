@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use anyhow::{Context, Result};
 use hivemind_auth::managed_proof::{
     ManagedProofAuthorizationBinding, ManagedProofAuthorizationVerifier,

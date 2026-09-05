@@ -73,7 +73,7 @@ pub struct GpuCapability {
 }
 
 impl GpuCapability {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         vendor: GpuVendor,
         device_id: impl Into<String>,
@@ -144,7 +144,7 @@ pub struct GpuRequirement {
 }
 
 impl GpuRequirement {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         vendor: GpuVendor,
         compute_capability: impl Into<String>,

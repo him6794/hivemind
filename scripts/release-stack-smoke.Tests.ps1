@@ -92,6 +92,7 @@ foreach ($expected in @(
     "Ed25519",
     "-pubout",
     "Remove-Item",
+    'Remove-Item -LiteralPath "Env:$name"',
     "SetEnvironmentVariable"
 )) {
     if (!$scriptText.Contains($expected)) {
@@ -175,7 +176,7 @@ function Get-ReleaseStackSmokeTempDirectories {
 
 try {
     foreach ($name in $managedEnvironmentNames) {
-        [Environment]::SetEnvironmentVariable($name, $null, "Process")
+        Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
     }
 
     $tempDirectoriesBefore = @(Get-ReleaseStackSmokeTempDirectories)
@@ -272,7 +273,7 @@ try {
         WORKER_EXECUTION_PUBLIC_KEY_PEM = "user-supplied-public-key"
     }
     foreach ($name in $managedEnvironmentNames) {
-        [Environment]::SetEnvironmentVariable($name, $null, "Process")
+        Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
     }
     foreach ($name in $suppliedEnvironment.Keys) {
         [Environment]::SetEnvironmentVariable($name, $suppliedEnvironment[$name], "Process")
@@ -298,7 +299,7 @@ try {
     }
 
     foreach ($name in $managedEnvironmentNames) {
-        [Environment]::SetEnvironmentVariable($name, $null, "Process")
+        Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
     }
     [Environment]::SetEnvironmentVariable("POSTGRES_PASSWORD", "private-only-postgres-password", "Process")
     [Environment]::SetEnvironmentVariable("JWT_SECRET", "private-only-jwt-secret-with-at-least-32-bytes", "Process")
@@ -321,7 +322,7 @@ try {
     }
 
     foreach ($name in $managedEnvironmentNames) {
-        [Environment]::SetEnvironmentVariable($name, $null, "Process")
+        Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
     }
     [Environment]::SetEnvironmentVariable("POSTGRES_PASSWORD", "public-only-postgres-password", "Process")
     [Environment]::SetEnvironmentVariable("JWT_SECRET", "public-only-jwt-secret-with-at-least-32-bytes", "Process")
@@ -343,22 +344,34 @@ try {
     }
 
     foreach ($name in $managedEnvironmentNames) {
-        [Environment]::SetEnvironmentVariable($name, $null, "Process")
+        Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
     }
     $env:Path = ""
     try {
-        $missingOpenSslError = $null
-        try {
-            & $scriptPath -CheckOnly *> $null
+        $powerShellExecutable = if ($PSEdition -eq "Core") {
+            Join-Path $PSHOME "pwsh.exe"
         }
-        catch {
-            $missingOpenSslError = $_.Exception.Message
+        else {
+            Join-Path $PSHOME "powershell.exe"
+        }
+        if (!(Test-Path -LiteralPath $powerShellExecutable -PathType Leaf)) {
+            throw "Unable to locate the current PowerShell executable at $powerShellExecutable."
         }
 
-        if ([string]::IsNullOrWhiteSpace($missingOpenSslError) -or
-            !$missingOpenSslError.Contains("OpenSSL is required") -or
-            !$missingOpenSslError.Contains("Install OpenSSL")) {
-            throw "release stack smoke harness must fail actionably when OpenSSL is unavailable. Error: $missingOpenSslError"
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            $missingOpenSslOutput = @(& $powerShellExecutable -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $scriptPath -CheckOnly *>&1)
+            $missingOpenSslExitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+        $missingOpenSslText = ($missingOpenSslOutput | ForEach-Object { $_.ToString() }) -join "`n"
+        if ($missingOpenSslExitCode -eq 0 -or
+            !$missingOpenSslText.Contains("OpenSSL is required") -or
+            !$missingOpenSslText.Contains("Install OpenSSL")) {
+            throw "release stack smoke harness must fail actionably when OpenSSL is unavailable. exit=$missingOpenSslExitCode Error: $missingOpenSslText"
         }
     }
     finally {
@@ -368,11 +381,18 @@ try {
 finally {
     $env:Path = $originalPath
     foreach ($name in $managedEnvironmentNames) {
-        [Environment]::SetEnvironmentVariable($name, $originalEnvironment[$name], "Process")
+        $originalValue = $originalEnvironment[$name]
+        if ([string]::IsNullOrWhiteSpace($originalValue)) {
+            Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+        }
+        else {
+            [Environment]::SetEnvironmentVariable($name, $originalValue, "Process")
+        }
     }
     if (Test-Path -LiteralPath $testOpenSslDirectory) {
         Remove-Item -LiteralPath $testOpenSslDirectory -Recurse -Force
     }
 }
 
+$global:LASTEXITCODE = 0
 Write-Host "release stack smoke tests passed"

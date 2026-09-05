@@ -467,6 +467,8 @@ pub struct Task {
     pub runtime: Option<String>,
     pub task_source: Option<String>,
     pub general_compute_manifest_json: Option<Vec<u8>>,
+    /// Canonical request manifest for the independent managed-function-gpu-v1 route.
+    pub managed_gpu_manifest_json: Option<Vec<u8>>,
     pub managed_dsl_backend_id: Option<String>,
     pub managed_dsl_semantics_manifest_sha256: Option<String>,
     pub expected_btih: Option<String>,
@@ -608,6 +610,7 @@ pub struct TaskInfo {
     pub dispatch_status: String,
     pub usage_units: i64,
     pub max_cpt: i64,
+    pub runtime: String,
 }
 
 /// Conversion from Task to TaskInfo
@@ -641,6 +644,7 @@ impl From<Task> for TaskInfo {
             },
             usage_units: t.managed_executed_ops,
             max_cpt: t.max_cpt,
+            runtime: t.runtime.unwrap_or_default(),
         }
     }
 }

@@ -1,6 +1,12 @@
+#![allow(clippy::result_large_err)]
+
 use crate::managed_proof_verifier::{verify_managed_proof, ManagedProofVerifierError};
 use anyhow::Result;
 use chrono::{Duration as ChronoDuration, Utc};
+use general_compute_runtime::managed_gpu::{
+    ManagedGpuCapability, ManagedGpuRequest, ManagedGpuResult, ManagedGpuStatus,
+    MANAGED_GPU_RUNTIME_VERSION,
+};
 use hivemind_auth::managed_proof::{
     claims_with_issuance, new_claims, ManagedProofAuthorizationSigner,
 };
@@ -24,7 +30,7 @@ use hivemind_proto::{
     GeneralComputeChunkUpload, GeneralComputePrepareRequest, ManagedProofEnvelope,
     ResourceSpec as ProtoResourceSpec, GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES,
     GENERAL_COMPUTE_RESULT_MAX_BYTES, LEGACY_MANAGED_RECEIPT_MAX_BYTES,
-    WORKER_RPC_MESSAGE_MAX_BYTES, WORKER_STATUS_MESSAGE_MAX_BYTES,
+    MANAGED_GPU_RESULT_MAX_BYTES, WORKER_RPC_MESSAGE_MAX_BYTES, WORKER_STATUS_MESSAGE_MAX_BYTES,
 };
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -36,7 +42,8 @@ use tracing::{error, info, warn};
 use crate::managed_proof_metrics::{self, ManagedProofMetricEvent};
 use crate::scheduler;
 use crate::task_repository::{
-    ManagedProofAuthorizationRecord, ManagedProofAuthorizationStateUpdate, TaskRepository,
+    is_managed_gpu_binding_integrity_error, ManagedProofAuthorizationRecord,
+    ManagedProofAuthorizationStateUpdate, TaskRepository,
 };
 
 pub struct Dispatcher {
@@ -56,10 +63,12 @@ struct WorkerExecutionOptions {
     managed_proof_authorization_private_key_pem: String,
     managed_proof_provider_configured: bool,
     managed_proof_rollout_mode: ManagedProofRolloutMode,
+    max_redispatch: i32,
 }
 
 impl Dispatcher {
     pub fn new(db: DatabaseManager, task_timeout_secs: u64, max_redispatch: i32) -> Self {
+        assert!(max_redispatch >= 0, "max_redispatch must not be negative");
         Self {
             repo: Arc::new(TaskRepository::new(db.pool.clone())),
             db,
@@ -123,7 +132,11 @@ impl Dispatcher {
         let worker = scheduler::find_best_worker(task, &ranked_workers).await?;
         let wid = worker.worker_id.clone();
         let wip = worker.ip.clone();
-        match self.repo.assign_to_worker(&task.task_id, &wid, &wip).await {
+        match self
+            .repo
+            .assign_to_worker_with_retry_limit(&task.task_id, &wid, &wip, self.max_redispatch)
+            .await
+        {
             Ok(_) => {
                 info!(
                     "Dispatched task {} to worker {} ({})",
@@ -166,7 +179,7 @@ impl Dispatcher {
         if task.status == TaskStatus::Assigned
             && self
                 .repo
-                .mark_worker_execution_running(task_id, worker_id)
+                .mark_worker_execution_running_snapshot(&task, worker_id)
                 .await?
                 .is_none()
         {
@@ -206,8 +219,9 @@ impl Dispatcher {
         validate_worker_response_sizes(&response)
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         if is_managed_runtime(task.runtime.as_deref())
-            || task.runtime.as_deref()
+            || task.runtime.as_deref().map(str::trim)
                 == Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION)
+            || task.runtime.as_deref().map(str::trim) == Some(MANAGED_GPU_RUNTIME_VERSION)
         {
             anyhow::bail!("session result requires the authoritative execution path");
         }
@@ -226,13 +240,32 @@ impl Dispatcher {
             anyhow::bail!("Worker session result belongs to a stale task attempt");
         }
         if response.success {
-            self.repo
-                .complete_for_worker(task_id, worker_id, None, Some(&response.status_message))
-                .await?;
-        } else {
-            self.repo
-                .fail_for_worker(task_id, worker_id, &response.status_message)
-                .await?;
+            if self
+                .repo
+                .complete_for_worker_snapshot(
+                    &task,
+                    worker_id,
+                    None,
+                    Some(&response.status_message),
+                )
+                .await?
+                .is_none()
+            {
+                warn!(
+                    task_id,
+                    worker_id, "session completion arrived after the active attempt changed"
+                );
+            }
+        } else if self
+            .repo
+            .fail_for_worker_snapshot(&task, worker_id, &response.status_message)
+            .await?
+            .is_none()
+        {
+            warn!(
+                task_id,
+                worker_id, "session failure arrived after the active attempt changed"
+            );
         }
         Ok(())
     }
@@ -280,6 +313,7 @@ impl Dispatcher {
             attempt_id: request.attempt_id.clone(),
             idempotency_key: request.idempotency_key.clone(),
             request_digest: request.request_digest.clone(),
+            retry_count: task.retry_count,
             payload: prost::Message::encode_to_vec(&request),
         };
         let outcome = match registry
@@ -335,6 +369,13 @@ impl Dispatcher {
     }
 
     pub async fn dispatch_pending(&self, workers: &[WorkerNode]) -> Result<u64> {
+        let terminalized = self.repo.terminalize_exhausted_pending().await?;
+        if terminalized > 0 {
+            warn!(
+                "Terminalized {} pending tasks that exceeded their retry limit",
+                terminalized
+            );
+        }
         let mut available_workers = self.repo.trusted_workers(workers).await?;
         let pending = self.repo.find_pending().await?;
         let mut dispatched = 0u64;
@@ -365,6 +406,13 @@ impl Dispatcher {
     }
 
     pub async fn dispatch_pending_from_registered_workers_and_execute(&self) -> Result<u64> {
+        let terminalized = self.repo.terminalize_exhausted_pending().await?;
+        if terminalized > 0 {
+            warn!(
+                "Terminalized {} pending tasks that exceeded their retry limit",
+                terminalized
+            );
+        }
         let workers = self.registered_workers().await?;
         let mut available_workers = self.repo.trusted_workers(&workers).await?;
         let pending = self.repo.find_pending().await?;
@@ -400,6 +448,7 @@ impl Dispatcher {
                         .clone(),
                     managed_proof_provider_configured: self.managed_proof_provider_configured,
                     managed_proof_rollout_mode: self.managed_proof_rollout_mode,
+                    max_redispatch: self.max_redispatch,
                 };
                 tokio::spawn(async move {
                     if let Err(e) = execute_on_worker_with_managed_proof_key(
@@ -494,49 +543,193 @@ impl Dispatcher {
         let mut redispatched = 0u64;
         let mut failed = 0u64;
         for task in &stale {
-            if task.retry_count >= self.max_redispatch {
+            let retry_limit = effective_retry_limit(task, self.max_redispatch);
+            if task.worker_id.is_none() || task.retry_count >= retry_limit {
                 if let Some(worker_id) = task.worker_id.as_deref() {
                     self.cancel_session_delivery(task);
-                    match self
-                        .repo
-                        .fail_for_worker(
-                            &task.task_id,
-                            worker_id,
-                            "Max redispatch attempts exceeded",
-                        )
-                        .await
+                    let result = if task.runtime.as_deref().map(str::trim)
+                        == Some(MANAGED_GPU_RUNTIME_VERSION)
                     {
-                        Ok(_) => {
+                        if let Some(manifest) = task.managed_gpu_manifest_json.as_deref() {
+                            self.repo
+                                .fail_managed_gpu_without_worker_result_snapshot(
+                                    task,
+                                    worker_id,
+                                    manifest,
+                                    ManagedGpuStatus::TimedOut,
+                                    "retry_limit_exceeded",
+                                    "Max redispatch attempts exceeded",
+                                )
+                                .await
+                        } else {
+                            self.repo
+                                .quarantine_managed_gpu_without_typed_result_snapshot(
+                                    task,
+                                    worker_id,
+                                    None,
+                                    "TIMED_OUT",
+                                    "Max redispatch attempts exceeded; managed GPU request manifest is missing",
+                                )
+                                .await
+                        }
+                    } else {
+                        self.repo
+                            .fail_for_worker_snapshot(
+                                task,
+                                worker_id,
+                                "Max redispatch attempts exceeded",
+                            )
+                            .await
+                    };
+                    match result {
+                        Ok(Some(_)) => {
                             warn!(
                                 "Task {} failed after {} retries",
                                 task.task_id, task.retry_count
                             );
                             failed += 1;
                         }
+                        Ok(None) => warn!(
+                            "Task {} changed before its retry-limit failure could be recorded",
+                            task.task_id
+                        ),
                         Err(e) => error!("Failed to mark task {} as failed: {}", task.task_id, e),
+                    }
+                } else {
+                    match self
+                        .repo
+                        .terminalize_stale_assignment_without_worker(
+                            task,
+                            "Stale assignment has no Worker identity",
+                        )
+                        .await
+                    {
+                        Ok(Some(_)) => {
+                            warn!(
+                                "Task {} failed because its stale assignment has no Worker identity",
+                                task.task_id
+                            );
+                            failed += 1;
+                        }
+                        Ok(None) => warn!(
+                            "Task {} changed before its worker-less stale assignment could be terminalized",
+                            task.task_id
+                        ),
+                        Err(e) => error!(
+                            "Failed to terminalize worker-less stale task {}: {}",
+                            task.task_id,
+                            e
+                        ),
                     }
                 }
             } else if let Some(worker_id) = task.worker_id.as_deref() {
                 self.cancel_session_delivery(task);
-                match self
-                    .repo
-                    .reset_to_pending_for_worker(&task.task_id, worker_id)
-                    .await
+                let result = if task.runtime.as_deref().map(str::trim)
+                    == Some(MANAGED_GPU_RUNTIME_VERSION)
                 {
-                    Ok(_) => {
+                    if let Some(manifest) = task.managed_gpu_manifest_json.as_deref() {
+                        if !managed_gpu_manifest_is_valid(manifest) {
+                            self.repo
+                                .quarantine_managed_gpu_without_typed_result_snapshot(
+                                    task,
+                                    worker_id,
+                                    Some(manifest),
+                                    "FAILED",
+                                    "managed GPU request manifest is malformed or invalid",
+                                )
+                                .await
+                                .map(|quarantined| quarantined.map(|_| ()))
+                        } else {
+                            self.repo
+                                .retry_to_pending_for_worker_attempt(
+                                    &task.task_id,
+                                    worker_id,
+                                    task.retry_count,
+                                    manifest,
+                                    retry_limit,
+                                    "Retry limit exceeded while resetting stale managed GPU attempt",
+                                )
+                                .await
+                                .map(|updated| {
+                                    updated.and_then(|task| {
+                                        (task.status == TaskStatus::Pending).then_some(())
+                                    })
+                                })
+                        }
+                    } else {
+                        self.repo
+                            .quarantine_managed_gpu_without_typed_result_snapshot(
+                                task,
+                                worker_id,
+                                None,
+                                "FAILED",
+                                "managed GPU request manifest is missing",
+                            )
+                            .await
+                            .map(|quarantined| quarantined.map(|_| ()))
+                    }
+                } else {
+                    self.repo
+                        .retry_to_pending_for_worker_snapshot(
+                            task,
+                            worker_id,
+                            retry_limit,
+                            "Retry limit exceeded while resetting stale assignment",
+                        )
+                        .await
+                        .map(|updated| {
+                            updated
+                                .and_then(|task| (task.status == TaskStatus::Pending).then_some(()))
+                        })
+                };
+                match result {
+                    Ok(Some(())) => {
                         info!(
                             "Task {} reset to pending (retry {}/{})",
                             task.task_id,
                             task.retry_count + 1,
-                            self.max_redispatch
+                            retry_limit
                         );
                         redispatched += 1;
                     }
+                    Ok(None) => {
+                        warn!(
+                            "Task {} was changed before its stale assignment could be reset",
+                            task.task_id
+                        );
+                    }
                     Err(e) => error!("Failed to reset task {}: {}", task.task_id, e),
+                }
+            } else {
+                match self
+                    .repo
+                    .terminalize_stale_assignment_without_worker(
+                        task,
+                        "Stale assignment has no Worker identity",
+                    )
+                    .await
+                {
+                    Ok(Some(_)) => {
+                        warn!(
+                            "Task {} failed because its stale assignment has no Worker identity",
+                            task.task_id
+                        );
+                        failed += 1;
+                    }
+                    Ok(None) => warn!(
+                        "Task {} changed before its worker-less stale assignment could be terminalized",
+                        task.task_id
+                    ),
+                    Err(e) => error!(
+                        "Failed to terminalize worker-less stale task {}: {}",
+                        task.task_id,
+                        e
+                    ),
                 }
             }
         }
-        let timed_out = self.repo.mark_stale_running().await?;
+        let managed_gpu_timed_out = self.repo.mark_stale_managed_gpu_running().await?;
+        let timed_out = self.repo.mark_stale_running().await? + managed_gpu_timed_out;
         if timed_out > 0 {
             warn!("Marked {} running tasks as timed out", timed_out);
         }
@@ -619,16 +812,33 @@ fn build_execute_task_request_with_credentials(
     token: String,
     managed_proof: Option<&ManagedProofDispatch>,
 ) -> ExecuteTaskRequest {
-    let identity = general_compute_identity(task);
+    let runtime = task.runtime.as_deref().map(str::trim);
+    let is_managed_gpu = runtime == Some(MANAGED_GPU_RUNTIME_VERSION);
+    let is_general_compute =
+        runtime == Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION);
+    let identity = if is_general_compute {
+        general_compute_identity(task)
+    } else {
+        None
+    };
     let managed_identity = if is_managed_runtime(task.runtime.as_deref()) {
         managed_proof_attempt_identity(task).ok()
+    } else {
+        None
+    };
+    let managed_gpu_identity = if is_managed_gpu {
+        managed_gpu_identity(task).ok()
     } else {
         None
     };
     let legacy_identity = legacy_execution_identity(task);
     ExecuteTaskRequest {
         task_id: task.task_id.clone(),
-        torrent: task.torrent_source.clone().unwrap_or_default(),
+        torrent: if is_managed_gpu || is_general_compute {
+            String::new()
+        } else {
+            task.torrent_source.clone().unwrap_or_default()
+        },
         resource_limits: Some(ProtoResourceSpec {
             cpu_cores: 0,
             memory_mb: task.req_memory_gb as i64 * 1024,
@@ -640,52 +850,90 @@ fn build_execute_task_request_with_credentials(
             storage_total_gb: task.req_storage_gb,
             storage_available_gb: task.req_storage_gb,
         }),
-        runtime: task.runtime.clone().unwrap_or_default(),
-        task_source: task.task_source.clone().unwrap_or_default(),
+        runtime: runtime.unwrap_or_default().to_owned(),
+        task_source: if is_managed_gpu || is_general_compute {
+            String::new()
+        } else {
+            task.task_source.clone().unwrap_or_default()
+        },
         token,
         managed_budget_units: if matches!(
-            task.runtime.as_deref(),
+            runtime,
             Some("managed-function-v0") | Some("production_sandboxed_dsl")
         ) {
             task.max_cpt.max(0)
         } else {
             0
         },
-        general_compute_manifest_json: task
-            .general_compute_manifest_json
-            .clone()
-            .unwrap_or_default(),
-        execution_id: managed_proof
-            .map(|proof| proof.execution_id.clone())
-            .or_else(|| managed_identity.as_ref().map(|identity| identity.0.clone()))
-            .or_else(|| identity.as_ref().map(|identity| identity.0.clone()))
-            .or_else(|| Some(legacy_identity.0.clone()))
-            .unwrap_or_default(),
-        attempt_id: managed_proof
-            .map(|proof| proof.attempt_id.clone())
-            .or_else(|| managed_identity.as_ref().map(|identity| identity.1.clone()))
-            .or_else(|| identity.as_ref().map(|identity| identity.1.clone()))
-            .or_else(|| Some(legacy_identity.1.clone()))
-            .unwrap_or_default(),
-        idempotency_key: managed_proof
-            .map(|proof| proof.idempotency_key.clone())
-            .or_else(|| managed_identity.as_ref().map(|identity| identity.2.clone()))
-            .or_else(|| identity.as_ref().map(|identity| identity.2.clone()))
-            .or_else(|| Some(legacy_identity.2.clone()))
-            .unwrap_or_default(),
-        request_digest: managed_proof
-            .map(|proof| proof.request_digest.clone())
-            .or_else(|| identity.as_ref().map(|identity| identity.3.clone()))
-            .or_else(|| Some(legacy_identity.3.clone()))
-            .unwrap_or_default(),
-        managed_dsl_backend_id: if task.runtime.as_deref() == Some("production_sandboxed_dsl") {
+        general_compute_manifest_json: if is_general_compute {
+            task.general_compute_manifest_json
+                .clone()
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        },
+        managed_gpu_manifest_json: if is_managed_gpu {
+            task.managed_gpu_manifest_json.clone().unwrap_or_default()
+        } else {
+            Vec::new()
+        },
+        execution_id: if is_managed_gpu {
+            managed_gpu_identity
+                .as_ref()
+                .map(|identity| identity.0.clone())
+                .unwrap_or_default()
+        } else {
+            managed_proof
+                .map(|proof| proof.execution_id.clone())
+                .or_else(|| managed_identity.as_ref().map(|identity| identity.0.clone()))
+                .or_else(|| identity.as_ref().map(|identity| identity.0.clone()))
+                .or_else(|| Some(legacy_identity.0.clone()))
+                .unwrap_or_default()
+        },
+        attempt_id: if is_managed_gpu {
+            managed_gpu_identity
+                .as_ref()
+                .map(|identity| identity.1.clone())
+                .unwrap_or_default()
+        } else {
+            managed_proof
+                .map(|proof| proof.attempt_id.clone())
+                .or_else(|| managed_identity.as_ref().map(|identity| identity.1.clone()))
+                .or_else(|| identity.as_ref().map(|identity| identity.1.clone()))
+                .or_else(|| Some(legacy_identity.1.clone()))
+                .unwrap_or_default()
+        },
+        idempotency_key: if is_managed_gpu {
+            managed_gpu_identity
+                .as_ref()
+                .map(|identity| identity.2.clone())
+                .unwrap_or_default()
+        } else {
+            managed_proof
+                .map(|proof| proof.idempotency_key.clone())
+                .or_else(|| managed_identity.as_ref().map(|identity| identity.2.clone()))
+                .or_else(|| identity.as_ref().map(|identity| identity.2.clone()))
+                .or_else(|| Some(legacy_identity.2.clone()))
+                .unwrap_or_default()
+        },
+        request_digest: if is_managed_gpu {
+            managed_gpu_identity
+                .as_ref()
+                .map(|identity| identity.3.clone())
+                .unwrap_or_default()
+        } else {
+            managed_proof
+                .map(|proof| proof.request_digest.clone())
+                .or_else(|| identity.as_ref().map(|identity| identity.3.clone()))
+                .or_else(|| Some(legacy_identity.3.clone()))
+                .unwrap_or_default()
+        },
+        managed_dsl_backend_id: if runtime == Some("production_sandboxed_dsl") {
             task.managed_dsl_backend_id.clone().unwrap_or_default()
         } else {
             String::new()
         },
-        managed_dsl_semantics_manifest_sha256: if task.runtime.as_deref()
-            == Some("production_sandboxed_dsl")
-        {
+        managed_dsl_semantics_manifest_sha256: if runtime == Some("production_sandboxed_dsl") {
             task.managed_dsl_semantics_manifest_sha256
                 .clone()
                 .unwrap_or_default()
@@ -716,7 +964,8 @@ fn legacy_execution_identity(task: &Task) -> (String, String, String, String) {
 
 fn session_compatible_runtime(runtime: Option<&str>) -> bool {
     !is_managed_runtime(runtime)
-        && runtime != Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION)
+        && runtime.map(str::trim) != Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION)
+        && runtime.map(str::trim) != Some(MANAGED_GPU_RUNTIME_VERSION)
 }
 
 fn general_compute_identity(task: &Task) -> Option<(String, String, String, String)> {
@@ -730,6 +979,55 @@ fn general_compute_identity(task: &Task) -> Option<(String, String, String, Stri
         request.idempotency_key,
         request.request_digest,
     ))
+}
+
+fn managed_gpu_identity(task: &Task) -> Result<(String, String, String, String)> {
+    let manifest = task
+        .managed_gpu_manifest_json
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("managed-function-gpu-v1 request manifest is missing"))?;
+    let request = serde_json::from_slice::<ManagedGpuRequest>(manifest)
+        .map_err(|error| anyhow::anyhow!("managed GPU request is malformed: {error}"))?;
+    request
+        .validate()
+        .map_err(|error| anyhow::anyhow!("managed GPU request is invalid: {error:?}"))?;
+    if u64::try_from(task.max_cpt).ok() != Some(request.reservation_cpt) {
+        anyhow::bail!("managed GPU task reservation does not match its request manifest");
+    }
+    Ok((
+        request.execution_id,
+        request.attempt_id,
+        request.idempotency_key,
+        request.request_digest,
+    ))
+}
+
+fn validate_managed_gpu_response_identity(
+    task: &Task,
+    response: &ExecuteTaskResponse,
+) -> std::result::Result<(), &'static str> {
+    if task.runtime.as_deref().map(str::trim) != Some(MANAGED_GPU_RUNTIME_VERSION) {
+        return Ok(());
+    }
+    let Some(manifest) = task.managed_gpu_manifest_json.as_deref() else {
+        return Err("managed-function-gpu-v1 request manifest is missing");
+    };
+    let request = serde_json::from_slice::<ManagedGpuRequest>(manifest)
+        .map_err(|_| "managed-function-gpu-v1 request manifest is malformed")?;
+    request
+        .validate()
+        .map_err(|_| "managed-function-gpu-v1 request manifest is invalid")?;
+    if response.execution_id != request.execution_id
+        || response.attempt_id != request.attempt_id
+        || response.idempotency_key != request.idempotency_key
+        || response.request_digest != request.request_digest
+    {
+        return Err("managed GPU response identity does not match the persisted request");
+    }
+    if response.managed_gpu_result_json.is_empty() {
+        return Err("managed GPU response is missing its typed result envelope");
+    }
+    Ok(())
 }
 
 fn validate_general_compute_response_identity(
@@ -787,6 +1085,153 @@ fn validate_managed_proof_response_identity(
     }
 }
 
+fn managed_gpu_manifest_is_valid(manifest: &[u8]) -> bool {
+    manifest.len() <= hivemind_proto::MANAGED_GPU_MANIFEST_MAX_BYTES
+        && serde_json::from_slice::<ManagedGpuRequest>(manifest)
+            .ok()
+            .is_some_and(|request| request.validate().is_ok())
+}
+
+/// The task-level limit may be lower than the dispatcher safety cap. A corrupt
+/// negative task limit is treated as zero so it can only fail closed, never
+/// grant an unbounded retry budget.
+fn effective_retry_limit(task: &Task, dispatcher_limit: i32) -> i32 {
+    dispatcher_limit.max(0).min(task.max_retries.max(0))
+}
+
+async fn retry_or_terminalize_without_worker_penalty(
+    repo: &TaskRepository,
+    task: &Task,
+    worker_id: &str,
+    dispatcher_limit: i32,
+    reason: &str,
+) -> Result<()> {
+    if task.runtime.as_deref().map(str::trim) == Some(MANAGED_GPU_RUNTIME_VERSION) {
+        return reset_managed_gpu_attempt(repo, task, worker_id, dispatcher_limit, reason).await;
+    }
+
+    let retry_limit = effective_retry_limit(task, dispatcher_limit);
+    let updated = repo
+        .retry_to_pending_for_worker_snapshot(task, worker_id, retry_limit, reason)
+        .await?;
+    match updated {
+        Some(updated) if updated.status == TaskStatus::Pending => {}
+        Some(updated) => warn!(
+            task_id = %task.task_id,
+            worker_id,
+            status = updated.status.as_str(),
+            "retryable failure exhausted the retry limit and terminalized the task"
+        ),
+        None => warn!(
+            task_id = %task.task_id,
+            worker_id,
+            "retryable failure arrived after the active attempt changed; leaving current task untouched"
+        ),
+    }
+    Ok(())
+}
+
+async fn reset_managed_gpu_attempt(
+    repo: &TaskRepository,
+    task: &Task,
+    worker_id: &str,
+    max_redispatch: i32,
+    reason: &str,
+) -> Result<()> {
+    let Some(manifest) = task.managed_gpu_manifest_json.as_deref() else {
+        let quarantined = repo
+            .quarantine_managed_gpu_without_typed_result_snapshot(
+                task, worker_id, None, "FAILED", reason,
+            )
+            .await?;
+        if quarantined.is_some() {
+            warn!(
+                task_id = %task.task_id,
+                worker_id,
+                "managed GPU attempt was quarantined because its request manifest is missing"
+            );
+        } else {
+            warn!(
+                task_id = %task.task_id,
+                worker_id,
+                "managed GPU quarantine skipped because the active attempt changed"
+            );
+        }
+        return Ok(());
+    };
+    if !managed_gpu_manifest_is_valid(manifest) {
+        let quarantined = repo
+            .quarantine_managed_gpu_without_typed_result_snapshot(
+                task,
+                worker_id,
+                Some(manifest),
+                "FAILED",
+                "managed GPU request manifest is malformed or invalid",
+            )
+            .await?;
+        if quarantined.is_some() {
+            warn!(
+                task_id = %task.task_id,
+                worker_id,
+                "managed GPU attempt was quarantined because its request manifest is malformed or invalid"
+            );
+        } else {
+            warn!(
+                task_id = %task.task_id,
+                worker_id,
+                "managed GPU quarantine skipped because the active attempt changed"
+            );
+        }
+        return Ok(());
+    }
+    let retry_limit = effective_retry_limit(task, max_redispatch);
+    if task.retry_count >= retry_limit {
+        let failed = repo
+            .fail_managed_gpu_without_worker_result_snapshot(
+                task,
+                worker_id,
+                manifest,
+                ManagedGpuStatus::Failed,
+                "retry_limit_exceeded",
+                reason,
+            )
+            .await?;
+        if failed.is_some() {
+            warn!(
+                task_id = %task.task_id,
+                worker_id,
+                retry_count = task.retry_count,
+                "managed GPU attempt reached the redispatch limit and was terminally failed"
+            );
+        } else {
+            warn!(
+                task_id = %task.task_id,
+                worker_id,
+                "managed GPU response arrived after the active attempt changed; leaving current task untouched"
+            );
+        }
+        return Ok(());
+    }
+    let updated = repo
+        .retry_to_pending_for_worker_snapshot(task, worker_id, retry_limit, reason)
+        .await?;
+    match updated {
+        Some(updated) if updated.status == TaskStatus::Pending => {}
+        Some(updated) => warn!(
+            task_id = %task.task_id,
+            worker_id,
+            status = updated.status.as_str(),
+            "managed GPU retry exhausted during reset"
+        ),
+        None => warn!(
+            task_id = %task.task_id,
+            worker_id,
+            "managed GPU response arrived after the active attempt changed; leaving current task untouched"
+        ),
+    }
+    Ok(())
+}
+
 fn same_active_task_attempt(expected: &Task, current: &Task, worker_id: &str) -> bool {
     expected.id == current.id
         && expected.retry_count == current.retry_count
@@ -832,7 +1277,8 @@ fn worker_execution_token_with_lifetime(
         iat: now as usize,
     };
     let signer = WorkerExecutionSigner::from_pem(private_key_pem)?;
-    if task.runtime.as_deref() == Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION) {
+    let runtime = task.runtime.as_deref().map(str::trim);
+    if runtime == Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION) {
         let (execution_id, attempt_id, idempotency_key, request_digest) =
             general_compute_identity(task)
                 .ok_or_else(|| anyhow::anyhow!("general-compute request identity is missing"))?;
@@ -847,6 +1293,26 @@ fn worker_execution_token_with_lifetime(
                 idempotency_key,
                 request_digest,
                 transfer_generation,
+            },
+        )
+    } else if runtime == Some(MANAGED_GPU_RUNTIME_VERSION) {
+        let (execution_id, attempt_id, idempotency_key, request_digest) =
+            managed_gpu_identity(task)?;
+        let attempt_generation = i64::from(task.retry_count)
+            .checked_add(1)
+            .filter(|generation| *generation > 0)
+            .ok_or_else(|| anyhow::anyhow!("managed GPU attempt generation is invalid"))?;
+        signer.encode_execution_claims(
+            &claims,
+            &WorkerExecutionIdentity {
+                execution_id,
+                attempt_id,
+                idempotency_key,
+                request_digest,
+                // GPU-v1 has no general-compute transfer lease. The positive
+                // attempt generation only satisfies the shared token schema;
+                // Worker admission does not interpret it as a transfer lease.
+                transfer_generation: attempt_generation,
             },
         )
     } else {
@@ -1486,6 +1952,7 @@ async fn execute_on_worker(
             managed_proof_authorization_private_key_pem: String::new(),
             managed_proof_provider_configured: false,
             managed_proof_rollout_mode,
+            max_redispatch: i32::MAX,
         },
     )
     .await
@@ -1503,6 +1970,7 @@ async fn execute_on_worker_with_managed_proof_key(
         managed_proof_authorization_private_key_pem,
         managed_proof_provider_configured,
         managed_proof_rollout_mode,
+        max_redispatch,
     } = options;
     let Some(current_task) = repo.find_by_task_id(&task.task_id).await? else {
         warn!("Task {} disappeared before worker execution", task.task_id);
@@ -1522,7 +1990,7 @@ async fn execute_on_worker_with_managed_proof_key(
     }
 
     let Some(current_task) = repo
-        .mark_worker_execution_running(&task.task_id, &worker_id)
+        .mark_worker_execution_running_snapshot(&current_task, &worker_id)
         .await?
     else {
         info!(
@@ -1537,8 +2005,9 @@ async fn execute_on_worker_with_managed_proof_key(
         Err(error) => {
             reset_after_worker_rpc_failure(
                 repo.as_ref(),
-                &task.task_id,
+                &current_task,
                 &worker_id,
+                max_redispatch,
                 WorkerRpcFailureDisposition::RetryWithoutWorkerPenalty,
                 &error,
             )
@@ -1551,8 +2020,9 @@ async fn execute_on_worker_with_managed_proof_key(
         Err(error) => {
             reset_after_worker_rpc_failure(
                 repo.as_ref(),
-                &task.task_id,
+                &current_task,
                 &worker_id,
+                max_redispatch,
                 worker_transport_failure_disposition(&error),
                 &error,
             )
@@ -1563,8 +2033,16 @@ async fn execute_on_worker_with_managed_proof_key(
     let mut client = WorkerNodeServiceClient::new(channel.clone())
         .max_encoding_message_size(WORKER_RPC_MESSAGE_MAX_BYTES)
         .max_decoding_message_size(WORKER_RPC_MESSAGE_MAX_BYTES);
-    repo.refresh_worker_endpoint(&task.task_id, &worker_id, &worker_addr)
-        .await?;
+    if !repo
+        .refresh_worker_endpoint_snapshot(&current_task, &worker_id, &worker_addr)
+        .await?
+    {
+        info!(
+            "Skipping worker execution for task {} because its assignment changed before transport setup",
+            task.task_id
+        );
+        return Ok(());
+    }
     let transfer_lease = if current_task.runtime.as_deref()
         == Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION)
     {
@@ -1575,8 +2053,9 @@ async fn execute_on_worker_with_managed_proof_key(
                     anyhow::anyhow!("general-compute transfer lease is missing or inactive");
                 reset_after_worker_rpc_failure(
                     repo.as_ref(),
-                    &task.task_id,
+                    &current_task,
                     &worker_id,
+                    max_redispatch,
                     WorkerRpcFailureDisposition::RetryWithoutWorkerPenalty,
                     &error,
                 )
@@ -1592,8 +2071,9 @@ async fn execute_on_worker_with_managed_proof_key(
             );
             reset_after_worker_rpc_failure(
                 repo.as_ref(),
-                &task.task_id,
+                &current_task,
                 &worker_id,
+                max_redispatch,
                 WorkerRpcFailureDisposition::RetryWithoutWorkerPenalty,
                 &error,
             )
@@ -1614,13 +2094,33 @@ async fn execute_on_worker_with_managed_proof_key(
         Err(error) => {
             let reason = error.to_string();
             // A signing-key/configuration failure is a Nodepool control-plane
-            // fault, not evidence against the assigned Worker. Fail closed so
-            // the task cannot remain ASSIGNED forever or be redispatched with
-            // an unsigned request.
-            repo.fail_for_worker_without_penalty(&task.task_id, &worker_id, &reason)
+            // fault, not evidence against the assigned Worker. Managed GPU
+            // attempts use the same bounded retry/typed-terminal path as other
+            // Nodepool-owned dispatch failures.
+            if current_task.runtime.as_deref().map(str::trim) == Some(MANAGED_GPU_RUNTIME_VERSION) {
+                reset_after_worker_rpc_failure(
+                    repo.as_ref(),
+                    &current_task,
+                    &worker_id,
+                    max_redispatch,
+                    WorkerRpcFailureDisposition::RetryWithoutWorkerPenalty,
+                    &error,
+                )
                 .await?;
+            } else {
+                if repo
+                    .fail_for_worker_without_penalty_snapshot(&current_task, &worker_id, &reason)
+                    .await?
+                    .is_none()
+                {
+                    warn!(
+                        "Task {} token failure arrived after the active attempt changed; leaving current task untouched",
+                        task.task_id
+                    );
+                }
+            }
             warn!(
-                "Task {} could not create a worker execution token; failing without worker penalty: {}",
+                "Task {} could not create a worker execution token; handling without worker penalty: {}",
                 task.task_id, reason
             );
             return Ok(());
@@ -1645,8 +2145,9 @@ async fn execute_on_worker_with_managed_proof_key(
                     if managed_proof_dispatch_should_redispatch(&error) {
                         reset_after_worker_rpc_failure(
                             repo.as_ref(),
-                            &task.task_id,
+                            &current_task,
                             &worker_id,
+                            max_redispatch,
                             WorkerRpcFailureDisposition::RetryWithoutWorkerPenalty,
                             &error,
                         )
@@ -1657,8 +2158,20 @@ async fn execute_on_worker_with_managed_proof_key(
                         );
                         return Ok(());
                     }
-                    repo.fail_for_worker_without_penalty(&task.task_id, &worker_id, &reason)
-                        .await?;
+                    if repo
+                        .fail_for_worker_without_penalty_snapshot(
+                            &current_task,
+                            &worker_id,
+                            &reason,
+                        )
+                        .await?
+                        .is_none()
+                    {
+                        warn!(
+                            "Task {} proof authorization failure arrived after the active attempt changed; leaving current task untouched",
+                            task.task_id
+                        );
+                    }
                     warn!(
                         "Task {} could not create managed proof authorization; failing without worker penalty: {}",
                         task.task_id, reason
@@ -1682,8 +2195,20 @@ async fn execute_on_worker_with_managed_proof_key(
                 match general_compute_prepare_failure_disposition(&error) {
                     GeneralComputePrepareFailureDisposition::FailTaskWithoutWorkerPenalty => {
                         let reason = error.to_string();
-                        repo.fail_for_worker_without_penalty(&task.task_id, &worker_id, &reason)
-                            .await?;
+                        if repo
+                            .fail_for_worker_without_penalty_snapshot(
+                                &current_task,
+                                &worker_id,
+                                &reason,
+                            )
+                            .await?
+                            .is_none()
+                        {
+                            warn!(
+                                "Task {} artifact failure arrived after the active attempt changed; leaving current task untouched",
+                                task.task_id
+                            );
+                        }
                         warn!(
                             "Task {} cannot load Nodepool-owned general-compute artifacts for worker {}; failing without worker penalty: {}",
                             task.task_id, worker_id, reason
@@ -1692,8 +2217,9 @@ async fn execute_on_worker_with_managed_proof_key(
                     GeneralComputePrepareFailureDisposition::RetryWithoutWorkerPenalty => {
                         reset_after_worker_rpc_failure(
                             repo.as_ref(),
-                            &task.task_id,
+                            &current_task,
                             &worker_id,
+                            max_redispatch,
                             WorkerRpcFailureDisposition::RetryWithoutWorkerPenalty,
                             &error,
                         )
@@ -1719,8 +2245,20 @@ async fn execute_on_worker_with_managed_proof_key(
             match general_compute_prepare_failure_disposition(&error) {
                 GeneralComputePrepareFailureDisposition::FailTaskWithoutWorkerPenalty => {
                     let reason = error.to_string();
-                    repo.fail_for_worker_without_penalty(&task.task_id, &worker_id, &reason)
-                        .await?;
+                    if repo
+                        .fail_for_worker_without_penalty_snapshot(
+                            &current_task,
+                            &worker_id,
+                            &reason,
+                        )
+                        .await?
+                        .is_none()
+                    {
+                        warn!(
+                            "Task {} preparation failure arrived after the active attempt changed; leaving current task untouched",
+                            task.task_id
+                        );
+                    }
                     warn!(
                         "Task {} cannot be prepared for general-compute on worker {}; failing without worker penalty: {}",
                         task.task_id, worker_id, reason
@@ -1729,8 +2267,9 @@ async fn execute_on_worker_with_managed_proof_key(
                 GeneralComputePrepareFailureDisposition::RetryWithoutWorkerPenalty => {
                     reset_after_worker_rpc_failure(
                         repo.as_ref(),
-                        &task.task_id,
+                        &current_task,
                         &worker_id,
+                        max_redispatch,
                         WorkerRpcFailureDisposition::RetryWithoutWorkerPenalty,
                         &error,
                     )
@@ -1789,15 +2328,25 @@ async fn execute_on_worker_with_managed_proof_key(
             tokio::select! {
                 response = &mut execute => break response,
                 _ = heartbeat.tick() => {
-                    if let Err(error) = repo
-                        .refresh_worker_endpoint(&task.task_id, &worker_id, &worker_addr)
+                    match repo
+                        .refresh_worker_endpoint_snapshot(&current_task, &worker_id, &worker_addr)
                         .await
                     {
-                        warn!(
-                            task_id = %task.task_id,
-                            error = %error,
-                            "failed to refresh the running Worker execution heartbeat"
-                        );
+                        Ok(true) => {}
+                        Ok(false) => {
+                            warn!(
+                                task_id = %task.task_id,
+                                "stopping Worker execution because its assignment changed"
+                            );
+                            return Ok(());
+                        }
+                        Err(error) => {
+                            warn!(
+                                task_id = %task.task_id,
+                                error = %error,
+                                "failed to refresh the running Worker execution heartbeat"
+                            );
+                        }
                     }
                 }
             }
@@ -1826,10 +2375,31 @@ async fn execute_on_worker_with_managed_proof_key(
                 &response,
                 managed_proof.as_ref(),
             ) {
-                repo.reset_to_pending_for_worker(&task.task_id, &worker_id)
-                    .await?;
+                retry_or_terminalize_without_worker_penalty(
+                    repo.as_ref(),
+                    &current_task,
+                    &worker_id,
+                    max_redispatch,
+                    reason,
+                )
+                .await?;
                 warn!(
-                    "Task {} returned a managed proof attempt identity mismatch from worker {}; redispatching: {}",
+                    "Task {} returned a managed proof attempt identity mismatch from worker {}; redispatching or terminalizing: {}",
+                    task.task_id, worker_id, reason
+                );
+                return Ok(());
+            }
+            if let Err(reason) = validate_managed_gpu_response_identity(&current_task, &response) {
+                reset_managed_gpu_attempt(
+                    repo.as_ref(),
+                    &current_task,
+                    &worker_id,
+                    max_redispatch,
+                    "invalid_response_identity",
+                )
+                .await?;
+                warn!(
+                    "Task {} returned an invalid managed GPU response from worker {}; redispatching: {}",
                     task.task_id, worker_id, reason
                 );
                 return Ok(());
@@ -1837,24 +2407,58 @@ async fn execute_on_worker_with_managed_proof_key(
             if let Err(reason) =
                 validate_general_compute_response_identity(&current_task, &response)
             {
-                repo.reset_to_pending_for_worker(&task.task_id, &worker_id)
-                    .await?;
+                retry_or_terminalize_without_worker_penalty(
+                    repo.as_ref(),
+                    &current_task,
+                    &worker_id,
+                    max_redispatch,
+                    reason,
+                )
+                .await?;
                 warn!(
-                    "Task {} returned an attempt identity mismatch from worker {}; redispatching: {}",
+                    "Task {} returned an attempt identity mismatch from worker {}; redispatching or terminalizing: {}",
                     task.task_id, worker_id, reason
                 );
                 return Ok(());
             }
             if let Err(reason) = validate_worker_response_sizes(&response) {
                 let reason = reason.to_string();
-                if current_task.runtime.as_deref()
-                    == Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION)
+                if matches!(
+                    current_task.runtime.as_deref().map(str::trim),
+                    Some(MANAGED_GPU_RUNTIME_VERSION)
+                        | Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION)
+                ) {
+                    if current_task.runtime.as_deref().map(str::trim)
+                        == Some(MANAGED_GPU_RUNTIME_VERSION)
+                    {
+                        reset_managed_gpu_attempt(
+                            repo.as_ref(),
+                            &current_task,
+                            &worker_id,
+                            max_redispatch,
+                            "response_too_large",
+                        )
+                        .await?;
+                    } else {
+                        retry_or_terminalize_without_worker_penalty(
+                            repo.as_ref(),
+                            &current_task,
+                            &worker_id,
+                            max_redispatch,
+                            &reason,
+                        )
+                        .await?;
+                    }
+                } else if repo
+                    .fail_for_worker_snapshot(&current_task, &worker_id, &reason)
+                    .await?
+                    .is_none()
                 {
-                    repo.reset_to_pending_for_worker(&task.task_id, &worker_id)
-                        .await?;
-                } else {
-                    repo.fail_for_worker(&task.task_id, &worker_id, &reason)
-                        .await?;
+                    warn!(
+                        "Task {} oversized response arrived after the active attempt changed; leaving current task untouched",
+                        task.task_id
+                    );
+                    return Ok(());
                 }
                 warn!(
                     "Task {} returned an oversized response from worker {}: {}",
@@ -1862,16 +2466,109 @@ async fn execute_on_worker_with_managed_proof_key(
                 );
                 return Ok(());
             }
+            let managed_gpu_result = if current_task.runtime.as_deref().map(str::trim)
+                == Some(MANAGED_GPU_RUNTIME_VERSION)
+            {
+                let attempt_generation = i64::from(current_task.retry_count)
+                    .checked_add(1)
+                    .filter(|generation| *generation > 0)
+                    .ok_or_else(|| anyhow::anyhow!("managed GPU attempt generation is invalid"))?;
+                let binding = match repo
+                    .managed_gpu_attempt_binding(
+                        &current_task.task_id,
+                        &worker_id,
+                        attempt_generation,
+                    )
+                    .await
+                {
+                    Ok(binding) => binding,
+                    Err(error) if is_managed_gpu_binding_integrity_error(&error) => {
+                        let reason =
+                            format!("managed GPU attempt capability binding is corrupt: {error}");
+                        let quarantined = repo
+                            .quarantine_managed_gpu_without_typed_result_snapshot(
+                                &current_task,
+                                &worker_id,
+                                current_task.managed_gpu_manifest_json.as_deref(),
+                                "FAILED",
+                                &reason,
+                            )
+                            .await?;
+                        if quarantined.is_some() {
+                            warn!(
+                                task_id = %current_task.task_id,
+                                worker_id = %worker_id,
+                                error = %reason,
+                                "managed GPU task was quarantined because its immutable assignment capability binding is corrupt"
+                            );
+                        } else {
+                            warn!(
+                                task_id = %current_task.task_id,
+                                worker_id = %worker_id,
+                                "managed GPU quarantine skipped because the active attempt changed"
+                            );
+                        }
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                };
+                let Some(binding) = binding else {
+                    reset_managed_gpu_attempt(
+                        repo.as_ref(),
+                        &current_task,
+                        &worker_id,
+                        max_redispatch,
+                        "trusted_capability_missing",
+                    )
+                    .await?;
+                    warn!(
+                        "Task {} returned a managed GPU result without an immutable assignment capability binding; redispatching",
+                        task.task_id
+                    );
+                    return Ok(());
+                };
+                match decode_and_validate_managed_gpu_result(
+                    &current_task,
+                    &response,
+                    &binding.capability_snapshot_json,
+                    &binding.selected_gpu,
+                ) {
+                    Ok(result) => Some(result),
+                    Err(reason) => {
+                        reset_managed_gpu_attempt(
+                            repo.as_ref(),
+                            &current_task,
+                            &worker_id,
+                            max_redispatch,
+                            "invalid_typed_result",
+                        )
+                        .await?;
+                        warn!(
+                            "Task {} returned an invalid typed managed GPU result from worker {}; redispatching: {}",
+                            task.task_id, worker_id, reason
+                        );
+                        return Ok(());
+                    }
+                }
+            } else {
+                None
+            };
             let general_compute_result = if current_task.runtime.as_deref()
                 == Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION)
             {
                 let capability_snapshot =
                     repo.general_compute_capability_snapshot(&worker_id).await?;
                 let Some(capability_snapshot) = capability_snapshot else {
-                    repo.reset_to_pending_for_worker(&task.task_id, &worker_id)
-                        .await?;
+                    retry_or_terminalize_without_worker_penalty(
+                        repo.as_ref(),
+                        &current_task,
+                        &worker_id,
+                        max_redispatch,
+                        "general-compute trusted capability snapshot is missing",
+                    )
+                    .await?;
                     warn!(
-                        "Task {} returned a general-compute result from worker {} without a trusted capability snapshot; redispatching",
+                        "Task {} returned a general-compute result from worker {} without a trusted capability snapshot; redispatching or terminalizing",
                         task.task_id, worker_id
                     );
                     return Ok(());
@@ -1909,10 +2606,16 @@ async fn execute_on_worker_with_managed_proof_key(
                             if let Err(reason) = validate_production_input_digest(
                                 &request, &result, &matrix, sources,
                             ) {
-                                repo.reset_to_pending_for_worker(&task.task_id, &worker_id)
-                                    .await?;
+                                retry_or_terminalize_without_worker_penalty(
+                                    repo.as_ref(),
+                                    &current_task,
+                                    &worker_id,
+                                    max_redispatch,
+                                    &reason,
+                                )
+                                .await?;
                                 warn!(
-                                    "Task {} returned an invalid production input digest from worker {}; redispatching: {}",
+                                    "Task {} returned an invalid production input digest from worker {}; redispatching or terminalizing: {}",
                                     task.task_id, worker_id, reason
                                 );
                                 return Ok(());
@@ -1921,10 +2624,16 @@ async fn execute_on_worker_with_managed_proof_key(
                         Some(result)
                     }
                     Err(reason) => {
-                        repo.reset_to_pending_for_worker(&task.task_id, &worker_id)
-                            .await?;
+                        retry_or_terminalize_without_worker_penalty(
+                            repo.as_ref(),
+                            &current_task,
+                            &worker_id,
+                            max_redispatch,
+                            &reason,
+                        )
+                        .await?;
                         warn!(
-                            "Task {} returned an invalid typed general-compute result from worker {}; redispatching: {}",
+                            "Task {} returned an invalid typed general-compute result from worker {}; redispatching or terminalizing: {}",
                             task.task_id, worker_id, reason
                         );
                         return Ok(());
@@ -1934,6 +2643,40 @@ async fn execute_on_worker_with_managed_proof_key(
                 None
             };
             if response.success {
+                if current_task.runtime.as_deref().map(str::trim)
+                    == Some(MANAGED_GPU_RUNTIME_VERSION)
+                {
+                    let _result = managed_gpu_result.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("managed GPU typed result is missing after validation")
+                    })?;
+                    if repo
+                        .complete_managed_gpu_for_worker_snapshot(
+                            &current_task,
+                            &worker_id,
+                            current_task
+                                .managed_gpu_manifest_json
+                                .as_deref()
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!("managed GPU request manifest is missing")
+                                })?,
+                            &response.managed_gpu_result_json,
+                        )
+                        .await?
+                        .is_none()
+                    {
+                        warn!(
+                            task_id = %task.task_id,
+                            worker_id = %worker_id,
+                            "managed GPU completion arrived after the active attempt changed; leaving current task untouched"
+                        );
+                        return Ok(());
+                    }
+                    info!(
+                        "Task {} completed managed GPU execution on worker {}",
+                        task.task_id, worker_id
+                    );
+                    return Ok(());
+                }
                 let managed_proof = match managed_proof_for_completion_with_mode(
                     managed_proof_rollout_mode,
                     &current_task,
@@ -1951,8 +2694,17 @@ async fn execute_on_worker_with_managed_proof_key(
                             Some(reason),
                         )
                         .await;
-                        repo.fail_for_worker(&task.task_id, &worker_id, reason)
-                            .await?;
+                        if repo
+                            .fail_for_worker_snapshot(&current_task, &worker_id, reason)
+                            .await?
+                            .is_none()
+                        {
+                            warn!(
+                                "Task {} managed proof failure arrived after the active attempt changed; leaving current task untouched",
+                                task.task_id
+                            );
+                            return Ok(());
+                        }
                         warn!(
                             "Task {} failed managed proof gate on worker {}: {}",
                             task.task_id, worker_id, reason
@@ -2032,16 +2784,35 @@ async fn execute_on_worker_with_managed_proof_key(
                             .await;
                             match disposition {
                                 ManagedProofFailureDisposition::RetryWithoutWorkerPenalty => {
-                                    repo.reset_to_pending_for_worker(&task.task_id, &worker_id)
-                                        .await?;
+                                    retry_or_terminalize_without_worker_penalty(
+                                        repo.as_ref(),
+                                        &current_task,
+                                        &worker_id,
+                                        max_redispatch,
+                                        &reason,
+                                    )
+                                    .await?;
                                     warn!(
-                                        "Task {} deferred because the local managed proof verifier is busy: {}",
+                                        "Task {} deferred or terminalized because the local managed proof verifier is busy: {}",
                                         task.task_id, reason
                                     );
                                 }
                                 ManagedProofFailureDisposition::FailWorkerResult => {
-                                    repo.fail_for_worker(&task.task_id, &worker_id, &reason)
-                                        .await?;
+                                    if repo
+                                        .fail_for_worker_snapshot(
+                                            &current_task,
+                                            &worker_id,
+                                            &reason,
+                                        )
+                                        .await?
+                                        .is_none()
+                                    {
+                                        warn!(
+                                            "Task {} managed proof failure arrived after the active attempt changed; leaving current task untouched",
+                                            task.task_id
+                                        );
+                                        return Ok(());
+                                    }
                                     warn!(
                                         "Task {} failed managed proof verification on worker {}: {}",
                                         task.task_id, worker_id, reason
@@ -2056,12 +2827,21 @@ async fn execute_on_worker_with_managed_proof_key(
                 };
                 if let Some(completion) = managed_completion {
                     if observed_verified {
-                        repo.complete_for_worker_observed_verified(
-                            &task.task_id,
-                            &worker_id,
-                            Some(&response.status_message),
-                        )
-                        .await?;
+                        if repo
+                            .complete_for_worker_observed_verified_snapshot(
+                                &current_task,
+                                &worker_id,
+                                Some(&response.status_message),
+                            )
+                            .await?
+                            .is_none()
+                        {
+                            warn!(
+                                "Task {} completion arrived after the active attempt changed; leaving current task untouched",
+                                task.task_id
+                            );
+                            return Ok(());
+                        }
                         managed_proof_metrics::record(ManagedProofMetricEvent::Verified);
                         managed_proof_metrics::record(ManagedProofMetricEvent::ObserveFallback);
                         record_managed_proof_audit(
@@ -2074,15 +2854,24 @@ async fn execute_on_worker_with_managed_proof_key(
                         )
                         .await;
                     } else {
-                        repo.complete_for_worker_with_managed_receipt(
-                            &task.task_id,
-                            &worker_id,
-                            Some(&response.status_message),
-                            completion.usage_units,
-                            completion.output_bytes,
-                            &completion.claim_json,
-                        )
-                        .await?;
+                        if repo
+                            .complete_for_worker_with_managed_receipt_snapshot(
+                                &current_task,
+                                &worker_id,
+                                Some(&response.status_message),
+                                completion.usage_units,
+                                completion.output_bytes,
+                                &completion.claim_json,
+                            )
+                            .await?
+                            .is_none()
+                        {
+                            warn!(
+                                "Task {} completion arrived after the active attempt changed; leaving current task untouched",
+                                task.task_id
+                            );
+                            return Ok(());
+                        }
                         managed_proof_metrics::record(ManagedProofMetricEvent::Verified);
                         record_managed_proof_audit(
                             repo.as_ref(),
@@ -2095,26 +2884,44 @@ async fn execute_on_worker_with_managed_proof_key(
                         .await;
                     }
                 } else if let Some(result) = general_compute_result.as_ref() {
-                    repo.complete_general_compute_for_worker(
-                        &task.task_id,
-                        &worker_id,
-                        current_task
-                            .general_compute_manifest_json
-                            .as_deref()
-                            .ok_or_else(|| {
-                                anyhow::anyhow!("general-compute request manifest is missing")
-                            })?,
-                        &response.general_compute_result_json,
-                        (!result.stdout.is_empty()).then_some(result.stdout.as_str()),
-                    )
-                    .await?;
+                    if repo
+                        .complete_general_compute_for_worker_snapshot(
+                            &current_task,
+                            &worker_id,
+                            current_task
+                                .general_compute_manifest_json
+                                .as_deref()
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!("general-compute request manifest is missing")
+                                })?,
+                            &response.general_compute_result_json,
+                            (!result.stdout.is_empty()).then_some(result.stdout.as_str()),
+                        )
+                        .await?
+                        .is_none()
+                    {
+                        warn!(
+                            "Task {} general-compute completion arrived after the active attempt changed; leaving current task untouched",
+                            task.task_id
+                        );
+                        return Ok(());
+                    }
                 } else if is_managed_runtime(current_task.runtime.as_deref()) {
-                    repo.complete_for_worker_legacy_managed(
-                        &task.task_id,
-                        &worker_id,
-                        Some(&response.status_message),
-                    )
-                    .await?;
+                    if repo
+                        .complete_for_worker_legacy_managed_snapshot(
+                            &current_task,
+                            &worker_id,
+                            Some(&response.status_message),
+                        )
+                        .await?
+                        .is_none()
+                    {
+                        warn!(
+                            "Task {} completion arrived after the active attempt changed; leaving current task untouched",
+                            task.task_id
+                        );
+                        return Ok(());
+                    }
                     if managed_proof_rollout_mode == ManagedProofRolloutMode::Observe
                         && response.managed_proof.is_none()
                     {
@@ -2141,44 +2948,109 @@ async fn execute_on_worker_with_managed_proof_key(
                         )
                         .await;
                     }
-                } else {
-                    repo.complete_for_worker(
-                        &task.task_id,
+                } else if repo
+                    .complete_for_worker_snapshot(
+                        &current_task,
                         &worker_id,
                         None,
                         Some(&response.status_message),
                     )
-                    .await?;
+                    .await?
+                    .is_none()
+                {
+                    warn!(
+                        "Task {} completion arrived after the active attempt changed; leaving current task untouched",
+                        task.task_id
+                    );
+                    return Ok(());
                 }
                 info!("Task {} completed by worker {}", task.task_id, worker_id);
             } else {
+                if current_task.runtime.as_deref().map(str::trim)
+                    == Some(MANAGED_GPU_RUNTIME_VERSION)
+                {
+                    let result = managed_gpu_result.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("managed GPU typed result is missing after validation")
+                    })?;
+                    let reason = result
+                        .error_code
+                        .as_deref()
+                        .filter(|message| !message.trim().is_empty())
+                        .unwrap_or("managed GPU execution failed");
+                    if repo
+                        .fail_managed_gpu_for_worker_snapshot(
+                            &current_task,
+                            &worker_id,
+                            current_task
+                                .managed_gpu_manifest_json
+                                .as_deref()
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!("managed GPU request manifest is missing")
+                                })?,
+                            &response.managed_gpu_result_json,
+                            reason,
+                        )
+                        .await?
+                        .is_none()
+                    {
+                        warn!(
+                            task_id = %task.task_id,
+                            worker_id = %worker_id,
+                            "managed GPU failure arrived after the active attempt changed; leaving current task untouched"
+                        );
+                        return Ok(());
+                    }
+                    warn!(
+                        "Task {} failed typed managed GPU execution on worker {}: {}",
+                        task.task_id, worker_id, reason
+                    );
+                    return Ok(());
+                }
                 if let Some(result) = general_compute_result.as_ref() {
                     let reason = result
                         .error_code
                         .as_deref()
                         .filter(|message| !message.trim().is_empty())
                         .unwrap_or("general-compute execution failed");
-                    repo.fail_general_compute_for_worker(
-                        &task.task_id,
-                        &worker_id,
-                        current_task
-                            .general_compute_manifest_json
-                            .as_deref()
-                            .ok_or_else(|| {
-                                anyhow::anyhow!("general-compute request manifest is missing")
-                            })?,
-                        &response.general_compute_result_json,
-                        reason,
-                    )
-                    .await?;
+                    if repo
+                        .fail_general_compute_for_worker_snapshot(
+                            &current_task,
+                            &worker_id,
+                            current_task
+                                .general_compute_manifest_json
+                                .as_deref()
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!("general-compute request manifest is missing")
+                                })?,
+                            &response.general_compute_result_json,
+                            reason,
+                        )
+                        .await?
+                        .is_none()
+                    {
+                        warn!(
+                            "Task {} general-compute failure arrived after the active attempt changed; leaving current task untouched",
+                            task.task_id
+                        );
+                        return Ok(());
+                    }
                     warn!(
                         "Task {} failed typed general-compute execution on worker {}: {}",
                         task.task_id, worker_id, reason
                     );
                     return Ok(());
                 }
-                repo.fail_for_worker(&task.task_id, &worker_id, &response.status_message)
-                    .await?;
+                if repo
+                    .fail_for_worker_snapshot(&current_task, &worker_id, &response.status_message)
+                    .await?
+                    .is_none()
+                {
+                    warn!(
+                        "Task {} failure arrived after the active attempt changed; leaving current task untouched",
+                        task.task_id
+                    );
+                    return Ok(());
+                }
                 warn!(
                     "Task {} failed on worker {}: {}",
                     task.task_id, worker_id, response.status_message
@@ -2189,8 +3061,9 @@ async fn execute_on_worker_with_managed_proof_key(
             let disposition = worker_rpc_failure_disposition(&e);
             reset_after_worker_rpc_failure(
                 repo.as_ref(),
-                &task.task_id,
+                &current_task,
                 &worker_id,
+                max_redispatch,
                 disposition,
                 &e,
             )
@@ -2206,12 +3079,22 @@ async fn complete_legacy_worker_result(
     worker_id: &str,
     response: &ExecuteTaskResponse,
 ) -> Result<()> {
-    repo.complete_for_worker_legacy_managed(
-        &task.task_id,
-        worker_id,
-        Some(&response.status_message),
-    )
-    .await?;
+    if repo
+        .complete_for_worker_legacy_managed_snapshot(
+            task,
+            worker_id,
+            Some(&response.status_message),
+        )
+        .await?
+        .is_none()
+    {
+        warn!(
+            task_id = %task.task_id,
+            worker_id = %worker_id,
+            "legacy managed completion arrived after the active attempt changed; leaving current task untouched"
+        );
+        return Ok(());
+    }
     managed_proof_metrics::record(ManagedProofMetricEvent::LegacySettlement);
     record_managed_proof_audit(
         repo,
@@ -2349,6 +3232,8 @@ enum WorkerResponseSizeError {
     LegacyReceiptTooLarge,
     #[error("Worker typed general-compute result exceeds the application limit")]
     GeneralComputeResultTooLarge,
+    #[error("Worker typed managed GPU result exceeds the application limit")]
+    ManagedGpuResultTooLarge,
 }
 
 fn validate_worker_response_sizes(
@@ -2362,6 +3247,9 @@ fn validate_worker_response_sizes(
     }
     if response.general_compute_result_json.len() > GENERAL_COMPUTE_RESULT_MAX_BYTES {
         return Err(WorkerResponseSizeError::GeneralComputeResultTooLarge);
+    }
+    if response.managed_gpu_result_json.len() > MANAGED_GPU_RESULT_MAX_BYTES {
+        return Err(WorkerResponseSizeError::ManagedGpuResultTooLarge);
     }
     Ok(())
 }
@@ -2415,7 +3303,54 @@ fn decode_and_validate_general_compute_result(
     Ok(result)
 }
 
-/// Production results are eligible for completion only when their input claim
+fn decode_and_validate_managed_gpu_result(
+    task: &Task,
+    response: &ExecuteTaskResponse,
+    capability_snapshot_json: &str,
+    assignment_gpu: &ManagedGpuCapability,
+) -> std::result::Result<ManagedGpuResult, String> {
+    if response.managed_gpu_result_json.is_empty() {
+        return Err("managed GPU typed result is missing".into());
+    }
+    let request = task
+        .managed_gpu_manifest_json
+        .as_deref()
+        .ok_or_else(|| "managed GPU request manifest is missing".to_string())
+        .and_then(|manifest| {
+            serde_json::from_slice::<ManagedGpuRequest>(manifest)
+                .map_err(|error| format!("managed GPU request is malformed: {error}"))
+        })?;
+    request
+        .validate()
+        .map_err(|error| format!("managed GPU request is invalid: {error:?}"))?;
+    if u64::try_from(task.max_cpt).ok() != Some(request.reservation_cpt) {
+        return Err("managed GPU task reservation does not match its request manifest".into());
+    }
+    let registration = serde_json::from_str::<
+        general_compute_runtime::TrustedWorkerCapabilityRegistration,
+    >(capability_snapshot_json)
+    .map_err(|error| format!("trusted capability snapshot is malformed: {error}"))?;
+    let trusted_gpu = registration
+        .select_managed_gpu_for_request(&request)
+        .map_err(|error| format!("trusted managed GPU selection failed: {error:?}"))?;
+    if trusted_gpu != *assignment_gpu {
+        return Err("managed GPU assignment device no longer matches its trusted snapshot".into());
+    }
+    let result = serde_json::from_slice::<ManagedGpuResult>(&response.managed_gpu_result_json)
+        .map_err(|error| format!("managed GPU typed result is malformed: {error}"))?;
+    result
+        .validate_against(&request, &registration)
+        .map_err(|error| format!("managed GPU typed result failed validation: {error:?}"))?;
+    if result.selected_gpu != *assignment_gpu {
+        return Err("managed GPU typed result selected a different assignment device".into());
+    }
+    let expected_success = result.status == ManagedGpuStatus::Completed;
+    if response.success != expected_success {
+        return Err("worker success flag does not match managed GPU typed result status".into());
+    }
+    Ok(result)
+}
+
 /// is tied to the exact raw bytes that Nodepool loaded from its immutable
 /// artifact source rows. Reference-direct results retain their legacy digest
 /// semantics because that adapter predates the production runner protocol.
@@ -2548,23 +3483,173 @@ fn worker_transport_failure_disposition(
 
 async fn reset_after_worker_rpc_failure(
     repo: &TaskRepository,
-    task_id: &str,
+    task: &Task,
     worker_id: &str,
+    max_redispatch: i32,
     disposition: WorkerRpcFailureDisposition,
-    error: &impl std::fmt::Display,
+    error: &(impl std::fmt::Display + ?Sized),
 ) -> Result<()> {
-    repo.reset_to_pending_for_worker(task_id, worker_id).await?;
+    let reason = error.to_string();
+    if task.runtime.as_deref().map(str::trim) == Some(MANAGED_GPU_RUNTIME_VERSION) {
+        let Some(manifest) = task.managed_gpu_manifest_json.as_deref() else {
+            let quarantined = repo
+                .quarantine_managed_gpu_without_typed_result_snapshot(
+                    task, worker_id, None, "FAILED", &reason,
+                )
+                .await?;
+            if quarantined.is_some() {
+                warn!(
+                    task_id = %task.task_id,
+                    worker_id,
+                    "managed GPU task was quarantined because its request manifest is missing"
+                );
+            } else {
+                warn!(
+                    task_id = %task.task_id,
+                    worker_id,
+                    "managed GPU quarantine skipped because the active attempt changed"
+                );
+            }
+            return Ok(());
+        };
+        if !managed_gpu_manifest_is_valid(manifest) {
+            let quarantined = repo
+                .quarantine_managed_gpu_without_typed_result_snapshot(
+                    task,
+                    worker_id,
+                    Some(manifest),
+                    "FAILED",
+                    "managed GPU request manifest is malformed or invalid",
+                )
+                .await?;
+            if quarantined.is_some() {
+                warn!(
+                    task_id = %task.task_id,
+                    worker_id,
+                    "managed GPU task was quarantined because its request manifest is malformed or invalid"
+                );
+            } else {
+                warn!(
+                    task_id = %task.task_id,
+                    worker_id,
+                    "managed GPU quarantine skipped because the active attempt changed"
+                );
+            }
+            return Ok(());
+        }
+        let retry_limit = effective_retry_limit(task, max_redispatch);
+        if task.retry_count >= retry_limit {
+            let status = match disposition {
+                WorkerRpcFailureDisposition::RetryAfterResourceExhaustion => {
+                    ManagedGpuStatus::ResourceExhausted
+                }
+                WorkerRpcFailureDisposition::RetryWithoutWorkerPenalty => ManagedGpuStatus::Failed,
+            };
+            let failed = repo
+                .fail_managed_gpu_without_worker_result_snapshot(
+                    task,
+                    worker_id,
+                    manifest,
+                    status,
+                    "worker_rpc_retry_limit",
+                    &reason,
+                )
+                .await?;
+            if failed.is_some() {
+                warn!(
+                    task_id = %task.task_id,
+                    worker_id,
+                    retry_count = task.retry_count,
+                    "managed GPU task reached the redispatch limit after a Worker RPC failure"
+                );
+            } else {
+                warn!(
+                    task_id = %task.task_id,
+                    worker_id,
+                    "managed GPU retry-limit failure arrived after the active attempt changed; leaving current task untouched"
+                );
+            }
+            return Ok(());
+        }
+        let updated = repo
+            .retry_to_pending_for_worker_snapshot(
+                task,
+                worker_id,
+                retry_limit,
+                "Worker RPC retry limit exceeded while resetting managed GPU task",
+            )
+            .await?;
+        if let Some(updated) = updated {
+            if updated.status != TaskStatus::Pending {
+                warn!(
+                    task_id = %task.task_id,
+                    worker_id,
+                    status = updated.status.as_str(),
+                    "managed GPU RPC retry exhausted during reset"
+                );
+            }
+        } else {
+            warn!(
+                task_id = %task.task_id,
+                worker_id,
+                "managed GPU RPC failure arrived after the active attempt changed; leaving current task untouched"
+            );
+        }
+    } else {
+        let retry_limit = effective_retry_limit(task, max_redispatch);
+        if task.retry_count >= retry_limit {
+            let failed = repo
+                .fail_for_worker_without_penalty_snapshot(
+                    task,
+                    worker_id,
+                    "Worker RPC retry limit exceeded",
+                )
+                .await?;
+            if failed.is_none() {
+                warn!(
+                    task_id = %task.task_id,
+                    worker_id,
+                    "Worker RPC retry-limit failure arrived after the active attempt changed; leaving current task untouched"
+                );
+            }
+            return Ok(());
+        }
+        let updated = repo
+            .retry_to_pending_for_worker_snapshot(
+                task,
+                worker_id,
+                retry_limit,
+                "Worker RPC retry limit exceeded while resetting task",
+            )
+            .await?;
+        if let Some(updated) = updated {
+            if updated.status != TaskStatus::Pending {
+                warn!(
+                    task_id = %task.task_id,
+                    worker_id,
+                    status = updated.status.as_str(),
+                    "Worker RPC retry exhausted during reset"
+                );
+            }
+        } else {
+            warn!(
+                task_id = %task.task_id,
+                worker_id,
+                "Worker RPC failure arrived after the active attempt changed; leaving current task untouched"
+            );
+        }
+    }
     match disposition {
         WorkerRpcFailureDisposition::RetryAfterResourceExhaustion => {
             warn!(
                 "Task {} was rejected because worker {} is resource exhausted; resetting for redispatch: {}",
-                task_id, worker_id, error
+                task.task_id, worker_id, error
             );
         }
         WorkerRpcFailureDisposition::RetryWithoutWorkerPenalty => {
             warn!(
                 "Task {} could not be sent to worker {}; resetting for redispatch without worker penalty: {}",
-                task_id, worker_id, error
+                task.task_id, worker_id, error
             );
         }
     }
@@ -2699,10 +3784,18 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use general_compute_runtime::{
-        canonical_artifact_root, sha256_digest, ArtifactManifest, ArtifactRole,
-        BackendRegistration, DeterminismPolicy, EvidenceEnvelope, ExecutionPolicy,
-        GeneralComputeRequest, GeneralComputeResult, ResultStatus,
-        TrustedWorkerCapabilityRegistration, UsageClaim, WorkerCapabilities,
+        canonical_artifact_root,
+        managed_gpu::{
+            ManagedGpuBackendRegistration, ManagedGpuCapability, ManagedGpuLimits,
+            ManagedGpuProofPolicy, ManagedGpuRequest, ManagedGpuRequirement, ManagedGpuResult,
+            ManagedGpuStatus, MANAGED_GPU_BILLING_VERSION, MANAGED_GPU_COST_MODEL_VERSION,
+            MANAGED_GPU_OPERATION_REGISTRY_VERSION, MANAGED_GPU_REQUEST_PROTOCOL_VERSION,
+            MANAGED_GPU_RUNTIME_VERSION, MANAGED_GPU_SEMANTICS_MANIFEST_SHA256,
+            MANAGED_GPU_SETTLEMENT_BASIS,
+        },
+        sha256_digest, ArtifactManifest, ArtifactRole, BackendRegistration, DeterminismPolicy,
+        EvidenceEnvelope, ExecutionPolicy, GeneralComputeRequest, GeneralComputeResult,
+        ResultStatus, TrustedWorkerCapabilityRegistration, UsageClaim, WorkerCapabilities,
         GENERAL_COMPUTE_RUNTIME_VERSION,
     };
     use hivemind_config::ManagedProofRolloutMode;
@@ -2726,6 +3819,7 @@ mod tests {
     use std::net::SocketAddr;
     use std::sync::{Arc, OnceLock};
     use std::time::Duration;
+    use tokio::sync::oneshot;
     use tokio_stream::wrappers::TcpListenerStream;
     use tonic::{Request, Response, Status};
 
@@ -3096,6 +4190,20 @@ mod tests {
         fixture.cleanup().await.ok();
     }
 
+    #[test]
+    fn effective_retry_limit_is_the_lower_nonnegative_budget() {
+        let mut task = make_task("retry-limit", TaskStatus::Assigned, 0);
+        task.max_retries = 5;
+        assert_eq!(effective_retry_limit(&task, 2), 2);
+
+        task.max_retries = 1;
+        assert_eq!(effective_retry_limit(&task, 2), 1);
+
+        task.max_retries = -1;
+        assert_eq!(effective_retry_limit(&task, 2), 0);
+        assert_eq!(effective_retry_limit(&task, -1), 0);
+    }
+
     fn make_task(id: &str, status: TaskStatus, retry_count: i32) -> Task {
         Task {
             id: uuid::Uuid::new_v4(),
@@ -3111,6 +4219,7 @@ mod tests {
             runtime: None,
             task_source: None,
             general_compute_manifest_json: None,
+            managed_gpu_manifest_json: None,
             managed_dsl_backend_id: None,
             managed_dsl_semantics_manifest_sha256: None,
             expected_btih: None,
@@ -4286,6 +5395,7 @@ mod tests {
                 gpu_available: false,
             },
             gpu_capabilities: vec![],
+            managed_gpu_backends: vec![],
             backends: vec![BackendRegistration {
                 backend_id: request.backend_id.clone(),
                 execution_mode:
@@ -4365,6 +5475,7 @@ mod tests {
                 gpu_available: true,
             },
             gpu_capabilities: vec![trusted_gpu],
+            managed_gpu_backends: vec![],
             backends: vec![BackendRegistration {
                 backend_id: request.backend_id.clone(),
                 execution_mode:
@@ -4488,6 +5599,7 @@ mod tests {
                 gpu_available: false,
             },
             gpu_capabilities: vec![],
+            managed_gpu_backends: vec![],
             backends: vec![BackendRegistration {
                 backend_id: request.backend_id.clone(),
                 execution_mode:
@@ -4539,7 +5651,7 @@ mod tests {
         assert_eq!(WORKER_EXECUTE_RPC_TIMEOUT, Duration::from_secs(20 * 60));
         assert_eq!(
             hivemind_proto::WORKER_RPC_MESSAGE_MAX_BYTES,
-            4 * 1024 * 1024
+            22 * 1024 * 1024
         );
     }
 
@@ -4602,6 +5714,933 @@ mod tests {
             worker_transport_failure_disposition(&error),
             WorkerRpcFailureDisposition::RetryWithoutWorkerPenalty
         );
+    }
+
+    #[tokio::test]
+    async fn managed_gpu_dispatch_retry_ceiling_persists_nodepool_failure() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_managed_gpu_retry_ceiling").await else {
+            return;
+        };
+        let repo = TaskRepository::new(db.pool.clone());
+        let unique = uuid::Uuid::new_v4().to_string();
+        let case = setup_managed_gpu_dispatch_case(&repo, &unique).await;
+        let reputation_before =
+            seed_managed_gpu_dispatch_reputation(&repo.pool, &case.worker_id).await;
+        let task = repo
+            .find_by_task_id(&case.task_id)
+            .await
+            .unwrap()
+            .expect("managed GPU task must exist");
+
+        reset_managed_gpu_attempt(&repo, &task, &case.worker_id, 0, "invalid typed result")
+            .await
+            .unwrap();
+
+        let stored = repo.find_by_task_id(&case.task_id).await.unwrap().unwrap();
+        assert_eq!(stored.status, TaskStatus::Failed);
+        assert_eq!(
+            stored.status_message.as_deref(),
+            Some("invalid typed result")
+        );
+        assert!(!stored.billing_settled);
+        assert_eq!(stored.billed_amount, 0);
+        let result_json: Vec<u8> =
+            sqlx::query_scalar("SELECT result_json FROM managed_gpu_results WHERE task_id = $1")
+                .bind(&case.task_id)
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap();
+        let result: ManagedGpuResult = serde_json::from_slice(&result_json).unwrap();
+        assert_eq!(result.status, ManagedGpuStatus::Failed);
+        assert_eq!(result.error_code.as_deref(), Some("retry_limit_exceeded"));
+        assert_eq!(result.selected_gpu, case.capability);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM managed_gpu_settlements WHERE task_id = $1",
+            )
+            .bind(&case.task_id)
+            .fetch_one(&repo.pool)
+            .await
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            managed_gpu_dispatch_reputation(&repo.pool, &case.worker_id).await,
+            reputation_before,
+            "retry-ceiling Nodepool failure must not mutate Worker reputation"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM task_attestations
+                 WHERE task_id = $1 AND worker_id = $2",
+            )
+            .bind(&case.task_id)
+            .bind(&case.worker_id)
+            .fetch_one(&repo.pool)
+            .await
+            .unwrap(),
+            0
+        );
+
+        cleanup_managed_gpu_dispatch_case(&repo, &case).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn managed_gpu_dispatch_malformed_manifest_is_quarantined() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_managed_gpu_malformed_manifest").await else {
+            return;
+        };
+        let repo = TaskRepository::new(db.pool.clone());
+        let unique = uuid::Uuid::new_v4().to_string();
+        let case = setup_managed_gpu_dispatch_case(&repo, &unique).await;
+        let reputation_before =
+            seed_managed_gpu_dispatch_reputation(&repo.pool, &case.worker_id).await;
+        let malformed_manifest = b"not-json".to_vec();
+        sqlx::query("UPDATE tasks SET managed_gpu_manifest_json = $1 WHERE task_id = $2")
+            .bind(&malformed_manifest)
+            .bind(&case.task_id)
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+        let task = repo
+            .find_by_task_id(&case.task_id)
+            .await
+            .unwrap()
+            .expect("managed GPU task must exist");
+
+        reset_managed_gpu_attempt(&repo, &task, &case.worker_id, 2, "invalid typed result")
+            .await
+            .unwrap();
+
+        let stored = repo.find_by_task_id(&case.task_id).await.unwrap().unwrap();
+        assert_eq!(stored.status, TaskStatus::Failed);
+        assert_eq!(
+            stored.status_message.as_deref(),
+            Some("managed GPU request manifest is malformed or invalid")
+        );
+        assert!(!stored.billing_settled);
+        assert_eq!(stored.billed_amount, 0);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM managed_gpu_results WHERE task_id = $1",
+            )
+            .bind(&case.task_id)
+            .fetch_one(&repo.pool)
+            .await
+            .unwrap(),
+            0,
+            "manifest quarantine must not fabricate a typed GPU identity"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM managed_gpu_settlements WHERE task_id = $1",
+            )
+            .bind(&case.task_id)
+            .fetch_one(&repo.pool)
+            .await
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            managed_gpu_dispatch_reputation(&repo.pool, &case.worker_id).await,
+            reputation_before,
+            "manifest quarantine must not mutate Worker reputation"
+        );
+
+        cleanup_managed_gpu_dispatch_case(&repo, &case).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn managed_gpu_dispatch_missing_manifest_is_quarantined() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_managed_gpu_missing_manifest").await else {
+            return;
+        };
+        let repo = TaskRepository::new(db.pool.clone());
+        let unique = uuid::Uuid::new_v4().to_string();
+        let task_id = format!("dispatcher-gpu-missing-manifest-task-{unique}");
+        let worker_id = format!("dispatcher-gpu-missing-manifest-worker-{unique}");
+        let mut task = make_task(&task_id, TaskStatus::Pending, 0);
+        task.owner = format!("dispatcher-gpu-missing-manifest-owner-{unique}");
+        repo.create(&task).await.unwrap();
+        sqlx::query(
+            "UPDATE tasks
+             SET runtime = $1, worker_id = $2, worker_ip = '127.0.0.1', status = 'ASSIGNED'
+             WHERE task_id = $3",
+        )
+        .bind(MANAGED_GPU_RUNTIME_VERSION)
+        .bind(&worker_id)
+        .bind(&task_id)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        let assigned = repo
+            .find_by_task_id(&task_id)
+            .await
+            .unwrap()
+            .expect("manually corrupted task must exist");
+
+        reset_managed_gpu_attempt(
+            &repo,
+            &assigned,
+            &worker_id,
+            2,
+            "managed GPU request manifest is missing",
+        )
+        .await
+        .unwrap();
+
+        let stored = repo.find_by_task_id(&task_id).await.unwrap().unwrap();
+        assert_eq!(stored.status, TaskStatus::Failed);
+        assert_eq!(
+            stored.status_message.as_deref(),
+            Some("managed GPU request manifest is missing")
+        );
+        assert!(!stored.billing_settled);
+        assert_eq!(stored.billed_amount, 0);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM managed_gpu_results WHERE task_id = $1",
+            )
+            .bind(&task_id)
+            .fetch_one(&repo.pool)
+            .await
+            .unwrap(),
+            0
+        );
+
+        sqlx::query("DELETE FROM tasks WHERE task_id = $1")
+            .bind(&task_id)
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn managed_gpu_dispatch_execute_path_missing_manifest_is_quarantined() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_managed_gpu_execute_missing_manifest").await
+        else {
+            return;
+        };
+        let repo = Arc::new(TaskRepository::new(db.pool.clone()));
+        let unique = uuid::Uuid::new_v4().to_string();
+        let case = setup_managed_gpu_dispatch_case(repo.as_ref(), &unique).await;
+        let reputation_before =
+            seed_managed_gpu_dispatch_reputation(&repo.pool, &case.worker_id).await;
+        sqlx::query("UPDATE tasks SET managed_gpu_manifest_json = NULL WHERE task_id = $1")
+            .bind(&case.task_id)
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+        let task = repo
+            .find_by_task_id(&case.task_id)
+            .await
+            .unwrap()
+            .expect("managed GPU task must exist");
+        let (worker_addr, mut execute_rx) = worker_only_execute_server().await.unwrap();
+        let (private_key, _) = hivemind_config::generate_worker_execution_test_key_pair();
+
+        execute_on_worker_with_managed_proof_key(
+            repo.clone(),
+            task,
+            case.worker_id.clone(),
+            worker_addr.to_string(),
+            WorkerExecutionOptions {
+                worker_execution_private_key_pem: private_key,
+                managed_proof_authorization_private_key_pem: String::new(),
+                managed_proof_provider_configured: false,
+                managed_proof_rollout_mode: ManagedProofRolloutMode::Enforce,
+                max_redispatch: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), execute_rx.recv())
+                .await
+                .is_err(),
+            "missing manifest must fail before submitting a Worker RPC"
+        );
+        let stored = repo.find_by_task_id(&case.task_id).await.unwrap().unwrap();
+        assert_eq!(stored.status, TaskStatus::Failed);
+        assert_eq!(
+            stored.status_message.as_deref(),
+            Some("managed-function-gpu-v1 request manifest is missing")
+        );
+        assert!(!stored.billing_settled);
+        assert_eq!(stored.billed_amount, 0);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM managed_gpu_results WHERE task_id = $1",
+            )
+            .bind(&case.task_id)
+            .fetch_one(&repo.pool)
+            .await
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM managed_gpu_settlements WHERE task_id = $1",
+            )
+            .bind(&case.task_id)
+            .fetch_one(&repo.pool)
+            .await
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            managed_gpu_dispatch_reputation(&repo.pool, &case.worker_id).await,
+            reputation_before,
+            "missing-manifest quarantine must not mutate Worker reputation"
+        );
+
+        cleanup_managed_gpu_dispatch_case(repo.as_ref(), &case).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn managed_gpu_dispatch_missing_or_corrupt_binding_is_quarantined() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_managed_gpu_binding_integrity").await else {
+            return;
+        };
+        let repo = TaskRepository::new(db.pool.clone());
+        for corrupt in [false, true] {
+            let unique = format!("{}-{}", uuid::Uuid::new_v4(), corrupt);
+            let case = setup_managed_gpu_dispatch_case(&repo, &unique).await;
+            let reputation_before =
+                seed_managed_gpu_dispatch_reputation(&repo.pool, &case.worker_id).await;
+            if corrupt {
+                sqlx::query(
+                    "UPDATE managed_gpu_attempt_bindings
+                     SET selected_gpu_json = $1
+                     WHERE task_id = $2 AND attempt_generation = 1",
+                )
+                .bind(b"not-json".to_vec())
+                .bind(&case.task_id)
+                .execute(&repo.pool)
+                .await
+                .unwrap();
+            } else {
+                sqlx::query("DELETE FROM managed_gpu_attempt_bindings WHERE task_id = $1")
+                    .bind(&case.task_id)
+                    .execute(&repo.pool)
+                    .await
+                    .unwrap();
+            }
+            let task = repo
+                .find_by_task_id(&case.task_id)
+                .await
+                .unwrap()
+                .expect("managed GPU task must exist");
+
+            reset_managed_gpu_attempt(
+                &repo,
+                &task,
+                &case.worker_id,
+                0,
+                "managed GPU binding integrity failure",
+            )
+            .await
+            .unwrap();
+
+            let stored = repo.find_by_task_id(&case.task_id).await.unwrap().unwrap();
+            assert_eq!(stored.status, TaskStatus::Failed);
+            assert!(!stored.billing_settled);
+            assert_eq!(stored.billed_amount, 0);
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM managed_gpu_results WHERE task_id = $1",
+                )
+                .bind(&case.task_id)
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap(),
+                0,
+                "quarantine must not fabricate a typed GPU identity"
+            );
+            assert_eq!(
+                managed_gpu_dispatch_reputation(&repo.pool, &case.worker_id).await,
+                reputation_before,
+                "binding quarantine must not mutate Worker reputation"
+            );
+            cleanup_managed_gpu_dispatch_case(&repo, &case).await;
+        }
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn managed_gpu_dispatch_response_binding_integrity_is_quarantined() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_managed_gpu_response_binding").await else {
+            return;
+        };
+        let repo = Arc::new(TaskRepository::new(db.pool.clone()));
+        for corrupt in [false, true] {
+            let unique = format!("{}-{corrupt}", uuid::Uuid::new_v4());
+            let case = setup_managed_gpu_dispatch_case(repo.as_ref(), &unique).await;
+            let reputation_before =
+                seed_managed_gpu_dispatch_reputation(&repo.pool, &case.worker_id).await;
+            let request: ManagedGpuRequest = serde_json::from_slice(&case.manifest).unwrap();
+            let response = managed_gpu_dispatch_completed_response(&request, &case.capability);
+            if corrupt {
+                sqlx::query(
+                    "UPDATE managed_gpu_attempt_bindings
+                     SET selected_gpu_json = $1
+                     WHERE task_id = $2 AND attempt_generation = 1",
+                )
+                .bind(b"not-json".to_vec())
+                .bind(&case.task_id)
+                .execute(&repo.pool)
+                .await
+                .unwrap();
+            } else {
+                sqlx::query("DELETE FROM managed_gpu_attempt_bindings WHERE task_id = $1")
+                    .bind(&case.task_id)
+                    .execute(&repo.pool)
+                    .await
+                    .unwrap();
+            }
+            let (worker_addr, mut execute_rx) = fake_worker_execute_server_with_response(response)
+                .await
+                .unwrap();
+            let task = repo
+                .find_by_task_id(&case.task_id)
+                .await
+                .unwrap()
+                .expect("managed GPU task must exist");
+            let (private_key, _) = hivemind_config::generate_worker_execution_test_key_pair();
+            let execution = tokio::spawn(execute_on_worker_with_managed_proof_key(
+                repo.clone(),
+                task,
+                case.worker_id.clone(),
+                worker_addr.to_string(),
+                WorkerExecutionOptions {
+                    worker_execution_private_key_pem: private_key,
+                    managed_proof_authorization_private_key_pem: String::new(),
+                    managed_proof_provider_configured: false,
+                    managed_proof_rollout_mode: ManagedProofRolloutMode::Enforce,
+                    max_redispatch: 0,
+                },
+            ));
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), execute_rx.recv())
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some(case.task_id.as_str())
+            );
+            execution.await.unwrap().unwrap();
+
+            let stored = repo.find_by_task_id(&case.task_id).await.unwrap().unwrap();
+            assert_eq!(stored.status, TaskStatus::Failed);
+            assert!(!stored.billing_settled);
+            assert_eq!(stored.billed_amount, 0);
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM managed_gpu_results WHERE task_id = $1",
+                )
+                .bind(&case.task_id)
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap(),
+                0,
+                "binding integrity quarantine must not fabricate a typed result"
+            );
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM managed_gpu_settlements WHERE task_id = $1",
+                )
+                .bind(&case.task_id)
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap(),
+                0
+            );
+            assert_eq!(
+                managed_gpu_dispatch_reputation(&repo.pool, &case.worker_id).await,
+                reputation_before,
+                "response-path binding quarantine must not mutate Worker reputation"
+            );
+            cleanup_managed_gpu_dispatch_case(repo.as_ref(), &case).await;
+        }
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn managed_gpu_dispatch_success_uses_immutable_binding_and_settles() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_managed_gpu_success").await else {
+            return;
+        };
+        let repo = Arc::new(TaskRepository::new(db.pool.clone()));
+        let unique = uuid::Uuid::new_v4().to_string();
+        let case = setup_managed_gpu_dispatch_case(repo.as_ref(), &unique).await;
+        let request: ManagedGpuRequest = serde_json::from_slice(&case.manifest).unwrap();
+        let binding_before = repo
+            .managed_gpu_attempt_binding(&case.task_id, &case.worker_id, 1)
+            .await
+            .unwrap()
+            .expect("managed GPU assignment must persist an immutable binding");
+
+        let changed_capability = ManagedGpuCapability::new(
+            "cuda-dispatch-mutated-0",
+            request.gpu_requirement.compute_capability.clone(),
+            request.gpu_requirement.runtime_version.clone(),
+            request.gpu_requirement.driver_abi.clone(),
+            16 * 1024 * 1024 * 1024,
+            32,
+            request.guest_image_digest.clone(),
+            1,
+            "GPU-fedcba9876543210",
+        )
+        .unwrap();
+        let changed_registration = managed_gpu_dispatch_registration(&request, &changed_capability);
+        sqlx::query(
+            "UPDATE worker_nodes
+             SET general_compute_capabilities_json = $1
+             WHERE worker_id = $2",
+        )
+        .bind(serde_json::to_string(&changed_registration).unwrap())
+        .bind(&case.worker_id)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+
+        let response = managed_gpu_dispatch_completed_response(&request, &case.capability);
+        let (worker_addr, mut execute_rx) = fake_worker_execute_server_with_response(response)
+            .await
+            .expect("fake Worker must start");
+        let task = repo
+            .find_by_task_id(&case.task_id)
+            .await
+            .unwrap()
+            .expect("managed GPU task must exist");
+        let (private_key, _) = hivemind_config::generate_worker_execution_test_key_pair();
+        let worker_id = case.worker_id.clone();
+        let worker_addr = worker_addr.to_string();
+        let execution_repo = repo.clone();
+        let execution = tokio::spawn(async move {
+            execute_on_worker(
+                execution_repo,
+                task,
+                worker_id,
+                worker_addr,
+                &private_key,
+                ManagedProofRolloutMode::Enforce,
+            )
+            .await
+        });
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), execute_rx.recv())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(case.task_id.as_str())
+        );
+        execution.await.unwrap().unwrap();
+
+        let stored = repo.find_by_task_id(&case.task_id).await.unwrap().unwrap();
+        assert_eq!(stored.status, TaskStatus::Completed);
+        assert!(stored.billing_settled);
+        assert_eq!(stored.billed_amount, request.reservation_cpt as i64);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM managed_gpu_results WHERE task_id = $1",
+            )
+            .bind(&case.task_id)
+            .fetch_one(&repo.pool)
+            .await
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM managed_gpu_settlements WHERE task_id = $1",
+            )
+            .bind(&case.task_id)
+            .fetch_one(&repo.pool)
+            .await
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM ledger_entries WHERE task_id = $1")
+                .bind(&case.task_id)
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap(),
+            3
+        );
+
+        let result_json: Vec<u8> =
+            sqlx::query_scalar("SELECT result_json FROM managed_gpu_results WHERE task_id = $1")
+                .bind(&case.task_id)
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap();
+        let persisted: ManagedGpuResult = serde_json::from_slice(&result_json).unwrap();
+        assert_eq!(persisted.selected_gpu, case.capability);
+        let binding_after = repo
+            .managed_gpu_attempt_binding(&case.task_id, &case.worker_id, 1)
+            .await
+            .unwrap()
+            .expect("managed GPU binding must remain available after settlement");
+        assert_eq!(binding_after, binding_before);
+
+        cleanup_managed_gpu_dispatch_case(repo.as_ref(), &case).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn managed_gpu_dispatch_token_signing_failure_hits_retry_ceiling() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_managed_gpu_token_failure").await else {
+            return;
+        };
+        let repo = Arc::new(TaskRepository::new(db.pool.clone()));
+        let unique = uuid::Uuid::new_v4().to_string();
+        let case = setup_managed_gpu_dispatch_case(repo.as_ref(), &unique).await;
+        let reputation_before =
+            seed_managed_gpu_dispatch_reputation(&repo.pool, &case.worker_id).await;
+        let task = repo
+            .find_by_task_id(&case.task_id)
+            .await
+            .unwrap()
+            .expect("managed GPU task must exist");
+        let (worker_addr, mut execute_rx) = worker_only_execute_server().await.unwrap();
+
+        execute_on_worker_with_managed_proof_key(
+            repo.clone(),
+            task,
+            case.worker_id.clone(),
+            worker_addr.to_string(),
+            WorkerExecutionOptions {
+                worker_execution_private_key_pem: "not-a-valid-ed25519-private-key".into(),
+                managed_proof_authorization_private_key_pem: String::new(),
+                managed_proof_provider_configured: false,
+                managed_proof_rollout_mode: ManagedProofRolloutMode::Enforce,
+                max_redispatch: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), execute_rx.recv())
+                .await
+                .is_err(),
+            "token signing failure must not submit an execution RPC"
+        );
+        let stored = repo.find_by_task_id(&case.task_id).await.unwrap().unwrap();
+        assert_eq!(stored.status, TaskStatus::Failed);
+        assert!(stored
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("WORKER_EXECUTION_PRIVATE_KEY_PEM")));
+        let result_json: Vec<u8> =
+            sqlx::query_scalar("SELECT result_json FROM managed_gpu_results WHERE task_id = $1")
+                .bind(&case.task_id)
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap();
+        let result: ManagedGpuResult = serde_json::from_slice(&result_json).unwrap();
+        assert_eq!(result.status, ManagedGpuStatus::Failed);
+        assert_eq!(result.error_code.as_deref(), Some("worker_rpc_retry_limit"));
+        assert_eq!(
+            managed_gpu_dispatch_reputation(&repo.pool, &case.worker_id).await,
+            reputation_before,
+            "token-signing failure must not mutate Worker reputation"
+        );
+
+        cleanup_managed_gpu_dispatch_case(repo.as_ref(), &case).await;
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn managed_gpu_dispatch_rpc_retry_ceiling_preserves_failure_kind() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_managed_gpu_rpc_ceiling").await else {
+            return;
+        };
+        let repo = TaskRepository::new(db.pool.clone());
+        for (suffix, disposition, expected_status) in [
+            (
+                "resource-exhausted",
+                WorkerRpcFailureDisposition::RetryAfterResourceExhaustion,
+                ManagedGpuStatus::ResourceExhausted,
+            ),
+            (
+                "ordinary-rpc",
+                WorkerRpcFailureDisposition::RetryWithoutWorkerPenalty,
+                ManagedGpuStatus::Failed,
+            ),
+        ] {
+            let unique = format!("{}-{suffix}", uuid::Uuid::new_v4());
+            let case = setup_managed_gpu_dispatch_case(&repo, &unique).await;
+            let reputation_before =
+                seed_managed_gpu_dispatch_reputation(&repo.pool, &case.worker_id).await;
+            let task = repo
+                .find_by_task_id(&case.task_id)
+                .await
+                .unwrap()
+                .expect("managed GPU task must exist");
+
+            reset_after_worker_rpc_failure(
+                &repo,
+                &task,
+                &case.worker_id,
+                0,
+                disposition,
+                "worker RPC failed",
+            )
+            .await
+            .unwrap();
+
+            let stored = repo.find_by_task_id(&case.task_id).await.unwrap().unwrap();
+            assert_eq!(stored.status, TaskStatus::Failed);
+            assert!(!stored.billing_settled);
+            let result_json: Vec<u8> = sqlx::query_scalar(
+                "SELECT result_json FROM managed_gpu_results WHERE task_id = $1",
+            )
+            .bind(&case.task_id)
+            .fetch_one(&repo.pool)
+            .await
+            .unwrap();
+            let result: ManagedGpuResult = serde_json::from_slice(&result_json).unwrap();
+            assert_eq!(result.status, expected_status);
+            assert_eq!(result.error_code.as_deref(), Some("worker_rpc_retry_limit"));
+            assert_eq!(result.selected_gpu, case.capability);
+            assert_eq!(
+                managed_gpu_dispatch_reputation(&repo.pool, &case.worker_id).await,
+                reputation_before,
+                "RPC retry ceiling must not mutate Worker reputation"
+            );
+            cleanup_managed_gpu_dispatch_case(&repo, &case).await;
+        }
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn managed_gpu_dispatch_rpc_failure_at_retry_ceiling_preserves_failure_kind() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_managed_gpu_rpc_path").await else {
+            return;
+        };
+        let repo = Arc::new(TaskRepository::new(db.pool.clone()));
+        for (suffix, code, expected_status) in [
+            (
+                "resource-exhausted",
+                tonic::Code::ResourceExhausted,
+                ManagedGpuStatus::ResourceExhausted,
+            ),
+            (
+                "unavailable",
+                tonic::Code::Unavailable,
+                ManagedGpuStatus::Failed,
+            ),
+        ] {
+            let unique = format!("{}-{suffix}", uuid::Uuid::new_v4());
+            let case = setup_managed_gpu_dispatch_case(repo.as_ref(), &unique).await;
+            let reputation_before =
+                seed_managed_gpu_dispatch_reputation(&repo.pool, &case.worker_id).await;
+            let (worker_addr, mut execute_rx) =
+                worker_error_execute_server(code, "worker RPC rejected the request")
+                    .await
+                    .unwrap();
+            let task = repo
+                .find_by_task_id(&case.task_id)
+                .await
+                .unwrap()
+                .expect("managed GPU task must exist");
+            let (private_key, _) = hivemind_config::generate_worker_execution_test_key_pair();
+            let execution = tokio::spawn(execute_on_worker_with_managed_proof_key(
+                repo.clone(),
+                task,
+                case.worker_id.clone(),
+                worker_addr.to_string(),
+                WorkerExecutionOptions {
+                    worker_execution_private_key_pem: private_key,
+                    managed_proof_authorization_private_key_pem: String::new(),
+                    managed_proof_provider_configured: false,
+                    managed_proof_rollout_mode: ManagedProofRolloutMode::Enforce,
+                    max_redispatch: 0,
+                },
+            ));
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), execute_rx.recv())
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some(case.task_id.as_str())
+            );
+            execution.await.unwrap().unwrap();
+
+            let stored = repo.find_by_task_id(&case.task_id).await.unwrap().unwrap();
+            assert_eq!(stored.status, TaskStatus::Failed);
+            assert!(!stored.billing_settled);
+            assert_eq!(stored.billed_amount, 0);
+            let result_json: Vec<u8> = sqlx::query_scalar(
+                "SELECT result_json FROM managed_gpu_results WHERE task_id = $1",
+            )
+            .bind(&case.task_id)
+            .fetch_one(&repo.pool)
+            .await
+            .unwrap();
+            let result: ManagedGpuResult = serde_json::from_slice(&result_json).unwrap();
+            assert_eq!(result.status, expected_status);
+            assert_eq!(result.error_code.as_deref(), Some("worker_rpc_retry_limit"));
+            assert_eq!(result.selected_gpu, case.capability);
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM managed_gpu_settlements WHERE task_id = $1",
+                )
+                .bind(&case.task_id)
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap(),
+                0
+            );
+            assert_eq!(
+                managed_gpu_dispatch_reputation(&repo.pool, &case.worker_id).await,
+                reputation_before,
+                "actual Worker RPC failure must not mutate Worker reputation"
+            );
+            cleanup_managed_gpu_dispatch_case(repo.as_ref(), &case).await;
+        }
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn managed_gpu_late_worker_responses_do_not_change_terminal_state() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_managed_gpu_late_response").await else {
+            return;
+        };
+        let repo = Arc::new(TaskRepository::new(db.pool.clone()));
+        for terminal in ["cancel", "failure", "quarantine"] {
+            let unique = format!("{}-{terminal}", uuid::Uuid::new_v4());
+            let case = setup_managed_gpu_dispatch_case(repo.as_ref(), &unique).await;
+            let task = repo
+                .find_by_task_id(&case.task_id)
+                .await
+                .unwrap()
+                .expect("managed GPU task must exist");
+            let (worker_addr, mut request_rx, response_tx) =
+                blocking_worker_execute_server().await.unwrap();
+            let (private_key, _) = hivemind_config::generate_worker_execution_test_key_pair();
+            let execution = tokio::spawn(execute_on_worker_with_managed_proof_key(
+                repo.clone(),
+                task,
+                case.worker_id.clone(),
+                worker_addr.to_string(),
+                WorkerExecutionOptions {
+                    worker_execution_private_key_pem: private_key,
+                    managed_proof_authorization_private_key_pem: String::new(),
+                    managed_proof_provider_configured: false,
+                    managed_proof_rollout_mode: ManagedProofRolloutMode::Enforce,
+                    max_redispatch: i32::MAX,
+                },
+            ));
+            let worker_request = tokio::time::timeout(Duration::from_secs(5), request_rx.recv())
+                .await
+                .expect("Worker execute RPC must arrive")
+                .expect("Worker execute RPC channel must remain open");
+            let worker_gpu_request: ManagedGpuRequest =
+                serde_json::from_slice(&worker_request.managed_gpu_manifest_json).unwrap();
+
+            match terminal {
+                "cancel" => {
+                    repo.cancel(&case.task_id).await.unwrap();
+                }
+                "failure" => {
+                    repo.fail_managed_gpu_without_worker_result(
+                        &case.task_id,
+                        &case.worker_id,
+                        &case.manifest,
+                        ManagedGpuStatus::BackendUnavailable,
+                        "backend_unavailable",
+                        "GPU backend is unavailable",
+                    )
+                    .await
+                    .unwrap();
+                }
+                "quarantine" => {
+                    sqlx::query("DELETE FROM managed_gpu_attempt_bindings WHERE task_id = $1")
+                        .bind(&case.task_id)
+                        .execute(&repo.pool)
+                        .await
+                        .unwrap();
+                    repo.quarantine_managed_gpu_without_typed_result(
+                        &case.task_id,
+                        &case.worker_id,
+                        Some(&case.manifest),
+                        "FAILED",
+                        "immutable binding unavailable",
+                    )
+                    .await
+                    .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            response_tx
+                .send(managed_gpu_dispatch_completed_response(
+                    &worker_gpu_request,
+                    &case.capability,
+                ))
+                .unwrap();
+            execution.await.unwrap().unwrap();
+
+            let stored = repo.find_by_task_id(&case.task_id).await.unwrap().unwrap();
+            assert!(matches!(
+                stored.status,
+                TaskStatus::Cancelled | TaskStatus::Failed
+            ));
+            if terminal == "quarantine" {
+                assert_eq!(
+                    sqlx::query_scalar::<_, i64>(
+                        "SELECT COUNT(*) FROM managed_gpu_results WHERE task_id = $1",
+                    )
+                    .bind(&case.task_id)
+                    .fetch_one(&repo.pool)
+                    .await
+                    .unwrap(),
+                    0
+                );
+            } else {
+                assert_eq!(
+                    sqlx::query_scalar::<_, i64>(
+                        "SELECT COUNT(*) FROM managed_gpu_results WHERE task_id = $1",
+                    )
+                    .bind(&case.task_id)
+                    .fetch_one(&repo.pool)
+                    .await
+                    .unwrap(),
+                    1
+                );
+            }
+            cleanup_managed_gpu_dispatch_case(repo.as_ref(), &case).await;
+        }
+        fixture.cleanup().await.ok();
     }
 
     const MANAGED_SOURCE: &str = "return get(input, \"value\") + 1;";
@@ -5057,6 +7096,297 @@ mod tests {
             registered_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    struct ManagedGpuDispatcherCase {
+        task_id: String,
+        owner: String,
+        provider: String,
+        worker_id: String,
+        capability: ManagedGpuCapability,
+        manifest: Vec<u8>,
+    }
+
+    fn managed_gpu_dispatch_request(unique: &str) -> ManagedGpuRequest {
+        let image_digest = format!("sha256:{}", "a".repeat(64));
+        let gpu_requirement = ManagedGpuRequirement::new(
+            "8.9",
+            "12.4",
+            "550",
+            8 * 1024 * 1024 * 1024,
+            1,
+            image_digest.clone(),
+        )
+        .unwrap();
+        let mut request = ManagedGpuRequest {
+            protocol_version: MANAGED_GPU_REQUEST_PROTOCOL_VERSION.into(),
+            execution_id: format!("dispatcher-gpu-execution-{unique}"),
+            attempt_id: format!("dispatcher-gpu-attempt-{unique}"),
+            idempotency_key: format!("dispatcher-gpu-idempotency-{unique}"),
+            request_digest: String::new(),
+            runtime_version: MANAGED_GPU_RUNTIME_VERSION.into(),
+            semantics_manifest_sha256: MANAGED_GPU_SEMANTICS_MANIFEST_SHA256.into(),
+            operation_registry_version: MANAGED_GPU_OPERATION_REGISTRY_VERSION.into(),
+            backend_id: "managed-cuda-dispatch-test".into(),
+            guest_image_digest: image_digest,
+            source: "gpu_add_f32([[1, 2]], [[3, 4]])".into(),
+            input_json: r#"{"lhs":[[1,2]],"rhs":[[3,4]]}"#.into(),
+            gpu_requirement,
+            limits: ManagedGpuLimits::default(),
+            reservation_cpt: 25,
+            billing_version: MANAGED_GPU_BILLING_VERSION.into(),
+            cost_model_version: MANAGED_GPU_COST_MODEL_VERSION.into(),
+            settlement_basis: MANAGED_GPU_SETTLEMENT_BASIS.into(),
+            proof_policy: ManagedGpuProofPolicy::None,
+        };
+        request.request_digest = request.canonical_request_digest();
+        request.validate().unwrap();
+        request
+    }
+
+    fn managed_gpu_dispatch_capability(request: &ManagedGpuRequest) -> ManagedGpuCapability {
+        ManagedGpuCapability::new(
+            "cuda-dispatch-test-0",
+            request.gpu_requirement.compute_capability.clone(),
+            request.gpu_requirement.runtime_version.clone(),
+            request.gpu_requirement.driver_abi.clone(),
+            16 * 1024 * 1024 * 1024,
+            32,
+            request.guest_image_digest.clone(),
+            0,
+            "GPU-0123456789abcdef",
+        )
+        .unwrap()
+    }
+
+    fn managed_gpu_dispatch_registration(
+        request: &ManagedGpuRequest,
+        capability: &ManagedGpuCapability,
+    ) -> TrustedWorkerCapabilityRegistration {
+        TrustedWorkerCapabilityRegistration {
+            worker: WorkerCapabilities {
+                guest_image_digests: vec![request.guest_image_digest.clone()],
+                capabilities: vec!["cuda".into()],
+                max_threads: 4,
+                gpu_available: true,
+            },
+            gpu_capabilities: vec![],
+            managed_gpu_backends: vec![ManagedGpuBackendRegistration {
+                backend_id: request.backend_id.clone(),
+                runtime_version: MANAGED_GPU_RUNTIME_VERSION.into(),
+                semantics_manifest_sha256: MANAGED_GPU_SEMANTICS_MANIFEST_SHA256.into(),
+                operation_registry_version: MANAGED_GPU_OPERATION_REGISTRY_VERSION.into(),
+                guest_image_digest: request.guest_image_digest.clone(),
+                billing_version: MANAGED_GPU_BILLING_VERSION.into(),
+                cost_model_version: MANAGED_GPU_COST_MODEL_VERSION.into(),
+                reservation_cpt: request.reservation_cpt,
+                max_source_bytes: 256 * 1024,
+                max_input_bytes: 16 * 1024 * 1024,
+                max_output_bytes: 16 * 1024 * 1024,
+                max_operations: 1_000_000,
+                max_gpu_time_ms: 120_000,
+                capabilities: vec![capability.clone()],
+            }],
+            backends: vec![],
+        }
+    }
+
+    fn managed_gpu_dispatch_completed_response(
+        request: &ManagedGpuRequest,
+        capability: &ManagedGpuCapability,
+    ) -> ExecuteTaskResponse {
+        let result = ManagedGpuResult {
+            protocol_version:
+                general_compute_runtime::managed_gpu::MANAGED_GPU_RESULT_PROTOCOL_VERSION.into(),
+            execution_id: request.execution_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+            request_digest: request.request_digest.clone(),
+            runtime_version: request.runtime_version.clone(),
+            semantics_manifest_sha256: request.semantics_manifest_sha256.clone(),
+            operation_registry_version: request.operation_registry_version.clone(),
+            backend_id: request.backend_id.clone(),
+            guest_image_digest: request.guest_image_digest.clone(),
+            source_sha256: request.source_sha256(),
+            input_sha256: request.input_sha256(),
+            reservation_cpt: request.reservation_cpt,
+            status: ManagedGpuStatus::Completed,
+            exit_code: Some(0),
+            error_code: None,
+            output: String::new(),
+            output_sha256: sha256_digest(b""),
+            selected_gpu: capability.clone(),
+            usage: general_compute_runtime::managed_gpu::ManagedGpuUsage {
+                source_bytes: request.source.len() as u64,
+                input_bytes: request.input_json.len() as u64,
+                executed_operations: 1,
+                operation_cost_units: 10,
+                ..Default::default()
+            },
+            evidence: Default::default(),
+        };
+        ExecuteTaskResponse {
+            success: true,
+            status_message: "executed".into(),
+            execution_id: request.execution_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+            request_digest: request.request_digest.clone(),
+            managed_gpu_result_json: serde_json::to_vec(&result).unwrap(),
+            ..ExecuteTaskResponse::default()
+        }
+    }
+
+    async fn seed_managed_gpu_dispatch_reputation(
+        pool: &sqlx::PgPool,
+        worker_id: &str,
+    ) -> (i64, i64, i32, bool) {
+        let baseline = (7, 3, 83, false);
+        sqlx::query(
+            "INSERT INTO worker_reputation
+             (worker_id, successful_tasks, failed_tasks, score, banned)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(worker_id)
+        .bind(baseline.0)
+        .bind(baseline.1)
+        .bind(baseline.2)
+        .bind(baseline.3)
+        .execute(pool)
+        .await
+        .unwrap();
+        baseline
+    }
+
+    async fn managed_gpu_dispatch_reputation(
+        pool: &sqlx::PgPool,
+        worker_id: &str,
+    ) -> (i64, i64, i32, bool) {
+        sqlx::query_as(
+            "SELECT successful_tasks, failed_tasks, score, banned
+             FROM worker_reputation WHERE worker_id = $1",
+        )
+        .bind(worker_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn setup_managed_gpu_dispatch_case(
+        repo: &TaskRepository,
+        unique: &str,
+    ) -> ManagedGpuDispatcherCase {
+        let owner = format!("dispatcher-gpu-owner-{unique}");
+        let provider = format!("dispatcher-gpu-provider-{unique}");
+        let worker_id = format!("dispatcher-gpu-worker-{unique}");
+        let task_id = format!("dispatcher-gpu-task-{unique}");
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance)
+             VALUES ($1, 'hash', 100)",
+        )
+        .bind(&owner)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance)
+             VALUES ($1, 'hash', 0)",
+        )
+        .bind(&provider)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO worker_nodes (worker_id, username, ip, cpu_cores, memory_gb)
+             VALUES ($1, $2, '127.0.0.1:50053', 4, 16)",
+        )
+        .bind(&worker_id)
+        .bind(&provider)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+
+        let request = managed_gpu_dispatch_request(unique);
+        let capability = managed_gpu_dispatch_capability(&request);
+        let registration = managed_gpu_dispatch_registration(&request, &capability);
+        sqlx::query(
+            "UPDATE worker_nodes
+             SET general_compute_capabilities_json = $1,
+                 admission_mode = $2
+             WHERE worker_id = $3",
+        )
+        .bind(serde_json::to_string(&registration).unwrap())
+        .bind(hivemind_models::PRIVATE_STATIC_ADMISSION_MODE)
+        .bind(&worker_id)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+
+        let manifest = serde_json::to_vec(&request).unwrap();
+        let mut task = make_task(&task_id, TaskStatus::Pending, 0);
+        task.owner = owner.clone();
+        task.runtime = Some(MANAGED_GPU_RUNTIME_VERSION.into());
+        task.torrent_source = None;
+        task.managed_gpu_manifest_json = Some(manifest.clone());
+        task.max_cpt = request.reservation_cpt as i64;
+        repo.create(&task).await.unwrap();
+        repo.assign_to_worker(&task_id, &worker_id, "127.0.0.1:50053")
+            .await
+            .unwrap();
+
+        ManagedGpuDispatcherCase {
+            task_id,
+            owner,
+            provider,
+            worker_id,
+            capability,
+            manifest,
+        }
+    }
+
+    async fn cleanup_managed_gpu_dispatch_case(
+        repo: &TaskRepository,
+        case: &ManagedGpuDispatcherCase,
+    ) {
+        sqlx::query("DELETE FROM ledger_entries WHERE task_id = $1")
+            .bind(&case.task_id)
+            .execute(&repo.pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM task_attestations WHERE task_id = $1")
+            .bind(&case.task_id)
+            .execute(&repo.pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM tasks WHERE task_id = $1")
+            .bind(&case.task_id)
+            .execute(&repo.pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM worker_reputation WHERE worker_id = $1")
+            .bind(&case.worker_id)
+            .execute(&repo.pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM worker_nodes WHERE worker_id = $1")
+            .bind(&case.worker_id)
+            .execute(&repo.pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM users WHERE username IN ($1, $2)")
+            .bind(&case.owner)
+            .bind(&case.provider)
+            .execute(&repo.pool)
+            .await
+            .ok();
+    }
+
+    #[test]
+    fn managed_gpu_dispatch_request_binds_the_new_runtime_identity() {
+        let request = managed_gpu_dispatch_request("request-contract");
+        assert_eq!(request.runtime_version, MANAGED_GPU_RUNTIME_VERSION);
+        assert!(!request.gpu_requirement.allow_cpu_fallback);
+        assert!(request.validate().is_ok());
     }
 
     #[test]
@@ -5580,7 +7910,7 @@ mod tests {
             ..ExecuteTaskResponse::default()
         };
         let (worker_addr, mut execute_rx) =
-            match fake_worker_execute_server_with_response(response).await {
+            match fake_worker_execute_server_with_response_echoing_identity(response).await {
                 Some(parts) => parts,
                 None => return,
             };
@@ -5730,7 +8060,7 @@ mod tests {
             ..ExecuteTaskResponse::default()
         };
         let (worker_addr, _execute_rx) =
-            match fake_worker_execute_server_with_response(response).await {
+            match fake_worker_execute_server_with_response_echoing_identity(response).await {
                 Some(parts) => parts,
                 None => return,
             };
@@ -6156,6 +8486,40 @@ mod tests {
         fixture.cleanup().await.ok();
     }
 
+    async fn blocking_worker_execute_server() -> Option<(
+        SocketAddr,
+        tokio::sync::mpsc::Receiver<ExecuteTaskRequest>,
+        oneshot::Sender<ExecuteTaskResponse>,
+    )> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.ok()?;
+        let addr = listener.local_addr().ok()?;
+        let (request_tx, request_rx) = tokio::sync::mpsc::channel(1);
+        let (response_tx, response_rx) = oneshot::channel();
+        let service = WorkerNodeServiceServer::new(BlockingWorkerExecuteService {
+            request_tx,
+            response_rx: tokio::sync::Mutex::new(Some(response_rx)),
+        });
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(service)
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await;
+        });
+
+        for _ in 0..30 {
+            if hivemind_proto::worker_node_service_client::WorkerNodeServiceClient::connect(
+                format!("http://{addr}"),
+            )
+            .await
+            .is_ok()
+            {
+                return Some((addr, request_rx, response_tx));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        None
+    }
+
     async fn worker_only_execute_server(
     ) -> Option<(SocketAddr, tokio::sync::mpsc::Receiver<String>)> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.ok()?;
@@ -6164,6 +8528,8 @@ mod tests {
         let service = WorkerNodeServiceServer::new(FakeWorkerExecuteService {
             execute_tx,
             response: ExecuteTaskResponse::default(),
+            echo_response_identity: false,
+            execute_error: None,
         });
         tokio::spawn(async move {
             let _ = tonic::transport::Server::builder()
@@ -6203,18 +8569,67 @@ mod tests {
     async fn fake_worker_execute_server_with_response(
         response: ExecuteTaskResponse,
     ) -> Option<(SocketAddr, tokio::sync::mpsc::Receiver<String>)> {
+        fake_worker_execute_server_with_response_mode(response, false).await
+    }
+
+    async fn fake_worker_execute_server_with_response_echoing_identity(
+        response: ExecuteTaskResponse,
+    ) -> Option<(SocketAddr, tokio::sync::mpsc::Receiver<String>)> {
+        fake_worker_execute_server_with_response_mode(response, true).await
+    }
+
+    async fn fake_worker_execute_server_with_response_mode(
+        response: ExecuteTaskResponse,
+        echo_response_identity: bool,
+    ) -> Option<(SocketAddr, tokio::sync::mpsc::Receiver<String>)> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.ok()?;
         let addr = listener.local_addr().ok()?;
         let (execute_tx, execute_rx) = tokio::sync::mpsc::channel(1);
         let service = WorkerNodeServiceServer::new(FakeWorkerExecuteService {
             execute_tx,
             response,
+            echo_response_identity,
+            execute_error: None,
         });
         let chunks = GeneralComputeChunkServiceServer::new(PermissiveChunkService);
         tokio::spawn(async move {
             let _ = tonic::transport::Server::builder()
                 .add_service(service)
                 .add_service(chunks)
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await;
+        });
+
+        for _ in 0..30 {
+            if hivemind_proto::worker_node_service_client::WorkerNodeServiceClient::connect(
+                format!("http://{addr}"),
+            )
+            .await
+            .is_ok()
+            {
+                return Some((addr, execute_rx));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        None
+    }
+
+    async fn worker_error_execute_server(
+        code: tonic::Code,
+        message: &str,
+    ) -> Option<(SocketAddr, tokio::sync::mpsc::Receiver<String>)> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.ok()?;
+        let addr = listener.local_addr().ok()?;
+        let (execute_tx, execute_rx) = tokio::sync::mpsc::channel(1);
+        let service = WorkerNodeServiceServer::new(FakeWorkerExecuteService {
+            execute_tx,
+            response: ExecuteTaskResponse::default(),
+            echo_response_identity: false,
+            execute_error: Some((code, message.to_owned())),
+        });
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(service)
                 .serve_with_incoming(TcpListenerStream::new(listener))
                 .await;
         });
@@ -6248,6 +8663,8 @@ mod tests {
         let worker = WorkerNodeServiceServer::new(FakeWorkerExecuteService {
             execute_tx,
             response: ExecuteTaskResponse::default(),
+            echo_response_identity: false,
+            execute_error: None,
         });
         let chunks = GeneralComputeChunkServiceServer::new(FakeGeneralComputeChunkService {
             prepare_tx,
@@ -6389,7 +8806,7 @@ mod tests {
         Prepare(GeneralComputePrepareRequest),
         Resume(GeneralComputeChunkResumeRequest),
         Upload(GeneralComputeChunkUpload),
-        Execute(ExecuteTaskRequest),
+        Execute(Box<ExecuteTaskRequest>),
     }
 
     async fn authenticated_general_compute_worker_server(
@@ -6505,7 +8922,7 @@ mod tests {
                 ..ExecuteTaskResponse::default()
             };
             self.calls_tx
-                .send(TransportCall::Execute(request))
+                .send(TransportCall::Execute(Box::new(request)))
                 .await
                 .map_err(|_| Status::internal("transport call receiver closed"))?;
             Ok(Response::new(response))
@@ -6592,9 +9009,83 @@ mod tests {
             }))
         }
     }
+    struct BlockingWorkerExecuteService {
+        request_tx: tokio::sync::mpsc::Sender<ExecuteTaskRequest>,
+        response_rx: tokio::sync::Mutex<Option<oneshot::Receiver<ExecuteTaskResponse>>>,
+    }
+
+    #[tonic::async_trait]
+    impl WorkerNodeService for BlockingWorkerExecuteService {
+        async fn execute_task(
+            &self,
+            request: Request<ExecuteTaskRequest>,
+        ) -> Result<Response<ExecuteTaskResponse>, Status> {
+            self.request_tx
+                .send(request.into_inner())
+                .await
+                .map_err(|_| Status::internal("execute request capture closed"))?;
+            let receiver = self
+                .response_rx
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| Status::internal("execute response receiver already used"))?;
+            let response = receiver
+                .await
+                .map_err(|_| Status::cancelled("test response was not released"))?;
+            Ok(Response::new(response))
+        }
+
+        async fn task_output_upload(
+            &self,
+            _request: Request<TaskOutputUploadRequest>,
+        ) -> Result<Response<TaskOutputUploadResponse>, Status> {
+            Err(Status::unimplemented(
+                "blocking worker does not upload output",
+            ))
+        }
+
+        async fn task_result_upload(
+            &self,
+            _request: Request<TaskResultUploadRequest>,
+        ) -> Result<Response<TaskResultUploadResponse>, Status> {
+            Err(Status::unimplemented(
+                "blocking worker does not upload results",
+            ))
+        }
+
+        async fn task_output(
+            &self,
+            _request: Request<TaskOutputRequest>,
+        ) -> Result<Response<TaskOutputResponse>, Status> {
+            Err(Status::unimplemented("blocking worker has no output"))
+        }
+
+        async fn stop_task_execution(
+            &self,
+            _request: Request<StopTaskExecutionRequest>,
+        ) -> Result<Response<StopTaskExecutionResponse>, Status> {
+            Ok(Response::new(StopTaskExecutionResponse {
+                success: true,
+                status_message: "Stop requested".into(),
+            }))
+        }
+
+        async fn task_usage(
+            &self,
+            _request: Request<TaskUsageRequest>,
+        ) -> Result<Response<TaskUsageResponse>, Status> {
+            Err(Status::unimplemented(
+                "blocking worker does not report usage",
+            ))
+        }
+    }
+
     struct FakeWorkerExecuteService {
         execute_tx: tokio::sync::mpsc::Sender<String>,
         response: ExecuteTaskResponse,
+        echo_response_identity: bool,
+        execute_error: Option<(tonic::Code, String)>,
     }
 
     #[tonic::async_trait]
@@ -6603,9 +9094,19 @@ mod tests {
             &self,
             request: Request<ExecuteTaskRequest>,
         ) -> Result<Response<ExecuteTaskResponse>, Status> {
-            let task_id = request.into_inner().task_id;
+            let request = request.into_inner();
+            let task_id = request.task_id.clone();
             let _ = self.execute_tx.send(task_id).await;
-            Ok(Response::new(self.response.clone()))
+            if let Some((code, message)) = &self.execute_error {
+                return Err(Status::new(*code, message.clone()));
+            }
+            let mut response = self.response.clone();
+            if self.echo_response_identity {
+                response.execution_id = request.execution_id;
+                response.attempt_id = request.attempt_id;
+                response.idempotency_key = request.idempotency_key;
+            }
+            Ok(Response::new(response))
         }
 
         async fn task_output_upload(

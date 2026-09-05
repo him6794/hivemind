@@ -2,10 +2,11 @@ use general_compute_runtime::gpu::{GpuRequirement, GpuRuntime, GpuVendor};
 use general_compute_runtime::sandbox::BackendExecutionMode;
 use general_compute_runtime::{
     ArtifactChunk, ArtifactManifest, ArtifactRange, ArtifactRole, BackendRegistration,
-    CapabilityMatrix, EvidenceEnvelope, ExecutionPolicy, GENERAL_COMPUTE_RUNTIME_VERSION,
-    GeneralComputeRequest, GeneralComputeResult, PRODUCTION_RESULT_PROTOCOL_VERSION,
-    ProductionResultEnvelope, ResultStatus, UsageClaim, ValidationErrorCode, WorkerCapabilities,
-    canonical_artifact_root, canonical_input_digest, sha256_digest,
+    CapabilityMatrix, DeterminismPolicy, EvidenceEnvelope, ExecutionPolicy,
+    GENERAL_COMPUTE_RUNTIME_VERSION, GeneralComputeRequest, GeneralComputeResult,
+    PRODUCTION_RESULT_PROTOCOL_VERSION, ProductionResultEnvelope, ResultStatus, UsageClaim,
+    ValidationErrorCode, WorkerCapabilities, canonical_artifact_root, canonical_input_digest,
+    sha256_digest,
 };
 
 #[test]
@@ -50,7 +51,7 @@ fn valid_request() -> GeneralComputeRequest {
         source_artifact: ArtifactManifest::inline_json(
             "input-source",
             ArtifactRole::Source,
-            br#"{}"#,
+            br"{}",
         ),
         input_artifacts: vec![ArtifactManifest::inline_json(
             "input-data",
@@ -58,7 +59,7 @@ fn valid_request() -> GeneralComputeRequest {
             br#"{"x":1}"#,
         )],
         execution_policy: ExecutionPolicy::default(),
-        determinism: Default::default(),
+        determinism: DeterminismPolicy::default(),
         billing_version: "billing-v1".into(),
         cost_model_version: "cost-model-v1".into(),
     };
@@ -88,7 +89,7 @@ fn production_result_envelope_requires_version_and_verified_output_root() {
             output_bytes: 2,
             ..UsageClaim::default()
         },
-        input_sha256: canonical_input_digest(br#"{}"#, &[br#"{"x":1}"#]),
+        input_sha256: canonical_input_digest(br"{}", &[br#"{"x":1}"#]),
     };
     assert!(valid.validate_for(&request).is_ok());
 
@@ -117,7 +118,7 @@ fn production_result_envelope_binds_materialized_source_and_input_bytes() {
             output_bytes: 2,
             ..UsageClaim::default()
         },
-        input_sha256: canonical_input_digest(br#"{}"#, &[br#"{"x":1}"#]),
+        input_sha256: canonical_input_digest(br"{}", &[br#"{"x":1}"#]),
         output_manifest_root: canonical_artifact_root(std::slice::from_ref(&output)),
     };
 
@@ -200,12 +201,12 @@ fn result_round_trip_keeps_claimed_usage_and_output_manifest() {
             ArtifactRole::Output,
             br#"{"answer":42}"#,
         )],
-        usage: Default::default(),
+        usage: UsageClaim::default(),
         runtime_version: request.runtime_version.clone(),
         backend_id: request.backend_id.clone(),
         guest_image_digest: request.guest_image_digest.clone(),
         input_sha256: "sha256:input".into(),
-        determinism: request.determinism.clone(),
+        determinism: request.determinism,
         capability_summary: vec!["cpu".into()],
         gpu_selection: None,
         output_manifest_root: canonical_artifact_root(&[ArtifactManifest::inline_json(
@@ -254,7 +255,7 @@ fn result_validation_rejects_retry_identity_mismatch() {
         stdout: String::new(),
         stderr: String::new(),
         output_artifacts: Vec::new(),
-        usage: Default::default(),
+        usage: UsageClaim::default(),
         runtime_version: request.runtime_version.clone(),
         backend_id: request.backend_id.clone(),
         guest_image_digest: request.guest_image_digest.clone(),
@@ -308,7 +309,7 @@ fn valid_result(request: &GeneralComputeRequest) -> GeneralComputeResult {
         stdout: String::new(),
         stderr: String::new(),
         output_artifacts: Vec::new(),
-        usage: Default::default(),
+        usage: UsageClaim::default(),
         runtime_version: request.runtime_version.clone(),
         backend_id: request.backend_id.clone(),
         guest_image_digest: request.guest_image_digest.clone(),
@@ -365,13 +366,65 @@ fn result_validation_rejects_usage_claim_above_execution_policy() {
 }
 
 #[test]
+fn result_validation_rejects_a_completed_output_without_verifiable_bytes() {
+    let request = valid_request();
+    let mut result = valid_result(&request);
+    result.output_artifacts = vec![ArtifactManifest {
+        artifact_id: "phantom-output".into(),
+        role: ArtifactRole::Output,
+        size_bytes: 4,
+        mime_type: "application/octet-stream".into(),
+        sha256: sha256_digest(b"data"),
+        chunks: Vec::new(),
+        inline_bytes: None,
+    }];
+    result.output_manifest_root = canonical_artifact_root(&result.output_artifacts);
+
+    let error = result
+        .validate_against(&request, &valid_registry(&request))
+        .expect_err("a completed result must carry verifiable output bytes");
+    assert_eq!(error.code, ValidationErrorCode::ArtifactInvalid);
+}
+
+#[test]
+fn production_result_rejects_a_completed_output_without_verifiable_bytes() {
+    let request = valid_request();
+    let output = ArtifactManifest {
+        artifact_id: "phantom-output".into(),
+        role: ArtifactRole::Output,
+        size_bytes: 4,
+        mime_type: "application/octet-stream".into(),
+        sha256: sha256_digest(b"data"),
+        chunks: Vec::new(),
+        inline_bytes: None,
+    };
+    let envelope = ProductionResultEnvelope {
+        protocol_version: PRODUCTION_RESULT_PROTOCOL_VERSION.into(),
+        status: ResultStatus::Completed,
+        exit_code: Some(0),
+        error_code: None,
+        stdout: String::new(),
+        stderr: String::new(),
+        output_manifest_root: canonical_artifact_root(std::slice::from_ref(&output)),
+        output_artifacts: vec![output],
+        usage: UsageClaim::default(),
+        input_sha256: canonical_input_digest(br"{}", &[br#"{"x":1}"#]),
+    };
+
+    let error = envelope
+        .validate_for(&request)
+        .expect_err("a production result must carry verifiable output bytes");
+    assert_eq!(error.code, ValidationErrorCode::ArtifactInvalid);
+}
+
+#[test]
 fn result_validation_rejects_non_output_artifact_role() {
     let request = valid_request();
     let mut result = valid_result(&request);
     result.output_artifacts = vec![ArtifactManifest::inline_json(
         "wrong-role",
         ArtifactRole::Input,
-        br#"{}"#,
+        br"{}",
     )];
 
     let error = result
@@ -496,6 +549,19 @@ fn request_validation_rejects_unbounded_or_writable_policy() {
         .validate()
         .expect_err("writable host filesystem must fail closed");
     assert_eq!(error.code, ValidationErrorCode::FilesystemPolicyViolation);
+}
+
+#[test]
+fn request_validation_rejects_duplicate_artifact_ids() {
+    let mut request = valid_request();
+    request.input_artifacts[0].artifact_id = request.source_artifact.artifact_id.clone();
+    request.request_digest = request.canonical_request_digest();
+
+    let error = request
+        .validate()
+        .expect_err("source and input artifact ids must be unique");
+    assert_eq!(error.code, ValidationErrorCode::ArtifactInvalid);
+    assert_eq!(error.message, "artifact ids must be unique");
 }
 
 #[test]

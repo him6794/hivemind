@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use crate::grpc::NodepoolState;
 use anyhow::Context;
 use hivemind_client_core::{
@@ -551,7 +553,7 @@ async fn handle_client_frame(
                 registry
                     .acknowledged_deliveries(session_id)
                     .into_iter()
-                    .map(|delivery| delivery.task.task_id)
+                    .map(|delivery| delivery.task)
                     .collect::<Vec<_>>()
             };
             if let Err(error) = state
@@ -748,6 +750,7 @@ mod tests {
                 attempt_id: "attempt-1".into(),
                 idempotency_key: "idempotency-1".into(),
                 request_digest: "digest-1".into(),
+                retry_count: 0,
                 payload: request.encode_to_vec(),
             },
             cancellation_requested: true,

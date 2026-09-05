@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use hivemind_auth::managed_proof::MANAGED_PROOF_AUTH_TOKEN_MAX_BYTES;
 use hivemind_auth::worker_execution::WorkerExecutionVerifier;
 use hivemind_models::Claims;
@@ -12,8 +14,9 @@ use hivemind_proto::{
     TaskOutputUploadRequest, TaskOutputUploadResponse, TaskResultUploadRequest,
     TaskResultUploadResponse, TaskUsageRequest, TaskUsageResponse,
     GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES, GENERAL_COMPUTE_RESULT_MAX_BYTES,
-    LEGACY_MANAGED_RECEIPT_MAX_BYTES, MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES,
-    WORKER_RPC_MESSAGE_MAX_BYTES, WORKER_STATUS_MESSAGE_MAX_BYTES,
+    LEGACY_MANAGED_RECEIPT_MAX_BYTES, MANAGED_GPU_RESULT_MAX_BYTES,
+    MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES, WORKER_RPC_MESSAGE_MAX_BYTES,
+    WORKER_STATUS_MESSAGE_MAX_BYTES,
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -27,6 +30,7 @@ use crate::{
     StopTaskOutcome, TaskResult, WorkerExecutor,
 };
 use general_compute_runtime::artifact::CasChunkStore;
+use general_compute_runtime::managed_gpu::{ManagedGpuRequest, MANAGED_GPU_RUNTIME_VERSION};
 use general_compute_runtime::GeneralComputeRequest;
 use hivemind_config::{HivemindConfig, ManagedProofRolloutMode};
 use hivemind_models::{Task, TaskStatus};
@@ -155,18 +159,35 @@ pub struct WorkerGrpcState {
     pub executor: Arc<WorkerExecutor>,
     worker_id: WorkerIdentityHandle,
     cas_store: Option<Arc<CasChunkStore>>,
-    reports: Mutex<HashMap<String, WorkerTaskReport>>,
+    reports: Mutex<HashMap<WorkerTaskKey, WorkerTaskReport>>,
     transfer_lease_authority: Arc<Mutex<Option<Arc<dyn TransferLeaseAuthority>>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct WorkerTaskKey {
+    task_id: String,
+    attempt_id: String,
+}
+
+impl WorkerTaskKey {
+    fn new(task_id: &str, attempt_id: Option<&str>) -> Self {
+        Self {
+            task_id: task_id.to_owned(),
+            attempt_id: attempt_id.unwrap_or_default().to_owned(),
+        }
+    }
 }
 
 #[derive(Clone)]
 struct WorkerTaskReport {
     owner: String,
     worker_id: Option<String>,
+    attempt_id: Option<String>,
     output: Option<String>,
     result_torrent: Option<String>,
     usage: Option<hivemind_proto::ResourceUsage>,
     general_compute_request: Option<GeneralComputeRequest>,
+    managed_gpu_request: Option<ManagedGpuRequest>,
     transfer_generation: Option<i64>,
 }
 
@@ -364,12 +385,16 @@ impl GrpcGeneralComputeChunkService {
                 "Token is not bound to this worker",
             ));
         }
+        let execution_claims = verifier
+            .decode_execution_claims(token)
+            .map_err(|_| Status::unauthenticated("Invalid token"))?;
         let reports = self
             .state
             .reports
             .lock()
             .map_err(|_| Status::internal("task report store poisoned"))?;
-        let report = reports.get(task_id).ok_or_else(|| {
+        let key = WorkerTaskKey::new(task_id, execution_claims.attempt_id.as_deref());
+        let report = reports.get(&key).ok_or_else(|| {
             Status::permission_denied("Token is not authorized for task assignment")
         })?;
         if report.owner != claims.sub || report.worker_id.as_deref() != Some(worker_id) {
@@ -485,14 +510,32 @@ impl GrpcGeneralComputeChunkService {
                 &request.request_digest,
             )
             .await?;
+        let key = WorkerTaskKey::new(&request.task_id, Some(&admitted_request.attempt_id));
         let mut reports = self
             .state
             .reports
             .lock()
             .map_err(|_| Status::internal("task report store poisoned"))?;
-        if let Some(report) = reports.get_mut(&request.task_id) {
+        if reports.iter().any(|(existing_key, report)| {
+            existing_key.task_id == request.task_id && report.owner != claims.sub
+        }) {
+            return Err(*task_assignment_denied());
+        }
+        if reports.keys().any(|existing_key| {
+            existing_key.task_id == request.task_id && existing_key.attempt_id.is_empty()
+        }) {
+            return Err(Status::permission_denied(
+                "typed execution cannot replace a legacy task attempt",
+            ));
+        }
+        if let Some(report) = reports.get_mut(&key) {
             if report.owner != claims.sub {
                 return Err(*task_assignment_denied());
+            }
+            if report.managed_gpu_request.is_some() {
+                return Err(Status::permission_denied(
+                    "general-compute preparation cannot replace a managed GPU attempt",
+                ));
             }
             if report.general_compute_request.as_ref() != Some(&admitted_request) {
                 if report
@@ -506,6 +549,10 @@ impl GrpcGeneralComputeChunkService {
                 // A task retry rotates its attempt identity while retaining
                 // the same task id. Re-preparation is the explicit lifecycle
                 // boundary that replaces the previous pending assignment.
+                report.attempt_id = Some(admitted_request.attempt_id.clone());
+                report.output = None;
+                report.result_torrent = None;
+                report.usage = None;
                 report.general_compute_request = Some(admitted_request.clone());
                 report.transfer_generation = Some(request.transfer_generation);
             } else if report.transfer_generation != Some(request.transfer_generation) {
@@ -515,14 +562,16 @@ impl GrpcGeneralComputeChunkService {
             }
         } else {
             reports.insert(
-                request.task_id.clone(),
+                key,
                 WorkerTaskReport {
                     owner: claims.sub,
                     worker_id: self.state.current_worker_id(),
+                    attempt_id: Some(admitted_request.attempt_id.clone()),
                     output: None,
                     result_torrent: None,
                     usage: None,
                     general_compute_request: Some(admitted_request.clone()),
+                    managed_gpu_request: None,
                     transfer_generation: Some(request.transfer_generation),
                 },
             );
@@ -590,27 +639,59 @@ impl GrpcWorkerNodeService {
         Ok(claims)
     }
 
+    #[allow(dead_code)]
     fn record_task_assignment(&self, task_id: &str, owner: &str) -> Result<(), Box<Status>> {
+        self.record_task_assignment_for_attempt(task_id, owner, None)
+    }
+
+    fn record_task_assignment_for_attempt(
+        &self,
+        task_id: &str,
+        owner: &str,
+        attempt_id: Option<&str>,
+    ) -> Result<(), Box<Status>> {
+        let key = WorkerTaskKey::new(task_id, attempt_id);
         let mut reports = self
             .state
             .reports
             .lock()
             .map_err(|_| Box::new(Status::internal("task report store poisoned")))?;
-        if let Some(report) = reports.get(task_id) {
+        if let Some(report) = reports.get(&key) {
             if report.owner != owner {
                 return Err(task_assignment_denied());
             }
             return Ok(());
         }
+
+        if reports
+            .iter()
+            .any(|(existing_key, report)| existing_key.task_id == task_id && report.owner != owner)
+        {
+            return Err(task_assignment_denied());
+        }
+        let incoming_is_typed = !key.attempt_id.is_empty();
+        if reports.keys().any(|existing_key| {
+            existing_key.task_id == task_id
+                && existing_key.attempt_id.is_empty() == incoming_is_typed
+        }) {
+            return Err(Box::new(Status::permission_denied(if incoming_is_typed {
+                "typed execution cannot replace a legacy task attempt"
+            } else {
+                "legacy execution cannot replace a typed task attempt"
+            })));
+        }
+
         reports.insert(
-            task_id.to_string(),
+            key,
             WorkerTaskReport {
                 owner: owner.to_string(),
                 worker_id: self.state.current_worker_id(),
+                attempt_id: attempt_id.map(str::to_owned),
                 output: None,
                 result_torrent: None,
                 usage: None,
                 general_compute_request: None,
+                managed_gpu_request: None,
                 transfer_generation: None,
             },
         );
@@ -622,21 +703,35 @@ impl GrpcWorkerNodeService {
         token: &str,
         task_id: &str,
         worker_id: Option<&str>,
-    ) -> Result<(), Box<Status>> {
+    ) -> Result<WorkerTaskKey, Box<Status>> {
         let claims = self.validate_worker_execution_token(token)?;
+        let execution_claims = WorkerExecutionVerifier::from_pem(
+            &self.state.config.auth.worker_execution_public_key_pem,
+        )
+        .map_err(|_| Box::new(Status::internal("Worker execution public key is invalid")))?
+        .decode_execution_claims(token)
+        .map_err(|_| Box::new(Status::unauthenticated("Invalid token")))?;
         if !crate::sandbox::is_safe_task_id(task_id) {
             return Err(Box::new(Status::invalid_argument("unsafe task id")));
         }
+        let key = WorkerTaskKey::new(task_id, execution_claims.attempt_id.as_deref());
         let reports = self
             .state
             .reports
             .lock()
             .map_err(|_| Box::new(Status::internal("task report store poisoned")))?;
-        let report = reports.get(task_id).ok_or_else(task_assignment_denied)?;
+        let report = reports.get(&key).ok_or_else(task_assignment_denied)?;
         if report.owner != claims.sub {
             return Err(task_assignment_denied());
         }
         if claims.task_id.as_deref() != Some(task_id) {
+            return Err(task_assignment_denied());
+        }
+        if report
+            .attempt_id
+            .as_deref()
+            .is_some_and(|attempt_id| execution_claims.attempt_id.as_deref() != Some(attempt_id))
+        {
             return Err(task_assignment_denied());
         }
         if report.worker_id.as_deref() != claims.worker_id.as_deref() {
@@ -647,7 +742,7 @@ impl GrpcWorkerNodeService {
                 return Err(task_assignment_denied());
             }
         }
-        Ok(())
+        Ok(key)
     }
 
     fn validate_task_attempt_assignment(
@@ -655,21 +750,42 @@ impl GrpcWorkerNodeService {
         token: &str,
         task_id: &str,
         attempt_id: &str,
-    ) -> Result<(), Box<Status>> {
-        self.validate_task_assignment(token, task_id, None)?;
-        let claims = WorkerExecutionVerifier::from_pem(
+    ) -> Result<WorkerTaskKey, Box<Status>> {
+        let key = self.validate_task_assignment(token, task_id, None)?;
+        if key.attempt_id != attempt_id {
+            return Err(task_assignment_denied());
+        }
+        Ok(key)
+    }
+
+    fn validate_task_attempt_assignment_with_idempotency(
+        &self,
+        token: &str,
+        task_id: &str,
+        attempt_id: &str,
+        idempotency_key: &str,
+    ) -> Result<WorkerTaskKey, Box<Status>> {
+        let key = self.validate_task_attempt_assignment(token, task_id, attempt_id)?;
+        if idempotency_key.trim().is_empty() {
+            return Err(task_assignment_denied());
+        }
+        let execution_claims = WorkerExecutionVerifier::from_pem(
             &self.state.config.auth.worker_execution_public_key_pem,
         )
         .map_err(|_| Box::new(Status::internal("Worker execution public key is invalid")))?
         .decode_execution_claims(token)
         .map_err(|_| Box::new(Status::unauthenticated("Invalid token")))?;
-        if claims.attempt_id.as_deref() != Some(attempt_id) {
+        if execution_claims.idempotency_key.as_deref() != Some(idempotency_key) {
             return Err(task_assignment_denied());
         }
-        Ok(())
+        Ok(key)
     }
 
-    fn report_for_update<F>(&self, task_id: &str, update: F) -> Result<(), Box<Status>>
+    fn report_for_update_for_key<F>(
+        &self,
+        key: &WorkerTaskKey,
+        update: F,
+    ) -> Result<(), Box<Status>>
     where
         F: FnOnce(&mut WorkerTaskReport),
     {
@@ -678,41 +794,91 @@ impl GrpcWorkerNodeService {
             .reports
             .lock()
             .map_err(|_| Box::new(Status::internal("task report store poisoned")))?;
-        let report = reports
-            .get_mut(task_id)
-            .ok_or_else(task_assignment_denied)?;
+        let report = reports.get_mut(key).ok_or_else(task_assignment_denied)?;
         update(report);
         Ok(())
     }
 
-    fn report_for_task(&self, task_id: &str) -> Result<Option<WorkerTaskReport>, Box<Status>> {
+    #[cfg(test)]
+    fn report_for_update<F>(&self, task_id: &str, update: F) -> Result<(), Box<Status>>
+    where
+        F: FnOnce(&mut WorkerTaskReport),
+    {
+        self.report_for_update_for_key(&WorkerTaskKey::new(task_id, None), update)
+    }
+
+    fn report_for_task_for_key(
+        &self,
+        key: &WorkerTaskKey,
+    ) -> Result<Option<WorkerTaskReport>, Box<Status>> {
         self.state
             .reports
             .lock()
             .map_err(|_| Box::new(Status::internal("task report store poisoned")))
-            .map(|reports| reports.get(task_id).cloned())
+            .map(|reports| reports.get(key).cloned())
     }
 
+    #[cfg(test)]
+    fn report_for_task(&self, task_id: &str) -> Result<Option<WorkerTaskReport>, Box<Status>> {
+        self.report_for_task_for_key(&WorkerTaskKey::new(task_id, None))
+    }
+
+    fn record_managed_gpu_request(
+        &self,
+        task_id: &str,
+        request: ManagedGpuRequest,
+    ) -> Result<(), Box<Status>> {
+        let key = WorkerTaskKey::new(task_id, Some(&request.attempt_id));
+        let mut reports = self
+            .state
+            .reports
+            .lock()
+            .map_err(|_| Box::new(Status::internal("task report store poisoned")))?;
+        let report = reports.get_mut(&key).ok_or_else(task_assignment_denied)?;
+        if report.transfer_generation.is_some() {
+            return Err(Box::new(Status::permission_denied(
+                "managed GPU execution cannot use a general-compute transfer lease",
+            )));
+        }
+        if let Some(existing) = report.managed_gpu_request.as_ref() {
+            if existing != &request {
+                return Err(Box::new(Status::permission_denied(
+                    "ExecuteTask request does not match the admitted managed GPU attempt",
+                )));
+            }
+        }
+        if report.general_compute_request.is_some() {
+            return Err(Box::new(Status::permission_denied(
+                "managed GPU execution cannot replace a general-compute attempt",
+            )));
+        }
+        report.managed_gpu_request = Some(request);
+        Ok(())
+    }
     fn record_general_compute_request(
         &self,
         task_id: &str,
         request: GeneralComputeRequest,
         transfer_generation: i64,
     ) -> Result<(), Box<Status>> {
+        let key = WorkerTaskKey::new(task_id, Some(&request.attempt_id));
         let mut reports = self
             .state
             .reports
             .lock()
             .map_err(|_| Box::new(Status::internal("task report store poisoned")))?;
-        let report = reports
-            .get_mut(task_id)
-            .ok_or_else(task_assignment_denied)?;
+        let report = reports.get_mut(&key).ok_or_else(task_assignment_denied)?;
         if report
             .transfer_generation
             .is_some_and(|generation| generation != transfer_generation)
         {
             return Err(Box::new(Status::permission_denied(
                 "stale transfer lease generation cannot replace the admitted attempt",
+            )));
+        }
+        if report.managed_gpu_request.is_some() {
+            return Err(Box::new(Status::permission_denied(
+                "general-compute execution cannot replace a managed GPU attempt",
             )));
         }
         report.general_compute_request = Some(request);
@@ -783,7 +949,7 @@ fn validate_execute_task_contract(request: &ExecuteTaskRequest) -> Result<(), &'
             }
             Ok(())
         }
-        "general-compute-v1alpha1" => {
+        general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION => {
             if !request.managed_dsl_backend_id.is_empty()
                 || !request.managed_dsl_semantics_manifest_sha256.is_empty()
             {
@@ -796,6 +962,57 @@ fn validate_execute_task_contract(request: &ExecuteTaskRequest) -> Result<(), &'
                 > hivemind_proto::GENERAL_COMPUTE_MANIFEST_MAX_BYTES
             {
                 return Err("general-compute-v1alpha1 request manifest exceeds the byte limit");
+            }
+            Ok(())
+        }
+        MANAGED_GPU_RUNTIME_VERSION => {
+            if !request.general_compute_manifest_json.is_empty() {
+                return Err("managed-function-gpu-v1 must not carry a general-compute manifest");
+            }
+            if !request.managed_dsl_backend_id.is_empty()
+                || !request.managed_dsl_semantics_manifest_sha256.is_empty()
+            {
+                return Err("managed-function-gpu-v1 must not carry managed DSL identity");
+            }
+            if !request.task_source.trim().is_empty() || !request.torrent.trim().is_empty() {
+                return Err(
+                    "managed-function-gpu-v1 source and input belong to the request manifest",
+                );
+            }
+            if request.managed_budget_units != 0 {
+                return Err("managed-function-gpu-v1 must not carry a managed budget field");
+            }
+            if request.managed_gpu_manifest_json.is_empty() {
+                return Err("managed-function-gpu-v1 requires a non-empty request manifest");
+            }
+            if request.managed_gpu_manifest_json.len()
+                > hivemind_proto::MANAGED_GPU_MANIFEST_MAX_BYTES
+            {
+                return Err("managed-function-gpu-v1 request manifest exceeds the byte limit");
+            }
+            if !request.managed_proof_authorization_token.is_empty()
+                || request.managed_proof_lease_generation != 0
+                || request.managed_proof_deadline_unix_ms != 0
+            {
+                return Err("managed-function-gpu-v1 must not carry managed proof fields");
+            }
+            let manifest =
+                serde_json::from_slice::<ManagedGpuRequest>(&request.managed_gpu_manifest_json)
+                    .map_err(|_| "managed-function-gpu-v1 request manifest is malformed")?;
+            manifest
+                .validate()
+                .map_err(|_| "managed-function-gpu-v1 request manifest is invalid")?;
+            for (actual, expected) in [
+                (&request.execution_id, &manifest.execution_id),
+                (&request.attempt_id, &manifest.attempt_id),
+                (&request.idempotency_key, &manifest.idempotency_key),
+                (&request.request_digest, &manifest.request_digest),
+            ] {
+                if !actual.is_empty() && actual != expected {
+                    return Err(
+                        "managed-function-gpu-v1 top-level identity does not match manifest",
+                    );
+                }
             }
             Ok(())
         }
@@ -890,7 +1107,7 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         request: Request<ExecuteTaskRequest>,
     ) -> Result<Response<ExecuteTaskResponse>, Status> {
         let req = request.into_inner();
-        let request_identity = ExecuteTaskIdentity::from_request(&req);
+        let mut request_identity = ExecuteTaskIdentity::from_request(&req);
         let claims = self
             .validate_worker_execution_token(&req.token)
             .map_err(|status| *status)?;
@@ -904,9 +1121,20 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         }
         let admitted = self
             .runtime_admission
-            .admit(&req.runtime, &req.general_compute_manifest_json)
+            .admit_with_manifests(
+                &req.runtime,
+                &req.general_compute_manifest_json,
+                &req.managed_gpu_manifest_json,
+            )
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
         validate_execute_task_contract(&req).map_err(Status::invalid_argument)?;
+        let managed_gpu_request = match &admitted {
+            crate::runtime_admission::RuntimeRoute::ManagedFunctionGpuV1(request) => {
+                Some(request.clone())
+            }
+            _ => None,
+        };
+        let is_managed_gpu = managed_gpu_request.is_some();
         let proof_context = managed_proof_context_for_request(
             &self.state.config,
             &req,
@@ -936,18 +1164,73 @@ impl WorkerNodeService for GrpcWorkerNodeService {
                 .reports
                 .lock()
                 .map_err(|_| Status::internal("task report store poisoned"))?;
-            if let Some(existing) = reports
-                .get(&req.task_id)
-                .and_then(|report| report.general_compute_request.as_ref())
+            if let Some(report) =
+                reports.get(&WorkerTaskKey::new(&req.task_id, Some(&request.attempt_id)))
             {
-                if existing != request {
-                    return Err(Status::permission_denied(
-                        "ExecuteTask request does not match the prepared general-compute attempt",
-                    ));
+                if let Some(existing) = report.general_compute_request.as_ref() {
+                    if report.attempt_id.as_deref() == Some(request.attempt_id.as_str())
+                        && existing != request
+                    {
+                        return Err(Status::permission_denied(
+                            "ExecuteTask request does not match the prepared general-compute attempt",
+                        ));
+                    }
                 }
             }
         }
+        if let crate::runtime_admission::RuntimeRoute::ManagedFunctionGpuV1(request) = &admitted {
+            let token_identity = WorkerExecutionVerifier::from_pem(
+                &self.state.config.auth.worker_execution_public_key_pem,
+            )
+            .map_err(|_| Status::internal("Worker execution public key is invalid"))?
+            .decode_execution_claims(&req.token)
+            .map_err(|_| Status::unauthenticated("Invalid worker execution token"))?;
+            if token_identity.execution_id.as_deref() != Some(request.execution_id.as_str())
+                || token_identity.attempt_id.as_deref() != Some(request.attempt_id.as_str())
+                || token_identity.idempotency_key.as_deref()
+                    != Some(request.idempotency_key.as_str())
+                || token_identity.request_digest.as_deref() != Some(request.request_digest.as_str())
+            {
+                return Err(Status::permission_denied(
+                    "worker execution token is not bound to the managed GPU attempt",
+                ));
+            }
+            request_identity.execution_id = request.execution_id.clone();
+            request_identity.attempt_id = request.attempt_id.clone();
+            request_identity.idempotency_key = request.idempotency_key.clone();
+            request_identity.request_digest = request.request_digest.clone();
+            let reports = self
+                .state
+                .reports
+                .lock()
+                .map_err(|_| Status::internal("task report store poisoned"))?;
+            if let Some(report) =
+                reports.get(&WorkerTaskKey::new(&req.task_id, Some(&request.attempt_id)))
+            {
+                if let Some(existing) = report.managed_gpu_request.as_ref() {
+                    if report.attempt_id.as_deref() == Some(request.attempt_id.as_str())
+                        && existing != request
+                    {
+                        return Err(Status::permission_denied(
+                            "ExecuteTask request does not match the admitted managed GPU attempt",
+                        ));
+                    }
+                }
+            }
+            if reports
+                .get(&WorkerTaskKey::new(&req.task_id, Some(&request.attempt_id)))
+                .is_some_and(|report| report.general_compute_request.is_some())
+            {
+                return Err(Status::permission_denied(
+                    "managed GPU execution cannot replace a general-compute attempt",
+                ));
+            }
+        }
         if let crate::runtime_admission::RuntimeRoute::GeneralComputeV1Alpha1(request) = admitted {
+            request_identity.execution_id = request.execution_id.clone();
+            request_identity.attempt_id = request.attempt_id.clone();
+            request_identity.idempotency_key = request.idempotency_key.clone();
+            request_identity.request_digest = request.request_digest.clone();
             let transfer_generation = WorkerExecutionVerifier::from_pem(
                 &self.state.config.auth.worker_execution_public_key_pem,
             )
@@ -969,13 +1252,22 @@ impl WorkerNodeService for GrpcWorkerNodeService {
                     &request.request_digest,
                 )
                 .await?;
-            self.record_task_assignment(&req.task_id, &claims.sub)
-                .map_err(|status| *status)?;
+            self.record_task_assignment_for_attempt(
+                &req.task_id,
+                &claims.sub,
+                Some(&request_identity.attempt_id),
+            )
+            .map_err(|status| *status)?;
             self.record_general_compute_request(&req.task_id, request, transfer_generation)
                 .map_err(|status| *status)?;
         } else {
-            self.record_task_assignment(&req.task_id, &claims.sub)
+            let attempt_id = is_managed_gpu.then_some(request_identity.attempt_id.as_str());
+            self.record_task_assignment_for_attempt(&req.task_id, &claims.sub, attempt_id)
                 .map_err(|status| *status)?;
+            if let Some(request) = managed_gpu_request.as_ref() {
+                self.record_managed_gpu_request(&req.task_id, request.clone())
+                    .map_err(|status| *status)?;
+            }
         }
         let limits = req.resource_limits.unwrap_or_default();
         let task = Task {
@@ -988,7 +1280,13 @@ impl WorkerNodeService for GrpcWorkerNodeService {
             status_message: None,
             output: None,
             result_torrent: None,
-            torrent_source: Some(req.torrent),
+            torrent_source: if is_managed_gpu
+                || req.runtime.trim() == general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION
+            {
+                None
+            } else {
+                Some(req.torrent)
+            },
             runtime: if req.runtime.trim().is_empty() {
                 None
             } else {
@@ -1003,6 +1301,11 @@ impl WorkerNodeService for GrpcWorkerNodeService {
                 None
             } else {
                 Some(req.general_compute_manifest_json)
+            },
+            managed_gpu_manifest_json: if is_managed_gpu {
+                Some(req.managed_gpu_manifest_json)
+            } else {
+                None
             },
             managed_dsl_backend_id: if req.managed_dsl_backend_id.trim().is_empty() {
                 None
@@ -1029,7 +1332,11 @@ impl WorkerNodeService for GrpcWorkerNodeService {
             req_gpu_memory_gb: (limits.vram_mb / 1024) as i32,
             req_storage_gb: limits.storage_total_gb,
             host_count: 1,
-            max_cpt: req.managed_budget_units,
+            max_cpt: managed_gpu_request
+                .as_ref()
+                .map_or(req.managed_budget_units, |request| {
+                    request.reservation_cpt as i64
+                }),
             billing_settled: false,
             billed_amount: 0,
             managed_executed_ops: 0,
@@ -1061,17 +1368,22 @@ impl WorkerNodeService for GrpcWorkerNodeService {
             )
             .await
         {
-            Ok(result) => Ok(Response::new(execute_response_from_result(
+            Ok(result) => Ok(Response::new(execute_response_from_result_for_runtime(
                 result,
                 matches!(
                     task.runtime.as_deref(),
                     Some("managed-function-v0") | Some("production_sandboxed_dsl")
                 ),
+                is_managed_gpu,
                 &request_identity,
-            ))),
+            )?)),
             Err(error) => {
                 if let Some(status) = worker_execution_error_status(&error) {
                     Err(status)
+                } else if is_managed_gpu {
+                    Err(Status::internal(
+                        "managed GPU execution ended without a typed result",
+                    ))
                 } else {
                     Ok(Response::new(failed_execute_response(
                         "Task execution failed",
@@ -1087,7 +1399,8 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         request: Request<TaskOutputUploadRequest>,
     ) -> Result<Response<TaskOutputUploadResponse>, Status> {
         let req = request.into_inner();
-        self.validate_task_assignment(&req.token, &req.task_id, Some(&req.worker_id))
+        let key = self
+            .validate_task_assignment(&req.token, &req.task_id, Some(&req.worker_id))
             .map_err(|status| *status)?;
         if req.task_id.trim().is_empty() {
             return Ok(Response::new(TaskOutputUploadResponse {
@@ -1106,7 +1419,7 @@ impl WorkerNodeService for GrpcWorkerNodeService {
             req.task_id,
             req.output.len()
         );
-        self.report_for_update(&req.task_id, |report| {
+        self.report_for_update_for_key(&key, |report| {
             report.output = Some(req.output);
         })
         .map_err(|status| *status)?;
@@ -1121,7 +1434,8 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         request: Request<TaskResultUploadRequest>,
     ) -> Result<Response<TaskResultUploadResponse>, Status> {
         let req = request.into_inner();
-        self.validate_task_assignment(&req.token, &req.task_id, Some(&req.worker_id))
+        let key = self
+            .validate_task_assignment(&req.token, &req.task_id, Some(&req.worker_id))
             .map_err(|status| *status)?;
         if req.task_id.trim().is_empty() {
             return Ok(Response::new(TaskResultUploadResponse {
@@ -1149,7 +1463,7 @@ impl WorkerNodeService for GrpcWorkerNodeService {
             req.task_id,
             req.result_torrent
         );
-        self.report_for_update(&req.task_id, |report| {
+        self.report_for_update_for_key(&key, |report| {
             report.result_torrent = Some(req.result_torrent);
         })
         .map_err(|status| *status)?;
@@ -1164,10 +1478,11 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         request: Request<TaskOutputRequest>,
     ) -> Result<Response<TaskOutputResponse>, Status> {
         let req = request.into_inner();
-        self.validate_task_assignment(&req.token, &req.task_id, None)
+        let key = self
+            .validate_task_assignment(&req.token, &req.task_id, None)
             .map_err(|status| *status)?;
         let Some(report) = self
-            .report_for_task(&req.task_id)
+            .report_for_task_for_key(&key)
             .map_err(|status| *status)?
         else {
             return Ok(Response::new(TaskOutputResponse {
@@ -1199,8 +1514,13 @@ impl WorkerNodeService for GrpcWorkerNodeService {
             self.validate_task_assignment(&req.token, &req.task_id, None)
                 .map_err(|status| *status)?;
         } else {
-            self.validate_task_attempt_assignment(&req.token, &req.task_id, &req.attempt_id)
-                .map_err(|status| *status)?;
+            self.validate_task_attempt_assignment_with_idempotency(
+                &req.token,
+                &req.task_id,
+                &req.attempt_id,
+                &req.idempotency_key,
+            )
+            .map_err(|status| *status)?;
         }
         if !crate::sandbox::is_safe_task_id(&req.task_id) {
             return Err(Status::invalid_argument("unsafe task id"));
@@ -1225,7 +1545,8 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         request: Request<TaskUsageRequest>,
     ) -> Result<Response<TaskUsageResponse>, Status> {
         let req = request.into_inner();
-        self.validate_task_assignment(&req.token, &req.task_id, Some(&req.worker_id))
+        let key = self
+            .validate_task_assignment(&req.token, &req.task_id, Some(&req.worker_id))
             .map_err(|status| *status)?;
         if req.task_id.trim().is_empty() {
             return Ok(Response::new(TaskUsageResponse {
@@ -1251,7 +1572,7 @@ impl WorkerNodeService for GrpcWorkerNodeService {
             usage.cpu_percent,
             usage.memory_percent
         );
-        self.report_for_update(&req.task_id, |report| {
+        self.report_for_update_for_key(&key, |report| {
             report.usage = Some(usage);
         })
         .map_err(|status| *status)?;
@@ -1412,11 +1733,23 @@ fn chunk_transport_status(error: crate::chunk_transport::WorkerChunkIngestError)
     }
 }
 
+#[cfg(test)]
 fn execute_response_from_result(
     result: TaskResult,
     managed_proof_required: bool,
     identity: &ExecuteTaskIdentity,
 ) -> ExecuteTaskResponse {
+    execute_response_from_result_for_runtime(result, managed_proof_required, false, identity)
+        .unwrap_or_else(|status| failed_execute_response(status.message(), identity))
+}
+
+#[allow(clippy::result_large_err)]
+fn execute_response_from_result_for_runtime(
+    result: TaskResult,
+    managed_proof_required: bool,
+    managed_gpu: bool,
+    identity: &ExecuteTaskIdentity,
+) -> Result<ExecuteTaskResponse, Status> {
     let TaskResult {
         success,
         output,
@@ -1426,13 +1759,17 @@ fn execute_response_from_result(
         managed_receipt_json,
         managed_proof,
         general_compute_result_json,
+        managed_gpu_result_json,
         ..
     } = result;
     let has_typed_general_compute_result = general_compute_result_json.is_some();
+    let has_typed_managed_gpu_result = managed_gpu_result_json.is_some();
     let response = ExecuteTaskResponse {
         success,
         status_message: if success && has_typed_general_compute_result {
             "general-compute result attached".into()
+        } else if success && has_typed_managed_gpu_result {
+            "managed GPU result attached".into()
         } else if success {
             output.unwrap_or_default()
         } else {
@@ -1443,6 +1780,7 @@ fn execute_response_from_result(
         managed_receipt_json: managed_receipt_json.unwrap_or_default(),
         managed_proof,
         general_compute_result_json: general_compute_result_json.unwrap_or_default(),
+        managed_gpu_result_json: managed_gpu_result_json.unwrap_or_default(),
         execution_id: identity.execution_id.clone(),
         attempt_id: identity.attempt_id.clone(),
         idempotency_key: identity.idempotency_key.clone(),
@@ -1450,19 +1788,68 @@ fn execute_response_from_result(
     };
 
     if managed_proof_required && response.success && response.managed_proof.is_none() {
-        return failed_execute_response("Managed proof is required", identity);
+        return Ok(failed_execute_response(
+            "Managed proof is required",
+            identity,
+        ));
     }
-    if !response_fits_worker_rpc_limits(&response) {
-        return failed_execute_response("Task result exceeds supported response limits", identity);
+    if managed_gpu {
+        let Some(payload) = (!response.managed_gpu_result_json.is_empty())
+            .then_some(response.managed_gpu_result_json.as_slice())
+        else {
+            return Err(Status::failed_precondition(
+                "managed GPU execution did not return a typed result",
+            ));
+        };
+        if !response_fits_worker_rpc_limits(&response) {
+            return Err(Status::resource_exhausted(
+                "managed GPU typed result exceeds the Worker RPC limit",
+            ));
+        }
+        let typed =
+            serde_json::from_slice::<general_compute_runtime::managed_gpu::ManagedGpuResult>(
+                payload,
+            )
+            .map_err(|_| Status::internal("managed GPU typed result is malformed"))?;
+        if typed.execution_id != identity.execution_id
+            || typed.attempt_id != identity.attempt_id
+            || typed.idempotency_key != identity.idempotency_key
+            || typed.request_digest != identity.request_digest
+        {
+            return Err(Status::internal(
+                "managed GPU typed result identity does not match the execution request",
+            ));
+        }
+        let typed_completed =
+            typed.status == general_compute_runtime::managed_gpu::ManagedGpuStatus::Completed;
+        if response.success != typed_completed {
+            return Err(Status::internal(
+                "managed GPU typed result status does not match the execution response",
+            ));
+        }
+        if response.managed_proof.is_some()
+            || !response.managed_receipt_json.is_empty()
+            || !response.general_compute_result_json.is_empty()
+        {
+            return Err(Status::internal(
+                "managed GPU execution returned an incompatible result channel",
+            ));
+        }
+    } else if !response_fits_worker_rpc_limits(&response) {
+        return Ok(failed_execute_response(
+            "Task result exceeds supported response limits",
+            identity,
+        ));
     }
 
-    response
+    Ok(response)
 }
 
 fn response_fits_worker_rpc_limits(response: &ExecuteTaskResponse) -> bool {
     response.status_message.len() <= WORKER_STATUS_MESSAGE_MAX_BYTES
         && response.managed_receipt_json.len() <= LEGACY_MANAGED_RECEIPT_MAX_BYTES
         && response.general_compute_result_json.len() <= GENERAL_COMPUTE_RESULT_MAX_BYTES
+        && response.managed_gpu_result_json.len() <= MANAGED_GPU_RESULT_MAX_BYTES
         && response
             .managed_proof
             .as_ref()
@@ -1479,6 +1866,7 @@ fn failed_execute_response(message: &str, identity: &ExecuteTaskIdentity) -> Exe
         managed_receipt_json: String::new(),
         managed_proof: None,
         general_compute_result_json: Vec::new(),
+        managed_gpu_result_json: Vec::new(),
         execution_id: identity.execution_id.clone(),
         attempt_id: identity.attempt_id.clone(),
         idempotency_key: identity.idempotency_key.clone(),
@@ -1523,6 +1911,15 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use general_compute_runtime::artifact::CasChunkStore;
+    use general_compute_runtime::managed_gpu::{
+        ManagedGpuBackendRegistration, ManagedGpuCapability, ManagedGpuEvidence, ManagedGpuLimits,
+        ManagedGpuProofPolicy, ManagedGpuRequest, ManagedGpuRequirement, ManagedGpuResult,
+        ManagedGpuUsage, MANAGED_GPU_BILLING_VERSION, MANAGED_GPU_COST_MODEL_VERSION,
+        MANAGED_GPU_OPERATION_COST_UNITS, MANAGED_GPU_OPERATION_REGISTRY_VERSION,
+        MANAGED_GPU_REQUEST_PROTOCOL_VERSION, MANAGED_GPU_RESULT_PROTOCOL_VERSION,
+        MANAGED_GPU_RUNTIME_VERSION, MANAGED_GPU_SEMANTICS_MANIFEST_SHA256,
+        MANAGED_GPU_SETTLEMENT_BASIS,
+    };
     use general_compute_runtime::{
         sha256_digest, ArtifactChunk, ArtifactManifest, ArtifactRole, ExecutionPolicy,
         GeneralComputeRequest, GENERAL_COMPUTE_RUNTIME_VERSION,
@@ -1573,9 +1970,136 @@ mod tests {
             managed_proof_authorization_token: String::new(),
             managed_proof_lease_generation: 0,
             managed_proof_deadline_unix_ms: 0,
+            managed_gpu_manifest_json: Vec::new(),
         }
     }
 
+    fn managed_gpu_request_for_execute_tests() -> ManagedGpuRequest {
+        let image_digest = format!("sha256:{}", "a".repeat(64));
+        let gpu_requirement = ManagedGpuRequirement::new(
+            "8.9",
+            "12.4",
+            "550",
+            8 * 1024 * 1024 * 1024,
+            1,
+            image_digest.clone(),
+        )
+        .unwrap();
+        let mut request = ManagedGpuRequest {
+            protocol_version: MANAGED_GPU_REQUEST_PROTOCOL_VERSION.into(),
+            execution_id: "execution-gpu-service".into(),
+            attempt_id: "attempt-gpu-service".into(),
+            idempotency_key: "idempotency-gpu-service".into(),
+            request_digest: String::new(),
+            runtime_version: MANAGED_GPU_RUNTIME_VERSION.into(),
+            semantics_manifest_sha256: MANAGED_GPU_SEMANTICS_MANIFEST_SHA256.into(),
+            operation_registry_version: MANAGED_GPU_OPERATION_REGISTRY_VERSION.into(),
+            backend_id: "cuda-service-test".into(),
+            guest_image_digest: image_digest,
+            source: "gpu_add_f32([1.0], [2.0])".into(),
+            input_json: "{}".into(),
+            gpu_requirement,
+            limits: ManagedGpuLimits::default(),
+            reservation_cpt: 10,
+            billing_version: MANAGED_GPU_BILLING_VERSION.into(),
+            cost_model_version: MANAGED_GPU_COST_MODEL_VERSION.into(),
+            settlement_basis: MANAGED_GPU_SETTLEMENT_BASIS.into(),
+            proof_policy: ManagedGpuProofPolicy::None,
+        };
+        request.request_digest = request.canonical_request_digest();
+        request
+    }
+
+    fn managed_gpu_capability_for_execute_tests(
+        request: &ManagedGpuRequest,
+    ) -> ManagedGpuCapability {
+        ManagedGpuCapability::new(
+            "cuda-service-test-0",
+            request.gpu_requirement.compute_capability.clone(),
+            request.gpu_requirement.runtime_version.clone(),
+            request.gpu_requirement.driver_abi.clone(),
+            16 * 1024 * 1024 * 1024,
+            32,
+            request.guest_image_digest.clone(),
+            0,
+            "GPU-0123456789abcdef",
+        )
+        .unwrap()
+    }
+
+    fn managed_gpu_runtime_admission_for_execute_tests(
+        request: &ManagedGpuRequest,
+        capability: ManagedGpuCapability,
+    ) -> WorkerRuntimeAdmission {
+        WorkerRuntimeAdmission::new_with_trusted_registration(
+            general_compute_runtime::TrustedWorkerCapabilityRegistration {
+                worker: general_compute_runtime::WorkerCapabilities {
+                    guest_image_digests: vec![request.guest_image_digest.clone()],
+                    capabilities: vec![MANAGED_GPU_RUNTIME_VERSION.into()],
+                    max_threads: 4,
+                    gpu_available: true,
+                },
+                gpu_capabilities: vec![],
+                managed_gpu_backends: vec![ManagedGpuBackendRegistration {
+                    backend_id: request.backend_id.clone(),
+                    runtime_version: MANAGED_GPU_RUNTIME_VERSION.into(),
+                    semantics_manifest_sha256: MANAGED_GPU_SEMANTICS_MANIFEST_SHA256.into(),
+                    operation_registry_version: MANAGED_GPU_OPERATION_REGISTRY_VERSION.into(),
+                    guest_image_digest: request.guest_image_digest.clone(),
+                    billing_version: MANAGED_GPU_BILLING_VERSION.into(),
+                    cost_model_version: MANAGED_GPU_COST_MODEL_VERSION.into(),
+                    reservation_cpt: request.reservation_cpt,
+                    max_source_bytes: 256 * 1024,
+                    max_input_bytes: 16 * 1024 * 1024,
+                    max_output_bytes: 16 * 1024 * 1024,
+                    max_operations: 1_000_000,
+                    max_gpu_time_ms: 120_000,
+                    capabilities: vec![capability],
+                }],
+                backends: vec![],
+            },
+        )
+    }
+
+    fn managed_gpu_result_for_execute_tests(
+        request: &ManagedGpuRequest,
+        selected_gpu: ManagedGpuCapability,
+    ) -> Vec<u8> {
+        let output = "42";
+        let result = ManagedGpuResult {
+            protocol_version: MANAGED_GPU_RESULT_PROTOCOL_VERSION.into(),
+            execution_id: request.execution_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+            request_digest: request.request_digest.clone(),
+            runtime_version: request.runtime_version.clone(),
+            semantics_manifest_sha256: request.semantics_manifest_sha256.clone(),
+            operation_registry_version: request.operation_registry_version.clone(),
+            backend_id: request.backend_id.clone(),
+            guest_image_digest: request.guest_image_digest.clone(),
+            source_sha256: request.source_sha256(),
+            input_sha256: request.input_sha256(),
+            reservation_cpt: request.reservation_cpt,
+            status: general_compute_runtime::managed_gpu::ManagedGpuStatus::Completed,
+            exit_code: Some(0),
+            error_code: None,
+            output: output.into(),
+            output_sha256: sha256_digest(output.as_bytes()),
+            selected_gpu,
+            usage: ManagedGpuUsage {
+                source_bytes: request.source.len() as u64,
+                input_bytes: request.input_json.len() as u64,
+                output_bytes: output.len() as u64,
+                executed_operations: 1,
+                operation_cost_units: MANAGED_GPU_OPERATION_COST_UNITS,
+                wall_time_ms: 1,
+                gpu_time_ms: 1,
+                gpu_memory_bytes: 1,
+            },
+            evidence: ManagedGpuEvidence::default(),
+        };
+        serde_json::to_vec(&result).unwrap()
+    }
     fn general_compute_request_for_chunk_tests() -> GeneralComputeRequest {
         let bytes = b"print(42)";
         let source = ArtifactManifest {
@@ -1750,6 +2274,215 @@ mod tests {
             .expect("general-compute admission should execute")
             .into_inner();
         assert!(response.success, "admission runner should succeed");
+    }
+
+    fn managed_gpu_result_json(identity: &ExecuteTaskIdentity) -> Vec<u8> {
+        serde_json::json!({
+            "protocol_version": "managed-function-gpu-result-v1",
+            "execution_id": identity.execution_id.clone(),
+            "attempt_id": identity.attempt_id.clone(),
+            "idempotency_key": identity.idempotency_key.clone(),
+            "request_digest": identity.request_digest.clone(),
+            "runtime_version": "managed-function-gpu-v1",
+            "semantics_manifest_sha256": "sha256:semantics",
+            "operation_registry_version": "managed-function-gpu-ops-v1",
+            "backend_id": "cuda-fixed",
+            "guest_image_digest": "sha256:image",
+            "source_sha256": "sha256:source",
+            "input_sha256": "sha256:input",
+            "reservation_cpt": 10,
+            "status": "completed",
+            "exit_code": 0,
+            "error_code": null,
+            "output": "42",
+            "output_sha256": "sha256:output",
+            "selected_gpu": {
+                "protocol_version": "managed-function-gpu-capability-v1",
+                "vendor": "nvidia",
+                "device_id": "gpu-0",
+                "compute_capability": "8.9",
+                "runtime": "cuda",
+                "runtime_version": "12.4",
+                "driver_abi": "550",
+                "vram_bytes": 17179869184u64,
+                "max_streams": 32,
+                "image_digest": "sha256:image",
+                "cuda_device_ordinal": 0,
+                "cuda_uuid": "GPU-test"
+            },
+            "usage": {
+                "source_bytes": 1,
+                "input_bytes": 1,
+                "output_bytes": 2,
+                "executed_operations": 1,
+                "operation_cost_units": 10,
+                "wall_time_ms": 1,
+                "gpu_time_ms": 1,
+                "gpu_memory_bytes": 1
+            },
+            "evidence": {
+                "level": "unverified",
+                "payload_sha256": null
+            }
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    #[test]
+    fn managed_gpu_execute_response_requires_a_typed_result() {
+        let mut request =
+            execute_request("managed-function-gpu-v1", String::new(), String::new(), 0);
+        request.execution_id = "execution-gpu-response".into();
+        request.attempt_id = "attempt-gpu-response".into();
+        request.idempotency_key = "idempotency-gpu-response".into();
+        request.request_digest = "sha256:gpu-response".into();
+        let error = execute_response_from_result_for_runtime(
+            successful_task_result(None),
+            false,
+            true,
+            &ExecuteTaskIdentity::from_request(&request),
+        )
+        .expect_err("GPU responses without a typed result must fail closed");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[test]
+    fn managed_gpu_execute_response_rejects_malformed_typed_result() {
+        let identity = ExecuteTaskIdentity {
+            execution_id: "execution-malformed".into(),
+            attempt_id: "attempt-malformed".into(),
+            idempotency_key: "idempotency-malformed".into(),
+            request_digest: "sha256:malformed".into(),
+        };
+        let mut result = successful_task_result(None);
+        result.managed_receipt_json = None;
+        result.managed_gpu_result_json = Some(b"{".to_vec());
+        let error = execute_response_from_result_for_runtime(result, false, true, &identity)
+            .expect_err("malformed GPU JSON must fail closed");
+        assert_eq!(error.code(), Code::Internal);
+    }
+
+    #[test]
+    fn managed_gpu_execute_response_rejects_identity_mismatch() {
+        let identity = ExecuteTaskIdentity {
+            execution_id: "execution-expected".into(),
+            attempt_id: "attempt-expected".into(),
+            idempotency_key: "idempotency-expected".into(),
+            request_digest: "sha256:expected".into(),
+        };
+        let payload_identity = ExecuteTaskIdentity {
+            execution_id: "execution-other".into(),
+            ..identity.clone()
+        };
+        let mut result = successful_task_result(None);
+        result.managed_receipt_json = None;
+        result.managed_gpu_result_json = Some(managed_gpu_result_json(&payload_identity));
+        let error = execute_response_from_result_for_runtime(result, false, true, &identity)
+            .expect_err("GPU identity drift must fail closed");
+        assert_eq!(error.code(), Code::Internal);
+    }
+
+    #[test]
+    fn managed_gpu_execute_response_rejects_status_mismatch() {
+        let identity = ExecuteTaskIdentity {
+            execution_id: "execution-status".into(),
+            attempt_id: "attempt-status".into(),
+            idempotency_key: "idempotency-status".into(),
+            request_digest: "sha256:status".into(),
+        };
+        let mut result = successful_task_result(None);
+        result.success = false;
+        result.output = None;
+        result.error = Some("failed".into());
+        result.managed_receipt_json = None;
+        result.managed_gpu_result_json = Some(managed_gpu_result_json(&identity));
+        let error = execute_response_from_result_for_runtime(result, false, true, &identity)
+            .expect_err("outer status must agree with the typed GPU status");
+        assert_eq!(error.code(), Code::Internal);
+    }
+
+    #[test]
+    fn managed_gpu_execute_response_rejects_incompatible_result_channels() {
+        let identity = ExecuteTaskIdentity {
+            execution_id: "execution-channel".into(),
+            attempt_id: "attempt-channel".into(),
+            idempotency_key: "idempotency-channel".into(),
+            request_digest: "sha256:channel".into(),
+        };
+        let mut result = successful_task_result(None);
+        result.managed_gpu_result_json = Some(managed_gpu_result_json(&identity));
+        let error = execute_response_from_result_for_runtime(result, false, true, &identity)
+            .expect_err("GPU responses must not carry legacy receipt bytes");
+        assert_eq!(error.code(), Code::Internal);
+    }
+
+    #[test]
+    fn managed_gpu_execute_response_rejects_oversized_typed_result() {
+        let identity = ExecuteTaskIdentity {
+            execution_id: "execution-oversized".into(),
+            attempt_id: "attempt-oversized".into(),
+            idempotency_key: "idempotency-oversized".into(),
+            request_digest: "sha256:oversized".into(),
+        };
+        let mut payload = managed_gpu_result_json(&identity);
+        payload.resize(MANAGED_GPU_RESULT_MAX_BYTES + 1, b'x');
+        let mut result = successful_task_result(None);
+        result.managed_receipt_json = None;
+        result.managed_gpu_result_json = Some(payload);
+        let error = execute_response_from_result_for_runtime(result, false, true, &identity)
+            .expect_err("oversized GPU typed results must fail closed");
+        assert_eq!(error.code(), Code::ResourceExhausted);
+    }
+
+    #[test]
+    fn managed_gpu_execute_response_accepts_typed_failure_without_success() {
+        let identity = ExecuteTaskIdentity {
+            execution_id: "execution-failure".into(),
+            attempt_id: "attempt-failure".into(),
+            idempotency_key: "idempotency-failure".into(),
+            request_digest: "sha256:failure".into(),
+        };
+        let mut payload =
+            serde_json::from_slice::<serde_json::Value>(&managed_gpu_result_json(&identity))
+                .expect("test GPU result JSON is valid");
+        payload["status"] = serde_json::Value::String("failed".into());
+        payload["exit_code"] = serde_json::Value::Number(1.into());
+        payload["error_code"] = serde_json::Value::String("backend_unavailable".into());
+        let mut result = successful_task_result(None);
+        result.success = false;
+        result.output = None;
+        result.error = Some("backend unavailable".into());
+        result.managed_receipt_json = None;
+        result.managed_gpu_result_json =
+            Some(serde_json::to_vec(&payload).expect("test GPU failure JSON serializes"));
+        let response = execute_response_from_result_for_runtime(result, false, true, &identity)
+            .expect("typed GPU failures remain typed at the RPC boundary");
+        assert!(!response.success);
+        assert!(!response.managed_gpu_result_json.is_empty());
+    }
+
+    #[test]
+    fn managed_gpu_execute_response_accepts_typed_success() {
+        let identity = ExecuteTaskIdentity {
+            execution_id: "execution-success".into(),
+            attempt_id: "attempt-success".into(),
+            idempotency_key: "idempotency-success".into(),
+            request_digest: "sha256:success".into(),
+        };
+        let payload = managed_gpu_result_json(&identity);
+        let mut result = successful_task_result(None);
+        result.managed_receipt_json = None;
+        result.managed_executed_ops = 0;
+        result.managed_output_bytes = 0;
+        result.managed_gpu_result_json = Some(payload.clone());
+        let response = execute_response_from_result_for_runtime(result, false, true, &identity)
+            .expect("typed GPU successes remain typed at the RPC boundary");
+        assert!(response.success);
+        assert_eq!(response.managed_gpu_result_json, payload);
+        assert!(response.managed_receipt_json.is_empty());
+        assert_eq!(response.managed_executed_ops, 0);
+        assert_eq!(response.managed_output_bytes, 0);
     }
 
     #[test]
@@ -2070,6 +2803,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_task_routes_a_valid_managed_gpu_request_to_the_typed_channel() {
+        let tmp = TempDir::new().unwrap();
+        let request = managed_gpu_request_for_execute_tests();
+        let selected_gpu = managed_gpu_capability_for_execute_tests(&request);
+        let typed_result = managed_gpu_result_for_execute_tests(&request, selected_gpu);
+        let executor_result = typed_result.clone();
+        let mut config = HivemindConfig::default();
+        config.executor.sandbox_dir = tmp.path().join("sandbox").to_string_lossy().to_string();
+        config.auth.jwt_secret = CONTROL_PLANE_SECRET.into();
+        config.auth.worker_execution_public_key_pem = test_key_pair().1.clone();
+        let executor = Arc::new(WorkerExecutor::new_with_task_runner(
+            config.clone(),
+            move |task: hivemind_models::Task,
+                  _cancellation: tokio::sync::watch::Receiver<bool>| {
+                let result_json = executor_result.clone();
+                async move {
+                    Ok(TaskResult {
+                        task_id: task.task_id,
+                        success: true,
+                        output: None,
+                        error: None,
+                        exit_code: 0,
+                        cpu_time_ms: 0,
+                        wall_time_ms: 1,
+                        peak_memory_mb: 0,
+                        managed_executed_ops: 0,
+                        managed_output_bytes: 0,
+                        managed_receipt_json: None,
+                        managed_proof: None,
+                        general_compute_result_json: None,
+                        managed_gpu_result_json: Some(result_json),
+                    })
+                }
+            },
+        ));
+        let state = Arc::new(WorkerGrpcState {
+            config,
+            executor,
+            worker_id: Arc::new(Mutex::new(Some(TEST_WORKER_ID.into()))),
+            cas_store: None,
+            reports: Mutex::new(HashMap::new()),
+            transfer_lease_authority: Arc::new(Mutex::new(None)),
+        });
+        let service = GrpcWorkerNodeService::new(state.clone()).with_runtime_admission(
+            managed_gpu_runtime_admission_for_execute_tests(
+                &request,
+                managed_gpu_capability_for_execute_tests(&request),
+            ),
+        );
+        let task_id = "managed-gpu-execute-route";
+        let token = bound_managed_gpu_token(ASSIGNED_OWNER, task_id, &request);
+        let response = service
+            .execute_task(Request::new(ExecuteTaskRequest {
+                task_id: task_id.into(),
+                runtime: MANAGED_GPU_RUNTIME_VERSION.into(),
+                token,
+                managed_gpu_manifest_json: serde_json::to_vec(&request).unwrap(),
+                ..ExecuteTaskRequest::default()
+            }))
+            .await
+            .expect("valid managed GPU request should execute through its dedicated route")
+            .into_inner();
+
+        assert!(response.success, "{}", response.status_message);
+        assert_eq!(response.managed_gpu_result_json, typed_result);
+        assert!(response.managed_receipt_json.is_empty());
+        assert!(response.managed_proof.is_none());
+        assert!(response.general_compute_result_json.is_empty());
+        assert_eq!(response.managed_executed_ops, 0);
+        assert_eq!(response.managed_output_bytes, 0);
+        let reports = state.reports.lock().unwrap();
+        let report = reports
+            .get(&WorkerTaskKey::new(task_id, Some(&request.attempt_id)))
+            .expect("GPU execution should record its attempt-bound request");
+        assert_eq!(report.managed_gpu_request.as_ref(), Some(&request));
+        assert!(report.general_compute_request.is_none());
+    }
+
+    #[tokio::test]
     async fn execute_task_requires_valid_token_before_running_code() {
         let tmp = TempDir::new().unwrap();
         let service = test_service(tmp.path());
@@ -2093,6 +2905,7 @@ mod tests {
                 managed_proof_authorization_token: String::new(),
                 managed_proof_lease_generation: 0,
                 managed_proof_deadline_unix_ms: 0,
+                managed_gpu_manifest_json: Vec::new(),
             }))
             .await;
 
@@ -2143,6 +2956,7 @@ mod tests {
                 managed_proof_authorization_token: String::new(),
                 managed_proof_lease_generation: 0,
                 managed_proof_deadline_unix_ms: 0,
+                managed_gpu_manifest_json: Vec::new(),
             }))
             .await;
 
@@ -2173,6 +2987,7 @@ mod tests {
                 managed_proof_authorization_token: String::new(),
                 managed_proof_lease_generation: 0,
                 managed_proof_deadline_unix_ms: 0,
+                managed_gpu_manifest_json: Vec::new(),
             }))
             .await;
 
@@ -2203,6 +3018,7 @@ mod tests {
                 managed_proof_authorization_token: String::new(),
                 managed_proof_lease_generation: 0,
                 managed_proof_deadline_unix_ms: 0,
+                managed_gpu_manifest_json: Vec::new(),
             }))
             .await;
 
@@ -2238,6 +3054,7 @@ mod tests {
             .task_output_upload(Request::new(TaskOutputUploadRequest {
                 task_id: "assigned-output".into(),
                 worker_id: TEST_WORKER_ID.into(),
+                retry_count: 0,
                 output: "stdout".into(),
                 token: test_user_token(test_private_key_pem(), ASSIGNED_OWNER),
             }))
@@ -2256,6 +3073,7 @@ mod tests {
             .task_result_upload(Request::new(TaskResultUploadRequest {
                 task_id: "assigned-result".into(),
                 worker_id: TEST_WORKER_ID.into(),
+                retry_count: 0,
                 result_torrent: "btih:result".into(),
                 token: test_user_token(test_private_key_pem(), ASSIGNED_OWNER),
             }))
@@ -2313,6 +3131,7 @@ mod tests {
             .task_usage(Request::new(TaskUsageRequest {
                 task_id: "assigned-usage".into(),
                 worker_id: TEST_WORKER_ID.into(),
+                retry_count: 0,
                 usage: Some(test_usage()),
                 token: test_user_token(test_private_key_pem(), ASSIGNED_OWNER),
             }))
@@ -2331,6 +3150,7 @@ mod tests {
             .task_output_upload(Request::new(TaskOutputUploadRequest {
                 task_id: "owner-output".into(),
                 worker_id: TEST_WORKER_ID.into(),
+                retry_count: 0,
                 output: "stdout".into(),
                 token: test_token(test_private_key_pem(), OTHER_OWNER),
             }))
@@ -2349,6 +3169,7 @@ mod tests {
             .task_output_upload(Request::new(TaskOutputUploadRequest {
                 task_id: "worker-output".into(),
                 worker_id: "other-worker".into(),
+                retry_count: 0,
                 output: "stdout".into(),
                 token: test_token(test_private_key_pem(), ASSIGNED_OWNER),
             }))
@@ -2367,6 +3188,7 @@ mod tests {
             .task_result_upload(Request::new(TaskResultUploadRequest {
                 task_id: "owner-result".into(),
                 worker_id: TEST_WORKER_ID.into(),
+                retry_count: 0,
                 result_torrent: "btih:result".into(),
                 token: test_token(test_private_key_pem(), OTHER_OWNER),
             }))
@@ -2385,6 +3207,7 @@ mod tests {
             .task_result_upload(Request::new(TaskResultUploadRequest {
                 task_id: "worker-result".into(),
                 worker_id: "other-worker".into(),
+                retry_count: 0,
                 result_torrent: "btih:result".into(),
                 token: test_token(test_private_key_pem(), ASSIGNED_OWNER),
             }))
@@ -2442,6 +3265,7 @@ mod tests {
             .task_usage(Request::new(TaskUsageRequest {
                 task_id: "owner-usage".into(),
                 worker_id: TEST_WORKER_ID.into(),
+                retry_count: 0,
                 usage: Some(test_usage()),
                 token: test_token(test_private_key_pem(), OTHER_OWNER),
             }))
@@ -2460,6 +3284,7 @@ mod tests {
             .task_usage(Request::new(TaskUsageRequest {
                 task_id: "worker-usage".into(),
                 worker_id: "other-worker".into(),
+                retry_count: 0,
                 usage: Some(test_usage()),
                 token: test_token(test_private_key_pem(), ASSIGNED_OWNER),
             }))
@@ -2479,6 +3304,7 @@ mod tests {
             .task_output_upload(Request::new(TaskOutputUploadRequest {
                 task_id: "task-with-output".into(),
                 worker_id: TEST_WORKER_ID.into(),
+                retry_count: 0,
                 output: "stdout body".into(),
                 token: token.clone(),
             }))
@@ -2501,6 +3327,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn task_reports_are_isolated_by_attempt_identity() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path());
+        let task_id = "attempt-isolated-reports";
+        service
+            .record_task_assignment_for_attempt(task_id, ASSIGNED_OWNER, Some("attempt-a"))
+            .unwrap();
+        service
+            .record_task_assignment_for_attempt(task_id, ASSIGNED_OWNER, Some("attempt-b"))
+            .unwrap();
+        service
+            .report_for_update_for_key(&WorkerTaskKey::new(task_id, Some("attempt-a")), |report| {
+                report.output = Some("output-a".into());
+            })
+            .unwrap();
+        service
+            .report_for_update_for_key(&WorkerTaskKey::new(task_id, Some("attempt-b")), |report| {
+                report.output = Some("output-b".into());
+            })
+            .unwrap();
+
+        for (attempt_id, expected_output) in [("attempt-a", "output-a"), ("attempt-b", "output-b")]
+        {
+            let response = service
+                .task_output(Request::new(TaskOutputRequest {
+                    task_id: task_id.into(),
+                    token: bound_attempt_token(ASSIGNED_OWNER, task_id, attempt_id),
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            assert!(response.success, "{}", response.status_message);
+            assert_eq!(response.output, expected_output);
+        }
+    }
+
+    #[tokio::test]
     async fn result_upload_and_usage_reporting_accept_valid_token() {
         let tmp = TempDir::new().unwrap();
         let service = test_service(tmp.path());
@@ -2511,6 +3374,7 @@ mod tests {
             .task_result_upload(Request::new(TaskResultUploadRequest {
                 task_id: "task-with-result".into(),
                 worker_id: TEST_WORKER_ID.into(),
+                retry_count: 0,
                 result_torrent: "btih:result-ref".into(),
                 token: token.clone(),
             }))
@@ -2523,6 +3387,7 @@ mod tests {
             .task_usage(Request::new(TaskUsageRequest {
                 task_id: "task-with-result".into(),
                 worker_id: TEST_WORKER_ID.into(),
+                retry_count: 0,
                 usage: Some(hivemind_proto::ResourceUsage {
                     cpu_percent: 12.5,
                     memory_percent: 34.5,
@@ -2550,6 +3415,7 @@ mod tests {
             .task_output_upload(Request::new(TaskOutputUploadRequest {
                 task_id: "oversized-output".into(),
                 worker_id: TEST_WORKER_ID.into(),
+                retry_count: 0,
                 output: "x".repeat(MAX_TASK_OUTPUT_BYTES + 1),
                 token,
             }))
@@ -2572,6 +3438,7 @@ mod tests {
             .task_usage(Request::new(TaskUsageRequest {
                 task_id: "bad-usage".into(),
                 worker_id: TEST_WORKER_ID.into(),
+                retry_count: 0,
                 usage: Some(hivemind_proto::ResourceUsage {
                     cpu_percent: f32::NAN,
                     memory_percent: 0.0,
@@ -2600,6 +3467,7 @@ mod tests {
             .task_usage(Request::new(TaskUsageRequest {
                 task_id: "missing-usage".into(),
                 worker_id: TEST_WORKER_ID.into(),
+                retry_count: 0,
                 usage: None,
                 token,
             }))
@@ -2651,6 +3519,7 @@ mod tests {
                     managed_proof_authorization_token: String::new(),
                     managed_proof_lease_generation: 0,
                     managed_proof_deadline_unix_ms: 0,
+                    managed_gpu_manifest_json: Vec::new(),
                 }))
                 .await
                 .unwrap()
@@ -2816,7 +3685,7 @@ mod tests {
             )))
             .await
             .expect_err("chunk upload must require an admitted request");
-        assert_eq!(status.code(), Code::FailedPrecondition);
+        assert_eq!(status.code(), Code::PermissionDenied);
     }
 
     #[tokio::test]
@@ -2928,7 +3797,7 @@ mod tests {
         let reports = worker.state.reports.lock().unwrap();
         assert_eq!(
             reports
-                .get("chunk-task")
+                .get(&WorkerTaskKey::new("chunk-task", Some(&request.attempt_id),))
                 .and_then(|report| report.transfer_generation),
             Some(2)
         );
@@ -3059,6 +3928,42 @@ mod tests {
         assert_eq!(status.code(), Code::PermissionDenied);
     }
 
+    #[tokio::test]
+    async fn stop_task_execution_requires_attempt_bound_idempotency_key() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path());
+        let task_id = "attempt-bound-stop";
+        let request = general_compute_request_for_chunk_tests();
+        service
+            .record_task_assignment_for_attempt(task_id, ASSIGNED_OWNER, Some(&request.attempt_id))
+            .unwrap();
+        let token = bound_general_compute_token(ASSIGNED_OWNER, task_id, &request);
+
+        let mismatched = service
+            .stop_task_execution(Request::new(StopTaskExecutionRequest {
+                task_id: task_id.into(),
+                token: token.clone(),
+                attempt_id: request.attempt_id.clone(),
+                idempotency_key: "wrong-idempotency".into(),
+            }))
+            .await
+            .expect_err("stop must reject an idempotency key not bound to the token");
+        assert_eq!(mismatched.code(), Code::PermissionDenied);
+
+        let accepted = service
+            .stop_task_execution(Request::new(StopTaskExecutionRequest {
+                task_id: task_id.into(),
+                token,
+                attempt_id: request.attempt_id,
+                idempotency_key: request.idempotency_key,
+            }))
+            .await
+            .expect("matching attempt identity should pass authorization")
+            .into_inner();
+        assert!(!accepted.success, "the test has no active executor");
+        assert_eq!(accepted.status_message, "Task not running");
+    }
+
     fn seed_assignment(
         service: &GrpcWorkerNodeService,
         task_id: &str,
@@ -3100,6 +4005,7 @@ mod tests {
             managed_receipt_json: Some("{}".into()),
             managed_proof,
             general_compute_result_json: None,
+            managed_gpu_result_json: None,
         }
     }
 
@@ -3153,6 +4059,7 @@ mod tests {
                     managed_receipt_json: None,
                     managed_proof: None,
                     general_compute_result_json: None,
+                    managed_gpu_result_json: None,
                 })
             },
         ));
@@ -3210,6 +4117,53 @@ mod tests {
             .unwrap()
     }
 
+    fn bound_attempt_token(subject: &str, task_id: &str, attempt_id: &str) -> String {
+        let now = Utc::now().timestamp();
+        WorkerExecutionSigner::from_pem(test_private_key_pem())
+            .unwrap()
+            .encode_attempt_claims(
+                &Claims {
+                    sub: subject.into(),
+                    user_id: subject.into(),
+                    role: Some("worker-execution".into()),
+                    task_id: Some(task_id.into()),
+                    worker_id: Some(TEST_WORKER_ID.into()),
+                    exp: (now + 3600) as usize,
+                    iat: now as usize,
+                },
+                attempt_id,
+            )
+            .unwrap()
+    }
+
+    fn bound_managed_gpu_token(
+        subject: &str,
+        task_id: &str,
+        request: &ManagedGpuRequest,
+    ) -> String {
+        let now = Utc::now().timestamp();
+        WorkerExecutionSigner::from_pem(test_private_key_pem())
+            .unwrap()
+            .encode_execution_claims(
+                &Claims {
+                    sub: subject.into(),
+                    user_id: subject.into(),
+                    role: Some("worker-execution".into()),
+                    task_id: Some(task_id.into()),
+                    worker_id: Some(TEST_WORKER_ID.into()),
+                    exp: (now + 3600) as usize,
+                    iat: now as usize,
+                },
+                &WorkerExecutionIdentity {
+                    execution_id: request.execution_id.clone(),
+                    attempt_id: request.attempt_id.clone(),
+                    idempotency_key: request.idempotency_key.clone(),
+                    request_digest: request.request_digest.clone(),
+                    transfer_generation: 1,
+                },
+            )
+            .unwrap()
+    }
     fn bound_general_compute_token(
         subject: &str,
         task_id: &str,

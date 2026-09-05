@@ -13,6 +13,23 @@ pub const V0_SEMANTICS_MANIFEST_JSON: &str = include_str!("../managed-function-v
 pub const V0_SEMANTICS_MANIFEST_SHA256: &str =
     "8ed716dc07c7bc9abcfc5338b1888e71dd041c3fb397c45d0efb1ff76af1deee";
 
+/// Canonical GPU-v1 semantics and operation-registry manifest.
+pub const GPU_SEMANTICS_MANIFEST_JSON: &str =
+    include_str!("../managed-function-gpu-v1-semantics.json");
+/// SHA-256 of the canonical GPU-v1 manifest excluding its trailing newline.
+pub const GPU_SEMANTICS_MANIFEST_SHA256: &str =
+    "4b5230145a43f05df6e8e09a4fa682e3babcfe43aa980883f72dd95d74d8cb13";
+
+mod gpu;
+
+#[cfg(all(feature = "cuda", target_os = "linux"))]
+pub use gpu::CudaGpuBackend;
+pub use gpu::{
+    CpuGpuBackend, GPU_BILLING_VERSION, GPU_COST_MODEL_VERSION, GPU_MAX_TENSOR_BYTES,
+    GPU_OPERATION_COST, GPU_OPERATION_REGISTRY_VERSION, GPU_RUNTIME_VERSION, GpuBackend,
+    GpuBackendError, GpuOperation, GpuTensor,
+};
+
 use std::{
     collections::{BTreeMap, HashMap},
     error::Error,
@@ -20,9 +37,23 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NumericMode {
+    IntegersOnly,
+    FloatEnabled,
+}
+
+impl NumericMode {
+    #[must_use]
+    const fn floats_enabled(self) -> bool {
+        matches!(self, Self::FloatEnabled)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Int(i64),
+    Float(f64),
     Bool(bool),
     String(String),
     List(Vec<Self>),
@@ -59,11 +90,37 @@ pub fn render_output_bounded(value: &Value, max_bytes: u64) -> Result<String, Ru
     match value {
         Value::String(value) => output.push_str(value)?,
         Value::Int(value) => output.push_str(&value.to_string())?,
+        Value::Float(value) => {
+            // JSON has no NaN or Infinity; a non-finite result can never be a
+            // portable canonical output, so it is rejected instead of rendered.
+            if value.is_finite() {
+                output.push_str(&canonical_float_string(*value))?;
+            } else {
+                return Err(RuntimeError::new(
+                    "type_error",
+                    "non-finite floats cannot be rendered as JSON output",
+                ));
+            }
+        }
         Value::Bool(value) => output.push_str(if *value { "true" } else { "false" })?,
         Value::Null => output.push_str("null")?,
         Value::List(_) | Value::Dict(_) => write_json_value(value, &mut output)?,
     }
     Ok(output.into_inner())
+}
+
+/// Canonical text for one finite f64 in task output and nested JSON.
+///
+/// `ryu`-free and stable across platforms: Rust's shortest-roundtrip `{}`
+/// formatting for f64 is deterministic, and integral values gain a `.0`
+/// suffix so floats stay distinguishable from ints after a round trip.
+fn canonical_float_string(value: f64) -> String {
+    let base = format!("{value}");
+    if base.contains('.') || base.contains('e') || base.contains('E') {
+        base
+    } else {
+        format!("{base}.0")
+    }
 }
 
 struct BoundedOutput {
@@ -112,6 +169,16 @@ fn output_limit_error() -> RuntimeError {
 fn write_json_value(value: &Value, output: &mut BoundedOutput) -> Result<(), RuntimeError> {
     match value {
         Value::Int(value) => output.push_str(&value.to_string()),
+        Value::Float(value) => {
+            if value.is_finite() {
+                output.push_str(&canonical_float_string(*value))
+            } else {
+                Err(RuntimeError::new(
+                    "type_error",
+                    "non-finite floats cannot be rendered as JSON output",
+                ))
+            }
+        }
         Value::Bool(value) => output.push_str(if *value { "true" } else { "false" }),
         Value::String(value) => write_json_string(value, output),
         Value::Null => output.push_str("null"),
@@ -243,6 +310,7 @@ impl ExecutionLimits {
 pub struct ExecutionReceipt {
     pub executed_ops: u64,
     pub usage_units: u64,
+    pub gpu_operations: u64,
     pub function_calls: u64,
     pub loop_iterations: u64,
     pub max_call_depth: usize,
@@ -251,7 +319,7 @@ pub struct ExecutionReceipt {
     pub failure_message: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ExecutionResult {
     pub status: Status,
     pub value: Value,
@@ -310,7 +378,61 @@ impl Error for RuntimeError {}
 #[derive(Debug, Default)]
 pub struct ManagedExecutor;
 
+/// GPU-enabled view of the same parser and evaluator.
+///
+/// This is a separate runtime entry point so the frozen `managed-function-v0`
+/// methods and proof guest never acquire GPU capabilities accidentally.
+pub struct ManagedGpuExecutor<'a> {
+    backend: &'a mut dyn GpuBackend,
+}
+
+impl<'a> ManagedGpuExecutor<'a> {
+    #[must_use]
+    pub fn new(backend: &'a mut dyn GpuBackend) -> Self {
+        Self { backend }
+    }
+
+    pub fn execute(
+        &mut self,
+        source: &str,
+        limits: ExecutionLimits,
+    ) -> Result<ExecutionResult, RuntimeError> {
+        let tokens = Lexer::with_numeric_mode(source, NumericMode::FloatEnabled).tokenize()?;
+        let program = Parser::new(tokens).parse_program()?;
+        Evaluator::with_gpu(limits, self.backend, None).eval_program(&program)
+    }
+
+    pub fn execute_json_input(
+        &mut self,
+        source: &str,
+        limits: ExecutionLimits,
+        input_json: &str,
+    ) -> Result<ExecutionResult, RuntimeError> {
+        self.execute_json_input_with_cancel(source, limits, input_json, None)
+    }
+
+    pub fn execute_json_input_with_cancel(
+        &mut self,
+        source: &str,
+        limits: ExecutionLimits,
+        input_json: &str,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<ExecutionResult, RuntimeError> {
+        let input = Value::from_json_str_with_mode(input_json, NumericMode::FloatEnabled)?;
+        let tokens = Lexer::with_numeric_mode(source, NumericMode::FloatEnabled).tokenize()?;
+        let program = Parser::new(tokens).parse_program()?;
+        let mut evaluator = Evaluator::with_gpu(limits, self.backend, cancelled);
+        evaluator.validate_external_value(&input)?;
+        evaluator.current_scope().insert("input".to_string(), input);
+        evaluator.eval_program(&program)
+    }
+}
+
 impl ManagedExecutor {
+    #[must_use]
+    pub fn with_gpu<'a>(&self, backend: &'a mut dyn GpuBackend) -> ManagedGpuExecutor<'a> {
+        ManagedGpuExecutor::new(backend)
+    }
     pub fn execute(
         &self,
         source: &str,
@@ -355,30 +477,58 @@ impl ManagedExecutor {
 
 impl Value {
     pub fn from_json_str(input: &str) -> Result<Self, RuntimeError> {
-        let value = serde_json::from_str::<serde_json::Value>(input)
-            .map_err(|e| RuntimeError::new("input_error", format!("invalid JSON input: {e}")))?;
-        Self::from_json_value(&value)
+        Self::from_json_str_with_mode(input, NumericMode::IntegersOnly)
     }
 
-    fn from_json_value(value: &serde_json::Value) -> Result<Self, RuntimeError> {
+    fn from_json_str_with_mode(
+        input: &str,
+        numeric_mode: NumericMode,
+    ) -> Result<Self, RuntimeError> {
+        let value = serde_json::from_str::<serde_json::Value>(input)
+            .map_err(|e| RuntimeError::new("input_error", format!("invalid JSON input: {e}")))?;
+        Self::from_json_value(&value, numeric_mode)
+    }
+
+    fn from_json_value(
+        value: &serde_json::Value,
+        numeric_mode: NumericMode,
+    ) -> Result<Self, RuntimeError> {
         match value {
             serde_json::Value::Null => Ok(Self::Null),
             serde_json::Value::Bool(value) => Ok(Self::Bool(*value)),
-            serde_json::Value::Number(value) => value.as_i64().map(Self::Int).ok_or_else(|| {
-                RuntimeError::new(
+            serde_json::Value::Number(value) => {
+                if let Some(int_value) = value.as_i64() {
+                    return Ok(Self::Int(int_value));
+                }
+                if numeric_mode.floats_enabled() {
+                    // JSON floats arrive as f64. Non-finite values cannot exist
+                    // in conforming JSON, but reject any non-finite conversion
+                    // rather than allowing an unrenderable managed value.
+                    return value
+                        .as_f64()
+                        .filter(|value| value.is_finite())
+                        .map(Self::Float)
+                        .ok_or_else(|| {
+                            RuntimeError::new(
+                                "input_error",
+                                "JSON numbers must be i64 integers or finite f64 floats",
+                            )
+                        });
+                }
+                Err(RuntimeError::new(
                     "input_error",
                     "only signed 64-bit JSON integers are supported",
-                )
-            }),
+                ))
+            }
             serde_json::Value::String(value) => Ok(Self::String(value.clone())),
             serde_json::Value::Array(values) => values
                 .iter()
-                .map(Self::from_json_value)
+                .map(|value| Self::from_json_value(value, numeric_mode))
                 .collect::<Result<Vec<_>, _>>()
                 .map(Self::List),
             serde_json::Value::Object(values) => values
                 .iter()
-                .map(|(key, value)| Ok((key.clone(), Self::from_json_value(value)?)))
+                .map(|(key, value)| Ok((key.clone(), Self::from_json_value(value, numeric_mode)?)))
                 .collect::<Result<BTreeMap<_, _>, _>>()
                 .map(Self::Dict),
         }
@@ -399,6 +549,21 @@ fn value_metrics(value: &Value) -> Result<ValueMetrics, RuntimeError> {
             depth: 1,
             max_collection_items: 0,
         }),
+        Value::Float(value) => {
+            // Non-finite floats are unrenderable, so their canonical size is
+            // undefined; fail the same way the renderer would.
+            if !value.is_finite() {
+                return Err(RuntimeError::new(
+                    "type_error",
+                    "non-finite floats cannot be rendered as JSON output",
+                ));
+            }
+            Ok(ValueMetrics {
+                canonical_bytes: logical_usize(canonical_float_string(*value).len())?,
+                depth: 1,
+                max_collection_items: 0,
+            })
+        }
         Value::Bool(value) => Ok(ValueMetrics {
             canonical_bytes: if *value { 4 } else { 5 },
             depth: 1,
@@ -571,7 +736,7 @@ fn value_limit_error() -> RuntimeError {
     RuntimeError::new("value_limit_exceeded", "value limit exceeded")
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 enum Token {
     Null,
     And,
@@ -579,6 +744,7 @@ enum Token {
     Not,
     Ident(String),
     Int(i64),
+    Float(f64),
     String(String),
     True,
     False,
@@ -618,7 +784,7 @@ struct Span {
     column: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct SpannedToken {
     token: Token,
     span: Span,
@@ -629,15 +795,21 @@ struct Lexer<'a> {
     pos: usize,
     line: usize,
     column: usize,
+    numeric_mode: NumericMode,
 }
 
 impl<'a> Lexer<'a> {
     fn new(source: &'a str) -> Self {
+        Self::with_numeric_mode(source, NumericMode::IntegersOnly)
+    }
+
+    fn with_numeric_mode(source: &'a str, numeric_mode: NumericMode) -> Self {
         Self {
             bytes: source.as_bytes(),
             pos: 0,
             line: 1,
             column: 1,
+            numeric_mode,
         }
     }
 
@@ -780,6 +952,10 @@ impl<'a> Lexer<'a> {
         self.bytes.get(self.pos).copied()
     }
 
+    fn byte_at(&self, position: usize) -> Option<u8> {
+        self.bytes.get(position).copied()
+    }
+
     fn consume_byte(&mut self, byte: u8) -> bool {
         if self.peek() == Some(byte) {
             self.bump();
@@ -821,12 +997,50 @@ impl<'a> Lexer<'a> {
         while matches!(self.peek(), Some(b'0'..=b'9')) {
             self.bump();
         }
+        // A digit run becomes a float literal when followed by a fractional
+        // part (`1.5`) or an exponent (`1e3`, `1E-3`). `1.` alone is rejected:
+        // JSON and most C-family grammars require a fraction digit.
+        let is_float = self.numeric_mode.floats_enabled()
+            && match self.peek() {
+                Some(b'.') => matches!(self.byte_at(self.pos + 1), Some(b'0'..=b'9')),
+                Some(b'e' | b'E') => true,
+                _ => false,
+            };
+        if !is_float {
+            let text = std::str::from_utf8(&self.bytes[start..self.pos])
+                .map_err(|_| RuntimeError::new("parse_error", "invalid integer"))?;
+            let value = text
+                .parse::<i64>()
+                .map_err(|_| RuntimeError::new("parse_error", "integer is out of range"))?;
+            return Ok(Token::Int(value));
+        }
+        if matches!(self.peek(), Some(b'.')) {
+            self.bump();
+            while matches!(self.peek(), Some(b'0'..=b'9')) {
+                self.bump();
+            }
+        }
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            self.bump();
+            if matches!(self.peek(), Some(b'+' | b'-')) {
+                self.bump();
+            }
+            if !matches!(self.peek(), Some(b'0'..=b'9')) {
+                return Err(RuntimeError::new(
+                    "parse_error",
+                    "float exponent requires a digit",
+                ));
+            }
+            while matches!(self.peek(), Some(b'0'..=b'9')) {
+                self.bump();
+            }
+        }
         let text = std::str::from_utf8(&self.bytes[start..self.pos])
-            .map_err(|_| RuntimeError::new("parse_error", "invalid integer"))?;
+            .map_err(|_| RuntimeError::new("parse_error", "invalid float literal"))?;
         let value = text
-            .parse::<i64>()
-            .map_err(|_| RuntimeError::new("parse_error", "integer is out of range"))?;
-        Ok(Token::Int(value))
+            .parse::<f64>()
+            .map_err(|_| RuntimeError::new("parse_error", "float literal is out of range"))?;
+        Ok(Token::Float(value))
     }
 
     fn string(&mut self) -> Result<Token, RuntimeError> {
@@ -1231,6 +1445,10 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Value(Value::Int(value)))
             }
+            Token::Float(value) => {
+                self.advance();
+                Ok(Expr::Value(Value::Float(value)))
+            }
             Token::String(value) => {
                 self.advance();
                 Ok(Expr::Value(Value::String(value)))
@@ -1400,6 +1618,8 @@ struct Evaluator<'a> {
     call_depth: usize,
     materialized_value_bytes: u64,
     cancelled: Option<&'a AtomicBool>,
+    gpu_backend: Option<&'a mut dyn GpuBackend>,
+    numeric_mode: NumericMode,
 }
 
 impl<'a> Evaluator<'a> {
@@ -1413,6 +1633,21 @@ impl<'a> Evaluator<'a> {
             call_depth: 0,
             materialized_value_bytes: 0,
             cancelled: None,
+            gpu_backend: None,
+            numeric_mode: NumericMode::IntegersOnly,
+        }
+    }
+
+    fn with_gpu(
+        limits: ExecutionLimits,
+        gpu_backend: &'a mut dyn GpuBackend,
+        cancelled: Option<&'a AtomicBool>,
+    ) -> Self {
+        Self {
+            gpu_backend: Some(gpu_backend),
+            cancelled,
+            numeric_mode: NumericMode::FloatEnabled,
+            ..Self::new(limits)
         }
     }
 
@@ -1557,7 +1792,7 @@ impl<'a> Evaluator<'a> {
             }
             Expr::Unary { op, expr } => {
                 let value = self.eval_expr(expr)?;
-                eval_unary(*op, &value)
+                eval_unary(*op, &value, self.numeric_mode)
             }
             Expr::Logical { left, op, right } => {
                 let left = self.eval_expr(left)?;
@@ -1718,11 +1953,36 @@ impl<'a> Evaluator<'a> {
         op: BinaryOp,
         right: Value,
     ) -> Result<Value, RuntimeError> {
-        match (op, left, right) {
-            (BinaryOp::Add, Value::String(left), Value::String(right)) => {
-                self.concat_strings(&left, &right)
+        match self.numeric_mode {
+            NumericMode::IntegersOnly => match (op, left, right) {
+                (BinaryOp::Add, Value::String(left), Value::String(right)) => {
+                    self.concat_strings(&left, &right)
+                }
+                (op, left, right) => eval_binary_integer(left, op, right),
+            },
+            NumericMode::FloatEnabled => {
+                // Mixed int/float arithmetic promotes to f64 with the same
+                // IEEE-754 semantics on every GPU-v1 host.
+                let mixed = matches!(
+                    (&left, &right),
+                    (Value::Int(_), Value::Float(_)) | (Value::Float(_), Value::Int(_))
+                );
+                if mixed {
+                    let left_float = numeric_value(&left, "arithmetic")?;
+                    let right_float = numeric_value(&right, "arithmetic")?;
+                    return eval_binary_float(
+                        Value::Float(left_float),
+                        op,
+                        Value::Float(right_float),
+                    );
+                }
+                match (op, left, right) {
+                    (BinaryOp::Add, Value::String(left), Value::String(right)) => {
+                        self.concat_strings(&left, &right)
+                    }
+                    (op, left, right) => eval_binary_float(left, op, right),
+                }
             }
-            (op, left, right) => eval_binary(left, op, right),
         }
     }
 
@@ -1876,6 +2136,18 @@ impl<'a> Evaluator<'a> {
 
     fn builtin_call(&mut self, name: &str, args: &[Expr]) -> Result<Option<Value>, RuntimeError> {
         match name {
+            "gpu_add_f32" if self.gpu_backend.is_some() => {
+                self.eval_gpu_builtin(GpuOperation::AddF32, args).map(Some)
+            }
+            "gpu_scale_f32" if self.gpu_backend.is_some() => self
+                .eval_gpu_builtin(GpuOperation::ScaleF32, args)
+                .map(Some),
+            "gpu_matmul_f32" if self.gpu_backend.is_some() => self
+                .eval_gpu_builtin(GpuOperation::MatmulF32, args)
+                .map(Some),
+            // Keep the names unavailable to the default v0 evaluator.  This is
+            // important for the frozen proof/semantics contract.
+            "gpu_add_f32" | "gpu_scale_f32" | "gpu_matmul_f32" => Ok(None),
             "len" => {
                 let [arg] = args else {
                     return Err(RuntimeError::new("arity_error", "len expects 1 argument"));
@@ -1946,8 +2218,186 @@ impl<'a> Evaluator<'a> {
                 };
                 Ok(Some(Value::Bool(value)))
             }
+            "abs" if self.numeric_mode.floats_enabled() => {
+                let [arg] = args else {
+                    return Err(RuntimeError::new("arity_error", "abs expects 1 argument"));
+                };
+                match self.eval_expr(arg)? {
+                    Value::Int(value) => Ok(Some(Value::Int(value.wrapping_abs()))),
+                    Value::Float(value) => Ok(Some(Value::Float(value.abs()))),
+                    _ => Err(RuntimeError::new("type_error", "abs expects a number")),
+                }
+            }
+            "min" | "max" if self.numeric_mode.floats_enabled() => {
+                let [left_arg, right_arg] = args else {
+                    return Err(RuntimeError::new(
+                        "arity_error",
+                        format!("{name} expects 2 arguments"),
+                    ));
+                };
+                let left = self.eval_expr(left_arg)?;
+                let right = self.eval_expr(right_arg)?;
+                let pick_min = name == "min";
+                // Ints stay ints when both sides are ints; any float promotes
+                // the result to float so no precision is silently dropped.
+                let result: Value = if let (Value::Int(left), Value::Int(right)) = (&left, &right) {
+                    let take_left = if pick_min {
+                        left <= right
+                    } else {
+                        left >= right
+                    };
+                    if take_left {
+                        Value::Int(*left)
+                    } else {
+                        Value::Int(*right)
+                    }
+                } else {
+                    let left_float = numeric_value(&left, name)?;
+                    let right_float = numeric_value(&right, name)?;
+                    let take_left = if pick_min {
+                        left_float <= right_float
+                    } else {
+                        left_float >= right_float
+                    };
+                    if !left_float.is_finite() || !right_float.is_finite() {
+                        return Err(RuntimeError::new(
+                            "type_error",
+                            format!("{name} received a non-finite float"),
+                        ));
+                    }
+                    // A mixed numeric comparison is promoted even when the
+                    // selected operand was originally an integer.
+                    Value::Float(if take_left { left_float } else { right_float })
+                };
+                Ok(Some(result))
+            }
+            "sqrt" | "floor" | "ceil" | "round" | "exp" | "ln"
+                if self.numeric_mode.floats_enabled() =>
+            {
+                let [arg] = args else {
+                    return Err(RuntimeError::new(
+                        "arity_error",
+                        format!("{name} expects 1 argument"),
+                    ));
+                };
+                let value = numeric_value(&self.eval_expr(arg)?, name)?;
+                let result = match name {
+                    "sqrt" => {
+                        if value < 0.0 {
+                            return Err(RuntimeError::new(
+                                "runtime_error",
+                                "sqrt of a negative number",
+                            ));
+                        }
+                        value.sqrt()
+                    }
+                    "floor" => value.floor(),
+                    "ceil" => value.ceil(),
+                    "round" => value.round(),
+                    "exp" => value.exp(),
+                    "ln" => {
+                        if value <= 0.0 {
+                            return Err(RuntimeError::new(
+                                "runtime_error",
+                                "ln requires a positive number",
+                            ));
+                        }
+                        value.ln()
+                    }
+                    _ => unreachable!("matched above"),
+                };
+                Ok(Some(Value::Float(result)))
+            }
+            "pow" if self.numeric_mode.floats_enabled() => {
+                let [base_arg, exponent_arg] = args else {
+                    return Err(RuntimeError::new("arity_error", "pow expects 2 arguments"));
+                };
+                let base = numeric_value(&self.eval_expr(base_arg)?, "pow")?;
+                let exponent = numeric_value(&self.eval_expr(exponent_arg)?, "pow")?;
+                Ok(Some(Value::Float(base.powf(exponent))))
+            }
+            "abs" | "min" | "max" | "sqrt" | "floor" | "ceil" | "round" | "exp" | "ln" | "pow" => {
+                Ok(None)
+            }
             _ => Ok(None),
         }
+    }
+
+    fn eval_gpu_builtin(
+        &mut self,
+        operation: GpuOperation,
+        args: &[Expr],
+    ) -> Result<Value, RuntimeError> {
+        if args.len() != operation.arity() {
+            return Err(RuntimeError::new(
+                "arity_error",
+                format!(
+                    "{} expects {} arguments, got {}",
+                    operation.name(),
+                    operation.arity(),
+                    args.len()
+                ),
+            ));
+        }
+        let values = args
+            .iter()
+            .map(|arg| self.eval_expr(arg))
+            .collect::<Result<Vec<_>, _>>()?;
+        let tensors = values
+            .iter()
+            .map(crate::gpu::tensor_from_value)
+            .collect::<Result<Vec<_>, _>>()?;
+        let input_bytes = tensors.iter().try_fold(0u64, |total, tensor| {
+            total
+                .checked_add(u64::try_from(tensor.bytes()).map_err(|_| {
+                    RuntimeError::new("gpu_input_error", "GPU tensor size is out of range")
+                })?)
+                .ok_or_else(|| RuntimeError::new("gpu_input_error", "GPU tensor size overflow"))
+        })?;
+        if input_bytes > self.limits.max_value_materialization_bytes {
+            return Err(RuntimeError::new(
+                "value_limit_exceeded",
+                "GPU tensor inputs exceed the materialization limit",
+            ));
+        }
+        self.charge(GPU_OPERATION_COST)?;
+        self.receipt.gpu_operations =
+            self.receipt.gpu_operations.checked_add(1).ok_or_else(|| {
+                RuntimeError::new("op_limit_exceeded", "GPU operation count overflow")
+            })?;
+        let output = {
+            let backend = self.gpu_backend.as_deref_mut().ok_or_else(|| {
+                RuntimeError::new(
+                    "gpu_backend_unavailable",
+                    "GPU operations require an enabled GPU execution context",
+                )
+            })?;
+            backend
+                .execute(operation, &tensors)
+                .map_err(|error| RuntimeError::new(error.code(), error.message()))?
+        };
+        let output_bytes = u64::try_from(output.bytes()).map_err(|_| {
+            RuntimeError::new(
+                "gpu_execution_error",
+                "GPU tensor output size is out of range",
+            )
+        })?;
+        if output_bytes > self.limits.max_value_materialization_bytes {
+            return Err(RuntimeError::new(
+                "value_limit_exceeded",
+                "GPU tensor output exceeds the materialization limit",
+            ));
+        }
+        crate::gpu::validate_tensor_value_limits(
+            &output,
+            self.limits.max_value_bytes,
+            self.limits.max_collection_items,
+            self.limits.max_value_depth,
+            self.limits.max_value_materialization_bytes,
+            self.materialized_value_bytes,
+        )?;
+        let value = crate::gpu::value_from_tensor(&output)?;
+        self.materialize_owned_value(value)
     }
 
     fn lookup(&mut self, name: &str) -> Result<Value, RuntimeError> {
@@ -2023,7 +2473,7 @@ enum Control {
     Return(Value),
 }
 
-fn eval_binary(left: Value, op: BinaryOp, right: Value) -> Result<Value, RuntimeError> {
+fn eval_binary_integer(left: Value, op: BinaryOp, right: Value) -> Result<Value, RuntimeError> {
     match op {
         BinaryOp::Add => match (left, right) {
             (Value::Int(left), Value::Int(right)) => Ok(Value::Int(left + right)),
@@ -2032,8 +2482,8 @@ fn eval_binary(left: Value, op: BinaryOp, right: Value) -> Result<Value, Runtime
                 "+ expects matching ints or strings",
             )),
         },
-        BinaryOp::Sub => int_binary(left, right, "-", |left, right| left - right),
-        BinaryOp::Mul => int_binary(left, right, "*", |left, right| left * right),
+        BinaryOp::Sub => int_binary_integer(left, right, "-", |left, right| left - right),
+        BinaryOp::Mul => int_binary_integer(left, right, "*", |left, right| left * right),
         BinaryOp::Div => match (left, right) {
             (Value::Int(_), Value::Int(0)) => {
                 Err(RuntimeError::new("runtime_error", "division by zero"))
@@ -2043,42 +2493,14 @@ fn eval_binary(left: Value, op: BinaryOp, right: Value) -> Result<Value, Runtime
         },
         BinaryOp::Eq => Ok(Value::Bool(left == right)),
         BinaryOp::NotEq => Ok(Value::Bool(left != right)),
-        BinaryOp::Lt => int_compare(left, right, "<", |left, right| left < right),
-        BinaryOp::LtEq => int_compare(left, right, "<=", |left, right| left <= right),
-        BinaryOp::Gt => int_compare(left, right, ">", |left, right| left > right),
-        BinaryOp::GtEq => int_compare(left, right, ">=", |left, right| left >= right),
+        BinaryOp::Lt => int_compare_integer(left, right, "<", |left, right| left < right),
+        BinaryOp::LtEq => int_compare_integer(left, right, "<=", |left, right| left <= right),
+        BinaryOp::Gt => int_compare_integer(left, right, ">", |left, right| left > right),
+        BinaryOp::GtEq => int_compare_integer(left, right, ">=", |left, right| left >= right),
     }
 }
 
-fn eval_unary(op: UnaryOp, value: &Value) -> Result<Value, RuntimeError> {
-    match op {
-        UnaryOp::Neg => match value {
-            Value::Int(value) => Ok(Value::Int(-value)),
-            _ => Err(RuntimeError::new("type_error", "unary - expects an int")),
-        },
-        UnaryOp::Pos => match value {
-            Value::Int(value) => Ok(Value::Int(*value)),
-            _ => Err(RuntimeError::new("type_error", "unary + expects an int")),
-        },
-        UnaryOp::Not => match value {
-            Value::Bool(value) => Ok(Value::Bool(!value)),
-            _ => Err(RuntimeError::new("type_error", "not expects a bool")),
-        },
-    }
-}
-
-fn normalize_index(index: i64, len: usize) -> Result<usize, RuntimeError> {
-    let len_i64 = i64::try_from(len)
-        .map_err(|_| RuntimeError::new("runtime_error", "collection is too large to index"))?;
-    let resolved = if index < 0 { index + len_i64 } else { index };
-    if resolved < 0 || resolved >= len_i64 {
-        return Err(RuntimeError::new("index_error", "index out of range"));
-    }
-    usize::try_from(resolved)
-        .map_err(|_| RuntimeError::new("runtime_error", "index is out of range"))
-}
-
-fn int_binary(
+fn int_binary_integer(
     left: Value,
     right: Value,
     op: &'static str,
@@ -2093,7 +2515,7 @@ fn int_binary(
     }
 }
 
-fn int_compare(
+fn int_compare_integer(
     left: Value,
     right: Value,
     op: &'static str,
@@ -2101,6 +2523,196 @@ fn int_compare(
 ) -> Result<Value, RuntimeError> {
     match (left, right) {
         (Value::Int(left), Value::Int(right)) => Ok(Value::Bool(apply(left, right))),
+        _ => Err(RuntimeError::new(
+            "type_error",
+            format!("{op} expects ints"),
+        )),
+    }
+}
+
+fn eval_binary_float(left: Value, op: BinaryOp, right: Value) -> Result<Value, RuntimeError> {
+    match op {
+        BinaryOp::Add => match (left, right) {
+            (Value::Int(left), Value::Int(right)) => Ok(Value::Int(left + right)),
+            (Value::Float(left), Value::Float(right)) => Ok(Value::Float(left + right)),
+            _ => Err(RuntimeError::new(
+                "type_error",
+                "+ expects matching ints, floats, or strings",
+            )),
+        },
+        BinaryOp::Sub => match (left, right) {
+            (Value::Int(left), Value::Int(right)) => Ok(Value::Int(left - right)),
+            (Value::Float(left), Value::Float(right)) => Ok(Value::Float(left - right)),
+            (left, right) => int_binary(&left, &right, "-"),
+        },
+        BinaryOp::Mul => match (left, right) {
+            (Value::Int(left), Value::Int(right)) => Ok(Value::Int(left * right)),
+            (Value::Float(left), Value::Float(right)) => Ok(Value::Float(left * right)),
+            (left, right) => int_binary(&left, &right, "*"),
+        },
+        BinaryOp::Div => match (left, right) {
+            (Value::Int(_), Value::Int(0)) => {
+                Err(RuntimeError::new("runtime_error", "division by zero"))
+            }
+            (Value::Int(left), Value::Int(right)) => Ok(Value::Int(left / right)),
+            // Float division never traps: IEEE-754 yields inf/NaN, which the
+            // canonical renderer rejects at output time.
+            (Value::Float(left), Value::Float(right)) => Ok(Value::Float(left / right)),
+            _ => Err(RuntimeError::new("type_error", "/ expects ints or floats")),
+        },
+        BinaryOp::Eq => Ok(Value::Bool(numeric_or_value_equal(&left, &right))),
+        BinaryOp::NotEq => Ok(Value::Bool(!numeric_or_value_equal(&left, &right))),
+        BinaryOp::Lt => numeric_compare(
+            left,
+            right,
+            |left, right| left < right,
+            |left, right| left < right,
+        ),
+        BinaryOp::LtEq => numeric_compare(
+            left,
+            right,
+            |left, right| left <= right,
+            |left, right| left <= right,
+        ),
+        BinaryOp::Gt => numeric_compare(
+            left,
+            right,
+            |left, right| left > right,
+            |left, right| left > right,
+        ),
+        BinaryOp::GtEq => numeric_compare(
+            left,
+            right,
+            |left, right| left >= right,
+            |left, right| left >= right,
+        ),
+    }
+}
+
+#[expect(clippy::float_cmp)]
+fn numeric_or_value_equal(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Int(left), Value::Float(right)) => (*left as f64) == *right,
+        (Value::Float(left), Value::Int(right)) => *left == (*right as f64),
+        _ => left == right,
+    }
+}
+
+/// Ordered comparison across the numeric tower. Integer-only comparisons stay
+/// in `i64` so enabling floats cannot change the ordering of large integers.
+/// Mixed comparisons promote the integer operand to `f64`. NaN compares false
+/// against everything (matching IEEE-754 and Rust's `PartialOrd` for `f64`).
+fn numeric_compare(
+    left: Value,
+    right: Value,
+    apply_int: impl FnOnce(i64, i64) -> bool,
+    apply_float: impl FnOnce(f64, f64) -> bool,
+) -> Result<Value, RuntimeError> {
+    match (left, right) {
+        (Value::Int(left), Value::Int(right)) => Ok(Value::Bool(apply_int(left, right))),
+        (Value::Float(left), Value::Float(right)) => {
+            if left.is_nan() || right.is_nan() {
+                return Ok(Value::Bool(false));
+            }
+            Ok(Value::Bool(apply_float(left, right)))
+        }
+        (Value::Int(left), Value::Float(right)) => {
+            if right.is_nan() {
+                return Ok(Value::Bool(false));
+            }
+            Ok(Value::Bool(apply_float(left as f64, right)))
+        }
+        (Value::Float(left), Value::Int(right)) => {
+            if left.is_nan() {
+                return Ok(Value::Bool(false));
+            }
+            Ok(Value::Bool(apply_float(left, right as f64)))
+        }
+        _ => Err(RuntimeError::new(
+            "type_error",
+            "ordered comparison expects numbers",
+        )),
+    }
+}
+
+fn eval_unary(
+    op: UnaryOp,
+    value: &Value,
+    numeric_mode: NumericMode,
+) -> Result<Value, RuntimeError> {
+    match numeric_mode {
+        NumericMode::IntegersOnly => match op {
+            UnaryOp::Neg => match value {
+                Value::Int(value) => Ok(Value::Int(-value)),
+                _ => Err(RuntimeError::new("type_error", "unary - expects an int")),
+            },
+            UnaryOp::Pos => match value {
+                Value::Int(value) => Ok(Value::Int(*value)),
+                _ => Err(RuntimeError::new("type_error", "unary + expects an int")),
+            },
+            UnaryOp::Not => match value {
+                Value::Bool(value) => Ok(Value::Bool(!value)),
+                _ => Err(RuntimeError::new("type_error", "not expects a bool")),
+            },
+        },
+        NumericMode::FloatEnabled => match op {
+            UnaryOp::Neg => match value {
+                Value::Int(value) => Ok(Value::Int(-value)),
+                Value::Float(value) => Ok(Value::Float(-value)),
+                _ => Err(RuntimeError::new("type_error", "unary - expects a number")),
+            },
+            UnaryOp::Pos => match value {
+                Value::Int(value) => Ok(Value::Int(*value)),
+                Value::Float(value) => Ok(Value::Float(*value)),
+                _ => Err(RuntimeError::new("type_error", "unary + expects a number")),
+            },
+            UnaryOp::Not => match value {
+                Value::Bool(value) => Ok(Value::Bool(!value)),
+                _ => Err(RuntimeError::new("type_error", "not expects a bool")),
+            },
+        },
+    }
+}
+
+/// Coerce a managed value to f64 for the math builtins. Ints promote exactly
+/// (i64 → f64 is lossless for |value| < 2^53, and Rust's cast rounds toward
+/// zero beyond that — the same behavior on every target, including the guest).
+fn numeric_value(value: &Value, function: &str) -> Result<f64, RuntimeError> {
+    match value {
+        Value::Int(value) => Ok(*value as f64),
+        Value::Float(value) => Ok(*value),
+        _ => Err(RuntimeError::new(
+            "type_error",
+            format!("{function} expects a number"),
+        )),
+    }
+}
+
+fn normalize_index(index: i64, len: usize) -> Result<usize, RuntimeError> {
+    let len_i64 = i64::try_from(len)
+        .map_err(|_| RuntimeError::new("runtime_error", "collection is too large to index"))?;
+    let resolved = if index < 0 { index + len_i64 } else { index };
+    if resolved < 0 || resolved >= len_i64 {
+        return Err(RuntimeError::new("index_error", "index out of range"));
+    }
+    usize::try_from(resolved)
+        .map_err(|_| RuntimeError::new("runtime_error", "index is out of range"))
+}
+
+fn int_binary(left: &Value, right: &Value, op: &'static str) -> Result<Value, RuntimeError> {
+    match (left, right) {
+        // Unchecked i64 arithmetic is the documented v0 integer model; the
+        // float path is the one that changes in this migration.
+        (Value::Int(left), Value::Int(right)) => Ok(Value::Int(match op {
+            "-" => left - right,
+            "*" => left * right,
+            _ => {
+                return Err(RuntimeError::new(
+                    "type_error",
+                    format!("{op} expects ints"),
+                ));
+            }
+        })),
         _ => Err(RuntimeError::new(
             "type_error",
             format!("{op} expects ints"),
@@ -2121,6 +2733,7 @@ fn append_debug_output(
     };
     match value {
         Value::Int(value) => write!(&mut writer, "{value}"),
+        Value::Float(value) => write!(&mut writer, "{}", canonical_float_string(*value)),
         Value::Bool(value) => write!(&mut writer, "{value}"),
         Value::String(value) => writer.write_str(value),
         Value::List(values) => write!(&mut writer, "{values:?}"),
@@ -2160,7 +2773,10 @@ impl Write for BoundedFmtWriter<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Value, render_output_bounded};
+    use super::{
+        CpuGpuBackend, ExecutionLimits, ManagedExecutor, ManagedGpuExecutor, Value,
+        render_output_bounded,
+    };
 
     #[test]
     fn bounded_canonical_renderer_matches_serde_json_escaping() {
@@ -2178,5 +2794,129 @@ mod tests {
                 .unwrap();
             assert_eq!(render_output_bounded(&managed, u64::MAX).unwrap(), expected);
         }
+    }
+
+    fn eval_gpu(source: &str, input: &str) -> Result<String, String> {
+        let max_output_bytes = ExecutionLimits::default().max_output_bytes;
+        let mut backend = CpuGpuBackend;
+        let execution = ManagedGpuExecutor::new(&mut backend)
+            .execute_json_input(source, ExecutionLimits::default(), input)
+            .map_err(|error| error.to_string())?;
+        render_output_bounded(&execution.value, max_output_bytes).map_err(|error| error.to_string())
+    }
+
+    fn eval_v0(source: &str, input: &str) -> Result<String, String> {
+        let max_output_bytes = ExecutionLimits::default().max_output_bytes;
+        let execution = ManagedExecutor
+            .execute_json_input(source, ExecutionLimits::default(), input)
+            .map_err(|error| error.to_string())?;
+        render_output_bounded(&execution.value, max_output_bytes).map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn float_literals_and_arithmetic_round_trip() {
+        assert_eq!(eval_gpu("return 1.5;", "null").unwrap(), "1.5");
+        assert_eq!(eval_gpu("return 1.5 + 2.25;", "null").unwrap(), "3.75");
+        // Exponent literals are floats, so integral results keep a .0 suffix.
+        assert_eq!(eval_gpu("return 1e3;", "null").unwrap(), "1000.0");
+        // Mixed int/float promotes to float; the result stays distinguishable
+        // from an int by its .0 suffix.
+        assert_eq!(eval_gpu("return 2 * 0.5;", "null").unwrap(), "1.0");
+        assert_eq!(eval_gpu("return 10 / 4.0;", "null").unwrap(), "2.5");
+        assert_eq!(eval_gpu("return 2.0 + 3.0;", "null").unwrap(), "5.0");
+    }
+
+    #[test]
+    fn json_float_input_is_accepted() {
+        assert_eq!(
+            eval_gpu("return get(input, \"x\") * 2.0;", r#"{"x": 1.25}"#).unwrap(),
+            "2.5"
+        );
+        // An integer JSON number promotes through arithmetic with a float.
+        assert_eq!(
+            eval_gpu("return get(input, \"n\") + 0.0;", r#"{"n": 7}"#).unwrap(),
+            "7.0"
+        );
+    }
+
+    #[test]
+    fn float_comparisons_work_across_the_numeric_tower() {
+        assert_eq!(eval_gpu("return 0.1 < 1;", "null").unwrap(), "true");
+        assert_eq!(eval_gpu("return 2 >= 1.5;", "null").unwrap(), "true");
+        assert_eq!(eval_gpu("return 1.5 == 1.5;", "null").unwrap(), "true");
+        assert_eq!(eval_gpu("return 1.5 != 1.5;", "null").unwrap(), "false");
+        assert_eq!(eval_gpu("return 1 == 1.0;", "null").unwrap(), "true");
+        assert_eq!(eval_gpu("return 1.0 == 1;", "null").unwrap(), "true");
+        assert_eq!(eval_gpu("return 1 != 1.0;", "null").unwrap(), "false");
+    }
+
+    #[test]
+    fn float_mode_preserves_exact_large_integer_ordering() {
+        assert_eq!(
+            eval_gpu("return 9007199254740992 < 9007199254740993;", "null").unwrap(),
+            "true"
+        );
+        assert_eq!(
+            eval_gpu("return 9007199254740993 > 9007199254740992;", "null").unwrap(),
+            "true"
+        );
+        assert_eq!(
+            eval_gpu("return 9007199254740992 == 9007199254740993;", "null").unwrap(),
+            "false"
+        );
+    }
+
+    #[test]
+    fn math_builtins_compute_deterministic_results() {
+        // Float-valued builtins keep the .0 suffix on integral results.
+        assert_eq!(eval_gpu("return sqrt(16.0);", "null").unwrap(), "4.0");
+        assert_eq!(eval_gpu("return floor(2.7);", "null").unwrap(), "2.0");
+        assert_eq!(eval_gpu("return ceil(2.1);", "null").unwrap(), "3.0");
+        assert_eq!(eval_gpu("return round(2.5);", "null").unwrap(), "3.0");
+        assert_eq!(eval_gpu("return abs(-3);", "null").unwrap(), "3");
+        assert_eq!(eval_gpu("return abs(-2.5);", "null").unwrap(), "2.5");
+        assert_eq!(eval_gpu("return min(1.5, 2);", "null").unwrap(), "1.5");
+        assert_eq!(eval_gpu("return min(1, 1.5);", "null").unwrap(), "1.0");
+        assert_eq!(eval_gpu("return max(1, 2.5);", "null").unwrap(), "2.5");
+        assert_eq!(eval_gpu("return max(2, 1.5);", "null").unwrap(), "2.0");
+        // min/max of two ints stay ints.
+        assert_eq!(eval_gpu("return min(3, 7);", "null").unwrap(), "3");
+        assert_eq!(eval_gpu("return pow(2, 10);", "null").unwrap(), "1024.0");
+        assert_eq!(eval_gpu("return exp(0) + ln(1);", "null").unwrap(), "1.0");
+    }
+
+    #[test]
+    fn non_finite_results_are_rejected_at_output() {
+        // Division by zero on floats follows IEEE-754 (inf), and the renderer
+        // must reject it rather than emit invalid JSON.
+        assert!(eval_gpu("return 1.0 / 0.0;", "null").is_err());
+        assert!(eval_gpu("return sqrt(-1.0);", "null").is_err());
+        assert!(eval_gpu("return ln(0);", "null").is_err());
+    }
+
+    #[test]
+    fn frozen_v0_rejects_gpu_float_surface() {
+        let error = ManagedExecutor
+            .execute("return 1.5;", ExecutionLimits::default())
+            .unwrap_err();
+        assert_eq!(error.code(), "parse_error");
+
+        let error = ManagedExecutor
+            .execute_json_input("return input;", ExecutionLimits::default(), "1.5")
+            .unwrap_err();
+        assert_eq!(error.code(), "input_error");
+
+        let error = ManagedExecutor
+            .execute("return sqrt(4);", ExecutionLimits::default())
+            .unwrap_err();
+        assert_eq!(error.code(), "name_error");
+    }
+
+    #[test]
+    fn integer_semantics_are_unchanged() {
+        // Integer division still truncates; ints never silently become floats.
+        assert_eq!(eval_v0("return 10 / 4;", "null").unwrap(), "2");
+        assert_eq!(eval_v0("return 1 + 1;", "null").unwrap(), "2");
+        assert_eq!(eval_v0("return -5 / 2;", "null").unwrap(), "-2");
     }
 }

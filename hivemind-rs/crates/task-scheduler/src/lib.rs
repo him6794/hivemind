@@ -1,4 +1,4 @@
-﻿pub mod dispatcher;
+pub mod dispatcher;
 pub mod managed_proof_metrics;
 pub(crate) mod managed_proof_verifier;
 pub mod scheduler;
@@ -50,6 +50,10 @@ impl TaskScheduler {
 
     pub async fn get_task(&self, task_id: &str) -> Result<Option<Task>> {
         self.repo.find_by_task_id(task_id).await
+    }
+
+    pub async fn managed_gpu_result_for_task(&self, task_id: &str) -> Result<Option<Vec<u8>>> {
+        self.repo.managed_gpu_result_for_task(task_id).await
     }
 
     pub async fn general_compute_transfer_lease(
@@ -151,6 +155,38 @@ impl TaskScheduler {
             .await
     }
 
+    pub async fn complete_task_result_for_worker_attempt(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        retry_count: i32,
+        result_torrent: &str,
+    ) -> Result<Option<Task>> {
+        self.repo
+            .complete_result_for_worker_attempt(task_id, worker_id, retry_count, result_torrent)
+            .await
+    }
+
+    pub async fn complete_task_for_worker_attempt(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        retry_count: i32,
+        result_torrent: Option<&str>,
+        output: Option<&str>,
+    ) -> Result<Option<Task>> {
+        let Some(expected) = self
+            .repo
+            .find_worker_attempt_snapshot(task_id, worker_id, retry_count)
+            .await?
+        else {
+            return Ok(None);
+        };
+        self.repo
+            .complete_for_worker_snapshot(&expected, worker_id, result_torrent, output)
+            .await
+    }
+
     pub async fn record_task_output_for_worker(
         &self,
         task_id: &str,
@@ -159,6 +195,18 @@ impl TaskScheduler {
     ) -> Result<Task> {
         self.repo
             .record_output_for_worker(task_id, worker_id, output)
+            .await
+    }
+
+    pub async fn record_task_output_for_worker_attempt(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        retry_count: i32,
+        output: &str,
+    ) -> Result<Option<Task>> {
+        self.repo
+            .record_output_for_worker_attempt(task_id, worker_id, retry_count, output)
             .await
     }
 
@@ -176,6 +224,30 @@ impl TaskScheduler {
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_task_resource_usage_for_worker_attempt(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        retry_count: i32,
+        cpu: f64,
+        memory: f64,
+        gpu: f64,
+        gpu_mem: f64,
+    ) -> Result<bool> {
+        self.repo
+            .update_resource_usage_for_worker_attempt(
+                task_id,
+                worker_id,
+                retry_count,
+                cpu,
+                memory,
+                gpu,
+                gpu_mem,
+            )
+            .await
+    }
+
     pub async fn record_batch_task_report_for_worker(
         &self,
         task_id: &str,
@@ -187,6 +259,18 @@ impl TaskScheduler {
             .await
     }
 
+    pub async fn record_batch_task_report_for_worker_attempt(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        retry_count: i32,
+        report: BatchTaskReport<'_>,
+    ) -> Result<Option<Task>> {
+        self.repo
+            .record_batch_report_for_worker_attempt(task_id, worker_id, retry_count, report)
+            .await
+    }
+
     pub async fn fail_task_for_worker(
         &self,
         task_id: &str,
@@ -194,6 +278,18 @@ impl TaskScheduler {
         reason: &str,
     ) -> Result<Task> {
         self.repo.fail_for_worker(task_id, worker_id, reason).await
+    }
+
+    pub async fn fail_task_for_worker_attempt(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        retry_count: i32,
+        reason: &str,
+    ) -> Result<Option<Task>> {
+        self.repo
+            .fail_for_worker_attempt(task_id, worker_id, retry_count, reason)
+            .await
     }
 
     pub async fn cancel_task(&self, task_id: &str) -> Result<Task> {

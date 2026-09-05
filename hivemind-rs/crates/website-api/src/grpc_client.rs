@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use hivemind_proto::{
     user_service_client::UserServiceClient, vpn_service_client::VpnServiceClient,
     GetBalanceRequest, GetBalanceResponse, IssueEnrollmentCredentialRequest,
