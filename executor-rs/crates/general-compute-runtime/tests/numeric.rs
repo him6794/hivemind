@@ -143,14 +143,16 @@ fn dot_computes_a_bounded_f64_vector_product() {
     let lhs = F64Tensor::new(vec![3], vec![1.0, 2.0, 3.0]).unwrap();
     let rhs = F64Tensor::new(vec![3], vec![4.0, 5.0, 6.0]).unwrap();
 
-    assert_eq!(lhs.dot(&rhs).expect("matching vectors should dot"), 32.0);
+    let dot = lhs.dot(&rhs).expect("matching vectors should dot");
+    assert!((dot - 32.0).abs() < 1e-12);
 }
 
 #[test]
 fn dot_preserves_f32_and_complex64_arithmetic() {
     let f32_lhs = F32Tensor::new(vec![2], vec![1.5_f32, 2.0]).unwrap();
     let f32_rhs = F32Tensor::new(vec![2], vec![2.0_f32, 4.0]).unwrap();
-    assert_eq!(f32_lhs.dot(&f32_rhs).unwrap(), 11.0_f32);
+    let f32_dot = f32_lhs.dot(&f32_rhs).unwrap();
+    assert!((f32_dot - 11.0_f32).abs() < f32::EPSILON);
 
     let complex_lhs = Complex64Tensor::new(
         vec![2],

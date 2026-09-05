@@ -3,7 +3,12 @@ import './console.css';
 import { artifactFilenameFromContentDisposition } from './artifactDownloadPolicy.mjs';
 import { clearStoredSession, readStoredSession, saveStoredSession } from './authSession.mjs';
 import { createTaskId, validateTaskId } from './taskIdPolicy.mjs';
-import { taskRequestFailureText, taskResponseFailureMessage } from './taskResponsePolicy.mjs';
+import {
+  isManagedGpuResult,
+  isManagedLogGuidanceResult,
+  taskRequestFailureText,
+  taskResponseFailureMessage,
+} from './taskResponsePolicy.mjs';
 import { normalizeTaskObservability } from './taskObservability.mjs';
 
 function toNumber(value) {
@@ -275,6 +280,37 @@ export default function MasterApp() {
 
     try {
       const { ok, data } = await api('GET', `/api/tasks/${encodeURIComponent(id)}/result`);
+      if (ok && isManagedGpuResult(data)) {
+        // GPU-v1 results are Nodepool-validated typed JSON, never torrents or
+        // managed log guidance. Render the envelope for both success and failure.
+        setTaskResult(JSON.stringify(data.managed_gpu_result, null, 2));
+        setSelectedTask(id);
+        return;
+      }
+      // Managed tasks deliberately persist output as a task log instead of a
+      // legacy result torrent; the endpoint reports that with success=false
+      // plus guidance. Surface the log inline rather than showing the
+      // contract message as an error.
+      if (ok && isManagedLogGuidanceResult(data)) {
+        const { ok: logOk, data: logData } = await api(
+          'GET',
+          `/api/tasks/${encodeURIComponent(id)}/log`
+        );
+        const logFailure = taskResponseFailureMessage(
+          logData,
+          'Managed output unavailable',
+          logOk
+        );
+        if (logFailure) {
+          throw new Error(logFailure);
+        }
+        const output = String(logData?.log ?? '');
+        setTaskResult(
+          `${output || '(No managed output yet)'}\n\n— Managed task: output is served from the task log above.`
+        );
+        setSelectedTask(id);
+        return;
+      }
       const failureMessage = taskResponseFailureMessage(data, 'Result unavailable', ok);
       if (failureMessage) {
         throw new Error(failureMessage);
@@ -536,6 +572,8 @@ export default function MasterApp() {
                     const statusText = task.status || task.Status || '';
                     const statusClass = statusText.toLowerCase();
                     const message = task.status_message || task.StatusMessage || '';
+                    const runtime = String(task.runtime || task.runtime_version || task.Runtime || '').trim();
+                    const isManagedTask = runtime === 'managed-function-v0';
                     const wallTimeMs = Number(task.wall_time_ms || 0);
                     const billedAmount = Number(task.billed_amount || 0);
                     const observability = normalizeTaskObservability({
@@ -580,9 +618,13 @@ export default function MasterApp() {
                           <button type="button" onClick={() => viewTaskLog(task)} disabled={isLogLoading} className="button">
                             {isLogLoading ? 'Loading...' : 'Log'}
                           </button>
-                          <button type="button" onClick={() => viewTaskResult(task)} disabled={isResultLoading} className="button">
-                            {isResultLoading ? 'Loading...' : 'Result'}
-                          </button>
+                          {isManagedTask ? (
+                            <span className="subtle" style={{ alignSelf: 'center' }}>Output in Log</span>
+                          ) : (
+                            <button type="button" onClick={() => viewTaskResult(task)} disabled={isResultLoading} className="button">
+                              {isResultLoading ? 'Loading...' : 'Result'}
+                            </button>
+                          )}
                           <button type="button" onClick={() => downloadArtifact(task)} disabled={isDownloadLoading} className="button">
                             {isDownloadLoading ? 'Downloading...' : 'Download'}
                           </button>

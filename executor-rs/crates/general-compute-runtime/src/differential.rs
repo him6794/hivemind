@@ -51,10 +51,12 @@ pub struct DifferentialRunner {
 }
 
 impl DifferentialRunner {
+    #[must_use]
     pub fn new(case: DifferentialCase) -> Self {
         Self { case }
     }
 
+    #[must_use]
     pub fn case(&self) -> &DifferentialCase {
         &self.case
     }

@@ -1,7 +1,10 @@
 use general_compute_runtime::artifact::{
     ArtifactMaterializationError, ArtifactMaterializer, CasChunkStore,
 };
-use general_compute_runtime::{ArtifactChunk, ArtifactManifest, ArtifactRole, sha256_digest};
+use general_compute_runtime::{
+    ArtifactChunk, ArtifactManifest, ArtifactRole, DeterminismPolicy, ExecutionPolicy,
+    sha256_digest,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -236,7 +239,7 @@ fn cas_transfer_state_rejects_manifest_redefinition_for_stable_execution() {
         .prepare_transfer("execution-stable", &artifact)
         .expect("initial transfer manifest should be persisted");
 
-    let mut changed = artifact.clone();
+    let mut changed = artifact;
     changed.sha256 = sha256_digest(b"different-artifact");
     assert!(matches!(
         store.prepare_transfer("execution-stable", &changed),
@@ -262,8 +265,8 @@ fn cas_transfer_state_reconciles_a_store_recreated_after_adapter_upload() {
             entrypoint: "main".into(),
             source_artifact: artifact.clone(),
             input_artifacts: vec![],
-            execution_policy: Default::default(),
-            determinism: Default::default(),
+            execution_policy: ExecutionPolicy::default(),
+            determinism: DeterminismPolicy::default(),
             billing_version: "billing-v1".into(),
             cost_model_version: "cost-v1".into(),
         };

@@ -2,7 +2,7 @@ use general_compute_runtime::gpu::{
     GpuCapability, GpuFallbackReason, GpuRequirement, GpuRuntime, GpuSelection, GpuVendor,
 };
 use general_compute_runtime::{
-    ArtifactManifest, ArtifactRole, EvidenceEnvelope, ExecutionPolicy,
+    ArtifactManifest, ArtifactRole, DeterminismPolicy, EvidenceEnvelope, ExecutionPolicy,
     GENERAL_COMPUTE_RUNTIME_VERSION, GeneralComputeRequest, GeneralComputeResult, ResultStatus,
     UsageClaim, ValidationErrorCode,
 };
@@ -10,21 +10,23 @@ use general_compute_runtime::{
 const IMAGE: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 fn gpu_request(allow_cpu_fallback: bool) -> GeneralComputeRequest {
-    let mut policy = ExecutionPolicy::default();
-    policy.gpu_required = true;
-    policy.gpu_requirement = Some(
-        GpuRequirement::new(
-            GpuVendor::Nvidia,
-            "sm_80",
-            GpuRuntime::Cuda,
-            "550.54",
-            16 * 1024 * 1024 * 1024,
-            8,
-            IMAGE,
-            allow_cpu_fallback,
-        )
-        .expect("valid GPU requirement"),
-    );
+    let policy = ExecutionPolicy {
+        gpu_required: true,
+        gpu_requirement: Some(
+            GpuRequirement::new(
+                GpuVendor::Nvidia,
+                "sm_80",
+                GpuRuntime::Cuda,
+                "550.54",
+                16 * 1024 * 1024 * 1024,
+                8,
+                IMAGE,
+                allow_cpu_fallback,
+            )
+            .expect("valid GPU requirement"),
+        ),
+        ..ExecutionPolicy::default()
+    };
     let mut request = GeneralComputeRequest {
         execution_id: "execution-result-gpu".into(),
         attempt_id: "attempt-result-gpu".into(),
@@ -37,7 +39,7 @@ fn gpu_request(allow_cpu_fallback: bool) -> GeneralComputeRequest {
         source_artifact: ArtifactManifest::inline_json("source", ArtifactRole::Source, b"{}"),
         input_artifacts: vec![],
         execution_policy: policy,
-        determinism: Default::default(),
+        determinism: DeterminismPolicy::default(),
         billing_version: "billing-v1".into(),
         cost_model_version: "cost-v1".into(),
     };

@@ -408,7 +408,13 @@ finally {
     }
 
     foreach ($name in $restoreEnvironmentNames) {
-        [Environment]::SetEnvironmentVariable($name, $originalEnvironment[$name], "Process")
+        $originalValue = $originalEnvironment[$name]
+        if ([string]::IsNullOrWhiteSpace($originalValue)) {
+            Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+        }
+        else {
+            [Environment]::SetEnvironmentVariable($name, $originalValue, "Process")
+        }
     }
 
     if ($null -ne $temporaryKeyDirectory -and (Test-Path -LiteralPath $temporaryKeyDirectory)) {

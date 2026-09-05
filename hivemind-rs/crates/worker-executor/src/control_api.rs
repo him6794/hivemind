@@ -893,13 +893,23 @@ async fn register_worker(
                 }),
             )
         }
-        Err(err) => (
-            StatusCode::BAD_GATEWAY,
-            Json(StatusResponse {
-                success: false,
-                status_message: err.to_string(),
-            }),
-        ),
+        Err(err) => {
+            // An expired or rejected Nodepool token must surface as 401 so
+            // the browser UI logs the user out instead of showing a raw
+            // gRPC status behind a generic bad gateway.
+            let status = if nodepool_client::is_nodepool_authentication_error(&err) {
+                StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            (
+                status,
+                Json(StatusResponse {
+                    success: false,
+                    status_message: err.to_string(),
+                }),
+            )
+        }
     }
 }
 

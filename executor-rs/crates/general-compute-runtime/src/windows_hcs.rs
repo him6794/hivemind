@@ -5,7 +5,10 @@
 //! ComputeCore.dll; non-Windows builds fail closed with `UnsupportedPlatform`.
 
 use crate::production::WindowsHcsContainerSpec;
-use crate::supervisor::{Cancellation, RunResult, RunStatus};
+#[cfg(any(windows, test))]
+use crate::supervisor::RunStatus;
+use crate::supervisor::{Cancellation, RunResult};
+#[cfg(any(windows, test))]
 use std::io::Read;
 use std::time::Duration;
 
@@ -61,6 +64,7 @@ impl WindowsHcsLauncher {
     }
 
     #[cfg(not(windows))]
+    #[expect(clippy::unused_self)]
     fn run_platform(
         &self,
         _spec: &WindowsHcsContainerSpec,
@@ -102,13 +106,16 @@ fn validate_spec(spec: &WindowsHcsContainerSpec) -> Result<(), WindowsHcsError> 
             "result transport and output limit are required".into(),
         ));
     }
-    let result_parent = spec.result_path.parent();
+    let result_parent = windows_path_parent(&spec.result_path);
+    let result_container_path = normalize_windows_path(&spec.result_container_path);
     let result_mount = spec.mounts.iter().any(|mount| {
+        let mount_host_path = normalize_windows_path(&mount.host_path.to_string_lossy());
+        let mount_container_path = normalize_windows_path(&mount.container_path);
         !mount.read_only
-            && result_parent == Some(mount.host_path.as_path())
-            && spec.result_container_path.starts_with(&format!(
+            && result_parent.as_deref() == Some(mount_host_path.as_str())
+            && result_container_path.starts_with(&format!(
                 "{}\\",
-                mount.container_path.trim_end_matches('\\')
+                mount_container_path.trim_end_matches('\\')
             ))
     });
     if !result_mount {
@@ -144,6 +151,18 @@ fn validate_spec(spec: &WindowsHcsContainerSpec) -> Result<(), WindowsHcsError> 
     Ok(())
 }
 
+fn normalize_windows_path(value: &str) -> String {
+    value.replace('/', "\\")
+}
+
+fn windows_path_parent(path: &std::path::Path) -> Option<String> {
+    let normalized = normalize_windows_path(&path.to_string_lossy());
+    normalized
+        .rsplit_once('\\')
+        .map(|(parent, _)| parent.to_owned())
+}
+
+#[cfg(any(windows, test))]
 fn read_result_file(
     path: &std::path::Path,
     max_output_bytes: usize,
@@ -181,12 +200,14 @@ fn read_result_file(
     Ok(bytes)
 }
 
+#[cfg(any(windows, test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HcsWaitOutcome {
     Exited,
     TimedOut,
 }
 
+#[cfg(any(windows, test))]
 trait HcsLifecycleProvider {
     fn start(&mut self, timeout: Duration) -> Result<(), WindowsHcsError>;
     fn wait_for_exit(&mut self, timeout: Duration) -> Result<HcsWaitOutcome, WindowsHcsError>;
@@ -194,6 +215,7 @@ trait HcsLifecycleProvider {
     fn shutdown(&mut self, timeout: Duration);
 }
 
+#[cfg(any(windows, test))]
 fn run_lifecycle<P: HcsLifecycleProvider>(
     provider: &mut P,
     timeout: Duration,
@@ -212,7 +234,7 @@ fn run_lifecycle<P: HcsLifecycleProvider>(
         }
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         match provider.wait_for_exit(remaining.min(Duration::from_secs(1)))? {
-            HcsWaitOutcome::TimedOut => continue,
+            HcsWaitOutcome::TimedOut => {}
             HcsWaitOutcome::Exited => {
                 provider.shutdown(timeout);
                 return Ok(RunResult {
@@ -266,6 +288,8 @@ mod hcs {
         let configuration = wide(&configuration);
         let system = create_system(&id, &configuration, timeout)?;
         let result = run_system(system, timeout, cancellation);
+        // SAFETY: system is the live handle returned by HcsCreateComputeSystem
+        // and is closed exactly once after the lifecycle completes.
         unsafe { HcsCloseComputeSystem(system) };
         let mut result = result?;
         result.stdout = super::read_result_file(&spec.result_path, spec.max_output_bytes)?;
@@ -277,6 +301,8 @@ mod hcs {
         configuration: &[u16],
         timeout: Duration,
     ) -> Result<HcsSystem, WindowsHcsError> {
+        // SAFETY: null callback/context arguments request a standalone HCS
+        // operation, and the returned handle is checked before use.
         let operation = unsafe { HcsCreateOperation(ptr::null(), None) };
         if operation.is_null() {
             return Err(WindowsHcsError::ProviderUnavailable(
@@ -284,16 +310,20 @@ mod hcs {
             ));
         }
         let mut system = ptr::null_mut();
+        // SAFETY: id and configuration are NUL-terminated UTF-16 buffers
+        // alive for the call; operation and output pointers are valid.
         let hr = unsafe {
             HcsCreateComputeSystem(
                 id.as_ptr(),
                 configuration.as_ptr(),
                 operation,
                 ptr::null(),
-                &mut system,
+                &raw mut system,
             )
         };
         let wait = wait_operation(operation, timeout);
+        // SAFETY: operation is the valid handle created above and is closed
+        // exactly once after the asynchronous result has been observed.
         unsafe { HcsCloseOperation(operation) };
         if hr < 0 {
             return Err(WindowsHcsError::OperationFailed(format!(
@@ -315,14 +345,20 @@ mod hcs {
 
     impl HcsLifecycleProvider for NativeHcsProvider {
         fn start(&mut self, timeout: Duration) -> Result<(), WindowsHcsError> {
+            // SAFETY: null callback/context arguments request a standalone HCS
+            // operation, and the returned handle is checked before use.
             let operation = unsafe { HcsCreateOperation(ptr::null(), None) };
             if operation.is_null() {
                 return Err(WindowsHcsError::ProviderUnavailable(
                     "HcsCreateOperation returned null".into(),
                 ));
             }
+            // SAFETY: self.system and operation are live HCS handles, and the
+            // optional settings pointer is intentionally null.
             let hr = unsafe { HcsStartComputeSystem(self.system, operation, ptr::null()) };
             let start_wait = wait_operation(operation, timeout);
+            // SAFETY: operation is the valid start operation handle and is
+            // closed exactly once after waiting for its result.
             unsafe { HcsCloseOperation(operation) };
             if hr < 0 {
                 return Err(WindowsHcsError::OperationFailed(format!(
@@ -334,8 +370,14 @@ mod hcs {
 
         fn wait_for_exit(&mut self, timeout: Duration) -> Result<HcsWaitOutcome, WindowsHcsError> {
             let mut document = ptr::null_mut();
-            let wait_ms = timeout.as_millis().max(1).min(u32::MAX as u128) as u32;
-            let hr = unsafe { HcsWaitForComputeSystemExit(self.system, wait_ms, &mut document) };
+            let wait_ms = u32::try_from(timeout.as_millis().max(1).min(u128::from(u32::MAX)))
+                .map_err(|_| {
+                    WindowsHcsError::OperationFailed("HCS wait timeout overflow".into())
+                })?;
+            // SAFETY: self.system is a live HCS handle and document points to
+            // initialized storage owned by this stack frame.
+            let hr =
+                unsafe { HcsWaitForComputeSystemExit(self.system, wait_ms, &raw mut document) };
             free_document(document);
             if is_timeout(hr) {
                 return Ok(HcsWaitOutcome::TimedOut);
@@ -366,43 +408,55 @@ mod hcs {
     }
 
     fn is_timeout(hr: i32) -> bool {
-        let value = hr as u32;
+        let value = hr.cast_unsigned();
         value == 258 || value == 0x8007_05b4
     }
 
     fn shutdown(system: HcsSystem, timeout: Duration) {
+        // SAFETY: null callback/context arguments request a standalone HCS
+        // operation, and the returned handle is checked before use.
         let operation = unsafe { HcsCreateOperation(ptr::null(), None) };
         if operation.is_null() {
             return;
         }
+        // SAFETY: system and operation are live HCS handles, and the optional
+        // settings pointer is intentionally null.
         let hr = unsafe { HcsShutDownComputeSystem(system, operation, ptr::null()) };
         if hr >= 0 {
             let _ = wait_operation(operation, timeout);
         }
+        // SAFETY: operation is the valid shutdown operation handle and is
+        // closed exactly once after the optional wait.
         unsafe { HcsCloseOperation(operation) };
     }
 
     fn terminate(system: HcsSystem, timeout: Duration) {
+        // SAFETY: null callback/context arguments request a standalone HCS
+        // operation, and the returned handle is checked before use.
         let operation = unsafe { HcsCreateOperation(ptr::null(), None) };
         if operation.is_null() {
             return;
         }
+        // SAFETY: system and operation are live HCS handles, and the optional
+        // settings pointer is intentionally null.
         let hr = unsafe { HcsTerminateComputeSystem(system, operation, ptr::null()) };
         if hr >= 0 {
             let _ = wait_operation(operation, timeout);
         }
+        // SAFETY: operation is the valid terminate operation handle and is
+        // closed exactly once after the optional wait.
         unsafe { HcsCloseOperation(operation) };
     }
 
     fn wait_operation(operation: HcsOperation, timeout: Duration) -> Result<(), WindowsHcsError> {
         let mut document = ptr::null_mut();
-        let hr = unsafe {
-            HcsWaitForOperationResult(
-                operation,
-                timeout.as_millis().min(u32::MAX as u128) as u32,
-                &mut document,
-            )
-        };
+        let timeout_ms =
+            u32::try_from(timeout.as_millis().min(u128::from(u32::MAX))).map_err(|_| {
+                WindowsHcsError::OperationFailed("HCS operation timeout overflow".into())
+            })?;
+        // SAFETY: operation is a live HCS handle and document points to
+        // initialized storage owned by this stack frame.
+        let hr = unsafe { HcsWaitForOperationResult(operation, timeout_ms, &raw mut document) };
         free_document(document);
         if hr < 0 {
             return Err(WindowsHcsError::OperationFailed(format!(
@@ -414,6 +468,8 @@ mod hcs {
 
     fn free_document(document: *mut u16) {
         if !document.is_null() {
+            // SAFETY: document is the allocation returned by the HCS API and
+            // is freed only when the API returned a non-null pointer.
             unsafe { LocalFree(document.cast()) };
         }
     }

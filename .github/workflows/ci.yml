@@ -2,120 +2,473 @@ name: CI
 
 on:
   push:
-    branches: [main, master, develop]
+    branches:
+      - '**'
   pull_request:
     branches: [main, master, develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: '1'
+  RUST_BACKTRACE: '1'
 
 jobs:
-  rust:
-    name: Rust Workspace
+  rust-hivemind:
+    name: Rust Hivemind workspace
     runs-on: ubuntu-latest
-
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: hivemind_test
+          POSTGRES_USER: hivemind
+          POSTGRES_PASSWORD: hivemind
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U hivemind -d hivemind_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      HIVEMIND_TEST_DATABASE_URL: postgres://hivemind:hivemind@127.0.0.1:5432/hivemind_test
+      HIVEMIND_REQUIRE_TEST_DATABASE: '1'
+      DATABASE_URL: postgres://hivemind:hivemind@127.0.0.1:5432/hivemind_test
+      REDIS_URL: redis://127.0.0.1:6379
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
-
       - name: Install protobuf compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
+      - name: Set up pinned Hivemind Rust
+        uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - name: Verify pinned Hivemind Rust
+        shell: bash
+        run: test "$(rustc --version | cut -d' ' -f2)" = '1.98.1'
+      - name: Cache Hivemind Cargo build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: hivemind-rs
-
       - name: Check formatting
         working-directory: hivemind-rs
         run: cargo fmt --all -- --check
-
-      - name: Clippy lints
+      - name: Compile all targets
         working-directory: hivemind-rs
-        run: cargo clippy --workspace -- -D warnings
-
-      - name: Run tests
+        run: cargo check --workspace --all-targets --locked
+      - name: Run strict Clippy
         working-directory: hivemind-rs
-        run: cargo test --workspace -- --nocapture
-
-      - name: Check binary crate
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Run full workspace tests with required database
         working-directory: hivemind-rs
-        run: cargo check -p hivemind-bin
+        run: cargo test --workspace --all-targets --locked -- --nocapture --test-threads=1
+      - name: Verify the pinned managed-proof contract
+        working-directory: hivemind-rs
+        run: cargo test -p hivemind-managed-proof --features risc0-verifier --test v0_semantics_manifest --locked
+
+  rust-executor:
+    name: Rust executor workspace
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up pinned Rust
+        uses: dtolnay/rust-toolchain@1.90.0
+        with:
+          components: rustfmt, clippy
+      - name: Verify pinned Rust
+        shell: bash
+        run: test "$(rustc --version | cut -d' ' -f2)" = '1.90.0'
+      - name: Verify rootless OCI test prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -r /proc/self/status
+          test -r /etc/subuid
+          test -r /etc/subgid
+          current_uid="$(id -u)"
+          current_user="$(id -un)"
+          for mapping_file in /etc/subuid /etc/subgid; do
+            awk -F: -v name="$current_user" -v numeric_id="$current_uid" '
+              ($1 == name || $1 == numeric_id) && $2 != numeric_id && $3 >= 65535 { found = 1 }
+              END { exit(found ? 0 : 1) }
+            ' "$mapping_file"
+          done
+          command -v runc
+          test -x "$(command -v runc)"
+      - name: Cache executor Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: executor-rs
+      - name: Check formatting
+        working-directory: executor-rs
+        run: cargo fmt --all -- --check
+      - name: Compile all targets
+        working-directory: executor-rs
+        run: cargo check --workspace --all-targets --locked
+      - name: Compile every feature
+        working-directory: executor-rs
+        run: cargo check --workspace --all-features --all-targets --locked
+      - name: Run strict Clippy
+        working-directory: executor-rs
+        run: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
+      - name: Run full executor tests without hardware-only CUDA linking
+        working-directory: executor-rs
+        run: cargo test --workspace --all-targets --locked -- --nocapture --test-threads=1
+      - name: Build executor release artifacts
+        working-directory: executor-rs
+        run: cargo build --workspace --locked --release
+
+  managed-proof:
+    name: Managed proof host and guest
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      HIVEMIND_ZKVM_USE_DOCKER: '0'
+      RISC0_BUILD_LOCKED: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up pinned host Rust
+        uses: dtolnay/rust-toolchain@1.90.0
+        with:
+          components: rustfmt, clippy
+      - name: Install pinned RISC Zero guest toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          guest_archive="$RUNNER_TEMP/rust-toolchain-x86_64-unknown-linux-gnu.tar.gz"
+          guest_url='https://github.com/risc0/rust/releases/download/r0.1.97.0/rust-toolchain-x86_64-unknown-linux-gnu.tar.gz'
+          guest_sha256='100b597d605b706bec94e1d32bfaaf5851df8d75173f986d4b56a3e90916be53'
+          curl --fail --location --retry 5 --retry-all-errors --connect-timeout 30 \
+            --output "$guest_archive" "$guest_url"
+          printf '%s  %s\n' "$guest_sha256" "$guest_archive" | sha256sum --check --strict
+          guest_extract="$RUNNER_TEMP/risc0-rust-toolchain"
+          rm -rf "$guest_extract"
+          mkdir -p "$guest_extract"
+          tar --extract --gzip --file "$guest_archive" --directory "$guest_extract"
+          guest_cargo="$(find "$guest_extract" \( -type f -o -type l \) -path '*/bin/cargo' -print -quit)"
+          test -n "$guest_cargo"
+          guest_root="${guest_cargo%/bin/cargo}"
+          test -x "$guest_root/bin/rustc"
+          risc0_home="$RUNNER_TEMP/risc0-home"
+          risc0_toolchain="$risc0_home/toolchains/v1.97.0-rust-x86_64-unknown-linux-gnu"
+          rm -rf "$risc0_home"
+          mkdir -p "$risc0_home/toolchains"
+          mv "$guest_root" "$risc0_toolchain"
+          : > "$risc0_home/.rzup"
+          rustup toolchain link risc0 "$risc0_toolchain"
+          cargo +risc0 --version | grep -Eq '1\.97\.0'
+          printf '[default_versions]\nrust = "1.97.0"\n' > "$risc0_home/settings.toml"
+          printf 'RISC0_HOME=%s\n' "$risc0_home" >> "$GITHUB_ENV"
+      - name: Set canonical proof source remapping
+        shell: bash
+        run: |
+          set -euo pipefail
+          canonical_guest_source_root=/run/desktop/mnt/host/d/hivemind
+          cargo_registry_index=index.crates.io-1949cf8c6b5b557f
+          guest_manifest="$GITHUB_WORKSPACE/zkvm/managed-proof/methods/guest/Cargo.toml"
+          test -f "$guest_manifest"
+          if grep -q '^\[package\.metadata\.risc0\]$' "$guest_manifest"; then
+            echo "guest Cargo.toml already contains proof rustc flags" >&2
+            exit 1
+          fi
+          cat >> "$guest_manifest" <<EOF
+
+          [package.metadata.risc0]
+          rustc-flags = [
+            "--remap-path-prefix=$GITHUB_WORKSPACE/executor-rs/crates/managed-function-runtime-v0/src/lib.rs=$canonical_guest_source_root/executor-rs/crates/managed-function-runtime/src/lib.rs",
+            "--remap-path-prefix=$GITHUB_WORKSPACE/hivemind-rs/crates/managed-proof-v0/src/lib.rs=$canonical_guest_source_root/hivemind-rs/crates/managed-proof/src/lib.rs",
+            "--remap-path-prefix=$GITHUB_WORKSPACE=$canonical_guest_source_root",
+            "--remap-path-prefix=$HOME/.cargo/registry/src/$cargo_registry_index/no_std_strings-0.1.3=/home/remi/.cargo/registry/src/$cargo_registry_index/no_std_strings-0.1.3",
+            "--remap-path-prefix=$HOME/.cargo=/root/.cargo",
+          ]
+          EOF
+          printf 'RUSTFLAGS=\n' >> "$GITHUB_ENV"
+          printf 'CARGO_ENCODED_RUSTFLAGS=\n' >> "$GITHUB_ENV"
+          grep -F '[package.metadata.risc0]' "$guest_manifest"
+          grep -F -- '--remap-path-prefix=' "$guest_manifest"
+      - name: Download and verify pinned recursion artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          recursion_archive="$RUNNER_TEMP/recursion_zkr.zip"
+          recursion_url='https://risc0-artifacts.s3.us-west-2.amazonaws.com/zkr/744b999f0a35b3c86753311c7efb2a0054be21727095cf105af6ee7d3f4d8849.zip'
+          recursion_sha256='744b999f0a35b3c86753311c7efb2a0054be21727095cf105af6ee7d3f4d8849'
+          curl --fail --location --retry 5 --retry-all-errors --connect-timeout 30 \
+            --output "$recursion_archive" "$recursion_url"
+          printf '%s  %s\n' "$recursion_sha256" "$recursion_archive" | sha256sum --check --strict
+          printf 'RECURSION_SRC_PATH=%s\n' "$recursion_archive" >> "$GITHUB_ENV"
+      - name: Verify proof build inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "${RISC0_DOCKER_CONTAINER_TAG:-}"
+          test -z "${RISC0_SKIP_BUILD:-}"
+          test "$(rustc --version | cut -d' ' -f2)" = '1.90.0'
+          cargo +risc0 --version | grep -Eq '1\.97\.0'
+          test -n "${RISC0_HOME:-}"
+          test -f "$RISC0_HOME/settings.toml"
+          test -f "$RISC0_HOME/.rzup"
+          test -x "$RISC0_HOME/toolchains/v1.97.0-rust-x86_64-unknown-linux-gnu/bin/rustc"
+          test -f "$GITHUB_WORKSPACE/hivemind-rs/crates/managed-proof-v0/Cargo.toml"
+          test -f "$GITHUB_WORKSPACE/hivemind-rs/crates/managed-proof-v0/src/lib.rs"
+          test -z "${RUSTFLAGS:-}"
+          test -z "${CARGO_ENCODED_RUSTFLAGS:-}"
+          guest_manifest="$GITHUB_WORKSPACE/zkvm/managed-proof/methods/guest/Cargo.toml"
+          grep -F '[package.metadata.risc0]' "$guest_manifest"
+          grep -F -- '--remap-path-prefix=' "$guest_manifest"
+      - name: Cache managed-proof Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            zkvm/managed-proof
+            hivemind-rs
+      - name: Check managed-proof workspace with native guest build
+        run: cargo check --manifest-path zkvm/managed-proof/Cargo.toml --workspace --all-targets --locked
+      - name: Test managed-proof semantics with native guest build
+        run: cargo test --manifest-path zkvm/managed-proof/Cargo.toml --workspace --all-targets --locked -- --nocapture --skip generated_guest_id_matches_nodepool_trust_pin
+      - name: Attested managed-prover build (protected environment only)
+        if: github.event_name == 'workflow_dispatch' && vars.HIVEMIND_ATTESTED_PROVER_BUILD == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/build-managed-prover.sh
 
   frontend:
-    name: Frontend Builds
+    name: Frontend app ${{ matrix.app }}
     runs-on: ubuntu-latest
-
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         app:
           - frontend/master-ui
           - frontend/worker-ui
-
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
-
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
           cache-dependency-path: ${{ matrix.app }}/package-lock.json
-
       - name: Install dependencies
         working-directory: ${{ matrix.app }}
         run: npm ci
-
-      - name: Run tests
+      - name: Run all app tests
         working-directory: ${{ matrix.app }}
         run: npm test
-
-      - name: Build
+      - name: Build app
         working-directory: ${{ matrix.app }}
         run: npm run build
 
   official-site:
-    name: Official Site
+    name: Official site tests and build
     runs-on: ubuntu-latest
-
+    timeout-minutes: 25
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
-
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-
       - name: Install dependencies
         working-directory: frontend
         run: npm ci
-
-      - name: Run contract tests
+      - name: Run the complete site test suite
         working-directory: frontend
-        run: node --test site-contract.test.mjs
-
-      - name: Build
+        run: npm test
+      - name: Build the official site
         working-directory: frontend
         run: npm run build
 
   docker:
-    name: Docker Compose
+    name: Docker images and Compose contract
     runs-on: ubuntu-latest
-
+    timeout-minutes: 60
+    env:
+      POSTGRES_PASSWORD: ci-postgres-password
+      JWT_SECRET: ci-jwt-secret-at-least-32-bytes
+      WORKER_EXECUTION_PRIVATE_KEY_PEM: ci-worker-execution-private-key-placeholder
+      WORKER_EXECUTION_PUBLIC_KEY_PEM: ci-worker-execution-public-key-placeholder
+      WORKER_NODEPOOL_TOKEN: ci-worker-nodepool-token-placeholder
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Validate Compose configuration
+        run: docker compose config --quiet
+      - name: Build the release Compose images
+        run: docker compose build --pull=false
 
-      - name: Validate compose file
+  powershell-contracts:
+    name: Windows and release contract tests
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            frontend/master-ui/package-lock.json
+            frontend/worker-ui/package-lock.json
+      - name: Install frontend dependencies
+        shell: pwsh
+        run: |
+          npm.cmd ci --prefix frontend
+          npm.cmd ci --prefix frontend/master-ui
+          npm.cmd ci --prefix frontend/worker-ui
+      - name: Build release frontend artifacts
+        shell: pwsh
+        run: ./scripts/build-release-frontends.ps1
+      - name: Run package worker contract
+        shell: pwsh
+        run: ./scripts/package-worker-windows.Tests.ps1
+      - name: Run native HCS contract
+        shell: pwsh
+        run: ./scripts/windows-hcs-e2e.Tests.ps1
+      - name: Run general-compute OCI contract
+        shell: pwsh
+        run: ./scripts/general-compute-oci-e2e.Tests.ps1
+      - name: Run Docker Compose contract
+        shell: pwsh
+        run: ./scripts/docker-compose-release.Tests.ps1
+      - name: Run release documentation contract
+        shell: pwsh
+        run: ./scripts/release-docs.Tests.ps1
+      - name: Run release frontend build contract
+        shell: pwsh
+        run: ./scripts/build-release-frontends.Tests.ps1
+      - name: Run release frontend smoke contract
+        shell: pwsh
+        run: ./scripts/release-frontend-smoke.Tests.ps1
+      - name: Run managed prover build contract
+        shell: pwsh
+        run: ./scripts/build-managed-prover.Tests.ps1
+      - name: Run ONNX runner contract
+        shell: pwsh
+        run: ./scripts/onnx-runner.Tests.ps1
+      - name: Run managed proof live E2E contract
+        shell: pwsh
+        run: ./scripts/managed-proof-live-e2e.Tests.ps1
+      - name: Run release stack smoke contract
+        shell: pwsh
+        run: ./scripts/release-stack-smoke.Tests.ps1
+
+  frontend-browser-smoke:
+    name: Hosted frontend browser smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            frontend/master-ui/package-lock.json
+            frontend/worker-ui/package-lock.json
+      - name: Install frontend dependencies
+        shell: bash
+        run: |
+          npm ci --prefix frontend
+          npm ci --prefix frontend/master-ui
+          npm ci --prefix frontend/worker-ui
+      - name: Install Chromium and ffmpeg
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium ffmpeg
+      - name: Start local frontend servers
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd frontend && npm run dev -- -p 8080 > "$RUNNER_TEMP/hivemind-site.log" 2>&1) &
+          (npm --prefix frontend/master-ui run dev -- --host 127.0.0.1 --port 3000 > "$RUNNER_TEMP/hivemind-master-ui.log" 2>&1) &
+          (npm --prefix frontend/worker-ui run dev -- --host 127.0.0.1 --port 3001 > "$RUNNER_TEMP/hivemind-worker-ui.log" 2>&1) &
+          for url in http://127.0.0.1:8080 http://127.0.0.1:3000 http://127.0.0.1:3001; do
+            for attempt in $(seq 1 120); do
+              if curl --fail --silent --show-error --max-time 30 "$url" >/dev/null; then
+                break
+              fi
+              test "$attempt" -lt 120 || {
+                echo "frontend server did not become ready: $url" >&2
+                exit 1
+              }
+              sleep 1
+            done
+          done
+      - name: Run hosted browser smoke
+        working-directory: frontend
         env:
-          POSTGRES_PASSWORD: ci-postgres-password
-          JWT_SECRET: ci-jwt-secret-at-least-32-bytes
-          WORKER_EXECUTION_PRIVATE_KEY_PEM: ci-worker-execution-private-key-placeholder
-          WORKER_EXECUTION_PUBLIC_KEY_PEM: ci-worker-execution-public-key-placeholder
-          WORKER_NODEPOOL_TOKEN: ci-worker-nodepool-token-placeholder
-        run: docker compose config
+          HIVEMIND_E2E_EVIDENCE_DIR: ${{ runner.temp }}/hivemind-browser-smoke
+        run: npm run test:e2e -- hosted-smoke.spec.mjs
+
+  protected-frontend-e2e:
+    name: Protected frontend Playwright E2E (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: protected-release-e2e
+    env:
+      HIVEMIND_SITE_URL: ${{ secrets.HIVEMIND_SITE_URL }}
+      HIVEMIND_MASTER_UI_URL: ${{ secrets.HIVEMIND_MASTER_UI_URL }}
+      HIVEMIND_WORKER_UI_URL: ${{ secrets.HIVEMIND_WORKER_UI_URL }}
+    steps:
+      - name: Require protected HTTPS endpoints
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in HIVEMIND_SITE_URL HIVEMIND_MASTER_UI_URL HIVEMIND_WORKER_UI_URL; do
+            value="${!name:-}"
+            test -n "$value" || { echo "$name is required for protected E2E" >&2; exit 1; }
+            case "$value" in https://*) ;; *) echo "$name must use HTTPS" >&2; exit 1 ;; esac
+          done
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies and browser
+        working-directory: frontend
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Run protected browser flow
+        working-directory: frontend
+        run: npm run test:e2e

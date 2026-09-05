@@ -23,7 +23,7 @@ fn statistics_compute_deterministic_moments() {
         5.0 / 3.0,
         1e-15,
     );
-    assert_eq!(population_variance(&[7.0]).unwrap(), 0.0);
+    assert_close(population_variance(&[7.0]).unwrap(), 0.0, 1e-15);
 }
 
 #[test]
@@ -34,7 +34,9 @@ fn statistics_compute_linear_interpolated_quantiles_without_mutating_input() {
     assert_close(quantile(&values, 0.5).unwrap(), 2.5, 1e-15);
     assert_close(quantile(&values, 0.75).unwrap(), 3.25, 1e-15);
     assert_close(quantile(&values, 1.0).unwrap(), 4.0, 1e-15);
-    assert_eq!(values, [4.0, 1.0, 3.0, 2.0]);
+    for (actual, expected) in values.iter().zip([4.0, 1.0, 3.0, 2.0]) {
+        assert_close(*actual, expected, 0.0);
+    }
 }
 
 #[test]

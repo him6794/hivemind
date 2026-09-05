@@ -10,7 +10,7 @@ use crate::{ArtifactManifest, sha256_digest};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArtifactMaterializationError {
@@ -91,11 +91,12 @@ impl CasChunkStore {
                 ));
             }
         } else {
-            fs::create_dir_all(&transfer_root).map_err(io_error)?;
+            fs::create_dir_all(&transfer_root).map_err(|error| io_error(&error))?;
         }
         Ok(Self { root })
     }
 
+    #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -126,7 +127,7 @@ impl CasChunkStore {
             if !metadata.is_file() {
                 return Err(ArtifactMaterializationError::ChunkChecksumMismatch);
             }
-            let existing = fs::read(&path).map_err(io_error)?;
+            let existing = fs::read(&path).map_err(|error| io_error(&error))?;
             return if existing == bytes {
                 Ok(())
             } else {
@@ -139,12 +140,12 @@ impl CasChunkStore {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 return self.put_chunk(digest, bytes);
             }
-            Err(error) => return Err(io_error(error)),
+            Err(error) => return Err(io_error(&error)),
         };
         if let Err(error) = write_and_sync(&mut file, bytes) {
             drop(file);
             let _ = fs::remove_file(&path);
-            return Err(io_error(error));
+            return Err(io_error(&error));
         }
         Ok(())
     }
@@ -186,9 +187,11 @@ impl CasChunkStore {
                     .map_err(|error| ArtifactMaterializationError::Io(error.to_string()))?;
                 let file = OpenOptions::new().write(true).create_new(true).open(&path);
                 match file {
-                    Ok(mut file) => write_and_sync(&mut file, &bytes).map_err(io_error),
+                    Ok(mut file) => {
+                        write_and_sync(&mut file, &bytes).map_err(|error| io_error(&error))
+                    }
                     Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                        let existing = fs::read(&path).map_err(io_error)?;
+                        let existing = fs::read(&path).map_err(|error| io_error(&error))?;
                         let existing: TransferManifest = serde_json::from_slice(&existing)
                             .map_err(|_| ArtifactMaterializationError::TransferStateCorrupt)?;
                         if existing == expected {
@@ -197,10 +200,10 @@ impl CasChunkStore {
                             Err(ArtifactMaterializationError::TransferStateMismatch)
                         }
                     }
-                    Err(error) => Err(io_error(error)),
+                    Err(error) => Err(io_error(&error)),
                 }
             }
-            Err(error) => Err(io_error(error)),
+            Err(error) => Err(io_error(&error)),
         }
     }
 
@@ -233,18 +236,17 @@ impl CasChunkStore {
             .create_new(true)
             .open(&marker)
         {
-            Ok(mut file) => {
-                write_and_sync(&mut file, manifest_chunk.sha256.as_bytes()).map_err(io_error)
-            }
+            Ok(mut file) => write_and_sync(&mut file, manifest_chunk.sha256.as_bytes())
+                .map_err(|error| io_error(&error)),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let existing = fs::read(&marker).map_err(io_error)?;
+                let existing = fs::read(&marker).map_err(|error| io_error(&error))?;
                 if existing == manifest_chunk.sha256.as_bytes() {
                     Ok(())
                 } else {
                     Err(ArtifactMaterializationError::TransferStateCorrupt)
                 }
             }
-            Err(error) => Err(io_error(error)),
+            Err(error) => Err(io_error(&error)),
         }
     }
 
@@ -275,18 +277,19 @@ impl CasChunkStore {
                         .open(&marker);
                     match file {
                         Ok(mut file) => {
-                            write_and_sync(&mut file, chunk.sha256.as_bytes()).map_err(io_error)?;
+                            write_and_sync(&mut file, chunk.sha256.as_bytes())
+                                .map_err(|error| io_error(&error))?;
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                            let existing = fs::read(&marker).map_err(io_error)?;
+                            let existing = fs::read(&marker).map_err(|error| io_error(&error))?;
                             if existing != chunk.sha256.as_bytes() {
                                 return Err(ArtifactMaterializationError::TransferStateCorrupt);
                             }
                         }
-                        Err(error) => return Err(io_error(error)),
+                        Err(error) => return Err(io_error(&error)),
                     }
                 }
-                Err(error) => return Err(io_error(error)),
+                Err(error) => return Err(io_error(&error)),
             }
         }
         Ok(missing)
@@ -319,7 +322,7 @@ impl CasChunkStore {
 
     fn transfer_root(&self) -> Result<PathBuf, ArtifactMaterializationError> {
         let path = self.root.join(".transfers");
-        let metadata = fs::symlink_metadata(&path).map_err(io_error)?;
+        let metadata = fs::symlink_metadata(&path).map_err(|error| io_error(&error))?;
         if metadata.file_type().is_symlink() {
             return Err(ArtifactMaterializationError::SymlinkTarget);
         }
@@ -346,7 +349,7 @@ impl CasChunkStore {
         let mut missing = Vec::new();
         for chunk in &artifact.chunks {
             let path = self.chunk_path(&chunk.sha256)?;
-            match self.read_verified(&path, &chunk.sha256)? {
+            match Self::read_verified(&path, &chunk.sha256)? {
                 Some(_) => {}
                 None => missing.push(chunk.clone()),
             }
@@ -365,10 +368,15 @@ impl CasChunkStore {
             return Err(ArtifactMaterializationError::ContentUnavailable);
         }
 
-        let mut bytes = Vec::with_capacity(artifact.size_bytes as usize);
+        let capacity = usize::try_from(artifact.size_bytes).map_err(|_| {
+            ArtifactMaterializationError::ManifestInvalid(
+                "artifact size does not fit in the host address space".into(),
+            )
+        })?;
+        let mut bytes = Vec::with_capacity(capacity);
         for chunk in &artifact.chunks {
             let path = self.chunk_path(&chunk.sha256)?;
-            let Some(chunk_bytes) = self.read_verified(&path, &chunk.sha256)? else {
+            let Some(chunk_bytes) = Self::read_verified(&path, &chunk.sha256)? else {
                 return Err(ArtifactMaterializationError::ChunkMissing);
             };
             if chunk_bytes.len() as u64 != chunk.size_bytes {
@@ -383,14 +391,13 @@ impl CasChunkStore {
     }
 
     fn read_verified(
-        &self,
         path: &Path,
         digest: &str,
     ) -> Result<Option<Vec<u8>>, ArtifactMaterializationError> {
         let metadata = match fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(io_error(error)),
+            Err(error) => return Err(io_error(&error)),
         };
         if metadata.file_type().is_symlink() {
             return Err(ArtifactMaterializationError::SymlinkTarget);
@@ -398,7 +405,7 @@ impl CasChunkStore {
         if !metadata.is_file() {
             return Err(ArtifactMaterializationError::ChunkChecksumMismatch);
         }
-        let bytes = fs::read(path).map_err(io_error)?;
+        let bytes = fs::read(path).map_err(|error| io_error(&error))?;
         if sha256_digest(&bytes) != digest {
             return Err(ArtifactMaterializationError::ChunkChecksumMismatch);
         }
@@ -413,6 +420,7 @@ impl ArtifactMaterializer {
         })
     }
 
+    #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -421,6 +429,9 @@ impl ArtifactMaterializer {
         &self,
         artifact: &ArtifactManifest,
     ) -> Result<MaterializedArtifact, ArtifactMaterializationError> {
+        // Preserve the materializer's path-specific error even though the
+        // manifest validator also rejects unsafe IDs.
+        let file_name = safe_artifact_id(&artifact.artifact_id)?;
         artifact
             .validate()
             .map_err(ArtifactMaterializationError::ManifestInvalid)?;
@@ -428,7 +439,6 @@ impl ArtifactMaterializer {
             .inline_bytes
             .as_deref()
             .ok_or(ArtifactMaterializationError::ContentUnavailable)?;
-        let file_name = safe_artifact_id(&artifact.artifact_id)?;
         let path = self.root.join(file_name);
 
         if let Ok(metadata) = fs::symlink_metadata(&path) {
@@ -438,7 +448,7 @@ impl ArtifactMaterializer {
             if !metadata.is_file() {
                 return Err(ArtifactMaterializationError::ExistingContentMismatch);
             }
-            let existing = fs::read(&path).map_err(io_error)?;
+            let existing = fs::read(&path).map_err(|error| io_error(&error))?;
             if existing == bytes {
                 return Ok(materialized(path, bytes));
             }
@@ -450,12 +460,12 @@ impl ArtifactMaterializer {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 return self.materialize(artifact);
             }
-            Err(error) => return Err(io_error(error)),
+            Err(error) => return Err(io_error(&error)),
         };
         if let Err(error) = write_and_sync(&mut file, bytes) {
             drop(file);
             let _ = fs::remove_file(&path);
-            return Err(io_error(error));
+            return Err(io_error(&error));
         }
         Ok(materialized(path, bytes))
     }
@@ -466,6 +476,9 @@ impl ArtifactMaterializer {
         artifact: &ArtifactManifest,
         store: &CasChunkStore,
     ) -> Result<MaterializedArtifact, ArtifactMaterializationError> {
+        // Keep path validation ahead of manifest validation so callers receive
+        // the materializer-specific unsafe-ID error consistently.
+        safe_artifact_id(&artifact.artifact_id)?;
         artifact
             .validate()
             .map_err(ArtifactMaterializationError::ManifestInvalid)?;
@@ -491,7 +504,7 @@ impl ArtifactMaterializer {
             if !metadata.is_file() {
                 return Err(ArtifactMaterializationError::ExistingContentMismatch);
             }
-            let existing = fs::read(&path).map_err(io_error)?;
+            let existing = fs::read(&path).map_err(|error| io_error(&error))?;
             if existing == bytes {
                 return Ok(materialized(path, bytes));
             }
@@ -503,12 +516,12 @@ impl ArtifactMaterializer {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 return self.materialize_bytes(artifact, bytes);
             }
-            Err(error) => return Err(io_error(error)),
+            Err(error) => return Err(io_error(&error)),
         };
         if let Err(error) = write_and_sync(&mut file, bytes) {
             drop(file);
             let _ = fs::remove_file(&path);
-            return Err(io_error(error));
+            return Err(io_error(&error));
         }
         Ok(materialized(path, bytes))
     }
@@ -528,11 +541,11 @@ fn canonical_root(root: &Path) -> Result<PathBuf, ArtifactMaterializationError> 
             ));
         }
     } else {
-        fs::create_dir_all(root).map_err(io_error)?;
+        fs::create_dir_all(root).map_err(|error| io_error(&error))?;
     }
-    let canonical_root = fs::canonicalize(root).map_err(io_error)?;
+    let canonical_root = fs::canonicalize(root).map_err(|error| io_error(&error))?;
     if fs::symlink_metadata(&canonical_root)
-        .map_err(io_error)?
+        .map_err(|error| io_error(&error))?
         .file_type()
         .is_symlink()
     {
@@ -542,18 +555,8 @@ fn canonical_root(root: &Path) -> Result<PathBuf, ArtifactMaterializationError> 
 }
 
 fn safe_artifact_id(value: &str) -> Result<&str, ArtifactMaterializationError> {
-    if value.trim().is_empty()
-        || value == "."
-        || value == ".."
-        || value.chars().any(|character| {
-            !character.is_ascii_alphanumeric() && !matches!(character, '-' | '_' | '.')
-        })
-        || Path::new(value)
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        return Err(ArtifactMaterializationError::UnsafeArtifactId);
-    }
+    crate::validate_artifact_id(value)
+        .map_err(|_| ArtifactMaterializationError::UnsafeArtifactId)?;
     Ok(value)
 }
 
@@ -570,7 +573,7 @@ fn write_and_sync(file: &mut File, bytes: &[u8]) -> std::io::Result<()> {
     file.sync_all()
 }
 
-fn io_error(error: std::io::Error) -> ArtifactMaterializationError {
+fn io_error(error: &std::io::Error) -> ArtifactMaterializationError {
     ArtifactMaterializationError::Io(error.to_string())
 }
 

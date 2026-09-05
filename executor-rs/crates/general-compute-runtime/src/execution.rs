@@ -95,6 +95,7 @@ impl ReferenceBackendExecutor {
         let trusted_registration = TrustedWorkerCapabilityRegistration {
             worker: worker.clone(),
             gpu_capabilities: Vec::new(),
+            managed_gpu_backends: Vec::new(),
             backends: capabilities.backends.clone(),
         };
         Self {
@@ -240,7 +241,10 @@ impl ReferenceBackendExecutor {
             Duration::from_millis(request.execution_policy.wall_time_ms),
             cancellation,
         )?;
-        let wall_time_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        let wall_time_ms = u64::try_from(started.elapsed().as_millis().min(u128::from(u64::MAX)))
+            .map_err(|_| {
+            ExecutionError::BackendUnavailable("wall-clock duration overflow".into())
+        })?;
         let status = match observation.status.as_str() {
             "halted" => ResultStatus::Completed,
             "exception" => ResultStatus::Failed,
@@ -300,7 +304,7 @@ impl ReferenceBackendExecutor {
             determinism: request.determinism.clone(),
             capability_summary: backend.capabilities.clone(),
             gpu_selection,
-            evidence: Default::default(),
+            evidence: crate::EvidenceEnvelope::default(),
         };
         result
             .validate_against(request, &self.capabilities)

@@ -250,7 +250,7 @@ fn sparse_matvec_reports_and_enforces_a_residual_tolerance() {
     let residual = matrix
         .residual_inf_norm(&vector, &rhs)
         .expect("residual should be computable");
-    assert_eq!(residual, 0.5);
+    assert!((residual - 0.5).abs() < 1e-12);
     assert!(
         matrix
             .matvec_with_residual_tolerance(&vector, &rhs, 0.5)

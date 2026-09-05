@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# Operator-owned CUDA support for managed-function-gpu-v1 only. The frozen
+# managed-function-v0/proof route remains independent of this feature.
+cuda = ["managed-function-runtime/cuda"]
+
 [dependencies]
 tokio.workspace = true
 tokio-stream.workspace = true

@@ -129,6 +129,7 @@ pub struct SessionTask {
     pub attempt_id: String,
     pub idempotency_key: String,
     pub request_digest: String,
+    pub retry_count: i32,
     pub payload: Vec<u8>,
 }
 
@@ -141,6 +142,7 @@ impl fmt::Debug for SessionTask {
             .field("attempt_id", &self.attempt_id)
             .field("idempotency_key", &self.idempotency_key)
             .field("request_digest", &self.request_digest)
+            .field("retry_count", &self.retry_count)
             .field("payload_bytes", &self.payload.len())
             .finish()
     }
@@ -831,6 +833,7 @@ mod tests {
             attempt_id: format!("attempt-{task_id}"),
             idempotency_key: format!("idempotency-{task_id}"),
             request_digest: "a".repeat(64),
+            retry_count: 0,
             payload: b"bounded-task".to_vec(),
         }
     }

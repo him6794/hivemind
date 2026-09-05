@@ -4,7 +4,7 @@ use general_compute_runtime::transport::{
     ingest_chunk,
 };
 use general_compute_runtime::{
-    ArtifactChunk, ArtifactManifest, ArtifactRole, ExecutionPolicy,
+    ArtifactChunk, ArtifactManifest, ArtifactRole, DeterminismPolicy, ExecutionPolicy,
     GENERAL_COMPUTE_RUNTIME_VERSION, GeneralComputeRequest, sha256_digest,
 };
 use std::fs;
@@ -65,7 +65,7 @@ fn valid_request() -> (GeneralComputeRequest, &'static [u8]) {
             br#"{"x":1}"#,
         )],
         execution_policy: ExecutionPolicy::default(),
-        determinism: Default::default(),
+        determinism: DeterminismPolicy::default(),
         billing_version: "billing-v1".into(),
         cost_model_version: "cost-model-v1".into(),
     };
@@ -184,7 +184,7 @@ fn chunk_upload_rejects_payload_size_and_digest_mismatch() {
     wrong_bytes.bytes = b"tampered".to_vec();
     assert!(matches!(
         ingest_chunk(&store, &request, &wrong_bytes),
-        Err(ChunkTransportError::ChunkSizeMismatch) | Err(ChunkTransportError::ChunkDigestMismatch)
+        Err(ChunkTransportError::ChunkSizeMismatch | ChunkTransportError::ChunkDigestMismatch)
     ));
 
     let mut oversized = upload(&request, bytes);
@@ -232,7 +232,7 @@ fn chunk_resume_envelope_is_identity_bound_and_returns_only_missing_manifest_chu
     assert_eq!(missing.len(), 1);
     assert_eq!(missing[0].sha256, sha256_digest(bytes));
 
-    let mut stale = resume.clone();
+    let mut stale = resume;
     stale.attempt_id = "attempt-previous".into();
     assert!(matches!(
         stale.missing_chunks(&request),
