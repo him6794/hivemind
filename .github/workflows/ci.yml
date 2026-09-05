@@ -153,6 +153,21 @@ jobs:
         uses: dtolnay/rust-toolchain@1.90.0
         with:
           components: rustfmt, clippy
+      - name: Prepare canonical proof workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          canonical_root=/run/desktop/mnt/host/d/hivemind
+          sudo rm -rf "$canonical_root"
+          sudo mkdir -p "$(dirname "$canonical_root")"
+          sudo mkdir "$canonical_root"
+          tar --exclude=.git --exclude=target --create --file - . | sudo tar --extract --file - --directory "$canonical_root"
+          sudo chown -R "$(id -u):$(id -g)" "$canonical_root"
+          mkdir -p "$canonical_root/.cache/zkvm-risc0" "$canonical_root/.cache/zkvm-target" "$canonical_root/.cache/zkvm-tmp"
+          printf 'HIVEMIND_PROOF_ROOT=%s\n' "$canonical_root" >> "$GITHUB_ENV"
+          printf 'RISC0_HOME=%s\n' "$canonical_root/.cache/zkvm-risc0" >> "$GITHUB_ENV"
+          printf 'CARGO_TARGET_DIR=%s\n' "$canonical_root/.cache/zkvm-target" >> "$GITHUB_ENV"
+          printf 'TMPDIR=%s\n' "$canonical_root/.cache/zkvm-tmp" >> "$GITHUB_ENV"
       - name: Install pinned RISC Zero guest toolchain
         shell: bash
         run: |
@@ -171,7 +186,7 @@ jobs:
           test -n "$guest_cargo"
           guest_root="${guest_cargo%/bin/cargo}"
           test -x "$guest_root/bin/rustc"
-          risc0_home="$RUNNER_TEMP/risc0-home"
+          risc0_home="$RISC0_HOME"
           risc0_toolchain="$risc0_home/toolchains/v1.97.0-rust-x86_64-unknown-linux-gnu"
           rm -rf "$risc0_home"
           mkdir -p "$risc0_home/toolchains"
@@ -181,33 +196,13 @@ jobs:
           cargo +risc0 --version | grep -Eq '1\.97\.0'
           printf '[default_versions]\nrust = "1.97.0"\n' > "$risc0_home/settings.toml"
           printf 'RISC0_HOME=%s\n' "$risc0_home" >> "$GITHUB_ENV"
-      - name: Set canonical proof source remapping
+      - name: Verify canonical proof workspace
         shell: bash
         run: |
           set -euo pipefail
-          canonical_guest_source_root=/run/desktop/mnt/host/d/hivemind
-          cargo_registry_index=index.crates.io-1949cf8c6b5b557f
-          guest_manifest="$GITHUB_WORKSPACE/zkvm/managed-proof/methods/guest/Cargo.toml"
-          test -f "$guest_manifest"
-          if grep -q '^\[package\.metadata\.risc0\]$' "$guest_manifest"; then
-            echo "guest Cargo.toml already contains proof rustc flags" >&2
-            exit 1
-          fi
-          cat >> "$guest_manifest" <<EOF
-
-          [package.metadata.risc0]
-          rustc-flags = [
-            "--remap-path-prefix=$GITHUB_WORKSPACE/executor-rs/crates/managed-function-runtime-v0/src/lib.rs=$canonical_guest_source_root/executor-rs/crates/managed-function-runtime/src/lib.rs",
-            "--remap-path-prefix=$GITHUB_WORKSPACE/hivemind-rs/crates/managed-proof-v0/src/lib.rs=$canonical_guest_source_root/hivemind-rs/crates/managed-proof/src/lib.rs",
-            "--remap-path-prefix=$GITHUB_WORKSPACE=$canonical_guest_source_root",
-            "--remap-path-prefix=$HOME/.cargo/registry/src/$cargo_registry_index/no_std_strings-0.1.3=/home/remi/.cargo/registry/src/$cargo_registry_index/no_std_strings-0.1.3",
-            "--remap-path-prefix=$HOME/.cargo=/root/.cargo",
-          ]
-          EOF
-          printf 'RUSTFLAGS=\n' >> "$GITHUB_ENV"
-          printf 'CARGO_ENCODED_RUSTFLAGS=\n' >> "$GITHUB_ENV"
-          grep -F '[package.metadata.risc0]' "$guest_manifest"
-          grep -F -- '--remap-path-prefix=' "$guest_manifest"
+          test -d "$HIVEMIND_PROOF_ROOT"
+          test -f "$HIVEMIND_PROOF_ROOT/zkvm/managed-proof/methods/guest/Cargo.toml"
+          test -f "$HIVEMIND_PROOF_ROOT/zkvm/managed-proof/methods/build.rs"
       - name: Download and verify pinned recursion artifact
         shell: bash
         run: |
@@ -227,35 +222,39 @@ jobs:
           test -z "${RISC0_SKIP_BUILD:-}"
           test "$(rustc --version | cut -d' ' -f2)" = '1.90.0'
           cargo +risc0 --version | grep -Eq '1\.97\.0'
-          test -n "${RISC0_HOME:-}"
+          test "$HIVEMIND_PROOF_ROOT" = '/run/desktop/mnt/host/d/hivemind'
           test -f "$RISC0_HOME/settings.toml"
           test -f "$RISC0_HOME/.rzup"
           test -x "$RISC0_HOME/toolchains/v1.97.0-rust-x86_64-unknown-linux-gnu/bin/rustc"
-          test -f "$GITHUB_WORKSPACE/hivemind-rs/crates/managed-proof-v0/Cargo.toml"
-          test -f "$GITHUB_WORKSPACE/hivemind-rs/crates/managed-proof-v0/src/lib.rs"
-          test -z "${RUSTFLAGS:-}"
-          test -z "${CARGO_ENCODED_RUSTFLAGS:-}"
-          guest_manifest="$GITHUB_WORKSPACE/zkvm/managed-proof/methods/guest/Cargo.toml"
-          grep -F '[package.metadata.risc0]' "$guest_manifest"
-          grep -F -- '--remap-path-prefix=' "$guest_manifest"
+          test -f "$HIVEMIND_PROOF_ROOT/hivemind-rs/crates/managed-proof-v0/Cargo.toml"
+          test -f "$HIVEMIND_PROOF_ROOT/hivemind-rs/crates/managed-proof-v0/src/lib.rs"
+          test -f "$HIVEMIND_PROOF_ROOT/executor-rs/crates/managed-function-runtime-v0/Cargo.toml"
+          test -f "$HIVEMIND_PROOF_ROOT/executor-rs/crates/managed-function-runtime-v0/src/lib.rs"
+          test -f "$HIVEMIND_PROOF_ROOT/zkvm/managed-proof/methods/guest/Cargo.lock"
       - name: Cache managed-proof Cargo build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
-            zkvm/managed-proof
-            hivemind-rs
+            /run/desktop/mnt/host/d/hivemind/zkvm/managed-proof
+            /run/desktop/mnt/host/d/hivemind/hivemind-rs
       - name: Check managed-proof workspace with native guest build
-        run: cargo check --manifest-path zkvm/managed-proof/Cargo.toml --workspace --all-targets --locked
-      - name: Test managed-proof workspace with native guest build
-        run: cargo test --manifest-path zkvm/managed-proof/Cargo.toml --workspace --all-targets --locked -- --nocapture
-      - name: Verify generated guest image ID matches Nodepool trust pin
         shell: bash
         run: |
           set -euo pipefail
-          output="$(cargo test --manifest-path zkvm/managed-proof/host/Cargo.toml --locked --lib tests::generated_guest_id_matches_nodepool_trust_pin -- --exact --nocapture 2>&1 | tee /dev/stderr)"
-          grep -Eq 'test tests::generated_guest_id_matches_nodepool_trust_pin[[:space:]].*ok' <<<"$output"
-      - name: Build the prover host
-        run: cargo build --manifest-path zkvm/managed-proof/host/Cargo.toml --release --locked
+          cd "$HIVEMIND_PROOF_ROOT"
+          cargo check --manifest-path zkvm/managed-proof/Cargo.toml --workspace --all-targets --locked
+      - name: Test managed-proof semantics with native guest build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$HIVEMIND_PROOF_ROOT"
+          cargo test --manifest-path zkvm/managed-proof/Cargo.toml --workspace --all-targets --locked -- --nocapture --skip generated_guest_id_matches_nodepool_trust_pin
+      - name: Run the attested managed-prover build contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$HIVEMIND_PROOF_ROOT"
+          bash scripts/build-managed-prover.sh
 
   frontend:
     name: Frontend app ${{ matrix.app }}
