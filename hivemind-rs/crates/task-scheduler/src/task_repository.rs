@@ -2594,7 +2594,7 @@ impl TaskRepository {
                     .fetch_optional(&mut *tx)
                     .await?;
             if locked.is_none() {
-                anyhow::bail!("managed GPU account is missing: {username}");
+                anyhow::bail!("managed GPU provider account is missing: {username}");
             }
         }
 
@@ -8586,9 +8586,6 @@ mod tests {
         );
         assert_eq!(user_balance(&repo.pool, &case.owner).await, 100);
 
-        repo.assign_to_worker(&case.task_id, &case.worker_id, "10.0.0.81")
-            .await
-            .unwrap();
         let changed_capability = ManagedGpuCapability::new(
             "cuda-test-retry-1",
             case.request.gpu_requirement.compute_capability.clone(),
@@ -8612,6 +8609,9 @@ mod tests {
         .execute(&repo.pool)
         .await
         .unwrap();
+        repo.assign_to_worker(&case.task_id, &case.worker_id, "10.0.0.81")
+            .await
+            .unwrap();
         let rotated_binding = repo
             .managed_gpu_attempt_binding(&case.task_id, &case.worker_id, 2)
             .await
@@ -9031,8 +9031,10 @@ mod tests {
             repo_a.create(&task).await.unwrap();
         }
         let modern_task_id = format!("claim-modern-task-{unique}");
-        let mut modern_task = make_task(&modern_task_id, &username);
-        modern_task.runtime = Some("general-compute-v1alpha1".into());
+        let modern_request =
+            inline_general_compute_request(&format!("modern-{unique}"), b"modern claim source");
+        let mut modern_task =
+            task_for_general_compute_request(&modern_task_id, &username, &modern_request);
         modern_task.priority = 20_000;
         repo_a.create(&modern_task).await.unwrap();
 
@@ -10500,11 +10502,11 @@ mod tests {
         task.max_cpt = 0;
         repo.create(&task).await.unwrap();
 
-        let claimed = repo
-            .claim_pending_for_worker(&worker_id, "10.0.0.9", 1)
+        let assigned = repo
+            .assign_to_worker(&task_id, &worker_id, "10.0.0.9")
             .await
             .unwrap();
-        assert_eq!(claimed.len(), 1);
+        assert_eq!(assigned.status, TaskStatus::Assigned);
         let lease = repo
             .general_compute_transfer_lease(&task_id)
             .await
@@ -10766,17 +10768,67 @@ mod tests {
             "timeout",
         ] {
             let worker_id = format!("worker-{transition}");
-            let (task_id, _) = create_assigned_general_compute_task(
-                &repo,
-                &format!("lease-{transition}"),
-                &worker_id,
-            )
-            .await;
+            let (task_id, request) = if transition == "complete" {
+                create_assigned_general_compute_task_with_max_cpt(
+                    &repo,
+                    &format!("lease-{transition}"),
+                    &worker_id,
+                    25,
+                )
+                .await
+            } else {
+                create_assigned_general_compute_task(
+                    &repo,
+                    &format!("lease-{transition}"),
+                    &worker_id,
+                )
+                .await
+            };
             match transition {
                 "complete" => {
-                    repo.complete_for_worker(&task_id, &worker_id, None, Some("done"))
-                        .await
-                        .unwrap();
+                    let result_json = serde_json::to_vec(&GeneralComputeResult {
+                        execution_id: request.execution_id.clone(),
+                        attempt_id: request.attempt_id.clone(),
+                        idempotency_key: request.idempotency_key.clone(),
+                        request_digest: request.request_digest.clone(),
+                        status: ResultStatus::Completed,
+                        exit_code: Some(0),
+                        error_code: None,
+                        stdout: "lease completion output".into(),
+                        stderr: String::new(),
+                        output_artifacts: vec![],
+                        usage: UsageClaim {
+                            wall_time_ms: 1,
+                            ..UsageClaim::default()
+                        },
+                        runtime_version: request.runtime_version.clone(),
+                        backend_id: request.backend_id.clone(),
+                        guest_image_digest: request.guest_image_digest.clone(),
+                        input_sha256: general_compute_runtime::canonical_input_digest(
+                            request
+                                .source_artifact
+                                .inline_bytes
+                                .as_deref()
+                                .unwrap_or_default(),
+                            &[],
+                        ),
+                        determinism: request.determinism.clone(),
+                        capability_summary: vec![],
+                        gpu_selection: None,
+                        output_manifest_root: canonical_artifact_root(&[]),
+                        evidence: EvidenceEnvelope::default(),
+                    })
+                    .unwrap();
+                    let manifest = serde_json::to_vec(&request).unwrap();
+                    repo.complete_general_compute_for_worker(
+                        &task_id,
+                        &worker_id,
+                        &manifest,
+                        &result_json,
+                        Some("lease completion output"),
+                    )
+                    .await
+                    .unwrap();
                 }
                 "cancel" => {
                     repo.cancel(&task_id).await.unwrap();
@@ -11006,12 +11058,21 @@ mod tests {
         label: &str,
         worker_id: &str,
     ) -> (String, GeneralComputeRequest) {
+        create_assigned_general_compute_task_with_max_cpt(repo, label, worker_id, 0).await
+    }
+
+    async fn create_assigned_general_compute_task_with_max_cpt(
+        repo: &TaskRepository,
+        label: &str,
+        worker_id: &str,
+        max_cpt: i64,
+    ) -> (String, GeneralComputeRequest) {
         let unique = uuid::Uuid::new_v4().to_string();
         let task_id = format!("{label}-{unique}");
         let request = inline_general_compute_request(&unique, b"lease source");
         let mut task =
             task_for_general_compute_request(&task_id, &format!("{label}-owner"), &request);
-        task.max_cpt = 0;
+        task.max_cpt = max_cpt;
         repo.create(&task).await.unwrap();
         repo.assign_to_worker(&task_id, worker_id, "10.0.0.1")
             .await

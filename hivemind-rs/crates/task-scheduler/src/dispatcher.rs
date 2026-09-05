@@ -1990,7 +1990,7 @@ async fn execute_on_worker_with_managed_proof_key(
     }
 
     let Some(current_task) = repo
-        .mark_worker_execution_running_snapshot(&task, &worker_id)
+        .mark_worker_execution_running_snapshot(&current_task, &worker_id)
         .await?
     else {
         info!(
@@ -3489,15 +3489,12 @@ async fn reset_after_worker_rpc_failure(
     disposition: WorkerRpcFailureDisposition,
     error: &(impl std::fmt::Display + ?Sized),
 ) -> Result<()> {
+    let reason = error.to_string();
     if task.runtime.as_deref().map(str::trim) == Some(MANAGED_GPU_RUNTIME_VERSION) {
         let Some(manifest) = task.managed_gpu_manifest_json.as_deref() else {
             let quarantined = repo
                 .quarantine_managed_gpu_without_typed_result_snapshot(
-                    task,
-                    worker_id,
-                    None,
-                    "FAILED",
-                    "managed GPU request manifest is missing",
+                    task, worker_id, None, "FAILED", &reason,
                 )
                 .await?;
             if quarantined.is_some() {
@@ -3555,7 +3552,7 @@ async fn reset_after_worker_rpc_failure(
                     manifest,
                     status,
                     "worker_rpc_retry_limit",
-                    "Worker RPC retry limit exceeded",
+                    &reason,
                 )
                 .await?;
             if failed.is_some() {
@@ -7913,7 +7910,7 @@ mod tests {
             ..ExecuteTaskResponse::default()
         };
         let (worker_addr, mut execute_rx) =
-            match fake_worker_execute_server_with_response(response).await {
+            match fake_worker_execute_server_with_response_echoing_identity(response).await {
                 Some(parts) => parts,
                 None => return,
             };
@@ -8063,7 +8060,7 @@ mod tests {
             ..ExecuteTaskResponse::default()
         };
         let (worker_addr, _execute_rx) =
-            match fake_worker_execute_server_with_response(response).await {
+            match fake_worker_execute_server_with_response_echoing_identity(response).await {
                 Some(parts) => parts,
                 None => return,
             };
@@ -8531,6 +8528,7 @@ mod tests {
         let service = WorkerNodeServiceServer::new(FakeWorkerExecuteService {
             execute_tx,
             response: ExecuteTaskResponse::default(),
+            echo_response_identity: false,
             execute_error: None,
         });
         tokio::spawn(async move {
@@ -8571,12 +8569,26 @@ mod tests {
     async fn fake_worker_execute_server_with_response(
         response: ExecuteTaskResponse,
     ) -> Option<(SocketAddr, tokio::sync::mpsc::Receiver<String>)> {
+        fake_worker_execute_server_with_response_mode(response, false).await
+    }
+
+    async fn fake_worker_execute_server_with_response_echoing_identity(
+        response: ExecuteTaskResponse,
+    ) -> Option<(SocketAddr, tokio::sync::mpsc::Receiver<String>)> {
+        fake_worker_execute_server_with_response_mode(response, true).await
+    }
+
+    async fn fake_worker_execute_server_with_response_mode(
+        response: ExecuteTaskResponse,
+        echo_response_identity: bool,
+    ) -> Option<(SocketAddr, tokio::sync::mpsc::Receiver<String>)> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.ok()?;
         let addr = listener.local_addr().ok()?;
         let (execute_tx, execute_rx) = tokio::sync::mpsc::channel(1);
         let service = WorkerNodeServiceServer::new(FakeWorkerExecuteService {
             execute_tx,
             response,
+            echo_response_identity,
             execute_error: None,
         });
         let chunks = GeneralComputeChunkServiceServer::new(PermissiveChunkService);
@@ -8612,6 +8624,7 @@ mod tests {
         let service = WorkerNodeServiceServer::new(FakeWorkerExecuteService {
             execute_tx,
             response: ExecuteTaskResponse::default(),
+            echo_response_identity: false,
             execute_error: Some((code, message.to_owned())),
         });
         tokio::spawn(async move {
@@ -8650,6 +8663,7 @@ mod tests {
         let worker = WorkerNodeServiceServer::new(FakeWorkerExecuteService {
             execute_tx,
             response: ExecuteTaskResponse::default(),
+            echo_response_identity: false,
             execute_error: None,
         });
         let chunks = GeneralComputeChunkServiceServer::new(FakeGeneralComputeChunkService {
@@ -9070,6 +9084,7 @@ mod tests {
     struct FakeWorkerExecuteService {
         execute_tx: tokio::sync::mpsc::Sender<String>,
         response: ExecuteTaskResponse,
+        echo_response_identity: bool,
         execute_error: Option<(tonic::Code, String)>,
     }
 
@@ -9079,12 +9094,19 @@ mod tests {
             &self,
             request: Request<ExecuteTaskRequest>,
         ) -> Result<Response<ExecuteTaskResponse>, Status> {
-            let task_id = request.into_inner().task_id;
+            let request = request.into_inner();
+            let task_id = request.task_id.clone();
             let _ = self.execute_tx.send(task_id).await;
             if let Some((code, message)) = &self.execute_error {
                 return Err(Status::new(*code, message.clone()));
             }
-            Ok(Response::new(self.response.clone()))
+            let mut response = self.response.clone();
+            if self.echo_response_identity {
+                response.execution_id = request.execution_id;
+                response.attempt_id = request.attempt_id;
+                response.idempotency_key = request.idempotency_key;
+            }
+            Ok(Response::new(response))
         }
 
         async fn task_output_upload(
