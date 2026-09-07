@@ -6,8 +6,12 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use chrono::Utc;
 use hivemind_models::Claims;
-use jsonwebtoken::{decode, DecodingKey, Validation};
+use jsonwebtoken::{
+    dangerous::insecure_decode,
+    errors::{new_error, ErrorKind},
+};
 
 /// Wraps the raw JWT token so handlers can forward it via gRPC.
 #[derive(Clone)]
@@ -116,17 +120,12 @@ fn bearer_token(value: &str) -> Option<&str> {
 /// Signature verification intentionally stays with nodepool. Master only needs
 /// structural claims (subject / expiry) so it can forward the raw token.
 pub fn decode_user_claims(token: &str) -> Result<Claims, jsonwebtoken::errors::Error> {
-    let mut validation = Validation::default();
-    validation.insecure_disable_signature_validation();
-    // Keep expiry checks so obviously expired browser tokens fail closed locally.
-    validation.validate_exp = true;
-    decode::<Claims>(
-        token,
-        // Key is ignored when signature validation is disabled.
-        &DecodingKey::from_secret(&[]),
-        &validation,
-    )
-    .map(|data| data.claims)
+    let claims = insecure_decode::<Claims>(token)?.claims;
+    let now = Utc::now().timestamp().max(0) as u64;
+    if (claims.exp as u64) < now.saturating_sub(60) {
+        return Err(new_error(ErrorKind::ExpiredSignature));
+    }
+    Ok(claims)
 }
 
 /// Combined extractor: both JWT claims and raw token for gRPC forwarding.
