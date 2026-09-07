@@ -6,7 +6,7 @@
 
 use super::sealed;
 use super::{GpuBackendError, GpuOperation, GpuTensor};
-use std::ffi::{CStr, c_char, c_int, c_void};
+use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
 use std::ptr;
 
 /// CUDA backend state is private to one interpreter invocation.
@@ -35,12 +35,20 @@ const CUBLAS_STATUS_SUCCESS: c_int = 0;
 const CUBLAS_OP_N: c_int = 0;
 const CUBLAS_DEFAULT_MATH: c_int = 0;
 
+#[link(name = "cuda")]
+unsafe extern "C" {
+    #[link_name = "cuInit"]
+    fn cuda_driver_init(flags: c_uint) -> c_int;
+    #[link_name = "cuDeviceGet"]
+    fn cuda_driver_device_get(device: *mut c_int, ordinal: c_int) -> c_int;
+    #[link_name = "cuDeviceGetUuid"]
+    fn cuda_driver_device_get_uuid(uuid: *mut CudaUuid, device: c_int) -> c_int;
+}
+
 #[link(name = "cudart")]
 unsafe extern "C" {
     #[link_name = "cudaSetDevice"]
     fn cuda_set_device(device: c_int) -> c_int;
-    #[link_name = "cudaDeviceGetUuid"]
-    fn cuda_device_get_uuid(uuid: *mut CudaUuid, device: c_int) -> c_int;
     #[link_name = "cudaMalloc"]
     fn cuda_malloc(device_pointer: *mut *mut c_void, bytes: usize) -> c_int;
     #[link_name = "cudaFree"]
@@ -244,11 +252,7 @@ impl CudaGpuBackend {
         // operator's trusted device binding rather than task input.
         let error = unsafe { cuda_set_device(device_ordinal) };
         check_cuda_initialization(error, "cudaSetDevice")?;
-        let mut actual_uuid = CudaUuid { bytes: [0; 16] };
-        // SAFETY: `actual_uuid` is valid writable storage for CUDA, and the
-        // ordinal was selected successfully immediately above.
-        let error = unsafe { cuda_device_get_uuid(&raw mut actual_uuid, device_ordinal) };
-        check_cuda_initialization(error, "cudaDeviceGetUuid")?;
+        let actual_uuid = read_cuda_uuid(device_ordinal)?;
         let actual_cuda_uuid = canonical_cuda_uuid(&actual_uuid);
         if actual_uuid.bytes != expected_cuda_uuid_bytes {
             return Err(GpuBackendError::unavailable(format!(
@@ -284,11 +288,7 @@ impl CudaGpuBackend {
         // or cuBLAS resources.
         let error = unsafe { cuda_set_device(self.device_ordinal) };
         check_cuda(error, "cudaSetDevice")?;
-        let mut actual_uuid = CudaUuid { bytes: [0; 16] };
-        // SAFETY: `actual_uuid` is valid writable storage for CUDA, and the
-        // ordinal was selected successfully immediately above.
-        let error = unsafe { cuda_device_get_uuid(&raw mut actual_uuid, self.device_ordinal) };
-        check_cuda(error, "cudaDeviceGetUuid")?;
+        let actual_uuid = read_cuda_uuid(self.device_ordinal)?;
         if actual_uuid.bytes != self.cuda_uuid_bytes {
             return Err(GpuBackendError::unavailable(format!(
                 "CUDA ordinal {} changed identity from {} to {}",
@@ -445,6 +445,23 @@ impl Drop for CudaGpuBackend {
 
 fn c_int_count(value: usize) -> Result<c_int, GpuBackendError> {
     c_int::try_from(value).map_err(|_| GpuBackendError::invalid("CUDA tensor is too large"))
+}
+
+fn read_cuda_uuid(device_ordinal: i32) -> Result<CudaUuid, GpuBackendError> {
+    // SAFETY: initializing the driver API with zero flags is process-global and
+    // does not access task-controlled state.
+    let error = unsafe { cuda_driver_init(0) };
+    check_cuda_initialization(error, "cuInit")?;
+    let mut device = 0;
+    // SAFETY: `device` is valid writable storage and the ordinal was validated
+    // by the operator-bound backend constructor.
+    let error = unsafe { cuda_driver_device_get(&raw mut device, device_ordinal) };
+    check_cuda_initialization(error, "cuDeviceGet")?;
+    let mut uuid = CudaUuid { bytes: [0; 16] };
+    // SAFETY: `uuid` is valid writable storage for the driver API device UUID.
+    let error = unsafe { cuda_driver_device_get_uuid(&raw mut uuid, device) };
+    check_cuda_initialization(error, "cuDeviceGetUuid")?;
+    Ok(uuid)
 }
 
 fn synchronize() -> Result<(), GpuBackendError> {
