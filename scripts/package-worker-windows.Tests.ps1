@@ -141,6 +141,65 @@ Assert-Contains `
     -Needle 'HIVEMIND_GENERAL_COMPUTE_WINDOWS_BACKENDS=' `
     -Message "worker package template must expose the native Windows HCS registry setting."
 
+# The normal double-click package is a dedicated Worker application. It must
+# not depend on the all-service binary or a role argument.
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle '"--bin", "hivemind-worker"' `
+    -Message "Windows worker packaging must build the dedicated hivemind-worker binary."
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle 'hivemind-worker.exe' `
+    -Message "Windows worker packaging must ship hivemind-worker.exe."
+if ($scriptText -match '& \(Join-Path \$PSScriptRoot "hivemind-bin\.exe"\)') {
+    throw "Windows worker launcher must not start the all-service hivemind-bin.exe."
+}
+if ($scriptText -match '& \(Join-Path \$PSScriptRoot "hivemind-worker\.exe"\) worker') {
+    throw "Dedicated Windows worker launcher must not require a worker role argument."
+}
+
+# The package owns the browser surface: build it with the configured local
+# control address and place it beside the executable for static serving.
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle '$workerUiRoot = Join-Path $repoRoot "frontend\worker-ui"' `
+    -Message "Windows worker packaging must locate the Worker UI source."
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle '& npm ci' `
+    -Message "Windows worker packaging must install the locked Worker UI dependencies."
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle '& npm run build' `
+    -Message "Windows worker packaging must build the Worker UI."
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle '$env:VITE_WORKER_CONTROL_BASE = $workerControlBase' `
+    -Message "Windows worker packaging must bake the configured Worker Control address into the UI."
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle '$packagedWorkerUi = Join-Path $out "worker-ui"' `
+    -Message "Windows worker packaging must create a beside-executable worker-ui directory."
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle 'Copy-Item -Path (Join-Path $workerUiDist "*") -Destination $packagedWorkerUi -Recurse -Force' `
+    -Message "Windows worker packaging must copy the built Worker UI into the package."
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle 'Test-Path -LiteralPath (Join-Path $workerUiDist "index.html")' `
+    -Message "Windows worker packaging must verify the direct package UI entrypoint exists."
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle ".TrimStart('\', '/')" `
+    -Message "Windows worker packaging must normalize UI paths with a single Windows path separator."
+
+if ($scriptText -notmatch '\[string\]\$NodepoolGrpcAddr\s*=\s*""') {
+    throw "Windows worker packaging must not use a fake Nodepool hostname as its default."
+}
+if ($scriptText -notmatch '\$packageArtifacts\s*\+=\s*\[ordered\]@\{\s*\r?\n\s*name\s*=\s*"worker-ui/') {
+    throw "Windows worker package manifest must include hashes for the bundled Worker UI files."
+}
+
 # The package README is Markdown, and it must be built from a literal
 # here-string: an interpolating one silently eats every backtick as an escape
 # character, so the code spans and fenced blocks reach the package intact.

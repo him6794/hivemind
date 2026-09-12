@@ -20,8 +20,7 @@ function validateWorkerEndpoint(value) {
 }
 
 export default function WorkerApp() {
-  const apiBase = String(import.meta.env.VITE_API_BASE || '').trim().replace(/\/$/, '');
-  const workerControlBase = String(import.meta.env.VITE_WORKER_CONTROL_BASE || '')
+  const workerControlBase = String(import.meta.env.VITE_WORKER_CONTROL_BASE || 'http://127.0.0.1:18080')
     .trim()
     .replace(/\/$/, '');
   const initialSession = readStoredSession(window.sessionStorage, SESSION_KEY);
@@ -171,13 +170,13 @@ export default function WorkerApp() {
     try {
       let res;
       try {
-        res = await fetch(`${apiBase}/api/login`, {
+        res = await fetch(`${workerControlBase}/api/login`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ username, password }),
         });
       } catch {
-        throw new Error(`Cannot reach Hivemind API at ${apiBase}. Check VITE_API_BASE.`);
+        throw new Error(`Cannot reach the local Worker app at ${workerControlBase}. Make sure it is running.`);
       }
       const data = await readJson(res);
       if (!res.ok || !data.success) {

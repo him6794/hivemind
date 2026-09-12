@@ -3,7 +3,7 @@ param(
     [ValidateSet("x86_64-pc-windows-msvc", "x86_64-pc-windows-gnu", "aarch64-pc-windows-msvc")]
     [string]$RustTarget = "x86_64-pc-windows-msvc",
     [string]$OutputDir = "dist\windows-worker",
-    [string]$NodepoolGrpcAddr = "nodepool.example.com:50051",
+    [string]$NodepoolGrpcAddr = "",
     [string]$NodepoolGrpcEndpoint = "",
     [string]$HeadscaleLoginServer = "",
     [string]$WebsiteApiBase = "",
@@ -18,6 +18,8 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $rustRoot = Join-Path $repoRoot "hivemind-rs"
+$workerUiRoot = Join-Path $repoRoot "frontend\worker-ui"
+$workerUiDist = Join-Path $workerUiRoot "dist"
 $out = Join-Path $repoRoot $OutputDir
 
 if ($Configuration -ne "release" -and $Configuration -ne "debug") {
@@ -55,7 +57,7 @@ if ($RustTarget -like "*-pc-windows-msvc") {
 
 Push-Location $rustRoot
 try {
-    $cargoArgs = @("build", "--locked", "--target", $RustTarget, "--bin", "hivemind-bin")
+    $cargoArgs = @("build", "--locked", "--target", $RustTarget, "--bin", "hivemind-worker")
     if ($Configuration -eq "release") {
         $cargoArgs += "--release"
     }
@@ -66,7 +68,7 @@ try {
         }
         $targetArch = if ($RustTarget.StartsWith("aarch64-")) { "arm64" } else { "x64" }
         $llvmBin = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages\MartinStorsjo.LLVM-MinGW.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\llvm-mingw-20260616-ucrt-x86_64\bin"
-        $cargoCommand = "cargo build --locked --target $RustTarget --bin hivemind-bin"
+        $cargoCommand = "cargo build --locked --target $RustTarget --bin hivemind-worker"
         if ($Configuration -eq "release") {
             $cargoCommand += " --release"
         }
@@ -83,25 +85,75 @@ try {
         throw "Cargo failed for target $RustTarget with exit code $LASTEXITCODE."
     }
     $profile = if ($Configuration -eq "release") { "release" } else { "debug" }
-    $binary = Join-Path $rustRoot "target\$RustTarget\$profile\hivemind-bin.exe"
+    $binary = Join-Path $rustRoot "target\$RustTarget\$profile\hivemind-worker.exe"
 } finally {
     Pop-Location
 }
 
 if (!(Test-Path $binary)) {
-    throw "Built binary not found: $binary"
+    throw "Built Worker binary not found: $binary"
+}
+
+Push-Location $workerUiRoot
+$previousWorkerControlBase = $env:VITE_WORKER_CONTROL_BASE
+try {
+    $workerControlBase = $WorkerControlHttpAddr.Trim()
+    if ($workerControlBase -notmatch '^[a-zA-Z][a-zA-Z0-9+.-]*://') {
+        $workerControlBase = "http://$workerControlBase"
+    }
+    if ($workerControlBase -match '^http://0\.0\.0\.0(?=[:/])') {
+        $workerControlBase = $workerControlBase -replace '^http://0\.0\.0\.0', 'http://127.0.0.1'
+    }
+    $env:VITE_WORKER_CONTROL_BASE = $workerControlBase.TrimEnd('/')
+    & npm ci
+    if ($LASTEXITCODE -ne 0) {
+        throw "npm ci failed while preparing the Worker UI."
+    }
+    & npm run build
+    if ($LASTEXITCODE -ne 0) {
+        throw "npm run build failed while preparing the Worker UI."
+    }
+} finally {
+    if ($null -eq $previousWorkerControlBase) {
+        Remove-Item Env:VITE_WORKER_CONTROL_BASE -ErrorAction SilentlyContinue
+    } else {
+        $env:VITE_WORKER_CONTROL_BASE = $previousWorkerControlBase
+    }
+    Pop-Location
+}
+
+if (!(Test-Path -LiteralPath (Join-Path $workerUiDist "index.html"))) {
+    throw "Worker UI build did not produce $workerUiDist\index.html"
 }
 
 New-Item -ItemType Directory -Force -Path $out | Out-Null
-$packagedBinary = Join-Path $out "hivemind-bin.exe"
+$staleAllInOneBinary = Join-Path $out "hivemind-bin.exe"
+if (Test-Path -LiteralPath $staleAllInOneBinary) {
+    Remove-Item -Force -LiteralPath $staleAllInOneBinary
+}
+$packagedBinary = Join-Path $out "hivemind-worker.exe"
 Copy-Item -Force $binary $packagedBinary
+$packagedWorkerUi = Join-Path $out "worker-ui"
+if (Test-Path -LiteralPath $packagedWorkerUi) {
+    Remove-Item -Recurse -Force -LiteralPath $packagedWorkerUi
+}
+New-Item -ItemType Directory -Force -Path $packagedWorkerUi | Out-Null
+Copy-Item -Path (Join-Path $workerUiDist "*") -Destination $packagedWorkerUi -Recurse -Force
 $packageArtifacts = @(
     [ordered]@{
-        name = "hivemind-bin.exe"
+        name = "hivemind-worker.exe"
         sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $packagedBinary).Hash.ToLowerInvariant()
         source = $binary
     }
 )
+Get-ChildItem -LiteralPath $packagedWorkerUi -File -Recurse | ForEach-Object {
+    $relativePath = $_.FullName.Substring($packagedWorkerUi.Length).TrimStart('\', '/')
+    $packageArtifacts += [ordered]@{
+        name = "worker-ui/$($relativePath -replace '\\', '/')"
+        sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+        source = $_.FullName
+    }
+}
 if ($RustTarget -like "*-pc-windows-msvc") {
     $packagedLibtailscale = Join-Path $out "libtailscale.dll"
     Copy-Item -Force $archive $packagedLibtailscale
@@ -406,7 +458,7 @@ Assert-RequiredEnv -Names @("WORKER_GRPC_ADDR", "WORKER_CONTROL_HTTP_ADDR")
 # NODEPOOL_GRPC_ENDPOINT/NODEPOOL_GRPC_ADDR are optional: public onboarding
 # discovers the platform transport after website login.
 
-& (Join-Path $PSScriptRoot "hivemind-bin.exe") worker
+& (Join-Path $PSScriptRoot "hivemind-worker.exe")
 $workerExitCode = $LASTEXITCODE
 if ($workerExitCode -ne 0) {
     exit $workerExitCode
@@ -420,23 +472,13 @@ $launcher | Set-Content -Encoding ASCII (Join-Path $out "start-worker.ps1")
 $readme = @'
 # Hivemind Windows Worker Package
 
-1. Copy `.env.worker.example` to `.env.worker`.
-2. `NODEPOOL_GRPC_ENDPOINT` and `NODEPOOL_GRPC_ADDR` are optional compatibility settings for private deployments. The default public onboarding needs neither: the worker discovers the platform transport automatically after website login.
-3. Set `WEBSITE_API_BASE` to the HTTPS origin of the deployed Rust Website API. That origin must expose `POST /api/login` and the protected `POST /api/vpn/config`; the official Next BFF is not a substitute unless it explicitly serves that contract. `WORKER_WEBSITE_API_BASE` can override it for this role. Leave it blank to use the built-in public default.
-4. For interactive enrollment, leave `WORKER_VPN_AUTHKEY` blank and sign in through Worker UI. The local worker sends the bearer JWT to the Website API, consumes the returned one-time Headscale key in memory, joins the overlay, and waits for the Nodepool gRPC transport before registration. A valid persisted VPN state is rehydrated first on restart.
-5. For unattended operator startup, optionally set `WORKER_VPN_AUTHKEY` to a role-scoped preauth key. `HEADSCALE_LOGIN_SERVER` and `WORKER_VPN_HOSTNAME` are optional overrides; keyed startup fails closed until the VPN and Nodepool transport are ready.
-6. No static Worker ID or reusable nodepool token is required. Worker identity is server-assigned at enrollment; `WORKER_NODEPOOL_TOKEN`, `WORKER_NODEPOOL_USERNAME`, and `WORKER_NODEPOOL_PASSWORD` remain only as explicit legacy/private-deployment overrides.
-7. `WORKER_ADVERTISE_ADDR` is optional. Workers without any inbound address register session-only: task delivery flows through the outbound worker session instead of a Nodepool-to-worker callback.
-8. `JWT_SECRET` will be generated automatically on first launch if it is blank. Set it explicitly if you need a fixed deployment secret.
-9. Run PowerShell as the operator user and execute:
+1. Double-click `hivemind-worker.exe`. The Worker page opens in your browser.
+2. Sign in with your Hivemind account. The Worker connects to the network, registers this machine, and starts accepting jobs automatically.
+3. Keep the Worker window open while you want this machine to receive jobs. No `.env` file, terminal command, port choice, or key setup is needed.
 
-```powershell
-.\start-worker.ps1
-```
+For a private deployment or unattended startup, `.env.worker.example` and `start-worker.ps1` are available as optional advanced settings. The normal sign-in flow does not store your password, server key, or reusable VPN key.
 
-The worker joins Headscale before startup-dependent registration, waits for the Nodepool gRPC transport, then starts its gRPC server, local control API, hardware profile reporting, registration loop, and the outbound session loop that receives tasks and returns results. Without `WORKER_VPN_AUTHKEY`, the local UI remains available while enrollment waits for an authenticated login. If the JWT expires or the device state is revoked, sign in again; no password, `HEADSCALE_API_KEY`, or reusable Headscale key is written to the package or browser storage.
-
-The downloaded Worker runs on the operator's suitable local host. Orange Pi is reserved for Nodepool, Website API, Headscale, PostgreSQL, and Redis; do not deploy this Worker package there.
+The Worker runs on a suitable local Windows host. Orange Pi is reserved for Nodepool, Website API, Headscale, PostgreSQL, and Redis; do not deploy this Worker package there.
 '@
 $readme | Set-Content -Encoding ASCII (Join-Path $out "README.md")
 

@@ -203,7 +203,6 @@ services:
       context: ./frontend/worker-ui
       dockerfile: Dockerfile
       args:
-        VITE_API_BASE: ${VITE_API_BASE:-http://localhost:8082}
         VITE_WORKER_CONTROL_BASE: ${VITE_WORKER_CONTROL_BASE:-http://localhost:18080}
     restart: unless-stopped
     ports:
