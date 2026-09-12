@@ -425,7 +425,7 @@ export default function MasterApp() {
               <p className="eyebrow">Hivemind Console</p>
               <h1>Master UI</h1>
               <p className="lead">
-                Submit managed-function tasks to the local Hivemind runtime, monitor execution, and collect worker output from one account session.
+                Submit work and follow it through — what it did, what it cost, and what came back.
               </p>
             </div>
           </div>
@@ -484,7 +484,7 @@ export default function MasterApp() {
                   <input
                     value={taskId}
                     onChange={(e) => setTaskId(e.target.value)}
-                    placeholder="optional, defaults to UUID"
+                    placeholder="Leave blank and we will assign one for you"
                     className="field"
                   />
                 </label>
@@ -496,7 +496,7 @@ export default function MasterApp() {
                       setTaskSource(e.target.value);
                       setSourceError(e.target.value.trim() ? null : 'Function source is required');
                     }}
-                    placeholder="managed-function-v0 source code"
+                    placeholder="The code to run — one small, self-contained function"
                     rows={8}
                     className={`field ${sourceError ? 'error' : ''}`}
                   />
@@ -564,7 +564,7 @@ export default function MasterApp() {
                 ) : null}
               </div>
               {tasks.length === 0 ? (
-                <p className="subtle">No tasks yet. Upload a task file to get started.</p>
+                <p className="subtle">No tasks yet. Fill in the form and send your first one — it will appear here, along with its progress, cost, and result.</p>
               ) : (
                 <ul className="task-list">
                   {tasks.map((task) => {

@@ -280,7 +280,7 @@ export default function WorkerApp() {
               <p className="eyebrow">Hivemind Console</p>
               <h1>Worker UI</h1>
               <p className="lead">
-                Register this local worker with the nodepool, publish hardware capacity, and keep the provider session active across page reloads.
+                Sign in to put this machine to work. It registers with the network, shares what it can do, and is ready to accept jobs.
               </p>
             </div>
           </div>
@@ -331,13 +331,13 @@ export default function WorkerApp() {
 
         <div className="grid two" style={{ marginTop: 18 }}>
           <section className="surface">
-            <h2>Local Capacity</h2>
+            <h2>Your Machine</h2>
             <label>
-              Callback endpoint (optional)
+              Where the network can reach this machine (optional)
               <input
                 value={workerIp}
                 onChange={(e) => handleWorkerIpChange(e.target.value)}
-                placeholder="blank = session-only (outbound)"
+                placeholder="Leave blank if jobs should arrive through this connection"
                 className={`field ${workerIpError ? 'error' : ''}`}
               />
             </label>
@@ -362,13 +362,13 @@ export default function WorkerApp() {
                   <dd>{profile.cpu_cores}</dd>
                   <dt>Memory</dt>
                   <dd>{profile.memory_gb} GB</dd>
-                  <dt>CPU score</dt>
+                  <dt>CPU rating</dt>
                   <dd>{profile.cpu_score}</dd>
-                  <dt>GPU score</dt>
+                  <dt>Graphics rating</dt>
                   <dd>{profile.gpu_score}</dd>
-                  <dt>GPU memory</dt>
+                  <dt>Graphics memory</dt>
                   <dd>{profile.gpu_memory_gb} GB</dd>
-                  <dt>GPU name</dt>
+                  <dt>Graphics card</dt>
                   <dd>{profile.gpu_name || '-'}</dd>
                   <dt>Storage</dt>
                   <dd>{profile.storage_available_gb} / {profile.storage_total_gb} GB</dd>
@@ -390,7 +390,7 @@ export default function WorkerApp() {
           </section>
 
           <section className="surface">
-            <h2>Registration Status</h2>
+            <h2>Registration</h2>
             {registration ? (
               <div className={`status ${registration.success ? 'success' : 'error'}`}>
                 <strong>{registration.success ? 'Registered' : 'Not registered'}</strong>
@@ -401,7 +401,7 @@ export default function WorkerApp() {
               </div>
             ) : (
               <p className="subtle">
-                Log in to register your worker node with the master nodepool. The nodepool can then assign tasks to this machine.
+                Log in to register this machine. Once registered, the network can send it jobs, and its results and usage are reported back so billing stays accurate.
               </p>
             )}
           </section>

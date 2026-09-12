@@ -71,7 +71,7 @@ export function Footer() {
 
         <div className="mt-12 flex flex-col items-start justify-between gap-4 border-t border-border/60 pt-6 text-xs text-muted-foreground sm:flex-row sm:items-center">
           <p>
-            © {new Date().getFullYear()} Hivemind. {locale === "zh" ? "分散式算力市集。" : "A marketplace for distributed compute."}
+            © {new Date().getFullYear()} Hivemind. {locale === "zh" ? "利用閒置算力執行任務的網路。" : "A network for running jobs on spare compute."}
           </p>
           <div className="flex items-center gap-4">
             <span className="inline-flex items-center gap-1.5">

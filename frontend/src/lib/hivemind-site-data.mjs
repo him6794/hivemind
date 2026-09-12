@@ -180,7 +180,7 @@ const definitions = {
         ],
       },
       account: {
-        summary: 'Your identity and balance live here. Work is submitted through your Master, then scheduled onto an eligible network worker.',
+        summary: 'Your account and balance, in one place. Send work from your Master, and it runs on an available machine on the network — your own, or one that another user set up.',
         panels: [
           {
             title: 'Balance',
@@ -627,7 +627,7 @@ const definitions = {
         ],
       },
       account: {
-        summary: '這裡放你的身份與餘額。工作跑在你自己部署的節點上。',
+        summary: '你的帳號與餘額，都在這裡。從你的 Master 送出的工作，會跑在網路上符合條件的機器上——可能是你的，也可能是其他人的。',
         panels: [
           {
             title: '餘額',
