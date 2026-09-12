@@ -24,7 +24,7 @@ export class ErrorBoundary extends React.Component {
           alignItems: 'center',
           justifyContent: 'center',
           fontFamily: 'Inter, system-ui, sans-serif',
-          background: 'linear-gradient(180deg, #eff4f8 0%, #f8fbfd 100%)',
+          background: '#f5f7fa',
           padding: 32,
         }}>
           <div style={{
@@ -34,7 +34,6 @@ export class ErrorBoundary extends React.Component {
             borderRadius: 14,
             background: '#fff',
             padding: 32,
-            boxShadow: '0 12px 32px rgba(15, 23, 42, 0.06)',
           }}>
             <h2 style={{ margin: '0 0 12px', fontSize: 22, color: '#c62828' }}>
               Something went wrong

@@ -47,7 +47,7 @@ export function LoginPage() {
   return (
     <section className="mx-auto grid min-h-screen max-w-7xl items-center gap-8 px-4 py-28 sm:px-6 lg:grid-cols-[1.1fr_0.9fr]">
       <div>
-        <div className="mb-4 inline-flex items-center gap-2 rounded-full glass px-3 py-1 text-xs font-medium text-muted-foreground">
+        <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1 text-xs font-medium text-muted-foreground">
           <Shield className="size-3.5 text-honey" />
           {locale === "zh" ? "安全登入" : "Secure sign in"}
         </div>
@@ -61,13 +61,13 @@ export function LoginPage() {
         </p>
       </div>
 
-      <Surface className="border-border/80 bg-card/70 p-8">
+      <Surface className="border-border/80 bg-card p-8">
         <form className="space-y-4" onSubmit={handleSubmit}>
           <div>
             <label htmlFor="login-username" className="mb-2 block text-sm font-medium">{locale === "zh" ? "使用者名稱" : "Username"}</label>
             <input
               id="login-username"
-              className="w-full rounded-xl border border-border bg-background/70 px-4 py-3 outline-none transition focus:border-honey/40"
+              className="w-full rounded-xl border border-border bg-background px-4 py-3 outline-none transition focus:border-honey/40 focus-visible:ring-2 focus-visible:ring-honey/30"
               value={username}
               onChange={(event) => setUsername(event.target.value)}
               placeholder="team-ops"
@@ -80,7 +80,7 @@ export function LoginPage() {
             <input
               id="login-password"
               type="password"
-              className="w-full rounded-xl border border-border bg-background/70 px-4 py-3 outline-none transition focus:border-honey/40"
+              className="w-full rounded-xl border border-border bg-background px-4 py-3 outline-none transition focus:border-honey/40 focus-visible:ring-2 focus-visible:ring-honey/30"
               value={password}
               onChange={(event) => setPassword(event.target.value)}
               placeholder={locale === "zh" ? "至少 8 個字元" : "At least 8 characters"}
@@ -95,7 +95,7 @@ export function LoginPage() {
           </Button>
         </form>
 
-        <div aria-live="polite" className="mt-4 rounded-xl border border-border/60 bg-background/40 p-4 text-sm text-muted-foreground">
+        <div aria-live="polite" className="mt-4 rounded-xl border border-border/60 bg-background p-4 text-sm text-muted-foreground">
           {status || (locale === "zh" ? "登入後可進入帳號中心。" : "Sign in to enter the account center.")}
         </div>
 

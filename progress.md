@@ -451,6 +451,18 @@ bounded renderer 的 `managed-function-runtime/src/lib.rs`、`zkvm` 的 `Cargo.l
 - 驗證：`cargo test -p hivemind-task-scheduler --lib --target x86_64-pc-windows-gnu --locked`（111 passed、1 intentional ignored）、Nodepool artifact upload focused test、database migration focused test、scoped `cargo check` 均通過；`git diff --check` 通過。
 - 剩餘 blocker：cross-Worker transfer coordination/lease、production OCI routing、trusted usage/billing settlement；Monty 不得恢復。
 
+## 2026-09-11：release-gate recovery completion evidence
+
+- 本輪未還原、reset、commit 或 push 既有 dirty worktree；所有修改均保留在原工作樹。
+- 受影響 Rust crate 全測試完成：`hivemind-config` 29 passed、`hivemind-proto` 23 passed、`hivemind-task-scheduler` 195 passed / 1 intentional ignored、`hivemind-worker-executor` 140 passed，均 0 failed。
+- 新增回歸 focused tests 全部通過：consensus timeout range、canonical consensus digest excluding diagnostic claims、missing prover sidecar readiness、legacy dispatch across rollout modes。
+- Hivemind 與 executor workspace 的 manifest-scoped `cargo fmt --check` 通過；affected-crate `cargo clippy --all-targets -- -D warnings` 與 `git diff --check` 也通過。
+- 主 workspace `cd hivemind-rs && cargo audit` 通過，僅保留文件化的 4 個非 vulnerability warnings；`cd zkvm/managed-proof && cargo audit` 通過，僅保留文件化的 5 個 allowed warnings。
+- Windows package、managed-prover verifier、release-stack smoke contract tests 均通過；secret-shaped scan 未在 untracked files 發現匹配。
+- OCI `scripts/general-compute-oci-e2e.ps1 -CheckOnly` 按設計 fail closed，原因是未設定 operator-owned `HIVEMIND_GENERAL_COMPUTE_PRODUCTION_BACKENDS`；沒有執行 `-Run`，所以沒有宣稱真實 rootless E2E。
+- 真實 PostgreSQL settlement/integration、target-matched Windows PE proving、guest-image equality/attestation、clean-host proof verification、proof-to-settlement evidence 仍 blocked/not-run，沒有以 mock、skip、Docker/WSL 或 contract test 冒充。
+- 本輪結論：本地 correctness、format、audit 與 contract gates 可採信；需要 operator assets、PostgreSQL 或 genuine Windows prover 的外部 release gates 仍未完成。
+
 ## 2026-08-14 Worker durable transfer state
 
 - `CasChunkStore` 現在在 operator-configured CAS root 下建立 `.transfers` durable journal：以 stable `execution_id + artifact_id` 綁定 immutable artifact digest/size/chunk coordinates，並用 atomic completion marker 記錄已驗證 chunk。

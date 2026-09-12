@@ -17,7 +17,6 @@ hex.workspace = true
 rand.workspace = true
 hivemind-models = { path = "../models" }
 hivemind-database = { path = "../database" }
-hivemind-managed-prover-protocol = { path = "../managed-prover-protocol" }
 
 [dev-dependencies]
 hivemind-config = { path = "../config" }

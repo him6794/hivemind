@@ -14,8 +14,6 @@ pub struct HivemindConfig {
     #[serde(default)]
     pub general_compute: GeneralComputeConfig,
     #[serde(default)]
-    pub managed_proof: ManagedProofConfig,
-    #[serde(default)]
     pub managed_consensus: ManagedConsensusConfig,
 }
 
@@ -81,20 +79,6 @@ pub struct TrustedManagedDslWorkerRegistration {
     /// Worker owner authorized to activate this exact DSL registration.
     pub owner: String,
     pub registrations: Vec<general_compute_runtime::production::ManagedDslBackendRegistration>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ManagedProofConfig {
-    #[serde(default)]
-    pub rollout_mode: ManagedProofRolloutMode,
-}
-
-impl Default for ManagedProofConfig {
-    fn default() -> Self {
-        Self {
-            rollout_mode: ManagedProofRolloutMode::Enforce,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,46 +196,6 @@ impl FromStr for ManagedConsensusRolloutMode {
             "enforce" => Ok(Self::Enforce),
             other => Err(format!(
                 "unsupported managed consensus rollout mode `{other}` (expected disabled, observe, or enforce)"
-            )),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ManagedProofRolloutMode {
-    Off,
-    Observe,
-    #[default]
-    Enforce,
-}
-
-impl ManagedProofRolloutMode {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::Observe => "observe",
-            Self::Enforce => "enforce",
-        }
-    }
-}
-
-impl std::fmt::Display for ManagedProofRolloutMode {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-impl FromStr for ManagedProofRolloutMode {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "off" => Ok(Self::Off),
-            "observe" => Ok(Self::Observe),
-            "enforce" => Ok(Self::Enforce),
-            other => Err(format!(
-                "unsupported managed proof rollout mode `{other}` (expected off, observe, or enforce)"
             )),
         }
     }
@@ -416,10 +360,6 @@ pub struct VpnConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutorConfig {
-    #[serde(default)]
-    pub managed_prover_executable: String,
-    #[serde(default = "default_managed_prover_timeout_secs")]
-    pub managed_prover_timeout_secs: u64,
     pub sandbox_dir: String,
     pub max_cpu_percent: f64,
     pub max_memory_mb: u64,
@@ -498,8 +438,6 @@ impl Default for HivemindConfig {
                 vpn_network: "100.64.0.0/10".into(),
             },
             executor: ExecutorConfig {
-                managed_prover_executable: String::new(),
-                managed_prover_timeout_secs: default_managed_prover_timeout_secs(),
                 sandbox_dir: "./sandbox".into(),
                 max_cpu_percent: 80.0,
                 max_memory_mb: 4096,
@@ -511,7 +449,6 @@ impl Default for HivemindConfig {
                 network_egress_targets: vec![],
             },
             general_compute: GeneralComputeConfig::default(),
-            managed_proof: ManagedProofConfig::default(),
             managed_consensus: ManagedConsensusConfig::default(),
         }
     }
@@ -636,16 +573,6 @@ impl HivemindConfig {
         }
         if let Ok(public_key) = std::env::var("WORKER_EXECUTION_PUBLIC_KEY_PEM") {
             self.auth.worker_execution_public_key_pem = public_key;
-        }
-        if let Ok(exec) = std::env::var("MANAGED_PROVER_EXECUTABLE") {
-            self.executor.managed_prover_executable = exec;
-        }
-        if let Ok(value) = std::env::var("MANAGED_PROVER_TIMEOUT_SECS") {
-            self.executor.managed_prover_timeout_secs =
-                parse_env("MANAGED_PROVER_TIMEOUT_SECS", &value)?;
-        }
-        if let Ok(mode) = std::env::var("MANAGED_PROOF_ROLLOUT_MODE") {
-            self.managed_proof.rollout_mode = parse_env("MANAGED_PROOF_ROLLOUT_MODE", &mode)?;
         }
         if let Ok(mode) = std::env::var("MANAGED_CONSENSUS_ROLLOUT_MODE") {
             self.managed_consensus.rollout_mode =
@@ -875,10 +802,6 @@ fn default_sandbox_mode() -> String {
     "dev".into()
 }
 
-fn default_managed_prover_timeout_secs() -> u64 {
-    900
-}
-
 fn default_network_egress_enabled() -> bool {
     false
 }
@@ -1019,14 +942,6 @@ mod tests {
     }
 
     #[test]
-    fn executor_defaults_include_managed_prover_settings() {
-        let config = HivemindConfig::default();
-
-        assert_eq!(config.executor.managed_prover_executable, "");
-        assert_eq!(config.executor.managed_prover_timeout_secs, 900);
-    }
-
-    #[test]
     fn trusted_worker_capability_config_round_trips_and_rejects_unknown_fields() {
         let image = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let config: HivemindConfig = serde_json::from_value(serde_json::json!({
@@ -1071,16 +986,6 @@ mod tests {
     }
 
     #[test]
-    fn managed_proof_rollout_defaults_to_enforce() {
-        let config = HivemindConfig::default();
-
-        assert_eq!(
-            config.managed_proof.rollout_mode,
-            ManagedProofRolloutMode::Enforce
-        );
-    }
-
-    #[test]
     fn managed_consensus_timeout_matches_database_range() {
         let config = ManagedConsensusConfig {
             timeout_secs: i64::MAX as u64,
@@ -1094,40 +999,6 @@ mod tests {
         };
         let error = config.validate().unwrap_err();
         assert!(error.contains("supported range"));
-    }
-
-    #[test]
-    fn managed_proof_rollout_loads_from_environment() {
-        let _environment_lock = lock_environment();
-        let old = std::env::var_os("MANAGED_PROOF_ROLLOUT_MODE");
-        std::env::set_var("MANAGED_PROOF_ROLLOUT_MODE", "observe");
-
-        let loaded = HivemindConfig::load_from_env();
-
-        match old {
-            Some(value) => std::env::set_var("MANAGED_PROOF_ROLLOUT_MODE", value),
-            None => std::env::remove_var("MANAGED_PROOF_ROLLOUT_MODE"),
-        }
-        assert_eq!(
-            loaded.managed_proof.rollout_mode,
-            ManagedProofRolloutMode::Observe
-        );
-    }
-
-    #[test]
-    fn managed_proof_rollout_rejects_unknown_environment_value() {
-        let _environment_lock = lock_environment();
-        let old = std::env::var_os("MANAGED_PROOF_ROLLOUT_MODE");
-        std::env::set_var("MANAGED_PROOF_ROLLOUT_MODE", "sometimes");
-
-        let mut config = HivemindConfig::default();
-        let error = config.apply_env_overrides().unwrap_err().to_string();
-
-        match old {
-            Some(value) => std::env::set_var("MANAGED_PROOF_ROLLOUT_MODE", value),
-            None => std::env::remove_var("MANAGED_PROOF_ROLLOUT_MODE"),
-        }
-        assert!(error.contains("MANAGED_PROOF_ROLLOUT_MODE"));
     }
 
     #[test]
@@ -1155,66 +1026,6 @@ mod tests {
             .expect("trusted worker registration");
         assert_eq!(registration.owner, "testuser");
         assert_eq!(registration.registration.worker.max_threads, 1);
-    }
-
-    #[test]
-    fn env_loading_overrides_managed_prover_settings() {
-        let _environment_lock = lock_environment();
-        let old_env = [
-            ("HIVEMIND_CONFIG", std::env::var_os("HIVEMIND_CONFIG")),
-            (
-                "MANAGED_PROVER_EXECUTABLE",
-                std::env::var_os("MANAGED_PROVER_EXECUTABLE"),
-            ),
-            (
-                "MANAGED_PROVER_TIMEOUT_SECS",
-                std::env::var_os("MANAGED_PROVER_TIMEOUT_SECS"),
-            ),
-        ];
-        std::env::remove_var("HIVEMIND_CONFIG");
-        std::env::set_var("MANAGED_PROVER_EXECUTABLE", "risc0-prover");
-        std::env::set_var("MANAGED_PROVER_TIMEOUT_SECS", "1200");
-
-        let loaded = HivemindConfig::load_from_env();
-
-        for (name, value) in old_env {
-            match value {
-                Some(value) => std::env::set_var(name, value),
-                None => std::env::remove_var(name),
-            }
-        }
-
-        assert_eq!(loaded.executor.managed_prover_executable, "risc0-prover");
-        assert_eq!(loaded.executor.managed_prover_timeout_secs, 1200);
-    }
-
-    #[test]
-    fn json_config_missing_managed_prover_settings_uses_defaults() {
-        let mut json = serde_json::to_value(HivemindConfig::default()).unwrap();
-        let executor = json
-            .get_mut("executor")
-            .and_then(serde_json::Value::as_object_mut)
-            .unwrap();
-        executor.remove("managed_prover_executable");
-        executor.remove("managed_prover_timeout_secs");
-
-        let config: HivemindConfig = serde_json::from_value(json).unwrap();
-
-        assert_eq!(config.executor.managed_prover_executable, "");
-        assert_eq!(config.executor.managed_prover_timeout_secs, 900);
-    }
-
-    #[test]
-    fn json_config_missing_managed_proof_settings_uses_enforce_default() {
-        let mut json = serde_json::to_value(HivemindConfig::default()).unwrap();
-        json.as_object_mut().unwrap().remove("managed_proof");
-
-        let config: HivemindConfig = serde_json::from_value(json).unwrap();
-
-        assert_eq!(
-            config.managed_proof.rollout_mode,
-            ManagedProofRolloutMode::Enforce
-        );
     }
 
     #[test]

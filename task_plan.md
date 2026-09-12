@@ -407,6 +407,18 @@
 
 狀態：`running`，尚未達可發布等級。
 
+## 2026-09-11 Release-gate recovery checkpoint
+
+- [x] Re-run affected-crate tests after canonical consensus digest, typed failure response, timeout-bound, sidecar-readiness, and rollout fixes: config 29, proto 23, scheduler 195 plus 1 intentional ignored, Worker executor 140; all failed counts zero.
+- [x] Re-run both workspace-scoped rustfmt checks; both passed without broad formatting of unrelated dirty files.
+- [x] Re-run main and isolated dependency audits; both exited successfully under their documented, narrowly scoped policies.
+- [x] Re-run Windows package, Windows prover verifier, and release-stack smoke contract tests; all passed.
+- [x] Run `git diff --check` and a secret-shaped scan that did not find matches in untracked files.
+- [x] Run OCI `-CheckOnly`; it failed closed because the operator registry was unset, so no real `-Run` evidence is claimed.
+- [ ] Real PostgreSQL settlement/integration validation remains blocked because no PostgreSQL client/server is available.
+- [ ] Native target-matched Windows PE proving, guest-image equality/attestation, clean-host proof verification, and proof-to-settlement evidence remain blocked/not-run.
+- **status:** local correctness/format/audit/contract gates complete; external/operator-dependent release gates remain blocked. Preserve dirty-tree changes and do not commit or push.
+
 已完成本機提交 `097c98a fix(runtime): enforce finite managed execution limits`：Worker 與 zkVM guest 現在共用有限的 `ExecutionLimits::default()` 安全界限，任務／envelope budget 仍是唯一計費上限；depth-65 回歸測試已證明舊 unlimited 策略會錯誤放行。
 
 目前 release blocker 與後續順序：

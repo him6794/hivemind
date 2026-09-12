@@ -38,7 +38,7 @@ export function Navbar() {
       <div className="mx-auto max-w-7xl px-4 sm:px-6">
         <nav className={cn(
           "relative flex h-14 items-center justify-between rounded-2xl px-3 transition-all duration-500 sm:px-4",
-          scrolled ? "glass-strong shadow-2xl shadow-black/30" : "border border-transparent"
+          scrolled ? "border border-border bg-background" : "border border-transparent"
         )}>
           <button
             type="button"
@@ -120,7 +120,7 @@ export function Navbar() {
               animate={{ opacity: 1, y: 0, height: "auto" }}
               exit={{ opacity: 0, y: -8, height: 0 }}
               transition={{ duration: 0.25 }}
-              className="mt-2 overflow-hidden rounded-2xl glass-strong p-2 md:hidden"
+              className="mt-2 overflow-hidden rounded-xl border border-border bg-card p-2 md:hidden"
             >
               {site.routes.map((item) => (
                 <button

@@ -171,89 +171,34 @@ When verification is complete, return to the repository root and run
 unlike the smoke harness, raw Compose requires secrets and the matching worker
 execution key pair to be supplied.
 
-### Managed-function proving
+### Managed consensus (opt-in)
 
-`managed-function-v0` tasks are settled only from a RISC Zero proof that the
-Nodepool verifies itself — a Worker's own usage numbers are never trusted. The
-Worker produces that proof by spawning an isolated prover sidecar, so a Worker
-that is meant to run managed tasks needs the sidecar binary present.
+The native Windows closed-DSL path can use Nodepool-coordinated replicated
+execution instead of a RISC Zero sidecar when explicitly enabled. Nodepool
+requires three distinct registered Workers and a strict majority of two by
+default. It accepts only matching canonical results from assigned Workers and
+persists a quorum certificate before completing or settling the task.
 
-#### Supported proving hosts
+Consensus is agreement evidence, not a zero-knowledge proof: a colluding or
+commonly compromised Worker majority can still agree on an incorrect result.
+Only deterministic, side-effect-free managed tasks are eligible. Worker usage
+claims remain non-authoritative, so consensus tasks use Nodepool-owned fixed
+reservation billing and never silently fall back to one Worker.
 
-| Proving host | Supported | Notes |
-|---|---|---|
-| Linux (`x86_64`) | Yes | The host the released sidecar is built on |
-| macOS | Yes | Supported by RISC Zero 3.0.6 |
-| WSL | Yes | Reports `Linux`, so it takes the supported Linux path |
-| Native Windows (MINGW/MSYS/Cygwin) | No | RISC Zero 3.0.6 ships no Windows prover |
+Enable the migration path on both Nodepool and consensus-capable Workers:
 
-There is no native Windows proving path, and Hivemind does not emulate one.
-`scripts/build-managed-prover.sh` refuses to run under a native Windows shell up
-front, rather than failing deep inside a RISC Zero build script.
-
-A native Windows Worker therefore has no prover sidecar to spawn. It can still
-run ordinary worker workloads, but under the default `enforce` rollout mode every
-managed task it is handed **fails closed** — never settled from unverified
-numbers. Managed tasks must run on a worker image or runtime that contains the
-Linux prover sidecar.
-
-`scripts/package-worker-windows.ps1` packages a native Windows worker and so
-stages no prover sidecar. The README it generates states that, rather than
-leaving a provider to infer it from managed tasks failing.
-
-Build the sidecar once on a supported host and stage it, then build the worker
-image:
-
-```bash
-bash scripts/build-managed-prover.sh   # writes packaging/managed-prover/
-docker compose build worker            # bakes it into /app/prover/
+```text
+MANAGED_CONSENSUS_ROLLOUT_MODE=enforce
+MANAGED_CONSENSUS_REPLICA_COUNT=3
+MANAGED_CONSENSUS_QUORUM=2
+MANAGED_CONSENSUS_MAX_RESULT_BYTES=262144
 ```
 
-From a Windows checkout, run the same build through WSL:
-
-```powershell
-wsl bash scripts/build-managed-prover.sh
-```
-
-#### Building without access to the RISC Zero artifact bucket
-
-The recursion circuit build downloads `recursion_zkr.zip` from
-`risc0-artifacts.s3.us-west-2.amazonaws.com`. Where network policy blocks that
-bucket, use `RECURSION_SRC_PATH` — the official upstream offline escape hatch —
-rather than patching anything in the RISC Zero registry sources:
-
-```bash
-RECURSION_SRC_PATH=/path/to/recursion_zkr.zip bash scripts/build-managed-prover.sh
-```
-
-`scripts/build-managed-prover.sh` verifies that artifact's SHA-256 against
-`744b999f0a35b3c86753311c7efb2a0054be21727095cf105af6ee7d3f4d8849` before
-handing it to Cargo, and aborts on a mismatch. This reuses a checked artifact —
-it does not skip the check. With `RECURSION_SRC_PATH` unset the script reuses a
-`recursion_zkr.zip` already present in the Cargo target tree under the same
-digest check, and otherwise leaves RISC Zero to its normal network download.
-
-#### Settlement behaviour
-
-`MANAGED_PROVER_EXECUTABLE` defaults to `/app/prover/hivemind-managed-proof-prover`
-under Compose. If the sidecar is missing, or its proof fails verification, the
-task fails — it is never settled from unverified numbers. Proving a single
-managed function currently takes roughly 570–580 seconds, which is why
-`MANAGED_PROVER_TIMEOUT_SECS` defaults to 900.
-
-`MANAGED_PROOF_ROLLOUT_MODE` controls the settlement policy and defaults to the
-fail-closed `enforce`. `observe` verifies proofs and records the outcome but
-still settles from the legacy path, which is useful for a monitored migration;
-`off` skips proof handling entirely and is an emergency rollback only. Both
-non-default modes settle from Worker-reported numbers, so neither is a
-trust-preserving configuration — watch
-`/api/admin/managed-proof/metrics` and the `managed_proof_verification` audit
-entries while either is active.
-
-Note which service takes which setting. `MANAGED_PROOF_ROLLOUT_MODE` belongs to
-the **nodepool**, because the nodepool owns the dispatcher that decides how a
-task settles; setting it on a worker has no effect at all. The prover settings
-belong to the **worker**, because that is where proving happens.
+The default remains `disabled` while legacy proof tasks drain. `observe` fans
+out replicas for canaries, records non-settling `OBSERVED` shadow state, and
+never exposes a billable result or falls back to one Worker. Do not describe a
+consensus certificate as cryptographic execution proof, and do not enable it
+for side-effecting tasks.
 
 ### Manual
 
@@ -292,9 +237,11 @@ Configuration is via environment variables:
 | `WORKER_GRPC_ADDR` | `0.0.0.0:50053` | Worker gRPC listen address |
 | `WORKER_ADVERTISE_ADDR` | - | Worker address registered with nodepool |
 | `EXECUTOR_SANDBOX_DIR` | `./sandbox` | Per-task working directory root |
-| `MANAGED_PROOF_ROLLOUT_MODE` | `enforce` | Managed-proof settlement policy: `off`, `observe`, or `enforce`; production default is fail-closed `enforce` |
-| `MANAGED_PROVER_EXECUTABLE` | - | Absolute path to the managed-proof prover sidecar, built on a Linux/macOS/WSL host; required for managed tasks in `enforce`. Unset on native Windows, where managed tasks fail closed |
-| `MANAGED_PROVER_TIMEOUT_SECS` | `900` | Bounded prover sidecar execution timeout |
+| `MANAGED_CONSENSUS_ROLLOUT_MODE` | `disabled` | Managed consensus rollout: `disabled`, `observe`, or `enforce`; enforce requires a strict-majority certificate |
+| `MANAGED_CONSENSUS_REPLICA_COUNT` | `3` | Distinct Worker replicas for consensus-managed tasks |
+| `MANAGED_CONSENSUS_QUORUM` | `2` | Required matching replicas; must be a strict majority |
+| `MANAGED_CONSENSUS_TIMEOUT_SECS` | `120` | Overall deadline for one consensus round |
+| `MANAGED_CONSENSUS_MAX_RESULT_BYTES` | `262144` | Nodepool/Worker cap for one consensus result |
 | `LOG_LEVEL` | `info` | Log level (debug, info, warn, error) |
 
 ## API Reference
@@ -345,15 +292,7 @@ curl "http://localhost:8082/api/admin/scheduling/cache-anomalies?limit=100" \
 # Admin audit logs (trust-control / artifact cleanup / etc.)
 curl "http://localhost:8082/api/admin/audit/logs?limit=100" \
   -H "Authorization: Bearer <admin-token>"
-
-# Managed-proof verification counters and active rollout mode (Nodepool-owned)
-curl http://localhost:8082/api/admin/managed-proof/metrics \
-  -H "Authorization: Bearer <admin-token>"
 ```
-
-Managed-proof verification and observe-mode fallback decisions are also written
-as `managed_proof_verification` entries in the admin audit log. The Nodepool is
-the only authority for these counters; a Master or Worker cannot edit them.
 
 ### Health Check
 

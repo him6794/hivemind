@@ -21,6 +21,7 @@ hivemind-database = { path = "../database" }
 hivemind-config = { path = "../config" }
 hivemind-auth = { path = "../auth" }
 hivemind-task-scheduler = { path = "../task-scheduler" }
+hivemind-managed-consensus = { path = "../managed-consensus" }
 hivemind-client-core = { path = "../client-core" }
 general-compute-runtime = { path = "../../../executor-rs/crates/general-compute-runtime" }
 tokio-stream.workspace = true

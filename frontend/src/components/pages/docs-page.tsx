@@ -21,7 +21,7 @@ const SECTIONS: { id: string; label: Copy }[] = [
 
 function CodeBlock({ children }: { children: string }) {
   return (
-    <pre className="mt-4 overflow-x-auto rounded-xl border border-border/60 bg-background/60 p-4 text-xs leading-relaxed">
+    <pre className="mt-4 overflow-x-auto rounded-xl border border-border/60 bg-background p-4 text-xs leading-relaxed">
       <code className="font-mono-tech">{children}</code>
     </pre>
   );
@@ -125,7 +125,7 @@ export function DocsPage() {
               <div key={group.id} className="mt-8">
                 <h3 className="text-lg font-semibold">{group.title}</h3>
                 <p className="mt-2 text-sm leading-relaxed text-muted-foreground">{group.note}</p>
-                <div className="mt-4 overflow-hidden rounded-2xl border border-border/60 bg-card/40">
+                <div className="mt-4 overflow-hidden rounded-xl border border-border bg-card">
                   {group.rows.map((row) => (
                     <div
                       key={`${row.method}-${row.path}`}
@@ -149,7 +149,7 @@ export function DocsPage() {
               en: "The request body for POST /api/tasks. A required field that is missing or invalid is rejected at submission time.",
             })}
           >
-            <div className="mt-6 overflow-hidden rounded-2xl border border-border/60 bg-card/40">
+            <div className="mt-6 overflow-hidden rounded-xl border border-border bg-card">
               {docs.taskFields.map((field: { name: string; type: string; required: string; note: string }) => (
                 <div
                   key={field.name}
@@ -219,7 +219,7 @@ export function DocsPage() {
                 {docs.language.forbidden.map((item: string) => (
                   <span
                     key={item}
-                    className="rounded-md border border-border/60 bg-background/50 px-2.5 py-1 text-xs text-muted-foreground"
+                    className="rounded-md border border-border/60 bg-background px-2.5 py-1 text-xs text-muted-foreground"
                   >
                     {item}
                   </span>
@@ -261,7 +261,7 @@ export function DocsPage() {
               en: "These are the ceilings in force today. A job that crosses one is rejected or stopped, never silently truncated.",
             })}
           >
-            <div className="mt-6 overflow-hidden rounded-2xl border border-border/60 bg-card/40">
+            <div className="mt-6 overflow-hidden rounded-xl border border-border bg-card">
               {docs.limits.map((limit: { name: string; value: string; note: string }) => (
                 <div
                   key={limit.name}
@@ -296,7 +296,7 @@ export function DocsPage() {
                   en: "These are the fixed costs for each callable function form. Argument evaluation, function bodies, and loop work add their own usage units on top.",
                 })}
               </p>
-              <div className="mt-4 overflow-hidden rounded-2xl border border-border/60 bg-card/40">
+              <div className="mt-4 overflow-hidden rounded-xl border border-border bg-card">
                 {docs.billing.functionRows.map((row: {
                   id: string;
                   name: string;
@@ -341,11 +341,11 @@ export function DocsPage() {
                     </div>
                     <CodeBlock>{example.program}</CodeBlock>
                     <div className="grid gap-2 text-sm sm:grid-cols-2">
-                      <div className="rounded-xl bg-background/50 p-3">
+                      <div className="rounded-xl bg-background p-3">
                         <div className="text-xs uppercase tracking-wide text-muted-foreground">usage units</div>
                         <div className="mt-1 font-mono-tech text-lg text-honey">{example.receiptUsageUnits}</div>
                       </div>
-                      <div className="rounded-xl bg-background/50 p-3">
+                      <div className="rounded-xl bg-background p-3">
                         <div className="text-xs uppercase tracking-wide text-muted-foreground">total CPT</div>
                         <div className="mt-1 font-mono-tech text-lg text-honey">{example.totalCpt}</div>
                       </div>
@@ -360,7 +360,7 @@ export function DocsPage() {
               <h3 className="text-lg font-semibold">
                 {t(locale, { zh: "平台支援矩陣", en: "Platform support matrix" })}
               </h3>
-              <div className="mt-4 overflow-hidden rounded-2xl border border-border/60 bg-card/40">
+              <div className="mt-4 overflow-hidden rounded-xl border border-border bg-card">
                 {docs.billing.platforms.map((platform: {
                   id: string;
                   name: string;
@@ -399,7 +399,7 @@ export function DocsPage() {
               en: "Every failed execution carries one of these codes in its receipt.",
             })}
           >
-            <div className="mt-6 overflow-hidden rounded-2xl border border-border/60 bg-card/40">
+            <div className="mt-6 overflow-hidden rounded-xl border border-border bg-card">
               {docs.failures.map((failure: { code: string; note: string }) => (
                 <div
                   key={failure.code}

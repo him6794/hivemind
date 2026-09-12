@@ -60,9 +60,12 @@ services:
       TORRENT_SEED_ADVERTISE_ADDR: ${TORRENT_SEED_ADVERTISE_ADDR:-nodepool:6881}
       TORRENT_ALLOW_LOCAL_TASK_ARTIFACTS: "false"
       # Settlement policy belongs to the nodepool: it owns the dispatcher that
-      # decides whether a managed task settles from a verified claim. Setting it
-      # on the worker has no effect.
-      MANAGED_PROOF_ROLLOUT_MODE: ${MANAGED_PROOF_ROLLOUT_MODE:-enforce}
+      # decides how a managed task settles from a quorum certificate.
+      MANAGED_CONSENSUS_ROLLOUT_MODE: ${MANAGED_CONSENSUS_ROLLOUT_MODE:-disabled}
+      MANAGED_CONSENSUS_REPLICA_COUNT: ${MANAGED_CONSENSUS_REPLICA_COUNT:-3}
+      MANAGED_CONSENSUS_QUORUM: ${MANAGED_CONSENSUS_QUORUM:-2}
+      MANAGED_CONSENSUS_TIMEOUT_SECS: ${MANAGED_CONSENSUS_TIMEOUT_SECS:-120}
+      MANAGED_CONSENSUS_MAX_RESULT_BYTES: ${MANAGED_CONSENSUS_MAX_RESULT_BYTES:-262144}
       # Explicitly opt-in bootstrap credentials are used by the reviewed OCI
       # E2E fixture only; the default keeps production deployments unseeded.
       HIVEMIND_SEED_DEFAULT_USER: ${HIVEMIND_SEED_DEFAULT_USER:-false}
@@ -104,6 +107,7 @@ services:
       NODEPOOL_GRPC_ENDPOINT: nodepool:50051
       MASTER_HTTP_ADDR: 0.0.0.0:8082
       MASTER_CORS_ALLOWED_ORIGINS: ${MASTER_CORS_ALLOWED_ORIGINS:-}
+      MASTER_DISABLE_WEBSITE_VPN: ${MASTER_DISABLE_WEBSITE_VPN:-1}
       TORRENT_API_DIR: /app/api/torrents
       TORRENT_BT_DIR: /app/bt_torrents
       TORRENT_ANNOUNCE_URL: ${HIVEMIND_TORRENT_ANNOUNCE_URL:-http://nodepool:6969/announce}
@@ -137,13 +141,15 @@ services:
       WORKER_ADVERTISE_ADDR: worker:50053
       WORKER_CONTROL_HTTP_ADDR: 0.0.0.0:18080
       WORKER_CONTROL_CORS_ALLOWED_ORIGINS: ${WORKER_CONTROL_CORS_ALLOWED_ORIGINS:-}
+      WORKER_DISABLE_WEBSITE_VPN: ${WORKER_DISABLE_WEBSITE_VPN:-1}
       TORRENT_API_DIR: /app/api/torrents
       TORRENT_BT_DIR: /app/bt_torrents
       TORRENT_ANNOUNCE_URL: ${HIVEMIND_TORRENT_ANNOUNCE_URL:-http://nodepool:6969/announce}
-      # Proving happens on the worker; the settlement policy that consumes the
-      # resulting proof is configured on the nodepool.
-      MANAGED_PROVER_EXECUTABLE: ${MANAGED_PROVER_EXECUTABLE:-/app/prover/hivemind-managed-proof-prover}
-      MANAGED_PROVER_TIMEOUT_SECS: ${MANAGED_PROVER_TIMEOUT_SECS:-900}
+      MANAGED_CONSENSUS_ROLLOUT_MODE: ${MANAGED_CONSENSUS_ROLLOUT_MODE:-disabled}
+      MANAGED_CONSENSUS_REPLICA_COUNT: ${MANAGED_CONSENSUS_REPLICA_COUNT:-3}
+      MANAGED_CONSENSUS_QUORUM: ${MANAGED_CONSENSUS_QUORUM:-2}
+      MANAGED_CONSENSUS_TIMEOUT_SECS: ${MANAGED_CONSENSUS_TIMEOUT_SECS:-120}
+      MANAGED_CONSENSUS_MAX_RESULT_BYTES: ${MANAGED_CONSENSUS_MAX_RESULT_BYTES:-262144}
       # Production general-compute configuration is deliberately addressed by
       # fixed paths inside the worker. The registry file and pinned runner are
       # operator-owned volume contents; the registry must name absolute

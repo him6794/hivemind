@@ -193,24 +193,6 @@
     background-color: var(--honey);
   }
 
-  /* Glass surface */
-  .glass {
-    background: oklch(1 0 0 / 0.04);
-    backdrop-filter: blur(16px) saturate(120%);
-    -webkit-backdrop-filter: blur(16px) saturate(120%);
-    border: 1px solid oklch(1 0 0 / 0.08);
-  }
-  /* The scrolled navbar sits over content, so it needs a real ground. At 6%
-     white the nav text and the cards underneath collided and both became
-     unreadable; backdrop-filter alone does not survive every renderer. */
-  .glass-strong {
-    background: color-mix(in oklch, var(--background) 97%, transparent);
-    backdrop-filter: blur(24px) saturate(140%);
-    -webkit-backdrop-filter: blur(24px) saturate(140%);
-    border: 1px solid var(--border);
-    box-shadow: 0 12px 32px -18px oklch(0 0 0 / 0.9);
-  }
-
 }
 
 /* Custom scrollbar (monochrome) */

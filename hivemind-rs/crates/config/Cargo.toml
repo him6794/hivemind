@@ -14,3 +14,4 @@ ed25519-dalek.workspace = true
 pkcs8.workspace = true
 rand.workspace = true
 general-compute-runtime = { path = "../../../executor-rs/crates/general-compute-runtime" }
+hivemind-managed-consensus = { path = "../managed-consensus" }

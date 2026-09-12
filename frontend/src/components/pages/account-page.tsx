@@ -58,7 +58,7 @@ export function AccountPage() {
       className="pt-32"
     >
       <div className="mt-10 grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
-        <Surface className="border-border/80 bg-card/70">
+        <Surface className="border-border/80 bg-card">
           <div className="flex items-start justify-between gap-4">
             <div>
               <div className="inline-flex items-center gap-2 rounded-full bg-honey/10 px-3 py-1 text-xs font-medium text-honey">
@@ -94,7 +94,7 @@ export function AccountPage() {
             />
           </div>
 
-          {status ? <div aria-live="polite" className="mt-6 rounded-xl border border-border/60 bg-background/40 p-4 text-sm text-muted-foreground">{status}</div> : null}
+          {status ? <div aria-live="polite" className="mt-6 rounded-xl border border-border/60 bg-background p-4 text-sm text-muted-foreground">{status}</div> : null}
         </Surface>
 
         <div className="grid gap-4">
@@ -102,7 +102,7 @@ export function AccountPage() {
             const icons = [CreditCard, Download, ShieldCheck];
             const Icon = icons[index % icons.length];
             return (
-              <Surface key={panel.title} className="bg-card/50">
+              <Surface key={panel.title} className="bg-card">
                 <div className="inline-flex size-10 items-center justify-center rounded-xl bg-honey/10 text-honey">
                   <Icon className="size-4.5" />
                 </div>
@@ -114,7 +114,7 @@ export function AccountPage() {
         </div>
       </div>
 
-      <Surface className="mt-8 border-border/80 bg-card/50">
+      <Surface className="mt-8 border-border/80 bg-card">
         <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div>
             <h3 className="text-lg font-semibold">

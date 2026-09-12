@@ -315,8 +315,6 @@
         "HIVEMIND_GENERAL_COMPUTE_PRODUCTION_BACKENDS": "/etc/hivemind/general-compute/backends.json",
         "JWT_SECRET": "test-jwt-secret",
         "LOG_LEVEL": "info",
-        "MANAGED_PROVER_EXECUTABLE": "/app/prover/hivemind-managed-proof-prover",
-        "MANAGED_PROVER_TIMEOUT_SECS": "900",
         "NODEPOOL_GRPC_ENDPOINT": "nodepool:50051",
         "TORRENT_ANNOUNCE_URL": "http://nodepool:6969/announce",
         "TORRENT_API_DIR": "/app/api/torrents",

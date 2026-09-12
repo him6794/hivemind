@@ -34,7 +34,7 @@ services:
       JWT_SECRET: ${TEST_JWT_SECRET:?TEST_JWT_SECRET must be set}
       HIVEMIND_ADMIN_USERS: testuser
       CARGO_INCREMENTAL: "0"
-      CARGO_BUILD_JOBS: "1"
+      CARGO_BUILD_JOBS: "${CARGO_BUILD_JOBS:-2}"
       RUSTFLAGS: -C debuginfo=0
     volumes:
       - .:/workspace

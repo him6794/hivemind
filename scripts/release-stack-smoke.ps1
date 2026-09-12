@@ -35,6 +35,8 @@ $managedEnvironmentNames = @(
     "MASTER_TORRENTS_VOLUME_NAME",
     "WORKER_TASK_DOWNLOADS_VOLUME_NAME",
     "WORKER_TORRENTS_VOLUME_NAME",
+    "WORKER_GENERAL_COMPUTE_CONFIG_VOLUME_NAME",
+    "WORKER_GENERAL_COMPUTE_STATE_VOLUME_NAME",
     "MASTER_CORS_ALLOWED_ORIGINS",
     "WORKER_CONTROL_CORS_ALLOWED_ORIGINS",
     "JWT_SECRET",
@@ -100,34 +102,6 @@ function Wait-ForHttpOk {
     }
 
     throw "Timed out waiting for $Uri. Last error: $lastError"
-}
-
-function Test-ManagedProverLaunch {
-    param([string]$WorkingDirectory)
-
-    Write-Host "RUN docker compose exec -T worker /app/prover/hivemind-managed-proof-prover (launch probe)"
-    $previousErrorActionPreference = $ErrorActionPreference
-    try {
-        # The probe intentionally exits 1 after parsing empty stdin. Do not let
-        # the script-wide Stop policy turn that expected native stderr into an
-        # exception before we can assert its contract.
-        $ErrorActionPreference = "Continue"
-        $proverOutput = @(& docker compose exec -T worker /app/prover/hivemind-managed-proof-prover 2>&1)
-        $proverExitCode = $LASTEXITCODE
-    }
-    finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-    }
-    $proverText = ($proverOutput | ForEach-Object { $_.ToString() }) -join "`n"
-
-    # Empty stdin must reach the sidecar parser and use its intentional generic
-    # failure. A loader error (for example a newer GLIBC requirement) proves
-    # that the packaged binary cannot run in the Worker runtime image.
-    if ($proverExitCode -ne 1 -or $proverText.Trim() -ne "managed proof generation failed") {
-        throw "Packaged managed prover launch probe failed. exit=$proverExitCode output=$proverText"
-    }
-
-    Write-Host "PASS packaged managed prover launches in the Worker runtime image"
 }
 
 function New-SecureEphemeralSecret {
@@ -264,6 +238,8 @@ try {
         MASTER_TORRENTS_VOLUME_NAME = "hivemind-smoke-${volumeRunId}-master-torrents"
         WORKER_TASK_DOWNLOADS_VOLUME_NAME = "hivemind-smoke-${volumeRunId}-worker-downloads"
         WORKER_TORRENTS_VOLUME_NAME = "hivemind-smoke-${volumeRunId}-worker-torrents"
+        WORKER_GENERAL_COMPUTE_CONFIG_VOLUME_NAME = "hivemind-smoke-${volumeRunId}-worker-general-compute-config"
+        WORKER_GENERAL_COMPUTE_STATE_VOLUME_NAME = "hivemind-smoke-${volumeRunId}-worker-general-compute-state"
     }
     foreach ($name in $ephemeralVolumeNames.Keys) {
         if ([string]::IsNullOrWhiteSpace($originalEnvironment[$name])) {
@@ -390,8 +366,6 @@ try {
             Wait-ForHttpOk -Uri $service.Uri -ExpectedContent $service.Match -TimeoutSeconds $StartupTimeoutSeconds
             Write-Host "PASS $($service.Name) $($service.Uri)"
         }
-
-        Test-ManagedProverLaunch -WorkingDirectory $repoRoot
 
         Write-Host "release stack smoke passed for official site, customer app, worker app, api, and worker control"
     }

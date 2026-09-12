@@ -1,18 +1,29 @@
+use prost::Message;
+use sha2::{Digest, Sha256};
+
 tonic::include_proto!("nodepool");
 
-pub mod managedprover {
-    tonic::include_proto!("managedprover");
+/// Return the consensus result representation used for quorum identity.
+///
+/// Usage and operation counts are worker-reported diagnostics, not deterministic
+/// execution output, so they must not split otherwise matching results into
+/// separate quorum groups.
+pub fn canonical_managed_consensus_result(
+    result: &ManagedConsensusResult,
+) -> ManagedConsensusResult {
+    let mut canonical = result.clone();
+    canonical.usage_units = 0;
+    canonical.executed_ops = 0;
+    canonical
 }
 
-/// Maximum encoded size of one remote managed-proof request or response RPC
-/// message. The proof envelope itself remains bounded by the stricter
-/// `MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES` limit below.
-pub const MANAGED_PROVER_RPC_MESSAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
-
-pub use managedprover::managed_proof_provider_client::ManagedProofProviderClient;
-pub use managedprover::managed_proof_provider_server::{
-    ManagedProofProvider, ManagedProofProviderServer,
-};
+pub fn managed_consensus_result_digest(result: &ManagedConsensusResult) -> String {
+    let canonical = canonical_managed_consensus_result(result);
+    format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(canonical.encode_to_vec()))
+    )
+}
 
 /// Maximum UTF-8 byte length accepted for any task identifier at an admission boundary.
 pub const TASK_ID_MAX_BYTES: usize = 255;
@@ -66,10 +77,107 @@ pub const WORKER_STATUS_MESSAGE_MAX_BYTES: usize = 1024 * 1024;
 /// Maximum legacy managed-receipt byte length accepted in a Worker execution response.
 pub const LEGACY_MANAGED_RECEIPT_MAX_BYTES: usize = 64 * 1024;
 
-/// Maximum encoded managed-proof protobuf message accepted across the verifier RPC boundary.
-pub const MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES: usize = 2_166_784;
+/// Maximum serialized size accepted for one managed consensus result.
+pub const MANAGED_CONSENSUS_RESULT_MAX_BYTES: usize = 512 * 1024;
 
-/// Maximum gRPC message size used by the frozen managed-function-v0 contract.
+/// Maximum serialized size accepted for one Nodepool-derived consensus certificate.
+pub const MANAGED_CONSENSUS_CERTIFICATE_MAX_BYTES: usize = 128 * 1024;
+
+/// Maximum number of replicas admitted to one managed consensus round.
+pub const MANAGED_CONSENSUS_MAX_REPLICAS: u32 = 7;
+
+/// Validate the additional identity fields used by a managed consensus request.
+/// Legacy requests keep version zero and are intentionally accepted by this
+/// helper so the existing proof/general-compute/GPU paths remain compatible.
+pub fn validate_managed_consensus_request(
+    request: &ExecuteTaskRequest,
+) -> Result<(), &'static str> {
+    if request.consensus_protocol_version == 0 {
+        return Ok(());
+    }
+    if request.consensus_protocol_version != 1 {
+        return Err("unsupported managed consensus protocol version");
+    }
+    if !matches!(
+        request.runtime.as_str(),
+        "managed-function-v0" | "production_sandboxed_dsl"
+    ) {
+        return Err("managed consensus is only supported for managed DSL runtimes");
+    }
+    for (field, value) in [
+        ("task_id", request.task_id.as_str()),
+        ("execution_id", request.execution_id.as_str()),
+        ("attempt_id", request.attempt_id.as_str()),
+        ("idempotency_key", request.idempotency_key.as_str()),
+        ("request_digest", request.request_digest.as_str()),
+        ("consensus_round_id", request.consensus_round_id.as_str()),
+        ("replica_id", request.replica_id.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err("managed consensus request identity is incomplete");
+        }
+        let max_bytes = if field == "request_digest" {
+            71
+        } else {
+            GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES
+        };
+        if value.len() > max_bytes {
+            return Err("managed consensus identity exceeds the byte limit");
+        }
+    }
+    Ok(())
+}
+
+/// Validate the bounded typed result returned by a consensus-mode Worker.
+pub fn validate_managed_consensus_response(
+    response: &ExecuteTaskResponse,
+) -> Result<(), &'static str> {
+    if response.consensus_protocol_version == 0
+        && response.managed_consensus_result.is_none()
+        && response.managed_consensus_result_digest.is_empty()
+    {
+        return Ok(());
+    }
+    if response.consensus_protocol_version != 1 {
+        return Err("unsupported managed consensus protocol version");
+    }
+    for (field, value) in [
+        ("execution_id", response.execution_id.as_str()),
+        ("attempt_id", response.attempt_id.as_str()),
+        ("idempotency_key", response.idempotency_key.as_str()),
+        ("request_digest", response.request_digest.as_str()),
+        ("consensus_round_id", response.consensus_round_id.as_str()),
+        ("replica_id", response.replica_id.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err("managed consensus response identity is incomplete");
+        }
+        let max_bytes = if field == "request_digest" {
+            71
+        } else {
+            GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES
+        };
+        if value.len() > max_bytes {
+            return Err("managed consensus identity exceeds the byte limit");
+        }
+    }
+    let Some(result) = response.managed_consensus_result.as_ref() else {
+        return Err("managed consensus result is missing");
+    };
+    if response.managed_consensus_result_digest.len() > 71
+        || result.encoded_len() > MANAGED_CONSENSUS_RESULT_MAX_BYTES
+    {
+        return Err("managed consensus result exceeds the byte limit");
+    }
+    if result.protocol_version != response.consensus_protocol_version {
+        return Err("managed consensus result protocol version does not match response");
+    }
+    if result.output_bytes != result.output.len() as u64 {
+        return Err("managed consensus result output length does not match payload");
+    }
+    Ok(())
+}
+
 ///
 /// This value remains in the v0 semantics manifest even though the shared Worker
 /// service now has a larger cap for the separately versioned GPU-v1 route.
@@ -240,6 +348,9 @@ pub fn validate_general_compute_artifact_chunk_upload(
     if upload.artifact_id.trim().is_empty() {
         return Err("artifact upload artifact id is required");
     }
+    if upload.artifact_id.len() > GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES {
+        return Err("artifact upload artifact id exceeds the byte limit");
+    }
     if upload.offset < 0 {
         return Err("artifact upload offset must not be negative");
     }
@@ -275,6 +386,14 @@ fn validate_chunk_identity(
         || artifact_id.trim().is_empty()
     {
         return Err("chunk transfer identity fields are required");
+    }
+    if token.len() > WORKER_EXECUTION_TOKEN_MAX_BYTES {
+        return Err("chunk transfer token exceeds the byte limit");
+    }
+    for value in [execution_id, attempt_id, idempotency_key, artifact_id] {
+        if value.len() > GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES {
+            return Err("chunk transfer identity field exceeds the byte limit");
+        }
     }
     if !is_sha256_digest(request_digest) {
         return Err("request digest must be a sha256 digest");
@@ -450,25 +569,26 @@ mod tests {
     use prost::Message;
 
     use super::{
-        validate_general_compute_artifact_chunk_upload,
+        managed_consensus_result_digest, validate_general_compute_artifact_chunk_upload,
         validate_general_compute_chunk_resume_request, validate_general_compute_chunk_upload,
         validate_general_compute_prepare_request, validate_general_compute_transfer_lease_request,
+        validate_managed_consensus_request, validate_managed_consensus_response,
         validate_worker_session_client_frame, validate_worker_session_server_frame,
         worker_session_client_frame, worker_session_server_frame, ExecuteTaskRequest,
         ExecuteTaskResponse, GeneralComputeArtifactChunkUpload, GeneralComputeChunkDescriptor,
         GeneralComputeChunkResumeRequest, GeneralComputeChunkResumeResponse,
         GeneralComputeChunkUpload, GeneralComputeChunkUploadResponse, GeneralComputePrepareRequest,
-        GeneralComputePrepareResponse, ManagedProofEnvelope, UploadTaskRequest,
-        ValidateGeneralComputeTransferLeaseRequest, ValidateGeneralComputeTransferLeaseResponse,
-        WorkerCapabilityReport, WorkerSessionCancelAck, WorkerSessionClientFrame,
-        WorkerSessionHello, WorkerSessionServerFrame, WorkerSessionTask,
-        GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES, GENERAL_COMPUTE_CHUNK_UPLOAD_MAX_BYTES,
-        GENERAL_COMPUTE_MANIFEST_MAX_BYTES, GENERAL_COMPUTE_RESULT_MAX_BYTES,
-        GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES,
+        GeneralComputePrepareResponse, ManagedConsensusResult,
+        UploadTaskRequest, ValidateGeneralComputeTransferLeaseRequest,
+        ValidateGeneralComputeTransferLeaseResponse, WorkerCapabilityReport,
+        WorkerSessionCancelAck, WorkerSessionClientFrame, WorkerSessionHello,
+        WorkerSessionServerFrame, WorkerSessionTask, GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES,
+        GENERAL_COMPUTE_CHUNK_UPLOAD_MAX_BYTES, GENERAL_COMPUTE_MANIFEST_MAX_BYTES,
+        GENERAL_COMPUTE_RESULT_MAX_BYTES, GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES,
         GENERAL_COMPUTE_TRANSFER_LEASE_RPC_MESSAGE_MAX_BYTES, LEGACY_MANAGED_RECEIPT_MAX_BYTES,
         MANAGED_BUDGET_MAX_USAGE_UNITS, MANAGED_GPU_MANIFEST_MAX_BYTES,
         MANAGED_GPU_RESULT_MAX_BYTES, MANAGED_JSON_INPUT_MAX_BYTES,
-        MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES, MANAGED_TASK_SOURCE_MAX_BYTES, TASK_ID_MAX_BYTES,
+        MANAGED_TASK_SOURCE_MAX_BYTES, TASK_ID_MAX_BYTES,
         WORKER_EXECUTION_TOKEN_MAX_BYTES, WORKER_RPC_MESSAGE_MAX_BYTES,
         WORKER_STATUS_MESSAGE_MAX_BYTES,
     };
@@ -483,7 +603,6 @@ mod tests {
         assert_eq!(MANAGED_GPU_MANIFEST_MAX_BYTES, 20 * 1024 * 1024);
         assert_eq!(MANAGED_GPU_RESULT_MAX_BYTES, 16 * 1024 * 1024);
         assert_eq!(MANAGED_BUDGET_MAX_USAGE_UNITS, 1_000_000);
-        assert_eq!(MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES, 2_166_784);
         assert_eq!(WORKER_STATUS_MESSAGE_MAX_BYTES, 1024 * 1024);
         assert_eq!(LEGACY_MANAGED_RECEIPT_MAX_BYTES, 64 * 1024);
         assert_eq!(WORKER_EXECUTION_TOKEN_MAX_BYTES, 8 * 1024);
@@ -502,19 +621,13 @@ mod tests {
             managed_executed_ops: i64::MAX,
             managed_output_bytes: i64::MAX,
             managed_receipt_json: "x".repeat(LEGACY_MANAGED_RECEIPT_MAX_BYTES),
-            managed_proof: Some(ManagedProofEnvelope {
-                receipt_json: vec![0; MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES - 16],
-                ..ManagedProofEnvelope::default()
-            }),
             ..ExecuteTaskResponse::default()
         };
         let worker_rpc_message_max_bytes = std::hint::black_box(WORKER_RPC_MESSAGE_MAX_BYTES);
 
         assert!(
             worker_rpc_message_max_bytes
-                >= MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES
-                    + WORKER_STATUS_MESSAGE_MAX_BYTES
-                    + LEGACY_MANAGED_RECEIPT_MAX_BYTES
+                >= WORKER_STATUS_MESSAGE_MAX_BYTES + LEGACY_MANAGED_RECEIPT_MAX_BYTES
         );
         assert_eq!(worker_rpc_message_max_bytes, 22 * 1024 * 1024);
         assert!(response.encoded_len() <= worker_rpc_message_max_bytes);
@@ -538,29 +651,87 @@ mod tests {
     }
 
     #[test]
-    fn managed_proof_envelope_round_trips_on_execute_response() {
+    fn managed_consensus_request_and_result_round_trip_with_identity() {
+        let request = ExecuteTaskRequest {
+            task_id: "task-1".into(),
+            runtime: "managed-function-v0".into(),
+            execution_id: "execution-1".into(),
+            attempt_id: "attempt-1".into(),
+            idempotency_key: "idempotency-1".into(),
+            request_digest: "sha256:request".into(),
+            consensus_round_id: "round-1".into(),
+            replica_id: "replica-1".into(),
+            consensus_protocol_version: 1,
+            ..ExecuteTaskRequest::default()
+        };
+        validate_managed_consensus_request(&request).unwrap();
         let response = ExecuteTaskResponse {
-            success: true,
-            status_message: "42".into(),
-            managed_executed_ops: 17,
-            managed_output_bytes: 2,
-            managed_receipt_json: "{}".into(),
-            managed_proof: Some(ManagedProofEnvelope {
-                proof_scheme: "risc0-zkvm-3.0.6".into(),
-                image_id: vec![1, 2, 3, 4, 5, 6, 7, 8],
-                journal: br#"{"usage_units":17}"#.to_vec(),
-                receipt_json: br#"{"inner":{}}"#.to_vec(),
+            execution_id: "execution-1".into(),
+            attempt_id: "attempt-1".into(),
+            idempotency_key: "idempotency-1".into(),
+            request_digest: "sha256:request".into(),
+            consensus_round_id: "round-1".into(),
+            replica_id: "replica-1".into(),
+            consensus_protocol_version: 1,
+            managed_consensus_result: Some(ManagedConsensusResult {
+                protocol_version: 1,
+                status: "completed".into(),
+                output: b"ok".to_vec(),
+                output_bytes: 2,
+                ..ManagedConsensusResult::default()
             }),
+            managed_consensus_result_digest: "sha256:digest".into(),
             ..ExecuteTaskResponse::default()
         };
-
+        validate_managed_consensus_response(&response).unwrap();
         let decoded = ExecuteTaskResponse::decode(response.encode_to_vec().as_slice()).unwrap();
-        let proof = decoded.managed_proof.expect("proof envelope is present");
+        assert_eq!(decoded.replica_id, "replica-1");
+        assert_eq!(decoded.managed_consensus_result.unwrap().output, b"ok");
+        let mut incomplete = request;
+        incomplete.request_digest.clear();
+        assert_eq!(
+            validate_managed_consensus_request(&incomplete),
+            Err("managed consensus request identity is incomplete")
+        );
+    }
 
-        assert_eq!(proof.proof_scheme, "risc0-zkvm-3.0.6");
-        assert_eq!(proof.image_id, vec![1, 2, 3, 4, 5, 6, 7, 8]);
-        assert_eq!(proof.journal, br#"{"usage_units":17}"#);
-        assert_eq!(proof.receipt_json, br#"{"inner":{}}"#);
+    #[test]
+    fn managed_consensus_response_rejects_incomplete_identity() {
+        let response = ExecuteTaskResponse {
+            consensus_protocol_version: 1,
+            ..ExecuteTaskResponse::default()
+        };
+        assert_eq!(
+            validate_managed_consensus_response(&response),
+            Err("managed consensus response identity is incomplete")
+        );
+    }
+
+    #[test]
+    fn managed_consensus_digest_excludes_diagnostic_claims() {
+        let mut first = ManagedConsensusResult {
+            protocol_version: 1,
+            status: "completed".into(),
+            output: b"ok".to_vec(),
+            output_bytes: 2,
+            usage_units: 3,
+            executed_ops: 4,
+            ..ManagedConsensusResult::default()
+        };
+        let mut second = first.clone();
+        second.usage_units = 300;
+        second.executed_ops = 400;
+
+        assert_eq!(
+            managed_consensus_result_digest(&first),
+            managed_consensus_result_digest(&second)
+        );
+        first.usage_units = 0;
+        first.executed_ops = 0;
+        assert_eq!(
+            managed_consensus_result_digest(&first),
+            managed_consensus_result_digest(&second)
+        );
     }
 
     #[test]
@@ -825,6 +996,18 @@ mod tests {
             Ok(())
         );
 
+        upload.artifact_id = "a".repeat(GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES);
+        assert_eq!(
+            validate_general_compute_artifact_chunk_upload(&upload),
+            Ok(())
+        );
+        upload.artifact_id.push('a');
+        assert_eq!(
+            validate_general_compute_artifact_chunk_upload(&upload),
+            Err("artifact upload artifact id exceeds the byte limit")
+        );
+        upload.artifact_id = "source".into();
+
         upload.bytes.pop();
         assert_eq!(
             validate_general_compute_artifact_chunk_upload(&upload),
@@ -842,6 +1025,59 @@ mod tests {
             validate_general_compute_artifact_chunk_upload(&upload),
             Err("artifact upload size must be positive")
         );
+    }
+
+    #[test]
+    fn general_compute_chunk_identity_rejects_oversized_fields() {
+        let valid = GeneralComputeChunkUpload {
+            token: "nodepool-token".into(),
+            execution_id: "execution-1".into(),
+            attempt_id: "attempt-1".into(),
+            idempotency_key: "idempotency-1".into(),
+            request_digest:
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
+            artifact_id: "source".into(),
+            offset: 0,
+            size_bytes: 4,
+            sha256: "sha256:3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7"
+                .into(),
+            bytes: b"data".to_vec(),
+            transfer_generation: 1,
+        };
+        validate_general_compute_chunk_upload(&valid).unwrap();
+
+        for field in [
+            "execution_id",
+            "attempt_id",
+            "idempotency_key",
+            "artifact_id",
+        ] {
+            let mut oversized = valid.clone();
+            match field {
+                "execution_id" => {
+                    oversized.execution_id = "x".repeat(GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES + 1)
+                }
+                "attempt_id" => {
+                    oversized.attempt_id = "x".repeat(GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES + 1)
+                }
+                "idempotency_key" => {
+                    oversized.idempotency_key =
+                        "x".repeat(GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES + 1)
+                }
+                "artifact_id" => {
+                    oversized.artifact_id = "x".repeat(GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES + 1)
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                validate_general_compute_chunk_upload(&oversized).is_err(),
+                "oversized {field} must be rejected"
+            );
+        }
+
+        let mut oversized_token = valid;
+        oversized_token.token = "x".repeat(WORKER_EXECUTION_TOKEN_MAX_BYTES + 1);
+        assert!(validate_general_compute_chunk_upload(&oversized_token).is_err());
     }
 
     #[test]

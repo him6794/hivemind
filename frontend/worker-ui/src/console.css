@@ -12,10 +12,7 @@
 body {
   margin: 0;
   min-width: 320px;
-  background:
-    radial-gradient(circle at 16% 8%, rgb(255 255 255 / 0.08), transparent 28rem),
-    radial-gradient(circle at 84% 14%, rgb(255 255 255 / 0.06), transparent 26rem),
-    #111;
+  background: #111;
 }
 
 button,
@@ -34,27 +31,6 @@ input:disabled {
   min-height: 100vh;
   overflow: hidden;
   padding: 32px 20px 48px;
-}
-
-.app-shell::before {
-  position: fixed;
-  inset: 0;
-  z-index: -2;
-  content: "";
-  background-image:
-    linear-gradient(to right, rgb(255 255 255 / 0.045) 1px, transparent 1px),
-    linear-gradient(to bottom, rgb(255 255 255 / 0.045) 1px, transparent 1px);
-  background-size: 56px 56px;
-  mask-image: radial-gradient(ellipse 82% 60% at 50% 0%, #000 28%, transparent 78%);
-}
-
-.app-shell::after {
-  position: fixed;
-  inset: auto 0 0;
-  z-index: -1;
-  height: 40vh;
-  content: "";
-  background: linear-gradient(to bottom, transparent, #111 72%);
 }
 
 .app-container {
@@ -84,8 +60,7 @@ input:disabled {
   place-items: center;
   border: 1px solid rgb(255 255 255 / 0.16);
   border-radius: 12px;
-  background: rgb(255 255 255 / 0.06);
-  box-shadow: 0 0 34px -16px rgb(255 255 255 / 0.85);
+  background: #1b1b1b;
 }
 
 .brand-mark::before {
@@ -144,13 +119,8 @@ h2 {
 
 .surface {
   border: 1px solid rgb(255 255 255 / 0.1);
-  border-radius: 16px;
-  background: rgb(255 255 255 / 0.045);
-  box-shadow:
-    0 1px 0 rgb(255 255 255 / 0.08) inset,
-    0 24px 70px rgb(0 0 0 / 0.28);
-  backdrop-filter: blur(18px) saturate(125%);
-  -webkit-backdrop-filter: blur(18px) saturate(125%);
+  border-radius: 12px;
+  background: #181818;
   padding: 18px;
 }
 
@@ -189,15 +159,16 @@ label {
   margin-top: 7px;
   padding: 11px 12px;
   border: 1px solid rgb(255 255 255 / 0.13);
-  border-radius: 12px;
+  border-radius: 10px;
   outline: none;
   color: #f5f5f5;
-  background: rgb(0 0 0 / 0.22);
+  background: #0f0f0f;
 }
 
-.field:focus {
+.field:focus-visible {
   border-color: rgb(255 255 255 / 0.42);
-  box-shadow: 0 0 0 3px rgb(255 255 255 / 0.08);
+  outline: 2px solid rgb(255 255 255 / 0.28);
+  outline-offset: 2px;
 }
 
 .field.error {
@@ -212,18 +183,22 @@ label {
   gap: 8px;
   padding: 10px 14px;
   border: 1px solid rgb(255 255 255 / 0.12);
-  border-radius: 12px;
+  border-radius: 10px;
   color: #f6f6f6;
-  background: rgb(255 255 255 / 0.07);
+  background: #202020;
   cursor: pointer;
   font-size: 13px;
   font-weight: 700;
 }
 
+.button:focus-visible {
+  outline: 2px solid rgb(255 255 255 / 0.72);
+  outline-offset: 2px;
+}
+
 .button.primary {
   color: #111;
   background: #f6f6f6;
-  box-shadow: 0 0 26px -12px rgb(255 255 255 / 0.9);
 }
 
 .button.ghost {
@@ -234,21 +209,21 @@ label {
   margin-top: 12px;
   padding: 11px 12px;
   border: 1px solid rgb(255 255 255 / 0.08);
-  border-radius: 12px;
+  border-radius: 10px;
   color: rgb(255 255 255 / 0.75);
-  background: rgb(255 255 255 / 0.045);
+  background: #1b1b1b;
 }
 
 .status.success {
   color: #dcffe8;
   border-color: rgb(107 255 166 / 0.18);
-  background: rgb(107 255 166 / 0.08);
+  background: #163c27;
 }
 
 .status.error {
   color: #ffd8d4;
   border-color: rgb(255 139 127 / 0.22);
-  background: rgb(255 139 127 / 0.08);
+  background: #3d211f;
 }
 
 .actions {

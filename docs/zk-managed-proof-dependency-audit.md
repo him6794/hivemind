@@ -12,21 +12,43 @@ so its dependency graph is the one that must stay clean. The prover only
 produces a candidate proof; if it is compromised or wrong, the Nodepool rejects
 the envelope and the task fails closed.
 
-## `hivemind-rs`: clean
+## `hivemind-rs`: one narrowly scoped accepted advisory
 
 ```
 cd hivemind-rs && cargo audit
 ```
 
-0 vulnerabilities. Three warnings are accepted and unrelated to proving:
+The audit exits successfully with one explicitly ignored advisory and four
+non-vulnerability warnings. The policy is in `hivemind-rs/.cargo/audit.toml`;
+the ignored advisory is documented below. The remaining warnings are
 `derivative` (RUSTSEC-2024-0388, unmaintained), `paste` (RUSTSEC-2024-0436,
-unmaintained), and a yanked `spin 0.9.8`. None is a vulnerability and none is
-reachable from the verifier's decision path.
+unmaintained), and yanked `chacha20 0.10.0` and `spin 0.9.8`.
 
-The verifier deliberately keeps a narrow feature graph — `risc0-verifier`
-enables only the protobuf transport, a no-default-feature RISC Zero verifier,
-and `disable-dev-mode`. It does not enable `std`, `prove`, methods, or the
-Docker builder, which is why the prover's advisories below do not appear here.
+### RUSTSEC-2023-0071 — `rsa 0.9.10`, Marvin timing side channel
+
+Dependency path:
+
+```
+rsa v0.9.10
+└── jsonwebtoken v10.4.0 (rust_crypto provider)
+    └── Hivemind auth/config/service crates
+```
+
+No fixed release exists. The `rust_crypto` provider exposes RSA support and
+therefore places `rsa` in the lockfile, but Hivemind's JWT contracts use only
+EdDSA/Ed25519 and HMAC. The source tree contains no RSA JWT algorithm, RSA key
+constructor, or RSA signing/decryption call path; the optional RSA code is not
+reachable from the shipped authentication flows. This is a precise audit
+suppression, not a claim that `rsa` is generally safe.
+
+Re-review this policy if jsonwebtoken changes provider features, an RSA
+algorithm/key path is introduced, or a fixed `rsa` release becomes available.
+
+The verifier's separate RISC Zero graph remains intentionally narrow:
+`hivemind-managed-proof` enables only the protobuf transport, a
+no-default-feature RISC Zero verifier, and `disable-dev-mode`. It does not
+enable `std`, `prove`, methods, or the Docker builder, which is why the
+prover/toolchain advisories below do not appear in the main workspace.
 
 ## `zkvm/managed-proof`: two accepted advisories
 

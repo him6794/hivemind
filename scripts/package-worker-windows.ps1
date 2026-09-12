@@ -164,11 +164,6 @@ WORKER_ID=
 WORKER_LOCATION=windows
 
 JWT_SECRET=
-# Managed-function proving is unsupported on native Windows: RISC Zero proving
-# hosts are Linux, macOS, and WSL. This package ships no prover sidecar, so
-# MANAGED_PROVER_EXECUTABLE stays unset and managed tasks fail closed here.
-# Managed tasks must run on a worker image or runtime that contains the Linux
-# prover sidecar.
 EXECUTOR_SANDBOX_DIR=.\sandbox
 EXECUTOR_MAX_CPU_PERCENT=80
 EXECUTOR_MAX_MEMORY_MB=4096
@@ -433,7 +428,7 @@ $readme = @'
 6. No static Worker ID or reusable nodepool token is required. Worker identity is server-assigned at enrollment; `WORKER_NODEPOOL_TOKEN`, `WORKER_NODEPOOL_USERNAME`, and `WORKER_NODEPOOL_PASSWORD` remain only as explicit legacy/private-deployment overrides.
 7. `WORKER_ADVERTISE_ADDR` is optional. Workers without any inbound address register session-only: task delivery flows through the outbound worker session instead of a Nodepool-to-worker callback.
 8. `JWT_SECRET` will be generated automatically on first launch if it is blank. Set it explicitly if you need a fixed deployment secret.
-9. Run PowerShell as the provider user and execute:
+9. Run PowerShell as the operator user and execute:
 
 ```powershell
 .\start-worker.ps1
@@ -441,31 +436,7 @@ $readme = @'
 
 The worker joins Headscale before startup-dependent registration, waits for the Nodepool gRPC transport, then starts its gRPC server, local control API, hardware profile reporting, registration loop, and the outbound session loop that receives tasks and returns results. Without `WORKER_VPN_AUTHKEY`, the local UI remains available while enrollment waits for an authenticated login. If the JWT expires or the device state is revoked, sign in again; no password, `HEADSCALE_API_KEY`, or reusable Headscale key is written to the package or browser storage.
 
-The downloaded Worker runs on the provider's local suitable host. Orange Pi is reserved for Nodepool, Website API, Headscale, PostgreSQL, and Redis; do not deploy this Worker package there.
-
-## Managed proving
-
-Windows workers run ordinary worker workloads, but this package does not include
-a RISC Zero prover sidecar: RISC Zero proving hosts are Linux, macOS, and WSL,
-and native Windows proving is unsupported. Managed proving therefore fails closed
-on this worker - `managed-function-v0` tasks are rejected rather than settled
-from unverified numbers. That is the intended safe behaviour, not a silent
-downgrade, which is why `MANAGED_PROVER_EXECUTABLE` is left unset here; pointing
-it at a Windows path does not make proving work.
-
-Managed tasks must run on a worker image or runtime that contains the Linux
-prover sidecar, so managed proving requires deploying this worker on a supported
-Linux-based runtime instead. Build that sidecar on a Linux, macOS, or WSL host.
-From a Windows checkout of the repository:
-
-```powershell
-wsl bash scripts/build-managed-prover.sh
-```
-
-Where network policy blocks the RISC Zero artifact bucket, point
-`RECURSION_SRC_PATH` at a local `recursion_zkr.zip`. That is the official
-upstream offline escape hatch: the build script verifies the artifact SHA-256
-against a pinned digest instead of patching RISC Zero registry sources.
+The downloaded Worker runs on the operator's suitable local host. Orange Pi is reserved for Nodepool, Website API, Headscale, PostgreSQL, and Redis; do not deploy this Worker package there.
 '@
 $readme | Set-Content -Encoding ASCII (Join-Path $out "README.md")
 

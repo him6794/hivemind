@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 tonic.workspace = true
 prost.workspace = true
+hex.workspace = true
+sha2.workspace = true
 
 [build-dependencies]
 tonic-build = "0.13"

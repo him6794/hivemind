@@ -36,7 +36,7 @@ export function LocaleToggle({ className }: { className?: string }) {
         <Languages className="size-4" />
       </button>
       {open ? (
-        <div className="absolute right-0 top-full z-50 mt-2 w-40 overflow-hidden rounded-xl border border-border/60 bg-card/95 p-1 shadow-2xl backdrop-blur-2xl">
+        <div className="absolute right-0 top-full z-50 mt-2 w-40 overflow-hidden rounded-xl border border-border bg-card p-1">
           {options.map((option) => (
             <button
               key={option.value}

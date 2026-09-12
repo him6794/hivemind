@@ -45,6 +45,8 @@ pub const MAX_THREADS: u32 = 4096;
 pub const MAX_SCRATCH_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 pub const MAX_OUTPUT_BYTES: u64 = 1024 * 1024 * 1024;
 pub const MAX_ARTIFACT_BYTES: u64 = 1024 * 1024 * 1024;
+/// Maximum UTF-8 byte length for an artifact identity persisted by Nodepool.
+pub const MAX_ARTIFACT_ID_BYTES: usize = 255;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const PRODUCTION_RESULT_PROTOCOL_VERSION: &str = "general-compute-result-v1";
 /// Versioned framing used to bind a production result to the exact source and
@@ -1130,6 +1132,9 @@ pub struct ArtifactManifest {
 /// ids are materialized below an operator-owned root, so separators, rooted
 /// paths, drive prefixes, and traversal components are never valid ids.
 pub fn validate_artifact_id(value: &str) -> Result<(), String> {
+    if value.len() > MAX_ARTIFACT_ID_BYTES {
+        return Err("artifact id exceeds the byte limit".into());
+    }
     if value.trim().is_empty()
         || value == "."
         || value == ".."

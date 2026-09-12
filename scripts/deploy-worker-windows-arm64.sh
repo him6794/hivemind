@@ -6,8 +6,8 @@ usage() {
 Usage: deploy-worker-windows-arm64.sh PACKAGE_DIR DEST_DIR
 
 Deploy a previously built Windows ARM64 worker package without downloading or
-regenerating binaries. The package must contain hivemind-bin.exe,
-libtailscale.dll, and the matching vcruntime140.dll.
+regenerating binaries. The package must contain hivemind-bin.exe, libtailscale.dll,
+and the matching vcruntime140.dll.
 EOF
   exit 2
 }
@@ -78,18 +78,23 @@ assert_arm64 "$binary"
 assert_arm64 "$dll"
 assert_arm64 "$runtime"
 
-if [[ -n "$PE_IMPORT_TOOL" ]]; then
-  imports="$($PE_IMPORT_TOOL -p "$dll")"
-elif [[ "$PE_HEADER_TOOL_KIND" == "readobj" ]]; then
-  imports="$($PE_HEADER_TOOL --coff-imports "$dll")"
-else
-  echo "an import-table inspection tool is required to validate libtailscale.dll dependencies" >&2
-  exit 1
-fi
-if grep -Eiq 'DLL Name: (libgcc|libwinpthread|libmingwex|msys)' <<<"$imports"; then
-  echo "refusing DLL with undeployed MinGW runtime dependency: $dll" >&2
-  exit 1
-fi
+assert_no_undeployed_imports() {
+  local path="$1"
+  local imports
+  if [[ -n "$PE_IMPORT_TOOL" ]]; then
+    imports="$($PE_IMPORT_TOOL -p "$path")"
+  elif [[ "$PE_HEADER_TOOL_KIND" == "readobj" ]]; then
+    imports="$($PE_HEADER_TOOL --coff-imports "$path")"
+  else
+    echo "an import-table inspection tool is required to validate PE dependencies" >&2
+    exit 1
+  fi
+  if grep -Eiq 'DLL Name: (libgcc|libwinpthread|libmingwex|msys)' <<<"$imports"; then
+    echo "refusing PE with undeployed MinGW runtime dependency: $path" >&2
+    exit 1
+  fi
+}
+assert_no_undeployed_imports "$dll"
 
 sha_file="${PACKAGE_DIR}/SHA256SUMS"
 [[ -f "$sha_file" ]] || {

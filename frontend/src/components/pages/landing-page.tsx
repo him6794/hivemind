@@ -66,7 +66,7 @@ function ReceiptPanel({ locale }: { locale: string }) {
       initial={animate ? { opacity: 0, y: 18 } : false}
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: 0.25, duration: 0.6, ease: [0.22, 1, 0.36, 1] }}
-      className="relative rounded-xl border border-border bg-card/70 p-6 sm:p-7"
+      className="relative rounded-xl border border-border bg-card p-6 sm:p-7"
     >
       <figcaption className="flex items-baseline justify-between gap-4 border-b border-border pb-4">
         <span className="eyebrow">{t(locale, { zh: "執行回執", en: "Execution receipt" })}</span>

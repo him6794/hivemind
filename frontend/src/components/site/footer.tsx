@@ -15,7 +15,7 @@ export function Footer() {
   const site = useMemo(() => getSiteDefinition(locale), [locale]);
 
   return (
-    <footer className="mt-auto border-t border-border/60 bg-background/60">
+    <footer className="mt-auto border-t border-border/60 bg-background">
       <div className="mx-auto max-w-7xl px-4 py-14 sm:px-6">
         <div className="grid gap-10 lg:grid-cols-[1.4fr_1fr_1fr]">
           <div className="space-y-4">
@@ -54,7 +54,7 @@ export function Footer() {
               {site.sections.features.map((feature, index) => {
                 const Icon = icons[index % icons.length];
                 return (
-                  <div key={feature.title} className="flex items-start gap-3 rounded-xl border border-border/60 bg-card/40 p-3">
+                  <div key={feature.title} className="flex items-start gap-3 rounded-xl border border-border bg-card p-3">
                     <span className="mt-0.5 flex size-8 items-center justify-center rounded-lg bg-honey/10 text-honey">
                       <Icon className="size-4" />
                     </span>
@@ -76,7 +76,6 @@ export function Footer() {
           <div className="flex items-center gap-4">
             <span className="inline-flex items-center gap-1.5">
               <span className="relative flex size-2">
-                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-foreground opacity-75" />
                 <span className="relative inline-flex size-2 rounded-full bg-foreground" />
               </span>
               {locale === "zh" ? "官方網站" : "Official site"}

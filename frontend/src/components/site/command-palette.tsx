@@ -70,7 +70,7 @@ export function CommandPalette() {
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent className="top-[15%] max-w-xl translate-y-0 gap-0 overflow-hidden rounded-2xl border-border/60 bg-card/95 p-0 backdrop-blur-2xl">
+      <DialogContent className="top-[15%] max-w-xl translate-y-0 gap-0 overflow-hidden rounded-xl border-border bg-card p-0">
         <DialogTitle className="sr-only">Command palette</DialogTitle>
         <DialogDescription className="sr-only">Quick navigation across the Hivemind site.</DialogDescription>
 
@@ -85,7 +85,7 @@ export function CommandPalette() {
             placeholder={locale === "zh" ? "搜尋頁面或操作..." : "Search pages or actions..."}
             className="h-14 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
           />
-          <kbd className="rounded-md border border-border bg-background/60 px-1.5 py-0.5 font-mono-tech text-[10px] text-muted-foreground">
+          <kbd className="rounded-md border border-border bg-background px-1.5 py-0.5 font-mono-tech text-[10px] text-muted-foreground">
             ESC
           </kbd>
         </div>

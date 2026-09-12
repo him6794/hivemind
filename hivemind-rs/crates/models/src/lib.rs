@@ -532,6 +532,7 @@ pub enum TaskStatus {
     Failed,
     Cancelled,
     TimedOut,
+    Observed,
 }
 
 impl TaskStatus {
@@ -545,6 +546,7 @@ impl TaskStatus {
             Self::Failed => "FAILED",
             Self::Cancelled => "CANCELLED",
             Self::TimedOut => "TIMED_OUT",
+            Self::Observed => "OBSERVED",
         }
     }
 }
@@ -561,6 +563,7 @@ impl std::str::FromStr for TaskStatus {
             "FAILED" => Self::Failed,
             "CANCELLED" => Self::Cancelled,
             "TIMED_OUT" => Self::TimedOut,
+            "OBSERVED" => Self::Observed,
             _ => Self::Pending,
         })
     }

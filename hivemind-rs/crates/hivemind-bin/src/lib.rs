@@ -393,7 +393,6 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
                 .with_worker_execution_private_key(
                     config.auth.worker_execution_private_key_pem.clone(),
                 )
-                .with_managed_proof_rollout_mode(config.managed_proof.rollout_mode)
                 .with_managed_consensus_config(&config.managed_consensus)
                 .with_session_registry(session_registry.clone()),
         );

@@ -4,9 +4,9 @@ use general_compute_runtime::{
     ArtifactChunk, ArtifactManifest, ArtifactRange, ArtifactRole, BackendRegistration,
     CapabilityMatrix, DeterminismPolicy, EvidenceEnvelope, ExecutionPolicy,
     GENERAL_COMPUTE_RUNTIME_VERSION, GeneralComputeRequest, GeneralComputeResult,
-    PRODUCTION_RESULT_PROTOCOL_VERSION, ProductionResultEnvelope, ResultStatus, UsageClaim,
-    ValidationErrorCode, WorkerCapabilities, canonical_artifact_root, canonical_input_digest,
-    sha256_digest,
+    MAX_ARTIFACT_ID_BYTES, PRODUCTION_RESULT_PROTOCOL_VERSION, ProductionResultEnvelope,
+    ResultStatus, UsageClaim, ValidationErrorCode, WorkerCapabilities, canonical_artifact_root,
+    canonical_input_digest, sha256_digest,
 };
 
 #[test]
@@ -518,6 +518,21 @@ fn inline_chunk_checksum_mismatch_is_rejected() {
         .validate()
         .expect_err("inline bytes must agree with chunk checksums");
     assert!(error.contains("chunk checksum does not match inline bytes"));
+}
+
+#[test]
+fn artifact_identity_uses_the_persistent_byte_bound() {
+    assert!(
+        general_compute_runtime::validate_artifact_id(&"a".repeat(MAX_ARTIFACT_ID_BYTES)).is_ok()
+    );
+    assert!(
+        general_compute_runtime::validate_artifact_id(&"a".repeat(MAX_ARTIFACT_ID_BYTES + 1))
+            .is_err()
+    );
+    assert!(
+        general_compute_runtime::validate_artifact_id(&"é".repeat(MAX_ARTIFACT_ID_BYTES / 2 + 1))
+            .is_err()
+    );
 }
 
 #[test]

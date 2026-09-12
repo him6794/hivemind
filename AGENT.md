@@ -174,7 +174,7 @@ Do not:
 
 Hivemind must support workers running natively on Windows without requiring the user to operate a Linux VM. The production matrix is explicitly split by workload contract:
 
-- Closed `managed-function-v0` DSL tasks use `production_sandboxed_dsl`. The interpreter exposes no filesystem, network, process, DLL, or native-API capability and enforces operation/CPT, usage, timeout, loop, call-depth, value/materialization, memory-accounting, and output bounds. This backend is cross-platform and does not require Windows Containers or HCS.
+- Closed `managed-function-v0` DSL tasks use `production_sandboxed_dsl`. The interpreter exposes no filesystem, network, process, DLL, or native-API capability and enforces operation/CPT, usage, timeout, loop, call-depth, value/materialization, memory-accounting, and output bounds. This backend is cross-platform and does not require Windows Containers or HCS. When `MANAGED_CONSENSUS_ROLLOUT_MODE=enforce`, managed tasks use Nodepool-coordinated replicated execution and do not require a RISC Zero prover; consensus is authenticated Worker agreement, not a zkVM correctness proof, and requires deterministic side-effect-free tasks.
 - Linux general-compute workers use `production_sandboxed_oci` with rootless OCI namespaces, cgroup v2, seccomp, read-only root, explicit artifact mounts, and deny-all networking.
 - Windows general-compute workers use a distinct Windows-native `production_sandboxed_windows` mode backed by Windows container/HCS process isolation. Windows must not reinterpret Linux OCI policy as a Windows sandbox.
 - `reference_direct` is reference/test-only and is never a production fallback.

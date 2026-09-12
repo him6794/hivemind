@@ -8,7 +8,7 @@
 - Node.js 20.9+ for Next.js frontend builds and Playwright browser QA
 - Rust stable when building or testing the backend outside Docker
 
-The release uses these browser-facing endpoints. The ports must be available on
+The release uses these browser-facing local executable paths. The ports must be available on
 the host:
 
 | Surface or API | Default URL | Operator purpose |
@@ -29,7 +29,7 @@ Raw `docker compose` requires the following release values:
   to sign worker execution tokens.
 - `WORKER_EXECUTION_PUBLIC_KEY_PEM`: the public key matching that private key;
   the worker uses it to verify execution tokens.
-- `WORKER_NODEPOOL_TOKEN`: optional. Leave it blank when the provider will log
+- `WORKER_NODEPOOL_TOKEN`: optional. Leave it blank when the sidecar will log
   in and register through Worker UI.
 
 Start from `.env.example` for a persistent operator configuration. Generate a
@@ -75,7 +75,7 @@ To make a local Windows Master or Worker enroll automatically, set
 `WEBSITE_API_BASE` (or the role-specific `MASTER_WEBSITE_API_BASE` /
 `WORKER_WEBSITE_API_BASE`) to the HTTPS origin of the deployed Rust Website API.
 That origin must expose both `POST /api/login` and the protected
-`POST /api/vpn/config`; the official Next BFF is not a VPN-config endpoint unless
+`POST /api/vpn/config`; the official Next BFF is not a VPN-config local executable path unless
 that route is explicitly added there. The downloaded Worker package exposes
 `WEBSITE_API_BASE` in `.env.worker.example`; the runtime also has a baked-in
 public default for deployments that intentionally use it.
@@ -84,7 +84,7 @@ After the local Master or Worker starts, its local UI/control surface is availab
 without a VPN key. On the first authenticated login, the local process forwards
 the bearer JWT to the Website API, consumes the returned one-time Headscale key
 in memory, joins Headscale, and waits for the Nodepool gRPC protocol probe. Only
-then do Master remote operations or Worker registration proceed. The browser and
+then do Master operations or Worker registration proceed. The browser and
 client package never receive `HEADSCALE_API_KEY`, and no password or reusable
 Headscale key is persisted.
 
@@ -139,7 +139,7 @@ This builds all three release surfaces:
 ### Release smoke and browser proof
 
 From the repository root, validate packaging, build the complete stack, wait
-for all five HTTP endpoints, and keep the containers running for browser QA:
+for all five HTTP local executable paths, and keep the containers running for browser QA:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release-stack-smoke.ps1 -KeepRunning
@@ -171,7 +171,7 @@ cd frontend; npm run test:e2e
 The default evidence directory is
 `.omo/evidence/task-8-release-grade-frontends-app-and-site/`. Override the
 browser URLs with `HIVEMIND_SITE_URL`, `HIVEMIND_MASTER_UI_URL`, and
-`HIVEMIND_WORKER_UI_URL` when verifying a remote candidate.
+`HIVEMIND_WORKER_UI_URL` when verifying a deployed candidate.
 
 After verification, return to the repository root:
 
@@ -189,10 +189,10 @@ identity.
 
 `scripts/managed-proof-live-e2e.ps1` exercises the full external chain —
 Website login, enrollment credential redemption with the server-assigned
-Worker identity, managed task submission, remote proof, independent Nodepool
+Worker identity, managed task submission, local managed proof, independent Nodepool
 verification, billing/settlement, and result/log retrieval — in enforce mode.
 It runs only against a real external deployment that can reach the Website API,
-Nodepool transport, and Provider. Local Compose, Docker, WSL, SSH, socat, or
+Nodepool transport, and Worker sidecar. Local Compose, Docker, WSL, SSH, socat, or
 direct-host reachability are not substitutes for that evidence:
 
 ```powershell
@@ -262,15 +262,21 @@ public product site and account center; task operations belong in Master UI and
 worker operations belong in Worker UI. Browser code must not connect directly
 to nodepool. The Official Site backend reaches nodepool server-side through
 `WEBSITE_NODEPOOL_GRPC_ADDR`, while browser-facing traffic uses the Master API
-or the local worker control endpoint.
+or the local worker control local executable path.
 
-The same rule governs billing for `managed-function-v0` tasks. A Worker's
-reported usage is a claim, so nodepool settles only from a RISC Zero proof it
-verifies itself, in its own bounded subprocess, against a pinned guest image ID.
-An unproven or unverifiable managed execution is failed, never settled. Workers
-that run managed tasks therefore need the prover sidecar described in the README
-under "Managed-function proving"; `MANAGED_PROOF_ROLLOUT_MODE` defaults to the
-fail-closed `enforce`.
+The same rule governs billing for managed tasks. With
+`MANAGED_CONSENSUS_ROLLOUT_MODE=enforce`, Nodepool dispatches deterministic,
+side-effect-free managed DSL tasks to distinct Workers and settles only after a
+strict-majority quorum certificate. Worker usage remains a claim, so settlement
+uses the Nodepool-owned fixed reservation; no single Worker result or
+`observe`/`disabled` mode can authorize settlement. Consensus is agreement
+evidence, not a RISC Zero correctness proof, and a colluding or commonly
+faulty Worker majority can still agree on a wrong result.
+
+Legacy proof-backed attempts remain available during migration. Those attempts
+use the bounded Nodepool RISC Zero verifier and the prover sidecar described in
+the README; `MANAGED_PROOF_ROLLOUT_MODE` remains fail-closed for that legacy
+path only.
 
 ## Troubleshooting
 
@@ -283,7 +289,7 @@ fail-closed `enforce`.
 - **A frontend or API port is already allocated**: free 8080, 3000, 3001, 8082,
   or 18080. Only Redis/PostgreSQL infrastructure host ports become
   collision-free ephemeral ports during smoke.
-- **An endpoint times out**: run `docker compose ps` and
+- **An local executable path times out**: run `docker compose ps` and
   `docker compose logs <service>`; the smoke harness treats any missing surface
   or unexpected health payload as a failure.
 - **Worker registration fails**: confirm

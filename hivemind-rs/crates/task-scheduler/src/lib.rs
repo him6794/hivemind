@@ -1,6 +1,4 @@
 pub mod dispatcher;
-pub mod managed_proof_metrics;
-pub(crate) mod managed_proof_verifier;
 pub mod scheduler;
 pub mod task_repository;
 
@@ -50,6 +48,40 @@ impl TaskScheduler {
 
     pub async fn get_task(&self, task_id: &str) -> Result<Option<Task>> {
         self.repo.find_by_task_id(task_id).await
+    }
+
+    pub async fn set_managed_consensus_policy(
+        &self,
+        task_id: &str,
+        protocol_version: u32,
+        replica_count: u16,
+        quorum: u16,
+        mode: &str,
+    ) -> Result<()> {
+        self.repo
+            .set_managed_consensus_policy(task_id, protocol_version, replica_count, quorum, mode)
+            .await
+    }
+
+    pub async fn managed_consensus_stop_targets(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<task_repository::ManagedConsensusStopTarget>> {
+        self.repo.managed_consensus_stop_targets(task_id).await
+    }
+
+    pub async fn managed_consensus_attempt_for_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<task_repository::ManagedConsensusAttempt>> {
+        self.repo.managed_consensus_attempt_for_task(task_id).await
+    }
+
+    pub async fn managed_consensus_policy(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<task_repository::ManagedConsensusPolicy>> {
+        self.repo.managed_consensus_policy(task_id).await
     }
 
     pub async fn managed_gpu_result_for_task(&self, task_id: &str) -> Result<Option<Vec<u8>>> {

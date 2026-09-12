@@ -6,7 +6,7 @@ Validate the managed-function-only Hivemind platform end to end, fix discovered 
 
 ## Status
 
-complete
+running
 
 ## Completed validation
 
@@ -23,7 +23,7 @@ complete
 - Windows ARM64 cross-target check: `cargo check --target aarch64-pc-windows-msvc --workspace` passed under the VS arm64 dev environment (2026-08-23), proving the whole workspace compiles for ARM64 Windows.
 - Linux target check: `cargo check --target x86_64-unknown-linux-gnu -p hivemind-client-core` passes; full-workspace Linux/macOS checks stay blocked in this environment because no `x86_64-linux-gnu-gcc` toolchain exists for the `ring` build script. This is a local toolchain blocker, not a source-compatibility failure.
 - PowerShell release contracts: all 11 `scripts/*.Tests.ps1` files pass, including zero-config package assertions (no required endpoint/Worker-ID/token settings, session-only default documented) and the zh-tw architecture doc contract.
-- Managed proof live E2E harness: `scripts/managed-proof-live-e2e.ps1` and its contract test exist and pass statically (phase order, fail-closed settlement gates, redaction guard, no local-substitute endpoints). The harness itself has NOT been executed against external infrastructure; live proof-to-settlement evidence remains blocked in this environment because no real external Website API/Nodepool/Provider host is reachable from here.
+- Managed proof live E2E harness: `scripts/managed-proof-live-e2e.ps1` and its contract test exist and pass statically (phase order, fail-closed settlement gates, redaction guard, no local-substitute endpoints). The harness itself has NOT been executed against external infrastructure; live proof-to-settlement evidence remains blocked in this environment because no real external Website API/Nodepool/proof-capable Worker host is reachable from here.
 
 ## Regressions fixed
 
@@ -75,9 +75,53 @@ interactive enrollment without weakening the trust boundary:
   evidence.
 - The required external flow remains to be demonstrated with Master and Worker
   on a suitable host separate from Orange Pi: enrollment, worker registration,
-  quote, task execution, proof verification where the provider is supported,
+  quote, task execution, proof verification where the local sidecar is packaged,
   result/log retrieval, usage, billing, settlement, and audit evidence.
 - Native Windows managed proving remains fail-closed because the approved RISC
-  Zero prover is Linux x86_64 and no validated native Windows or ARM64 provider
-  has been accepted yet.
+  Zero 3.0.6 stack has no validated native Windows PE prover yet. The packaged
+  Worker path is implemented as a prerequisite-gated contract and cannot be
+  released until a real target-matched artifact passes the unchanged equality
+  and attestation gates.
 - Automatic client update/download remains deferred.
+
+## Current release-gate recovery — 2026-09-11
+
+The current dirty-tree recovery has fixed several local correctness contracts:
+
+- Legacy managed tasks without a persisted consensus policy remain on the
+  legacy proof-backed path across `disabled`, `observe`, and `enforce` rollout
+  transitions; persisted consensus tasks never silently downgrade.
+- Direct Node Manager gRPC replica/quorum overrides use checked `u32`→`u16`
+  conversion, and ingress runtime values are trimmed before persistence and
+  classification.
+- Artifact/chunk identity fields reject values above the 255-byte persistent
+  bound before database or CAS use.
+- Windows Worker packaging carries allowed prover-side DLLs into `prover/` and
+  re-verifies the final packaged layout before recording checksums/provenance.
+
+Current local evidence includes passing workspace-scoped rustfmt checks for both
+Rust workspaces, the affected-crate suites (`hivemind-config` 29 passed,
+`hivemind-proto` 23 passed, `hivemind-task-scheduler` 195 passed and 1
+intentional ignored, `hivemind-worker-executor` 140 passed), the focused
+consensus/readiness regressions, the general-compute runtime suite, and the
+Windows packaging/verifier contracts. `git diff --check` also passes. The main
+workspace dependency audit now exits successfully under the narrowly scoped
+`hivemind-rs/.cargo/audit.toml` policy; the isolated managed-proof audit also
+exits successfully under its existing policy. Remaining warnings are recorded
+by the dependency-audit document and are not vulnerabilities. A secret-shaped
+content scan found no matches in untracked files; matches in tracked files are
+limited to test/configuration fixtures and example names.
+
+The following release gates remain blocked or not-run, and are not represented
+as passing evidence:
+
+- No PostgreSQL client/server is available in this environment, so real
+  PostgreSQL settlement/integration validation was not run. The running Docker
+  database is MySQL and is not a substitute.
+- The OCI `-CheckOnly` harness fails closed because the operator-owned backend
+  registry is not configured. Real `-Run` execution therefore was not run;
+  rootless namespaces, cgroup v2, seccomp, deny-all networking, hostile
+  workload behavior, and multi-process settlement remain unproven.
+- Native Windows managed proving remains blocked pending a genuine
+  target-matched PE prover, exact guest-image equality, attestation, clean-host
+  launch, real proof verification, and proof-to-settlement evidence.

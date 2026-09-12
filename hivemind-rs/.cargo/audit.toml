@@ -1,0 +1,13 @@
+# cargo-audit policy for the Hivemind verifier/nodepool workspace.
+#
+# The application uses jsonwebtoken's rust_crypto provider for EdDSA and HMAC
+# tokens. The provider's optional RSA implementation pulls rsa 0.9.10 into the
+# lockfile, but Hivemind has no RSA JWT key, Algorithm::RS*, or RSA signing/
+# decryption call path. Do not add an ignore without updating the dependency
+# audit documentation with the exact reachability and re-review trigger.
+
+[advisories]
+ignore = [
+    # rsa 0.9.10 - Marvin timing side channel; no fixed release is available.
+    "RUSTSEC-2023-0071",
+]

@@ -425,6 +425,217 @@ async fn run_migrations_inner(pool: &PgPool) -> Result<()> {
     .await?;
 
     sqlx::query(
+        "CREATE TABLE IF NOT EXISTS managed_consensus_policies (
+            task_id VARCHAR(255) PRIMARY KEY REFERENCES tasks(task_id) ON DELETE CASCADE,
+            protocol_version INTEGER NOT NULL,
+            replica_count INTEGER NOT NULL CHECK (replica_count >= 2 AND replica_count <= 7),
+            quorum INTEGER NOT NULL,
+            deterministic_required BOOLEAN NOT NULL DEFAULT true,
+            mode VARCHAR(16) NOT NULL DEFAULT 'disabled',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            CHECK (quorum > replica_count / 2 AND quorum <= replica_count)
+        );",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS managed_consensus_attempts (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            task_id VARCHAR(255) NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+            execution_id VARCHAR(255) NOT NULL,
+            round_id VARCHAR(255) NOT NULL,
+            request_digest VARCHAR(71) NOT NULL,
+            replica_count INTEGER NOT NULL CHECK (replica_count >= 2 AND replica_count <= 7),
+            quorum INTEGER NOT NULL,
+            mode VARCHAR(16) NOT NULL DEFAULT 'enforce',
+            state VARCHAR(32) NOT NULL DEFAULT 'pending',
+            deadline TIMESTAMPTZ NOT NULL,
+            failure_reason TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            completed_at TIMESTAMPTZ,
+            UNIQUE (task_id, round_id)
+        );",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "ALTER TABLE managed_consensus_attempts
+         ADD COLUMN IF NOT EXISTS mode VARCHAR(16) NOT NULL DEFAULT 'enforce';",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS managed_consensus_worker_reservations (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            attempt_id UUID NOT NULL REFERENCES managed_consensus_attempts(id) ON DELETE CASCADE,
+            worker_id VARCHAR(255) NOT NULL,
+            state VARCHAR(16) NOT NULL DEFAULT 'active',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            released_at TIMESTAMPTZ,
+            UNIQUE (attempt_id, worker_id)
+        );",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_managed_consensus_worker_reservations_active
+         ON managed_consensus_worker_reservations(worker_id, state);",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS managed_consensus_replicas (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            task_id VARCHAR(255) NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+            attempt_id UUID NOT NULL REFERENCES managed_consensus_attempts(id) ON DELETE CASCADE,
+            replica_id VARCHAR(255) NOT NULL,
+            worker_id VARCHAR(255) NOT NULL,
+            worker_ip VARCHAR(255) NOT NULL DEFAULT '',
+            provider_user VARCHAR(255) NOT NULL DEFAULT '',
+            execution_id VARCHAR(255) NOT NULL,
+            worker_attempt_id VARCHAR(255) NOT NULL,
+            request_digest VARCHAR(71) NOT NULL,
+            transfer_generation BIGINT,
+            state VARCHAR(32) NOT NULL DEFAULT 'assigned',
+            success BOOLEAN,
+            result_digest VARCHAR(71),
+            output_bytes BIGINT,
+            result_json BYTEA,
+            usage_units BIGINT,
+            executed_ops BIGINT,
+            rejection_reason TEXT,
+            assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            reported_at TIMESTAMPTZ,
+            UNIQUE (attempt_id, replica_id),
+            UNIQUE (attempt_id, worker_id),
+            UNIQUE (attempt_id, worker_attempt_id)
+        );",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "ALTER TABLE managed_consensus_replicas
+         ADD COLUMN IF NOT EXISTS worker_ip VARCHAR(255) NOT NULL DEFAULT '',
+         ADD COLUMN IF NOT EXISTS provider_user VARCHAR(255) NOT NULL DEFAULT '';",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS managed_consensus_certificates (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            task_id VARCHAR(255) NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+            attempt_id UUID NOT NULL REFERENCES managed_consensus_attempts(id) ON DELETE RESTRICT,
+            execution_id VARCHAR(255) NOT NULL,
+            round_id VARCHAR(255) NOT NULL,
+            protocol_version INTEGER NOT NULL,
+            request_digest VARCHAR(71) NOT NULL,
+            result_digest VARCHAR(71) NOT NULL,
+            output_bytes BIGINT NOT NULL,
+            quorum INTEGER NOT NULL,
+            matching_votes INTEGER NOT NULL,
+            participant_worker_ids JSONB NOT NULL,
+            participant_replica_ids JSONB NOT NULL,
+            certificate_digest VARCHAR(71) NOT NULL,
+            evidence_level VARCHAR(32) NOT NULL DEFAULT 'replicated',
+            mode VARCHAR(16) NOT NULL DEFAULT 'enforce',
+            settlement_authorized BOOLEAN NOT NULL DEFAULT true,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE (task_id),
+            UNIQUE (attempt_id),
+            UNIQUE (certificate_digest)
+        );",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "ALTER TABLE managed_consensus_certificates
+         ADD COLUMN IF NOT EXISTS mode VARCHAR(16) NOT NULL DEFAULT 'enforce',
+         ADD COLUMN IF NOT EXISTS settlement_authorized BOOLEAN NOT NULL DEFAULT true;",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS managed_consensus_settlements (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            task_id VARCHAR(255) UNIQUE NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+            certificate_id UUID NOT NULL REFERENCES managed_consensus_certificates(id) ON DELETE RESTRICT,
+            payer_user VARCHAR(255) NOT NULL,
+            amount_cpt BIGINT NOT NULL CHECK (amount_cpt >= 0),
+            platform_fee_cpt BIGINT NOT NULL CHECK (platform_fee_cpt >= 0),
+            provider_total_cpt BIGINT NOT NULL CHECK (provider_total_cpt >= 0),
+            billing_version VARCHAR(64) NOT NULL,
+            cost_model_version VARCHAR(64) NOT NULL,
+            settlement_basis VARCHAR(64) NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE (certificate_id)
+        );",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "ALTER TABLE managed_consensus_settlements
+         ADD COLUMN IF NOT EXISTS id UUID DEFAULT gen_random_uuid();",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE managed_consensus_settlements SET id = gen_random_uuid() WHERE id IS NULL;",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("ALTER TABLE managed_consensus_settlements ALTER COLUMN id SET NOT NULL;")
+        .execute(&mut *tx)
+        .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_managed_consensus_settlements_certificate
+         ON managed_consensus_settlements(certificate_id);",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_managed_consensus_attempts_active
+         ON managed_consensus_attempts(state, deadline);",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_managed_consensus_replicas_worker
+         ON managed_consensus_replicas(worker_id, state);",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "ALTER TABLE tasks
+         ADD COLUMN IF NOT EXISTS managed_consensus_version INTEGER,
+         ADD COLUMN IF NOT EXISTS managed_consensus_mode VARCHAR(16),
+         ADD COLUMN IF NOT EXISTS managed_replica_count INTEGER,
+         ADD COLUMN IF NOT EXISTS managed_quorum INTEGER,
+         ADD COLUMN IF NOT EXISTS managed_consensus_state VARCHAR(32),
+         ADD COLUMN IF NOT EXISTS managed_consensus_attempt_id UUID,
+         ADD COLUMN IF NOT EXISTS managed_result_digest VARCHAR(71),
+         ADD COLUMN IF NOT EXISTS managed_certificate_id UUID,
+         ADD COLUMN IF NOT EXISTS managed_votes_received INTEGER NOT NULL DEFAULT 0,
+         ADD COLUMN IF NOT EXISTS managed_winning_votes INTEGER NOT NULL DEFAULT 0,
+         ADD COLUMN IF NOT EXISTS managed_consensus_updated_at TIMESTAMPTZ;",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
         "CREATE TABLE IF NOT EXISTS general_compute_results (
             task_id VARCHAR(255) PRIMARY KEY,
             worker_id VARCHAR(255) NOT NULL,
@@ -991,84 +1202,6 @@ async fn run_migrations_inner(pool: &PgPool) -> Result<()> {
                     CHECK (generation > 0);
             END IF;
         END $$;"#,
-    )
-    .execute(&mut *tx)
-    .await?;
-
-    // Nodepool-owned, metadata-only authorization evidence for managed proof
-    // attempts. Source, input, receipt bytes, private keys, and bearer tokens
-    // are deliberately absent from this table.
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS managed_proof_authorizations (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            task_id VARCHAR(255) NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
-            protocol_version INTEGER,
-            proof_task_id VARCHAR(255),
-            owner VARCHAR(255) NOT NULL,
-            worker_id VARCHAR(255) NOT NULL,
-            execution_id VARCHAR(255) NOT NULL,
-            attempt_id VARCHAR(255) NOT NULL,
-            idempotency_key VARCHAR(255) NOT NULL,
-            request_digest VARCHAR(71) NOT NULL,
-            lease_generation BIGINT NOT NULL CHECK (lease_generation > 0),
-            runtime VARCHAR(64) NOT NULL,
-            backend_id VARCHAR(255) NOT NULL DEFAULT '',
-            semantics_manifest_sha256 VARCHAR(71) NOT NULL DEFAULT '',
-            proof_scheme VARCHAR(64) NOT NULL,
-            image_id_json TEXT NOT NULL,
-            deadline_unix_ms BIGINT NOT NULL CHECK (deadline_unix_ms > 0),
-            token_jti VARCHAR(255) NOT NULL,
-            token_iat BIGINT,
-            token_exp BIGINT,
-            token_sha256 VARCHAR(71) NOT NULL,
-            state VARCHAR(32) NOT NULL DEFAULT 'issued',
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            UNIQUE (task_id, lease_generation, attempt_id)
-        );",
-    )
-    .execute(&mut *tx)
-    .await?;
-
-    // Upgrade authorization rows created before proof-task and issuance
-    // metadata became part of the immutable binding. Legacy rows with NULL
-    // timestamps are deliberately not regenerated by the scheduler.
-    sqlx::query(
-        "ALTER TABLE managed_proof_authorizations
-         ADD COLUMN IF NOT EXISTS protocol_version INTEGER,
-         ADD COLUMN IF NOT EXISTS proof_task_id VARCHAR(255),
-         ADD COLUMN IF NOT EXISTS token_iat BIGINT,
-         ADD COLUMN IF NOT EXISTS token_exp BIGINT",
-    )
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query(
-        "ALTER TABLE managed_proof_authorizations
-         ALTER COLUMN lease_generation SET NOT NULL;",
-    )
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query(
-        r#"DO $$
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1
-                FROM pg_constraint
-                WHERE conrelid = 'managed_proof_authorizations'::regclass
-                  AND conname = 'managed_proof_authorizations_lease_generation_positive'
-            ) THEN
-                ALTER TABLE managed_proof_authorizations
-                    ADD CONSTRAINT managed_proof_authorizations_lease_generation_positive
-                    CHECK (lease_generation > 0);
-            END IF;
-        END $$;"#,
-    )
-    .execute(&mut *tx)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_managed_proof_authorizations_identity
-         ON managed_proof_authorizations(task_id, worker_id, execution_id, attempt_id, lease_generation);",
     )
     .execute(&mut *tx)
     .await?;

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Navbar } from "@/components/site/navbar";
 import { Footer } from "@/components/site/footer";
@@ -16,26 +16,45 @@ import { useAppStore, type Route } from "@/store/app-store";
 
 const fullscreenRoutes: Route[] = ["login", "register"];
 
+function routeFromHash(): Route | null {
+  const raw = window.location.hash.replace(/^#\/?/, "");
+  if (!raw) {
+    return "home";
+  }
+  return (["home", "login", "register", "account", "security", "docs", "terms"] as Route[])
+    .find((entry) => entry === raw) || null;
+}
+
 export default function Home() {
   const route = useAppStore((state) => state.route);
   const navigate = useAppStore((state) => state.navigate);
+  const hashSynced = useRef(false);
   const isFullscreen = fullscreenRoutes.includes(route);
 
   useEffect(() => {
-    const fromHash = () => {
-      const raw = window.location.hash.replace(/^#\/?/, "");
-      const next = (["home", "login", "register", "account", "security", "docs", "terms"] as Route[])
-        .find((entry) => entry === raw) || "home";
-      navigate(next);
+    const syncRoute = () => {
+      const next = routeFromHash();
+      if (next !== null && next !== useAppStore.getState().route) {
+        navigate(next);
+      }
     };
-    fromHash();
-    window.addEventListener("hashchange", fromHash);
-    return () => window.removeEventListener("hashchange", fromHash);
-  }, [navigate]);
 
-  useEffect(() => {
-    window.history.replaceState(null, "", route === "home" ? "#/" : `#/${route}`);
-  }, [route]);
+    if (!hashSynced.current) {
+      hashSynced.current = true;
+      const next = routeFromHash() ?? "home";
+      if (next !== route) {
+        navigate(next);
+        return;
+      }
+    }
+
+    const nextHash = route === "home" ? "#/" : `#/${route}`;
+    if (window.location.hash !== nextHash) {
+      window.history.replaceState(null, "", nextHash);
+    }
+    window.addEventListener("hashchange", syncRoute);
+    return () => window.removeEventListener("hashchange", syncRoute);
+  }, [navigate, route]);
 
   return (
     <div className="relative flex min-h-screen flex-col overflow-x-hidden bg-background">

@@ -65,6 +65,12 @@ pub struct WorkerExecutionClaims {
     pub request_digest: Option<String>,
     #[serde(default)]
     pub transfer_generation: Option<i64>,
+    #[serde(default)]
+    pub consensus_round_id: Option<String>,
+    #[serde(default)]
+    pub replica_id: Option<String>,
+    #[serde(default)]
+    pub consensus_protocol_version: Option<u16>,
 }
 
 impl WorkerExecutionSigner {
@@ -99,6 +105,9 @@ impl WorkerExecutionSigner {
                 idempotency_key: None,
                 request_digest: None,
                 transfer_generation: None,
+                consensus_round_id: None,
+                replica_id: None,
+                consensus_protocol_version: None,
             },
             &self.encoding_key,
         )
@@ -122,10 +131,48 @@ impl WorkerExecutionSigner {
                 idempotency_key: Some(identity.idempotency_key.clone()),
                 request_digest: Some(identity.request_digest.clone()),
                 transfer_generation: Some(identity.transfer_generation),
+                consensus_round_id: None,
+                replica_id: None,
+                consensus_protocol_version: None,
             },
             &self.encoding_key,
         )
         .context("Failed to encode worker execution token")
+    }
+
+    pub fn encode_consensus_claims(
+        &self,
+        claims: &Claims,
+        identity: &WorkerExecutionIdentity,
+        consensus_round_id: &str,
+        replica_id: &str,
+        consensus_protocol_version: u16,
+    ) -> Result<String> {
+        identity.validate()?;
+        if consensus_round_id.trim().is_empty() || replica_id.trim().is_empty() {
+            anyhow::bail!("managed consensus round and replica identities must not be empty");
+        }
+        if consensus_protocol_version == 0 {
+            anyhow::bail!("managed consensus protocol version must be positive");
+        }
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.typ = Some("JWT".into());
+        encode(
+            &header,
+            &WorkerExecutionClaims {
+                claims: claims.clone(),
+                execution_id: Some(identity.execution_id.clone()),
+                attempt_id: Some(identity.attempt_id.clone()),
+                idempotency_key: Some(identity.idempotency_key.clone()),
+                request_digest: Some(identity.request_digest.clone()),
+                transfer_generation: Some(identity.transfer_generation),
+                consensus_round_id: Some(consensus_round_id.to_owned()),
+                replica_id: Some(replica_id.to_owned()),
+                consensus_protocol_version: Some(consensus_protocol_version),
+            },
+            &self.encoding_key,
+        )
+        .context("Failed to encode managed consensus worker execution token")
     }
 }
 
@@ -244,6 +291,36 @@ mod tests {
         assert_eq!(decoded.idempotency_key.as_deref(), Some("idempotency-3"));
         assert_eq!(decoded.request_digest, Some(identity.request_digest));
         assert_eq!(decoded.transfer_generation, Some(7));
+    }
+
+    #[test]
+    fn consensus_execution_token_roundtrip_binds_round_and_replica() {
+        let (private_key, public_key) = hivemind_config::generate_worker_execution_test_key_pair();
+        let signer = WorkerExecutionSigner::from_pem(&private_key).unwrap();
+        let verifier = WorkerExecutionVerifier::from_pem(&public_key).unwrap();
+        let identity = WorkerExecutionIdentity {
+            execution_id: "execution-1".into(),
+            attempt_id: "attempt-2".into(),
+            idempotency_key: "idempotency-3".into(),
+            request_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            transfer_generation: 1,
+        };
+        let token = signer
+            .encode_consensus_claims(&sample_claims(), &identity, "round-4", "replica-2", 1)
+            .unwrap();
+        let decoded = verifier.decode_execution_claims(&token).unwrap();
+
+        assert_eq!(decoded.consensus_round_id.as_deref(), Some("round-4"));
+        assert_eq!(decoded.replica_id.as_deref(), Some("replica-2"));
+        assert_eq!(decoded.consensus_protocol_version, Some(1));
+        assert_eq!(decoded.execution_id.as_deref(), Some("execution-1"));
+        assert_eq!(decoded.attempt_id.as_deref(), Some("attempt-2"));
+        assert_eq!(decoded.idempotency_key.as_deref(), Some("idempotency-3"));
+        assert_eq!(
+            decoded.request_digest.as_deref(),
+            Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
     }
 
     #[test]

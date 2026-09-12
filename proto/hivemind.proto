@@ -450,13 +450,6 @@ message ExecuteTaskRequest {
     uint32 consensus_protocol_version = 21;
 }
 
-message ManagedProofEnvelope {
-    string proof_scheme = 1;
-    repeated fixed32 image_id = 2 [packed = true];
-    bytes journal = 3;
-    bytes receipt_json = 4;
-}
-
 message ManagedConsensusResult {
     uint32 protocol_version = 1;
     string status = 2;
@@ -495,7 +488,6 @@ message ExecuteTaskResponse {
     int64 managed_executed_ops = 3;
     int64 managed_output_bytes = 4;
     string managed_receipt_json = 5;
-    ManagedProofEnvelope managed_proof = 6;
     string execution_id = 7;
     string attempt_id = 8;
     string idempotency_key = 9;

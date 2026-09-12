@@ -6,6 +6,12 @@ members = [
 ]
 default-members = ["crates/managed-function-runtime"]
 
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0
+
 [workspace.package]
 edition = "2024"
 version = "0.1.0"
