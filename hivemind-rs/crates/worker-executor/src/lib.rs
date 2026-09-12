@@ -2,7 +2,6 @@ pub mod chunk_transport;
 pub mod control_api;
 pub mod executor;
 pub mod grpc_server;
-pub mod managed_prover;
 pub mod nodepool_client;
 pub mod resource_monitor;
 pub mod runtime_admission;
@@ -48,13 +47,7 @@ struct ActiveTaskEntry {
 type ActiveTaskMap = Arc<Mutex<HashMap<ActiveTaskKey, ActiveTaskEntry>>>;
 type TaskResultMessage = Result<TaskResult, String>;
 type TaskRunnerFuture = Pin<Box<dyn Future<Output = Result<TaskResult>> + Send>>;
-type TaskRunner = dyn Fn(
-        Task,
-        watch::Receiver<bool>,
-        Option<managed_prover::ManagedProofTaskContext>,
-    ) -> TaskRunnerFuture
-    + Send
-    + Sync;
+type TaskRunner = dyn Fn(Task, watch::Receiver<bool>, bool) -> TaskRunnerFuture + Send + Sync;
 
 pub struct WorkerExecutor {
     active_tasks: ActiveTaskMap,
@@ -69,15 +62,8 @@ impl WorkerExecutor {
 
     pub fn try_new(config: HivemindConfig) -> Result<Self> {
         let runner_config = config.clone();
-        let prover = Arc::new(managed_prover::ManagedProverExecutor::new(&config));
         let admission = runtime_admission::WorkerRuntimeAdmission::from_environment()?;
-        let mut dynamic_capability_report = admission.public_capability_report();
-        if !prover.has_configured_route() {
-            dynamic_capability_report.ready = false;
-            dynamic_capability_report.capabilities.clear();
-            dynamic_capability_report.readiness_reason =
-                "managed proof provider is not configured".into();
-        }
+        let dynamic_capability_report = admission.public_capability_report();
         let trusted_registration = admission.trusted_registration();
         // ReferenceDirect is a test-only backend. Production workers must never
         // load the Python reference executor from environment configuration.
@@ -103,9 +89,8 @@ impl WorkerExecutor {
         };
         Ok(Self {
             active_tasks: Arc::new(Mutex::new(HashMap::new())),
-            task_runner: Arc::new(move |task, cancellation, proof_context| {
+            task_runner: Arc::new(move |task, cancellation, _consensus_request| {
                 let config = runner_config.clone();
-                let prover = Arc::clone(&prover);
                 let reference_executor = reference_executor.clone();
                 let cas_store = cas_store.clone();
                 let production_backends = production_backends.clone();
@@ -114,10 +99,10 @@ impl WorkerExecutor {
                 let capability_matrix = capability_matrix.clone();
                 let trusted_registration = trusted_registration.clone();
                 Box::pin(async move {
-                    let mut result = executor::run_task_with_cancel_and_backends_and_trusted_registration_and_windows_and_managed_gpu(
+                    executor::run_task_with_cancel_and_backends_and_trusted_registration_and_windows_and_managed_gpu(
                         &task,
                         &config,
-                        cancellation.clone(),
+                        cancellation,
                         reference_executor,
                         cas_store,
                         production_backends,
@@ -126,34 +111,7 @@ impl WorkerExecutor {
                         capability_matrix,
                         Some(trusted_registration),
                     )
-                    .await?;
-                    if result.success
-                        && matches!(
-                            task.runtime.as_deref(),
-                            Some("managed-function-v0") | Some("production_sandboxed_dsl")
-                        )
-                    {
-                        match prover
-                            .prove_with_context(&task, cancellation.clone(), proof_context)
-                            .await
-                        {
-                            Ok(proof) if !*cancellation.borrow() => {
-                                result.managed_proof = Some(proof);
-                            }
-                            Ok(_) | Err(managed_prover::ManagedProverError::Failed) => {
-                                let message = if *cancellation.borrow() {
-                                    "Task execution stopped"
-                                } else {
-                                    "Managed proof generation failed"
-                                };
-                                result = managed_proof_failure(result, message);
-                            }
-                            Err(managed_prover::ManagedProverError::QueueFull) => {
-                                return Err(managed_prover::ManagedProverError::QueueFull.into());
-                            }
-                        }
-                    }
-                    Ok(result)
+                    .await
                 })
             }),
             dynamic_capability_report,
@@ -168,30 +126,41 @@ impl WorkerExecutor {
     {
         Self {
             active_tasks: Arc::new(Mutex::new(HashMap::new())),
-            task_runner: Arc::new(move |task, cancellation, _proof_context| {
+            task_runner: Arc::new(move |task, cancellation, _consensus_request| {
                 Box::pin(task_runner(task, cancellation))
             }),
             dynamic_capability_report: WorkerCapabilityReport::public_managed_dsl(),
         }
     }
     pub async fn execute_task(&self, task: &Task) -> Result<TaskResult> {
-        self.execute_task_with_context(task, None).await
+        self.execute_task_with_attempt(task, "").await
     }
 
-    pub async fn execute_task_with_context(
+    pub async fn execute_task_with_attempt(
         &self,
         task: &Task,
-        proof_context: Option<managed_prover::ManagedProofTaskContext>,
+        attempt_id: &str,
     ) -> Result<TaskResult> {
-        self.execute_task_with_context_and_attempt(task, proof_context, "")
+        self.execute_task_with_attempt_mode(task, attempt_id, false)
             .await
     }
 
-    pub async fn execute_task_with_context_and_attempt(
+    /// Execute a managed task as a consensus replica. The request contract,
+    /// rather than the Worker rollout environment, disables the legacy prover.
+    pub async fn execute_task_with_consensus(
         &self,
         task: &Task,
-        proof_context: Option<managed_prover::ManagedProofTaskContext>,
         attempt_id: &str,
+    ) -> Result<TaskResult> {
+        self.execute_task_with_attempt_mode(task, attempt_id, true)
+            .await
+    }
+
+    async fn execute_task_with_attempt_mode(
+        &self,
+        task: &Task,
+        attempt_id: &str,
+        consensus_request: bool,
     ) -> Result<TaskResult> {
         let (cancellation_tx, cancellation_rx) = watch::channel(false);
         let (result_tx, result_rx) = watch::channel(None);
@@ -225,7 +194,7 @@ impl WorkerExecutor {
         let task = task.clone();
         tokio::spawn(async move {
             let _active_task_guard = ActiveTaskGuard::new(active_tasks, active_task_key);
-            let result = task_runner(task, cancellation_rx, proof_context)
+            let result = task_runner(task, cancellation_rx, consensus_request)
                 .await
                 .map_err(|error| error.to_string());
             let _ = result_tx.send(Some(result));
@@ -300,8 +269,6 @@ pub struct TaskResult {
     pub managed_executed_ops: i64,
     pub managed_output_bytes: i64,
     pub managed_receipt_json: Option<String>,
-    #[serde(default, with = "managed_proof_serde")]
-    pub managed_proof: Option<hivemind_proto::ManagedProofEnvelope>,
     /// Serialized typed result for `general-compute-v1alpha1`.
     /// Legacy managed-function results leave this unset.
     #[serde(default)]
@@ -310,66 +277,6 @@ pub struct TaskResult {
     /// GPU-v1 results never enter the proof or legacy result-torrent routes.
     #[serde(default)]
     pub managed_gpu_result_json: Option<Vec<u8>>,
-}
-
-/// Preserves `TaskResult`'s public serde contract without omitting a proof.
-///
-/// Prost's generated envelope deliberately has no serde derives, so the
-/// JSON representation uses the same four fields and byte-vector semantics
-/// rather than silently skipping the proof from externally stored results.
-mod managed_proof_serde {
-    use hivemind_proto::ManagedProofEnvelope;
-
-    #[derive(serde::Serialize, serde::Deserialize)]
-    struct SerializableManagedProofEnvelope {
-        proof_scheme: String,
-        image_id: Vec<u32>,
-        journal: Vec<u8>,
-        receipt_json: Vec<u8>,
-    }
-
-    impl From<&ManagedProofEnvelope> for SerializableManagedProofEnvelope {
-        fn from(proof: &ManagedProofEnvelope) -> Self {
-            Self {
-                proof_scheme: proof.proof_scheme.clone(),
-                image_id: proof.image_id.clone(),
-                journal: proof.journal.clone(),
-                receipt_json: proof.receipt_json.clone(),
-            }
-        }
-    }
-
-    impl From<SerializableManagedProofEnvelope> for ManagedProofEnvelope {
-        fn from(proof: SerializableManagedProofEnvelope) -> Self {
-            Self {
-                proof_scheme: proof.proof_scheme,
-                image_id: proof.image_id,
-                journal: proof.journal,
-                receipt_json: proof.receipt_json,
-            }
-        }
-    }
-
-    pub fn serialize<S>(
-        proof: &Option<ManagedProofEnvelope>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let serializable = proof.as_ref().map(SerializableManagedProofEnvelope::from);
-        serde::Serialize::serialize(&serializable, serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<ManagedProofEnvelope>, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let proof = <Option<SerializableManagedProofEnvelope> as serde::Deserialize>::deserialize(
-            deserializer,
-        )?;
-        Ok(proof.map(Into::into))
-    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -393,19 +300,6 @@ pub struct GpuInfo {
     pub vram_used_mb: i64,
     pub vram_available_mb: i64,
     pub gpu_utilization_percent: f64,
-}
-
-fn managed_proof_failure(mut result: TaskResult, message: &str) -> TaskResult {
-    result.success = false;
-    result.output = None;
-    result.error = Some(message.to_string());
-    result.exit_code = 1;
-    result.managed_executed_ops = 0;
-    result.managed_output_bytes = 0;
-    result.managed_receipt_json = None;
-    result.managed_proof = None;
-    result.general_compute_result_json = None;
-    result
 }
 
 struct ActiveTaskGuard {

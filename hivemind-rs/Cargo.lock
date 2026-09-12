@@ -1522,7 +1522,6 @@ dependencies = [
  "hex",
  "hivemind-config",
  "hivemind-database",
- "hivemind-managed-prover-protocol",
  "hivemind-models",
  "jsonwebtoken",
  "rand 0.8.7",
@@ -1614,6 +1613,7 @@ dependencies = [
  "dotenvy",
  "ed25519-dalek",
  "general-compute-runtime",
+ "hivemind-managed-consensus",
  "jsonwebtoken",
  "pkcs8",
  "rand 0.8.7",
@@ -1636,6 +1636,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hivemind-managed-consensus"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "hivemind-managed-proof"
 version = "0.1.0"
 dependencies = [
@@ -1651,33 +1661,9 @@ dependencies = [
 name = "hivemind-managed-prover-protocol"
 version = "0.1.0"
 dependencies = [
- "hex",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "thiserror 1.0.69",
-]
-
-[[package]]
-name = "hivemind-managed-prover-service"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "general-compute-runtime",
- "hivemind-auth",
- "hivemind-config",
- "hivemind-managed-proof",
- "hivemind-managed-prover-protocol",
- "hivemind-proto",
- "prost",
- "serde",
- "serde_json",
- "tokio",
- "tonic",
- "tracing",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
@@ -1732,6 +1718,7 @@ dependencies = [
  "hivemind-client-core",
  "hivemind-config",
  "hivemind-database",
+ "hivemind-managed-consensus",
  "hivemind-models",
  "hivemind-proto",
  "hivemind-task-scheduler",
@@ -1750,7 +1737,9 @@ dependencies = [
 name = "hivemind-proto"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "prost",
+ "sha2 0.10.9",
  "tonic",
  "tonic-build",
 ]
@@ -1767,8 +1756,8 @@ dependencies = [
  "hivemind-client-core",
  "hivemind-config",
  "hivemind-database",
+ "hivemind-managed-consensus",
  "hivemind-managed-proof",
- "hivemind-managed-prover-protocol",
  "hivemind-models",
  "hivemind-proto",
  "jsonwebtoken",
@@ -1840,8 +1829,7 @@ dependencies = [
  "hivemind-auth",
  "hivemind-client-runtime",
  "hivemind-config",
- "hivemind-managed-proof",
- "hivemind-managed-prover-protocol",
+ "hivemind-managed-consensus",
  "hivemind-models",
  "hivemind-proto",
  "jsonwebtoken",

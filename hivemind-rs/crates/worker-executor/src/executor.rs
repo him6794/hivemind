@@ -87,7 +87,6 @@ fn execute_managed_function_task(
                     managed_executed_ops: 0,
                     managed_output_bytes: 0,
                     managed_receipt_json: Some(receipt.to_string()),
-                    managed_proof: None,
                     general_compute_result_json: None,
                     managed_gpu_result_json: None,
                 });
@@ -118,7 +117,6 @@ fn execute_managed_function_task(
                     managed_executed_ops: execution.receipt.executed_ops as i64,
                     managed_output_bytes: 0,
                     managed_receipt_json: Some(receipt.to_string()),
-                    managed_proof: None,
                     general_compute_result_json: None,
                     managed_gpu_result_json: None,
                 });
@@ -153,7 +151,6 @@ fn execute_managed_function_task(
         managed_executed_ops: execution.receipt.usage_units.min(i64::MAX as u64) as i64,
         managed_output_bytes: output_bytes,
         managed_receipt_json: Some(receipt.to_string()),
-        managed_proof: None,
         general_compute_result_json: None,
         managed_gpu_result_json: None,
     })
@@ -233,7 +230,6 @@ fn execute_managed_dsl_task(
                     managed_executed_ops: 0,
                     managed_output_bytes: 0,
                     managed_receipt_json: Some(receipt.to_string()),
-                    managed_proof: None,
                     general_compute_result_json: None,
                     managed_gpu_result_json: None,
                 });
@@ -267,7 +263,6 @@ fn execute_managed_dsl_task(
                     managed_executed_ops: execution.receipt.executed_ops as i64,
                     managed_output_bytes: 0,
                     managed_receipt_json: Some(receipt.to_string()),
-                    managed_proof: None,
                     general_compute_result_json: None,
                     managed_gpu_result_json: None,
                 });
@@ -302,7 +297,6 @@ fn execute_managed_dsl_task(
         managed_executed_ops: execution.receipt.usage_units.min(i64::MAX as u64) as i64,
         managed_output_bytes: output_bytes,
         managed_receipt_json: Some(receipt.to_string()),
-        managed_proof: None,
         general_compute_result_json: None,
         managed_gpu_result_json: None,
     })
@@ -1030,7 +1024,6 @@ fn typed_managed_gpu_task_result(
         managed_executed_ops: typed.usage.executed_operations.min(i64::MAX as u64) as i64,
         managed_output_bytes: typed.usage.output_bytes.min(i64::MAX as u64) as i64,
         managed_receipt_json: None,
-        managed_proof: None,
         general_compute_result_json: None,
         managed_gpu_result_json: Some(encoded),
     })
@@ -1049,7 +1042,6 @@ fn failed_managed_gpu_task(task: &Task, error: String) -> super::TaskResult {
         managed_executed_ops: 0,
         managed_output_bytes: 0,
         managed_receipt_json: None,
-        managed_proof: None,
         general_compute_result_json: None,
         managed_gpu_result_json: None,
     }
@@ -1244,7 +1236,6 @@ fn typed_task_result(task: &Task, typed: GeneralComputeResult) -> Result<super::
         managed_executed_ops: 0,
         managed_output_bytes: typed.usage.output_bytes.min(i64::MAX as u64) as i64,
         managed_receipt_json: None,
-        managed_proof: None,
         general_compute_result_json: Some(encoded),
         managed_gpu_result_json: None,
     })
@@ -1939,7 +1930,6 @@ mod tests {
         assert_eq!(receipt["status"], "failed");
         assert_eq!(receipt["executed_ops"], 0);
         assert_eq!(receipt["output_bytes"], 0);
-        assert!(result.managed_proof.is_none());
     }
 
     #[tokio::test]
@@ -2549,7 +2539,6 @@ mod tests {
         assert!(!result.success);
         assert!(result.output.is_none());
         assert!(result.general_compute_result_json.is_none());
-        assert!(result.managed_proof.is_none());
         let typed: ManagedGpuResult =
             serde_json::from_slice(result.managed_gpu_result_json.as_deref().unwrap()).unwrap();
         assert_eq!(typed.status, ManagedGpuStatus::BackendUnavailable);
@@ -2732,7 +2721,6 @@ mod tests {
         assert_eq!(typed.output, "runner output");
         assert!(result.managed_receipt_json.is_none());
         assert!(result.general_compute_result_json.is_none());
-        assert!(result.managed_proof.is_none());
     }
 
     fn managed_gpu_worker_fixture() -> (

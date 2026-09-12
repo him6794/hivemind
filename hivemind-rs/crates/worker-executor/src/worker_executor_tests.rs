@@ -1,11 +1,9 @@
-use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
 use hivemind_models::TaskStatus;
-use tempfile::TempDir;
 use tokio::sync::{oneshot, Notify};
 use uuid::Uuid;
 
@@ -26,107 +24,6 @@ fn stop_task_execution_reports_not_running_for_unknown_task() {
     let outcome = executor.stop_task_execution("missing-task");
 
     assert_eq!(outcome, StopTaskOutcome::NotRunning);
-}
-
-#[tokio::test]
-async fn managed_task_cannot_succeed_without_a_generated_proof() {
-    let executor = WorkerExecutor::new(HivemindConfig::default());
-
-    let result = executor
-        .execute_task(&test_task("managed-proof-required"))
-        .await
-        .expect("a proof-generation failure is represented as a task failure");
-
-    assert!(!result.success);
-    assert_eq!(
-        result.error.as_deref(),
-        Some("Managed proof generation failed")
-    );
-    assert!(result.output.is_none());
-    assert!(result.managed_proof.is_none());
-    assert_eq!(result.managed_executed_ops, 0);
-    assert_eq!(result.managed_output_bytes, 0);
-    assert!(result.managed_receipt_json.is_none());
-}
-
-#[tokio::test]
-async fn managed_task_forwards_a_generated_proof_before_reporting_success() {
-    let temp = TempDir::new().expect("temporary fake prover directory");
-    let mut config = HivemindConfig::default();
-    config.executor.managed_prover_executable = successful_fake_prover(&temp);
-    config.executor.managed_prover_timeout_secs = 5;
-    let executor = WorkerExecutor::new(config);
-
-    let result = executor
-        .execute_task(&test_task("managed-proof-forwarded"))
-        .await
-        .expect("a structurally valid sidecar response completes the worker execution");
-
-    assert!(result.success);
-    assert_eq!(result.output.as_deref(), Some("1"));
-    assert_eq!(
-        result
-            .managed_proof
-            .as_ref()
-            .map(|proof| proof.proof_scheme.as_str()),
-        Some("test-proof")
-    );
-    assert_eq!(
-        result
-            .managed_proof
-            .as_ref()
-            .map(|proof| proof.image_id.as_slice()),
-        Some(&[1, 2, 3, 4, 5, 6, 7, 8][..])
-    );
-}
-
-#[test]
-fn task_result_serializes_proofs_without_losing_legacy_compatibility() {
-    let proof = hivemind_proto::ManagedProofEnvelope {
-        proof_scheme: "test-proof".into(),
-        image_id: vec![1, 2, 3, 4, 5, 6, 7, 8],
-        journal: vec![9, 10],
-        receipt_json: br#"{\"seal\":\"ok\"}"#.to_vec(),
-    };
-    let result = TaskResult {
-        task_id: "serialized-proof".into(),
-        success: true,
-        output: Some("42".into()),
-        error: None,
-        exit_code: 0,
-        cpu_time_ms: 1,
-        wall_time_ms: 2,
-        peak_memory_mb: 3,
-        managed_executed_ops: 4,
-        managed_output_bytes: 2,
-        managed_receipt_json: Some("{}".into()),
-        managed_proof: Some(proof.clone()),
-        general_compute_result_json: None,
-        managed_gpu_result_json: None,
-    };
-
-    let serialized = serde_json::to_string(&result)
-        .expect("public TaskResult remains serializable with its proof");
-    let decoded: TaskResult = serde_json::from_str(&serialized)
-        .expect("serialized TaskResult proof round-trips without loss");
-    assert_eq!(decoded.managed_proof, Some(proof));
-
-    let legacy_json = serde_json::json!({
-        "task_id": "legacy-result",
-        "success": false,
-        "output": null,
-        "error": "legacy failure",
-        "exit_code": 1,
-        "cpu_time_ms": 0,
-        "wall_time_ms": 0,
-        "peak_memory_mb": 0,
-        "managed_executed_ops": 0,
-        "managed_output_bytes": 0,
-        "managed_receipt_json": null
-    });
-    let legacy: TaskResult = serde_json::from_value(legacy_json)
-        .expect("TaskResult serialized before proof support remains readable");
-    assert!(legacy.managed_proof.is_none());
 }
 
 #[tokio::test]
@@ -163,7 +60,6 @@ async fn dropped_execute_future_keeps_supervisor_cleanup_alive() {
                     managed_executed_ops: 0,
                     managed_output_bytes: 0,
                     managed_receipt_json: None,
-                    managed_proof: None,
                     general_compute_result_json: None,
                     managed_gpu_result_json: None,
                 })
@@ -236,7 +132,6 @@ async fn concurrent_duplicate_execution_waits_for_the_original_result() {
                         managed_executed_ops: 0,
                         managed_output_bytes: 0,
                         managed_receipt_json: None,
-                        managed_proof: None,
                         general_compute_result_json: None,
                         managed_gpu_result_json: None,
                     })
@@ -312,7 +207,6 @@ async fn overlapping_attempts_keep_execution_and_cancellation_isolated() {
                         managed_executed_ops: 0,
                         managed_output_bytes: 0,
                         managed_receipt_json: None,
-                        managed_proof: None,
                         general_compute_result_json: None,
                         managed_gpu_result_json: None,
                     })
@@ -324,11 +218,7 @@ async fn overlapping_attempts_keep_execution_and_cancellation_isolated() {
     let first = {
         let executor = Arc::clone(&executor);
         let task = task.clone();
-        tokio::spawn(async move {
-            executor
-                .execute_task_with_context_and_attempt(&task, None, "attempt-a")
-                .await
-        })
+        tokio::spawn(async move { executor.execute_task_with_attempt(&task, "attempt-a").await })
     };
     tokio::time::timeout(Duration::from_secs(2), async {
         while calls.load(Ordering::SeqCst) != 1 {
@@ -340,11 +230,7 @@ async fn overlapping_attempts_keep_execution_and_cancellation_isolated() {
     let second = {
         let executor = Arc::clone(&executor);
         let task = task.clone();
-        tokio::spawn(async move {
-            executor
-                .execute_task_with_context_and_attempt(&task, None, "attempt-b")
-                .await
-        })
+        tokio::spawn(async move { executor.execute_task_with_attempt(&task, "attempt-b").await })
     };
 
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -383,35 +269,6 @@ async fn overlapping_attempts_keep_execution_and_cancellation_isolated() {
         .expect("second attempt should succeed");
     assert_eq!(second_result.output.as_deref(), Some("attempt-1"));
     assert_eq!(calls.load(Ordering::SeqCst), 2);
-}
-
-#[cfg(unix)]
-fn successful_fake_prover(temp: &TempDir) -> String {
-    use std::os::unix::fs::PermissionsExt;
-
-    let path = temp.path().join("successful-prover.sh");
-    fs::write(
-        &path,
-        "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"protocol_version\":1,\"proof_scheme\":\"test-proof\",\"image_id\":[1,2,3,4,5,6,7,8],\"journal\":[9],\"receipt_json\":\"{\\\"seal\\\":\\\"ok\\\"}\"}'\n",
-    )
-    .expect("fake prover script is written");
-    let mut permissions = fs::metadata(&path)
-        .expect("fake prover metadata")
-        .permissions();
-    permissions.set_mode(0o700);
-    fs::set_permissions(&path, permissions).expect("fake prover is executable");
-    path.to_string_lossy().into_owned()
-}
-
-#[cfg(windows)]
-fn successful_fake_prover(temp: &TempDir) -> String {
-    let path = temp.path().join("successful-prover.cmd");
-    fs::write(
-        &path,
-        "@echo off\r\nfindstr \"^\" > nul\r\necho {\"protocol_version\":1,\"proof_scheme\":\"test-proof\",\"image_id\":[1,2,3,4,5,6,7,8],\"journal\":[9],\"receipt_json\":\"{\\\"seal\\\":\\\"ok\\\"}\"}\r\nexit /b 0\r\n",
-    )
-    .expect("fake prover script is written");
-    path.to_string_lossy().into_owned()
 }
 
 fn test_task(task_id: &str) -> Task {

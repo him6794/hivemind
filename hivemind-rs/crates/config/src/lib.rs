@@ -15,6 +15,8 @@ pub struct HivemindConfig {
     pub general_compute: GeneralComputeConfig,
     #[serde(default)]
     pub managed_proof: ManagedProofConfig,
+    #[serde(default)]
+    pub managed_consensus: ManagedConsensusConfig,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,57 +87,132 @@ pub struct TrustedManagedDslWorkerRegistration {
 pub struct ManagedProofConfig {
     #[serde(default)]
     pub rollout_mode: ManagedProofRolloutMode,
-    /// Nodepool-only Ed25519 key used to mint proof-production authorizations.
-    #[serde(default)]
-    pub authorization_private_key_pem: String,
-    /// Provider-side Ed25519 verification key. This is public and may be
-    /// distributed to the provider, but never replaces the task JWT.
-    #[serde(default)]
-    pub authorization_public_key_pem: String,
-    /// Worker-side remote provider endpoint. Empty means no remote provider.
-    #[serde(default)]
-    pub provider_endpoint: String,
-    #[serde(default)]
-    pub provider_tls_ca_path: String,
-    #[serde(default)]
-    pub provider_tls_client_cert_path: String,
-    #[serde(default)]
-    pub provider_tls_client_key_path: String,
-    /// Service-side server certificate, private key, and client CA paths.
-    #[serde(default)]
-    pub provider_tls_server_cert_path: String,
-    #[serde(default)]
-    pub provider_tls_server_key_path: String,
-    #[serde(default)]
-    pub provider_tls_client_ca_path: String,
-    /// Service-side bind address, state directory, and staged prover path.
-    #[serde(default = "default_managed_prover_service_addr")]
-    pub provider_service_addr: String,
-    #[serde(default = "default_managed_prover_state_dir")]
-    pub provider_state_dir: String,
-    #[serde(default)]
-    pub provider_executable: String,
-    #[serde(default = "default_managed_prover_queue_capacity")]
-    pub provider_queue_capacity: usize,
 }
 
 impl Default for ManagedProofConfig {
     fn default() -> Self {
         Self {
             rollout_mode: ManagedProofRolloutMode::Enforce,
-            authorization_private_key_pem: String::new(),
-            authorization_public_key_pem: String::new(),
-            provider_endpoint: String::new(),
-            provider_tls_ca_path: String::new(),
-            provider_tls_client_cert_path: String::new(),
-            provider_tls_client_key_path: String::new(),
-            provider_tls_server_cert_path: String::new(),
-            provider_tls_server_key_path: String::new(),
-            provider_tls_client_ca_path: String::new(),
-            provider_service_addr: default_managed_prover_service_addr(),
-            provider_state_dir: default_managed_prover_state_dir(),
-            provider_executable: String::new(),
-            provider_queue_capacity: default_managed_prover_queue_capacity(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedConsensusConfig {
+    #[serde(default)]
+    pub rollout_mode: ManagedConsensusRolloutMode,
+    #[serde(default = "default_consensus_replica_count")]
+    pub replica_count: u16,
+    #[serde(default = "default_consensus_quorum")]
+    pub quorum: u16,
+    #[serde(default = "default_consensus_max_replicas")]
+    pub max_replicas: u16,
+    #[serde(default = "default_consensus_timeout_secs")]
+    pub timeout_secs: u64,
+    #[serde(default = "default_consensus_max_result_bytes")]
+    pub max_result_bytes: usize,
+}
+
+fn default_consensus_replica_count() -> u16 {
+    3
+}
+
+fn default_consensus_quorum() -> u16 {
+    2
+}
+
+fn default_consensus_max_replicas() -> u16 {
+    7
+}
+
+fn default_consensus_timeout_secs() -> u64 {
+    120
+}
+
+fn default_consensus_max_result_bytes() -> usize {
+    256 * 1024
+}
+
+impl Default for ManagedConsensusConfig {
+    fn default() -> Self {
+        Self {
+            rollout_mode: ManagedConsensusRolloutMode::default(),
+            replica_count: default_consensus_replica_count(),
+            quorum: default_consensus_quorum(),
+            max_replicas: default_consensus_max_replicas(),
+            timeout_secs: default_consensus_timeout_secs(),
+            max_result_bytes: default_consensus_max_result_bytes(),
+        }
+    }
+}
+
+impl ManagedConsensusConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if !(2..=self.max_replicas).contains(&self.replica_count) {
+            return Err(format!(
+                "managed consensus replica count must be between 2 and {}, got {}",
+                self.max_replicas, self.replica_count
+            ));
+        }
+        if self.quorum <= self.replica_count / 2 || self.quorum > self.replica_count {
+            return Err(format!(
+                "managed consensus quorum must be a strict majority of {}, got {}",
+                self.replica_count, self.quorum
+            ));
+        }
+        if self.max_replicas > hivemind_managed_consensus::MAX_REPLICAS {
+            return Err(format!(
+                "managed consensus max replicas cannot exceed {}",
+                hivemind_managed_consensus::MAX_REPLICAS
+            ));
+        }
+        if self.timeout_secs == 0 || self.max_result_bytes == 0 {
+            return Err("managed consensus timeout and result limit must be positive".into());
+        }
+        if self.timeout_secs > i64::MAX as u64 {
+            return Err("managed consensus timeout exceeds the supported range".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ManagedConsensusRolloutMode {
+    Disabled,
+    Observe,
+    #[default]
+    Enforce,
+}
+
+impl ManagedConsensusRolloutMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Observe => "observe",
+            Self::Enforce => "enforce",
+        }
+    }
+}
+
+impl std::fmt::Display for ManagedConsensusRolloutMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ManagedConsensusRolloutMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "disabled" | "off" => Ok(Self::Disabled),
+            "observe" => Ok(Self::Observe),
+            "enforce" => Ok(Self::Enforce),
+            other => Err(format!(
+                "unsupported managed consensus rollout mode `{other}` (expected disabled, observe, or enforce)"
+            )),
         }
     }
 }
@@ -435,6 +512,7 @@ impl Default for HivemindConfig {
             },
             general_compute: GeneralComputeConfig::default(),
             managed_proof: ManagedProofConfig::default(),
+            managed_consensus: ManagedConsensusConfig::default(),
         }
     }
 }
@@ -569,46 +647,32 @@ impl HivemindConfig {
         if let Ok(mode) = std::env::var("MANAGED_PROOF_ROLLOUT_MODE") {
             self.managed_proof.rollout_mode = parse_env("MANAGED_PROOF_ROLLOUT_MODE", &mode)?;
         }
-        if let Ok(key) = std::env::var("MANAGED_PROOF_AUTH_PRIVATE_KEY_PEM") {
-            self.managed_proof.authorization_private_key_pem = key;
+        if let Ok(mode) = std::env::var("MANAGED_CONSENSUS_ROLLOUT_MODE") {
+            self.managed_consensus.rollout_mode =
+                parse_env("MANAGED_CONSENSUS_ROLLOUT_MODE", &mode)?;
         }
-        if let Ok(key) = std::env::var("MANAGED_PROOF_AUTH_PUBLIC_KEY_PEM") {
-            self.managed_proof.authorization_public_key_pem = key;
+        if let Ok(value) = std::env::var("MANAGED_CONSENSUS_REPLICA_COUNT") {
+            self.managed_consensus.replica_count =
+                parse_env("MANAGED_CONSENSUS_REPLICA_COUNT", &value)?;
         }
-        if let Ok(endpoint) = std::env::var("MANAGED_PROVER_SERVICE_ENDPOINT") {
-            self.managed_proof.provider_endpoint = endpoint;
+        if let Ok(value) = std::env::var("MANAGED_CONSENSUS_QUORUM") {
+            self.managed_consensus.quorum = parse_env("MANAGED_CONSENSUS_QUORUM", &value)?;
         }
-        if let Ok(path) = std::env::var("MANAGED_PROVER_TLS_CA_PATH") {
-            self.managed_proof.provider_tls_ca_path = path;
+        if let Ok(value) = std::env::var("MANAGED_CONSENSUS_MAX_REPLICAS") {
+            self.managed_consensus.max_replicas =
+                parse_env("MANAGED_CONSENSUS_MAX_REPLICAS", &value)?;
         }
-        if let Ok(path) = std::env::var("MANAGED_PROVER_TLS_CLIENT_CERT_PATH") {
-            self.managed_proof.provider_tls_client_cert_path = path;
+        if let Ok(value) = std::env::var("MANAGED_CONSENSUS_TIMEOUT_SECS") {
+            self.managed_consensus.timeout_secs =
+                parse_env("MANAGED_CONSENSUS_TIMEOUT_SECS", &value)?;
         }
-        if let Ok(path) = std::env::var("MANAGED_PROVER_TLS_CLIENT_KEY_PATH") {
-            self.managed_proof.provider_tls_client_key_path = path;
+        if let Ok(value) = std::env::var("MANAGED_CONSENSUS_MAX_RESULT_BYTES") {
+            self.managed_consensus.max_result_bytes =
+                parse_env("MANAGED_CONSENSUS_MAX_RESULT_BYTES", &value)?;
         }
-        if let Ok(path) = std::env::var("MANAGED_PROVER_TLS_SERVER_CERT_PATH") {
-            self.managed_proof.provider_tls_server_cert_path = path;
-        }
-        if let Ok(path) = std::env::var("MANAGED_PROVER_TLS_SERVER_KEY_PATH") {
-            self.managed_proof.provider_tls_server_key_path = path;
-        }
-        if let Ok(path) = std::env::var("MANAGED_PROVER_TLS_CLIENT_CA_PATH") {
-            self.managed_proof.provider_tls_client_ca_path = path;
-        }
-        if let Ok(addr) = std::env::var("MANAGED_PROVER_SERVICE_ADDR") {
-            self.managed_proof.provider_service_addr = addr;
-        }
-        if let Ok(dir) = std::env::var("MANAGED_PROVER_STATE_DIR") {
-            self.managed_proof.provider_state_dir = dir;
-        }
-        if let Ok(exec) = std::env::var("MANAGED_PROVER_SERVICE_EXECUTABLE") {
-            self.managed_proof.provider_executable = exec;
-        }
-        if let Ok(capacity) = std::env::var("MANAGED_PROVER_QUEUE_CAPACITY") {
-            self.managed_proof.provider_queue_capacity =
-                parse_env("MANAGED_PROVER_QUEUE_CAPACITY", &capacity)?;
-        }
+        self.managed_consensus
+            .validate()
+            .map_err(|error| anyhow::anyhow!("invalid managed consensus configuration: {error}"))?;
         if let Ok(mode) = std::env::var("HIVEMIND_WORKER_ADMISSION_MODE") {
             self.general_compute.admission_mode =
                 parse_env("HIVEMIND_WORKER_ADMISSION_MODE", &mode)?;
@@ -815,18 +879,6 @@ fn default_managed_prover_timeout_secs() -> u64 {
     900
 }
 
-fn default_managed_prover_service_addr() -> String {
-    "0.0.0.0:50054".into()
-}
-
-fn default_managed_prover_state_dir() -> String {
-    "./managed-prover-state".into()
-}
-
-fn default_managed_prover_queue_capacity() -> usize {
-    1
-}
-
 fn default_network_egress_enabled() -> bool {
     false
 }
@@ -1026,6 +1078,22 @@ mod tests {
             config.managed_proof.rollout_mode,
             ManagedProofRolloutMode::Enforce
         );
+    }
+
+    #[test]
+    fn managed_consensus_timeout_matches_database_range() {
+        let config = ManagedConsensusConfig {
+            timeout_secs: i64::MAX as u64,
+            ..ManagedConsensusConfig::default()
+        };
+        assert!(config.validate().is_ok());
+
+        let config = ManagedConsensusConfig {
+            timeout_secs: i64::MAX as u64 + 1,
+            ..ManagedConsensusConfig::default()
+        };
+        let error = config.validate().unwrap_err();
+        assert!(error.contains("supported range"));
     }
 
     #[test]

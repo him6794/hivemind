@@ -2,25 +2,21 @@
 
 use crate::managed_proof_verifier::{verify_managed_proof, ManagedProofVerifierError};
 use anyhow::Result;
-use chrono::{Duration as ChronoDuration, Utc};
 use general_compute_runtime::managed_gpu::{
     ManagedGpuCapability, ManagedGpuRequest, ManagedGpuResult, ManagedGpuStatus,
     MANAGED_GPU_RUNTIME_VERSION,
 };
-use hivemind_auth::managed_proof::{
-    claims_with_issuance, new_claims, ManagedProofAuthorizationSigner,
-};
 use hivemind_auth::worker_execution::{WorkerExecutionIdentity, WorkerExecutionSigner};
 use hivemind_client_core::{SessionError, SessionTask, SharedSessionRegistry};
-use hivemind_config::ManagedProofRolloutMode;
+use hivemind_config::{
+    ManagedConsensusConfig, ManagedConsensusRolloutMode, ManagedProofRolloutMode,
+};
 use hivemind_database::DatabaseManager;
-use hivemind_managed_proof::{
-    dsl_proof_task_id, ClaimError, ExecutionClaim, RISC0_MANAGED_GUEST_ID, RISC0_PROOF_SCHEME,
+use hivemind_managed_consensus::{
+    digest_hex, evaluate_quorum, ConsensusBinding, ConsensusObservation, QuorumPolicy,
+    CONSENSUS_PROTOCOL_VERSION,
 };
-use hivemind_managed_prover_protocol::{
-    ManagedProverRequest, RemoteManagedProofRequest, MANAGED_PROVER_PROTOCOL_VERSION,
-    REMOTE_MANAGED_PROOF_PROTOCOL_VERSION,
-};
+use hivemind_managed_proof::{dsl_proof_task_id, ClaimError, ExecutionClaim};
 use hivemind_models::{Claims, Task, TaskStatus, WorkerNode};
 use hivemind_proto::{
     general_compute_chunk_service_client::GeneralComputeChunkServiceClient,
@@ -28,22 +24,26 @@ use hivemind_proto::{
     validate_general_compute_prepare_request, worker_node_service_client::WorkerNodeServiceClient,
     ExecuteTaskRequest, ExecuteTaskResponse, GeneralComputeChunkResumeRequest,
     GeneralComputeChunkUpload, GeneralComputePrepareRequest, ManagedProofEnvelope,
-    ResourceSpec as ProtoResourceSpec, GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES,
-    GENERAL_COMPUTE_RESULT_MAX_BYTES, LEGACY_MANAGED_RECEIPT_MAX_BYTES,
-    MANAGED_GPU_RESULT_MAX_BYTES, WORKER_RPC_MESSAGE_MAX_BYTES, WORKER_STATUS_MESSAGE_MAX_BYTES,
+    ResourceSpec as ProtoResourceSpec, StopTaskExecutionRequest,
+    GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES, GENERAL_COMPUTE_RESULT_MAX_BYTES,
+    LEGACY_MANAGED_RECEIPT_MAX_BYTES, MANAGED_GPU_RESULT_MAX_BYTES, WORKER_RPC_MESSAGE_MAX_BYTES,
+    WORKER_STATUS_MESSAGE_MAX_BYTES,
 };
+use prost::Message;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::watch;
 use tracing::{error, info, warn};
+use uuid::Uuid;
 
 use crate::managed_proof_metrics::{self, ManagedProofMetricEvent};
 use crate::scheduler;
 use crate::task_repository::{
-    is_managed_gpu_binding_integrity_error, ManagedProofAuthorizationRecord,
-    ManagedProofAuthorizationStateUpdate, TaskRepository,
+    is_managed_gpu_binding_integrity_error, ManagedConsensusAssignment, ManagedConsensusAttempt,
+    ManagedConsensusReplica, ManagedConsensusStopTarget, TaskRepository,
 };
 
 pub struct Dispatcher {
@@ -52,18 +52,50 @@ pub struct Dispatcher {
     task_timeout_secs: u64,
     max_redispatch: i32,
     worker_execution_private_key_pem: String,
-    managed_proof_authorization_private_key_pem: String,
-    managed_proof_provider_configured: bool,
     managed_proof_rollout_mode: ManagedProofRolloutMode,
+    managed_consensus_rollout_mode: ManagedConsensusRolloutMode,
+    managed_consensus_replica_count: u16,
+    managed_consensus_quorum: u16,
+    managed_consensus_max_replicas: u16,
+    managed_consensus_timeout_secs: u64,
+    managed_consensus_max_result_bytes: usize,
     session_registry: Option<SharedSessionRegistry>,
 }
 
 struct WorkerExecutionOptions {
     worker_execution_private_key_pem: String,
-    managed_proof_authorization_private_key_pem: String,
-    managed_proof_provider_configured: bool,
     managed_proof_rollout_mode: ManagedProofRolloutMode,
     max_redispatch: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManagedTaskDispatchMode {
+    Legacy,
+    Consensus,
+    AwaitingPolicy,
+    Disabled,
+}
+
+fn classify_managed_task_dispatch(
+    task: &Task,
+    rollout_mode: ManagedConsensusRolloutMode,
+    has_policy: bool,
+) -> ManagedTaskDispatchMode {
+    if !is_managed_runtime(task.runtime.as_deref()) {
+        return ManagedTaskDispatchMode::Legacy;
+    }
+    if has_policy {
+        return if rollout_mode == ManagedConsensusRolloutMode::Disabled {
+            ManagedTaskDispatchMode::Disabled
+        } else {
+            ManagedTaskDispatchMode::Consensus
+        };
+    }
+
+    // A managed task without a persisted policy has no authoritative execution
+    // route. Keep it closed until policy creation succeeds; never send it to the
+    // legacy single-Worker/proof path.
+    ManagedTaskDispatchMode::AwaitingPolicy
 }
 
 impl Dispatcher {
@@ -76,28 +108,19 @@ impl Dispatcher {
             max_redispatch,
             worker_execution_private_key_pem: std::env::var("WORKER_EXECUTION_PRIVATE_KEY_PEM")
                 .unwrap_or_default(),
-            managed_proof_authorization_private_key_pem: std::env::var(
-                "MANAGED_PROOF_AUTH_PRIVATE_KEY_PEM",
-            )
-            .unwrap_or_default(),
-            managed_proof_provider_configured: false,
             managed_proof_rollout_mode: ManagedProofRolloutMode::Enforce,
+            managed_consensus_rollout_mode: ManagedConsensusRolloutMode::Enforce,
+            managed_consensus_replica_count: 3,
+            managed_consensus_quorum: 2,
+            managed_consensus_max_replicas: 7,
+            managed_consensus_timeout_secs: 120,
+            managed_consensus_max_result_bytes: 256 * 1024,
             session_registry: None,
         }
     }
 
     pub fn with_worker_execution_private_key(mut self, private_key_pem: String) -> Self {
         self.worker_execution_private_key_pem = private_key_pem;
-        self
-    }
-
-    pub fn with_managed_proof_authorization_private_key(mut self, private_key_pem: String) -> Self {
-        self.managed_proof_authorization_private_key_pem = private_key_pem;
-        self
-    }
-
-    pub fn with_managed_proof_provider_configured(mut self, configured: bool) -> Self {
-        self.managed_proof_provider_configured = configured;
         self
     }
 
@@ -109,16 +132,102 @@ impl Dispatcher {
         self
     }
 
+    pub fn with_managed_consensus_config(mut self, config: &ManagedConsensusConfig) -> Self {
+        self.managed_consensus_rollout_mode = config.rollout_mode;
+        self.managed_consensus_replica_count = config.replica_count;
+        self.managed_consensus_quorum = config.quorum;
+        self.managed_consensus_max_replicas = config.max_replicas;
+        self.managed_consensus_timeout_secs = config.timeout_secs;
+        self.managed_consensus_max_result_bytes = config.max_result_bytes;
+        self
+    }
+
     pub fn with_session_registry(mut self, session_registry: SharedSessionRegistry) -> Self {
         self.session_registry = Some(session_registry);
         self
     }
 
+    async fn managed_task_dispatch_mode(&self, task: &Task) -> Result<ManagedTaskDispatchMode> {
+        let has_policy = if is_managed_runtime(task.runtime.as_deref()) {
+            self.repo
+                .managed_consensus_policy(&task.task_id)
+                .await?
+                .is_some()
+        } else {
+            false
+        };
+        Ok(classify_managed_task_dispatch(
+            task,
+            self.managed_consensus_rollout_mode,
+            has_policy,
+        ))
+    }
+
+    async fn dispatch_managed_consensus(
+        &self,
+        task: &Task,
+        workers: &[WorkerNode],
+    ) -> Result<Option<(ManagedConsensusAttempt, Vec<ManagedConsensusAssignment>)>> {
+        let Some(policy) = self.repo.managed_consensus_policy(&task.task_id).await? else {
+            anyhow::bail!("managed consensus task has no persisted policy");
+        };
+        if policy.protocol_version != CONSENSUS_PROTOCOL_VERSION {
+            anyhow::bail!("unsupported persisted managed consensus protocol version");
+        }
+        if !matches!(policy.mode.as_str(), "observe" | "enforce") {
+            anyhow::bail!("unsupported persisted managed consensus mode");
+        }
+        if policy.replica_count > self.managed_consensus_max_replicas {
+            anyhow::bail!(
+                "managed consensus replica count exceeds the configured maximum of {}",
+                self.managed_consensus_max_replicas
+            );
+        }
+        let mut candidates = self.rank_workers_by_cache_affinity(task, workers).await?;
+        let required = usize::from(policy.replica_count);
+        let mut selected = Vec::with_capacity(required);
+        for _ in 0..required {
+            let Some(worker) = scheduler::find_best_worker(task, &candidates).await else {
+                return Ok(None);
+            };
+            candidates.retain(|candidate| candidate.worker_id != worker.worker_id);
+            selected.push(worker);
+        }
+        self.repo
+            .create_managed_consensus_attempt(
+                task,
+                &selected,
+                policy.replica_count,
+                policy.quorum,
+                self.managed_consensus_timeout_secs,
+                &policy.mode,
+            )
+            .await
+    }
     pub async fn dispatch_one(
         &self,
         task: &Task,
         workers: &[WorkerNode],
     ) -> Option<(String, String)> {
+        match self.managed_task_dispatch_mode(task).await {
+            Ok(ManagedTaskDispatchMode::Legacy) => {}
+            Ok(mode) => {
+                warn!(
+                    task_id = %task.task_id,
+                    mode = ?mode,
+                    "refusing single-Worker dispatch for a managed task that requires consensus"
+                );
+                return None;
+            }
+            Err(error) => {
+                warn!(
+                    task_id = %task.task_id,
+                    error = %error,
+                    "refusing managed task dispatch because its consensus policy could not be read"
+                );
+                return None;
+            }
+        }
         let ranked_workers = match self.rank_workers_by_cache_affinity(task, workers).await {
             Ok(ranked) => ranked,
             Err(e) => {
@@ -306,7 +415,7 @@ impl Dispatcher {
             worker_id,
             SESSION_WORKER_EXECUTION_TOKEN_TTL_SECS,
         )?;
-        let request = build_execute_task_request_with_credentials(&task, token, None);
+        let request = build_execute_task_request_with_credentials(&task, token);
         let delivery = SessionTask {
             task_id: task.task_id.clone(),
             execution_id: request.execution_id.clone(),
@@ -380,6 +489,17 @@ impl Dispatcher {
         let pending = self.repo.find_pending().await?;
         let mut dispatched = 0u64;
         for task in &pending {
+            match self.managed_task_dispatch_mode(task).await? {
+                ManagedTaskDispatchMode::Legacy => {}
+                mode => {
+                    warn!(
+                        task_id = %task.task_id,
+                        mode = ?mode,
+                        "holding managed task outside the consensus execution dispatcher"
+                    );
+                    continue;
+                }
+            }
             if let Some((worker_id, _)) = self.dispatch_one(task, &available_workers).await {
                 reserve_worker_for_batch(&mut available_workers, &worker_id);
                 dispatched += 1;
@@ -418,6 +538,77 @@ impl Dispatcher {
         let pending = self.repo.find_pending().await?;
         let mut dispatched = 0u64;
         for task in &pending {
+            let dispatch_mode = self.managed_task_dispatch_mode(task).await?;
+            if matches!(
+                dispatch_mode,
+                ManagedTaskDispatchMode::AwaitingPolicy | ManagedTaskDispatchMode::Disabled
+            ) {
+                warn!(
+                    task_id = %task.task_id,
+                    mode = ?dispatch_mode,
+                    "holding managed task until its persisted consensus policy is usable"
+                );
+                continue;
+            }
+            if dispatch_mode == ManagedTaskDispatchMode::Consensus {
+                if !task.deterministic || task.side_effects {
+                    let reason = "managed consensus requires a deterministic side-effect-free task";
+                    match self.repo.fail(&task.task_id, reason).await {
+                        Ok(_) => warn!(
+                            task_id = %task.task_id,
+                            "rejected managed task that is ineligible for consensus"
+                        ),
+                        Err(error) => warn!(
+                            task_id = %task.task_id,
+                            error = %error,
+                            "could not terminalize a managed task that is ineligible for consensus"
+                        ),
+                    }
+                    continue;
+                }
+                match self
+                    .dispatch_managed_consensus(task, &available_workers)
+                    .await
+                {
+                    Ok(Some((attempt, assignments))) => {
+                        for assignment in &assignments {
+                            reserve_worker_for_batch(&mut available_workers, &assignment.worker_id);
+                        }
+                        dispatched += 1;
+                        let repo = self.repo.clone();
+                        let task = task.clone();
+                        let private_key = self.worker_execution_private_key_pem.clone();
+                        let max_result_bytes = self.managed_consensus_max_result_bytes;
+                        let max_redispatch = self.max_redispatch;
+                        tokio::spawn(async move {
+                            if let Err(error) = execute_managed_consensus_attempt(
+                                repo,
+                                task,
+                                attempt,
+                                assignments,
+                                private_key,
+                                max_redispatch,
+                                max_result_bytes,
+                                Vec::new(),
+                                HashMap::new(),
+                            )
+                            .await
+                            {
+                                warn!("Managed consensus execution failed: {}", error);
+                            }
+                        });
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        warn!(
+                            task_id = %task.task_id,
+                            error = %error,
+                            "Managed consensus assignment was not created"
+                        );
+                    }
+                }
+                continue;
+            }
             if let Some((worker_id, worker_addr)) =
                 self.dispatch_one(task, &available_workers).await
             {
@@ -443,15 +634,11 @@ impl Dispatcher {
                 let task = task.clone();
                 let execution_options = WorkerExecutionOptions {
                     worker_execution_private_key_pem: self.worker_execution_private_key_pem.clone(),
-                    managed_proof_authorization_private_key_pem: self
-                        .managed_proof_authorization_private_key_pem
-                        .clone(),
-                    managed_proof_provider_configured: self.managed_proof_provider_configured,
                     managed_proof_rollout_mode: self.managed_proof_rollout_mode,
                     max_redispatch: self.max_redispatch,
                 };
                 tokio::spawn(async move {
-                    if let Err(e) = execute_on_worker_with_managed_proof_key(
+                    if let Err(e) = execute_on_worker_with_options(
                         repo,
                         task,
                         worker_id,
@@ -535,6 +722,43 @@ impl Dispatcher {
         Ok(ranked)
     }
 
+    async fn expire_managed_consensus_attempt(
+        &self,
+        task: &Task,
+        attempt: &ManagedConsensusAttempt,
+        reason: &str,
+        retry_limit: i32,
+    ) -> Result<Option<Task>> {
+        let targets = self
+            .repo
+            .managed_consensus_stop_targets(&task.task_id)
+            .await?;
+        let mut all_stopped = true;
+        for target in &targets {
+            if let Err(error) =
+                stop_managed_consensus_replica(&self.worker_execution_private_key_pem, task, target)
+                    .await
+            {
+                all_stopped = false;
+                warn!(
+                    task_id = %task.task_id,
+                    worker_id = %target.worker_id,
+                    error = %error,
+                    "managed consensus timeout stop was not confirmed"
+                );
+            }
+        }
+        if all_stopped {
+            self.repo
+                .mark_managed_consensus_no_quorum(&task.task_id, attempt.id, reason, retry_limit)
+                .await
+        } else {
+            self.repo
+                .mark_managed_consensus_stop_pending(&task.task_id, attempt.id, reason)
+                .await
+        }
+    }
+
     pub async fn process_timeouts(&self) -> Result<(u64, u64)> {
         let stale = self
             .repo
@@ -543,6 +767,40 @@ impl Dispatcher {
         let mut redispatched = 0u64;
         let mut failed = 0u64;
         for task in &stale {
+            if is_managed_runtime(task.runtime.as_deref()) {
+                if let Some(attempt) = self
+                    .repo
+                    .managed_consensus_attempt_for_task(&task.task_id)
+                    .await?
+                {
+                    if attempt.deadline > chrono::Utc::now() {
+                        continue;
+                    }
+                    match self
+                        .expire_managed_consensus_attempt(
+                            task,
+                            &attempt,
+                            "managed consensus deadline exceeded",
+                            effective_retry_limit(task, self.max_redispatch),
+                        )
+                        .await?
+                    {
+                        Some(updated) if updated.status == TaskStatus::Pending => {
+                            redispatched += 1;
+                        }
+                        Some(_) => {
+                            failed += 1;
+                        }
+                        None => {
+                            warn!(
+                                task_id = %task.task_id,
+                                "managed consensus timeout was superseded before it could be recorded"
+                            );
+                        }
+                    }
+                    continue;
+                }
+            }
             let retry_limit = effective_retry_limit(task, self.max_redispatch);
             if task.worker_id.is_none() || task.retry_count >= retry_limit {
                 if let Some(worker_id) = task.worker_id.as_deref() {
@@ -728,6 +986,54 @@ impl Dispatcher {
                 }
             }
         }
+        for (task, attempt) in self.repo.managed_consensus_pending_stop_attempts().await? {
+            let targets = self
+                .repo
+                .managed_consensus_stop_targets(&task.task_id)
+                .await?;
+            let mut all_stopped = true;
+            for target in &targets {
+                if let Err(error) = stop_managed_consensus_replica(
+                    &self.worker_execution_private_key_pem,
+                    &task,
+                    target,
+                )
+                .await
+                {
+                    all_stopped = false;
+                    warn!(
+                        task_id = %task.task_id,
+                        worker_id = %target.worker_id,
+                        error = %error,
+                        "managed consensus pending stop remains unconfirmed"
+                    );
+                }
+            }
+            if all_stopped {
+                self.repo
+                    .finalize_managed_consensus_stop_pending(&task.task_id, attempt.id)
+                    .await?;
+            }
+        }
+        for (task, attempt) in self.repo.expired_managed_consensus_attempts().await? {
+            match self
+                .expire_managed_consensus_attempt(
+                    &task,
+                    &attempt,
+                    "managed consensus deadline exceeded",
+                    effective_retry_limit(&task, self.max_redispatch),
+                )
+                .await?
+            {
+                Some(updated) if updated.status == TaskStatus::Pending => {
+                    redispatched += 1;
+                }
+                Some(_) => {
+                    failed += 1;
+                }
+                None => {}
+            }
+        }
         let managed_gpu_timed_out = self.repo.mark_stale_managed_gpu_running().await?;
         let timed_out = self.repo.mark_stale_running().await? + managed_gpu_timed_out;
         if timed_out > 0 {
@@ -736,12 +1042,86 @@ impl Dispatcher {
         Ok((redispatched, failed))
     }
 
+    async fn recover_managed_consensus_attempts(&self) -> Result<u64> {
+        let attempts = self.repo.active_managed_consensus_attempts().await?;
+        let max_result_bytes = self.managed_consensus_max_result_bytes;
+        let mut resumed = 0u64;
+        for attempt in attempts {
+            let Some(task) = self.repo.find_by_task_id(&attempt.task_id).await? else {
+                continue;
+            };
+            if !matches!(task.status, TaskStatus::Assigned | TaskStatus::Running) {
+                continue;
+            }
+            let replicas = self
+                .repo
+                .managed_consensus_replicas(&attempt.task_id, &attempt.round_id)
+                .await?;
+            let mut initial_observations = Vec::new();
+            let mut initial_outputs = HashMap::new();
+            for replica in &replicas {
+                match persisted_managed_consensus_observation(
+                    &task,
+                    &attempt,
+                    replica,
+                    max_result_bytes,
+                ) {
+                    Ok(Some((observation, output))) => {
+                        initial_outputs.insert(observation.result_digest, output);
+                        initial_observations.push(observation);
+                    }
+                    Ok(None) => {}
+                    Err(error) => warn!(
+                        task_id = %task.task_id,
+                        replica_id = %replica.replica_id,
+                        error = %error,
+                        "ignoring malformed persisted managed consensus observation during recovery"
+                    ),
+                }
+            }
+            let assignments = self
+                .repo
+                .managed_consensus_assignments_for_attempt(attempt.id)
+                .await?;
+            let repo = self.repo.clone();
+            let private_key = self.worker_execution_private_key_pem.clone();
+            let max_redispatch = self.max_redispatch;
+            let max_result_bytes = self.managed_consensus_max_result_bytes;
+            tokio::spawn(async move {
+                if let Err(error) = execute_managed_consensus_attempt(
+                    repo,
+                    task,
+                    attempt,
+                    assignments,
+                    private_key,
+                    max_redispatch,
+                    max_result_bytes,
+                    initial_observations,
+                    initial_outputs,
+                )
+                .await
+                {
+                    warn!("Managed consensus recovery failed: {}", error);
+                }
+            });
+            resumed += 1;
+        }
+        Ok(resumed)
+    }
+
     pub fn start_registered_dispatch_loop(
         self: Arc<Self>,
         interval: std::time::Duration,
     ) -> watch::Sender<bool> {
         let (tx, mut rx) = watch::channel(false);
         tokio::spawn(async move {
+            match self.recover_managed_consensus_attempts().await {
+                Ok(resumed) if resumed > 0 => {
+                    info!("Resumed {} managed consensus attempts", resumed);
+                }
+                Ok(_) => {}
+                Err(error) => error!("Managed consensus recovery failed: {}", error),
+            }
             let mut tick = tokio::time::interval(interval);
             loop {
                 tokio::select! {
@@ -788,30 +1168,15 @@ pub fn worker_endpoint(addr: &str) -> Result<String> {
     }
 }
 
-#[derive(Clone)]
-struct ManagedProofDispatch {
-    token: String,
-    execution_id: String,
-    attempt_id: String,
-    idempotency_key: String,
-    request_digest: String,
-    lease_generation: i64,
-    deadline_unix_ms: i64,
-}
-
 pub fn build_execute_task_request(task: &Task) -> ExecuteTaskRequest {
     build_execute_task_request_with_token(task, String::new())
 }
 
 fn build_execute_task_request_with_token(task: &Task, token: String) -> ExecuteTaskRequest {
-    build_execute_task_request_with_credentials(task, token, None)
+    build_execute_task_request_with_credentials(task, token)
 }
 
-fn build_execute_task_request_with_credentials(
-    task: &Task,
-    token: String,
-    managed_proof: Option<&ManagedProofDispatch>,
-) -> ExecuteTaskRequest {
+fn build_execute_task_request_with_credentials(task: &Task, token: String) -> ExecuteTaskRequest {
     let runtime = task.runtime.as_deref().map(str::trim);
     let is_managed_gpu = runtime == Some(MANAGED_GPU_RUNTIME_VERSION);
     let is_general_compute =
@@ -883,9 +1248,9 @@ fn build_execute_task_request_with_credentials(
                 .map(|identity| identity.0.clone())
                 .unwrap_or_default()
         } else {
-            managed_proof
-                .map(|proof| proof.execution_id.clone())
-                .or_else(|| managed_identity.as_ref().map(|identity| identity.0.clone()))
+            managed_identity
+                .as_ref()
+                .map(|identity| identity.0.clone())
                 .or_else(|| identity.as_ref().map(|identity| identity.0.clone()))
                 .or_else(|| Some(legacy_identity.0.clone()))
                 .unwrap_or_default()
@@ -896,9 +1261,9 @@ fn build_execute_task_request_with_credentials(
                 .map(|identity| identity.1.clone())
                 .unwrap_or_default()
         } else {
-            managed_proof
-                .map(|proof| proof.attempt_id.clone())
-                .or_else(|| managed_identity.as_ref().map(|identity| identity.1.clone()))
+            managed_identity
+                .as_ref()
+                .map(|identity| identity.1.clone())
                 .or_else(|| identity.as_ref().map(|identity| identity.1.clone()))
                 .or_else(|| Some(legacy_identity.1.clone()))
                 .unwrap_or_default()
@@ -909,9 +1274,9 @@ fn build_execute_task_request_with_credentials(
                 .map(|identity| identity.2.clone())
                 .unwrap_or_default()
         } else {
-            managed_proof
-                .map(|proof| proof.idempotency_key.clone())
-                .or_else(|| managed_identity.as_ref().map(|identity| identity.2.clone()))
+            managed_identity
+                .as_ref()
+                .map(|identity| identity.2.clone())
                 .or_else(|| identity.as_ref().map(|identity| identity.2.clone()))
                 .or_else(|| Some(legacy_identity.2.clone()))
                 .unwrap_or_default()
@@ -922,9 +1287,9 @@ fn build_execute_task_request_with_credentials(
                 .map(|identity| identity.3.clone())
                 .unwrap_or_default()
         } else {
-            managed_proof
-                .map(|proof| proof.request_digest.clone())
-                .or_else(|| identity.as_ref().map(|identity| identity.3.clone()))
+            identity
+                .as_ref()
+                .map(|identity| identity.3.clone())
                 .or_else(|| Some(legacy_identity.3.clone()))
                 .unwrap_or_default()
         },
@@ -940,15 +1305,9 @@ fn build_execute_task_request_with_credentials(
         } else {
             String::new()
         },
-        managed_proof_authorization_token: managed_proof
-            .map(|proof| proof.token.clone())
-            .unwrap_or_default(),
-        managed_proof_lease_generation: managed_proof
-            .map(|proof| proof.lease_generation)
-            .unwrap_or_default(),
-        managed_proof_deadline_unix_ms: managed_proof
-            .map(|proof| proof.deadline_unix_ms)
-            .unwrap_or_default(),
+        consensus_round_id: String::new(),
+        replica_id: String::new(),
+        consensus_protocol_version: 0,
     }
 }
 
@@ -1055,7 +1414,6 @@ fn validate_general_compute_response_identity(
 fn validate_managed_proof_response_identity(
     task: &Task,
     response: &ExecuteTaskResponse,
-    dispatch: Option<&ManagedProofDispatch>,
 ) -> std::result::Result<(), &'static str> {
     if !is_managed_runtime(task.runtime.as_deref()) {
         return Ok(());
@@ -1070,19 +1428,10 @@ fn validate_managed_proof_response_identity(
     {
         return Err("managed proof response identity does not match the current task attempt");
     }
-    match dispatch {
-        Some(dispatch)
-            if response.request_digest != dispatch.request_digest
-                || response.execution_id != dispatch.execution_id
-                || response.attempt_id != dispatch.attempt_id
-                || response.idempotency_key != dispatch.idempotency_key =>
-        {
-            Err("managed proof response identity does not match the dispatched attempt")
-        }
-        Some(_) => Ok(()),
-        None if response.request_digest.is_empty() => Ok(()),
-        None => Err("local managed proof response unexpectedly contains a request digest"),
+    if response.request_digest != legacy_execution_identity(task).3 {
+        return Err("local managed proof response identity does not match the legacy request");
     }
+    Ok(())
 }
 
 fn managed_gpu_manifest_is_valid(manifest: &[u8]) -> bool {
@@ -1256,6 +1605,39 @@ fn worker_execution_token(
     )
 }
 
+fn worker_execution_consensus_token(
+    private_key_pem: &str,
+    task: &Task,
+    assignment: &ManagedConsensusAssignment,
+) -> anyhow::Result<String> {
+    if private_key_pem.trim().is_empty() {
+        anyhow::bail!("WORKER_EXECUTION_PRIVATE_KEY_PEM is required for worker execution dispatch");
+    }
+    let now = chrono::Utc::now().timestamp();
+    let claims = Claims {
+        sub: task.owner.clone(),
+        user_id: task.owner.clone(),
+        role: Some("worker-execution".into()),
+        task_id: Some(task.task_id.clone()),
+        worker_id: Some(assignment.worker_id.clone()),
+        exp: (now + 300) as usize,
+        iat: now as usize,
+    };
+    WorkerExecutionSigner::from_pem(private_key_pem)?.encode_consensus_claims(
+        &claims,
+        &WorkerExecutionIdentity {
+            execution_id: assignment.execution_id.clone(),
+            attempt_id: assignment.worker_attempt_id.clone(),
+            idempotency_key: managed_consensus_idempotency_key(task),
+            request_digest: assignment.request_digest.clone(),
+            transfer_generation: 1,
+        },
+        &assignment.round_id,
+        &assignment.replica_id,
+        CONSENSUS_PROTOCOL_VERSION,
+    )
+}
+
 fn worker_execution_token_with_lifetime(
     private_key_pem: &str,
     task: &Task,
@@ -1343,159 +1725,6 @@ fn worker_session_execution_token_with_lifetime(
     WorkerExecutionSigner::from_pem(private_key_pem)?.encode_attempt_claims(&claims, &attempt_id)
 }
 
-async fn mint_managed_proof_dispatch(
-    repo: &TaskRepository,
-    task: &Task,
-    worker_id: &str,
-    transfer_generation: Option<i64>,
-    authorization_private_key_pem: &str,
-) -> Result<Option<ManagedProofDispatch>> {
-    if !is_managed_runtime(task.runtime.as_deref()) {
-        return Ok(None);
-    }
-    if authorization_private_key_pem.trim().is_empty() {
-        anyhow::bail!("managed proof authorization private key is required");
-    }
-
-    let runtime = task.runtime.as_deref().unwrap_or_default();
-    let capability_snapshot = repo.managed_dsl_capability_snapshot(worker_id).await?;
-    if !scheduler::worker_supports_managed_dsl_request(
-        capability_snapshot.as_deref(),
-        runtime,
-        task.managed_dsl_backend_id.as_deref(),
-        task.managed_dsl_semantics_manifest_sha256.as_deref(),
-        task.max_cpt,
-    ) {
-        anyhow::bail!("assigned Worker lacks the operator-approved managed DSL capability");
-    }
-
-    let lease_generation = if task.runtime.as_deref()
-        == Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION)
-    {
-        transfer_generation
-            .filter(|generation| *generation > 0)
-            .ok_or_else(|| anyhow::anyhow!("managed proof transfer lease is missing"))?
-    } else {
-        i64::from(task.retry_count)
-            .checked_add(1)
-            .filter(|generation| *generation > 0)
-            .ok_or_else(|| anyhow::anyhow!("managed proof attempt generation is invalid"))?
-    };
-
-    let (execution_id, attempt_id, idempotency_key) = managed_proof_attempt_identity(task)?;
-    let mut deadline_unix_ms = match repo
-        .managed_proof_authorization_deadline(&task.task_id, lease_generation, &attempt_id)
-        .await?
-    {
-        Some(deadline) => deadline,
-        None => managed_proof_deadline(task)?.0,
-    };
-    if deadline_unix_ms <= Utc::now().timestamp_millis() {
-        anyhow::bail!("managed proof deadline has expired");
-    }
-
-    let signer = ManagedProofAuthorizationSigner::from_pem(authorization_private_key_pem)?;
-    // A concurrent first mint can win the task-row lock between the lookup and
-    // insert. If that happens, retry once using the persisted deadline; the
-    // deadline participates in the canonical request digest and must not be
-    // regenerated for the same attempt.
-    let mut retried_with_persisted_deadline = false;
-    let (request, persisted) = loop {
-        let lifetime = managed_proof_lifetime(deadline_unix_ms)?;
-        let request = managed_proof_request(
-            task,
-            worker_id,
-            &execution_id,
-            &attempt_id,
-            &idempotency_key,
-            lease_generation,
-            deadline_unix_ms,
-        )?;
-        let candidate_claims = new_claims(
-            &request,
-            uuid::Uuid::new_v4().to_string(),
-            Utc::now(),
-            lifetime,
-        )?;
-        let candidate_token = signer.encode(&candidate_claims)?;
-        let image_id_json = serde_json::to_string(&request.image_id)?;
-        let result = repo
-            .record_managed_proof_authorization(&ManagedProofAuthorizationRecord {
-                task_id: request.task_id.clone(),
-                protocol_version: request.protocol_version,
-                proof_task_id: request.proof_task_id.clone(),
-                owner: request.owner.clone(),
-                worker_id: request.worker_id.clone(),
-                execution_id: request.execution_id.clone(),
-                attempt_id: request.attempt_id.clone(),
-                idempotency_key: request.idempotency_key.clone(),
-                request_digest: request.request_digest.clone(),
-                lease_generation: request.lease_generation,
-                runtime: request.runtime.clone(),
-                backend_id: request.backend_id.clone(),
-                semantics_manifest_sha256: request.semantics_manifest_sha256.clone(),
-                proof_scheme: request.proof_scheme.clone(),
-                image_id_json,
-                deadline_unix_ms: request.deadline_unix_ms,
-                token_jti: candidate_claims.jti.clone(),
-                token_iat: i64::try_from(candidate_claims.iat)
-                    .map_err(|_| anyhow::anyhow!("managed proof issue time is out of range"))?,
-                token_exp: i64::try_from(candidate_claims.exp)
-                    .map_err(|_| anyhow::anyhow!("managed proof expiry is out of range"))?,
-                token_sha256: sha256_prefixed(candidate_token.as_bytes()),
-            })
-            .await;
-        match result {
-            Ok(persisted) => break (request, persisted),
-            Err(error) if !retried_with_persisted_deadline => {
-                let Some(persisted_deadline) = repo
-                    .managed_proof_authorization_deadline(
-                        &task.task_id,
-                        lease_generation,
-                        &attempt_id,
-                    )
-                    .await?
-                else {
-                    return Err(error);
-                };
-                if persisted_deadline == deadline_unix_ms {
-                    return Err(error);
-                }
-                if persisted_deadline <= Utc::now().timestamp_millis() {
-                    anyhow::bail!("persisted managed proof deadline has expired");
-                }
-                deadline_unix_ms = persisted_deadline;
-                retried_with_persisted_deadline = true;
-            }
-            Err(error) => return Err(error),
-        }
-    };
-
-    let claims = claims_with_issuance(
-        &request,
-        persisted.token_jti.clone(),
-        persisted.token_iat,
-        persisted.token_exp,
-    )?;
-    let token = signer.encode(&claims)?;
-    let token_sha256 = sha256_prefixed(token.as_bytes());
-    if token_sha256 != persisted.token_sha256 {
-        anyhow::bail!(
-            "managed proof authorization cannot be regenerated with the configured signing key"
-        );
-    }
-
-    Ok(Some(ManagedProofDispatch {
-        token,
-        execution_id,
-        attempt_id,
-        idempotency_key,
-        request_digest: request.request_digest,
-        lease_generation,
-        deadline_unix_ms: request.deadline_unix_ms,
-    }))
-}
-
 fn is_managed_runtime(runtime: Option<&str>) -> bool {
     matches!(
         runtime,
@@ -1512,114 +1741,6 @@ fn managed_proof_attempt_identity(task: &Task) -> Result<(String, String, String
         format!("managed-attempt-v1:{stable_task}:{attempt_number}"),
         format!("managed-proof-v1:{stable_task}:{attempt_number}"),
     ))
-}
-
-fn managed_proof_deadline(task: &Task) -> Result<(i64, ChronoDuration)> {
-    let now = Utc::now();
-    let rpc_deadline = now
-        .checked_add_signed(
-            ChronoDuration::from_std(WORKER_EXECUTE_RPC_TIMEOUT)
-                .map_err(|_| anyhow::anyhow!("worker execute timeout is invalid"))?,
-        )
-        .ok_or_else(|| anyhow::anyhow!("managed proof deadline overflowed"))?;
-    let deadline = task.deadline.map_or(rpc_deadline, |deadline| {
-        if deadline < rpc_deadline {
-            deadline
-        } else {
-            rpc_deadline
-        }
-    });
-    let deadline_unix_ms = deadline.timestamp_millis();
-    Ok((deadline_unix_ms, managed_proof_lifetime(deadline_unix_ms)?))
-}
-
-fn managed_proof_lifetime(deadline_unix_ms: i64) -> Result<ChronoDuration> {
-    let remaining_ms = deadline_unix_ms
-        .checked_sub(Utc::now().timestamp_millis())
-        .filter(|remaining| *remaining > 0)
-        .ok_or_else(|| anyhow::anyhow!("managed proof deadline has expired"))?;
-    let lifetime_ms = remaining_ms
-        .checked_add(999)
-        .ok_or_else(|| anyhow::anyhow!("managed proof lifetime overflowed"))?;
-    let lifetime_seconds = lifetime_ms / 1_000 + 5;
-    Ok(ChronoDuration::seconds(lifetime_seconds))
-}
-
-fn managed_proof_request(
-    task: &Task,
-    worker_id: &str,
-    execution_id: &str,
-    attempt_id: &str,
-    idempotency_key: &str,
-    lease_generation: i64,
-    deadline_unix_ms: i64,
-) -> Result<RemoteManagedProofRequest> {
-    let runtime = task
-        .runtime
-        .as_deref()
-        .filter(|runtime| is_managed_runtime(Some(runtime)))
-        .ok_or_else(|| anyhow::anyhow!("managed proof runtime is unsupported"))?;
-    let proof_task_id = if runtime == "production_sandboxed_dsl" {
-        let backend_id = task
-            .managed_dsl_backend_id
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| anyhow::anyhow!("managed DSL backend identity is missing"))?;
-        let semantics_digest = task
-            .managed_dsl_semantics_manifest_sha256
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| anyhow::anyhow!("managed DSL semantics identity is missing"))?;
-        dsl_proof_task_id(task.task_id.as_str(), runtime, backend_id, semantics_digest)
-    } else {
-        task.task_id.clone()
-    };
-    let sidecar_request = ManagedProverRequest {
-        protocol_version: MANAGED_PROVER_PROTOCOL_VERSION,
-        task_id: proof_task_id.clone(),
-        source: task.task_source.clone().unwrap_or_default(),
-        input: task.torrent_source.clone().unwrap_or_default(),
-        max_usage_units: u64::try_from(task.max_cpt)
-            .map_err(|_| anyhow::anyhow!("managed proof budget is invalid"))?,
-    };
-    sidecar_request
-        .validate()
-        .map_err(|error| anyhow::anyhow!("managed proof request is invalid: {error}"))?;
-
-    let request = RemoteManagedProofRequest {
-        protocol_version: REMOTE_MANAGED_PROOF_PROTOCOL_VERSION,
-        task_id: task.task_id.clone(),
-        proof_task_id,
-        owner: task.owner.clone(),
-        worker_id: worker_id.to_string(),
-        execution_id: execution_id.to_string(),
-        attempt_id: attempt_id.to_string(),
-        idempotency_key: idempotency_key.to_string(),
-        request_digest: String::new(),
-        lease_generation,
-        runtime: runtime.to_string(),
-        backend_id: if runtime == "production_sandboxed_dsl" {
-            task.managed_dsl_backend_id.clone().unwrap_or_default()
-        } else {
-            String::new()
-        },
-        semantics_manifest_sha256: if runtime == "production_sandboxed_dsl" {
-            task.managed_dsl_semantics_manifest_sha256
-                .clone()
-                .unwrap_or_default()
-        } else {
-            String::new()
-        },
-        source: sidecar_request.source,
-        input: sidecar_request.input,
-        max_usage_units: sidecar_request.max_usage_units,
-        proof_scheme: RISC0_PROOF_SCHEME.to_string(),
-        image_id: RISC0_MANAGED_GUEST_ID,
-        deadline_unix_ms,
-    };
-    request
-        .with_computed_digest()
-        .map_err(|error| anyhow::anyhow!("managed proof request binding is invalid: {error}"))
 }
 
 fn sha256_prefixed(value: &[u8]) -> String {
@@ -1933,6 +2054,555 @@ fn select_missing_general_compute_chunks(
     Ok(selected)
 }
 
+struct ManagedConsensusVote {
+    observation: ConsensusObservation,
+    output: String,
+    result_json: Vec<u8>,
+    result_digest: String,
+}
+
+fn persisted_managed_consensus_observation(
+    task: &Task,
+    attempt: &ManagedConsensusAttempt,
+    replica: &ManagedConsensusReplica,
+    max_result_bytes: usize,
+) -> Result<Option<(ConsensusObservation, String)>> {
+    if replica.state != "reported" || replica.success != Some(true) {
+        return Ok(None);
+    }
+    let result_json = replica
+        .result_json
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("reported consensus replica has no result bytes"))?;
+    let result = hivemind_proto::ManagedConsensusResult::decode(result_json)
+        .map_err(|error| anyhow::anyhow!("persisted consensus result is malformed: {error}"))?;
+    if max_result_bytes == 0
+        || result.encoded_len() > max_result_bytes
+        || result.output.len() > max_result_bytes
+    {
+        anyhow::bail!("persisted consensus result exceeds the configured byte limit");
+    }
+    let result_digest = replica
+        .result_digest
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("reported consensus replica has no result digest"))?;
+    if digest_hex(result_json) != result_digest
+        || result.encode_to_vec() != result_json
+        || result.status != "completed"
+        || result.output_bytes != result.output.len() as u64
+        || result.result_digest != digest_hex(&result.output)
+        || replica.output_bytes
+            != Some(i64::try_from(result.output_bytes).map_err(|_| {
+                anyhow::anyhow!("persisted consensus output length exceeds database range")
+            })?)
+        || replica.usage_units
+            != Some(
+                i64::try_from(result.usage_units).map_err(|_| {
+                    anyhow::anyhow!("persisted consensus usage exceeds database range")
+                })?,
+            )
+        || replica.executed_ops
+            != Some(i64::try_from(result.executed_ops).map_err(|_| {
+                anyhow::anyhow!("persisted consensus operation count exceeds database range")
+            })?)
+    {
+        anyhow::bail!("persisted consensus observation is internally inconsistent");
+    }
+    let output = String::from_utf8(result.output.clone())
+        .map_err(|_| anyhow::anyhow!("persisted consensus output is not UTF-8"))?;
+    let assignment = ManagedConsensusAssignment {
+        replica_id: replica.replica_id.clone(),
+        worker_id: replica.worker_id.clone(),
+        worker_ip: String::new(),
+        attempt_id: replica.attempt_id,
+        execution_id: replica.execution_id.clone(),
+        round_id: attempt.round_id.clone(),
+        worker_attempt_id: replica.worker_attempt_id.clone(),
+        request_digest: replica.request_digest.clone(),
+    };
+    let observation = ConsensusObservation {
+        worker_id: replica.worker_id.clone(),
+        replica_id: replica.replica_id.clone(),
+        attempt_id: replica.worker_attempt_id.clone(),
+        binding: managed_consensus_binding_for_assignment(task, &assignment),
+        success: true,
+        output_digest: hivemind_managed_consensus::output_digest(&result.output),
+        result_digest: parse_consensus_digest(result_digest)?,
+        output_bytes: result.output_bytes,
+        claimed_usage_units: result.usage_units,
+        claimed_executed_ops: result.executed_ops,
+    };
+    Ok(Some((observation, output)))
+}
+
+fn parse_consensus_digest(value: &str) -> Result<[u8; 32]> {
+    let encoded = value
+        .strip_prefix("sha256:")
+        .ok_or_else(|| anyhow::anyhow!("consensus digest is missing its sha256 prefix"))?;
+    let bytes = hex::decode(encoded)
+        .map_err(|error| anyhow::anyhow!("consensus digest is not hexadecimal: {error}"))?;
+    bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("consensus digest must contain 32 bytes"))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_managed_consensus_attempt(
+    repo: Arc<TaskRepository>,
+    task: Task,
+    attempt: ManagedConsensusAttempt,
+    assignments: Vec<ManagedConsensusAssignment>,
+    private_key_pem: String,
+    max_redispatch: i32,
+    max_result_bytes: usize,
+    initial_observations: Vec<ConsensusObservation>,
+    initial_outputs: HashMap<[u8; 32], String>,
+) -> Result<()> {
+    let policy = QuorumPolicy::new(attempt.replica_count as u16, attempt.quorum as u16)
+        .map_err(|error| anyhow::anyhow!("invalid persisted managed consensus policy: {error}"))?;
+    let binding = managed_consensus_binding(&task, &attempt);
+    let deadline = if attempt.deadline > chrono::Utc::now() {
+        attempt.deadline
+    } else {
+        chrono::Utc::now()
+    };
+    let mut pending_assignments: HashMap<String, ManagedConsensusAssignment> = assignments
+        .iter()
+        .cloned()
+        .map(|assignment| (assignment.replica_id.clone(), assignment))
+        .collect();
+    let mut observations = initial_observations;
+    let mut outputs = initial_outputs;
+    if let Ok(certificate) = evaluate_quorum(&binding, policy, &observations) {
+        let output = outputs
+            .get(&certificate.result_digest)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("managed consensus recovery output was not retained"))?;
+        let mut stops_confirmed = true;
+        for assignment in pending_assignments.values() {
+            if let Err(error) =
+                stop_managed_consensus_assignment(&private_key_pem, &task, assignment).await
+            {
+                stops_confirmed = false;
+                warn!(
+                    task_id = %task.task_id,
+                    worker_id = %assignment.worker_id,
+                    error = %error,
+                    "managed consensus recovery stop was not confirmed"
+                );
+            }
+        }
+        if attempt.mode == "observe" {
+            repo.complete_managed_consensus_observe(
+                &task.task_id,
+                attempt.id,
+                Some(&certificate),
+                stops_confirmed,
+            )
+            .await?;
+        } else {
+            repo.complete_managed_consensus(&certificate, &output, stops_confirmed)
+                .await?;
+        }
+        return Ok(());
+    }
+    let mut workers = tokio::task::JoinSet::new();
+    for assignment in assignments {
+        let repo = Arc::clone(&repo);
+        let task = task.clone();
+        let private_key_pem = private_key_pem.clone();
+        workers.spawn(async move {
+            let replica_id = assignment.replica_id.clone();
+            let result = execute_managed_consensus_replica(
+                repo,
+                task,
+                assignment,
+                private_key_pem,
+                max_result_bytes,
+                deadline,
+            )
+            .await;
+            (replica_id, result)
+        });
+    }
+    while !workers.is_empty() {
+        let remaining = if deadline > chrono::Utc::now() {
+            deadline
+                .signed_duration_since(chrono::Utc::now())
+                .to_std()
+                .unwrap_or_default()
+        } else {
+            Duration::ZERO
+        };
+        if remaining.is_zero() {
+            break;
+        }
+        let joined = tokio::time::timeout(remaining, workers.join_next()).await;
+        let Some(joined) = joined.ok().flatten() else {
+            break;
+        };
+        match joined {
+            Ok((replica_id, Ok(Some(vote)))) => {
+                pending_assignments.remove(&replica_id);
+                let outcome = repo
+                    .record_managed_consensus_observation(
+                        &task.task_id,
+                        attempt.id,
+                        &attempt.round_id,
+                        &vote.observation.replica_id,
+                        &vote.observation.worker_id,
+                        vote.observation.success,
+                        &vote.result_digest,
+                        i64::try_from(vote.observation.output_bytes).map_err(|_| {
+                            anyhow::anyhow!("consensus output length exceeds database range")
+                        })?,
+                        &vote.result_json,
+                        i64::try_from(vote.observation.claimed_usage_units).map_err(|_| {
+                            anyhow::anyhow!("consensus usage exceeds database range")
+                        })?,
+                        i64::try_from(vote.observation.claimed_executed_ops).map_err(|_| {
+                            anyhow::anyhow!("consensus operation count exceeds database range")
+                        })?,
+                    )
+                    .await?;
+                if outcome == crate::task_repository::ManagedConsensusObservationOutcome::Recorded {
+                    let result_key = vote.observation.result_digest;
+                    outputs.insert(result_key, vote.output);
+                    observations.push(vote.observation);
+                    if let Ok(certificate) = evaluate_quorum(&binding, policy, &observations) {
+                        let mut stops_confirmed = true;
+                        for assignment in pending_assignments.values() {
+                            if let Err(error) = stop_managed_consensus_assignment(
+                                &private_key_pem,
+                                &task,
+                                assignment,
+                            )
+                            .await
+                            {
+                                stops_confirmed = false;
+                                warn!(
+                                    task_id = %task.task_id,
+                                    worker_id = %assignment.worker_id,
+                                    error = %error,
+                                    "managed consensus stop after quorum was not confirmed"
+                                );
+                            }
+                        }
+                        let output = outputs
+                            .get(&certificate.result_digest)
+                            .cloned()
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "managed consensus certificate output was not retained"
+                                )
+                            })?;
+                        if attempt.mode == "observe" {
+                            repo.complete_managed_consensus_observe(
+                                &task.task_id,
+                                attempt.id,
+                                Some(&certificate),
+                                stops_confirmed,
+                            )
+                            .await?;
+                        } else {
+                            repo.complete_managed_consensus(&certificate, &output, stops_confirmed)
+                                .await?;
+                        }
+                        workers.abort_all();
+                        return Ok(());
+                    }
+                }
+            }
+            Ok((replica_id, Ok(None))) => {
+                pending_assignments.remove(&replica_id);
+            }
+            Ok((replica_id, Err(error))) => {
+                warn!(
+                    task_id = %task.task_id,
+                    replica_id,
+                    error = %error,
+                    "managed consensus replica failed"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    task_id = %task.task_id,
+                    error = %error,
+                    "managed consensus replica task panicked"
+                );
+            }
+        }
+    }
+    let mut stops_confirmed = true;
+    for assignment in pending_assignments.values() {
+        if let Err(error) =
+            stop_managed_consensus_assignment(&private_key_pem, &task, assignment).await
+        {
+            stops_confirmed = false;
+            warn!(
+                task_id = %task.task_id,
+                worker_id = %assignment.worker_id,
+                error = %error,
+                "managed consensus timeout stop was not confirmed"
+            );
+        }
+    }
+    workers.abort_all();
+    let reason = "managed consensus quorum was not reached";
+    if attempt.mode == "observe" {
+        repo.complete_managed_consensus_observe(&task.task_id, attempt.id, None, stops_confirmed)
+            .await?;
+    } else if stops_confirmed {
+        repo.mark_managed_consensus_no_quorum(
+            &task.task_id,
+            attempt.id,
+            reason,
+            effective_retry_limit(&task, max_redispatch),
+        )
+        .await?;
+    } else {
+        repo.mark_managed_consensus_stop_pending(&task.task_id, attempt.id, reason)
+            .await?;
+    }
+    Ok(())
+}
+
+async fn execute_managed_consensus_replica(
+    repo: Arc<TaskRepository>,
+    task: Task,
+    assignment: ManagedConsensusAssignment,
+    private_key_pem: String,
+    max_result_bytes: usize,
+    deadline: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<ManagedConsensusVote>> {
+    if !repo
+        .mark_managed_consensus_replica_running(assignment.attempt_id, &assignment.replica_id)
+        .await?
+    {
+        return Ok(None);
+    }
+    let token = worker_execution_consensus_token(&private_key_pem, &task, &assignment)?;
+    let endpoint = worker_transport_endpoint(&assignment.worker_ip)?;
+    let channel = endpoint.connect().await?;
+    let mut client = WorkerNodeServiceClient::new(channel)
+        .max_encoding_message_size(WORKER_RPC_MESSAGE_MAX_BYTES)
+        .max_decoding_message_size(WORKER_RPC_MESSAGE_MAX_BYTES);
+    let mut request = build_execute_task_request_with_credentials(&task, token);
+    request.execution_id = assignment.execution_id.clone();
+    request.attempt_id = assignment.worker_attempt_id.clone();
+    request.idempotency_key = managed_consensus_idempotency_key(&task);
+    request.request_digest = assignment.request_digest.clone();
+    request.consensus_round_id = assignment.round_id.clone();
+    request.replica_id = assignment.replica_id.clone();
+    request.consensus_protocol_version = CONSENSUS_PROTOCOL_VERSION as u32;
+    let rpc_timeout = deadline
+        .signed_duration_since(chrono::Utc::now())
+        .to_std()
+        .unwrap_or_default();
+    if rpc_timeout.is_zero() {
+        anyhow::bail!("managed consensus replica deadline expired before RPC dispatch");
+    }
+    let mut rpc = tonic::Request::new(request);
+    rpc.set_timeout(rpc_timeout);
+    let response = client.execute_task(rpc).await?.into_inner();
+    hivemind_proto::validate_managed_consensus_response(&response)
+        .map_err(|error| anyhow::anyhow!(error))?;
+    if response.execution_id != assignment.execution_id
+        || response.attempt_id != assignment.worker_attempt_id
+        || response.idempotency_key != managed_consensus_idempotency_key(&task)
+        || response.request_digest != assignment.request_digest
+        || response.consensus_round_id != assignment.round_id
+        || response.replica_id != assignment.replica_id
+        || response.consensus_protocol_version != CONSENSUS_PROTOCOL_VERSION as u32
+    {
+        anyhow::bail!("managed consensus response identity does not match its replica assignment");
+    }
+    let result = response
+        .managed_consensus_result
+        .ok_or_else(|| anyhow::anyhow!("managed consensus result is missing"))?;
+    if max_result_bytes == 0
+        || result.encoded_len() > max_result_bytes
+        || result.output.len() > max_result_bytes
+    {
+        anyhow::bail!("managed consensus result exceeds the configured byte limit");
+    }
+    let result_json = result.encode_to_vec();
+    let canonical_result_json =
+        hivemind_proto::canonical_managed_consensus_result(&result).encode_to_vec();
+    let result_digest = hivemind_proto::managed_consensus_result_digest(&result);
+    if response.managed_consensus_result_digest != result_digest
+        || result.result_digest != digest_hex(&result.output)
+        || result.output_bytes != result.output.len() as u64
+        || result.runtime != task.runtime.clone().unwrap_or_default()
+        || result.backend_id != managed_consensus_backend_id(&task)
+        || result.semantics_manifest_sha256 != managed_consensus_semantics_digest(&task)
+        || result.source_sha256
+            != digest_hex(task.task_source.as_deref().unwrap_or_default().as_bytes())
+        || result.input_sha256
+            != digest_hex(
+                task.torrent_source
+                    .as_deref()
+                    .unwrap_or_default()
+                    .as_bytes(),
+            )
+    {
+        anyhow::bail!("managed consensus result binding or digest is invalid");
+    }
+    let output = String::from_utf8(result.output.clone())
+        .map_err(|_| anyhow::anyhow!("managed consensus output is not UTF-8"))?;
+    let binding = managed_consensus_binding_for_assignment(&task, &assignment);
+    let observation = ConsensusObservation {
+        worker_id: assignment.worker_id,
+        replica_id: assignment.replica_id,
+        attempt_id: assignment.worker_attempt_id,
+        binding,
+        success: response.success && result.status == "completed",
+        output_digest: hivemind_managed_consensus::output_digest(&result.output),
+        result_digest: hivemind_managed_consensus::output_digest(&canonical_result_json),
+        output_bytes: result.output_bytes,
+        claimed_usage_units: result.usage_units,
+        claimed_executed_ops: result.executed_ops,
+    };
+    Ok(Some(ManagedConsensusVote {
+        observation,
+        output,
+        result_json,
+        result_digest,
+    }))
+}
+
+async fn stop_managed_consensus_assignment(
+    private_key_pem: &str,
+    task: &Task,
+    assignment: &ManagedConsensusAssignment,
+) -> Result<()> {
+    let token = worker_execution_consensus_token(private_key_pem, task, assignment)?;
+    let endpoint = worker_transport_endpoint(&assignment.worker_ip)?;
+    let channel = endpoint.connect().await?;
+    let mut client = WorkerNodeServiceClient::new(channel)
+        .max_encoding_message_size(WORKER_RPC_MESSAGE_MAX_BYTES)
+        .max_decoding_message_size(WORKER_RPC_MESSAGE_MAX_BYTES);
+    let mut request = tonic::Request::new(StopTaskExecutionRequest {
+        task_id: task.task_id.clone(),
+        token,
+        attempt_id: assignment.worker_attempt_id.clone(),
+        idempotency_key: managed_consensus_idempotency_key(task),
+    });
+    request.set_timeout(Duration::from_secs(5));
+    let response = client.stop_task_execution(request).await?.into_inner();
+    if response.success || response.status_message == "Task not running" {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "Worker {} did not confirm managed consensus stop: {}",
+        assignment.worker_id,
+        response.status_message
+    )
+}
+
+async fn stop_managed_consensus_replica(
+    private_key_pem: &str,
+    task: &Task,
+    target: &ManagedConsensusStopTarget,
+) -> Result<()> {
+    let assignment = ManagedConsensusAssignment {
+        replica_id: target.replica_id.clone(),
+        worker_id: target.worker_id.clone(),
+        worker_ip: target.worker_ip.clone(),
+        attempt_id: Uuid::nil(),
+        execution_id: target.execution_id.clone(),
+        round_id: target.round_id.clone(),
+        worker_attempt_id: target.worker_attempt_id.clone(),
+        request_digest: target.request_digest.clone(),
+    };
+    if target.idempotency_key != managed_consensus_idempotency_key(task) {
+        anyhow::bail!("managed consensus stop target idempotency key is stale");
+    }
+    stop_managed_consensus_assignment(private_key_pem, task, &assignment).await
+}
+
+fn managed_consensus_backend_id(task: &Task) -> String {
+    task.managed_dsl_backend_id
+        .as_deref()
+        .filter(|backend_id| !backend_id.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            if task.runtime.as_deref().map(str::trim)
+                == Some(general_compute_runtime::MANAGED_DSL_RUNTIME_VERSION)
+            {
+                hivemind_managed_consensus::MANAGED_DSL_DEFAULT_BACKEND_ID.to_owned()
+            } else {
+                String::new()
+            }
+        })
+}
+
+fn managed_consensus_semantics_digest(task: &Task) -> String {
+    task.managed_dsl_semantics_manifest_sha256
+        .as_deref()
+        .filter(|digest| !digest.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            if task.runtime.as_deref().map(str::trim)
+                == Some(general_compute_runtime::MANAGED_DSL_RUNTIME_VERSION)
+            {
+                hivemind_managed_consensus::MANAGED_DSL_DEFAULT_SEMANTICS_DIGEST.to_owned()
+            } else {
+                String::new()
+            }
+        })
+}
+
+pub(crate) fn managed_consensus_binding(
+    task: &Task,
+    attempt: &ManagedConsensusAttempt,
+) -> ConsensusBinding {
+    ConsensusBinding {
+        task_id: task.task_id.clone(),
+        execution_id: attempt.execution_id.clone(),
+        round_id: attempt.round_id.clone(),
+        idempotency_key: managed_consensus_idempotency_key(task),
+        request_digest: attempt.request_digest.clone(),
+        runtime: task.runtime.clone().unwrap_or_default(),
+        backend_id: managed_consensus_backend_id(task),
+        semantics_digest: managed_consensus_semantics_digest(task),
+        source_digest: digest_hex(task.task_source.as_deref().unwrap_or_default().as_bytes()),
+        input_digest: digest_hex(
+            task.torrent_source
+                .as_deref()
+                .unwrap_or_default()
+                .as_bytes(),
+        ),
+    }
+}
+
+pub(crate) fn managed_consensus_binding_for_assignment(
+    task: &Task,
+    assignment: &ManagedConsensusAssignment,
+) -> ConsensusBinding {
+    ConsensusBinding {
+        task_id: task.task_id.clone(),
+        execution_id: assignment.execution_id.clone(),
+        round_id: assignment.round_id.clone(),
+        idempotency_key: managed_consensus_idempotency_key(task),
+        request_digest: assignment.request_digest.clone(),
+        runtime: task.runtime.clone().unwrap_or_default(),
+        backend_id: managed_consensus_backend_id(task),
+        semantics_digest: managed_consensus_semantics_digest(task),
+        source_digest: digest_hex(task.task_source.as_deref().unwrap_or_default().as_bytes()),
+        input_digest: digest_hex(
+            task.torrent_source
+                .as_deref()
+                .unwrap_or_default()
+                .as_bytes(),
+        ),
+    }
+}
+
+fn managed_consensus_idempotency_key(task: &Task) -> String {
+    format!("managed-consensus-v1:{}", task.id.simple())
+}
+
 #[cfg(test)]
 async fn execute_on_worker(
     repo: Arc<TaskRepository>,
@@ -1942,15 +2612,13 @@ async fn execute_on_worker(
     worker_execution_private_key_pem: &str,
     managed_proof_rollout_mode: ManagedProofRolloutMode,
 ) -> Result<()> {
-    execute_on_worker_with_managed_proof_key(
+    execute_on_worker_with_options(
         repo,
         task,
         worker_id,
         worker_addr,
         WorkerExecutionOptions {
             worker_execution_private_key_pem: worker_execution_private_key_pem.to_owned(),
-            managed_proof_authorization_private_key_pem: String::new(),
-            managed_proof_provider_configured: false,
             managed_proof_rollout_mode,
             max_redispatch: i32::MAX,
         },
@@ -1958,7 +2626,7 @@ async fn execute_on_worker(
     .await
 }
 
-async fn execute_on_worker_with_managed_proof_key(
+async fn execute_on_worker_with_options(
     repo: Arc<TaskRepository>,
     task: Task,
     worker_id: String,
@@ -1967,8 +2635,6 @@ async fn execute_on_worker_with_managed_proof_key(
 ) -> Result<()> {
     let WorkerExecutionOptions {
         worker_execution_private_key_pem,
-        managed_proof_authorization_private_key_pem,
-        managed_proof_provider_configured,
         managed_proof_rollout_mode,
         max_redispatch,
     } = options;
@@ -2126,64 +2792,6 @@ async fn execute_on_worker_with_managed_proof_key(
             return Ok(());
         }
     };
-    let managed_proof = if managed_proof_provider_configured
-        && managed_proof_rollout_mode != ManagedProofRolloutMode::Off
-    {
-        match mint_managed_proof_dispatch(
-            repo.as_ref(),
-            &current_task,
-            &worker_id,
-            transfer_lease.as_ref().map(|lease| lease.generation),
-            &managed_proof_authorization_private_key_pem,
-        )
-        .await
-        {
-            Ok(dispatch) => dispatch,
-            Err(error) => {
-                let reason = error.to_string();
-                if is_managed_runtime(current_task.runtime.as_deref()) {
-                    if managed_proof_dispatch_should_redispatch(&error) {
-                        reset_after_worker_rpc_failure(
-                            repo.as_ref(),
-                            &current_task,
-                            &worker_id,
-                            max_redispatch,
-                            WorkerRpcFailureDisposition::RetryWithoutWorkerPenalty,
-                            &error,
-                        )
-                        .await?;
-                        warn!(
-                            "Task {} no longer matches worker {} managed capability; resetting for redispatch: {}",
-                            task.task_id, worker_id, reason
-                        );
-                        return Ok(());
-                    }
-                    if repo
-                        .fail_for_worker_without_penalty_snapshot(
-                            &current_task,
-                            &worker_id,
-                            &reason,
-                        )
-                        .await?
-                        .is_none()
-                    {
-                        warn!(
-                            "Task {} proof authorization failure arrived after the active attempt changed; leaving current task untouched",
-                            task.task_id
-                        );
-                    }
-                    warn!(
-                        "Task {} could not create managed proof authorization; failing without worker penalty: {}",
-                        task.task_id, reason
-                    );
-                    return Ok(());
-                }
-                return Err(error);
-            }
-        }
-    } else {
-        None
-    };
     let general_compute_sources = if current_task.runtime.as_deref()
         == Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION)
     {
@@ -2282,42 +2890,9 @@ async fn execute_on_worker_with_managed_proof_key(
     } else {
         None
     };
-    if let Err(error) = update_managed_proof_dispatch_state(
-        repo.as_ref(),
-        &task.task_id,
-        &worker_id,
-        managed_proof.as_ref(),
-        "submitted",
-    )
-    .await
-    {
-        warn!(
-            task_id = %task.task_id,
-            error = %error,
-            "managed proof authorization was no longer active before submission"
-        );
-        return Ok(());
-    }
-    if let Err(error) = update_managed_proof_dispatch_state(
-        repo.as_ref(),
-        &task.task_id,
-        &worker_id,
-        managed_proof.as_ref(),
-        "running",
-    )
-    .await
-    {
-        warn!(
-            task_id = %task.task_id,
-            error = %error,
-            "managed proof authorization was no longer active before worker execution"
-        );
-        return Ok(());
-    }
     let mut request = tonic::Request::new(build_execute_task_request_with_credentials(
         &current_task,
         token,
-        managed_proof.as_ref(),
     ));
     request.set_timeout(WORKER_EXECUTE_RPC_TIMEOUT);
     let response = {
@@ -2370,11 +2945,8 @@ async fn execute_on_worker_with_managed_proof_key(
                 return Ok(());
             }
             let current_task = response_task;
-            if let Err(reason) = validate_managed_proof_response_identity(
-                &current_task,
-                &response,
-                managed_proof.as_ref(),
-            ) {
+            if let Err(reason) = validate_managed_proof_response_identity(&current_task, &response)
+            {
                 retry_or_terminalize_without_worker_penalty(
                     repo.as_ref(),
                     &current_task,
@@ -3113,29 +3685,6 @@ async fn complete_legacy_worker_result(
     Ok(())
 }
 
-async fn update_managed_proof_dispatch_state(
-    repo: &TaskRepository,
-    task_id: &str,
-    worker_id: &str,
-    dispatch: Option<&ManagedProofDispatch>,
-    state: &str,
-) -> Result<()> {
-    let Some(dispatch) = dispatch else {
-        return Ok(());
-    };
-    let update = ManagedProofAuthorizationStateUpdate {
-        task_id,
-        lease_generation: dispatch.lease_generation,
-        attempt_id: &dispatch.attempt_id,
-        worker_id,
-        execution_id: &dispatch.execution_id,
-        idempotency_key: &dispatch.idempotency_key,
-        request_digest: &dispatch.request_digest,
-        state,
-    };
-    repo.update_managed_proof_authorization_state(&update).await
-}
-
 async fn record_managed_proof_audit(
     repo: &TaskRepository,
     task_id: &str,
@@ -3656,12 +4205,6 @@ async fn reset_after_worker_rpc_failure(
     Ok(())
 }
 
-fn managed_proof_dispatch_should_redispatch(error: &anyhow::Error) -> bool {
-    error
-        .to_string()
-        .contains("assigned Worker lacks the operator-approved managed DSL capability")
-}
-
 fn managed_proof_failure_disposition(
     error: &ManagedProofGateError,
 ) -> ManagedProofFailureDisposition {
@@ -3798,7 +4341,7 @@ mod tests {
         ResultStatus, TrustedWorkerCapabilityRegistration, UsageClaim, WorkerCapabilities,
         GENERAL_COMPUTE_RUNTIME_VERSION,
     };
-    use hivemind_config::ManagedProofRolloutMode;
+    use hivemind_config::{ManagedConsensusRolloutMode, ManagedProofRolloutMode};
     use hivemind_managed_proof::{
         ClaimError, ExecutionClaim, ExecutionMetrics, COST_MODEL_ID, MANAGED_RUNTIME_ID,
         PROOF_PROTOCOL_VERSION,
@@ -3812,9 +4355,10 @@ mod tests {
         ExecuteTaskRequest, ExecuteTaskResponse, GeneralComputeChunkDescriptor,
         GeneralComputeChunkResumeRequest, GeneralComputeChunkResumeResponse,
         GeneralComputeChunkUpload, GeneralComputeChunkUploadResponse, GeneralComputePrepareRequest,
-        GeneralComputePrepareResponse, StopTaskExecutionRequest, StopTaskExecutionResponse,
-        TaskOutputRequest, TaskOutputResponse, TaskOutputUploadRequest, TaskOutputUploadResponse,
-        TaskResultUploadRequest, TaskResultUploadResponse, TaskUsageRequest, TaskUsageResponse,
+        GeneralComputePrepareResponse, ManagedConsensusResult, StopTaskExecutionRequest,
+        StopTaskExecutionResponse, TaskOutputRequest, TaskOutputResponse, TaskOutputUploadRequest,
+        TaskOutputUploadResponse, TaskResultUploadRequest, TaskResultUploadResponse,
+        TaskUsageRequest, TaskUsageResponse,
     };
     use std::net::SocketAddr;
     use std::sync::{Arc, OnceLock};
@@ -4191,6 +4735,37 @@ mod tests {
     }
 
     #[test]
+    fn managed_dispatch_fails_closed_without_a_persisted_policy() {
+        let mut task = make_task("managed-rollout", TaskStatus::Pending, 0);
+        task.runtime = Some("managed-function-v0".into());
+
+        for rollout_mode in [
+            ManagedConsensusRolloutMode::Disabled,
+            ManagedConsensusRolloutMode::Observe,
+            ManagedConsensusRolloutMode::Enforce,
+        ] {
+            assert_eq!(
+                classify_managed_task_dispatch(&task, rollout_mode, false),
+                ManagedTaskDispatchMode::AwaitingPolicy
+            );
+        }
+        assert_eq!(
+            classify_managed_task_dispatch(&task, ManagedConsensusRolloutMode::Enforce, true),
+            ManagedTaskDispatchMode::Consensus
+        );
+        assert_eq!(
+            classify_managed_task_dispatch(&task, ManagedConsensusRolloutMode::Disabled, true),
+            ManagedTaskDispatchMode::Disabled
+        );
+
+        task.status_message = Some(MANAGED_CONSENSUS_POLICY_PENDING_MESSAGE.into());
+        assert_eq!(
+            classify_managed_task_dispatch(&task, ManagedConsensusRolloutMode::Enforce, false),
+            ManagedTaskDispatchMode::AwaitingPolicy
+        );
+    }
+
+    #[test]
     fn effective_retry_limit_is_the_lower_nonnegative_budget() {
         let mut task = make_task("retry-limit", TaskStatus::Assigned, 0);
         task.max_retries = 5;
@@ -4269,6 +4844,11 @@ mod tests {
         assert_eq!(request.task_source, "return get(input, \"value\") + 1;");
         assert_eq!(request.managed_budget_units, 1_000);
         assert_eq!(request.torrent, "{\"value\": 41}");
+        assert_eq!(
+            request.request_digest,
+            legacy_execution_identity(&task).3,
+            "local managed requests must use the legacy execution digest"
+        );
     }
 
     #[test]
@@ -4286,82 +4866,6 @@ mod tests {
         assert_ne!(first.2, second.2);
         assert!(second.1.ends_with(":1"));
         assert!(second.2.ends_with(":1"));
-    }
-
-    #[test]
-    fn managed_proof_request_binds_production_dsl_identity_and_digest() {
-        let mut task = make_task("managed-request-binding", TaskStatus::Pending, 0);
-        task.runtime = Some("production_sandboxed_dsl".into());
-        task.task_source = Some("return get(input, \"value\");".into());
-        task.torrent_source = Some(r#"{"value": 41}"#.into());
-        task.managed_dsl_backend_id = Some("managed-default".into());
-        task.managed_dsl_semantics_manifest_sha256 =
-            Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into());
-
-        let request = managed_proof_request(
-            &task,
-            "worker-binding",
-            "execution-binding",
-            "attempt-binding",
-            "idempotency-binding",
-            7,
-            Utc::now().timestamp_millis() + 60_000,
-        )
-        .expect("canonical managed proof request");
-
-        assert_eq!(
-            request.proof_task_id,
-            hivemind_managed_proof::dsl_proof_task_id(
-                &task.task_id,
-                "production_sandboxed_dsl",
-                "managed-default",
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            )
-        );
-        assert_eq!(request.request_digest, request.compute_digest().unwrap());
-        assert!(request.validate().is_ok());
-
-        let mut changed = request;
-        changed.max_usage_units += 1;
-        assert!(changed.validate().is_err());
-    }
-
-    #[test]
-    fn managed_proof_credentials_fill_execute_identity_fields() {
-        let task = make_task("managed-credentials", TaskStatus::Pending, 0);
-        let dispatch = ManagedProofDispatch {
-            token: "proof-token".into(),
-            execution_id: "execution-1".into(),
-            attempt_id: "attempt-1".into(),
-            idempotency_key: "idempotency-1".into(),
-            request_digest:
-                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
-            lease_generation: 3,
-            deadline_unix_ms: 4_000_000_000_000,
-        };
-
-        let request = build_execute_task_request_with_credentials(
-            &task,
-            "worker-token".into(),
-            Some(&dispatch),
-        );
-
-        assert_eq!(request.token, "worker-token");
-        assert_eq!(request.managed_proof_authorization_token, "proof-token");
-        assert_eq!(request.execution_id, "execution-1");
-        assert_eq!(request.attempt_id, "attempt-1");
-        assert_eq!(request.idempotency_key, "idempotency-1");
-        assert_eq!(request.request_digest, dispatch.request_digest);
-        assert_eq!(request.managed_proof_lease_generation, 3);
-        assert_eq!(request.managed_proof_deadline_unix_ms, 4_000_000_000_000);
-    }
-
-    #[test]
-    fn managed_proof_deadline_rejects_expired_tasks() {
-        let mut task = make_task("managed-expired", TaskStatus::Pending, 0);
-        task.deadline = Some(Utc::now() - chrono::Duration::seconds(1));
-        let error = managed_proof_deadline(&task).expect_err("expired task must fail closed");
-        assert!(error.to_string().contains("expired"));
     }
 
     #[test]
@@ -4616,6 +5120,39 @@ mod tests {
             error,
             "general-compute response identity does not match the persisted request"
         );
+    }
+
+    #[test]
+    fn local_managed_proof_response_requires_the_legacy_request_digest() {
+        let mut task = make_task("managed-local-response-identity", TaskStatus::Running, 0);
+        task.runtime = Some("managed-function-v0".into());
+        let (execution_id, attempt_id, idempotency_key) =
+            managed_proof_attempt_identity(&task).expect("managed attempt identity");
+        let matching = ExecuteTaskResponse {
+            execution_id,
+            attempt_id,
+            idempotency_key,
+            request_digest: legacy_execution_identity(&task).3,
+            ..ExecuteTaskResponse::default()
+        };
+
+        assert!(validate_managed_proof_response_identity(&task, &matching).is_ok());
+
+        let other_task = make_task("managed-other-response-identity", TaskStatus::Running, 0);
+        for request_digest in [
+            String::new(),
+            "sha256:forged".into(),
+            legacy_execution_identity(&other_task).3,
+        ] {
+            let mut response = matching.clone();
+            response.request_digest = request_digest;
+            let error = validate_managed_proof_response_identity(&task, &response)
+                .expect_err("a local response with the wrong digest must fail closed");
+            assert_eq!(
+                error,
+                "local managed proof response identity does not match the legacy request"
+            );
+        }
     }
 
     #[tokio::test]
@@ -5950,15 +6487,13 @@ mod tests {
         let (worker_addr, mut execute_rx) = worker_only_execute_server().await.unwrap();
         let (private_key, _) = hivemind_config::generate_worker_execution_test_key_pair();
 
-        execute_on_worker_with_managed_proof_key(
+        execute_on_worker_with_options(
             repo.clone(),
             task,
             case.worker_id.clone(),
             worker_addr.to_string(),
             WorkerExecutionOptions {
                 worker_execution_private_key_pem: private_key,
-                managed_proof_authorization_private_key_pem: String::new(),
-                managed_proof_provider_configured: false,
                 managed_proof_rollout_mode: ManagedProofRolloutMode::Enforce,
                 max_redispatch: 0,
             },
@@ -6124,15 +6659,13 @@ mod tests {
                 .unwrap()
                 .expect("managed GPU task must exist");
             let (private_key, _) = hivemind_config::generate_worker_execution_test_key_pair();
-            let execution = tokio::spawn(execute_on_worker_with_managed_proof_key(
+            let execution = tokio::spawn(execute_on_worker_with_options(
                 repo.clone(),
                 task,
                 case.worker_id.clone(),
                 worker_addr.to_string(),
                 WorkerExecutionOptions {
                     worker_execution_private_key_pem: private_key,
-                    managed_proof_authorization_private_key_pem: String::new(),
-                    managed_proof_provider_configured: false,
                     managed_proof_rollout_mode: ManagedProofRolloutMode::Enforce,
                     max_redispatch: 0,
                 },
@@ -6326,15 +6859,13 @@ mod tests {
             .expect("managed GPU task must exist");
         let (worker_addr, mut execute_rx) = worker_only_execute_server().await.unwrap();
 
-        execute_on_worker_with_managed_proof_key(
+        execute_on_worker_with_options(
             repo.clone(),
             task,
             case.worker_id.clone(),
             worker_addr.to_string(),
             WorkerExecutionOptions {
                 worker_execution_private_key_pem: "not-a-valid-ed25519-private-key".into(),
-                managed_proof_authorization_private_key_pem: String::new(),
-                managed_proof_provider_configured: false,
                 managed_proof_rollout_mode: ManagedProofRolloutMode::Enforce,
                 max_redispatch: 0,
             },
@@ -6472,15 +7003,13 @@ mod tests {
                 .unwrap()
                 .expect("managed GPU task must exist");
             let (private_key, _) = hivemind_config::generate_worker_execution_test_key_pair();
-            let execution = tokio::spawn(execute_on_worker_with_managed_proof_key(
+            let execution = tokio::spawn(execute_on_worker_with_options(
                 repo.clone(),
                 task,
                 case.worker_id.clone(),
                 worker_addr.to_string(),
                 WorkerExecutionOptions {
                     worker_execution_private_key_pem: private_key,
-                    managed_proof_authorization_private_key_pem: String::new(),
-                    managed_proof_provider_configured: false,
                     managed_proof_rollout_mode: ManagedProofRolloutMode::Enforce,
                     max_redispatch: 0,
                 },
@@ -6548,15 +7077,13 @@ mod tests {
             let (worker_addr, mut request_rx, response_tx) =
                 blocking_worker_execute_server().await.unwrap();
             let (private_key, _) = hivemind_config::generate_worker_execution_test_key_pair();
-            let execution = tokio::spawn(execute_on_worker_with_managed_proof_key(
+            let execution = tokio::spawn(execute_on_worker_with_options(
                 repo.clone(),
                 task,
                 case.worker_id.clone(),
                 worker_addr.to_string(),
                 WorkerExecutionOptions {
                     worker_execution_private_key_pem: private_key,
-                    managed_proof_authorization_private_key_pem: String::new(),
-                    managed_proof_provider_configured: false,
                     managed_proof_rollout_mode: ManagedProofRolloutMode::Enforce,
                     max_redispatch: i32::MAX,
                 },
@@ -8486,6 +9013,270 @@ mod tests {
         fixture.cleanup().await.ok();
     }
 
+    #[tokio::test]
+    async fn managed_consensus_fanout_accepts_two_of_three_and_stops_the_loser() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_managed_consensus_fanout").await else {
+            return;
+        };
+        let repo = Arc::new(TaskRepository::new(db.pool.clone()));
+        let unique = uuid::Uuid::new_v4().to_string();
+        let owner = format!("dispatcher-consensus-owner-{unique}");
+        let task_id = format!("dispatcher-consensus-task-{unique}");
+        let worker_ids = [
+            format!("dispatcher-consensus-worker-a-{unique}"),
+            format!("dispatcher-consensus-worker-b-{unique}"),
+            format!("dispatcher-consensus-worker-c-{unique}"),
+        ];
+        let provider_users = [
+            format!("dispatcher-consensus-provider-a-{unique}"),
+            format!("dispatcher-consensus-provider-b-{unique}"),
+            format!("dispatcher-consensus-provider-c-{unique}"),
+        ];
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 1000)",
+        )
+        .bind(&owner)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        for (worker_id, provider_user) in worker_ids.iter().zip(provider_users.iter()) {
+            sqlx::query(
+                "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 0)",
+            )
+            .bind(provider_user)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO worker_nodes (worker_id, username, ip, cpu_cores, memory_gb,
+                 cpu_score, gpu_score, gpu_memory_gb, storage_total_gb, storage_available_gb)
+                 VALUES ($1, $2, '127.0.0.1:1', 4, 16, 400, 0, 0, 500, 200)",
+            )
+            .bind(worker_id)
+            .bind(provider_user)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        }
+        let mut task = make_task(&task_id, TaskStatus::Pending, 0);
+        task.owner = owner.clone();
+        task.runtime = Some("managed-function-v0".into());
+        task.task_source = Some("return input".into());
+        task.torrent_source = Some("{}".into());
+        task.deterministic = true;
+        task.max_cpt = 100;
+        task = repo.create(&task).await.unwrap();
+
+        let (addr_a, _stops_a) = consensus_worker_server(b"same-result".to_vec(), Duration::ZERO)
+            .await
+            .unwrap();
+        let (addr_b, _stops_b) = consensus_worker_server(b"same-result".to_vec(), Duration::ZERO)
+            .await
+            .unwrap();
+        let (addr_c, mut stops_c) =
+            consensus_worker_server(b"different-result".to_vec(), Duration::from_millis(250))
+                .await
+                .unwrap();
+        let addresses = [addr_a, addr_b, addr_c];
+        let workers: Vec<_> = worker_ids
+            .iter()
+            .zip(provider_users.iter())
+            .zip(addresses.iter())
+            .map(|((worker_id, provider_user), address)| {
+                let mut worker = make_worker(worker_id, 4, 16, WorkerStatus::Idle);
+                worker.username = provider_user.clone();
+                worker.ip = address.to_string();
+                worker
+            })
+            .collect();
+        let (attempt, assignments) = repo
+            .create_managed_consensus_attempt(&task, &workers, 3, 2, 30, "enforce")
+            .await
+            .unwrap()
+            .unwrap();
+        let (private_key, _) = hivemind_config::generate_worker_execution_test_key_pair();
+        let attempt_id = attempt.id;
+        execute_managed_consensus_attempt(
+            repo.clone(),
+            task.clone(),
+            attempt,
+            assignments.clone(),
+            private_key,
+            i32::MAX,
+            256 * 1024,
+            Vec::new(),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+        let stored = repo.find_by_task_id(&task_id).await.unwrap().unwrap();
+        assert_eq!(stored.status, TaskStatus::Completed);
+        assert_eq!(stored.output.as_deref(), Some("same-result"));
+        let certificate_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM managed_consensus_certificates WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(certificate_count, 1);
+        let stop = tokio::time::timeout(Duration::from_secs(2), stops_c.recv())
+            .await
+            .unwrap()
+            .expect("the delayed divergent replica must receive an explicit stop");
+        assert_eq!(stop.task_id, task_id);
+        assert_eq!(stop.attempt_id, assignments[2].worker_attempt_id);
+        assert_eq!(
+            stop.idempotency_key,
+            managed_consensus_idempotency_key(&task)
+        );
+        let active_reservations: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM managed_consensus_worker_reservations\n             WHERE attempt_id = $1 AND state = 'active'",
+        )
+        .bind(attempt_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(active_reservations, 0);
+        fixture.cleanup().await.ok();
+    }
+
+    struct ConsensusWorkerService {
+        output: Vec<u8>,
+        delay: Duration,
+        stop_tx: tokio::sync::mpsc::Sender<StopTaskExecutionRequest>,
+    }
+
+    #[tonic::async_trait]
+    impl WorkerNodeService for ConsensusWorkerService {
+        async fn execute_task(
+            &self,
+            request: Request<ExecuteTaskRequest>,
+        ) -> Result<Response<ExecuteTaskResponse>, Status> {
+            let request = request.into_inner();
+            if !self.delay.is_zero() {
+                tokio::time::sleep(self.delay).await;
+            }
+            let output = self.output.clone();
+            let result = ManagedConsensusResult {
+                protocol_version: CONSENSUS_PROTOCOL_VERSION as u32,
+                status: "completed".into(),
+                output: output.clone(),
+                output_bytes: output.len() as u64,
+                runtime: request.runtime.clone(),
+                backend_id: hivemind_managed_consensus::MANAGED_DSL_DEFAULT_BACKEND_ID.into(),
+                semantics_manifest_sha256:
+                    hivemind_managed_consensus::MANAGED_DSL_DEFAULT_SEMANTICS_DIGEST.into(),
+                source_sha256: digest_hex(request.task_source.as_bytes()),
+                input_sha256: digest_hex(request.torrent.as_bytes()),
+                result_digest: digest_hex(&output),
+                ..ManagedConsensusResult::default()
+            };
+            let result_digest = digest_hex(&result.encode_to_vec());
+            Ok(Response::new(ExecuteTaskResponse {
+                success: true,
+                status_message: String::from_utf8(output)
+                    .map_err(|_| Status::invalid_argument("test consensus output is not UTF-8"))?,
+                execution_id: request.execution_id.clone(),
+                attempt_id: request.attempt_id.clone(),
+                idempotency_key: request.idempotency_key.clone(),
+                request_digest: request.request_digest.clone(),
+                managed_consensus_result: Some(result),
+                managed_consensus_result_digest: result_digest,
+                replica_id: request.replica_id.clone(),
+                consensus_round_id: request.consensus_round_id.clone(),
+                consensus_protocol_version: request.consensus_protocol_version,
+                ..ExecuteTaskResponse::default()
+            }))
+        }
+
+        async fn task_output_upload(
+            &self,
+            _request: Request<TaskOutputUploadRequest>,
+        ) -> Result<Response<TaskOutputUploadResponse>, Status> {
+            Err(Status::unimplemented(
+                "consensus fixture does not upload output",
+            ))
+        }
+
+        async fn task_result_upload(
+            &self,
+            _request: Request<TaskResultUploadRequest>,
+        ) -> Result<Response<TaskResultUploadResponse>, Status> {
+            Err(Status::unimplemented(
+                "consensus fixture does not upload results",
+            ))
+        }
+
+        async fn task_output(
+            &self,
+            _request: Request<TaskOutputRequest>,
+        ) -> Result<Response<TaskOutputResponse>, Status> {
+            Err(Status::unimplemented("consensus fixture has no output"))
+        }
+
+        async fn stop_task_execution(
+            &self,
+            request: Request<StopTaskExecutionRequest>,
+        ) -> Result<Response<StopTaskExecutionResponse>, Status> {
+            self.stop_tx
+                .send(request.into_inner())
+                .await
+                .map_err(|_| Status::internal("consensus stop receiver closed"))?;
+            Ok(Response::new(StopTaskExecutionResponse {
+                success: true,
+                status_message: "Stop requested".into(),
+            }))
+        }
+
+        async fn task_usage(
+            &self,
+            _request: Request<TaskUsageRequest>,
+        ) -> Result<Response<TaskUsageResponse>, Status> {
+            Err(Status::unimplemented(
+                "consensus fixture does not report usage",
+            ))
+        }
+    }
+
+    async fn consensus_worker_server(
+        output: Vec<u8>,
+        delay: Duration,
+    ) -> Option<(
+        SocketAddr,
+        tokio::sync::mpsc::Receiver<StopTaskExecutionRequest>,
+    )> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.ok()?;
+        let addr = listener.local_addr().ok()?;
+        let (stop_tx, stop_rx) = tokio::sync::mpsc::channel(4);
+        let service = WorkerNodeServiceServer::new(ConsensusWorkerService {
+            output,
+            delay,
+            stop_tx,
+        });
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(service)
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await;
+        });
+        for _ in 0..30 {
+            if hivemind_proto::worker_node_service_client::WorkerNodeServiceClient::connect(
+                format!("http://{addr}"),
+            )
+            .await
+            .is_ok()
+            {
+                return Some((addr, stop_rx));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        None
+    }
+
     async fn blocking_worker_execute_server() -> Option<(
         SocketAddr,
         tokio::sync::mpsc::Receiver<ExecuteTaskRequest>,
@@ -9105,6 +9896,7 @@ mod tests {
                 response.execution_id = request.execution_id;
                 response.attempt_id = request.attempt_id;
                 response.idempotency_key = request.idempotency_key;
+                response.request_digest = request.request_digest;
             }
             Ok(Response::new(response))
         }

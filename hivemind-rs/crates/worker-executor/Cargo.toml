@@ -6,8 +6,8 @@ license.workspace = true
 
 [features]
 default = []
-# Operator-owned CUDA support for managed-function-gpu-v1 only. The frozen
-# managed-function-v0/proof route remains independent of this feature.
+# Operator-owned CUDA support for managed-function-gpu-v1 only. The managed
+# runtimes use their typed result channels independently of this feature.
 cuda = ["managed-function-runtime/cuda"]
 
 [dependencies]
@@ -29,8 +29,7 @@ hivemind-proto = { path = "../proto" }
 hivemind-models = { path = "../models" }
 hivemind-config = { path = "../config" }
 hivemind-client-runtime = { path = "../client-runtime" }
-hivemind-managed-prover-protocol = { path = "../managed-prover-protocol" }
-hivemind-managed-proof = { path = "../managed-proof" }
+hivemind-managed-consensus = { path = "../managed-consensus" }
 hivemind-auth = { path = "../auth" }
 managed-function-runtime = { path = "../../../executor-rs/crates/managed-function-runtime" }
 general-compute-runtime = { path = "../../../executor-rs/crates/general-compute-runtime" }

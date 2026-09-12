@@ -1,38 +1,35 @@
 #![allow(clippy::result_large_err)]
 
-use hivemind_auth::managed_proof::MANAGED_PROOF_AUTH_TOKEN_MAX_BYTES;
-use hivemind_auth::worker_execution::WorkerExecutionVerifier;
+use hivemind_auth::worker_execution::{WorkerExecutionClaims, WorkerExecutionVerifier};
 use hivemind_models::Claims;
 use hivemind_proto::{
     general_compute_chunk_service_server::GeneralComputeChunkService,
-    node_manager_service_client::NodeManagerServiceClient,
-    worker_node_service_server::WorkerNodeService, ExecuteTaskRequest, ExecuteTaskResponse,
-    GeneralComputeChunkDescriptor, GeneralComputeChunkResumeRequest,
-    GeneralComputeChunkResumeResponse, GeneralComputeChunkUpload,
+    node_manager_service_client::NodeManagerServiceClient, validate_managed_consensus_request,
+    validate_managed_consensus_response, worker_node_service_server::WorkerNodeService,
+    ExecuteTaskRequest, ExecuteTaskResponse, GeneralComputeChunkDescriptor,
+    GeneralComputeChunkResumeRequest, GeneralComputeChunkResumeResponse, GeneralComputeChunkUpload,
     GeneralComputeChunkUploadResponse, GeneralComputePrepareRequest, GeneralComputePrepareResponse,
-    StopTaskExecutionRequest, StopTaskExecutionResponse, TaskOutputRequest, TaskOutputResponse,
-    TaskOutputUploadRequest, TaskOutputUploadResponse, TaskResultUploadRequest,
+    ManagedConsensusResult, StopTaskExecutionRequest, StopTaskExecutionResponse, TaskOutputRequest,
+    TaskOutputResponse, TaskOutputUploadRequest, TaskOutputUploadResponse, TaskResultUploadRequest,
     TaskResultUploadResponse, TaskUsageRequest, TaskUsageResponse,
     GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES, GENERAL_COMPUTE_RESULT_MAX_BYTES,
-    LEGACY_MANAGED_RECEIPT_MAX_BYTES, MANAGED_GPU_RESULT_MAX_BYTES,
-    MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES, WORKER_RPC_MESSAGE_MAX_BYTES,
+    LEGACY_MANAGED_RECEIPT_MAX_BYTES, MANAGED_GPU_RESULT_MAX_BYTES, WORKER_RPC_MESSAGE_MAX_BYTES,
     WORKER_STATUS_MESSAGE_MAX_BYTES,
 };
 use prost::Message;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tonic::{Request, Response, Status};
 
 use crate::{
-    managed_prover::{ManagedProofTaskContext, ManagedProverError},
-    runtime_admission::WorkerRuntimeAdmission,
-    StopTaskOutcome, TaskResult, WorkerExecutor,
+    runtime_admission::WorkerRuntimeAdmission, StopTaskOutcome, TaskResult, WorkerExecutor,
 };
 use general_compute_runtime::artifact::CasChunkStore;
 use general_compute_runtime::managed_gpu::{ManagedGpuRequest, MANAGED_GPU_RUNTIME_VERSION};
 use general_compute_runtime::GeneralComputeRequest;
-use hivemind_config::{HivemindConfig, ManagedProofRolloutMode};
+use hivemind_config::HivemindConfig;
+use hivemind_managed_consensus::digest_hex;
 use hivemind_models::{Task, TaskStatus};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,7 +157,27 @@ pub struct WorkerGrpcState {
     worker_id: WorkerIdentityHandle,
     cas_store: Option<Arc<CasChunkStore>>,
     reports: Mutex<HashMap<WorkerTaskKey, WorkerTaskReport>>,
+    completed_consensus_results:
+        Arc<Mutex<HashMap<CompletedConsensusResultKey, CompletedConsensusResult>>>,
     transfer_lease_authority: Arc<Mutex<Option<Arc<dyn TransferLeaseAuthority>>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CompletedConsensusResultKey {
+    task_id: String,
+    execution_id: String,
+    attempt_id: String,
+    idempotency_key: String,
+    request_digest: String,
+    consensus_round_id: String,
+    replica_id: String,
+    consensus_protocol_version: u32,
+    payload_digest: String,
+}
+
+struct CompletedConsensusResult {
+    response: ExecuteTaskResponse,
+    expires_at: Instant,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -209,6 +226,7 @@ impl WorkerGrpcState {
             worker_id: Arc::new(Mutex::new(Some(worker_id))),
             cas_store: crate::executor::cas_store_from_environment(),
             reports: Mutex::new(HashMap::new()),
+            completed_consensus_results: Arc::new(Mutex::new(HashMap::new())),
             transfer_lease_authority: Arc::new(Mutex::new(None)),
         }
     }
@@ -296,10 +314,99 @@ impl WorkerGrpcState {
                 TransferLeaseAuthorityError::Unavailable(message) => Status::unavailable(message),
             })
     }
+
+    fn completed_consensus_result_key(request: &ExecuteTaskRequest) -> CompletedConsensusResultKey {
+        let mut payload = request.clone();
+        payload.token.clear();
+        let payload_digest = digest_hex(&payload.encode_to_vec());
+        CompletedConsensusResultKey {
+            task_id: request.task_id.clone(),
+            execution_id: request.execution_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+            request_digest: request.request_digest.clone(),
+            consensus_round_id: request.consensus_round_id.clone(),
+            replica_id: request.replica_id.clone(),
+            consensus_protocol_version: request.consensus_protocol_version,
+            payload_digest,
+        }
+    }
+
+    fn cached_consensus_result(
+        &self,
+        request: &ExecuteTaskRequest,
+    ) -> Result<Option<ExecuteTaskResponse>, Status> {
+        let mut cache = self
+            .completed_consensus_results
+            .lock()
+            .map_err(|_| Status::internal("completed result cache is unavailable"))?;
+        let now = Instant::now();
+        cache.retain(|_, entry| entry.expires_at > now);
+        let key = Self::completed_consensus_result_key(request);
+        Ok(cache.get(&key).map(|entry| entry.response.clone()))
+    }
+
+    fn cache_consensus_result(
+        &self,
+        request: &ExecuteTaskRequest,
+        response: &ExecuteTaskResponse,
+    ) -> Result<(), Status> {
+        if response.encoded_len() > hivemind_proto::MANAGED_CONSENSUS_RESULT_MAX_BYTES * 2 {
+            return Err(Status::resource_exhausted(
+                "managed consensus cached result exceeds the Worker cache limit",
+            ));
+        }
+        let mut cache = self
+            .completed_consensus_results
+            .lock()
+            .map_err(|_| Status::internal("completed result cache is unavailable"))?;
+        let now = Instant::now();
+        cache.retain(|_, entry| entry.expires_at > now);
+        let key = Self::completed_consensus_result_key(request);
+        if let Some(existing) = cache.get(&key) {
+            if existing.response != *response {
+                return Err(Status::failed_precondition(
+                    "conflicting managed consensus result is already cached",
+                ));
+            }
+            return Ok(());
+        }
+        let mut total_bytes: usize = cache
+            .values()
+            .map(|entry| entry.response.encoded_len())
+            .sum();
+        while (!cache.is_empty() && cache.len() >= COMPLETED_CONSENSUS_RESULT_CACHE_MAX_ENTRIES)
+            || (!cache.is_empty()
+                && total_bytes.saturating_add(response.encoded_len())
+                    > COMPLETED_CONSENSUS_RESULT_CACHE_MAX_BYTES)
+        {
+            let Some(oldest_key) = cache
+                .iter()
+                .min_by_key(|(_, entry)| entry.expires_at)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            if let Some(entry) = cache.remove(&oldest_key) {
+                total_bytes = total_bytes.saturating_sub(entry.response.encoded_len());
+            }
+        }
+        cache.insert(
+            key,
+            CompletedConsensusResult {
+                response: response.clone(),
+                expires_at: now + COMPLETED_CONSENSUS_RESULT_CACHE_TTL,
+            },
+        );
+        Ok(())
+    }
 }
 
 const MAX_TASK_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_RESULT_REFERENCE_BYTES: usize = 4096;
+const COMPLETED_CONSENSUS_RESULT_CACHE_MAX_ENTRIES: usize = 256;
+const COMPLETED_CONSENSUS_RESULT_CACHE_MAX_BYTES: usize = 8 * 1024 * 1024;
+const COMPLETED_CONSENSUS_RESULT_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Clone)]
 pub struct GrpcWorkerNodeService {
@@ -328,6 +435,7 @@ impl Clone for WorkerGrpcState {
                     .map(|reports| reports.clone())
                     .unwrap_or_default(),
             ),
+            completed_consensus_results: self.completed_consensus_results.clone(),
             transfer_lease_authority: self.transfer_lease_authority.clone(),
         }
     }
@@ -893,6 +1001,25 @@ fn task_assignment_denied() -> Box<Status> {
     ))
 }
 
+fn validate_managed_consensus_token_identity(
+    claims: &WorkerExecutionClaims,
+    request: &ExecuteTaskRequest,
+) -> Result<(), Status> {
+    let matches = claims.execution_id.as_deref() == Some(request.execution_id.as_str())
+        && claims.attempt_id.as_deref() == Some(request.attempt_id.as_str())
+        && claims.idempotency_key.as_deref() == Some(request.idempotency_key.as_str())
+        && claims.request_digest.as_deref() == Some(request.request_digest.as_str())
+        && claims.consensus_round_id.as_deref() == Some(request.consensus_round_id.as_str())
+        && claims.replica_id.as_deref() == Some(request.replica_id.as_str())
+        && claims.consensus_protocol_version == Some(request.consensus_protocol_version as u16);
+    if !matches {
+        return Err(Status::permission_denied(
+            "worker execution token is not bound to the complete managed consensus identity",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_execute_task_contract(request: &ExecuteTaskRequest) -> Result<(), &'static str> {
     match request.runtime.trim() {
         "" => Ok(()),
@@ -990,12 +1117,6 @@ fn validate_execute_task_contract(request: &ExecuteTaskRequest) -> Result<(), &'
             {
                 return Err("managed-function-gpu-v1 request manifest exceeds the byte limit");
             }
-            if !request.managed_proof_authorization_token.is_empty()
-                || request.managed_proof_lease_generation != 0
-                || request.managed_proof_deadline_unix_ms != 0
-            {
-                return Err("managed-function-gpu-v1 must not carry managed proof fields");
-            }
             let manifest =
                 serde_json::from_slice::<ManagedGpuRequest>(&request.managed_gpu_manifest_json)
                     .map_err(|_| "managed-function-gpu-v1 request manifest is malformed")?;
@@ -1020,86 +1141,6 @@ fn validate_execute_task_contract(request: &ExecuteTaskRequest) -> Result<(), &'
     }
 }
 
-fn managed_proof_context_for_request(
-    config: &HivemindConfig,
-    request: &ExecuteTaskRequest,
-    claims: &Claims,
-    worker_id: Option<&str>,
-) -> Result<Option<ManagedProofTaskContext>, Box<Status>> {
-    let is_managed = matches!(
-        request.runtime.trim(),
-        "managed-function-v0" | "production_sandboxed_dsl"
-    );
-    if !is_managed {
-        return Ok(None);
-    }
-
-    // Local sidecar callers retain the legacy contract. Once a remote endpoint
-    // is configured, every managed attempt must carry the Nodepool proof grant.
-    if config.managed_proof.rollout_mode == ManagedProofRolloutMode::Off
-        || config.managed_proof.provider_endpoint.trim().is_empty()
-    {
-        return Ok(None);
-    }
-    let token = request.managed_proof_authorization_token.trim();
-    if token.is_empty() || token.len() > MANAGED_PROOF_AUTH_TOKEN_MAX_BYTES {
-        return Err(Box::new(Status::permission_denied(
-            "managed proof authorization is required",
-        )));
-    }
-    let worker_id = worker_id
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            Box::new(Status::failed_precondition(
-                "worker identity is unavailable",
-            ))
-        })?;
-    for value in [
-        request.execution_id.as_str(),
-        request.attempt_id.as_str(),
-        request.idempotency_key.as_str(),
-    ] {
-        if value.trim().is_empty() || value.len() > hivemind_proto::TASK_ID_MAX_BYTES {
-            return Err(Box::new(Status::invalid_argument(
-                "managed proof attempt identity is invalid",
-            )));
-        }
-    }
-    if !is_sha256_digest(&request.request_digest) {
-        return Err(Box::new(Status::invalid_argument(
-            "managed proof request digest is invalid",
-        )));
-    }
-    if request.managed_proof_lease_generation <= 0 {
-        return Err(Box::new(Status::permission_denied(
-            "managed proof lease generation is invalid",
-        )));
-    }
-    if request.managed_proof_deadline_unix_ms <= chrono::Utc::now().timestamp_millis() {
-        return Err(Box::new(Status::deadline_exceeded(
-            "managed proof deadline has expired",
-        )));
-    }
-    Ok(Some(ManagedProofTaskContext {
-        owner: claims.sub.clone(),
-        worker_id: worker_id.to_string(),
-        execution_id: request.execution_id.clone(),
-        attempt_id: request.attempt_id.clone(),
-        idempotency_key: request.idempotency_key.clone(),
-        request_digest: request.request_digest.clone(),
-        lease_generation: request.managed_proof_lease_generation,
-        authorization_token: token.to_string(),
-        deadline_unix_ms: request.managed_proof_deadline_unix_ms,
-    }))
-}
-
-fn is_sha256_digest(value: &str) -> bool {
-    let Some(hex_value) = value.strip_prefix("sha256:") else {
-        return false;
-    };
-    hex_value.len() == 64 && hex_value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
 #[tonic::async_trait]
 impl WorkerNodeService for GrpcWorkerNodeService {
     async fn execute_task(
@@ -1107,6 +1148,9 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         request: Request<ExecuteTaskRequest>,
     ) -> Result<Response<ExecuteTaskResponse>, Status> {
         let req = request.into_inner();
+        let consensus_mode = req.consensus_protocol_version > 0;
+        validate_managed_consensus_request(&req).map_err(Status::invalid_argument)?;
+        let consensus_request = req.clone();
         let mut request_identity = ExecuteTaskIdentity::from_request(&req);
         let claims = self
             .validate_worker_execution_token(&req.token)
@@ -1119,6 +1163,16 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         {
             return Err(*task_assignment_denied());
         }
+        if consensus_mode {
+            let verifier = WorkerExecutionVerifier::from_pem(
+                &self.state.config.auth.worker_execution_public_key_pem,
+            )
+            .map_err(|_| Status::internal("Worker execution public key is invalid"))?;
+            let execution_claims = verifier
+                .decode_execution_claims(&req.token)
+                .map_err(|_| Status::unauthenticated("Invalid worker execution token"))?;
+            validate_managed_consensus_token_identity(&execution_claims, &req)?;
+        }
         let admitted = self
             .runtime_admission
             .admit_with_manifests(
@@ -1128,6 +1182,27 @@ impl WorkerNodeService for GrpcWorkerNodeService {
             )
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
         validate_execute_task_contract(&req).map_err(Status::invalid_argument)?;
+        if !consensus_mode
+            && matches!(
+                &admitted,
+                crate::runtime_admission::RuntimeRoute::ManagedFunctionV0
+                    | crate::runtime_admission::RuntimeRoute::ProductionSandboxedDsl
+            )
+        {
+            return Err(Status::failed_precondition(
+                "managed execution requires a consensus request",
+            ));
+        }
+        if consensus_mode {
+            if let Some(cached) = self.state.cached_consensus_result(&req)? {
+                validate_managed_consensus_response(&cached).map_err(|error| {
+                    Status::internal(format!("cached consensus result is invalid: {error}"))
+                })?;
+                validate_managed_consensus_result_config_limit(&self.state.config, &cached)?;
+                validate_managed_consensus_response_identity(&cached, &req)?;
+                return Ok(Response::new(cached));
+            }
+        }
         let managed_gpu_request = match &admitted {
             crate::runtime_admission::RuntimeRoute::ManagedFunctionGpuV1(request) => {
                 Some(request.clone())
@@ -1135,13 +1210,6 @@ impl WorkerNodeService for GrpcWorkerNodeService {
             _ => None,
         };
         let is_managed_gpu = managed_gpu_request.is_some();
-        let proof_context = managed_proof_context_for_request(
-            &self.state.config,
-            &req,
-            &claims,
-            self.state.current_worker_id().as_deref(),
-        )
-        .map_err(|status| *status)?;
         if let crate::runtime_admission::RuntimeRoute::GeneralComputeV1Alpha1(request) = &admitted {
             let token_identity = WorkerExecutionVerifier::from_pem(
                 &self.state.config.auth.worker_execution_public_key_pem,
@@ -1261,7 +1329,8 @@ impl WorkerNodeService for GrpcWorkerNodeService {
             self.record_general_compute_request(&req.task_id, request, transfer_generation)
                 .map_err(|status| *status)?;
         } else {
-            let attempt_id = is_managed_gpu.then_some(request_identity.attempt_id.as_str());
+            let attempt_id =
+                (is_managed_gpu || consensus_mode).then_some(request_identity.attempt_id.as_str());
             self.record_task_assignment_for_attempt(&req.task_id, &claims.sub, attempt_id)
                 .map_err(|status| *status)?;
             if let Some(request) = managed_gpu_request.as_ref() {
@@ -1358,37 +1427,60 @@ impl WorkerNodeService for GrpcWorkerNodeService {
             completed_at: None,
         };
         tracing::info!("Worker executing task {}", req.task_id);
-        match self
-            .state
-            .executor
-            .execute_task_with_context_and_attempt(
-                &task,
-                proof_context,
-                &request_identity.attempt_id,
-            )
-            .await
-        {
-            Ok(result) => Ok(Response::new(execute_response_from_result_for_runtime(
-                result,
-                matches!(
-                    task.runtime.as_deref(),
-                    Some("managed-function-v0") | Some("production_sandboxed_dsl")
-                ),
-                is_managed_gpu,
-                &request_identity,
-            )?)),
-            Err(error) => {
-                if let Some(status) = worker_execution_error_status(&error) {
-                    Err(status)
-                } else if is_managed_gpu {
+        match if consensus_mode {
+            self.state
+                .executor
+                .execute_task_with_consensus(&task, &request_identity.attempt_id)
+                .await
+        } else {
+            self.state
+                .executor
+                .execute_task_with_attempt(&task, &request_identity.attempt_id)
+                .await
+        } {
+            Ok(result) => {
+                let mut response = execute_response_from_result_for_runtime(
+                    result,
+                    is_managed_gpu,
+                    &request_identity,
+                )?;
+                if consensus_mode {
+                    attach_managed_consensus_result(&mut response, &consensus_request, &task)?;
+                    validate_managed_consensus_response(&response).map_err(|error| {
+                        Status::internal(format!("generated consensus result is invalid: {error}"))
+                    })?;
+                    validate_managed_consensus_result_config_limit(&self.state.config, &response)?;
+                    validate_managed_consensus_response_identity(&response, &consensus_request)?;
+                    self.state
+                        .cache_consensus_result(&consensus_request, &response)?;
+                }
+                Ok(Response::new(response))
+            }
+            Err(_error) => {
+                if is_managed_gpu {
                     Err(Status::internal(
                         "managed GPU execution ended without a typed result",
                     ))
                 } else {
-                    Ok(Response::new(failed_execute_response(
-                        "Task execution failed",
-                        &request_identity,
-                    )))
+                    let mut response =
+                        failed_execute_response("Task execution failed", &request_identity);
+                    if consensus_mode {
+                        attach_managed_consensus_result(&mut response, &consensus_request, &task)?;
+                        validate_managed_consensus_response(&response).map_err(|error| {
+                            Status::internal(format!(
+                                "generated consensus failure result is invalid: {error}"
+                            ))
+                        })?;
+                        validate_managed_consensus_result_config_limit(
+                            &self.state.config,
+                            &response,
+                        )?;
+                        validate_managed_consensus_response_identity(
+                            &response,
+                            &consensus_request,
+                        )?;
+                    }
+                    Ok(Response::new(response))
                 }
             }
         }
@@ -1736,17 +1828,15 @@ fn chunk_transport_status(error: crate::chunk_transport::WorkerChunkIngestError)
 #[cfg(test)]
 fn execute_response_from_result(
     result: TaskResult,
-    managed_proof_required: bool,
     identity: &ExecuteTaskIdentity,
 ) -> ExecuteTaskResponse {
-    execute_response_from_result_for_runtime(result, managed_proof_required, false, identity)
+    execute_response_from_result_for_runtime(result, false, identity)
         .unwrap_or_else(|status| failed_execute_response(status.message(), identity))
 }
 
 #[allow(clippy::result_large_err)]
 fn execute_response_from_result_for_runtime(
     result: TaskResult,
-    managed_proof_required: bool,
     managed_gpu: bool,
     identity: &ExecuteTaskIdentity,
 ) -> Result<ExecuteTaskResponse, Status> {
@@ -1757,7 +1847,6 @@ fn execute_response_from_result_for_runtime(
         managed_executed_ops,
         managed_output_bytes,
         managed_receipt_json,
-        managed_proof,
         general_compute_result_json,
         managed_gpu_result_json,
         ..
@@ -1778,21 +1867,19 @@ fn execute_response_from_result_for_runtime(
         managed_executed_ops,
         managed_output_bytes,
         managed_receipt_json: managed_receipt_json.unwrap_or_default(),
-        managed_proof,
+        managed_proof: None,
         general_compute_result_json: general_compute_result_json.unwrap_or_default(),
         managed_gpu_result_json: managed_gpu_result_json.unwrap_or_default(),
+        managed_consensus_result: None,
+        managed_consensus_result_digest: String::new(),
+        replica_id: String::new(),
+        consensus_round_id: String::new(),
+        consensus_protocol_version: 0,
         execution_id: identity.execution_id.clone(),
         attempt_id: identity.attempt_id.clone(),
         idempotency_key: identity.idempotency_key.clone(),
         request_digest: identity.request_digest.clone(),
     };
-
-    if managed_proof_required && response.success && response.managed_proof.is_none() {
-        return Ok(failed_execute_response(
-            "Managed proof is required",
-            identity,
-        ));
-    }
     if managed_gpu {
         let Some(payload) = (!response.managed_gpu_result_json.is_empty())
             .then_some(response.managed_gpu_result_json.as_slice())
@@ -1827,8 +1914,7 @@ fn execute_response_from_result_for_runtime(
                 "managed GPU typed result status does not match the execution response",
             ));
         }
-        if response.managed_proof.is_some()
-            || !response.managed_receipt_json.is_empty()
+        if !response.managed_receipt_json.is_empty()
             || !response.general_compute_result_json.is_empty()
         {
             return Err(Status::internal(
@@ -1851,10 +1937,139 @@ fn response_fits_worker_rpc_limits(response: &ExecuteTaskResponse) -> bool {
         && response.general_compute_result_json.len() <= GENERAL_COMPUTE_RESULT_MAX_BYTES
         && response.managed_gpu_result_json.len() <= MANAGED_GPU_RESULT_MAX_BYTES
         && response
-            .managed_proof
+            .managed_consensus_result
             .as_ref()
-            .is_none_or(|proof| proof.encoded_len() <= MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES)
+            .is_none_or(|result| {
+                result.encoded_len() <= hivemind_proto::MANAGED_CONSENSUS_RESULT_MAX_BYTES
+            })
+        && response.managed_consensus_result_digest.len() <= 71
+        && response.replica_id.len() <= hivemind_proto::GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES
+        && response.consensus_round_id.len()
+            <= hivemind_proto::GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES
         && response.encoded_len() <= WORKER_RPC_MESSAGE_MAX_BYTES
+}
+
+fn validate_managed_consensus_response_identity(
+    response: &ExecuteTaskResponse,
+    request: &ExecuteTaskRequest,
+) -> Result<(), Status> {
+    if response.execution_id != request.execution_id
+        || response.attempt_id != request.attempt_id
+        || response.idempotency_key != request.idempotency_key
+        || response.request_digest != request.request_digest
+        || response.consensus_round_id != request.consensus_round_id
+        || response.replica_id != request.replica_id
+        || response.consensus_protocol_version != request.consensus_protocol_version
+    {
+        return Err(Status::internal(
+            "managed consensus response identity does not match the request",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_managed_consensus_result_config_limit(
+    config: &HivemindConfig,
+    response: &ExecuteTaskResponse,
+) -> Result<(), Status> {
+    if response.consensus_protocol_version > 0
+        && response
+            .managed_consensus_result
+            .as_ref()
+            .is_some_and(|result| {
+                result.encoded_len() > config.managed_consensus.max_result_bytes
+                    || result.output.len() > config.managed_consensus.max_result_bytes
+            })
+    {
+        return Err(Status::resource_exhausted(
+            "managed consensus result exceeds the configured byte limit",
+        ));
+    }
+    Ok(())
+}
+
+fn managed_consensus_backend_id(task: &Task) -> String {
+    task.managed_dsl_backend_id
+        .as_deref()
+        .filter(|backend_id| !backend_id.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            if task.runtime.as_deref().map(str::trim)
+                == Some(general_compute_runtime::MANAGED_DSL_RUNTIME_VERSION)
+            {
+                hivemind_managed_consensus::MANAGED_DSL_DEFAULT_BACKEND_ID.to_owned()
+            } else {
+                String::new()
+            }
+        })
+}
+
+fn managed_consensus_semantics_digest(task: &Task) -> String {
+    task.managed_dsl_semantics_manifest_sha256
+        .as_deref()
+        .filter(|digest| !digest.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            if task.runtime.as_deref().map(str::trim)
+                == Some(general_compute_runtime::MANAGED_DSL_RUNTIME_VERSION)
+            {
+                hivemind_managed_consensus::MANAGED_DSL_DEFAULT_SEMANTICS_DIGEST.to_owned()
+            } else {
+                String::new()
+            }
+        })
+}
+
+fn attach_managed_consensus_result(
+    response: &mut ExecuteTaskResponse,
+    request: &ExecuteTaskRequest,
+    task: &Task,
+) -> Result<(), Status> {
+    let output = if response.success {
+        response.status_message.as_bytes().to_vec()
+    } else {
+        Vec::new()
+    };
+    if output.len() > hivemind_proto::MANAGED_CONSENSUS_RESULT_MAX_BYTES {
+        return Err(Status::resource_exhausted(
+            "managed consensus result exceeds the Worker result limit",
+        ));
+    }
+    let result = ManagedConsensusResult {
+        protocol_version: request.consensus_protocol_version,
+        status: if response.success {
+            "completed".into()
+        } else {
+            "failed".into()
+        },
+        output: output.clone(),
+        error_code: if response.success {
+            String::new()
+        } else {
+            response.status_message.clone()
+        },
+        usage_units: response.managed_executed_ops.max(0) as u64,
+        executed_ops: response.managed_executed_ops.max(0) as u64,
+        output_bytes: output.len() as u64,
+        runtime: task.runtime.clone().unwrap_or_default(),
+        backend_id: managed_consensus_backend_id(task),
+        semantics_manifest_sha256: managed_consensus_semantics_digest(task),
+        source_sha256: digest_hex(task.task_source.as_deref().unwrap_or_default().as_bytes()),
+        input_sha256: digest_hex(
+            task.torrent_source
+                .as_deref()
+                .unwrap_or_default()
+                .as_bytes(),
+        ),
+        result_digest: digest_hex(&output),
+    };
+    response.managed_consensus_result_digest =
+        hivemind_proto::managed_consensus_result_digest(&result);
+    response.managed_consensus_result = Some(result);
+    response.replica_id = request.replica_id.clone();
+    response.consensus_round_id = request.consensus_round_id.clone();
+    response.consensus_protocol_version = request.consensus_protocol_version;
+    Ok(())
 }
 
 fn failed_execute_response(message: &str, identity: &ExecuteTaskIdentity) -> ExecuteTaskResponse {
@@ -1867,6 +2082,11 @@ fn failed_execute_response(message: &str, identity: &ExecuteTaskIdentity) -> Exe
         managed_proof: None,
         general_compute_result_json: Vec::new(),
         managed_gpu_result_json: Vec::new(),
+        managed_consensus_result: None,
+        managed_consensus_result_digest: String::new(),
+        replica_id: String::new(),
+        consensus_round_id: String::new(),
+        consensus_protocol_version: 0,
         execution_id: identity.execution_id.clone(),
         attempt_id: identity.attempt_id.clone(),
         idempotency_key: identity.idempotency_key.clone(),
@@ -1891,11 +2111,6 @@ impl ExecuteTaskIdentity {
             request_digest: request.request_digest.clone(),
         }
     }
-}
-
-fn worker_execution_error_status(error: &anyhow::Error) -> Option<Status> {
-    (error.downcast_ref::<ManagedProverError>() == Some(&ManagedProverError::QueueFull))
-        .then(|| Status::resource_exhausted("Managed prover is busy"))
 }
 
 fn resource_usage_is_finite(usage: &hivemind_proto::ResourceUsage) -> bool {
@@ -1946,6 +2161,127 @@ mod tests {
         test_key_pair().0.as_str()
     }
 
+    #[test]
+    fn managed_consensus_token_identity_requires_every_signed_field() {
+        let mut request = execute_request(
+            "managed-function-v0",
+            "return input".into(),
+            "{}".into(),
+            10,
+        );
+        request.execution_id = "execution-1".into();
+        request.attempt_id = "attempt-1".into();
+        request.idempotency_key = "idempotency-1".into();
+        request.request_digest = "sha256:request".into();
+        request.consensus_round_id = "round-1".into();
+        request.replica_id = "replica-1".into();
+        request.consensus_protocol_version = 1;
+        let claims = WorkerExecutionClaims {
+            claims: Claims {
+                sub: ASSIGNED_OWNER.into(),
+                user_id: ASSIGNED_OWNER.into(),
+                role: Some("worker-execution".into()),
+                task_id: Some(request.task_id.clone()),
+                worker_id: Some(TEST_WORKER_ID.into()),
+                exp: usize::MAX,
+                iat: 0,
+            },
+            execution_id: Some(request.execution_id.clone()),
+            attempt_id: Some(request.attempt_id.clone()),
+            idempotency_key: Some(request.idempotency_key.clone()),
+            request_digest: Some(request.request_digest.clone()),
+            transfer_generation: Some(1),
+            consensus_round_id: Some(request.consensus_round_id.clone()),
+            replica_id: Some(request.replica_id.clone()),
+            consensus_protocol_version: Some(1),
+        };
+        validate_managed_consensus_token_identity(&claims, &request).unwrap();
+        let mut forged = request;
+        forged.request_digest = "sha256:other".into();
+        assert!(validate_managed_consensus_token_identity(&claims, &forged).is_err());
+    }
+
+    #[test]
+    fn managed_consensus_completed_result_cache_replays_the_exact_response() {
+        let temp = TempDir::new().unwrap();
+        let service = test_service(temp.path());
+        let mut request = execute_request(
+            "managed-function-v0",
+            "return input".into(),
+            "{}".into(),
+            10,
+        );
+        request.execution_id = "execution-cache".into();
+        request.attempt_id = "attempt-cache".into();
+        request.idempotency_key = "idempotency-cache".into();
+        request.request_digest = "sha256:request-cache".into();
+        request.consensus_round_id = "round-cache".into();
+        request.replica_id = "replica-cache".into();
+        request.consensus_protocol_version = 1;
+        let output = b"cached".to_vec();
+        let result = ManagedConsensusResult {
+            protocol_version: 1,
+            status: "completed".into(),
+            output: output.clone(),
+            output_bytes: output.len() as u64,
+            runtime: "managed-function-v0".into(),
+            backend_id: hivemind_managed_consensus::MANAGED_DSL_DEFAULT_BACKEND_ID.into(),
+            semantics_manifest_sha256:
+                hivemind_managed_consensus::MANAGED_DSL_DEFAULT_SEMANTICS_DIGEST.into(),
+            source_sha256: digest_hex(b"return input"),
+            input_sha256: digest_hex(b"{}"),
+            result_digest: digest_hex(&output),
+            ..ManagedConsensusResult::default()
+        };
+        let mut response = ExecuteTaskResponse {
+            success: true,
+            execution_id: request.execution_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+            request_digest: request.request_digest.clone(),
+            consensus_round_id: request.consensus_round_id.clone(),
+            replica_id: request.replica_id.clone(),
+            consensus_protocol_version: 1,
+            managed_consensus_result: Some(result),
+            ..ExecuteTaskResponse::default()
+        };
+        response.managed_consensus_result_digest = digest_hex(
+            &response
+                .managed_consensus_result
+                .as_ref()
+                .unwrap()
+                .encode_to_vec(),
+        );
+        service
+            .state
+            .cache_consensus_result(&request, &response)
+            .unwrap();
+        let mut conflicting = response.clone();
+        conflicting.status_message = "different".into();
+        assert!(service
+            .state
+            .cache_consensus_result(&request, &conflicting)
+            .is_err());
+        assert_eq!(
+            service.state.cached_consensus_result(&request).unwrap(),
+            Some(response)
+        );
+        let mut different_replica = request.clone();
+        different_replica.replica_id = "replica-other".into();
+        assert!(service
+            .state
+            .cached_consensus_result(&different_replica)
+            .unwrap()
+            .is_none());
+        let mut different_payload = request;
+        different_payload.task_source = "return a different value".into();
+        assert!(service
+            .state
+            .cached_consensus_result(&different_payload)
+            .unwrap()
+            .is_none());
+    }
+
     fn execute_request(
         runtime: &str,
         source: String,
@@ -1967,10 +2303,10 @@ mod tests {
             request_digest: String::new(),
             managed_dsl_backend_id: String::new(),
             managed_dsl_semantics_manifest_sha256: String::new(),
-            managed_proof_authorization_token: String::new(),
-            managed_proof_lease_generation: 0,
-            managed_proof_deadline_unix_ms: 0,
             managed_gpu_manifest_json: Vec::new(),
+            consensus_round_id: String::new(),
+            replica_id: String::new(),
+            consensus_protocol_version: 0,
         }
     }
 
@@ -2203,7 +2539,7 @@ mod tests {
         config.auth.worker_execution_public_key_pem = test_key_pair().1.clone();
         let executor = Arc::new(WorkerExecutor::new_with_task_runner(
             config.clone(),
-            |_task, _cancellation| async move { Ok(successful_task_result(None)) },
+            |_task, _cancellation| async move { Ok(successful_task_result()) },
         ));
         let state = Arc::new(WorkerGrpcState {
             config,
@@ -2211,6 +2547,7 @@ mod tests {
             worker_id: Arc::new(Mutex::new(Some(worker_id.into()))),
             cas_store,
             reports: Mutex::new(HashMap::new()),
+            completed_consensus_results: Arc::new(Mutex::new(HashMap::new())),
             transfer_lease_authority: Arc::new(Mutex::new(Some(authority))),
         });
         let worker = GrpcWorkerNodeService::new(state.clone())
@@ -2338,8 +2675,7 @@ mod tests {
         request.idempotency_key = "idempotency-gpu-response".into();
         request.request_digest = "sha256:gpu-response".into();
         let error = execute_response_from_result_for_runtime(
-            successful_task_result(None),
-            false,
+            successful_task_result(),
             true,
             &ExecuteTaskIdentity::from_request(&request),
         )
@@ -2355,10 +2691,10 @@ mod tests {
             idempotency_key: "idempotency-malformed".into(),
             request_digest: "sha256:malformed".into(),
         };
-        let mut result = successful_task_result(None);
+        let mut result = successful_task_result();
         result.managed_receipt_json = None;
         result.managed_gpu_result_json = Some(b"{".to_vec());
-        let error = execute_response_from_result_for_runtime(result, false, true, &identity)
+        let error = execute_response_from_result_for_runtime(result, true, &identity)
             .expect_err("malformed GPU JSON must fail closed");
         assert_eq!(error.code(), Code::Internal);
     }
@@ -2375,10 +2711,10 @@ mod tests {
             execution_id: "execution-other".into(),
             ..identity.clone()
         };
-        let mut result = successful_task_result(None);
+        let mut result = successful_task_result();
         result.managed_receipt_json = None;
         result.managed_gpu_result_json = Some(managed_gpu_result_json(&payload_identity));
-        let error = execute_response_from_result_for_runtime(result, false, true, &identity)
+        let error = execute_response_from_result_for_runtime(result, true, &identity)
             .expect_err("GPU identity drift must fail closed");
         assert_eq!(error.code(), Code::Internal);
     }
@@ -2391,13 +2727,13 @@ mod tests {
             idempotency_key: "idempotency-status".into(),
             request_digest: "sha256:status".into(),
         };
-        let mut result = successful_task_result(None);
+        let mut result = successful_task_result();
         result.success = false;
         result.output = None;
         result.error = Some("failed".into());
         result.managed_receipt_json = None;
         result.managed_gpu_result_json = Some(managed_gpu_result_json(&identity));
-        let error = execute_response_from_result_for_runtime(result, false, true, &identity)
+        let error = execute_response_from_result_for_runtime(result, true, &identity)
             .expect_err("outer status must agree with the typed GPU status");
         assert_eq!(error.code(), Code::Internal);
     }
@@ -2410,9 +2746,9 @@ mod tests {
             idempotency_key: "idempotency-channel".into(),
             request_digest: "sha256:channel".into(),
         };
-        let mut result = successful_task_result(None);
+        let mut result = successful_task_result();
         result.managed_gpu_result_json = Some(managed_gpu_result_json(&identity));
-        let error = execute_response_from_result_for_runtime(result, false, true, &identity)
+        let error = execute_response_from_result_for_runtime(result, true, &identity)
             .expect_err("GPU responses must not carry legacy receipt bytes");
         assert_eq!(error.code(), Code::Internal);
     }
@@ -2427,10 +2763,10 @@ mod tests {
         };
         let mut payload = managed_gpu_result_json(&identity);
         payload.resize(MANAGED_GPU_RESULT_MAX_BYTES + 1, b'x');
-        let mut result = successful_task_result(None);
+        let mut result = successful_task_result();
         result.managed_receipt_json = None;
         result.managed_gpu_result_json = Some(payload);
-        let error = execute_response_from_result_for_runtime(result, false, true, &identity)
+        let error = execute_response_from_result_for_runtime(result, true, &identity)
             .expect_err("oversized GPU typed results must fail closed");
         assert_eq!(error.code(), Code::ResourceExhausted);
     }
@@ -2449,14 +2785,14 @@ mod tests {
         payload["status"] = serde_json::Value::String("failed".into());
         payload["exit_code"] = serde_json::Value::Number(1.into());
         payload["error_code"] = serde_json::Value::String("backend_unavailable".into());
-        let mut result = successful_task_result(None);
+        let mut result = successful_task_result();
         result.success = false;
         result.output = None;
         result.error = Some("backend unavailable".into());
         result.managed_receipt_json = None;
         result.managed_gpu_result_json =
             Some(serde_json::to_vec(&payload).expect("test GPU failure JSON serializes"));
-        let response = execute_response_from_result_for_runtime(result, false, true, &identity)
+        let response = execute_response_from_result_for_runtime(result, true, &identity)
             .expect("typed GPU failures remain typed at the RPC boundary");
         assert!(!response.success);
         assert!(!response.managed_gpu_result_json.is_empty());
@@ -2471,43 +2807,18 @@ mod tests {
             request_digest: "sha256:success".into(),
         };
         let payload = managed_gpu_result_json(&identity);
-        let mut result = successful_task_result(None);
+        let mut result = successful_task_result();
         result.managed_receipt_json = None;
         result.managed_executed_ops = 0;
         result.managed_output_bytes = 0;
         result.managed_gpu_result_json = Some(payload.clone());
-        let response = execute_response_from_result_for_runtime(result, false, true, &identity)
+        let response = execute_response_from_result_for_runtime(result, true, &identity)
             .expect("typed GPU successes remain typed at the RPC boundary");
         assert!(response.success);
         assert_eq!(response.managed_gpu_result_json, payload);
         assert!(response.managed_receipt_json.is_empty());
         assert_eq!(response.managed_executed_ops, 0);
         assert_eq!(response.managed_output_bytes, 0);
-    }
-
-    #[test]
-    fn managed_success_response_forwards_the_proof_envelope() {
-        let proof = hivemind_proto::ManagedProofEnvelope {
-            proof_scheme: "risc0-zkvm-3.0.6".into(),
-            image_id: vec![1, 2, 3, 4, 5, 6, 7, 8],
-            journal: vec![9, 10],
-            receipt_json: br#"{"receipt":true}"#.to_vec(),
-        };
-
-        let response = execute_response_from_result(
-            successful_task_result(Some(proof.clone())),
-            true,
-            &ExecuteTaskIdentity::from_request(&execute_request(
-                "managed-function-v0",
-                "return 42;".into(),
-                "{}".into(),
-                10,
-            )),
-        );
-
-        assert!(response.success);
-        assert_eq!(response.status_message, "42");
-        assert_eq!(response.managed_proof, Some(proof));
     }
 
     #[test]
@@ -2520,8 +2831,7 @@ mod tests {
         request.request_digest = "sha256:request-digest".into();
 
         let success = execute_response_from_result(
-            successful_task_result(None),
-            false,
+            successful_task_result(),
             &ExecuteTaskIdentity::from_request(&request),
         );
         assert!(success.success);
@@ -2530,9 +2840,12 @@ mod tests {
         assert_eq!(success.idempotency_key, request.idempotency_key);
         assert_eq!(success.request_digest, request.request_digest);
 
+        let mut failed_result = successful_task_result();
+        failed_result.success = false;
+        failed_result.output = None;
+        failed_result.error = Some("execution failed".into());
         let failure = execute_response_from_result(
-            successful_task_result(None),
-            true,
+            failed_result,
             &ExecuteTaskIdentity::from_request(&request),
         );
         assert!(!failure.success);
@@ -2552,8 +2865,7 @@ mod tests {
         request.request_digest = "sha256:managed-attempt".into();
 
         let response = execute_response_from_result(
-            successful_task_result(None),
-            false,
+            successful_task_result(),
             &ExecuteTaskIdentity::from_request(&request),
         );
 
@@ -2564,33 +2876,12 @@ mod tests {
     }
 
     #[test]
-    fn managed_success_without_a_proof_fails_closed_before_the_rpc_boundary() {
-        let response = execute_response_from_result(
-            successful_task_result(None),
-            true,
-            &ExecuteTaskIdentity::from_request(&execute_request(
-                "managed-function-v0",
-                "return 42;".into(),
-                "{}".into(),
-                10,
-            )),
-        );
-
-        assert!(!response.success);
-        assert_eq!(response.status_message, "Managed proof is required");
-        assert!(response.managed_proof.is_none());
-        assert_eq!(response.managed_executed_ops, 0);
-        assert_eq!(response.managed_output_bytes, 0);
-    }
-
-    #[test]
     fn worker_response_over_the_shared_output_cap_fails_closed() {
-        let mut result = successful_task_result(None);
+        let mut result = successful_task_result();
         result.output = Some("x".repeat(hivemind_proto::WORKER_STATUS_MESSAGE_MAX_BYTES + 1));
 
         let response = execute_response_from_result(
             result,
-            false,
             &ExecuteTaskIdentity::from_request(&execute_request(
                 "managed-function-v0",
                 "return 42;".into(),
@@ -2604,18 +2895,16 @@ mod tests {
             response.status_message,
             "Task result exceeds supported response limits"
         );
-        assert!(response.managed_proof.is_none());
     }
 
     #[test]
     fn worker_execute_response_forwards_typed_general_compute_result() {
         let payload = br#"{"status":"completed"}"#.to_vec();
-        let mut result = successful_task_result(None);
+        let mut result = successful_task_result();
         result.general_compute_result_json = Some(payload.clone());
 
         let response = execute_response_from_result(
             result,
-            false,
             &ExecuteTaskIdentity::from_request(&execute_request(
                 "general-compute-v1alpha1",
                 String::new(),
@@ -2625,16 +2914,6 @@ mod tests {
         );
 
         assert_eq!(response.general_compute_result_json, payload);
-    }
-
-    #[test]
-    fn full_prover_queue_maps_to_redispatchable_resource_exhaustion() {
-        let error = anyhow::Error::new(ManagedProverError::QueueFull);
-        let status = worker_execution_error_status(&error)
-            .expect("a full local prover queue is an RPC resource exhaustion");
-
-        assert_eq!(status.code(), tonic::Code::ResourceExhausted);
-        assert_eq!(status.message(), "Managed prover is busy");
     }
 
     #[test]
@@ -2716,6 +2995,29 @@ mod tests {
             Err("unsupported task runtime")
         );
         assert_eq!(validate_execute_task_contract(&non_managed), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn execute_task_rejects_managed_execution_without_consensus_request() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path());
+        let task_id = "managed-without-consensus";
+        let mut request =
+            execute_request("managed-function-v0", "return 1;".into(), "{}".into(), 1);
+        request.task_id = task_id.into();
+        request.token = bound_token(test_private_key_pem(), ASSIGNED_OWNER, task_id);
+
+        let error = service
+            .execute_task(Request::new(request))
+            .await
+            .expect_err("managed execution without consensus must fail closed");
+
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            error.message(),
+            "managed execution requires a consensus request"
+        );
+        assert!(service.report_for_task(task_id).unwrap().is_none());
     }
 
     #[tokio::test]
@@ -2831,7 +3133,6 @@ mod tests {
                         managed_executed_ops: 0,
                         managed_output_bytes: 0,
                         managed_receipt_json: None,
-                        managed_proof: None,
                         general_compute_result_json: None,
                         managed_gpu_result_json: Some(result_json),
                     })
@@ -2844,6 +3145,7 @@ mod tests {
             worker_id: Arc::new(Mutex::new(Some(TEST_WORKER_ID.into()))),
             cas_store: None,
             reports: Mutex::new(HashMap::new()),
+            completed_consensus_results: Arc::new(Mutex::new(HashMap::new())),
             transfer_lease_authority: Arc::new(Mutex::new(None)),
         });
         let service = GrpcWorkerNodeService::new(state.clone()).with_runtime_admission(
@@ -2860,6 +3162,9 @@ mod tests {
                 runtime: MANAGED_GPU_RUNTIME_VERSION.into(),
                 token,
                 managed_gpu_manifest_json: serde_json::to_vec(&request).unwrap(),
+                consensus_round_id: String::new(),
+                replica_id: String::new(),
+                consensus_protocol_version: 0,
                 ..ExecuteTaskRequest::default()
             }))
             .await
@@ -2869,7 +3174,6 @@ mod tests {
         assert!(response.success, "{}", response.status_message);
         assert_eq!(response.managed_gpu_result_json, typed_result);
         assert!(response.managed_receipt_json.is_empty());
-        assert!(response.managed_proof.is_none());
         assert!(response.general_compute_result_json.is_empty());
         assert_eq!(response.managed_executed_ops, 0);
         assert_eq!(response.managed_output_bytes, 0);
@@ -2902,10 +3206,10 @@ mod tests {
                 request_digest: String::new(),
                 managed_dsl_backend_id: String::new(),
                 managed_dsl_semantics_manifest_sha256: String::new(),
-                managed_proof_authorization_token: String::new(),
-                managed_proof_lease_generation: 0,
-                managed_proof_deadline_unix_ms: 0,
                 managed_gpu_manifest_json: Vec::new(),
+                consensus_round_id: String::new(),
+                replica_id: String::new(),
+                consensus_protocol_version: 0,
             }))
             .await;
 
@@ -2953,10 +3257,10 @@ mod tests {
                 request_digest: String::new(),
                 managed_dsl_backend_id: String::new(),
                 managed_dsl_semantics_manifest_sha256: String::new(),
-                managed_proof_authorization_token: String::new(),
-                managed_proof_lease_generation: 0,
-                managed_proof_deadline_unix_ms: 0,
                 managed_gpu_manifest_json: Vec::new(),
+                consensus_round_id: String::new(),
+                replica_id: String::new(),
+                consensus_protocol_version: 0,
             }))
             .await;
 
@@ -2984,10 +3288,10 @@ mod tests {
                 request_digest: String::new(),
                 managed_dsl_backend_id: String::new(),
                 managed_dsl_semantics_manifest_sha256: String::new(),
-                managed_proof_authorization_token: String::new(),
-                managed_proof_lease_generation: 0,
-                managed_proof_deadline_unix_ms: 0,
                 managed_gpu_manifest_json: Vec::new(),
+                consensus_round_id: String::new(),
+                replica_id: String::new(),
+                consensus_protocol_version: 0,
             }))
             .await;
 
@@ -3015,10 +3319,10 @@ mod tests {
                 request_digest: String::new(),
                 managed_dsl_backend_id: String::new(),
                 managed_dsl_semantics_manifest_sha256: String::new(),
-                managed_proof_authorization_token: String::new(),
-                managed_proof_lease_generation: 0,
-                managed_proof_deadline_unix_ms: 0,
                 managed_gpu_manifest_json: Vec::new(),
+                consensus_round_id: String::new(),
+                replica_id: String::new(),
+                consensus_protocol_version: 0,
             }))
             .await;
 
@@ -3487,7 +3791,24 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let service = Arc::new(test_service_with_cancellable_runner(tmp.path()));
         let task_id = "grpc-stop-managed-function".to_string();
+        let execution_id = "execution-stop-managed";
+        let attempt_id = "attempt-stop-managed";
+        let idempotency_key = "idempotency-stop-managed";
+        let request_digest = "sha256:stop-managed";
+        let consensus_round_id = "round-stop-managed";
+        let replica_id = "replica-stop-managed";
+        let token = bound_consensus_token(
+            ASSIGNED_OWNER,
+            &task_id,
+            execution_id,
+            attempt_id,
+            idempotency_key,
+            request_digest,
+            consensus_round_id,
+            replica_id,
+        );
         let execute_service = service.clone();
+        let execute_token = token.clone();
         let execute_task_id = task_id.clone();
         let execute = tokio::spawn(async move {
             execute_service
@@ -3507,19 +3828,19 @@ mod tests {
                     }),
                     runtime: "managed-function-v0".into(),
                     task_source: "return 1;".into(),
-                    token: bound_token(test_private_key_pem(), ASSIGNED_OWNER, &execute_task_id),
+                    token: execute_token,
                     managed_budget_units: hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS,
                     general_compute_manifest_json: Vec::new(),
-                    execution_id: String::new(),
-                    attempt_id: String::new(),
-                    idempotency_key: String::new(),
-                    request_digest: String::new(),
+                    execution_id: execution_id.into(),
+                    attempt_id: attempt_id.into(),
+                    idempotency_key: idempotency_key.into(),
+                    request_digest: request_digest.into(),
                     managed_dsl_backend_id: String::new(),
                     managed_dsl_semantics_manifest_sha256: String::new(),
-                    managed_proof_authorization_token: String::new(),
-                    managed_proof_lease_generation: 0,
-                    managed_proof_deadline_unix_ms: 0,
                     managed_gpu_manifest_json: Vec::new(),
+                    consensus_round_id: consensus_round_id.into(),
+                    replica_id: replica_id.into(),
+                    consensus_protocol_version: 1,
                 }))
                 .await
                 .unwrap()
@@ -3533,9 +3854,9 @@ mod tests {
             match service
                 .stop_task_execution(Request::new(StopTaskExecutionRequest {
                     task_id: task_id.clone(),
-                    token: bound_token(test_private_key_pem(), ASSIGNED_OWNER, &task_id),
-                    attempt_id: String::new(),
-                    idempotency_key: String::new(),
+                    token: token.clone(),
+                    attempt_id: attempt_id.into(),
+                    idempotency_key: idempotency_key.into(),
                 }))
                 .await
             {
@@ -3988,9 +4309,7 @@ mod tests {
         }
     }
 
-    fn successful_task_result(
-        managed_proof: Option<hivemind_proto::ManagedProofEnvelope>,
-    ) -> TaskResult {
+    fn successful_task_result() -> TaskResult {
         TaskResult {
             task_id: "worker-result".into(),
             success: true,
@@ -4003,7 +4322,6 @@ mod tests {
             managed_executed_ops: 17,
             managed_output_bytes: 2,
             managed_receipt_json: Some("{}".into()),
-            managed_proof,
             general_compute_result_json: None,
             managed_gpu_result_json: None,
         }
@@ -4017,7 +4335,7 @@ mod tests {
         let executor = Arc::new(WorkerExecutor::new_with_task_runner(
             config.clone(),
             |task: hivemind_models::Task, _cancellation: tokio::sync::watch::Receiver<bool>| async move {
-                let mut result = successful_task_result(None);
+                let mut result = successful_task_result();
                 result.task_id = task.task_id;
                 Ok(result)
             },
@@ -4028,6 +4346,7 @@ mod tests {
             worker_id: Arc::new(Mutex::new(Some(TEST_WORKER_ID.into()))),
             cas_store: None,
             reports: Mutex::new(HashMap::new()),
+            completed_consensus_results: Arc::new(Mutex::new(HashMap::new())),
             transfer_lease_authority: Arc::new(Mutex::new(None)),
         }))
     }
@@ -4057,7 +4376,6 @@ mod tests {
                     managed_executed_ops: 0,
                     managed_output_bytes: 0,
                     managed_receipt_json: None,
-                    managed_proof: None,
                     general_compute_result_json: None,
                     managed_gpu_result_json: None,
                 })
@@ -4069,6 +4387,7 @@ mod tests {
             worker_id: Arc::new(Mutex::new(Some(TEST_WORKER_ID.into()))),
             cas_store: None,
             reports: Mutex::new(HashMap::new()),
+            completed_consensus_results: Arc::new(Mutex::new(HashMap::new())),
             transfer_lease_authority: Arc::new(Mutex::new(None)),
         }))
     }
@@ -4085,6 +4404,7 @@ mod tests {
             worker_id: Arc::new(Mutex::new(Some(TEST_WORKER_ID.into()))),
             cas_store: None,
             reports: Mutex::new(HashMap::new()),
+            completed_consensus_results: Arc::new(Mutex::new(HashMap::new())),
             transfer_lease_authority: Arc::new(Mutex::new(None)),
         }))
     }
@@ -4132,6 +4452,43 @@ mod tests {
                     iat: now as usize,
                 },
                 attempt_id,
+            )
+            .unwrap()
+    }
+
+    fn bound_consensus_token(
+        subject: &str,
+        task_id: &str,
+        execution_id: &str,
+        attempt_id: &str,
+        idempotency_key: &str,
+        request_digest: &str,
+        consensus_round_id: &str,
+        replica_id: &str,
+    ) -> String {
+        let now = Utc::now().timestamp();
+        WorkerExecutionSigner::from_pem(test_private_key_pem())
+            .unwrap()
+            .encode_consensus_claims(
+                &Claims {
+                    sub: subject.into(),
+                    user_id: subject.into(),
+                    role: Some("worker-execution".into()),
+                    task_id: Some(task_id.into()),
+                    worker_id: Some(TEST_WORKER_ID.into()),
+                    exp: (now + 3600) as usize,
+                    iat: now as usize,
+                },
+                &WorkerExecutionIdentity {
+                    execution_id: execution_id.into(),
+                    attempt_id: attempt_id.into(),
+                    idempotency_key: idempotency_key.into(),
+                    request_digest: request_digest.into(),
+                    transfer_generation: 1,
+                },
+                consensus_round_id,
+                replica_id,
+                1,
             )
             .unwrap()
     }
