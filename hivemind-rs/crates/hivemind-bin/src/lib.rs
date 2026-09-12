@@ -4,10 +4,6 @@ use anyhow::Result;
 #[cfg(any(feature = "master", feature = "worker"))]
 use hivemind_client_runtime as client_runtime;
 use hivemind_config::HivemindConfig;
-#[cfg(feature = "nodepool")]
-use prost::Message;
-#[cfg(feature = "nodepool")]
-use std::io::{Read, Write};
 use tokio::sync::watch;
 #[cfg(feature = "worker")]
 use tokio_stream::wrappers::TcpListenerStream;
@@ -78,73 +74,6 @@ pub enum ServiceRole {
     All,
 }
 
-const VERIFY_MANAGED_PROOF_ARG: &str = "--verify-managed-proof";
-#[cfg(feature = "nodepool")]
-pub const MANAGED_PROOF_STDIN_MAX_BYTES: usize =
-    hivemind_proto::MANAGED_PROOF_RPC_MESSAGE_MAX_BYTES;
-
-pub fn is_managed_proof_verifier_mode(args: &[String]) -> bool {
-    matches!(args, [_, argument] if argument == VERIFY_MANAGED_PROOF_ARG)
-}
-
-#[cfg(feature = "nodepool")]
-pub fn verify_managed_proof_bytes(input: &[u8]) -> Result<Vec<u8>> {
-    if input.len() > MANAGED_PROOF_STDIN_MAX_BYTES {
-        anyhow::bail!("managed proof input exceeds the verifier limit");
-    }
-
-    let envelope = hivemind_proto::ManagedProofEnvelope::decode(input)
-        .map_err(|_| anyhow::anyhow!("managed proof input is malformed"))?;
-    if envelope.encode_to_vec() != input {
-        anyhow::bail!("managed proof input is not canonical");
-    }
-
-    let claim = hivemind_managed_proof::verify_risc0_proof_envelope(&envelope)
-        .map_err(|_| anyhow::anyhow!("managed proof verification failed"))?;
-    serde_json::to_vec(&claim).map_err(Into::into)
-}
-
-#[cfg(feature = "nodepool")]
-fn read_managed_proof_input(reader: impl Read) -> Result<Vec<u8>> {
-    let mut input = Vec::new();
-    reader
-        .take((MANAGED_PROOF_STDIN_MAX_BYTES + 1) as u64)
-        .read_to_end(&mut input)?;
-    if input.len() > MANAGED_PROOF_STDIN_MAX_BYTES {
-        anyhow::bail!("managed proof input exceeds the verifier limit");
-    }
-    Ok(input)
-}
-
-#[cfg(feature = "nodepool")]
-fn run_managed_proof_verifier_inner(reader: impl Read, mut writer: impl Write) -> Result<()> {
-    let input = read_managed_proof_input(reader)?;
-    let output = verify_managed_proof_bytes(&input)?;
-    writer.write_all(&output)?;
-    writer.flush()?;
-    Ok(())
-}
-
-#[cfg(feature = "nodepool")]
-fn run_managed_proof_verifier_io(reader: impl Read, writer: impl Write) -> bool {
-    run_managed_proof_verifier_inner(reader, writer).is_ok()
-}
-
-#[cfg(feature = "nodepool")]
-pub fn run_managed_proof_verifier() -> ! {
-    let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
-    if run_managed_proof_verifier_io(stdin.lock(), stdout.lock()) {
-        std::process::exit(0);
-    }
-
-    let stderr = std::io::stderr();
-    let mut stderr = stderr.lock();
-    let _ = stderr.write_all(b"managed proof verification failed\n");
-    let _ = stderr.flush();
-    std::process::exit(1);
-}
-
 impl ServiceRole {
     pub fn includes_master(self) -> bool {
         matches!(self, ServiceRole::Master | ServiceRole::All)
@@ -171,11 +100,6 @@ pub async fn run_service(role: ServiceRole) -> Result<()> {
 
 #[cfg(feature = "cli")]
 pub async fn run_from_cli(args: Vec<String>) -> Result<()> {
-    #[cfg(feature = "nodepool")]
-    if is_managed_proof_verifier_mode(&args) {
-        run_managed_proof_verifier();
-    }
-
     hivemind_common::init_tracing("hivemind");
     let command = cli::parse_cli_args(&args)?;
     if let cli::CliCommand::Submit(submit) = command {
@@ -469,13 +393,8 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
                 .with_worker_execution_private_key(
                     config.auth.worker_execution_private_key_pem.clone(),
                 )
-                .with_managed_proof_authorization_private_key(
-                    config.managed_proof.authorization_private_key_pem.clone(),
-                )
-                .with_managed_proof_provider_configured(
-                    !config.managed_proof.provider_endpoint.trim().is_empty(),
-                )
                 .with_managed_proof_rollout_mode(config.managed_proof.rollout_mode)
+                .with_managed_consensus_config(&config.managed_consensus)
                 .with_session_registry(session_registry.clone()),
         );
 
@@ -495,6 +414,11 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
             worker_execution_private_key_pem: config.auth.worker_execution_private_key_pem.clone(),
             worker_execution_public_key_pem: config.auth.worker_execution_public_key_pem.clone(),
             managed_proof_rollout_mode: config.managed_proof.rollout_mode,
+            managed_consensus_rollout_mode: config.managed_consensus.rollout_mode,
+            managed_consensus_replica_count: config.managed_consensus.replica_count,
+            managed_consensus_quorum: config.managed_consensus.quorum,
+            managed_consensus_max_replicas: config.managed_consensus.max_replicas,
+            managed_consensus_timeout_secs: config.managed_consensus.timeout_secs,
             node_manager: node_mgr.clone(),
             session_registry: session_registry.clone(),
             dispatcher: Some(dispatcher.clone()),
@@ -816,120 +740,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn managed_proof_verifier_mode_requires_the_exact_hidden_argument() {
-        let nodepool = "hivemind-nodepool".to_owned();
-        let hidden_flag = "--verify-managed-proof".to_owned();
-
-        assert!(is_managed_proof_verifier_mode(&[
-            nodepool.clone(),
-            hidden_flag.clone()
-        ]));
-        assert!(!is_managed_proof_verifier_mode(std::slice::from_ref(
-            &nodepool
-        )));
-        assert!(!is_managed_proof_verifier_mode(&[
-            nodepool.clone(),
-            "--verify-managed-proofs".to_owned()
-        ]));
-        assert!(!is_managed_proof_verifier_mode(&[
-            nodepool.clone(),
-            hidden_flag.clone(),
-            "unexpected".to_owned()
-        ]));
-        assert!(!is_managed_proof_verifier_mode(&[
-            nodepool,
-            "all".to_owned(),
-            hidden_flag
-        ]));
-    }
-
-    #[cfg(feature = "nodepool")]
-    mod managed_proof_verifier {
-        use super::*;
-        use hivemind_managed_proof::ExecutionClaim;
-        use hivemind_proto::ManagedProofEnvelope;
-        use prost::Message;
-        use serde::Deserialize;
-
-        #[derive(Deserialize)]
-        struct ProofFixture {
-            proof_scheme: String,
-            image_id: [u32; 8],
-            journal: Vec<u8>,
-            receipt: serde_json::Value,
-        }
-
-        fn fixture() -> ProofFixture {
-            serde_json::from_slice(include_bytes!(
-                "../../managed-proof/tests/fixtures/risc0-managed-proof-v1.json"
-            ))
-            .expect("pinned proof fixture parses")
-        }
-
-        fn encode_fixture(fixture: &ProofFixture) -> Vec<u8> {
-            ManagedProofEnvelope {
-                proof_scheme: fixture.proof_scheme.clone(),
-                image_id: fixture.image_id.to_vec(),
-                journal: fixture.journal.clone(),
-                receipt_json: serde_json::to_vec(&fixture.receipt).expect("receipt serializes"),
-            }
-            .encode_to_vec()
-        }
-
-        #[test]
-        fn verifier_returns_only_the_claim_json_for_the_pinned_real_proof() {
-            let output = verify_managed_proof_bytes(&encode_fixture(&fixture()))
-                .expect("pinned proof verifies");
-
-            let claim: ExecutionClaim =
-                serde_json::from_slice(&output).expect("output is an execution claim");
-            assert_eq!(claim.task_id, "task-zk-golden");
-            assert_eq!(claim.usage_units, 29);
-            assert_eq!(output.last(), Some(&b'}'));
-        }
-
-        #[test]
-        fn verifier_rejects_an_invalid_cryptographic_proof() {
-            let mut fixture = fixture();
-            let seal_word = &mut fixture.receipt["inner"]["Composite"]["segments"][0]["seal"][0];
-            let changed = seal_word.as_u64().expect("seal word is an integer") ^ 1;
-            *seal_word = serde_json::Value::from(changed);
-
-            assert!(verify_managed_proof_bytes(&encode_fixture(&fixture)).is_err());
-        }
-
-        #[test]
-        fn verifier_rejects_a_malformed_envelope() {
-            assert!(verify_managed_proof_bytes(&[0x0a, 0xff]).is_err());
-        }
-
-        #[test]
-        fn verifier_io_adapter_reports_failure_without_writing_stdout() {
-            let mut output = Vec::new();
-
-            let succeeded = run_managed_proof_verifier_io(&[0x0a, 0xff][..], &mut output);
-
-            assert!(!succeeded);
-            assert!(output.is_empty());
-        }
-
-        #[test]
-        fn verifier_rejects_trailing_protobuf_fields() {
-            let mut input = encode_fixture(&fixture());
-            input.extend_from_slice(&[0x28, 0x00]);
-
-            assert!(verify_managed_proof_bytes(&input).is_err());
-        }
-
-        #[test]
-        fn verifier_rejects_input_over_the_strict_cap() {
-            let input = vec![0; MANAGED_PROOF_STDIN_MAX_BYTES + 1];
-
-            assert!(verify_managed_proof_bytes(&input).is_err());
-        }
-    }
-
-    #[test]
     fn default_user_seed_requires_explicit_truthy_env_value() {
         assert!(!should_seed_default_user(None));
         assert!(!should_seed_default_user(Some("")));
@@ -1132,6 +942,11 @@ mod tests {
                     .worker_execution_public_key_pem
                     .clone(),
                 managed_proof_rollout_mode: config.managed_proof.rollout_mode,
+                managed_consensus_rollout_mode: config.managed_consensus.rollout_mode,
+                managed_consensus_replica_count: config.managed_consensus.replica_count,
+                managed_consensus_quorum: config.managed_consensus.quorum,
+                managed_consensus_max_replicas: config.managed_consensus.max_replicas,
+                managed_consensus_timeout_secs: config.managed_consensus.timeout_secs,
                 node_manager: node_manager.clone(),
                 session_registry: session_registry.clone(),
                 dispatcher: Some(dispatcher.clone()),
@@ -1344,7 +1159,10 @@ mod tests {
             let completed = tokio::time::timeout(Duration::from_secs(15), async {
                 loop {
                     let task = scheduler.get_task(&task_id).await.unwrap().unwrap();
-                    if matches!(task.status, TaskStatus::Completed | TaskStatus::Failed) {
+                    if matches!(
+                        task.status,
+                        TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Observed
+                    ) {
                         break task;
                     }
                     tokio::time::sleep(Duration::from_millis(50)).await;
