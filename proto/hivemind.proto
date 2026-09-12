@@ -204,6 +204,9 @@ message UploadTaskRequest {
     string managed_dsl_backend_id = 13;
     string managed_dsl_semantics_manifest_sha256 = 14;
     bytes managed_gpu_manifest_json = 15; // canonical managed-function-gpu-v1 request manifest
+    uint32 managed_consensus_version = 16;
+    uint32 managed_replica_count = 17;
+    uint32 managed_quorum = 18;
 }
 
 message UploadTaskResponse {
@@ -243,6 +246,7 @@ message TaskInfo {
     int64 usage_units = 21;
     int64 max_cpt = 22;
     string runtime = 23;
+    ManagedConsensusSummary managed_consensus = 25;
 }
 
 
@@ -383,6 +387,7 @@ message GetTaskResultResponse {
     string status_message = 2;
     string result_torrent = 3;
     bytes managed_gpu_result_json = 4; // Nodepool-validated managed-function-gpu-v1 result
+    ManagedConsensusSummary managed_consensus = 5;
 }
 
 message StopTaskRequest {
@@ -438,10 +443,11 @@ message ExecuteTaskRequest {
     string request_digest = 12; // canonical SHA-256 request digest
     string managed_dsl_backend_id = 13;
     string managed_dsl_semantics_manifest_sha256 = 14;
-    string managed_proof_authorization_token = 15; // Nodepool proof-production authorization; memory-only on Worker
-    int64 managed_proof_lease_generation = 16; // active Nodepool lease generation
-    int64 managed_proof_deadline_unix_ms = 17; // absolute proof request deadline
+    reserved 15 to 17;
     bytes managed_gpu_manifest_json = 18; // canonical managed-function-gpu-v1 request manifest
+    string consensus_round_id = 19; // Nodepool-created managed consensus round
+    string replica_id = 20; // Nodepool-created replica assignment identity
+    uint32 consensus_protocol_version = 21;
 }
 
 message ManagedProofEnvelope {
@@ -449,6 +455,38 @@ message ManagedProofEnvelope {
     repeated fixed32 image_id = 2 [packed = true];
     bytes journal = 3;
     bytes receipt_json = 4;
+}
+
+message ManagedConsensusResult {
+    uint32 protocol_version = 1;
+    string status = 2;
+    bytes output = 3;
+    string error_code = 4;
+    uint64 usage_units = 5;
+    uint64 executed_ops = 6;
+    uint64 output_bytes = 7;
+    string runtime = 8;
+    string backend_id = 9;
+    string semantics_manifest_sha256 = 10;
+    string source_sha256 = 11;
+    string input_sha256 = 12;
+    string result_digest = 13;
+}
+
+message ManagedConsensusSummary {
+    uint32 protocol_version = 1;
+    string state = 2;
+    uint32 replica_count = 3;
+    uint32 required_quorum = 4;
+    uint32 votes_received = 5;
+    uint32 matching_votes = 6;
+    string result_digest = 7;
+    string certificate_id = 8;
+    string evidence_level = 9;
+    string decided_at = 10;
+    string mode = 11;
+    string settlement_id = 12;
+    bool settlement_authorized = 13;
 }
 
 message ExecuteTaskResponse {
@@ -464,6 +502,11 @@ message ExecuteTaskResponse {
     string request_digest = 10;
     bytes general_compute_result_json = 11; // validated general-compute-v1alpha1 result envelope
     bytes managed_gpu_result_json = 12; // validated managed-function-gpu-v1 result envelope
+    ManagedConsensusResult managed_consensus_result = 13;
+    string managed_consensus_result_digest = 14;
+    string replica_id = 15;
+    string consensus_round_id = 16;
+    uint32 consensus_protocol_version = 17;
 }
 
 // Nodepool -> Worker: authenticated, attempt-bound general-compute artifact
@@ -947,23 +990,6 @@ message ListAdminAuditLogsResponse {
     repeated AdminAuditLogEntry entries = 3;
 }
 
-// Managed-proof verification observability. The Nodepool is the authority for
-// these counters; Master only proxies them to authenticated administrators.
-message GetAdminManagedProofMetricsRequest {
-    string token = 1;
-}
-
-message GetAdminManagedProofMetricsResponse {
-    bool success = 1;
-    string status_message = 2;
-    string rollout_mode = 3;
-    int64 verification_attempts = 4;
-    int64 verified = 5;
-    int64 rejected = 6;
-    int64 queue_retries = 7;
-    int64 observe_fallbacks = 8;
-    int64 legacy_settlements = 9;
-}
 // ============================================================
 // Platform-neutral outbound Worker session
 // ============================================================
@@ -1115,7 +1141,6 @@ service MasterNodeService {
     rpc UpdateWorkerTrustControl(UpdateWorkerTrustControlRequest) returns (UpdateWorkerTrustControlResponse);
     rpc ListAdminWorkerTrust(ListAdminWorkerTrustRequest) returns (ListAdminWorkerTrustResponse);
     rpc ListAdminAuditLogs(ListAdminAuditLogsRequest) returns (ListAdminAuditLogsResponse);
-    rpc GetAdminManagedProofMetrics(GetAdminManagedProofMetricsRequest) returns (GetAdminManagedProofMetricsResponse);
 }
 
 service WorkerNodeService {

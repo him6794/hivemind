@@ -8,8 +8,7 @@ use hivemind_proto::{
     DownloadTaskArtifactResponse, GeneralComputeArtifactChunkUpload,
     GeneralComputeArtifactChunkUploadResponse, GetAdminArtifactOverviewRequest,
     GetAdminArtifactOverviewResponse, GetAdminBillingOverviewRequest,
-    GetAdminBillingOverviewResponse, GetAdminManagedProofMetricsRequest,
-    GetAdminManagedProofMetricsResponse, GetAdminSchedulingCacheAlertRequest,
+    GetAdminBillingOverviewResponse, GetAdminSchedulingCacheAlertRequest,
     GetAdminSchedulingCacheAlertResponse, GetAdminSchedulingCacheMetricsRequest,
     GetAdminSchedulingCacheMetricsResponse, GetAllUserTasksRequest, GetAllUserTasksResponse,
     GetBalanceRequest, GetBalanceResponse, GetProviderEarningsRequest, GetProviderEarningsResponse,
@@ -252,6 +251,9 @@ impl GrpcClient {
         managed_dsl_backend_id: &str,
         managed_dsl_semantics_manifest_sha256: &str,
         managed_gpu_manifest_json: &[u8],
+        managed_consensus_version: u32,
+        managed_replica_count: u32,
+        managed_quorum: u32,
     ) -> Result<UploadTaskResponse, tonic::Status> {
         let task_id = task_id.to_string();
         let torrent = torrent.to_string();
@@ -283,6 +285,9 @@ impl GrpcClient {
                     managed_dsl_backend_id,
                     managed_dsl_semantics_manifest_sha256,
                     managed_gpu_manifest_json,
+                    managed_consensus_version,
+                    managed_replica_count,
+                    managed_quorum,
                 }))
                 .await
                 .map(|r| r.into_inner())
@@ -696,23 +701,6 @@ impl GrpcClient {
                 .list_admin_audit_logs(Request::new(ListAdminAuditLogsRequest { token, limit }))
                 .await
                 .map(|r| r.into_inner())
-        })
-        .await
-    }
-
-    pub async fn get_admin_managed_proof_metrics(
-        &mut self,
-        token: &str,
-    ) -> Result<GetAdminManagedProofMetricsResponse, tonic::Status> {
-        let token = token.to_string();
-        self.with_clients(|mut clients| async move {
-            clients
-                .master
-                .get_admin_managed_proof_metrics(Request::new(GetAdminManagedProofMetricsRequest {
-                    token,
-                }))
-                .await
-                .map(|response| response.into_inner())
         })
         .await
     }

@@ -78,7 +78,11 @@ async fn nodepool_test_fixture() -> Option<NodepoolTestFixture> {
         auth,
         worker_execution_private_key_pem: config.auth.worker_execution_private_key_pem.clone(),
         worker_execution_public_key_pem: config.auth.worker_execution_public_key_pem.clone(),
-        managed_proof_rollout_mode: config.managed_proof.rollout_mode,
+        managed_consensus_rollout_mode: config.managed_consensus.rollout_mode,
+        managed_consensus_replica_count: config.managed_consensus.replica_count,
+        managed_consensus_quorum: config.managed_consensus.quorum,
+        managed_consensus_max_replicas: config.managed_consensus.max_replicas,
+        managed_consensus_timeout_secs: config.managed_consensus.timeout_secs,
         node_manager,
         session_registry: hivemind_client_core::SessionRegistry::shared(Default::default()),
         dispatcher: None,
@@ -313,6 +317,9 @@ async fn master_http_artifact_chunk_proxy_persists_a_manifest_bound_source() {
             "",
             "",
             &[],
+            0,
+            0,
+            0,
         )
         .await
         .unwrap();
@@ -539,6 +546,9 @@ async fn master_http_managed_gpu_result_returns_typed_json_without_legacy_torren
             "",
             "",
             &manifest_json,
+            0,
+            0,
+            0,
         )
         .await
         .unwrap();

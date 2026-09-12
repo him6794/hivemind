@@ -413,7 +413,6 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
             auth: auth.clone(),
             worker_execution_private_key_pem: config.auth.worker_execution_private_key_pem.clone(),
             worker_execution_public_key_pem: config.auth.worker_execution_public_key_pem.clone(),
-            managed_proof_rollout_mode: config.managed_proof.rollout_mode,
             managed_consensus_rollout_mode: config.managed_consensus.rollout_mode,
             managed_consensus_replica_count: config.managed_consensus.replica_count,
             managed_consensus_quorum: config.managed_consensus.quorum,
@@ -941,7 +940,6 @@ mod tests {
                     .auth
                     .worker_execution_public_key_pem
                     .clone(),
-                managed_proof_rollout_mode: config.managed_proof.rollout_mode,
                 managed_consensus_rollout_mode: config.managed_consensus.rollout_mode,
                 managed_consensus_replica_count: config.managed_consensus.replica_count,
                 managed_consensus_quorum: config.managed_consensus.quorum,

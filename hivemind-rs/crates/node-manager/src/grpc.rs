@@ -1,6 +1,6 @@
 #![allow(clippy::result_large_err)]
 
-use hivemind_config::{HivemindConfig, ManagedProofRolloutMode};
+use hivemind_config::{HivemindConfig, ManagedConsensusRolloutMode};
 use hivemind_proto::{
     batch_runtime_service_server::BatchRuntimeService,
     general_compute_artifact_service_server::GeneralComputeArtifactService,
@@ -24,8 +24,6 @@ use hivemind_proto::{
     // Admin RPC types
     GetAdminBillingOverviewRequest,
     GetAdminBillingOverviewResponse,
-    GetAdminManagedProofMetricsRequest,
-    GetAdminManagedProofMetricsResponse,
     GetAdminSchedulingCacheAlertRequest,
     GetAdminSchedulingCacheAlertResponse,
     GetAdminSchedulingCacheMetricsRequest,
@@ -56,6 +54,7 @@ use hivemind_proto::{
     ListWorkersResponse,
     LoginRequest,
     LoginResponse,
+    ManagedConsensusSummary,
     PricingBreakdown,
     ProviderEarningsEntry,
     ProviderWorkerSettings,
@@ -124,12 +123,19 @@ use hivemind_models::{
     WORKER_CAPABILITY_REPORT_MAX_BYTES,
 };
 use hivemind_task_scheduler::{
-    dispatcher::worker_endpoint, dispatcher::Dispatcher, BatchTaskReport, TaskScheduler,
+    dispatcher::worker_endpoint,
+    dispatcher::Dispatcher,
+    task_repository::{ManagedConsensusStopTarget, MANAGED_CONSENSUS_POLICY_PENDING_MESSAGE},
+    BatchTaskReport, TaskScheduler,
 };
 
 const MAX_TASK_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_RESULT_REFERENCE_BYTES: usize = 4096;
 const MAX_DOWNLOAD_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
+
+fn checked_consensus_u16(value: u32, field: &'static str) -> Result<u16, String> {
+    u16::try_from(value).map_err(|_| format!("managed consensus {field} is out of range"))
+}
 
 fn managed_gpu_result_status_message(result: &ManagedGpuResult) -> String {
     match result.status {
@@ -185,7 +191,11 @@ pub struct NodepoolState {
     pub auth: AuthManager,
     pub worker_execution_private_key_pem: String,
     pub worker_execution_public_key_pem: String,
-    pub managed_proof_rollout_mode: ManagedProofRolloutMode,
+    pub managed_consensus_rollout_mode: ManagedConsensusRolloutMode,
+    pub managed_consensus_replica_count: u16,
+    pub managed_consensus_quorum: u16,
+    pub managed_consensus_max_replicas: u16,
+    pub managed_consensus_timeout_secs: u64,
     pub node_manager: Arc<NodeManager>,
     pub session_registry: SharedSessionRegistry,
     pub dispatcher: Option<Arc<Dispatcher>>,
@@ -1820,6 +1830,7 @@ impl MasterNodeService for GrpcMasterNodeService {
         request: Request<UploadTaskRequest>,
     ) -> Result<Response<UploadTaskResponse>, Status> {
         let req = request.into_inner();
+        let runtime = req.runtime.trim().to_owned();
         let claims = self
             .state
             .auth
@@ -1832,7 +1843,7 @@ impl MasterNodeService for GrpcMasterNodeService {
             }));
         }
         if let Err(message) = validate_runtime_contract_with_manifest(
-            &req.runtime,
+            &runtime,
             &req.task_source,
             &req.general_compute_manifest_json,
             &req.managed_gpu_manifest_json,
@@ -1844,7 +1855,7 @@ impl MasterNodeService for GrpcMasterNodeService {
                 status_message: message.into(),
             }));
         }
-        if req.runtime.trim() == "production_sandboxed_dsl" {
+        if runtime == "production_sandboxed_dsl" {
             if req.managed_dsl_backend_id.trim().is_empty() {
                 return Ok(Response::new(UploadTaskResponse {
                     success: false,
@@ -1895,7 +1906,7 @@ impl MasterNodeService for GrpcMasterNodeService {
         // tasks. General-compute requests carry source and input artifacts in
         // their validated manifest and must not fall back to `torrent`.
         if let Err(message) = validate_task_input_contract(
-            &req.runtime,
+            &runtime,
             &req.torrent,
             &req.general_compute_manifest_json,
             &req.managed_gpu_manifest_json,
@@ -1906,6 +1917,93 @@ impl MasterNodeService for GrpcMasterNodeService {
             }));
         }
         let expected_btih = None;
+        let managed_runtime = matches!(
+            runtime.as_str(),
+            "managed-function-v0" | "production_sandboxed_dsl"
+        );
+        let explicit_consensus_policy = req.managed_consensus_version > 0
+            || req.managed_replica_count > 0
+            || req.managed_quorum > 0;
+        if explicit_consensus_policy && !managed_runtime {
+            return Ok(Response::new(UploadTaskResponse {
+                success: false,
+                status_message: "managed consensus policy requires a managed DSL runtime".into(),
+            }));
+        }
+        if explicit_consensus_policy
+            && self.state.managed_consensus_rollout_mode == ManagedConsensusRolloutMode::Disabled
+        {
+            return Ok(Response::new(UploadTaskResponse {
+                success: false,
+                status_message: "managed consensus is disabled for new tasks".into(),
+            }));
+        }
+        let consensus_requested = managed_runtime
+            && self.state.managed_consensus_rollout_mode != ManagedConsensusRolloutMode::Disabled;
+        let consensus_version = if consensus_requested {
+            if req.managed_consensus_version == 0 {
+                1
+            } else {
+                req.managed_consensus_version
+            }
+        } else {
+            0
+        };
+        let requested_replica_count =
+            match checked_consensus_u16(req.managed_replica_count, "replica count") {
+                Ok(value) => value,
+                Err(message) => {
+                    return Ok(Response::new(UploadTaskResponse {
+                        success: false,
+                        status_message: message,
+                    }));
+                }
+            };
+        let consensus_replica_count = if requested_replica_count == 0 {
+            self.state.managed_consensus_replica_count
+        } else {
+            requested_replica_count
+        };
+        let requested_quorum = match checked_consensus_u16(req.managed_quorum, "quorum") {
+            Ok(value) => value,
+            Err(message) => {
+                return Ok(Response::new(UploadTaskResponse {
+                    success: false,
+                    status_message: message,
+                }));
+            }
+        };
+        let consensus_quorum = if requested_quorum == 0 {
+            self.state.managed_consensus_quorum
+        } else {
+            requested_quorum
+        };
+        if consensus_requested {
+            if consensus_version != 1 {
+                return Ok(Response::new(UploadTaskResponse {
+                    success: false,
+                    status_message: "unsupported managed consensus protocol version".into(),
+                }));
+            }
+            if consensus_replica_count > self.state.managed_consensus_max_replicas {
+                return Ok(Response::new(UploadTaskResponse {
+                    success: false,
+                    status_message: format!(
+                        "managed consensus replica count exceeds the configured maximum of {}",
+                        self.state.managed_consensus_max_replicas
+                    ),
+                }));
+            }
+            if let Err(error) = hivemind_managed_consensus::QuorumPolicy::new(
+                consensus_replica_count,
+                consensus_quorum,
+            ) {
+                return Ok(Response::new(UploadTaskResponse {
+                    success: false,
+                    status_message: format!("invalid managed consensus policy: {error}"),
+                }));
+            }
+        }
 
         // Balance admission gate. Nodepool is the sole billing authority. A task
         // can be charged up to `max_cpt` at settlement (see `billable_amount_cpt`),
@@ -1947,21 +2045,22 @@ impl MasterNodeService for GrpcMasterNodeService {
             worker_id: None,
             worker_ip: None,
             status: TaskStatus::Pending,
-            status_message: None,
+            status_message: consensus_requested
+                .then_some(MANAGED_CONSENSUS_POLICY_PENDING_MESSAGE.to_owned()),
             output: None,
             result_torrent: None,
-            torrent_source: if req.runtime.trim()
+            torrent_source: if runtime
                 == general_compute_runtime::managed_gpu::MANAGED_GPU_RUNTIME_VERSION
-                || req.runtime.trim() == "general-compute-v1alpha1"
+                || runtime == "general-compute-v1alpha1"
             {
                 None
             } else {
                 Some(req.torrent)
             },
-            runtime: if req.runtime.trim().is_empty() {
+            runtime: if runtime.is_empty() {
                 None
             } else {
-                Some(req.runtime)
+                Some(runtime)
             },
             task_source: if req.task_source.trim().is_empty() {
                 None
@@ -2012,7 +2111,7 @@ impl MasterNodeService for GrpcMasterNodeService {
             retry_count: 0,
             max_retries: 3,
             deadline: None,
-            deterministic: false,
+            deterministic: consensus_requested,
             side_effects: false,
             priority: 0,
             cpu_time_ms: 0,
@@ -2026,6 +2125,46 @@ impl MasterNodeService for GrpcMasterNodeService {
         };
         match self.state.scheduler.create_task(&task).await {
             Ok(t) => {
+                if consensus_requested {
+                    if let Err(error) = self
+                        .state
+                        .scheduler
+                        .set_managed_consensus_policy(
+                            &t.task_id,
+                            consensus_version,
+                            consensus_replica_count,
+                            consensus_quorum,
+                            self.state.managed_consensus_rollout_mode.as_str(),
+                        )
+                        .await
+                    {
+                        tracing::error!(
+                            task_id = %t.task_id,
+                            error = %error,
+                            "failed to persist managed consensus policy"
+                        );
+                        if let Err(failure) = self
+                            .state
+                            .scheduler
+                            .fail_task(
+                                &t.task_id,
+                                "managed consensus policy could not be persisted",
+                            )
+                            .await
+                        {
+                            tracing::error!(
+                                task_id = %t.task_id,
+                                error = %failure,
+                                "failed to quarantine task after consensus policy persistence failure"
+                            );
+                        }
+                        return Ok(Response::new(UploadTaskResponse {
+                            success: false,
+                            status_message: "managed consensus policy could not be persisted"
+                                .into(),
+                        }));
+                    }
+                }
                 tracing::info!("Task {} created via gRPC", t.task_id);
                 Ok(Response::new(UploadTaskResponse {
                     success: true,
@@ -2091,8 +2230,19 @@ impl MasterNodeService for GrpcMasterNodeService {
                         status_message: "Not authorized".into(),
                         result_torrent: String::new(),
                         managed_gpu_result_json: Vec::new(),
+                        managed_consensus: None,
                     }));
                 }
+                let managed_consensus = task_info_from_task(
+                    &self.state.scheduler.database().pool,
+                    t.clone(),
+                )
+                .await
+                .map_err(|error| {
+                    tracing::error!(task_id = %req.task_id, error = %error, "failed to load managed consensus summary");
+                    Status::internal("managed consensus summary is unavailable")
+                })?
+                .managed_consensus;
 
                 if t.runtime.as_deref().map(str::trim)
                     == Some(general_compute_runtime::managed_gpu::MANAGED_GPU_RUNTIME_VERSION)
@@ -2127,6 +2277,7 @@ impl MasterNodeService for GrpcMasterNodeService {
                             status_message,
                             result_torrent: String::new(),
                             managed_gpu_result_json: result_json,
+                            managed_consensus: managed_consensus.clone(),
                         }));
                     }
 
@@ -2143,6 +2294,9 @@ impl MasterNodeService for GrpcMasterNodeService {
                     return Ok(Response::new(GetTaskResultResponse {
                         success: false,
                         status_message: match t.status {
+                            TaskStatus::Observed => {
+                                "Task was collected in observe-only mode; no user result or settlement is available".into()
+                            }
                             TaskStatus::Failed | TaskStatus::Cancelled | TaskStatus::TimedOut => {
                                 format!(
                                     "Task did not complete successfully (status: {}); no typed result is available",
@@ -2153,6 +2307,7 @@ impl MasterNodeService for GrpcMasterNodeService {
                         },
                         result_torrent: String::new(),
                         managed_gpu_result_json: Vec::new(),
+                        managed_consensus: managed_consensus.clone(),
                     }));
                 }
 
@@ -2162,6 +2317,15 @@ impl MasterNodeService for GrpcMasterNodeService {
                     .map(str::trim)
                     .is_some_and(|torrent| !torrent.is_empty());
                 match &t.status {
+                    TaskStatus::Observed => {
+                        return Ok(Response::new(GetTaskResultResponse {
+                            success: false,
+                            status_message: "Task was collected in observe-only mode; no user result or settlement is available".into(),
+                            result_torrent: String::new(),
+                            managed_gpu_result_json: Vec::new(),
+                            managed_consensus: managed_consensus.clone(),
+                        }));
+                    }
                     TaskStatus::Failed | TaskStatus::Cancelled | TaskStatus::TimedOut => {
                         return Ok(Response::new(GetTaskResultResponse {
                             success: false,
@@ -2171,6 +2335,7 @@ impl MasterNodeService for GrpcMasterNodeService {
                             ),
                             result_torrent: String::new(),
                             managed_gpu_result_json: Vec::new(),
+                            managed_consensus: managed_consensus.clone(),
                         }));
                     }
                     TaskStatus::Completed if torrent_available => {
@@ -2179,6 +2344,7 @@ impl MasterNodeService for GrpcMasterNodeService {
                             status_message: "OK".into(),
                             result_torrent: t.result_torrent.unwrap_or_default(),
                             managed_gpu_result_json: Vec::new(),
+                            managed_consensus: managed_consensus.clone(),
                         }));
                     }
                     _ => {}
@@ -2192,6 +2358,7 @@ impl MasterNodeService for GrpcMasterNodeService {
                     status_message,
                     result_torrent: String::new(),
                     managed_gpu_result_json: Vec::new(),
+                    managed_consensus: managed_consensus.clone(),
                 }))
             }
             Ok(None) => Ok(Response::new(GetTaskResultResponse {
@@ -2199,6 +2366,7 @@ impl MasterNodeService for GrpcMasterNodeService {
                 status_message: "Not found".into(),
                 result_torrent: String::new(),
                 managed_gpu_result_json: Vec::new(),
+                managed_consensus: None,
             })),
             Err(e) => Err(Status::internal(e.to_string())),
         }
@@ -2233,42 +2401,109 @@ impl MasterNodeService for GrpcMasterNodeService {
             }
             Err(e) => return Err(Status::internal(e.to_string())),
         }
+        let consensus_targets = self
+            .state
+            .scheduler
+            .managed_consensus_stop_targets(&req.task_id)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
         match self.state.scheduler.cancel_task(&req.task_id).await {
             Ok(task) => {
                 if let Some(dispatcher) = self.state.dispatcher.as_ref() {
                     dispatcher.cancel_session_delivery(&task);
                 }
-                let stop_dispatch = match worker_stop_credentials(
-                    &self.state.worker_execution_private_key_pem,
-                    &task,
-                ) {
-                    Ok(credentials) => {
-                        request_worker_stop(
+                let status_message = if consensus_targets.is_empty() {
+                    let stop_dispatch = match worker_stop_credentials(
+                        &self.state.worker_execution_private_key_pem,
+                        &task,
+                    ) {
+                        Ok(credentials) => {
+                            request_worker_stop(
+                                &task,
+                                &credentials.token,
+                                credentials.attempt_id.as_deref(),
+                                credentials.idempotency_key.as_deref(),
+                            )
+                            .await
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                task_id = %task.task_id,
+                                error = %error,
+                                "Task cancellation recorded but the attempt-bound worker stop identity could not be created"
+                            );
+                            WorkerStopDispatch::NotConfirmed(
+                                "managed execution identity is unavailable".into(),
+                            )
+                        }
+                    };
+                    match stop_dispatch {
+                        WorkerStopDispatch::NotAssigned => "Task cancellation recorded".to_string(),
+                        WorkerStopDispatch::Requested => {
+                            "Task cancellation recorded; worker stop requested".to_string()
+                        }
+                        WorkerStopDispatch::NotConfirmed(message) => {
+                            format!(
+                                "Task cancellation recorded; worker stop not confirmed: {message}"
+                            )
+                        }
+                    }
+                } else {
+                    let mut requested = 0usize;
+                    let mut failures = 0usize;
+                    for target in &consensus_targets {
+                        let credentials = match worker_stop_credentials_for_consensus(
+                            &self.state.worker_execution_private_key_pem,
                             &task,
+                            target,
+                        ) {
+                            Ok(credentials) => credentials,
+                            Err(error) => {
+                                failures += 1;
+                                tracing::warn!(
+                                    task_id = %task.task_id,
+                                    worker_id = %target.worker_id,
+                                    error = %error,
+                                    "managed consensus cancellation identity could not be created"
+                                );
+                                continue;
+                            }
+                        };
+                        let mut replica_task = task.clone();
+                        replica_task.worker_id = Some(target.worker_id.clone());
+                        replica_task.worker_ip = Some(target.worker_ip.clone());
+                        match request_worker_stop(
+                            &replica_task,
                             &credentials.token,
                             credentials.attempt_id.as_deref(),
                             credentials.idempotency_key.as_deref(),
                         )
                         .await
+                        {
+                            WorkerStopDispatch::Requested | WorkerStopDispatch::NotAssigned => {
+                                requested += 1;
+                            }
+                            WorkerStopDispatch::NotConfirmed(message) => {
+                                failures += 1;
+                                tracing::warn!(
+                                    task_id = %task.task_id,
+                                    worker_id = %target.worker_id,
+                                    "managed consensus Worker stop was not confirmed: {}",
+                                    message
+                                );
+                            }
+                        }
                     }
-                    Err(error) => {
-                        tracing::warn!(
-                            task_id = %task.task_id,
-                            error = %error,
-                            "Task cancellation recorded but the attempt-bound worker stop identity could not be created"
-                        );
-                        WorkerStopDispatch::NotConfirmed(
-                            "managed execution identity is unavailable".into(),
+                    if failures == 0 {
+                        format!(
+                            "Task cancellation recorded; worker stop requested for {requested}/{} consensus replicas",
+                            consensus_targets.len()
                         )
-                    }
-                };
-                let status_message = match stop_dispatch {
-                    WorkerStopDispatch::NotAssigned => "Task cancellation recorded".to_string(),
-                    WorkerStopDispatch::Requested => {
-                        "Task cancellation recorded; worker stop requested".to_string()
-                    }
-                    WorkerStopDispatch::NotConfirmed(message) => {
-                        format!("Task cancellation recorded; worker stop not confirmed: {message}")
+                    } else {
+                        format!(
+                            "Task cancellation recorded; worker stop requested for {requested}/{} consensus replicas ({failures} not confirmed)",
+                            consensus_targets.len()
+                        )
                     }
                 };
                 Ok(Response::new(StopTaskResponse {
@@ -3003,44 +3238,6 @@ impl MasterNodeService for GrpcMasterNodeService {
         }))
     }
 
-    async fn get_admin_managed_proof_metrics(
-        &self,
-        request: Request<GetAdminManagedProofMetricsRequest>,
-    ) -> Result<Response<GetAdminManagedProofMetricsResponse>, Status> {
-        let req = request.into_inner();
-        let claims = self
-            .state
-            .auth
-            .validate_token(&req.token)
-            .map_err(|_| Status::unauthenticated("Invalid token"))?;
-        let snapshot = hivemind_task_scheduler::managed_proof_metrics::snapshot();
-        if !is_admin(&claims.sub) {
-            return Ok(Response::new(GetAdminManagedProofMetricsResponse {
-                success: false,
-                status_message: "Forbidden".into(),
-                rollout_mode: String::new(),
-                verification_attempts: 0,
-                verified: 0,
-                rejected: 0,
-                queue_retries: 0,
-                observe_fallbacks: 0,
-                legacy_settlements: 0,
-            }));
-        }
-        Ok(Response::new(GetAdminManagedProofMetricsResponse {
-            success: true,
-            status_message: "OK".into(),
-            rollout_mode: self.state.managed_proof_rollout_mode.to_string(),
-            verification_attempts: i64::try_from(snapshot.verification_attempts)
-                .unwrap_or(i64::MAX),
-            verified: i64::try_from(snapshot.verified).unwrap_or(i64::MAX),
-            rejected: i64::try_from(snapshot.rejected).unwrap_or(i64::MAX),
-            queue_retries: i64::try_from(snapshot.queue_retries).unwrap_or(i64::MAX),
-            observe_fallbacks: i64::try_from(snapshot.observe_fallbacks).unwrap_or(i64::MAX),
-            legacy_settlements: i64::try_from(snapshot.legacy_settlements).unwrap_or(i64::MAX),
-        }))
-    }
-
     async fn quote_task(
         &self,
         request: Request<QuoteTaskRequest>,
@@ -3490,7 +3687,7 @@ async fn task_info_from_task(pool: &sqlx::PgPool, task: Task) -> Result<TaskInfo
             (SELECT provider_user
              FROM ledger_entries
              WHERE task_id = $1
-               AND kind = 'provider_credit'
+               AND (kind = 'provider_credit' OR kind LIKE 'consensus_provider_credit_%')
                AND status = 'settled'
                AND provider_user IS NOT NULL
              ORDER BY created_at DESC
@@ -3518,6 +3715,94 @@ async fn task_info_from_task(pool: &sqlx::PgPool, task: Task) -> Result<TaskInfo
         "NOT_DISPATCHED"
     };
 
+    let consensus: Option<ManagedConsensusSummary> = sqlx::query_as::<
+        _,
+        (
+            Option<i32>,
+            Option<String>,
+            Option<i32>,
+            Option<i32>,
+            i32,
+            i32,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<chrono::DateTime<chrono::Utc>>,
+            Option<String>,
+            bool,
+        ),
+    >(
+        "SELECT COALESCE(t.managed_consensus_version, p.protocol_version),
+                COALESCE(t.managed_consensus_state,
+                         CASE WHEN p.task_id IS NOT NULL THEN 'pending' ELSE NULL END),
+                COALESCE(t.managed_replica_count, p.replica_count),
+                COALESCE(t.managed_quorum, p.quorum),
+                t.managed_votes_received, t.managed_winning_votes,
+                t.managed_result_digest,
+                COALESCE(t.managed_consensus_mode, p.mode),
+                t.managed_certificate_id::text,
+                (SELECT created_at FROM managed_consensus_certificates c
+                 WHERE c.id = t.managed_certificate_id),
+                (SELECT s.id::text FROM managed_consensus_settlements s
+                 WHERE s.task_id = t.task_id),
+                COALESCE((SELECT c.settlement_authorized
+                          FROM managed_consensus_certificates c
+                          WHERE c.id = t.managed_certificate_id), false)
+         FROM tasks t
+         LEFT JOIN managed_consensus_policies p
+           ON p.task_id = t.task_id
+         WHERE t.task_id = $1",
+    )
+    .bind(&task.task_id)
+    .fetch_optional(pool)
+    .await?
+    .and_then(
+        |(
+            protocol_version,
+            state,
+            replica_count,
+            required_quorum,
+            votes_received,
+            matching_votes,
+            result_digest,
+            mode,
+            certificate_id,
+            decided_at,
+            settlement_id,
+            settlement_authorized,
+        )| {
+            protocol_version.map(|protocol_version| ManagedConsensusSummary {
+                protocol_version: protocol_version as u32,
+                state: state.clone().unwrap_or_default(),
+                replica_count: replica_count.unwrap_or_default() as u32,
+                required_quorum: required_quorum.unwrap_or_default() as u32,
+                votes_received: votes_received.max(0) as u32,
+                matching_votes: matching_votes.max(0) as u32,
+                result_digest: result_digest.unwrap_or_default(),
+                certificate_id: certificate_id.unwrap_or_default(),
+                evidence_level: if matches!(
+                    state.as_deref(),
+                    Some("quorum_reached") | Some("quorum_stop_pending")
+                ) {
+                    "replicated".into()
+                } else if matches!(
+                    state.as_deref(),
+                    Some("shadow_quorum_reached") | Some("shadow_stop_pending")
+                ) {
+                    "shadow".into()
+                } else {
+                    String::new()
+                },
+                decided_at: decided_at
+                    .map(|timestamp| timestamp.to_rfc3339())
+                    .unwrap_or_default(),
+                mode: mode.unwrap_or_default(),
+                settlement_id: settlement_id.unwrap_or_default(),
+                settlement_authorized,
+            })
+        },
+    );
+
     Ok(TaskInfo {
         task_id: task.task_id,
         owner: task.owner,
@@ -3542,6 +3827,7 @@ async fn task_info_from_task(pool: &sqlx::PgPool, task: Task) -> Result<TaskInfo
         usage_units: task.managed_executed_ops,
         max_cpt: task.max_cpt,
         runtime: task.runtime.unwrap_or_default(),
+        managed_consensus: consensus,
     })
 }
 
@@ -3724,6 +4010,42 @@ fn encode_worker_execution_claims(
         .encode_claims(claims)
 }
 
+fn worker_stop_credentials_for_consensus(
+    private_key_pem: &str,
+    task: &Task,
+    target: &ManagedConsensusStopTarget,
+) -> anyhow::Result<WorkerStopCredentials> {
+    let now = chrono::Utc::now().timestamp() as usize;
+    let claims = Claims {
+        sub: task.owner.clone(),
+        user_id: task.owner.clone(),
+        role: Some("worker-execution".into()),
+        task_id: Some(task.task_id.clone()),
+        worker_id: Some(target.worker_id.clone()),
+        exp: now + 300,
+        iat: now,
+    };
+    let token = hivemind_auth::worker_execution::WorkerExecutionSigner::from_pem(private_key_pem)?
+        .encode_consensus_claims(
+            &claims,
+            &hivemind_auth::worker_execution::WorkerExecutionIdentity {
+                execution_id: target.execution_id.clone(),
+                attempt_id: target.worker_attempt_id.clone(),
+                idempotency_key: target.idempotency_key.clone(),
+                request_digest: target.request_digest.clone(),
+                transfer_generation: 1,
+            },
+            &target.round_id,
+            &target.replica_id,
+            hivemind_managed_consensus::CONSENSUS_PROTOCOL_VERSION,
+        )?;
+    Ok(WorkerStopCredentials {
+        token,
+        attempt_id: Some(target.worker_attempt_id.clone()),
+        idempotency_key: Some(target.idempotency_key.clone()),
+    })
+}
+
 struct WorkerStopCredentials {
     token: String,
     attempt_id: Option<String>,
@@ -3885,9 +4207,9 @@ mod tests {
         node_manager_service_server::NodeManagerServiceServer,
         worker_node_service_server::{WorkerNodeService, WorkerNodeServiceServer},
         ExecuteTaskRequest, ExecuteTaskResponse, GeneralComputeArtifactChunkUpload,
-        GetAdminManagedProofMetricsRequest, StopTaskExecutionRequest, StopTaskExecutionResponse,
-        TaskOutputRequest, TaskOutputResponse, TaskOutputUploadRequest, TaskOutputUploadResponse,
-        TaskResultUploadRequest, TaskResultUploadResponse, TaskUsageRequest, TaskUsageResponse,
+        StopTaskExecutionRequest, StopTaskExecutionResponse, TaskOutputRequest, TaskOutputResponse,
+        TaskOutputUploadRequest, TaskOutputUploadResponse, TaskResultUploadRequest,
+        TaskResultUploadResponse, TaskUsageRequest, TaskUsageResponse,
     };
     use std::net::SocketAddr;
     use std::sync::{Arc, OnceLock};
@@ -3918,6 +4240,23 @@ mod tests {
                 None => std::env::remove_var("HIVEMIND_ADMIN_USERS"),
             }
         }
+    }
+
+    #[test]
+    fn consensus_u32_overrides_are_checked_before_narrowing() {
+        assert_eq!(checked_consensus_u16(0, "quorum").unwrap(), 0);
+        assert_eq!(
+            checked_consensus_u16(u16::MAX as u32, "quorum").unwrap(),
+            u16::MAX
+        );
+        assert_eq!(
+            checked_consensus_u16(u32::from(u16::MAX) + 1, "quorum").unwrap_err(),
+            "managed consensus quorum is out of range"
+        );
+        assert_eq!(
+            checked_consensus_u16(u32::MAX, "replica count").unwrap_err(),
+            "managed consensus replica count is out of range"
+        );
     }
 
     #[test]
@@ -4156,7 +4495,11 @@ mod tests {
             auth: auth.clone(),
             worker_execution_private_key_pem: config.auth.worker_execution_private_key_pem.clone(),
             worker_execution_public_key_pem: config.auth.worker_execution_public_key_pem.clone(),
-            managed_proof_rollout_mode: config.managed_proof.rollout_mode,
+            managed_consensus_rollout_mode: config.managed_consensus.rollout_mode,
+            managed_consensus_replica_count: config.managed_consensus.replica_count,
+            managed_consensus_quorum: config.managed_consensus.quorum,
+            managed_consensus_max_replicas: config.managed_consensus.max_replicas,
+            managed_consensus_timeout_secs: config.managed_consensus.timeout_secs,
             node_manager,
             session_registry: hivemind_client_core::SessionRegistry::shared(Default::default()),
             dispatcher: None,
@@ -4196,33 +4539,6 @@ mod tests {
         assert_eq!(
             validate_worker_report_task_id(&oversized),
             Err("Task id is required")
-        );
-    }
-
-    #[tokio::test]
-    async fn admin_managed_proof_metrics_exposes_authorized_snapshot() {
-        let _admin_users = AdminUsersEnvGuard::set("admin");
-        let node_service = node_manager_service_without_database();
-        let service = GrpcMasterNodeService::new(node_service.state.clone());
-        let before = hivemind_task_scheduler::managed_proof_metrics::snapshot();
-        hivemind_task_scheduler::managed_proof_metrics::record(
-            hivemind_task_scheduler::managed_proof_metrics::ManagedProofMetricEvent::Verified,
-        );
-        let token = token_for(&service.state.auth, "admin");
-
-        let response = service
-            .get_admin_managed_proof_metrics(Request::new(GetAdminManagedProofMetricsRequest {
-                token,
-            }))
-            .await
-            .unwrap()
-            .into_inner();
-
-        assert!(response.success);
-        assert_eq!(response.rollout_mode, "enforce");
-        assert_eq!(
-            response.verification_attempts,
-            (before.verification_attempts + 1) as i64
         );
     }
 
@@ -4337,7 +4653,11 @@ mod tests {
             auth,
             worker_execution_private_key_pem: config.auth.worker_execution_private_key_pem.clone(),
             worker_execution_public_key_pem: config.auth.worker_execution_public_key_pem.clone(),
-            managed_proof_rollout_mode: config.managed_proof.rollout_mode,
+            managed_consensus_rollout_mode: config.managed_consensus.rollout_mode,
+            managed_consensus_replica_count: config.managed_consensus.replica_count,
+            managed_consensus_quorum: config.managed_consensus.quorum,
+            managed_consensus_max_replicas: config.managed_consensus.max_replicas,
+            managed_consensus_timeout_secs: config.managed_consensus.timeout_secs,
             node_manager,
             session_registry: hivemind_client_core::SessionRegistry::shared(Default::default()),
             dispatcher: None,
@@ -5076,6 +5396,9 @@ mod tests {
                 managed_dsl_backend_id: String::new(),
                 managed_dsl_semantics_manifest_sha256: String::new(),
                 managed_gpu_manifest_json: Vec::new(),
+                managed_consensus_version: 0,
+                managed_replica_count: 0,
+                managed_quorum: 0,
             }))
             .await
             .unwrap()
@@ -5643,6 +5966,9 @@ mod tests {
                 managed_dsl_backend_id: String::new(),
                 managed_dsl_semantics_manifest_sha256: String::new(),
                 managed_gpu_manifest_json: Vec::new(),
+                managed_consensus_version: 0,
+                managed_replica_count: 0,
+                managed_quorum: 0,
             }))
             .await
             .unwrap()
@@ -5724,6 +6050,9 @@ mod tests {
                 managed_dsl_backend_id: String::new(),
                 managed_dsl_semantics_manifest_sha256: String::new(),
                 managed_gpu_manifest_json: Vec::new(),
+                managed_consensus_version: 0,
+                managed_replica_count: 0,
+                managed_quorum: 0,
             }))
             .await
             .unwrap()
@@ -5788,6 +6117,9 @@ mod tests {
                 managed_dsl_backend_id: String::new(),
                 managed_dsl_semantics_manifest_sha256: String::new(),
                 managed_gpu_manifest_json: Vec::new(),
+                managed_consensus_version: 0,
+                managed_replica_count: 0,
+                managed_quorum: 0,
             }))
             .await
             .unwrap()
@@ -5852,6 +6184,9 @@ mod tests {
                 managed_dsl_backend_id: String::new(),
                 managed_dsl_semantics_manifest_sha256: String::new(),
                 managed_gpu_manifest_json: Vec::new(),
+                managed_consensus_version: 0,
+                managed_replica_count: 0,
+                managed_quorum: 0,
             }))
             .await
             .unwrap()
@@ -5905,6 +6240,9 @@ mod tests {
                 managed_dsl_backend_id: String::new(),
                 managed_dsl_semantics_manifest_sha256: String::new(),
                 managed_gpu_manifest_json: manifest.clone(),
+                managed_consensus_version: 0,
+                managed_replica_count: 0,
+                managed_quorum: 0,
             }))
             .await
             .unwrap()
@@ -5975,6 +6313,9 @@ mod tests {
                     managed_dsl_backend_id: String::new(),
                     managed_dsl_semantics_manifest_sha256: String::new(),
                     managed_gpu_manifest_json: serde_json::to_vec(&request).unwrap(),
+                    managed_consensus_version: 0,
+                    managed_replica_count: 0,
+                    managed_quorum: 0,
                 }))
                 .await
                 .unwrap()

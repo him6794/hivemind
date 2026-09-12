@@ -135,6 +135,12 @@ pub struct CreateTaskBody {
     pub location: Option<String>,
     pub host_count: Option<i32>,
     pub max_cpt: Option<i64>,
+    #[serde(default)]
+    pub managed_consensus_version: Option<u32>,
+    #[serde(default)]
+    pub managed_replica_count: Option<u32>,
+    #[serde(default)]
+    pub managed_quorum: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -274,6 +280,32 @@ fn validate_task_resources(body: &CreateTaskBody) -> Result<(), &'static str> {
 
 fn validate_runtime_contract(body: &CreateTaskBody) -> Result<(), &'static str> {
     let runtime = body.runtime.as_deref().map(str::trim).unwrap_or_default();
+    let consensus_requested = body.managed_consensus_version.is_some()
+        || body.managed_replica_count.is_some()
+        || body.managed_quorum.is_some();
+    if consensus_requested && !matches!(runtime, "managed-function-v0" | "production_sandboxed_dsl")
+    {
+        return Err("managed consensus policy requires a managed DSL runtime");
+    }
+    if body
+        .managed_consensus_version
+        .is_some_and(|version| version > 1)
+    {
+        return Err("unsupported managed consensus protocol version");
+    }
+    if let Some(replica_count) = body.managed_replica_count {
+        if !(2..=7).contains(&replica_count) {
+            return Err("managed consensus replica count must be between 2 and 7");
+        }
+    }
+    if let (Some(replica_count), Some(quorum)) = (body.managed_replica_count, body.managed_quorum) {
+        if quorum <= replica_count / 2 || quorum > replica_count {
+            return Err("managed consensus quorum must be a strict majority of replicas");
+        }
+    }
+    if body.managed_quorum.is_some_and(|quorum| quorum == 0) {
+        return Err("managed consensus quorum must be positive");
+    }
     if body.general_compute_manifest_json.is_some() && body.managed_gpu_manifest_json.is_some() {
         return Err("general-compute and managed GPU manifests cannot be combined");
     }
@@ -589,18 +621,6 @@ pub struct AdminSchedulingCacheMetricsResponse {
     pub top_workers: Vec<WorkerCacheAffinityMetric>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct AdminManagedProofMetricsResponse {
-    pub success: bool,
-    pub rollout_mode: String,
-    pub verification_attempts: i64,
-    pub verified: i64,
-    pub rejected: i64,
-    pub queue_retries: i64,
-    pub observe_fallbacks: i64,
-    pub legacy_settlements: i64,
-}
-
 #[derive(Debug, Deserialize)]
 pub struct AdminSchedulingCacheAlertQuery {
     pub low: Option<f64>,
@@ -748,6 +768,23 @@ pub struct WorkerInfo {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ManagedConsensusInfo {
+    pub protocol_version: u32,
+    pub state: String,
+    pub replica_count: u32,
+    pub required_quorum: u32,
+    pub votes_received: u32,
+    pub matching_votes: u32,
+    pub result_digest: String,
+    pub certificate_id: String,
+    pub evidence_level: String,
+    pub decided_at: String,
+    pub mode: String,
+    pub settlement_id: String,
+    pub settlement_authorized: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct TaskInfo {
     pub task_id: String,
     pub owner: String,
@@ -772,6 +809,7 @@ pub struct TaskInfo {
     pub usage_units: i64,
     pub max_cpt: i64,
     pub runtime: String,
+    pub managed_consensus: Option<ManagedConsensusInfo>,
 }
 
 impl From<hivemind_proto::PricingBreakdown> for PricingBreakdown {
@@ -1374,6 +1412,9 @@ async fn create_task_from_submission(
                 .as_deref()
                 .unwrap_or_default(),
             &managed_gpu_manifest_json,
+            body.managed_consensus_version.unwrap_or(0),
+            body.managed_replica_count.unwrap_or(0),
+            body.managed_quorum.unwrap_or(0),
         )
         .await
     {
@@ -1442,6 +1483,21 @@ pub async fn list_tasks(
                     usage_units: t.usage_units,
                     max_cpt: t.max_cpt,
                     runtime: t.runtime,
+                    managed_consensus: t.managed_consensus.map(|consensus| ManagedConsensusInfo {
+                        protocol_version: consensus.protocol_version,
+                        state: consensus.state,
+                        replica_count: consensus.replica_count,
+                        required_quorum: consensus.required_quorum,
+                        votes_received: consensus.votes_received,
+                        matching_votes: consensus.matching_votes,
+                        result_digest: consensus.result_digest,
+                        certificate_id: consensus.certificate_id,
+                        evidence_level: consensus.evidence_level,
+                        decided_at: consensus.decided_at,
+                        mode: consensus.mode,
+                        settlement_id: consensus.settlement_id,
+                        settlement_authorized: consensus.settlement_authorized,
+                    }),
                 })
                 .collect();
             (
@@ -2075,42 +2131,6 @@ pub async fn get_admin_scheduling_cache_metrics(
     }
 }
 
-/// GET /api/admin/managed-proof/metrics
-pub async fn get_admin_managed_proof_metrics(
-    State(state): State<AppState>,
-    AuthUser { token, .. }: AuthUser,
-) -> (StatusCode, Json<AdminManagedProofMetricsResponse>) {
-    let mut grpc = state.grpc_client.clone();
-    match grpc.get_admin_managed_proof_metrics(&token).await {
-        Ok(resp) => (
-            StatusCode::OK,
-            Json(AdminManagedProofMetricsResponse {
-                success: resp.success,
-                rollout_mode: resp.rollout_mode,
-                verification_attempts: resp.verification_attempts,
-                verified: resp.verified,
-                rejected: resp.rejected,
-                queue_retries: resp.queue_retries,
-                observe_fallbacks: resp.observe_fallbacks,
-                legacy_settlements: resp.legacy_settlements,
-            }),
-        ),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(AdminManagedProofMetricsResponse {
-                success: false,
-                rollout_mode: String::new(),
-                verification_attempts: 0,
-                verified: 0,
-                rejected: 0,
-                queue_retries: 0,
-                observe_fallbacks: 0,
-                legacy_settlements: 0,
-            }),
-        ),
-    }
-}
-
 /// GET /api/admin/scheduling/cache-alert
 pub async fn get_admin_scheduling_cache_alert(
     State(state): State<AppState>,
@@ -2722,6 +2742,9 @@ mod tests {
             location: None,
             host_count: None,
             max_cpt: Some(budget),
+            managed_consensus_version: None,
+            managed_replica_count: None,
+            managed_quorum: None,
         }
     }
 
