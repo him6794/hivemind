@@ -2,11 +2,10 @@
 
 ## Scope
 
-Managed DSL execution can use Nodepool-coordinated replicated execution instead of
-RISC Zero proof generation when the consensus rollout is explicitly enabled.
-Consensus is an agreement signal between authenticated Workers; it is not a
-zero-knowledge proof and does not establish that a result is semantically
-correct or that reported usage actually occurred.
+Managed DSL execution settles through Nodepool-coordinated replicated
+execution by default. Consensus is an agreement signal between authenticated
+Workers; it is not a zero-knowledge proof and does not establish that a
+result is semantically correct or that reported usage actually occurred.
 
 ## Configuration
 
@@ -14,14 +13,15 @@ The Nodepool and each consensus-capable Worker must use the same protocol
 settings:
 
 ```text
-MANAGED_CONSENSUS_ROLLOUT_MODE=disabled|observe|enforce
+MANAGED_CONSENSUS_ROLLOUT_MODE=enforce
 MANAGED_CONSENSUS_REPLICA_COUNT=3
 MANAGED_CONSENSUS_QUORUM=2
 MANAGED_CONSENSUS_TIMEOUT_SECS=120
 MANAGED_CONSENSUS_MAX_RESULT_BYTES=262144
 ```
 
-The default is `disabled` while legacy proof deployments drain. The initial
+The default is `enforce`: managed tasks settle only from a quorum
+certificate and never fall back to a single-Worker result. The initial
 bounded policy is three distinct registered Workers and a strict majority of
 two. The Nodepool never lowers the quorum when fewer Workers are available.
 `observe` is non-settling: the dispatcher fans out all replicas and ends the
@@ -67,8 +67,8 @@ Workers, and a colluding quorum can return the same incorrect result. Transport,
 capacity, and timeout failures do not automatically establish Worker
 misbehaviour. Invalid identity/result envelopes are rejected and audited.
 
-Rollout classification uses persisted task policy identity. A legacy managed task
-without a persisted consensus policy remains on the proof-backed path regardless
+Rollout classification uses persisted task policy identity. A managed task
+without a persisted consensus policy is held closed (awaiting policy) regardless
 of the current rollout setting; a policy-backed task is held closed when rollout
 is disabled and never silently downgraded. Direct gRPC numeric overrides are
 checked before narrowing, and runtime identities are normalized before
@@ -80,6 +80,6 @@ but cannot split matching deterministic outputs into separate quorum groups.
 Typed consensus failures retain execution/round/replica identity so Nodepool can
 record a failed observation instead of accepting an incomplete response.
 
-The managed proof path remains available for legacy tasks during migration. New
+The managed proof path has been removed. New
 consensus tasks must not fall back to legacy completion, proofless single-Worker
 settlement, or `observe`/`disabled` as success evidence.

@@ -171,21 +171,23 @@ When verification is complete, return to the repository root and run
 unlike the smoke harness, raw Compose requires secrets and the matching worker
 execution key pair to be supplied.
 
-### Managed consensus (opt-in)
+### Managed consensus
 
-The native Windows closed-DSL path can use Nodepool-coordinated replicated
-execution instead of a RISC Zero sidecar when explicitly enabled. Nodepool
-requires three distinct registered Workers and a strict majority of two by
-default. It accepts only matching canonical results from assigned Workers and
-persists a quorum certificate before completing or settling the task.
+Managed tasks settle through Nodepool-coordinated replicated execution
+by default. Nodepool assigns the same deterministic task to three distinct
+registered Workers and requires a strict majority of two to return matching
+canonical results. It persists a quorum certificate before completing or
+settling the task, and never falls back to a single-Worker result.
 
 Consensus is agreement evidence, not a zero-knowledge proof: a colluding or
 commonly compromised Worker majority can still agree on an incorrect result.
 Only deterministic, side-effect-free managed tasks are eligible. Worker usage
 claims remain non-authoritative, so consensus tasks use Nodepool-owned fixed
-reservation billing and never silently fall back to one Worker.
+reservation billing.
 
-Enable the migration path on both Nodepool and consensus-capable Workers:
+The default rollout is `enforce`. Use `observe` for a canary that fans out
+replicas, records non-settling shadow state, and never exposes a billable
+result; use `disabled` to turn the consensus path off entirely.
 
 ```text
 MANAGED_CONSENSUS_ROLLOUT_MODE=enforce
@@ -194,11 +196,8 @@ MANAGED_CONSENSUS_QUORUM=2
 MANAGED_CONSENSUS_MAX_RESULT_BYTES=262144
 ```
 
-The default remains `disabled` while legacy proof tasks drain. `observe` fans
-out replicas for canaries, records non-settling `OBSERVED` shadow state, and
-never exposes a billable result or falls back to one Worker. Do not describe a
-consensus certificate as cryptographic execution proof, and do not enable it
-for side-effecting tasks.
+Do not describe a consensus certificate as cryptographic execution proof,
+and do not enable it for side-effecting tasks.
 
 ### Manual
 
@@ -237,7 +236,7 @@ Configuration is via environment variables:
 | `WORKER_GRPC_ADDR` | `0.0.0.0:50053` | Worker gRPC listen address |
 | `WORKER_ADVERTISE_ADDR` | - | Worker address registered with nodepool |
 | `EXECUTOR_SANDBOX_DIR` | `./sandbox` | Per-task working directory root |
-| `MANAGED_CONSENSUS_ROLLOUT_MODE` | `disabled` | Managed consensus rollout: `disabled`, `observe`, or `enforce`; enforce requires a strict-majority certificate |
+| `MANAGED_CONSENSUS_ROLLOUT_MODE` | `enforce` | Managed consensus rollout: `disabled`, `observe`, or `enforce`; the default is `enforce`, which settles managed tasks only from a strict-majority quorum certificate |
 | `MANAGED_CONSENSUS_REPLICA_COUNT` | `3` | Distinct Worker replicas for consensus-managed tasks |
 | `MANAGED_CONSENSUS_QUORUM` | `2` | Required matching replicas; must be a strict majority |
 | `MANAGED_CONSENSUS_TIMEOUT_SECS` | `120` | Overall deadline for one consensus round |

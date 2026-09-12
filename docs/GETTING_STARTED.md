@@ -185,31 +185,6 @@ raw Compose can require placeholder values for its configuration parser during
 `docker compose down`; the values do not alter the already-created project's
 identity.
 
-### Managed proof live E2E (protected environment only)
-
-`scripts/managed-proof-live-e2e.ps1` exercises the full external chain —
-Website login, enrollment credential redemption with the server-assigned
-Worker identity, managed task submission, local managed proof, independent Nodepool
-verification, billing/settlement, and result/log retrieval — in enforce mode.
-It runs only against a real external deployment that can reach the Website API,
-Nodepool transport, and Worker sidecar. Local Compose, Docker, WSL, SSH, socat, or
-direct-host reachability are not substitutes for that evidence:
-
-```powershell
-scripts/managed-proof-live-e2e.ps1 `
-  -WebsiteApiBase https://<website-origin> `
-  -MasterApiBase http://<master-api> `
-  -Username <account> -Password <password> `
-  -TaskSourcePath examples/managed-add.hdsl `
-  -TaskInputJson '{"left":20,"right":22}'
-```
-
-Evidence lands in `test_logs\managed-proof-live-e2e\` and is redacted by
-construction: identifiers, states, timings, policy decisions, verification
-outcomes, settlement amounts, and digests — never passwords, JWTs,
-enrollment credentials, Headscale keys, proof tokens, source, input, or raw
-proof envelopes.
-
 ### Development and manual runtime
 
 The repository root `README.md` documents the other development and runtime
@@ -265,18 +240,13 @@ to nodepool. The Official Site backend reaches nodepool server-side through
 or the local worker control local executable path.
 
 The same rule governs billing for managed tasks. With
-`MANAGED_CONSENSUS_ROLLOUT_MODE=enforce`, Nodepool dispatches deterministic,
-side-effect-free managed DSL tasks to distinct Workers and settles only after a
-strict-majority quorum certificate. Worker usage remains a claim, so settlement
-uses the Nodepool-owned fixed reservation; no single Worker result or
-`observe`/`disabled` mode can authorize settlement. Consensus is agreement
-evidence, not a RISC Zero correctness proof, and a colluding or commonly
-faulty Worker majority can still agree on a wrong result.
-
-Legacy proof-backed attempts remain available during migration. Those attempts
-use the bounded Nodepool RISC Zero verifier and the prover sidecar described in
-the README; `MANAGED_PROOF_ROLLOUT_MODE` remains fail-closed for that legacy
-path only.
+`MANAGED_CONSENSUS_ROLLOUT_MODE=enforce` (the default), Nodepool dispatches
+deterministic, side-effect-free managed DSL tasks to distinct Workers and
+settles only after a strict-majority quorum certificate. Worker usage remains
+a claim, so settlement uses the Nodepool-owned fixed reservation; no single
+Worker result or `observe`/`disabled` mode can authorize settlement. Consensus
+is agreement evidence, not a RISC Zero correctness proof, and a colluding or
+commonly faulty Worker majority can still agree on a wrong result.
 
 ## Troubleshooting
 
@@ -296,14 +266,12 @@ path only.
   `http://localhost:18080/api/worker-info` responds, the public key matches the
   nodepool private key, and login credentials are valid. A blank
   `WORKER_NODEPOOL_TOKEN` is expected for UI-driven registration.
-- **Every managed-function task fails**: the worker could not produce a
-  verifiable proof. Check that `packaging/managed-prover/` held the sidecar when
-  the worker image was built, that `MANAGED_PROVER_EXECUTABLE` points at it, and
-  that `MANAGED_PROVER_TIMEOUT_SECS` exceeds the ~570-580 second proving time.
-  `/api/admin/managed-proof/metrics` reports the rejection counters, and the
-  admin audit log carries a `managed_proof_verification` entry per decision. A
-  sidecar whose embedded guest does not match the nodepool trust pin is rejected
-  on every task — regenerate the pin and receipt fixture after any guest change.
+- **Every managed-function task fails to settle**: no quorum was reached.
+  Confirm at least two of the three assigned Workers returned a matching
+  canonical result before the round deadline (`MANAGED_CONSENSUS_TIMEOUT_SECS`).
+  If a Worker is untrusted, offline, or produced a divergent result, the round
+  records a no-quorum observation, releases the reservations, and retries up
+  to the task retry limit before failing the task.
 - **Playwright cannot launch a browser**: install Edge/Chrome on Windows or the
   Playwright browser dependencies on other platforms; optionally set
   `HIVEMIND_PLAYWRIGHT_CHANNEL`.
