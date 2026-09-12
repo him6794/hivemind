@@ -12,10 +12,10 @@ export function SecurityPage() {
   return (
     <PageSection
       eyebrow={locale === "zh" ? "信任與安全" : "Trust & Safety"}
-      title={locale === "zh" ? "worker 說它用了多少，不算數。" : "What the worker says it used does not count."}
+      title={locale === "zh" ? "單一電腦的回報不能直接扣款。" : "One computer cannot charge your account by itself."}
       body={locale === "zh"
-        ? "計費之前，網路端會自己驗證一份密碼學證明，並確認它來自被釘選的那份程式。驗不過的工作就直接失敗。"
-        : "Before anything is billed, the network verifies a cryptographic proof on its own side and confirms it came from the exact program it pinned. A job that fails that check fails outright."}
+        ? "扣款之前，幾台參與工作的電腦會回報結果，網路會比較它們並確認是否達成共識。無法確認的工作就直接失敗。"
+        : "Before anything is charged, several participating computers report their results and the network checks whether they agree. A task the network cannot confirm fails outright."}
     >
       <div className="mt-10 grid gap-4 lg:grid-cols-2">
         {security.items.map((item: string) => (

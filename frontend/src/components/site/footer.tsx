@@ -22,8 +22,8 @@ export function Footer() {
             <HiveLogo withText />
             <p className="max-w-md text-sm leading-relaxed text-muted-foreground">
               {locale === "zh"
-                ? "工作是一段原始碼加一份 JSON，跑在別人的機器上，用量由網路端查核。"
-                : "A job is source text plus a JSON document. It runs on someone else's machine, and the network checks what it used."}
+                ? "送出工作說明和輸入資料，讓共享網路幫你完成工作。"
+                : "Send the task instructions and input, then let the shared network do the work."}
             </p>
           </div>
 

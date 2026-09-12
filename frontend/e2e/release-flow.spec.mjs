@@ -35,7 +35,7 @@ async function useEnglish(page) {
   await page.getByRole('button', { name: /^English\b/ }).click();
 }
 
-test.describe.serial('release browser flow across the official site, Worker UI, and Master UI', () => {
+test.describe.serial('release browser flow across the official site, Share this computer, and Task dashboard', () => {
   test.beforeAll(() => {
     fs.mkdirSync(evidenceDirectory, { recursive: true });
     fs.writeFileSync(
@@ -74,7 +74,7 @@ test.describe.serial('release browser flow across the official site, Worker UI, 
     await expect(page.getByText('Account Center', { exact: true })).toBeVisible();
     await expect(page.getByText(username, { exact: true })).toBeVisible();
     await expect(page.getByText('CPT balance', { exact: true })).toBeVisible();
-    await expect(page.getByText('Master / Worker docs', { exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Open docs', exact: true })).toBeVisible();
     await expect(page.getByText(/^\d+\.\d{2}$/)).toBeVisible();
 
     const sensitiveStorageKeys = await page.evaluate(() => (
@@ -109,68 +109,67 @@ test.describe.serial('release browser flow across the official site, Worker UI, 
     recordEvidence('PASS official site rejected bad credentials and accepted the correct login.');
   });
 
-  test('Worker UI registers capacity and Master UI completes, cancels, inspects, and downloads tasks', async ({ page }) => {
+  test('Share this computer registers capacity and Task dashboard completes, cancels, inspects, and downloads tasks', async ({ page }) => {
     const workerInfoRoute = '**/api/worker-info';
     await page.route(workerInfoRoute, (route) => route.abort('connectionfailed'));
     await page.goto(workerUiUrl);
-    await expect(page.getByRole('heading', { name: 'Worker UI' })).toBeVisible();
-    await expect(page.getByText('Cannot reach local worker agent', { exact: true })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Share this computer' })).toBeVisible();
+    await expect(page.getByText('We could not check this computer', { exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Try again', exact: true })).toBeVisible();
     await page.screenshot({
       path: evidencePath('task-6-release-grade-frontends-app-and-site-failure.png'),
       fullPage: true,
     });
-    recordEvidence('PASS Worker UI surfaced a controlled unreachable worker-control error with a retry action.');
+    recordEvidence('PASS Share this computer surfaced a controlled unreachable worker-control error with a retry action.');
 
     await page.unroute(workerInfoRoute);
-    await page.getByRole('button', { name: 'Retry', exact: true }).click();
-    await expect(page.getByRole('button', { name: 'Refresh profile', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Try again', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Check again', exact: true })).toBeVisible();
     await page.getByLabel('Username').fill(username);
     await page.getByLabel('Password').fill(password);
-    await page.getByRole('button', { name: 'Login and register' }).click();
-    await expect(page.getByText('Registered', { exact: true })).toBeVisible({ timeout: 45_000 });
-    await expect(page.getByText(/worker_id:/)).toBeVisible();
+    await page.getByRole('button', { name: 'Sign in and connect' }).click();
+    await expect(page.getByText('Ready', { exact: true })).toBeVisible({ timeout: 45_000 });
+    await expect(page.getByText(/Computer ID:/)).toBeVisible();
     await page.screenshot({
       path: evidencePath('task-6-release-grade-frontends-app-and-site-browser.png'),
       fullPage: true,
     });
-    recordEvidence('PASS Worker UI authenticated, loaded local capacity, and registered the worker with nodepool.');
+    recordEvidence('PASS Share this computer signed in, checked local capacity, and connected this computer.');
 
     await page.goto(masterUiUrl);
-    await expect(page.getByRole('heading', { name: 'Master UI' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Task dashboard' })).toBeVisible();
     await page.getByLabel('Username').fill(username);
     await page.getByLabel('Password').fill(password);
-    await page.getByRole('button', { name: 'Login' }).click();
-    await expect(page.getByText('Logged in successfully', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Sign in' }).click();
+    await expect(page.getByText('Signed in and ready', { exact: true })).toBeVisible();
 
     await page.getByLabel('Task ID').fill(cancelledTaskId);
-    await page.getByLabel('Function source').fill(taskSourceCode);
-    await page.getByLabel('Input (JSON)').fill(taskInputJson);
+    await page.getByLabel('Task instructions').fill(taskSourceCode);
+    await page.getByLabel('Input data (JSON)').fill(taskInputJson);
     await page.getByLabel('CPU score').fill('1201');
     await page.getByLabel('Max CPT').fill('200');
-    await page.getByRole('button', { name: 'Submit Task' }).click();
+    await page.getByRole('button', { name: 'Send task' }).click();
     const cancelledRow = page.locator('li.task-row').filter({ hasText: cancelledTaskId });
     await expect(cancelledRow).toBeVisible();
     page.once('dialog', (dialog) => dialog.accept());
     await cancelledRow.getByRole('button', { name: 'Cancel' }).click();
     await expect(page.getByText(`Task cancelled: ${cancelledTaskId}`, { exact: true })).toBeVisible();
     await expect(cancelledRow.locator('.pill')).toHaveText('CANCELLED');
-    recordEvidence('PASS Master UI submitted and cancelled an unschedulable task.');
+    recordEvidence('PASS Task dashboard submitted and cancelled an unschedulable task.');
 
     await page.getByLabel('Task ID').fill(completedTaskId);
-    await page.getByLabel('Function source').fill(taskSourceCode);
-    await page.getByLabel('Input (JSON)').fill(taskInputJson);
+    await page.getByLabel('Task instructions').fill(taskSourceCode);
+    await page.getByLabel('Input data (JSON)').fill(taskInputJson);
     await page.getByLabel('CPU score').fill('0');
     await page.getByLabel('Max CPT').fill('100');
-    await page.getByRole('button', { name: 'Submit Task' }).click();
+    await page.getByRole('button', { name: 'Send task' }).click();
     const completedRow = page.locator('li.task-row').filter({ hasText: completedTaskId });
     await expect(completedRow).toBeVisible();
     await expect(completedRow.locator('.pill')).toHaveText('COMPLETED', { timeout: 120_000 });
 
     await completedRow.getByRole('button', { name: 'Log' }).click();
     await expect(page.locator('pre').filter({ hasText: 'Hello from Hivemind sample task' })).toBeVisible();
-    await completedRow.getByRole('button', { name: 'Result' }).click();
-    await expect(page.locator('pre').filter({ hasText: /"success": true/ })).toBeVisible();
+    await expect(completedRow.getByText('Output in Log', { exact: true })).toBeVisible();
 
     const downloadPromise = page.waitForEvent('download');
     await completedRow.getByRole('button', { name: 'Download' }).click();
@@ -187,7 +186,7 @@ test.describe.serial('release browser flow across the official site, Worker UI, 
       path: evidencePath('task-5-release-grade-frontends-app-and-site.png'),
       fullPage: true,
     });
-    recordEvidence(`PASS Master UI completed a task, loaded log/result, and downloaded safe artifact '${suggestedFilename}'.`);
+    recordEvidence(`PASS Task dashboard completed a task, loaded the task log, and downloaded safe artifact '${suggestedFilename}'.`);
 
     await cancelledRow.getByRole('button', { name: 'Download' }).click();
     await expect(page.getByText('Download failed: Artifact not found', { exact: true })).toBeVisible();
@@ -195,6 +194,6 @@ test.describe.serial('release browser flow across the official site, Worker UI, 
       path: evidencePath('task-5-release-grade-frontends-app-and-site-failure.png'),
       fullPage: true,
     });
-    recordEvidence('PASS Master UI surfaced a controlled missing-artifact failure without stale content.');
+    recordEvidence('PASS Task dashboard surfaced a controlled missing-artifact failure without stale content.');
   });
 });

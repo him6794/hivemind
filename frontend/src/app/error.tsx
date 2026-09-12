@@ -20,7 +20,7 @@ export default function Error({
           Something went wrong
         </h2>
         <p className="mt-3 text-muted-foreground">
-          {error.message || "An unexpected error occurred."}
+          Hivemind could not load this page. Try again, or return later.
         </p>
         <button
           onClick={reset}

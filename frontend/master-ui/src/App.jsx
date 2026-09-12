@@ -77,7 +77,7 @@ export default function MasterApp() {
         body: body instanceof FormData ? body : body !== undefined ? JSON.stringify(body) : undefined,
       });
     } catch {
-      throw new Error(`Cannot reach Hivemind API at ${apiBase}. Check your connection and VITE_API_BASE.`);
+      throw new Error('Hivemind could not be reached. Check your connection and try again.');
     }
 
     const data = await readJson(res);
@@ -107,14 +107,14 @@ export default function MasterApp() {
     if (!authToken) throw new Error('Login is required before VPN bootstrap');
     if (vpnReadyToken.current === authToken) return { success: true, state: 'ready' };
 
-    setStatus('Connecting to Hivemind network...');
+    setStatus('Connecting to the network...');
     const { ok, data } = await api('POST', '/api/vpn/bootstrap', undefined, authToken);
     const state = String(data.state || '').trim();
     if (!ok || !data.success || !['ready', 'disabled'].includes(state)) {
-      throw new Error(data.message || `VPN is not ready (${state || 'unknown'})`);
+      throw new Error('The network is not ready. Please try again.');
     }
     vpnReadyToken.current = authToken;
-    setStatus(state === 'disabled' ? 'Connected in local mode' : 'Connected to Hivemind network');
+    setStatus(state === 'disabled' ? 'Connected locally' : 'Connected to the network');
     return data;
   }
 
@@ -165,6 +165,7 @@ export default function MasterApp() {
       setUsername(ownerUsername);
       await bootstrapVpn(data.token);
       await refreshTasks(data.token);
+      setStatus('Signed in and ready');
       setLastRefresh(Date.now());
     } catch (err) {
       setStatus(`Login failed: ${err.message}`);
@@ -180,7 +181,7 @@ export default function MasterApp() {
 
     try {
       if (!taskSource.trim()) {
-        throw new Error('Function source is required');
+        throw new Error('Task instructions are required');
       }
       if (!taskInput.trim()) {
         throw new Error('Input JSON is required');
@@ -422,8 +423,8 @@ export default function MasterApp() {
           <div className="brand-lockup">
             <div className="brand-mark" aria-hidden="true" />
             <div>
-              <p className="eyebrow">Hivemind Console</p>
-              <h1>Master UI</h1>
+              <p className="eyebrow">Hivemind</p>
+              <h1>Task dashboard</h1>
               <p className="lead">
                 Submit work and follow it through — what it did, what it cost, and what came back.
               </p>
@@ -440,7 +441,7 @@ export default function MasterApp() {
           {token ? (
             <div className="toolbar">
               <div>
-                <p className="eyebrow">Authenticated</p>
+                <p className="eyebrow">Signed in</p>
                 <strong>{username}</strong>
               </div>
               <button
@@ -451,7 +452,7 @@ export default function MasterApp() {
                 }).catch((err) => setStatus(`Refresh failed: ${err.message}`))}
                 className="button"
               >
-                Refresh tasks
+                Refresh
               </button>
             </div>
           ) : (
@@ -465,7 +466,7 @@ export default function MasterApp() {
                 <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="field" />
               </label>
               <button type="submit" disabled={loginLoading} className="button primary">
-                {loginLoading ? 'Signing in...' : 'Login'}
+                {loginLoading ? 'Signing in...' : 'Sign in'}
               </button>
             </form>
           )}
@@ -477,7 +478,7 @@ export default function MasterApp() {
         {token ? (
           <div className="grid two" style={{ marginTop: 18 }}>
             <section className="surface">
-              <h2>Submit Task</h2>
+              <h2>Send a task</h2>
               <div className="grid">
                 <label>
                   Task ID
@@ -489,21 +490,21 @@ export default function MasterApp() {
                   />
                 </label>
                 <label>
-                  Function source
+                  Task instructions
                   <textarea
                     value={taskSource}
                     onChange={(e) => {
                       setTaskSource(e.target.value);
-                      setSourceError(e.target.value.trim() ? null : 'Function source is required');
+                      setSourceError(e.target.value.trim() ? null : 'Task instructions are required');
                     }}
-                    placeholder="The code to run — one small, self-contained function"
+                    placeholder="Describe the small, self-contained task to run"
                     rows={8}
                     className={`field ${sourceError ? 'error' : ''}`}
                   />
                   {sourceError ? <div className="status error">{sourceError}</div> : null}
                 </label>
                 <label>
-                  Input (JSON)
+                  Input data (JSON)
                   <textarea
                     value={taskInput}
                     onChange={(e) => setTaskInput(e.target.value)}
@@ -551,20 +552,20 @@ export default function MasterApp() {
                   disabled={submitLoading || !taskSource.trim() || !!sourceError}
                   className="button primary"
                 >
-                  {submitLoading ? 'Submitting...' : 'Submit Task'}
+                  {submitLoading ? 'Sending...' : 'Send task'}
                 </button>
               </div>
             </section>
 
             <section className="surface">
               <div className="toolbar" style={{ marginBottom: 12 }}>
-                <h2 style={{ marginBottom: 0 }}>Your Tasks</h2>
+                <h2 style={{ marginBottom: 0 }}>Your tasks</h2>
                 {lastRefresh ? (
                   <span className="subtle">Updated {Math.round((Date.now() - lastRefresh) / 1000)}s ago</span>
                 ) : null}
               </div>
               {tasks.length === 0 ? (
-                <p className="subtle">No tasks yet. Fill in the form and send your first one — it will appear here, along with its progress, cost, and result.</p>
+                <p className="subtle">No tasks yet. Fill in the form and send your first one — its progress, credits, and result will appear here.</p>
               ) : (
                 <ul className="task-list">
                   {tasks.map((task) => {
@@ -600,18 +601,18 @@ export default function MasterApp() {
                         <div className="subtle" style={{ marginTop: 4, fontSize: 12 }}>{message}</div>
                         <div className="meta">
                           <span>wall {(wallTimeMs / 1000).toFixed(1)}s</span>
-                          <span>Final charge {observability.billedAmount || billedAmount} CPT</span>
-                          <span>{observability.billingSettled ? 'Billed / settled' : 'Billing pending'}</span>
-                          {observability.retryCount ? <span>retries {observability.retryCount}</span> : null}
+                          <span>Credits used {observability.billedAmount || billedAmount} CPT</span>
+                          <span>{observability.billingSettled ? 'Charged' : 'Charge pending'}</span>
+                          {observability.retryCount ? <span>tries {observability.retryCount}</span> : null}
                         </div>
                         <dl className="observability-grid">
-                          <dt>Worker ID</dt>
-                          <dd>{observability.workerId || 'Not assigned yet'}</dd>
-                          <dt>Provider</dt>
-                          <dd>{observability.providerUser || 'Not settled yet'}</dd>
-                          <dt>Dispatch</dt>
+                          <dt>Computer</dt>
+                          <dd>{observability.workerId || 'Not selected yet'}</dd>
+                          <dt>Shared by</dt>
+                          <dd>{observability.providerUser || 'Not available yet'}</dd>
+                          <dt>Progress</dt>
                           <dd>{observability.dispatchStatus}</dd>
-                          <dt>Usage / max CPT</dt>
+                          <dt>Credits / limit</dt>
                           <dd>{observability.usageUnits} / {observability.maxCpt || '—'}</dd>
                         </dl>
                         <div className="actions">

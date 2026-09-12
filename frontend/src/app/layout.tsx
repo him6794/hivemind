@@ -6,7 +6,7 @@ import { Toaster as SonnerToaster } from "@/components/ui/sonner";
 export const metadata: Metadata = {
   title: "Hivemind | Official Site",
   description:
-    "Hivemind explains distributed compute, manages account access and balance visibility, and guides users to deploy their own Master or Worker nodes.",
+    "Hivemind helps you run tasks on a shared network or share a computer with other users.",
 };
 
 export default function RootLayout({

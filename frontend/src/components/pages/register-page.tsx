@@ -62,12 +62,12 @@ export function RegisterPage() {
           {locale === "zh" ? "建立官方帳號" : "Create an official account"}
         </div>
         <h1 className="text-balance text-4xl font-semibold tracking-tight sm:text-6xl">
-          {locale === "zh" ? "建立你的 Hivemind 帳號中心。" : "Create your Hivemind account center."}
+          {locale === "zh" ? "建立 Hivemind 帳號，開始使用。" : "Create a Hivemind account and get started."}
         </h1>
         <p className="mt-4 max-w-xl text-muted-foreground">
           {locale === "zh"
-            ? "一個帳號，送工作和貢獻算力都能用。"
-            : "One account works for sending work and for contributing compute."}
+            ? "一個帳號就能送出工作，也能分享一台電腦。"
+            : "One account lets you send tasks or share a computer."}
         </p>
       </div>
 

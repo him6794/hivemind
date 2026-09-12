@@ -74,8 +74,8 @@ export function DocsPage() {
         </h1>
         <p className="mt-4 text-pretty leading-relaxed text-muted-foreground">
           {t(locale, {
-            zh: "以下的路由、欄位、限制與失敗代碼，都對應目前執行中的系統行為。任務 API 位於你自己部署的 Master 節點，不在本網站。",
-            en: "Every route, field, limit, and failure code below matches how the running system behaves today. The task API lives on the Master node you deploy, not on this website.",
+            zh: "以下的路由、欄位、限制與失敗代碼，都對應目前執行中的系統行為。任務 API 會透過承載任務服務的電腦運作，不在本網站。",
+            en: "Every route, field, limit, and failure code below matches how the running system behaves today. The task API runs through the computer that hosts your task service, not through this website.",
           })}
         </p>
       </div>
@@ -247,7 +247,7 @@ export function DocsPage() {
               <p className="mt-3 text-sm text-muted-foreground">{docs.language.exampleNote}</p>
 
               <div className="mt-6 text-sm font-medium">
-                {t(locale, { zh: "送出（在你的 Master 節點上）", en: "Submit it (against your Master node)" })}
+                {t(locale, { zh: "透過任務服務送出", en: "Send it through your task service" })}
               </div>
               <CodeBlock>{docs.language.submitExample}</CodeBlock>
             </div>
@@ -317,12 +317,12 @@ export function DocsPage() {
 
             <div className="mt-8">
               <h3 className="text-lg font-semibold">
-                {t(locale, { zh: "回執帳單範例", en: "Receipt-backed examples" })}
+                {t(locale, { zh: "工作記錄與扣款範例", en: "Task record examples" })}
               </h3>
               <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
                 {t(locale, {
-                  zh: "以下數字來自執行回執；每個範例都把 usage unit 與 1 CPT 基本呼叫費分開列出。",
-                  en: "Each example is backed by an execution receipt and separates usage units from the 1 CPT base invocation charge.",
+                  zh: "以下數字來自工作記錄；每個範例都把工作額度與 1 CPT 起始費用分開列出。",
+                  en: "Each example uses a task record and separates the work credits from the 1 CPT starting charge.",
                 })}
               </p>
               <div className="mt-4 grid gap-4 lg:grid-cols-2">
@@ -365,7 +365,7 @@ export function DocsPage() {
                   id: string;
                   name: string;
                   status: string;
-                  proof: string;
+                  check: string;
                 }) => (
                   <div
                     key={platform.id}
@@ -373,7 +373,7 @@ export function DocsPage() {
                   >
                     <div className="text-sm font-medium">{platform.name}</div>
                     <div className="font-mono-tech text-xs text-honey">{platform.status}</div>
-                    <div className="text-sm leading-relaxed text-muted-foreground">{platform.proof}</div>
+                    <div className="text-sm leading-relaxed text-muted-foreground">{platform.check}</div>
                   </div>
                 ))}
               </div>
@@ -395,8 +395,8 @@ export function DocsPage() {
             id="failures"
             title={t(locale, { zh: "失敗代碼", en: "Failure codes" })}
             body={t(locale, {
-              zh: "每一次失敗的執行都會在回執中帶一個代碼。",
-              en: "Every failed execution carries one of these codes in its receipt.",
+              zh: "每一次失敗的工作都會在工作記錄中帶一個代碼。",
+              en: "Every failed task carries one of these codes in its task record.",
             })}
           >
             <div className="mt-6 overflow-hidden rounded-xl border border-border bg-card">

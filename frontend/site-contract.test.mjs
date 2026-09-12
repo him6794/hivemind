@@ -38,7 +38,7 @@ test('site definition exposes only official website and account-center routes', 
       `official site must not expose a ${forbidden} route`
     );
   }
-  assert.match(site.hero.title, /compute|account|deploy/i);
+  assert.match(site.hero.title, /task|network|account/i);
   assert.ok(zhSite.hero.title.length > 8);
   assert.ok(zhSite.hero.body.length > 20);
   assert.doesNotMatch(publicCopy, /repository|repo|runtime|endpoint|JWT|gRPC|nodepool|master API|contract/i);
@@ -64,7 +64,7 @@ test('public copy explains cross-account worker scheduling and prices every func
       assert.match(publicCopy, /not (a )?guaranteed destination|not necessarily your own/i);
     } else {
       assert.match(publicCopy, /其他.*(使用者|用戶)/);
-      assert.match(publicCopy, /不保證.*(自己|自有).*worker/i);
+      assert.match(publicCopy, /不保證.*(自己|自有).*(電腦|機器)/i);
     }
 
     const rows = site.sections.docs.billing.functionRows;
@@ -118,10 +118,10 @@ test('billing docs publish receipt-backed examples and a platform support matrix
       ['linux', 'macos', 'wsl', 'windows-native'],
       `${locale} docs must publish all supported host paths`
     );
-    assert.ok(
-      docs.billing.platforms.find((platform) => platform.id === 'windows-native').proof.includes('fail'),
-      `${locale} docs must disclose native Windows proof behavior`
-    );
+    const windows = docs.billing.platforms.find((platform) => platform.id === 'windows-native');
+    assert.equal(windows.status, locale === 'en' ? 'Supported' : '支援');
+    assert.match(windows.check, /Windows|工作|task|charge|扣款/i);
+
   }
 });
 
@@ -143,7 +143,7 @@ test('task observability is exposed by the trusted API and rendered by Master UI
     assert.match(masterApi, new RegExp(`\\b${field}\\b`), `Master API must forward ${field}`);
     assert.match(masterUi, new RegExp(field), `Master UI must render ${field}`);
   }
-  assert.match(masterUi, /Final charge|Billed|結算/);
+  assert.match(masterUi, /Credits used|Charged|Billed|結算/);
   assert.match(masterUi, /Provider|provider_user/);
   assert.match(masterUi, /Redispatch|dispatch_status/);
 });
@@ -256,19 +256,19 @@ test('usage rules state the CPT limitation the product documentation records', (
   assert.ok(zhText.includes('不是貨幣'));
   assert.ok(zhText.includes('沒有'));
 
-  // The trust page has to keep admitting what verification does not cover.
-  // These are the gaps an operator would otherwise discover the hard way.
+  // The trust page has to keep admitting what the network check does not cover.
+  // These are the limits a user would otherwise discover the hard way.
   for (const locale of ['en', 'zh']) {
     const caveats = getSiteDefinition(locale).sections.security.caveats.join('\n');
     assert.match(
       caveats,
-      /self-declared|自行申報/,
-      `${locale} trust page must disclose that worker capability numbers are self-declared`
+      /reported by each owner|由.*回報/,
+      `${locale} trust page must disclose that computer capability numbers come from each owner`
     );
     assert.match(
       caveats,
       /Windows/,
-      `${locale} trust page must disclose that a native Windows worker cannot prove`
+      `${locale} trust page must disclose native Windows support`
     );
   }
 
@@ -374,12 +374,12 @@ test('release browser QA covers account, worker registration, and task lifecycle
   assert.match(configSource, /msedge|chrome/);
   assert.match(flowSource, /official site/i);
   assert.match(flowSource, /Account Center/);
-  assert.match(flowSource, /Worker UI/);
-  assert.match(flowSource, /Login and register/);
-  assert.match(flowSource, /Master UI/);
-  assert.match(flowSource, /Submit Task/);
+  assert.match(flowSource, /Share this computer/);
+  assert.match(flowSource, /Sign in and connect/);
+  assert.match(flowSource, /Task dashboard/);
+  assert.match(flowSource, /Send task/);
   assert.match(flowSource, /Log/);
-  assert.match(flowSource, /Result/);
+  assert.match(flowSource, /Output in Log/);
   assert.match(flowSource, /Download/);
   assert.match(flowSource, /Cancel/);
   assert.match(flowSource, /getByLabel\('CPU score'\)\.fill\('1201'\)/);

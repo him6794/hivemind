@@ -36,7 +36,6 @@ export default function WorkerApp() {
   const [registerLoading, setRegisterLoading] = useState(false);
   const [refreshLoading, setRefreshLoading] = useState(false);
   const [workerIp, setWorkerIp] = useState('');
-  const [workerIpError, setWorkerIpError] = useState(null);
   const [profile, setProfile] = useState(emptyProfile);
   const [registration, setRegistration] = useState(null);
 
@@ -53,24 +52,18 @@ export default function WorkerApp() {
   async function refreshLocalProfile() {
     const ipError = validateWorkerEndpoint(workerIp);
     if (ipError) {
-      setWorkerIpError(ipError);
       throw new Error(ipError);
     }
-    setWorkerIpError(null);
 
     let res;
     try {
       res = await fetch(`${workerControlBase}/api/worker-info`);
     } catch {
-      throw new Error(
-        `Worker agent not responding at ${workerControlBase}. Verify the worker is running and VITE_WORKER_CONTROL_BASE is correct.`
-      );
+      throw new Error('This computer app could not be reached. Make sure it is open and try again.');
     }
     const data = await readJson(res);
     if (!res.ok || !data.success || !data.profile) {
-      throw new Error(
-        `Worker agent not responding at ${workerControlBase}. Verify the worker is running and VITE_WORKER_CONTROL_BASE is correct.`
-      );
+      throw new Error('This computer app could not be reached. Make sure it is open and try again.');
     }
 
     const normalized = normalizeWorkerProfile(data.profile, workerIp);
@@ -92,7 +85,7 @@ export default function WorkerApp() {
         headers: { Authorization: `Bearer ${authToken}` },
       });
     } catch {
-      throw new Error(`Cannot reach Worker Control at ${workerControlBase}.`);
+      throw new Error('The network connection is not ready. Please try again.');
     }
     const data = await readJson(res);
     if (res.status === 401) {
@@ -100,7 +93,7 @@ export default function WorkerApp() {
       throw new Error('Session expired. Please log in again.');
     }
     if (!res.ok || !data.success || !['ready', 'disabled'].includes(String(data.state || ''))) {
-      throw new Error(data.message || `VPN is not ready (${data.state || 'unknown'})`);
+      throw new Error('The network connection is not ready. Please try again.');
     }
     setStatus(data.state === 'disabled' ? 'Connected in local mode' : 'Connected to Hivemind network');
     return data;
@@ -118,7 +111,7 @@ export default function WorkerApp() {
       return;
     }
     setRegisterLoading(true);
-    setStatus('Registering worker with nodepool...');
+    setStatus('Preparing this computer...');
 
     try {
       const workerId = String(workerProfile.worker_id || '').trim() || ownerUsername;
@@ -131,7 +124,7 @@ export default function WorkerApp() {
       try {
         res = await fetch(request.url, request.options);
       } catch {
-        throw new Error(`Cannot reach Worker Control at ${workerControlBase}.`);
+        throw new Error('The network connection is not ready. Please try again.');
       }
       const data = await readJson(res);
       if (!res.ok) {
@@ -143,18 +136,19 @@ export default function WorkerApp() {
       }
 
       if (!data.success) {
-        throw new Error(data.status_message || 'Worker registration failed');
+        throw new Error('This computer could not be connected. Please try again.');
       }
 
       setRegistration({
         success: true,
-        message: data.status_message || 'Registered',
+        message: 'This computer is connected and ready to receive tasks.',
         workerId,
       });
-      setStatus(`Worker registered: ${workerId}`);
+      setStatus('This computer is ready to receive tasks.');
     } catch (err) {
-      setRegistration({ success: false, message: err.message });
-      setStatus(`Registration failed: ${err.message}`);
+      console.error('Computer connection failed:', err);
+      setRegistration({ success: false, message: 'This computer could not be connected. Please try again.' });
+      setStatus('This computer could not be connected. Please try again.');
     } finally {
       setRegisterLoading(false);
     }
@@ -176,7 +170,7 @@ export default function WorkerApp() {
           body: JSON.stringify({ username, password }),
         });
       } catch {
-        throw new Error(`Cannot reach the local Worker app at ${workerControlBase}. Make sure it is running.`);
+        throw new Error('This computer app could not be reached. Make sure it is open and try again.');
       }
       const data = await readJson(res);
       if (!res.ok || !data.success) {
@@ -196,7 +190,7 @@ export default function WorkerApp() {
       setUsername(ownerUsername);
       setAuthenticatedUsername(ownerUsername);
       await bootstrapVpn(authToken);
-      setStatus('Connected. Fetching local worker info...');
+      setStatus('Connected. Checking this computer...');
       const localProfile = await refreshLocalProfile();
       await registerWorker(authToken, localProfile, localProfile.ip);
     } catch (err) {
@@ -222,27 +216,10 @@ export default function WorkerApp() {
       setStatus('Profile refreshed');
     } catch (err) {
       setProfileError(err.message);
-      setStatus(`Refresh failed: ${err.message}`);
+      setStatus('Refresh failed. Please try again.');
     } finally {
       setRefreshLoading(false);
     }
-  }
-
-  async function handleRegisterAgain() {
-    const ipError = validateWorkerEndpoint(workerIp);
-    if (ipError) {
-      setWorkerIpError(ipError);
-      setStatus(`Validation error: ${ipError}`);
-      return;
-    }
-    setWorkerIpError(null);
-    await registerWorker();
-  }
-
-  function handleWorkerIpChange(value) {
-    setWorkerIp(value);
-    const error = validateWorkerEndpoint(value);
-    setWorkerIpError(error);
   }
 
   useEffect(() => {
@@ -251,18 +228,18 @@ export default function WorkerApp() {
     (async () => {
       try {
         if (initialSession.token && initialSession.username) {
-          setStatus('Session restored. Connecting to Hivemind network...');
+          setStatus('Session restored. Connecting to the network...');
           await bootstrapVpn(initialSession.token);
           const localProfile = await refreshLocalProfile();
-          setStatus('Connected. Registering local worker...');
+          setStatus('Connected. Preparing this computer...');
           await registerWorker(initialSession.token, localProfile, localProfile.ip);
         } else {
           await refreshLocalProfile();
-          setStatus('Local worker profile loaded');
+          setStatus('This computer is ready to connect.');
         }
       } catch (err) {
         setProfileError(err.message);
-        setStatus(`Cannot initialize worker: ${err.message}`);
+        setStatus('We could not prepare this computer. Please try again.');
       } finally {
         setProfileLoading(false);
       }
@@ -276,8 +253,8 @@ export default function WorkerApp() {
           <div className="brand-lockup">
             <div className="brand-mark" aria-hidden="true" />
             <div>
-              <p className="eyebrow">Hivemind Console</p>
-              <h1>Worker UI</h1>
+              <p className="eyebrow">Hivemind</p>
+              <h1>Share this computer</h1>
               <p className="lead">
                 Sign in to put this machine to work. It registers with the network, shares what it can do, and is ready to accept jobs.
               </p>
@@ -294,17 +271,10 @@ export default function WorkerApp() {
           {token ? (
             <div className="toolbar">
               <div>
-                <p className="eyebrow">Authenticated</p>
+                <p className="eyebrow">Signed in</p>
                 <strong>{authenticatedUsername || username}</strong>
               </div>
-              <button
-                type="button"
-                onClick={handleRegisterAgain}
-                disabled={registerLoading}
-                className="button primary"
-              >
-                {registerLoading ? 'Registering...' : 'Register worker'}
-              </button>
+              <span className="subtle">This computer connects automatically after sign-in.</span>
             </div>
           ) : (
             <form onSubmit={handleLogin} className="form-grid">
@@ -317,7 +287,7 @@ export default function WorkerApp() {
                 <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="field" />
               </label>
               <button type="submit" disabled={loginLoading} className="button primary">
-                {loginLoading ? 'Working...' : 'Login and register'}
+                {loginLoading ? 'Connecting...' : 'Sign in and connect'}
               </button>
             </form>
           )}
@@ -330,33 +300,24 @@ export default function WorkerApp() {
 
         <div className="grid two" style={{ marginTop: 18 }}>
           <section className="surface">
-            <h2>Your Machine</h2>
-            <label>
-              Where the network can reach this machine (optional)
-              <input
-                value={workerIp}
-                onChange={(e) => handleWorkerIpChange(e.target.value)}
-                placeholder="Leave blank if jobs should arrive through this connection"
-                className={`field ${workerIpError ? 'error' : ''}`}
-              />
-            </label>
-            {workerIpError ? <div className="status error">{workerIpError}</div> : null}
+            <h2>This computer</h2>
+            <p className="subtle">Hivemind detects the computer settings it needs. There is nothing else to configure.</p>
 
             {profileLoading ? (
-              <div className="status">Fetching local worker info...</div>
+              <div className="status">Checking this computer...</div>
             ) : profileError ? (
               <div className="status error">
-                <strong>Cannot reach local worker agent</strong>
-                <p className="subtle" style={{ marginTop: 6 }}>{profileError}</p>
+                <strong>We could not check this computer</strong>
+                <p className="subtle" style={{ marginTop: 6 }}>Make sure the app is open, then try again.</p>
                 <button type="button" onClick={handleRefresh} disabled={refreshLoading} className="button">
-                  {refreshLoading ? 'Retrying...' : 'Retry'}
+                  {refreshLoading ? 'Trying again...' : 'Try again'}
                 </button>
               </div>
             ) : (
               <>
                 <dl>
-                  <dt>Worker ID</dt>
-                  <dd>{profile.worker_id || '(unregistered)'}</dd>
+                  <dt>Computer ID</dt>
+                  <dd>{profile.worker_id || '(not connected yet)'}</dd>
                   <dt>CPU cores</dt>
                   <dd>{profile.cpu_cores}</dd>
                   <dt>Memory</dt>
@@ -376,31 +337,26 @@ export default function WorkerApp() {
                 </dl>
                 <div className="actions">
                   <button type="button" onClick={handleRefresh} disabled={refreshLoading} className="button">
-                    {refreshLoading ? 'Refreshing...' : 'Refresh profile'}
+                    {refreshLoading ? 'Checking...' : 'Check again'}
                   </button>
-                  {token ? (
-                    <button type="button" onClick={handleRegisterAgain} disabled={registerLoading} className="button primary">
-                      {registerLoading ? 'Registering...' : 'Register again'}
-                    </button>
-                  ) : null}
                 </div>
               </>
             )}
           </section>
 
           <section className="surface">
-            <h2>Registration</h2>
+            <h2>Connection</h2>
             {registration ? (
               <div className={`status ${registration.success ? 'success' : 'error'}`}>
-                <strong>{registration.success ? 'Registered' : 'Not registered'}</strong>
+                <strong>{registration.success ? 'Ready' : 'Not connected'}</strong>
                 <div style={{ marginTop: 6 }}>{registration.message}</div>
                 {registration.workerId ? (
-                  <div className="subtle" style={{ marginTop: 6 }}>worker_id: {registration.workerId}</div>
+                  <div className="subtle" style={{ marginTop: 6 }}>Computer ID: {registration.workerId}</div>
                 ) : null}
               </div>
             ) : (
               <p className="subtle">
-                Log in to register this machine. Once registered, the network can send it jobs, and its results and usage are reported back so billing stays accurate.
+                Sign in to connect this computer. Once it is ready, the network can send it tasks and check the work before charging.
               </p>
             )}
           </section>

@@ -12,11 +12,10 @@ type Copy = { zh: string; en: string };
 const t = (locale: string, copy: Copy) => (locale === "zh" ? copy.zh : copy.en);
 
 // Every figure below is the real output of the example the docs publish. It is
-// pinned by published_doc_example.rs in executor-rs, so this panel cannot drift
-// into being a mockup of numbers that never happened.
+// pinned by published_doc_example.rs in executor-rs, so this panel stays tied to
+// a task the runtime actually completed.
 const RECEIPT = {
   jobId: "row-score-001",
-  runtime: "managed-function-v0",
   meter: [
     { key: "executed_ops", value: 80 },
     { key: "usage_units", value: 80 },
@@ -29,6 +28,14 @@ const RECEIPT = {
     { label: { zh: "用量 80 × 1 CPT", en: "usage 80 × 1 CPT" }, amount: "80 CPT" },
   ],
   total: "81 CPT",
+};
+
+const METER_LABELS = {
+  executed_ops: { zh: "完成步驟", en: "Steps completed" },
+  usage_units: { zh: "使用額度", en: "Credits used" },
+  function_calls: { zh: "動作", en: "Actions" },
+  loop_iterations: { zh: "重複步驟", en: "Repeated steps" },
+  output_bytes: { zh: "輸出大小", en: "Output size" },
 };
 
 function useCountUp(target: number, run: boolean, durationMs = 900) {
@@ -54,8 +61,8 @@ function useCountUp(target: number, run: boolean, durationMs = 900) {
   return value;
 }
 
-/** The signature element: a real execution receipt, the artifact this product
- *  is actually about. The bill is derived from it and proven before it settles. */
+/** The signature element: a real task record, the artifact this product
+ *  is actually about. The charge is derived from it and checked by the network. */
 function ReceiptPanel({ locale }: { locale: string }) {
   const reduceMotion = useReducedMotion();
   const animate = !reduceMotion;
@@ -69,18 +76,20 @@ function ReceiptPanel({ locale }: { locale: string }) {
       className="relative rounded-xl border border-border bg-card p-6 sm:p-7"
     >
       <figcaption className="flex items-baseline justify-between gap-4 border-b border-border pb-4">
-        <span className="eyebrow">{t(locale, { zh: "執行回執", en: "Execution receipt" })}</span>
-        <span className="tabular text-xs text-muted-foreground">{RECEIPT.runtime}</span>
+        <span className="eyebrow">{t(locale, { zh: "工作摘要", en: "Task summary" })}</span>
+        <span className="tabular text-xs text-muted-foreground">{t(locale, { zh: "範例工作", en: "Example task" })}</span>
       </figcaption>
 
       <dl className="mt-5 space-y-2.5">
         <div className="flex items-baseline justify-between gap-4">
-          <dt className="text-xs text-muted-foreground">{t(locale, { zh: "工作", en: "job" })}</dt>
+          <dt className="text-xs text-muted-foreground">{t(locale, { zh: "工作", en: "task" })}</dt>
           <dd className="tabular text-xs">{RECEIPT.jobId}</dd>
         </div>
         {RECEIPT.meter.map((row) => (
           <div key={row.key} className="flex items-baseline justify-between gap-4">
-            <dt className="tabular text-xs text-muted-foreground">{row.key}</dt>
+            <dt className="tabular text-xs text-muted-foreground">
+              {METER_LABELS[row.key as keyof typeof METER_LABELS]?.[locale === "zh" ? "zh" : "en"] || row.key}
+            </dt>
             <dd className="tabular text-sm">{row.key === "executed_ops" ? ops : row.value}</dd>
           </div>
         ))}
@@ -95,8 +104,8 @@ function ReceiptPanel({ locale }: { locale: string }) {
         ))}
       </div>
 
-      {/* The stamp lands on the total, because the total is the claim being
-          verified. Kept in flow so it can never collide with the caption. */}
+      {/* The stamp lands on the total, because the total is what the network
+          checks. Kept in flow so it can never collide with the caption. */}
       <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-border pt-5">
         <span className="eyebrow">{t(locale, { zh: "應付", en: "total" })}</span>
         <div className="flex items-center gap-4">
@@ -106,7 +115,7 @@ function ReceiptPanel({ locale }: { locale: string }) {
             transition={{ delay: 1.15, duration: 0.4, ease: "backOut" }}
             className="stamp rounded px-2.5 py-1 font-mono-tech text-xs uppercase"
           >
-            {t(locale, { zh: "已驗證", en: "verified" })}
+            {t(locale, { zh: "網路已查核", en: "network checked" })}
           </motion.span>
           <span className="tabular text-2xl font-semibold">{RECEIPT.total}</span>
         </div>
@@ -114,8 +123,8 @@ function ReceiptPanel({ locale }: { locale: string }) {
 
       <p className="mt-6 text-xs leading-relaxed text-muted-foreground">
         {t(locale, {
-          zh: "這是文件裡那個範例的實際回執。帳單從回執推導，並在結算前經過證明驗證。",
-          en: "The real receipt from the example in the docs. The bill is derived from it, and verified by proof before it settles.",
+          zh: "這是文件裡那個範例的實際工作記錄。扣款從記錄推導，並在扣款前經過網路查核。",
+          en: "The task record from the example in the docs. The charge is derived from it, then checked by the network before it is confirmed.",
         })}
       </p>
     </motion.figure>
@@ -224,8 +233,8 @@ export function LandingPage() {
           <div className="eyebrow">{locale === "zh" ? "為什麼是 Hivemind" : "Why Hivemind"}</div>
           <h2 className="font-display mt-4 max-w-2xl text-balance text-2xl leading-tight sm:text-4xl">
             {locale === "zh"
-              ? "每一筆帳單都能追回到一份證明。"
-              : "Every bill traces back to a proof."}
+              ? "每一筆扣款都會經過網路查核。"
+              : "Every charge is checked by the network."}
           </h2>
 
           <div className="mt-14 grid gap-x-12 gap-y-10 md:grid-cols-2">

@@ -52,12 +52,12 @@ export function LoginPage() {
           {locale === "zh" ? "安全登入" : "Secure sign in"}
         </div>
         <h1 className="text-balance text-4xl font-semibold tracking-tight sm:text-6xl">
-          {locale === "zh" ? "回到你的 Hivemind 帳號中心。" : "Return to your Hivemind account center."}
+          {locale === "zh" ? "登入 Hivemind，開始使用你的額度。" : "Sign in to Hivemind and use your credits."}
         </h1>
         <p className="mt-4 max-w-xl text-muted-foreground">
           {locale === "zh"
-            ? "登入後可以查看 CPT 餘額，以及部署節點的下一步。"
-            : "Sign in to check your CPT balance and your next step."}
+            ? "登入後可以查看額度，送出工作或分享一台電腦。"
+            : "After signing in, you can send a task or share a computer."}
         </p>
       </div>
 

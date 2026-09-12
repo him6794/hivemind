@@ -25,8 +25,8 @@ export function TermsPage() {
         </div>
         <p className="mt-3 text-pretty leading-relaxed">
           {locale === "zh"
-            ? "CPT 是內部額度單位，不是貨幣，也沒有任何兌換或贖回管道。貢獻算力換到的是可以用來跑自己工作的額度，不是收入。"
-            : "CPT is an internal quota unit. It is not money, and there is no conversion or redemption path. Contributing compute earns credit you spend on your own jobs, not income."}
+            ? "CPT 是工作額度，不是貨幣，也沒有兌換或提領管道。分享電腦得到的是可以用來執行自己工作的額度，不是收入。"
+            : "CPT is a work credit, not money. There is no conversion or withdrawal path. Sharing a computer earns credit for your own tasks, not income."}
         </p>
       </Surface>
 
@@ -48,8 +48,8 @@ export function TermsPage() {
 
       <p className="mt-8 max-w-3xl text-sm leading-relaxed text-muted-foreground">
         {locale === "zh"
-          ? "這一頁描述的是系統目前的行為與界線，會隨系統改變而更新。它不是法律契約，也不取代你與網路營運方之間的任何協議。"
-          : "This page describes how the system behaves and where its edges are today, and it changes as the system does. It is not a legal agreement and does not replace any arrangement you have with the network operator."}
+          ? "這一頁描述系統目前的行為與界線，會隨系統改變而更新。它不是法律契約，也不取代你與提供服務的人之間的任何協議。"
+          : "This page describes how the system behaves and where its edges are today. It is not a legal agreement and does not replace any arrangement you have with the people running the service."}
       </p>
     </PageSection>
   );

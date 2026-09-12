@@ -70,8 +70,8 @@ export function AccountPage() {
               </h3>
               <p className="mt-2 text-sm text-muted-foreground">
                 {locale === "zh"
-                  ? "工作從你的 Master 送出，再由排程器交給符合條件的網路 worker。"
-                  : "Work leaves through your Master, then the scheduler assigns it to an eligible network worker."}
+                  ? "送出的工作會交給符合條件的可用電腦。"
+                  : "Your task is sent to an available computer that fits what it needs."}
               </p>
             </div>
             <Button variant="outline" onClick={() => navigate(token ? "docs" : "login")}>
@@ -85,12 +85,12 @@ export function AccountPage() {
               value={<span className="font-mono-tech text-3xl">{balance === null ? "..." : balance.toFixed(2)}</span>}
             />
             <KeyValue
-              label={locale === "zh" ? "工作在哪跑" : "Where work runs"}
-              value={locale === "zh" ? "符合條件的網路 worker" : "An eligible network worker"}
+              label={locale === "zh" ? "工作在哪裡執行" : "Where it runs"}
+              value={locale === "zh" ? "可用的共享電腦" : "An available shared computer"}
             />
             <KeyValue
               label={locale === "zh" ? "下一步" : "Next step"}
-              value={locale === "zh" ? "部署 Master 或 Worker" : "Deploy a Master or Worker"}
+              value={locale === "zh" ? "送出工作或分享電腦" : "Send work or share a computer"}
             />
           </div>
 
@@ -118,16 +118,16 @@ export function AccountPage() {
         <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div>
             <h3 className="text-lg font-semibold">
-              {locale === "zh" ? "要送出工作，還是貢獻算力？" : "Send work, or contribute compute?"}
+              {locale === "zh" ? "你想執行工作，還是分享電腦？" : "Run a task, or share a computer?"}
             </h3>
             <p className="mt-2 text-sm text-muted-foreground">
               {locale === "zh"
-                ? "送工作部署 Master，貢獻算力部署 Worker。"
-                : "Deploy a Master node to send work. Deploy a Worker node to contribute compute."}
+                ? "從任務頁面送出工作，或打開 Worker 應用程式分享這台電腦。"
+                : "Use the task page to send work, or open the Worker app to share this computer."}
             </p>
           </div>
           <Button onClick={() => navigate("docs")} className="bg-honey text-honey-foreground hover:bg-honey/90">
-            {locale === "zh" ? "前往部署文件" : "Go to deployment docs"}
+            {locale === "zh" ? "查看使用說明" : "Go to deployment docs"}
             <ArrowRight className="size-4" />
           </Button>
         </div>

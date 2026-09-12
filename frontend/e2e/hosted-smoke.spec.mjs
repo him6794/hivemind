@@ -7,14 +7,14 @@ const applications = [
     heading: /./,
   },
   {
-    name: 'Master UI',
+    name: 'Task dashboard',
     url: process.env.HIVEMIND_MASTER_UI_URL || 'http://127.0.0.1:3000',
-    heading: 'Master UI',
+    heading: 'Task dashboard',
   },
   {
-    name: 'Worker UI',
+    name: 'Share this computer',
     url: process.env.HIVEMIND_WORKER_UI_URL || 'http://127.0.0.1:3001',
-    heading: 'Worker UI',
+    heading: 'Share this computer',
   },
 ];
 

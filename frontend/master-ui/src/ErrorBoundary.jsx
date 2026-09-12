@@ -39,7 +39,7 @@ export class ErrorBoundary extends React.Component {
               Something went wrong
             </h2>
             <p style={{ margin: '0 0 20px', color: '#5e6c7a', fontSize: 14 }}>
-              {this.state.error?.message || 'An unexpected error occurred.'}
+              Hivemind could not load this page. Try again, or return later.
             </p>
             <button
               type="button"
