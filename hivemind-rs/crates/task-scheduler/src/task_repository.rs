@@ -11576,7 +11576,9 @@ mod tests {
                 binding: managed_consensus_binding_for_assignment(&task, assignment),
                 success: true,
                 output_digest: hivemind_managed_consensus::output_digest(&output),
-                result_digest: hivemind_managed_consensus::output_digest(&result_json),
+                result_digest: hivemind_managed_consensus::output_digest(
+                    &hivemind_proto::canonical_managed_consensus_result(&result).encode_to_vec(),
+                ),
                 output_bytes: output.len() as u64,
                 claimed_usage_units: 7,
                 claimed_executed_ops: 11,
@@ -11782,7 +11784,9 @@ mod tests {
                 ),
                 success: true,
                 output_digest: hivemind_managed_consensus::output_digest(&output),
-                result_digest: hivemind_managed_consensus::output_digest(&result_json),
+                result_digest: hivemind_managed_consensus::output_digest(
+                    &hivemind_proto::canonical_managed_consensus_result(&result).encode_to_vec(),
+                ),
                 output_bytes: output.len() as u64,
                 claimed_usage_units: 1,
                 claimed_executed_ops: 2,
