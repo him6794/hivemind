@@ -210,7 +210,6 @@ fn managed_gpu_task_status(status: ManagedGpuStatus) -> &'static str {
 }
 
 const PLATFORM_FEE_BPS: i64 = 1000; // 10%
-const MANAGED_BASE_INVOCATION_CPT: i64 = 1;
 const GENERAL_COMPUTE_BILLING_VERSION: &str = "billing-v1";
 const GENERAL_COMPUTE_COST_MODEL_VERSION: &str = "cost-v1";
 const MANAGED_CONSENSUS_BILLING_VERSION: &str = "consensus-billing-v1";
@@ -218,25 +217,6 @@ const MANAGED_CONSENSUS_COST_MODEL_VERSION: &str = "consensus-reservation-v1";
 pub const MANAGED_CONSENSUS_POLICY_PENDING_MESSAGE: &str = "awaiting managed consensus policy";
 const MANAGED_CONSENSUS_SETTLEMENT_BASIS: &str = "nodepool-reservation";
 pub(crate) const MIN_WORKER_REPUTATION_SCORE: i32 = 20;
-
-struct ManagedCompletionReceipt<'a> {
-    executed_ops: i64,
-    output_bytes: i64,
-    receipt_json: &'a str,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ManagedCompletionEvidence {
-    /// The Nodepool dispatcher independently verified and persisted a receipt.
-    VerifiedReceipt,
-    /// Observe mode verified a receipt but intentionally settles through the
-    /// legacy path; this is recorded separately from receipt-backed settlement.
-    ObservedVerified,
-    /// An explicitly selected compatibility path settled without a receipt.
-    LegacyFallback,
-    /// Generic repository completion has no managed-proof authority.
-    Untrusted,
-}
 
 /// Nodepool-owned settlement evidence for an alpha general-compute result.
 /// Worker usage remains an unverified claim; the amount is the task's fixed
@@ -2136,7 +2116,9 @@ impl TaskRepository {
                     .as_deref()
                     .is_some_and(|receipt| !receipt.trim().is_empty())
             {
-                anyhow::bail!("managed GPU tasks cannot carry managed DSL or proof fields");
+                anyhow::bail!(
+                    "managed GPU tasks cannot carry managed DSL or legacy receipt fields"
+                );
             }
         }
         if runtime != Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION)
@@ -3549,8 +3531,8 @@ impl TaskRepository {
                   AND retry_count <= max_retries
                   -- PullBatch is the legacy completion surface. Modern
                   -- runtimes must be assigned by the capability-aware
-                  -- dispatcher so they cannot bypass typed admission,
-                  -- proof verification, or settlement gates.
+                  -- dispatcher so they cannot bypass typed admission or
+                  -- consensus settlement gates.
                   AND (runtime IS NULL OR BTRIM(runtime) = '')
                 ORDER BY priority DESC, created_at ASC
                 FOR UPDATE SKIP LOCKED
@@ -3581,19 +3563,9 @@ impl TaskRepository {
         result_torrent: Option<&str>,
         output: Option<&str>,
     ) -> Result<Task> {
-        self.complete_guarded(
-            task_id,
-            None,
-            result_torrent,
-            output,
-            None,
-            None,
-            None,
-            ManagedCompletionEvidence::Untrusted,
-            None,
-        )
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("task changed before completion"))
+        self.complete_guarded(task_id, None, result_torrent, output, None, None, None)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("task changed before completion"))
     }
 
     pub async fn complete_for_worker(
@@ -3610,8 +3582,6 @@ impl TaskRepository {
             output,
             None,
             None,
-            None,
-            ManagedCompletionEvidence::Untrusted,
             None,
         )
         .await?
@@ -3632,96 +3602,6 @@ impl TaskRepository {
             output,
             None,
             None,
-            None,
-            ManagedCompletionEvidence::Untrusted,
-            Some(expected),
-        )
-        .await
-    }
-
-    /// Explicitly selected observe/off compatibility completion for a managed
-    /// task. This is never used by the generic Worker result APIs, which must
-    /// not bypass the enforce proof gate.
-    pub async fn complete_for_worker_legacy_managed(
-        &self,
-        task_id: &str,
-        worker_id: &str,
-        output: Option<&str>,
-    ) -> Result<Task> {
-        self.complete_guarded(
-            task_id,
-            Some(worker_id),
-            None,
-            output,
-            None,
-            None,
-            None,
-            ManagedCompletionEvidence::LegacyFallback,
-            None,
-        )
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("task changed before completion"))
-    }
-
-    pub async fn complete_for_worker_legacy_managed_snapshot(
-        &self,
-        expected: &Task,
-        worker_id: &str,
-        output: Option<&str>,
-    ) -> Result<Option<Task>> {
-        self.complete_guarded(
-            &expected.task_id,
-            Some(worker_id),
-            None,
-            output,
-            None,
-            None,
-            None,
-            ManagedCompletionEvidence::LegacyFallback,
-            Some(expected),
-        )
-        .await
-    }
-
-    /// Observe mode retains legacy settlement after a proof was independently
-    /// verified. The authorization row records `observed_verified` so audit
-    /// consumers can distinguish this from receipt-backed settlement.
-    pub async fn complete_for_worker_observed_verified(
-        &self,
-        task_id: &str,
-        worker_id: &str,
-        output: Option<&str>,
-    ) -> Result<Task> {
-        self.complete_guarded(
-            task_id,
-            Some(worker_id),
-            None,
-            output,
-            None,
-            None,
-            None,
-            ManagedCompletionEvidence::ObservedVerified,
-            None,
-        )
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("task changed before completion"))
-    }
-
-    pub async fn complete_for_worker_observed_verified_snapshot(
-        &self,
-        expected: &Task,
-        worker_id: &str,
-        output: Option<&str>,
-    ) -> Result<Option<Task>> {
-        self.complete_guarded(
-            &expected.task_id,
-            Some(worker_id),
-            None,
-            output,
-            None,
-            None,
-            None,
-            ManagedCompletionEvidence::ObservedVerified,
             Some(expected),
         )
         .await
@@ -3740,10 +3620,8 @@ impl TaskRepository {
             Some(worker_id),
             None,
             output,
-            None,
             Some(expected_manifest),
             Some(result_json),
-            ManagedCompletionEvidence::Untrusted,
             None,
         )
         .await?
@@ -3763,10 +3641,8 @@ impl TaskRepository {
             Some(worker_id),
             None,
             output,
-            None,
             Some(expected_manifest),
             Some(result_json),
-            ManagedCompletionEvidence::Untrusted,
             Some(expected),
         )
         .await
@@ -4878,61 +4754,6 @@ impl TaskRepository {
         Ok(Some(failed))
     }
 
-    pub async fn complete_for_worker_with_managed_receipt(
-        &self,
-        task_id: &str,
-        worker_id: &str,
-        output: Option<&str>,
-        executed_ops: i64,
-        output_bytes: i64,
-        receipt_json: &str,
-    ) -> Result<Task> {
-        self.complete_guarded(
-            task_id,
-            Some(worker_id),
-            None,
-            output,
-            Some(ManagedCompletionReceipt {
-                executed_ops,
-                output_bytes,
-                receipt_json,
-            }),
-            None,
-            None,
-            ManagedCompletionEvidence::VerifiedReceipt,
-            None,
-        )
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("task changed before completion"))
-    }
-
-    pub async fn complete_for_worker_with_managed_receipt_snapshot(
-        &self,
-        expected: &Task,
-        worker_id: &str,
-        output: Option<&str>,
-        executed_ops: i64,
-        output_bytes: i64,
-        receipt_json: &str,
-    ) -> Result<Option<Task>> {
-        self.complete_guarded(
-            &expected.task_id,
-            Some(worker_id),
-            None,
-            output,
-            Some(ManagedCompletionReceipt {
-                executed_ops,
-                output_bytes,
-                receipt_json,
-            }),
-            None,
-            None,
-            ManagedCompletionEvidence::VerifiedReceipt,
-            Some(expected),
-        )
-        .await
-    }
-
     pub async fn complete_result_for_worker(
         &self,
         task_id: &str,
@@ -5165,13 +4986,20 @@ impl TaskRepository {
         worker_id: Option<&str>,
         result_torrent: Option<&str>,
         output: Option<&str>,
-        managed_receipt: Option<ManagedCompletionReceipt<'_>>,
         expected_manifest: Option<&[u8]>,
         general_compute_result: Option<&[u8]>,
-        managed_evidence: ManagedCompletionEvidence,
         expected_snapshot: Option<&Task>,
     ) -> Result<Option<Task>> {
         let mut tx = self.pool.begin().await?;
+        let runtime: Option<String> =
+            sqlx::query_scalar("SELECT runtime FROM tasks WHERE task_id = $1")
+                .bind(task_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        let managed_runtime = matches!(
+            runtime.as_deref().map(str::trim),
+            Some("managed-function-v0") | Some("production_sandboxed_dsl")
+        );
         let consensus_required: bool = sqlx::query_scalar(
             "SELECT EXISTS(
                  SELECT 1 FROM managed_consensus_policies
@@ -5186,7 +5014,7 @@ impl TaskRepository {
         .bind(task_id)
         .fetch_one(&mut *tx)
         .await?;
-        if consensus_required {
+        if managed_runtime || consensus_required {
             anyhow::bail!("managed consensus task requires a quorum certificate");
         }
         let snapshot = if let Some(expected) = expected_snapshot {
@@ -5205,15 +5033,8 @@ impl TaskRepository {
         let runtime: Option<String> = if let Some(snapshot) = snapshot.as_ref() {
             snapshot.runtime.clone()
         } else {
-            sqlx::query_scalar("SELECT runtime FROM tasks WHERE task_id = $1")
-                .bind(task_id)
-                .fetch_one(&mut *tx)
-                .await?
+            runtime
         };
-        let managed_runtime = matches!(
-            runtime.as_deref(),
-            Some("managed-function-v0") | Some("production_sandboxed_dsl")
-        );
         let general_compute_runtime =
             runtime.as_deref() == Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION);
         if runtime.as_deref().map(str::trim) == Some(MANAGED_GPU_RUNTIME_VERSION) {
@@ -5222,11 +5043,6 @@ impl TaskRepository {
         if general_compute_runtime && general_compute_result.is_none() {
             anyhow::bail!(
                 "general-compute task completion requires a validated typed result envelope"
-            );
-        }
-        if managed_runtime && managed_evidence == ManagedCompletionEvidence::Untrusted {
-            anyhow::bail!(
-                "managed task completion requires a Nodepool-verified proof or an explicit rollout compatibility path"
             );
         }
         let deterministic = if let Some(snapshot) = snapshot.as_ref() {
@@ -5245,7 +5061,7 @@ impl TaskRepository {
             anyhow::bail!("deterministic task completion requires a result reference");
         }
 
-        let mut completed = if let Some(worker_id) = worker_id {
+        let completed = if let Some(worker_id) = worker_id {
             sqlx::query_as::<_, Task>(
                 "UPDATE tasks
                  SET status = 'COMPLETED', result_torrent = $1, output = COALESCE($2, output), last_update = NOW(), completed_at = NOW()
@@ -5338,24 +5154,6 @@ impl TaskRepository {
             .await?;
         }
 
-        if let Some(receipt) = managed_receipt {
-            completed = sqlx::query_as::<_, Task>(
-                "UPDATE tasks
-                 SET managed_executed_ops = $1,
-                     managed_output_bytes = $2,
-                     managed_receipt_json = $3,
-                     last_update = NOW()
-                 WHERE task_id = $4
-                 RETURNING *",
-            )
-            .bind(receipt.executed_ops.max(0))
-            .bind(receipt.output_bytes.max(0))
-            .bind(receipt.receipt_json)
-            .bind(task_id)
-            .fetch_one(&mut *tx)
-            .await?;
-        }
-
         if let Some(worker_id) = completed.worker_id.as_deref() {
             increment_worker_success(&mut tx, worker_id).await?;
             insert_task_attestation(
@@ -5368,10 +5166,17 @@ impl TaskRepository {
             )
             .await?;
             if completed.deterministic {
-                let proof =
-                    checksum_proof_details(completed.result_torrent.as_deref().unwrap_or(""));
-                insert_task_attestation(&mut tx, task_id, worker_id, "checksum_proof", 80, &proof)
-                    .await?;
+                let attestation =
+                    checksum_attestation_details(completed.result_torrent.as_deref().unwrap_or(""));
+                insert_task_attestation(
+                    &mut tx,
+                    task_id,
+                    worker_id,
+                    "checksum_attestation",
+                    80,
+                    &attestation,
+                )
+                .await?;
             }
         }
 
@@ -7002,10 +6807,6 @@ fn managed_gpu_settlement(
     })
 }
 
-fn managed_receipt_amount_cpt(task: &Task) -> i64 {
-    MANAGED_BASE_INVOCATION_CPT + task.managed_executed_ops.max(0)
-}
-
 fn nodepool_general_compute_terminal_result(
     task: &Task,
     status: ResultStatus,
@@ -7093,15 +6894,7 @@ fn nodepool_general_compute_terminal_result(
 }
 
 fn billable_amount_cpt(task: &Task) -> i64 {
-    if matches!(
-        task.runtime.as_deref(),
-        Some("managed-function-v0") | Some("production_sandboxed_dsl")
-    ) && task.managed_receipt_json.is_some()
-    {
-        managed_receipt_amount_cpt(task).min(task.max_cpt).max(0)
-    } else {
-        task.max_cpt.max(0)
-    }
+    task.max_cpt.max(0)
 }
 
 async fn increment_worker_success(
@@ -7178,7 +6971,7 @@ async fn insert_task_attestation(
     Ok(())
 }
 
-fn checksum_proof_details(result_ref: &str) -> String {
+fn checksum_attestation_details(result_ref: &str) -> String {
     let mut hasher = Sha1::new();
     hasher.update(result_ref.as_bytes());
     format!(
@@ -7312,34 +7105,15 @@ mod tests {
     }
 
     #[test]
-    fn managed_v0_billing_formula_matches_frozen_manifest() {
-        let manifest: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../executor-rs/crates/managed-function-runtime/managed-function-v0-semantics.json"
-        ))
-        .unwrap();
-        let mut task = make_task("managed-v0-billing-contract", "owner");
+    fn billable_amount_uses_the_task_reservation() {
+        let mut task = make_task("fixed-reservation-billing-contract", "owner");
         task.runtime = Some("managed-function-v0".into());
-        task.managed_receipt_json = Some("{}".into());
-        task.managed_executed_ops = 17;
         task.max_cpt = 100;
 
-        assert_eq!(
-            manifest["billing"]["base_invocation_cpt"],
-            MANAGED_BASE_INVOCATION_CPT
-        );
-        assert_eq!(manifest["billing"]["usage_unit_cpt"], 1);
-        assert_eq!(
-            manifest["billing"]["formula"],
-            "min(max_cpt, base_invocation_cpt + usage_units)"
-        );
-        assert_eq!(managed_receipt_amount_cpt(&task), 18);
-        assert_eq!(billable_amount_cpt(&task), 18);
+        assert_eq!(billable_amount_cpt(&task), 100);
 
-        task.max_cpt = 10;
-        assert!(manifest["billing"]["max_cpt_cap_applied"]
-            .as_bool()
-            .unwrap());
-        assert_eq!(billable_amount_cpt(&task), 10);
+        task.max_cpt = -1;
+        assert_eq!(billable_amount_cpt(&task), 0);
     }
 
     #[test]
@@ -11482,17 +11256,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_managed_complete_settles_billing_from_receipt() {
-        let (p, fixture) = match pool("task_repository_managed_receipt_billing").await {
+    async fn managed_task_completion_requires_a_persisted_quorum_certificate() {
+        let (p, fixture) = match pool("task_repository_managed_certificate_required").await {
             Some(parts) => parts,
             None => return,
         };
         let repo = TaskRepository::new(p);
         let unique = uuid::Uuid::new_v4().to_string();
-        let username = format!("managed-billing-user-{unique}");
-        let provider = format!("managed-billing-provider-{unique}");
-        let worker_id = format!("managed-billing-worker-{unique}");
-        let task_id = format!("managed-billing-task-{unique}");
+        let username = format!("managed-certificate-user-{unique}");
+        let provider = format!("managed-certificate-provider-{unique}");
+        let worker_id = format!("managed-certificate-worker-{unique}");
+        let task_id = format!("managed-certificate-task-{unique}");
 
         sqlx::query(
             "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
@@ -11511,89 +11285,32 @@ mod tests {
             .await
             .unwrap();
 
-        let completed = repo
-            .complete_for_worker_with_managed_receipt(
-                &task_id,
-                &worker_id,
-                Some("7"),
-                2_500,
-                2_049,
-                "{\"usage_units\":2500,\"output_bytes\":2049}",
-            )
-            .await
-            .unwrap();
+        let result = repo
+            .complete_for_worker(&task_id, &worker_id, Some("result-reference"), Some("done"))
+            .await;
+        let error = result.expect_err("managed completion must require a quorum certificate");
+        assert!(error
+            .to_string()
+            .contains("managed consensus task requires a quorum certificate"));
 
-        assert!(completed.billing_settled);
-        assert_eq!(completed.billed_amount, 25);
-        assert_eq!(completed.managed_executed_ops, 2_500);
-        assert_eq!(completed.managed_output_bytes, 2_049);
-        assert_eq!(
-            completed.managed_receipt_json.as_deref(),
-            Some("{\"usage_units\":2500,\"output_bytes\":2049}")
-        );
-
+        let stored = repo.find_by_task_id(&task_id).await.unwrap().unwrap();
+        assert_eq!(stored.status, TaskStatus::Assigned);
+        assert!(!stored.billing_settled);
+        assert_eq!(stored.billed_amount, 0);
         let balance: i64 = sqlx::query_scalar("SELECT balance FROM users WHERE username = $1")
             .bind(&username)
             .fetch_one(&repo.pool)
             .await
             .unwrap();
-        assert_eq!(balance, 75);
-
-        cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
-        fixture.cleanup().await.ok();
-    }
-
-    #[tokio::test]
-    async fn test_managed_receipt_billing_is_capped_by_max_cpt() {
-        let (p, fixture) = match pool("task_repository_managed_receipt_billing_cap").await {
-            Some(parts) => parts,
-            None => return,
-        };
-        let repo = TaskRepository::new(p);
-        let unique = uuid::Uuid::new_v4().to_string();
-        let username = format!("managed-cap-user-{unique}");
-        let provider = format!("managed-cap-provider-{unique}");
-        let worker_id = format!("managed-cap-worker-{unique}");
-        let task_id = format!("managed-cap-task-{unique}");
-
-        sqlx::query(
-            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
+        assert_eq!(balance, 100);
+        let settlement_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM managed_consensus_settlements WHERE task_id = $1",
         )
-        .bind(&username)
-        .execute(&repo.pool)
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
         .await
         .unwrap();
-        insert_worker(&repo.pool, &worker_id, &provider).await;
-
-        let mut task = make_task(&task_id, &username);
-        task.runtime = Some("managed-function-v0".into());
-        task.max_cpt = 5;
-        repo.create(&task).await.unwrap();
-        repo.assign_to_worker(&task_id, &worker_id, "10.0.0.16")
-            .await
-            .unwrap();
-
-        let completed = repo
-            .complete_for_worker_with_managed_receipt(
-                &task_id,
-                &worker_id,
-                Some("large"),
-                10_000,
-                8_192,
-                "{\"executed_ops\":10000,\"output_bytes\":8192}",
-            )
-            .await
-            .unwrap();
-
-        assert!(completed.billing_settled);
-        assert_eq!(completed.billed_amount, 5);
-
-        let balance: i64 = sqlx::query_scalar("SELECT balance FROM users WHERE username = $1")
-            .bind(&username)
-            .fetch_one(&repo.pool)
-            .await
-            .unwrap();
-        assert_eq!(balance, 95);
+        assert_eq!(settlement_count, 0);
 
         cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
         fixture.cleanup().await.ok();
@@ -11641,8 +11358,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_deterministic_complete_records_checksum_proof() {
-        let (p, fixture) = match pool("task_repository_deterministic_checksum_proof").await {
+    async fn test_deterministic_complete_records_checksum_attestation() {
+        let (p, fixture) = match pool("task_repository_deterministic_checksum_attestation").await {
             Some(parts) => parts,
             None => return,
         };
@@ -11679,16 +11396,16 @@ mod tests {
             .unwrap();
         assert_eq!(completed.status, TaskStatus::Completed);
 
-        let proof_count: i64 = sqlx::query_scalar(
+        let attestation_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM task_attestations
-             WHERE task_id = $1 AND worker_id = $2 AND verdict = 'checksum_proof'",
+             WHERE task_id = $1 AND worker_id = $2 AND verdict = 'checksum_attestation'",
         )
         .bind(&task_id)
         .bind(&worker_id)
         .fetch_one(&repo.pool)
         .await
         .unwrap();
-        assert_eq!(proof_count, 1);
+        assert_eq!(attestation_count, 1);
 
         cleanup_task_case(&repo.pool, &task_id, &username, Some(&worker_id)).await;
         fixture.cleanup().await.ok();
@@ -11754,14 +11471,15 @@ mod tests {
             .unwrap()
             .expect("pending task should create a consensus attempt");
         assert_eq!(assignments.len(), 3);
-        assert!(repo
-            .complete_for_worker_legacy_managed(
+        let legacy_completion = repo
+            .complete_for_worker(
                 &task.task_id,
                 &assignments[0].worker_id,
                 Some("legacy-bypass"),
+                Some("legacy-bypass"),
             )
-            .await
-            .is_err());
+            .await;
+        assert!(legacy_completion.is_err());
         assert!(repo
             .fail_for_worker(&task.task_id, &assignments[0].worker_id, "legacy-bypass")
             .await
@@ -11789,7 +11507,7 @@ mod tests {
             ..hivemind_proto::ManagedConsensusResult::default()
         };
         let result_json = result.encode_to_vec();
-        let result_digest = hivemind_managed_consensus::digest_hex(&result_json);
+        let result_digest = hivemind_proto::managed_consensus_result_digest(&result);
         let binding = managed_consensus_binding(&task, &attempt);
         let mut observations = Vec::new();
         for assignment in assignments.iter().take(2) {
@@ -12033,7 +11751,7 @@ mod tests {
             ..hivemind_proto::ManagedConsensusResult::default()
         };
         let result_json = result.encode_to_vec();
-        let result_digest = hivemind_managed_consensus::digest_hex(&result_json);
+        let result_digest = hivemind_proto::managed_consensus_result_digest(&result);
         let binding = crate::dispatcher::managed_consensus_binding(&task, &attempt);
         let mut observations = Vec::new();
         for assignment in assignments.iter().take(2) {
@@ -12174,7 +11892,7 @@ mod tests {
             ..hivemind_proto::ManagedConsensusResult::default()
         };
         let result_json = result.encode_to_vec();
-        let result_digest = hivemind_managed_consensus::digest_hex(&result_json);
+        let result_digest = hivemind_proto::managed_consensus_result_digest(&result);
         repo.record_managed_consensus_observation(
             &task.task_id,
             attempt.id,
