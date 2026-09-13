@@ -6,6 +6,12 @@ if (!(Test-Path -LiteralPath $scriptPath)) {
 }
 
 $scriptText = Get-Content -LiteralPath $scriptPath -Raw
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$composePath = Join-Path $repoRoot "docker-compose.yml"
+if (!(Test-Path -LiteralPath $composePath -PathType Leaf)) {
+    throw "release stack smoke consensus validation requires docker-compose.yml."
+}
+$composeText = Get-Content -LiteralPath $composePath -Raw
 
 foreach ($expected in @(
     "docker compose up -d --build",
@@ -43,13 +49,18 @@ foreach ($expected in @(
 }
 
 foreach ($expected in @(
-    "Test-ManagedProverLaunch",
-    "docker compose exec -T worker",
-    "managed proof generation failed"
+    "MANAGED_CONSENSUS_ROLLOUT_MODE",
+    "MANAGED_CONSENSUS_REPLICA_COUNT",
+    "MANAGED_CONSENSUS_QUORUM",
+    "MANAGED_CONSENSUS_ROLLOUT_MODE:-enforce"
 )) {
-    if (!$scriptText.Contains($expected)) {
-        throw "release stack smoke harness must verify the packaged managed prover can launch via '$expected'."
+    if (!$composeText.Contains($expected)) {
+        throw "release stack smoke prerequisites must keep consensus settlement enabled via '$expected'."
     }
+}
+
+if ($scriptText -match '(?i)managed.?prover|managed proof|zkvm|risc.?zero') {
+    throw "release stack smoke harness must not retain the removed proof settlement path."
 }
 
 if (!$scriptText.Contains("docker-compose-release.Tests.ps1")) {
