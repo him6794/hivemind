@@ -1,8 +1,14 @@
-# Hivemind 驗證進度
+# Hivemind 驗證進度（歷史紀錄，已取代）
 
-## ZK 函式計費證明（2026-08-07）
+> This is a superseded historical record. The former proof/prover workflow
+> described below was removed. Current managed execution is consensus-only; use
+> `docs/managed-consensus-state.md`, `docs/MANAGED_FUNCTION_RUNTIME.md`, and
+> `docs/ARCHITECTURE.md` for current behavior. The entries below are retained
+> for audit context only and are not current release evidence.
 
-- overall: `running`
+## 歷史：ZK 函式計費證明（2026-08-07；已取代）
+
+- overall: `superseded`
 - current step: 階段 3，定義 protobuf proof envelope 與 Nodepool 獨立 verifier
 - completed this round:
   - 確認現有系統沒有真正 ZKP，receipt 是未驗證 Worker claim
@@ -23,7 +29,7 @@
 
 ### 2026-08-09 恢復檢查
 
-- 從 `task_plan.md`、`findings.md`、`progress.md` 與 `docs/zk-metering-proof-state.md` 恢復階段 3。
+- 從 `task_plan.md`、`findings.md`、`progress.md` 與當時的 proof-era state note 恢復階段 3；該 note 現已移除。
 - `session-catchup.py` 的技能文件仍指向舊 `.claude` 路徑；已確認並改用實際 `.codex` 安裝路徑，恢復成功。
 - WSL 內沒有殘留 Cargo/rustc/generator 程序，也沒有 `/run/desktop/mnt/host/d` 或 `/root/.cargo` 暫時 bind mount；可安全建立本輪精確 mount。
 - 未停止或清理使用者正在測試的 Docker stack。
@@ -44,7 +50,7 @@
 - verifier依賴精簡後再次執行 WSL methods rebuild，19秒GREEN；guest ID仍為 `[3606400121, 4250889949, 2277454476, 3430793801, 2111044864, 2713379816, 851522248, 2751351423]`，所有暫時 mount與Cargo/rustc程序均已清理。
 - verifier資源稽核確認近似有效的截短／翻轉／補零 seal約17.6 ms，未發現比合法 proof更昂貴的失敗路徑；2 MiB receipt與131,072-word seal caps彼此相容。
 - Review要求的 crypto-path negative test已補齊：合法大小Composite seal bit flip通過shape/journal gates後回 `InvalidProof`；完整 verifier suite為25 passed。
-- 新增tracked host regression `tests::generated_guest_id_matches_nodepool_trust_pin`；先取得常數被feature gate隱藏的預期RED，再將純trust pin移出feature gate，current-source WSL rebuild後1 passed。ELF/input SHA-256與cleanup證據已寫入 `docs/zk-managed-proof-build-attestation.md`。
+- 新增tracked host regression `tests::generated_guest_id_matches_nodepool_trust_pin`；先取得常數被feature gate隱藏的預期RED，再將純trust pin移出feature gate，current-source WSL rebuild後1 passed。ELF/input SHA-256與cleanup證據當時寫入 proof-era build note；該 note 現已移除。
 - verifier post-change re-review：CLEAR／APPROVE，原 guest pin與crypto-gate blockers均解除，0 remaining blockers。
 - claim binding TDD：API-missing RED 與 10 個 mismatch RED 均如預期失敗；GREEN 後 default 15 passed、all-feature 37 passed、clippy/fmt passed，read-only review CLEAR；本機 commit `eb9894a feat(proof): bind verified claims to tasks`。
 - scheduler verified-claim settlement RED：因 `verified_managed_completion`／`ManagedCompletionError` 尚不存在而 E0425/E0433；最小實作後 12 passed，已覆蓋重播、source/input/output/budget、protocol/runtime/cost-model mismatch、missing source/nonpositive budget、null input 與 Worker legacy scalar/receipt 不可信。
@@ -135,7 +141,7 @@ Docker validation resources 已移除；native PostgreSQL 已停止。安全政�
 
 ## 2026-08-09：ZK managed-function 實作續作
 
-- 依 long-task recovery 重新讀取 `task_plan.md`、`findings.md`、`progress.md` 與 `docs/zk-metering-proof-state.md`，並核對 git 工作樹及 active goal；狀態維持 `running`。
+- 依 long-task recovery 重新讀取 `task_plan.md`、`findings.md`、`progress.md` 與當時的 proof-era state note，並核對 git 工作樹及 active goal；該 note 現已移除。
 - Admission caps 首輪 read-only review 為 BLOCK：四個 Node Manager direct task-ID RPC 漏 admission gate，另有一項 DB fixture 不可用時 silent-return 的測試證據缺口；已寫入 durable state，等待 owner 修正後重審。
 - Prover sidecar owner 已確認 protocol RED→GREEN；Windows host compile 被既有 RISC Zero C++17/C++20 與 build-script linker 問題阻擋，已要求不重跑、不改 registry/toolchain，繼續輕量檢查。
 - 啟動 read-only `worker_lifecycle_map`，盤點 Worker RPC deadline、message caps、active-task cleanup、`spawn_blocking` cancellation 與 proof response test seams。
@@ -293,7 +299,7 @@ bounded renderer 的 `managed-function-runtime/src/lib.rs`、`zkvm` 的 `Cargo.l
 - fixture 形狀未變：journal 656、單一 Composite segment（index 0、poseidon2）、無 assumption、
   seal 63,914 words。僅位元組數變動：envelope 664,026 → 664,258，receipt JSON
   661,720 → 661,953，兩者都遠低於 verifier 的 pre-crypto 上限。budget regression 常數已更新。
-- 證據寫入 `docs/zk-managed-proof-build-attestation.md`。
+- 證據當時寫入 proof-era build note；該 note 現已移除。
 
 ### Prover sidecar 打包
 
@@ -314,9 +320,9 @@ bounded renderer 的 `managed-function-runtime/src/lib.rs`、`zkvm` 的 `Cargo.l
 - zkVM prover workspace 的兩個無法升級的 advisory（`rsa` RUSTSEC-2023-0071、
   `tracing-subscriber 0.2.25` RUSTSEC-2025-0055）改為可稽核的接受政策：
   `zkvm/managed-proof/.cargo/audit.toml` 逐項記錄，可達性分析、依賴路徑與重新檢視觸發條件
-  寫在 `docs/zk-managed-proof-dependency-audit.md`。加上政策後該 workspace `cargo audit` exit 0。
-- `docs/zk-managed-proof-threat-coverage.md` 將每一種惡意 Worker 手法對應到具體測試；
-  文件引用的 54 個測試名稱已逐一驗證存在於原始碼。
+  當時寫在 proof-era dependency note；該 note 現已移除。加上政策後該 workspace `cargo audit` exit 0。
+- proof-era 威脅覆蓋盤點曾將每一種惡意 Worker 手法對應到具體測試；當時引用的
+  54 個測試名稱已逐一驗證存在於原始碼，原獨立文件現已移除。
 
 ### 本輪測試結果
 
@@ -361,7 +367,7 @@ bounded renderer 的 `managed-function-runtime/src/lib.rs`、`zkvm` 的 `Cargo.l
 
 該 binary 是在容器內以自帶 rzup guest toolchain 建置，而 pin 來自 WSL native 路徑的
 快取 toolchain。「建置自同一份原始碼」**不是**相符的證據——此處先前的推論已被實測推翻，
-`docs/zk-managed-proof-build-attestation.md` 已更正。
+proof-era build note 已更正；該 note 現已移除。
 
 信任模型完全站得住：兩次嘗試都 audit 為 `event=rejected`、
 `reason="Managed proof verification failed"`、`rollout_mode=enforce`；任務最終 `FAILED`、

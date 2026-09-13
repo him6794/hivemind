@@ -1,6 +1,12 @@
-# Full Test And Review Findings
+# Full Test And Review Findings（歷史紀錄，已取代）
 
-## Worker prover／RPC／lifecycle seam map（2026-08-09）
+> This is a superseded historical record. The former proof/prover implementation
+> described in these findings was removed. Current managed execution is
+> consensus-only; use `docs/managed-consensus-state.md`,
+> `docs/MANAGED_FUNCTION_RUNTIME.md`, and `docs/ARCHITECTURE.md` for current
+> behavior. The findings below are retained for audit context only.
+
+## Worker prover／RPC／lifecycle seam map（2026-08-09；歷史）
 
 - Scheduler `task-scheduler/src/dispatcher.rs::execute_on_worker` 目前直接 `WorkerNodeServiceClient::connect(...).await` 再呼叫 `execute_task`，沒有 explicit connect timeout、約 570 秒 proving 所需的 RPC deadline，亦沒有 client encode/decode caps。
 - Worker server startup 在 `hivemind-bin/src/lib.rs` 未對 Worker service 配置 message-size caps；`worker-executor/src/grpc_server.rs` 所有 `ExecuteTaskResponse` branch 仍固定 `managed_proof: None`。

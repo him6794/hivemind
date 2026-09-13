@@ -1,10 +1,18 @@
-# Task State: Managed Runtime 演進
+# Task State: Managed Runtime 演進（歷史紀錄，已取代）
 
-## Goal
+> This is a superseded historical record. The former proof/prover implementation
+> described here was removed. Current managed execution is consensus-only and is
+> documented in `docs/managed-consensus-state.md`,
+> `docs/MANAGED_FUNCTION_RUNTIME.md`, and `docs/ARCHITECTURE.md`.
+>
+> The goals, status, test results, and acceptance criteria below are retained for
+> audit context only. Do not use them as current implementation or release evidence.
+
+## Historical goal (superseded)
 
 完整實作 [`MANAGED_RUNTIME_EVOLUTION_PLAN.md`](MANAGED_RUNTIME_EVOLUTION_PLAN.md) 的 M0–M5：保留 `managed-function-v0` 的 deterministic、bounded、proof-friendly 契約，同時交付隔離的 `general-compute-v1` runtime、科學運算 ABI／backend、Worker 與 Nodepool 接線、GPU beta，以及可用性發布 gates。
 
-## Success criteria
+## Historical success criteria (superseded)
 
 - 每個可獨立驗收的小單元都先有能正確失敗的測試，再做最小實作、相容性驗證與本地 Conventional Commit；不 push。
 - M0 凍結 v1 request/result、artifact manifest、capability matrix 與 threat model，schema/property tests 全綠且不破壞 v0 proof vectors。
@@ -15,9 +23,9 @@
 - M5 完成文件、SDK 範例、benchmark dashboard、support matrix、rollback，且 reproducibility/security/performance/release image digest 全部簽核。
 - 每個 milestone 都保存測試命令與結果、fixture/hash、benchmark 原始資料、已知限制、rollback 與 owner；最終逐要求完成 completion audit。
 
-## Status
+## Historical status (superseded)
 
-running
+superseded
 
 ### 2026-08-14 optimized backend registration checkpoint
 

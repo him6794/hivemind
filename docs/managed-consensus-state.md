@@ -4,8 +4,8 @@
 
 Managed DSL execution settles through Nodepool-coordinated replicated
 execution by default. Consensus is an agreement signal between authenticated
-Workers; it is not a zero-knowledge proof and does not establish that a
-result is semantically correct or that reported usage actually occurred.
+Workers; it does not independently establish that a result is semantically
+correct or that reported usage actually occurred.
 
 ## Configuration
 
@@ -46,7 +46,7 @@ transaction. The round, replica assignments, endpoint/provider snapshots,
 observations, worker-slot reservations, certificate, and settlement record are
 persisted independently. No quorum, stale response, conflicting result, or
 single Worker success may complete a consensus task. The certificate is
-persisted as Nodepool evidence; raw proof envelopes are not stored or exposed.
+persisted as Nodepool evidence; raw replica payloads are not stored or exposed.
 Outstanding replicas are explicitly fenced and receive an attempt-bound stop
 request after a quorum, timeout, or cancellation. If a stop cannot be
 confirmed, Nodepool retains the Worker-slot reservation in a durable
@@ -57,7 +57,7 @@ Consensus does not authorize variable usage billing. Until a separate usage
 attestation is designed, settlement remains the Nodepool-owned reservation,
 with the provider share split deterministically across the matching Workers.
 Worker usage is diagnostic only. A consensus certificate must never be
-described as cryptographic execution proof.
+described as independent correctness validation.
 
 ## Failure model
 
@@ -80,6 +80,6 @@ but cannot split matching deterministic outputs into separate quorum groups.
 Typed consensus failures retain execution/round/replica identity so Nodepool can
 record a failed observation instead of accepting an incomplete response.
 
-The managed proof path has been removed. New
-consensus tasks must not fall back to legacy completion, proofless single-Worker
-settlement, or `observe`/`disabled` as success evidence.
+Consensus is the only managed settlement path. New consensus tasks must not
+fall back to legacy completion, single-Worker settlement, or `observe`/`disabled`
+as success evidence.

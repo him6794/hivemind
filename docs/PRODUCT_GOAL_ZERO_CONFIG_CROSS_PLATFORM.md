@@ -24,7 +24,7 @@ Hivemind 的最終使用體驗必須是「下載、登入、放著就能用」�
 - 取得必要的網路/連線設定。
 - 向 Nodepool 註冊 Worker 與 authenticated owner。
 - 完成 capability/readiness handshake。
-- 自動取得可用的 runtime、Worker sidecar 與平台政策。
+- 自動取得可用的 runtime 與平台政策。
 - 在背景接收相容任務、執行 DSL、回報結果。
 
 Worker 使用者不應該手動填寫或理解：
@@ -32,11 +32,9 @@ Worker 使用者不應該手動填寫或理解：
 ```text
 Nodepool local executable path
 Headscale local executable path
-Worker sidecar local executable path
 Worker ID
 owner
 Worker execution certificate path
-proof token
 trust list
 lease
 billing
@@ -55,8 +53,8 @@ settlement
 Master 使用者不需要：
 
 - 選擇某一台 Worker。
-- 設定 Headscale、Nodepool 或 Worker sidecar。
-- 管理 proof token、lease、retry 或 receipt。
+- 設定 Headscale 或 Nodepool。
+- 管理 lease、retry 或結果驗證。
 - 計算 usage、billing 或 settlement。
 - 知道任務實際在哪一台主機執行。
 
@@ -76,9 +74,9 @@ Master 使用者不需要：
   -> result / log retrieval
 ```
 
-Legacy proof-backed attempts additionally pass through the local managed-prover
-sidecar and Nodepool receipt verifier. Consensus certificates are agreement
-evidence, not zkVM correctness proofs or trusted usage attestation.
+Consensus certificates are agreement evidence between authenticated Workers,
+not independent correctness validation or trusted usage attestation. Nodepool
+settles only after the configured quorum is reached.
 
 ## 二、公開網路模型
 
@@ -88,7 +86,7 @@ evidence, not zkVM correctness proofs or trusted usage attestation.
 - Worker 透過 enrollment 自動註冊 Nodepool。
 - Nodepool 綁定 Worker identity 與 authenticated owner。
 - Nodepool 動態檢查 capability、liveness、quota、reputation、資源與政策。
-- 不應要求 operator 手動將每一個 Worker 加入 Worker sidecar trust list。
+- 不應要求 operator 手動將每一個 Worker 加入額外的本機 trust list。
 - 不應要求使用者編輯 `HIVEMIND_MANAGED_DSL_TRUSTED_WORKER_CAPABILITIES`。
 - 不符合任務要求的 Worker 不被派發該任務，但可以正常加入網路。
 - quota、rate limit、reputation、stake/bond、失敗懲罰等是平台政策，
@@ -99,10 +97,9 @@ Consensus-enabled managed tasks 由 Nodepool 派送至 distinct Workers；token 
 round、replica、attempt、request digest 與完整 execution identity。Nodepool 只在
 canonical result 達到 quorum 後完成 settlement。
 
-Legacy managed proof 不走獨立網路服務：proof-capable Worker 直接呼叫本機 sidecar，
-Nodepool 收到 envelope 後獨立驗證 proof scheme、guest image、journal、receipt 與
-claim。本機 sidecar 不保存 Worker allowlist、遠端 queue、JWT 或 durable proof job
-state；缺少 sidecar 或 sidecar 失敗時，legacy proof execution fail closed。
+Consensus-enabled managed tasks use only the Nodepool-coordinated replica
+path. A task is settled only after matching canonical results reach the configured
+quorum; if the quorum cannot be formed, the task remains unsettled or fails.
 
 ## 三、跨平台目標
 
@@ -127,7 +124,7 @@ Android ARM64
 - canonical result serialization 與 distinct-replica observation protocol。
 - cancellation、timeout、retry、idempotency 與 stale-attempt fencing。
 - digest、budget、semantics 與 settlement reservation 驗證。
-- Legacy receipt、ExecutionClaim 與 Worker-local sidecar protocol。
+- result、observation、quorum certificate 與 Worker identity protocol。
 - usage、billing、settlement 的資料模型。
 
 核心不得依賴：
@@ -139,7 +136,7 @@ Docker
 WSL
 shell / arbitrary host command
 平台專用 sandbox 語義
-某個 OS 專用的 RISC Zero backend
+某個 OS 專用的 execution backend
 ```
 
 managed DSL 必須是封閉 runtime，不能透過 DSL 呼叫任意 host process、
@@ -156,11 +153,11 @@ managed DSL 必須是封閉 runtime，不能透過 DSL 呼叫任意 host process
 - 通知與 UI。
 - 安裝、啟動與權限提示。
 
-這些 adapter 不能改變 DSL、任務、consensus/proof 或 settlement 語義。
+這些 adapter 不能改變 DSL、任務、consensus 或 settlement 語義。
 
 Android 特別需要遵守 Android 的背景執行與電源限制，可能需要使用者
 第一次允許 foreground service 或相關背景權限；這是一次性的 OS UX，
-不能完全消除，但不能讓 Android 使用者手動配置平台網路與 proof 流程。
+不能完全消除，但不能讓 Android 使用者手動配置平台網路與 consensus 流程。
 
 ## 四、建議的跨平台連線架構
 
@@ -208,11 +205,11 @@ Headscale 可以保留為選配：
 - `managed-function-v0` closed DSL runtime 已存在。
 - Worker 不執行任意 host command 的產品邊界已定義。
 - Master、Nodepool、Worker 的主要任務流程已存在。
-- Nodepool 是 identity、排程、proof verification、usage、billing、
+- Nodepool 是 identity、排程、consensus evaluation、usage、billing、
   settlement 的權威。
-- managed-prover protocol、Worker local sidecar 與 Nodepool verifier 的主要 Rust 結構
-  已存在；proof production 僅走 Worker local sidecar 與 Nodepool verifier。
-- Native Windows Worker 不應攜帶 Linux prover 的方向已確立。
+- consensus round、replica observation 與 quorum certificate 的 Rust 結構已存在，
+  managed task 只走 Nodepool 協調的多 Worker 路徑。
+- Native Windows Worker 執行 closed DSL 不需要 Linux service 或額外 runtime。
 - `docs/ARCHITECTURE.md` 已記錄 Orange Pi 邊界、公開 enrollment 與
   zero-configuration 使用目標。
 
@@ -248,9 +245,10 @@ Headscale 可以保留為選配：
      capability/readiness reports without a Worker-ID capability-map entry.
    - Dynamic observations persist admission mode, canonical capabilities,
      digest, readiness, reason and observation time; stale or tampered reports
-     are excluded from scheduling and proof request binding.
-   - Worker sidecar public mode validates Nodepool's per-attempt execution authorization plus its
-     own bounded runtime/queue/image policy, without a permanent Worker-ID map.
+     are excluded from scheduling and consensus request binding.
+   - Public Worker mode validates Nodepool's per-attempt execution authorization
+     plus its own bounded runtime/queue/image policy, without a permanent
+     Worker-ID map.
    - `HIVEMIND_MANAGED_DSL_TRUSTED_WORKER_CAPABILITIES` remains available only
      for explicitly selected private static deployments.
 
@@ -274,34 +272,25 @@ Headscale 可以保留為選配：
    - Android 需要獨立的 app/foreground-service adapter;Android FFI 與
      Linux/macOS packaging 定義尚未建立。
 
-6. **Local managed proof 完整鏈路尚未完成 live 驗證**
-   - **Task #10 已交付 harness（外部證據仍 blocked）：**
-     `scripts/managed-proof-live-e2e.ps1` 是 redacted、enforce-mode 的
-     protected E2E harness,依序驗證 Website login、enrollment credential
-     redemption 與 server-assigned Worker identity、managed 任務提交、終端
-     狀態、`billing_settled`、verified usage、result/log retrieval,並以
-     fail-closed gate 拒絕任何未結算或未驗證的「成功」。evidence 只含
-     identifiers、states、timings、policy decisions、verification outcomes
-     與 settlement 金額;password、JWT、enrollment credential、proof token、
-     source/input 與 raw proof envelope 由建構排除,redaction guard 會在
-     寫入前攔截。契約測試鎖定 phase 順序、fail-closed gates、redaction,
-     並禁止 docker compose/localhost/observe-mode 等本機替代品。
-   - **Blocked:** 實際執行需要真實外部 host（Website API、Nodepool
-     transport、Worker sidecar）與足夠餘額的帳號。本環境沒有這些資源,依計畫
-     不得以 Docker/WSL/VM/SSH/socat/direct-host reachability 取代,也不得
-     從本機測試宣稱 live proof-to-settlement 已驗收。對應命令與輸出必須在
-     protected/manual 環境產生後記錄於 validation state 文件。
+6. **Local managed consensus 完整鏈路尚未完成 live 驗證**
+   - **已完成：** consensus policy、replica dispatch、canonical result
+     comparison、strict-majority quorum certificate、Nodepool settlement
+     guard 與資料庫持久化都有 focused tests。沒有足夠 distinct Workers 或
+     無法形成 quorum 時，任務保持未結算或失敗，不會改走單一 Worker。
+   - **仍 blocked：** 真正三個 distinct eligible Workers 的外部多節點執行、
+     clean-host Worker enrollment、瀏覽器流程與完整結果/結算證據尚未在同一
+     release run 中完成。Docker 或單進程測試只能驗證契約，不能冒充 live
+     多節點證據；完成後應將命令、狀態與 settlement evidence 記錄在 validation
+     state 文件。
 
-7. **Worker sidecar 部署仍有手動 operator 工作**
-   - Worker image 只在 operator 已完成 equality gate 與 attestation 後才可帶入
-     pinned Linux x86_64 sidecar。
-   - `scripts/build-managed-prover.sh` 與 `scripts/verify-staged-prover.sh` 是
-     保留的 build/verify gates；fresh checkout 缺少可信 staged binary 時，
-     managed task 必須 fail closed。
-   - Native Windows package 不攜帶 Linux sidecar，也不再提供遠端 proving fallback；
-     proof-capable Linux Worker 才能產生 managed proof。
-   - 目前 guest-image equality gate 仍 blocked，不得宣稱 trusted prover 或
-     managed settlement 已驗收。
+7. **Worker/Nodepool 的跨平台自動化仍需完成 release 驗收**
+   - Windows Worker 的登入、enrollment、registration、session 與 closed DSL
+     執行路徑已提供 zero-config package；一般使用者不需要填 endpoint、port、
+     Worker ID 或其他 runtime 設定。
+   - 仍需在 clean Windows host 驗證雙擊啟動、登入後自動 enrollment、持續連線、
+     任務接收與停止/重試行為；缺少必要 provider 或 quorum 時必須明確失敗。
+   - Linux-only OCI services 只在 Nodepool/control plane 或本地 Docker 驗證，
+     不得成為 Windows Worker 的隱性依賴。
 
 8. **目前 dist package 不能當成正式 release**
    - 舊 package 可能有固定 Worker ID 或缺少設定。
@@ -313,10 +302,9 @@ Headscale 可以保留為選配：
    - Headscale 或 outbound secure channel。
    - Worker registration。
    - quote、排程與 DSL task。
-   - local managed proof。
-   - Nodepool 獨立 receipt verification。
+   - distinct Worker replica execution 與 quorum certificate。
    - result/log retrieval。
-   - verified usage、billing、settlement、audit evidence。
+   - Nodepool-owned usage、billing、settlement、audit evidence。
 
 ## 六、下一階段實作順序
 
@@ -325,7 +313,7 @@ Headscale 可以保留為選配：
 ### Phase 1：固定平台無關核心邊界
 
 - 抽出或確認純 Rust Worker core。
-- 將 DSL、task protocol、auth、proof client、state、retry 與 idempotency
+- 將 DSL、task protocol、auth、consensus client、state、retry 與 idempotency
   保持在 core。
 - 建立明確的 OS adapter interface。
 - 確認 core 不引用 Windows HCS、Linux cgroup、Docker、WSL、shell 或
@@ -336,19 +324,20 @@ Headscale 可以保留為選配：
 - Website API 提供短期、角色限定 enrollment credential。
 - Client 登入後自動取得 Worker identity。
 - 自動向 Nodepool 註冊 owner、capability 與 readiness。
-- 自動取得必要的 Worker sidecar/transport configuration。
+- 自動取得必要的 runtime、consensus 與 transport configuration。
 - 不再要求一般使用者填 local executable path、Worker ID、Worker execution path 或 trust list。
 - 私密資料只放 secure storage，不能進 log、package 或一般 state。
 
 ### Phase 3：移除公開網路的 static trust list 依賴
 
-- Nodepool 成為 Worker admission、task execution authorization、proof verification
-  與 settlement 的唯一來源。
-- Worker sidecar 僅執行本機 bounded JSON contract，不接受網路 proof grant。
+- Nodepool 成為 Worker admission、task execution authorization、consensus
+  evaluation 與 settlement 的唯一來源。
+- Worker 只執行本機 bounded runtime contract，不接受網路傳入的結算決策。
 - Worker capability/readiness policy 仍由 Nodepool 於派送前驗證。
 - `HIVEMIND_MANAGED_DSL_TRUSTED_WORKER_CAPABILITIES` 降級為 private
   deployment compatibility mode，不能阻擋公開 Worker enrollment。
-- 保留所有 server-side capability、lease、identity 與 proof binding 檢查。
+- 保留所有 server-side capability、lease、identity 與 consensus request binding
+  檢查。
 
 ### Phase 4：建立跨平台 outbound transport
 
@@ -367,15 +356,16 @@ Headscale 可以保留為選配：
 - Android ARM64：app + foreground service adapter 與相同 Worker core。
 - 平台差異只存在於 adapter、packaging、lifecycle、storage 與 UI。
 
-### Phase 6：完成 proof、settlement 與正式 E2E
+### Phase 6：完成 consensus、settlement 與正式 E2E
 
-- proof-capable Worker 使用 pinned Linux x86_64 RISC Zero sidecar。
-- Worker 只送出 bounded canonical local request。
-- Nodepool 驗證 Worker execution identity、proof envelope 與 receipt。
-- Worker sidecar 不取得 Nodepool database/private key，也不決定 settlement。
-- Nodepool 獨立驗證 receipt、ExecutionClaim、digest、budget、semantics。
-- 完成 duplicate、retry、cancel、timeout、stale lease、wrong image、
-  forged receipt、sidecar outage 與 settlement idempotency 測試。
+- Nodepool 建立 durable consensus round，將相同的 deterministic task
+  派送給足夠數量的 distinct Workers。
+- Worker 只送出 bounded canonical result 與 attempt-bound identity。
+- Nodepool 驗證 task、attempt、runtime、image、result digest 與 policy binding，
+  再以 strict-majority quorum 建立 certificate。
+- Worker 不取得 Nodepool database/private key，也不決定 settlement。
+- 完成 duplicate、retry、cancel、timeout、stale lease、wrong result、
+  Worker outage 與 settlement idempotency 測試。
 - 用 fresh install client 驗證「只登入即可工作」的完整流程。
 
 ## 七、最終驗收標準
@@ -397,8 +387,8 @@ Headscale 可以保留為選配：
 - 顯示為 Nodepool 可用 Worker。
 - 接收相容任務。
 - 執行封閉 DSL。
-- 必要時取得 local managed proof。
-- 回報結果。
+- 在被派送時執行 consensus replica。
+- 回報 canonical result 與執行狀態。
 
 不得要求手動修改 config、local executable path、Worker ID、Worker execution path 或 trust list。
 
@@ -412,32 +402,32 @@ Headscale 可以保留為選配：
 確保帳戶餘額足夠
 ```
 
-平台必須自動完成選 Worker、排程、執行、proof、驗證、計費與結算，並將
+平台必須自動完成選 Worker、排程、replica 執行、quorum、計費與結算，並將
 結果與必要的 logs 回傳給使用者。
 
 ### 平台驗收
 
 - 任何通過 Website API 登入的使用者都能申請加入。
 - 沒有人工逐台 Worker allowlist 才能加入的要求。
-- Worker 與 Worker sidecar 都不能決定 settlement。
-- Nodepool 是唯一 proof、usage、billing、settlement authority。
+- Worker 與 client 都不能決定 settlement。
+- Nodepool 是唯一 consensus、usage、billing、settlement authority。
 - Windows、Linux、macOS、Android 使用相同的 core protocol 與 DSL 語義。
 - 任何 OS-specific API 只出現在薄型 client adapter，不進入核心執行語義。
 - Orange Pi 仍只執行 Nodepool、Website API、Headscale、PostgreSQL、Redis。
-- 沒有 Linux prover、Nodepool private key、Headscale API key 或 reusable
-  proof token 被打包進一般 client。
+- Nodepool private key、Headscale API key 或 reusable credential 不得被打包
+  進一般 client。
 
 ## 八、不可違反的工作區與安全限制
 
 - 不要 reset、clean 或覆蓋其他未相關的 dirty worktree 變更。
 - 不要刪除既有 legacy authorization data；本次變更不會對已部署資料庫執行 destructive drop。
 - 沒有明確要求時不要 commit 或 push。
-- 不要把 `HEADSCALE_API_KEY`、Nodepool private key、JWT、password、Worker execution
-  private key 或 proof payload 寫入 package、log 或文件。
+- 不要把 `HEADSCALE_API_KEY`、Nodepool private key、JWT、password 或 Worker execution
+  private key 寫入 package、log 或文件。
 - 不要把 Worker 或 Master 部署到 Orange Pi。
 - 不要用 WSL、VM、Docker、SSH、socat 或 direct-host reachability 取代
-  正式外部 Headscale/transport/proof 證據。
-- 不要用 `MANAGED_PROOF_ROLLOUT_MODE=off` 或 `observe` 當 production
-  sidecar 缺失的 workaround。
-- 不要把本機 `dist/*`、ignored credential、staged prover 或 archive 當成
-  live deployment evidence。
+  正式外部 Headscale/transport/consensus 證據。
+- 不要把 `observe` 或 `disabled` 當成 production settlement 的 workaround；
+  consensus 無法執行時必須保持未結算或失敗。
+- 不要把本機 `dist/*`、ignored credential 或 archive 當成 live deployment
+  evidence。

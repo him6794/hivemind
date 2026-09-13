@@ -1,12 +1,21 @@
-# Hivemind 工作計畫
+# Hivemind 工作計畫（歷史紀錄，已取代）
 
-## 目前目標（2026-08-12）
+> This is a superseded historical record. The former proof/ZK implementation and
+> rollout plan described here were removed. Current managed execution is
+> consensus-only; use `docs/managed-consensus-state.md`,
+> `docs/MANAGED_FUNCTION_RUNTIME.md`, and `docs/ARCHITECTURE.md` as the current
+> source of truth.
+>
+> The goals, status, test results, and work items below are retained for audit
+> context only. Do not use them as current implementation or release evidence.
+
+## 歷史目標（已取代；2026-08-12）
 
 先以可重現的引用／建置／測試證據盤點並移除未使用的程式碼與檔案，再產出一份可執行的底層 runtime 路線圖，使 `managed-function-v0` 具備明確的圖靈完備語義與實用的科學運算能力，同時維持 Nodepool 信任邊界、決定性、資源計量與 ZK 證明鏈。
 
-## 目前階段
+## 歷史階段（已結束）
 
-階段 E：完成稽核（running）。清理證據、runtime 路線圖、README 契約、executor 全測試、Hivemind Windows GNU 全 workspace 測試、三個 frontend build 與 48 個 frontend tests 已完成；目前正在恢復兩次中斷留下的 release-test 子程序，並補齊 serial release gates、文件現況同步與最終 diff audit。既有大量未提交 general-compute／frontend 變更仍視為使用者／先前工作的資產，不覆寫、不還原。
+階段 E：完成稽核（superseded historical phase）。清理證據、runtime 路線圖、README 契約、executor 全測試、Hivemind Windows GNU 全 workspace 測試、三個 frontend build 與 48 個 frontend tests 已完成；目前正在恢復兩次中斷留下的 release-test 子程序，並補齊 serial release gates、文件現況同步與最終 diff audit。既有大量未提交 general-compute／frontend 變更仍視為使用者／先前工作的資產，不覆寫、不還原。
 
 ### 恢復狀態（2026-08-14）
 
@@ -249,7 +258,7 @@
 ### 階段 5：完整驗證與發布
 
 - [x] runtime、Worker、scheduler、node-manager focused/full tests（首次接上真實測試資料庫執行，抓出兩個先前被靜默跳過的失敗）
-- [x] 惡意 Worker 測試：偽造計費、輸出、task id、版本、seal — 覆蓋盤點與逐項對照見 `docs/zk-managed-proof-threat-coverage.md`（54 個具名測試已驗證存在）
+- [x] 惡意 Worker 測試：偽造計費、輸出、task id、版本、seal — proof-era 威脅覆蓋盤點當時已完成；原獨立文件已隨該實作移除（54 個具名測試已驗證存在）
 - [x] Docker 多節點完整流程與瀏覽器回歸
 - [x] cargo fmt、clippy、audit、依賴授權與可重現 guest build
 - [ ] 文件與本機 Conventional Commits 完整；不 push

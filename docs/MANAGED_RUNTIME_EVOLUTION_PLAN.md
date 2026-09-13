@@ -2,14 +2,14 @@
 
 ## 0. 先講結論
 
-目前的 `managed-function-runtime` 是刻意設計成 deterministic、bounded、可計量的 JSON DSL。它適合做可驗證的函式計費與 proof settlement，但不能誠實宣稱是「部署時圖靈完備」或「完整科學運算環境」：目前的值域只有有限的整數、布林、字串、list、dict、null，且每次執行有固定的 operation、loop、call-depth、value、output 與 materialization 上限。
+目前的 `managed-function-runtime` 是刻意設計成 deterministic、bounded、可計量的 JSON DSL。它適合做受 Nodepool consensus 保護的函式結算，但不能誠實宣稱是「部署時圖靈完備」或「完整科學運算環境」：目前的值域只有有限的整數、布林、字串、list、dict、null，且每次執行有固定的 operation、loop、call-depth、value、output 與 materialization 上限。
 
 本計畫不把這兩個互相衝突的目標硬塞進同一個 v0 執行器，而是採雙 runtime 契約：
 
 | Runtime | 目的 | 宣稱 | 結算方式 |
 |---|---|---|---|
-| `managed-function-v0` | 小型 deterministic 函式、可 proof／meter 的結算 | 有限 DSL；不宣稱圖靈完備 | 保留現有 proof settlement |
-| `general-compute-v1alpha1` | 一般程式與科學工作負載的 pre-release 契約 | 採 pinned CPython 的一般程式語義；單次執行仍受資源配額限制 | 僅允許 allowlisted beta；usage 先視為 claim，不冒充 v0 proof |
+| `managed-function-v0` | 小型 deterministic 函式、可計量的結算 | 有限 DSL；不宣稱圖靈完備 | Nodepool 以多 Worker consensus certificate 結算 |
+| `general-compute-v1alpha1` | 一般程式與科學工作負載的 pre-release 契約 | 採 pinned CPython 的一般程式語義；單次執行仍受資源配額限制 | 僅允許 allowlisted beta；usage 先視為 claim，不直接驅動結算 |
 | `general-compute-v1` | 通過 M0–M5 後的穩定契約 | 只宣稱 support matrix 與 gates 已證明的 CPU／GPU 能力 | 依 Nodepool 驗證出的 evidence level 結算 |
 
 「圖靈完備」在這裡是語言的抽象語義宣稱，不是允許生產任務無限消耗 CPU 或記憶體。任何實際平台都必須有 CPU、記憶體、wall-time、取消、儲存與輸出上限；非終止程式應被可預期地取消，而不是拖垮 Worker。
@@ -18,7 +18,7 @@
 
 ### 目標
 
-- 保持 v0 的 deterministic、bounded、可重播與 proof 相容性。
+- 保持 v0 的 deterministic、bounded、可重播與 consensus result contract 相容性。
 - 增加隔離的 v1 general-compute backend，能執行任意迴圈、遞迴、可成長 heap 與任意精度整數的程式。
 - 提供可實際使用的 CPU 科學運算：浮點、複數、ndarray、線性代數、FFT、統計、ODE、Monte Carlo 與 sparse matrix/tensor。
 - 讓大型輸入／輸出走 binary artifact、chunked transfer、checksum 與 content-addressed storage，不把 ndarray 塞進 JSON 或 gRPC 單一訊息。
@@ -32,7 +32,7 @@
 - 允許任意 `pip install`、任意網路、任意 host filesystem 或任意 native library 載入。
 - 為了科學運算移除 sandbox、取消、output cap 或 hash pinning。
 - 在未定義 NaN/Inf、dtype、stride、byte order、seed 與誤差容忍度前，宣稱「支援 NumPy/SciPy」。
-- 讓 v1 的巨大執行軌跡強制通過目前約 570–580 秒的單次 RISC Zero proof path。
+- 讓 v1 的巨大執行軌跡依賴單一 Worker 或單一執行結果作為結算依據。
 
 ## 2. 目標架構
 
@@ -40,7 +40,7 @@
 
 先新增 `general-compute-v1alpha1`，不改變 `managed-function-v0` 的語義。只有完成 M0–M5 的 schema、tensor ABI、sandbox、verifiability、migration 與 release gates 才能升為 `general-compute-v1`。目前程式碼中過早使用的 `general-compute-v1` 常數必須在 M0 改為 alpha id，避免未凍結契約被誤認為穩定 API。
 
-`managed-function-v0` 的 runtime id、cost-model id 與 RISC Zero guest image 是同一個 proof binding；任何語義或計量改動都必須產生新 runtime／cost-model id、guest image、fixture、attestation 與 rollout，不能在 v0 原地擴充。若未來需要 richer deterministic DSL，另開 `managed-function-v1`，不要與完整 Python scientific backend 混為一談。
+`managed-function-v0` 的 runtime id、cost-model id 與 consensus result contract 是同一個版本化邊界；任何語義或計量改動都必須產生新 runtime／cost-model id、fixture 與 rollout，不能在 v0 原地擴充。若未來需要 richer deterministic DSL，另開 `managed-function-v1`，不要與完整 Python scientific backend 混為一談。
 
 本計畫另明確區分執行邊界：既有 v0 interpreter 可作為跨平台的 `production_sandboxed_dsl` backend。它只執行封閉自訂語法，沒有 filesystem、network、process、DLL 或 native API capability，並以 operation/CPT、usage、timeout、loop、call-depth、value/materialization、memory-accounting 與 output bounds fail closed；Windows DSL Worker 不需要 Windows Containers/HCS。真正需要 operator-owned runner、image、rootfs、artifact mounts 或外部程式的 general-compute workload，才分別使用 Linux `production_sandboxed_oci` 或 Windows `production_sandboxed_windows`/HCS，且各自的 provider prerequisite 不得套用到 DSL。
 
@@ -65,7 +65,7 @@ RuntimeResult + usage + output artifact manifests
 
 建議的程式分層：
 
-- `executor-rs/crates/managed-function-runtime`：維持 v0 DSL、canonical renderer、metering 與 proof guest 共用語義。
+- `executor-rs/crates/managed-function-runtime`：維持 v0 DSL、canonical renderer、metering 與 consensus result contract 共用語義。
 - `executor-rs/crates/general-compute-runtime`：新增 request/result schema、supervisor、quota、cancellation、artifact、capability 與 backend adapter；不得依賴 Hivemind database。
 - `hivemind-rs/crates/worker-executor`：依 runtime version 分派 v0 或 v1；保留 detached supervisor 的 kill/reap cleanup guard。
 - `proto/hivemind.proto`：只傳版本化 manifest、hash、狀態與受限 metadata；大型資料走 artifact service/CAS。
@@ -89,7 +89,7 @@ RuntimeResult + usage + output artifact manifests
 - request digest、execution/attempt binding、exit/error code、受限 stdout/stderr preview、output artifact manifest root、output hash 與 checksum；大型 output 不得內嵌在 result frame。
 - 實測 CPU time、wall time、peak memory、I/O bytes、GPU time/VRAM（皆標註為 worker claim，未驗證前不得結算）。
 - runtime/backend/image/cost-model/result-schema/tensor-ABI 版本、input manifest root、seed/RNG algorithm/stream、實際 determinism profile 與 capability negotiation 結果。
-- evidence envelope（`unverified`、`replicated`、`tee_attested`、`zk_proved`）；此欄由 Nodepool 驗證後衍生，Worker 不得自行決定 verified level。
+- evidence envelope（`unverified`、`replicated`、`tee_attested`）；此欄由 Nodepool 驗證後衍生，Worker 不得自行決定 evidence level。
 
 `GeneralComputeResult::validate_against(request, registry)` 是 M0 必須完成的可信邊界：驗證 unknown fields/版本、request/attempt binding、status 與 exit-code 合法組合、artifact role/size/root、usage 不超過 policy、實際 backend/image/determinism，以及 evidence 格式。安全敏感 envelope 採 `deny_unknown_fields` 或顯式 compatibility wrapper，不能讓新欄位被舊 verifier 靜默忽略。
 
@@ -179,15 +179,15 @@ v1 延續目前 trust model：Nodepool 是唯一可信結算權威，Worker 的�
 - network 預設 deny；filesystem 只允許明確的 read-only input 與 ephemeral output mount；禁止任意 pip/npm install、動態 native plugin 與 host socket。
 - Worker 只回傳受限 telemetry；Nodepool 驗證 envelope、hash、配額、runtime/image/cost-model 版本後才建立 usage claim。
 - registry-approved image/capability與 Worker自報 capability是不同資料；Nodepool須記錄 claim、persisted registration、operator-approved registry與attested capability的 provenance。字串相符或 `gpu_available=true` 不是硬體存在的證明。
-- v0 繼續走目前 proof settlement。v1 alpha 的 resource telemetry一律存為 `worker_usage_claim`，不得單獨驅動 variable settlement；先採 Nodepool-owned fixed reservation/tariff，或在 replicated/TEE/zk evidence驗證後才升級可信度。Replicated output只能提高結果可信度，不能證明 CPU/GPU usage。
-- evidence level由 Nodepool在驗證後寫入；Worker只能附 evidence bytes，不能宣告自己是 `tee_attested`或`zk_proved`。
-- 每個版本同時鎖定 runtime version、cost model、proof/attestation protocol、guest image、trust pin 與 golden fixtures；任一項變更都產生新版本。
+- v0 由 Nodepool 以 strict-majority consensus certificate 結算。v1 alpha 的 resource telemetry 一律存為 `worker_usage_claim`，不得單獨驅動 variable settlement；先採 Nodepool-owned fixed reservation/tariff，直到對應的 evidence policy 完成驗證。Replicated output 只能提高結果可信度，不能證明 CPU/GPU usage。
+- evidence level 由 Nodepool 在驗證後寫入；Worker 只能附 evidence bytes，不能宣告自己是 `tee_attested`。
+- 每個版本同時鎖定 runtime version、cost model、result/consensus protocol、trust policy 與 golden fixtures；任一項變更都產生新版本。
 
 ## 6. 里程碑與 Definition of Done
 
 | Milestone | 交付物 | 必須通過的 gate |
 |---|---|---|
-| M0a 凍結 v0 | semantics/cost manifest、既知 Unicode/overflow/partial-receipt限制、proof vectors | v0 image/claim/receipt fixtures不漂移；公開文件不誇大 |
+| M0a 凍結 v0 | semantics/cost manifest、既知 Unicode/overflow/partial-result限制、consensus result vectors | v0 result fixtures不漂移；公開文件不誇大 |
 | M0b v1alpha 契約 | IDs、request/result/evidence validator、artifact/tensor schema、typed capability、threat model | property/fuzz/replay/unknown-field/shape-overflow tests；runtime id仍為 alpha |
 | M1 圖靈核心與 sandbox | pinned CPython harness、trusted backend registry、rootless supervisor、Minsky/recursion/heap/cancel fixtures | differential + fuzz；timeout/cancel/drop/leader-exit全部 kill/reap；hostile escape tests |
 | M2 CPU 科學 | tensor ABI、dtype/complex、broadcast/reduce、BLAS/LAPACK、FFT、ODE、RNG、Monte Carlo、sparse | NumPy/SciPy/reference golden；誤差與 failure semantics gate |
@@ -206,7 +206,7 @@ M3 trusted capability registry gate 已落地：Nodepool operator config 是 wor
 - `strict_reproducible_cpu` 固定 architecture/features、rounding、單 thread、BLAS/FFT與 reduction policy；`reproducible_same_profile`只承諾同 image/hardware profile；GPU/parallel CPU預設 `best_effort`並用數值 acceptance rules，不宣稱跨硬體 bitwise一致。
 - 觀測至少包括 queue latency、startup、CPU/wall ratio、peak RSS、I/O、GPU time/VRAM、cancel/timeout、artifact retry、backend mismatch、reproducibility mismatch 與 unverified claim count。
 - 發布前必須做長跑 soak、重派與節點故障、CAS 中斷續傳、同一任務重播、惡意輸入、超大 shape、NaN/Inf、fork/thread bomb 與 container escape 測試。
-- benchmark保存 raw data與 p50/p95：sandbox cold/warm start、cancel latency、CAS upload/download/checksum/resume/dedup、elementwise/reduction、DGEMM多尺寸、FFT、SpMV、ODE、Monte Carlo、CPU thread scaling、GPU init/transfer/kernel/fallback；v0 native與proof path是不可退化 baseline。
+- benchmark保存 raw data與 p50/p95：sandbox cold/warm start、cancel latency、CAS upload/download/checksum/resume/dedup、elementwise/reduction、DGEMM多尺寸、FFT、SpMV、ODE、Monte Carlo、CPU thread scaling、GPU init/transfer/kernel/fallback；v0 native與replicated consensus path是不可退化 baseline。
 
 ## 8. 建議實作順序（前十個 PR）
 
@@ -378,7 +378,7 @@ covers the HEAD-present max-redispatch terminal path. The envelope remains
 request/backend/image bound and non-settling; existing Worker reputation and
 rejected-attestation behavior is preserved. The DB test was observed RED with
 `RowNotFound` and is now green (1/1); focused failure compatibility (2/2),
-legacy managed-proof rejection (1/1), scoped formatting/diff checks, and locked
+consensus-only settlement rejection (1/1), scoped formatting/diff checks, and locked
 Scheduler/Nodepool/Master checks pass. Real OCI execution/isolation and the
 operator-gated multi-process evidence remain open.
 

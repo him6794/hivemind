@@ -72,8 +72,40 @@ Assert-Contains -DocumentName "docs/ARCHITECTURE.md" -DocumentText $architecture
     "Worker control",
     "18080",
     "唯一平台 authority",
-    "不得暴露給 Worker、Worker sidecar、browser 或下載的 package",
+    "不得暴露給 Worker、browser 或下載的 package",
     "Browser 不直接連線 Nodepool"
 )
+
+Assert-Contains -DocumentName "docs/GETTING_STARTED.md" -DocumentText $gettingStarted -ExpectedValues @(
+    "MANAGED_CONSENSUS_ROLLOUT_MODE=enforce",
+    "strict-majority quorum certificate",
+    "Nodepool-owned fixed reservation"
+)
+
+$currentDocuments = @{
+    "README.md" = $readme
+    "docs/GETTING_STARTED.md" = $gettingStarted
+    "docs/ARCHITECTURE.md" = $architecture
+}
+
+$forbiddenPatterns = @(
+    "managed.?prover",
+    "worker sidecar",
+    "risc.?zero",
+    "zkvm",
+    "managed.?proof",
+    "MANAGED_PROOF",
+    "zk-metering-proof-state\\.md",
+    "zk-managed-proof-.*\\.md",
+    "managed-prover-host-support-state\\.md"
+)
+
+foreach ($document in $currentDocuments.GetEnumerator()) {
+    foreach ($pattern in $forbiddenPatterns) {
+        if ($document.Value -match ("(?i)" + $pattern)) {
+            throw "$($document.Key) retains removed proof workflow text matching '$pattern'."
+        }
+    }
+}
 
 Write-Host "release documentation contract tests passed"

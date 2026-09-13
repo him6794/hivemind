@@ -151,7 +151,7 @@ make docker-down
 The release candidate consists of the public Official Site/account center on
 port 8080, the task-oriented Master UI on port 3000, and the provider-oriented
 Worker UI on port 3001. The detailed operator runbook, environment contract,
-trust boundaries, smoke checks, browser proof, and troubleshooting steps are in
+trust boundaries, smoke checks, browser tests, and troubleshooting steps are in
 [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md).
 
 From the repository root on Windows, build and leave the complete stack running:
@@ -179,8 +179,8 @@ registered Workers and requires a strict majority of two to return matching
 canonical results. It persists a quorum certificate before completing or
 settling the task, and never falls back to a single-Worker result.
 
-Consensus is agreement evidence, not a zero-knowledge proof: a colluding or
-commonly compromised Worker majority can still agree on an incorrect result.
+Consensus is agreement evidence, not independent correctness validation: a
+colluding or commonly compromised Worker majority can still agree on an incorrect result.
 Only deterministic, side-effect-free managed tasks are eligible. Worker usage
 claims remain non-authoritative, so consensus tasks use Nodepool-owned fixed
 reservation billing.
@@ -196,7 +196,7 @@ MANAGED_CONSENSUS_QUORUM=2
 MANAGED_CONSENSUS_MAX_RESULT_BYTES=262144
 ```
 
-Do not describe a consensus certificate as cryptographic execution proof,
+Do not treat a consensus certificate as independent correctness validation,
 and do not enable it for side-effecting tasks.
 
 ### Manual

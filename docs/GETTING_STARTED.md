@@ -29,8 +29,8 @@ Raw `docker compose` requires the following release values:
   to sign worker execution tokens.
 - `WORKER_EXECUTION_PUBLIC_KEY_PEM`: the public key matching that private key;
   the worker uses it to verify execution tokens.
-- `WORKER_NODEPOOL_TOKEN`: optional. Leave it blank when the sidecar will log
-  in and register through Worker UI.
+- `WORKER_NODEPOOL_TOKEN`: optional. Leave it blank when the Worker signs in
+  through Website API and registers through Worker UI.
 
 Start from `.env.example` for a persistent operator configuration. Generate a
 matching Ed25519 key pair with OpenSSL:
@@ -67,9 +67,9 @@ Local suitable host
 ```
 
 Master and Worker connect to the Orange Pi Nodepool through the Headscale
-overlay. Do not deploy either downloaded client, a managed prover, or the
-platform `HEADSCALE_API_KEY` on the Orange Pi as a substitute for that topology.
-The API key remains server-side and is never distributed in client packages.
+overlay. Do not deploy either downloaded client or the platform
+`HEADSCALE_API_KEY` on the Orange Pi as a substitute for that topology. The API
+key remains server-side and is never distributed in client packages.
 
 To make a local Windows Master or Worker enroll automatically, set
 `WEBSITE_API_BASE` (or the role-specific `MASTER_WEBSITE_API_BASE` /
@@ -136,7 +136,7 @@ This builds all three release surfaces:
 
 ## Run
 
-### Release smoke and browser proof
+### Release smoke and browser tests
 
 From the repository root, validate packaging, build the complete stack, wait
 for all five HTTP local executable paths, and keep the containers running for browser QA:
@@ -245,7 +245,7 @@ deterministic, side-effect-free managed DSL tasks to distinct Workers and
 settles only after a strict-majority quorum certificate. Worker usage remains
 a claim, so settlement uses the Nodepool-owned fixed reservation; no single
 Worker result or `observe`/`disabled` mode can authorize settlement. Consensus
-is agreement evidence, not a RISC Zero correctness proof, and a colluding or
+is agreement evidence, not independent correctness validation, and a colluding or
 commonly faulty Worker majority can still agree on a wrong result.
 
 ## Troubleshooting
