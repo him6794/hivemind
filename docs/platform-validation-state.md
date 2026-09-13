@@ -18,12 +18,12 @@ running
 - PowerShell release contracts: all 8 `scripts/*.Tests.ps1` files passed.
 - Release frontend preview smoke: official site, Master UI, and Worker UI passed; cleanup releases ports 4173-4175.
 - Release Docker stack smoke: official site, Master UI, Worker UI, Master API, and Worker Control passed on collision-free host ports.
-- Playwright release flow: 2 passed, covering account registration/login/logout, worker registration, task cancellation/completion, log/result inspection, artifact download, and controlled failure surfaces.
+- Frontend browser smoke: hosted smoke passed 3/3. The release flow account registration/login/logout, Worker registration, task cancellation, managed completion, log inspection, artifact download, and controlled missing-artifact checks passed. The first single-Worker run stayed PENDING for 120 seconds as required by enforce mode; a separate isolated run with three distinct Workers then settled through quorum without a single-Worker fallback.
 - Rust gates passed: `cargo fmt --all -- --check`, GNU workspace `cargo check`, and GNU all-target/all-feature `cargo clippy -D warnings`.
 - Windows ARM64 cross-target check: `cargo check --target aarch64-pc-windows-msvc --workspace` passed under the VS arm64 dev environment (2026-08-23), proving the whole workspace compiles for ARM64 Windows.
 - Linux target check: `cargo check --target x86_64-unknown-linux-gnu -p hivemind-client-core` passes; full-workspace Linux/macOS checks stay blocked in this environment because no `x86_64-linux-gnu-gcc` toolchain exists for the `ring` build script. This is a local toolchain blocker, not a source-compatibility failure.
 - PowerShell release contracts: all 11 `scripts/*.Tests.ps1` files pass, including zero-config package assertions (no required endpoint/Worker-ID/token settings, session-only default documented) and the zh-tw architecture doc contract.
-- Managed proof live E2E harness: `scripts/managed-proof-live-e2e.ps1` and its contract test exist and pass statically (phase order, fail-closed settlement gates, redaction guard, no local-substitute endpoints). The harness itself has NOT been executed against external infrastructure; live proof-to-settlement evidence remains blocked in this environment because no real external Website API/Nodepool/proof-capable Worker host is reachable from here.
+- Managed consensus settlement is covered by local dispatcher and repository tests for replica fan-out, quorum certificates, persistence, and fail-closed no-quorum behavior. A live local Docker deployment also settled a managed task with three distinct Workers, a 2-of-3 quorum certificate, replicated evidence, and nodepool-authorized billing.
 
 ## Regressions fixed
 
@@ -74,30 +74,29 @@ interactive enrollment without weakening the trust boundary:
   WSL, SSH, socat, or direct-host reachability are not substitutes for that
   evidence.
 - The required external flow remains to be demonstrated with Master and Worker
-  on a suitable host separate from Orange Pi: enrollment, worker registration,
-  quote, task execution, proof verification where the local sidecar is packaged,
-  result/log retrieval, usage, billing, settlement, and audit evidence.
-- Native Windows managed proving remains fail-closed because the approved RISC
-  Zero 3.0.6 stack has no validated native Windows PE prover yet. The packaged
-  Worker path is implemented as a prerequisite-gated contract and cannot be
-  released until a real target-matched artifact passes the unchanged equality
-  and attestation gates.
+  on a suitable host separate from Orange Pi: enrollment, Worker registration,
+  quote, task execution, multi-Worker quorum certificate, result/log retrieval,
+  usage, billing, settlement, and audit evidence.
+- Native Windows Worker packaging has been verified statically. A clean-host run
+  still needs to demonstrate login-driven enrollment, registration, managed
+  execution, and real multi-Worker quorum settlement. Missing readiness or quorum
+  must fail closed.
 - Automatic client update/download remains deferred.
 
 ## Current release-gate recovery — 2026-09-11
 
 The current dirty-tree recovery has fixed several local correctness contracts:
 
-- Legacy managed tasks without a persisted consensus policy remain on the
-  legacy proof-backed path across `disabled`, `observe`, and `enforce` rollout
-  transitions; persisted consensus tasks never silently downgrade.
+- Managed tasks without a persisted consensus policy remain held across
+  `disabled`, `observe`, and `enforce` rollout transitions; persisted consensus
+  tasks never silently downgrade to single-Worker completion.
 - Direct Node Manager gRPC replica/quorum overrides use checked `u32`→`u16`
   conversion, and ingress runtime values are trimmed before persistence and
   classification.
 - Artifact/chunk identity fields reject values above the 255-byte persistent
   bound before database or CAS use.
-- Windows Worker packaging carries allowed prover-side DLLs into `prover/` and
-  re-verifies the final packaged layout before recording checksums/provenance.
+- Windows Worker packaging re-verifies the final executable, runtime files,
+  checksums, and provenance before the package is written.
 
 Current local evidence includes passing workspace-scoped rustfmt checks for both
 Rust workspaces, the affected-crate suites (`hivemind-config` 29 passed,
@@ -106,22 +105,46 @@ intentional ignored, `hivemind-worker-executor` 140 passed), the focused
 consensus/readiness regressions, the general-compute runtime suite, and the
 Windows packaging/verifier contracts. `git diff --check` also passes. The main
 workspace dependency audit now exits successfully under the narrowly scoped
-`hivemind-rs/.cargo/audit.toml` policy; the isolated managed-proof audit also
-exits successfully under its existing policy. Remaining warnings are recorded
-by the dependency-audit document and are not vulnerabilities. A secret-shaped
+`hivemind-rs/.cargo/audit.toml` policy. Remaining warnings are recorded by the
+dependency-audit document and are not vulnerabilities. A secret-shaped
 content scan found no matches in untracked files; matches in tracked files are
 limited to test/configuration fixtures and example names.
 
 The following release gates remain blocked or not-run, and are not represented
 as passing evidence:
 
-- No PostgreSQL client/server is available in this environment, so real
-  PostgreSQL settlement/integration validation was not run. The running Docker
-  database is MySQL and is not a substitute.
 - The OCI `-CheckOnly` harness fails closed because the operator-owned backend
   registry is not configured. Real `-Run` execution therefore was not run;
   rootless namespaces, cgroup v2, seccomp, deny-all networking, hostile
-  workload behavior, and multi-process settlement remain unproven.
-- Native Windows managed proving remains blocked pending a genuine
-  target-matched PE prover, exact guest-image equality, attestation, clean-host
-  launch, real proof verification, and proof-to-settlement evidence.
+  workload behavior, and multi-process OCI settlement remain unproven.
+- Native Windows live Worker execution remains not run against a clean host;
+  login-driven enrollment, registration, managed execution, and quorum
+  settlement still need direct end-to-end evidence on Windows itself.
+
+## Local release validation — 2026-09-13
+
+- `scripts/release-stack-smoke.Tests.ps1` passed after the smoke harness began
+  creating its stack without starting services, seeding an empty registry only in
+  harness-owned Worker volumes, and fixing mutable state-volume ownership.
+- `scripts/release-stack-smoke.ps1 -CheckOnly` passed.
+- A clean isolated Docker release stack started successfully on fixed browser
+  ports. Official site, Master UI, Worker UI, Master API, and Worker Control all
+  passed their health checks.
+- `frontend` contract tests passed (20/20), hosted Playwright smoke passed (3/3),
+  and the full release browser journey passed (2/2), including registration,
+  login/logout, Worker registration, cancellation, managed completion, log
+  inspection, artifact download, and controlled missing-artifact handling.
+- The first single-Worker release attempt remained `PENDING` for 120 seconds;
+  enforce mode correctly refused to settle without the configured replica set.
+  A separate isolated validation topology then ran three distinct Workers
+  (`release-consensus-a`, `release-consensus-b`, and `release-ui-worker`) with
+  separate mutable volumes and completed the same managed flow without a
+  single-Worker fallback.
+- Direct task evidence for `qa-complete-mtzoe8au` reported `COMPLETED` with
+  `replica_count=3`, `required_quorum=2`, `votes_received=2`,
+  `evidence_level=replicated`, `mode=enforce`, and both certificate and
+  nodepool settlement authorization present. The task output, log, and artifact
+  download were verified by the browser journey.
+- The Docker PostgreSQL-backed integration suite exited 0 with 525 passed and
+  0 failed tests, including the managed consensus repository, node-manager,
+  master API, and binary suites.
