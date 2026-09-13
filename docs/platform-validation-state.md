@@ -148,3 +148,5 @@ as passing evidence:
 - The Docker PostgreSQL-backed integration suite exited 0 with 525 passed and
   0 failed tests, including the managed consensus repository, node-manager,
   master API, and binary suites.
+- `cargo test --workspace --all-targets --all-features -- --test-threads=1`
+  exited 0 for the unified Rust workspace; no test failures were reported.
