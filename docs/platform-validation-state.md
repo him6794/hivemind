@@ -77,10 +77,11 @@ interactive enrollment without weakening the trust boundary:
   on a suitable host separate from Orange Pi: enrollment, Worker registration,
   quote, task execution, multi-Worker quorum certificate, result/log retrieval,
   usage, billing, settlement, and audit evidence.
-- Native Windows Worker packaging has been verified statically. A clean-host run
-  still needs to demonstrate login-driven enrollment, registration, managed
-  execution, and real multi-Worker quorum settlement. Missing readiness or quorum
-  must fail closed.
+- Native Windows Worker packaging, login-driven registration, managed execution,
+  and local multi-Worker quorum settlement are now proven on this host. A
+  clean-host run over the real external Headscale/VPN path is still required;
+  missing readiness or quorum must continue to fail closed.
+- Real Windows HCS guest execution and restart/recovery remain unproven.
 - Automatic client update/download remains deferred.
 
 ## Historical release-gate recovery — 2026-09-11
@@ -171,12 +172,27 @@ as passing evidence:
   the three-replica assignment alongside two Docker Workers. The task completed
   with a 2-of-3 replicated certificate, but the two Docker Workers reached
   quorum before the native replica reported and the native replica was cancelled
-  with `quorum reached`. Native Worker registration and assignment passed;
-  native Worker contribution of a successful quorum vote remains unproven.
-- The native HCS gate was executed without Docker, WSL, a Linux VM, or direct
-  process fallback. It failed closed with exit code 2 because the Windows
-  Containers optional feature was `Disabled` (while `vmcompute` was running).
-  Windows HCS isolation therefore remains blocked by the host prerequisite.
+  with `quorum reached`; that mixed topology run proved registration and
+  assignment, but not a native vote.
+- A fresh native-only local validation then ran three packaged native Windows
+  Workers (`native-win-a-efb24a566a`, `native-win-b-efb24a566a`, and
+  `native-win-c-efb24a566a`) against the local Nodepool. All three Workers
+  received task `native-only-quorum-efb24a566a-5` and returned the same `3`
+  result. The task completed with `replica_count=3`, `required_quorum=2`,
+  `votes_received=2`, `matching_votes=2`, `evidence_level=replicated`, a
+  certificate, `settlement_authorized=true`, and `billing_settled=true`.
+  This proves native Worker consensus contribution and local settlement, but
+  used `WORKER_DISABLE_WEBSITE_VPN=1` and the Docker-published Nodepool endpoint;
+  it is not evidence of external Headscale/VPN enrollment or Windows HCS guest
+  execution.
+- An earlier native HCS gate was executed without Docker, WSL, a Linux VM, or
+  direct process fallback. That run failed closed with exit code 2 because the
+  Windows Containers optional feature was `Disabled` while `vmcompute` was
+  running. A fresh host check on 2026-09-13 now reports Containers `Enabled`,
+  `vmcompute` and HNS `Running`, and `hcsdiag.exe` present; the required
+  operator-owned Windows image/backend registry and an executing HCS harness are
+  still absent, so this is prerequisite evidence only and not HCS execution or
+  recovery evidence.
 - The OCI production `-Run` harness was invoked and failed closed with exit code
   1 because no operator-owned production backend registry was configured. No
   direct-host substitute was used; rootless OCI namespaces, cgroup v2, seccomp,
