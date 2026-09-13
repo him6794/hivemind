@@ -23,26 +23,34 @@ canonical Rust/serde bytes and cannot be safely guessed by a shell script:
 
 ```json
 {
-  "max_cpt": 1000,
+  "max_cpt": 100,
   "primary_manifest": { "...": "a complete validated GeneralComputeRequest" },
   "timeout_cancel": {
     "manifest": { "...": "a long-running validated request" },
     "cancel_after_seconds": 1,
     "expected_task_status": "CANCELLED",
-    "expected_result_status": "cancelled"
+    "expected_result_status": "cancelled",
+    "expected_result_error_code": "task_cancelled"
   },
   "network_denied": {
     "manifest": { "...": "a request whose guest attempts network egress" },
     "expected_task_status": "FAILED",
-    "expected_result_status": "backend_unavailable"
+    "expected_result_status": "failed",
+    "expected_result_error_code": "backend_failed"
   },
   "filesystem_denied": {
     "manifest": { "...": "a request whose guest attempts a forbidden write" },
     "expected_task_status": "FAILED",
-    "expected_result_status": "backend_unavailable"
+    "expected_result_status": "failed",
+    "expected_result_error_code": "backend_failed"
   }
 }
 ```
+
+The cancellation case waits until the task is `RUNNING` before sending the
+stop request, so it exercises Worker cancellation rather than only cancelling a
+pending task. Nodepool persists the durable cancellation envelope with
+`error_code: "task_cancelled"`.
 
 Each manifest must already carry a correct `request_digest`; the API remains
 the authority that validates it. The fixture does not synthesize or weaken that

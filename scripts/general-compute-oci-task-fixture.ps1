@@ -235,7 +235,11 @@ function Provision-OperatorVolumes {
             $backendId = [string]$registration.backend_id
             $stateDirectories += "mkdir -p /state/bundles/$backendId /state/artifacts/$backendId /state/runner-state/$backendId"
             $stateDirectories += "cp -a /source/config/bundles/$backendId/. /state/bundles/$backendId/"
-            $stateDirectories += "mkdir -p /state/bundles/$backendId/rootfs/work/source /state/bundles/$backendId/rootfs/work/output"
+            # Artifact mounts are regular files; keep the OCI destination shape
+            # compatible with runc's bind-mount handling instead of creating a
+            # directory at the file mount point.
+            $stateDirectories += "mkdir -p /state/bundles/$backendId/rootfs/work /state/bundles/$backendId/rootfs/work/output"
+            $stateDirectories += "touch /state/bundles/$backendId/rootfs/work/source"
         }
         $seedCommandParts = @(
             "set -eu",
@@ -286,7 +290,11 @@ function Invoke-Api {
         return Invoke-RestMethod -Method $Method -Uri $Uri -Headers $headers `
             -ContentType "application/json" -Body $json -UseBasicParsing
     } catch {
-        Fail-Fixture "$Method $Uri failed: $($_.Exception.Message)"
+        $detail = $_.ErrorDetails.Message
+        if ([string]::IsNullOrWhiteSpace([string]$detail)) {
+            $detail = $_.Exception.Message
+        }
+        Fail-Fixture "$Method $Uri failed: $detail"
     }
 }
 
@@ -398,29 +406,60 @@ function Wait-TaskTerminal {
     Fail-Fixture "task '$CaseTaskId' did not reach a terminal state before the deadline"
 }
 
+function Wait-TaskRunning {
+    param(
+        [Parameter(Mandatory = $true)][string]$Token,
+        [Parameter(Mandatory = $true)][string]$CaseTaskId,
+        [int]$TimeoutSeconds = 120
+    )
+    $terminal = @("COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT")
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $response = Invoke-Api -Method GET -Uri "$MasterBaseUrl/api/tasks" -Token $Token
+        $task = @($response.tasks | Where-Object {
+            [string]$_.task_id -eq $CaseTaskId
+        }) | Select-Object -First 1
+        if ($null -ne $task) {
+            $status = ([string]$task.status).ToUpperInvariant()
+            if ($status -eq "RUNNING") {
+                return $task
+            }
+            if ($terminal -contains $status) {
+                Fail-Fixture "task '$CaseTaskId' reached '$status' before the cancellation stop request"
+            }
+        }
+        Start-Sleep -Seconds 1
+    } while ((Get-Date) -lt $deadline)
+    Fail-Fixture "task '$CaseTaskId' did not reach RUNNING before the cancellation deadline"
+}
+
 function Read-ResultEnvelope {
     param(
         [Parameter(Mandatory = $true)][string]$CaseTaskId,
-        [Parameter(Mandatory = $true)][string]$ExpectedStatus
+        [Parameter(Mandatory = $true)][string]$ExpectedStatus,
+        [string]$ExpectedErrorCode
     )
     if ($CaseTaskId -notmatch '^[A-Za-z0-9_.-]+$') {
         Fail-Fixture "unsafe task id in Postgres result query"
     }
-    $sql = "SELECT encode(result_json, 'base64') FROM general_compute_results WHERE task_id = '$CaseTaskId';"
+    $sql = "SELECT convert_from(result_json, 'UTF8') FROM general_compute_results WHERE task_id = '$CaseTaskId';"
     $lines = @(Invoke-Compose @("exec", "-T", "postgres", "psql", "-U", "hivemind", "-d", "hivemind", "-At", "-c", $sql))
-    $encoded = ($lines | ForEach-Object { $_.ToString().Trim() } |
-        Where-Object { $_ -and $_ -notmatch '^NOTICE:' } | Select-Object -Last 1)
-    if ([string]::IsNullOrWhiteSpace([string]$encoded)) {
+    $jsonText = ($lines | ForEach-Object { $_.ToString() } |
+        Where-Object { $_ -and $_ -notmatch '^NOTICE:' } | ForEach-Object { $_.TrimEnd() }) -join "`n"
+    if ([string]::IsNullOrWhiteSpace([string]$jsonText)) {
         Fail-Fixture "Nodepool did not persist a typed general-compute result for '$CaseTaskId'"
     }
     try {
-        $bytes = [Convert]::FromBase64String([string]$encoded)
-        $result = ([Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json)
+        $result = ($jsonText | ConvertFrom-Json)
     } catch {
-        Fail-Fixture "persisted result for '$CaseTaskId' is not valid UTF-8 JSON"
+        Fail-Fixture "persisted result for '$CaseTaskId' is not valid UTF-8 JSON: $($_.Exception.Message)"
     }
     if ([string]$result.status -ne $ExpectedStatus) {
-        Fail-Fixture "typed result for '$CaseTaskId' has status '$($result.status)', expected '$ExpectedStatus'"
+        Fail-Fixture "result_status=$($result.status) result_error_code=$($result.error_code) expected_status=$ExpectedStatus expected_error_code=$ExpectedErrorCode"
+    }
+    if (![string]::IsNullOrWhiteSpace($ExpectedErrorCode) -and
+        [string]$result.error_code -ne $ExpectedErrorCode) {
+        Fail-Fixture "result_status=$($result.status) result_error_code=$($result.error_code) expected_status=$ExpectedStatus expected_error_code=$ExpectedErrorCode"
     }
     foreach ($field in @("execution_id", "attempt_id", "idempotency_key", "request_digest", "runtime_version", "backend_id", "guest_image_digest", "input_sha256", "output_manifest_root")) {
         if ([string]::IsNullOrWhiteSpace([string]$result.$field)) {
@@ -496,6 +535,7 @@ function Invoke-ExecutionPhase {
         $caseTaskId = "$TaskId-$caseName"
         $expectedTaskStatus = [string]$case.Value.expected_task_status
         $expectedResultStatus = [string]$case.Value.expected_result_status
+        $expectedResultErrorCode = [string]$case.Value.expected_result_error_code
         if ([string]::IsNullOrWhiteSpace($expectedTaskStatus) -or
             [string]::IsNullOrWhiteSpace($expectedResultStatus)) {
             Fail-Fixture "case '$caseName' must declare expected_task_status and expected_result_status"
@@ -503,6 +543,10 @@ function Invoke-ExecutionPhase {
         Submit-GeneralComputeTask -Token $token -CaseTaskId $caseTaskId `
             -Manifest $case.Value.manifest -MaxCpt $maxCpt
         if ($caseName -eq "timeout_cancel") {
+            # Wait until the Worker has accepted the assignment so this case
+            # exercises the supervisor cancellation path instead of merely
+            # cancelling a still-pending Nodepool task.
+            [void](Wait-TaskRunning -Token $token -CaseTaskId $caseTaskId)
             $delay = 1
             if ($null -ne $case.Value.cancel_after_seconds) {
                 $delay = [int]$case.Value.cancel_after_seconds
@@ -518,7 +562,8 @@ function Invoke-ExecutionPhase {
             Fail-Fixture "case '$caseName' reached '$($terminal.status)', expected '$expectedTaskStatus'"
         }
         $caseResults[$caseName] = Read-ResultEnvelope `
-            -CaseTaskId $caseTaskId -ExpectedStatus $expectedResultStatus
+            -CaseTaskId $caseTaskId -ExpectedStatus $expectedResultStatus `
+            -ExpectedErrorCode $expectedResultErrorCode
     }
 
     $evidence = [ordered]@{

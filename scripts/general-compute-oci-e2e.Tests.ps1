@@ -61,9 +61,13 @@ foreach ($expected in @(
     "-EvidencePath",
     "Invoke-ReviewedTaskFixture",
     "docker compose",
+    "Wait-TcpPort",
+    "nodepoolPort",
     "up",
     "-d",
     "--build",
+    "postgres redis nodepool",
+    "master worker",
     "schema_version",
     "general-compute-oci-e2e-v1",
     "task_completion",
@@ -99,7 +103,7 @@ foreach ($expected in @(
     "Invoke-RestMethod",
     "general_compute_results",
     "general_compute_settlements",
-    "encode(result_json",
+    "convert_from(result_json",
     "general-compute-result-v1",
     "timeout_cancel",
     "network_denied",
@@ -108,6 +112,7 @@ foreach ($expected in @(
     "chown -R 100000:100000 /state/bundles/*/rootfs",
     "rootfs/work/source",
     "rootfs/work/output",
+    'touch /state/bundles/$backendId/rootfs/work/source',
     "Read-ResultDiagnostic",
     "convert_from(result_json",
     'for ($attempt = 0; $attempt -lt 10; $attempt++)',
@@ -144,8 +149,8 @@ if (!(Test-Path -LiteralPath $ociComposePath -PathType Leaf)) {
     throw "Repository must ship the reviewed OCI E2E Compose override."
 }
 $ociComposeText = Get-Content -LiteralPath $ociComposePath -Raw
-if ($ociComposeText -notmatch '(?m)^\s*user:\s*"0:0"\s*$') {
-    throw "OCI E2E Compose must run the nested runc preparation as outer-container root."
+if ($ociComposeText -notmatch '(?m)^\s*user:\s*"10001:10001"\s*$') {
+    throw "OCI E2E Compose must run the Worker as the subordinate-id owner for rootless runc."
 }
 if ($ociComposeText -notmatch '(?m)^\s*privileged:\s*true\s*$' -or
     $ociComposeText -notmatch '(?m)^\s*cgroup:\s*host\s*$') {

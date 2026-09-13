@@ -469,6 +469,31 @@ function Restore-IsolatedComposePorts {
     $script:composePortsApplied = $false
 }
 
+function Wait-TcpPort {
+    param(
+        [Parameter(Mandatory = $true)][string]$Address,
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $client = New-Object System.Net.Sockets.TcpClient
+        try {
+            $connect = $client.ConnectAsync($Address, $Port)
+            if ($connect.Wait(2000) -and $client.Connected) {
+                return
+            }
+        } catch {
+            # The service may still be running migrations or binding its gRPC
+            # listener; keep the bounded readiness wait.
+        } finally {
+            $client.Dispose()
+        }
+        Start-Sleep -Seconds 2
+    } while ((Get-Date) -lt $deadline)
+    Fail-Contract "timed out waiting for Compose service TCP readiness at ${Address}:${Port}"
+}
+
 $composeFixtureEnvironmentNames = @(
     "HIVEMIND_SEED_DEFAULT_USER",
     "WORKER_NODEPOOL_USERNAME",
@@ -761,14 +786,30 @@ try {
             -StateVolumeName $stateVolumeName `
             -WorkerId $fixtureWorkerId
 
-        Write-Host "RUN docker compose up -d --build (postgres redis nodepool master worker)"
+        Write-Host "RUN docker compose up -d --build (postgres redis nodepool)"
         & docker compose `
             --project-name $safeProjectName `
             --project-directory $repoRoot `
             --file $ComposeFile `
-            up -d --build postgres redis nodepool master worker
+            up -d --build postgres redis nodepool
         if ($LASTEXITCODE -ne 0) {
-            Fail-Contract "docker compose up failed for isolated project '$safeProjectName'"
+            Fail-Contract "docker compose infrastructure startup failed for isolated project '$safeProjectName'"
+        }
+        $nodepoolPortText = [Environment]::GetEnvironmentVariable('NODEPOOL_GRPC_HOST_PORT', 'Process')
+        $nodepoolPort = 0
+        if (![int]::TryParse($nodepoolPortText, [ref]$nodepoolPort) -or $nodepoolPort -le 0) {
+            Fail-Contract "isolated Nodepool gRPC host port is invalid: '$nodepoolPortText'"
+        }
+        Wait-TcpPort -Address "127.0.0.1" -Port $nodepoolPort -TimeoutSeconds 180
+
+        Write-Host "RUN docker compose up -d --build (master worker)"
+        & docker compose `
+            --project-name $safeProjectName `
+            --project-directory $repoRoot `
+            --file $ComposeFile `
+            up -d --build master worker
+        if ($LASTEXITCODE -ne 0) {
+            Fail-Contract "control-plane startup failed for isolated project '$safeProjectName'"
         }
 
         $evidence = Invoke-ReviewedTaskFixture `

@@ -83,7 +83,10 @@ interactive enrollment without weakening the trust boundary:
   must fail closed.
 - Automatic client update/download remains deferred.
 
-## Current release-gate recovery — 2026-09-11
+## Historical release-gate recovery — 2026-09-11
+
+This section records the release-gate state before the operator-owned OCI
+registry was supplied. The current OCI result is recorded below.
 
 The current dirty-tree recovery has fixed several local correctness contracts:
 
@@ -182,3 +185,18 @@ as passing evidence:
   complete release browser journey remains covered by the earlier 2/2 evidence
   above; the current single-Worker stack was not represented as a new successful
   managed-task journey because enforce mode requires the configured replica set.
+- The reviewed OCI production harness passed with the operator-owned registry,
+  rootless policy, pinned runner/rootfs and seccomp material, and the staged
+  Nodepool readiness gate. Evidence was written to
+  `test_logs/general-compute-oci-e2e-final-192fa15aa85347c3a56eec30b869a4b3.json`
+  with schema `general-compute-oci-e2e-v1` and status `passed`.
+- The OCI evidence validates Worker registration, primary production execution,
+  PostgreSQL typed-result persistence, and settlement. The primary result is a
+  `general-compute-result-v1` envelope with execution `primary-execution`, the
+  expected request digest, and a completed status.
+- The same run passed the running-task cancellation case, including the
+  `CANCELLED` task state and Nodepool-owned `task_cancelled` result envelope,
+  plus the deny-all network and read-only filesystem hostile-workload cases,
+  which returned the reviewed `FAILED`/`backend_failed` outcomes.
+- The isolated OCI Compose project was cleaned up after the run; no host-process
+  substitute or unsafe execution fallback was used.
