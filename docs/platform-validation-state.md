@@ -150,3 +150,35 @@ as passing evidence:
   master API, and binary suites.
 - `cargo test --workspace --all-targets --all-features -- --test-threads=1`
   exited 0 for the unified Rust workspace; no test failures were reported.
+
+## Native Windows and OCI release-gate evidence — 2026-09-13
+
+- The packaged native Windows Worker (`dist/windows-worker/hivemind-worker.exe`)
+  started on this Windows host and served `/api/worker-info` from its local
+  control API. The native `hivemind-bin.exe master` binary also started against
+  the Docker PostgreSQL/Redis services and returned `OK` from `/health`.
+- A user created through the official site logged in successfully through the
+  native Master API; an authenticated native-Master balance request also passed.
+- The native Worker completed the local login-driven Nodepool registration path
+  with a matching account and execution public key. This local run used
+  `WORKER_DISABLE_WEBSITE_VPN=1` and the Docker-published Nodepool endpoint, so
+  it proves native startup, local login, and registration only; it is not
+  evidence of Headscale/VPN enrollment.
+- In task `native-win-consensus-918797bd5fae`, the native Worker was present in
+  the three-replica assignment alongside two Docker Workers. The task completed
+  with a 2-of-3 replicated certificate, but the two Docker Workers reached
+  quorum before the native replica reported and the native replica was cancelled
+  with `quorum reached`. Native Worker registration and assignment passed;
+  native Worker contribution of a successful quorum vote remains unproven.
+- The native HCS gate was executed without Docker, WSL, a Linux VM, or direct
+  process fallback. It failed closed with exit code 2 because the Windows
+  Containers optional feature was `Disabled` (while `vmcompute` was running).
+  Windows HCS isolation therefore remains blocked by the host prerequisite.
+- The OCI production `-Run` harness was invoked and failed closed with exit code
+  1 because no operator-owned production backend registry was configured. No
+  direct-host substitute was used; rootless OCI namespaces, cgroup v2, seccomp,
+  deny-all networking, and hostile-workload cases remain unproven.
+- A current release-stack browser registration/login smoke passed 1/1. The
+  complete release browser journey remains covered by the earlier 2/2 evidence
+  above; the current single-Worker stack was not represented as a new successful
+  managed-task journey because enforce mode requires the configured replica set.
