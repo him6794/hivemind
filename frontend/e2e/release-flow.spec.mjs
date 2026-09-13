@@ -55,7 +55,7 @@ test.describe.serial('release browser flow across the official site, Share this 
     await useEnglish(page);
     await expect.poll(() => page.evaluate(() => window.localStorage.getItem('hivemind-site-auth'))).toBeNull();
     await page.goto(`${officialSiteUrl}/#/register`);
-    await expect(page.getByRole('heading', { name: 'Create your Hivemind account center.' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Create a Hivemind account and get started.' })).toBeVisible();
 
     await page.getByLabel('Username').fill(username);
     await page.getByLabel('Password', { exact: true }).fill(password);
