@@ -1033,7 +1033,7 @@ mod tests {
                     queue_capacity: 4,
                     general_compute_capabilities_json: None,
                     managed_dsl_capabilities_json: Some(
-                        r#"[{"backend_id":"session-test-managed-dsl","runtime_version":"managed-function-v0","semantics_manifest_sha256":"sha256:8ed716dc07c7bc9abcfc5338b1888e71dd041c3fb397c45d0efb1ff76af1deee","max_usage_units":1000,"max_output_bytes":1048576}]"#.into(),
+                        r#"[{"backend_id":"session-test-managed-dsl","runtime_version":"managed-function-v0","semantics_manifest_sha256":"sha256:d61a8134f665100855402d7455cfcf3b3e701a79ad43e0039f4ad6c5f05bafef","max_usage_units":1000,"max_output_bytes":1048576}]"#.into(),
                     ),
                     admission_mode: config.general_compute.admission_mode.to_string(),
                     dynamic_capabilities_json: None,

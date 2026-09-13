@@ -145,8 +145,8 @@ impl WorkerExecutor {
             .await
     }
 
-    /// Execute a managed task as a consensus replica. The request contract,
-    /// rather than the Worker rollout environment, disables the legacy prover.
+    /// Execute a managed task as a consensus replica. The request contract
+    /// selects this route independently of the Worker rollout environment.
     pub async fn execute_task_with_consensus(
         &self,
         task: &Task,
@@ -274,7 +274,7 @@ pub struct TaskResult {
     #[serde(default)]
     pub general_compute_result_json: Option<Vec<u8>>,
     /// Serialized typed result for `managed-function-gpu-v1`.
-    /// GPU-v1 results never enter the proof or legacy result-torrent routes.
+    /// GPU-v1 results never enter the legacy result-torrent route.
     #[serde(default)]
     pub managed_gpu_result_json: Option<Vec<u8>>,
 }

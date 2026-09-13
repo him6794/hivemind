@@ -1,9 +1,9 @@
 use general_compute_runtime::managed_gpu::{
-    ManagedGpuBackendRegistration, ManagedGpuCapability, ManagedGpuLimits, ManagedGpuProofPolicy,
-    ManagedGpuRequest, ManagedGpuRequirement, MANAGED_GPU_BILLING_VERSION,
-    MANAGED_GPU_COST_MODEL_VERSION, MANAGED_GPU_OPERATION_REGISTRY_VERSION,
-    MANAGED_GPU_REQUEST_PROTOCOL_VERSION, MANAGED_GPU_RUNTIME_VERSION,
-    MANAGED_GPU_SEMANTICS_MANIFEST_SHA256, MANAGED_GPU_SETTLEMENT_BASIS,
+    ManagedGpuBackendRegistration, ManagedGpuCapability, ManagedGpuLimits, ManagedGpuRequest,
+    ManagedGpuRequirement, MANAGED_GPU_BILLING_VERSION, MANAGED_GPU_COST_MODEL_VERSION,
+    MANAGED_GPU_OPERATION_REGISTRY_VERSION, MANAGED_GPU_REQUEST_PROTOCOL_VERSION,
+    MANAGED_GPU_RUNTIME_VERSION, MANAGED_GPU_SEMANTICS_MANIFEST_SHA256,
+    MANAGED_GPU_SETTLEMENT_BASIS,
 };
 use general_compute_runtime::{
     ArtifactManifest, ArtifactRole, BackendRegistration, CapabilityMatrix, DeterminismPolicy,
@@ -260,7 +260,6 @@ fn managed_gpu_request() -> ManagedGpuRequest {
         billing_version: MANAGED_GPU_BILLING_VERSION.into(),
         cost_model_version: MANAGED_GPU_COST_MODEL_VERSION.into(),
         settlement_basis: MANAGED_GPU_SETTLEMENT_BASIS.into(),
-        proof_policy: ManagedGpuProofPolicy::None,
     };
     request.request_digest = request.canonical_request_digest();
     request

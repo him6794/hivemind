@@ -2126,8 +2126,8 @@ mod tests {
     use general_compute_runtime::artifact::CasChunkStore;
     use general_compute_runtime::managed_gpu::{
         ManagedGpuBackendRegistration, ManagedGpuCapability, ManagedGpuEvidence, ManagedGpuLimits,
-        ManagedGpuProofPolicy, ManagedGpuRequest, ManagedGpuRequirement, ManagedGpuResult,
-        ManagedGpuUsage, MANAGED_GPU_BILLING_VERSION, MANAGED_GPU_COST_MODEL_VERSION,
+        ManagedGpuRequest, ManagedGpuRequirement, ManagedGpuResult, ManagedGpuUsage,
+        MANAGED_GPU_BILLING_VERSION, MANAGED_GPU_COST_MODEL_VERSION,
         MANAGED_GPU_OPERATION_COST_UNITS, MANAGED_GPU_OPERATION_REGISTRY_VERSION,
         MANAGED_GPU_REQUEST_PROTOCOL_VERSION, MANAGED_GPU_RESULT_PROTOCOL_VERSION,
         MANAGED_GPU_RUNTIME_VERSION, MANAGED_GPU_SEMANTICS_MANIFEST_SHA256,
@@ -2338,7 +2338,6 @@ mod tests {
             billing_version: MANAGED_GPU_BILLING_VERSION.into(),
             cost_model_version: MANAGED_GPU_COST_MODEL_VERSION.into(),
             settlement_basis: MANAGED_GPU_SETTLEMENT_BASIS.into(),
-            proof_policy: ManagedGpuProofPolicy::None,
         };
         request.request_digest = request.canonical_request_digest();
         request
@@ -4454,6 +4453,7 @@ mod tests {
             .unwrap()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn bound_consensus_token(
         subject: &str,
         task_id: &str,

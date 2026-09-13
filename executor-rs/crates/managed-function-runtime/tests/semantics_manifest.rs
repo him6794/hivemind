@@ -6,7 +6,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 const EXPECTED_MANIFEST_SHA256: &str =
-    "8ed716dc07c7bc9abcfc5338b1888e71dd041c3fb397c45d0efb1ff76af1deee";
+    "d61a8134f665100855402d7455cfcf3b3e701a79ad43e0039f4ad6c5f05bafef";
 
 #[test]
 fn managed_function_v0_manifest_is_canonical_and_hash_pinned() {
@@ -23,11 +23,26 @@ fn managed_function_v0_manifest_is_canonical_and_hash_pinned() {
         manifest["cost_model"]["id"],
         "managed-function-v0-metering-v1"
     );
-    assert_eq!(manifest["proof_binding"]["protocol_version"], 1);
-    assert_eq!(manifest["proof_binding"]["scheme"], "risc0-zkvm-3.0.6");
     assert_eq!(
-        manifest["proof_binding"]["fixture"]["sha256"],
-        "8221629b1ba7f2a22430cb4b18a8f2ecb02b306bedb1069d6290cbab95f890bb"
+        manifest["manifest_id"],
+        "managed-function-v0-semantics-manifest-v2"
+    );
+    assert_eq!(manifest["billing"]["authority"], "nodepool");
+    assert_eq!(manifest["billing"]["reservation"], "fixed");
+    assert_eq!(manifest["billing"]["usage_role"], "diagnostic-only");
+    assert_eq!(
+        manifest["result_contract"]["canonical_result"],
+        "managed-consensus-result-v1"
+    );
+    assert_eq!(
+        manifest["result_contract"]["settlement_authority"],
+        "nodepool"
+    );
+    assert_eq!(manifest["result_contract"]["usage_role"], "diagnostic-only");
+    assert!(
+        manifest
+            .as_object()
+            .is_some_and(|object| !object.contains_key("binding"))
     );
 }
 
@@ -39,8 +54,10 @@ fn public_runtime_doc_links_the_frozen_manifest_and_its_known_limits() {
     assert!(documentation.contains(EXPECTED_MANIFEST_SHA256));
     assert!(documentation.contains("decoded byte by byte"));
     assert!(documentation.contains("does not accept `\\uXXXX`"));
-    assert!(documentation.contains("not a portable or proof-stable result"));
-    assert!(documentation.contains("does not expose the evaluator's partial receipt"));
+    assert!(documentation.contains("not a portable cross-worker language result"));
+    assert!(
+        documentation.contains("Failed receipts are diagnostic evidence, not settlement evidence.")
+    );
 }
 
 #[test]

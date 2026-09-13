@@ -298,7 +298,7 @@ impl WorkerCapabilityReport {
 
     /// The default public closed-DSL claim. It expresses only interpreter
     /// capability; Nodepool still controls task budget, liveness, reputation,
-    /// and per-attempt proof authorization.
+    /// and per-attempt execution authorization.
     pub fn public_managed_dsl() -> Self {
         Self {
             protocol_version: WORKER_CAPABILITY_REPORT_VERSION,

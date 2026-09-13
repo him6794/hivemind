@@ -36,7 +36,6 @@ fn request() -> ManagedGpuRequest {
         billing_version: MANAGED_GPU_BILLING_VERSION.into(),
         cost_model_version: MANAGED_GPU_COST_MODEL_VERSION.into(),
         settlement_basis: MANAGED_GPU_SETTLEMENT_BASIS.into(),
-        proof_policy: general_compute_runtime::managed_gpu::ManagedGpuProofPolicy::None,
     };
     request.request_digest = request.canonical_request_digest();
     request
@@ -174,7 +173,10 @@ fn request_deserialization_rejects_unknown_fields() {
     let mut json = serde_json::to_value(request).expect("request should serialize");
     json.as_object_mut()
         .expect("request should be an object")
-        .insert("proof".into(), serde_json::json!({"receipt": "forbidden"}));
+        .insert(
+            "obsolete_field".into(),
+            serde_json::json!({"value": "forbidden"}),
+        );
     assert!(serde_json::from_value::<ManagedGpuRequest>(json).is_err());
 }
 
@@ -246,7 +248,7 @@ fn result_requires_exact_trusted_identity_and_usage_accounting() {
 }
 
 #[test]
-fn result_rejects_output_source_and_proof_drift() {
+fn result_rejects_output_source_and_unknown_field_drift() {
     let request = request();
     let registration = registration(vec![capability("gpu-a", 0, "GPU-aaaaaaaa")]);
     let result = completed_result(&request, &registration);
@@ -274,7 +276,10 @@ fn result_rejects_output_source_and_proof_drift() {
     let mut json = serde_json::to_value(result).expect("result should serialize");
     json.as_object_mut()
         .expect("result should be an object")
-        .insert("proof".into(), serde_json::json!({"seal": "forbidden"}));
+        .insert(
+            "obsolete_field".into(),
+            serde_json::json!({"value": "forbidden"}),
+        );
     assert!(serde_json::from_value::<ManagedGpuResult>(json).is_err());
 }
 

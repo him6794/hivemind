@@ -22,7 +22,7 @@ use std::path::PathBuf;
 ///
 /// Unlike OCI/HCS registrations this contains no executable, image, or host
 /// path. The interpreter is the backend and its semantics digest is the trust
-/// binding used by Worker admission and proof/settlement validation.
+/// binding used by Worker admission and consensus settlement validation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedDslBackendRegistration {

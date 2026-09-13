@@ -1,4 +1,4 @@
-use std::sync::atomic::AtomicBool;
+use std::{collections::BTreeSet, sync::atomic::AtomicBool};
 
 use managed_function_runtime::{
     CpuGpuBackend, ExecutionLimits, GPU_BILLING_VERSION, GPU_COST_MODEL_VERSION,
@@ -10,7 +10,7 @@ use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 
 const EXPECTED_GPU_MANIFEST_SHA256: &str =
-    "4b5230145a43f05df6e8e09a4fa682e3babcfe43aa980883f72dd95d74d8cb13";
+    "2069ca41a110fd931aab3e9fbcdf00489ddc60cdfda3d62a38bd4b4812ab1f75";
 
 #[test]
 fn gpu_manifest_and_runtime_identifiers_are_pinned() {
@@ -44,7 +44,31 @@ fn gpu_manifest_and_runtime_identifiers_are_pinned() {
     assert_eq!(manifest["max_tensor_bytes"], 16_777_216);
     assert_eq!(manifest["cpu_fallback"], false);
     assert_eq!(manifest["determinism"], "fixed-f32-operation-order");
-    assert_eq!(manifest["proof"], "none");
+    let manifest_keys = manifest
+        .as_object()
+        .expect("GPU manifest must be an object")
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        manifest_keys,
+        BTreeSet::from([
+            "billing_version",
+            "cost_model_version",
+            "cpu_fallback",
+            "determinism",
+            "interpreter",
+            "language",
+            "max_rank",
+            "max_tensor_bytes",
+            "numeric_builtins",
+            "operation_registry",
+            "operations",
+            "runtime",
+            "supported_dtype",
+            "tensor_abi",
+        ])
+    );
     assert_eq!(
         manifest["numeric_builtins"],
         serde_json::json!([

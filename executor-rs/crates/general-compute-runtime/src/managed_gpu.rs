@@ -2,7 +2,7 @@
 //!
 //! This module intentionally has no dependency on the general-compute GPU ABI.
 //! The managed GPU route has its own capability, requirement, billing, result,
-//! and evidence identities and must never enter the v0 proof or result-torrent
+//! and evidence identities and must never enter the v0 or result-torrent
 //! completion paths.
 
 use crate::{
@@ -19,7 +19,7 @@ pub const MANAGED_GPU_RUNTIME_VERSION: &str = "managed-function-gpu-v1";
 /// This is the raw digest of the canonical managed GPU semantics manifest. It
 /// deliberately uses the same representation as the interpreter crate.
 pub const MANAGED_GPU_SEMANTICS_MANIFEST_SHA256: &str =
-    "4b5230145a43f05df6e8e09a4fa682e3babcfe43aa980883f72dd95d74d8cb13";
+    "2069ca41a110fd931aab3e9fbcdf00489ddc60cdfda3d62a38bd4b4812ab1f75";
 pub const MANAGED_GPU_OPERATION_REGISTRY_VERSION: &str = "managed-function-gpu-ops-v1";
 pub const MANAGED_GPU_BILLING_VERSION: &str = "managed-function-gpu-billing-v1";
 pub const MANAGED_GPU_COST_MODEL_VERSION: &str = "managed-function-gpu-metering-v1";
@@ -436,15 +436,6 @@ pub struct ManagedGpuRequest {
     pub billing_version: String,
     pub cost_model_version: String,
     pub settlement_basis: String,
-    pub proof_policy: ManagedGpuProofPolicy,
-}
-
-/// GPU-v1 has no proof-bearing result variant. Keeping the policy explicit in
-/// the request makes the absence of a proof a versioned protocol decision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ManagedGpuProofPolicy {
-    None,
 }
 
 impl ManagedGpuRequest {
@@ -579,12 +570,6 @@ impl ManagedGpuRequest {
                 "managed GPU settlement basis is unsupported",
             ));
         }
-        if self.proof_policy != ManagedGpuProofPolicy::None {
-            return Err(invalid(
-                ValidationErrorCode::EvidenceInvalid,
-                "managed GPU-v1 does not support proof-bearing requests",
-            ));
-        }
         Ok(())
     }
 }
@@ -608,7 +593,6 @@ struct CanonicalManagedGpuRequest<'a> {
     billing_version: &'a str,
     cost_model_version: &'a str,
     settlement_basis: &'a str,
-    proof_policy: ManagedGpuProofPolicy,
 }
 
 impl<'a> From<&'a ManagedGpuRequest> for CanonicalManagedGpuRequest<'a> {
@@ -631,7 +615,6 @@ impl<'a> From<&'a ManagedGpuRequest> for CanonicalManagedGpuRequest<'a> {
             billing_version: &request.billing_version,
             cost_model_version: &request.cost_model_version,
             settlement_basis: &request.settlement_basis,
-            proof_policy: request.proof_policy,
         }
     }
 }

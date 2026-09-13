@@ -5,7 +5,7 @@ use managed_function_runtime::{
 };
 
 #[test]
-fn renders_canonical_output_for_host_and_zk_guest() {
+fn renders_canonical_output_for_host_and_consensus_replica() {
     let value = Value::Dict(
         [
             ("answer".to_string(), Value::Int(42)),

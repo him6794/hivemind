@@ -3001,7 +3001,6 @@ mod tests {
                 general_compute_runtime::managed_gpu::MANAGED_GPU_COST_MODEL_VERSION.into(),
             settlement_basis: general_compute_runtime::managed_gpu::MANAGED_GPU_SETTLEMENT_BASIS
                 .into(),
-            proof_policy: general_compute_runtime::managed_gpu::ManagedGpuProofPolicy::None,
         };
         request.request_digest = request.canonical_request_digest();
         serde_json::to_value(request).unwrap()

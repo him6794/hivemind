@@ -1,24 +1,24 @@
 //! Metered managed function runtime.
 
-/// Canonical `managed-function-v0` semantics, metering, billing, and proof
-/// compatibility manifest.
+/// Canonical `managed-function-v0` semantics, metering, billing, and result
+/// contract manifest.
 ///
 /// The bytes are deliberately checked into the runtime crate and hash-pinned
-/// by contract tests. Changing them is a runtime/proof protocol migration, not
-/// an in-place behavior edit.
+/// by contract tests. Changing them is a runtime contract migration, not an
+/// in-place behavior edit.
 pub const V0_SEMANTICS_MANIFEST_JSON: &str = include_str!("../managed-function-v0-semantics.json");
 
 /// SHA-256 of the canonical JSON bytes in [`V0_SEMANTICS_MANIFEST_JSON`],
 /// excluding the file's trailing newline.
 pub const V0_SEMANTICS_MANIFEST_SHA256: &str =
-    "8ed716dc07c7bc9abcfc5338b1888e71dd041c3fb397c45d0efb1ff76af1deee";
+    "d61a8134f665100855402d7455cfcf3b3e701a79ad43e0039f4ad6c5f05bafef";
 
 /// Canonical GPU-v1 semantics and operation-registry manifest.
 pub const GPU_SEMANTICS_MANIFEST_JSON: &str =
     include_str!("../managed-function-gpu-v1-semantics.json");
 /// SHA-256 of the canonical GPU-v1 manifest excluding its trailing newline.
 pub const GPU_SEMANTICS_MANIFEST_SHA256: &str =
-    "4b5230145a43f05df6e8e09a4fa682e3babcfe43aa980883f72dd95d74d8cb13";
+    "2069ca41a110fd931aab3e9fbcdf00489ddc60cdfda3d62a38bd4b4812ab1f75";
 
 mod gpu;
 
@@ -84,7 +84,7 @@ pub fn render_output(value: &Value) -> String {
 /// incrementally and checks every append before allocation, so a rejected
 /// value never first creates an unbounded serialized intermediate. `max_bytes`
 /// is a fixed-width logical UTF-8 byte count, so the decision is identical on
-/// native workers and zkVM guests.
+/// every supported Worker platform.
 pub fn render_output_bounded(value: &Value, max_bytes: u64) -> Result<String, RuntimeError> {
     let mut output = BoundedOutput::new(max_bytes);
     match value {
@@ -260,7 +260,7 @@ pub struct ExecutionLimits {
     ///
     /// This is deterministic logical byte accounting, not allocator capacity:
     /// string/key escaping and collection punctuation are included so native
-    /// workers and zkVM guests make the same acceptance decision. The counter
+    /// workers and consensus replicas make the same acceptance decision. The counter
     /// is fixed-width (`u64`), rather than pointer-sized.
     pub max_value_bytes: u64,
     /// Maximum number of direct elements in any materialized list or dict.
@@ -381,7 +381,7 @@ pub struct ManagedExecutor;
 /// GPU-enabled view of the same parser and evaluator.
 ///
 /// This is a separate runtime entry point so the frozen `managed-function-v0`
-/// methods and proof guest never acquire GPU capabilities accidentally.
+/// methods never acquire GPU capabilities accidentally.
 pub struct ManagedGpuExecutor<'a> {
     backend: &'a mut dyn GpuBackend,
 }
@@ -2146,7 +2146,7 @@ impl<'a> Evaluator<'a> {
                 .eval_gpu_builtin(GpuOperation::MatmulF32, args)
                 .map(Some),
             // Keep the names unavailable to the default v0 evaluator.  This is
-            // important for the frozen proof/semantics contract.
+            // important for the frozen semantics contract.
             "gpu_add_f32" | "gpu_scale_f32" | "gpu_matmul_f32" => Ok(None),
             "len" => {
                 let [arg] = args else {

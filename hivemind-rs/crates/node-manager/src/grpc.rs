@@ -4331,7 +4331,6 @@ mod tests {
                 general_compute_runtime::managed_gpu::MANAGED_GPU_COST_MODEL_VERSION.into(),
             settlement_basis: general_compute_runtime::managed_gpu::MANAGED_GPU_SETTLEMENT_BASIS
                 .into(),
-            proof_policy: general_compute_runtime::managed_gpu::ManagedGpuProofPolicy::None,
         };
         request.request_digest = request.canonical_request_digest();
 
@@ -4847,7 +4846,6 @@ mod tests {
                 general_compute_runtime::managed_gpu::MANAGED_GPU_COST_MODEL_VERSION.into(),
             settlement_basis: general_compute_runtime::managed_gpu::MANAGED_GPU_SETTLEMENT_BASIS
                 .into(),
-            proof_policy: general_compute_runtime::managed_gpu::ManagedGpuProofPolicy::None,
         };
         request.request_digest = request.canonical_request_digest();
         request
@@ -6874,7 +6872,7 @@ mod tests {
         sqlx::query(
             "UPDATE tasks SET
                 status = 'COMPLETED',
-                status_message = 'completed with verified proof',
+                status_message = 'completed with consensus certificate',
                 output = 'managed textual output',
                 result_torrent = NULL,
                 managed_executed_ops = 25,

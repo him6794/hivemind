@@ -1788,8 +1788,8 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use general_compute_runtime::managed_gpu::{
-        ManagedGpuBackendRegistration, ManagedGpuLimits, ManagedGpuProofPolicy,
-        ManagedGpuRequirement, MANAGED_GPU_RUNTIME_VERSION,
+        ManagedGpuBackendRegistration, ManagedGpuLimits, ManagedGpuRequirement,
+        MANAGED_GPU_RUNTIME_VERSION,
     };
     use hivemind_models::TaskStatus;
     use managed_function_runtime::V0_SEMANTICS_MANIFEST_JSON;
@@ -2780,7 +2780,6 @@ mod tests {
                 general_compute_runtime::managed_gpu::MANAGED_GPU_COST_MODEL_VERSION.into(),
             settlement_basis: general_compute_runtime::managed_gpu::MANAGED_GPU_SETTLEMENT_BASIS
                 .into(),
-            proof_policy: ManagedGpuProofPolicy::None,
         };
         request.request_digest = request.canonical_request_digest();
         let trusted_registration = TrustedWorkerCapabilityRegistration {

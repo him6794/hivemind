@@ -9,20 +9,21 @@ predictable billing and a small, tightly bounded execution surface.
 
 The first milestone is a Rust executor that parses a fixed syntax, evaluates it
 without file, network, import, subprocess, or reflection support, and returns an
-execution receipt that can be used for deterministic billing.
+execution receipt for diagnostics and audit records.
 
 ## Frozen v0 contract
 
 The machine-readable `managed-function-v0` semantics, metering, billing, and
-proof binding is frozen in
+result contract are frozen in
 [`executor-rs/crates/managed-function-runtime/managed-function-v0-semantics.json`](../executor-rs/crates/managed-function-runtime/managed-function-v0-semantics.json).
 Its canonical JSON SHA-256 is
-`8ed716dc07c7bc9abcfc5338b1888e71dd041c3fb397c45d0efb1ff76af1deee`.
-The manifest includes executable cost vectors and pins the real proof fixture,
-proof protocol, RISC Zero scheme, guest image ID, admission limits, and default
-runtime limits. An incompatible change requires new runtime, cost-model,
-proof-protocol, and guest-image identifiers; this file is not a mutable latest
-configuration.
+`d61a8134f665100855402d7455cfcf3b3e701a79ad43e0039f4ad6c5f05bafef`.
+The manifest includes executable cost vectors, admission limits, default runtime
+limits, the canonical managed-consensus result contract, and Nodepool-owned
+fixed billing metadata. Worker usage and operation counts are diagnostic only;
+they do not authorize settlement. An incompatible change requires new runtime,
+cost-model, and semantics manifest identifiers; this file is not a mutable
+latest configuration.
 
 The v0 limitations are part of that frozen contract:
 
@@ -31,11 +32,11 @@ The v0 limitations are part of that frozen contract:
   syntax. It only recognizes quote, backslash, line-feed, carriage-return, and
   tab escapes. JSON input and canonical output remain UTF-8.
 - Managed integers are signed `i64`. Arithmetic overflow currently uses the evaluator's
-  unchecked Rust integer operators, so overflow is not a portable or proof-stable result;
+  unchecked Rust integer operators, so overflow is not a portable cross-worker language result;
   tasks must keep arithmetic in range.
 - `RuntimeError` does not expose the evaluator's partial receipt. Worker
   evaluation failures synthesize zeroed counters; final output-render failures
-  retain only `executed_ops`, and failed receipts do not carry proof envelopes.
+  retain only `executed_ops`. Failed receipts are diagnostic evidence, not settlement evidence.
 - `ExecutionLimits::unlimited()` is a legacy/testing convenience, not the
   production v0 default.
 
@@ -82,7 +83,9 @@ Worker `ExecuteTaskResponse` forwards the receipt summary back to the scheduler:
 - `managed_output_bytes`
 - `managed_receipt_json`
 
-The scheduler stores these fields on the task before billing settlement.
+The scheduler stores these fields as diagnostic evidence. Managed settlement is
+authorized only by the Nodepool-owned consensus certificate and the fixed task
+reservation, never by a single Worker receipt or usage claim.
 
 ## Supported Syntax v0
 
@@ -158,7 +161,7 @@ GPU-enabled managed functions use a separate runtime identity,
 `managed-function-gpu-v1`, and the canonical
 `executor-rs/crates/managed-function-runtime/managed-function-gpu-v1-semantics.json`
 manifest. This keeps floating-point and GPU behavior out of the frozen v0
-proof contract.
+result contract.
 
 GPU-v1 adds only fixed, Rust-owned operations:
 
@@ -173,9 +176,10 @@ GPU-required request fails closed when a trusted compatible GPU is unavailable;
 it never silently uses the CPU reference backend.
 
 GPU-v1 also permits the separately declared floating-point and math surface
-only inside its explicit GPU execution context. GPU-v1 uses `proof = none` and
-must remain on the authoritative typed result and settlement path rather than
-falling back to the v0 proof guest or legacy result-torrent completion.
+only inside its explicit GPU execution context. GPU-v1 uses the authoritative
+typed result contract and consensus settlement path. A GPU result without the
+required consensus evidence is not settled, and the route never falls back to
+legacy result-torrent completion.
 
 ## Metering v0
 
@@ -201,34 +205,27 @@ configured limit.
 
 ## Billing Direction
 
-Managed function billing should be derived from the receipt, not from wall-clock
-time alone.
+Managed function settlement uses the Nodepool-owned fixed reservation. The
+execution receipt remains useful for diagnostics, audit, and capacity analysis,
+but Worker-reported usage does not determine the amount charged.
 
-Current formula:
+The result contract is:
 
 ```text
-total_cpt =
-  base_invocation_cpt
-  + usage_units
+canonical result = managed-consensus-result-v1
+output digest    = sha256
+settlement       = Nodepool certificate over a strict-majority quorum
+billing          = fixed task reservation
 ```
 
-`usage_units` is accumulated by the evaluator as each primitive expression,
-builtin call, user-function call, and loop body operation executes. The task's
-`max_cpt` is the user-selected budget; it is passed to the worker as the
-managed execution budget and execution stops with `budget_exhausted` when it is
-spent. The receipt is persisted before settlement so billing can be recomputed
-from the versioned cost model and receipt data.
+A managed task is dispatched to distinct eligible Workers. Settlement requires
+a valid quorum certificate, matching persisted replica evidence, and the exact
+task, attempt, and round identity. Worker usage and operation counts remain
+diagnostic evidence and do not authorize settlement.
 
-The first integrated billing constants are:
-
-| Component | CPT |
-| --- | ---: |
-| base invocation | 1 |
-| each usage unit | 1 |
-
-The computed amount cannot exceed the selected `max_cpt` because the worker
-stops when the budget is spent. Legacy tasks without a managed receipt
-continue to use their legacy billing path during migration.
+If the consensus policy is missing, disabled, or cannot reach quorum, the task
+remains un-settled or fails closed. There is no single-Worker, receipt-only,
+or legacy fallback path.
 
 ## Implementation Plan
 
@@ -238,4 +235,5 @@ continue to use their legacy billing path during migration.
 4. Implement metering in the evaluator, not only in the parser.
 5. Return a structured `ExecutionReceipt`.
 6. Add CLI/service integration after the core crate is stable.
-7. Add billing ledger integration after receipts are persisted.
+7. Keep fixed-reservation billing and consensus certificate settlement in the
+   Nodepool control plane; receipts remain diagnostic evidence.

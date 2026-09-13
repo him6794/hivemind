@@ -6,7 +6,7 @@ use thiserror::Error;
 /// Version of the Nodepool-coordinated managed execution quorum protocol.
 pub const CONSENSUS_PROTOCOL_VERSION: u16 = 1;
 /// Evidence produced by this crate means agreement between authenticated Workers,
-/// not independent proof that the agreed result is semantically correct.
+/// not independent correctness validation of the agreed result.
 pub const CONSENSUS_EVIDENCE_LEVEL: &str = "replicated";
 pub const MAX_REPLICAS: u16 = 7;
 pub const MAX_CERTIFICATE_OBSERVATIONS: usize = 7;
@@ -14,7 +14,7 @@ pub const MAX_CERTIFICATE_OBSERVATIONS: usize = 7;
 /// does not carry an explicit production backend registration.
 pub const MANAGED_DSL_DEFAULT_BACKEND_ID: &str = "managed-function-v0";
 pub const MANAGED_DSL_DEFAULT_SEMANTICS_DIGEST: &str =
-    "sha256:8ed716dc07c7bc9abcfc5338b1888e71dd041c3fb397c45d0efb1ff76af1deee";
+    "sha256:d61a8134f665100855402d7455cfcf3b3e701a79ad43e0039f4ad6c5f05bafef";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConsensusBinding {

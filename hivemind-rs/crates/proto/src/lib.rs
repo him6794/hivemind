@@ -88,7 +88,7 @@ pub const MANAGED_CONSENSUS_MAX_REPLICAS: u32 = 7;
 
 /// Validate the additional identity fields used by a managed consensus request.
 /// Legacy requests keep version zero and are intentionally accepted by this
-/// helper so the existing proof/general-compute/GPU paths remain compatible.
+/// helper so the existing managed/general-compute/GPU paths remain compatible.
 pub fn validate_managed_consensus_request(
     request: &ExecuteTaskRequest,
 ) -> Result<(), &'static str> {
@@ -186,7 +186,7 @@ pub const LEGACY_WORKER_RPC_MESSAGE_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// Maximum gRPC message size for Worker RPCs.
 ///
 /// The cap must cover the largest admitted managed-GPU manifest or result, in
-/// addition to the bounded status, proof, receipt, and protobuf field overhead.
+/// addition to the bounded status, receipt, and protobuf field overhead.
 /// Keep the Worker client and server symmetric when changing this value.
 pub const WORKER_RPC_MESSAGE_MAX_BYTES: usize = 22 * 1024 * 1024;
 
@@ -578,18 +578,17 @@ mod tests {
         ExecuteTaskResponse, GeneralComputeArtifactChunkUpload, GeneralComputeChunkDescriptor,
         GeneralComputeChunkResumeRequest, GeneralComputeChunkResumeResponse,
         GeneralComputeChunkUpload, GeneralComputeChunkUploadResponse, GeneralComputePrepareRequest,
-        GeneralComputePrepareResponse, ManagedConsensusResult,
-        UploadTaskRequest, ValidateGeneralComputeTransferLeaseRequest,
-        ValidateGeneralComputeTransferLeaseResponse, WorkerCapabilityReport,
-        WorkerSessionCancelAck, WorkerSessionClientFrame, WorkerSessionHello,
-        WorkerSessionServerFrame, WorkerSessionTask, GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES,
-        GENERAL_COMPUTE_CHUNK_UPLOAD_MAX_BYTES, GENERAL_COMPUTE_MANIFEST_MAX_BYTES,
-        GENERAL_COMPUTE_RESULT_MAX_BYTES, GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES,
+        GeneralComputePrepareResponse, ManagedConsensusResult, UploadTaskRequest,
+        ValidateGeneralComputeTransferLeaseRequest, ValidateGeneralComputeTransferLeaseResponse,
+        WorkerCapabilityReport, WorkerSessionCancelAck, WorkerSessionClientFrame,
+        WorkerSessionHello, WorkerSessionServerFrame, WorkerSessionTask,
+        GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES, GENERAL_COMPUTE_CHUNK_UPLOAD_MAX_BYTES,
+        GENERAL_COMPUTE_MANIFEST_MAX_BYTES, GENERAL_COMPUTE_RESULT_MAX_BYTES,
+        GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES,
         GENERAL_COMPUTE_TRANSFER_LEASE_RPC_MESSAGE_MAX_BYTES, LEGACY_MANAGED_RECEIPT_MAX_BYTES,
         MANAGED_BUDGET_MAX_USAGE_UNITS, MANAGED_GPU_MANIFEST_MAX_BYTES,
-        MANAGED_GPU_RESULT_MAX_BYTES, MANAGED_JSON_INPUT_MAX_BYTES,
-        MANAGED_TASK_SOURCE_MAX_BYTES, TASK_ID_MAX_BYTES,
-        WORKER_EXECUTION_TOKEN_MAX_BYTES, WORKER_RPC_MESSAGE_MAX_BYTES,
+        MANAGED_GPU_RESULT_MAX_BYTES, MANAGED_JSON_INPUT_MAX_BYTES, MANAGED_TASK_SOURCE_MAX_BYTES,
+        TASK_ID_MAX_BYTES, WORKER_EXECUTION_TOKEN_MAX_BYTES, WORKER_RPC_MESSAGE_MAX_BYTES,
         WORKER_STATUS_MESSAGE_MAX_BYTES,
     };
 

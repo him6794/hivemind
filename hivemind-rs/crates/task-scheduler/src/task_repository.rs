@@ -5841,7 +5841,7 @@ impl TaskRepository {
 
     /// An ASSIGNED task without a Worker identity cannot be safely retried or
     /// attributed. Terminalize it without Worker penalty and revoke all task
-    /// transfer/proof state in the same transaction.
+    /// transfer/evidence state in the same transaction.
     pub async fn terminalize_stale_assignment_without_worker(
         &self,
         expected: &Task,
@@ -5891,7 +5891,7 @@ impl TaskRepository {
 
     /// Terminalize an active attempt when another retry would exceed the
     /// effective limit. This helper runs inside the caller's transaction so
-    /// the state change and lease/proof cleanup are atomic.
+    /// the state change and lease/evidence cleanup are atomic.
     async fn terminalize_retry_exhausted_locked(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -7053,12 +7053,12 @@ mod tests {
         canonical_artifact_root,
         managed_gpu::{
             ManagedGpuBackendRegistration, ManagedGpuCapability, ManagedGpuEvidence,
-            ManagedGpuEvidenceLevel, ManagedGpuLimits, ManagedGpuProofPolicy, ManagedGpuRequest,
-            ManagedGpuRequirement, ManagedGpuResult, ManagedGpuStatus, ManagedGpuUsage,
-            MANAGED_GPU_BILLING_VERSION, MANAGED_GPU_COST_MODEL_VERSION,
-            MANAGED_GPU_OPERATION_REGISTRY_VERSION, MANAGED_GPU_REQUEST_PROTOCOL_VERSION,
-            MANAGED_GPU_RESULT_PROTOCOL_VERSION, MANAGED_GPU_RUNTIME_VERSION,
-            MANAGED_GPU_SEMANTICS_MANIFEST_SHA256, MANAGED_GPU_SETTLEMENT_BASIS,
+            ManagedGpuEvidenceLevel, ManagedGpuLimits, ManagedGpuRequest, ManagedGpuRequirement,
+            ManagedGpuResult, ManagedGpuStatus, ManagedGpuUsage, MANAGED_GPU_BILLING_VERSION,
+            MANAGED_GPU_COST_MODEL_VERSION, MANAGED_GPU_OPERATION_REGISTRY_VERSION,
+            MANAGED_GPU_REQUEST_PROTOCOL_VERSION, MANAGED_GPU_RESULT_PROTOCOL_VERSION,
+            MANAGED_GPU_RUNTIME_VERSION, MANAGED_GPU_SEMANTICS_MANIFEST_SHA256,
+            MANAGED_GPU_SETTLEMENT_BASIS,
         },
         ArtifactManifest, ArtifactRole, DeterminismPolicy, EvidenceEnvelope, ExecutionPolicy,
         GeneralComputeRequest, GeneralComputeResult, ResultStatus,
@@ -11365,9 +11365,9 @@ mod tests {
         };
         let repo = TaskRepository::new(p);
         let unique = uuid::Uuid::new_v4().to_string();
-        let username = format!("verify-proof-owner-{unique}");
-        let worker_id = format!("verify-proof-worker-{unique}");
-        let task_id = format!("verify-proof-task-{unique}");
+        let username = format!("verify-check-owner-{unique}");
+        let worker_id = format!("verify-check-worker-{unique}");
+        let task_id = format!("verify-check-task-{unique}");
 
         sqlx::query(
             "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
@@ -12833,7 +12833,6 @@ mod tests {
             billing_version: MANAGED_GPU_BILLING_VERSION.into(),
             cost_model_version: MANAGED_GPU_COST_MODEL_VERSION.into(),
             settlement_basis: MANAGED_GPU_SETTLEMENT_BASIS.into(),
-            proof_policy: ManagedGpuProofPolicy::None,
         };
         request.request_digest = request.canonical_request_digest();
         request.validate().unwrap();
