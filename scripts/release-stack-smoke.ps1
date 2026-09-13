@@ -72,6 +72,55 @@ function Invoke-CheckedCommand {
     }
 }
 
+function Initialize-EphemeralWorkerVolumes {
+    param(
+        [string]$WorkingDirectory
+    )
+
+    $configVolume = [Environment]::GetEnvironmentVariable("WORKER_GENERAL_COMPUTE_CONFIG_VOLUME_NAME", "Process")
+    $stateVolume = [Environment]::GetEnvironmentVariable("WORKER_GENERAL_COMPUTE_STATE_VOLUME_NAME", "Process")
+    if ([string]::IsNullOrWhiteSpace($configVolume) -or [string]::IsNullOrWhiteSpace($stateVolume)) {
+        throw "Ephemeral Worker general-compute volumes must be named before bootstrap."
+    }
+
+    $previousLocation = Get-Location
+    try {
+        Set-Location -LiteralPath $WorkingDirectory
+        $imageNames = @(& docker compose config --images | ForEach-Object { $_.ToString().Trim() })
+        if ($LASTEXITCODE -ne 0) {
+            throw "Unable to resolve Compose image names for release smoke volume bootstrap."
+        }
+        $workerImage = ($imageNames | Where-Object { $_ -match '(?:^|-)worker$' } | Select-Object -First 1)
+        if ($null -eq $workerImage -or [string]::IsNullOrWhiteSpace($workerImage.ToString())) {
+            throw "Unable to resolve the built Worker image for release smoke volume bootstrap."
+        }
+        $workerImage = $workerImage.ToString().Trim()
+    }
+    finally {
+        Set-Location $previousLocation
+    }
+
+    # The release smoke stack has no operator backend bundle. Seed only its
+    # isolated, harness-owned volume with an empty registry so managed-function
+    # endpoints can start while general-compute admission remains disabled.
+    $bootstrapCommand = "if [ ! -f /config/backends.json ]; then printf '%s\n' '[]' > /config/backends.json; fi; chown -R 10001:10001 /state; chmod 0750 /state"
+    Invoke-CheckedCommand -Command "docker" -Arguments @(
+        "run",
+        "--rm",
+        "--user",
+        "0:0",
+        "--volume",
+        "${configVolume}:/config",
+        "--volume",
+        "${stateVolume}:/state",
+        "--entrypoint",
+        "/bin/sh",
+        $workerImage,
+        "-c",
+        $bootstrapCommand
+    ) -WorkingDirectory $WorkingDirectory
+}
+
 function Wait-ForHttpOk {
     param(
         [string]$Uri,
@@ -358,8 +407,21 @@ try {
         Write-Host "release stack smoke check-only passed"
     }
     else {
-        Write-Host "RUN docker compose up -d --build"
-        Invoke-CheckedCommand -Command "docker" -Arguments @("compose", "up", "-d", "--build") -WorkingDirectory $repoRoot
+        Write-Host "RUN docker compose up -d --build --no-start"
+        Invoke-CheckedCommand -Command "docker" -Arguments @("compose", "up", "-d", "--build", "--no-start") -WorkingDirectory $repoRoot
+
+        $ephemeralConfigVolume = $restoreEnvironmentNames -contains "WORKER_GENERAL_COMPUTE_CONFIG_VOLUME_NAME"
+        $ephemeralStateVolume = $restoreEnvironmentNames -contains "WORKER_GENERAL_COMPUTE_STATE_VOLUME_NAME"
+        if ($ephemeralConfigVolume -and $ephemeralStateVolume) {
+            Write-Host "BOOTSTRAP isolated Worker general-compute volumes"
+            Initialize-EphemeralWorkerVolumes -WorkingDirectory $repoRoot
+        }
+        elseif ($ephemeralConfigVolume -or $ephemeralStateVolume) {
+            throw "WORKER_GENERAL_COMPUTE_CONFIG_VOLUME_NAME and WORKER_GENERAL_COMPUTE_STATE_VOLUME_NAME must be supplied together."
+        }
+
+        Write-Host "RUN docker compose up -d"
+        Invoke-CheckedCommand -Command "docker" -Arguments @("compose", "up", "-d") -WorkingDirectory $repoRoot
 
         foreach ($service in $services) {
             Write-Host "WAIT $($service.Name) $($service.Uri)"

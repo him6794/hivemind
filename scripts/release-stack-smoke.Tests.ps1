@@ -12,9 +12,25 @@ if (!(Test-Path -LiteralPath $composePath -PathType Leaf)) {
     throw "release stack smoke consensus validation requires docker-compose.yml."
 }
 $composeText = Get-Content -LiteralPath $composePath -Raw
+$protectedRuntimePath = Join-Path $repoRoot ".github/workflows/protected-runtime.yml"
+if (!(Test-Path -LiteralPath $protectedRuntimePath -PathType Leaf)) {
+    throw "protected runtime workflow must exist."
+}
+$protectedRuntimeText = Get-Content -LiteralPath $protectedRuntimePath -Raw
+$ociFixturePath = Join-Path $repoRoot "test-fixtures/general-compute-oci/compose-config.json"
+if (!(Test-Path -LiteralPath $ociFixturePath -PathType Leaf)) {
+    throw "general-compute OCI fixture must exist."
+}
+$ociFixtureText = Get-Content -LiteralPath $ociFixturePath -Raw
 
 foreach ($expected in @(
     "docker compose up -d --build",
+    "docker compose up -d --build --no-start",
+    "docker compose up -d",
+    "Initialize-EphemeralWorkerVolumes",
+    "backends.json",
+    "10001:10001",
+    "--entrypoint",
     "docker compose down -v",
     "Wait-ForHttpOk",
     "SITE_HOST_PORT",
@@ -59,8 +75,14 @@ foreach ($expected in @(
     }
 }
 
-if ($scriptText -match '(?i)managed.?prover|managed proof|zkvm|risc.?zero') {
+if ($scriptText -match '(?i)managed.?prover|managed proof|proof.?to.?settlement|zkvm|risc.?zero') {
     throw "release stack smoke harness must not retain the removed proof settlement path."
+}
+if ($protectedRuntimeText -match '(?i)managed.?prover|managed proof|proof.?to.?settlement|managed_proof|zkvm|risc.?zero') {
+    throw "protected runtime workflow must not retain the removed proof settlement path."
+}
+if ($ociFixtureText -match '(?i)managed.?prover|managed proof|proof.?to.?settlement|managed_proof|zkvm|risc.?zero') {
+    throw "general-compute OCI fixture must use consensus settlement configuration."
 }
 
 if (!$scriptText.Contains("docker-compose-release.Tests.ps1")) {
