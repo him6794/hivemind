@@ -491,7 +491,7 @@ $readme = @'
 
 For a private deployment or unattended startup, `.env.worker.example` and `start-worker.ps1` are available as optional advanced settings. The normal sign-in flow does not store your password, server key, or reusable VPN key.
 
-`update-manifest.unsigned.json` is a build input only. It is not an update authority; release publication requires a root-verified keyset and an independently signed manifest.
+`manifest.unsigned.json` and `update-manifest.unsigned.json` are build inputs only. They are not update authorities; release publication requires a root-verified keyset and an independently signed manifest.
 
 The Worker runs on a suitable local Windows host. Orange Pi is reserved for Nodepool, Website API, Headscale, PostgreSQL, and Redis; do not deploy this Worker package there.
 '@
