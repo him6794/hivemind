@@ -8,7 +8,8 @@
 use crate::onnx::OnnxBackendConfig;
 use crate::sandbox::{
     BackendExecutionMode, ProductionSandboxLaunch, SandboxDevice, SandboxMount,
-    WindowsNativeSandboxLaunch, WindowsSandboxPolicy,
+    WindowsHcsResourceLimits, WindowsNativeSandboxLaunch, WindowsSandboxPolicy,
+    WindowsSandboxPolicyError,
 };
 use crate::{
     GeneralComputeRequest, MANAGED_DSL_RUNTIME_VERSION, MANAGED_DSL_SEMANTICS_MANIFEST_SHA256,
@@ -642,16 +643,15 @@ pub struct WindowsHcsContainerSpec {
     pub image_root: PathBuf,
     pub entrypoint: Vec<String>,
     pub mounts: Vec<WindowsHcsMountSpec>,
+    /// HCS `Container.Storage.Path`, owned by the operator and used for the
+    /// container scratch layer.
+    pub storage_path: PathBuf,
     pub result_path: PathBuf,
     pub result_container_path: String,
     pub max_output_bytes: usize,
     pub network_isolated: bool,
     pub root_read_only: bool,
-    pub memory_bytes: u64,
-    pub cpu_millis: u64,
-    pub process_limit: u32,
-    pub thread_limit: u32,
-    pub scratch_bytes: u64,
+    pub resource_limits: WindowsHcsResourceLimits,
 }
 
 impl WindowsProductionBackendConfig {
@@ -679,13 +679,13 @@ impl WindowsProductionBackendConfig {
         }
         ensure_no_symlink_ancestors(&self.image_root)?;
         ensure_no_symlink_ancestors(&self.artifact_root)?;
-        let image_task_root = self.image_root.join(task_id);
+        let image_root = self.image_root.clone();
         let artifact_task_root = self.artifact_root.join(task_id);
-        ensure_contained(&self.image_root, &image_task_root)?;
+        ensure_contained(&self.image_root, &image_root)?;
         ensure_contained(&self.artifact_root, &artifact_task_root)?;
-        ensure_no_symlink_ancestors(&image_task_root)?;
+        ensure_no_symlink_ancestors(&image_root)?;
         ensure_no_symlink_ancestors(&artifact_task_root)?;
-        Ok((image_task_root, artifact_task_root))
+        Ok((image_root, artifact_task_root))
     }
 
     /// Build the operator-owned HCS specification without invoking HCS.
@@ -696,8 +696,23 @@ impl WindowsProductionBackendConfig {
         &self,
         task_id: &str,
     ) -> Result<WindowsHcsContainerSpec, ProductionBackendRegistryError> {
+        if !is_safe_task_id(task_id) {
+            return Err(ProductionBackendRegistryError::UnsafeTaskId);
+        }
         self.validate()?;
-        let (image_task_root, artifact_task_root) = self.task_root(task_id)?;
+        let resource_limits = self
+            .policy
+            .hcs_enforced_resource_limits()
+            .map_err(ProductionBackendRegistryError::WindowsPolicyUnenforceable)?;
+        self.hcs_spec_with_limits(task_id, resource_limits)
+    }
+
+    fn hcs_spec_with_limits(
+        &self,
+        task_id: &str,
+        resource_limits: WindowsHcsResourceLimits,
+    ) -> Result<WindowsHcsContainerSpec, ProductionBackendRegistryError> {
+        let (image_root, artifact_task_root) = self.task_root(task_id)?;
         let container_id = format!("hivemind-{task_id}");
         let mounts = self
             .policy
@@ -719,21 +734,19 @@ impl WindowsProductionBackendConfig {
                 },
             })
             .collect();
+        let storage_path = artifact_task_root.join("scratch");
         Ok(WindowsHcsContainerSpec {
             container_id,
-            image_root: image_task_root,
+            image_root,
             entrypoint: self.entrypoint.clone(),
             mounts,
-            result_path: artifact_task_root.join("scratch").join("result.json"),
+            storage_path: storage_path.clone(),
+            result_path: storage_path.join("result.json"),
             result_container_path: "C:\\work\\output\\result.json".into(),
             max_output_bytes: self.max_output_bytes,
             network_isolated: true,
             root_read_only: true,
-            memory_bytes: self.policy.memory_bytes,
-            cpu_millis: self.policy.cpu_millis,
-            process_limit: self.policy.process_limit,
-            thread_limit: self.policy.thread_limit,
-            scratch_bytes: self.policy.scratch_bytes,
+            resource_limits,
         })
     }
 
@@ -807,6 +820,7 @@ pub enum ProductionBackendRegistryError {
     WindowsPathTraversal,
     WindowsRunnerDigestInvalid,
     WindowsLaunchInvalid(crate::sandbox::ProductionSandboxError),
+    WindowsPolicyUnenforceable(WindowsSandboxPolicyError),
     WindowsResourceLimitRequired,
     WindowsRegistryEmpty,
     ManagedDslBackendIdEmpty,

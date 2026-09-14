@@ -5,6 +5,7 @@
 //! ComputeCore.dll; non-Windows builds fail closed with `UnsupportedPlatform`.
 
 use crate::production::WindowsHcsContainerSpec;
+use crate::sandbox::WINDOWS_HCS_PROCESSOR_MAXIMUM;
 #[cfg(any(windows, test))]
 use crate::supervisor::RunStatus;
 use crate::supervisor::{Cancellation, RunResult};
@@ -102,12 +103,31 @@ fn validate_spec(spec: &WindowsHcsContainerSpec) -> Result<(), WindowsHcsError> 
             "image root and non-empty entrypoint are required".into(),
         ));
     }
-    if spec.result_path.as_os_str().is_empty()
+    if spec.storage_path.as_os_str().is_empty()
+        || spec.result_path.as_os_str().is_empty()
         || spec.result_container_path.is_empty()
         || spec.max_output_bytes == 0
     {
         return Err(WindowsHcsError::InvalidSpec(
-            "result transport and output limit are required".into(),
+            "HCS storage, result transport, and output limit are required".into(),
+        ));
+    }
+    if spec.resource_limits.memory_size_mb == 0
+        || spec.resource_limits.processor_maximum == 0
+        || spec.resource_limits.processor_maximum > WINDOWS_HCS_PROCESSOR_MAXIMUM
+    {
+        return Err(WindowsHcsError::InvalidSpec(
+            "HCS memory and processor limits are invalid".into(),
+        ));
+    }
+    let storage_path = normalize_windows_path(&spec.storage_path.to_string_lossy());
+    let storage_mount = spec.mounts.iter().any(|mount| {
+        !mount.read_only
+            && normalize_windows_path(&mount.host_path.to_string_lossy()) == storage_path
+    });
+    if !storage_mount {
+        return Err(WindowsHcsError::InvalidSpec(
+            "HCS storage path must use an explicit writable mount".into(),
         ));
     }
     let result_parent = windows_path_parent(&spec.result_path);
@@ -132,16 +152,6 @@ fn validate_spec(spec: &WindowsHcsContainerSpec) -> Result<(), WindowsHcsError> 
             "HCS spec must deny networking and use a read-only root".into(),
         ));
     }
-    if spec.memory_bytes == 0
-        || spec.cpu_millis == 0
-        || spec.process_limit == 0
-        || spec.thread_limit == 0
-        || spec.scratch_bytes == 0
-    {
-        return Err(WindowsHcsError::InvalidSpec(
-            "HCS resource limits must be nonzero".into(),
-        ));
-    }
     if spec.mounts.is_empty()
         || spec
             .mounts
@@ -164,6 +174,37 @@ fn windows_path_parent(path: &std::path::Path) -> Option<String> {
     normalized
         .rsplit_once('\\')
         .map(|(parent, _)| parent.to_owned())
+}
+
+#[cfg(any(windows, test))]
+fn configuration_json(spec: &WindowsHcsContainerSpec) -> Result<String, WindowsHcsError> {
+    serde_json::to_string(&serde_json::json!({
+        "Owner": "hivemind",
+        "SchemaVersion": {"Major": 2, "Minor": 1},
+        "ShouldTerminateOnLastHandleClosed": true,
+        "Container": {
+            "Storage": {
+                "Layers": [{"Path": spec.image_root}],
+                "Path": spec.storage_path,
+            },
+            "MappedDirectories": spec.mounts.iter().map(|mount| serde_json::json!({
+                "HostPath": mount.host_path,
+                "HostPathType": "Directory",
+                "ContainerPath": mount.container_path,
+                "ReadOnly": mount.read_only,
+            })).collect::<Vec<_>>(),
+            "Memory": {
+                "SizeInMB": spec.resource_limits.memory_size_mb,
+            },
+            "Processor": {
+                "Maximum": spec.resource_limits.processor_maximum,
+            },
+            "Networking": {
+                "NetworkAdapters": [],
+            },
+        }
+    }))
+    .map_err(|error| WindowsHcsError::InvalidSpec(error.to_string()))
 }
 
 #[cfg(any(windows, test))]
@@ -353,7 +394,7 @@ fn run_lifecycle<P: HcsLifecycleProvider>(
 mod hcs {
     use super::{
         Cancellation, HcsLifecycleProvider, HcsWaitOutcome, RunResult, RunStatus, WindowsHcsError,
-        run_lifecycle,
+        configuration_json, run_lifecycle,
     };
     use crate::production::WindowsHcsContainerSpec;
     use serde::Deserialize;
@@ -870,27 +911,6 @@ mod hcs {
             .collect()
     }
 
-    fn configuration_json(spec: &WindowsHcsContainerSpec) -> Result<String, WindowsHcsError> {
-        serde_json::to_string(&json!({
-            "Owner": "hivemind",
-            "SchemaVersion": {"Major": 2, "Minor": 1},
-            "ShouldTerminateOnLastHandleClosed": true,
-            "Container": {
-                "Storage": {
-                    "Layers": [{"Path": spec.image_root}],
-                    "SandboxPath": spec.image_root,
-                },
-                "MappedDirectories": spec.mounts.iter().map(|mount| json!({
-                    "HostPath": mount.host_path,
-                    "ContainerPath": mount.container_path,
-                    "ReadOnly": mount.read_only,
-                })).collect::<Vec<_>>(),
-                "NetworkEndpoints": [],
-            }
-        }))
-        .map_err(|error| WindowsHcsError::InvalidSpec(error.to_string()))
-    }
-
     fn process_parameters_json(spec: &WindowsHcsContainerSpec) -> Result<String, WindowsHcsError> {
         let command_line = spec
             .entrypoint
@@ -1032,17 +1052,54 @@ mod tests {
                     read_only: false,
                 },
             ],
+            storage_path: PathBuf::from("C:\\hivemind\\scratch"),
             result_path: PathBuf::from("C:\\hivemind\\scratch\\result.json"),
             result_container_path: "C:\\work\\output\\result.json".into(),
             max_output_bytes: 4096,
             network_isolated: true,
             root_read_only: true,
-            memory_bytes: 1024,
-            cpu_millis: 1000,
-            process_limit: 4,
-            thread_limit: 4,
-            scratch_bytes: 1024,
+            resource_limits: crate::sandbox::WindowsHcsResourceLimits {
+                memory_size_mb: 1,
+                processor_maximum: 10_000,
+            },
         }
+    }
+
+    #[test]
+    fn hcs_configuration_uses_schema_two_resource_and_network_fields() {
+        let value: serde_json::Value = serde_json::from_str(
+            &configuration_json(&spec()).expect("HCS configuration should serialize"),
+        )
+        .expect("HCS configuration should be valid JSON");
+        let container = &value["Container"];
+        let storage = &container["Storage"];
+
+        assert_eq!(value["Owner"], serde_json::json!("hivemind"));
+        assert_eq!(
+            value["SchemaVersion"],
+            serde_json::json!({"Major": 2, "Minor": 1})
+        );
+        assert_eq!(
+            storage["Layers"][0]["Path"],
+            serde_json::json!("C:\\hivemind\\image")
+        );
+        assert_eq!(storage["Path"], serde_json::json!("C:\\hivemind\\scratch"));
+        assert!(storage.get("SandboxPath").is_none());
+        assert_eq!(container["Memory"]["SizeInMB"], serde_json::json!(1));
+        assert_eq!(container["Processor"]["Maximum"], serde_json::json!(10_000));
+        assert_eq!(
+            container["Networking"]["NetworkAdapters"],
+            serde_json::json!([])
+        );
+        assert!(container.get("NetworkEndpoints").is_none());
+
+        let mounts = container["MappedDirectories"]
+            .as_array()
+            .expect("HCS mapped directories should be an array");
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts[0]["HostPathType"], serde_json::json!("Directory"));
+        assert_eq!(mounts[0]["ReadOnly"], serde_json::json!(true));
+        assert_eq!(mounts[1]["ReadOnly"], serde_json::json!(false));
     }
 
     #[test]

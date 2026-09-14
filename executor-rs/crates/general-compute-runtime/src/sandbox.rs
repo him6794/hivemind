@@ -492,6 +492,18 @@ pub enum WindowsRootFilesystemPolicy {
 /// This is deliberately separate from [`LinuxSandboxPolicy`]. A Windows
 /// worker must never reinterpret Linux namespaces or seccomp fields as a
 /// Windows security boundary.
+pub const WINDOWS_HCS_MEMORY_UNIT_BYTES: u64 = 1024 * 1024;
+pub const WINDOWS_HCS_PROCESSOR_MAXIMUM: u32 = 10_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowsHcsResourceLimits {
+    /// HCS `Container.Memory.SizeInMB`.
+    pub memory_size_mb: u64,
+    /// HCS `Container.Processor.Maximum`, expressed as percent times 100.
+    pub processor_maximum: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WindowsSandboxPolicy {
@@ -501,6 +513,7 @@ pub struct WindowsSandboxPolicy {
     pub mounts: Vec<SandboxMount>,
     pub memory_bytes: u64,
     pub cpu_millis: u64,
+    pub processor_maximum: u32,
     pub process_limit: u32,
     pub thread_limit: u32,
     pub scratch_bytes: u64,
@@ -519,6 +532,9 @@ impl WindowsSandboxPolicy {
         }
         if self.mounts.is_empty() {
             return Err(WindowsSandboxPolicyError::ExplicitMountsRequired);
+        }
+        if self.processor_maximum == 0 || self.processor_maximum > WINDOWS_HCS_PROCESSOR_MAXIMUM {
+            return Err(WindowsSandboxPolicyError::ProcessorMaximumInvalid);
         }
         if self.memory_bytes == 0
             || self.cpu_millis == 0
@@ -563,6 +579,47 @@ impl WindowsSandboxPolicy {
         }
         Ok(())
     }
+
+    /// Convert the policy values that have a documented HCS schema 2
+    /// representation. Memory is kept exact: rounding a limit upward would
+    /// silently grant more memory than the policy allows.
+    pub fn hcs_resource_limits(
+        &self,
+    ) -> Result<WindowsHcsResourceLimits, WindowsSandboxPolicyError> {
+        self.validate()?;
+        if !self
+            .memory_bytes
+            .is_multiple_of(WINDOWS_HCS_MEMORY_UNIT_BYTES)
+        {
+            return Err(WindowsSandboxPolicyError::MemoryLimitNotRepresentable);
+        }
+        let memory_size_mb = self.memory_bytes / WINDOWS_HCS_MEMORY_UNIT_BYTES;
+        if memory_size_mb == 0 {
+            return Err(WindowsSandboxPolicyError::MemoryLimitNotRepresentable);
+        }
+        Ok(WindowsHcsResourceLimits {
+            memory_size_mb,
+            processor_maximum: self.processor_maximum,
+        })
+    }
+
+    /// HCS schema 2 does not expose process-count, thread-count, or scratch
+    /// size controls. Until a separately verified native mechanism exists,
+    /// Windows general-compute admission must reject every policy that asks
+    /// for those controls rather than serializing unenforced claims.
+    pub fn hcs_enforced_resource_limits(
+        &self,
+    ) -> Result<WindowsHcsResourceLimits, WindowsSandboxPolicyError> {
+        let limits = self.hcs_resource_limits()?;
+        if self.cpu_millis != 0
+            || self.process_limit != 0
+            || self.thread_limit != 0
+            || self.scratch_bytes != 0
+        {
+            return Err(WindowsSandboxPolicyError::NativeResourceControlsUnavailable);
+        }
+        Ok(limits)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -573,6 +630,9 @@ pub enum WindowsSandboxPolicyError {
     ExplicitMountsRequired,
     ExplicitArtifactAndScratchMountsRequired,
     ResourceLimitsRequired,
+    MemoryLimitNotRepresentable,
+    ProcessorMaximumInvalid,
+    NativeResourceControlsUnavailable,
     ScratchLimitExceeded,
     InvalidMountDestination,
     DuplicateMountDestination,

@@ -39,10 +39,6 @@ fn operator_path(name: &str) -> PathBuf {
     }
 }
 
-fn windows_style_path(path: &std::path::Path) -> String {
-    path.to_string_lossy().replace('/', "\\")
-}
-
 #[test]
 fn managed_dsl_registry_round_trips_and_has_no_host_execution_fields() {
     let registration = dsl_registration("managed-default");
@@ -227,6 +223,7 @@ fn windows_policy() -> WindowsSandboxPolicy {
         ],
         memory_bytes: 1024 * 1024,
         cpu_millis: 1000,
+        processor_maximum: 10_000,
         process_limit: 8,
         thread_limit: 16,
         scratch_bytes: 4096,
@@ -313,30 +310,14 @@ fn windows_registry_rejects_empty_registry() {
 }
 
 #[test]
-fn windows_hcs_spec_uses_only_operator_roots_and_enforces_isolation_flags() {
+fn windows_hcs_spec_rejects_unenforceable_native_limits() {
     let registration = windows_config("windows-spec");
-    let spec = registration
-        .hcs_spec("task-123")
-        .expect("validated registration should produce an HCS spec");
-    assert_eq!(spec.container_id, "hivemind-task-123");
-    assert!(spec.network_isolated);
-    assert!(spec.root_read_only);
-    assert_eq!(spec.entrypoint, vec!["hivemind-runner.exe"]);
-    assert_eq!(spec.mounts.len(), 2);
-    assert!(spec.mounts[0].read_only);
-    assert!(windows_style_path(&spec.mounts[0].host_path).ends_with("artifacts\\task-123\\source"));
-    assert_eq!(spec.mounts[0].container_path, "C:\\work\\source");
-    assert!(!spec.mounts[1].read_only);
-    assert!(
-        windows_style_path(&spec.mounts[1].host_path).ends_with("artifacts\\task-123\\scratch")
+    assert_eq!(
+        registration.hcs_spec("task-123").unwrap_err(),
+        ProductionBackendRegistryError::WindowsPolicyUnenforceable(
+            general_compute_runtime::sandbox::WindowsSandboxPolicyError::NativeResourceControlsUnavailable,
+        )
     );
-    assert_eq!(spec.mounts[1].container_path, "C:\\work\\output");
-    assert!(
-        windows_style_path(&spec.result_path)
-            .ends_with("artifacts\\task-123\\scratch\\result.json")
-    );
-    assert_eq!(spec.result_container_path, "C:\\work\\output\\result.json");
-    assert_eq!(spec.max_output_bytes, registration.max_output_bytes);
 }
 
 #[test]

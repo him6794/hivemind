@@ -3,9 +3,10 @@ use general_compute_runtime::sandbox::{
     CgroupPolicy, LinuxNamespace, LinuxSandboxPolicy, OciPrivilegeMode, PrivilegeEscalationPolicy,
     ProductionSandboxError, ProductionSandboxLaunch, ProductionSandboxLauncher,
     RootFilesystemPolicy, SandboxDevice, SandboxDeviceType, SandboxMount, SandboxNetworkPolicy,
-    SandboxPolicyError, SeccompPolicy, WindowsIsolationMode, WindowsNativeSandboxLaunch,
-    WindowsRootFilesystemPolicy, WindowsSandboxNetworkPolicy, WindowsSandboxPolicy,
-    rootless_id_mappings,
+    SandboxPolicyError, SeccompPolicy, WINDOWS_HCS_MEMORY_UNIT_BYTES,
+    WINDOWS_HCS_PROCESSOR_MAXIMUM, WindowsHcsResourceLimits, WindowsIsolationMode,
+    WindowsNativeSandboxLaunch, WindowsRootFilesystemPolicy, WindowsSandboxNetworkPolicy,
+    WindowsSandboxPolicy, WindowsSandboxPolicyError, rootless_id_mappings,
 };
 use general_compute_runtime::sha256_digest;
 use general_compute_runtime::supervisor::Cancellation;
@@ -60,6 +61,7 @@ fn valid_windows_policy() -> WindowsSandboxPolicy {
         ],
         memory_bytes: 1024 * 1024,
         cpu_millis: 1000,
+        processor_maximum: 10_000,
         process_limit: 4,
         thread_limit: 8,
         scratch_bytes: 1024,
@@ -84,6 +86,64 @@ fn windows_native_policy_requires_process_isolation_and_deny_all_network() {
         destination: "/work/source".into(),
     };
     assert!(policy.validate().is_err());
+}
+
+#[test]
+fn windows_hcs_resource_limits_convert_exactly_to_documented_units() {
+    let policy = valid_windows_policy();
+    let limits = policy
+        .hcs_resource_limits()
+        .expect("valid policy should convert to HCS limits");
+
+    assert_eq!(
+        policy.memory_bytes / WINDOWS_HCS_MEMORY_UNIT_BYTES,
+        limits.memory_size_mb
+    );
+    assert_eq!(limits.processor_maximum, WINDOWS_HCS_PROCESSOR_MAXIMUM);
+    assert_eq!(
+        limits,
+        WindowsHcsResourceLimits {
+            memory_size_mb: 1,
+            processor_maximum: 10_000,
+        }
+    );
+}
+
+#[test]
+fn windows_hcs_resource_limits_reject_nonrepresentable_memory() {
+    let mut policy = valid_windows_policy();
+    policy.memory_bytes += 1;
+
+    assert_eq!(
+        policy.hcs_resource_limits(),
+        Err(WindowsSandboxPolicyError::MemoryLimitNotRepresentable)
+    );
+}
+
+#[test]
+fn windows_hcs_resource_limits_reject_invalid_processor_maximum() {
+    let mut policy = valid_windows_policy();
+    policy.processor_maximum = 0;
+    assert_eq!(
+        policy.validate(),
+        Err(WindowsSandboxPolicyError::ProcessorMaximumInvalid)
+    );
+
+    policy.processor_maximum = WINDOWS_HCS_PROCESSOR_MAXIMUM + 1;
+    assert_eq!(
+        policy.validate(),
+        Err(WindowsSandboxPolicyError::ProcessorMaximumInvalid)
+    );
+}
+
+#[test]
+fn windows_hcs_admission_rejects_unenforced_native_controls() {
+    let policy = valid_windows_policy();
+
+    assert_eq!(
+        policy.hcs_enforced_resource_limits(),
+        Err(WindowsSandboxPolicyError::NativeResourceControlsUnavailable)
+    );
 }
 
 #[test]
