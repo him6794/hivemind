@@ -447,6 +447,37 @@ pub struct TorrentConfig {
     pub task_artifact_base_url: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalOverlayMode {
+    /// Local/compose deployments may use a directly reachable Nodepool endpoint.
+    #[default]
+    Local,
+    /// Client operations require an active authenticated overlay session.
+    Strict,
+}
+
+impl std::fmt::Display for ExternalOverlayMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Local => "local",
+            Self::Strict => "strict",
+        })
+    }
+}
+
+impl FromStr for ExternalOverlayMode {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "local" => Ok(Self::Local),
+            "strict" | "external" => Ok(Self::Strict),
+            _ => Err("expected local or strict"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VpnConfig {
     pub headscale_url: String,
@@ -464,6 +495,10 @@ pub struct VpnConfig {
     /// This is the nodepool's WireGuard listen address.
     #[serde(default)]
     pub wireguard_platform_endpoint: String,
+    /// External mode rejects direct host-to-Nodepool readiness as a substitute for
+    /// an authenticated Headscale/libtailscale session. Local remains the compose default.
+    #[serde(default)]
+    pub external_overlay_mode: ExternalOverlayMode,
     /// Maximum time a keyed client startup may wait for the VPN/Nodepool path.
     #[serde(default = "default_vpn_startup_timeout_secs")]
     pub startup_timeout_secs: u64,
@@ -545,6 +580,7 @@ impl Default for HivemindConfig {
                 base_virtual_ip: "100.64.0.0".into(),
                 wireguard_platform_public_key: String::new(),
                 wireguard_platform_endpoint: String::new(),
+                external_overlay_mode: ExternalOverlayMode::default(),
                 startup_timeout_secs: default_vpn_startup_timeout_secs(),
                 vpn_network: "100.64.0.0/10".into(),
             },
@@ -862,6 +898,9 @@ impl HivemindConfig {
         if let Ok(network) = std::env::var("VPN_NETWORK") {
             self.vpn.vpn_network = network;
         }
+        if let Ok(mode) = std::env::var("HIVEMIND_EXTERNAL_OVERLAY_MODE") {
+            self.vpn.external_overlay_mode = parse_env("HIVEMIND_EXTERNAL_OVERLAY_MODE", &mode)?;
+        }
         if let Ok(value) = std::env::var("VPN_STARTUP_TIMEOUT_SECS") {
             self.vpn.startup_timeout_secs = parse_env("VPN_STARTUP_TIMEOUT_SECS", &value)?;
         }
@@ -1123,6 +1162,34 @@ mod tests {
         assert_eq!(
             WorkerAdmissionMode::from_str("private"),
             Ok(WorkerAdmissionMode::PrivateStatic)
+        );
+    }
+
+    #[test]
+    fn external_overlay_defaults_to_local_and_parses_strict() {
+        assert_eq!(ExternalOverlayMode::default(), ExternalOverlayMode::Local);
+        assert_eq!(
+            ExternalOverlayMode::from_str("strict"),
+            Ok(ExternalOverlayMode::Strict)
+        );
+        assert!(ExternalOverlayMode::from_str("unsupported").is_err());
+    }
+
+    #[test]
+    fn external_overlay_mode_loads_from_environment() {
+        let _environment_lock = lock_environment();
+        let old = std::env::var_os("HIVEMIND_EXTERNAL_OVERLAY_MODE");
+        std::env::set_var("HIVEMIND_EXTERNAL_OVERLAY_MODE", "strict");
+
+        let loaded = HivemindConfig::load_from_env();
+
+        match old {
+            Some(value) => std::env::set_var("HIVEMIND_EXTERNAL_OVERLAY_MODE", value),
+            None => std::env::remove_var("HIVEMIND_EXTERNAL_OVERLAY_MODE"),
+        }
+        assert_eq!(
+            loaded.vpn.external_overlay_mode,
+            ExternalOverlayMode::Strict
         );
     }
 

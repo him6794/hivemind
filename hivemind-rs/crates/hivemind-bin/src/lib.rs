@@ -516,6 +516,8 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
     #[cfg(feature = "worker")]
     if run_worker {
         let configured_nodepool_addr = nodepool_client_addr(&config, run_nodepool)?;
+        let require_external_overlay =
+            client_runtime::external_overlay_required(&config, client_runtime::ClientRole::Worker);
         // An explicit role-scoped Headscale key makes VPN and Nodepool readiness
         // part of startup. Without one, preserve deferred UI-login enrollment.
         let vpn_endpoint = client_runtime::ensure_env_vpn_for_endpoint(
@@ -524,9 +526,12 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
             &configured_nodepool_addr,
         )
         .await?;
-        let nodepool_addr = vpn_endpoint
-            .clone()
-            .unwrap_or_else(|| configured_nodepool_addr.clone());
+        let nodepool_addr = match (require_external_overlay, vpn_endpoint.clone()) {
+            (true, Some(endpoint)) => endpoint,
+            (true, None) => String::new(),
+            (false, Some(endpoint)) => endpoint,
+            (false, None) => configured_nodepool_addr.clone(),
+        };
         let nodepool_addr_state = std::sync::Arc::new(std::sync::Mutex::new(nodepool_addr.clone()));
 
         let executor = Arc::new(WorkerExecutor::try_new(config.clone())?);
@@ -556,26 +561,39 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
         } else {
             None
         };
-        let worker_advertise_addr = match nodepool_client::advertise_addr_for_vpn(
-            &wk_addr,
-            config.server.worker_advertise_addr.clone(),
-            overlay_ip.as_deref(),
-        ) {
-            Ok(addr) => addr,
-            Err(err) if vpn_endpoint.is_some() => {
-                return Err(err.context(
-                    "keyed Worker startup cannot determine a Headscale-reachable advertise address",
-                ));
+        let worker_advertise_addr = if require_external_overlay {
+            match overlay_ip.as_deref() {
+                Some(overlay_ip) => nodepool_client::advertise_addr_from_overlay(&wk_addr, overlay_ip)
+                    .context(
+                        "strict external overlay requires a Nodepool-reachable Worker advertise address",
+                    )?,
+                None => {
+                    tracing::info!(
+                        "Worker advertise address deferred until external overlay enrollment"
+                    );
+                    String::new()
+                }
             }
-            Err(err) => {
-                // Preserve compatibility for no-key local/UI deployments. The
-                // address is replaced by the real overlay address after login.
-                let port = wk_addr.rsplit(':').next().unwrap_or("50053");
-                let fallback = format!("{worker_id}:{port}");
-                tracing::warn!(
-                    "WORKER_ADVERTISE_ADDR unset ({err}); using fallback advertise addr {fallback} until UI login"
-                );
-                fallback
+        } else {
+            match nodepool_client::advertise_addr_for_vpn(
+                &wk_addr,
+                config.server.worker_advertise_addr.clone(),
+                overlay_ip.as_deref(),
+            ) {
+                Ok(addr) => addr,
+                Err(err) if vpn_endpoint.is_some() => {
+                    return Err(err.context(
+                        "keyed Worker startup cannot determine a Headscale-reachable advertise address",
+                    ));
+                }
+                Err(err) => {
+                    // Local/UI deployments may defer the callback address until login.
+                    tracing::info!(
+                        error = %err,
+                        "Worker advertise address deferred until local login"
+                    );
+                    String::new()
+                }
             }
         };
         let worker_advertise_addr = if vpn_endpoint.is_some() {
@@ -589,8 +607,9 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
             config.clone(),
             executor.clone(),
             worker_id.clone(),
-            hivemind_worker_executor::grpc_server::NodepoolTransferLeaseAuthority::new_shared(
+            hivemind_worker_executor::grpc_server::NodepoolTransferLeaseAuthority::new_shared_with_mode(
                 nodepool_addr_state.clone(),
+                require_external_overlay,
             ),
         ));
         let runtime_admission = WorkerRuntimeAdmission::from_environment()?;
@@ -690,7 +709,8 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
                     .filter(|v| !v.is_empty())
                     .is_some());
 
-        if has_preprovisioned_auth {
+        let preprovisioned_overlay_ready = !require_external_overlay || vpn_endpoint.is_some();
+        if has_preprovisioned_auth && preprovisioned_overlay_ready {
             let worker_nodepool_token =
                 worker_nodepool_token(&config, &nodepool_addr, &worker_id).await?;
             let worker_username = resolve_worker_owner(&config, &worker_id)?;
@@ -711,6 +731,7 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
                     location: std::env::var("WORKER_LOCATION").unwrap_or_else(|_| "local".into()),
                     token: worker_nodepool_token.clone(),
                     interval: std::time::Duration::from_secs(10),
+                    require_external_overlay,
                 },
             );
             shutdown_handles.push(reg_shutdown);
@@ -724,9 +745,12 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
                     token: worker_nodepool_token,
                     interval: std::time::Duration::from_secs(10),
                     service: session_worker_service.clone(),
+                    require_external_overlay,
                 },
             );
             shutdown_handles.push(session_shutdown);
+        } else if require_external_overlay && has_preprovisioned_auth {
+            info!("Worker registration loop deferred until external overlay enrollment");
         } else {
             info!(
                 "Worker registration loop deferred until UI login (no WORKER_NODEPOOL_TOKEN/USERNAME/PASSWORD)"
@@ -1148,6 +1172,7 @@ mod tests {
                     token,
                     interval: Duration::from_millis(50),
                     service: Arc::new(GrpcWorkerNodeService::new(worker_state)),
+                    require_external_overlay: false,
                 },
             );
             tokio::time::timeout(Duration::from_secs(10), async {

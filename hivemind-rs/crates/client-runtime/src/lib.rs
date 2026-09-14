@@ -12,7 +12,7 @@ pub mod update;
 pub mod update_loop;
 
 use anyhow::{bail, Context, Result};
-use hivemind_config::HivemindConfig;
+use hivemind_config::{ExternalOverlayMode, HivemindConfig};
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -647,6 +647,121 @@ pub async fn current_vpn_session(role: ClientRole) -> Option<Arc<VpnSession>> {
     sessions_map().lock().unwrap().get(&role).cloned()
 }
 
+/// Return whether this client must use the authenticated external overlay.
+///
+/// Local is deliberately the configuration default because the compose topology
+/// uses a directly published Nodepool endpoint. Strict mode is an explicit
+/// validation boundary; it never turns a direct endpoint into overlay evidence.
+pub fn external_overlay_required(config: &HivemindConfig, _role: ClientRole) -> bool {
+    config.vpn.external_overlay_mode == ExternalOverlayMode::Strict
+}
+
+/// Validate the configuration needed before a strict external enrollment.
+///
+/// This check is intentionally independent of endpoint reachability. A local
+/// Docker address, a disabled Website API, or an insecure Website API URL must
+/// not be accepted as a substitute for the authenticated external path.
+pub fn validate_external_overlay_configuration(
+    config: &HivemindConfig,
+    role: ClientRole,
+) -> Result<()> {
+    if !external_overlay_required(config, role) {
+        return Ok(());
+    }
+    if !cfg!(target_os = "windows") {
+        bail!("strict external overlay requires a native Windows client");
+    }
+    if env_truthy("HIVEMIND_DISABLE_WEBSITE_VPN")
+        || env_truthy(&format!("{}_DISABLE_WEBSITE_VPN", role.env_prefix()))
+    {
+        bail!("strict external overlay rejects disabled Website API enrollment");
+    }
+    let website_base = website_api_base(config, role).ok_or_else(|| {
+        anyhow::anyhow!("strict external overlay requires Website API enrollment")
+    })?;
+    if !website_base.starts_with("https://") {
+        bail!("strict external overlay requires an HTTPS Website API endpoint");
+    }
+    let login_server = first_nonempty(&[
+        env_trim(&format!("{}_VPN_LOGIN_SERVER", role.env_prefix())),
+        env_trim("HEADSCALE_LOGIN_SERVER"),
+        Some(config.vpn.headscale_login_server.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        Some(config.vpn.headscale_url.trim().to_string()).filter(|value| !value.is_empty()),
+    ])
+    .ok_or_else(|| anyhow::anyhow!("strict external overlay requires a Headscale login server"))?;
+    if !login_server.starts_with("https://") {
+        bail!("strict external overlay requires an HTTPS Headscale login server");
+    }
+    Ok(())
+}
+
+/// Resolve a Nodepool endpoint only through an active authenticated overlay.
+///
+/// Unlike `resolve_reachable_nodepool_endpoint`, this function never probes or
+/// returns the configured direct endpoint. The active libtailscale session and
+/// its localhost bridge are both required before the transport probe is used.
+pub async fn external_overlay_endpoint(
+    role: ClientRole,
+    configured_endpoint: &str,
+) -> Result<String> {
+    let session = current_vpn_session(role)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("authenticated overlay session is not ready"))?;
+    if session.transport != VpnTransport::Tailscale {
+        bail!("strict external overlay requires the embedded libtailscale transport");
+    }
+    if session
+        .overlay_ip
+        .as_deref()
+        .is_none_or(|ip| ip.trim().is_empty())
+    {
+        bail!("authenticated overlay session has no assigned overlay address");
+    }
+    let bridge = session
+        .bridge_endpoint()
+        .ok_or_else(|| anyhow::anyhow!("authenticated overlay session has no local bridge"))?;
+    if !nodepool_endpoint_reachable(&bridge).await {
+        bail!(
+            "authenticated overlay Nodepool transport is unavailable (configured endpoint: {})",
+            configured_endpoint
+        );
+    }
+    Ok(bridge)
+}
+
+/// Validate and resolve the strict external overlay before an operation.
+pub async fn ensure_external_overlay_ready(
+    config: &HivemindConfig,
+    role: ClientRole,
+) -> Result<String> {
+    validate_external_overlay_configuration(config, role)?;
+    external_overlay_endpoint(role, &resolve_nodepool_grpc_endpoint(config)).await
+}
+
+/// Decide whether a status response may claim VPN bootstrap success.
+///
+/// In strict mode `Disabled` is never success, and a status without an overlay
+/// address cannot be evidence of an authenticated external session.
+pub fn vpn_bootstrap_status_success(
+    config: &HivemindConfig,
+    role: ClientRole,
+    status: &VpnBootstrapStatus,
+) -> bool {
+    if external_overlay_required(config, role) {
+        status.state == VpnBootstrapState::Ready
+            && status
+                .overlay_ip
+                .as_deref()
+                .is_some_and(|ip| !ip.trim().is_empty())
+    } else {
+        matches!(
+            status.state,
+            VpnBootstrapState::Ready | VpnBootstrapState::Disabled
+        )
+    }
+}
+
 /// Clear the VPN session for a role
 pub async fn clear_vpn_session(role: ClientRole) {
     sessions_map().lock().unwrap().remove(&role);
@@ -734,6 +849,7 @@ async fn ensure_env_vpn_for_endpoint_with_worker_addr(
     worker_grpc_addr: Option<&str>,
 ) -> Result<Option<String>> {
     let prefix = role.env_prefix();
+    let require_external_overlay = external_overlay_required(config, role);
     let auth_key = first_nonempty(&[
         env_trim(&format!("{prefix}_VPN_AUTHKEY")),
         env_trim(&format!("{prefix}_VPN_AUTH_KEY")),
@@ -752,6 +868,10 @@ async fn ensure_env_vpn_for_endpoint_with_worker_addr(
         Some(format!("{}-{}", role.as_str(), short_host_id())),
     ]);
 
+    if require_external_overlay {
+        validate_external_overlay_configuration(config, role)?;
+    }
+
     match plan_vpn_bootstrap(
         auth_key.as_deref(),
         login_server.as_deref(),
@@ -760,6 +880,15 @@ async fn ensure_env_vpn_for_endpoint_with_worker_addr(
         role,
     )? {
         VpnBootstrapPlan::Skip => {
+            if require_external_overlay {
+                set_vpn_status(
+                    role,
+                    VpnBootstrapStatus::new(
+                        VpnBootstrapState::AwaitingLogin,
+                        Some("sign in to enroll this client on the external overlay".into()),
+                    ),
+                );
+            }
             tracing::info!(
                 "{} VPN env bootstrap skipped (no {}_VPN_AUTHKEY); login may auto-issue via website-api",
                 role.as_str(),
@@ -772,6 +901,9 @@ async fn ensure_env_vpn_for_endpoint_with_worker_addr(
             login_server,
             hostname,
         } => {
+            if require_external_overlay && !login_server.starts_with("https://") {
+                bail!("strict external overlay requires an HTTPS Headscale login server");
+            }
             let endpoint = if has_persisted_vpn_state(role) {
                 match join_and_confirm_nodepool(
                     role,
@@ -781,6 +913,7 @@ async fn ensure_env_vpn_for_endpoint_with_worker_addr(
                     configured_endpoint,
                     worker_grpc_addr,
                     Duration::from_secs(config.vpn.startup_timeout_secs),
+                    require_external_overlay,
                 )
                 .await
                 {
@@ -801,6 +934,7 @@ async fn ensure_env_vpn_for_endpoint_with_worker_addr(
                             configured_endpoint,
                             worker_grpc_addr,
                             Duration::from_secs(config.vpn.startup_timeout_secs),
+                            require_external_overlay,
                         )
                         .await?
                     }
@@ -815,10 +949,11 @@ async fn ensure_env_vpn_for_endpoint_with_worker_addr(
                     configured_endpoint,
                     worker_grpc_addr,
                     Duration::from_secs(config.vpn.startup_timeout_secs),
+                    require_external_overlay,
                 )
                 .await?
             };
-            set_ready_vpn_status(role, &endpoint).await;
+            set_ready_vpn_status(role, &endpoint, require_external_overlay).await?;
             Ok(Some(endpoint))
         }
     }
@@ -900,6 +1035,10 @@ async fn ensure_user_vpn_inner(
     password: &str,
     existing_token: Option<&str>,
 ) -> Result<Option<String>> {
+    let require_external_overlay = external_overlay_required(config, role);
+    if require_external_overlay {
+        validate_external_overlay_configuration(config, role)?;
+    }
     if env_auth_key_present(role) {
         let endpoint =
             ensure_env_vpn_for_endpoint(config, role, &resolve_nodepool_grpc_endpoint(config))
@@ -934,6 +1073,10 @@ async fn ensure_user_vpn_for_token_inner(
     role: ClientRole,
     token: &str,
 ) -> Result<Option<String>> {
+    let require_external_overlay = external_overlay_required(config, role);
+    if require_external_overlay {
+        validate_external_overlay_configuration(config, role)?;
+    }
     let token = token.trim();
     if token.is_empty() {
         set_vpn_status(
@@ -965,9 +1108,12 @@ async fn ensure_user_vpn_for_token_inner(
     };
 
     let configured_endpoint = resolve_nodepool_grpc_endpoint(config);
-    if let Some(endpoint) = first_reachable_nodepool_endpoint(role, &configured_endpoint).await {
-        set_ready_vpn_status(role, &endpoint).await;
-        return Ok(Some(endpoint));
+    if !require_external_overlay {
+        if let Some(endpoint) = first_reachable_nodepool_endpoint(role, &configured_endpoint).await
+        {
+            set_ready_vpn_status(role, &endpoint, require_external_overlay).await?;
+            return Ok(Some(endpoint));
+        }
     }
 
     let device_name = client_device_name(role)?;
@@ -1004,11 +1150,12 @@ async fn ensure_user_vpn_for_token_inner(
             &configured_endpoint,
             worker_grpc_addr_for_role(config, role),
             Duration::from_secs(config.vpn.startup_timeout_secs),
+            require_external_overlay,
         )
         .await
         {
             Ok(endpoint) => {
-                set_ready_vpn_status(role, &endpoint).await;
+                set_ready_vpn_status(role, &endpoint, require_external_overlay).await?;
                 return Ok(Some(endpoint));
             }
             Err(err) => {
@@ -1070,11 +1217,12 @@ async fn ensure_user_vpn_for_token_inner(
         &configured_endpoint,
         worker_grpc_addr_for_role(config, role),
         Duration::from_secs(config.vpn.startup_timeout_secs),
+        require_external_overlay,
     )
     .await
     {
         Ok(endpoint) => {
-            set_ready_vpn_status(role, &endpoint).await;
+            set_ready_vpn_status(role, &endpoint, require_external_overlay).await?;
             Ok(Some(endpoint))
         }
         Err(err) => {
@@ -1088,10 +1236,31 @@ async fn ensure_user_vpn_for_token_inner(
     }
 }
 
-async fn set_ready_vpn_status(role: ClientRole, endpoint: &str) {
-    let overlay_ip = current_vpn_session(role)
-        .await
-        .and_then(|session| session.overlay_ip.clone());
+async fn set_ready_vpn_status(
+    role: ClientRole,
+    endpoint: &str,
+    require_external_overlay: bool,
+) -> Result<()> {
+    let session = current_vpn_session(role).await;
+    let strict_session = session.as_ref().is_some_and(|session| {
+        session.transport == VpnTransport::Tailscale
+            && session
+                .overlay_ip
+                .as_deref()
+                .is_some_and(|ip| !ip.trim().is_empty())
+    });
+    if require_external_overlay && !strict_session {
+        let error = anyhow::anyhow!(
+            "strict external overlay cannot report Nodepool readiness without an authenticated Tailscale session"
+        );
+        set_vpn_status(
+            role,
+            VpnBootstrapStatus::new(VpnBootstrapState::RetryableFailure, Some(error.to_string())),
+        );
+        return Err(error);
+    }
+
+    let overlay_ip = session.and_then(|session| session.overlay_ip.clone());
     set_vpn_status(
         role,
         VpnBootstrapStatus {
@@ -1101,6 +1270,7 @@ async fn set_ready_vpn_status(role: ClientRole, endpoint: &str) {
             message: None,
         },
     );
+    Ok(())
 }
 
 pub fn website_api_base(config: &HivemindConfig, role: ClientRole) -> Option<String> {
@@ -1170,13 +1340,15 @@ pub async fn resolve_reachable_nodepool_endpoint(
     role: ClientRole,
     configured_endpoint: &str,
 ) -> Result<String> {
-    if let Some(endpoint) = first_reachable_nodepool_endpoint(role, configured_endpoint).await {
+    if let Some(endpoint) =
+        first_reachable_nodepool_endpoint_with_mode(role, configured_endpoint, false).await
+    {
         return Ok(endpoint);
     }
 
     let session = current_vpn_session(role).await;
     let candidates =
-        nodepool_endpoint_candidates(role, configured_endpoint, session.as_deref()).await;
+        nodepool_endpoint_candidates(role, configured_endpoint, session.as_deref(), false).await;
     bail!(
         "nodepool endpoint is still unreachable after VPN bootstrap (tried: {}). Check that WireGuard is connected and that the platform nodepool VPN sidecar ({}) is online",
         if candidates.is_empty() {
@@ -1192,9 +1364,22 @@ async fn first_reachable_nodepool_endpoint(
     role: ClientRole,
     configured_endpoint: &str,
 ) -> Option<String> {
+    first_reachable_nodepool_endpoint_with_mode(role, configured_endpoint, false).await
+}
+
+async fn first_reachable_nodepool_endpoint_with_mode(
+    role: ClientRole,
+    configured_endpoint: &str,
+    require_external_overlay: bool,
+) -> Option<String> {
     let session = current_vpn_session(role).await;
-    let candidates =
-        nodepool_endpoint_candidates(role, configured_endpoint, session.as_deref()).await;
+    let candidates = nodepool_endpoint_candidates(
+        role,
+        configured_endpoint,
+        session.as_deref(),
+        require_external_overlay,
+    )
+    .await;
     // Probe candidates concurrently. Sequential 3-second probes made every
     // login wait for dead overlay/DNS candidates before trying the live one.
     let mut probes = tokio::task::JoinSet::new();
@@ -1228,6 +1413,7 @@ async fn nodepool_endpoint_candidates(
     _role: ClientRole,
     configured_endpoint: &str,
     session: Option<&VpnSession>,
+    require_external_overlay: bool,
 ) -> Vec<String> {
     let mut candidates = Vec::new();
     let mut push_unique = |value: String| {
@@ -1244,10 +1430,23 @@ async fn nodepool_endpoint_candidates(
     // userspace TUN, so we expose nodepool on a localhost forwarder. Once a
     // bridge exists, never bypass it with the raw endpoint after a keyed join.
     if let Some(session) = session {
-        if let Some(bridge) = session.bridge_endpoint() {
-            push_unique(bridge);
-            return candidates;
+        let strict_session = session.transport == VpnTransport::Tailscale
+            && session
+                .overlay_ip
+                .as_deref()
+                .is_some_and(|ip| !ip.trim().is_empty());
+        if !require_external_overlay || strict_session {
+            if let Some(bridge) = session.bridge_endpoint() {
+                push_unique(bridge);
+                return candidates;
+            }
         }
+    }
+
+    if require_external_overlay {
+        // Strict external mode has no direct-endpoint compatibility path. A
+        // missing authenticated bridge is a not-ready state, not evidence.
+        return candidates;
     }
 
     // The configured endpoint is authoritative when the active transport does
@@ -1529,6 +1728,7 @@ async fn bring_up_vpn_bounded(
     })?
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn join_and_confirm_nodepool(
     role: ClientRole,
     auth_key: Option<&str>,
@@ -1537,6 +1737,7 @@ async fn join_and_confirm_nodepool(
     configured_endpoint: &str,
     worker_grpc_addr: Option<&str>,
     startup_timeout: Duration,
+    require_external_overlay: bool,
 ) -> Result<String> {
     let startup_timeout = startup_timeout.max(Duration::from_secs(1));
     let hostname = bounded_hostname(hostname);
@@ -1559,9 +1760,14 @@ async fn join_and_confirm_nodepool(
             startup_timeout
         );
     }
-    let endpoint =
-        wait_for_nodepool_after_join(role, session.as_ref(), configured_endpoint, remaining)
-            .await?;
+    let endpoint = wait_for_nodepool_after_join(
+        role,
+        session.as_ref(),
+        configured_endpoint,
+        remaining,
+        require_external_overlay,
+    )
+    .await?;
     if let Err(err) = mark_persisted_vpn_state(role, login_server, &hostname) {
         tracing::warn!(
             "{} VPN joined but its local state marker could not be persisted: {}",
@@ -1577,10 +1783,12 @@ async fn join_and_confirm_nodepool(
         configured_endpoint,
         worker_grpc_addr,
         startup_timeout,
+        require_external_overlay,
     );
     Ok(endpoint)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_vpn_keepalive(
     role: ClientRole,
     auth_key: Option<&str>,
@@ -1589,6 +1797,7 @@ fn spawn_vpn_keepalive(
     configured_endpoint: &str,
     worker_grpc_addr: Option<&str>,
     startup_timeout: Duration,
+    require_external_overlay: bool,
 ) {
     let auth_key = auth_key.map(str::to_string);
     let login_server = login_server.to_string();
@@ -1604,11 +1813,13 @@ fn spawn_vpn_keepalive(
             configured_endpoint,
             worker_grpc_addr,
             startup_timeout,
+            require_external_overlay,
         )
         .await;
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn vpn_keepalive_loop(
     role: ClientRole,
     auth_key: Option<String>,
@@ -1617,6 +1828,7 @@ async fn vpn_keepalive_loop(
     configured_endpoint: String,
     worker_grpc_addr: Option<String>,
     startup_timeout: Duration,
+    require_external_overlay: bool,
 ) {
     let mut failures = 0u32;
     loop {
@@ -1645,10 +1857,21 @@ async fn vpn_keepalive_loop(
                             session.as_ref(),
                             &configured_endpoint,
                             startup_timeout,
+                            require_external_overlay,
                         )
                         .await
                         {
-                            Ok(endpoint) => set_ready_vpn_status(role, &endpoint).await,
+                            Ok(endpoint) => {
+                                if let Err(err) =
+                                    set_ready_vpn_status(role, &endpoint, require_external_overlay)
+                                        .await
+                                {
+                                    tracing::warn!(
+                                        "{} VPN rejoin readiness status was rejected: {err}",
+                                        role.as_str()
+                                    );
+                                }
+                            }
                             Err(err) => {
                                 set_vpn_status(
                                     role,
@@ -1680,9 +1903,13 @@ async fn vpn_keepalive_loop(
         };
 
         let ping_ok = wireguard_is_up(session.as_ref()).await.unwrap_or(false);
-        let endpoint_ok = first_reachable_nodepool_endpoint(role, &configured_endpoint)
-            .await
-            .is_some();
+        let endpoint_ok = first_reachable_nodepool_endpoint_with_mode(
+            role,
+            &configured_endpoint,
+            require_external_overlay,
+        )
+        .await
+        .is_some();
 
         // A live tunnel alone is not sufficient; Nodepool must complete the
         // same gRPC transport probe used during startup.
@@ -1726,10 +1953,20 @@ async fn vpn_keepalive_loop(
                     new_session.as_ref(),
                     &configured_endpoint,
                     startup_timeout,
+                    require_external_overlay,
                 )
                 .await
                 {
-                    Ok(endpoint) => set_ready_vpn_status(role, &endpoint).await,
+                    Ok(endpoint) => {
+                        if let Err(err) =
+                            set_ready_vpn_status(role, &endpoint, require_external_overlay).await
+                        {
+                            tracing::warn!(
+                                "{} VPN reconnect readiness status was rejected: {err}",
+                                role.as_str()
+                            );
+                        }
+                    }
                     Err(err) => {
                         set_vpn_status(
                             role,
@@ -1764,8 +2001,21 @@ async fn wait_for_nodepool_after_join(
     session: &VpnSession,
     configured_endpoint: &str,
     startup_timeout: Duration,
+    require_external_overlay: bool,
 ) -> Result<String> {
     let timeout = startup_timeout;
+    if require_external_overlay {
+        if session.transport != VpnTransport::Tailscale {
+            bail!("strict external overlay requires the embedded libtailscale transport");
+        }
+        if session
+            .overlay_ip
+            .as_deref()
+            .is_none_or(|ip| ip.trim().is_empty())
+        {
+            bail!("authenticated overlay session has no assigned overlay address");
+        }
+    }
     let deadline = Instant::now() + timeout;
     let mut last_err = None;
     let mut attempt = 0u32;
@@ -1788,7 +2038,13 @@ async fn wait_for_nodepool_after_join(
         if attempt == 1 || attempt.is_multiple_of(4) {
             let _ = wireguard_is_up(session).await;
         }
-        match first_reachable_nodepool_endpoint(role, configured_endpoint).await {
+        match first_reachable_nodepool_endpoint_with_mode(
+            role,
+            configured_endpoint,
+            require_external_overlay,
+        )
+        .await
+        {
             Some(endpoint) => {
                 // Ensure bridge (if any) is pointed at the live peer IP.
                 if let Some(ip) = endpoint_host(&endpoint) {
@@ -1844,6 +2100,7 @@ async fn wait_for_nodepool_after_join(
         role,
         configured_endpoint,
         current_session.as_deref().or(Some(session)),
+        require_external_overlay,
     )
     .await;
     bail!(
@@ -3110,6 +3367,59 @@ mod tests {
             std::env::remove_var("HIVEMIND_DISABLE_WEBSITE_VPN");
         }
         assert!(base.is_none());
+    }
+
+    #[test]
+    fn strict_bootstrap_status_requires_an_overlay_address() {
+        let mut config = HivemindConfig::for_test();
+        config.vpn.external_overlay_mode = ExternalOverlayMode::Strict;
+        let status = VpnBootstrapStatus {
+            state: VpnBootstrapState::Ready,
+            endpoint: Some("127.0.0.1:50051".into()),
+            overlay_ip: None,
+            message: None,
+        };
+        assert!(!vpn_bootstrap_status_success(
+            &config,
+            ClientRole::Worker,
+            &status
+        ));
+
+        let status = VpnBootstrapStatus {
+            overlay_ip: Some("100.64.0.20".into()),
+            ..status
+        };
+        assert!(vpn_bootstrap_status_success(
+            &config,
+            ClientRole::Worker,
+            &status
+        ));
+    }
+
+    #[tokio::test]
+    async fn strict_endpoint_candidates_never_return_a_direct_endpoint() {
+        let candidates =
+            nodepool_endpoint_candidates(ClientRole::Worker, "nodepool:50051", None, true).await;
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn strict_configuration_rejects_disabled_website_enrollment() {
+        let _env = env_lock();
+        let mut config = HivemindConfig::for_test();
+        config.vpn.external_overlay_mode = ExternalOverlayMode::Strict;
+        let original = std::env::var_os("HIVEMIND_DISABLE_WEBSITE_VPN");
+        std::env::set_var("HIVEMIND_DISABLE_WEBSITE_VPN", "1");
+        let result = validate_external_overlay_configuration(&config, ClientRole::Worker);
+        match original {
+            Some(value) => std::env::set_var("HIVEMIND_DISABLE_WEBSITE_VPN", value),
+            None => std::env::remove_var("HIVEMIND_DISABLE_WEBSITE_VPN"),
+        }
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("rejects disabled Website API enrollment"),
+            "{error}"
+        );
     }
 
     #[test]

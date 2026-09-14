@@ -148,6 +148,10 @@ impl ControlApiState {
                 location: self.profile.location.clone(),
                 token: token.to_string(),
                 interval: std::time::Duration::from_secs(10),
+                require_external_overlay: client_runtime::external_overlay_required(
+                    &self.config,
+                    ClientRole::Worker,
+                ),
             },
         );
         *guard = Some(shutdown);
@@ -186,6 +190,10 @@ impl ControlApiState {
                 token: token.to_string(),
                 interval: std::time::Duration::from_secs(10),
                 service: worker_service,
+                require_external_overlay: client_runtime::external_overlay_required(
+                    &self.config,
+                    ClientRole::Worker,
+                ),
             },
         );
         *guard = Some(shutdown);
@@ -399,6 +407,8 @@ async fn bootstrap_vpn(
         return (
             StatusCode::UNAUTHORIZED,
             Json(vpn_bootstrap_response(
+                &state.config,
+                ClientRole::Worker,
                 client_runtime::current_vpn_status(ClientRole::Worker),
                 Some("missing bearer token".into()),
             )),
@@ -409,28 +419,43 @@ async fn bootstrap_vpn(
     {
         Ok(Some(endpoint)) => {
             state.set_nodepool_addr(endpoint);
+            let status = client_runtime::current_vpn_status(ClientRole::Worker);
+            let http_status =
+                vpn_bootstrap_http_status_for(&state.config, ClientRole::Worker, &status);
             (
-                StatusCode::OK,
+                http_status,
                 Json(vpn_bootstrap_response(
-                    client_runtime::current_vpn_status(ClientRole::Worker),
+                    &state.config,
+                    ClientRole::Worker,
+                    status,
                     None,
                 )),
             )
         }
-        Ok(None) => (
-            StatusCode::OK,
-            Json(vpn_bootstrap_response(
-                client_runtime::current_vpn_status(ClientRole::Worker),
-                None,
-            )),
-        ),
-        Err(err) => {
-            tracing::warn!("Worker VPN bootstrap failed: {err}");
+        Ok(None) => {
             let status = client_runtime::current_vpn_status(ClientRole::Worker);
-            let http_status = vpn_bootstrap_http_status(status.state);
+            let http_status =
+                vpn_bootstrap_http_status_for(&state.config, ClientRole::Worker, &status);
             (
                 http_status,
                 Json(vpn_bootstrap_response(
+                    &state.config,
+                    ClientRole::Worker,
+                    status,
+                    None,
+                )),
+            )
+        }
+        Err(err) => {
+            tracing::warn!("Worker VPN bootstrap failed: {err}");
+            let status = client_runtime::current_vpn_status(ClientRole::Worker);
+            let http_status =
+                vpn_bootstrap_http_status_for(&state.config, ClientRole::Worker, &status);
+            (
+                http_status,
+                Json(vpn_bootstrap_response(
+                    &state.config,
+                    ClientRole::Worker,
                     status,
                     Some("VPN/Nodepool bootstrap failed".into()),
                 )),
@@ -439,39 +464,59 @@ async fn bootstrap_vpn(
     }
 }
 
-async fn vpn_status(headers: axum::http::HeaderMap) -> (StatusCode, Json<VpnBootstrapResponse>) {
+async fn vpn_status(
+    State(state): State<ControlApiState>,
+    headers: axum::http::HeaderMap,
+) -> (StatusCode, Json<VpnBootstrapResponse>) {
     if bearer_token(&headers).is_none() {
         return (
             StatusCode::UNAUTHORIZED,
             Json(vpn_bootstrap_response(
+                &state.config,
+                ClientRole::Worker,
                 client_runtime::current_vpn_status(ClientRole::Worker),
                 Some("missing bearer token".into()),
             )),
         );
     }
+    let status = client_runtime::current_vpn_status(ClientRole::Worker);
+    let http_status = vpn_bootstrap_http_status_for(&state.config, ClientRole::Worker, &status);
     (
-        StatusCode::OK,
+        http_status,
         Json(vpn_bootstrap_response(
-            client_runtime::current_vpn_status(ClientRole::Worker),
+            &state.config,
+            ClientRole::Worker,
+            status,
             None,
         )),
     )
 }
 
 fn vpn_bootstrap_response(
+    config: &HivemindConfig,
+    role: ClientRole,
     status: client_runtime::VpnBootstrapStatus,
     fallback_message: Option<String>,
 ) -> VpnBootstrapResponse {
-    let success = matches!(
-        status.state,
-        client_runtime::VpnBootstrapState::Ready | client_runtime::VpnBootstrapState::Disabled
-    );
+    let success = client_runtime::vpn_bootstrap_status_success(config, role, &status);
     VpnBootstrapResponse {
         success,
         state: status.state.as_str().to_string(),
         endpoint: status.endpoint,
         overlay_ip: status.overlay_ip,
         message: status.message.or(fallback_message),
+    }
+}
+
+fn vpn_bootstrap_http_status_for(
+    config: &HivemindConfig,
+    role: ClientRole,
+    status: &client_runtime::VpnBootstrapStatus,
+) -> StatusCode {
+    if client_runtime::vpn_bootstrap_status_success(config, role, status) {
+        StatusCode::OK
+    } else {
+        vpn_bootstrap_http_status(status.state)
     }
 }
 
@@ -487,6 +532,8 @@ async fn login(
     State(state): State<ControlApiState>,
     Json(body): Json<LoginBody>,
 ) -> (StatusCode, Json<LoginResponse>) {
+    let require_external_overlay =
+        client_runtime::external_overlay_required(&state.config, ClientRole::Worker);
     // Prefer automatic website-api VPN bootstrap for remote workers. Local
     // compose can disable it with WORKER_DISABLE_WEBSITE_VPN=1.
     let bootstrap_endpoint = match client_runtime::ensure_user_vpn(
@@ -503,11 +550,22 @@ async fn login(
             tracing::info!("Worker VPN bootstrap succeeded before nodepool login");
             Some(endpoint)
         }
+        Ok(None) if require_external_overlay => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(LoginResponse {
+                    success: false,
+                    message: "External overlay enrollment is required before Worker login".into(),
+                    token: None,
+                }),
+            );
+        }
         Ok(None) => None,
         Err(err) => {
             let message = err.to_string();
             tracing::warn!("Worker VPN bootstrap before login failed: {}", message);
-            if message.contains("nodepool endpoint")
+            if require_external_overlay
+                || message.contains("nodepool endpoint")
                 || message.contains("VPN bootstrap")
                 || message.contains("tailscale")
                 || message.contains("website-api")
@@ -540,7 +598,28 @@ async fn login(
             .await
             {
                 Ok(Some(endpoint)) => state.set_nodepool_addr(endpoint),
+                Ok(None) if require_external_overlay => {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(LoginResponse {
+                            success: false,
+                            message: "External overlay enrollment was lost after Worker login"
+                                .into(),
+                            token: None,
+                        }),
+                    );
+                }
                 Ok(None) => {}
+                Err(err) if require_external_overlay => {
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(LoginResponse {
+                            success: false,
+                            message: format!("VPN/nodepool bootstrap failed after login: {err}"),
+                            token: None,
+                        }),
+                    );
+                }
                 Err(err) => {
                     tracing::warn!("Worker VPN bootstrap after login failed: {}", err);
                 }
@@ -655,6 +734,8 @@ async fn register_worker(
     Json(body): Json<RegisterWorkerBody>,
 ) -> (StatusCode, Json<StatusResponse>) {
     let token = bearer_token(&headers).unwrap_or_default();
+    let require_external_overlay =
+        client_runtime::external_overlay_required(&state.config, ClientRole::Worker);
     if token.is_empty() {
         return (
             StatusCode::UNAUTHORIZED,
@@ -668,6 +749,16 @@ async fn register_worker(
     match client_runtime::ensure_user_vpn_for_token(&state.config, ClientRole::Worker, &token).await
     {
         Ok(Some(endpoint)) => state.set_nodepool_addr(endpoint),
+        Ok(None) if require_external_overlay => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(StatusResponse {
+                    success: false,
+                    status_message:
+                        "External overlay enrollment is required before Worker registration".into(),
+                }),
+            );
+        }
         Ok(None) => {}
         Err(err) => {
             let vpn_status = client_runtime::current_vpn_status(ClientRole::Worker);
@@ -699,7 +790,10 @@ async fn register_worker(
             // owner registration against the Nodepool. Only fall through when
             // website-api is disabled; real enrollment failures stay fatal so
             // public onboarding keeps failing closed.
-            Err(error) if error.to_string().contains("enrollment is disabled") => {
+            Err(error)
+                if !require_external_overlay
+                    && error.to_string().contains("enrollment is disabled") =>
+            {
                 tracing::info!(
                     "website-api enrollment disabled; registering directly with Nodepool as {}",
                     body.username.as_deref().unwrap_or_default()
@@ -920,6 +1014,34 @@ async fn effective_worker_advertise_addr(
     let requested = requested.trim();
     if requested.is_empty() {
         anyhow::bail!("ip is required");
+    }
+
+    let require_external_overlay =
+        client_runtime::external_overlay_required(&state.config, ClientRole::Worker);
+    if require_external_overlay {
+        let session = client_runtime::current_vpn_session(ClientRole::Worker)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("authenticated overlay session is not ready"))?;
+        if session.transport != client_runtime::VpnTransport::Tailscale {
+            anyhow::bail!("strict external overlay requires the embedded libtailscale transport");
+        }
+        let overlay_ip = session
+            .overlay_ip
+            .as_deref()
+            .map(str::trim)
+            .filter(|ip| !ip.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!("authenticated overlay session has no assigned overlay address")
+            })?;
+        let port_source = state
+            .config
+            .server
+            .worker_advertise_addr
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(requested);
+        return nodepool_client::advertise_addr_from_overlay(port_source, overlay_ip);
     }
 
     if let Some(configured) = state

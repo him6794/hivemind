@@ -200,6 +200,37 @@ pub fn advertise_addr_for_vpn(
     Ok(listen_addr.to_string())
 }
 
+/// Build a Worker callback address from the authenticated overlay address.
+///
+/// Strict external enrollment never trusts a configured callback host. It only
+/// reuses the locally bound port and the address assigned by the active
+/// libtailscale session.
+pub fn advertise_addr_from_overlay(listen_addr: &str, overlay_ip: &str) -> anyhow::Result<String> {
+    let listen_addr = listen_addr.trim();
+    let overlay_ip = overlay_ip.trim();
+    if overlay_ip.is_empty() {
+        anyhow::bail!("authenticated overlay address must not be blank");
+    }
+    if overlay_ip.parse::<IpAddr>().is_err() {
+        anyhow::bail!("authenticated overlay address is not a valid IP address");
+    }
+    let port = if let Some(rest) = listen_addr.strip_prefix('[') {
+        rest.split_once(']')
+            .and_then(|(_, suffix)| suffix.strip_prefix(':'))
+    } else {
+        listen_addr.rsplit_once(':').map(|(_, port)| port)
+    }
+    .map(str::trim)
+    .filter(|port| !port.is_empty())
+    .ok_or_else(|| anyhow::anyhow!("Worker listen address must include a port: {listen_addr}"))?;
+    let host = if overlay_ip.contains(':') && !overlay_ip.starts_with('[') {
+        format!("[{overlay_ip}]")
+    } else {
+        overlay_ip.to_string()
+    };
+    validate_advertise_addr(&format!("{host}:{port}"))
+}
+
 pub async fn login_to_nodepool(
     nodepool_addr: &str,
     username: &str,
@@ -515,6 +546,7 @@ pub struct RegistrationLoopConfig {
     pub location: String,
     pub token: String,
     pub interval: Duration,
+    pub require_external_overlay: bool,
 }
 
 pub fn start_registration_loop(
@@ -531,25 +563,47 @@ pub fn start_registration_loop(
         loop {
             tokio::select! {
                 _ = tick.tick() => {
-                    if let Some(session) = hivemind_client_runtime::current_vpn_session(
-                        hivemind_client_runtime::ClientRole::Worker,
-                    ).await {
-                        if let Some(bridge) = session.bridge_endpoint() {
-                            let mut guard = registration
-                                .nodepool_addr
-                                .lock()
-                                .unwrap_or_else(|err| err.into_inner());
-                            if *guard != bridge {
-                                *guard = bridge;
-                                client = None;
-                            }
-                        }
-                    }
                     let configured_addr = registration
                         .nodepool_addr
                         .lock()
                         .unwrap_or_else(|err| err.into_inner())
                         .clone();
+                    let configured_addr = if registration.require_external_overlay {
+                        match hivemind_client_runtime::external_overlay_endpoint(
+                            hivemind_client_runtime::ClientRole::Worker,
+                            &configured_addr,
+                        )
+                        .await
+                        {
+                            Ok(bridge) => {
+                                let mut guard = registration
+                                    .nodepool_addr
+                                    .lock()
+                                    .unwrap_or_else(|err| err.into_inner());
+                                if *guard != bridge {
+                                    *guard = bridge.clone();
+                                    client = None;
+                                }
+                                bridge
+                            }
+                            Err(error) => {
+                                client = None;
+                                warn!(
+                                    worker_id = %registration.worker_id,
+                                    error = %error,
+                                    "Strict external overlay is not ready; deferring Worker registration"
+                                );
+                                continue;
+                            }
+                        }
+                    } else {
+                        refresh_nodepool_bridge(&registration.nodepool_addr).await;
+                        registration
+                            .nodepool_addr
+                            .lock()
+                            .unwrap_or_else(|err| err.into_inner())
+                            .clone()
+                    };
                     let current_endpoint = nodepool_endpoint(&configured_addr);
                     if endpoint != current_endpoint {
                         endpoint = current_endpoint.clone();
@@ -665,6 +719,7 @@ pub struct SessionLoopConfig {
     pub token: String,
     pub interval: Duration,
     pub service: Arc<GrpcWorkerNodeService>,
+    pub require_external_overlay: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -730,12 +785,35 @@ async fn run_worker_session(
     last_received_sequence: &mut u64,
     shutdown: &mut watch::Receiver<bool>,
 ) -> anyhow::Result<SessionRunOutcome> {
-    refresh_nodepool_bridge(&config.nodepool_addr).await;
     let configured_addr = config
         .nodepool_addr
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .clone();
+    let configured_addr = if config.require_external_overlay {
+        let bridge = hivemind_client_runtime::external_overlay_endpoint(
+            hivemind_client_runtime::ClientRole::Worker,
+            &configured_addr,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+        let mut guard = config
+            .nodepool_addr
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *guard = bridge.clone();
+        bridge
+    } else {
+        refresh_nodepool_bridge(&config.nodepool_addr).await;
+        config
+            .nodepool_addr
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    };
+    if configured_addr.trim().is_empty() {
+        anyhow::bail!("Worker session Nodepool endpoint is unavailable");
+    }
     let endpoint = nodepool_endpoint(&configured_addr);
     let endpoint_builder =
         Endpoint::from_shared(endpoint.clone())?.connect_timeout(Duration::from_secs(10));
@@ -918,13 +996,46 @@ async fn run_worker_session(
                 }
             }
             _ = heartbeat.tick() => {
-                refresh_nodepool_bridge(&config.nodepool_addr).await;
-                let current_addr = config
-                    .nodepool_addr
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .clone();
-                if nodepool_endpoint(&current_addr) != endpoint {
+                let current_addr = if config.require_external_overlay {
+                    let configured_addr = config
+                        .nodepool_addr
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .clone();
+                    match hivemind_client_runtime::external_overlay_endpoint(
+                        hivemind_client_runtime::ClientRole::Worker,
+                        &configured_addr,
+                    )
+                    .await
+                    {
+                        Ok(bridge) => {
+                            let mut guard = config
+                                .nodepool_addr
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner());
+                            *guard = bridge.clone();
+                            bridge
+                        }
+                        Err(error) => {
+                            warn!(
+                                worker_id = %config.worker_id,
+                                error = %error,
+                                "Strict external overlay is no longer ready; reconnecting Worker session"
+                            );
+                            return Ok(SessionRunOutcome::Reconnect);
+                        }
+                    }
+                } else {
+                    refresh_nodepool_bridge(&config.nodepool_addr).await;
+                    config
+                        .nodepool_addr
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .clone()
+                };
+                if current_addr.trim().is_empty()
+                    || nodepool_endpoint(&current_addr) != endpoint
+                {
                     return Ok(SessionRunOutcome::Reconnect);
                 }
                 send_client_frame(
@@ -1251,6 +1362,19 @@ mod tests {
             super::advertise_addr("0.0.0.0:50053", Some("worker.local:50053".to_string())).unwrap(),
             "worker.local:50053"
         );
+    }
+
+    #[test]
+    fn overlay_advertise_address_uses_only_the_bound_port() {
+        assert_eq!(
+            super::advertise_addr_from_overlay("0.0.0.0:50053", "100.64.0.20").unwrap(),
+            "100.64.0.20:50053"
+        );
+        assert_eq!(
+            super::advertise_addr_from_overlay("[::]:50054", "fd7a:115c:a1e0::20").unwrap(),
+            "[fd7a:115c:a1e0::20]:50054"
+        );
+        assert!(super::advertise_addr_from_overlay("0.0.0.0:50053", "").is_err());
     }
 
     #[test]

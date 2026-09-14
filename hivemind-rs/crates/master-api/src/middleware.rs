@@ -71,6 +71,11 @@ pub async fn auth_middleware(
                         request.uri().path(),
                         "/api/vpn/bootstrap" | "/api/vpn/status"
                     ) {
+                        let require_external_overlay =
+                            hivemind_client_runtime::external_overlay_required(
+                                &state.config,
+                                hivemind_client_runtime::ClientRole::Master,
+                            );
                         match hivemind_client_runtime::ensure_user_vpn_for_token(
                             &state.config,
                             hivemind_client_runtime::ClientRole::Master,
@@ -79,6 +84,12 @@ pub async fn auth_middleware(
                         .await
                         {
                             Ok(Some(endpoint)) => state.grpc_client.set_endpoint(endpoint).await,
+                            Ok(None) if require_external_overlay => {
+                                let vpn_status = hivemind_client_runtime::current_vpn_status(
+                                    hivemind_client_runtime::ClientRole::Master,
+                                );
+                                return Ok(vpn_gate_response(vpn_status.state));
+                            }
                             Ok(None) => {}
                             Err(err) => {
                                 let vpn_status = hivemind_client_runtime::current_vpn_status(

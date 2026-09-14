@@ -60,6 +60,7 @@ pub trait TransferLeaseAuthority: Send + Sync {
 /// Worker-local revocation cache is trusted.
 pub struct NodepoolTransferLeaseAuthority {
     endpoint: Arc<Mutex<String>>,
+    require_external_overlay: bool,
 }
 
 impl NodepoolTransferLeaseAuthority {
@@ -70,7 +71,18 @@ impl NodepoolTransferLeaseAuthority {
 
     #[must_use]
     pub fn new_shared(endpoint: Arc<Mutex<String>>) -> Arc<Self> {
-        Arc::new(Self { endpoint })
+        Self::new_shared_with_mode(endpoint, false)
+    }
+
+    #[must_use]
+    pub fn new_shared_with_mode(
+        endpoint: Arc<Mutex<String>>,
+        require_external_overlay: bool,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            endpoint,
+            require_external_overlay,
+        })
     }
 }
 
@@ -87,11 +99,26 @@ impl TransferLeaseAuthority for NodepoolTransferLeaseAuthority {
         idempotency_key: &str,
         request_digest: &str,
     ) -> Result<(), TransferLeaseAuthorityError> {
-        let endpoint = self
+        let configured_endpoint = self
             .endpoint
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone();
+        let endpoint = if self.require_external_overlay {
+            hivemind_client_runtime::external_overlay_endpoint(
+                hivemind_client_runtime::ClientRole::Worker,
+                &configured_endpoint,
+            )
+            .await
+            .map_err(|error| TransferLeaseAuthorityError::Unavailable(error.to_string()))?
+        } else {
+            configured_endpoint
+        };
+        if endpoint.trim().is_empty() {
+            return Err(TransferLeaseAuthorityError::Unavailable(
+                "Nodepool endpoint is not ready".into(),
+            ));
+        }
         let mut client =
             NodeManagerServiceClient::connect(crate::nodepool_client::nodepool_endpoint(&endpoint))
                 .await

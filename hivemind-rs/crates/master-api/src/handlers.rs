@@ -917,23 +917,32 @@ pub async fn bootstrap_vpn(
             let status = hivemind_client_runtime::current_vpn_status(
                 hivemind_client_runtime::ClientRole::Master,
             );
-            (StatusCode::OK, Json(vpn_bootstrap_response(status, None)))
+            let http_status = vpn_bootstrap_http_status_for(&state.config, &status);
+            (
+                http_status,
+                Json(vpn_bootstrap_response(&state.config, status, None)),
+            )
         }
         Ok(None) => {
             let status = hivemind_client_runtime::current_vpn_status(
                 hivemind_client_runtime::ClientRole::Master,
             );
-            (StatusCode::OK, Json(vpn_bootstrap_response(status, None)))
+            let http_status = vpn_bootstrap_http_status_for(&state.config, &status);
+            (
+                http_status,
+                Json(vpn_bootstrap_response(&state.config, status, None)),
+            )
         }
         Err(err) => {
             tracing::warn!("Master VPN bootstrap failed: {err}");
             let status = hivemind_client_runtime::current_vpn_status(
                 hivemind_client_runtime::ClientRole::Master,
             );
-            let http_status = vpn_bootstrap_http_status(status.state);
+            let http_status = vpn_bootstrap_http_status_for(&state.config, &status);
             (
                 http_status,
                 Json(vpn_bootstrap_response(
+                    &state.config,
                     status,
                     Some("VPN/Nodepool bootstrap failed".to_string()),
                 )),
@@ -945,20 +954,28 @@ pub async fn bootstrap_vpn(
 /// GET /api/vpn/status
 ///
 /// Return only non-secret local readiness information.
-pub async fn vpn_status(AuthUser { .. }: AuthUser) -> (StatusCode, Json<VpnBootstrapResponse>) {
+pub async fn vpn_status(
+    State(state): State<AppState>,
+    AuthUser { .. }: AuthUser,
+) -> (StatusCode, Json<VpnBootstrapResponse>) {
     let status =
         hivemind_client_runtime::current_vpn_status(hivemind_client_runtime::ClientRole::Master);
-    (StatusCode::OK, Json(vpn_bootstrap_response(status, None)))
+    let http_status = vpn_bootstrap_http_status_for(&state.config, &status);
+    (
+        http_status,
+        Json(vpn_bootstrap_response(&state.config, status, None)),
+    )
 }
 
 fn vpn_bootstrap_response(
+    config: &HivemindConfig,
     status: hivemind_client_runtime::VpnBootstrapStatus,
     fallback_message: Option<String>,
 ) -> VpnBootstrapResponse {
-    let success = matches!(
-        status.state,
-        hivemind_client_runtime::VpnBootstrapState::Ready
-            | hivemind_client_runtime::VpnBootstrapState::Disabled
+    let success = hivemind_client_runtime::vpn_bootstrap_status_success(
+        config,
+        hivemind_client_runtime::ClientRole::Master,
+        &status,
     );
     VpnBootstrapResponse {
         success,
@@ -966,6 +983,21 @@ fn vpn_bootstrap_response(
         endpoint: status.endpoint,
         overlay_ip: status.overlay_ip,
         message: status.message.or(fallback_message),
+    }
+}
+
+fn vpn_bootstrap_http_status_for(
+    config: &HivemindConfig,
+    status: &hivemind_client_runtime::VpnBootstrapStatus,
+) -> StatusCode {
+    if hivemind_client_runtime::vpn_bootstrap_status_success(
+        config,
+        hivemind_client_runtime::ClientRole::Master,
+        status,
+    ) {
+        StatusCode::OK
+    } else {
+        vpn_bootstrap_http_status(status.state)
     }
 }
 
@@ -989,6 +1021,10 @@ pub async fn login(
     State(state): State<AppState>,
     Json(body): Json<LoginBody>,
 ) -> (StatusCode, Json<LoginResponse>) {
+    let require_external_overlay = hivemind_client_runtime::external_overlay_required(
+        &state.config,
+        hivemind_client_runtime::ClientRole::Master,
+    );
     // Prefer automatic website-api VPN bootstrap for remote masters. Local
     // compose deployments leave MASTER_WEBSITE_API_BASE unset and skip this.
     match crate::vpn_bootstrap::ensure_master_vpn_for_user(
@@ -1003,13 +1039,24 @@ pub async fn login(
             // VPN may have just come up; point gRPC at the discovered VIP/IP.
             state.grpc_client.set_endpoint(endpoint).await;
         }
+        Ok(None) if require_external_overlay => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(LoginResponse {
+                    success: false,
+                    message: "External overlay enrollment is required before Master login".into(),
+                    token: None,
+                }),
+            );
+        }
         Ok(None) => {}
         Err(err) => {
             let message = err.to_string();
             tracing::warn!("Master VPN bootstrap before login failed: {}", message);
-            // Hard-fail remote overlay problems instead of masking them as a later
-            // generic nodepool transport error.
-            if message.contains("nodepool endpoint")
+            // Strict mode has no direct Nodepool fallback. Local compose keeps
+            // its direct endpoint compatibility when the Website API is absent.
+            if require_external_overlay
+                || message.contains("nodepool endpoint")
                 || message.contains("VPN bootstrap")
                 || message.contains("tailscale")
                 || message.contains("website-api")
@@ -1041,6 +1088,17 @@ pub async fn login(
             .await
             {
                 Ok(Some(endpoint)) => state.grpc_client.set_endpoint(endpoint).await,
+                Ok(None) if require_external_overlay => {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(LoginResponse {
+                            success: false,
+                            message: "External overlay enrollment was lost after Master login"
+                                .into(),
+                            token: None,
+                        }),
+                    );
+                }
                 Ok(None) => {}
                 Err(err) => {
                     tracing::warn!("Master VPN bootstrap after login failed: {}", err);
@@ -1073,6 +1131,18 @@ pub async fn login(
             }),
         ),
         Err(e) => {
+            if require_external_overlay {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(LoginResponse {
+                        success: false,
+                        message: format!(
+                            "nodepool login failed after external overlay bootstrap: {e}"
+                        ),
+                        token: None,
+                    }),
+                );
+            }
             // One more VPN attempt, then retry nodepool login once. This covers
             // the common remote path: website-api is public, nodepool is VPN-only.
             if let Ok(Some(endpoint)) = crate::vpn_bootstrap::ensure_master_vpn_for_user(
@@ -1086,6 +1156,42 @@ pub async fn login(
                 state.grpc_client.set_endpoint(endpoint).await;
                 match grpc.login(&body.username, &body.password).await {
                     Ok(resp) if resp.success => {
+                        if require_external_overlay {
+                            match crate::vpn_bootstrap::ensure_master_vpn_for_user(
+                                &state.config,
+                                &body.username,
+                                &body.password,
+                                Some(resp.token.as_str()),
+                            )
+                            .await
+                            {
+                                Ok(Some(endpoint)) => {
+                                    state.grpc_client.set_endpoint(endpoint).await
+                                }
+                                Ok(None) => {
+                                    return (
+                                        StatusCode::SERVICE_UNAVAILABLE,
+                                        Json(LoginResponse {
+                                            success: false,
+                                            message: "External overlay enrollment was not ready after Master login".into(),
+                                            token: None,
+                                        }),
+                                    );
+                                }
+                                Err(err) => {
+                                    return (
+                                        StatusCode::BAD_GATEWAY,
+                                        Json(LoginResponse {
+                                            success: false,
+                                            message: format!(
+                                                "VPN/nodepool bootstrap failed after login: {err}"
+                                            ),
+                                            token: None,
+                                        }),
+                                    );
+                                }
+                            }
+                        }
                         return (
                             StatusCode::OK,
                             Json(LoginResponse {
@@ -2495,7 +2601,9 @@ mod tests {
 
     #[test]
     fn vpn_bootstrap_response_is_non_secret_and_marks_ready_success() {
+        let config = HivemindConfig::for_test();
         let response = vpn_bootstrap_response(
+            &config,
             hivemind_client_runtime::VpnBootstrapStatus {
                 state: hivemind_client_runtime::VpnBootstrapState::Ready,
                 endpoint: Some("127.0.0.1:18051".into()),
