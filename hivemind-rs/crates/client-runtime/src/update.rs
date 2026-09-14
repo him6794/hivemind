@@ -13,10 +13,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+use zip::ZipArchive;
 
 pub const UPDATE_PROTOCOL_VERSION: u32 = 1;
 pub const UPDATE_MANIFEST_MAX_BYTES: usize = 256 * 1024;
@@ -24,6 +25,8 @@ pub const UPDATE_KEYSET_MAX_BYTES: usize = 64 * 1024;
 pub const UPDATE_MAX_FILES: usize = 4096;
 pub const UPDATE_MAX_KEYS: usize = 64;
 pub const UPDATE_MAX_PACKAGE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+pub const UPDATE_MAX_ARCHIVE_ENTRIES: usize = UPDATE_MAX_FILES * 2;
+pub const UPDATE_MAX_EXTRACTED_BYTES: u64 = UPDATE_MAX_PACKAGE_BYTES;
 const UPDATE_MAX_FIELD_BYTES: usize = 512;
 const UPDATE_MAX_STATE_BYTES: usize = 64 * 1024;
 const UPDATE_HASH_BYTES: usize = 32;
@@ -61,6 +64,8 @@ pub enum UpdateError {
     Downgrade,
     #[error("update package does not match its signed manifest")]
     PackageMismatch,
+    #[error("update archive is invalid: {0}")]
+    InvalidArchive(String),
     #[error("update path is unsafe: {0}")]
     UnsafePath(String),
     #[error("update path uses a symlink or reparse point: {0}")]
@@ -526,11 +531,15 @@ fn validate_file_list(files: &[ReleaseFile]) -> Result<(), UpdateError> {
         ));
     }
     let mut paths = BTreeSet::new();
+    let mut case_insensitive_paths = BTreeSet::new();
     for file in files {
         validate_package_path(&file.path)?;
         validate_bounded_field(&file.sha256, "file hash")?;
         let _ = decode_fixed_hex::<UPDATE_HASH_BYTES>(&file.sha256, "file hash")?;
-        if file.size == 0 || !paths.insert(file.path.clone()) {
+        if file.size == 0
+            || !paths.insert(file.path.clone())
+            || !case_insensitive_paths.insert(file.path.to_ascii_lowercase())
+        {
             return Err(UpdateError::InvalidMetadata(
                 "release file list contains an empty or duplicate file".into(),
             ));
@@ -635,6 +644,7 @@ fn validate_package_path(value: &str) -> Result<(), UpdateError> {
         || value.starts_with('\\')
         || value.contains('\\')
         || value.contains(':')
+        || !value.is_ascii()
         || value.chars().any(|character| character.is_control())
     {
         return Err(UpdateError::UnsafePath(value.to_string()));
@@ -895,6 +905,543 @@ pub async fn download_verified_package(
         let _ = fs::remove_file(&temporary_path);
     }
     result.map(|()| final_path)
+}
+
+/// Extract a verified archive into a newly created operator-owned directory.
+///
+/// Archive metadata is treated as hostile even after the outer package hash has
+/// been checked. Paths, entry types, entry counts, and expanded byte counts are
+/// bounded before the extracted tree is re-verified against the signed file
+/// manifest. The destination must not already exist; this prevents extraction
+/// from replacing the current verified package or an unrelated operator path.
+pub fn extract_verified_zip(
+    archive_path: &Path,
+    destination: &Path,
+    verified: &VerifiedReleaseManifest,
+    policy: &UpdatePolicy,
+) -> Result<(), UpdateError> {
+    if !archive_path.is_absolute() {
+        return Err(UpdateError::UnsafePath(archive_path.display().to_string()));
+    }
+    let archive_metadata =
+        fs::symlink_metadata(archive_path).map_err(|error| UpdateError::Io(error.to_string()))?;
+    ensure_metadata_is_not_reparse(archive_path, &archive_metadata)?;
+    if !archive_metadata.is_file() {
+        return Err(UpdateError::UnsafePath(archive_path.display().to_string()));
+    }
+    let (archive_size, archive_digest) = hash_file(archive_path)?;
+    if archive_size != verified.manifest.package_size
+        || archive_size > policy.max_package_bytes
+        || archive_digest != verified.manifest.package_sha256
+    {
+        return Err(UpdateError::PackageMismatch);
+    }
+
+    let parent = destination
+        .parent()
+        .ok_or_else(|| UpdateError::UnsafePath(destination.display().to_string()))?;
+    ensure_safe_directory(parent)?;
+    match fs::symlink_metadata(destination) {
+        Ok(metadata) => {
+            ensure_metadata_is_not_reparse(destination, &metadata)?;
+            return Err(UpdateError::UnsafePath(destination.display().to_string()));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(UpdateError::from(error)),
+    }
+    fs::create_dir(destination)?;
+    let destination_metadata = fs::symlink_metadata(destination)?;
+    ensure_metadata_is_not_reparse(destination, &destination_metadata)?;
+
+    let result = extract_archive_to_directory(archive_path, destination, verified, policy);
+    if let Err(error) = result {
+        return match fs::remove_dir_all(destination) {
+            Ok(()) => Err(error),
+            Err(cleanup_error) => Err(UpdateError::Io(format!(
+                "archive extraction failed: {error}; extraction cleanup failed: {cleanup_error}"
+            ))),
+        };
+    }
+    Ok(())
+}
+
+fn archive_entry_path(name: &str, is_directory: bool) -> Result<&str, UpdateError> {
+    if is_directory {
+        let relative = name
+            .strip_suffix('/')
+            .ok_or_else(|| UpdateError::UnsafePath(name.to_owned()))?;
+        validate_package_path(relative)?;
+        Ok(relative)
+    } else {
+        if name.ends_with('/') {
+            return Err(UpdateError::UnsafePath(name.to_owned()));
+        }
+        validate_package_path(name)?;
+        Ok(name)
+    }
+}
+
+fn manifest_contains_directory(expected_files: &BTreeSet<&str>, directory: &str) -> bool {
+    let prefix = format!("{directory}/");
+    expected_files
+        .iter()
+        .any(|path| path.starts_with(prefix.as_str()))
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ArchiveEntryKind {
+    Directory { explicit: bool },
+    File,
+}
+
+fn register_archive_path(
+    paths: &mut BTreeMap<String, ArchiveEntryKind>,
+    relative: &str,
+    is_directory: bool,
+) -> Result<(), UpdateError> {
+    let normalized = relative.to_ascii_lowercase();
+    let components: Vec<&str> = normalized.split('/').collect();
+    let mut prefix = String::new();
+    for component in &components[..components.len() - 1] {
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(component);
+        if matches!(paths.get(&prefix), Some(ArchiveEntryKind::File)) {
+            return Err(UpdateError::InvalidArchive(
+                "archive contains a file/directory collision".into(),
+            ));
+        }
+        paths
+            .entry(prefix.clone())
+            .or_insert(ArchiveEntryKind::Directory { explicit: false });
+    }
+
+    match paths.get(&normalized).copied() {
+        Some(ArchiveEntryKind::File) => {
+            return Err(UpdateError::InvalidArchive(
+                "archive contains a file/directory collision".into(),
+            ));
+        }
+        Some(ArchiveEntryKind::Directory { explicit: true }) => {
+            return Err(UpdateError::InvalidArchive(
+                "archive contains duplicate entries".into(),
+            ));
+        }
+        Some(ArchiveEntryKind::Directory { explicit: false }) if !is_directory => {
+            return Err(UpdateError::InvalidArchive(
+                "archive contains a file/directory collision".into(),
+            ));
+        }
+        Some(ArchiveEntryKind::Directory { explicit: false }) => {
+            paths.insert(normalized, ArchiveEntryKind::Directory { explicit: true });
+        }
+        None if is_directory => {
+            paths.insert(normalized, ArchiveEntryKind::Directory { explicit: true });
+        }
+        None => {
+            if paths
+                .keys()
+                .any(|path| path.starts_with(&format!("{normalized}/")))
+            {
+                return Err(UpdateError::InvalidArchive(
+                    "archive contains a file/directory collision".into(),
+                ));
+            }
+            paths.insert(normalized, ArchiveEntryKind::File);
+        }
+    }
+    Ok(())
+}
+
+fn validate_archive_entry_count_bound(archive_path: &Path) -> Result<(), UpdateError> {
+    const EOCD_BYTES: usize = 22;
+    const ZIP64_LOCATOR_BYTES: usize = 20;
+    const ZIP64_EOCD_BYTES: usize = 56;
+    let mut file = File::open(archive_path)?;
+    let file_size = file.metadata()?.len();
+    let tail_size = file_size.min((EOCD_BYTES + u16::MAX as usize) as u64) as usize;
+    if tail_size < EOCD_BYTES {
+        return Err(UpdateError::InvalidArchive(
+            "archive is shorter than its end record".into(),
+        ));
+    }
+    file.seek(SeekFrom::Start(file_size - tail_size as u64))?;
+    let mut tail = vec![0u8; tail_size];
+    file.read_exact(&mut tail)?;
+
+    let eocd_index = (0..=tail.len() - EOCD_BYTES)
+        .rev()
+        .find(|index| {
+            if &tail[*index..*index + 4] != b"PK\x05\x06" {
+                return false;
+            }
+            let comment_length =
+                u16::from_le_bytes([tail[*index + 20], tail[*index + 21]]) as usize;
+            index
+                .checked_add(EOCD_BYTES)
+                .and_then(|end| end.checked_add(comment_length))
+                == Some(tail.len())
+        })
+        .ok_or_else(|| UpdateError::InvalidArchive("archive end record is missing".into()))?;
+    let eocd_offset = file_size - tail_size as u64 + eocd_index as u64;
+    let disk_number = u16::from_le_bytes([tail[eocd_index + 4], tail[eocd_index + 5]]);
+    let central_disk = u16::from_le_bytes([tail[eocd_index + 6], tail[eocd_index + 7]]);
+    let entries_on_disk = u16::from_le_bytes([tail[eocd_index + 8], tail[eocd_index + 9]]);
+    let entries_total = u16::from_le_bytes([tail[eocd_index + 10], tail[eocd_index + 11]]);
+    if disk_number != 0 || central_disk != 0 {
+        return Err(UpdateError::InvalidArchive(
+            "archive uses unsupported disk layout".into(),
+        ));
+    }
+    let central_size = u32::from_le_bytes([
+        tail[eocd_index + 12],
+        tail[eocd_index + 13],
+        tail[eocd_index + 14],
+        tail[eocd_index + 15],
+    ]);
+    let central_offset = u32::from_le_bytes([
+        tail[eocd_index + 16],
+        tail[eocd_index + 17],
+        tail[eocd_index + 18],
+        tail[eocd_index + 19],
+    ]);
+
+    let entry_count = if entries_on_disk == u16::MAX
+        || entries_total == u16::MAX
+        || central_size == u32::MAX
+        || central_offset == u32::MAX
+    {
+        let locator_offset = eocd_offset
+            .checked_sub(ZIP64_LOCATOR_BYTES as u64)
+            .ok_or_else(|| UpdateError::InvalidArchive("ZIP64 locator is missing".into()))?;
+        file.seek(SeekFrom::Start(locator_offset))?;
+        let mut locator = [0u8; ZIP64_LOCATOR_BYTES];
+        file.read_exact(&mut locator)?;
+        if &locator[..4] != b"PK\x06\x07"
+            || u32::from_le_bytes(locator[4..8].try_into().unwrap()) != 0
+            || u32::from_le_bytes(locator[16..20].try_into().unwrap()) != 1
+        {
+            return Err(UpdateError::InvalidArchive(
+                "ZIP64 archive uses unsupported disk layout".into(),
+            ));
+        }
+        let zip64_offset = u64::from_le_bytes(locator[8..16].try_into().unwrap());
+        let zip64_end = zip64_offset
+            .checked_add(ZIP64_EOCD_BYTES as u64)
+            .ok_or_else(|| UpdateError::InvalidArchive("ZIP64 end record overflows".into()))?;
+        if zip64_end > file_size {
+            return Err(UpdateError::InvalidArchive(
+                "ZIP64 end record is outside the archive".into(),
+            ));
+        }
+        file.seek(SeekFrom::Start(zip64_offset))?;
+        let mut zip64 = [0u8; ZIP64_EOCD_BYTES];
+        file.read_exact(&mut zip64)?;
+        if &zip64[..4] != b"PK\x06\x06"
+            || u64::from_le_bytes(zip64[4..12].try_into().unwrap()) < 44
+            || u32::from_le_bytes(zip64[16..20].try_into().unwrap()) != 0
+            || u32::from_le_bytes(zip64[20..24].try_into().unwrap()) != 0
+            || u64::from_le_bytes(zip64[32..40].try_into().unwrap())
+                != u64::from_le_bytes(zip64[24..32].try_into().unwrap())
+        {
+            return Err(UpdateError::InvalidArchive(
+                "ZIP64 end record is malformed".into(),
+            ));
+        }
+        let zip64_size = u64::from_le_bytes(zip64[4..12].try_into().unwrap());
+        let zip64_record_end = 12u64
+            .checked_add(zip64_size)
+            .and_then(|record_size| zip64_offset.checked_add(record_size));
+        if zip64_record_end.map_or(true, |end| end > file_size) {
+            return Err(UpdateError::InvalidArchive(
+                "ZIP64 end record exceeds the archive".into(),
+            ));
+        }
+        u64::from_le_bytes(zip64[32..40].try_into().unwrap())
+    } else if entries_on_disk != entries_total {
+        return Err(UpdateError::InvalidArchive(
+            "archive uses unsupported disk layout".into(),
+        ));
+    } else {
+        entries_total as u64
+    };
+
+    if entry_count > UPDATE_MAX_ARCHIVE_ENTRIES as u64 {
+        return Err(UpdateError::InvalidArchive(
+            "archive contains too many entries".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn scan_archive_directory(archive_path: &Path) -> Result<(usize, BTreeSet<String>), UpdateError> {
+    validate_archive_entry_count_bound(archive_path)?;
+    let archive = ZipArchive::new(File::open(archive_path)?)
+        .map_err(|error| UpdateError::InvalidArchive(error.to_string()))?;
+    let central_directory_start = archive.central_directory_start();
+    let parsed_entry_count = archive.len();
+    drop(archive);
+
+    let mut file = File::open(archive_path)?;
+    file.seek(SeekFrom::Start(central_directory_start))?;
+    let mut names = BTreeSet::new();
+    let mut entry_count = 0usize;
+    loop {
+        let mut signature = [0u8; 4];
+        file.read_exact(&mut signature)
+            .map_err(|error| UpdateError::InvalidArchive(error.to_string()))?;
+        match &signature {
+            b"PK\x01\x02" => {
+                let mut fixed = [0u8; 42];
+                file.read_exact(&mut fixed)
+                    .map_err(|error| UpdateError::InvalidArchive(error.to_string()))?;
+                entry_count = entry_count
+                    .checked_add(1)
+                    .ok_or_else(|| UpdateError::InvalidArchive("entry count overflow".into()))?;
+                if entry_count > UPDATE_MAX_ARCHIVE_ENTRIES {
+                    return Err(UpdateError::InvalidArchive(
+                        "archive contains too many entries".into(),
+                    ));
+                }
+                let version_made_by = u16::from_le_bytes([fixed[0], fixed[1]]);
+                let flags = u16::from_le_bytes([fixed[4], fixed[5]]);
+                let name_length = u16::from_le_bytes([fixed[24], fixed[25]]) as usize;
+                let extra_length = u16::from_le_bytes([fixed[26], fixed[27]]) as usize;
+                let comment_length = u16::from_le_bytes([fixed[28], fixed[29]]) as usize;
+                if name_length == 0 || name_length > UPDATE_MAX_FIELD_BYTES {
+                    return Err(UpdateError::InvalidArchive(
+                        "archive entry name is outside the configured bound".into(),
+                    ));
+                }
+                if flags & 1 != 0 {
+                    return Err(UpdateError::InvalidArchive(
+                        "encrypted entries are not accepted".into(),
+                    ));
+                }
+                let mut raw_name = vec![0u8; name_length];
+                file.read_exact(&mut raw_name)
+                    .map_err(|error| UpdateError::InvalidArchive(error.to_string()))?;
+                if raw_name.contains(&0) {
+                    return Err(UpdateError::InvalidArchive(
+                        "archive entry contains a NUL byte".into(),
+                    ));
+                }
+                if !raw_name.is_ascii() && flags & (1 << 11) == 0 {
+                    return Err(UpdateError::InvalidArchive(
+                        "non-ASCII archive names must use UTF-8".into(),
+                    ));
+                }
+                let name = std::str::from_utf8(&raw_name).map_err(|_| {
+                    UpdateError::InvalidArchive("archive entry name is not valid UTF-8".into())
+                })?;
+                let is_directory = name.ends_with('/');
+                let relative = archive_entry_path(name, is_directory)?;
+                if !names.insert(name.to_owned()) {
+                    return Err(UpdateError::InvalidArchive(
+                        "archive contains duplicate entries".into(),
+                    ));
+                }
+                let file_type = if version_made_by >> 8 == 3 {
+                    let external_attributes =
+                        u32::from_le_bytes([fixed[34], fixed[35], fixed[36], fixed[37]]);
+                    Some((external_attributes >> 16) & 0o170000)
+                } else {
+                    None
+                };
+                if file_type == Some(0o120000) {
+                    return Err(UpdateError::ReparsePoint(relative.to_owned()));
+                }
+                if is_directory {
+                    if file_type.is_some_and(|file_type| file_type != 0 && file_type != 0o040000) {
+                        return Err(UpdateError::InvalidArchive(
+                            "directory entry has a non-directory Unix mode".into(),
+                        ));
+                    }
+                } else if file_type.is_some_and(|file_type| file_type != 0 && file_type != 0o100000)
+                {
+                    return Err(UpdateError::InvalidArchive(
+                        "archive contains a non-regular file".into(),
+                    ));
+                }
+                let metadata_length =
+                    extra_length.checked_add(comment_length).ok_or_else(|| {
+                        UpdateError::InvalidArchive("archive metadata overflow".into())
+                    })?;
+                file.seek(SeekFrom::Current(metadata_length as i64))?;
+            }
+            b"PK\x05\x06" | b"PK\x06\x06" | b"PK\x06\x07" => break,
+            _ => {
+                return Err(UpdateError::InvalidArchive(
+                    "archive central directory is malformed".into(),
+                ));
+            }
+        }
+    }
+    if entry_count != parsed_entry_count {
+        return Err(UpdateError::InvalidArchive(
+            "archive entry table is inconsistent".into(),
+        ));
+    }
+    Ok((entry_count, names))
+}
+
+fn extract_archive_to_directory(
+    archive_path: &Path,
+    destination: &Path,
+    verified: &VerifiedReleaseManifest,
+    policy: &UpdatePolicy,
+) -> Result<(), UpdateError> {
+    let (archive_entry_count, _) = scan_archive_directory(archive_path)?;
+    let archive_file = File::open(archive_path)?;
+    let mut archive = ZipArchive::new(archive_file)
+        .map_err(|error| UpdateError::InvalidArchive(error.to_string()))?;
+    if archive_entry_count > UPDATE_MAX_ARCHIVE_ENTRIES {
+        return Err(UpdateError::InvalidArchive(
+            "archive contains too many entries".into(),
+        ));
+    }
+    let expanded_limit = policy.max_package_bytes.min(UPDATE_MAX_EXTRACTED_BYTES);
+    if expanded_limit == 0 {
+        return Err(UpdateError::InvalidArchive(
+            "expanded archive limit is zero".into(),
+        ));
+    }
+    let expected_files: BTreeSet<&str> = verified
+        .manifest
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect();
+
+    let mut paths = BTreeMap::new();
+    let mut extracted_bytes = 0u64;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| UpdateError::InvalidArchive(error.to_string()))?;
+        if entry.encrypted() {
+            return Err(UpdateError::InvalidArchive(
+                "encrypted entries are not accepted".into(),
+            ));
+        }
+        if entry.name_raw().contains(&0) || entry.name().contains('\0') {
+            return Err(UpdateError::InvalidArchive(
+                "archive entry contains a NUL byte".into(),
+            ));
+        }
+        if std::str::from_utf8(entry.name_raw()).is_err() {
+            return Err(UpdateError::InvalidArchive(
+                "archive entry name is not valid UTF-8".into(),
+            ));
+        }
+        if entry.is_symlink() {
+            return Err(UpdateError::ReparsePoint(entry.name().to_string()));
+        }
+        validate_archive_entry_type(&entry)?;
+
+        if entry.is_dir() {
+            let relative = archive_entry_path(entry.name(), true)?;
+            if !manifest_contains_directory(&expected_files, relative) {
+                return Err(UpdateError::PackageMismatch);
+            }
+            register_archive_path(&mut paths, relative, true)?;
+            ensure_safe_directory(&safe_join(destination, relative)?)?;
+            continue;
+        }
+
+        let relative = archive_entry_path(entry.name(), false)?;
+        if !expected_files.contains(relative) {
+            return Err(UpdateError::PackageMismatch);
+        }
+        register_archive_path(&mut paths, relative, false)?;
+        let declared_size = entry.size();
+        if declared_size == 0 || declared_size > expanded_limit {
+            return Err(UpdateError::InvalidArchive(
+                "archive entry size is outside the configured bound".into(),
+            ));
+        }
+        extracted_bytes = extracted_bytes
+            .checked_add(declared_size)
+            .ok_or_else(|| UpdateError::InvalidArchive("archive size overflow".into()))?;
+        if extracted_bytes > expanded_limit {
+            return Err(UpdateError::InvalidArchive(
+                "expanded archive exceeds the configured bound".into(),
+            ));
+        }
+
+        let output_path = safe_join(destination, relative)?;
+        let parent = output_path
+            .parent()
+            .ok_or_else(|| UpdateError::UnsafePath(output_path.display().to_string()))?;
+        ensure_safe_directory(parent)?;
+        if let Ok(metadata) = fs::symlink_metadata(&output_path) {
+            ensure_metadata_is_not_reparse(&output_path, &metadata)?;
+            return Err(UpdateError::InvalidArchive(
+                "archive entry would overwrite an existing path".into(),
+            ));
+        }
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&output_path)?;
+        let mut written = 0u64;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = entry.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            written = written
+                .checked_add(read as u64)
+                .ok_or_else(|| UpdateError::InvalidArchive("entry size overflow".into()))?;
+            if written > declared_size {
+                return Err(UpdateError::InvalidArchive(
+                    "archive entry expanded beyond its declared size".into(),
+                ));
+            }
+            output.write_all(&buffer[..read])?;
+        }
+        if written != declared_size {
+            return Err(UpdateError::InvalidArchive(
+                "archive entry ended before its declared size".into(),
+            ));
+        }
+        output.flush()?;
+        output.sync_all()?;
+        let metadata = fs::symlink_metadata(&output_path)?;
+        ensure_metadata_is_not_reparse(&output_path, &metadata)?;
+        if !metadata.is_file() {
+            return Err(UpdateError::InvalidArchive(
+                "archive extraction did not produce a regular file".into(),
+            ));
+        }
+    }
+
+    verify_installed_package(destination, verified)
+}
+
+fn validate_archive_entry_type(entry: &zip::read::ZipFile<'_>) -> Result<(), UpdateError> {
+    let file_type = entry.unix_mode().map(|mode| mode & 0o170000);
+    if entry.is_dir() {
+        if entry.size() != 0 {
+            return Err(UpdateError::InvalidArchive(
+                "directory entry contains data".into(),
+            ));
+        }
+        if file_type.is_some_and(|file_type| file_type != 0 && file_type != 0o040000) {
+            return Err(UpdateError::InvalidArchive(
+                "directory entry has a non-directory Unix mode".into(),
+            ));
+        }
+        return Ok(());
+    }
+    if file_type.is_some_and(|file_type| file_type != 0 && file_type != 0o100000) {
+        return Err(UpdateError::InvalidArchive(
+            "archive contains a non-regular file".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -1180,6 +1727,7 @@ mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
     use std::fs;
+    use zip::write::{SimpleFileOptions, ZipWriter};
 
     fn key(seed: u8) -> SigningKey {
         SigningKey::from_bytes(&[seed; 32])
@@ -1269,6 +1817,171 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&root);
         root
+    }
+
+    fn write_zip(path: &Path, entries: &[(&str, &[u8])]) {
+        let file = File::create(path).unwrap();
+        let mut writer = ZipWriter::new(file);
+        for &(name, content) in entries {
+            writer
+                .start_file(name, SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(content).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+
+    fn write_zip_with_directory(path: &Path, directory: &str, entries: &[(&str, &[u8])]) {
+        let file = File::create(path).unwrap();
+        let mut writer = ZipWriter::new(file);
+        writer
+            .add_directory(directory, SimpleFileOptions::default())
+            .unwrap();
+        for &(name, content) in entries {
+            writer
+                .start_file(name, SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(content).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+
+    fn write_zip_with_symlink(path: &Path, name: &str, target: &str) {
+        let file = File::create(path).unwrap();
+        let mut writer = ZipWriter::new(file);
+        writer
+            .add_symlink(name, target, SimpleFileOptions::default())
+            .unwrap();
+        writer.finish().unwrap();
+    }
+
+    fn write_zip_with_entry_count(path: &Path, count: usize) {
+        let file = File::create(path).unwrap();
+        let mut writer = ZipWriter::new(file);
+        for index in 0..count {
+            let name = format!("entry-{index}.bin");
+            writer
+                .start_file(name, SimpleFileOptions::default())
+                .unwrap();
+        }
+        writer.finish().unwrap();
+    }
+
+    fn duplicate_first_central_entry(path: &Path) {
+        let bytes = fs::read(path).unwrap();
+        let end = bytes
+            .windows(4)
+            .rposition(|signature| signature == b"PK\x05\x06")
+            .unwrap();
+        let central_offset =
+            u32::from_le_bytes(bytes[end + 16..end + 20].try_into().unwrap()) as usize;
+        let central_size =
+            u32::from_le_bytes(bytes[end + 12..end + 16].try_into().unwrap()) as usize;
+        let central_entry = bytes[central_offset..central_offset + central_size].to_vec();
+        let mut output = bytes[..end].to_vec();
+        output.extend_from_slice(&central_entry);
+        let mut end_record = bytes[end..].to_vec();
+        let entries = u16::from_le_bytes(end_record[10..12].try_into().unwrap());
+        end_record[8..10].copy_from_slice(&(entries + 1).to_le_bytes());
+        end_record[10..12].copy_from_slice(&(entries + 1).to_le_bytes());
+        let new_central_size = central_size + central_entry.len();
+        end_record[12..16].copy_from_slice(&(new_central_size as u32).to_le_bytes());
+        output.extend_from_slice(&end_record);
+        fs::write(path, output).unwrap();
+    }
+
+    fn patch_zip_entry_count(path: &Path, count: u16) {
+        let mut bytes = fs::read(path).unwrap();
+        let end = bytes
+            .windows(4)
+            .rposition(|signature| signature == b"PK\x05\x06")
+            .unwrap();
+        bytes[end + 8..end + 10].copy_from_slice(&count.to_le_bytes());
+        bytes[end + 10..end + 12].copy_from_slice(&count.to_le_bytes());
+        fs::write(path, bytes).unwrap();
+    }
+
+    fn patch_zip_unix_mode(path: &Path, mode: u32) {
+        let mut bytes = fs::read(path).unwrap();
+        let central_header = bytes
+            .windows(4)
+            .position(|signature| signature == b"PK\x01\x02")
+            .unwrap();
+        let version_made_by = ((3u16) << 8) | 20;
+        bytes[central_header + 4..central_header + 6]
+            .copy_from_slice(&version_made_by.to_le_bytes());
+        bytes[central_header + 38..central_header + 42]
+            .copy_from_slice(&(mode << 16).to_le_bytes());
+        fs::write(path, bytes).unwrap();
+    }
+
+    fn patch_zip_encrypted(path: &Path) {
+        let mut bytes = fs::read(path).unwrap();
+        for (signature, flags_offset) in [(b"PK\x03\x04", 6usize), (b"PK\x01\x02", 8usize)] {
+            let mut search_from = 0;
+            while let Some(relative) = bytes[search_from..]
+                .windows(4)
+                .position(|candidate| candidate == signature)
+            {
+                let header = search_from + relative;
+                let flags = u16::from_le_bytes([
+                    bytes[header + flags_offset],
+                    bytes[header + flags_offset + 1],
+                ]);
+                bytes[header + flags_offset..header + flags_offset + 2]
+                    .copy_from_slice(&(flags | 1).to_le_bytes());
+                search_from = header + 4;
+            }
+        }
+        fs::write(path, bytes).unwrap();
+    }
+
+    fn verified_archive(
+        archive_path: &Path,
+        expected_files: &[(&str, &[u8])],
+    ) -> VerifiedReleaseManifest {
+        let (package_size, package_sha256) = hash_file(archive_path).unwrap();
+        let manifest = ReleaseManifest {
+            schema_version: UPDATE_PROTOCOL_VERSION,
+            product: "hivemind-windows-worker".into(),
+            channel: "stable".into(),
+            platform: "windows".into(),
+            architecture: "x86_64".into(),
+            version: "0.1.1".into(),
+            sequence: 1,
+            minimum_supported_version: "0.1.0".into(),
+            release_key_id: "release-1".into(),
+            issued_at_unix: 900,
+            expires_at_unix: 2_000,
+            package_url: "https://updates.example.test/worker.zip".into(),
+            package_size,
+            package_sha256,
+            files: expected_files
+                .iter()
+                .map(|&(path, content)| ReleaseFile {
+                    path: path.into(),
+                    size: content.len() as u64,
+                    sha256: hex::encode(Sha256::digest(content)),
+                })
+                .collect(),
+        };
+        VerifiedReleaseManifest {
+            manifest,
+            manifest_sha256: "a".repeat(64),
+        }
+    }
+
+    fn extract_test_archive(
+        label: &str,
+        entries: &[(&str, &[u8])],
+        expected_files: &[(&str, &[u8])],
+    ) -> (PathBuf, PathBuf, VerifiedReleaseManifest) {
+        let root = temp_root(label);
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("package.zip");
+        write_zip(&archive, entries);
+        let verified = verified_archive(&archive, expected_files);
+        (root.clone(), root.join("release"), verified)
     }
 
     #[test]
@@ -1493,6 +2206,292 @@ mod tests {
                 .sequence,
             1
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn extracts_verified_zip_and_rejects_unexpected_files() {
+        let (root, destination, verified) = extract_test_archive(
+            "archive-valid",
+            &[
+                ("hivemind-worker.exe", b"worker"),
+                ("worker-ui/index.html", b"page"),
+            ],
+            &[
+                ("hivemind-worker.exe", b"worker"),
+                ("worker-ui/index.html", b"page"),
+            ],
+        );
+        extract_verified_zip(
+            &root.join("package.zip"),
+            &destination,
+            &verified,
+            &policy(),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(destination.join("hivemind-worker.exe")).unwrap(),
+            b"worker"
+        );
+        assert_eq!(
+            fs::read(destination.join("worker-ui/index.html")).unwrap(),
+            b"page"
+        );
+        let _ = fs::remove_dir_all(root);
+
+        let (root, destination, verified) = extract_test_archive(
+            "archive-unexpected",
+            &[
+                ("hivemind-worker.exe", b"worker"),
+                ("unexpected.dll", b"extra"),
+            ],
+            &[("hivemind-worker.exe", b"worker")],
+        );
+        assert!(matches!(
+            extract_verified_zip(
+                &root.join("package.zip"),
+                &destination,
+                &verified,
+                &policy(),
+            ),
+            Err(UpdateError::PackageMismatch)
+        ));
+        assert!(!destination.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn extracts_explicit_directories_and_rejects_manifest_mismatch() {
+        let root = temp_root("archive-directory");
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("package.zip");
+        write_zip_with_directory(&archive, "worker-ui/", &[("worker-ui/index.html", b"page")]);
+        let verified = verified_archive(&archive, &[("worker-ui/index.html", b"page")]);
+        let destination = root.join("release");
+        extract_verified_zip(&archive, &destination, &verified, &policy()).unwrap();
+        assert_eq!(
+            fs::read(destination.join("worker-ui/index.html")).unwrap(),
+            b"page"
+        );
+        let _ = fs::remove_dir_all(root);
+
+        let (root, destination, verified) = extract_test_archive(
+            "archive-mismatch",
+            &[("hivemind-worker.exe", b"actual")],
+            &[("hivemind-worker.exe", b"expected")],
+        );
+        assert!(matches!(
+            extract_verified_zip(
+                &root.join("package.zip"),
+                &destination,
+                &verified,
+                &policy(),
+            ),
+            Err(UpdateError::PackageMismatch)
+        ));
+        assert!(!destination.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_unsafe_archive_paths_and_preserves_existing_destination() {
+        for (index, name) in [
+            ("parent", "../outside.exe"),
+            ("absolute", "/outside.exe"),
+            ("backslash", "worker\\\\outside.exe"),
+            ("drive", "C:outside.exe"),
+            ("dot", "worker/./outside.exe"),
+            ("empty", "worker//outside.exe"),
+        ] {
+            let (root, destination, verified) =
+                extract_test_archive(index, &[(name, b"bad")], &[("safe.exe", b"safe")]);
+            assert!(matches!(
+                extract_verified_zip(
+                    &root.join("package.zip"),
+                    &destination,
+                    &verified,
+                    &policy(),
+                ),
+                Err(UpdateError::UnsafePath(_))
+            ));
+            assert!(!destination.exists());
+            let _ = fs::remove_dir_all(root);
+        }
+
+        let (root, destination, verified) = extract_test_archive(
+            "archive-existing-destination",
+            &[("hivemind-worker.exe", b"worker")],
+            &[("hivemind-worker.exe", b"worker")],
+        );
+        fs::create_dir_all(&destination).unwrap();
+        fs::write(destination.join("keep.txt"), b"keep").unwrap();
+        assert!(matches!(
+            extract_verified_zip(
+                &root.join("package.zip"),
+                &destination,
+                &verified,
+                &policy(),
+            ),
+            Err(UpdateError::UnsafePath(_))
+        ));
+        assert_eq!(fs::read(destination.join("keep.txt")).unwrap(), b"keep");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_duplicate_entries_and_file_directory_collisions() {
+        let root = temp_root("archive-duplicate");
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("package.zip");
+        write_zip(&archive, &[("hivemind-worker.exe", b"worker")]);
+        duplicate_first_central_entry(&archive);
+        let destination = root.join("release");
+        let verified = verified_archive(&archive, &[("hivemind-worker.exe", b"worker")]);
+        let result = extract_verified_zip(
+            &root.join("package.zip"),
+            &destination,
+            &verified,
+            &policy(),
+        );
+        assert!(result.is_err(), "duplicate archive result: {result:?}");
+        assert!(!destination.exists());
+        let _ = fs::remove_dir_all(root);
+
+        let (root, destination, verified) = extract_test_archive(
+            "archive-collision",
+            &[("foo", b"file"), ("foo/bar", b"nested")],
+            &[("foo", b"file"), ("foo/bar", b"nested")],
+        );
+        assert!(matches!(
+            extract_verified_zip(
+                &root.join("package.zip"),
+                &destination,
+                &verified,
+                &policy(),
+            ),
+            Err(UpdateError::InvalidArchive(_))
+        ));
+        assert!(!destination.exists());
+        let _ = fs::remove_dir_all(root);
+
+        let (root, destination, verified) = extract_test_archive(
+            "archive-case-collision",
+            &[("Worker.exe", b"one"), ("worker.exe", b"two")],
+            &[("Worker.exe", b"one"), ("worker.exe", b"two")],
+        );
+        assert!(matches!(
+            extract_verified_zip(
+                &root.join("package.zip"),
+                &destination,
+                &verified,
+                &policy(),
+            ),
+            Err(UpdateError::InvalidArchive(_))
+        ));
+        assert!(!destination.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_symlinks_special_modes_encryption_and_malformed_archives() {
+        let root = temp_root("archive-symlink");
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("package.zip");
+        write_zip_with_symlink(&archive, "hivemind-worker.exe", "outside.exe");
+        let verified = verified_archive(&archive, &[("hivemind-worker.exe", b"outside.exe")]);
+        let destination = root.join("release");
+        assert!(matches!(
+            extract_verified_zip(&archive, &destination, &verified, &policy()),
+            Err(UpdateError::ReparsePoint(_))
+        ));
+        assert!(!destination.exists());
+        let _ = fs::remove_dir_all(root);
+
+        let root = temp_root("archive-special-mode");
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("package.zip");
+        write_zip(&archive, &[("hivemind-worker.exe", b"worker")]);
+        patch_zip_unix_mode(&archive, 0o020000);
+        let verified = verified_archive(&archive, &[("hivemind-worker.exe", b"worker")]);
+        let destination = root.join("release");
+        assert!(matches!(
+            extract_verified_zip(&archive, &destination, &verified, &policy()),
+            Err(UpdateError::InvalidArchive(_))
+        ));
+        assert!(!destination.exists());
+        let _ = fs::remove_dir_all(root);
+
+        let root = temp_root("archive-encrypted");
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("package.zip");
+        write_zip(&archive, &[("hivemind-worker.exe", b"worker")]);
+        patch_zip_encrypted(&archive);
+        let verified = verified_archive(&archive, &[("hivemind-worker.exe", b"worker")]);
+        let destination = root.join("release");
+        assert!(matches!(
+            extract_verified_zip(&archive, &destination, &verified, &policy()),
+            Err(UpdateError::InvalidArchive(_))
+        ));
+        assert!(!destination.exists());
+        let _ = fs::remove_dir_all(root);
+
+        let root = temp_root("archive-malformed");
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("package.zip");
+        fs::write(&archive, b"not a zip archive").unwrap();
+        let verified = verified_archive(&archive, &[("hivemind-worker.exe", b"worker")]);
+        let destination = root.join("release");
+        assert!(matches!(
+            extract_verified_zip(&archive, &destination, &verified, &policy()),
+            Err(UpdateError::InvalidArchive(_))
+        ));
+        assert!(!destination.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_archive_entry_count_and_expanded_size_limits() {
+        let root = temp_root("archive-entry-limit");
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("package.zip");
+        write_zip_with_entry_count(&archive, UPDATE_MAX_ARCHIVE_ENTRIES + 1);
+        let verified = verified_archive(&archive, &[("hivemind-worker.exe", b"worker")]);
+        let destination = root.join("release");
+        assert!(matches!(
+            extract_verified_zip(&archive, &destination, &verified, &policy()),
+            Err(UpdateError::InvalidArchive(_))
+        ));
+        assert!(!destination.exists());
+        let _ = fs::remove_dir_all(root);
+
+        let root = temp_root("archive-forged-entry-count");
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("package.zip");
+        write_zip(&archive, &[("hivemind-worker.exe", b"worker")]);
+        patch_zip_entry_count(&archive, u16::MAX);
+        let verified = verified_archive(&archive, &[("hivemind-worker.exe", b"worker")]);
+        let destination = root.join("release");
+        assert!(matches!(
+            extract_verified_zip(&archive, &destination, &verified, &policy()),
+            Err(UpdateError::InvalidArchive(_))
+        ));
+        assert!(!destination.exists());
+        let _ = fs::remove_dir_all(root);
+
+        let root = temp_root("archive-expanded-limit");
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("package.zip");
+        let content = vec![b'x'; 16 * 1024];
+        write_zip(&archive, &[("hivemind-worker.exe", &content)]);
+        let verified = verified_archive(&archive, &[("hivemind-worker.exe", &content)]);
+        let limit = fs::metadata(&archive).unwrap().len() + 1;
+        let limited_policy = policy().with_max_package_bytes(limit);
+        let destination = root.join("release");
+        assert!(matches!(
+            extract_verified_zip(&archive, &destination, &verified, &limited_policy),
+            Err(UpdateError::InvalidArchive(_))
+        ));
+        assert!(!destination.exists());
         let _ = fs::remove_dir_all(root);
     }
 

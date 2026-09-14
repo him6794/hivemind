@@ -54,6 +54,7 @@ bcrypt = "0.15"
 sha1 = "0.10"
 sha2 = "0.10"
 hex = "0.4"
+zip = { version = "2.4.2", default-features = false, features = ["deflate-miniz"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 thiserror = "1"
