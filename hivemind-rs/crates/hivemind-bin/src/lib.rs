@@ -27,6 +27,7 @@ use hivemind_node_manager::grpc::{
 use hivemind_node_manager::outbound_session::GrpcWorkerSessionService;
 #[cfg(feature = "nodepool")]
 use hivemind_node_manager::{heartbeat::HeartbeatHandler, NodeManager};
+#[cfg(feature = "worker")]
 use hivemind_proto::GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES;
 #[cfg(feature = "nodepool")]
 use hivemind_proto::{
@@ -361,9 +362,13 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
 
     validate_service_config(&config, role)?;
 
-    #[cfg(any(feature = "nodepool", feature = "worker"))]
+    #[cfg(any(feature = "master", feature = "nodepool", feature = "worker"))]
     let mut shutdown_handles: Vec<watch::Sender<bool>> = Vec::new();
-    #[cfg(all(not(feature = "nodepool"), not(feature = "worker")))]
+    #[cfg(all(
+        not(feature = "master"),
+        not(feature = "nodepool"),
+        not(feature = "worker")
+    ))]
     let shutdown_handles: Vec<watch::Sender<bool>> = Vec::new();
 
     #[cfg(feature = "nodepool")]
@@ -478,6 +483,11 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
                 tracing::error!("Master API error: {}", e);
             }
         });
+        let update_shutdown = client_runtime::update_loop::start_update_loop(
+            config.clone(),
+            client_runtime::ClientRole::Master,
+        );
+        shutdown_handles.push(update_shutdown);
         info!(
             "Master HTTP API started on {}",
             config.server.master_http_addr
@@ -649,6 +659,11 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
             "Worker control HTTP API started on {}",
             config.server.worker_control_http_addr
         );
+        let update_shutdown = client_runtime::update_loop::start_update_loop(
+            config.clone(),
+            client_runtime::ClientRole::Worker,
+        );
+        shutdown_handles.push(update_shutdown);
 
         // Only start the automatic registration loop when credentials/token are
         // already provisioned. Downloaded workers authenticate through the local

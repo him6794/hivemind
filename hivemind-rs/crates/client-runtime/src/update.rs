@@ -133,6 +133,17 @@ impl UpdatePolicy {
     }
 
     #[must_use]
+    pub fn windows_master(allowed_hosts: &[&str]) -> Self {
+        Self::new(
+            "hivemind-windows-master",
+            "stable",
+            "windows",
+            current_windows_architecture(),
+            allowed_hosts,
+        )
+    }
+
+    #[must_use]
     pub fn with_max_package_bytes(mut self, max_package_bytes: u64) -> Self {
         self.max_package_bytes = max_package_bytes;
         self
@@ -585,7 +596,7 @@ fn parse_version(value: &str) -> Result<[u64; 3], UpdateError> {
     Ok(parsed)
 }
 
-fn validate_https_package_url(
+pub(crate) fn validate_https_package_url(
     value: &str,
     allowed_hosts: &BTreeSet<String>,
 ) -> Result<(), UpdateError> {
@@ -761,7 +772,7 @@ fn hash_file(path: &Path) -> Result<(u64, String), UpdateError> {
         }
         size = size
             .checked_add(read as u64)
-            .ok_or_else(|| UpdateError::PackageMismatch)?;
+            .ok_or(UpdateError::PackageMismatch)?;
         if size > UPDATE_MAX_PACKAGE_BYTES {
             return Err(UpdateError::PackageMismatch);
         }
@@ -816,6 +827,73 @@ fn ensure_metadata_is_not_reparse(path: &Path, metadata: &fs::Metadata) -> Resul
         }
     }
     Ok(())
+}
+
+/// Fetch bounded signed metadata from an approved HTTPS host.
+///
+/// This helper is deliberately separate from package download: metadata is
+/// parsed and signature-checked by the caller before it can authorize any
+/// package bytes. Redirects, non-HTTPS URLs, unapproved hosts, oversized
+/// responses, and non-200 responses are rejected without a fallback source.
+pub async fn download_signed_metadata(
+    url: &str,
+    max_bytes: usize,
+    allowed_hosts: &BTreeSet<String>,
+) -> Result<Vec<u8>, UpdateError> {
+    if max_bytes == 0 {
+        return Err(UpdateError::MetadataTooLarge);
+    }
+    validate_https_package_url(url, allowed_hosts)?;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|error| UpdateError::Download(error.to_string()))?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| UpdateError::Download(error.to_string()))?;
+    if response.status().is_redirection() || response.status() != StatusCode::OK {
+        return Err(UpdateError::Download(
+            "metadata endpoint returned an unexpected response".into(),
+        ));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        return Err(UpdateError::MetadataTooLarge);
+    }
+
+    let mut body = Vec::with_capacity(
+        response
+            .content_length()
+            .unwrap_or_default()
+            .min(max_bytes as u64) as usize,
+    );
+    let mut response = response;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| UpdateError::Download(error.to_string()))?
+    {
+        let next_len = body
+            .len()
+            .checked_add(chunk.len())
+            .ok_or(UpdateError::MetadataTooLarge)?;
+        if next_len > max_bytes {
+            return Err(UpdateError::MetadataTooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    if body.is_empty() {
+        return Err(UpdateError::InvalidMetadata(
+            "metadata response is empty".into(),
+        ));
+    }
+    Ok(body)
 }
 
 pub async fn download_verified_package(
@@ -1153,7 +1231,7 @@ fn validate_archive_entry_count_bound(archive_path: &Path) -> Result<(), UpdateE
         let zip64_record_end = 12u64
             .checked_add(zip64_size)
             .and_then(|record_size| zip64_offset.checked_add(record_size));
-        if zip64_record_end.map_or(true, |end| end > file_size) {
+        if zip64_record_end.is_none_or(|end| end > file_size) {
             return Err(UpdateError::InvalidArchive(
                 "ZIP64 end record exceeds the archive".into(),
             ));

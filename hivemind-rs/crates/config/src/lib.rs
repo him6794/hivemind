@@ -15,6 +15,8 @@ pub struct HivemindConfig {
     pub general_compute: GeneralComputeConfig,
     #[serde(default)]
     pub managed_consensus: ManagedConsensusConfig,
+    #[serde(default)]
+    pub client_updates: ClientUpdateConfig,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +120,22 @@ fn default_consensus_max_result_bytes() -> usize {
     256 * 1024
 }
 
+fn default_client_updates_enabled() -> bool {
+    true
+}
+
+fn default_client_update_channel() -> String {
+    "stable".into()
+}
+
+fn default_client_update_check_interval_secs() -> u64 {
+    6 * 60 * 60
+}
+
+fn default_client_update_max_package_bytes() -> u64 {
+    8 * 1024 * 1024 * 1024
+}
+
 impl Default for ManagedConsensusConfig {
     fn default() -> Self {
         Self {
@@ -156,6 +174,99 @@ impl ManagedConsensusConfig {
         }
         if self.timeout_secs > i64::MAX as u64 {
             return Err("managed consensus timeout exceeds the supported range".into());
+        }
+        Ok(())
+    }
+}
+
+/// Runtime configuration for the signed update loop.
+///
+/// Empty endpoint/allow-list values deliberately leave updates deferred. They
+/// are not replaced with an unsigned or unpinned source at runtime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClientUpdateConfig {
+    #[serde(default = "default_client_updates_enabled")]
+    pub enabled: bool,
+    /// Optional product override; the runtime derives the role-specific default.
+    #[serde(default)]
+    pub product: Option<String>,
+    #[serde(default = "default_client_update_channel")]
+    pub channel: String,
+    #[serde(default)]
+    pub keyset_url: Option<String>,
+    #[serde(default)]
+    pub manifest_url: Option<String>,
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+    #[serde(default)]
+    pub install_root: Option<String>,
+    #[serde(default)]
+    pub staging_root: Option<String>,
+    #[serde(default = "default_client_update_check_interval_secs")]
+    pub check_interval_secs: u64,
+    #[serde(default = "default_client_update_max_package_bytes")]
+    pub max_package_bytes: u64,
+}
+
+impl Default for ClientUpdateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_client_updates_enabled(),
+            product: None,
+            channel: default_client_update_channel(),
+            keyset_url: None,
+            manifest_url: None,
+            allowed_hosts: Vec::new(),
+            install_root: None,
+            staging_root: None,
+            check_interval_secs: default_client_update_check_interval_secs(),
+            max_package_bytes: default_client_update_max_package_bytes(),
+        }
+    }
+}
+
+impl ClientUpdateConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.check_interval_secs == 0 {
+            return Err("client update check interval must be positive".into());
+        }
+        if self.check_interval_secs > 7 * 24 * 60 * 60 {
+            return Err("client update check interval cannot exceed seven days".into());
+        }
+        if self.max_package_bytes == 0 || self.max_package_bytes > 8 * 1024 * 1024 * 1024 {
+            return Err("client update package limit is outside the supported range".into());
+        }
+        if self
+            .product
+            .as_deref()
+            .is_some_and(|product| product.trim().is_empty())
+        {
+            return Err("client update product must not be blank".into());
+        }
+        if self.channel.trim().is_empty() {
+            return Err("client update channel must not be blank".into());
+        }
+        if self
+            .install_root
+            .as_deref()
+            .is_some_and(|root| root.trim().is_empty())
+            || self
+                .staging_root
+                .as_deref()
+                .is_some_and(|root| root.trim().is_empty())
+        {
+            return Err("client update storage roots must not be blank".into());
+        }
+        if self.allowed_hosts.iter().any(|host| {
+            let host = host.trim();
+            host.is_empty()
+                || host.contains('/')
+                || host.contains('\\')
+                || host.contains('@')
+                || host.chars().any(|character| character.is_control())
+        }) {
+            return Err("client update approved hosts contain an invalid value".into());
         }
         Ok(())
     }
@@ -450,6 +561,7 @@ impl Default for HivemindConfig {
             },
             general_compute: GeneralComputeConfig::default(),
             managed_consensus: ManagedConsensusConfig::default(),
+            client_updates: ClientUpdateConfig::default(),
         }
     }
 }
@@ -600,6 +712,49 @@ impl HivemindConfig {
         self.managed_consensus
             .validate()
             .map_err(|error| anyhow::anyhow!("invalid managed consensus configuration: {error}"))?;
+        if let Ok(enabled) = std::env::var("UPDATE_ENABLED") {
+            self.client_updates.enabled = parse_env("UPDATE_ENABLED", &enabled)?;
+        }
+        if let Ok(product) = std::env::var("UPDATE_PRODUCT") {
+            let product = product.trim().to_string();
+            self.client_updates.product = if product.is_empty() {
+                None
+            } else {
+                Some(product)
+            };
+        }
+        if let Ok(channel) = std::env::var("UPDATE_CHANNEL") {
+            self.client_updates.channel = channel.trim().to_string();
+        }
+        if let Ok(url) = std::env::var("UPDATE_KEYSET_URL") {
+            let url = url.trim().to_string();
+            self.client_updates.keyset_url = if url.is_empty() { None } else { Some(url) };
+        }
+        if let Ok(url) = std::env::var("UPDATE_MANIFEST_URL") {
+            let url = url.trim().to_string();
+            self.client_updates.manifest_url = if url.is_empty() { None } else { Some(url) };
+        }
+        if let Ok(hosts) = std::env::var("UPDATE_ALLOWED_HOSTS") {
+            self.client_updates.allowed_hosts = parse_csv(&hosts);
+        }
+        if let Ok(root) = std::env::var("UPDATE_INSTALL_ROOT") {
+            let root = root.trim().to_string();
+            self.client_updates.install_root = if root.is_empty() { None } else { Some(root) };
+        }
+        if let Ok(root) = std::env::var("UPDATE_STAGING_ROOT") {
+            let root = root.trim().to_string();
+            self.client_updates.staging_root = if root.is_empty() { None } else { Some(root) };
+        }
+        if let Ok(value) = std::env::var("UPDATE_CHECK_INTERVAL_SECS") {
+            self.client_updates.check_interval_secs =
+                parse_env("UPDATE_CHECK_INTERVAL_SECS", &value)?;
+        }
+        if let Ok(value) = std::env::var("UPDATE_MAX_PACKAGE_BYTES") {
+            self.client_updates.max_package_bytes = parse_env("UPDATE_MAX_PACKAGE_BYTES", &value)?;
+        }
+        self.client_updates
+            .validate()
+            .map_err(|error| anyhow::anyhow!("invalid client update configuration: {error}"))?;
         if let Ok(mode) = std::env::var("HIVEMIND_WORKER_ADMISSION_MODE") {
             self.general_compute.admission_mode =
                 parse_env("HIVEMIND_WORKER_ADMISSION_MODE", &mode)?;
@@ -770,6 +925,54 @@ mod test_config_tests {
             "test database URL should not default to the production/dev database: {}",
             config.database.url
         );
+    }
+
+    #[test]
+    fn client_update_defaults_are_deferred_without_signed_endpoints() {
+        let config = ClientUpdateConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.channel, "stable");
+        assert!(config.keyset_url.is_none());
+        assert!(config.manifest_url.is_none());
+        assert!(config.allowed_hosts.is_empty());
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn client_update_validation_rejects_unsafe_values() {
+        let config = ClientUpdateConfig {
+            check_interval_secs: 0,
+            ..ClientUpdateConfig::default()
+        };
+        assert!(config.validate().is_err());
+
+        let config = ClientUpdateConfig {
+            max_package_bytes: 0,
+            ..ClientUpdateConfig::default()
+        };
+        assert!(config.validate().is_err());
+
+        let config = ClientUpdateConfig {
+            allowed_hosts: vec!["https://updates.example".into()],
+            ..ClientUpdateConfig::default()
+        };
+        assert!(config.validate().is_err());
+
+        let config = ClientUpdateConfig {
+            allowed_hosts: vec!["updates.example".into()],
+            install_root: Some("relative\\updates".into()),
+            ..ClientUpdateConfig::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn client_update_schema_rejects_unknown_fields() {
+        let error = serde_json::from_str::<ClientUpdateConfig>(
+            r#"{"enabled":true,"channel":"stable","unknown":true}"#,
+        )
+        .expect_err("unknown update configuration fields must fail closed");
+        assert!(error.to_string().contains("unknown field"));
     }
 }
 

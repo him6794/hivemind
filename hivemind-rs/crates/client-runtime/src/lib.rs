@@ -9,6 +9,7 @@
 //! Users must not hand-copy pre-auth keys after install.
 
 pub mod update;
+pub mod update_loop;
 
 use anyhow::{bail, Context, Result};
 use hivemind_config::HivemindConfig;
