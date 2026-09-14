@@ -29,6 +29,9 @@ pub const UPDATE_MAX_ARCHIVE_ENTRIES: usize = UPDATE_MAX_FILES * 2;
 pub const UPDATE_MAX_EXTRACTED_BYTES: u64 = UPDATE_MAX_PACKAGE_BYTES;
 const UPDATE_MAX_FIELD_BYTES: usize = 512;
 const UPDATE_MAX_STATE_BYTES: usize = 64 * 1024;
+const UPDATE_ACTIVATION_DESCRIPTOR_MAX_BYTES: usize = 512 * 1024;
+const UPDATE_ACTIVATION_DESCRIPTOR_DIR: &str = ".hivemind-update-activation";
+const UPDATE_ACTIVATION_DESCRIPTOR_FILE: &str = "descriptor.json";
 const UPDATE_HASH_BYTES: usize = 32;
 const UPDATE_SIGNATURE_BYTES: usize = 64;
 
@@ -80,6 +83,12 @@ pub enum UpdateError {
     Download(String),
     #[error("update filesystem operation failed: {0}")]
     Io(String),
+    #[error("signed update activation is unavailable: {0}")]
+    ActivationUnavailable(String),
+    #[error("signed update activation failed: {0}")]
+    ActivationFailed(String),
+    #[error("signed update activation is supported only on native Windows")]
+    UnsupportedPlatform,
 }
 
 impl From<io::Error> for UpdateError {
@@ -88,7 +97,8 @@ impl From<io::Error> for UpdateError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct UpdatePolicy {
     pub product: String,
     pub channel: String,
@@ -267,6 +277,30 @@ pub struct InstalledPackageState {
     pub product: String,
     pub current: InstalledRelease,
     pub last_known_good: Option<InstalledRelease>,
+}
+
+/// A one-shot, non-secret handoff from the running client to an updater
+/// process copied from that same verified client image.
+///
+/// The signed keyset and manifest are carried in the descriptor so the updater
+/// can re-verify the release after the client exits. Filesystem locations are
+/// independently constrained by the updater; they are never treated as signed
+/// authority.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateActivationDescriptor {
+    pub schema_version: u32,
+    pub policy: UpdatePolicy,
+    pub signed_keyset: SignedReleaseKeyset,
+    pub signed_manifest: SignedReleaseManifest,
+    pub install_root: String,
+    pub release_dir: String,
+    pub active_root: String,
+    pub service_executable_name: String,
+    pub service_arguments: Vec<String>,
+    pub helper_executable: String,
+    pub helper_sha256: String,
+    pub parent_pid: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -723,6 +757,35 @@ pub fn verify_installed_package(
     for (path, file) in expected {
         let (size, digest) = actual.get(&path).ok_or(UpdateError::PackageMismatch)?;
         if *size != file.size || digest != &file.sha256 {
+            return Err(UpdateError::PackageMismatch);
+        }
+    }
+    Ok(())
+}
+
+/// Verify all signed package files in an active client directory while allowing
+/// operator-owned runtime files such as `.env.worker` and `sandbox` to remain.
+/// Unknown files are never copied or executed by the activation transaction.
+pub fn verify_active_directory(
+    root: &Path,
+    verified: &VerifiedReleaseManifest,
+) -> Result<(), UpdateError> {
+    ensure_safe_directory(root)?;
+    for file in &verified.manifest.files {
+        let path = safe_join(root, &file.path)?;
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(UpdateError::PackageMismatch)
+            }
+            Err(error) => return Err(UpdateError::ActivationFailed(error.to_string())),
+        };
+        ensure_metadata_is_not_reparse(&path, &metadata)?;
+        if !metadata.is_file() {
+            return Err(UpdateError::PackageMismatch);
+        }
+        let (size, digest) = hash_file(&path)?;
+        if size != file.size || digest != file.sha256 {
             return Err(UpdateError::PackageMismatch);
         }
     }
@@ -1686,6 +1749,168 @@ impl UpdateInstaller {
         Ok(state)
     }
 
+    pub fn pending_activation_path(&self) -> Result<Option<PathBuf>, UpdateError> {
+        let descriptor_dir = self.root.join(UPDATE_ACTIVATION_DESCRIPTOR_DIR);
+        match fs::symlink_metadata(&descriptor_dir) {
+            Ok(metadata) => {
+                ensure_metadata_is_not_reparse(&descriptor_dir, &metadata)?;
+                if !metadata.is_dir() {
+                    return Err(UpdateError::CorruptState(
+                        "update activation descriptor root is not a directory".into(),
+                    ));
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(UpdateError::from(error)),
+        }
+        let descriptor = descriptor_dir.join(UPDATE_ACTIVATION_DESCRIPTOR_FILE);
+        match fs::symlink_metadata(&descriptor) {
+            Ok(metadata) => {
+                ensure_metadata_is_not_reparse(&descriptor, &metadata)?;
+                if !metadata.is_file()
+                    || metadata.len() > UPDATE_ACTIVATION_DESCRIPTOR_MAX_BYTES as u64
+                {
+                    return Err(UpdateError::CorruptState(
+                        "update activation descriptor is not a bounded regular file".into(),
+                    ));
+                }
+                Ok(Some(descriptor))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(UpdateError::from(error)),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_activation(
+        &self,
+        signed_keyset: &SignedReleaseKeyset,
+        signed_manifest: &SignedReleaseManifest,
+        verifier: &UpdateVerifier,
+        policy: &UpdatePolicy,
+        now_unix: u64,
+        active_root: &Path,
+        service_executable_name: &str,
+        service_arguments: &[String],
+        helper_executable: &Path,
+        parent_pid: u32,
+    ) -> Result<PathBuf, UpdateError> {
+        let state = self.load_state()?.ok_or(UpdateError::MissingState)?;
+        let verified_keyset = verifier.verify_keyset(signed_keyset, policy, now_unix)?;
+        let verified =
+            verifier.verify_manifest(signed_manifest, &verified_keyset, policy, None, now_unix)?;
+        if !release_matches_manifest(&state.current, &verified) {
+            return Err(UpdateError::CorruptState(
+                "activation state does not match the signed release".into(),
+            ));
+        }
+        let release_root = self.release_path(&state.current.release_dir)?;
+        verify_installed_package(&release_root, &verified)?;
+        validate_absolute_directory(active_root)?;
+        validate_package_path(service_executable_name)?;
+        if !verified
+            .manifest()
+            .files
+            .iter()
+            .any(|file| file.path == service_executable_name)
+        {
+            return Err(UpdateError::ActivationFailed(
+                "signed release does not contain the service executable".into(),
+            ));
+        }
+        validate_service_arguments(service_arguments)?;
+        validate_absolute_file(helper_executable)?;
+        let (_, helper_sha256) = hash_file(helper_executable)?;
+        if parent_pid == 0 {
+            return Err(UpdateError::ActivationUnavailable(
+                "parent process identity is missing".into(),
+            ));
+        }
+
+        let descriptor_dir = self.root.join(UPDATE_ACTIVATION_DESCRIPTOR_DIR);
+        ensure_safe_directory(&descriptor_dir)?;
+        let descriptor = UpdateActivationDescriptor {
+            schema_version: UPDATE_PROTOCOL_VERSION,
+            policy: policy.clone(),
+            signed_keyset: signed_keyset.clone(),
+            signed_manifest: signed_manifest.clone(),
+            install_root: self.root.display().to_string(),
+            release_dir: state.current.release_dir,
+            active_root: active_root.display().to_string(),
+            service_executable_name: service_executable_name.to_owned(),
+            service_arguments: service_arguments.to_vec(),
+            helper_executable: helper_executable.display().to_string(),
+            helper_sha256,
+            parent_pid,
+        };
+        let descriptor_path = descriptor_dir.join(UPDATE_ACTIVATION_DESCRIPTOR_FILE);
+        write_activation_descriptor_atomic(&descriptor_path, &descriptor)?;
+        Ok(descriptor_path)
+    }
+
+    pub fn prepare_activation_from_current_process(
+        &self,
+        signed_keyset: &SignedReleaseKeyset,
+        signed_manifest: &SignedReleaseManifest,
+        verifier: &UpdateVerifier,
+        policy: &UpdatePolicy,
+        now_unix: u64,
+        service_arguments: &[String],
+    ) -> Result<PathBuf, UpdateError> {
+        if !cfg!(target_os = "windows") {
+            return Err(UpdateError::UnsupportedPlatform);
+        }
+        let current_exe = std::env::current_exe()
+            .map_err(|error| UpdateError::ActivationUnavailable(error.to_string()))?;
+        validate_absolute_file(&current_exe)?;
+        let active_root = current_exe.parent().ok_or_else(|| {
+            UpdateError::ActivationUnavailable("running executable has no parent directory".into())
+        })?;
+        let service_executable_name = current_exe
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                UpdateError::ActivationUnavailable(
+                    "running executable name is not valid UTF-8".into(),
+                )
+            })?;
+        let descriptor_dir = self.root.join(UPDATE_ACTIVATION_DESCRIPTOR_DIR);
+        ensure_safe_directory(&descriptor_dir)?;
+        let helper_executable = descriptor_dir.join(format!(
+            "helper-{}-{}.exe",
+            std::process::id(),
+            monotonic_nonce()
+        ));
+        fs::copy(&current_exe, &helper_executable).map_err(|error| {
+            UpdateError::ActivationUnavailable(format!("could not stage updater helper: {error}"))
+        })?;
+        let helper_result = self.prepare_activation(
+            signed_keyset,
+            signed_manifest,
+            verifier,
+            policy,
+            now_unix,
+            active_root,
+            service_executable_name,
+            service_arguments,
+            &helper_executable,
+            std::process::id(),
+        );
+        if helper_result.is_err() {
+            let _ = fs::remove_file(&helper_executable);
+        }
+        helper_result
+    }
+
+    pub fn verified_release_path(&self, release_dir: &str) -> Result<PathBuf, UpdateError> {
+        self.release_path(release_dir)
+    }
+
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     fn release_path(&self, release_dir: &str) -> Result<PathBuf, UpdateError> {
         validate_package_path(release_dir)?;
         safe_join(&self.root.join("releases"), release_dir)
@@ -1723,6 +1948,105 @@ fn copy_verified_tree(source: &Path, destination: &Path) -> Result<(), UpdateErr
         } else {
             return Err(UpdateError::PackageMismatch);
         }
+    }
+    Ok(())
+}
+
+fn validate_absolute_directory(path: &Path) -> Result<(), UpdateError> {
+    if !path.is_absolute() {
+        return Err(UpdateError::UnsafePath(path.display().to_string()));
+    }
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| UpdateError::ActivationUnavailable(error.to_string()))?;
+    ensure_metadata_is_not_reparse(path, &metadata)?;
+    if !metadata.is_dir() {
+        return Err(UpdateError::UnsafePath(path.display().to_string()));
+    }
+    Ok(())
+}
+
+fn validate_absolute_file(path: &Path) -> Result<(), UpdateError> {
+    if !path.is_absolute() {
+        return Err(UpdateError::UnsafePath(path.display().to_string()));
+    }
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| UpdateError::ActivationUnavailable(error.to_string()))?;
+    ensure_metadata_is_not_reparse(path, &metadata)?;
+    if !metadata.is_file() {
+        return Err(UpdateError::UnsafePath(path.display().to_string()));
+    }
+    Ok(())
+}
+
+fn validate_service_arguments(arguments: &[String]) -> Result<(), UpdateError> {
+    const MAX_ARGUMENTS: usize = 32;
+    const MAX_ARGUMENT_BYTES: usize = 4096;
+    const MAX_TOTAL_BYTES: usize = 16 * 1024;
+    if arguments.len() > MAX_ARGUMENTS {
+        return Err(UpdateError::ActivationFailed(
+            "service argument list is too large".into(),
+        ));
+    }
+    let mut total = 0usize;
+    for argument in arguments {
+        if argument.is_empty()
+            || argument.len() > MAX_ARGUMENT_BYTES
+            || argument.contains('\0')
+            || argument.chars().any(|character| character.is_control())
+            || argument == "--hivemind-apply-update"
+        {
+            return Err(UpdateError::ActivationFailed(
+                "service argument list contains an unsafe argument".into(),
+            ));
+        }
+        total = total
+            .checked_add(argument.len())
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| {
+                UpdateError::ActivationFailed("service argument list overflows".into())
+            })?;
+        if total > MAX_TOTAL_BYTES {
+            return Err(UpdateError::ActivationFailed(
+                "service argument list is too large".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn write_activation_descriptor_atomic(
+    path: &Path,
+    descriptor: &UpdateActivationDescriptor,
+) -> Result<(), UpdateError> {
+    if !path.is_absolute() {
+        return Err(UpdateError::UnsafePath(path.display().to_string()));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| UpdateError::UnsafePath(path.display().to_string()))?;
+    ensure_safe_directory(parent)?;
+    let bytes = serde_json::to_vec(descriptor)
+        .map_err(|error| UpdateError::CorruptState(error.to_string()))?;
+    if bytes.len() > UPDATE_ACTIVATION_DESCRIPTOR_MAX_BYTES {
+        return Err(UpdateError::MetadataTooLarge);
+    }
+    let temporary = parent.join(format!(
+        ".activation-{}-{}.tmp",
+        std::process::id(),
+        monotonic_nonce()
+    ));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    file.write_all(&bytes)?;
+    file.write_all(b"\n")?;
+    file.flush()?;
+    file.sync_all()?;
+    drop(file);
+    if let Err(error) = atomic_replace(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
     }
     Ok(())
 }
@@ -1791,6 +2115,517 @@ fn atomic_replace(source: &Path, destination: &Path) -> Result<(), UpdateError> 
     {
         fs::rename(source, destination).map_err(UpdateError::from)
     }
+}
+
+/// Parse the private updater handoff argument before normal service startup.
+///
+/// The handoff is intentionally not part of the public CLI. Any malformed or
+/// unexpected argument is rejected instead of being interpreted as a service
+/// command or an update fallback.
+pub fn activation_request_path(args: &[String]) -> Result<Option<PathBuf>, UpdateError> {
+    match args {
+        [] | [_] => Ok(None),
+        [_, flag, path] if flag == "--hivemind-apply-update" => {
+            let path = PathBuf::from(path);
+            if !path.is_absolute() {
+                return Err(UpdateError::UnsafePath(path.display().to_string()));
+            }
+            Ok(Some(path))
+        }
+        [_, flag, ..] if flag == "--hivemind-apply-update" => Err(UpdateError::ActivationFailed(
+            "update handoff accepts exactly one descriptor".into(),
+        )),
+        _ => Ok(None),
+    }
+}
+
+/// Validate a pending handoff and return the copied updater plus the service
+/// arguments that must be restored after activation. The copied executable is
+/// authenticated by the hash recorded before the running client requested a
+/// restart; a descriptor cannot redirect startup to an arbitrary file.
+pub fn activation_launch_spec(path: &Path) -> Result<(PathBuf, Vec<String>), UpdateError> {
+    let descriptor = read_activation_descriptor(path)?;
+    validate_activation_descriptor(path, &descriptor)?;
+    let helper = PathBuf::from(&descriptor.helper_executable);
+    let (_, helper_sha256) = hash_file(&helper)?;
+    if helper_sha256 != descriptor.helper_sha256 {
+        return Err(UpdateError::ActivationFailed(
+            "update helper no longer matches its recorded digest".into(),
+        ));
+    }
+    Ok((helper, descriptor.service_arguments))
+}
+
+fn validate_activation_preflight(path: &Path) -> Result<(), UpdateError> {
+    let descriptor = read_activation_descriptor(path)?;
+    validate_activation_descriptor(path, &descriptor)?;
+    let now_unix = unix_now()?;
+    let verifier = UpdateVerifier::embedded()?;
+    let keyset = verifier.verify_keyset(&descriptor.signed_keyset, &descriptor.policy, now_unix)?;
+    let verified = verifier.verify_manifest(
+        &descriptor.signed_manifest,
+        &keyset,
+        &descriptor.policy,
+        None,
+        now_unix,
+    )?;
+    let installer = UpdateInstaller::new(&descriptor.install_root)?;
+    let state = installer.load_state()?.ok_or(UpdateError::MissingState)?;
+    if state.current.release_dir != descriptor.release_dir
+        || !release_matches_manifest(&state.current, &verified)
+    {
+        return Err(UpdateError::CorruptState(
+            "activation descriptor does not match installed state".into(),
+        ));
+    }
+    if !verified
+        .manifest()
+        .files
+        .iter()
+        .any(|file| file.path == descriptor.service_executable_name)
+    {
+        return Err(UpdateError::ActivationFailed(
+            "signed release does not contain the service executable".into(),
+        ));
+    }
+    let service_path = safe_join(
+        Path::new(&descriptor.active_root),
+        &descriptor.service_executable_name,
+    )?;
+    validate_absolute_file(&service_path)?;
+    let release_root = installer.verified_release_path(&descriptor.release_dir)?;
+    verify_installed_package(&release_root, &verified)
+}
+
+pub fn spawn_activation_helper(path: &Path) -> Result<(), UpdateError> {
+    if !cfg!(target_os = "windows") {
+        return Err(UpdateError::UnsupportedPlatform);
+    }
+    validate_activation_preflight(path)?;
+    let (helper, _) = activation_launch_spec(path)?;
+    std::process::Command::new(&helper)
+        .arg("--hivemind-apply-update")
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| UpdateError::ActivationUnavailable(error.to_string()))
+}
+
+/// Execute a verified update handoff in a separate process.
+///
+/// The helper is created by copying the currently running executable to a
+/// transaction directory before the service exits. That copy is not locked by
+/// the service, so it can replace the service executable after the parent has
+/// stopped. On non-Windows targets there is deliberately no process-replacement
+/// fallback.
+pub async fn run_activation_helper(descriptor_path: PathBuf) -> Result<(), UpdateError> {
+    #[cfg(windows)]
+    {
+        tokio::task::spawn_blocking(move || apply_activation(&descriptor_path))
+            .await
+            .map_err(|error| UpdateError::ActivationFailed(error.to_string()))??;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = descriptor_path;
+        Err(UpdateError::UnsupportedPlatform)
+    }
+}
+
+#[cfg(windows)]
+fn spawn_activated_service(
+    service_path: &Path,
+    active_root: &Path,
+    service_arguments: &[String],
+    helper_executable: &Path,
+) -> Result<std::process::Child, UpdateError> {
+    std::process::Command::new(service_path)
+        .args(service_arguments)
+        .current_dir(active_root)
+        .env("HIVEMIND_UPDATE_HELPER_TEMP", helper_executable)
+        .spawn()
+        .map_err(|error| UpdateError::ActivationFailed(error.to_string()))
+}
+
+#[cfg(windows)]
+fn apply_activation(descriptor_path: &Path) -> Result<(), UpdateError> {
+    let descriptor = read_activation_descriptor(descriptor_path)?;
+    validate_activation_descriptor(descriptor_path, &descriptor)?;
+    let current_exe = std::env::current_exe()
+        .map_err(|error| UpdateError::ActivationFailed(error.to_string()))?;
+    validate_absolute_file(&current_exe)?;
+    if canonical_path(&current_exe)? != canonical_path(Path::new(&descriptor.helper_executable))? {
+        return Err(UpdateError::ActivationFailed(
+            "updater executable does not match the handoff descriptor".into(),
+        ));
+    }
+    let (_, current_sha256) = hash_file(&current_exe)?;
+    if current_sha256 != descriptor.helper_sha256 {
+        return Err(UpdateError::ActivationFailed(
+            "updater executable digest does not match the handoff descriptor".into(),
+        ));
+    }
+    let active_root = Path::new(&descriptor.active_root);
+    let service_path = safe_join(active_root, &descriptor.service_executable_name)?;
+    validate_absolute_file(&service_path)?;
+    wait_for_parent_exit(descriptor.parent_pid, service_path.clone())?;
+
+    let now_unix = unix_now()?;
+    let verifier = UpdateVerifier::embedded()?;
+    let keyset = verifier.verify_keyset(&descriptor.signed_keyset, &descriptor.policy, now_unix)?;
+    let verified = verifier.verify_manifest(
+        &descriptor.signed_manifest,
+        &keyset,
+        &descriptor.policy,
+        None,
+        now_unix,
+    )?;
+    if !verified
+        .manifest()
+        .files
+        .iter()
+        .any(|file| file.path == descriptor.service_executable_name)
+    {
+        return Err(UpdateError::ActivationFailed(
+            "signed release does not contain the service executable".into(),
+        ));
+    }
+
+    let installer = UpdateInstaller::new(&descriptor.install_root)?;
+    let state = installer.load_state()?.ok_or(UpdateError::MissingState)?;
+    if state.current.release_dir != descriptor.release_dir
+        || !release_matches_manifest(&state.current, &verified)
+    {
+        return Err(UpdateError::CorruptState(
+            "activation descriptor does not match installed state".into(),
+        ));
+    }
+    let release_root = installer.verified_release_path(&descriptor.release_dir)?;
+    verify_installed_package(&release_root, &verified)?;
+
+    let backup_dir = apply_release_files(&release_root, active_root, &verified)?;
+    let mut child = match spawn_activated_service(
+        &service_path,
+        active_root,
+        &descriptor.service_arguments,
+        &current_exe,
+    ) {
+        Ok(child) => child,
+        Err(error) => {
+            let rollback = rollback_activation_files(active_root, &backup_dir, &verified);
+            return match rollback {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(UpdateError::ActivationFailed(format!(
+                    "new client could not start: {error}; rollback failed: {rollback_error}"
+                ))),
+            };
+        }
+    };
+
+    if let Err(error) = fs::remove_file(descriptor_path) {
+        let _ = child.kill();
+        let _ = child.wait();
+        let rollback = rollback_activation_files(active_root, &backup_dir, &verified);
+        return match rollback {
+            Ok(()) => Err(UpdateError::ActivationFailed(format!(
+                "activation descriptor could not be removed: {error}"
+            ))),
+            Err(rollback_error) => Err(UpdateError::ActivationFailed(format!(
+                "activation descriptor could not be removed: {error}; rollback failed: {rollback_error}"
+            ))),
+        };
+    }
+    let _ = fs::remove_dir_all(&backup_dir);
+    Ok(())
+}
+
+fn read_activation_descriptor(path: &Path) -> Result<UpdateActivationDescriptor, UpdateError> {
+    let metadata = fs::symlink_metadata(path)?;
+    ensure_metadata_is_not_reparse(path, &metadata)?;
+    if !metadata.is_file() || metadata.len() > UPDATE_ACTIVATION_DESCRIPTOR_MAX_BYTES as u64 {
+        return Err(UpdateError::CorruptState(
+            "update activation descriptor is not a bounded regular file".into(),
+        ));
+    }
+    let bytes = fs::read(path)?;
+    serde_json::from_slice(&bytes).map_err(|error| UpdateError::CorruptState(error.to_string()))
+}
+
+fn validate_activation_descriptor(
+    descriptor_path: &Path,
+    descriptor: &UpdateActivationDescriptor,
+) -> Result<(), UpdateError> {
+    if descriptor.schema_version != UPDATE_PROTOCOL_VERSION {
+        return Err(UpdateError::CorruptState(
+            "unsupported update activation descriptor schema".into(),
+        ));
+    }
+    let install_root = Path::new(&descriptor.install_root);
+    validate_absolute_directory(install_root)?;
+    let transaction_dir = descriptor_path
+        .parent()
+        .ok_or_else(|| UpdateError::UnsafePath(descriptor_path.display().to_string()))?;
+    let expected_transaction_dir = install_root.join(UPDATE_ACTIVATION_DESCRIPTOR_DIR);
+    if canonical_path(transaction_dir)? != canonical_path(&expected_transaction_dir)?
+        || descriptor_path.file_name().and_then(|name| name.to_str())
+            != Some(UPDATE_ACTIVATION_DESCRIPTOR_FILE)
+    {
+        return Err(UpdateError::ActivationFailed(
+            "activation descriptor is outside its installed update root".into(),
+        ));
+    }
+    validate_absolute_directory(Path::new(&descriptor.active_root))?;
+    validate_package_path(&descriptor.service_executable_name)?;
+    validate_service_arguments(&descriptor.service_arguments)?;
+    let helper = Path::new(&descriptor.helper_executable);
+    validate_absolute_file(helper)?;
+    let helper_parent = helper
+        .parent()
+        .ok_or_else(|| UpdateError::UnsafePath(helper.display().to_string()))?;
+    if canonical_path(helper_parent)? != canonical_path(transaction_dir)? {
+        return Err(UpdateError::ActivationFailed(
+            "update helper is outside the activation transaction directory".into(),
+        ));
+    }
+    let _ = decode_fixed_hex::<UPDATE_HASH_BYTES>(&descriptor.helper_sha256, "helper hash")?;
+    if descriptor.parent_pid == 0 {
+        return Err(UpdateError::ActivationFailed(
+            "activation parent process identity is invalid".into(),
+        ));
+    }
+    validate_package_path(&descriptor.release_dir)?;
+    Ok(())
+}
+
+fn canonical_path(path: &Path) -> Result<PathBuf, UpdateError> {
+    fs::canonicalize(path).map_err(|error| UpdateError::ActivationFailed(error.to_string()))
+}
+
+#[cfg(windows)]
+fn apply_release_files(
+    release_root: &Path,
+    active_root: &Path,
+    verified: &VerifiedReleaseManifest,
+) -> Result<PathBuf, UpdateError> {
+    validate_absolute_directory(active_root)?;
+    let transaction_dir = active_root.join(format!(
+        ".hivemind-activation-backup-{}-{}",
+        std::process::id(),
+        monotonic_nonce()
+    ));
+    ensure_safe_directory(&transaction_dir)?;
+    let mut backups = Vec::new();
+    let result = (|| {
+        for file in &verified.manifest.files {
+            validate_package_path(&file.path)?;
+            let source = safe_join(release_root, &file.path)?;
+            let source_metadata = fs::symlink_metadata(&source)?;
+            ensure_metadata_is_not_reparse(&source, &source_metadata)?;
+            if !source_metadata.is_file() {
+                return Err(UpdateError::PackageMismatch);
+            }
+            let destination = safe_join(active_root, &file.path)?;
+            let parent = destination
+                .parent()
+                .ok_or_else(|| UpdateError::UnsafePath(destination.display().to_string()))?;
+            ensure_safe_directory(parent)?;
+            let backup = match fs::symlink_metadata(&destination) {
+                Ok(metadata) => {
+                    ensure_metadata_is_not_reparse(&destination, &metadata)?;
+                    if !metadata.is_file() {
+                        return Err(UpdateError::ActivationFailed(
+                            "active package path is not a regular file".into(),
+                        ));
+                    }
+                    let backup_path = safe_join(&transaction_dir, &file.path)?;
+                    let backup_parent = backup_path.parent().ok_or_else(|| {
+                        UpdateError::UnsafePath(backup_path.display().to_string())
+                    })?;
+                    ensure_safe_directory(backup_parent)?;
+                    fs::copy(&destination, &backup_path)?;
+                    Some(backup_path)
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(error) => return Err(UpdateError::from(error)),
+            };
+            let temporary = parent.join(format!(
+                ".hivemind-activation-{}-{}.tmp",
+                std::process::id(),
+                monotonic_nonce()
+            ));
+            if let Err(error) = fs::copy(&source, &temporary) {
+                let _ = fs::remove_file(&temporary);
+                return Err(UpdateError::from(error));
+            }
+            let temporary_metadata = fs::symlink_metadata(&temporary)?;
+            ensure_metadata_is_not_reparse(&temporary, &temporary_metadata)?;
+            if let Err(error) = atomic_replace(&temporary, &destination) {
+                let _ = fs::remove_file(&temporary);
+                return Err(error);
+            }
+            backups.push((destination, backup));
+        }
+        Ok::<(), UpdateError>(())
+    })();
+    if let Err(error) = result {
+        let rollback = rollback_activation_backups(&backups, &transaction_dir);
+        return match rollback {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(UpdateError::ActivationFailed(format!(
+                "activation failed: {error}; rollback failed: {rollback_error}"
+            ))),
+        };
+    }
+    Ok(transaction_dir)
+}
+
+#[cfg(windows)]
+fn rollback_activation_backups(
+    backups: &[(PathBuf, Option<PathBuf>)],
+    transaction_dir: &Path,
+) -> Result<(), UpdateError> {
+    for (destination, backup) in backups.iter().rev() {
+        match backup {
+            Some(backup) => {
+                let temporary = destination.with_extension(format!(
+                    "restore-{}-{}",
+                    std::process::id(),
+                    monotonic_nonce()
+                ));
+                fs::copy(backup, &temporary)?;
+                if let Err(error) = atomic_replace(&temporary, destination) {
+                    let _ = fs::remove_file(&temporary);
+                    return Err(error);
+                }
+            }
+            None => match fs::remove_file(destination) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(UpdateError::from(error)),
+            },
+        }
+    }
+    fs::remove_dir_all(transaction_dir).map_err(UpdateError::from)
+}
+
+#[cfg(windows)]
+fn rollback_activation_files(
+    active_root: &Path,
+    transaction_dir: &Path,
+    verified: &VerifiedReleaseManifest,
+) -> Result<(), UpdateError> {
+    let mut backups = Vec::with_capacity(verified.manifest.files.len());
+    for file in &verified.manifest.files {
+        let destination = safe_join(active_root, &file.path)?;
+        let backup = safe_join(transaction_dir, &file.path)?;
+        let backup = match fs::symlink_metadata(&backup) {
+            Ok(metadata) => {
+                ensure_metadata_is_not_reparse(&backup, &metadata)?;
+                if !metadata.is_file() {
+                    return Err(UpdateError::ActivationFailed(
+                        "activation backup is not a regular file".into(),
+                    ));
+                }
+                Some(backup)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(UpdateError::from(error)),
+        };
+        backups.push((destination, backup));
+    }
+    rollback_activation_backups(&backups, transaction_dir)
+}
+
+#[cfg(windows)]
+fn wait_for_parent_exit(parent_pid: u32, expected_executable: PathBuf) -> Result<(), UpdateError> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::raw::HANDLE;
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    const WAIT_OBJECT_0: u32 = 0;
+    const WAIT_TIMEOUT: u32 = 258;
+    const WAIT_FAILED: u32 = 0xffff_ffff;
+    extern "system" {
+        fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> HANDLE;
+        fn QueryFullProcessImageNameW(
+            process: HANDLE,
+            flags: u32,
+            exe_name: *mut u16,
+            size: *mut u32,
+        ) -> i32;
+        fn WaitForSingleObject(handle: HANDLE, milliseconds: u32) -> u32;
+        fn CloseHandle(handle: HANDLE) -> i32;
+    }
+    let handle = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+            0,
+            parent_pid,
+        )
+    };
+    if handle.is_null() {
+        if std::io::Error::last_os_error().raw_os_error() == Some(87) {
+            return Ok(());
+        }
+        return Err(UpdateError::ActivationFailed(
+            "could not open the update parent process".into(),
+        ));
+    }
+    let result = (|| {
+        let mut buffer = vec![0u16; 32768];
+        let mut length = buffer.len() as u32;
+        if unsafe { QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut length) } == 0 {
+            return Err(UpdateError::ActivationFailed(
+                "could not identify the update parent process".into(),
+            ));
+        }
+        let image = OsString::from_wide(&buffer[..length as usize]);
+        if canonical_path(Path::new(&image))? != canonical_path(&expected_executable)? {
+            return Err(UpdateError::ActivationFailed(
+                "update parent process is not the expected service".into(),
+            ));
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(UpdateError::ActivationFailed(
+                    "timed out waiting for the service to stop".into(),
+                ));
+            }
+            let wait_ms = remaining.as_millis().min(1000) as u32;
+            match unsafe { WaitForSingleObject(handle, wait_ms) } {
+                WAIT_OBJECT_0 => return Ok(()),
+                WAIT_TIMEOUT => continue,
+                WAIT_FAILED => {
+                    return Err(UpdateError::ActivationFailed(
+                        "waiting for the service process failed".into(),
+                    ))
+                }
+                _ => {
+                    return Err(UpdateError::ActivationFailed(
+                        "waiting for the service process returned an unknown status".into(),
+                    ))
+                }
+            }
+        }
+    })();
+    unsafe {
+        CloseHandle(handle);
+    }
+    result
+}
+
+fn unix_now() -> Result<u64, UpdateError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .map_err(|error| UpdateError::Io(error.to_string()))
 }
 
 fn monotonic_nonce() -> u128 {
@@ -1895,6 +2730,42 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&root);
         root
+    }
+
+    fn test_activation_descriptor(root: &Path, helper: &Path) -> UpdateActivationDescriptor {
+        let root_signer = key(9);
+        let release_signer = key(7);
+        let (signed_keyset, signed_manifest, _) =
+            signed_release(&root_signer, &release_signer, 1, b"worker");
+        let (_, helper_sha256) = hash_file(helper).unwrap();
+        UpdateActivationDescriptor {
+            schema_version: UPDATE_PROTOCOL_VERSION,
+            policy: policy(),
+            signed_keyset,
+            signed_manifest,
+            install_root: root.display().to_string(),
+            release_dir: "release-1-abcdef0123456789".into(),
+            active_root: root.join("active").display().to_string(),
+            service_executable_name: "hivemind-worker.exe".into(),
+            service_arguments: vec!["worker".into()],
+            helper_executable: helper.display().to_string(),
+            helper_sha256,
+            parent_pid: 1234,
+        }
+    }
+
+    fn write_test_activation_descriptor(
+        root: &Path,
+        helper: &Path,
+    ) -> (PathBuf, UpdateActivationDescriptor) {
+        let transaction = root.join(UPDATE_ACTIVATION_DESCRIPTOR_DIR);
+        fs::create_dir_all(&transaction).unwrap();
+        fs::create_dir_all(root.join("active")).unwrap();
+        fs::write(helper, b"verified updater helper").unwrap();
+        let descriptor = test_activation_descriptor(root, helper);
+        let path = transaction.join(UPDATE_ACTIVATION_DESCRIPTOR_FILE);
+        write_activation_descriptor_atomic(&path, &descriptor).unwrap();
+        (path, descriptor)
     }
 
     fn write_zip(path: &Path, entries: &[(&str, &[u8])]) {
@@ -2571,6 +3442,419 @@ mod tests {
         ));
         assert!(!destination.exists());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn activation_request_rejects_malformed_handoffs() {
+        let program = "hivemind-worker".to_string();
+        let flag = "--hivemind-apply-update".to_string();
+        let absolute = std::env::temp_dir().join("descriptor.json");
+        let absolute = absolute.display().to_string();
+
+        assert_eq!(activation_request_path(&[]).unwrap(), None);
+        assert_eq!(
+            activation_request_path(std::slice::from_ref(&program)).unwrap(),
+            None
+        );
+        assert_eq!(
+            activation_request_path(&[program.clone(), flag.clone(), absolute.clone()])
+                .unwrap()
+                .unwrap(),
+            PathBuf::from(absolute.clone())
+        );
+        assert!(matches!(
+            activation_request_path(&[
+                program.clone(),
+                flag.clone(),
+                "relative/descriptor.json".into()
+            ]),
+            Err(UpdateError::UnsafePath(_))
+        ));
+        assert!(matches!(
+            activation_request_path(&[
+                program.clone(),
+                flag.clone(),
+                absolute.clone(),
+                "unexpected".into()
+            ]),
+            Err(UpdateError::ActivationFailed(_))
+        ));
+        assert_eq!(
+            activation_request_path(&[program, "worker".into(), absolute]).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn activation_service_arguments_fail_closed() {
+        assert!(validate_service_arguments(&[String::new()]).is_err());
+        assert!(validate_service_arguments(&["--hivemind-apply-update".into()]).is_err());
+        assert!(validate_service_arguments(&["contains\0nul".into()]).is_err());
+        assert!(validate_service_arguments(&["contains\ncontrol".into()]).is_err());
+        assert!(validate_service_arguments(&["x".repeat(4097)]).is_err());
+        assert!(validate_service_arguments(&vec!["x".into(); 33]).is_err());
+        assert!(validate_service_arguments(&["x".repeat(16 * 1024)]).is_err());
+        validate_service_arguments(&["worker".into(), "--config".into()]).unwrap();
+    }
+
+    #[test]
+    fn activation_descriptor_rejects_outside_paths_and_helper_tampering() {
+        let root = temp_root("activation-descriptor-validation");
+        fs::create_dir_all(&root).unwrap();
+        let helper = root
+            .join(UPDATE_ACTIVATION_DESCRIPTOR_DIR)
+            .join("helper.exe");
+        let (descriptor_path, mut descriptor) = write_test_activation_descriptor(&root, &helper);
+        validate_activation_descriptor(&descriptor_path, &descriptor).unwrap();
+
+        let outside_descriptor = root.join("outside").join(UPDATE_ACTIVATION_DESCRIPTOR_FILE);
+        write_activation_descriptor_atomic(&outside_descriptor, &descriptor).unwrap();
+        assert!(matches!(
+            validate_activation_descriptor(&outside_descriptor, &descriptor),
+            Err(UpdateError::ActivationFailed(_))
+        ));
+
+        descriptor.helper_executable = root.join("outside-helper.exe").display().to_string();
+        fs::write(&descriptor.helper_executable, b"outside helper").unwrap();
+        write_activation_descriptor_atomic(&descriptor_path, &descriptor).unwrap();
+        assert!(matches!(
+            validate_activation_descriptor(&descriptor_path, &descriptor),
+            Err(UpdateError::ActivationFailed(_))
+        ));
+
+        let (descriptor_path, descriptor) = write_test_activation_descriptor(&root, &helper);
+        fs::write(&helper, b"tampered updater helper").unwrap();
+        assert!(matches!(
+            activation_launch_spec(&descriptor_path),
+            Err(UpdateError::ActivationFailed(_))
+        ));
+        assert_eq!(descriptor.service_arguments, vec!["worker".to_string()]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pending_activation_is_bounded_and_discoverable() {
+        let root = temp_root("pending-activation");
+        let installer = UpdateInstaller::new(&root).unwrap();
+        assert_eq!(installer.pending_activation_path().unwrap(), None);
+
+        let helper = root
+            .join(UPDATE_ACTIVATION_DESCRIPTOR_DIR)
+            .join("helper.exe");
+        let (descriptor_path, _) = write_test_activation_descriptor(&root, &helper);
+        assert_eq!(
+            installer.pending_activation_path().unwrap(),
+            Some(descriptor_path)
+        );
+
+        fs::write(
+            root.join(UPDATE_ACTIVATION_DESCRIPTOR_DIR)
+                .join(UPDATE_ACTIVATION_DESCRIPTOR_FILE),
+            vec![b'x'; UPDATE_ACTIVATION_DESCRIPTOR_MAX_BYTES + 1],
+        )
+        .unwrap();
+        assert!(matches!(
+            installer.pending_activation_path(),
+            Err(UpdateError::CorruptState(_))
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn activation_prepare_records_verified_helper_and_service_arguments() {
+        let root = temp_root("activation-prepare");
+        fs::create_dir_all(&root).unwrap();
+        let install_root = root.join("installed");
+        let active_root = root.join("active");
+        let staged = root.join("staged");
+        fs::create_dir_all(&staged).unwrap();
+        fs::create_dir_all(&active_root).unwrap();
+        fs::write(staged.join("hivemind-worker.exe"), b"worker").unwrap();
+
+        let root_signer = key(9);
+        let release_signer = key(7);
+        let (signed_keyset, signed_manifest, verifier) =
+            signed_release(&root_signer, &release_signer, 1, b"worker");
+        let policy = policy();
+        let keyset = verifier
+            .verify_keyset(&signed_keyset, &policy, 1_000)
+            .unwrap();
+        let installer = UpdateInstaller::new(&install_root).unwrap();
+        installer
+            .install_verified_directory(
+                &staged,
+                &signed_manifest,
+                &keyset,
+                &verifier,
+                &policy,
+                1_000,
+            )
+            .unwrap();
+        let descriptor_dir = install_root.join(UPDATE_ACTIVATION_DESCRIPTOR_DIR);
+        fs::create_dir_all(&descriptor_dir).unwrap();
+        let helper = descriptor_dir.join("helper.exe");
+        fs::write(&helper, b"helper").unwrap();
+        let service_arguments = vec!["worker".into(), "--config".into(), "worker.env".into()];
+        let descriptor_path = installer
+            .prepare_activation(
+                &signed_keyset,
+                &signed_manifest,
+                &verifier,
+                &policy,
+                1_000,
+                &active_root,
+                "hivemind-worker.exe",
+                &service_arguments,
+                &helper,
+                1234,
+            )
+            .unwrap();
+        let descriptor = read_activation_descriptor(&descriptor_path).unwrap();
+        assert_eq!(descriptor.service_arguments, service_arguments);
+        assert_eq!(
+            descriptor.release_dir,
+            "release-1-".to_string() + &signed_manifest.manifest.package_sha256[..16]
+        );
+        let (launch_helper, launch_arguments) = activation_launch_spec(&descriptor_path).unwrap();
+        assert_eq!(launch_helper, helper);
+        assert_eq!(launch_arguments, service_arguments);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn activation_prepare_rejects_state_mismatch() {
+        let root = temp_root("activation-state-mismatch");
+        fs::create_dir_all(&root).unwrap();
+        let install_root = root.join("installed");
+        let active_root = root.join("active");
+        let staged = root.join("staged");
+        fs::create_dir_all(&staged).unwrap();
+        fs::create_dir_all(&active_root).unwrap();
+        fs::write(staged.join("hivemind-worker.exe"), b"worker").unwrap();
+
+        let root_signer = key(9);
+        let release_signer = key(7);
+        let (first_keyset, first_manifest, first_verifier) =
+            signed_release(&root_signer, &release_signer, 1, b"worker");
+        let policy = policy();
+        let first_keyset_verified = first_verifier
+            .verify_keyset(&first_keyset, &policy, 1_000)
+            .unwrap();
+        let installer = UpdateInstaller::new(&install_root).unwrap();
+        let state = installer
+            .install_verified_directory(
+                &staged,
+                &first_manifest,
+                &first_keyset_verified,
+                &first_verifier,
+                &policy,
+                1_000,
+            )
+            .unwrap();
+        let helper = install_root
+            .join(UPDATE_ACTIVATION_DESCRIPTOR_DIR)
+            .join("helper.exe");
+        fs::create_dir_all(helper.parent().unwrap()).unwrap();
+        fs::write(&helper, b"helper").unwrap();
+
+        let (second_keyset, second_manifest, second_verifier) =
+            signed_release(&root_signer, &release_signer, 2, b"worker");
+        let result = installer.prepare_activation(
+            &second_keyset,
+            &second_manifest,
+            &second_verifier,
+            &policy,
+            1_000,
+            &active_root,
+            "hivemind-worker.exe",
+            &[],
+            &helper,
+            1234,
+        );
+        assert!(
+            matches!(result, Err(UpdateError::CorruptState(_))),
+            "{result:?}"
+        );
+        assert_eq!(state.current.sequence, 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn activation_prepare_rejects_release_without_service_executable() {
+        let root = temp_root("activation-missing-service");
+        fs::create_dir_all(&root).unwrap();
+        let install_root = root.join("installed");
+        let active_root = root.join("active");
+        let staged = root.join("staged");
+        fs::create_dir_all(&staged).unwrap();
+        fs::create_dir_all(&active_root).unwrap();
+        fs::write(staged.join("other.exe"), b"worker").unwrap();
+
+        let root_signer = key(9);
+        let release_signer = key(7);
+        let (signed_keyset, mut signed_manifest, verifier) =
+            signed_release(&root_signer, &release_signer, 1, b"worker");
+        signed_manifest.manifest.files[0].path = "other.exe".into();
+        signed_manifest.signature = sign(
+            &release_signer,
+            &canonical_manifest_bytes(&signed_manifest.manifest).unwrap(),
+        );
+        let policy = policy();
+        let keyset = verifier
+            .verify_keyset(&signed_keyset, &policy, 1_000)
+            .unwrap();
+        let installer = UpdateInstaller::new(&install_root).unwrap();
+        let state = installer
+            .install_verified_directory(
+                &staged,
+                &signed_manifest,
+                &keyset,
+                &verifier,
+                &policy,
+                1_000,
+            )
+            .unwrap();
+        let descriptor_dir = install_root.join(UPDATE_ACTIVATION_DESCRIPTOR_DIR);
+        fs::create_dir_all(&descriptor_dir).unwrap();
+        let helper = descriptor_dir.join("helper.exe");
+        fs::write(&helper, b"helper").unwrap();
+        let result = installer.prepare_activation(
+            &signed_keyset,
+            &signed_manifest,
+            &verifier,
+            &policy,
+            1_000,
+            &active_root,
+            "hivemind-worker.exe",
+            &[],
+            &helper,
+            1234,
+        );
+        assert!(
+            matches!(result, Err(UpdateError::ActivationFailed(_))),
+            "{result:?}"
+        );
+        assert_eq!(state.current.sequence, 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn activation_file_replacement_rolls_back_on_later_failure() {
+        let root = temp_root("activation-replacement-rollback");
+        let release_root = root.join("release");
+        let active_root = root.join("active");
+        fs::create_dir_all(&release_root).unwrap();
+        fs::create_dir_all(&active_root).unwrap();
+        fs::write(release_root.join("first.dll"), b"new first").unwrap();
+        fs::write(active_root.join("first.dll"), b"old first").unwrap();
+        let verified = VerifiedReleaseManifest {
+            manifest: ReleaseManifest {
+                schema_version: UPDATE_PROTOCOL_VERSION,
+                product: "hivemind-windows-worker".into(),
+                channel: "stable".into(),
+                platform: "windows".into(),
+                architecture: "x86_64".into(),
+                version: "0.1.1".into(),
+                sequence: 1,
+                minimum_supported_version: "0.1.0".into(),
+                release_key_id: "release-1".into(),
+                issued_at_unix: 900,
+                expires_at_unix: 2_000,
+                package_url: "https://updates.example.test/worker.zip".into(),
+                package_size: 1,
+                package_sha256: "a".repeat(64),
+                files: vec![
+                    ReleaseFile {
+                        path: "first.dll".into(),
+                        size: 9,
+                        sha256: hex::encode(Sha256::digest(b"new first")),
+                    },
+                    ReleaseFile {
+                        path: "missing.dll".into(),
+                        size: 7,
+                        sha256: hex::encode(Sha256::digest(b"missing")),
+                    },
+                ],
+            },
+            manifest_sha256: "b".repeat(64),
+        };
+        assert!(apply_release_files(&release_root, &active_root, &verified).is_err());
+        assert_eq!(
+            fs::read(active_root.join("first.dll")).unwrap(),
+            b"old first"
+        );
+        let backup_left = fs::read_dir(&active_root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".hivemind-activation-backup-")
+            });
+        assert!(!backup_left);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn activation_rolls_back_when_replacement_process_cannot_start() {
+        let root = temp_root("activation-process-start-rollback");
+        let release_root = root.join("release");
+        let active_root = root.join("active");
+        fs::create_dir_all(&release_root).unwrap();
+        fs::create_dir_all(&active_root).unwrap();
+        let service_path = active_root.join("hivemind-worker.exe");
+        fs::write(release_root.join("hivemind-worker.exe"), b"new client").unwrap();
+        fs::write(&service_path, b"old client").unwrap();
+        let verified = VerifiedReleaseManifest {
+            manifest: ReleaseManifest {
+                schema_version: UPDATE_PROTOCOL_VERSION,
+                product: "hivemind-windows-worker".into(),
+                channel: "stable".into(),
+                platform: "windows".into(),
+                architecture: "x86_64".into(),
+                version: "0.1.1".into(),
+                sequence: 1,
+                minimum_supported_version: "0.1.0".into(),
+                release_key_id: "release-1".into(),
+                issued_at_unix: 900,
+                expires_at_unix: 2_000,
+                package_url: "https://updates.example.test/worker.zip".into(),
+                package_size: 1,
+                package_sha256: "a".repeat(64),
+                files: vec![ReleaseFile {
+                    path: "hivemind-worker.exe".into(),
+                    size: 10,
+                    sha256: hex::encode(Sha256::digest(b"new client")),
+                }],
+            },
+            manifest_sha256: "b".repeat(64),
+        };
+        let backup_dir = apply_release_files(&release_root, &active_root, &verified).unwrap();
+        let result =
+            spawn_activated_service(&service_path, &active_root, &[], &root.join("helper.exe"));
+        assert!(
+            matches!(result, Err(UpdateError::ActivationFailed(_))),
+            "{result:?}"
+        );
+        rollback_activation_files(&active_root, &backup_dir, &verified).unwrap();
+        assert_eq!(fs::read(&service_path).unwrap(), b"old client");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn activation_is_rejected_off_windows() {
+        assert!(matches!(
+            run_activation_helper(PathBuf::from("/tmp/descriptor.json")).await,
+            Err(UpdateError::UnsupportedPlatform)
+        ));
+        assert!(matches!(
+            spawn_activation_helper(Path::new("/tmp/descriptor.json")),
+            Err(UpdateError::UnsupportedPlatform)
+        ));
     }
 
     #[cfg(unix)]

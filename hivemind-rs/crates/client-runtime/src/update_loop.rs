@@ -7,8 +7,8 @@
 
 use crate::update::{
     download_signed_metadata, download_verified_package, extract_verified_zip, parse_signed_keyset,
-    parse_signed_manifest, UpdateError, UpdateInstaller, UpdatePolicy, UpdateVerifier,
-    UPDATE_KEYSET_MAX_BYTES, UPDATE_MANIFEST_MAX_BYTES,
+    parse_signed_manifest, spawn_activation_helper, UpdateError, UpdateInstaller, UpdatePolicy,
+    UpdateVerifier, VerifiedReleaseManifest, UPDATE_KEYSET_MAX_BYTES, UPDATE_MANIFEST_MAX_BYTES,
 };
 use crate::ClientRole;
 use hivemind_config::HivemindConfig;
@@ -29,14 +29,21 @@ pub struct UpdateLoopConfig {
     pub manifest_url: String,
     pub interval: Duration,
     pub max_backoff: Duration,
+    pub service_arguments: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpdateCycleOutcome {
     Disabled,
     Deferred(String),
-    UpToDate { sequence: u64 },
-    Installed { sequence: u64, version: String },
+    UpToDate {
+        sequence: u64,
+    },
+    Activating {
+        sequence: u64,
+        version: String,
+        descriptor: PathBuf,
+    },
 }
 
 /// Translate the shared configuration into a validated Windows update loop.
@@ -127,6 +134,7 @@ pub fn config_for_role(
         manifest_url,
         interval,
         max_backoff: MAX_RETRY_BACKOFF,
+        service_arguments: current_service_arguments(),
     }))
 }
 
@@ -138,6 +146,14 @@ pub async fn run_update_cycle(
     config: &HivemindConfig,
     role: ClientRole,
 ) -> Result<UpdateCycleOutcome, UpdateError> {
+    run_update_cycle_with_arguments(config, role, &current_service_arguments()).await
+}
+
+async fn run_update_cycle_with_arguments(
+    config: &HivemindConfig,
+    role: ClientRole,
+    service_arguments: &[String],
+) -> Result<UpdateCycleOutcome, UpdateError> {
     if !config.client_updates.enabled {
         return Ok(UpdateCycleOutcome::Disabled);
     }
@@ -146,7 +162,7 @@ pub async fn run_update_cycle(
             "signed client updates are configured only for native Windows clients".into(),
         ));
     }
-    let update_config = match config_for_role(config, role)? {
+    let mut update_config = match config_for_role(config, role)? {
         Some(update_config) => update_config,
         None => {
             return Ok(UpdateCycleOutcome::Deferred(
@@ -154,6 +170,7 @@ pub async fn run_update_cycle(
             ))
         }
     };
+    update_config.service_arguments = service_arguments.to_vec();
     run_configured_update_cycle(&update_config).await
 }
 
@@ -164,6 +181,15 @@ async fn run_configured_update_cycle(
 ) -> Result<UpdateCycleOutcome, UpdateError> {
     let installer = UpdateInstaller::new(&config.install_root)?;
     let current = installer.load_state()?;
+    if let Some(descriptor) = installer.pending_activation_path()? {
+        let current = current.as_ref().ok_or(UpdateError::MissingState)?;
+        spawn_activation_helper(&descriptor)?;
+        return Ok(UpdateCycleOutcome::Activating {
+            sequence: current.current.sequence,
+            version: current.current.version.clone(),
+            descriptor,
+        });
+    }
     let verifier = UpdateVerifier::embedded()?;
     let now_unix = unix_now()?;
 
@@ -193,8 +219,31 @@ async fn run_configured_update_cycle(
                 &config.policy,
                 now_unix,
             )?;
-            return Ok(UpdateCycleOutcome::UpToDate {
+            let verified_current = verifier.verify_manifest(
+                &signed_manifest,
+                &verified_keyset,
+                &config.policy,
+                None,
+                now_unix,
+            )?;
+            if active_package_is_current(&verified_current)? {
+                return Ok(UpdateCycleOutcome::UpToDate {
+                    sequence: state.current.sequence,
+                });
+            }
+            let descriptor = installer.prepare_activation_from_current_process(
+                &signed_keyset,
+                &signed_manifest,
+                &verifier,
+                &config.policy,
+                now_unix,
+                &config.service_arguments,
+            )?;
+            spawn_activation_helper(&descriptor)?;
+            return Ok(UpdateCycleOutcome::Activating {
                 sequence: state.current.sequence,
+                version: state.current.version,
+                descriptor,
             });
         }
     }
@@ -251,16 +300,32 @@ async fn run_configured_update_cycle(
         }
     };
 
-    Ok(UpdateCycleOutcome::Installed {
+    let descriptor = installer.prepare_activation_from_current_process(
+        &signed_keyset,
+        &signed_manifest,
+        &verifier,
+        &config.policy,
+        now_unix,
+        &config.service_arguments,
+    )?;
+    spawn_activation_helper(&descriptor)?;
+
+    Ok(UpdateCycleOutcome::Activating {
         sequence: installed.current.sequence,
         version: installed.current.version,
+        descriptor,
     })
 }
 
 /// Start the signed update loop for a client role and return its shutdown
 /// signal. Missing signed endpoints intentionally remain deferred; they do not
 /// cause a network request and never select an unsigned source.
-pub fn start_update_loop(config: HivemindConfig, role: ClientRole) -> watch::Sender<bool> {
+pub fn start_update_loop(
+    config: HivemindConfig,
+    role: ClientRole,
+    service_arguments: Vec<String>,
+    activation_tx: watch::Sender<bool>,
+) -> watch::Sender<bool> {
     let interval = Duration::from_secs(config.client_updates.check_interval_secs.max(1));
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     tokio::spawn(async move {
@@ -270,7 +335,7 @@ pub fn start_update_loop(config: HivemindConfig, role: ClientRole) -> watch::Sen
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(next_wait) => {
-                    match run_update_cycle(&config, role).await {
+                    match run_update_cycle_with_arguments(&config, role, &service_arguments).await {
                         Ok(UpdateCycleOutcome::Disabled) => {
                             info!(role = role_name(role), "Signed client updates are disabled");
                             next_wait = interval;
@@ -286,10 +351,16 @@ pub fn start_update_loop(config: HivemindConfig, role: ClientRole) -> watch::Sen
                             next_wait = interval;
                             retry_backoff = Duration::from_secs(1);
                         }
-                        Ok(UpdateCycleOutcome::Installed { sequence, version }) => {
-                            info!(role = role_name(role), sequence, version = %version, "Signed client release verified and staged; restart is required to activate it");
-                            next_wait = interval;
-                            retry_backoff = Duration::from_secs(1);
+                        Ok(UpdateCycleOutcome::Activating { sequence, version, descriptor }) => {
+                            info!(
+                                role = role_name(role),
+                                sequence,
+                                version = %version,
+                                descriptor = %descriptor.display(),
+                                "Signed client release verified; activation helper started"
+                            );
+                            let _ = activation_tx.send(true);
+                            break;
                         }
                         Err(error) => {
                             warn!(role = role_name(role), error = %error, "Signed client update check failed; keeping the current client and retrying");
@@ -335,6 +406,23 @@ fn current_windows_architecture() -> &'static str {
     } else {
         "unknown"
     }
+}
+
+fn active_package_is_current(verified: &VerifiedReleaseManifest) -> Result<bool, UpdateError> {
+    let executable = std::env::current_exe()
+        .map_err(|error| UpdateError::ActivationUnavailable(error.to_string()))?;
+    let root = executable.parent().ok_or_else(|| {
+        UpdateError::ActivationUnavailable("running executable has no parent directory".into())
+    })?;
+    match crate::update::verify_active_directory(root, verified) {
+        Ok(()) => Ok(true),
+        Err(UpdateError::PackageMismatch) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn current_service_arguments() -> Vec<String> {
+    std::env::args().skip(1).collect()
 }
 
 fn resolve_storage_root(

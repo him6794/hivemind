@@ -1,7 +1,6 @@
 #[cfg(feature = "worker")]
 use anyhow::Context;
 use anyhow::Result;
-#[cfg(any(feature = "master", feature = "worker"))]
 use hivemind_client_runtime as client_runtime;
 use hivemind_config::HivemindConfig;
 use tokio::sync::watch;
@@ -27,7 +26,7 @@ use hivemind_node_manager::grpc::{
 use hivemind_node_manager::outbound_session::GrpcWorkerSessionService;
 #[cfg(feature = "nodepool")]
 use hivemind_node_manager::{heartbeat::HeartbeatHandler, NodeManager};
-#[cfg(feature = "worker")]
+#[cfg(any(feature = "nodepool", feature = "worker"))]
 use hivemind_proto::GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES;
 #[cfg(feature = "nodepool")]
 use hivemind_proto::{
@@ -94,13 +93,24 @@ impl ServiceRole {
 }
 
 pub async fn run_service(role: ServiceRole) -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(descriptor) = client_runtime::update::activation_request_path(&args)? {
+        hivemind_common::init_tracing("hivemind-update");
+        client_runtime::update::run_activation_helper(descriptor).await?;
+        return Ok(());
+    }
     hivemind_common::init_tracing("hivemind");
     ensure_role_supported(role)?;
-    run_service_inner(role).await
+    run_service_inner(role, args.into_iter().skip(1).collect()).await
 }
 
 #[cfg(feature = "cli")]
 pub async fn run_from_cli(args: Vec<String>) -> Result<()> {
+    if let Some(descriptor) = client_runtime::update::activation_request_path(&args)? {
+        hivemind_common::init_tracing("hivemind-update");
+        client_runtime::update::run_activation_helper(descriptor).await?;
+        return Ok(());
+    }
     hivemind_common::init_tracing("hivemind");
     let command = cli::parse_cli_args(&args)?;
     if let cli::CliCommand::Submit(submit) = command {
@@ -128,7 +138,7 @@ pub async fn run_from_cli(args: Vec<String>) -> Result<()> {
         }
     };
     ensure_role_supported(role)?;
-    run_service_inner(role).await
+    run_service_inner(role, args.into_iter().skip(1).collect()).await
 }
 
 fn ensure_role_supported(role: ServiceRole) -> Result<()> {
@@ -333,7 +343,10 @@ mod worker_owner_tests {
     }
 }
 
-async fn run_service_inner(role: ServiceRole) -> Result<()> {
+async fn run_service_inner(role: ServiceRole, service_arguments: Vec<String>) -> Result<()> {
+    #[cfg(not(any(feature = "master", feature = "worker")))]
+    let _ = &service_arguments;
+
     #[cfg(feature = "worker")]
     if role.includes_worker() && std::env::var_os("HIVEMIND_CONFIG").is_none() {
         // Downloaded workers must be runnable with only website credentials.
@@ -370,6 +383,10 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
         not(feature = "worker")
     ))]
     let shutdown_handles: Vec<watch::Sender<bool>> = Vec::new();
+
+    let (activation_tx, mut activation_rx) = watch::channel(false);
+    #[cfg(not(any(feature = "master", feature = "worker")))]
+    let _ = &activation_tx;
 
     #[cfg(feature = "nodepool")]
     if run_nodepool {
@@ -486,6 +503,8 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
         let update_shutdown = client_runtime::update_loop::start_update_loop(
             config.clone(),
             client_runtime::ClientRole::Master,
+            service_arguments.clone(),
+            activation_tx.clone(),
         );
         shutdown_handles.push(update_shutdown);
         info!(
@@ -681,6 +700,8 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
         let update_shutdown = client_runtime::update_loop::start_update_loop(
             config.clone(),
             client_runtime::ClientRole::Worker,
+            service_arguments.clone(),
+            activation_tx.clone(),
         );
         shutdown_handles.push(update_shutdown);
 
@@ -759,7 +780,17 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
     }
 
     info!("Hivemind running. Press Ctrl+C to stop.");
-    tokio::signal::ctrl_c().await?;
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => {
+            result?;
+            info!("Shutdown requested");
+        }
+        changed = activation_rx.changed() => {
+            if changed.is_ok() && *activation_rx.borrow() {
+                info!("Verified client update activation requested; shutting down for restart");
+            }
+        }
+    }
 
     for handle in shutdown_handles {
         let _ = handle.send(true);
