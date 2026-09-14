@@ -526,14 +526,19 @@ async fn run_service_inner(role: ServiceRole) -> Result<()> {
             resources.cpu_cores, resources.total_memory_gb
         );
 
-        let wk_addr = config.server.worker_grpc_addr.clone();
-        // Bind before resolving credentials or scheduling registration. A worker
-        // must never advertise/register before its control plane can accept RPCs.
-        let wk_listener = tokio::net::TcpListener::bind(&wk_addr).await?;
         let worker_id = std::env::var("WORKER_ID")
             .or_else(|_| std::env::var("COMPUTERNAME"))
             .or_else(|_| std::env::var("HOSTNAME"))
             .unwrap_or_else(|_| format!("worker-{}", uuid::Uuid::new_v4()));
+        #[cfg(windows)]
+        executor
+            .reconcile_hcs_startup(&worker_id, std::time::Duration::from_secs(5))
+            .context("native HCS startup reconciliation failed")?;
+
+        let wk_addr = config.server.worker_grpc_addr.clone();
+        // Bind before resolving credentials or scheduling registration. A worker
+        // must never advertise/register before its control plane can accept RPCs.
+        let wk_listener = tokio::net::TcpListener::bind(&wk_addr).await?;
         let overlay_ip = if vpn_endpoint.is_some() {
             client_runtime::current_vpn_session(client_runtime::ClientRole::Worker)
                 .await

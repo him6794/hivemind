@@ -6,12 +6,108 @@
 
 use crate::production::WindowsHcsContainerSpec;
 use crate::sandbox::WINDOWS_HCS_PROCESSOR_MAXIMUM;
+
+/// Stable ownership marker for operator-created HCS systems.
+///
+/// Worker reconciliation must not infer ownership from a system name alone.
+pub const HIVEMIND_HCS_OWNER: &str = "hivemind";
+pub const HIVEMIND_HCS_SYSTEM_ID_PREFIX: &str = "hivemind-";
+
 #[cfg(any(windows, test))]
 use crate::supervisor::RunStatus;
 use crate::supervisor::{Cancellation, RunResult};
 #[cfg(any(windows, test))]
 use std::io::Read;
 use std::time::Duration;
+
+/// Lifecycle facts emitted by the native HCS launcher.
+///
+/// The event stream contains no task input, source bytes, credentials, or
+/// result payload. It is suitable for an operator-owned recovery journal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HcsLifecycleEvent {
+    Created { system_id: String },
+    Started,
+    Waiting,
+    GuestExited { exit_code: Option<i32> },
+    Cancelled,
+    TimedOut,
+    StartFailed { error: String },
+    WaitFailed { error: String },
+    ShutdownStarted,
+    ShutdownCompleted { status: i32, exit_type: String },
+    ShutdownFailed { error: String },
+    TerminateStarted,
+    Terminated { status: i32, exit_type: String },
+    TerminateFailed { error: String },
+    ResultRead { sha256: String, size: usize },
+    ResultReadFailed { error: String },
+    Closed,
+}
+
+/// Receives authoritative lifecycle facts from [`WindowsHcsLauncher`].
+///
+/// Implementations may reject an event. A rejection is fatal to the
+/// execution; the launcher still attempts HCS cleanup before returning.
+pub trait HcsLifecycleObserver {
+    fn on_event(&mut self, event: HcsLifecycleEvent) -> Result<(), String>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HcsSystemSummary {
+    pub id: String,
+    pub owner: Option<String>,
+    pub state: Option<String>,
+}
+
+/// Enumerate existing HCS systems for crash/restart reconciliation.
+///
+/// Non-Windows builds deliberately return `UnsupportedPlatform`; they must not
+/// emulate HCS with Docker, WSL, or a direct host process.
+pub fn enumerate_systems(timeout: Duration) -> Result<Vec<HcsSystemSummary>, WindowsHcsError> {
+    #[cfg(not(windows))]
+    {
+        let _ = timeout;
+        Err(WindowsHcsError::UnsupportedPlatform)
+    }
+    #[cfg(windows)]
+    {
+        hcs::enumerate_systems(timeout)
+    }
+}
+
+/// Terminate one existing HCS system by its exact operator-recorded identity
+/// and retain the authoritative compute-system exit status.
+///
+/// This is used only for fail-closed recovery. It never opens an arbitrary host
+/// process or substitutes a non-HCS runtime.
+pub fn terminate_system_with_status(
+    system_id: &str,
+    timeout: Duration,
+) -> Result<HcsSystemExitStatus, WindowsHcsError> {
+    if system_id.trim().is_empty() {
+        return Err(WindowsHcsError::InvalidSpec(
+            "HCS system identity must not be empty".into(),
+        ));
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = timeout;
+        Err(WindowsHcsError::UnsupportedPlatform)
+    }
+    #[cfg(windows)]
+    {
+        hcs::terminate_system(system_id, timeout)
+    }
+}
+
+/// Terminate one existing HCS system by its exact operator-recorded identity.
+///
+/// The status-bearing variant is used by recovery journaling; this compatibility
+/// wrapper keeps callers that only need success/failure from discarding that API.
+pub fn terminate_system(system_id: &str, timeout: Duration) -> Result<(), WindowsHcsError> {
+    terminate_system_with_status(system_id, timeout).map(|_| ())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WindowsHcsError {
@@ -58,11 +154,20 @@ impl WindowsHcsLauncher {
         spec: &WindowsHcsContainerSpec,
         cancellation: &Cancellation,
     ) -> Result<RunResult, WindowsHcsError> {
+        self.run_with_observer(spec, cancellation, None)
+    }
+
+    pub fn run_with_observer(
+        &self,
+        spec: &WindowsHcsContainerSpec,
+        cancellation: &Cancellation,
+        observer: Option<&mut dyn HcsLifecycleObserver>,
+    ) -> Result<RunResult, WindowsHcsError> {
         validate_spec(spec)?;
         if cancellation.is_cancelled() {
             return Err(WindowsHcsError::Cancelled);
         }
-        self.run_platform(spec, cancellation)
+        self.run_platform(spec, cancellation, observer)
     }
 
     #[cfg(not(windows))]
@@ -71,6 +176,7 @@ impl WindowsHcsLauncher {
         &self,
         _spec: &WindowsHcsContainerSpec,
         _cancellation: &Cancellation,
+        _observer: Option<&mut dyn HcsLifecycleObserver>,
     ) -> Result<RunResult, WindowsHcsError> {
         Err(WindowsHcsError::UnsupportedPlatform)
     }
@@ -80,8 +186,9 @@ impl WindowsHcsLauncher {
         &self,
         spec: &WindowsHcsContainerSpec,
         cancellation: &Cancellation,
+        observer: Option<&mut dyn HcsLifecycleObserver>,
     ) -> Result<RunResult, WindowsHcsError> {
-        hcs::run(spec, self.timeout, cancellation)
+        hcs::run(spec, self.timeout, cancellation, observer)
     }
 }
 
@@ -179,7 +286,7 @@ fn windows_path_parent(path: &std::path::Path) -> Option<String> {
 #[cfg(any(windows, test))]
 fn configuration_json(spec: &WindowsHcsContainerSpec) -> Result<String, WindowsHcsError> {
     serde_json::to_string(&serde_json::json!({
-        "Owner": "hivemind",
+        "Owner": HIVEMIND_HCS_OWNER,
         "SchemaVersion": {"Major": 2, "Minor": 1},
         "ShouldTerminateOnLastHandleClosed": true,
         "Container": {
@@ -252,11 +359,10 @@ enum HcsWaitOutcome {
     TimedOut,
 }
 
-#[cfg(any(windows, test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct HcsSystemExitStatus {
-    status: i32,
-    exit_type: String,
+pub struct HcsSystemExitStatus {
+    pub status: i32,
+    pub exit_type: String,
 }
 
 #[cfg(any(windows, test))]
@@ -298,21 +404,60 @@ fn terminal_result(status: RunStatus) -> RunResult {
 }
 
 #[cfg(any(windows, test))]
+fn observe_event(
+    observer: &mut Option<&mut dyn HcsLifecycleObserver>,
+    event: HcsLifecycleEvent,
+) -> Result<(), WindowsHcsError> {
+    let Some(observer) = observer.as_deref_mut() else {
+        return Ok(());
+    };
+    observer.on_event(event).map_err(|error| {
+        WindowsHcsError::OperationFailed(format!("HCS lifecycle journal rejected event: {error}"))
+    })
+}
+
+#[cfg(any(windows, test))]
 fn cleanup_after_interrupt<P: HcsLifecycleProvider>(
     provider: &mut P,
     timeout: Duration,
     status: RunStatus,
+    observer: &mut Option<&mut dyn HcsLifecycleObserver>,
 ) -> Result<RunResult, WindowsHcsError> {
-    match provider.terminate(timeout) {
-        Ok(system_status) => match validate_system_exit_status(&system_status) {
-            Ok(()) => Ok(terminal_result(status)),
-            Err(cleanup_error) => Err(WindowsHcsError::CleanupFailed(format!(
-                "HCS {status:?} cleanup was not authoritative: {cleanup_error}"
-            ))),
-        },
-        Err(cleanup_error) => Err(WindowsHcsError::CleanupFailed(format!(
-            "HCS {status:?} cleanup failed: {cleanup_error}"
-        ))),
+    let observer_error = observe_event(observer, HcsLifecycleEvent::TerminateStarted).err();
+    let cleanup_result = provider.terminate(timeout);
+    match cleanup_result {
+        Ok(system_status) => {
+            let termination_event_error = observe_event(
+                observer,
+                HcsLifecycleEvent::Terminated {
+                    status: system_status.status,
+                    exit_type: system_status.exit_type.clone(),
+                },
+            )
+            .err();
+            if let Err(cleanup_error) = validate_system_exit_status(&system_status) {
+                return Err(WindowsHcsError::CleanupFailed(format!(
+                    "HCS {status:?} cleanup was not authoritative: {cleanup_error}"
+                )));
+            }
+            if let Some(error) = observer_error.or(termination_event_error) {
+                return Err(WindowsHcsError::CleanupFailed(format!(
+                    "HCS {status:?} cleanup was not journaled: {error}"
+                )));
+            }
+            Ok(terminal_result(status))
+        }
+        Err(cleanup_error) => {
+            let _ = observe_event(
+                observer,
+                HcsLifecycleEvent::TerminateFailed {
+                    error: cleanup_error.to_string(),
+                },
+            );
+            Err(WindowsHcsError::CleanupFailed(format!(
+                "HCS {status:?} cleanup failed: {cleanup_error}"
+            )))
+        }
     }
 }
 
@@ -321,52 +466,146 @@ fn cleanup_after_lifecycle_error<P: HcsLifecycleProvider>(
     provider: &mut P,
     timeout: Duration,
     lifecycle_error: WindowsHcsError,
+    observer: &mut Option<&mut dyn HcsLifecycleObserver>,
 ) -> Result<RunResult, WindowsHcsError> {
-    match provider.terminate(timeout) {
-        Ok(system_status) => match validate_system_exit_status(&system_status) {
-            Ok(()) => Err(lifecycle_error),
-            Err(cleanup_error) => Err(WindowsHcsError::CleanupFailed(format!(
-                "HCS lifecycle failed: {lifecycle_error}; cleanup was not authoritative: {cleanup_error}"
-            ))),
-        },
-        Err(cleanup_error) => Err(WindowsHcsError::CleanupFailed(format!(
-            "HCS lifecycle failed: {lifecycle_error}; cleanup failed: {cleanup_error}"
-        ))),
+    let observer_error = observe_event(observer, HcsLifecycleEvent::TerminateStarted).err();
+    let cleanup_result = provider.terminate(timeout);
+    match cleanup_result {
+        Ok(system_status) => {
+            let termination_event_error = observe_event(
+                observer,
+                HcsLifecycleEvent::Terminated {
+                    status: system_status.status,
+                    exit_type: system_status.exit_type.clone(),
+                },
+            )
+            .err();
+            if let Err(cleanup_error) = validate_system_exit_status(&system_status) {
+                return Err(WindowsHcsError::CleanupFailed(format!(
+                    "HCS lifecycle failed: {lifecycle_error}; cleanup was not authoritative: {cleanup_error}"
+                )));
+            }
+            if let Some(error) = observer_error.or(termination_event_error) {
+                return Err(WindowsHcsError::CleanupFailed(format!(
+                    "HCS lifecycle failed: {lifecycle_error}; cleanup was not journaled: {error}"
+                )));
+            }
+            Err(lifecycle_error)
+        }
+        Err(cleanup_error) => {
+            let _ = observe_event(
+                observer,
+                HcsLifecycleEvent::TerminateFailed {
+                    error: cleanup_error.to_string(),
+                },
+            );
+            Err(WindowsHcsError::CleanupFailed(format!(
+                "HCS lifecycle failed: {lifecycle_error}; cleanup failed: {cleanup_error}"
+            )))
+        }
     }
 }
 
-#[cfg(any(windows, test))]
+#[cfg(test)]
 fn run_lifecycle<P: HcsLifecycleProvider>(
     provider: &mut P,
     timeout: Duration,
     cancellation: &Cancellation,
 ) -> Result<RunResult, WindowsHcsError> {
+    let mut observer = None;
+    run_lifecycle_with_observer(provider, timeout, cancellation, &mut observer)
+}
+
+#[cfg(any(windows, test))]
+fn run_lifecycle_with_observer<P: HcsLifecycleProvider>(
+    provider: &mut P,
+    timeout: Duration,
+    cancellation: &Cancellation,
+    observer: &mut Option<&mut dyn HcsLifecycleObserver>,
+) -> Result<RunResult, WindowsHcsError> {
     if let Err(error) = provider.start(timeout) {
-        return cleanup_after_lifecycle_error(provider, timeout, error);
+        let _ = observe_event(
+            observer,
+            HcsLifecycleEvent::StartFailed {
+                error: error.to_string(),
+            },
+        );
+        return cleanup_after_lifecycle_error(provider, timeout, error, observer);
+    }
+    if let Err(error) = observe_event(observer, HcsLifecycleEvent::Started) {
+        return cleanup_after_lifecycle_error(provider, timeout, error, observer);
     }
     let deadline = std::time::Instant::now() + timeout;
     loop {
         if cancellation.is_cancelled() {
-            return cleanup_after_interrupt(provider, timeout, RunStatus::Cancelled);
+            if let Err(error) = observe_event(observer, HcsLifecycleEvent::Cancelled) {
+                return cleanup_after_lifecycle_error(provider, timeout, error, observer);
+            }
+            return cleanup_after_interrupt(provider, timeout, RunStatus::Cancelled, observer);
         }
         if std::time::Instant::now() >= deadline {
-            return cleanup_after_interrupt(provider, timeout, RunStatus::TimedOut);
+            if let Err(error) = observe_event(observer, HcsLifecycleEvent::TimedOut) {
+                return cleanup_after_lifecycle_error(provider, timeout, error, observer);
+            }
+            return cleanup_after_interrupt(provider, timeout, RunStatus::TimedOut, observer);
+        }
+        if let Err(error) = observe_event(observer, HcsLifecycleEvent::Waiting) {
+            return cleanup_after_lifecycle_error(provider, timeout, error, observer);
         }
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         let wait = match provider.wait_for_exit(remaining.min(Duration::from_secs(1))) {
             Ok(wait) => wait,
-            Err(error) => return cleanup_after_lifecycle_error(provider, timeout, error),
+            Err(error) => {
+                let _ = observe_event(
+                    observer,
+                    HcsLifecycleEvent::WaitFailed {
+                        error: error.to_string(),
+                    },
+                );
+                return cleanup_after_lifecycle_error(provider, timeout, error, observer);
+            }
         };
         match wait {
             HcsWaitOutcome::TimedOut => {}
             HcsWaitOutcome::Exited { exit_code } => {
+                if let Err(error) =
+                    observe_event(observer, HcsLifecycleEvent::GuestExited { exit_code })
+                {
+                    return cleanup_after_lifecycle_error(provider, timeout, error, observer);
+                }
+                if let Err(error) = observe_event(observer, HcsLifecycleEvent::ShutdownStarted) {
+                    return cleanup_after_lifecycle_error(provider, timeout, error, observer);
+                }
                 let system_status = match provider.shutdown(timeout) {
                     Ok(status) => status,
                     Err(error) => {
-                        return cleanup_after_lifecycle_error(provider, timeout, error);
+                        let _ = observe_event(
+                            observer,
+                            HcsLifecycleEvent::ShutdownFailed {
+                                error: error.to_string(),
+                            },
+                        );
+                        return cleanup_after_lifecycle_error(provider, timeout, error, observer);
                     }
                 };
-                validate_system_exit_status(&system_status)?;
+                if let Err(error) = validate_system_exit_status(&system_status) {
+                    let _ = observe_event(
+                        observer,
+                        HcsLifecycleEvent::ShutdownFailed {
+                            error: error.to_string(),
+                        },
+                    );
+                    return cleanup_after_lifecycle_error(provider, timeout, error, observer);
+                }
+                if let Err(error) = observe_event(
+                    observer,
+                    HcsLifecycleEvent::ShutdownCompleted {
+                        status: system_status.status,
+                        exit_type: system_status.exit_type,
+                    },
+                ) {
+                    return cleanup_after_lifecycle_error(provider, timeout, error, observer);
+                }
                 let Some(exit_code) = exit_code else {
                     return Err(WindowsHcsError::OperationFailed(
                         "guest process exit code was not available".into(),
@@ -393,29 +632,35 @@ fn run_lifecycle<P: HcsLifecycleProvider>(
 #[cfg(windows)]
 mod hcs {
     use super::{
-        Cancellation, HcsLifecycleProvider, HcsWaitOutcome, RunResult, RunStatus, WindowsHcsError,
-        configuration_json, run_lifecycle,
+        Cancellation, HcsLifecycleEvent, HcsLifecycleObserver, HcsLifecycleProvider,
+        HcsSystemSummary, HcsWaitOutcome, RunResult, RunStatus, WindowsHcsError,
+        configuration_json, run_lifecycle_with_observer,
     };
     use crate::production::WindowsHcsContainerSpec;
     use serde::Deserialize;
     use serde::de::DeserializeOwned;
     use serde_json::json;
+    use std::collections::HashSet;
     use std::ffi::{OsStr, c_void};
     use std::os::windows::ffi::OsStrExt;
     use std::ptr;
     use std::time::Duration;
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_ALL, HANDLE};
     use windows_sys::Win32::System::HostComputeSystem::{
         HCS_OPERATION, HCS_PROCESS, HCS_PROCESS_INFORMATION, HCS_SYSTEM, HcsCloseComputeSystem,
         HcsCloseOperation, HcsCloseProcess, HcsCreateComputeSystem, HcsCreateOperation,
-        HcsCreateProcess, HcsShutDownComputeSystem, HcsStartComputeSystem,
-        HcsTerminateComputeSystem, HcsWaitForComputeSystemExit, HcsWaitForOperationResult,
+        HcsCreateProcess, HcsEnumerateComputeSystems, HcsOpenComputeSystem,
+        HcsShutDownComputeSystem, HcsStartComputeSystem, HcsTerminateComputeSystem,
+        HcsWaitForComputeSystemExit, HcsWaitForOperationResult,
         HcsWaitForOperationResultAndProcessInfo, HcsWaitForProcessExit,
     };
 
     type HcsOperation = HCS_OPERATION;
     type HcsProcess = HCS_PROCESS;
     type HcsSystem = HCS_SYSTEM;
+
+    const MAX_ENUMERATED_SYSTEMS: usize = 4096;
+    const MAX_SUMMARY_FIELD_BYTES: usize = 4096;
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -426,6 +671,7 @@ mod hcs {
         spec: &WindowsHcsContainerSpec,
         timeout: Duration,
         cancellation: &Cancellation,
+        observer: Option<&mut dyn HcsLifecycleObserver>,
     ) -> Result<RunResult, WindowsHcsError> {
         let configuration = configuration_json(spec)?;
         let process_parameters = process_parameters_json(spec)?;
@@ -433,15 +679,212 @@ mod hcs {
         let configuration = wide(&configuration);
         let process_parameters = wide(&process_parameters);
         let system = create_system(&id, &configuration, timeout)?;
-        let result = run_system(system, &process_parameters, timeout, cancellation);
+        let mut observer = observer;
+        if let Err(error) = super::observe_event(
+            &mut observer,
+            HcsLifecycleEvent::Created {
+                system_id: spec.container_id.clone(),
+            },
+        ) {
+            let _ = terminate(system, timeout);
+            // SAFETY: system is the live handle returned by HcsCreateComputeSystem
+            // and is closed exactly once after the lifecycle completes.
+            unsafe { HcsCloseComputeSystem(system) };
+            return Err(error);
+        }
+        let result = run_system(
+            system,
+            &process_parameters,
+            timeout,
+            cancellation,
+            &mut observer,
+        );
         // SAFETY: system is the live handle returned by HcsCreateComputeSystem
         // and is closed exactly once after the lifecycle completes.
         unsafe { HcsCloseComputeSystem(system) };
+        if let Err(error) = super::observe_event(&mut observer, HcsLifecycleEvent::Closed) {
+            return Err(error);
+        }
         let mut result = result?;
         if result.status == RunStatus::Completed {
-            result.stdout = super::read_result_file(&spec.result_path, spec.max_output_bytes)?;
+            match super::read_result_file(&spec.result_path, spec.max_output_bytes) {
+                Ok(bytes) => {
+                    let size = bytes.len();
+                    let digest = crate::sha256_digest(&bytes);
+                    super::observe_event(
+                        &mut observer,
+                        HcsLifecycleEvent::ResultRead {
+                            sha256: digest,
+                            size,
+                        },
+                    )?;
+                    result.stdout = bytes;
+                }
+                Err(error) => {
+                    let _ = super::observe_event(
+                        &mut observer,
+                        HcsLifecycleEvent::ResultReadFailed {
+                            error: error.to_string(),
+                        },
+                    );
+                    return Err(error);
+                }
+            }
         }
         Ok(result)
+    }
+
+    pub fn enumerate_systems(timeout: Duration) -> Result<Vec<HcsSystemSummary>, WindowsHcsError> {
+        let operation = unsafe { HcsCreateOperation(ptr::null(), None) };
+        if operation.is_null() {
+            return Err(WindowsHcsError::ProviderUnavailable(
+                "HcsCreateOperation returned null".into(),
+            ));
+        }
+        let query = wide("{}");
+        // SAFETY: query is a NUL-terminated UTF-16 buffer alive for the call;
+        // operation is a live HCS operation handle and is closed below.
+        let hr = unsafe { HcsEnumerateComputeSystems(query.as_ptr(), operation) };
+        let document = if hr < 0 {
+            Err(WindowsHcsError::OperationFailed(format!(
+                "HcsEnumerateComputeSystems HRESULT 0x{hr:08x}"
+            )))
+        } else {
+            wait_operation_document(operation, timeout)
+        };
+        // SAFETY: operation is the valid enumeration handle and is closed once
+        // after the result document has been copied.
+        unsafe { HcsCloseOperation(operation) };
+        let document = document?.ok_or_else(|| {
+            WindowsHcsError::OperationFailed("HCS enumeration returned no document".into())
+        })?;
+        parse_system_summaries(&document)
+    }
+
+    pub fn terminate_system(
+        system_id: &str,
+        timeout: Duration,
+    ) -> Result<super::HcsSystemExitStatus, WindowsHcsError> {
+        let id = wide(system_id);
+        let mut system = ptr::null_mut();
+        // SAFETY: id is a NUL-terminated UTF-16 buffer alive for the call and
+        // the output pointer is valid. GENERIC_ALL is the access requested by
+        // the HCS API for an opened compute-system handle.
+        let hr = unsafe { HcsOpenComputeSystem(id.as_ptr(), GENERIC_ALL, &raw mut system) };
+        if hr < 0 {
+            return Err(WindowsHcsError::OperationFailed(format!(
+                "HcsOpenComputeSystem HRESULT 0x{hr:08x}"
+            )));
+        }
+        if system.is_null() {
+            return Err(WindowsHcsError::OperationFailed(
+                "HcsOpenComputeSystem returned a null handle".into(),
+            ));
+        }
+        let result = terminate(system, timeout)
+            .and_then(|status| super::validate_system_exit_status(&status).map(|_| status));
+        // SAFETY: system is the live handle returned by HcsOpenComputeSystem
+        // and is closed exactly once after termination completes.
+        unsafe { HcsCloseComputeSystem(system) };
+        result
+    }
+
+    fn parse_system_summaries(document: &str) -> Result<Vec<HcsSystemSummary>, WindowsHcsError> {
+        let value: serde_json::Value = serde_json::from_str(document).map_err(|error| {
+            WindowsHcsError::OperationFailed(format!("invalid HCS enumeration document: {error}"))
+        })?;
+        let systems = match value {
+            serde_json::Value::Array(systems) => systems,
+            serde_json::Value::Object(mut object) => {
+                let systems = object
+                    .remove("ComputeSystems")
+                    .or_else(|| object.remove("Systems"))
+                    .ok_or_else(|| {
+                        WindowsHcsError::OperationFailed(
+                            "HCS enumeration document has no compute-system array".into(),
+                        )
+                    })?;
+                systems.as_array().cloned().ok_or_else(|| {
+                    WindowsHcsError::OperationFailed(
+                        "HCS enumeration compute-system field is not an array".into(),
+                    )
+                })?
+            }
+            _ => {
+                return Err(WindowsHcsError::OperationFailed(
+                    "HCS enumeration document must be an array or object".into(),
+                ));
+            }
+        };
+        if systems.len() > MAX_ENUMERATED_SYSTEMS {
+            return Err(WindowsHcsError::OperationFailed(
+                "HCS enumeration returned too many compute systems".into(),
+            ));
+        }
+        let mut system_ids = HashSet::with_capacity(systems.len());
+        systems
+            .into_iter()
+            .map(|system| {
+                let object = system.as_object().ok_or_else(|| {
+                    WindowsHcsError::OperationFailed(
+                        "HCS enumeration entry is not an object".into(),
+                    )
+                })?;
+                let id = object
+                    .get("Id")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|id| !id.trim().is_empty())
+                    .ok_or_else(|| {
+                        WindowsHcsError::OperationFailed(
+                            "HCS enumeration entry has no stable system id".into(),
+                        )
+                    })?
+                    .to_owned();
+                validate_summary_field("Id", &id)?;
+                if !system_ids.insert(id.clone()) {
+                    return Err(WindowsHcsError::OperationFailed(
+                        "HCS enumeration returned duplicate system identities".into(),
+                    ));
+                }
+                let owner = match object.get("Owner") {
+                    None => None,
+                    Some(serde_json::Value::String(owner)) => {
+                        validate_summary_field("Owner", owner)?;
+                        Some(owner.clone())
+                    }
+                    Some(_) => {
+                        return Err(WindowsHcsError::OperationFailed(
+                            "HCS enumeration owner is not a string".into(),
+                        ));
+                    }
+                };
+                let state = match object.get("State") {
+                    None => None,
+                    Some(serde_json::Value::String(state)) => {
+                        validate_summary_field("State", state)?;
+                        Some(state.clone())
+                    }
+                    Some(_) => {
+                        return Err(WindowsHcsError::OperationFailed(
+                            "HCS enumeration state is not a string".into(),
+                        ));
+                    }
+                };
+                Ok(HcsSystemSummary { id, owner, state })
+            })
+            .collect()
+    }
+
+    fn validate_summary_field(name: &str, value: &str) -> Result<(), WindowsHcsError> {
+        if value.is_empty()
+            || value.len() > MAX_SUMMARY_FIELD_BYTES
+            || value.chars().any(char::is_control)
+        {
+            return Err(WindowsHcsError::OperationFailed(format!(
+                "HCS enumeration {name} field is invalid"
+            )));
+        }
+        Ok(())
     }
 
     fn create_system(
@@ -802,8 +1245,9 @@ mod hcs {
         process_parameters: &[u16],
         timeout: Duration,
         cancellation: &Cancellation,
+        observer: &mut Option<&mut dyn HcsLifecycleObserver>,
     ) -> Result<RunResult, WindowsHcsError> {
-        run_lifecycle(
+        run_lifecycle_with_observer(
             &mut NativeHcsProvider {
                 system,
                 process: ptr::null_mut(),
@@ -812,6 +1256,7 @@ mod hcs {
             },
             timeout,
             cancellation,
+            observer,
         )
     }
 
@@ -879,6 +1324,14 @@ mod hcs {
     }
 
     fn wait_operation(operation: HcsOperation, timeout: Duration) -> Result<(), WindowsHcsError> {
+        let _ = wait_operation_document(operation, timeout)?;
+        Ok(())
+    }
+
+    fn wait_operation_document(
+        operation: HcsOperation,
+        timeout: Duration,
+    ) -> Result<Option<String>, WindowsHcsError> {
         let mut document = ptr::null_mut();
         let timeout_ms =
             u32::try_from(timeout.as_millis().min(u128::from(u32::MAX))).map_err(|_| {
@@ -887,13 +1340,13 @@ mod hcs {
         // SAFETY: operation is a live HCS handle and document points to
         // initialized storage owned by this stack frame.
         let hr = unsafe { HcsWaitForOperationResult(operation, timeout_ms, &raw mut document) };
-        free_document(document);
         if hr < 0 {
+            free_document(document);
             return Err(WindowsHcsError::OperationFailed(format!(
                 "HCS operation HRESULT 0x{hr:08x}"
             )));
         }
-        Ok(())
+        take_document(document)
     }
 
     fn free_document(document: *mut u16) {
@@ -1168,7 +1621,7 @@ mod tests {
         let error = run_lifecycle(&mut nonzero, Duration::from_secs(1), &Cancellation::new())
             .expect_err("nonzero HCS shutdown status must fail closed");
         assert!(matches!(error, WindowsHcsError::OperationFailed(_)));
-        assert_eq!(nonzero.events, ["start", "wait", "shutdown"]);
+        assert_eq!(nonzero.events, ["start", "wait", "shutdown", "terminate"]);
 
         let mut unexpected_type =
             MockHcsProvider::new(HcsWaitOutcome::Exited { exit_code: Some(0) });
@@ -1180,7 +1633,10 @@ mod tests {
         )
         .expect_err("unexpected HCS shutdown type must fail closed");
         assert!(matches!(error, WindowsHcsError::OperationFailed(_)));
-        assert_eq!(unexpected_type.events, ["start", "wait", "shutdown"]);
+        assert_eq!(
+            unexpected_type.events,
+            ["start", "wait", "shutdown", "terminate"]
+        );
     }
 
     #[test]

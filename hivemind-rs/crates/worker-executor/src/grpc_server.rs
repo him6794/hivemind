@@ -23,7 +23,8 @@ use std::time::{Duration, Instant};
 use tonic::{Request, Response, Status};
 
 use crate::{
-    runtime_admission::WorkerRuntimeAdmission, StopTaskOutcome, TaskResult, WorkerExecutor,
+    runtime_admission::WorkerRuntimeAdmission, ExecutionAttemptContext, StopTaskOutcome,
+    TaskResult, WorkerExecutor,
 };
 use general_compute_runtime::artifact::CasChunkStore;
 use general_compute_runtime::managed_gpu::{ManagedGpuRequest, MANAGED_GPU_RUNTIME_VERSION};
@@ -1210,6 +1211,9 @@ impl WorkerNodeService for GrpcWorkerNodeService {
             _ => None,
         };
         let is_managed_gpu = managed_gpu_request.is_some();
+        let is_general_compute =
+            req.runtime.trim() == general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION;
+        let mut transfer_generation_for_execution = None;
         if let crate::runtime_admission::RuntimeRoute::GeneralComputeV1Alpha1(request) = &admitted {
             let token_identity = WorkerExecutionVerifier::from_pem(
                 &self.state.config.auth.worker_execution_public_key_pem,
@@ -1309,6 +1313,7 @@ impl WorkerNodeService for GrpcWorkerNodeService {
             .ok_or_else(|| {
                 Status::permission_denied("worker transfer lease generation is missing")
             })?;
+            transfer_generation_for_execution = Some(transfer_generation);
             self.state
                 .validate_transfer_lease(
                     &req.token,
@@ -1338,6 +1343,10 @@ impl WorkerNodeService for GrpcWorkerNodeService {
                     .map_err(|status| *status)?;
             }
         }
+        let execution_context = ExecutionAttemptContext {
+            worker_id: claims.worker_id.clone(),
+            transfer_generation: transfer_generation_for_execution,
+        };
         let limits = req.resource_limits.unwrap_or_default();
         let task = Task {
             id: uuid::Uuid::new_v4(),
@@ -1427,17 +1436,17 @@ impl WorkerNodeService for GrpcWorkerNodeService {
             completed_at: None,
         };
         tracing::info!("Worker executing task {}", req.task_id);
-        match if consensus_mode {
-            self.state
-                .executor
-                .execute_task_with_consensus(&task, &request_identity.attempt_id)
-                .await
-        } else {
-            self.state
-                .executor
-                .execute_task_with_attempt(&task, &request_identity.attempt_id)
-                .await
-        } {
+        match self
+            .state
+            .executor
+            .execute_task_with_attempt_context(
+                &task,
+                &request_identity.attempt_id,
+                execution_context,
+                consensus_mode,
+            )
+            .await
+        {
             Ok(result) => {
                 let mut response = execute_response_from_result_for_runtime(
                     result,
@@ -1453,6 +1462,26 @@ impl WorkerNodeService for GrpcWorkerNodeService {
                     validate_managed_consensus_response_identity(&response, &consensus_request)?;
                     self.state
                         .cache_consensus_result(&consensus_request, &response)?;
+                }
+                if is_general_compute && response.success {
+                    if let Some(transfer_generation) = transfer_generation_for_execution {
+                        let journal_identity = crate::hcs_journal::HcsExecutionIdentity {
+                            task_id: req.task_id.clone(),
+                            execution_id: request_identity.execution_id.clone(),
+                            attempt_id: request_identity.attempt_id.clone(),
+                            idempotency_key: request_identity.idempotency_key.clone(),
+                            request_digest: request_identity.request_digest.clone(),
+                            transfer_generation: Some(transfer_generation),
+                        };
+                        self.state
+                            .executor
+                            .mark_hcs_delivery(&journal_identity)
+                            .map_err(|error| {
+                                Status::internal(format!(
+                                    "HCS journal delivery transition failed: {error}"
+                                ))
+                            })?;
+                    }
                 }
                 Ok(Response::new(response))
             }

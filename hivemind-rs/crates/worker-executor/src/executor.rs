@@ -433,6 +433,36 @@ pub(crate) async fn run_task_with_cancel_and_backends_and_trusted_registration_a
 pub(crate) async fn run_task_with_cancel_and_backends_and_trusted_registration_and_windows_and_managed_gpu(
     task: &Task,
     config: &HivemindConfig,
+    cancel_rx: watch::Receiver<bool>,
+    reference_executor: Option<Arc<ReferenceBackendExecutor>>,
+    cas_store: Option<Arc<CasChunkStore>>,
+    production_backends: Option<Arc<ProductionBackendRegistry>>,
+    managed_gpu_production_backends: Option<Arc<ManagedGpuProductionBackendRegistry>>,
+    windows_backends: Option<Arc<WindowsProductionBackendRegistry>>,
+    capability_matrix: Option<Arc<general_compute_runtime::CapabilityMatrix>>,
+    trusted_registration: Option<TrustedWorkerCapabilityRegistration>,
+) -> Result<super::TaskResult> {
+    run_task_with_cancel_and_backends_and_trusted_registration_and_windows_and_managed_gpu_with_context(
+        task,
+        config,
+        cancel_rx,
+        reference_executor,
+        cas_store,
+        production_backends,
+        managed_gpu_production_backends,
+        windows_backends,
+        capability_matrix,
+        trusted_registration,
+        None,
+        super::ExecutionAttemptContext::default(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_task_with_cancel_and_backends_and_trusted_registration_and_windows_and_managed_gpu_with_context(
+    task: &Task,
+    config: &HivemindConfig,
     mut cancel_rx: watch::Receiver<bool>,
     reference_executor: Option<Arc<ReferenceBackendExecutor>>,
     cas_store: Option<Arc<CasChunkStore>>,
@@ -441,6 +471,8 @@ pub(crate) async fn run_task_with_cancel_and_backends_and_trusted_registration_a
     windows_backends: Option<Arc<WindowsProductionBackendRegistry>>,
     capability_matrix: Option<Arc<general_compute_runtime::CapabilityMatrix>>,
     trusted_registration: Option<TrustedWorkerCapabilityRegistration>,
+    hcs_journal: Option<crate::hcs_journal::HcsExecutionJournal>,
+    execution_context: super::ExecutionAttemptContext,
 ) -> Result<super::TaskResult> {
     let start = Instant::now();
     tracing::info!(
@@ -543,6 +575,8 @@ pub(crate) async fn run_task_with_cancel_and_backends_and_trusted_registration_a
                 windows_backends.as_deref(),
                 capability_matrix.as_deref(),
                 trusted_registration.as_ref(),
+                hcs_journal.as_ref(),
+                &execution_context,
                 &execution_cancelled,
                 &execution_runtime_cancellation,
             )
@@ -1057,6 +1091,8 @@ fn execute_general_compute_task(
     windows_backends: Option<&WindowsProductionBackendRegistry>,
     capability_matrix: Option<&general_compute_runtime::CapabilityMatrix>,
     trusted_registration: Option<&TrustedWorkerCapabilityRegistration>,
+    hcs_journal: Option<&crate::hcs_journal::HcsExecutionJournal>,
+    execution_context: &super::ExecutionAttemptContext,
     cancelled: &AtomicBool,
     cancellation: &Cancellation,
 ) -> Result<super::TaskResult> {
@@ -1142,6 +1178,8 @@ fn execute_general_compute_task(
                 config,
                 backend,
                 cas_store,
+                hcs_journal,
+                execution_context,
                 cancelled,
                 cancellation,
                 trusted_gpu_selection.clone(),
@@ -1367,6 +1405,8 @@ fn execute_windows_backend_task(
     config: &HivemindConfig,
     backend: &WindowsProductionBackendConfig,
     cas_store: Option<&CasChunkStore>,
+    hcs_journal: Option<&crate::hcs_journal::HcsExecutionJournal>,
+    execution_context: &super::ExecutionAttemptContext,
     cancelled: &AtomicBool,
     cancellation: &Cancellation,
     trusted_gpu_selection: Option<general_compute_runtime::gpu::GpuSelection>,
@@ -1388,6 +1428,11 @@ fn execute_windows_backend_task(
     }
     if cancelled.load(Ordering::Acquire) {
         cancellation.cancel();
+    }
+    if request.request_digest != request.canonical_request_digest() {
+        return Err(ExecutionError::BackendUnavailable(
+            "Windows HCS request digest does not match the canonical request".into(),
+        ));
     }
     backend
         .validate()
@@ -1454,16 +1499,148 @@ fn execute_windows_backend_task(
             .map(Vec::as_slice)
             .collect::<Vec<_>>(),
     );
+    let journal = hcs_journal.ok_or_else(|| {
+        ExecutionError::BackendUnavailable(
+            "Windows HCS execution requires an operator Worker state root journal".into(),
+        )
+    })?;
+    let worker_id = execution_context.worker_id.clone().ok_or_else(|| {
+        ExecutionError::BackendUnavailable(
+            "Windows HCS execution requires the registered Worker identity".into(),
+        )
+    })?;
+    let transfer_generation = execution_context.transfer_generation.ok_or_else(|| {
+        ExecutionError::BackendUnavailable(
+            "Windows HCS execution requires the active transfer lease generation".into(),
+        )
+    })?;
+    if transfer_generation <= 0 {
+        return Err(ExecutionError::BackendUnavailable(
+            "Windows HCS transfer lease generation must be positive".into(),
+        ));
+    }
+    let policy_digest = general_compute_runtime::sha256_digest(
+        &serde_json::to_vec(&backend.policy).map_err(|error| {
+            ExecutionError::BackendUnavailable(format!(
+                "Windows HCS policy cannot be encoded: {error}"
+            ))
+        })?,
+    );
+    let spec_digest =
+        general_compute_runtime::sha256_digest(&serde_json::to_vec(&spec).map_err(|error| {
+            ExecutionError::BackendUnavailable(format!(
+                "Windows HCS spec cannot be encoded: {error}"
+            ))
+        })?);
+    let identity = crate::hcs_journal::HcsExecutionIdentity {
+        task_id: task.task_id.clone(),
+        execution_id: request.execution_id.clone(),
+        attempt_id: request.attempt_id.clone(),
+        idempotency_key: request.idempotency_key.clone(),
+        request_digest: request.request_digest.clone(),
+        transfer_generation: Some(transfer_generation),
+    };
+    let intent = crate::hcs_journal::HcsExecutionIntent {
+        identity: identity.clone(),
+        worker_id,
+        backend_id: request.backend_id.clone(),
+        guest_image_digest: request.guest_image_digest.clone(),
+        runner_sha256: backend.runner_sha256.clone(),
+        policy_digest,
+        spec_digest,
+        input_sha256: input_sha256.clone(),
+        container_id: spec.container_id.clone(),
+        scratch_path: spec.storage_path.clone(),
+        result_path: spec.result_path.clone(),
+    };
+    let initial_record = journal
+        .begin(intent)
+        .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
+    if initial_record.sequence != 1
+        || initial_record.lifecycle != crate::hcs_journal::HcsLifecycleState::Prepared
+    {
+        return Err(ExecutionError::BackendUnavailable(
+            "Windows HCS execution identity already has a non-prepared journal state".into(),
+        ));
+    }
+    journal
+        .append_event(
+            &identity,
+            crate::hcs_journal::HcsJournalEvent::CreateRequested,
+        )
+        .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
+    let mut observer =
+        crate::hcs_journal::HcsJournalObserver::new(journal.clone(), identity.clone());
     let launcher = WindowsHcsLauncher::new().with_timeout(std::time::Duration::from_millis(
         request
             .execution_policy
             .wall_time_ms
             .min(backend.timeout_ms),
     ));
-    let result = launcher
-        .run(&spec, cancellation)
-        .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
-    production_result(request, result, input_sha256, config, trusted_gpu_selection)
+    let result = match launcher.run_with_observer(&spec, cancellation, Some(&mut observer)) {
+        Ok(result) => result,
+        Err(error) => {
+            let message = error.to_string();
+            if let Err(journal_error) = journal.append_event(
+                &identity,
+                crate::hcs_journal::HcsJournalEvent::Failed {
+                    error: message.clone(),
+                },
+            ) {
+                return Err(ExecutionError::BackendUnavailable(format!(
+                    "Windows HCS execution failed and its failure could not be journaled: {message}; {journal_error}"
+                )));
+            }
+            return Err(ExecutionError::BackendUnavailable(message));
+        }
+    };
+    let typed = match production_result(
+        request,
+        result,
+        input_sha256,
+        config,
+        trusted_gpu_selection,
+    ) {
+        Ok(typed) => typed,
+        Err(error) => {
+            let message = error.to_string();
+            if let Err(journal_error) = journal.append_event(
+                &identity,
+                crate::hcs_journal::HcsJournalEvent::Failed {
+                    error: message.clone(),
+                },
+            ) {
+                return Err(ExecutionError::BackendUnavailable(format!(
+                        "Windows HCS result validation failed and its failure could not be journaled: {message}; {journal_error}"
+                    )));
+            }
+            return Err(error);
+        }
+    };
+    match typed.status {
+        ResultStatus::Completed => {
+            journal
+                .append_event(&identity, crate::hcs_journal::HcsJournalEvent::Completed)
+                .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
+        }
+        ResultStatus::Failed
+        | ResultStatus::ResourceExhausted
+        | ResultStatus::BackendUnavailable => {
+            journal
+                .append_event(
+                    &identity,
+                    crate::hcs_journal::HcsJournalEvent::Failed {
+                        error: typed
+                            .error_code
+                            .clone()
+                            .unwrap_or_else(|| "Windows HCS execution did not complete".into()),
+                    },
+                )
+                .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
+        }
+        ResultStatus::Cancelled | ResultStatus::TimedOut => {}
+    }
+    Ok(typed)
 }
 
 fn production_result(
