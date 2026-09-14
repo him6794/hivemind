@@ -5,6 +5,8 @@
 //! ComputeCore.dll; non-Windows builds fail closed with `UnsupportedPlatform`.
 
 use crate::production::WindowsHcsContainerSpec;
+#[cfg(windows)]
+use crate::production::verify_windows_hcs_assets;
 use crate::sandbox::WINDOWS_HCS_PROCESSOR_MAXIMUM;
 
 /// Stable ownership marker for operator-created HCS systems.
@@ -202,14 +204,63 @@ fn validate_spec(spec: &WindowsHcsContainerSpec) -> Result<(), WindowsHcsError> 
     {
         return Err(WindowsHcsError::InvalidSpec("invalid container id".into()));
     }
-    if spec.image_root.as_os_str().is_empty()
+    if spec.backend_id.trim().is_empty()
+        || spec.image_root.as_os_str().is_empty()
+        || spec.runner_executable.as_os_str().is_empty()
+        || spec.runner_sha256.trim().is_empty()
+        || spec.image_material_digest.trim().is_empty()
+        || spec.guest_image_digest.trim().is_empty()
+        || spec.policy_digest.trim().is_empty()
+        || spec.runner_container_path.trim().is_empty()
         || spec.entrypoint.is_empty()
         || spec.entrypoint.iter().any(|part| part.trim().is_empty())
     {
         return Err(WindowsHcsError::InvalidSpec(
-            "image root and non-empty entrypoint are required".into(),
+            "HCS asset identities and non-empty entrypoint are required".into(),
         ));
     }
+    if !spec.runner_container_path.starts_with("C:\\")
+        || spec
+            .runner_container_path
+            .split(['\\', '/'])
+            .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return Err(WindowsHcsError::InvalidSpec(
+            "HCS runner container path is invalid".into(),
+        ));
+    }
+    let runner_name = spec
+        .runner_container_path
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or_default();
+    if !spec
+        .entrypoint
+        .first()
+        .is_some_and(|entrypoint| entrypoint.eq_ignore_ascii_case(runner_name))
+    {
+        return Err(WindowsHcsError::InvalidSpec(
+            "HCS entrypoint is not bound to the pinned runner".into(),
+        ));
+    }
+    if !is_sha256_digest(&spec.runner_sha256)
+        || !is_sha256_digest(&spec.guest_image_digest)
+        || spec.image_material_digest != spec.guest_image_digest
+        || !is_sha256_digest(&spec.policy_digest)
+    {
+        return Err(WindowsHcsError::InvalidSpec(
+            "HCS asset or policy digest is invalid".into(),
+        ));
+    }
+    #[cfg(windows)]
+    verify_windows_hcs_assets(
+        &spec.image_root,
+        &spec.runner_executable,
+        &spec.guest_image_digest,
+        &spec.runner_sha256,
+    )
+    .map_err(|error| WindowsHcsError::InvalidSpec(error.to_string()))?;
+
     if spec.storage_path.as_os_str().is_empty()
         || spec.result_path.as_os_str().is_empty()
         || spec.result_container_path.is_empty()
@@ -272,6 +323,13 @@ fn validate_spec(spec: &WindowsHcsContainerSpec) -> Result<(), WindowsHcsError> 
     Ok(())
 }
 
+fn is_sha256_digest(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn normalize_windows_path(value: &str) -> String {
     value.replace('/', "\\")
 }
@@ -285,6 +343,9 @@ fn windows_path_parent(path: &std::path::Path) -> Option<String> {
 
 #[cfg(any(windows, test))]
 fn configuration_json(spec: &WindowsHcsContainerSpec) -> Result<String, WindowsHcsError> {
+    // HCS's Container schema has no arbitrary annotation field. Identity is
+    // retained in the operator journal/spec and passed through the documented
+    // process environment instead of adding an unsupported schema property.
     serde_json::to_string(&serde_json::json!({
         "Owner": HIVEMIND_HCS_OWNER,
         "SchemaVersion": {"Major": 2, "Minor": 1},
@@ -702,9 +763,7 @@ mod hcs {
         // SAFETY: system is the live handle returned by HcsCreateComputeSystem
         // and is closed exactly once after the lifecycle completes.
         unsafe { HcsCloseComputeSystem(system) };
-        if let Err(error) = super::observe_event(&mut observer, HcsLifecycleEvent::Closed) {
-            return Err(error);
-        }
+        super::observe_event(&mut observer, HcsLifecycleEvent::Closed)?;
         let mut result = result?;
         if result.status == RunStatus::Completed {
             match super::read_result_file(&spec.result_path, spec.max_output_bytes) {
@@ -735,6 +794,8 @@ mod hcs {
     }
 
     pub fn enumerate_systems(timeout: Duration) -> Result<Vec<HcsSystemSummary>, WindowsHcsError> {
+        // SAFETY: null callback/context arguments request a standalone HCS
+        // operation, and the returned handle is checked before use.
         let operation = unsafe { HcsCreateOperation(ptr::null(), None) };
         if operation.is_null() {
             return Err(WindowsHcsError::ProviderUnavailable(
@@ -782,7 +843,7 @@ mod hcs {
             ));
         }
         let result = terminate(system, timeout)
-            .and_then(|status| super::validate_system_exit_status(&status).map(|_| status));
+            .and_then(|status| super::validate_system_exit_status(&status).map(|()| status));
         // SAFETY: system is the live handle returned by HcsOpenComputeSystem
         // and is closed exactly once after termination completes.
         unsafe { HcsCloseComputeSystem(system) };
@@ -1364,25 +1425,32 @@ mod hcs {
             .collect()
     }
 
-    fn process_parameters_json(spec: &WindowsHcsContainerSpec) -> Result<String, WindowsHcsError> {
-        let command_line = spec
-            .entrypoint
+    pub(super) fn process_parameters_json(
+        spec: &WindowsHcsContainerSpec,
+    ) -> Result<String, WindowsHcsError> {
+        let mut command = spec.entrypoint.clone();
+        let application_name = command
+            .first_mut()
+            .ok_or_else(|| WindowsHcsError::InvalidSpec("HCS process has no application".into()))?;
+        application_name.clone_from(&spec.runner_container_path);
+        let command_line = command
             .iter()
             .map(|argument| quote_windows_argument(argument))
             .collect::<Vec<_>>()
             .join(" ");
-        let application_name = spec
-            .entrypoint
-            .first()
-            .ok_or_else(|| WindowsHcsError::InvalidSpec("HCS process has no application".into()))?;
         serde_json::to_string(&json!({
-            "ApplicationName": application_name,
+            "ApplicationName": spec.runner_container_path,
             "CommandLine": command_line,
             "CreateStdInPipe": false,
             "CreateStdOutPipe": false,
             "CreateStdErrPipe": false,
             "Environment": {
                 "HIVEMIND_RESULT_PATH": spec.result_container_path,
+                "HIVEMIND_BACKEND_ID": spec.backend_id,
+                "HIVEMIND_GUEST_IMAGE_DIGEST": spec.guest_image_digest,
+                "HIVEMIND_IMAGE_MATERIAL_SHA256": spec.image_material_digest,
+                "HIVEMIND_RUNNER_SHA256": spec.runner_sha256,
+                "HIVEMIND_POLICY_SHA256": spec.policy_digest,
             },
         }))
         .map_err(|error| WindowsHcsError::InvalidSpec(error.to_string()))
@@ -1491,7 +1559,14 @@ mod tests {
     fn spec() -> WindowsHcsContainerSpec {
         WindowsHcsContainerSpec {
             container_id: "hivemind-test".into(),
+            backend_id: "windows-test".into(),
+            guest_image_digest: format!("sha256:{}", "a".repeat(64)),
+            image_material_digest: format!("sha256:{}", "a".repeat(64)),
             image_root: PathBuf::from("C:\\hivemind\\image"),
+            runner_executable: PathBuf::from("C:\\hivemind\\image\\runner.exe"),
+            runner_sha256: format!("sha256:{}", "b".repeat(64)),
+            runner_container_path: "C:\\runner.exe".into(),
+            policy_digest: format!("sha256:{}", "c".repeat(64)),
             entrypoint: vec!["runner.exe".into()],
             mounts: vec![
                 WindowsHcsMountSpec {
@@ -1532,6 +1607,7 @@ mod tests {
             value["SchemaVersion"],
             serde_json::json!({"Major": 2, "Minor": 1})
         );
+        assert!(container.get("Annotations").is_none());
         assert_eq!(
             storage["Layers"][0]["Path"],
             serde_json::json!("C:\\hivemind\\image")
@@ -1553,6 +1629,42 @@ mod tests {
         assert_eq!(mounts[0]["HostPathType"], serde_json::json!("Directory"));
         assert_eq!(mounts[0]["ReadOnly"], serde_json::json!(true));
         assert_eq!(mounts[1]["ReadOnly"], serde_json::json!(false));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn hcs_process_parameters_bind_verified_runner_and_identity() {
+        let value: serde_json::Value = serde_json::from_str(
+            &hcs::process_parameters_json(&spec())
+                .expect("HCS process parameters should serialize"),
+        )
+        .expect("HCS process parameters should be valid JSON");
+
+        assert_eq!(
+            value["ApplicationName"],
+            serde_json::json!("C:\\runner.exe")
+        );
+        assert_eq!(value["CommandLine"], serde_json::json!("C:\\runner.exe"));
+        assert_eq!(
+            value["Environment"]["HIVEMIND_BACKEND_ID"],
+            serde_json::json!("windows-test")
+        );
+        assert_eq!(
+            value["Environment"]["HIVEMIND_GUEST_IMAGE_DIGEST"],
+            serde_json::json!(format!("sha256:{}", "a".repeat(64)))
+        );
+        assert_eq!(
+            value["Environment"]["HIVEMIND_IMAGE_MATERIAL_SHA256"],
+            serde_json::json!(format!("sha256:{}", "a".repeat(64)))
+        );
+        assert_eq!(
+            value["Environment"]["HIVEMIND_RUNNER_SHA256"],
+            serde_json::json!(format!("sha256:{}", "b".repeat(64)))
+        );
+        assert_eq!(
+            value["Environment"]["HIVEMIND_POLICY_SHA256"],
+            serde_json::json!(format!("sha256:{}", "c".repeat(64)))
+        );
     }
 
     #[test]

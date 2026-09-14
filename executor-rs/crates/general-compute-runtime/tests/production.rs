@@ -15,6 +15,8 @@ use general_compute_runtime::{
     ArtifactManifest, ArtifactRole, DeterminismPolicy, ExecutionPolicy,
     GENERAL_COMPUTE_RUNTIME_VERSION, GeneralComputeRequest,
 };
+#[cfg(windows)]
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
 fn dsl_registration(backend_id: &str) -> ManagedDslBackendRegistration {
@@ -236,13 +238,202 @@ fn windows_config(backend_id: &str) -> WindowsProductionBackendConfig {
         guest_image_digest: format!("sha256:{}", "a".repeat(64)),
         image_root: PathBuf::from("C:\\hivemind\\windows\\images\\python"),
         artifact_root: PathBuf::from("C:\\hivemind\\windows\\artifacts"),
-        runner_executable: PathBuf::from("C:\\hivemind\\windows\\hcs-helper.exe"),
+        runner_executable: PathBuf::from(
+            "C:\\hivemind\\windows\\images\\python\\hivemind-runner.exe",
+        ),
         runner_sha256: format!("sha256:{}", "b".repeat(64)),
         entrypoint: vec!["hivemind-runner.exe".into()],
         policy: windows_policy(),
         max_output_bytes: 1024 * 1024,
         timeout_ms: 30_000,
     }
+}
+
+#[cfg(windows)]
+fn collect_windows_test_entries(
+    root: &std::path::Path,
+    relative_root: &str,
+    entries: &mut Vec<(String, PathBuf, bool)>,
+) {
+    let mut children = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .collect::<Vec<_>>();
+    children.sort_by_key(|entry| entry.file_name().to_string_lossy().to_ascii_lowercase());
+    for child in children {
+        let name = child.file_name().to_string_lossy().to_ascii_lowercase();
+        let relative = if relative_root.is_empty() {
+            name
+        } else {
+            format!("{relative_root}/{name}")
+        };
+        let path = child.path();
+        let metadata = std::fs::symlink_metadata(&path).unwrap();
+        if metadata.is_dir() {
+            entries.push((relative.clone(), path.clone(), true));
+            collect_windows_test_entries(&path, &relative, entries);
+        } else {
+            assert!(metadata.is_file());
+            entries.push((relative, path, false));
+        }
+    }
+}
+
+#[cfg(windows)]
+fn windows_test_image_digest(root: &std::path::Path) -> String {
+    let mut entries = Vec::new();
+    collect_windows_test_entries(root, "", &mut entries);
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"hivemind-windows-image-material-v1\0");
+    for (relative, path, is_directory) in entries {
+        hasher.update(if is_directory { b"d" } else { b"f" });
+        hasher.update((relative.len() as u64).to_be_bytes());
+        hasher.update(relative.as_bytes());
+        if !is_directory {
+            let bytes = std::fs::read(path).unwrap();
+            hasher.update((bytes.len() as u64).to_be_bytes());
+            hasher.update(bytes);
+        }
+    }
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+#[cfg(windows)]
+fn windows_asset_config(label: &str) -> (WindowsProductionBackendConfig, PathBuf) {
+    let root = std::env::temp_dir().join(format!(
+        "hivemind-hcs-assets-{label}-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let image_root = root.join("image");
+    let artifact_root = root.join("artifacts");
+    let runner_executable = image_root.join("hivemind-runner.exe");
+    std::fs::create_dir_all(&image_root).unwrap();
+    std::fs::write(&runner_executable, b"runner-v1").unwrap();
+    std::fs::write(image_root.join("runtime.txt"), b"runtime-v1").unwrap();
+    let config = WindowsProductionBackendConfig {
+        backend_id: format!("windows-{label}"),
+        guest_image_digest: windows_test_image_digest(&image_root),
+        image_root,
+        artifact_root,
+        runner_sha256: general_compute_runtime::sha256_digest(b"runner-v1"),
+        runner_executable,
+        entrypoint: vec!["hivemind-runner.exe".into()],
+        policy: windows_policy(),
+        max_output_bytes: 1024 * 1024,
+        timeout_ms: 30_000,
+    };
+    (config, root)
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_operator_assets_bind_verified_runner_and_guest_path() {
+    let (config, root) = windows_asset_config("success");
+    let binding = config
+        .verify_operator_assets()
+        .expect("operator-owned Windows assets should verify");
+    assert_eq!(binding.image_material_digest, config.guest_image_digest);
+    assert_eq!(binding.runner_sha256, config.runner_sha256);
+    assert_eq!(binding.runner_container_path, "C:\\hivemind-runner.exe");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_operator_assets_reject_image_root_that_is_not_a_directory() {
+    let (config, root) = windows_asset_config("image-file");
+    let image_root = config.image_root.clone();
+    std::fs::remove_dir_all(&image_root).unwrap();
+    std::fs::write(&image_root, b"not-an-image-directory").unwrap();
+    assert!(matches!(
+        config.verify_operator_assets(),
+        Err(ProductionBackendRegistryError::WindowsImageUnavailable(_))
+    ));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_operator_assets_reject_missing_image_and_runner() {
+    let (config, root) = windows_asset_config("missing");
+    let _ = std::fs::remove_dir_all(&config.image_root);
+    assert!(matches!(
+        config.verify_operator_assets(),
+        Err(ProductionBackendRegistryError::WindowsImageUnavailable(_))
+    ));
+    let _ = std::fs::remove_dir_all(root);
+
+    let (config, root) = windows_asset_config("missing-runner");
+    let _ = std::fs::remove_file(&config.runner_executable);
+    assert!(matches!(
+        config.verify_operator_assets(),
+        Err(ProductionBackendRegistryError::WindowsRunnerUnavailable(_))
+    ));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_operator_assets_reject_runner_and_image_digest_drift() {
+    let (mut config, root) = windows_asset_config("digest");
+    config.runner_sha256 = general_compute_runtime::sha256_digest(b"different-runner");
+    assert_eq!(
+        config.verify_operator_assets().unwrap_err(),
+        ProductionBackendRegistryError::WindowsRunnerDigestMismatch
+    );
+    let _ = std::fs::remove_dir_all(root);
+
+    let (mut config, root) = windows_asset_config("image-digest");
+    config.guest_image_digest = format!("sha256:{}", "0".repeat(64));
+    assert_eq!(
+        config.verify_operator_assets().unwrap_err(),
+        ProductionBackendRegistryError::WindowsImageDigestMismatch
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_operator_assets_reject_runner_outside_image_and_entrypoint_drift() {
+    let (mut config, root) = windows_asset_config("containment");
+    let outside = root.join("outside.exe");
+    std::fs::write(&outside, b"runner-v1").unwrap();
+    config.runner_executable = outside;
+    assert_eq!(
+        config.verify_operator_assets().unwrap_err(),
+        ProductionBackendRegistryError::WindowsRunnerOutsideImage
+    );
+
+    let mut config = windows_config("entrypoint");
+    config.entrypoint = vec!["other-runner.exe".into()];
+    assert_eq!(
+        config.validate().unwrap_err(),
+        ProductionBackendRegistryError::WindowsEntrypointRunnerMismatch
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_operator_assets_reject_reparse_runner_when_available() {
+    use std::os::windows::fs::symlink_file;
+
+    let (mut config, root) = windows_asset_config("reparse");
+    let target = config.runner_executable.clone();
+    let link = config.image_root.join("linked-runner.exe");
+    if symlink_file(&target, &link).is_err() {
+        let _ = std::fs::remove_dir_all(root);
+        return;
+    }
+    config.runner_executable = link;
+    assert!(matches!(
+        config.verify_operator_assets(),
+        Err(ProductionBackendRegistryError::WindowsRunnerUnavailable(_))
+    ));
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]

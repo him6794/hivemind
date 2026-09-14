@@ -13,11 +13,14 @@ use crate::sandbox::{
 };
 use crate::{
     GeneralComputeRequest, MANAGED_DSL_RUNTIME_VERSION, MANAGED_DSL_SEMANTICS_MANIFEST_SHA256,
-    gpu::GpuSelection, managed_gpu::ManagedGpuCapability,
+    gpu::GpuSelection, managed_gpu::ManagedGpuCapability, sha256_digest,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::fs::File;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 /// Operator-owned registration for the cross-platform closed managed DSL.
 ///
@@ -640,7 +643,14 @@ pub struct WindowsHcsMountSpec {
 #[serde(deny_unknown_fields)]
 pub struct WindowsHcsContainerSpec {
     pub container_id: String,
+    pub backend_id: String,
+    pub guest_image_digest: String,
+    pub image_material_digest: String,
     pub image_root: PathBuf,
+    pub runner_executable: PathBuf,
+    pub runner_sha256: String,
+    pub runner_container_path: String,
+    pub policy_digest: String,
     pub entrypoint: Vec<String>,
     pub mounts: Vec<WindowsHcsMountSpec>,
     /// HCS `Container.Storage.Path`, owned by the operator and used for the
@@ -652,6 +662,14 @@ pub struct WindowsHcsContainerSpec {
     pub network_isolated: bool,
     pub root_read_only: bool,
     pub resource_limits: WindowsHcsResourceLimits,
+}
+
+/// Verified operator assets bound to one native HCS launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowsHcsAssetBinding {
+    pub image_material_digest: String,
+    pub runner_sha256: String,
+    pub runner_container_path: String,
 }
 
 impl WindowsProductionBackendConfig {
@@ -688,6 +706,24 @@ impl WindowsProductionBackendConfig {
         Ok((image_root, artifact_task_root))
     }
 
+    /// Verify the operator-owned Windows image and runner before HCS creation.
+    ///
+    /// The configured guest image digest is the digest of a deterministic
+    /// directory walk of `image_root`; it is not accepted as a label for an
+    /// arbitrary directory. The runner must be a regular, non-reparse file
+    /// below that image root so the process created inside HCS is the exact
+    /// pinned runner whose bytes were checked here.
+    pub fn verify_operator_assets(
+        &self,
+    ) -> Result<WindowsHcsAssetBinding, ProductionBackendRegistryError> {
+        verify_windows_hcs_assets(
+            &self.image_root,
+            &self.runner_executable,
+            &self.guest_image_digest,
+            &self.runner_sha256,
+        )
+    }
+
     /// Build the operator-owned HCS specification without invoking HCS.
     ///
     /// Every host path comes from this validated registration and the
@@ -712,6 +748,7 @@ impl WindowsProductionBackendConfig {
         task_id: &str,
         resource_limits: WindowsHcsResourceLimits,
     ) -> Result<WindowsHcsContainerSpec, ProductionBackendRegistryError> {
+        let assets = self.verify_operator_assets()?;
         let (image_root, artifact_task_root) = self.task_root(task_id)?;
         let container_id = format!("hivemind-{task_id}");
         let mounts = self
@@ -735,9 +772,19 @@ impl WindowsProductionBackendConfig {
             })
             .collect();
         let storage_path = artifact_task_root.join("scratch");
+        let policy_digest = sha256_digest(&serde_json::to_vec(&self.policy).map_err(|error| {
+            ProductionBackendRegistryError::WindowsPolicyIdentityUnavailable(error.to_string())
+        })?);
         Ok(WindowsHcsContainerSpec {
             container_id,
+            backend_id: self.backend_id.clone(),
+            guest_image_digest: self.guest_image_digest.clone(),
+            image_material_digest: assets.image_material_digest,
             image_root,
+            runner_executable: self.runner_executable.clone(),
+            runner_sha256: assets.runner_sha256,
+            runner_container_path: assets.runner_container_path,
+            policy_digest,
             entrypoint: self.entrypoint.clone(),
             mounts,
             storage_path: storage_path.clone(),
@@ -771,6 +818,18 @@ impl WindowsProductionBackendConfig {
         }
         if !is_sha256_digest(&self.runner_sha256) {
             return Err(ProductionBackendRegistryError::WindowsRunnerDigestInvalid);
+        }
+        if !windows_path_is_contained(&self.image_root, &self.runner_executable) {
+            return Err(ProductionBackendRegistryError::WindowsRunnerOutsideImage);
+        }
+        let runner_name = windows_path_file_name(&self.runner_executable)
+            .ok_or(ProductionBackendRegistryError::WindowsRunnerOutsideImage)?;
+        if self
+            .entrypoint
+            .first()
+            .is_none_or(|entrypoint| !entrypoint.eq_ignore_ascii_case(&runner_name))
+        {
+            return Err(ProductionBackendRegistryError::WindowsEntrypointRunnerMismatch);
         }
         self.launch()
             .validate()
@@ -819,6 +878,13 @@ pub enum ProductionBackendRegistryError {
     WindowsPathMustBeAbsolute,
     WindowsPathTraversal,
     WindowsRunnerDigestInvalid,
+    WindowsRunnerUnavailable(String),
+    WindowsRunnerDigestMismatch,
+    WindowsRunnerOutsideImage,
+    WindowsEntrypointRunnerMismatch,
+    WindowsImageUnavailable(String),
+    WindowsImageDigestMismatch,
+    WindowsPolicyIdentityUnavailable(String),
     WindowsLaunchInvalid(crate::sandbox::ProductionSandboxError),
     WindowsPolicyUnenforceable(WindowsSandboxPolicyError),
     WindowsResourceLimitRequired,
@@ -862,9 +928,9 @@ fn ensure_no_symlink_ancestors(
 ) -> Result<(), ProductionBackendRegistryError> {
     for ancestor in path.ancestors() {
         match std::fs::symlink_metadata(ancestor) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
+            Ok(metadata) if is_reparse_point(&metadata) => {
                 return Err(ProductionBackendRegistryError::RootUnavailable(
-                    "configured production root contains a symlink boundary".into(),
+                    "configured production root contains a reparse-point boundary".into(),
                 ));
             }
             Ok(metadata) if !metadata.is_dir() => {
@@ -1419,6 +1485,241 @@ impl WindowsProductionBackendRegistry {
     pub fn is_empty(&self) -> bool {
         self.backends.is_empty()
     }
+}
+
+pub(crate) fn verify_windows_hcs_assets(
+    image_root: &Path,
+    runner_executable: &Path,
+    guest_image_digest: &str,
+    runner_sha256: &str,
+) -> Result<WindowsHcsAssetBinding, ProductionBackendRegistryError> {
+    if !is_sha256_digest(guest_image_digest) {
+        return Err(ProductionBackendRegistryError::WindowsImageDigestMismatch);
+    }
+    if !is_sha256_digest(runner_sha256) {
+        return Err(ProductionBackendRegistryError::WindowsRunnerDigestInvalid);
+    }
+    if !is_absolute_windows_path(image_root) || !is_absolute_windows_path(runner_executable) {
+        return Err(ProductionBackendRegistryError::WindowsPathMustBeAbsolute);
+    }
+    if windows_path_has_traversal(image_root) || windows_path_has_traversal(runner_executable) {
+        return Err(ProductionBackendRegistryError::WindowsPathTraversal);
+    }
+    if !windows_path_is_contained(image_root, runner_executable) {
+        return Err(ProductionBackendRegistryError::WindowsRunnerOutsideImage);
+    }
+    let image_metadata = std::fs::symlink_metadata(image_root).map_err(|error| {
+        ProductionBackendRegistryError::WindowsImageUnavailable(error.to_string())
+    })?;
+    if !image_metadata.is_dir() || is_reparse_point(&image_metadata) {
+        return Err(ProductionBackendRegistryError::WindowsImageUnavailable(
+            "Windows image root must be a real directory without reparse points".into(),
+        ));
+    }
+    ensure_no_symlink_ancestors(image_root)?;
+
+    let runner_metadata = std::fs::symlink_metadata(runner_executable).map_err(|error| {
+        ProductionBackendRegistryError::WindowsRunnerUnavailable(error.to_string())
+    })?;
+    if !runner_metadata.is_file() || is_reparse_point(&runner_metadata) {
+        return Err(ProductionBackendRegistryError::WindowsRunnerUnavailable(
+            "Windows runner must be a regular file without a reparse point".into(),
+        ));
+    }
+    let actual_runner_sha256 = hash_windows_file(runner_executable).map_err(|error| {
+        ProductionBackendRegistryError::WindowsRunnerUnavailable(error.to_string())
+    })?;
+    if actual_runner_sha256 != runner_sha256 {
+        return Err(ProductionBackendRegistryError::WindowsRunnerDigestMismatch);
+    }
+
+    let image_material_digest = hash_windows_image_tree(image_root)
+        .map_err(ProductionBackendRegistryError::WindowsImageUnavailable)?;
+    if image_material_digest != guest_image_digest {
+        return Err(ProductionBackendRegistryError::WindowsImageDigestMismatch);
+    }
+    let relative_runner = windows_relative_path(image_root, runner_executable)
+        .ok_or(ProductionBackendRegistryError::WindowsRunnerOutsideImage)?;
+    let runner_name = windows_path_file_name(runner_executable)
+        .ok_or(ProductionBackendRegistryError::WindowsRunnerOutsideImage)?;
+    Ok(WindowsHcsAssetBinding {
+        image_material_digest,
+        runner_sha256: runner_sha256.to_owned(),
+        runner_container_path: format!("C:\\{relative_runner}"),
+    })
+    .and_then(|binding| {
+        if binding
+            .runner_container_path
+            .rsplit('\\')
+            .next()
+            .is_some_and(|name| name.eq_ignore_ascii_case(&runner_name))
+        {
+            Ok(binding)
+        } else {
+            Err(ProductionBackendRegistryError::WindowsRunnerOutsideImage)
+        }
+    })
+}
+
+fn hash_windows_file(path: &Path) -> std::io::Result<String> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_file() || is_reparse_point(&metadata) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "path is not a regular non-reparse file",
+        ));
+    }
+    let expected_size = metadata.len();
+    let mut file = File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 128 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let after = std::fs::symlink_metadata(path)?;
+    if after.len() != expected_size || !after.is_file() || is_reparse_point(&after) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "file changed or became a reparse point while it was hashed",
+        ));
+    }
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn hash_windows_image_tree(root: &Path) -> Result<String, String> {
+    let mut entries = Vec::new();
+    collect_windows_image_entries(root, "", &mut entries)?;
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    for pair in entries.windows(2) {
+        if pair[0].0 == pair[1].0 {
+            return Err("Windows image contains duplicate case-insensitive paths".into());
+        }
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"hivemind-windows-image-material-v1\0");
+    for (relative, path, is_directory) in entries {
+        let relative_bytes = relative.as_bytes();
+        hasher.update(if is_directory { b"d" } else { b"f" });
+        hasher.update((relative_bytes.len() as u64).to_be_bytes());
+        hasher.update(relative_bytes);
+        if !is_directory {
+            let metadata = std::fs::symlink_metadata(&path)
+                .map_err(|error| format!("image file metadata failed: {error}"))?;
+            hasher.update(metadata.len().to_be_bytes());
+            let mut file =
+                File::open(&path).map_err(|error| format!("image file open failed: {error}"))?;
+            let mut buffer = vec![0_u8; 128 * 1024];
+            loop {
+                let read = file
+                    .read(&mut buffer)
+                    .map_err(|error| format!("image file read failed: {error}"))?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+            }
+            let after = std::fs::symlink_metadata(&path)
+                .map_err(|error| format!("image file recheck failed: {error}"))?;
+            if after.len() != metadata.len() || !after.is_file() || is_reparse_point(&after) {
+                return Err(
+                    "Windows image file changed or became a reparse point while hashed".into(),
+                );
+            }
+        }
+    }
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn collect_windows_image_entries(
+    root: &Path,
+    relative_root: &str,
+    entries: &mut Vec<(String, PathBuf, bool)>,
+) -> Result<(), String> {
+    let mut children = std::fs::read_dir(root)
+        .map_err(|error| format!("Windows image directory read failed: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("Windows image directory entry failed: {error}"))?;
+    children.sort_by_key(|entry| entry.file_name().to_string_lossy().to_ascii_lowercase());
+    for child in children {
+        let file_name = child.file_name();
+        let name = file_name
+            .to_str()
+            .filter(|name| !name.is_empty() && !name.chars().any(char::is_control))
+            .ok_or_else(|| "Windows image path is not valid UTF-8".to_owned())?;
+        let normalized_name = name.to_ascii_lowercase();
+        let relative = if relative_root.is_empty() {
+            normalized_name
+        } else {
+            format!("{relative_root}/{normalized_name}")
+        };
+        let path = child.path();
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("Windows image entry metadata failed: {error}"))?;
+        if is_reparse_point(&metadata) {
+            return Err(format!(
+                "Windows image contains a reparse point: {relative}"
+            ));
+        }
+        if metadata.is_dir() {
+            entries.push((relative.clone(), path.clone(), true));
+            collect_windows_image_entries(&path, &relative, entries)?;
+        } else if metadata.is_file() {
+            entries.push((relative, path, false));
+        } else {
+            return Err(format!(
+                "Windows image contains an unsupported entry: {relative}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
+fn windows_path_is_contained(root: &Path, child: &Path) -> bool {
+    let root = normalize_windows_host_path(root);
+    let child = normalize_windows_host_path(child);
+    child.starts_with(&(root + "\\"))
+}
+
+fn windows_relative_path(root: &Path, child: &Path) -> Option<String> {
+    let root = normalize_windows_host_path(root);
+    let child = normalize_windows_host_path(child);
+    child
+        .strip_prefix(&(root + "\\"))
+        .filter(|relative| !relative.is_empty())
+        .map(str::to_owned)
+}
+
+fn windows_path_file_name(path: &Path) -> Option<String> {
+    normalize_windows_host_path(path)
+        .rsplit('\\')
+        .next()
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+}
+
+fn normalize_windows_host_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase()
 }
 
 fn is_sha256_digest(value: &str) -> bool {
