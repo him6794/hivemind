@@ -11,7 +11,16 @@ param(
     [string]$WorkerVpnHostname = "",
     [ValidateRange(1, 300)][int]$VpnStartupTimeoutSecs = 30,
     [string]$WorkerGrpcAddr = "0.0.0.0:50053",
-    [string]$WorkerControlHttpAddr = "127.0.0.1:18080"
+    [string]$WorkerControlHttpAddr = "127.0.0.1:18080",
+    [ValidateSet("stable", "beta", "nightly")][string]$UpdateChannel = "stable",
+    [string]$PackageVersion = "0.1.0",
+    [UInt64]$PackageSequence = 0,
+    [string]$MinimumSupportedVersion = "",
+    [UInt64]$IssuedAtUnix = 0,
+    [UInt64]$ExpiresAtUnix = 0,
+    [string]$ReleaseKeyId = "",
+    [string]$UpdatePackageUrl = "",
+    [string]$UpdatePackagePath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -142,6 +151,7 @@ Copy-Item -Path (Join-Path $workerUiDist "*") -Destination $packagedWorkerUi -Re
 $packageArtifacts = @(
     [ordered]@{
         name = "hivemind-worker.exe"
+        size = [UInt64](Get-Item -LiteralPath $packagedBinary).Length
         sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $packagedBinary).Hash.ToLowerInvariant()
         source = $binary
     }
@@ -150,6 +160,7 @@ Get-ChildItem -LiteralPath $packagedWorkerUi -File -Recurse | ForEach-Object {
     $relativePath = $_.FullName.Substring($packagedWorkerUi.Length).TrimStart('\', '/')
     $packageArtifacts += [ordered]@{
         name = "worker-ui/$($relativePath -replace '\\', '/')"
+        size = [UInt64]$_.Length
         sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
         source = $_.FullName
     }
@@ -159,6 +170,7 @@ if ($RustTarget -like "*-pc-windows-msvc") {
     Copy-Item -Force $archive $packagedLibtailscale
     $packageArtifacts += [ordered]@{
         name = "libtailscale.dll"
+        size = [UInt64](Get-Item -LiteralPath $packagedLibtailscale).Length
         sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $packagedLibtailscale).Hash.ToLowerInvariant()
         source = $archive
     }
@@ -166,6 +178,7 @@ if ($RustTarget -like "*-pc-windows-msvc") {
     Copy-Item -Force $vcRuntimeSource.FullName $packagedVcRuntime
     $packageArtifacts += [ordered]@{
         name = "vcruntime140.dll"
+        size = [UInt64](Get-Item -LiteralPath $packagedVcRuntime).Length
         sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $packagedVcRuntime).Hash.ToLowerInvariant()
         source = $vcRuntimeSource.FullName
     }
@@ -478,12 +491,22 @@ $readme = @'
 
 For a private deployment or unattended startup, `.env.worker.example` and `start-worker.ps1` are available as optional advanced settings. The normal sign-in flow does not store your password, server key, or reusable VPN key.
 
+`update-manifest.unsigned.json` is a build input only. It is not an update authority; release publication requires a root-verified keyset and an independently signed manifest.
+
 The Worker runs on a suitable local Windows host. Orange Pi is reserved for Nodepool, Website API, Headscale, PostgreSQL, and Redis; do not deploy this Worker package there.
 '@
 $readme | Set-Content -Encoding ASCII (Join-Path $out "README.md")
 
 $shaFile = Join-Path $out "SHA256SUMS"
-$manifestFile = Join-Path $out "manifest.json"
+$manifestFile = Join-Path $out "manifest.unsigned.json"
+$legacyManifestFile = Join-Path $out "manifest.json"
+$updateManifestFile = Join-Path $out "update-manifest.unsigned.json"
+foreach ($metadataPath in @($shaFile, $manifestFile, $legacyManifestFile, $updateManifestFile)) {
+    if (Test-Path -LiteralPath $metadataPath) {
+        Remove-Item -Force -LiteralPath $metadataPath
+    }
+}
+
 $gitCommit = try { (git -C $repoRoot rev-parse HEAD 2>$null).Trim() } catch { "unknown" }
 $gitDirty = $true
 try {
@@ -492,9 +515,51 @@ try {
     $gitDirty = $true
 }
 
-$packageArtifacts | ForEach-Object {
+# Only known package files enter the release inventory. This avoids silently
+# shipping an old or operator-created file left in the output directory.
+$packageFiles = @()
+$packageFiles += [ordered]@{
+    name = "hivemind-worker.exe"
+    size = [UInt64](Get-Item -LiteralPath $packagedBinary).Length
+    sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $packagedBinary).Hash.ToLowerInvariant()
+}
+Get-ChildItem -LiteralPath $packagedWorkerUi -File -Recurse | ForEach-Object {
+    $relativePath = $_.FullName.Substring($packagedWorkerUi.Length).TrimStart('\', '/')
+    $packageFiles += [ordered]@{
+        name = "worker-ui/$($relativePath -replace '\\', '/')"
+        size = [UInt64]$_.Length
+        sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+    }
+}
+foreach ($optionalPackageFile in @(
+        (Join-Path $out "libtailscale.dll"),
+        (Join-Path $out "vcruntime140.dll"),
+        (Join-Path $out "native-dependency-provenance.json"),
+        (Join-Path $out ".env.worker.example"),
+        (Join-Path $out "start-worker.ps1"),
+        (Join-Path $out "README.md")
+    )) {
+    if (Test-Path -LiteralPath $optionalPackageFile) {
+        $file = Get-Item -LiteralPath $optionalPackageFile
+        $packageFiles += [ordered]@{
+            name = $file.Name
+            size = [UInt64]$file.Length
+            sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
+        }
+    }
+}
+$packageFiles = @($packageFiles | Sort-Object -Property name)
+
+$packageFiles | ForEach-Object {
     "{0} *{1}" -f $_.sha256, $_.name
 } | Set-Content -Encoding ASCII -Path $shaFile
+$shaMetadata = Get-Item -LiteralPath $shaFile
+$packageFiles += [ordered]@{
+    name = "SHA256SUMS"
+    size = [UInt64]$shaMetadata.Length
+    sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $shaFile).Hash.ToLowerInvariant()
+}
+$packageFiles = @($packageFiles | Sort-Object -Property name)
 
 $manifest = [ordered]@{
     package = "hivemind-windows-worker"
@@ -502,8 +567,84 @@ $manifest = [ordered]@{
     generated_at_utc = (Get-Date).ToUniversalTime().ToString("o")
     git_commit = $gitCommit
     git_dirty = $gitDirty
-    artifacts = $packageArtifacts
+    artifacts = $packageFiles
 }
-$manifest | ConvertTo-Json -Depth 5 | Set-Content -Encoding ASCII -Path $manifestFile
+$manifest | ConvertTo-Json -Depth 10 | Set-Content -Encoding ASCII -Path $manifestFile
+
+$updateMetadataRequested = $PackageSequence -ne 0 -or
+    -not [string]::IsNullOrWhiteSpace($ReleaseKeyId) -or
+    -not [string]::IsNullOrWhiteSpace($UpdatePackageUrl) -or
+    -not [string]::IsNullOrWhiteSpace($UpdatePackagePath) -or
+    -not [string]::IsNullOrWhiteSpace($MinimumSupportedVersion) -or
+    $IssuedAtUnix -ne 0 -or
+    $ExpiresAtUnix -ne 0
+if ($updateMetadataRequested) {
+    if ($PackageSequence -le 0) {
+        throw "PackageSequence must be positive when update metadata is requested."
+    }
+    if ($PackageVersion -notmatch '^\d+\.\d+\.\d+$') {
+        throw "PackageVersion must use canonical major.minor.patch form."
+    }
+    if ([string]::IsNullOrWhiteSpace($MinimumSupportedVersion)) {
+        $MinimumSupportedVersion = $PackageVersion
+    }
+    if ($MinimumSupportedVersion -notmatch '^\d+\.\d+\.\d+$') {
+        throw "MinimumSupportedVersion must use canonical major.minor.patch form."
+    }
+    if ([string]::IsNullOrWhiteSpace($ReleaseKeyId)) {
+        throw "ReleaseKeyId is required for update metadata."
+    }
+    if ([string]::IsNullOrWhiteSpace($UpdatePackageUrl) -or $UpdatePackageUrl -notmatch '^https://') {
+        throw "UpdatePackageUrl must be an HTTPS URL for update metadata."
+    }
+    if ([string]::IsNullOrWhiteSpace($UpdatePackagePath) -or !(Test-Path -LiteralPath $UpdatePackagePath -PathType Leaf)) {
+        throw "UpdatePackagePath must point to the verified package archive."
+    }
+    $packagePathItem = Get-Item -LiteralPath $UpdatePackagePath
+    if ($packagePathItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw "UpdatePackagePath must not be a reparse point."
+    }
+    if ($packagePathItem.Length -le 0) {
+        throw "UpdatePackagePath must not be empty."
+    }
+    if ($IssuedAtUnix -eq 0) {
+        $IssuedAtUnix = [UInt64][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    }
+    if ($ExpiresAtUnix -eq 0) {
+        $ExpiresAtUnix = $IssuedAtUnix + 30 * 24 * 60 * 60
+    }
+    if ($ExpiresAtUnix -le $IssuedAtUnix) {
+        throw "ExpiresAtUnix must be later than IssuedAtUnix."
+    }
+    $architecture = if ($RustTarget.StartsWith("aarch64-")) { "aarch64" } else { "x86_64" }
+    $unsignedUpdateManifest = [ordered]@{
+        schema_version = 1
+        product = "hivemind-windows-worker"
+        channel = $UpdateChannel
+        platform = "windows"
+        architecture = $architecture
+        version = $PackageVersion
+        sequence = [UInt64]$PackageSequence
+        minimum_supported_version = $MinimumSupportedVersion
+        release_key_id = $ReleaseKeyId
+        issued_at_unix = [UInt64]$IssuedAtUnix
+        expires_at_unix = [UInt64]$ExpiresAtUnix
+        package_url = $UpdatePackageUrl
+        package_size = [UInt64]$packagePathItem.Length
+        package_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $packagePathItem.FullName).Hash.ToLowerInvariant()
+        files = @($packageFiles | ForEach-Object {
+            [ordered]@{
+                path = $_.name
+                size = [UInt64]$_.size
+                sha256 = $_.sha256
+            }
+        })
+    }
+    # This is canonical unsigned input for an external release signer. It is
+    # never accepted as an update manifest and must not be published as one.
+    $canonicalJson = $unsignedUpdateManifest | ConvertTo-Json -Depth 10 -Compress
+    [IO.File]::WriteAllText($updateManifestFile, $canonicalJson, [Text.Encoding]::ASCII)
+    Write-Host "Unsigned update manifest input written to $updateManifestFile; external release signing is still required."
+}
 
 Write-Host "Windows worker package written to $out"

@@ -7,9 +7,12 @@ build = "build.rs"
 
 [dependencies]
 anyhow.workspace = true
+ed25519-dalek.workspace = true
 hivemind-config = { path = "../config" }
 reqwest.workspace = true
 serde.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
 serde_json.workspace = true
 prost.workspace = true
 tokio.workspace = true

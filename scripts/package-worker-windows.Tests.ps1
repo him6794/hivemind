@@ -250,4 +250,47 @@ foreach ($forbiddenRequirement in @(
     }
 }
 
-Write-Host "package-worker-windows launcher tests passed"
+# Release metadata is only an external signing input. The package must never
+# emit a file whose name implies that unsigned bytes are update authority.
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle '$manifestFile = Join-Path $out "manifest.unsigned.json"' `
+    -Message "Windows worker packaging must keep the provenance manifest explicitly unsigned."
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle '$updateManifestFile = Join-Path $out "update-manifest.unsigned.json"' `
+    -Message "Windows worker packaging must emit a distinct unsigned update-manifest signing input."
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle 'external release signing is still required' `
+    -Message "Windows worker packaging must require external release signing."
+if ($scriptText -match '\$manifestFile\s*=\s*Join-Path \$out "manifest\.json"') {
+    throw "Windows worker packaging must not emit an unsigned manifest.json update authority."
+}
+if ($scriptText -match '(?i)(private[_ -]?key|signing[_ -]?key)\s*=') {
+    throw "Windows worker packaging must not accept or embed a release signing private key."
+}
+if ($scriptText -match 'WORKER_EXECUTION_PUBLIC_KEY_PEM') {
+    throw "Windows release metadata must not reuse the Worker execution trust key."
+}
+
+foreach ($requiredUpdateContract in @(
+        '[string]$PackageVersion = "0.1.0"',
+        '[UInt64]$PackageSequence = 0',
+        '[string]$MinimumSupportedVersion = ""',
+        '[string]$ReleaseKeyId = ""',
+        '[string]$UpdatePackageUrl = ""',
+        '[string]$UpdatePackagePath = ""',
+        'PackageSequence must be positive when update metadata is requested.',
+        'PackageVersion must use canonical major.minor.patch form.',
+        'MinimumSupportedVersion must use canonical major.minor.patch form.',
+        'UpdatePackageUrl must be an HTTPS URL for update metadata.',
+        'UpdatePackagePath must point to the verified package archive.',
+        'UpdatePackagePath must not be a reparse point.',
+        'canonical unsigned input for an external release signer'
+    )) {
+    Assert-Contains -Haystack $scriptText -Needle $requiredUpdateContract `
+        -Message "Windows worker packaging is missing update contract '$requiredUpdateContract'."
+}
+
+Write-Host "package-worker-windows launcher and release-input tests passed"

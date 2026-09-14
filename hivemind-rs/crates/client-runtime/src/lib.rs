@@ -8,6 +8,8 @@
 //!
 //! Users must not hand-copy pre-auth keys after install.
 
+pub mod update;
+
 use anyhow::{bail, Context, Result};
 use hivemind_config::HivemindConfig;
 use rand::{rngs::OsRng, RngCore};
