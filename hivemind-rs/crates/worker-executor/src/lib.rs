@@ -76,16 +76,39 @@ impl WorkerExecutor {
     pub fn try_new(config: HivemindConfig) -> Result<Self> {
         let runner_config = config.clone();
         let configured_admission = runtime_admission::WorkerRuntimeAdmission::from_environment()?;
-        let hcs_journal = hcs_journal::HcsExecutionJournal::from_environment_or_default()?;
-        let package_runtime = if runtime_admission::WorkerRuntimeAdmission::has_explicit_operator_admission_environment()
+        let explicit_operator_admission =
+            runtime_admission::WorkerRuntimeAdmission::has_explicit_operator_admission_environment(
+            );
+        let explicit_hcs_environment =
+            runtime_admission::WorkerRuntimeAdmission::has_explicit_windows_hcs_environment();
+        let (package_runtime, hcs_journal) = if explicit_operator_admission
+            || explicit_hcs_environment
         {
-            None
+            let hcs_journal = if explicit_hcs_environment {
+                hcs_journal::HcsExecutionJournal::from_environment_or_default()?
+            } else {
+                None
+            };
+            (None, hcs_journal)
         } else {
             match windows_hcs_provisioning::load_package_relative() {
-                Ok(runtime) => runtime,
+                Ok(Some(runtime)) => {
+                    let journal_root = runtime.state_root.join("hcs-journal");
+                    match hcs_journal::HcsExecutionJournal::open(journal_root) {
+                        Ok(journal) => (Some(runtime), Some(journal)),
+                        Err(error) => {
+                            tracing::warn!(
+                                error = %error,
+                                "signed package HCS runtime is unavailable because its journal cannot be opened"
+                            );
+                            (None, None)
+                        }
+                    }
+                }
+                Ok(None) => (None, None),
                 Err(error) => {
                     tracing::warn!(error = %error, "signed package HCS runtime is unavailable");
-                    None
+                    (None, None)
                 }
             }
         };

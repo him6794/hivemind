@@ -209,6 +209,16 @@ impl WorkerRuntimeAdmission {
         })
     }
 
+    /// Return whether an operator explicitly selected the HCS state or
+    /// registry. Package provisioning must not replace that private layout.
+    #[must_use]
+    pub fn has_explicit_windows_hcs_environment() -> bool {
+        std::env::var_os("HIVEMIND_WORKER_STATE_ROOT").is_some()
+            || std::env::var("HIVEMIND_GENERAL_COMPUTE_WINDOWS_BACKENDS")
+                .ok()
+                .is_some_and(|value| !value.trim().is_empty())
+    }
+
     /// Load an operator-owned capability registry.  An absent registry keeps
     /// the alpha runtime disabled; malformed configuration fails closed at
     /// worker startup instead of silently widening admission.
