@@ -1,7 +1,6 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$WorkerExecutable,
-    [Parameter(Mandatory = $true)][string]$BackendRegistry,
     [Parameter(Mandatory = $true)][string]$EvidenceDirectory
 )
 
@@ -31,19 +30,50 @@ if ($null -eq $vmcompute -or $vmcompute.Status -ne "Running") {
 }
 
 if (!(Test-Path -LiteralPath $WorkerExecutable -PathType Leaf)) {
-    Fail-Prerequisite "operator-provided Worker executable is missing"
+    Fail-Prerequisite "packaged Worker executable is missing"
 }
-if (!(Test-Path -LiteralPath $BackendRegistry -PathType Leaf)) {
-    Fail-Prerequisite "operator-provided Windows backend registry is missing"
+$workerItem = Get-Item -LiteralPath $WorkerExecutable -Force
+if (!($workerItem -is [IO.FileInfo]) -or
+    (($workerItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+    Fail-Prerequisite "Worker executable must be a regular, non-reparse file"
 }
-
+$packageRoot = $workerItem.DirectoryName
+$bundleRoot = Join-Path $packageRoot "windows-hcs-runtime"
+if (!(Test-Path -LiteralPath $bundleRoot -PathType Container)) {
+    Fail-Prerequisite "signed package-relative Windows HCS runtime bundle is missing"
+}
+$bundleItem = Get-Item -LiteralPath $bundleRoot -Force
+if (!($bundleItem -is [IO.DirectoryInfo]) -or
+    (($bundleItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+    Fail-Prerequisite "Windows HCS runtime bundle must be a regular, non-reparse directory"
+}
+$bundleManifest = Join-Path $bundleRoot "bundle-manifest.json"
+if (!(Test-Path -LiteralPath $bundleManifest -PathType Leaf)) {
+    Fail-Prerequisite "signed Windows HCS runtime bundle manifest is missing"
+}
+$bundleManifestItem = Get-Item -LiteralPath $bundleManifest -Force
+if (!($bundleManifestItem -is [IO.FileInfo]) -or
+    (($bundleManifestItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+    Fail-Prerequisite "Windows HCS runtime bundle manifest must be a regular, non-reparse file"
+}
 try {
-    $registry = Get-Content -LiteralPath $BackendRegistry -Raw | ConvertFrom-Json
+    $signedManifest = Get-Content -LiteralPath $bundleManifest -Raw | ConvertFrom-Json
 } catch {
-    Fail-Prerequisite "operator-provided Windows backend registry is not valid JSON"
+    Fail-Prerequisite "signed Windows HCS runtime bundle manifest is not valid JSON"
 }
-if ($null -eq $registry -or @($registry).Count -eq 0) {
-    Fail-Prerequisite "operator-provided Windows backend registry is empty"
+if ($null -eq $signedManifest.manifest -or
+    [string]::IsNullOrWhiteSpace([string]$signedManifest.signature) -or
+    $null -eq $signedManifest.manifest.backends -or
+    @($signedManifest.manifest.backends).Count -eq 0) {
+    Fail-Prerequisite "signed Windows HCS runtime bundle manifest is incomplete"
+}
+foreach ($bundleEntry in @(Get-ChildItem -LiteralPath $bundleRoot -Force -Recurse)) {
+    if (($bundleEntry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        Fail-Prerequisite "Windows HCS runtime bundle contains a reparse point"
+    }
+    if (!$bundleEntry.PSIsContainer -and !($bundleEntry -is [IO.FileInfo])) {
+        Fail-Prerequisite "Windows HCS runtime bundle contains an unsupported filesystem entry"
+    }
 }
 
 New-Item -ItemType Directory -Force -Path $EvidenceDirectory | Out-Null
@@ -51,8 +81,9 @@ $evidence = [ordered]@{
     schema = "hivemind.windows-hcs-e2e.v1"
     platform = "windows"
     provider = "hcs-windows-containers"
-    worker_executable = (Resolve-Path -LiteralPath $WorkerExecutable).Path
-    backend_registry = (Resolve-Path -LiteralPath $BackendRegistry).Path
+    worker_executable = $workerItem.FullName
+    hcs_runtime_bundle = $bundleItem.FullName
+    bundle_manifest = $bundleManifestItem.FullName
     containers_feature = $containers.State
     vmcompute = $vmcompute.Status.ToString()
     status = "prerequisites_ready"

@@ -44,6 +44,7 @@ running
 - Windows Rust builds now keep the MinGW static archive on `x86_64-pc-windows-gnu` and use an ABI-neutral dynamically loaded `libtailscale.dll` on `x86_64-pc-windows-msvc`. The MSVC package ships the DLL beside the executable and fails closed when it is absent or missing required exports.
 - The MSVC build was verified locally with `cargo build --release --locked --target x86_64-pc-windows-msvc -p hivemind-bin --bins`; this proves compilation/linking and CLI startup, not a live VPN or Windows HCS isolation run.
 - An ARM64 `libtailscale.dll` and `aarch64-pc-windows-msvc` worker executable were built and validated as `IMAGE_FILE_MACHINE_ARM64`. The package includes required native exports, no undeployed MinGW DLL dependencies, provenance, and checksums. This proves compilation and static package validation, not live VPN or Windows HCS isolation.
+- The Windows package now accepts an operator-built signed HCS runtime bundle beside the Worker executable. The package copies its manifest, guest image, and custom runner into a fixed relative path and includes them in the release inventory; the public template does not require a backend registry, image path, runner path, or execution setting. Missing or invalid bundle material leaves Windows general-compute unavailable.
 
 ## Authenticated local enrollment slice
 
@@ -189,10 +190,10 @@ as passing evidence:
   direct process fallback. That run failed closed with exit code 2 because the
   Windows Containers optional feature was `Disabled` while `vmcompute` was
   running. A fresh host check on 2026-09-13 now reports Containers `Enabled`,
-  `vmcompute` and HNS `Running`, and `hcsdiag.exe` present; the required
-  operator-owned Windows image/backend registry and an executing HCS harness are
-  still absent, so this is prerequisite evidence only and not HCS execution or
-  recovery evidence.
+  `vmcompute` and HNS `Running`, and `hcsdiag.exe` present; the required signed
+  package bundle with operator-owned Windows image and custom runner, plus an
+  executing HCS harness, are still absent, so this is prerequisite evidence only
+  and not HCS execution or recovery evidence.
 - The OCI production `-Run` harness was invoked and failed closed with exit code
   1 because no operator-owned production backend registry was configured. No
   direct-host substitute was used; rootless OCI namespaces, cgroup v2, seccomp,

@@ -23,8 +23,12 @@ Assert-Contains $scriptText 'provider = "hcs-windows-containers"' `
     "HCS E2E evidence must identify the native Windows provider."
 Assert-Contains $scriptText 'exit 2' `
     "Missing HCS prerequisites must fail closed with a distinct blocked status."
-Assert-Contains $scriptText 'backend_registry' `
-    "HCS E2E gate must require an operator-owned backend registry."
+Assert-Contains $scriptText 'windows-hcs-runtime' `
+    "HCS E2E gate must require the package-relative HCS runtime bundle."
+Assert-Contains $scriptText 'bundle-manifest.json' `
+    "HCS E2E gate must require the signed package bundle manifest."
+Assert-Contains $scriptText 'hcs_runtime_bundle' `
+    "HCS E2E evidence must identify the packaged HCS runtime bundle."
 
 if ($scriptText -match '(?i)docker|wsl|linux vm|direct process|powershell\.exe|cmd\.exe') {
     throw "Native Windows HCS E2E gate must not contain fallback execution paths."
