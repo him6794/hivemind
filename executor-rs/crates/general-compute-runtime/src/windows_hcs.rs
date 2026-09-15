@@ -78,6 +78,15 @@ pub fn enumerate_systems(timeout: Duration) -> Result<Vec<HcsSystemSummary>, Win
     }
 }
 
+/// Check that the native HCS provider answers an authoritative system query.
+///
+/// An empty system list is a successful readiness result; it proves that the
+/// provider can answer the query without claiming that any guest assets exist.
+/// Non-Windows builds remain explicitly unsupported rather than emulating HCS.
+pub fn probe_provider(timeout: Duration) -> Result<(), WindowsHcsError> {
+    enumerate_systems(timeout).map(|_| ())
+}
+
 /// Terminate one existing HCS system by its exact operator-recorded identity
 /// and retain the authoritative compute-system exit status.
 ///

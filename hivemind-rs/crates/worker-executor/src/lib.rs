@@ -7,6 +7,7 @@ pub mod nodepool_client;
 pub mod resource_monitor;
 pub mod runtime_admission;
 pub mod sandbox;
+pub mod windows_hcs_provisioning;
 
 use anyhow::Result;
 use hivemind_config::HivemindConfig;
@@ -63,6 +64,7 @@ pub struct WorkerExecutor {
     active_tasks: ActiveTaskMap,
     task_runner: Arc<TaskRunner>,
     dynamic_capability_report: WorkerCapabilityReport,
+    runtime_admission: runtime_admission::WorkerRuntimeAdmission,
     hcs_journal: Option<hcs_journal::HcsExecutionJournal>,
 }
 
@@ -73,8 +75,36 @@ impl WorkerExecutor {
 
     pub fn try_new(config: HivemindConfig) -> Result<Self> {
         let runner_config = config.clone();
-        let admission = runtime_admission::WorkerRuntimeAdmission::from_environment()?;
-        let hcs_journal = hcs_journal::HcsExecutionJournal::from_environment()?;
+        let configured_admission = runtime_admission::WorkerRuntimeAdmission::from_environment()?;
+        let hcs_journal = hcs_journal::HcsExecutionJournal::from_environment_or_default()?;
+        let package_runtime = if runtime_admission::WorkerRuntimeAdmission::has_explicit_operator_admission_environment()
+        {
+            None
+        } else {
+            match windows_hcs_provisioning::load_package_relative() {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    tracing::warn!(error = %error, "signed package HCS runtime is unavailable");
+                    None
+                }
+            }
+        };
+        let (admission, windows_backends) = match package_runtime {
+            Some(runtime) => {
+                let trusted_registration = runtime.trusted_registration;
+                let windows_backends = Arc::new(runtime.registry);
+                (
+                    runtime_admission::WorkerRuntimeAdmission::new_with_trusted_registration(
+                        trusted_registration,
+                    ),
+                    Some(windows_backends),
+                )
+            }
+            None => (
+                configured_admission,
+                executor::windows_production_backends_from_environment()?,
+            ),
+        };
         let dynamic_capability_report = admission.public_capability_report();
         let trusted_registration = admission.trusted_registration();
         // ReferenceDirect is a test-only backend. Production workers must never
@@ -93,7 +123,6 @@ impl WorkerExecutor {
         let production_backends = executor::production_backends_from_environment()?;
         let managed_gpu_production_backends =
             executor::managed_gpu_production_backends_from_environment()?;
-        let windows_backends = executor::windows_production_backends_from_environment()?;
         let capability_matrix = if admission.capability_matrix().backends.is_empty() {
             executor::runtime_capability_matrix_from_environment()
         } else {
@@ -133,6 +162,7 @@ impl WorkerExecutor {
                 },
             ),
             dynamic_capability_report,
+            runtime_admission: admission,
             hcs_journal,
         })
     }
@@ -151,6 +181,7 @@ impl WorkerExecutor {
                 },
             ),
             dynamic_capability_report: WorkerCapabilityReport::public_managed_dsl(),
+            runtime_admission: runtime_admission::WorkerRuntimeAdmission::default(),
             hcs_journal: None,
         }
     }
@@ -297,6 +328,11 @@ impl WorkerExecutor {
     #[must_use]
     pub fn dynamic_capability_report(&self) -> WorkerCapabilityReport {
         self.dynamic_capability_report.clone()
+    }
+
+    #[must_use]
+    pub fn runtime_admission(&self) -> runtime_admission::WorkerRuntimeAdmission {
+        self.runtime_admission.clone()
     }
 
     #[must_use]

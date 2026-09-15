@@ -317,6 +317,19 @@ impl UpdateVerifier {
             .map_err(|_| UpdateError::InvalidRootKey)
     }
 
+    /// Verify bytes signed directly by the immutable update root.
+    ///
+    /// This method is intentionally limited to the release trust domain. It is
+    /// not an execution or Nodepool authentication key, and callers must still
+    /// validate the signed document's schema and policy before using it.
+    pub fn verify_root_signature(
+        &self,
+        message: &[u8],
+        encoded_signature: &str,
+    ) -> Result<(), UpdateError> {
+        verify_hex_signature(&self.root_key, message, encoded_signature)
+    }
+
     pub fn verify_keyset(
         &self,
         signed_keyset: &SignedReleaseKeyset,

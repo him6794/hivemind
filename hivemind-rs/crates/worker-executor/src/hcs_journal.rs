@@ -588,6 +588,49 @@ impl HcsExecutionJournal {
         }
     }
 
+    /// Open the operator-owned journal using the package's zero-configuration
+    /// Windows state root when no explicit deployment override is present.
+    /// Non-Windows workers do not create an HCS journal because HCS is not an
+    /// available execution provider there.
+    pub fn from_environment_or_default() -> Result<Option<Self>, HcsJournalError> {
+        if std::env::var_os("HIVEMIND_WORKER_STATE_ROOT").is_some() {
+            return Self::from_environment();
+        }
+
+        #[cfg(windows)]
+        {
+            let root = Self::default_windows_worker_state_root()?.join("hcs-journal");
+            Self::open(root).map(Some)
+        }
+
+        #[cfg(not(windows))]
+        {
+            Ok(None)
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn default_windows_worker_state_root() -> Result<PathBuf, HcsJournalError> {
+        let local_app_data = std::env::var_os("LOCALAPPDATA").ok_or_else(|| {
+            HcsJournalError::InvalidRoot(
+                "LOCALAPPDATA is required for the default Worker state root".into(),
+            )
+        })?;
+        let local_app_data = PathBuf::from(local_app_data);
+        if !local_app_data.is_absolute()
+            || local_app_data.as_os_str().is_empty()
+            || local_app_data
+                .to_string_lossy()
+                .chars()
+                .any(char::is_control)
+        {
+            return Err(HcsJournalError::InvalidRoot(
+                "LOCALAPPDATA must be an absolute path without control characters".into(),
+            ));
+        }
+        Ok(local_app_data.join("Hivemind").join("Worker"))
+    }
+
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root

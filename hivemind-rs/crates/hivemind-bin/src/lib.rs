@@ -59,8 +59,6 @@ use hivemind_worker_executor::grpc_server::{
 #[cfg(feature = "worker")]
 use hivemind_worker_executor::nodepool_client;
 #[cfg(feature = "worker")]
-use hivemind_worker_executor::runtime_admission::WorkerRuntimeAdmission;
-#[cfg(feature = "worker")]
 use hivemind_worker_executor::WorkerExecutor;
 #[cfg(any(feature = "nodepool", feature = "worker"))]
 use std::sync::Arc;
@@ -631,7 +629,7 @@ async fn run_service_inner(role: ServiceRole, service_arguments: Vec<String>) ->
                 require_external_overlay,
             ),
         ));
-        let runtime_admission = WorkerRuntimeAdmission::from_environment()?;
+        let runtime_admission = executor.runtime_admission();
         let wk_chunk_svc = GeneralComputeChunkServiceServer::new(
             GrpcGeneralComputeChunkService::new(wk_state.clone(), runtime_admission.clone()),
         )

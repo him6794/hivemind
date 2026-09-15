@@ -190,6 +190,25 @@ impl WorkerRuntimeAdmission {
         self.trusted_registration.select_gpu_for_request(request)
     }
 
+    /// Return whether the operator supplied an explicit typed admission or
+    /// Windows backend override. Package provisioning must never replace that
+    /// private deployment configuration.
+    #[must_use]
+    pub fn has_explicit_operator_admission_environment() -> bool {
+        [
+            "HIVEMIND_GENERAL_COMPUTE_TRUSTED_REGISTRATION",
+            "HIVEMIND_GENERAL_COMPUTE_BACKENDS",
+            "HIVEMIND_GENERAL_COMPUTE_WORKER_CAPABILITIES",
+            "HIVEMIND_GENERAL_COMPUTE_WINDOWS_BACKENDS",
+        ]
+        .iter()
+        .any(|name| {
+            std::env::var(name)
+                .ok()
+                .is_some_and(|value| !value.trim().is_empty())
+        })
+    }
+
     /// Load an operator-owned capability registry.  An absent registry keeps
     /// the alpha runtime disabled; malformed configuration fails closed at
     /// worker startup instead of silently widening admission.
