@@ -136,11 +136,6 @@ Assert-Contains `
     -Needle 'TORRENT_TASK_ARTIFACT_BASE_URL=' `
     -Message "worker package template must expose the remote task artifact base URL setting."
 
-Assert-Contains `
-    -Haystack $scriptText `
-    -Needle 'HIVEMIND_GENERAL_COMPUTE_WINDOWS_BACKENDS=' `
-    -Message "worker package template must expose the native Windows HCS registry setting."
-
 # The normal double-click package is a dedicated Worker application. It must
 # not depend on the all-service binary or a role argument.
 Assert-Contains `
@@ -193,6 +188,24 @@ Assert-Contains `
     -Needle ".TrimStart('\', '/')" `
     -Message "Windows worker packaging must normalize UI paths with a single Windows path separator."
 
+# Native HCS assets are package-owned and loaded automatically. The public
+# template must not turn an operator registry path into a user setting.
+foreach ($requiredHcsBundleContract in @(
+        '[string]$WindowsHcsRuntimeBundlePath = ""',
+        '$packagedHcsRuntime = Join-Path $out "windows-hcs-runtime"',
+        'WindowsHcsRuntimeBundlePath must point to a regular, non-reparse directory.',
+        'Windows HCS runtime bundle must contain bundle-manifest.json.',
+        'Windows HCS runtime bundle manifest must be a regular, non-reparse file.',
+        'Windows HCS runtime bundle manifest must contain manifest and signature fields.',
+        'Windows HCS runtime bundle cannot contain reparse points:',
+        'Get-ChildItem -LiteralPath $bundleSource -Force',
+        'Copy-Item -LiteralPath $bundleChild.FullName -Destination $packagedHcsRuntime -Recurse -Force',
+        'name = "windows-hcs-runtime/'
+    )) {
+    Assert-Contains -Haystack $scriptText -Needle $requiredHcsBundleContract `
+        -Message "Windows worker packaging is missing HCS bundle contract '$requiredHcsBundleContract'."
+}
+
 if ($scriptText -notmatch '\[string\]\$NodepoolGrpcAddr\s*=\s*""') {
     throw "Windows worker packaging must not use a fake Nodepool hostname as its default."
 }
@@ -237,11 +250,18 @@ foreach ($expected in @(
         "UPDATE_ENABLED", "UPDATE_PRODUCT", "UPDATE_CHANNEL", "UPDATE_KEYSET_URL",
         "UPDATE_MANIFEST_URL", "UPDATE_ALLOWED_HOSTS", "UPDATE_INSTALL_ROOT",
         "UPDATE_STAGING_ROOT", "UPDATE_CHECK_INTERVAL_SECS", "UPDATE_MAX_PACKAGE_BYTES",
-        "TORRENT_TASK_ARTIFACT_BASE_URL", "HIVEMIND_GENERAL_COMPUTE_WINDOWS_BACKENDS"
+        "TORRENT_TASK_ARTIFACT_BASE_URL"
     )) {
     Assert-Contains -Haystack $packagedEnv -Needle $expected `
         -Message "worker package template must expose '$expected'."
 }
+if ($packagedEnv -match '(?m)^\s*HIVEMIND_GENERAL_COMPUTE_WINDOWS_BACKENDS\s*=') {
+    throw "public worker package template must not require an HCS backend registry setting."
+}
+Assert-Contains `
+    -Haystack $packagedEnv `
+    -Needle 'Native Windows HCS general-compute support is loaded from the signed bundle' `
+    -Message "worker package template must describe automatic signed HCS bundle loading."
 foreach ($forbiddenRequirement in @(
         'Assert-RequiredEnv[^\r\n]*WORKER_VPN_AUTHKEY',
         'Assert-RequiredEnv[^\r\n]*WORKER_NODEPOOL_TOKEN',

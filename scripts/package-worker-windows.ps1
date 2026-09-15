@@ -20,7 +20,8 @@ param(
     [UInt64]$ExpiresAtUnix = 0,
     [string]$ReleaseKeyId = "",
     [string]$UpdatePackageUrl = "",
-    [string]$UpdatePackagePath = ""
+    [string]$UpdatePackagePath = "",
+    [string]$WindowsHcsRuntimeBundlePath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -148,6 +149,58 @@ if (Test-Path -LiteralPath $packagedWorkerUi) {
 }
 New-Item -ItemType Directory -Force -Path $packagedWorkerUi | Out-Null
 Copy-Item -Path (Join-Path $workerUiDist "*") -Destination $packagedWorkerUi -Recurse -Force
+
+$packagedHcsRuntime = Join-Path $out "windows-hcs-runtime"
+if (Test-Path -LiteralPath $packagedHcsRuntime) {
+    Remove-Item -Recurse -Force -LiteralPath $packagedHcsRuntime
+}
+if (-not [string]::IsNullOrWhiteSpace($WindowsHcsRuntimeBundlePath)) {
+    if (!(Test-Path -LiteralPath $WindowsHcsRuntimeBundlePath -PathType Container)) {
+        throw "WindowsHcsRuntimeBundlePath must point to a bundle directory."
+    }
+    $bundleSource = (Resolve-Path -LiteralPath $WindowsHcsRuntimeBundlePath).Path
+    $bundleSourceItem = Get-Item -LiteralPath $bundleSource -Force
+    if (!($bundleSourceItem -is [IO.DirectoryInfo]) -or
+        (($bundleSourceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        throw "WindowsHcsRuntimeBundlePath must point to a regular, non-reparse directory."
+    }
+    $bundleManifestSource = Join-Path $bundleSource "bundle-manifest.json"
+    if (!(Test-Path -LiteralPath $bundleManifestSource -PathType Leaf)) {
+        throw "Windows HCS runtime bundle must contain bundle-manifest.json."
+    }
+    $bundleManifestItem = Get-Item -LiteralPath $bundleManifestSource -Force
+    if (!($bundleManifestItem -is [IO.FileInfo]) -or
+        (($bundleManifestItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        throw "Windows HCS runtime bundle manifest must be a regular, non-reparse file."
+    }
+    try {
+        $signedBundleManifest = Get-Content -LiteralPath $bundleManifestSource -Raw | ConvertFrom-Json
+    } catch {
+        throw "Windows HCS runtime bundle manifest must be valid JSON: $($_.Exception.Message)"
+    }
+    if ($null -eq $signedBundleManifest.manifest -or
+        [string]::IsNullOrWhiteSpace([string]$signedBundleManifest.signature)) {
+        throw "Windows HCS runtime bundle manifest must contain manifest and signature fields."
+    }
+    foreach ($bundleEntry in @(Get-ChildItem -LiteralPath $bundleSource -Force -Recurse)) {
+        if (($bundleEntry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Windows HCS runtime bundle cannot contain reparse points: $($bundleEntry.FullName)"
+        }
+        if (!$bundleEntry.PSIsContainer -and !($bundleEntry -is [IO.FileInfo])) {
+            throw "Windows HCS runtime bundle contains an unsupported filesystem entry: $($bundleEntry.FullName)"
+        }
+    }
+    New-Item -ItemType Directory -Force -Path $packagedHcsRuntime | Out-Null
+    foreach ($bundleChild in @(Get-ChildItem -LiteralPath $bundleSource -Force)) {
+        Copy-Item -LiteralPath $bundleChild.FullName -Destination $packagedHcsRuntime -Recurse -Force
+    }
+    foreach ($bundleEntry in @(Get-ChildItem -LiteralPath $packagedHcsRuntime -Force -Recurse)) {
+        if (($bundleEntry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Packaged Windows HCS runtime bundle contains a reparse point: $($bundleEntry.FullName)"
+        }
+    }
+}
+
 $packageArtifacts = @(
     [ordered]@{
         name = "hivemind-worker.exe"
@@ -163,6 +216,17 @@ Get-ChildItem -LiteralPath $packagedWorkerUi -File -Recurse | ForEach-Object {
         size = [UInt64]$_.Length
         sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
         source = $_.FullName
+    }
+}
+if (Test-Path -LiteralPath $packagedHcsRuntime -PathType Container) {
+    Get-ChildItem -LiteralPath $packagedHcsRuntime -File -Recurse | ForEach-Object {
+        $relativePath = $_.FullName.Substring($packagedHcsRuntime.Length).TrimStart('\', '/')
+        $packageArtifacts += [ordered]@{
+            name = "windows-hcs-runtime/$($relativePath -replace '\\', '/')"
+            size = [UInt64]$_.Length
+            sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+            source = $_.FullName
+        }
     }
 }
 if ($RustTarget -like "*-pc-windows-msvc") {
@@ -253,9 +317,8 @@ EXECUTOR_NETWORK_EGRESS_MODE=allowlist
 EXECUTOR_NETWORK_EGRESS_TARGETS=127.0.0.1
 TORRENT_ALLOW_LOCAL_TASK_ARTIFACTS=false
 TORRENT_TASK_ARTIFACT_BASE_URL=
-# Operator-owned native Windows HCS backend registry. The worker fails closed
-# if this file is set but missing, malformed, or invalid.
-HIVEMIND_GENERAL_COMPUTE_WINDOWS_BACKENDS=
+# Native Windows HCS general-compute support is loaded from the signed bundle
+# beside this executable. Missing or invalid runtime assets keep it unavailable.
 "@
 $envTemplate | Set-Content -Encoding ASCII (Join-Path $out ".env.worker.example")
 
@@ -506,6 +569,8 @@ For a private deployment or unattended startup, `.env.worker.example` and `start
 
 `manifest.unsigned.json` and `update-manifest.unsigned.json` are build inputs only. They are not update authorities; release publication requires a root-verified keyset and an independently signed manifest.
 
+When general-compute support is included, the package also contains a signed Windows HCS runtime bundle with its guest runner and image identity. It loads automatically after sign-in; no registry, image, runner, or execution settings are needed. If the bundle, policy, assets, or native HCS provider cannot be verified, general-compute stays unavailable instead of running on the host.
+
 The Worker runs on a suitable local Windows host. Orange Pi is reserved for Nodepool, Website API, Headscale, PostgreSQL, and Redis; do not deploy this Worker package there.
 '@
 $readme | Set-Content -Encoding ASCII (Join-Path $out "README.md")
@@ -542,6 +607,16 @@ Get-ChildItem -LiteralPath $packagedWorkerUi -File -Recurse | ForEach-Object {
         name = "worker-ui/$($relativePath -replace '\\', '/')"
         size = [UInt64]$_.Length
         sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+    }
+}
+if (Test-Path -LiteralPath $packagedHcsRuntime -PathType Container) {
+    Get-ChildItem -LiteralPath $packagedHcsRuntime -File -Recurse | ForEach-Object {
+        $relativePath = $_.FullName.Substring($packagedHcsRuntime.Length).TrimStart('\', '/')
+        $packageFiles += [ordered]@{
+            name = "windows-hcs-runtime/$($relativePath -replace '\\', '/')"
+            size = [UInt64]$_.Length
+            sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+        }
     }
 }
 foreach ($optionalPackageFile in @(
