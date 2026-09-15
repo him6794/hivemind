@@ -100,7 +100,7 @@ pub fn validate_managed_consensus_request(
     }
     if !matches!(
         request.runtime.as_str(),
-        "managed-function-v0" | "production_sandboxed_dsl"
+        "managed-function-v0" | "managed-function-v1" | "production_sandboxed_dsl"
     ) {
         return Err("managed consensus is only supported for managed DSL runtimes");
     }

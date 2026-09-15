@@ -1072,6 +1072,31 @@ fn validate_execute_task_contract(request: &ExecuteTaskRequest) -> Result<(), &'
             }
             Ok(())
         }
+        "managed-function-v1" => {
+            if request.task_source.trim().is_empty() {
+                return Err("managed-function-v1 requires non-empty task_source");
+            }
+            if request.task_source.len() > hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES {
+                return Err("managed-function-v1 task_source exceeds the byte limit");
+            }
+            if request.torrent.trim().is_empty() {
+                return Err("managed-function-v1 requires non-empty JSON input");
+            }
+            if request.torrent.len() > hivemind_proto::MANAGED_JSON_INPUT_MAX_BYTES {
+                return Err("managed-function-v1 JSON input exceeds the byte limit");
+            }
+            if request.managed_budget_units <= 0 {
+                return Err("managed-function-v1 budget must be positive");
+            }
+            if !request.general_compute_manifest_json.is_empty()
+                || !request.managed_gpu_manifest_json.is_empty()
+                || !request.managed_dsl_backend_id.is_empty()
+                || !request.managed_dsl_semantics_manifest_sha256.is_empty()
+            {
+                return Err("managed-function-v1 must not carry another runtime manifest");
+            }
+            Ok(())
+        }
         "production_sandboxed_dsl" => {
             if request.task_source.trim().is_empty() {
                 return Err("production_sandboxed_dsl requires non-empty task_source");
@@ -1214,6 +1239,7 @@ impl WorkerNodeService for GrpcWorkerNodeService {
             && matches!(
                 &admitted,
                 crate::runtime_admission::RuntimeRoute::ManagedFunctionV0
+                    | crate::runtime_admission::RuntimeRoute::ManagedFunctionV1
                     | crate::runtime_admission::RuntimeRoute::ProductionSandboxedDsl
             )
         {
@@ -2075,6 +2101,40 @@ fn managed_consensus_semantics_digest(task: &Task) -> String {
         })
 }
 
+fn managed_receipt_counter(response: &ExecuteTaskResponse, field: &str) -> Result<u64, Status> {
+    if response.managed_receipt_json.trim().is_empty() {
+        return u64::try_from(response.managed_executed_ops)
+            .map_err(|_| Status::internal("managed execution usage counter is negative"));
+    }
+    let receipt = serde_json::from_str::<serde_json::Value>(&response.managed_receipt_json)
+        .map_err(|_| Status::internal("managed execution receipt is malformed"))?;
+    let Some(value) = receipt.get(field) else {
+        return u64::try_from(response.managed_executed_ops)
+            .map_err(|_| Status::internal("managed execution usage counter is negative"));
+    };
+    value.as_u64().ok_or_else(|| {
+        Status::internal(format!(
+            "managed execution receipt field {field} is not an unsigned counter"
+        ))
+    })
+}
+
+fn managed_failure_code(response: &ExecuteTaskResponse) -> Result<String, Status> {
+    if response.success || response.managed_receipt_json.trim().is_empty() {
+        return Ok("execution_failed".into());
+    }
+    let receipt = serde_json::from_str::<serde_json::Value>(&response.managed_receipt_json)
+        .map_err(|_| Status::internal("managed execution receipt is malformed"))?;
+    match receipt.get("failure_code") {
+        None | Some(serde_json::Value::Null) => Ok("execution_failed".into()),
+        Some(value) => value
+            .as_str()
+            .filter(|code| !code.trim().is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| Status::internal("managed execution failure code is malformed")),
+    }
+}
+
 fn attach_managed_consensus_result(
     response: &mut ExecuteTaskResponse,
     request: &ExecuteTaskRequest,
@@ -2101,10 +2161,10 @@ fn attach_managed_consensus_result(
         error_code: if response.success {
             String::new()
         } else {
-            response.status_message.clone()
+            managed_failure_code(response)?
         },
-        usage_units: response.managed_executed_ops.max(0) as u64,
-        executed_ops: response.managed_executed_ops.max(0) as u64,
+        usage_units: managed_receipt_counter(response, "usage_units")?,
+        executed_ops: managed_receipt_counter(response, "executed_ops")?,
         output_bytes: output.len() as u64,
         runtime: task.runtime.clone().unwrap_or_default(),
         backend_id: managed_consensus_backend_id(task),
@@ -2334,6 +2394,112 @@ mod tests {
             .cached_consensus_result(&different_payload)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn managed_consensus_attachment_preserves_failed_partial_usage_and_code() {
+        let mut request = execute_request(
+            "managed-function-v1",
+            "return 1 + 2;".into(),
+            "{}".into(),
+            10,
+        );
+        request.execution_id = "execution-partial".into();
+        request.attempt_id = "attempt-partial".into();
+        request.idempotency_key = "idempotency-partial".into();
+        request.request_digest = "sha256:partial".into();
+        request.consensus_round_id = "round-partial".into();
+        request.replica_id = "replica-partial".into();
+        request.consensus_protocol_version = 1;
+        let mut response = ExecuteTaskResponse {
+            success: false,
+            status_message: "budget exhausted after partial work".into(),
+            managed_executed_ops: 7,
+            managed_output_bytes: 0,
+            managed_receipt_json: serde_json::json!({
+                "runtime": "managed-function-v1",
+                "status": "failed",
+                "usage_units": 7,
+                "executed_ops": 7,
+                "function_calls": 2,
+                "loop_iterations": 0,
+                "max_call_depth": 1,
+                "output_bytes": 0,
+                "failure_code": "budget_exhausted",
+                "failure_message": "execution budget exhausted"
+            })
+            .to_string(),
+            ..ExecuteTaskResponse::default()
+        };
+
+        attach_managed_consensus_result(
+            &mut response,
+            &request,
+            &managed_consensus_task("managed-function-v1"),
+        )
+        .expect("partial managed result should be attachable");
+
+        let result = response
+            .managed_consensus_result
+            .expect("typed consensus result should be present");
+        assert!(!response.success);
+        assert_eq!(result.status, "failed");
+        assert_eq!(result.error_code, "budget_exhausted");
+        assert_eq!(result.usage_units, 7);
+        assert_eq!(result.executed_ops, 7);
+        assert_eq!(result.output_bytes, 0);
+    }
+
+    fn managed_consensus_task(runtime: &str) -> Task {
+        Task {
+            id: uuid::Uuid::new_v4(),
+            task_id: "managed-consensus-test".into(),
+            owner: "task-owner".into(),
+            worker_id: None,
+            worker_ip: None,
+            status: TaskStatus::Running,
+            status_message: None,
+            output: None,
+            result_torrent: None,
+            torrent_source: Some("{}".into()),
+            runtime: Some(runtime.into()),
+            task_source: Some("return 1 + 2;".into()),
+            general_compute_manifest_json: None,
+            managed_gpu_manifest_json: None,
+            managed_dsl_backend_id: None,
+            managed_dsl_semantics_manifest_sha256: None,
+            expected_btih: None,
+            cpu_usage: 0.0,
+            memory_usage: 0.0,
+            gpu_usage: 0.0,
+            gpu_memory_usage: 0.0,
+            req_cpu_score: 1,
+            req_gpu_score: 0,
+            req_memory_gb: 1,
+            req_gpu_memory_gb: 0,
+            req_storage_gb: 1,
+            host_count: 1,
+            max_cpt: 10,
+            billing_settled: false,
+            billed_amount: 0,
+            managed_executed_ops: 0,
+            managed_output_bytes: 0,
+            managed_receipt_json: None,
+            retry_count: 0,
+            max_retries: 3,
+            deadline: None,
+            deterministic: true,
+            side_effects: false,
+            priority: 0,
+            cpu_time_ms: 0,
+            wall_time_ms: 0,
+            peak_memory_mb: 0,
+            download_bytes: 0,
+            cache_hits: 0,
+            created_at: Utc::now(),
+            last_update: Utc::now(),
+            completed_at: None,
+        }
     }
 
     fn execute_request(

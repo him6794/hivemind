@@ -164,6 +164,15 @@ fn managed_function_v0_keeps_its_existing_typed_route() {
 }
 
 #[test]
+fn managed_function_v1_is_admitted_without_a_host_runtime_manifest() {
+    let route = WorkerRuntimeAdmission::default()
+        .admit("managed-function-v1", &[])
+        .expect("v1 managed functions use the built-in closed interpreter");
+
+    assert_eq!(route, RuntimeRoute::ManagedFunctionV1);
+}
+
+#[test]
 fn general_compute_v1alpha1_rejects_an_unregistered_backend() {
     let request =
         request_manifest("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");

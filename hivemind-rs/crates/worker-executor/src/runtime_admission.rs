@@ -18,6 +18,7 @@ use std::fmt;
 pub enum RuntimeRoute {
     Legacy,
     ManagedFunctionV0,
+    ManagedFunctionV1,
     ProductionSandboxedDsl,
     GeneralComputeV1Alpha1(GeneralComputeRequest),
     ManagedFunctionGpuV1(ManagedGpuRequest),
@@ -290,6 +291,14 @@ impl WorkerRuntimeAdmission {
                     return Err(RuntimeAdmissionError::ManifestRuntimeMismatch);
                 }
                 Ok(RuntimeRoute::ManagedFunctionV0)
+            }
+            "managed-function-v1" => {
+                if !general_compute_manifest_json.is_empty()
+                    || !managed_gpu_manifest_json.is_empty()
+                {
+                    return Err(RuntimeAdmissionError::ManifestRuntimeMismatch);
+                }
+                Ok(RuntimeRoute::ManagedFunctionV1)
             }
             "production_sandboxed_dsl" => {
                 if !general_compute_manifest_json.is_empty()

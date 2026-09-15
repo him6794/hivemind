@@ -21,8 +21,10 @@ use general_compute_runtime::{
 };
 use hivemind_config::HivemindConfig;
 use hivemind_models::Task;
-use managed_function_runtime::{render_output_bounded, ExecutionLimits, ManagedExecutor};
-use serde_json::json;
+use managed_function_runtime::{
+    render_output_bounded, ExecutionLimits, ExecutionReceipt, ManagedExecutor,
+};
+use serde_json::{json, Map, Value as JsonValue};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -31,11 +33,154 @@ use std::time::Instant;
 use tokio::sync::watch;
 
 fn is_managed_function_task(task: &Task) -> bool {
-    task.runtime.as_deref() == Some("managed-function-v0")
+    matches!(
+        task.runtime.as_deref(),
+        Some("managed-function-v0" | "managed-function-v1")
+    )
 }
 
 fn is_managed_gpu_task(task: &Task) -> bool {
     task.runtime.as_deref() == Some(MANAGED_GPU_RUNTIME_VERSION)
+}
+
+fn managed_function_limits(task: &Task) -> Result<ExecutionLimits> {
+    let max_usage_units = u64::try_from(task.max_cpt)
+        .ok()
+        .filter(|usage| *usage > 0)
+        .ok_or_else(|| anyhow::anyhow!("managed-function budget must be positive"))?;
+    if task.runtime.as_deref() == Some("managed-function-v1") {
+        Ok(ExecutionLimits::for_managed_function_budget(
+            max_usage_units,
+        ))
+    } else {
+        Ok(ExecutionLimits {
+            max_usage_units: Some(max_usage_units),
+            ..ExecutionLimits::default()
+        })
+    }
+}
+
+fn checked_managed_i64(value: u64, name: &str) -> Result<i64> {
+    i64::try_from(value)
+        .map_err(|_| anyhow::anyhow!("managed {name} exceeds the database counter range"))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ManagedReceiptMetadata<'a> {
+    runtime: &'a str,
+    execution_mode: Option<&'a str>,
+    backend_id: Option<&'a str>,
+    semantics_digest: Option<&'a str>,
+}
+
+fn managed_receipt_json(
+    receipt: &ExecutionReceipt,
+    status: &str,
+    output_bytes: usize,
+    failure_code: Option<&str>,
+    failure_message: Option<&str>,
+    metadata: ManagedReceiptMetadata<'_>,
+) -> String {
+    let mut object = Map::new();
+    object.insert("runtime".into(), json!(metadata.runtime));
+    if let Some(execution_mode) = metadata.execution_mode {
+        object.insert("execution_mode".into(), json!(execution_mode));
+    }
+    if let Some(backend_id) = metadata.backend_id {
+        object.insert("backend_id".into(), json!(backend_id));
+    }
+    if let Some(semantics_digest) = metadata.semantics_digest {
+        object.insert("semantics_manifest_sha256".into(), json!(semantics_digest));
+    }
+    object.insert("status".into(), json!(status));
+    object.insert("usage_units".into(), json!(receipt.usage_units));
+    object.insert("executed_ops".into(), json!(receipt.executed_ops));
+    object.insert("function_calls".into(), json!(receipt.function_calls));
+    object.insert("loop_iterations".into(), json!(receipt.loop_iterations));
+    object.insert("max_call_depth".into(), json!(receipt.max_call_depth));
+    object.insert("output_bytes".into(), json!(output_bytes));
+    object.insert(
+        "failure_code".into(),
+        failure_code.map_or(JsonValue::Null, |code| json!(code)),
+    );
+    object.insert(
+        "failure_message".into(),
+        failure_message.map_or(JsonValue::Null, |message| json!(message)),
+    );
+    JsonValue::Object(object).to_string()
+}
+
+fn failed_managed_task_result(
+    task: &Task,
+    elapsed_ms: i64,
+    error_code: &str,
+    error_message: String,
+    partial_receipt: Option<&ExecutionReceipt>,
+    metadata: ManagedReceiptMetadata<'_>,
+) -> Result<super::TaskResult> {
+    let receipt = partial_receipt.cloned().unwrap_or_default();
+    let usage_units = checked_managed_i64(receipt.usage_units, "usage units")?;
+    let output_bytes = checked_managed_i64(
+        u64::try_from(receipt.output_bytes)
+            .map_err(|_| anyhow::anyhow!("managed output bytes exceed the counter range"))?,
+        "output bytes",
+    )?;
+    let receipt_json = managed_receipt_json(
+        &receipt,
+        "failed",
+        receipt.output_bytes,
+        Some(error_code),
+        Some(&error_message),
+        metadata,
+    );
+    Ok(super::TaskResult {
+        task_id: task.task_id.clone(),
+        success: false,
+        output: None,
+        error: Some(error_message),
+        exit_code: 1,
+        cpu_time_ms: 0,
+        wall_time_ms: elapsed_ms,
+        peak_memory_mb: 0,
+        managed_executed_ops: usage_units,
+        managed_output_bytes: output_bytes,
+        managed_receipt_json: Some(receipt_json),
+        general_compute_result_json: None,
+        managed_gpu_result_json: None,
+    })
+}
+
+fn legacy_failed_managed_task_result(
+    task: &Task,
+    runtime: &str,
+    elapsed_ms: i64,
+    error_code: &str,
+    error_message: String,
+    executed_ops: i64,
+) -> Result<super::TaskResult> {
+    let receipt = json!({
+        "runtime": runtime,
+        "status": "failed",
+        "executed_ops": executed_ops,
+        "output_bytes": 0,
+        "failure_code": error_code,
+        "failure_message": error_message,
+    });
+    Ok(super::TaskResult {
+        task_id: task.task_id.clone(),
+        success: false,
+        output: None,
+        error: Some(error_message),
+        exit_code: 1,
+        cpu_time_ms: 0,
+        wall_time_ms: elapsed_ms,
+        peak_memory_mb: 0,
+        managed_executed_ops: executed_ops,
+        managed_output_bytes: 0,
+        managed_receipt_json: Some(receipt.to_string()),
+        general_compute_result_json: None,
+        managed_gpu_result_json: None,
+    })
 }
 
 fn execute_managed_function_task(
@@ -43,20 +188,18 @@ fn execute_managed_function_task(
     elapsed_ms: i64,
     cancelled: &AtomicBool,
 ) -> Result<super::TaskResult> {
+    let runtime = task.runtime.as_deref().unwrap_or("managed-function-v0");
     let source = task
         .task_source
         .as_deref()
         .filter(|source| !source.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("managed-function-v0 task_source is required"))?;
+        .ok_or_else(|| anyhow::anyhow!("{runtime} task_source is required"))?;
     let input = task
         .torrent_source
         .as_deref()
         .filter(|input| !input.trim().is_empty())
         .unwrap_or("null");
-    let limits = ExecutionLimits {
-        max_usage_units: (task.max_cpt > 0).then_some(task.max_cpt as u64),
-        ..ExecutionLimits::default()
-    };
+    let limits = managed_function_limits(task)?;
     let max_output_bytes = limits.max_output_bytes;
     let execution =
         match ManagedExecutor.execute_json_input_with_cancel(source, limits, input, cancelled) {
@@ -67,29 +210,29 @@ fn execute_managed_function_task(
                 } else {
                     error.to_string()
                 };
-                let receipt = json!({
-                    "runtime": "managed-function-v0",
-                    "status": "failed",
-                    "executed_ops": 0,
-                    "output_bytes": 0,
-                    "failure_code": error.code(),
-                    "failure_message": error_message,
-                });
-                return Ok(super::TaskResult {
-                    task_id: task.task_id.clone(),
-                    success: false,
-                    output: None,
-                    error: Some(error_message),
-                    exit_code: 1,
-                    cpu_time_ms: 0,
-                    wall_time_ms: elapsed_ms,
-                    peak_memory_mb: 0,
-                    managed_executed_ops: 0,
-                    managed_output_bytes: 0,
-                    managed_receipt_json: Some(receipt.to_string()),
-                    general_compute_result_json: None,
-                    managed_gpu_result_json: None,
-                });
+                if runtime == "managed-function-v1" {
+                    return failed_managed_task_result(
+                        task,
+                        elapsed_ms,
+                        error.code(),
+                        error_message,
+                        error.partial_receipt(),
+                        ManagedReceiptMetadata {
+                            runtime,
+                            execution_mode: None,
+                            backend_id: None,
+                            semantics_digest: None,
+                        },
+                    );
+                }
+                return legacy_failed_managed_task_result(
+                    task,
+                    runtime,
+                    elapsed_ms,
+                    error.code(),
+                    error_message,
+                    0,
+                );
             }
         };
     let output = if execution.output.is_empty() {
@@ -97,47 +240,52 @@ fn execute_managed_function_task(
             Ok(output) => output,
             Err(error) => {
                 let error_message = error.to_string();
-                let receipt = json!({
-                    "runtime": "managed-function-v0",
-                    "status": "failed",
-                    "executed_ops": execution.receipt.executed_ops,
-                    "output_bytes": 0,
-                    "failure_code": error.code(),
-                    "failure_message": error_message,
-                });
-                return Ok(super::TaskResult {
-                    task_id: task.task_id.clone(),
-                    success: false,
-                    output: None,
-                    error: Some(error_message),
-                    exit_code: 1,
-                    cpu_time_ms: 0,
-                    wall_time_ms: elapsed_ms,
-                    peak_memory_mb: 0,
-                    managed_executed_ops: execution.receipt.executed_ops as i64,
-                    managed_output_bytes: 0,
-                    managed_receipt_json: Some(receipt.to_string()),
-                    general_compute_result_json: None,
-                    managed_gpu_result_json: None,
-                });
+                if runtime == "managed-function-v1" {
+                    return failed_managed_task_result(
+                        task,
+                        elapsed_ms,
+                        error.code(),
+                        error_message,
+                        Some(&execution.receipt),
+                        ManagedReceiptMetadata {
+                            runtime,
+                            execution_mode: None,
+                            backend_id: None,
+                            semantics_digest: None,
+                        },
+                    );
+                }
+                return legacy_failed_managed_task_result(
+                    task,
+                    runtime,
+                    elapsed_ms,
+                    error.code(),
+                    error_message,
+                    checked_managed_i64(execution.receipt.executed_ops, "operation count")?,
+                );
             }
         }
     } else {
         execution.output
     };
-    let output_bytes = output.len() as i64;
-    let receipt = json!({
-        "runtime": "managed-function-v0",
-        "status": "completed",
-        "usage_units": execution.receipt.usage_units,
-        "executed_ops": execution.receipt.executed_ops,
-        "function_calls": execution.receipt.function_calls,
-        "loop_iterations": execution.receipt.loop_iterations,
-        "max_call_depth": execution.receipt.max_call_depth,
-        "output_bytes": output_bytes,
-        "failure_code": execution.receipt.failure_code,
-        "failure_message": execution.receipt.failure_message,
-    });
+    let output_bytes = checked_managed_i64(
+        u64::try_from(output.len())
+            .map_err(|_| anyhow::anyhow!("managed output bytes exceed the counter range"))?,
+        "output bytes",
+    )?;
+    let receipt = managed_receipt_json(
+        &execution.receipt,
+        "completed",
+        output.len(),
+        execution.receipt.failure_code.as_deref(),
+        execution.receipt.failure_message.as_deref(),
+        ManagedReceiptMetadata {
+            runtime,
+            execution_mode: None,
+            backend_id: None,
+            semantics_digest: None,
+        },
+    );
 
     Ok(super::TaskResult {
         task_id: task.task_id.clone(),
@@ -148,9 +296,9 @@ fn execute_managed_function_task(
         cpu_time_ms: 0,
         wall_time_ms: elapsed_ms,
         peak_memory_mb: 0,
-        managed_executed_ops: execution.receipt.usage_units.min(i64::MAX as u64) as i64,
+        managed_executed_ops: checked_managed_i64(execution.receipt.usage_units, "usage units")?,
         managed_output_bytes: output_bytes,
-        managed_receipt_json: Some(receipt.to_string()),
+        managed_receipt_json: Some(receipt),
         general_compute_result_json: None,
         managed_gpu_result_json: None,
     })
@@ -194,9 +342,10 @@ fn execute_managed_dsl_task(
         .map(|requested| requested.min(backend.max_usage_units))
         .or(Some(backend.max_usage_units));
     let limits = ExecutionLimits {
-        max_usage_units,
         max_output_bytes: backend.max_output_bytes as u64,
-        ..ExecutionLimits::default()
+        ..ExecutionLimits::for_managed_function_budget(
+            max_usage_units.unwrap_or(backend.max_usage_units),
+        )
     };
     let execution =
         match ManagedExecutor.execute_json_input_with_cancel(source, limits, input, cancelled) {
@@ -207,32 +356,19 @@ fn execute_managed_dsl_task(
                 } else {
                     error.to_string()
                 };
-                let receipt = json!({
-                    "runtime": "managed-function-v0",
-                    "execution_mode": "production_sandboxed_dsl",
-                    "backend_id": backend.backend_id,
-                    "semantics_manifest_sha256": backend.semantics_manifest_sha256,
-                    "status": "failed",
-                    "executed_ops": 0,
-                    "output_bytes": 0,
-                    "failure_code": error.code(),
-                    "failure_message": error_message,
-                });
-                return Ok(super::TaskResult {
-                    task_id: task.task_id.clone(),
-                    success: false,
-                    output: None,
-                    error: Some(error_message),
-                    exit_code: 1,
-                    cpu_time_ms: 0,
-                    wall_time_ms: elapsed_ms,
-                    peak_memory_mb: 0,
-                    managed_executed_ops: 0,
-                    managed_output_bytes: 0,
-                    managed_receipt_json: Some(receipt.to_string()),
-                    general_compute_result_json: None,
-                    managed_gpu_result_json: None,
-                });
+                return failed_managed_task_result(
+                    task,
+                    elapsed_ms,
+                    error.code(),
+                    error_message,
+                    error.partial_receipt(),
+                    ManagedReceiptMetadata {
+                        runtime: "managed-function-v0",
+                        execution_mode: Some("production_sandboxed_dsl"),
+                        backend_id: Some(backend.backend_id.as_str()),
+                        semantics_digest: Some(backend.semantics_manifest_sha256.as_str()),
+                    },
+                );
             }
         };
     let output = if execution.output.is_empty() {
@@ -240,51 +376,42 @@ fn execute_managed_dsl_task(
             Ok(output) => output,
             Err(error) => {
                 let error_message = error.to_string();
-                let receipt = json!({
-                    "runtime": "managed-function-v0",
-                    "execution_mode": "production_sandboxed_dsl",
-                    "backend_id": backend.backend_id,
-                    "semantics_manifest_sha256": backend.semantics_manifest_sha256,
-                    "status": "failed",
-                    "executed_ops": execution.receipt.executed_ops,
-                    "output_bytes": 0,
-                    "failure_code": error.code(),
-                    "failure_message": error_message,
-                });
-                return Ok(super::TaskResult {
-                    task_id: task.task_id.clone(),
-                    success: false,
-                    output: None,
-                    error: Some(error_message),
-                    exit_code: 1,
-                    cpu_time_ms: 0,
-                    wall_time_ms: elapsed_ms,
-                    peak_memory_mb: 0,
-                    managed_executed_ops: execution.receipt.executed_ops as i64,
-                    managed_output_bytes: 0,
-                    managed_receipt_json: Some(receipt.to_string()),
-                    general_compute_result_json: None,
-                    managed_gpu_result_json: None,
-                });
+                return failed_managed_task_result(
+                    task,
+                    elapsed_ms,
+                    error.code(),
+                    error_message,
+                    Some(&execution.receipt),
+                    ManagedReceiptMetadata {
+                        runtime: "managed-function-v0",
+                        execution_mode: Some("production_sandboxed_dsl"),
+                        backend_id: Some(backend.backend_id.as_str()),
+                        semantics_digest: Some(backend.semantics_manifest_sha256.as_str()),
+                    },
+                );
             }
         }
     } else {
         execution.output
     };
-    let output_bytes = output.len() as i64;
-    let receipt = json!({
-        "runtime": "managed-function-v0",
-        "execution_mode": "production_sandboxed_dsl",
-        "backend_id": backend.backend_id,
-        "semantics_manifest_sha256": backend.semantics_manifest_sha256,
-        "status": "completed",
-        "usage_units": execution.receipt.usage_units,
-        "executed_ops": execution.receipt.executed_ops,
-        "function_calls": execution.receipt.function_calls,
-        "loop_iterations": execution.receipt.loop_iterations,
-        "max_call_depth": execution.receipt.max_call_depth,
-        "output_bytes": output_bytes,
-    });
+    let output_bytes = checked_managed_i64(
+        u64::try_from(output.len())
+            .map_err(|_| anyhow::anyhow!("managed output bytes exceed the counter range"))?,
+        "output bytes",
+    )?;
+    let receipt = managed_receipt_json(
+        &execution.receipt,
+        "completed",
+        output.len(),
+        None,
+        None,
+        ManagedReceiptMetadata {
+            runtime: "managed-function-v0",
+            execution_mode: Some("production_sandboxed_dsl"),
+            backend_id: Some(backend.backend_id.as_str()),
+            semantics_digest: Some(backend.semantics_manifest_sha256.as_str()),
+        },
+    );
     Ok(super::TaskResult {
         task_id: task.task_id.clone(),
         success: true,
@@ -294,9 +421,9 @@ fn execute_managed_dsl_task(
         cpu_time_ms: 0,
         wall_time_ms: elapsed_ms,
         peak_memory_mb: 0,
-        managed_executed_ops: execution.receipt.usage_units.min(i64::MAX as u64) as i64,
+        managed_executed_ops: checked_managed_i64(execution.receipt.usage_units, "usage units")?,
         managed_output_bytes: output_bytes,
-        managed_receipt_json: Some(receipt.to_string()),
+        managed_receipt_json: Some(receipt),
         general_compute_result_json: None,
         managed_gpu_result_json: None,
     })
@@ -592,7 +719,7 @@ pub(crate) async fn run_task_with_cancel_and_backends_and_trusted_registration_a
     }
 
     Err(anyhow::anyhow!(
-        "unsupported runtime {:?}: only managed-function-v0 tasks are supported",
+        "unsupported runtime {:?}: only managed-function-v0/v1 tasks are supported",
         task.runtime.as_deref().unwrap_or("<none>")
     ))
 }
@@ -2107,6 +2234,34 @@ mod tests {
         assert_eq!(receipt["status"], "failed");
         assert_eq!(receipt["executed_ops"], 0);
         assert_eq!(receipt["output_bytes"], 0);
+    }
+
+    #[tokio::test]
+    async fn managed_function_v1_budget_exhaustion_preserves_partial_usage() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path().join("sandbox").to_str().unwrap());
+        let mut task = test_task_with_source("null");
+        task.runtime = Some("managed-function-v1".into());
+        task.max_cpt = 2;
+        task.task_source = Some("return 1 + 2 + 3;".into());
+
+        let result = run_task(&task, &config).await.unwrap();
+
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("budget_exhausted"));
+        assert!(result.managed_executed_ops > 0);
+        assert!(result.managed_executed_ops <= task.max_cpt);
+        let receipt: Value =
+            serde_json::from_str(result.managed_receipt_json.as_deref().unwrap()).unwrap();
+        assert_eq!(receipt["runtime"], "managed-function-v1");
+        assert_eq!(receipt["status"], "failed");
+        assert_eq!(receipt["failure_code"], "budget_exhausted");
+        assert_eq!(receipt["usage_units"], receipt["executed_ops"]);
+        assert!(receipt["usage_units"].as_u64().unwrap() <= task.max_cpt as u64);
     }
 
     #[tokio::test]

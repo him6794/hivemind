@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
+use std::sync::atomic::AtomicBool;
 
 use managed_function_runtime::{
-    ExecutionLimits, ManagedExecutor, Status, Value, render_output, render_output_bounded,
+    render_output, render_output_bounded, ExecutionLimits, ManagedExecutor, Status, Value,
 };
 
 #[test]
@@ -417,6 +418,110 @@ add(add(1, 2), add(3, 4));
         .unwrap_err();
 
     assert_eq!(err.code(), "op_limit_exceeded");
+}
+
+#[test]
+fn managed_function_profile_leaves_budget_as_the_work_limit() {
+    let limits = ExecutionLimits::for_managed_function_budget(123);
+
+    assert_eq!(limits.max_usage_units, Some(123));
+    assert_eq!(limits.max_ops, u64::MAX);
+    assert_eq!(limits.max_loop_iterations, u64::MAX);
+    assert_eq!(
+        limits.max_call_depth,
+        ExecutionLimits::default().max_call_depth
+    );
+    assert_eq!(
+        limits.max_output_bytes,
+        ExecutionLimits::default().max_output_bytes
+    );
+}
+
+#[test]
+fn budget_exhaustion_preserves_partial_receipt_without_overspending() {
+    let err = ManagedExecutor
+        .execute(
+            "return 1 + 2 + 3;",
+            ExecutionLimits::for_managed_function_budget(2),
+        )
+        .expect_err("the selected budget should be exhausted");
+
+    assert_eq!(err.code(), "budget_exhausted");
+    let receipt = err
+        .partial_receipt()
+        .expect("evaluator errors must carry their metering receipt");
+    assert!(receipt.executed_ops > 0);
+    assert_eq!(receipt.executed_ops, receipt.usage_units);
+    assert!(receipt.usage_units <= 2);
+}
+
+#[test]
+fn budget_boundary_is_exact_and_does_not_charge_failed_operation() {
+    let source = "return 1 + 2 + 3;";
+    let completed = ManagedExecutor
+        .execute(source, ExecutionLimits::for_managed_function_budget(100))
+        .expect("the reference budget must cover the program");
+    let exact_budget = completed.receipt.usage_units;
+    assert!(exact_budget > 0);
+
+    let exact = ManagedExecutor
+        .execute(
+            source,
+            ExecutionLimits::for_managed_function_budget(exact_budget),
+        )
+        .expect("the exact measured usage must remain executable");
+    assert_eq!(exact.receipt.usage_units, exact_budget);
+
+    let err = ManagedExecutor
+        .execute(
+            source,
+            ExecutionLimits::for_managed_function_budget(exact_budget - 1),
+        )
+        .expect_err("one unit below the measured usage must fail");
+    assert_eq!(err.code(), "budget_exhausted");
+    let receipt = err.partial_receipt().expect("partial receipt is required");
+    assert_eq!(receipt.executed_ops, receipt.usage_units);
+    assert!(receipt.usage_units < exact_budget);
+}
+
+#[test]
+fn unbounded_recursive_work_stops_at_the_user_budget() {
+    let source = r"
+fn recurse(value) { return recurse(value); }
+recurse(0);
+";
+    let limits = ExecutionLimits {
+        max_call_depth: usize::MAX,
+        ..ExecutionLimits::for_managed_function_budget(256)
+    };
+
+    let err = ManagedExecutor
+        .execute(source, limits)
+        .expect_err("recursive work must stop when the budget is exhausted");
+
+    assert_eq!(err.code(), "budget_exhausted");
+    let receipt = err.partial_receipt().expect("partial receipt is required");
+    assert_eq!(receipt.executed_ops, receipt.usage_units);
+    assert!(receipt.usage_units <= 256);
+    assert!(receipt.function_calls > 0);
+}
+
+#[test]
+fn cancellation_returns_a_partial_receipt() {
+    let cancelled = AtomicBool::new(true);
+    let err = ManagedExecutor
+        .execute_json_input_with_cancel(
+            "return 1;",
+            ExecutionLimits::for_managed_function_budget(100),
+            "null",
+            &cancelled,
+        )
+        .expect_err("pre-cancelled execution must stop");
+
+    assert_eq!(err.code(), "cancelled");
+    let receipt = err.partial_receipt().expect("partial receipt is required");
+    assert_eq!(receipt.executed_ops, 0);
+    assert_eq!(receipt.usage_units, 0);
 }
 
 #[test]

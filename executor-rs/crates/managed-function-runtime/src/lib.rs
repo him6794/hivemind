@@ -25,9 +25,9 @@ mod gpu;
 #[cfg(all(feature = "cuda", target_os = "linux"))]
 pub use gpu::CudaGpuBackend;
 pub use gpu::{
-    CpuGpuBackend, GPU_BILLING_VERSION, GPU_COST_MODEL_VERSION, GPU_MAX_TENSOR_BYTES,
-    GPU_OPERATION_COST, GPU_OPERATION_REGISTRY_VERSION, GPU_RUNTIME_VERSION, GpuBackend,
-    GpuBackendError, GpuOperation, GpuTensor,
+    CpuGpuBackend, GpuBackend, GpuBackendError, GpuOperation, GpuTensor, GPU_BILLING_VERSION,
+    GPU_COST_MODEL_VERSION, GPU_MAX_TENSOR_BYTES, GPU_OPERATION_COST,
+    GPU_OPERATION_REGISTRY_VERSION, GPU_RUNTIME_VERSION,
 };
 
 use std::{
@@ -304,6 +304,21 @@ impl ExecutionLimits {
             max_value_materialization_bytes: u64::MAX,
         }
     }
+
+    /// Build the production managed-function profile for one replica.
+    ///
+    /// The user's usage allowance is the only work-count limit. Operation and
+    /// loop counters still use checked arithmetic, while output, value, and
+    /// call-depth limits remain independent structural safety controls.
+    #[must_use]
+    pub fn for_managed_function_budget(max_usage_units: u64) -> Self {
+        Self {
+            max_ops: u64::MAX,
+            max_usage_units: Some(max_usage_units),
+            max_loop_iterations: u64::MAX,
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -333,6 +348,7 @@ pub struct RuntimeError {
     message: String,
     line: Option<usize>,
     column: Option<usize>,
+    partial_receipt: Option<Box<ExecutionReceipt>>,
 }
 
 impl RuntimeError {
@@ -351,13 +367,25 @@ impl RuntimeError {
         self.column
     }
 
+    /// Return the metering state accumulated before this error.
+    #[must_use]
+    pub fn partial_receipt(&self) -> Option<&ExecutionReceipt> {
+        self.partial_receipt.as_deref()
+    }
+
     fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
             line: None,
             column: None,
+            partial_receipt: None,
         }
+    }
+
+    fn with_partial_receipt(mut self, receipt: ExecutionReceipt) -> Self {
+        self.partial_receipt = Some(Box::new(receipt));
+        self
     }
 
     fn at(mut self, span: Span) -> Self {
@@ -1666,26 +1694,32 @@ impl<'a> Evaluator<'a> {
             }
         }
 
-        let mut last = Value::Null;
-        for statement in &program.statements {
-            if matches!(statement, Stmt::Fn(_)) {
-                continue;
-            }
-            match self.eval_stmt(statement)? {
-                Control::Continue(value) => last = value,
-                Control::Return(value) => {
-                    last = value;
-                    break;
+        let evaluated: Result<Value, RuntimeError> = (|| {
+            let mut last = Value::Null;
+            for statement in &program.statements {
+                if matches!(statement, Stmt::Fn(_)) {
+                    continue;
+                }
+                match self.eval_stmt(statement)? {
+                    Control::Continue(value) => last = value,
+                    Control::Return(value) => {
+                        last = value;
+                        break;
+                    }
                 }
             }
-        }
+            Ok(last)
+        })();
 
-        Ok(ExecutionResult {
-            status: Status::Completed,
-            value: last,
-            output: self.output,
-            receipt: self.receipt,
-        })
+        match evaluated {
+            Ok(value) => Ok(ExecutionResult {
+                status: Status::Completed,
+                value,
+                output: self.output,
+                receipt: self.receipt,
+            }),
+            Err(error) => Err(error.with_partial_receipt(self.receipt)),
+        }
     }
 
     fn eval_stmt(&mut self, statement: &Stmt) -> Result<Control, RuntimeError> {
@@ -2444,14 +2478,19 @@ impl<'a> Evaluator<'a> {
         {
             return Err(RuntimeError::new("cancelled", "task execution stopped"));
         }
-        let next = self.receipt.executed_ops.saturating_add(cost);
+        let next = self.receipt.executed_ops.checked_add(cost).ok_or_else(|| {
+            RuntimeError::new("op_limit_exceeded", "operation counter overflowed")
+        })?;
         if next > self.limits.max_ops {
             return Err(RuntimeError::new(
                 "op_limit_exceeded",
                 "operation limit exceeded",
             ));
         }
-        let next_usage = self.receipt.usage_units.saturating_add(cost);
+        let next_usage =
+            self.receipt.usage_units.checked_add(cost).ok_or_else(|| {
+                RuntimeError::new("budget_exhausted", "execution budget exhausted")
+            })?;
         if self
             .limits
             .max_usage_units
@@ -2774,8 +2813,8 @@ impl Write for BoundedFmtWriter<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CpuGpuBackend, ExecutionLimits, ManagedExecutor, ManagedGpuExecutor, Value,
-        render_output_bounded,
+        render_output_bounded, CpuGpuBackend, ExecutionLimits, ManagedExecutor, ManagedGpuExecutor,
+        Value,
     };
 
     #[test]
