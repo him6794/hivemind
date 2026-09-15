@@ -1,6 +1,9 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$WorkerExecutable,
+    # Kept optional for older protected CI invocations; the packaged bundle is
+    # the only runtime source and this value is deliberately never read.
+    [Parameter(Mandatory = $false)][string]$BackendRegistry = "",
     [Parameter(Mandatory = $true)][string]$EvidenceDirectory
 )
 
