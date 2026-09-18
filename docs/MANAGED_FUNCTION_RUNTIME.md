@@ -1,15 +1,25 @@
-# Managed Function Runtime Plan
+# Managed Function Runtime
 
 ## Goal
 
 The Managed Function Runtime is a restricted, metered execution path for small
-serverless-style Hivemind tasks. It is the only supported task runtime:
-ZIP/package execution has been removed, and managed functions provide
-predictable billing and a small, tightly bounded execution surface.
+serverless-style Hivemind tasks. It parses a fixed syntax, evaluates it with a
+closed Rust-owned interpreter, and returns deterministic output and execution
+receipts. It does not execute user-supplied executables or expose file, network,
+import, subprocess, reflection, or arbitrary host-function capabilities.
 
-The first milestone is a Rust executor that parses a fixed syntax, evaluates it
-without file, network, import, subprocess, or reflection support, and returns an
-execution receipt for diagnostics and audit records.
+General-compute tasks are a separate runtime. Only that arbitrary-compute route
+may use the native Windows HCS backend; managed functions never require HCS,
+Docker, WSL, a VM, SSH, or a direct host-process fallback.
+
+## Active contract
+
+`managed-function-v1` is the only managed-function runtime accepted for new
+submissions. It uses the closed interpreter described below with a versioned
+per-replica usage allowance, checked arithmetic, structural safety limits, and
+Nodepool-coordinated consensus settlement. `managed-function-v0` is retained
+only so historical tasks, receipts, consensus evidence, and legacy capability
+reports remain readable; it is rejected at every new-work admission boundary.
 
 ## Frozen v0 contract
 
@@ -40,12 +50,43 @@ The v0 limitations are part of that frozen contract:
 - `ExecutionLimits::unlimited()` is a legacy/testing convenience, not the
   production v0 default.
 
+## Managed-function-v1 contract
+
+`managed-function-v1` is the versioned usage-billing contract for the same
+closed interpreter. Its runtime, backend, cost-model, and semantics identities
+are pinned by
+[`executor-rs/crates/managed-function-runtime/managed-function-v1-semantics.json`](../executor-rs/crates/managed-function-runtime/managed-function-v1-semantics.json)
+and digest
+`c2dc962dcf6762df51fa94af2ee1f00a4d1aabdf84321ec67a3ab7f892692853`.
+
+- Each managed task is executed by the configured replica set (three replicas
+  by default, with a two-replica quorum; at most seven replicas). A single
+  Worker cannot complete, settle, or bill the task.
+- `max_cpt` is an independent execution-credit allowance for each replica. One
+  executed operation is one CPT. The evaluator does not impose a separate
+  fixed `max_ops` or `max_loop_iterations` work ceiling; execution stops before
+  charging an operation that would exceed that replica's allowance.
+- Results use checked signed-`i64` arithmetic. Overflow fails with
+  `integer_arithmetic_overflow`; division by zero remains a separate runtime
+  failure.
+- A budget-exhausted result is failed for consensus, but valid work recorded
+  before exhaustion remains billable. Nodepool pays every replica with valid
+  accepted evidence, including a valid divergent result outside the winning
+  certificate participants.
+- Nodepool holds the worst-case per-replica allowance before enforce-mode
+  dispatch, settles actual accepted usage plus its calculated fee, and refunds
+  the unused hold. Observe mode records shadow evidence only and never creates
+  a hold or financial ledger mutation.
+- Structural safety limits and the task deadline remain bounded. Missing or
+  invalid runtime assets fail closed; no unsafe execution fallback is allowed.
+
 ## Runtime Contract
 
 Input:
 
 - source text using the supported syntax below
-- execution limits: max operations, max call depth, max output bytes
+- a positive per-replica `max_cpt` usage allowance plus structural safety limits
+  such as call depth, value size, output size, and the task deadline
 - optional function arguments in a later milestone
 
 Output:
@@ -58,12 +99,16 @@ Output:
 
 Hivemind task integration:
 
-- set `runtime = "managed-function-v0"`
+- set `runtime` to `managed-function-v1` for every new managed submission
 - set `task_source` to the managed function source text
 - set `torrent` / `torrent_source` to the JSON input payload when input is
   needed
-- `managed-function-v0` is the only supported task runtime; ZIP/torrent-based
-  task execution has been removed
+- v1 submissions are admitted only when their runtime, backend, semantics
+  digest, source, and input identities match the Nodepool policy
+- historical v0 task rows and evidence remain readable but cannot be resumed
+  or submitted as new work
+- ZIP/torrent-based executable task execution has been removed; the JSON
+  payload is data for the closed interpreter, not an executable package
 
 Receipt fields:
 
@@ -83,11 +128,17 @@ Worker `ExecuteTaskResponse` forwards the receipt summary back to the scheduler:
 - `managed_output_bytes`
 - `managed_receipt_json`
 
-The scheduler stores these fields as diagnostic evidence. Managed settlement is
-authorized only by the Nodepool-owned consensus certificate and the fixed task
-reservation, never by a single Worker receipt or usage claim.
+The scheduler stores these fields as typed replica evidence. For v0 they remain
+compatibility and diagnostic data. For v1 Nodepool independently validates the
+current-attempt evidence and uses the accepted per-replica usage for settlement;
+a single Worker receipt or usage claim is never authoritative.
 
-## Supported Syntax v0
+## Supported Syntax
+
+The active v1 language and the frozen v0 language share this closed syntax. The
+syntax is intentionally separate from each version's metering and settlement
+rules, so a historical v0 fixture can be parsed without making v0 available for
+new submission.
 
 Statements:
 
@@ -138,11 +189,14 @@ Rules:
 - The last expression statement becomes the final value unless an earlier
   `return` exits the program.
 - `input` is available when the caller provides JSON input.
-- `for` only iterates lists and is bounded by `max_loop_iterations`.
+- `for` only iterates lists. In v1, work is bounded by the per-replica
+  `max_cpt` allowance while structural limits and the task deadline remain
+  active; frozen v0 fixtures additionally retain their historical
+  `max_loop_iterations` limit.
 - Built-in functions currently include `len(value)`, `get(target, key)`, and
   `contains(target, value)`.
 
-Forbidden in v0:
+Forbidden in managed-function-v1 (and in the frozen v0 language):
 
 - imports
 - file I/O
@@ -203,37 +257,51 @@ Initial cost table:
 Execution stops with `op_limit_exceeded` before an operation would exceed the
 configured limit.
 
-## Billing Direction
+## Metering v1
 
-Managed function settlement uses the Nodepool-owned fixed reservation. The
-execution receipt remains useful for diagnostics, audit, and capacity analysis,
-but Worker-reported usage does not determine the amount charged.
+The v1 cost vectors use the same evaluator operation accounting, including
+function-call, print, and loop-iteration costs. `max_usage_units` is the
+per-replica work allowance and is the only dynamic work stop; `max_ops` and
+`max_loop_iterations` use the unbounded sentinel. Receipt `usage_units` and
+`executed_ops` are equal and are checked before settlement.
 
-The result contract is:
+## Billing and consensus
+
+The frozen v0 contract retains its historical fixed-reservation and diagnostic
+receipt semantics. V0 is no longer accepted for new work; completed v0 records
+are preserved as historical evidence, and unfinished v0 work is cancelled at
+Nodepool startup rather than being converted to v1.
+
+For v1, consensus and payment are deliberately separate:
 
 ```text
 canonical result = managed-consensus-result-v1
 output digest    = sha256
-settlement       = Nodepool certificate over a strict-majority quorum
-billing          = fixed task reservation
+quorum           = Nodepool certificate over the configured replica quorum
+billing          = accepted per-replica executed operations + Nodepool fee
 ```
 
-A managed task is dispatched to distinct eligible Workers. Settlement requires
-a valid quorum certificate, matching persisted replica evidence, and the exact
-task, attempt, and round identity. Worker usage and operation counts remain
-diagnostic evidence and do not authorize settlement.
+A managed task is dispatched to distinct eligible Workers. Nodepool validates
+the task, attempt, replica, result, identity, and usage evidence. The winning
+certificate selects the output, while every valid accepted replica in the
+attempt is paid for its own measured work. A valid divergent replica need not be
+a certificate participant to receive payment.
 
-If the consensus policy is missing, disabled, or cannot reach quorum, the task
-remains un-settled or fails closed. There is no single-Worker, receipt-only,
-or legacy fallback path.
+No certificate is fabricated merely to justify payment. Accepted terminal
+evidence may settle an enforce-mode hold without a winning certificate, but
+usage-only settlement never marks the task completed. If policy is missing,
+disabled, malformed, or cannot safely execute, the route fails closed. There is
+no single-Worker, receipt-only, fixed-split, or unsafe fallback path.
 
-## Implementation Plan
+## Execution boundary
 
-1. Add a new Rust crate under `executor-rs/crates/managed-function-runtime`.
-2. Implement a small lexer and recursive-descent parser for v0 syntax.
-3. Implement evaluation over a closed `Value` enum.
-4. Implement metering in the evaluator, not only in the parser.
-5. Return a structured `ExecutionReceipt`.
-6. Add CLI/service integration after the core crate is stable.
-7. Keep fixed-reservation billing and consensus certificate settlement in the
-   Nodepool control plane; receipts remain diagnostic evidence.
+The runtime is a closed interpreter over the `Value` enum. It has no API for
+arbitrary process creation, shell commands, filesystem access, network access,
+imports, reflection, dynamic evaluation, or host callbacks. The Worker only
+returns the typed result and receipt; Nodepool is the sole verification,
+consensus, payment, settlement, and billing authority.
+
+The v0 and v1 contracts are intentionally versioned. Changes to parser
+semantics, limits, receipt meaning, cost vectors, or settlement inputs require a
+new runtime/cost-model/manifest identity and compatibility tests rather than a
+silent mutation of v0.

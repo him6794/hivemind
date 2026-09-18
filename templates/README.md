@@ -1,11 +1,11 @@
 # Hivemind Task Templates
 
-Ready-to-use starting points for requestors. Hivemind runs
-`managed-function-v0` tasks: a source function plus a JSON input payload.
+Ready-to-use starting points for requestors. Hivemind runs the active
+`managed-function-v1` runtime: a source function plus a JSON input payload.
 
 ## Available Templates
 
-See `managed-function-v0/` for runnable samples. Each sample is a pair:
+See `managed-function-v1/` for runnable samples. Each sample is a pair:
 
 | Sample | Use Case |
 |--------|----------|
@@ -22,12 +22,14 @@ See `managed-function-v0/` for runnable samples. Each sample is a pair:
 3. Submit with the CLI:
 
    ```bash
-   hivemind submit templates/managed-function-v0/03_batch_sum.hmf \
-     --input templates/managed-function-v0/03_batch_sum.input.json \
-     --username user --password pass --max-cpt 25
+   hivemind submit templates/managed-function-v1/03_batch_sum.hmf \
+     --input '{"items":[{"status":"paid","amount":10},{"status":"pending","amount":7},{"status":"paid","amount":25}]}' \
+     --username user --password pass --max-cpt 1000
    ```
 
-   Or submit over HTTP with `POST /api/tasks` (see `docs/MANAGED_FUNCTION_RUNTIME.md`).
+   The CLI `--input` option takes inline JSON; the matching `.input.json` file
+   is a reference payload and is not read automatically. Or submit over HTTP
+   with `POST /api/tasks` (see `docs/MANAGED_FUNCTION_RUNTIME.md`).
 
 ## Resource and Budget Overrides
 
@@ -38,4 +40,10 @@ Submission flags adjust the requested resources and budget:
 - `--gpu-score` - minimum GPU benchmark score
 - `--gpu-memory-gb` - VRAM requirement
 - `--storage-gb` - disk space requirement
-- `--max-cpt` - the managed execution budget; execution stops when it is spent
+- `--max-cpt` - the positive per-replica managed execution allowance; the
+  initial hold covers every selected replica plus the platform fee, and unused
+  held CPT is refunded after settlement
+
+The historical `managed-function-v0/` fixtures remain in the repository for
+frozen compatibility tests and old task documentation. New submissions must
+use `managed-function-v1`.

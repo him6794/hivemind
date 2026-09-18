@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+general-compute-runtime = { path = "../../../executor-rs/crates/general-compute-runtime" }
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true

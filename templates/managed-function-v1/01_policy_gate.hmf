@@ -1,0 +1,21 @@
+let user = get(input, "user");
+let spend = get(input, "spend_cpt");
+let max = get(input, "max_cpt");
+let verified = get(user, "verified");
+let risk = get(user, "risk_score");
+
+let allowed = if verified == true {
+    if risk < 50 {
+        if spend <= max { true } else { false }
+    } else {
+        false
+    }
+} else {
+    false
+};
+
+{
+    "allowed": allowed,
+    "risk_score": risk,
+    "spend_cpt": spend
+};

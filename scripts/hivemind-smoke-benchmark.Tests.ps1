@@ -21,13 +21,23 @@ function Assert-Contains {
 
 Assert-Contains `
     -Haystack $scriptText `
-    -Needle "WorkerCounts = @(1, 5)" `
-    -Message "benchmark must cover the recommended 1-worker and 5-worker smoke sizes."
+    -Needle 'ValidateSet("managed-function-v1")' `
+    -Message "benchmark must expose only the active managed-function-v1 runtime."
+
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle "WorkerCounts = @(3, 5)" `
+    -Message "benchmark must cover the enforced-consensus 3-worker and 5-worker smoke sizes."
 
 Assert-Contains `
     -Haystack $scriptText `
     -Needle "TaskCounts = @(10, 100)" `
     -Message "benchmark must cover the recommended 10-task and 100-task smoke sizes."
+
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle 'requires at least $workerTarget registered Workers for managed-function-v1 consensus' `
+    -Message "benchmark must fail before a V1 consensus scenario lacks enough Workers."
 
 Assert-Contains `
     -Haystack $scriptText `

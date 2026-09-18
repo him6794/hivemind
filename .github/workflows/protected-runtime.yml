@@ -14,7 +14,6 @@ on:
           - onnx
           - oci
           - hcs
-          - settlement
 
 permissions:
   contents: read
@@ -188,45 +187,3 @@ jobs:
             -BackendRegistry $env:HIVEMIND_WINDOWS_HCS_BACKEND_REGISTRY `
             -EvidenceDirectory (Join-Path $env:GITHUB_WORKSPACE 'test_logs/windows-hcs-e2e')
           if (!$?) { throw 'native HCS gate failed' }
-
-  protected-settlement:
-    name: Managed proof live settlement
-    if: inputs.scope == 'all' || inputs.scope == 'settlement'
-    runs-on: [self-hosted, windows, x64, managed-proof]
-    timeout-minutes: 45
-    environment: protected-managed-proof-settlement
-    env:
-      HIVEMIND_LIVE_WEBSITE_API_BASE: ${{ secrets.HIVEMIND_LIVE_WEBSITE_API_BASE }}
-      HIVEMIND_LIVE_MASTER_API_BASE: ${{ secrets.HIVEMIND_LIVE_MASTER_API_BASE }}
-      HIVEMIND_LIVE_USERNAME: ${{ secrets.HIVEMIND_LIVE_USERNAME }}
-      HIVEMIND_LIVE_PASSWORD: ${{ secrets.HIVEMIND_LIVE_PASSWORD }}
-      HIVEMIND_LIVE_TASK_SOURCE_PATH: ${{ vars.HIVEMIND_LIVE_TASK_SOURCE_PATH }}
-      HIVEMIND_LIVE_TASK_INPUT_JSON: ${{ secrets.HIVEMIND_LIVE_TASK_INPUT_JSON }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Require protected deployment and task fixture
-        shell: pwsh
-        run: |
-          foreach ($name in @('HIVEMIND_LIVE_WEBSITE_API_BASE', 'HIVEMIND_LIVE_MASTER_API_BASE', 'HIVEMIND_LIVE_USERNAME', 'HIVEMIND_LIVE_PASSWORD', 'HIVEMIND_LIVE_TASK_SOURCE_PATH', 'HIVEMIND_LIVE_TASK_INPUT_JSON')) {
-            $value = [Environment]::GetEnvironmentVariable($name)
-            if ([string]::IsNullOrWhiteSpace($value)) { throw "$name is required" }
-          }
-          foreach ($name in @('HIVEMIND_LIVE_WEBSITE_API_BASE', 'HIVEMIND_LIVE_MASTER_API_BASE')) {
-            $uri = [Uri][Environment]::GetEnvironmentVariable($name)
-            if ($uri.Scheme -ne 'https') { throw "$name must use HTTPS" }
-          }
-          if (!(Test-Path -LiteralPath $env:HIVEMIND_LIVE_TASK_SOURCE_PATH -PathType Leaf)) { throw 'managed proof task source is missing' }
-          $null = $env:HIVEMIND_LIVE_TASK_INPUT_JSON | ConvertFrom-Json
-      - name: Execute proof-to-settlement flow
-        shell: pwsh
-        run: |
-          & ./scripts/managed-proof-live-e2e.ps1 `
-            -WebsiteApiBase $env:HIVEMIND_LIVE_WEBSITE_API_BASE `
-            -MasterApiBase $env:HIVEMIND_LIVE_MASTER_API_BASE `
-            -Username $env:HIVEMIND_LIVE_USERNAME `
-            -Password $env:HIVEMIND_LIVE_PASSWORD `
-            -TaskSourcePath $env:HIVEMIND_LIVE_TASK_SOURCE_PATH `
-            -TaskInputJson $env:HIVEMIND_LIVE_TASK_INPUT_JSON `
-            -OutputDir (Join-Path $env:GITHUB_WORKSPACE 'test_logs/managed-proof-live-e2e')
-          if (!$?) { throw 'managed proof live settlement failed' }

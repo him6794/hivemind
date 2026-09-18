@@ -5,6 +5,9 @@ use general_compute_runtime::managed_gpu::{
     ManagedGpuCapability, ManagedGpuRequest, ManagedGpuResult, ManagedGpuStatus,
     MANAGED_GPU_RUNTIME_VERSION,
 };
+use general_compute_runtime::{
+    MANAGED_DSL_V1_RUNTIME_VERSION, MANAGED_DSL_V1_SEMANTICS_MANIFEST_SHA256,
+};
 use hivemind_auth::worker_execution::{WorkerExecutionIdentity, WorkerExecutionSigner};
 use hivemind_client_core::{SessionError, SessionTask, SharedSessionRegistry};
 use hivemind_config::{ManagedConsensusConfig, ManagedConsensusRolloutMode};
@@ -37,6 +40,7 @@ use crate::scheduler;
 use crate::task_repository::{
     is_managed_gpu_binding_integrity_error, ManagedConsensusAssignment, ManagedConsensusAttempt,
     ManagedConsensusReplica, ManagedConsensusStopTarget, TaskRepository,
+    MANAGED_FUNCTION_V0_RETIREMENT_REASON,
 };
 
 pub struct Dispatcher {
@@ -72,6 +76,9 @@ fn classify_managed_task_dispatch(
     rollout_mode: ManagedConsensusRolloutMode,
     has_policy: bool,
 ) -> ManagedTaskDispatchMode {
+    if task.runtime.as_deref().map(str::trim) == Some("managed-function-v0") {
+        return ManagedTaskDispatchMode::Disabled;
+    }
     if !is_managed_runtime(task.runtime.as_deref()) {
         return ManagedTaskDispatchMode::Legacy;
     }
@@ -740,6 +747,67 @@ impl Dispatcher {
         }
     }
 
+    async fn reconcile_managed_consensus_pending_stops(&self) -> Result<u64> {
+        let mut finalized = 0u64;
+        for (task, attempt) in self.repo.managed_consensus_pending_stop_attempts().await? {
+            let targets = self
+                .repo
+                .managed_consensus_stop_targets(&task.task_id)
+                .await?;
+            let mut all_stopped = true;
+            for target in &targets {
+                if let Err(error) = stop_managed_consensus_replica(
+                    &self.worker_execution_private_key_pem,
+                    &task,
+                    target,
+                )
+                .await
+                {
+                    all_stopped = false;
+                    warn!(
+                        task_id = %task.task_id,
+                        worker_id = %target.worker_id,
+                        error = %error,
+                        "managed consensus pending stop remains unconfirmed"
+                    );
+                }
+            }
+            if all_stopped
+                && self
+                    .repo
+                    .finalize_managed_consensus_stop_pending(&task.task_id, attempt.id)
+                    .await?
+                    .is_some()
+            {
+                finalized += 1;
+            }
+        }
+        Ok(finalized)
+    }
+
+    /// Retire unfinished public V0 tasks before recovery can resume an old
+    /// consensus attempt. Pending stop reconciliation also retries V0 stops
+    /// that were recorded by a prior process before a Worker acknowledged.
+    pub async fn retire_managed_function_v0_tasks(&self) -> Result<u64> {
+        let retired = self
+            .repo
+            .retire_nonterminal_managed_function_v0_tasks()
+            .await?;
+        for task in &retired {
+            self.cancel_session_delivery(task);
+        }
+        let finalized = self.reconcile_managed_consensus_pending_stops().await?;
+        if !retired.is_empty() {
+            warn!(
+                count = retired.len(),
+                reason = MANAGED_FUNCTION_V0_RETIREMENT_REASON,
+                finalized_pending_stops = finalized,
+                "cancelled unfinished managed-function-v0 tasks during runtime retirement"
+            );
+        }
+        Ok(u64::try_from(retired.len())?)
+    }
+
     pub async fn process_timeouts(&self) -> Result<(u64, u64)> {
         let stale = self
             .repo
@@ -967,35 +1035,7 @@ impl Dispatcher {
                 }
             }
         }
-        for (task, attempt) in self.repo.managed_consensus_pending_stop_attempts().await? {
-            let targets = self
-                .repo
-                .managed_consensus_stop_targets(&task.task_id)
-                .await?;
-            let mut all_stopped = true;
-            for target in &targets {
-                if let Err(error) = stop_managed_consensus_replica(
-                    &self.worker_execution_private_key_pem,
-                    &task,
-                    target,
-                )
-                .await
-                {
-                    all_stopped = false;
-                    warn!(
-                        task_id = %task.task_id,
-                        worker_id = %target.worker_id,
-                        error = %error,
-                        "managed consensus pending stop remains unconfirmed"
-                    );
-                }
-            }
-            if all_stopped {
-                self.repo
-                    .finalize_managed_consensus_stop_pending(&task.task_id, attempt.id)
-                    .await?;
-            }
-        }
+        self.reconcile_managed_consensus_pending_stops().await?;
         for (task, attempt) in self.repo.expired_managed_consensus_attempts().await? {
             match self
                 .expire_managed_consensus_attempt(
@@ -1031,6 +1071,13 @@ impl Dispatcher {
             let Some(task) = self.repo.find_by_task_id(&attempt.task_id).await? else {
                 continue;
             };
+            if task.runtime.as_deref().map(str::trim) == Some("managed-function-v0") {
+                warn!(
+                    task_id = %task.task_id,
+                    "skipping retired managed-function-v0 consensus recovery"
+                );
+                continue;
+            }
             if !matches!(task.status, TaskStatus::Assigned | TaskStatus::Running) {
                 continue;
             }
@@ -1095,6 +1142,7 @@ impl Dispatcher {
         interval: std::time::Duration,
     ) -> watch::Sender<bool> {
         let (tx, mut rx) = watch::channel(false);
+        // Nodepool startup retires V0 synchronously before this loop starts.
         tokio::spawn(async move {
             match self.recover_managed_consensus_attempts().await {
                 Ok(resumed) if resumed > 0 => {
@@ -1200,7 +1248,9 @@ fn build_execute_task_request_with_credentials(task: &Task, token: String) -> Ex
         token,
         managed_budget_units: if matches!(
             runtime,
-            Some("managed-function-v0") | Some("production_sandboxed_dsl")
+            Some("managed-function-v0")
+                | Some("managed-function-v1")
+                | Some("production_sandboxed_dsl")
         ) {
             task.max_cpt.max(0)
         } else {
@@ -1678,7 +1728,9 @@ fn worker_session_execution_token_with_lifetime(
 fn is_managed_runtime(runtime: Option<&str>) -> bool {
     matches!(
         runtime,
-        Some("managed-function-v0") | Some("production_sandboxed_dsl")
+        Some("managed-function-v0")
+            | Some("managed-function-v1")
+            | Some("production_sandboxed_dsl")
     )
 }
 
@@ -2461,6 +2513,9 @@ async fn stop_managed_consensus_replica(
 }
 
 fn managed_consensus_backend_id(task: &Task) -> String {
+    if task.runtime.as_deref().map(str::trim) == Some(MANAGED_DSL_V1_RUNTIME_VERSION) {
+        return hivemind_managed_consensus::MANAGED_DSL_V1_DEFAULT_BACKEND_ID.to_owned();
+    }
     task.managed_dsl_backend_id
         .as_deref()
         .filter(|backend_id| !backend_id.trim().is_empty())
@@ -2477,6 +2532,9 @@ fn managed_consensus_backend_id(task: &Task) -> String {
 }
 
 fn managed_consensus_semantics_digest(task: &Task) -> String {
+    if task.runtime.as_deref().map(str::trim) == Some(MANAGED_DSL_V1_RUNTIME_VERSION) {
+        return MANAGED_DSL_V1_SEMANTICS_MANIFEST_SHA256.to_owned();
+    }
     task.managed_dsl_semantics_manifest_sha256
         .as_deref()
         .filter(|digest| !digest.trim().is_empty())
@@ -4161,7 +4219,7 @@ mod tests {
     #[test]
     fn managed_dispatch_fails_closed_without_a_persisted_policy() {
         let mut task = make_task("managed-rollout", TaskStatus::Pending, 0);
-        task.runtime = Some("managed-function-v0".into());
+        task.runtime = Some("managed-function-v1".into());
 
         for rollout_mode in [
             ManagedConsensusRolloutMode::Disabled,
@@ -7731,6 +7789,323 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(active_reservations, 0);
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn retiring_active_v0_consensus_retries_worker_stops_before_releasing_reservations() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_retiring_active_v0_consensus").await else {
+            return;
+        };
+        let repo = Arc::new(TaskRepository::new(db.pool.clone()));
+        let unique = uuid::Uuid::new_v4().to_string();
+        let owner = format!("dispatcher-retired-v0-owner-{unique}");
+        let task_id = format!("dispatcher-retired-v0-task-{unique}");
+        let worker_ids = [
+            format!("dispatcher-retired-v0-worker-a-{unique}"),
+            format!("dispatcher-retired-v0-worker-b-{unique}"),
+            format!("dispatcher-retired-v0-worker-c-{unique}"),
+        ];
+        let provider_users = [
+            format!("dispatcher-retired-v0-provider-a-{unique}"),
+            format!("dispatcher-retired-v0-provider-b-{unique}"),
+            format!("dispatcher-retired-v0-provider-c-{unique}"),
+        ];
+        let Some((reachable_addr, mut stop_requests)) =
+            consensus_worker_server(Vec::new(), Duration::ZERO).await
+        else {
+            fixture.cleanup().await.ok();
+            return;
+        };
+        let unreachable_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unreachable_addr = unreachable_listener.local_addr().unwrap();
+        drop(unreachable_listener);
+
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 1000)",
+        )
+        .bind(&owner)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        for (worker_id, provider_user) in worker_ids.iter().zip(provider_users.iter()) {
+            sqlx::query(
+                "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 0)",
+            )
+            .bind(provider_user)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO worker_nodes (worker_id, username, ip, cpu_cores, memory_gb,
+                 cpu_score, gpu_score, gpu_memory_gb, storage_total_gb, storage_available_gb)
+                 VALUES ($1, $2, '127.0.0.1:1', 4, 16, 400, 0, 0, 500, 200)",
+            )
+            .bind(worker_id)
+            .bind(provider_user)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        }
+
+        let mut task = make_task(&task_id, TaskStatus::Pending, 0);
+        task.owner = owner.clone();
+        task.runtime = Some("managed-function-v0".into());
+        task.task_source = Some("return input".into());
+        task.torrent_source = Some("{}".into());
+        task.deterministic = true;
+        task.max_cpt = 100;
+        task = repo.create(&task).await.unwrap();
+
+        let attempt_id = uuid::Uuid::new_v4();
+        let execution_id = format!("managed-execution-v0:{unique}");
+        let round_id = format!("managed-consensus-round-v0:{unique}:0");
+        let request_digest = format!("sha256:{}", "a".repeat(64));
+        sqlx::query(
+            "INSERT INTO managed_consensus_attempts
+                (id, task_id, execution_id, round_id, request_digest, replica_count, quorum,
+                 mode, state, deadline)
+             VALUES ($1, $2, $3, $4, $5, 3, 2, 'enforce', 'running', NOW() + INTERVAL '5 minutes')",
+        )
+        .bind(attempt_id)
+        .bind(&task_id)
+        .bind(&execution_id)
+        .bind(&round_id)
+        .bind(&request_digest)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        for (index, worker_id) in worker_ids.iter().enumerate() {
+            let replica_id = format!("replica-{}", index + 1);
+            let worker_attempt_id = format!("{round_id}:{replica_id}");
+            let worker_ip = if index < 2 {
+                reachable_addr.to_string()
+            } else {
+                unreachable_addr.to_string()
+            };
+            sqlx::query(
+                "INSERT INTO managed_consensus_worker_reservations (attempt_id, worker_id)
+                 VALUES ($1, $2)",
+            )
+            .bind(attempt_id)
+            .bind(worker_id)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO managed_consensus_replicas
+                    (task_id, attempt_id, replica_id, worker_id, worker_ip, provider_user,
+                     execution_id, worker_attempt_id, request_digest, state)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'running')",
+            )
+            .bind(&task_id)
+            .bind(attempt_id)
+            .bind(&replica_id)
+            .bind(worker_id)
+            .bind(worker_ip)
+            .bind(&provider_users[index])
+            .bind(&execution_id)
+            .bind(&worker_attempt_id)
+            .bind(&request_digest)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "UPDATE tasks SET
+                status = 'RUNNING', worker_id = $2, worker_ip = $3,
+                managed_consensus_version = 1, managed_consensus_mode = 'enforce',
+                managed_replica_count = 3, managed_quorum = 2,
+                managed_consensus_state = 'running', managed_consensus_attempt_id = $4,
+                managed_consensus_updated_at = NOW(), last_update = NOW()
+             WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .bind(&worker_ids[0])
+        .bind(reachable_addr.to_string())
+        .bind(attempt_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let (private_key, _) = hivemind_config::generate_worker_execution_test_key_pair();
+        let dispatcher = Dispatcher::new(db, 120, 3).with_worker_execution_private_key(private_key);
+        assert_eq!(
+            dispatcher.retire_managed_function_v0_tasks().await.unwrap(),
+            1
+        );
+
+        let first_requests = vec![
+            tokio::time::timeout(Duration::from_secs(2), stop_requests.recv())
+                .await
+                .unwrap()
+                .expect("first reachable Worker must receive a stop request"),
+            tokio::time::timeout(Duration::from_secs(2), stop_requests.recv())
+                .await
+                .unwrap()
+                .expect("second reachable Worker must receive a stop request"),
+        ];
+        let mut first_attempt_ids: Vec<_> = first_requests
+            .iter()
+            .map(|request| request.attempt_id.clone())
+            .collect();
+        first_attempt_ids.sort();
+        assert_eq!(
+            first_attempt_ids,
+            vec![
+                format!("{round_id}:replica-1"),
+                format!("{round_id}:replica-2"),
+            ]
+        );
+        for request in &first_requests {
+            assert_eq!(request.task_id, task_id);
+            assert_eq!(
+                request.idempotency_key,
+                format!("managed-consensus-v1:{}", task.id.simple())
+            );
+            assert!(!request.token.is_empty());
+        }
+
+        let cancelled = repo.find_by_task_id(&task_id).await.unwrap().unwrap();
+        assert_eq!(cancelled.status, TaskStatus::Cancelled);
+        assert_eq!(
+            cancelled.status_message.as_deref(),
+            Some(MANAGED_FUNCTION_V0_RETIREMENT_REASON)
+        );
+        let attempt_state: String =
+            sqlx::query_scalar("SELECT state FROM managed_consensus_attempts WHERE id = $1")
+                .bind(attempt_id)
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap();
+        assert_eq!(attempt_state, "cancel_pending");
+        let pending_replicas: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM managed_consensus_replicas
+             WHERE attempt_id = $1 AND state = 'cancel_pending'",
+        )
+        .bind(attempt_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(pending_replicas, 3);
+        let active_reservations: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM managed_consensus_worker_reservations
+             WHERE attempt_id = $1 AND state = 'active'",
+        )
+        .bind(attempt_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(active_reservations, 3);
+        assert_eq!(
+            repo.managed_consensus_pending_stop_attempts()
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        for (table, query) in [
+            (
+                "managed_consensus_usage_holds",
+                "SELECT COUNT(*) FROM managed_consensus_usage_holds WHERE task_id = $1",
+            ),
+            (
+                "managed_consensus_replica_payouts",
+                "SELECT COUNT(*) FROM managed_consensus_replica_payouts WHERE task_id = $1",
+            ),
+        ] {
+            let count: i64 = sqlx::query_scalar(query)
+                .bind(&task_id)
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap();
+            assert_eq!(count, 0, "retirement must not create V1 {table}");
+        }
+
+        sqlx::query(
+            "UPDATE managed_consensus_replicas
+             SET worker_ip = $2
+             WHERE task_id = $1 AND replica_id = 'replica-3'",
+        )
+        .bind(&task_id)
+        .bind(reachable_addr.to_string())
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            dispatcher.retire_managed_function_v0_tasks().await.unwrap(),
+            0
+        );
+
+        let mut retry_attempt_ids = Vec::new();
+        for _ in 0..3 {
+            let request = tokio::time::timeout(Duration::from_secs(2), stop_requests.recv())
+                .await
+                .unwrap()
+                .expect("reconciliation must retry every pending Worker stop");
+            retry_attempt_ids.push(request.attempt_id);
+        }
+        retry_attempt_ids.sort();
+        assert_eq!(
+            retry_attempt_ids,
+            vec![
+                format!("{round_id}:replica-1"),
+                format!("{round_id}:replica-2"),
+                format!("{round_id}:replica-3"),
+            ]
+        );
+
+        let final_attempt_state: String =
+            sqlx::query_scalar("SELECT state FROM managed_consensus_attempts WHERE id = $1")
+                .bind(attempt_id)
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap();
+        assert_eq!(final_attempt_state, "cancelled");
+        let cancelled_replicas: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM managed_consensus_replicas
+             WHERE attempt_id = $1 AND state = 'cancelled'",
+        )
+        .bind(attempt_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(cancelled_replicas, 3);
+        let released_reservations: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM managed_consensus_worker_reservations
+             WHERE attempt_id = $1 AND state = 'released'",
+        )
+        .bind(attempt_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(released_reservations, 3);
+        assert!(repo
+            .managed_consensus_pending_stop_attempts()
+            .await
+            .unwrap()
+            .is_empty());
+        for (table, query) in [
+            (
+                "managed_consensus_usage_holds",
+                "SELECT COUNT(*) FROM managed_consensus_usage_holds WHERE task_id = $1",
+            ),
+            (
+                "managed_consensus_replica_payouts",
+                "SELECT COUNT(*) FROM managed_consensus_replica_payouts WHERE task_id = $1",
+            ),
+        ] {
+            let count: i64 = sqlx::query_scalar(query)
+                .bind(&task_id)
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap();
+            assert_eq!(count, 0, "retirement must not create V1 {table}");
+        }
+
         fixture.cleanup().await.ok();
     }
 

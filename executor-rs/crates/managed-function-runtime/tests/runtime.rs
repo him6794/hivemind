@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::AtomicBool;
 
 use managed_function_runtime::{
-    render_output, render_output_bounded, ExecutionLimits, ManagedExecutor, Status, Value,
+    ExecutionLimits, ManagedExecutor, Status, Value, render_output, render_output_bounded,
 };
 
 #[test]
@@ -427,6 +427,8 @@ fn managed_function_profile_leaves_budget_as_the_work_limit() {
     assert_eq!(limits.max_usage_units, Some(123));
     assert_eq!(limits.max_ops, u64::MAX);
     assert_eq!(limits.max_loop_iterations, u64::MAX);
+    assert!(limits.checked_integer_arithmetic);
+    assert!(!ExecutionLimits::default().checked_integer_arithmetic);
     assert_eq!(
         limits.max_call_depth,
         ExecutionLimits::default().max_call_depth
@@ -435,6 +437,44 @@ fn managed_function_profile_leaves_budget_as_the_work_limit() {
         limits.max_output_bytes,
         ExecutionLimits::default().max_output_bytes
     );
+}
+
+#[test]
+fn managed_v1_checked_i64_arithmetic_rejects_overflow() {
+    let cases = [
+        "return 9223372036854775807 + 1;",
+        "return (-9223372036854775807 - 1) - 1;",
+        "return 3037000500 * 3037000500;",
+        "return (-9223372036854775807 - 1) / -1;",
+        "return -(-9223372036854775807 - 1);",
+    ];
+
+    for source in cases {
+        let error = ManagedExecutor
+            .execute(source, ExecutionLimits::for_managed_function_budget(100))
+            .unwrap_err();
+        assert_eq!(error.code(), "integer_arithmetic_overflow", "{source}");
+        let receipt = error
+            .partial_receipt()
+            .expect("arithmetic failures must preserve metering");
+        assert_eq!(receipt.executed_ops, receipt.usage_units);
+    }
+}
+
+#[test]
+fn managed_v1_checked_i64_arithmetic_accepts_signed_boundaries() {
+    let cases = [
+        ("return 9223372036854775807;", Value::Int(i64::MAX)),
+        ("return -9223372036854775807;", Value::Int(i64::MIN + 1)),
+        ("return -9223372036854775807 - 1;", Value::Int(i64::MIN)),
+    ];
+
+    for (source, expected) in cases {
+        let result = ManagedExecutor
+            .execute(source, ExecutionLimits::for_managed_function_budget(100))
+            .unwrap();
+        assert_eq!(result.value, expected, "{source}");
+    }
 }
 
 #[test]
@@ -662,6 +702,70 @@ fn managed_function_templates_execute_successfully() {
         assert_eq!(result.status, Status::Completed);
         assert_eq!(result.value, expected);
         assert!(result.receipt.executed_ops > 0);
+    }
+}
+
+#[test]
+fn managed_function_v1_templates_execute_with_versioned_budget_profile() {
+    let cases = [
+        (
+            include_str!("../../../../templates/managed-function-v1/01_policy_gate.hmf"),
+            include_str!("../../../../templates/managed-function-v1/01_policy_gate.input.json"),
+            dict([
+                ("allowed", Value::Bool(true)),
+                ("risk_score", Value::Int(21)),
+                ("spend_cpt", Value::Int(12)),
+            ]),
+        ),
+        (
+            include_str!("../../../../templates/managed-function-v1/02_weighted_score.hmf"),
+            include_str!("../../../../templates/managed-function-v1/02_weighted_score.input.json"),
+            dict([
+                ("band", Value::String("gold".into())),
+                ("score", Value::Int(860)),
+            ]),
+        ),
+        (
+            include_str!("../../../../templates/managed-function-v1/03_batch_sum.hmf"),
+            include_str!("../../../../templates/managed-function-v1/03_batch_sum.input.json"),
+            dict([
+                ("input_count", Value::Int(3)),
+                ("paid_count", Value::Int(2)),
+                ("paid_total", Value::Int(35)),
+            ]),
+        ),
+        (
+            include_str!("../../../../templates/managed-function-v1/04_price_quote.hmf"),
+            include_str!("../../../../templates/managed-function-v1/04_price_quote.input.json"),
+            dict([
+                ("per_host_cpt", Value::Int(29)),
+                ("total_cpt", Value::Int(58)),
+                ("within_budget", Value::Bool(true)),
+            ]),
+        ),
+        (
+            include_str!("../../../../templates/managed-function-v1/05_route_task.hmf"),
+            include_str!("../../../../templates/managed-function-v1/05_route_task.input.json"),
+            dict([
+                ("pool", Value::String("cpu_pool".into())),
+                ("priority", Value::Int(10)),
+            ]),
+        ),
+    ];
+
+    for (source, input, expected) in cases {
+        let result = ManagedExecutor
+            .execute_json_input(
+                source,
+                ExecutionLimits::for_managed_function_budget(100_000),
+                input,
+            )
+            .unwrap();
+
+        assert_eq!(result.status, Status::Completed);
+        assert_eq!(result.value, expected);
+        assert!(result.receipt.usage_units > 0);
+        assert_eq!(result.receipt.executed_ops, result.receipt.usage_units);
     }
 }
 

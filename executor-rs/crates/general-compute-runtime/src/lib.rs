@@ -31,12 +31,18 @@ pub mod transport;
 pub mod windows_hcs;
 
 pub const GENERAL_COMPUTE_RUNTIME_VERSION: &str = "general-compute-v1alpha1";
-/// Runtime identity shared by the closed, metered managed DSL admission path.
+/// Frozen runtime identity used by the operator-registered production DSL
+/// route. This v0 identity must not be silently upgraded.
 pub const MANAGED_DSL_RUNTIME_VERSION: &str = "managed-function-v0";
-/// Canonical managed DSL semantics binding. Keep synchronized with the
-/// managed-function-runtime semantics manifest; changing it is a protocol change.
+/// Canonical v0 managed DSL semantics binding.
 pub const MANAGED_DSL_SEMANTICS_MANIFEST_SHA256: &str =
     "sha256:d61a8134f665100855402d7455cfcf3b3e701a79ad43e0039f4ad6c5f05bafef";
+/// Runtime identity for the built-in usage-settled managed DSL route.
+pub const MANAGED_DSL_V1_RUNTIME_VERSION: &str = "managed-function-v1";
+/// Canonical v1 managed DSL semantics binding.
+pub const MANAGED_DSL_V1_SEMANTICS_MANIFEST_SHA256: &str =
+    "sha256:c2dc962dcf6762df51fa94af2ee1f00a4d1aabdf84321ec67a3ab7f892692853";
+pub const MANAGED_DSL_V1_COST_MODEL_VERSION: &str = "managed-function-v1-execution-cpt-v1";
 pub const MAX_CPU_MILLIS: u64 = 24 * 60 * 60 * 1000;
 pub const MAX_MEMORY_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 pub const MAX_WALL_TIME_MS: u64 = 7 * 24 * 60 * 60 * 1000;

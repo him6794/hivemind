@@ -202,7 +202,7 @@ Headscale 可以保留為選配：
 
 ### 已有基礎
 
-- `managed-function-v0` closed DSL runtime 已存在。
+- active `managed-function-v1` closed DSL runtime 已存在；frozen v0 僅保留相容性資料與測試。
 - Worker 不執行任意 host command 的產品邊界已定義。
 - Master、Nodepool、Worker 的主要任務流程已存在。
 - Nodepool 是 identity、排程、consensus evaluation、usage、billing、

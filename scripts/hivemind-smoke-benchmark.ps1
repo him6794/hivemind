@@ -3,8 +3,8 @@ param(
     [Parameter(Mandatory = $true)][string]$Token,
     [Parameter(Mandatory = $true)][string]$TaskSourcePath,
     [string]$TaskInputPath,
-    [string]$Runtime = "managed-function-v0",
-    [int[]]$WorkerCounts = @(1, 5),
+    [ValidateSet("managed-function-v1")][string]$Runtime = "managed-function-v1",
+    [int[]]$WorkerCounts = @(3, 5),
     [int[]]$TaskCounts = @(10, 100),
     [int]$CpuScore = 1,
     [int]$MemoryGb = 1,
@@ -45,8 +45,8 @@ function Invoke-HivemindGet {
 function Submit-HivemindTask {
     param([Parameter(Mandatory = $true)][string]$TaskId)
 
-    # managed-function-v0 tasks carry their JSON input in the `torrent` field;
-    # nodepool stores it verbatim as the task input reference.
+    # managed-function-v1 tasks carry their JSON input in the `torrent` field;
+    # Nodepool stores it verbatim as the task input reference.
     $body = [ordered]@{
         task_id     = $TaskId
         runtime     = $Runtime
@@ -108,7 +108,10 @@ for ($scenarioIndex = 0; $scenarioIndex -lt $WorkerCounts.Count; $scenarioIndex+
         $workerResponse = Invoke-HivemindGet -Path "/api/workers"
         if ($workerResponse.workers) { $workers = @($workerResponse.workers) }
     } catch {
-        Write-Warning "Could not read worker list before ${scenario}: $($_.Exception.Message)"
+        throw "Could not read the worker list before ${scenario}: $($_.Exception.Message)"
+    }
+    if ($workers.Count -lt $workerTarget) {
+        throw "Scenario ${scenario} requires at least $workerTarget registered Workers for managed-function-v1 consensus; observed $($workers.Count)."
     }
 
     foreach ($taskId in $taskIds) {

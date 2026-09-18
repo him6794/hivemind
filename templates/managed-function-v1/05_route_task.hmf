@@ -1,0 +1,21 @@
+let task = get(input, "task");
+let kind = get(task, "kind");
+let needs_gpu = get(task, "needs_gpu");
+let input_mb = get(task, "input_mb");
+
+let pool = if needs_gpu == true {
+    "gpu_pool"
+} else {
+    if input_mb > 1000 {
+        "storage_pool"
+    } else {
+        if kind == "analysis" { "cpu_pool" } else { "default_pool" }
+    }
+};
+
+let priority = if contains(get(input, "labels"), "urgent") { 10 } else { 3 };
+
+{
+    "pool": pool,
+    "priority": priority
+};

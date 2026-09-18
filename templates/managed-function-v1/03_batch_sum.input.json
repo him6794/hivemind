@@ -1,0 +1,7 @@
+{
+  "items": [
+    { "status": "paid", "amount": 10 },
+    { "status": "pending", "amount": 7 },
+    { "status": "paid", "amount": 25 }
+  ]
+}

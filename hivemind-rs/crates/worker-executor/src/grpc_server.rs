@@ -28,7 +28,9 @@ use crate::{
 };
 use general_compute_runtime::artifact::CasChunkStore;
 use general_compute_runtime::managed_gpu::{ManagedGpuRequest, MANAGED_GPU_RUNTIME_VERSION};
-use general_compute_runtime::GeneralComputeRequest;
+use general_compute_runtime::{
+    GeneralComputeRequest, MANAGED_DSL_V1_RUNTIME_VERSION, MANAGED_DSL_V1_SEMANTICS_MANIFEST_SHA256,
+};
 use hivemind_config::HivemindConfig;
 use hivemind_managed_consensus::digest_hex;
 use hivemind_models::{Task, TaskStatus};
@@ -1052,25 +1054,7 @@ fn validate_execute_task_contract(request: &ExecuteTaskRequest) -> Result<(), &'
     match request.runtime.trim() {
         "" => Ok(()),
         "managed-function-v0" => {
-            if request.task_source.trim().is_empty() {
-                return Err("managed-function-v0 requires non-empty task_source");
-            }
-            if request.task_source.len() > hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES {
-                return Err("managed-function-v0 task_source exceeds the byte limit");
-            }
-            if request.torrent.trim().is_empty() {
-                return Err("managed-function-v0 requires non-empty JSON input");
-            }
-            if request.torrent.len() > hivemind_proto::MANAGED_JSON_INPUT_MAX_BYTES {
-                return Err("managed-function-v0 JSON input exceeds the byte limit");
-            }
-            if request.managed_budget_units <= 0 {
-                return Err("managed-function-v0 budget must be positive");
-            }
-            if request.managed_budget_units > hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS {
-                return Err("managed-function-v0 budget exceeds the usage-unit limit");
-            }
-            Ok(())
+            Err("managed-function-v0 has been retired; use managed-function-v1")
         }
         "managed-function-v1" => {
             if request.task_source.trim().is_empty() {
@@ -1226,6 +1210,7 @@ impl WorkerNodeService for GrpcWorkerNodeService {
                 .map_err(|_| Status::unauthenticated("Invalid worker execution token"))?;
             validate_managed_consensus_token_identity(&execution_claims, &req)?;
         }
+        validate_execute_task_contract(&req).map_err(Status::invalid_argument)?;
         let admitted = self
             .runtime_admission
             .admit_with_manifests(
@@ -1234,12 +1219,10 @@ impl WorkerNodeService for GrpcWorkerNodeService {
                 &req.managed_gpu_manifest_json,
             )
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
-        validate_execute_task_contract(&req).map_err(Status::invalid_argument)?;
         if !consensus_mode
             && matches!(
                 &admitted,
-                crate::runtime_admission::RuntimeRoute::ManagedFunctionV0
-                    | crate::runtime_admission::RuntimeRoute::ManagedFunctionV1
+                crate::runtime_admission::RuntimeRoute::ManagedFunctionV1
                     | crate::runtime_admission::RuntimeRoute::ProductionSandboxedDsl
             )
         {
@@ -2070,6 +2053,9 @@ fn validate_managed_consensus_result_config_limit(
 }
 
 fn managed_consensus_backend_id(task: &Task) -> String {
+    if task.runtime.as_deref().map(str::trim) == Some(MANAGED_DSL_V1_RUNTIME_VERSION) {
+        return MANAGED_DSL_V1_RUNTIME_VERSION.to_owned();
+    }
     task.managed_dsl_backend_id
         .as_deref()
         .filter(|backend_id| !backend_id.trim().is_empty())
@@ -2086,6 +2072,9 @@ fn managed_consensus_backend_id(task: &Task) -> String {
 }
 
 fn managed_consensus_semantics_digest(task: &Task) -> String {
+    if task.runtime.as_deref().map(str::trim) == Some(MANAGED_DSL_V1_RUNTIME_VERSION) {
+        return MANAGED_DSL_V1_SEMANTICS_MANIFEST_SHA256.to_owned();
+    }
     task.managed_dsl_semantics_manifest_sha256
         .as_deref()
         .filter(|digest| !digest.trim().is_empty())
@@ -3136,27 +3125,27 @@ mod tests {
     }
 
     #[test]
-    fn managed_execute_contract_enforces_source_input_and_budget_caps() {
+    fn managed_execute_contract_enforces_source_and_input_caps_without_a_v0_budget_ceiling() {
         let exact = execute_request(
-            "managed-function-v0",
+            "managed-function-v1",
             "s".repeat(hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES),
             "i".repeat(hivemind_proto::MANAGED_JSON_INPUT_MAX_BYTES),
             hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS,
         );
         let oversized_source = execute_request(
-            "managed-function-v0",
+            "managed-function-v1",
             "s".repeat(hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES + 1),
             "{}".into(),
             1,
         );
         let oversized_input = execute_request(
-            "managed-function-v0",
+            "managed-function-v1",
             "return 1;".into(),
             "i".repeat(hivemind_proto::MANAGED_JSON_INPUT_MAX_BYTES + 1),
             1,
         );
-        let oversized_budget = execute_request(
-            "managed-function-v0",
+        let beyond_legacy_budget = execute_request(
+            "managed-function-v1",
             "return 1;".into(),
             "{}".into(),
             hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS + 1,
@@ -3165,42 +3154,52 @@ mod tests {
         assert_eq!(validate_execute_task_contract(&exact), Ok(()));
         assert_eq!(
             validate_execute_task_contract(&oversized_source),
-            Err("managed-function-v0 task_source exceeds the byte limit")
+            Err("managed-function-v1 task_source exceeds the byte limit")
         );
         assert_eq!(
             validate_execute_task_contract(&oversized_input),
-            Err("managed-function-v0 JSON input exceeds the byte limit")
+            Err("managed-function-v1 JSON input exceeds the byte limit")
         );
         assert_eq!(
-            validate_execute_task_contract(&oversized_budget),
-            Err("managed-function-v0 budget exceeds the usage-unit limit")
+            validate_execute_task_contract(&beyond_legacy_budget),
+            Ok(())
         );
     }
 
     #[test]
     fn managed_execute_contract_rejects_blank_fields_and_nonpositive_budget() {
-        let blank_source = execute_request("managed-function-v0", "".into(), "{}".into(), 1);
-        let blank_input = execute_request("managed-function-v0", "return 1;".into(), "".into(), 1);
+        let blank_source = execute_request("managed-function-v1", "".into(), "{}".into(), 1);
+        let blank_input = execute_request("managed-function-v1", "return 1;".into(), "".into(), 1);
         let zero_budget =
-            execute_request("managed-function-v0", "return 1;".into(), "{}".into(), 0);
+            execute_request("managed-function-v1", "return 1;".into(), "{}".into(), 0);
         let negative_budget =
-            execute_request("managed-function-v0", "return 1;".into(), "{}".into(), -1);
+            execute_request("managed-function-v1", "return 1;".into(), "{}".into(), -1);
 
         assert_eq!(
             validate_execute_task_contract(&blank_source),
-            Err("managed-function-v0 requires non-empty task_source")
+            Err("managed-function-v1 requires non-empty task_source")
         );
         assert_eq!(
             validate_execute_task_contract(&blank_input),
-            Err("managed-function-v0 requires non-empty JSON input")
+            Err("managed-function-v1 requires non-empty JSON input")
         );
         assert_eq!(
             validate_execute_task_contract(&zero_budget),
-            Err("managed-function-v0 budget must be positive")
+            Err("managed-function-v1 budget must be positive")
         );
         assert_eq!(
             validate_execute_task_contract(&negative_budget),
-            Err("managed-function-v0 budget must be positive")
+            Err("managed-function-v1 budget must be positive")
+        );
+    }
+
+    #[test]
+    fn managed_function_v0_execute_contract_returns_the_v1_migration_error() {
+        let request = execute_request("managed-function-v0", "return 1;".into(), "{}".into(), 1);
+
+        assert_eq!(
+            validate_execute_task_contract(&request),
+            Err("managed-function-v0 has been retired; use managed-function-v1")
         );
     }
 
@@ -3222,7 +3221,7 @@ mod tests {
         let service = test_service(tmp.path());
         let task_id = "managed-without-consensus";
         let mut request =
-            execute_request("managed-function-v0", "return 1;".into(), "{}".into(), 1);
+            execute_request("managed-function-v1", "return 1;".into(), "{}".into(), 1);
         request.task_id = task_id.into();
         request.token = bound_token(test_private_key_pem(), ASSIGNED_OWNER, task_id);
 
@@ -3255,6 +3254,29 @@ mod tests {
 
         assert_eq!(error.code(), tonic::Code::InvalidArgument);
         assert_eq!(error.message(), "unsupported task runtime");
+        assert!(service.report_for_task(task_id).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn execute_task_rejects_retired_v0_before_recording_assignment() {
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path());
+        let task_id = "worker-retired-v0";
+        let mut request =
+            execute_request("managed-function-v0", "return 1;".into(), "{}".into(), 1);
+        request.task_id = task_id.into();
+        request.token = bound_token(test_private_key_pem(), ASSIGNED_OWNER, task_id);
+
+        let error = service
+            .execute_task(Request::new(request))
+            .await
+            .expect_err("retired v0 must fail admission");
+
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            error.message(),
+            "managed-function-v0 has been retired; use managed-function-v1"
+        );
         assert!(service.report_for_task(task_id).unwrap().is_none());
     }
 
@@ -4045,7 +4067,7 @@ mod tests {
                         storage_total_gb: 1,
                         storage_available_gb: 1,
                     }),
-                    runtime: "managed-function-v0".into(),
+                    runtime: "managed-function-v1".into(),
                     task_source: "return 1;".into(),
                     token: execute_token,
                     managed_budget_units: hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS,

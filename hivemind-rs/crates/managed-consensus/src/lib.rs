@@ -15,6 +15,10 @@ pub const MAX_CERTIFICATE_OBSERVATIONS: usize = 7;
 pub const MANAGED_DSL_DEFAULT_BACKEND_ID: &str = "managed-function-v0";
 pub const MANAGED_DSL_DEFAULT_SEMANTICS_DIGEST: &str =
     "sha256:d61a8134f665100855402d7455cfcf3b3e701a79ad43e0039f4ad6c5f05bafef";
+/// Canonical semantic identity for the built-in usage-settled v1 route.
+pub const MANAGED_DSL_V1_DEFAULT_BACKEND_ID: &str = "managed-function-v1";
+pub const MANAGED_DSL_V1_DEFAULT_SEMANTICS_DIGEST: &str =
+    "sha256:c2dc962dcf6762df51fa94af2ee1f00a4d1aabdf84321ec67a3ab7f892692853";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConsensusBinding {

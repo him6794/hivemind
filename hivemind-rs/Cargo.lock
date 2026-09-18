@@ -1300,6 +1300,7 @@ name = "hivemind-models"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "general-compute-runtime",
  "serde",
  "serde_json",
  "sqlx",

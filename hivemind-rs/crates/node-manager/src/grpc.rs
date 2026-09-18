@@ -125,7 +125,10 @@ use hivemind_models::{
 use hivemind_task_scheduler::{
     dispatcher::worker_endpoint,
     dispatcher::Dispatcher,
-    task_repository::{ManagedConsensusStopTarget, MANAGED_CONSENSUS_POLICY_PENDING_MESSAGE},
+    task_repository::{
+        managed_v1_worst_case_hold, ManagedConsensusStopTarget,
+        MANAGED_CONSENSUS_POLICY_PENDING_MESSAGE,
+    },
     BatchTaskReport, TaskScheduler,
 };
 
@@ -813,6 +816,9 @@ fn validate_runtime_contract_with_manifest(
     input: &str,
     budget: i64,
 ) -> Result<(), &'static str> {
+    if runtime.trim() == "managed-function-v0" {
+        return Err("managed-function-v0 has been retired; use managed-function-v1");
+    }
     if !manifest_json.is_empty() && !managed_gpu_manifest_json.is_empty() {
         return Err("general-compute and managed GPU manifests cannot be combined");
     }
@@ -826,24 +832,21 @@ fn validate_runtime_contract_with_manifest(
     }
     match runtime.trim() {
         "" => Ok(()),
-        "managed-function-v0" => {
+        "managed-function-v1" => {
             if task_source.trim().is_empty() {
-                return Err("managed-function-v0 requires non-empty task_source");
+                return Err("managed-function-v1 requires non-empty task_source");
             }
             if task_source.len() > hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES {
-                return Err("managed-function-v0 task_source exceeds the byte limit");
+                return Err("managed-function-v1 task_source exceeds the byte limit");
             }
             if input.trim().is_empty() {
-                return Err("managed-function-v0 requires non-empty JSON input");
+                return Err("managed-function-v1 requires non-empty JSON input");
             }
             if input.len() > hivemind_proto::MANAGED_JSON_INPUT_MAX_BYTES {
-                return Err("managed-function-v0 JSON input exceeds the byte limit");
+                return Err("managed-function-v1 JSON input exceeds the byte limit");
             }
             if budget <= 0 {
-                return Err("managed-function-v0 budget must be positive");
-            }
-            if budget > hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS {
-                return Err("managed-function-v0 budget exceeds the usage-unit limit");
+                return Err("managed-function-v1 budget must be positive");
             }
             Ok(())
         }
@@ -1917,10 +1920,19 @@ impl MasterNodeService for GrpcMasterNodeService {
             }));
         }
         let expected_btih = None;
+        let managed_v1_runtime = runtime == "managed-function-v1";
         let managed_runtime = matches!(
             runtime.as_str(),
-            "managed-function-v0" | "production_sandboxed_dsl"
+            "managed-function-v1" | "production_sandboxed_dsl"
         );
+        if managed_v1_runtime
+            && self.state.managed_consensus_rollout_mode == ManagedConsensusRolloutMode::Disabled
+        {
+            return Ok(Response::new(UploadTaskResponse {
+                success: false,
+                status_message: "managed-function-v1 requires managed consensus".into(),
+            }));
+        }
         let explicit_consensus_policy = req.managed_consensus_version > 0
             || req.managed_replica_count > 0
             || req.managed_quorum > 0;
@@ -2005,12 +2017,34 @@ impl MasterNodeService for GrpcMasterNodeService {
             }
         }
 
-        // Balance admission gate. Nodepool is the sole billing authority. A task
-        // can be charged up to `max_cpt` at settlement (see `billable_amount_cpt`),
-        // so refuse submission unless the owner can currently cover that
-        // worst-case amount. This stops broke accounts at the door instead of
-        // letting them accrue unbilled "pending" overruns.
-        if req.max_cpt > 0 {
+        // Balance admission is only a preflight check. Enforce-mode v1 holds
+        // the checked worst-case allowance for every replica plus the maximum
+        // Nodepool fee; the scheduler repeats the check and deduction atomically
+        // while creating the attempt. Observe mode is shadow-only and must not
+        // perform financial admission.
+        let balance_requirement = if managed_v1_runtime
+            && self.state.managed_consensus_rollout_mode == ManagedConsensusRolloutMode::Observe
+        {
+            None
+        } else if managed_v1_runtime {
+            match managed_v1_worst_case_hold(req.max_cpt, consensus_replica_count) {
+                Ok((_, _, held_total_cpt)) => Some((
+                    held_total_cpt,
+                    "the managed-function-v1 worst-case replica hold",
+                )),
+                Err(error) => {
+                    return Ok(Response::new(UploadTaskResponse {
+                        success: false,
+                        status_message: error.to_string(),
+                    }));
+                }
+            }
+        } else if req.max_cpt > 0 {
+            Some((req.max_cpt, "max_cpt"))
+        } else {
+            None
+        };
+        if let Some((required_balance, description)) = balance_requirement {
             let balance: Option<i64> = sqlx::query_scalar(
                 "SELECT balance FROM users WHERE username = $1 AND is_active = true",
             )
@@ -2019,13 +2053,13 @@ impl MasterNodeService for GrpcMasterNodeService {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
             match balance {
-                Some(balance) if balance >= req.max_cpt => {}
+                Some(balance) if balance >= required_balance => {}
                 Some(_) => {
                     return Ok(Response::new(UploadTaskResponse {
                         success: false,
                         status_message: format!(
-                            "insufficient balance: need {} CPT to cover max_cpt",
-                            req.max_cpt
+                            "insufficient balance: need {} CPT to cover {}",
+                            required_balance, description
                         ),
                     }));
                 }
@@ -4666,7 +4700,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_upload_contract_enforces_source_input_and_budget_caps() {
+    fn managed_upload_contract_enforces_source_and_input_caps_without_a_v0_budget_ceiling() {
         let exact_source = "s".repeat(hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES);
         let oversized_source = "s".repeat(hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES + 1);
         let exact_input = "i".repeat(hivemind_proto::MANAGED_JSON_INPUT_MAX_BYTES);
@@ -4674,7 +4708,7 @@ mod tests {
 
         assert_eq!(
             validate_runtime_contract(
-                "managed-function-v0",
+                "managed-function-v1",
                 &exact_source,
                 &exact_input,
                 hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS,
@@ -4682,41 +4716,49 @@ mod tests {
             Ok(())
         );
         assert_eq!(
-            validate_runtime_contract("managed-function-v0", &oversized_source, "{}", 1,),
-            Err("managed-function-v0 task_source exceeds the byte limit")
+            validate_runtime_contract("managed-function-v1", &oversized_source, "{}", 1,),
+            Err("managed-function-v1 task_source exceeds the byte limit")
         );
         assert_eq!(
-            validate_runtime_contract("managed-function-v0", "return 1;", &oversized_input, 1,),
-            Err("managed-function-v0 JSON input exceeds the byte limit")
+            validate_runtime_contract("managed-function-v1", "return 1;", &oversized_input, 1,),
+            Err("managed-function-v1 JSON input exceeds the byte limit")
         );
         assert_eq!(
             validate_runtime_contract(
-                "managed-function-v0",
+                "managed-function-v1",
                 "return 1;",
                 "{}",
                 hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS + 1,
             ),
-            Err("managed-function-v0 budget exceeds the usage-unit limit")
+            Ok(())
         );
     }
 
     #[test]
     fn managed_upload_contract_rejects_blank_fields_and_nonpositive_budget() {
         assert_eq!(
-            validate_runtime_contract("managed-function-v0", "", "{}", 1),
-            Err("managed-function-v0 requires non-empty task_source")
+            validate_runtime_contract("managed-function-v1", "", "{}", 1),
+            Err("managed-function-v1 requires non-empty task_source")
         );
         assert_eq!(
-            validate_runtime_contract("managed-function-v0", "return 1;", "", 1),
-            Err("managed-function-v0 requires non-empty JSON input")
+            validate_runtime_contract("managed-function-v1", "return 1;", "", 1),
+            Err("managed-function-v1 requires non-empty JSON input")
         );
         assert_eq!(
-            validate_runtime_contract("managed-function-v0", "return 1;", "{}", 0),
-            Err("managed-function-v0 budget must be positive")
+            validate_runtime_contract("managed-function-v1", "return 1;", "{}", 0),
+            Err("managed-function-v1 budget must be positive")
         );
         assert_eq!(
-            validate_runtime_contract("managed-function-v0", "return 1;", "{}", -1),
-            Err("managed-function-v0 budget must be positive")
+            validate_runtime_contract("managed-function-v1", "return 1;", "{}", -1),
+            Err("managed-function-v1 budget must be positive")
+        );
+    }
+
+    #[test]
+    fn managed_function_v0_upload_is_rejected_with_the_v1_migration_error() {
+        assert_eq!(
+            validate_runtime_contract("managed-function-v0", "return 1;", "{}", 1),
+            Err("managed-function-v0 has been retired; use managed-function-v1")
         );
     }
 
@@ -5404,6 +5446,45 @@ mod tests {
 
         assert!(!response.success);
         assert_eq!(response.status_message, "unsupported task runtime");
+    }
+
+    #[tokio::test]
+    async fn upload_task_rejects_retired_v0_before_persisting_any_assignment() {
+        let service = GrpcMasterNodeService::new(nodepool_state_without_database());
+        let owner = "grpc-retired-v0-owner";
+        let rejected_task_id = format!("grpc-retired-v0-{}", uuid::Uuid::new_v4());
+        let response = service
+            .upload_task(Request::new(UploadTaskRequest {
+                task_id: rejected_task_id,
+                torrent: "{}".into(),
+                requirements: Some(ProtoResourceSpec::default()),
+                location: String::new(),
+                host_count: 1,
+                token: token_for(&service.state.auth, owner),
+                max_cpt: 1,
+                runtime: "managed-function-v0".into(),
+                task_source: "return 1;".into(),
+                package_data: Default::default(),
+                package_filename: String::new(),
+                general_compute_manifest_json: Vec::new(),
+                managed_dsl_backend_id: String::new(),
+                managed_dsl_semantics_manifest_sha256: String::new(),
+                managed_gpu_manifest_json: Vec::new(),
+                managed_consensus_version: 0,
+                managed_replica_count: 0,
+                managed_quorum: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // Runtime admission happens before task lookup, assignment, or any
+        // persistence call, so this direct RPC cannot create V0 work.
+        assert!(!response.success);
+        assert_eq!(
+            response.status_message,
+            "managed-function-v0 has been retired; use managed-function-v1"
+        );
     }
 
     #[tokio::test]

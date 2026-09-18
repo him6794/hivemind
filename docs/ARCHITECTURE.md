@@ -361,9 +361,10 @@ Operator 也可以為 unattended startup 配置角色限定的
 
 ### Worker Executor
 
-- 在 closed managed-function runtime 中執行 `managed-function-v0` 任務。
+- 在 closed managed-function runtime 中執行 active `managed-function-v1` 任務。
 - 追蹤本機資源使用量，並提供 Worker gRPC/control HTTP endpoints。
 - 只回報帶有 assignment identity 的 result observation；不擁有 settlement 權限。
+- 保留解析既有 v0 執行與歷史 evidence 的相容邊界，但不接受新的 v0 work。
 
 ## Trust 與資料邊界
 
@@ -428,8 +429,12 @@ Worker into a settlement authority; only Nodepool can verify a quorum certificat
 - `proto/hivemind.proto` 定義 Worker/Master/Nodepool 共用的 gRPC surface。
 - `managed-consensus` 定義 consensus binding、observation、quorum policy 與
   certificate contract。
-- 任務使用 `managed-function-v0` runtime：封閉的 source function 加上有界
-  JSON input payload。
+- 新任務只使用 `managed-function-v1`：它沿用封閉的 source function/JSON input
+  interpreter，並以每個 replica 的實際執行 operation 做 Nodepool settlement。
+  `managed-function-v0` 僅保留歷史相容契約；舊資料可讀取，但新的 v0 submission
+  會被拒絕，未完成的 v0 work 會在 Nodepool 啟動時取消。
+- Managed function 不執行使用者提供的 executable，也不需要 HCS；只有
+  `general-compute-v1alpha1` 的 arbitrary-compute 路徑使用原生 Windows HCS。
 - `hivemind-bin` 可以在本機開發時執行 `master`、`nodepool`、`worker` 或
   `all`；正式 Orange Pi 部署使用 role-specific services。
 - binary 也提供 `submit`、`status` 與 `result` CLI helper。
@@ -453,11 +458,16 @@ Worker into a settlement authority; only Nodepool can verify a quorum certificat
 - Rust workspace 是 authoritative implementation。
 - `docs_backup_20260611_202024/` 中較舊的 Python-era architecture notes
   只作為歷史參考。
-- 本文件描述的公開 enrollment、dynamic admission 與 consensus settlement model
-  是目標產品架構。
+- 本文件描述的公開 enrollment、dynamic admission、versioned managed runtime
+  與 consensus settlement model 是 authoritative product architecture；未配置
+  的外部 credential 或 operator asset 仍必須 fail closed。
 - 目前本機測試已涵蓋 policy admission、replica fan-out、quorum certificate、
-  certificate-backed settlement 與 fail-closed completion guard。
+  certificate-backed settlement、accepted-replica usage billing 與 fail-closed
+  completion guard。
 - 完整外部證據仍需要在 Orange Pi 之外完成 Website enrollment、Headscale overlay
   connectivity、至少三個 eligible Worker、Worker registration、result/log
   retrieval、usage、billing、settlement 與 audit evidence。
-- 自動 client update/download 仍然延後處理。
+- Signed client update runtime 已實作 archive verification、activation 與
+  rollback guard；在 production-signed keyset、核准 HTTPS endpoint、clean-host
+  live update 與 minimum-supported-version evidence 齊備前，更新保持
+  fail-closed/deferred，不使用 unsigned fallback。

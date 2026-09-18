@@ -289,8 +289,8 @@ pub async fn run_submit(submit: SubmitCommand) -> Result<()> {
     )
     .await?;
 
-    // managed-function-v0 tasks carry their JSON input in the `torrent` field;
-    // nodepool stores it verbatim as the task input reference.
+    // managed-function-v1 tasks carry their JSON input in the `torrent` field;
+    // Nodepool stores it verbatim as the task input reference.
     let input = if submit.input.trim().is_empty() {
         None
     } else {
@@ -298,7 +298,7 @@ pub async fn run_submit(submit: SubmitCommand) -> Result<()> {
     };
     let mut body = serde_json::json!({
         "task_id": submit.task_id,
-        "runtime": "managed-function-v0",
+        "runtime": "managed-function-v1",
         "task_source": task_source,
     });
     if let Some(input) = input {

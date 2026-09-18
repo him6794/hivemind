@@ -416,6 +416,13 @@ async fn run_service_inner(role: ServiceRole, service_arguments: Vec<String>) ->
                 .with_managed_consensus_config(&config.managed_consensus)
                 .with_session_registry(session_registry.clone()),
         );
+        let retired_v0 = dispatcher.retire_managed_function_v0_tasks().await?;
+        if retired_v0 > 0 {
+            info!(
+                "Retired {} unfinished managed-function-v0 tasks",
+                retired_v0
+            );
+        }
 
         let disp_shutdown = dispatcher
             .clone()

@@ -18,6 +18,7 @@ use general_compute_runtime::windows_hcs::WindowsHcsLauncher;
 use general_compute_runtime::{
     ArtifactManifest, ArtifactRole, DeterminismPolicy, ExecutionPolicy, GeneralComputeRequest,
     GeneralComputeResult, ResultStatus, TrustedWorkerCapabilityRegistration,
+    MANAGED_DSL_V1_RUNTIME_VERSION, MANAGED_DSL_V1_SEMANTICS_MANIFEST_SHA256,
 };
 use hivemind_config::HivemindConfig;
 use hivemind_models::Task;
@@ -33,10 +34,7 @@ use std::time::Instant;
 use tokio::sync::watch;
 
 fn is_managed_function_task(task: &Task) -> bool {
-    matches!(
-        task.runtime.as_deref(),
-        Some("managed-function-v0" | "managed-function-v1")
-    )
+    task.runtime.as_deref() == Some(MANAGED_DSL_V1_RUNTIME_VERSION)
 }
 
 fn is_managed_gpu_task(task: &Task) -> bool {
@@ -48,16 +46,9 @@ fn managed_function_limits(task: &Task) -> Result<ExecutionLimits> {
         .ok()
         .filter(|usage| *usage > 0)
         .ok_or_else(|| anyhow::anyhow!("managed-function budget must be positive"))?;
-    if task.runtime.as_deref() == Some("managed-function-v1") {
-        Ok(ExecutionLimits::for_managed_function_budget(
-            max_usage_units,
-        ))
-    } else {
-        Ok(ExecutionLimits {
-            max_usage_units: Some(max_usage_units),
-            ..ExecutionLimits::default()
-        })
-    }
+    Ok(ExecutionLimits::for_managed_function_budget(
+        max_usage_units,
+    ))
 }
 
 fn checked_managed_i64(value: u64, name: &str) -> Result<i64> {
@@ -71,6 +62,15 @@ struct ManagedReceiptMetadata<'a> {
     execution_mode: Option<&'a str>,
     backend_id: Option<&'a str>,
     semantics_digest: Option<&'a str>,
+}
+
+fn managed_function_receipt_metadata() -> ManagedReceiptMetadata<'static> {
+    ManagedReceiptMetadata {
+        runtime: MANAGED_DSL_V1_RUNTIME_VERSION,
+        execution_mode: None,
+        backend_id: Some(MANAGED_DSL_V1_RUNTIME_VERSION),
+        semantics_digest: Some(MANAGED_DSL_V1_SEMANTICS_MANIFEST_SHA256),
+    }
 }
 
 fn managed_receipt_json(
@@ -150,45 +150,12 @@ fn failed_managed_task_result(
     })
 }
 
-fn legacy_failed_managed_task_result(
-    task: &Task,
-    runtime: &str,
-    elapsed_ms: i64,
-    error_code: &str,
-    error_message: String,
-    executed_ops: i64,
-) -> Result<super::TaskResult> {
-    let receipt = json!({
-        "runtime": runtime,
-        "status": "failed",
-        "executed_ops": executed_ops,
-        "output_bytes": 0,
-        "failure_code": error_code,
-        "failure_message": error_message,
-    });
-    Ok(super::TaskResult {
-        task_id: task.task_id.clone(),
-        success: false,
-        output: None,
-        error: Some(error_message),
-        exit_code: 1,
-        cpu_time_ms: 0,
-        wall_time_ms: elapsed_ms,
-        peak_memory_mb: 0,
-        managed_executed_ops: executed_ops,
-        managed_output_bytes: 0,
-        managed_receipt_json: Some(receipt.to_string()),
-        general_compute_result_json: None,
-        managed_gpu_result_json: None,
-    })
-}
-
 fn execute_managed_function_task(
     task: &Task,
     elapsed_ms: i64,
     cancelled: &AtomicBool,
 ) -> Result<super::TaskResult> {
-    let runtime = task.runtime.as_deref().unwrap_or("managed-function-v0");
+    let runtime = MANAGED_DSL_V1_RUNTIME_VERSION;
     let source = task
         .task_source
         .as_deref()
@@ -210,28 +177,13 @@ fn execute_managed_function_task(
                 } else {
                     error.to_string()
                 };
-                if runtime == "managed-function-v1" {
-                    return failed_managed_task_result(
-                        task,
-                        elapsed_ms,
-                        error.code(),
-                        error_message,
-                        error.partial_receipt(),
-                        ManagedReceiptMetadata {
-                            runtime,
-                            execution_mode: None,
-                            backend_id: None,
-                            semantics_digest: None,
-                        },
-                    );
-                }
-                return legacy_failed_managed_task_result(
+                return failed_managed_task_result(
                     task,
-                    runtime,
                     elapsed_ms,
                     error.code(),
                     error_message,
-                    0,
+                    error.partial_receipt(),
+                    managed_function_receipt_metadata(),
                 );
             }
         };
@@ -240,28 +192,13 @@ fn execute_managed_function_task(
             Ok(output) => output,
             Err(error) => {
                 let error_message = error.to_string();
-                if runtime == "managed-function-v1" {
-                    return failed_managed_task_result(
-                        task,
-                        elapsed_ms,
-                        error.code(),
-                        error_message,
-                        Some(&execution.receipt),
-                        ManagedReceiptMetadata {
-                            runtime,
-                            execution_mode: None,
-                            backend_id: None,
-                            semantics_digest: None,
-                        },
-                    );
-                }
-                return legacy_failed_managed_task_result(
+                return failed_managed_task_result(
                     task,
-                    runtime,
                     elapsed_ms,
                     error.code(),
                     error_message,
-                    checked_managed_i64(execution.receipt.executed_ops, "operation count")?,
+                    Some(&execution.receipt),
+                    managed_function_receipt_metadata(),
                 );
             }
         }
@@ -279,12 +216,7 @@ fn execute_managed_function_task(
         output.len(),
         execution.receipt.failure_code.as_deref(),
         execution.receipt.failure_message.as_deref(),
-        ManagedReceiptMetadata {
-            runtime,
-            execution_mode: None,
-            backend_id: None,
-            semantics_digest: None,
-        },
+        managed_function_receipt_metadata(),
     );
 
     Ok(super::TaskResult {
@@ -652,6 +584,12 @@ pub(crate) async fn run_task_with_cancel_and_backends_and_trusted_registration_a
         };
     }
 
+    if task.runtime.as_deref() == Some("managed-function-v0") {
+        return Err(anyhow::anyhow!(
+            "managed-function-v0 has been retired; use managed-function-v1"
+        ));
+    }
+
     if is_managed_gpu_task(task) {
         let task = task.clone();
         let trusted_registration = trusted_registration.clone();
@@ -719,7 +657,7 @@ pub(crate) async fn run_task_with_cancel_and_backends_and_trusted_registration_a
     }
 
     Err(anyhow::anyhow!(
-        "unsupported runtime {:?}: only managed-function-v0/v1 tasks are supported",
+        "unsupported runtime {:?}",
         task.runtime.as_deref().unwrap_or("<none>")
     ))
 }
@@ -2096,7 +2034,6 @@ mod tests {
         MANAGED_GPU_RUNTIME_VERSION,
     };
     use hivemind_models::TaskStatus;
-    use managed_function_runtime::V0_SEMANTICS_MANIFEST_JSON;
     use serde_json::Value;
     use tempfile::TempDir;
     use uuid::Uuid;
@@ -2120,13 +2057,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn managed_function_task_executes_without_host_artifact_or_process() {
+    async fn managed_function_v1_executes_without_host_artifact_or_process() {
         let tmp = TempDir::new().unwrap();
         let mut config = test_config(tmp.path().join("sandbox").to_str().unwrap());
         config.torrent.api_dir = tmp.path().join("api").to_string_lossy().to_string();
         std::fs::create_dir_all(&config.torrent.api_dir).unwrap();
         let mut task = test_task_with_source("{\"items\":[1,2,3]}");
-        task.runtime = Some("managed-function-v0".into());
+        task.runtime = Some("managed-function-v1".into());
         task.task_source = Some(
             "let total = 0; for item in get(input, \"items\") { let total = total + item; } return total;"
                 .into(),
@@ -2141,6 +2078,22 @@ mod tests {
         assert!(result.managed_receipt_json.is_some());
         assert!(result.managed_executed_ops > 0);
         assert_eq!(result.managed_output_bytes, 1);
+    }
+
+    #[tokio::test]
+    async fn managed_function_v0_task_is_rejected_before_execution() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path().join("sandbox").to_str().unwrap());
+        let mut task = test_task_with_source("null");
+        task.runtime = Some("managed-function-v0".into());
+
+        let error = run_task(&task, &config)
+            .await
+            .expect_err("retired v0 must not execute");
+
+        assert!(error
+            .to_string()
+            .contains("managed-function-v0 has been retired; use managed-function-v1"));
     }
 
     #[test]
@@ -2198,45 +2151,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn managed_function_budget_exhaustion_returns_structured_failure() {
-        let tmp = TempDir::new().unwrap();
-        let config = test_config(tmp.path().join("sandbox").to_str().unwrap());
-        let mut task = test_task_with_source("null");
-        task.runtime = Some("managed-function-v0".into());
-        task.max_cpt = 2;
-        task.task_source = Some("return 1 + 2 + 3;".into());
-
-        let result = run_task(&task, &config).await.unwrap();
-
-        assert!(!result.success);
-        assert!(result
-            .error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("budget_exhausted"));
-        assert!(result
-            .managed_receipt_json
-            .as_deref()
-            .unwrap_or_default()
-            .contains("budget_exhausted"));
-
-        let manifest: Value = serde_json::from_str(V0_SEMANTICS_MANIFEST_JSON).unwrap();
-        let receipt: Value =
-            serde_json::from_str(result.managed_receipt_json.as_deref().unwrap()).unwrap();
-        assert!(manifest["failure_receipts"]["worker_synthetic_receipt"]
-            .as_bool()
-            .unwrap());
-        assert_eq!(
-            manifest["failure_receipts"]["evaluation_failure_counters"],
-            "zeroed"
-        );
-        assert_eq!(receipt["runtime"], manifest["runtime_id"]);
-        assert_eq!(receipt["status"], "failed");
-        assert_eq!(receipt["executed_ops"], 0);
-        assert_eq!(receipt["output_bytes"], 0);
-    }
-
-    #[tokio::test]
     async fn managed_function_v1_budget_exhaustion_preserves_partial_usage() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path().join("sandbox").to_str().unwrap());
@@ -2278,7 +2192,7 @@ mod tests {
         source.push_str("fn step_64() { return 0; }\nreturn step_0();");
 
         let mut task = test_task_with_source("null");
-        task.runtime = Some("managed-function-v0".into());
+        task.runtime = Some("managed-function-v1".into());
         task.max_cpt = 10_000;
         task.task_source = Some(source);
 
@@ -2307,7 +2221,7 @@ mod tests {
         }
 
         let mut task = test_task_with_source("null");
-        task.runtime = Some("managed-function-v0".into());
+        task.runtime = Some("managed-function-v1".into());
         task.max_cpt = 10_000;
         task.task_source = Some(format!(
             "fn double(value) {{ return value + value; }} return {expression};"

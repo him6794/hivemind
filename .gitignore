@@ -16,6 +16,7 @@ node_modules/
 .omo/
 # Build outputs and compiler caches
 target/
+/target-v0-retirement-check/
 subagents/sandbox-egress/target/
 hivemind-rs/target-alt/
 hivemind-rs/target-local/

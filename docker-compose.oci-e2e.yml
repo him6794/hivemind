@@ -5,18 +5,21 @@ services:
   nodepool:
     environment:
       WORKER_EXECUTION_PUBLIC_KEY_PEM: ${WORKER_EXECUTION_PUBLIC_KEY_PEM:?worker execution public key must be set for OCI E2E}
+      HIVEMIND_WORKER_ADMISSION_MODE: private_static
       HIVEMIND_GENERAL_COMPUTE_TRUSTED_WORKER_CAPABILITIES: ${HIVEMIND_GENERAL_COMPUTE_TRUSTED_WORKER_CAPABILITIES:-}
   worker:
     hostname: ${WORKER_ID:-oci-e2e-worker}
-    # Docker Desktop's nested rootless runc needs outer-container CAP_CHOWN while
-    # it prepares the mapped rootfs. This privilege is scoped to the reviewed
-    # OCI E2E override; release Compose continues to run the worker as uid 10001.
-    user: "0:0"
+    # The Worker must remain the subordinate-id owner while nested rootless runc
+    # builds its user namespace. The override grants only the host capabilities
+    # needed by Docker Desktop's nested runner; release Compose keeps the same
+    # non-root uid without these test-only privileges.
+    user: "10001:10001"
     # Docker Desktop exposes the container cgroup tree read-only by default;
     # nested runc needs a writable v2 hierarchy to enforce the operator policy.
     privileged: true
     cgroup: host
     environment:
+      HIVEMIND_WORKER_ADMISSION_MODE: private_static
       HIVEMIND_GENERAL_COMPUTE_BACKENDS: ${HIVEMIND_GENERAL_COMPUTE_BACKENDS:-}
       HIVEMIND_GENERAL_COMPUTE_WORKER_CAPABILITIES: ${HIVEMIND_GENERAL_COMPUTE_WORKER_CAPABILITIES:-}
     cap_add:

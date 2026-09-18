@@ -2,13 +2,21 @@
 
 ## 0. 先講結論
 
-目前的 `managed-function-runtime` 是刻意設計成 deterministic、bounded、可計量的 JSON DSL。它適合做受 Nodepool consensus 保護的函式結算，但不能誠實宣稱是「部署時圖靈完備」或「完整科學運算環境」：目前的值域只有有限的整數、布林、字串、list、dict、null，且每次執行有固定的 operation、loop、call-depth、value、output 與 materialization 上限。
+目前 active 的 `managed-function-runtime` 是 deterministic、bounded、可計量的
+`managed-function-v1` JSON DSL。它適合做受 Nodepool consensus 保護的函式結算，
+但不能誠實宣稱是「部署時圖靈完備」或「完整科學運算環境」：值域仍是有限的
+整數、布林、字串、list、dict、null；每個 replica 以 `max_cpt` 作為工作額度，
+並另外受 call-depth、value、output、materialization 與 deadline 等結構性限制。
+歷史 `managed-function-v0` 的固定計量與結算契約已凍結，只保留相容性讀取與測試，
+不再接受新的 v0 submission。
 
-本計畫不把這兩個互相衝突的目標硬塞進同一個 v0 執行器，而是採雙 runtime 契約：
+本計畫不把這些互相衝突的目標硬塞進同一個 managed runtime，而是採分層 runtime
+契約：
 
 | Runtime | 目的 | 宣稱 | 結算方式 |
 |---|---|---|---|
-| `managed-function-v0` | 小型 deterministic 函式、可計量的結算 | 有限 DSL；不宣稱圖靈完備 | Nodepool 以多 Worker consensus certificate 結算 |
+| `managed-function-v1` | 小型 deterministic 函式、可計量的結算 | 有限 DSL；不宣稱圖靈完備 | Nodepool 以多 Worker consensus 與有效 replica usage evidence 結算 |
+| `managed-function-v0` | 已完成任務與舊 Worker 的相容性 | 凍結的歷史有限 DSL；不接受新工作 | 保留原有歷史 fixed-reservation 語義，不轉換成 v1 |
 | `general-compute-v1alpha1` | 一般程式與科學工作負載的 pre-release 契約 | 採 pinned CPython 的一般程式語義；單次執行仍受資源配額限制 | 僅允許 allowlisted beta；usage 先視為 claim，不直接驅動結算 |
 | `general-compute-v1` | 通過 M0–M5 後的穩定契約 | 只宣稱 support matrix 與 gates 已證明的 CPU／GPU 能力 | 依 Nodepool 驗證出的 evidence level 結算 |
 
@@ -38,11 +46,25 @@
 
 ### 2.1 契約分層
 
-先新增 `general-compute-v1alpha1`，不改變 `managed-function-v0` 的語義。只有完成 M0–M5 的 schema、tensor ABI、sandbox、verifiability、migration 與 release gates 才能升為 `general-compute-v1`。目前程式碼中過早使用的 `general-compute-v1` 常數必須在 M0 改為 alpha id，避免未凍結契約被誤認為穩定 API。
+`managed-function-v1` 已是 active managed runtime；它沿用封閉 interpreter，並以每個
+replica 的 usage allowance 與有效 evidence 進行 Nodepool settlement。`managed-function-v0`
+的 runtime id、cost-model id 與 consensus result contract 仍是不可變的歷史邊界；新的
+v0 submission 會被拒絕，未完成的 v0 work 在 Nodepool 啟動時取消，已完成資料只作
+相容性讀取。只有完成 M0–M5 的 schema、tensor ABI、sandbox、verifiability、migration
+與 release gates，`general-compute-v1alpha1` 才能升為 `general-compute-v1`。目前
+程式碼中過早使用的 `general-compute-v1` 常數必須在 M0 改為 alpha id，避免未凍結契約
+被誤認為穩定 API。
 
-`managed-function-v0` 的 runtime id、cost-model id 與 consensus result contract 是同一個版本化邊界；任何語義或計量改動都必須產生新 runtime／cost-model id、fixture 與 rollout，不能在 v0 原地擴充。若未來需要 richer deterministic DSL，另開 `managed-function-v1`，不要與完整 Python scientific backend 混為一談。
+任何 managed 語義或計量改動都必須產生新 runtime／cost-model id、fixture 與 rollout，
+不能原地修改 frozen v0。V1 與完整 Python scientific backend 仍是不同契約，不應混為一談。
 
-本計畫另明確區分執行邊界：既有 v0 interpreter 可作為跨平台的 `production_sandboxed_dsl` backend。它只執行封閉自訂語法，沒有 filesystem、network、process、DLL 或 native API capability，並以 operation/CPT、usage、timeout、loop、call-depth、value/materialization、memory-accounting 與 output bounds fail closed；Windows DSL Worker 不需要 Windows Containers/HCS。真正需要 operator-owned runner、image、rootfs、artifact mounts 或外部程式的 general-compute workload，才分別使用 Linux `production_sandboxed_oci` 或 Windows `production_sandboxed_windows`/HCS，且各自的 provider prerequisite 不得套用到 DSL。
+本計畫另明確區分執行邊界：active `managed-function-v1` 以及相容用的 frozen v0
+interpreter 都只執行封閉自訂語法，沒有 filesystem、network、process、DLL 或 native
+API capability。`production_sandboxed_dsl` 仍保留其 frozen v0 semantics identity，並在
+自身路由中使用對應的封閉 interpreter；Windows DSL Worker 不需要 Windows
+Containers/HCS。真正需要 operator-owned runner、image、rootfs、artifact mounts 或
+外部程式的 general-compute workload，才分別使用 Linux `production_sandboxed_oci` 或
+Windows `production_sandboxed_windows`/HCS，且各自的 provider prerequisite 不得套用到 DSL。
 
 Rust control plane 負責驗證請求、建立 sandbox、套用配額、串流 artifact、取消／kill／reap、收集 telemetry 與產生結果 envelope；guest/backend 負責執行使用者程式。
 
@@ -65,9 +87,12 @@ RuntimeResult + usage + output artifact manifests
 
 建議的程式分層：
 
-- `executor-rs/crates/managed-function-runtime`：維持 v0 DSL、canonical renderer、metering 與 consensus result contract 共用語義。
-- `executor-rs/crates/general-compute-runtime`：新增 request/result schema、supervisor、quota、cancellation、artifact、capability 與 backend adapter；不得依賴 Hivemind database。
-- `hivemind-rs/crates/worker-executor`：依 runtime version 分派 v0 或 v1；保留 detached supervisor 的 kill/reap cleanup guard。
+- `executor-rs/crates/managed-function-runtime`：提供 active v1 DSL、canonical renderer、metering
+  與共識結果語義，同時保留 frozen v0 compatibility fixtures 與 parser behavior。
+- `executor-rs/crates/general-compute-runtime`：新增 request/result schema、supervisor、quota、
+  cancellation、artifact、capability 與 backend adapter；不得依賴 Hivemind database。
+- `hivemind-rs/crates/worker-executor`：新 managed work 只分派 v1；保留 v0 historical
+  recognition，以及 detached supervisor 的 kill/reap cleanup guard。
 - `proto/hivemind.proto`：只傳版本化 manifest、hash、狀態與受限 metadata；大型資料走 artifact service/CAS。
 - `packaging/` 與 Docker/worker package：以 image digest、backend manifest、driver compatibility matrix 產生可重現包。
 
@@ -179,7 +204,12 @@ v1 延續目前 trust model：Nodepool 是唯一可信結算權威，Worker 的�
 - network 預設 deny；filesystem 只允許明確的 read-only input 與 ephemeral output mount；禁止任意 pip/npm install、動態 native plugin 與 host socket。
 - Worker 只回傳受限 telemetry；Nodepool 驗證 envelope、hash、配額、runtime/image/cost-model 版本後才建立 usage claim。
 - registry-approved image/capability與 Worker自報 capability是不同資料；Nodepool須記錄 claim、persisted registration、operator-approved registry與attested capability的 provenance。字串相符或 `gpu_available=true` 不是硬體存在的證明。
-- v0 由 Nodepool 以 strict-majority consensus certificate 結算。v1 alpha 的 resource telemetry 一律存為 `worker_usage_claim`，不得單獨驅動 variable settlement；先採 Nodepool-owned fixed reservation/tariff，直到對應的 evidence policy 完成驗證。Replicated output 只能提高結果可信度，不能證明 CPU/GPU usage。
+- active `managed-function-v1` 由 Nodepool 以 strict-majority consensus certificate 選出
+  結果，並獨立以驗證過的 per-replica usage evidence 結算；有效但 divergent 的 replica
+  也可按實際工作量結算，未使用的 hold 會退回。`general-compute-v1alpha1` 的 resource
+  telemetry 仍一律存為 `worker_usage_claim`，不得單獨驅動 variable settlement；其
+  fixed reservation 會維持到對應 evidence policy 完成驗證。Replicated output 只能提高
+  結果可信度，不能單獨證明 CPU/GPU usage。
 - evidence level 由 Nodepool 在驗證後寫入；Worker 只能附 evidence bytes，不能宣告自己是 `tee_attested`。
 - 每個版本同時鎖定 runtime version、cost model、result/consensus protocol、trust policy 與 golden fixtures；任一項變更都產生新版本。
 
@@ -206,7 +236,7 @@ M3 trusted capability registry gate 已落地：Nodepool operator config 是 wor
 - `strict_reproducible_cpu` 固定 architecture/features、rounding、單 thread、BLAS/FFT與 reduction policy；`reproducible_same_profile`只承諾同 image/hardware profile；GPU/parallel CPU預設 `best_effort`並用數值 acceptance rules，不宣稱跨硬體 bitwise一致。
 - 觀測至少包括 queue latency、startup、CPU/wall ratio、peak RSS、I/O、GPU time/VRAM、cancel/timeout、artifact retry、backend mismatch、reproducibility mismatch 與 unverified claim count。
 - 發布前必須做長跑 soak、重派與節點故障、CAS 中斷續傳、同一任務重播、惡意輸入、超大 shape、NaN/Inf、fork/thread bomb 與 container escape 測試。
-- benchmark保存 raw data與 p50/p95：sandbox cold/warm start、cancel latency、CAS upload/download/checksum/resume/dedup、elementwise/reduction、DGEMM多尺寸、FFT、SpMV、ODE、Monte Carlo、CPU thread scaling、GPU init/transfer/kernel/fallback；v0 native與replicated consensus path是不可退化 baseline。
+- benchmark保存 raw data與 p50/p95：sandbox cold/warm start、cancel latency、CAS upload/download/checksum/resume/dedup、elementwise/reduction、DGEMM多尺寸、FFT、SpMV、ODE、Monte Carlo、CPU thread scaling、GPU init/transfer/kernel/fallback；active v1 native與replicated consensus path是不可退化 baseline，v0 僅作歷史相容性 regression evidence。
 
 ## 8. 建議實作順序（前十個 PR）
 
@@ -230,7 +260,10 @@ M3 trusted capability registry gate 已落地：Nodepool operator config 是 wor
 crate，以及其專用 Makefile／CI／IDE metadata 已在使用者明確授權後移除；這些內容不再是
 Hivemind 的 source、build 或 release surface。
 
-`general-compute-runtime` 已有 contracts、capability validation、framed JSON、bounded supervisor與 output capture；這只是 M0/M1 scaffold，尚未接 Worker，也沒有 sandbox、CAS、tensor ABI、scientific image或可信 billing。Master、Nodepool、Worker目前仍只接受 v0 managed path。
+`general-compute-runtime` 已有 contracts、capability validation、framed JSON、bounded supervisor
+與 output capture；這仍是 M0/M1 scaffold，尚未完成完整 production sandbox、CAS、tensor ABI、
+scientific image 或可信 billing。Master、Nodepool、Worker 現在接受 active v1 managed path；
+舊 v0 只保留歷史資料與相容解析，新的 v0 work 會被拒絕。
 
 已保存的 cleanup／scaffold驗證包括：
 

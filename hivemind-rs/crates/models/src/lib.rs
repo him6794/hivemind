@@ -1,4 +1,7 @@
 use chrono::{DateTime, Utc};
+use general_compute_runtime::{
+    MANAGED_DSL_V1_RUNTIME_VERSION, MANAGED_DSL_V1_SEMANTICS_MANIFEST_SHA256,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
@@ -57,6 +60,7 @@ pub struct LedgerEntry {
 #[serde(rename_all = "snake_case")]
 pub enum LedgerEntryKind {
     PayerDebit,
+    PayerRefund,
     ProviderCredit,
     PlatformFee,
     UserTransferDebit,
@@ -67,6 +71,7 @@ impl LedgerEntryKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::PayerDebit => "payer_debit",
+            Self::PayerRefund => "payer_refund",
             Self::ProviderCredit => "provider_credit",
             Self::PlatformFee => "platform_fee",
             Self::UserTransferDebit => "user_transfer_debit",
@@ -79,6 +84,7 @@ impl std::str::FromStr for LedgerEntryKind {
     type Err = std::convert::Infallible;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(match s {
+            "payer_refund" => Self::PayerRefund,
             "provider_credit" => Self::ProviderCredit,
             "platform_fee" => Self::PlatformFee,
             "user_transfer_debit" => Self::UserTransferDebit,
@@ -190,6 +196,7 @@ pub const WORKER_CAPABILITY_REPORT_VERSION: u32 = 1;
 pub const WORKER_CAPABILITY_REPORT_MAX_BYTES: usize = 16 * 1024;
 pub const WORKER_CAPABILITY_MAX_ENTRIES: usize = 32;
 pub const WORKER_CAPABILITY_MAX_USAGE_UNITS: u64 = 1_000_000;
+pub const WORKER_CAPABILITY_MAX_V1_USAGE_UNITS: u64 = u64::MAX;
 pub const WORKER_CAPABILITY_MAX_OUTPUT_BYTES: u64 = 1024 * 1024;
 pub const WORKER_CAPABILITY_MAX_READINESS_REASON_BYTES: usize = 255;
 
@@ -239,6 +246,7 @@ impl WorkerCapabilityReport {
         let mut previous: Option<(&str, &str, &str)> = None;
         for capability in &self.capabilities {
             if capability.runtime != "managed-function-v0"
+                && capability.runtime != MANAGED_DSL_V1_RUNTIME_VERSION
                 && capability.runtime != "production_sandboxed_dsl"
             {
                 return Err("worker capability report contains an unsupported runtime".into());
@@ -249,16 +257,28 @@ impl WorkerCapabilityReport {
             {
                 return Err("managed-function-v0 capability identity is invalid".into());
             }
+            if capability.runtime == MANAGED_DSL_V1_RUNTIME_VERSION
+                && (capability.backend_id != MANAGED_DSL_V1_RUNTIME_VERSION
+                    || capability.semantics_manifest_sha256
+                        != MANAGED_DSL_V1_SEMANTICS_MANIFEST_SHA256)
+            {
+                return Err("managed-function-v1 capability identity is invalid".into());
+            }
             if capability.runtime == "production_sandboxed_dsl"
                 && (capability.backend_id.trim().is_empty()
                     || capability.semantics_manifest_sha256.trim().is_empty())
             {
                 return Err("production DSL capability identity is incomplete".into());
             }
+            let max_usage_units = if capability.runtime == MANAGED_DSL_V1_RUNTIME_VERSION {
+                WORKER_CAPABILITY_MAX_V1_USAGE_UNITS
+            } else {
+                WORKER_CAPABILITY_MAX_USAGE_UNITS
+            };
             if capability.runtime.len() > 64
                 || capability.backend_id.len() > 255
                 || capability.semantics_manifest_sha256.len() > 71
-                || !(1..=WORKER_CAPABILITY_MAX_USAGE_UNITS).contains(&capability.max_usage_units)
+                || !(1..=max_usage_units).contains(&capability.max_usage_units)
                 || !(1..=WORKER_CAPABILITY_MAX_OUTPUT_BYTES).contains(&capability.max_output_bytes)
             {
                 return Err("worker capability report entry is outside its bounds".into());
@@ -278,13 +298,12 @@ impl WorkerCapabilityReport {
 
     pub fn validate_public_dynamic(&self) -> Result<(), String> {
         self.validate()?;
-        if self
-            .capabilities
-            .iter()
-            .any(|capability| capability.runtime != "managed-function-v0")
-        {
+        if self.capabilities.iter().any(|capability| {
+            capability.runtime != "managed-function-v0"
+                && capability.runtime != MANAGED_DSL_V1_RUNTIME_VERSION
+        }) {
             return Err(
-                "public dynamic admission supports only managed-function-v0 capabilities".into(),
+                "public dynamic admission supports only managed-function-v0/v1 capabilities".into(),
             );
         }
         Ok(())
@@ -303,10 +322,10 @@ impl WorkerCapabilityReport {
         Self {
             protocol_version: WORKER_CAPABILITY_REPORT_VERSION,
             capabilities: vec![WorkerRuntimeCapability {
-                runtime: "managed-function-v0".into(),
-                backend_id: String::new(),
-                semantics_manifest_sha256: String::new(),
-                max_usage_units: WORKER_CAPABILITY_MAX_USAGE_UNITS,
+                runtime: MANAGED_DSL_V1_RUNTIME_VERSION.into(),
+                backend_id: MANAGED_DSL_V1_RUNTIME_VERSION.into(),
+                semantics_manifest_sha256: MANAGED_DSL_V1_SEMANTICS_MANIFEST_SHA256.into(),
+                max_usage_units: WORKER_CAPABILITY_MAX_V1_USAGE_UNITS,
                 max_output_bytes: WORKER_CAPABILITY_MAX_OUTPUT_BYTES,
             }],
             ready: true,
@@ -764,4 +783,59 @@ pub struct LoginResponse {
 pub struct TokenResponse {
     pub token: String,
     pub expires_at: DateTime<Utc>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn legacy_v0_report() -> WorkerCapabilityReport {
+        WorkerCapabilityReport {
+            protocol_version: WORKER_CAPABILITY_REPORT_VERSION,
+            capabilities: vec![WorkerRuntimeCapability {
+                runtime: "managed-function-v0".into(),
+                backend_id: String::new(),
+                semantics_manifest_sha256: String::new(),
+                max_usage_units: 1,
+                max_output_bytes: 1,
+            }],
+            ready: true,
+            readiness_reason: String::new(),
+        }
+    }
+
+    #[test]
+    fn legacy_v0_capability_reports_remain_parseable_for_retirement_compatibility() {
+        let report = legacy_v0_report();
+
+        assert_eq!(report.validate(), Ok(()));
+        assert_eq!(report.validate_public_dynamic(), Ok(()));
+    }
+
+    #[test]
+    fn legacy_v0_capability_reports_reject_an_identity_the_old_contract_never_had() {
+        let mut report = legacy_v0_report();
+        report.capabilities[0].backend_id = "unexpected-backend".into();
+
+        assert_eq!(
+            report.validate(),
+            Err("managed-function-v0 capability identity is invalid".into())
+        );
+    }
+
+    #[test]
+    fn new_public_capability_report_is_v1_only() {
+        let report = WorkerCapabilityReport::public_managed_dsl();
+
+        assert_eq!(report.validate(), Ok(()));
+        assert_eq!(report.capabilities.len(), 1);
+        assert_eq!(
+            report.capabilities[0].runtime,
+            MANAGED_DSL_V1_RUNTIME_VERSION
+        );
+        assert!(report
+            .capabilities
+            .iter()
+            .all(|capability| capability.runtime != "managed-function-v0"));
+    }
 }

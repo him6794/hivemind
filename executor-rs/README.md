@@ -2,8 +2,10 @@
 
 This Rust workspace contains the execution libraries used by Hivemind:
 
-- `managed-function-runtime` implements the deterministic, metered
-  `managed-function-v0` DSL used by the Worker and managed-proof guest.
+- `managed-function-runtime` implements the active deterministic, metered
+  `managed-function-v1` DSL used by the Worker. The historical
+  `managed-function-v0` contract remains available only for compatibility
+  parsing and frozen fixtures.
   Production closed-DSL execution is exposed as `production_sandboxed_dsl`;
   it is cross-platform and requires no Windows Containers or HCS.
 - `general-compute-runtime` owns the versioned contracts and bounded
@@ -32,4 +34,4 @@ cargo fmt --all -- --check
 
 The Hivemind Worker imports `managed-function-runtime` by path, so changes to
 that crate must preserve deterministic semantics, metering, cancellation, and
-the proof-facing output contract.
+the Worker result contract.

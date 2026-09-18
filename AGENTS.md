@@ -4,7 +4,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## What is Hivemind?
 
-Hivemind is a distributed compute runtime for public-network workers. Users submit batch tasks as `managed-function-v0` source functions with a JSON input payload; the system schedules them across a pool of worker nodes and returns results. The backend is a single Rust binary (`hivemind-bin`) that can run as `master`, `nodepool`, `worker`, or `all` (colocated). Frontends are React SPAs.
+Hivemind is a distributed compute runtime for public-network workers. Users submit batch tasks as `managed-function-v1` source functions with a JSON input payload; the system schedules them through Nodepool-coordinated replica execution and returns validated results. The frozen `managed-function-v0` contract remains readable for historical compatibility but is not accepted for new work. The backend is a single Rust binary (`hivemind-bin`) that can run as `master`, `nodepool`, `worker`, or `all` (colocated). Frontends are React SPAs.
 
 ## Common Commands
 
@@ -110,10 +110,10 @@ Client / UI
 ### Key Data Flow
 
 1. User submits a task (HTTP POST or CLI `submit`) → Master API → Nodepool gRPC
-2. Nodepool persists task to Postgres, dispatches to an available worker via gRPC
-3. Worker runs the `managed-function-v0` source with its JSON input in the managed-function runtime
-4. Worker reports results back via gRPC → Nodepool marks task complete
-5. Frontend polls Master API for task status/results
+2. Nodepool persists the task to Postgres and dispatches active managed work to a configured replica set
+3. Each Worker runs the `managed-function-v1` source with its JSON input in the closed managed-function runtime
+4. Workers report attempt-bound results and usage evidence via gRPC → Nodepool validates consensus and settles valid replica usage
+5. Frontend polls Master API for task status/results; historical v0 rows remain readable but are not newly dispatched
 
 ### Configuration
 

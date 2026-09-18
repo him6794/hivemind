@@ -213,7 +213,7 @@ export function DocsPage() {
 
             <Surface className="mt-4 border-honey/25 bg-honey/[0.04]">
               <h3 className="text-base font-semibold">
-                {t(locale, { zh: "v0 不支援", en: "Not available in v0" })}
+                {t(locale, { zh: "V1 不支援", en: "Not available in managed-function-v1" })}
               </h3>
               <div className="mt-3 flex flex-wrap gap-2">
                 {docs.language.forbidden.map((item: string) => (
@@ -321,8 +321,8 @@ export function DocsPage() {
               </h3>
               <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
                 {t(locale, {
-                  zh: "以下數字來自工作記錄；每個範例都把工作額度與 1 CPT 起始費用分開列出。",
-                  en: "Each example uses a task record and separates the work credits from the 1 CPT starting charge.",
+                  zh: "以下數字來自工作記錄；每個範例都顯示單一有效副本的實際用量，不代表整份任務的固定總額。",
+                  en: "Each example uses a task record and shows one valid replica's measured usage, not a fixed whole-task total.",
                 })}
               </p>
               <div className="mt-4 grid gap-4 lg:grid-cols-2">
@@ -331,23 +331,30 @@ export function DocsPage() {
                   title: string;
                   program: string;
                   receiptUsageUnits: number;
-                  totalCpt: number;
                   breakdown: string;
                 }) => (
                   <Surface key={example.id} className="flex flex-col gap-3">
                     <div className="flex items-start justify-between gap-4">
                       <h4 className="text-base font-semibold">{example.title}</h4>
-                      <span className="shrink-0 font-mono-tech text-sm text-honey">{example.totalCpt} CPT</span>
+                      <span className="shrink-0 font-mono-tech text-sm text-honey">
+                        {example.receiptUsageUnits} {t(locale, { zh: "用量／副本", en: "usage / replica" })}
+                      </span>
                     </div>
                     <CodeBlock>{example.program}</CodeBlock>
                     <div className="grid gap-2 text-sm sm:grid-cols-2">
                       <div className="rounded-xl bg-background p-3">
-                        <div className="text-xs uppercase tracking-wide text-muted-foreground">usage units</div>
+                        <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                          {t(locale, { zh: "每個有效副本用量", en: "usage per valid replica" })}
+                        </div>
                         <div className="mt-1 font-mono-tech text-lg text-honey">{example.receiptUsageUnits}</div>
                       </div>
                       <div className="rounded-xl bg-background p-3">
-                        <div className="text-xs uppercase tracking-wide text-muted-foreground">total CPT</div>
-                        <div className="mt-1 font-mono-tech text-lg text-honey">{example.totalCpt}</div>
+                        <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                          {t(locale, { zh: "結算依據", en: "settlement basis" })}
+                        </div>
+                        <div className="mt-1 font-mono-tech text-lg text-honey">
+                          {t(locale, { zh: "有效用量 + 10% 費用", en: "valid usage + 10% fee" })}
+                        </div>
                       </div>
                     </div>
                     <p className="text-sm leading-relaxed text-muted-foreground">{example.breakdown}</p>

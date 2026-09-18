@@ -20,7 +20,7 @@ make dev
 If you want to submit a task and write the task program, start here:
 
 - [docs/MANAGED_FUNCTION_RUNTIME.md](docs/MANAGED_FUNCTION_RUNTIME.md) — the
-  `managed-function-v0` syntax, metering model, and billing formula
+  active `managed-function-v1` syntax, metering model, and settlement formula
 - [docs/PUBLIC_NETWORK_LIMITATIONS.md](docs/PUBLIC_NETWORK_LIMITATIONS.md) —
   what the network does not do yet, including that CPT is an internal quota unit
 - The Docs and Usage rules pages on the official site render the same reference
@@ -181,9 +181,10 @@ settling the task, and never falls back to a single-Worker result.
 
 Consensus is agreement evidence, not independent correctness validation: a
 colluding or commonly compromised Worker majority can still agree on an incorrect result.
-Only deterministic, side-effect-free managed tasks are eligible. Worker usage
-claims remain non-authoritative, so consensus tasks use Nodepool-owned fixed
-reservation billing.
+Only deterministic, side-effect-free managed tasks are eligible. V1 holds a
+per-replica allowance plus the platform fee, settles validated usage evidence
+from valid replicas, and refunds unused held CPT; quorum output and payment
+eligibility are separate decisions.
 
 The default rollout is `enforce`. Use `observe` for a canary that fans out
 replicas, records non-settling shadow state, and never exposes a billable
@@ -263,13 +264,13 @@ curl -X POST http://localhost:8082/api/tasks \
   -H "Content-Type: application/json" \
   -d '{
     "task_id": "task-1",
-    "runtime": "managed-function-v0",
+    "runtime": "managed-function-v1",
     "task_source": "fn sum(values) {\n  return get(values, \"a\") + get(values, \"b\");\n}\nsum(input);\n",
     "torrent": "{\"a\": 1, \"b\": 2}",
     "memory_gb": 4,
     "cpu_score": 100,
     "storage_gb": 10,
-    "max_cpt": 25
+    "max_cpt": 1000
   }'
 
 # List tasks

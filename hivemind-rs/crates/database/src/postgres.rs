@@ -605,6 +605,78 @@ async fn run_migrations_inner(pool: &PgPool) -> Result<()> {
     .execute(&mut *tx)
     .await?;
 
+    // v1 managed-function billing is usage-based and has a separate escrow
+    // record from the frozen certificate settlement table above. The hold is
+    // per attempt so retries cannot reuse or overwrite another attempt's
+    // reservation, and certificate_id remains nullable for no-quorum outcomes.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS managed_consensus_usage_holds (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            task_id VARCHAR(255) NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+            attempt_id UUID NOT NULL REFERENCES managed_consensus_attempts(id) ON DELETE CASCADE,
+            owner VARCHAR(255) NOT NULL,
+            max_cpt BIGINT NOT NULL CHECK (max_cpt > 0),
+            replica_count INTEGER NOT NULL CHECK (replica_count >= 2 AND replica_count <= 7),
+            reserved_usage_cpt BIGINT NOT NULL CHECK (reserved_usage_cpt >= 0),
+            reserved_fee_cpt BIGINT NOT NULL CHECK (reserved_fee_cpt >= 0),
+            held_total_cpt BIGINT NOT NULL CHECK (held_total_cpt >= 0),
+            actual_usage_cpt BIGINT NOT NULL DEFAULT 0 CHECK (actual_usage_cpt >= 0),
+            actual_fee_cpt BIGINT NOT NULL DEFAULT 0 CHECK (actual_fee_cpt >= 0),
+            charged_amount_cpt BIGINT NOT NULL DEFAULT 0 CHECK (charged_amount_cpt >= 0),
+            refund_cpt BIGINT NOT NULL DEFAULT 0 CHECK (refund_cpt >= 0),
+            state VARCHAR(24) NOT NULL DEFAULT 'held'
+                CHECK (state IN ('held', 'settled', 'released')),
+            terminal_outcome VARCHAR(32) NOT NULL,
+            certificate_id UUID REFERENCES managed_consensus_certificates(id) ON DELETE RESTRICT,
+            billing_version VARCHAR(64) NOT NULL,
+            cost_model_version VARCHAR(64) NOT NULL,
+            settlement_basis VARCHAR(64) NOT NULL,
+            settlement_plan_hash VARCHAR(71),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            settled_at TIMESTAMPTZ,
+            UNIQUE (task_id, attempt_id),
+            UNIQUE (attempt_id)
+        );",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS managed_consensus_replica_payouts (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            hold_id UUID NOT NULL REFERENCES managed_consensus_usage_holds(id) ON DELETE CASCADE,
+            task_id VARCHAR(255) NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+            attempt_id UUID NOT NULL REFERENCES managed_consensus_attempts(id) ON DELETE CASCADE,
+            replica_id VARCHAR(255) NOT NULL,
+            worker_id VARCHAR(255) NOT NULL,
+            provider_user VARCHAR(255),
+            usage_units BIGINT NOT NULL CHECK (usage_units >= 0),
+            payout_amount_cpt BIGINT NOT NULL CHECK (payout_amount_cpt >= 0),
+            eligible BOOLEAN NOT NULL,
+            result_digest VARCHAR(71),
+            result_status VARCHAR(16),
+            rejection_reason TEXT,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE (hold_id, replica_id)
+        );",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_managed_consensus_usage_holds_task
+         ON managed_consensus_usage_holds(task_id, state);",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_managed_consensus_replica_payouts_task
+         ON managed_consensus_replica_payouts(task_id, attempt_id);",
+    )
+    .execute(&mut *tx)
+    .await?;
+
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_managed_consensus_attempts_active
          ON managed_consensus_attempts(state, deadline);",

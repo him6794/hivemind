@@ -69,7 +69,13 @@ pub const WORKER_EXECUTION_TOKEN_MAX_BYTES: usize = 8 * 1024;
 pub const GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES: usize = 255;
 
 /// Maximum signed admission budget accepted for `managed-function-v0` execution.
+/// This cap is frozen as part of the v0 contract.
 pub const MANAGED_BUDGET_MAX_USAGE_UNITS: i64 = 1_000_000;
+
+/// v1 has no fixed work-count ceiling. The protobuf field is signed, so this
+/// is only its representable positive boundary; Nodepool still checks every
+/// task-level hold and replica multiplication with checked arithmetic.
+pub const MANAGED_V1_BUDGET_MAX_USAGE_UNITS: i64 = i64::MAX;
 
 /// Maximum status/output byte length accepted in a Worker execution response.
 pub const WORKER_STATUS_MESSAGE_MAX_BYTES: usize = 1024 * 1024;
@@ -78,7 +84,7 @@ pub const WORKER_STATUS_MESSAGE_MAX_BYTES: usize = 1024 * 1024;
 pub const LEGACY_MANAGED_RECEIPT_MAX_BYTES: usize = 64 * 1024;
 
 /// Maximum serialized size accepted for one managed consensus result.
-pub const MANAGED_CONSENSUS_RESULT_MAX_BYTES: usize = 512 * 1024;
+pub const MANAGED_CONSENSUS_RESULT_MAX_BYTES: usize = 256 * 1024;
 
 /// Maximum serialized size accepted for one Nodepool-derived consensus certificate.
 pub const MANAGED_CONSENSUS_CERTIFICATE_MAX_BYTES: usize = 128 * 1024;
@@ -586,9 +592,10 @@ mod tests {
         GENERAL_COMPUTE_MANIFEST_MAX_BYTES, GENERAL_COMPUTE_RESULT_MAX_BYTES,
         GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES,
         GENERAL_COMPUTE_TRANSFER_LEASE_RPC_MESSAGE_MAX_BYTES, LEGACY_MANAGED_RECEIPT_MAX_BYTES,
-        MANAGED_BUDGET_MAX_USAGE_UNITS, MANAGED_GPU_MANIFEST_MAX_BYTES,
-        MANAGED_GPU_RESULT_MAX_BYTES, MANAGED_JSON_INPUT_MAX_BYTES, MANAGED_TASK_SOURCE_MAX_BYTES,
-        TASK_ID_MAX_BYTES, WORKER_EXECUTION_TOKEN_MAX_BYTES, WORKER_RPC_MESSAGE_MAX_BYTES,
+        MANAGED_BUDGET_MAX_USAGE_UNITS, MANAGED_CONSENSUS_RESULT_MAX_BYTES,
+        MANAGED_GPU_MANIFEST_MAX_BYTES, MANAGED_GPU_RESULT_MAX_BYTES, MANAGED_JSON_INPUT_MAX_BYTES,
+        MANAGED_TASK_SOURCE_MAX_BYTES, MANAGED_V1_BUDGET_MAX_USAGE_UNITS, TASK_ID_MAX_BYTES,
+        WORKER_EXECUTION_TOKEN_MAX_BYTES, WORKER_RPC_MESSAGE_MAX_BYTES,
         WORKER_STATUS_MESSAGE_MAX_BYTES,
     };
 
@@ -602,6 +609,8 @@ mod tests {
         assert_eq!(MANAGED_GPU_MANIFEST_MAX_BYTES, 20 * 1024 * 1024);
         assert_eq!(MANAGED_GPU_RESULT_MAX_BYTES, 16 * 1024 * 1024);
         assert_eq!(MANAGED_BUDGET_MAX_USAGE_UNITS, 1_000_000);
+        assert_eq!(MANAGED_V1_BUDGET_MAX_USAGE_UNITS, i64::MAX);
+        assert_eq!(MANAGED_CONSENSUS_RESULT_MAX_BYTES, 256 * 1024);
         assert_eq!(WORKER_STATUS_MESSAGE_MAX_BYTES, 1024 * 1024);
         assert_eq!(LEGACY_MANAGED_RECEIPT_MAX_BYTES, 64 * 1024);
         assert_eq!(WORKER_EXECUTION_TOKEN_MAX_BYTES, 8 * 1024);

@@ -1,6 +1,7 @@
 use managed_function_runtime::{
     ExecutionLimits, ManagedExecutor, Status, V0_SEMANTICS_MANIFEST_JSON,
-    V0_SEMANTICS_MANIFEST_SHA256,
+    V0_SEMANTICS_MANIFEST_SHA256, V1_COST_MODEL_ID, V1_SEMANTICS_MANIFEST_JSON,
+    V1_SEMANTICS_MANIFEST_SHA256,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -177,3 +178,105 @@ fn managed_function_v0_manifest_records_known_semantic_limits() {
         .unwrap_err();
     assert_eq!(unicode_escape.code(), "parse_error");
 }
+
+#[test]
+fn managed_function_v1_manifest_is_canonical_and_hash_pinned() {
+    let manifest: Value =
+        serde_json::from_str(V1_SEMANTICS_MANIFEST_JSON).expect("v1 manifest must be valid JSON");
+    let canonical = serde_json::to_string(&manifest).expect("v1 manifest must serialize");
+    let digest = format!("{:x}", Sha256::digest(canonical.as_bytes()));
+
+    assert_eq!(V1_SEMANTICS_MANIFEST_JSON.trim_end(), canonical);
+    assert_eq!(V1_SEMANTICS_MANIFEST_SHA256, EXPECTED_V1_MANIFEST_SHA256);
+    assert_eq!(digest, EXPECTED_V1_MANIFEST_SHA256);
+    assert_eq!(manifest["runtime_id"], "managed-function-v1");
+    assert_eq!(manifest["cost_model"]["id"], V1_COST_MODEL_ID);
+    assert_eq!(
+        manifest["manifest_id"],
+        "managed-function-v1-semantics-manifest-v1"
+    );
+    assert_eq!(manifest["billing"]["authority"], "nodepool");
+    assert_eq!(manifest["billing"]["reservation"], "per-replica-allowance");
+    assert_eq!(manifest["billing"]["usage_role"], "settlement-input");
+    assert_eq!(
+        manifest["result_contract"]["canonical_result"],
+        "managed-consensus-result-v1"
+    );
+    assert_eq!(
+        manifest["result_contract"]["settlement_authority"],
+        "nodepool"
+    );
+    assert_eq!(
+        manifest["result_contract"]["usage_role"],
+        "settlement-input"
+    );
+    assert_eq!(
+        manifest["result_contract"]["quorum_participants_are_payment_recipients"],
+        false
+    );
+}
+
+#[test]
+fn managed_function_v1_manifest_matches_budget_profile_and_cost_vectors() {
+    let manifest: Value = serde_json::from_str(V1_SEMANTICS_MANIFEST_JSON).unwrap();
+    let limits = ExecutionLimits::for_managed_function_budget(100);
+    let frozen = &manifest["default_execution_limits"];
+
+    assert_eq!(frozen["max_ops"].as_u64(), Some(u64::MAX));
+    assert!(frozen["max_usage_units"].is_null());
+    assert_eq!(frozen["max_loop_iterations"].as_u64(), Some(u64::MAX));
+    assert_eq!(frozen["max_call_depth"], limits.max_call_depth);
+    assert_eq!(frozen["max_output_bytes"], limits.max_output_bytes);
+    assert_eq!(frozen["max_value_bytes"], limits.max_value_bytes);
+    assert_eq!(frozen["max_collection_items"], limits.max_collection_items);
+    assert_eq!(frozen["max_value_depth"], limits.max_value_depth);
+    assert_eq!(
+        frozen["max_value_materialization_bytes"],
+        limits.max_value_materialization_bytes
+    );
+
+    for vector in manifest["cost_model"]["vectors"].as_array().unwrap() {
+        let result = ManagedExecutor
+            .execute_json_input(
+                vector["source"].as_str().unwrap(),
+                limits.clone(),
+                vector["input_json"].as_str().unwrap(),
+            )
+            .unwrap_or_else(|error| panic!("vector {} failed: {error}", vector["name"]));
+        let expected = &vector["expected"];
+
+        assert_eq!(result.status, Status::Completed);
+        assert_eq!(
+            result.receipt.executed_ops,
+            expected["executed_ops"].as_u64().unwrap()
+        );
+        assert_eq!(
+            result.receipt.usage_units,
+            expected["usage_units"].as_u64().unwrap()
+        );
+        assert_eq!(
+            result.receipt.function_calls,
+            expected["function_calls"].as_u64().unwrap()
+        );
+        assert_eq!(
+            result.receipt.loop_iterations,
+            expected["loop_iterations"].as_u64().unwrap()
+        );
+        assert_eq!(
+            result.receipt.max_call_depth,
+            usize::try_from(expected["max_call_depth"].as_u64().unwrap()).unwrap()
+        );
+        assert_eq!(
+            result.receipt.output_bytes,
+            usize::try_from(expected["receipt_output_bytes"].as_u64().unwrap()).unwrap()
+        );
+        assert_eq!(result.output, expected["stdout"].as_str().unwrap());
+        assert_eq!(
+            managed_function_runtime::render_output(&result.value),
+            expected["return_value"].as_str().unwrap()
+        );
+    }
+}
+
+const EXPECTED_V1_MANIFEST_SHA256: &str =
+    "c2dc962dcf6762df51fa94af2ee1f00a4d1aabdf84321ec67a3ab7f892692853";

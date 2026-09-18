@@ -118,7 +118,7 @@
         "HIVEMIND_SEED_DEFAULT_USER": "false",
         "JWT_SECRET": "test-jwt-secret",
         "LOG_LEVEL": "info",
-        "MANAGED_PROOF_ROLLOUT_MODE": "enforce",
+        "MANAGED_CONSENSUS_ROLLOUT_MODE": "enforce",
         "NODEPOOL_GRPC_ADDR": "0.0.0.0:50051",
         "REDIS_URL": "redis://redis:6379",
         "TORRENT_ALLOW_LOCAL_TASK_ARTIFACTS": "false",

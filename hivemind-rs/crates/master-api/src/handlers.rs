@@ -280,10 +280,13 @@ fn validate_task_resources(body: &CreateTaskBody) -> Result<(), &'static str> {
 
 fn validate_runtime_contract(body: &CreateTaskBody) -> Result<(), &'static str> {
     let runtime = body.runtime.as_deref().map(str::trim).unwrap_or_default();
+    if runtime == "managed-function-v0" {
+        return Err("managed-function-v0 has been retired; use managed-function-v1");
+    }
     let consensus_requested = body.managed_consensus_version.is_some()
         || body.managed_replica_count.is_some()
         || body.managed_quorum.is_some();
-    if consensus_requested && !matches!(runtime, "managed-function-v0" | "production_sandboxed_dsl")
+    if consensus_requested && !matches!(runtime, "managed-function-v1" | "production_sandboxed_dsl")
     {
         return Err("managed consensus policy requires a managed DSL runtime");
     }
@@ -325,27 +328,23 @@ fn validate_runtime_contract(body: &CreateTaskBody) -> Result<(), &'static str> 
     }
     match runtime {
         "" => Ok(()),
-        "managed-function-v0" => {
+        "managed-function-v1" => {
             let source = body.task_source.as_deref().unwrap_or_default();
             if source.trim().is_empty() {
-                return Err("managed-function-v0 requires non-empty task_source");
+                return Err("managed-function-v1 requires non-empty task_source");
             }
             if source.len() > hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES {
-                return Err("managed-function-v0 task_source exceeds the byte limit");
+                return Err("managed-function-v1 task_source exceeds the byte limit");
             }
             let input = body.torrent.as_deref().unwrap_or_default();
             if input.trim().is_empty() {
-                return Err("managed-function-v0 requires non-empty JSON input");
+                return Err("managed-function-v1 requires non-empty JSON input");
             }
             if input.len() > hivemind_proto::MANAGED_JSON_INPUT_MAX_BYTES {
-                return Err("managed-function-v0 JSON input exceeds the byte limit");
+                return Err("managed-function-v1 JSON input exceeds the byte limit");
             }
-            let budget = body.max_cpt.unwrap_or(0);
-            if budget <= 0 {
-                return Err("managed-function-v0 budget must be positive");
-            }
-            if budget > hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS {
-                return Err("managed-function-v0 budget exceeds the usage-unit limit");
+            if body.max_cpt.unwrap_or(0) <= 0 {
+                return Err("managed-function-v1 budget must be positive");
             }
             Ok(())
         }
@@ -2859,13 +2858,13 @@ mod tests {
     #[test]
     fn managed_runtime_source_accepts_64_kib_and_rejects_one_more_byte() {
         let exact = task_body(
-            Some("managed-function-v0"),
+            Some("managed-function-v1"),
             Some("s".repeat(hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES)),
             Some("{}".into()),
             1,
         );
         let oversized = task_body(
-            Some("managed-function-v0"),
+            Some("managed-function-v1"),
             Some("s".repeat(hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES + 1)),
             Some("{}".into()),
             1,
@@ -2874,7 +2873,7 @@ mod tests {
         assert_eq!(validate_runtime_contract(&exact), Ok(()));
         assert_eq!(
             validate_runtime_contract(&oversized),
-            Err("managed-function-v0 task_source exceeds the byte limit")
+            Err("managed-function-v1 task_source exceeds the byte limit")
         );
     }
 
@@ -3143,13 +3142,13 @@ mod tests {
     #[test]
     fn managed_runtime_input_accepts_one_mib_and_rejects_one_more_byte() {
         let exact = task_body(
-            Some("managed-function-v0"),
+            Some("managed-function-v1"),
             Some("return 1;".into()),
             Some("i".repeat(hivemind_proto::MANAGED_JSON_INPUT_MAX_BYTES)),
             1,
         );
         let oversized = task_body(
-            Some("managed-function-v0"),
+            Some("managed-function-v1"),
             Some("return 1;".into()),
             Some("i".repeat(hivemind_proto::MANAGED_JSON_INPUT_MAX_BYTES + 1)),
             1,
@@ -3158,54 +3157,51 @@ mod tests {
         assert_eq!(validate_runtime_contract(&exact), Ok(()));
         assert_eq!(
             validate_runtime_contract(&oversized),
-            Err("managed-function-v0 JSON input exceeds the byte limit")
+            Err("managed-function-v1 JSON input exceeds the byte limit")
         );
     }
 
     #[test]
-    fn managed_runtime_budget_accepts_one_million_and_rejects_larger() {
-        let exact = task_body(
-            Some("managed-function-v0"),
+    fn managed_runtime_v1_accepts_budgets_beyond_the_retired_v0_limit() {
+        let legacy_limit = task_body(
+            Some("managed-function-v1"),
             Some("return 1;".into()),
             Some("{}".into()),
             hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS,
         );
-        let oversized = task_body(
-            Some("managed-function-v0"),
+        let beyond_legacy_limit = task_body(
+            Some("managed-function-v1"),
             Some("return 1;".into()),
             Some("{}".into()),
             hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS + 1,
         );
 
-        assert_eq!(validate_runtime_contract(&exact), Ok(()));
-        assert_eq!(
-            validate_runtime_contract(&oversized),
-            Err("managed-function-v0 budget exceeds the usage-unit limit")
-        );
+        assert_eq!(validate_runtime_contract(&legacy_limit), Ok(()));
+        assert_eq!(validate_runtime_contract(&beyond_legacy_limit), Ok(()));
     }
 
     #[test]
     fn managed_runtime_rejects_blank_fields_and_nonpositive_budget() {
         let blank_source = task_body(
-            Some("managed-function-v0"),
+            Some("managed-function-v1"),
             Some("   ".into()),
             Some("{}".into()),
             1,
         );
         let blank_input = task_body(
-            Some("managed-function-v0"),
+            Some("managed-function-v1"),
             Some("return 1;".into()),
             Some("   ".into()),
             1,
         );
         let zero_budget = task_body(
-            Some("managed-function-v0"),
+            Some("managed-function-v1"),
             Some("return 1;".into()),
             Some("{}".into()),
             0,
         );
         let negative_budget = task_body(
-            Some("managed-function-v0"),
+            Some("managed-function-v1"),
             Some("return 1;".into()),
             Some("{}".into()),
             -1,
@@ -3213,19 +3209,34 @@ mod tests {
 
         assert_eq!(
             validate_runtime_contract(&blank_source),
-            Err("managed-function-v0 requires non-empty task_source")
+            Err("managed-function-v1 requires non-empty task_source")
         );
         assert_eq!(
             validate_runtime_contract(&blank_input),
-            Err("managed-function-v0 requires non-empty JSON input")
+            Err("managed-function-v1 requires non-empty JSON input")
         );
         assert_eq!(
             validate_runtime_contract(&zero_budget),
-            Err("managed-function-v0 budget must be positive")
+            Err("managed-function-v1 budget must be positive")
         );
         assert_eq!(
             validate_runtime_contract(&negative_budget),
-            Err("managed-function-v0 budget must be positive")
+            Err("managed-function-v1 budget must be positive")
+        );
+    }
+
+    #[test]
+    fn managed_function_v0_submission_is_rejected_with_the_v1_migration_error() {
+        let body = task_body(
+            Some("managed-function-v0"),
+            Some("return 1;".into()),
+            Some("{}".into()),
+            1,
+        );
+
+        assert_eq!(
+            validate_runtime_contract(&body),
+            Err("managed-function-v0 has been retired; use managed-function-v1")
         );
     }
 
@@ -3249,7 +3260,7 @@ mod tests {
             task_submit_limiter: Arc::new(tokio::sync::Mutex::new(TaskSubmitRateLimiter::new())),
         };
         let body = task_body(
-            Some("managed-function-v0"),
+            Some("managed-function-v1"),
             Some("s".repeat(hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES + 1)),
             Some("{}".into()),
             1,
@@ -3262,7 +3273,7 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(
             response.message,
-            "managed-function-v0 task_source exceeds the byte limit"
+            "managed-function-v1 task_source exceeds the byte limit"
         );
     }
 }

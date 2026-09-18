@@ -1,0 +1,8 @@
+{
+  "task": {
+    "kind": "analysis",
+    "needs_gpu": false,
+    "input_mb": 512
+  },
+  "labels": ["customer", "urgent"]
+}

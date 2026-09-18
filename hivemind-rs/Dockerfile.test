@@ -4,6 +4,11 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends protobuf-compiler pkg-config ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# The production OCI fixture validates the same rootless mapping contract as a
+# Linux worker. Keep the test image explicit instead of weakening that check.
+RUN printf 'root:100000:65536\n' > /etc/subuid \
+    && printf 'root:100000:65536\n' > /etc/subgid
+
 WORKDIR /workspace/hivemind-rs
 
 CMD ["cargo", "test", "--workspace", "--all-targets", "--", "--test-threads=1"]

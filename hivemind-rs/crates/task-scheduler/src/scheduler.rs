@@ -2,7 +2,8 @@ use general_compute_runtime::production::ManagedDslBackendRegistration;
 use general_compute_runtime::{
     managed_gpu::{ManagedGpuRequest, MANAGED_GPU_RUNTIME_VERSION},
     CapabilityMatrix, GeneralComputeRequest, TrustedWorkerCapabilityRegistration,
-    GENERAL_COMPUTE_RUNTIME_VERSION, MANAGED_DSL_RUNTIME_VERSION,
+    GENERAL_COMPUTE_RUNTIME_VERSION, MANAGED_DSL_RUNTIME_VERSION, MANAGED_DSL_V1_RUNTIME_VERSION,
+    MANAGED_DSL_V1_SEMANTICS_MANIFEST_SHA256,
 };
 
 use hivemind_models::{
@@ -42,6 +43,7 @@ pub fn worker_supports_managed_dsl_request(
                 && requested_budget_units as u64 <= registration.max_usage_units
                 && match runtime {
                     "managed-function-v0" => true,
+                    "managed-function-v1" => false,
                     "production_sandboxed_dsl" => {
                         requested_backend_id.is_some_and(|backend_id| {
                             !backend_id.trim().is_empty() && backend_id == registration.backend_id
@@ -75,6 +77,13 @@ pub fn worker_supports_managed_dsl_request(
                 "managed-function-v0" => {
                     requested_backend_id.is_none_or(str::is_empty)
                         && requested_semantics_manifest_sha256.is_none_or(str::is_empty)
+                }
+                "managed-function-v1" => {
+                    requested_backend_id.is_none_or(str::is_empty)
+                        && requested_semantics_manifest_sha256.is_none_or(str::is_empty)
+                        && capability.backend_id == MANAGED_DSL_V1_RUNTIME_VERSION
+                        && capability.semantics_manifest_sha256
+                            == MANAGED_DSL_V1_SEMANTICS_MANIFEST_SHA256
                 }
                 "production_sandboxed_dsl" => {
                     requested_backend_id.is_some_and(|backend_id| {
@@ -214,7 +223,7 @@ pub async fn find_best_worker(task: &Task, workers: &[WorkerNode]) -> Option<Wor
         };
 
         let general_compute_compatible = match task.runtime.as_deref().map(str::trim) {
-            Some("managed-function-v0") | Some("production_sandboxed_dsl") => {
+            Some("managed-function-v1") | Some("production_sandboxed_dsl") => {
                 worker_supports_managed_dsl_request(
                     managed_dsl_snapshot_for_worker(w),
                     task.runtime.as_deref().unwrap_or_default(),
@@ -244,7 +253,11 @@ pub async fn find_best_worker(task: &Task, workers: &[WorkerNode]) -> Option<Wor
                             general_compute_snapshot_for_worker(w),
                         )
                 }),
-            Some(_) | None => true,
+            // A missing runtime is the legacy task route. Any explicit but
+            // unknown runtime must fail closed instead of inheriting generic
+            // Worker admission.
+            None => true,
+            Some(_) => false,
         };
 
         status_ok
@@ -490,7 +503,7 @@ mod tests {
         );
         assert!(worker_supports_managed_dsl_request(
             managed_dsl_snapshot_for_worker(&worker),
-            "managed-function-v0",
+            "managed-function-v1",
             None,
             None,
             1,

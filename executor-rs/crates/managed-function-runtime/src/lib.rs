@@ -13,6 +13,19 @@ pub const V0_SEMANTICS_MANIFEST_JSON: &str = include_str!("../managed-function-v
 pub const V0_SEMANTICS_MANIFEST_SHA256: &str =
     "d61a8134f665100855402d7455cfcf3b3e701a79ad43e0039f4ad6c5f05bafef";
 
+/// Canonical `managed-function-v1` semantics, metering, billing, and result
+/// contract manifest. The v1 contract reuses the closed interpreter while
+/// versioning its budget and settlement semantics independently from v0.
+pub const V1_SEMANTICS_MANIFEST_JSON: &str = include_str!("../managed-function-v1-semantics.json");
+
+/// SHA-256 of the canonical JSON bytes in [`V1_SEMANTICS_MANIFEST_JSON`],
+/// excluding the file's trailing newline.
+pub const V1_SEMANTICS_MANIFEST_SHA256: &str =
+    "c2dc962dcf6762df51fa94af2ee1f00a4d1aabdf84321ec67a3ab7f892692853";
+
+/// Versioned metering identity committed by the v1 semantics manifest.
+pub const V1_COST_MODEL_ID: &str = "managed-function-v1-execution-cpt-v1";
+
 /// Canonical GPU-v1 semantics and operation-registry manifest.
 pub const GPU_SEMANTICS_MANIFEST_JSON: &str =
     include_str!("../managed-function-gpu-v1-semantics.json");
@@ -25,9 +38,9 @@ mod gpu;
 #[cfg(all(feature = "cuda", target_os = "linux"))]
 pub use gpu::CudaGpuBackend;
 pub use gpu::{
-    CpuGpuBackend, GpuBackend, GpuBackendError, GpuOperation, GpuTensor, GPU_BILLING_VERSION,
-    GPU_COST_MODEL_VERSION, GPU_MAX_TENSOR_BYTES, GPU_OPERATION_COST,
-    GPU_OPERATION_REGISTRY_VERSION, GPU_RUNTIME_VERSION,
+    CpuGpuBackend, GPU_BILLING_VERSION, GPU_COST_MODEL_VERSION, GPU_MAX_TENSOR_BYTES,
+    GPU_OPERATION_COST, GPU_OPERATION_REGISTRY_VERSION, GPU_RUNTIME_VERSION, GpuBackend,
+    GpuBackendError, GpuOperation, GpuTensor,
 };
 
 use std::{
@@ -253,6 +266,9 @@ pub enum Status {
 pub struct ExecutionLimits {
     pub max_ops: u64,
     pub max_usage_units: Option<u64>,
+    /// Use checked signed-i64 arithmetic for the versioned managed-function-v1
+    /// profile without changing the frozen v0 arithmetic behavior.
+    pub checked_integer_arithmetic: bool,
     pub max_call_depth: usize,
     pub max_output_bytes: u64,
     pub max_loop_iterations: u64,
@@ -278,6 +294,7 @@ impl Default for ExecutionLimits {
         Self {
             max_ops: 1_000_000,
             max_usage_units: None,
+            checked_integer_arithmetic: false,
             max_call_depth: 64,
             max_output_bytes: 1_048_576,
             max_loop_iterations: 100_000,
@@ -295,6 +312,7 @@ impl ExecutionLimits {
         Self {
             max_ops: u64::MAX,
             max_usage_units: None,
+            checked_integer_arithmetic: false,
             max_call_depth: usize::MAX,
             max_output_bytes: u64::MAX,
             max_loop_iterations: u64::MAX,
@@ -315,6 +333,7 @@ impl ExecutionLimits {
         Self {
             max_ops: u64::MAX,
             max_usage_units: Some(max_usage_units),
+            checked_integer_arithmetic: true,
             max_loop_iterations: u64::MAX,
             ..Self::default()
         }
@@ -1648,10 +1667,12 @@ struct Evaluator<'a> {
     cancelled: Option<&'a AtomicBool>,
     gpu_backend: Option<&'a mut dyn GpuBackend>,
     numeric_mode: NumericMode,
+    checked_integer_arithmetic: bool,
 }
 
 impl<'a> Evaluator<'a> {
     fn new(limits: ExecutionLimits) -> Self {
+        let checked_integer_arithmetic = limits.checked_integer_arithmetic;
         Self {
             limits,
             receipt: ExecutionReceipt::default(),
@@ -1663,6 +1684,7 @@ impl<'a> Evaluator<'a> {
             cancelled: None,
             gpu_backend: None,
             numeric_mode: NumericMode::IntegersOnly,
+            checked_integer_arithmetic,
         }
     }
 
@@ -1826,7 +1848,12 @@ impl<'a> Evaluator<'a> {
             }
             Expr::Unary { op, expr } => {
                 let value = self.eval_expr(expr)?;
-                eval_unary(*op, &value, self.numeric_mode)
+                eval_unary(
+                    *op,
+                    &value,
+                    self.numeric_mode,
+                    self.checked_integer_arithmetic,
+                )
             }
             Expr::Logical { left, op, right } => {
                 let left = self.eval_expr(left)?;
@@ -1992,7 +2019,9 @@ impl<'a> Evaluator<'a> {
                 (BinaryOp::Add, Value::String(left), Value::String(right)) => {
                     self.concat_strings(&left, &right)
                 }
-                (op, left, right) => eval_binary_integer(left, op, right),
+                (op, left, right) => {
+                    eval_binary_integer(left, op, right, self.checked_integer_arithmetic)
+                }
             },
             NumericMode::FloatEnabled => {
                 // Mixed int/float arithmetic promotes to f64 with the same
@@ -2008,13 +2037,16 @@ impl<'a> Evaluator<'a> {
                         Value::Float(left_float),
                         op,
                         Value::Float(right_float),
+                        self.checked_integer_arithmetic,
                     );
                 }
                 match (op, left, right) {
                     (BinaryOp::Add, Value::String(left), Value::String(right)) => {
                         self.concat_strings(&left, &right)
                     }
-                    (op, left, right) => eval_binary_float(left, op, right),
+                    (op, left, right) => {
+                        eval_binary_float(left, op, right, self.checked_integer_arithmetic)
+                    }
                 }
             }
         }
@@ -2512,22 +2544,31 @@ enum Control {
     Return(Value),
 }
 
-fn eval_binary_integer(left: Value, op: BinaryOp, right: Value) -> Result<Value, RuntimeError> {
+fn eval_binary_integer(
+    left: Value,
+    op: BinaryOp,
+    right: Value,
+    checked_integer_arithmetic: bool,
+) -> Result<Value, RuntimeError> {
     match op {
         BinaryOp::Add => match (left, right) {
-            (Value::Int(left), Value::Int(right)) => Ok(Value::Int(left + right)),
+            (Value::Int(left), Value::Int(right)) => {
+                apply_integer_binary(left, "+", right, checked_integer_arithmetic)
+            }
             _ => Err(RuntimeError::new(
                 "type_error",
                 "+ expects matching ints or strings",
             )),
         },
-        BinaryOp::Sub => int_binary_integer(left, right, "-", |left, right| left - right),
-        BinaryOp::Mul => int_binary_integer(left, right, "*", |left, right| left * right),
+        BinaryOp::Sub => int_binary_integer(left, right, "-", checked_integer_arithmetic),
+        BinaryOp::Mul => int_binary_integer(left, right, "*", checked_integer_arithmetic),
         BinaryOp::Div => match (left, right) {
             (Value::Int(_), Value::Int(0)) => {
                 Err(RuntimeError::new("runtime_error", "division by zero"))
             }
-            (Value::Int(left), Value::Int(right)) => Ok(Value::Int(left / right)),
+            (Value::Int(left), Value::Int(right)) => {
+                apply_integer_binary(left, "/", right, checked_integer_arithmetic)
+            }
             _ => Err(RuntimeError::new("type_error", "/ expects ints")),
         },
         BinaryOp::Eq => Ok(Value::Bool(left == right)),
@@ -2539,14 +2580,64 @@ fn eval_binary_integer(left: Value, op: BinaryOp, right: Value) -> Result<Value,
     }
 }
 
+fn integer_arithmetic_overflow_error() -> RuntimeError {
+    RuntimeError::new(
+        "integer_arithmetic_overflow",
+        "signed i64 arithmetic overflow",
+    )
+}
+
+fn apply_integer_binary(
+    left: i64,
+    op: &'static str,
+    right: i64,
+    checked_integer_arithmetic: bool,
+) -> Result<Value, RuntimeError> {
+    let result = match (op, checked_integer_arithmetic) {
+        ("+", true) => left.checked_add(right),
+        ("+", false) => Some(left + right),
+        ("-", true) => left.checked_sub(right),
+        ("-", false) => Some(left - right),
+        ("*", true) => left.checked_mul(right),
+        ("*", false) => Some(left * right),
+        ("/", true) => left.checked_div(right),
+        ("/", false) => Some(left / right),
+        _ => {
+            return Err(RuntimeError::new(
+                "type_error",
+                format!("{op} expects ints"),
+            ));
+        }
+    };
+    result
+        .map(Value::Int)
+        .ok_or_else(integer_arithmetic_overflow_error)
+}
+
+fn apply_integer_negation(
+    value: i64,
+    checked_integer_arithmetic: bool,
+) -> Result<Value, RuntimeError> {
+    let result = if checked_integer_arithmetic {
+        value.checked_neg()
+    } else {
+        Some(-value)
+    };
+    result
+        .map(Value::Int)
+        .ok_or_else(integer_arithmetic_overflow_error)
+}
+
 fn int_binary_integer(
     left: Value,
     right: Value,
     op: &'static str,
-    apply: impl FnOnce(i64, i64) -> i64,
+    checked_integer_arithmetic: bool,
 ) -> Result<Value, RuntimeError> {
     match (left, right) {
-        (Value::Int(left), Value::Int(right)) => Ok(Value::Int(apply(left, right))),
+        (Value::Int(left), Value::Int(right)) => {
+            apply_integer_binary(left, op, right, checked_integer_arithmetic)
+        }
         _ => Err(RuntimeError::new(
             "type_error",
             format!("{op} expects ints"),
@@ -2569,10 +2660,17 @@ fn int_compare_integer(
     }
 }
 
-fn eval_binary_float(left: Value, op: BinaryOp, right: Value) -> Result<Value, RuntimeError> {
+fn eval_binary_float(
+    left: Value,
+    op: BinaryOp,
+    right: Value,
+    checked_integer_arithmetic: bool,
+) -> Result<Value, RuntimeError> {
     match op {
         BinaryOp::Add => match (left, right) {
-            (Value::Int(left), Value::Int(right)) => Ok(Value::Int(left + right)),
+            (Value::Int(left), Value::Int(right)) => {
+                apply_integer_binary(left, "+", right, checked_integer_arithmetic)
+            }
             (Value::Float(left), Value::Float(right)) => Ok(Value::Float(left + right)),
             _ => Err(RuntimeError::new(
                 "type_error",
@@ -2580,20 +2678,26 @@ fn eval_binary_float(left: Value, op: BinaryOp, right: Value) -> Result<Value, R
             )),
         },
         BinaryOp::Sub => match (left, right) {
-            (Value::Int(left), Value::Int(right)) => Ok(Value::Int(left - right)),
+            (Value::Int(left), Value::Int(right)) => {
+                apply_integer_binary(left, "-", right, checked_integer_arithmetic)
+            }
             (Value::Float(left), Value::Float(right)) => Ok(Value::Float(left - right)),
-            (left, right) => int_binary(&left, &right, "-"),
+            (left, right) => int_binary(&left, &right, "-", checked_integer_arithmetic),
         },
         BinaryOp::Mul => match (left, right) {
-            (Value::Int(left), Value::Int(right)) => Ok(Value::Int(left * right)),
+            (Value::Int(left), Value::Int(right)) => {
+                apply_integer_binary(left, "*", right, checked_integer_arithmetic)
+            }
             (Value::Float(left), Value::Float(right)) => Ok(Value::Float(left * right)),
-            (left, right) => int_binary(&left, &right, "*"),
+            (left, right) => int_binary(&left, &right, "*", checked_integer_arithmetic),
         },
         BinaryOp::Div => match (left, right) {
             (Value::Int(_), Value::Int(0)) => {
                 Err(RuntimeError::new("runtime_error", "division by zero"))
             }
-            (Value::Int(left), Value::Int(right)) => Ok(Value::Int(left / right)),
+            (Value::Int(left), Value::Int(right)) => {
+                apply_integer_binary(left, "/", right, checked_integer_arithmetic)
+            }
             // Float division never traps: IEEE-754 yields inf/NaN, which the
             // canonical renderer rejects at output time.
             (Value::Float(left), Value::Float(right)) => Ok(Value::Float(left / right)),
@@ -2678,11 +2782,12 @@ fn eval_unary(
     op: UnaryOp,
     value: &Value,
     numeric_mode: NumericMode,
+    checked_integer_arithmetic: bool,
 ) -> Result<Value, RuntimeError> {
     match numeric_mode {
         NumericMode::IntegersOnly => match op {
             UnaryOp::Neg => match value {
-                Value::Int(value) => Ok(Value::Int(-value)),
+                Value::Int(value) => apply_integer_negation(*value, checked_integer_arithmetic),
                 _ => Err(RuntimeError::new("type_error", "unary - expects an int")),
             },
             UnaryOp::Pos => match value {
@@ -2696,7 +2801,7 @@ fn eval_unary(
         },
         NumericMode::FloatEnabled => match op {
             UnaryOp::Neg => match value {
-                Value::Int(value) => Ok(Value::Int(-value)),
+                Value::Int(value) => apply_integer_negation(*value, checked_integer_arithmetic),
                 Value::Float(value) => Ok(Value::Float(-value)),
                 _ => Err(RuntimeError::new("type_error", "unary - expects a number")),
             },
@@ -2738,20 +2843,16 @@ fn normalize_index(index: i64, len: usize) -> Result<usize, RuntimeError> {
         .map_err(|_| RuntimeError::new("runtime_error", "index is out of range"))
 }
 
-fn int_binary(left: &Value, right: &Value, op: &'static str) -> Result<Value, RuntimeError> {
+fn int_binary(
+    left: &Value,
+    right: &Value,
+    op: &'static str,
+    checked_integer_arithmetic: bool,
+) -> Result<Value, RuntimeError> {
     match (left, right) {
-        // Unchecked i64 arithmetic is the documented v0 integer model; the
-        // float path is the one that changes in this migration.
-        (Value::Int(left), Value::Int(right)) => Ok(Value::Int(match op {
-            "-" => left - right,
-            "*" => left * right,
-            _ => {
-                return Err(RuntimeError::new(
-                    "type_error",
-                    format!("{op} expects ints"),
-                ));
-            }
-        })),
+        (Value::Int(left), Value::Int(right)) => {
+            apply_integer_binary(*left, op, *right, checked_integer_arithmetic)
+        }
         _ => Err(RuntimeError::new(
             "type_error",
             format!("{op} expects ints"),
@@ -2813,8 +2914,8 @@ impl Write for BoundedFmtWriter<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        render_output_bounded, CpuGpuBackend, ExecutionLimits, ManagedExecutor, ManagedGpuExecutor,
-        Value,
+        CpuGpuBackend, ExecutionLimits, ManagedExecutor, ManagedGpuExecutor, Value,
+        render_output_bounded,
     };
 
     #[test]

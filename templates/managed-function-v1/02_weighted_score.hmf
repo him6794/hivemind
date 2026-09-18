@@ -1,0 +1,16 @@
+let metrics = get(input, "metrics");
+let quality = get(metrics, "quality");
+let speed = get(metrics, "speed");
+let reliability = get(metrics, "reliability");
+
+let score = quality * 5 + speed * 3 + reliability * 2;
+let band = if score >= 850 {
+    "gold"
+} else {
+    if score >= 700 { "silver" } else { "bronze" }
+};
+
+{
+    "score": score,
+    "band": band
+};

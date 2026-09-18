@@ -75,7 +75,7 @@ test('public copy explains cross-account worker scheduling and prices every func
       `${locale} billing must cover every supported function form`
     );
     for (const row of rows) {
-      assert.match(row.price, /6 CPT|6 usage units|6 點|6 單位/i, `${locale} ${row.id} needs its call price`);
+      assert.match(row.price, /6 CPT|6 usage units|6 個 usage unit|6 點|6 單位/i, `${locale} ${row.id} needs its call price`);
       assert.ok(row.note.length > 20, `${locale} ${row.id} needs a pricing explanation`);
     }
   }
@@ -102,13 +102,23 @@ test('billing docs publish receipt-backed examples and a platform support matrix
     const examples = docs.billing.examples;
 
     assert.ok(examples.length >= 3, `${locale} billing needs worked receipt examples`);
+    assert.match(docs.billing.body, /replica|副本/i);
+    assert.match(docs.billing.formula, /replica_count|副本數/);
+    assert.match(docs.billing.formula, /10%/);
+    assert.match(docs.billing.formula, /refund_cpt|退回/);
+
     for (const example of examples) {
       assert.ok(example.program.length > 10, `${locale} ${example.id} needs the program`);
       assert.ok(example.receiptUsageUnits > 0, `${locale} ${example.id} needs receipt usage`);
       assert.equal(
-        example.totalCpt,
-        example.receiptUsageUnits + 1,
-        `${locale} ${example.id} must apply the one-CPT invocation charge`
+        Object.hasOwn(example, 'totalCpt'),
+        false,
+        `${locale} ${example.id} must not publish a fixed whole-task total`
+      );
+      assert.match(
+        example.breakdown,
+        /replica|副本|valid|有效/i,
+        `${locale} ${example.id} must identify replica/evidence billing semantics`
       );
       assert.ok(example.breakdown.length > 20, `${locale} ${example.id} needs a billing breakdown`);
     }
@@ -195,13 +205,12 @@ test('published limits mirror the constants the system actually enforces', () =>
     taskId: readRustConst(proto, 'TASK_ID_MAX_BYTES'),
     taskSource: readRustConst(proto, 'MANAGED_TASK_SOURCE_MAX_BYTES'),
     jsonInput: readRustConst(proto, 'MANAGED_JSON_INPUT_MAX_BYTES'),
-    budget: readRustConst(proto, 'MANAGED_BUDGET_MAX_USAGE_UNITS'),
-    ops: readRustField(defaultBlock, 'max_ops'),
     callDepth: readRustField(defaultBlock, 'max_call_depth'),
     output: readRustField(defaultBlock, 'max_output_bytes'),
-    loops: readRustField(defaultBlock, 'max_loop_iterations'),
+    valueBytes: readRustField(defaultBlock, 'max_value_bytes'),
     items: readRustField(defaultBlock, 'max_collection_items'),
     valueDepth: readRustField(defaultBlock, 'max_value_depth'),
+    materialization: readRustField(defaultBlock, 'max_value_materialization_bytes'),
   };
 
   for (const locale of ['en', 'zh']) {

@@ -155,12 +155,31 @@ fn production_sandboxed_dsl_is_admitted_without_general_compute_manifest() {
 }
 
 #[test]
-fn managed_function_v0_keeps_its_existing_typed_route() {
-    let route = WorkerRuntimeAdmission::default()
+fn managed_function_v0_is_rejected_after_retirement() {
+    let error = WorkerRuntimeAdmission::default()
         .admit("managed-function-v0", &[])
-        .expect("v0 admission is handled by the legacy contract");
+        .expect_err("retired v0 must not be admitted");
 
-    assert_eq!(route, RuntimeRoute::ManagedFunctionV0);
+    assert!(matches!(
+        &error,
+        RuntimeAdmissionError::UnsupportedRuntime(runtime) if runtime == "managed-function-v0"
+    ));
+    assert_eq!(
+        error.to_string(),
+        "managed-function-v0 has been retired; use managed-function-v1"
+    );
+}
+
+#[test]
+fn public_managed_dsl_capability_advertises_v1_without_v0() {
+    let report = WorkerRuntimeAdmission::default().public_capability_report();
+
+    assert_eq!(report.capabilities.len(), 1);
+    assert_eq!(report.capabilities[0].runtime, "managed-function-v1");
+    assert!(report
+        .capabilities
+        .iter()
+        .all(|capability| capability.runtime != "managed-function-v0"));
 }
 
 #[test]

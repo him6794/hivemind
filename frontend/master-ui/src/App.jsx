@@ -206,10 +206,10 @@ export default function MasterApp() {
 
       const body = {
         task_id: validatedTaskId.taskId,
-        runtime: 'managed-function-v0',
+        runtime: 'managed-function-v1',
         task_source: taskSource,
       };
-      // managed-function-v0 tasks carry their JSON input in the `torrent` field.
+      // managed-function-v1 tasks carry their JSON input in the `torrent` field.
       if (taskInput.trim()) body.torrent = taskInput;
       if (cpuScore > 0) body.cpu_score = toNumber(cpuScore);
       if (gpuScore > 0) body.gpu_score = toNumber(gpuScore);
@@ -574,7 +574,8 @@ export default function MasterApp() {
                     const statusClass = statusText.toLowerCase();
                     const message = task.status_message || task.StatusMessage || '';
                     const runtime = String(task.runtime || task.runtime_version || task.Runtime || '').trim();
-                    const isManagedTask = runtime === 'managed-function-v0';
+                    const isManagedTask =
+                      runtime === 'managed-function-v0' || runtime === 'managed-function-v1';
                     const wallTimeMs = Number(task.wall_time_ms || 0);
                     const billedAmount = Number(task.billed_amount || 0);
                     const observability = normalizeTaskObservability({

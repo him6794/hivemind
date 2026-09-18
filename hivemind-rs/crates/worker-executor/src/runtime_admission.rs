@@ -17,7 +17,6 @@ use std::fmt;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeRoute {
     Legacy,
-    ManagedFunctionV0,
     ManagedFunctionV1,
     ProductionSandboxedDsl,
     GeneralComputeV1Alpha1(GeneralComputeRequest),
@@ -87,10 +86,10 @@ impl std::fmt::Display for RuntimeAdmissionError {
                     "typed runtime request was rejected ({code:?}): {message}"
                 )
             }
-            Self::UnsupportedRuntime(runtime) => {
-                let _ = runtime;
-                formatter.write_str("unsupported task runtime")
+            Self::UnsupportedRuntime(runtime) if runtime == "managed-function-v0" => {
+                formatter.write_str("managed-function-v0 has been retired; use managed-function-v1")
             }
+            Self::UnsupportedRuntime(_) => formatter.write_str("unsupported task runtime"),
         }
     }
 }
@@ -284,14 +283,7 @@ impl WorkerRuntimeAdmission {
                 }
                 Ok(RuntimeRoute::Legacy)
             }
-            "managed-function-v0" => {
-                if !general_compute_manifest_json.is_empty()
-                    || !managed_gpu_manifest_json.is_empty()
-                {
-                    return Err(RuntimeAdmissionError::ManifestRuntimeMismatch);
-                }
-                Ok(RuntimeRoute::ManagedFunctionV0)
-            }
+            "managed-function-v0" => Err(RuntimeAdmissionError::UnsupportedRuntime(runtime.into())),
             "managed-function-v1" => {
                 if !general_compute_manifest_json.is_empty()
                     || !managed_gpu_manifest_json.is_empty()

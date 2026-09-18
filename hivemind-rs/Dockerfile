@@ -51,12 +51,12 @@ COPY --from=builder /tmp/hivemind-bin /app/hivemind-bin
 COPY --from=master-ui /ui/dist /app/frontend/master-ui/dist
 COPY --from=worker-ui /ui/dist /app/frontend/worker-ui/dist
 
-RUN mkdir -p /app/api/torrents /app/bt_torrents /app/sandbox /app/general-compute
+RUN mkdir -p /app/api/torrents /app/bt_torrents /app/sandbox /app/general-compute /home/hivemind
 RUN groupadd --system --gid 10001 hivemind \
-    && useradd --system --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin hivemind \
+    && useradd --system --uid 10001 --gid 10001 --home-dir /home/hivemind --no-create-home --shell /usr/sbin/nologin hivemind \
     && printf '%s\n' 'hivemind:100000:65536' >> /etc/subuid \
     && printf '%s\n' 'hivemind:100000:65536' >> /etc/subgid \
-    && chown -R 10001:10001 /app
+    && chown -R 10001:10001 /app /home/hivemind
 
 USER 10001:10001
 

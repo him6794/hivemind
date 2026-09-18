@@ -30,6 +30,7 @@ services:
     environment:
       DATABASE_URL: "postgres://hivemind:${TEST_POSTGRES_PASSWORD:?TEST_POSTGRES_PASSWORD must be set}@postgres:5432/hivemind_test"
       HIVEMIND_TEST_DATABASE_URL: "postgres://hivemind:${TEST_POSTGRES_PASSWORD:?TEST_POSTGRES_PASSWORD must be set}@postgres:5432/hivemind_test"
+      HIVEMIND_REQUIRE_TEST_DATABASE: "1"
       REDIS_URL: redis://redis:6379
       JWT_SECRET: ${TEST_JWT_SECRET:?TEST_JWT_SECRET must be set}
       HIVEMIND_ADMIN_USERS: testuser

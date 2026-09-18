@@ -1,6 +1,11 @@
-# Managed Function v0 Templates
+# Historical Managed Function v0 Templates
 
-These templates are small `managed-function-v0` tasks that can be submitted with:
+These fixtures preserve the frozen `managed-function-v0` contract for
+compatibility tests and historical task records. They are not accepted for new
+submission. Use [`../managed-function-v1/`](../managed-function-v1/) for active
+work.
+
+The archived request shape was:
 
 ```json
 {
@@ -12,10 +17,11 @@ These templates are small `managed-function-v0` tasks that can be submitted with
 }
 ```
 
-The `torrent` field is used as JSON input for managed functions.
-`managed-function-v0` remains the proof-facing runtime contract. Operators may
-select the cross-platform `production_sandboxed_dsl` Worker backend for the
-same closed interpreter; that route does not require Windows Containers/HCS.
+The `torrent` field was used as JSON input for managed functions.
+`managed-function-v0` remains a frozen historical runtime contract. Operators
+may still need the cross-platform `production_sandboxed_dsl` Worker backend to
+read compatible historical work; that route does not require Windows
+Containers/HCS.
 
 Templates:
 
