@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArtifactMaterializationError {
@@ -76,6 +77,11 @@ struct TransferManifest {
     sha256: String,
     chunks: Vec<crate::ArtifactChunk>,
 }
+
+/// Transfer metadata is retained for restart/resume safety, then collected
+/// after a bounded period of inactivity. CAS chunk objects are never deleted by
+/// this collector because they may be shared by immutable artifact manifests.
+pub const TRANSFER_METADATA_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 impl CasChunkStore {
     pub fn new(root: impl AsRef<Path>) -> Result<Self, ArtifactMaterializationError> {
@@ -177,6 +183,11 @@ impl CasChunkStore {
                 let existing: TransferManifest = serde_json::from_slice(&bytes)
                     .map_err(|_| ArtifactMaterializationError::TransferStateCorrupt)?;
                 if existing == expected {
+                    // A successful identity lookup is transfer activity. Updating
+                    // the manifest mtime lets the collector distinguish an
+                    // active retry from an abandoned transfer without rewriting
+                    // its immutable bytes.
+                    let _ = OpenOptions::new().append(true).open(&path);
                     Ok(())
                 } else {
                     Err(ArtifactMaterializationError::TransferStateMismatch)
@@ -293,6 +304,138 @@ impl CasChunkStore {
             }
         }
         Ok(missing)
+    }
+
+    /// Collect inactive transfer manifests and completion markers.
+    ///
+    /// This deliberately leaves all content-addressed chunk objects in place:
+    /// a chunk can be referenced by more than one transfer, and deleting it
+    /// without a mark-and-sweep pass would break later immutable artifacts.
+    pub fn gc_transfer_metadata(
+        &self,
+        retention: Duration,
+    ) -> Result<usize, ArtifactMaterializationError> {
+        let root = self.transfer_root()?;
+        let cutoff = SystemTime::now()
+            .checked_sub(retention)
+            .unwrap_or(UNIX_EPOCH);
+        let mut manifests = Vec::new();
+        for entry in fs::read_dir(&root).map_err(|error| io_error(&error))? {
+            let entry = entry.map_err(|error| io_error(&error))?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|error| io_error(&error))?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let Some(key) = name.strip_suffix(".manifest.json").map(str::to_owned) else {
+                continue;
+            };
+            if !is_transfer_key(&key) {
+                continue;
+            }
+            let Ok(manifest_bytes) = fs::read(&path) else {
+                continue;
+            };
+            let Ok(manifest) = serde_json::from_slice::<TransferManifest>(&manifest_bytes) else {
+                // Corrupt metadata is retained for operator inspection and
+                // must not be mistaken for an abandoned valid transfer.
+                continue;
+            };
+            let manifest_artifact = ArtifactManifest {
+                artifact_id: manifest.artifact_id.clone(),
+                role: crate::ArtifactRole::Input,
+                size_bytes: manifest.size_bytes,
+                mime_type: String::new(),
+                sha256: manifest.sha256.clone(),
+                chunks: manifest.chunks.clone(),
+                inline_bytes: None,
+            };
+            if validate_transfer_execution_id(&manifest.execution_id).is_err()
+                || manifest_artifact.validate().is_err()
+            {
+                // Structurally decodable but semantically invalid metadata is
+                // still corrupt and must remain available for inspection.
+                continue;
+            }
+            let mut last_activity = metadata.modified().unwrap_or(UNIX_EPOCH);
+            let mut marker_paths = Vec::new();
+            let mut invalid_marker = false;
+            for chunk in &manifest.chunks {
+                let marker_name = format!(
+                    "{key}.{}.complete",
+                    chunk.sha256.strip_prefix("sha256:").unwrap_or_default()
+                );
+                if !is_transfer_marker_name(&marker_name, &key) {
+                    continue;
+                }
+                let marker = root.join(marker_name);
+                if let Ok(marker_metadata) = fs::symlink_metadata(&marker) {
+                    if marker_metadata.file_type().is_symlink() || !marker_metadata.is_file() {
+                        invalid_marker = true;
+                        break;
+                    }
+                    let Ok(marker_bytes) = fs::read(&marker) else {
+                        invalid_marker = true;
+                        break;
+                    };
+                    if marker_bytes != chunk.sha256.as_bytes() {
+                        invalid_marker = true;
+                        break;
+                    }
+                    let modified = marker_metadata.modified().unwrap_or(UNIX_EPOCH);
+                    if modified > last_activity {
+                        last_activity = modified;
+                    }
+                    marker_paths.push(marker);
+                }
+            }
+            if invalid_marker || last_activity > cutoff {
+                continue;
+            }
+            manifests.push((path, key, marker_paths));
+        }
+
+        let mut removed = 0usize;
+        for (manifest, key, markers) in manifests {
+            if fs::remove_file(&manifest).is_ok() {
+                removed += 1;
+            }
+            for marker in markers {
+                if fs::remove_file(marker).is_ok() {
+                    removed += 1;
+                }
+            }
+            // Remove stale orphan markers only when their own mtime is also
+            // beyond the cutoff. A concurrent retry can therefore keep its
+            // fresh marker even if the manifest was old.
+            if let Ok(entries) = fs::read_dir(&root) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                        continue;
+                    };
+                    if !is_transfer_marker_name(name, &key) {
+                        continue;
+                    }
+                    let Ok(metadata) = fs::symlink_metadata(&path) else {
+                        continue;
+                    };
+                    if metadata.file_type().is_symlink()
+                        || !metadata.is_file()
+                        || metadata.modified().unwrap_or(UNIX_EPOCH) > cutoff
+                    {
+                        continue;
+                    }
+                    if fs::remove_file(path).is_ok() {
+                        removed += 1;
+                    }
+                }
+            }
+        }
+        Ok(removed)
     }
 
     fn transfer_manifest_path(
@@ -592,4 +735,20 @@ fn transfer_key(execution_id: &str, artifact_id: &str) -> String {
         .strip_prefix("sha256:")
         .unwrap_or_default()
         .to_owned()
+}
+
+fn is_transfer_key(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_transfer_marker_name(value: &str, key: &str) -> bool {
+    let Some(rest) = value.strip_prefix(&format!("{key}.")) else {
+        return false;
+    };
+    let Some(digest) = rest.strip_suffix(".complete") else {
+        return false;
+    };
+    is_transfer_key(key)
+        && digest.len() == 64
+        && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
 }

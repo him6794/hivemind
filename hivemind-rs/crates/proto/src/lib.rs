@@ -89,9 +89,6 @@ pub const MANAGED_CONSENSUS_RESULT_MAX_BYTES: usize = 256 * 1024;
 /// Maximum serialized size accepted for one Nodepool-derived consensus certificate.
 pub const MANAGED_CONSENSUS_CERTIFICATE_MAX_BYTES: usize = 128 * 1024;
 
-/// Maximum number of replicas admitted to one managed consensus round.
-pub const MANAGED_CONSENSUS_MAX_REPLICAS: u32 = 7;
-
 /// Validate the additional identity fields used by a managed consensus request.
 /// Legacy requests keep version zero and are intentionally accepted by this
 /// helper so the existing managed/general-compute/GPU paths remain compatible.

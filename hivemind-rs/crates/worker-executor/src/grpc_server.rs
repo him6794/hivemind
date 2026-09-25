@@ -883,40 +883,51 @@ impl GrpcWorkerNodeService {
         Ok(key)
     }
 
-    fn validate_task_attempt_assignment(
-        &self,
-        token: &str,
-        task_id: &str,
-        attempt_id: &str,
-    ) -> Result<WorkerTaskKey, Box<Status>> {
-        let key = self.validate_task_assignment(token, task_id, None)?;
-        if key.attempt_id != attempt_id {
-            return Err(task_assignment_denied());
-        }
-        Ok(key)
-    }
-
     fn validate_task_attempt_assignment_with_idempotency(
         &self,
         token: &str,
         task_id: &str,
         attempt_id: &str,
         idempotency_key: &str,
-    ) -> Result<WorkerTaskKey, Box<Status>> {
-        let key = self.validate_task_attempt_assignment(token, task_id, attempt_id)?;
-        if idempotency_key.trim().is_empty() {
-            return Err(task_assignment_denied());
-        }
+    ) -> Result<WorkerExecutionClaims, Box<Status>> {
         let execution_claims = WorkerExecutionVerifier::from_pem(
             &self.state.config.auth.worker_execution_public_key_pem,
         )
         .map_err(|_| Box::new(Status::internal("Worker execution public key is invalid")))?
         .decode_execution_claims(token)
         .map_err(|_| Box::new(Status::unauthenticated("Invalid token")))?;
-        if execution_claims.idempotency_key.as_deref() != Some(idempotency_key) {
+        let claims = &execution_claims.claims;
+        if !crate::sandbox::is_safe_task_id(task_id) {
+            return Err(Box::new(Status::invalid_argument("unsafe task id")));
+        }
+        if claims.role.as_deref() != Some("worker-execution")
+            || claims.sub.trim().is_empty()
+            || claims.task_id.as_deref() != Some(task_id)
+            || execution_claims.attempt_id.as_deref() != Some(attempt_id)
+            || idempotency_key.trim().is_empty()
+            || execution_claims.idempotency_key.as_deref() != Some(idempotency_key)
+            || claims.worker_id != self.state.current_worker_id()
+            || claims.worker_id.is_none()
+        {
             return Err(task_assignment_denied());
         }
-        Ok(key)
+        let reports = self
+            .state
+            .reports
+            .lock()
+            .map_err(|_| Box::new(Status::internal("task report store poisoned")))?;
+        if reports
+            .iter()
+            .any(|(key, report)| key.task_id == task_id && report.owner != claims.sub)
+        {
+            return Err(task_assignment_denied());
+        }
+        if let Some(report) = reports.get(&WorkerTaskKey::new(task_id, Some(attempt_id))) {
+            if report.worker_id != claims.worker_id || report.owner != claims.sub {
+                return Err(task_assignment_denied());
+            }
+        }
+        Ok(execution_claims)
     }
 
     fn report_for_update_for_key<F>(
@@ -1667,26 +1678,42 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         request: Request<StopTaskExecutionRequest>,
     ) -> Result<Response<StopTaskExecutionResponse>, Status> {
         let req = request.into_inner();
-        if req.attempt_id.trim().is_empty() {
+        let attempt_bound = !req.attempt_id.trim().is_empty();
+        let outcome = if attempt_bound {
+            let claims = self
+                .validate_task_attempt_assignment_with_idempotency(
+                    &req.token,
+                    &req.task_id,
+                    &req.attempt_id,
+                    &req.idempotency_key,
+                )
+                .map_err(|status| *status)?;
+            self.state
+                .executor
+                .stop_task_execution_for_attempt_confirmed(
+                    &req.task_id,
+                    &req.attempt_id,
+                    claims.claims.exp,
+                )
+                .await
+        } else {
             self.validate_task_assignment(&req.token, &req.task_id, None)
                 .map_err(|status| *status)?;
-        } else {
-            self.validate_task_attempt_assignment_with_idempotency(
-                &req.token,
-                &req.task_id,
-                &req.attempt_id,
-                &req.idempotency_key,
-            )
-            .map_err(|status| *status)?;
-        }
+            self.state
+                .executor
+                .stop_task_execution_for_attempt(&req.task_id, None)
+        };
         if !crate::sandbox::is_safe_task_id(&req.task_id) {
             return Err(Status::invalid_argument("unsafe task id"));
         }
         tracing::info!("Stop task {}", req.task_id);
-        let (success, status_message) = match self.state.executor.stop_task_execution_for_attempt(
-            &req.task_id,
-            (!req.attempt_id.trim().is_empty()).then_some(req.attempt_id.as_str()),
-        ) {
+        let (success, status_message) = match outcome {
+            StopTaskOutcome::StopRequested if attempt_bound => (true, "Stop confirmed"),
+            StopTaskOutcome::AlreadyStopping if attempt_bound => (true, "Stop confirmed"),
+            StopTaskOutcome::StoppedBeforeStart => (true, "Stop fenced before start"),
+            StopTaskOutcome::StopConfirmationUnavailable => {
+                (false, "Stop confirmation unavailable")
+            }
             StopTaskOutcome::StopRequested => (true, "Stop requested"),
             StopTaskOutcome::AlreadyStopping => (true, "Stop already requested"),
             StopTaskOutcome::NotRunning => (false, "Task not running"),
@@ -4030,7 +4057,8 @@ mod tests {
         // milliseconds, so cancellation is asserted deterministically with an
         // injected runner that only returns once cancellation is observed.
         let tmp = TempDir::new().unwrap();
-        let service = Arc::new(test_service_with_cancellable_runner(tmp.path()));
+        let (service, started) = test_service_with_cancellable_runner(tmp.path());
+        let service = Arc::new(service);
         let task_id = "grpc-stop-managed-function".to_string();
         let execution_id = "execution-stop-managed";
         let attempt_id = "attempt-stop-managed";
@@ -4088,39 +4116,22 @@ mod tests {
                 .into_inner()
         });
 
-        // Poll instead of sleeping a fixed interval so the stop request never
-        // races task registration.
-        let mut stop = None;
-        for _ in 0..600 {
-            match service
-                .stop_task_execution(Request::new(StopTaskExecutionRequest {
-                    task_id: task_id.clone(),
-                    token: token.clone(),
-                    attempt_id: attempt_id.into(),
-                    idempotency_key: idempotency_key.into(),
-                }))
-                .await
-            {
-                Ok(response) => {
-                    let attempt = response.into_inner();
-                    if attempt.success {
-                        stop = Some(attempt);
-                        break;
-                    }
-                }
-                // `execute_task` records the task assignment as part of the
-                // request, so a stop that arrives first is rejected as an
-                // unauthorized assignment rather than an unknown task. Treat
-                // that exactly like a not-yet-running task and keep polling.
-                Err(status) if status.code() == tonic::Code::PermissionDenied => {}
-                Err(status) => panic!("stop_task_execution should not fail: {status:?}"),
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        let stop = stop.expect("stop_task_execution should observe the running task");
+        started
+            .await
+            .expect("managed runner must start before stop");
+        let stop = service
+            .stop_task_execution(Request::new(StopTaskExecutionRequest {
+                task_id: task_id.clone(),
+                token: token.clone(),
+                attempt_id: attempt_id.into(),
+                idempotency_key: idempotency_key.into(),
+            }))
+            .await
+            .expect("stop_task_execution should succeed")
+            .into_inner();
 
         assert!(stop.success);
-        assert_eq!(stop.status_message, "Stop requested");
+        assert_eq!(stop.status_message, "Stop confirmed");
         let execute_response = tokio::time::timeout(Duration::from_secs(10), execute)
             .await
             .expect("execute_task should return after stop")
@@ -4496,10 +4507,25 @@ mod tests {
         let service = test_service(tmp.path());
         let task_id = "attempt-bound-stop";
         let request = general_compute_request_for_chunk_tests();
-        service
-            .record_task_assignment_for_attempt(task_id, ASSIGNED_OWNER, Some(&request.attempt_id))
-            .unwrap();
         let token = bound_general_compute_token(ASSIGNED_OWNER, task_id, &request);
+
+        let wrong_worker = bound_general_compute_token_for_worker(
+            ASSIGNED_OWNER,
+            task_id,
+            &request,
+            "other-worker",
+            1,
+        );
+        let rejected_worker = service
+            .stop_task_execution(Request::new(StopTaskExecutionRequest {
+                task_id: task_id.into(),
+                token: wrong_worker,
+                attempt_id: request.attempt_id.clone(),
+                idempotency_key: request.idempotency_key.clone(),
+            }))
+            .await
+            .expect_err("stop must reject another Worker's signed assignment");
+        assert_eq!(rejected_worker.code(), Code::PermissionDenied);
 
         let mismatched = service
             .stop_task_execution(Request::new(StopTaskExecutionRequest {
@@ -4522,8 +4548,11 @@ mod tests {
             .await
             .expect("matching attempt identity should pass authorization")
             .into_inner();
-        assert!(!accepted.success, "the test has no active executor");
-        assert_eq!(accepted.status_message, "Task not running");
+        assert!(
+            accepted.success,
+            "the attempt must be fenced before execution"
+        );
+        assert_eq!(accepted.status_message, "Stop fenced before start");
     }
 
     fn seed_assignment(
@@ -4592,45 +4621,57 @@ mod tests {
         }))
     }
 
-    fn test_service_with_cancellable_runner(base: &std::path::Path) -> GrpcWorkerNodeService {
+    fn test_service_with_cancellable_runner(
+        base: &std::path::Path,
+    ) -> (GrpcWorkerNodeService, tokio::sync::oneshot::Receiver<()>) {
         let mut config = HivemindConfig::default();
         config.executor.sandbox_dir = base.join("sandbox").to_string_lossy().to_string();
         config.auth.jwt_secret = CONTROL_PLANE_SECRET.into();
         config.auth.worker_execution_public_key_pem = test_key_pair().1.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let started_tx = Arc::new(Mutex::new(Some(started_tx)));
         let executor = Arc::new(WorkerExecutor::new_with_task_runner(
             config.clone(),
-            |task: hivemind_models::Task, mut cancellation: tokio::sync::watch::Receiver<bool>| async move {
-                while !*cancellation.borrow() {
-                    if cancellation.changed().await.is_err() {
-                        break;
+            move |task: hivemind_models::Task,
+                  mut cancellation: tokio::sync::watch::Receiver<bool>| {
+                let started_tx = Arc::clone(&started_tx);
+                async move {
+                    started_tx.lock().unwrap().take().unwrap().send(()).unwrap();
+                    while !*cancellation.borrow() {
+                        if cancellation.changed().await.is_err() {
+                            break;
+                        }
                     }
+                    Ok(crate::TaskResult {
+                        task_id: task.task_id.clone(),
+                        success: false,
+                        output: None,
+                        error: Some("Task execution stopped".into()),
+                        exit_code: 1,
+                        cpu_time_ms: 0,
+                        wall_time_ms: 0,
+                        peak_memory_mb: 0,
+                        managed_executed_ops: 0,
+                        managed_output_bytes: 0,
+                        managed_receipt_json: None,
+                        general_compute_result_json: None,
+                        managed_gpu_result_json: None,
+                    })
                 }
-                Ok(crate::TaskResult {
-                    task_id: task.task_id.clone(),
-                    success: false,
-                    output: None,
-                    error: Some("Task execution stopped".into()),
-                    exit_code: 1,
-                    cpu_time_ms: 0,
-                    wall_time_ms: 0,
-                    peak_memory_mb: 0,
-                    managed_executed_ops: 0,
-                    managed_output_bytes: 0,
-                    managed_receipt_json: None,
-                    general_compute_result_json: None,
-                    managed_gpu_result_json: None,
-                })
             },
         ));
-        GrpcWorkerNodeService::new(Arc::new(WorkerGrpcState {
-            config,
-            executor,
-            worker_id: Arc::new(Mutex::new(Some(TEST_WORKER_ID.into()))),
-            cas_store: None,
-            reports: Mutex::new(HashMap::new()),
-            completed_consensus_results: Arc::new(Mutex::new(HashMap::new())),
-            transfer_lease_authority: Arc::new(Mutex::new(None)),
-        }))
+        (
+            GrpcWorkerNodeService::new(Arc::new(WorkerGrpcState {
+                config,
+                executor,
+                worker_id: Arc::new(Mutex::new(Some(TEST_WORKER_ID.into()))),
+                cas_store: None,
+                reports: Mutex::new(HashMap::new()),
+                completed_consensus_results: Arc::new(Mutex::new(HashMap::new())),
+                transfer_lease_authority: Arc::new(Mutex::new(None)),
+            })),
+            started_rx,
+        )
     }
 
     fn test_service(base: &std::path::Path) -> GrpcWorkerNodeService {

@@ -26,12 +26,108 @@ use managed_function_runtime::{
     render_output_bounded, ExecutionLimits, ExecutionReceipt, ManagedExecutor,
 };
 use serde_json::{json, Map, Value as JsonValue};
+use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
 use std::time::Instant;
 use tokio::sync::watch;
+
+/// Owns only task-scoped production directories. The guard runs after the
+/// runner/HCS future has returned, so result bytes and journal terminal facts
+/// have already been captured before host files are removed.
+struct ProductionTaskCleanup {
+    roots: Vec<PathBuf>,
+    cleanup_on_drop: bool,
+}
+
+impl ProductionTaskCleanup {
+    fn new(roots: impl IntoIterator<Item = PathBuf>) -> Self {
+        Self {
+            roots: roots.into_iter().collect(),
+            cleanup_on_drop: true,
+        }
+    }
+
+    fn deferred(roots: impl IntoIterator<Item = PathBuf>) -> Self {
+        Self {
+            roots: roots.into_iter().collect(),
+            cleanup_on_drop: false,
+        }
+    }
+
+    fn cleanup_now(&mut self) {
+        self.cleanup_on_drop = true;
+        self.cleanup();
+    }
+
+    fn cleanup(&mut self) {
+        for root in self.roots.drain(..) {
+            match std::fs::symlink_metadata(&root) {
+                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                    tracing::error!(
+                        path = %root.display(),
+                        "production task cleanup refused a non-directory or symlink root"
+                    );
+                }
+                Ok(_) => {
+                    if let Err(error) = std::fs::remove_dir_all(&root) {
+                        tracing::error!(
+                            path = %root.display(),
+                            error = %error,
+                            "production task cleanup failed; durable maintenance will retry"
+                        );
+                        if let Err(record_error) = crate::maintenance::record_cleanup_failure(&root)
+                        {
+                            tracing::error!(
+                                path = %root.display(),
+                                error = %record_error,
+                                "production task cleanup failure could not be recorded durably"
+                            );
+                        }
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    tracing::error!(
+                        path = %root.display(),
+                        error = %error,
+                        "production task cleanup could not inspect its root"
+                    );
+                    if let Err(record_error) = crate::maintenance::record_cleanup_failure(&root) {
+                        tracing::error!(
+                            path = %root.display(),
+                            error = %record_error,
+                            "production task cleanup failure could not be recorded durably"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Drop for ProductionTaskCleanup {
+    fn drop(&mut self) {
+        if self.cleanup_on_drop {
+            self.cleanup();
+        }
+    }
+}
+
+fn production_execution_scope(request: &GeneralComputeRequest, task: &Task) -> String {
+    let canonical = format!(
+        "{}\0{}\0{}\0{}",
+        task.task_id, request.execution_id, request.attempt_id, request.idempotency_key
+    );
+    let digest = general_compute_runtime::sha256_digest(canonical.as_bytes());
+    let digest = digest.strip_prefix("sha256:").unwrap_or(digest.as_str());
+    // OCI runtimes accept at most 64 bytes for a container ID. Keep the
+    // execution scope deterministic while leaving enough digest material to
+    // make accidental overlap between attempts infeasible.
+    format!("exec-{}", &digest[..59])
+}
 
 fn is_managed_function_task(task: &Task) -> bool {
     task.runtime.as_deref() == Some(MANAGED_DSL_V1_RUNTIME_VERSION)
@@ -778,29 +874,35 @@ fn execute_managed_gpu_task(
             );
         }
     };
-    let (bundle_root, artifact_root) =
-        match backend.materialize_bundle_for_launch(&bundle_request, &task.task_id, &launch) {
-            Ok(paths) => paths,
-            Err(error) => {
-                tracing::warn!(
-                    task_id = %task.task_id,
-                    backend_id = %request.backend_id,
-                    error = %error,
-                    "managed GPU production bundle materialization failed"
-                );
-                return typed_managed_gpu_task_result(
-                    task,
-                    managed_gpu_result(
-                        &request,
-                        selected_gpu,
-                        ManagedGpuStatus::BackendUnavailable,
-                        Some("backend_unavailable"),
-                        String::new(),
-                        gpu_usage(&request, 0, 0, 0),
-                    )?,
-                );
-            }
-        };
+    let execution_scope = production_execution_scope(&bundle_request, task);
+    let (bundle_root, artifact_root) = match backend.materialize_bundle_for_execution(
+        &bundle_request,
+        &task.task_id,
+        &execution_scope,
+        &launch,
+    ) {
+        Ok(paths) => paths,
+        Err(error) => {
+            tracing::warn!(
+                task_id = %task.task_id,
+                backend_id = %request.backend_id,
+                error = %error,
+                "managed GPU production bundle materialization failed"
+            );
+            return typed_managed_gpu_task_result(
+                task,
+                managed_gpu_result(
+                    &request,
+                    selected_gpu,
+                    ManagedGpuStatus::BackendUnavailable,
+                    Some("backend_unavailable"),
+                    String::new(),
+                    gpu_usage(&request, 0, 0, 0),
+                )?,
+            );
+        }
+    };
+    let _cleanup = ProductionTaskCleanup::new([bundle_root.clone(), artifact_root.clone()]);
 
     let materializer = ArtifactMaterializer::new(&artifact_root)
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -850,7 +952,7 @@ fn execute_managed_gpu_task(
         &launch,
         &bundle_root,
         &artifact_root,
-        &task.task_id,
+        &execution_scope,
         cancellation,
     ) {
         Ok(run) => run,
@@ -1371,9 +1473,11 @@ fn execute_production_backend_task(
     let launch = backend
         .launch_for_gpu_selection(trusted_gpu_selection.as_ref())
         .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
+    let execution_scope = production_execution_scope(request, task);
     let (bundle_root, artifact_root) = backend
-        .materialize_bundle_for_launch(request, &task.task_id, &launch)
+        .materialize_bundle_for_execution(request, &task.task_id, &execution_scope, &launch)
         .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
+    let _cleanup = ProductionTaskCleanup::new([bundle_root.clone(), artifact_root.clone()]);
     let materializer = ArtifactMaterializer::new(&artifact_root)
         .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
     let mut materialized_bytes = Vec::with_capacity(1 + request.input_artifacts.len());
@@ -1456,7 +1560,7 @@ fn execute_production_backend_task(
             &launch,
             &bundle_root,
             &artifact_root,
-            &task.task_id,
+            &execution_scope,
             cancellation,
         )
         .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
@@ -1502,8 +1606,9 @@ fn execute_windows_backend_task(
     backend
         .validate()
         .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
+    let execution_scope = production_execution_scope(request, task);
     let spec = backend
-        .hcs_spec(&task.task_id)
+        .hcs_spec_for_execution(&task.task_id, &execution_scope)
         .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
     let artifact_root = spec
         .mounts
@@ -1512,6 +1617,7 @@ fn execute_windows_backend_task(
         .ok_or_else(|| {
             ExecutionError::BackendUnavailable("Windows artifact root is unavailable".into())
         })?;
+    let mut cleanup = ProductionTaskCleanup::deferred([artifact_root.clone()]);
     std::fs::create_dir_all(&artifact_root)
         .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
     let scratch_root = spec.result_path.parent().ok_or_else(|| {
@@ -1656,6 +1762,7 @@ fn execute_windows_backend_task(
                     "Windows HCS execution failed and its failure could not be journaled: {message}; {journal_error}"
                 )));
             }
+            cleanup.cleanup_now();
             return Err(ExecutionError::BackendUnavailable(message));
         }
     };
@@ -1679,31 +1786,51 @@ fn execute_windows_backend_task(
                         "Windows HCS result validation failed and its failure could not be journaled: {message}; {journal_error}"
                     )));
             }
+            cleanup.cleanup_now();
             return Err(error);
         }
     };
-    match typed.status {
+    let terminal_result = match typed.status {
         ResultStatus::Completed => {
-            journal
-                .append_event(&identity, crate::hcs_journal::HcsJournalEvent::Completed)
-                .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
+            journal.append_event(&identity, crate::hcs_journal::HcsJournalEvent::Completed)
         }
         ResultStatus::Failed
         | ResultStatus::ResourceExhausted
-        | ResultStatus::BackendUnavailable => {
-            journal
-                .append_event(
-                    &identity,
-                    crate::hcs_journal::HcsJournalEvent::Failed {
-                        error: typed
-                            .error_code
-                            .clone()
-                            .unwrap_or_else(|| "Windows HCS execution did not complete".into()),
-                    },
-                )
-                .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
-        }
-        ResultStatus::Cancelled | ResultStatus::TimedOut => {}
+        | ResultStatus::BackendUnavailable => journal.append_event(
+            &identity,
+            crate::hcs_journal::HcsJournalEvent::Failed {
+                error: typed
+                    .error_code
+                    .clone()
+                    .unwrap_or_else(|| "Windows HCS execution did not complete".into()),
+            },
+        ),
+        ResultStatus::Cancelled => match journal.load(&identity) {
+            Ok(record) if record.lifecycle == crate::hcs_journal::HcsLifecycleState::Cancelled => {
+                Ok(record)
+            }
+            Ok(_) => {
+                journal.append_event(&identity, crate::hcs_journal::HcsJournalEvent::Cancelled)
+            }
+            Err(error) => Err(error),
+        },
+        ResultStatus::TimedOut => match journal.load(&identity) {
+            Ok(record) if record.lifecycle == crate::hcs_journal::HcsLifecycleState::TimedOut => {
+                Ok(record)
+            }
+            Ok(_) => journal.append_event(&identity, crate::hcs_journal::HcsJournalEvent::TimedOut),
+            Err(error) => Err(error),
+        },
+    };
+    if let Err(error) = terminal_result {
+        return Err(ExecutionError::BackendUnavailable(error.to_string()));
+    }
+    // A completed HCS result is retained until the gRPC layer has durably
+    // recorded DeliveryValidated and Delivered. Failed, cancelled, and timed
+    // out executions do not have a result delivery boundary and can be removed
+    // as soon as their terminal journal event is durable.
+    if !matches!(typed.status, ResultStatus::Completed) {
+        cleanup.cleanup_now();
     }
     Ok(typed)
 }
@@ -2054,6 +2181,21 @@ mod tests {
             result.stderr,
             "general-compute backend unavailable: runner stderr: permission denied"
         );
+    }
+
+    #[test]
+    fn production_execution_scope_fits_the_oci_container_id_limit() {
+        let request = production_request(
+            "oci-scope",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "execution-scope-test",
+        );
+        let task = test_task_with_source("null");
+        let scope = production_execution_scope(&request, &task);
+
+        assert_eq!(scope.len(), 64);
+        assert!(scope.starts_with("exec-"));
+        assert!(scope[5..].bytes().all(|byte| byte.is_ascii_hexdigit()));
     }
 
     #[tokio::test]

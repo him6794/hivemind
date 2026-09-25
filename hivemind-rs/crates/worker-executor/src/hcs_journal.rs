@@ -9,7 +9,7 @@ use general_compute_runtime::windows_hcs::{
     HcsLifecycleEvent, HcsSystemSummary, HIVEMIND_HCS_OWNER, HIVEMIND_HCS_SYSTEM_ID_PREFIX,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -23,6 +23,12 @@ const MAX_RECORD_BYTES: u64 = 1024 * 1024;
 const MAX_ERROR_BYTES: usize = 2048;
 const MAX_ENUMERATED_SYSTEMS: usize = 4096;
 const REPARSE_POINT_ATTRIBUTE: u32 = 0x0400;
+const TERMINAL_RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
+const TEMPORARY_SNAPSHOT_MIN_AGE_MS: u64 = 60 * 60 * 1_000;
+
+/// Terminal HCS records are retained for this long after authoritative cleanup
+/// and delivery. Non-terminal or unreconciled records are never removed by GC.
+pub const HCS_JOURNAL_TERMINAL_RETENTION_MS: u64 = TERMINAL_RETENTION_MS;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -555,6 +561,7 @@ pub enum HcsJournalError {
 pub struct HcsExecutionJournal {
     root: PathBuf,
     lock: Arc<Mutex<()>>,
+    index: Arc<Mutex<HashMap<String, PathBuf>>>,
 }
 
 impl HcsExecutionJournal {
@@ -567,10 +574,21 @@ impl HcsExecutionJournal {
         }
         ensure_safe_directory(&root)?;
         ensure_safe_directory(&root.join("entries"))?;
-        Ok(Self {
+        let journal = Self {
             root,
             lock: Arc::new(Mutex::new(())),
-        })
+            index: Arc::new(Mutex::new(HashMap::new())),
+        };
+        {
+            let _guard = journal
+                .lock
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            journal.cleanup_temporary_snapshots_locked()?;
+            journal.rebuild_index_locked()?;
+            journal.prune_terminal_records_locked(now_ms(), TERMINAL_RETENTION_MS)?;
+        }
+        Ok(journal)
     }
 
     pub fn from_environment() -> Result<Option<Self>, HcsJournalError> {
@@ -647,8 +665,12 @@ impl HcsExecutionJournal {
             return Err(HcsJournalError::IdentityConflict);
         }
         let record = HcsJournalRecord::from_intent(intent, now_ms());
-        self.append_snapshot_locked(&directory, &record)
-            .map(|_| record)
+        self.append_snapshot_locked(&directory, &record)?;
+        self.index
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(immutable_key(&record.identity), directory);
+        Ok(record)
     }
 
     pub fn load(
@@ -739,14 +761,6 @@ impl HcsExecutionJournal {
                 .then_with(|| left.identity.attempt_id.cmp(&right.identity.attempt_id))
         });
         Ok(records)
-    }
-
-    pub fn pending_reconciliation(&self) -> Result<Vec<HcsJournalRecord>, HcsJournalError> {
-        Ok(self
-            .list_records()?
-            .into_iter()
-            .filter(HcsJournalRecord::needs_reconciliation)
-            .collect())
     }
 
     pub fn plan_reconciliation(
@@ -1473,6 +1487,26 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+fn is_temporary_snapshot_name(name: &str) -> bool {
+    let Some(name) = name.strip_prefix('.') else {
+        return false;
+    };
+    let Some(name) = name.strip_suffix(".tmp") else {
+        return false;
+    };
+    let mut fields = name.split('.');
+    fields
+        .next()
+        .is_some_and(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        && fields.next().is_some_and(|value| {
+            !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        && fields.next().is_some_and(|value| {
+            !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        && fields.next().is_none()
+}
+
 fn immutable_key(identity: &HcsExecutionIdentity) -> String {
     let mut canonical = Vec::new();
     canonical.extend_from_slice(b"hivemind-hcs-journal-key");
@@ -1569,12 +1603,48 @@ fn io_error(error: std::io::Error) -> HcsJournalError {
 }
 
 impl HcsExecutionJournal {
-    fn entry_directory(&self, identity: &HcsExecutionIdentity) -> Result<PathBuf, HcsJournalError> {
+    /// Remove crash-orphaned snapshot writers before rebuilding the index.
+    fn cleanup_temporary_snapshots_locked(&self) -> Result<(), HcsJournalError> {
         let entries = self.root.join("entries");
-        ensure_safe_directory(&entries)?;
-        let current = entries.join(immutable_key(identity));
-        let legacy = entries.join(legacy_immutable_key(identity));
-        let mut matches = Vec::new();
+        for entry in fs::read_dir(&entries).map_err(io_error)? {
+            let entry = entry.map_err(io_error)?;
+            let directory = entry.path();
+            let metadata = fs::symlink_metadata(&directory).map_err(io_error)?;
+            if is_reparse_point(&metadata) || !metadata.is_dir() {
+                return Err(HcsJournalError::Corrupt(
+                    "HCS journal entries contains a non-directory or reparse point".into(),
+                ));
+            }
+            for snapshot in fs::read_dir(&directory).map_err(io_error)? {
+                let snapshot = snapshot.map_err(io_error)?;
+                let path = snapshot.path();
+                let name = snapshot.file_name().to_string_lossy().into_owned();
+                if !is_temporary_snapshot_name(&name) {
+                    continue;
+                }
+                let metadata = fs::symlink_metadata(&path).map_err(io_error)?;
+                if is_reparse_point(&metadata) || !metadata.is_file() {
+                    return Err(HcsJournalError::Corrupt(
+                        "HCS journal temporary snapshot is not a regular file".into(),
+                    ));
+                }
+                let age_ms = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|modified| modified.elapsed().ok())
+                    .and_then(|age| u64::try_from(age.as_millis()).ok())
+                    .unwrap_or_default();
+                if age_ms >= TEMPORARY_SNAPSHOT_MIN_AGE_MS {
+                    fs::remove_file(path).map_err(io_error)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn rebuild_index_locked(&self) -> Result<(), HcsJournalError> {
+        let entries = self.root.join("entries");
+        let mut rebuilt = HashMap::new();
         for entry in fs::read_dir(&entries).map_err(io_error)? {
             let entry = entry.map_err(io_error)?;
             let path = entry.path();
@@ -1589,28 +1659,144 @@ impl HcsExecutionJournal {
                     "HCS journal entry directory has no snapshot".into(),
                 ));
             };
-            if immutable_identity_matches_without_generation(&record.identity, identity) {
-                matches.push((path, record.identity));
-            }
-        }
-        if matches.len() > 1 {
-            return Err(HcsJournalError::Corrupt(
-                "HCS journal identity has multiple entry directories".into(),
-            ));
-        }
-        if let Some((directory, existing_identity)) = matches.pop() {
-            if existing_identity != *identity {
-                return Err(HcsJournalError::IdentityConflict);
-            }
-            if directory != current && directory != legacy {
+            let directory_name = entry.file_name().to_string_lossy().into_owned();
+            if directory_name != immutable_key(&record.identity)
+                && directory_name != legacy_immutable_key(&record.identity)
+            {
                 return Err(HcsJournalError::Corrupt(
-                    "HCS journal identity is stored under an unexpected directory".into(),
+                    "HCS journal entry directory does not match its immutable identity".into(),
                 ));
             }
-            ensure_safe_directory(&directory)?;
-            return Ok(directory);
+            if rebuilt
+                .insert(immutable_key(&record.identity), path)
+                .is_some()
+            {
+                return Err(HcsJournalError::Corrupt(
+                    "HCS journal contains duplicate immutable execution identities".into(),
+                ));
+            }
         }
-        Ok(current)
+        *self.index.lock().unwrap_or_else(|error| error.into_inner()) = rebuilt;
+        Ok(())
+    }
+
+    pub fn prune_terminal_records(&self) -> Result<usize, HcsJournalError> {
+        let _guard = self.lock.lock().unwrap_or_else(|error| error.into_inner());
+        self.prune_terminal_records_locked(now_ms(), TERMINAL_RETENTION_MS)
+    }
+
+    fn prune_terminal_records_locked(
+        &self,
+        now_ms: u64,
+        retention_ms: u64,
+    ) -> Result<usize, HcsJournalError> {
+        let entries = self.root.join("entries");
+        let mut compacted_snapshots = 0;
+        for entry in fs::read_dir(&entries).map_err(io_error)? {
+            let entry = entry.map_err(io_error)?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(io_error)?;
+            if is_reparse_point(&metadata) || !metadata.is_dir() {
+                return Err(HcsJournalError::Corrupt(
+                    "HCS journal entries contains a non-directory or reparse point".into(),
+                ));
+            }
+            let Some(record) = self.read_latest_locked(&path)? else {
+                return Err(HcsJournalError::Corrupt(
+                    "HCS journal entry directory has no snapshot".into(),
+                ));
+            };
+            let eligible = matches!(
+                record.lifecycle,
+                HcsLifecycleState::Completed
+                    | HcsLifecycleState::Failed
+                    | HcsLifecycleState::Cancelled
+                    | HcsLifecycleState::TimedOut
+                    | HcsLifecycleState::Abandoned
+            ) && !record.needs_reconciliation()
+                && record.cleanup == HcsCleanupState::Succeeded
+                && now_ms.saturating_sub(record.updated_at_ms) >= retention_ms;
+            if !eligible {
+                continue;
+            }
+            for snapshot in fs::read_dir(&path).map_err(io_error)? {
+                let snapshot = snapshot.map_err(io_error)?;
+                let snapshot_path = snapshot.path();
+                let name = snapshot.file_name().to_string_lossy().into_owned();
+                let Some(sequence_text) = name.strip_suffix(".json") else {
+                    continue;
+                };
+                if !sequence_text.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err(HcsJournalError::Corrupt(
+                        "HCS journal snapshot name is invalid".into(),
+                    ));
+                }
+                let sequence = sequence_text.parse::<u64>().map_err(|_| {
+                    HcsJournalError::Corrupt("HCS journal snapshot sequence is invalid".into())
+                })?;
+                if sequence < record.sequence {
+                    fs::remove_file(snapshot_path).map_err(io_error)?;
+                    compacted_snapshots += 1;
+                }
+            }
+        }
+        Ok(compacted_snapshots)
+    }
+
+    fn entry_directory(&self, identity: &HcsExecutionIdentity) -> Result<PathBuf, HcsJournalError> {
+        let entries = self.root.join("entries");
+        ensure_safe_directory(&entries)?;
+        let current = entries.join(immutable_key(identity));
+        let legacy = entries.join(legacy_immutable_key(identity));
+        let key = immutable_key(identity);
+
+        if let Some(directory) = self
+            .index
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&key)
+            .cloned()
+        {
+            if directory.exists() {
+                ensure_safe_directory(&directory)?;
+                return Ok(directory);
+            }
+            self.index
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(&key);
+        }
+
+        let current_exists = current.exists();
+        let legacy_exists = legacy.exists();
+        if current_exists && legacy_exists {
+            return Err(HcsJournalError::Corrupt(
+                "HCS journal identity has both current and legacy entry directories".into(),
+            ));
+        }
+        let directory = if current_exists {
+            current
+        } else if legacy_exists {
+            legacy
+        } else {
+            current
+        };
+        if directory.exists() {
+            ensure_safe_directory(&directory)?;
+            let Some(record) = self.read_latest_locked(&directory)? else {
+                return Err(HcsJournalError::Corrupt(
+                    "HCS journal entry directory has no snapshot".into(),
+                ));
+            };
+            if !immutable_identity_matches_without_generation(&record.identity, identity) {
+                return Err(HcsJournalError::IdentityConflict);
+            }
+            self.index
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(key, directory.clone());
+        }
+        Ok(directory)
     }
 
     fn read_latest_locked(

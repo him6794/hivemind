@@ -49,6 +49,36 @@ pub struct ManagedConsensusAttempt {
     pub deadline: DateTime<Utc>,
 }
 
+#[derive(Debug, FromRow)]
+struct ManagedConsensusPendingCertificateRow {
+    output: Option<String>,
+    task_uuid: Uuid,
+    runtime: Option<String>,
+    task_source: Option<String>,
+    torrent_source: Option<String>,
+    managed_dsl_backend_id: Option<String>,
+    managed_dsl_semantics_manifest_sha256: Option<String>,
+    managed_certificate_id: Option<Uuid>,
+    certificate_id: Uuid,
+    execution_id: String,
+    round_id: String,
+    request_digest: String,
+    protocol_version: i32,
+    evidence_level: String,
+    result_digest: String,
+    output_bytes: i64,
+    quorum: i32,
+    matching_votes: i32,
+    participant_worker_ids: serde_json::Value,
+    participant_replica_ids: serde_json::Value,
+    certificate_digest: String,
+    replica_count: i32,
+    attempt_quorum: i32,
+    attempt_execution_id: String,
+    attempt_round_id: String,
+    attempt_request_digest: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, FromRow)]
 pub struct ManagedConsensusReplica {
     pub id: Uuid,
@@ -103,6 +133,15 @@ struct ManagedV1UsageHoldRow {
     held_total_cpt: i64,
     state: String,
     certificate_id: Option<Uuid>,
+    billing_version: String,
+    cost_model_version: String,
+    settlement_basis: String,
+}
+
+fn decode_managed_consensus_digest(value: &str) -> Option<[u8; 32]> {
+    let encoded = value.strip_prefix("sha256:")?;
+    let digest = hex::decode(encoded).ok()?;
+    digest.try_into().ok()
 }
 
 #[derive(Debug, FromRow)]
@@ -301,7 +340,8 @@ const GENERAL_COMPUTE_BILLING_VERSION: &str = "billing-v1";
 const GENERAL_COMPUTE_COST_MODEL_VERSION: &str = "cost-v1";
 const MANAGED_CONSENSUS_BILLING_VERSION: &str = "consensus-billing-v1";
 const MANAGED_CONSENSUS_COST_MODEL_VERSION: &str = "consensus-reservation-v1";
-const MANAGED_CONSENSUS_V1_BILLING_VERSION: &str = "managed-function-v1-billing-v1";
+const MANAGED_CONSENSUS_V1_LEGACY_BILLING_VERSION: &str = "managed-function-v1-billing-v1";
+const MANAGED_CONSENSUS_V1_BILLING_VERSION: &str = "managed-function-v1-billing-v2-total-budget";
 const MANAGED_CONSENSUS_V1_COST_MODEL_VERSION: &str =
     general_compute_runtime::MANAGED_DSL_V1_COST_MODEL_VERSION;
 pub const MANAGED_CONSENSUS_POLICY_PENDING_MESSAGE: &str = "awaiting managed consensus policy";
@@ -389,15 +429,16 @@ fn managed_v1_fee(amount_cpt: i64) -> Result<i64> {
     if amount_cpt < 0 {
         anyhow::bail!("managed v1 settlement amount cannot be negative");
     }
-    Ok(amount_cpt
+    let whole = amount_cpt / 10_000;
+    let remainder = amount_cpt % 10_000;
+    whole
         .checked_mul(PLATFORM_FEE_BPS)
-        .ok_or_else(|| anyhow::anyhow!("managed v1 fee calculation overflowed"))?
-        / 10_000)
+        .and_then(|fee| fee.checked_add(remainder * PLATFORM_FEE_BPS / 10_000))
+        .ok_or_else(|| anyhow::anyhow!("managed v1 fee calculation overflowed"))
 }
 
-/// Calculate the worst-case v1 hold before an enforce-mode attempt is created.
-/// The caller must still perform the balance deduction in the same transaction
-/// that creates the attempt; this helper is only the checked pricing formula.
+/// Calculate the worst-case v1 hold from a per-replica allowance. This is also
+/// the persisted-hold formula used to settle historical in-progress attempts.
 pub fn managed_v1_worst_case_hold(max_cpt: i64, replica_count: u16) -> Result<(i64, i64, i64)> {
     if max_cpt <= 0 {
         anyhow::bail!("managed v1 settlement allowance must be positive");
@@ -413,6 +454,122 @@ pub fn managed_v1_worst_case_hold(max_cpt: i64, replica_count: u16) -> Result<(i
         .checked_add(reserved_fee_cpt)
         .ok_or_else(|| anyhow::anyhow!("managed v1 hold calculation overflowed"))?;
     Ok((reserved_usage_cpt, reserved_fee_cpt, held_total_cpt))
+}
+
+/// Derive the largest equal per-replica allowance that fits a task-total v1
+/// budget, including the platform fee on aggregate replica usage.
+/// Returns (per-replica allowance, reserved usage, reserved fee, total hold).
+pub fn managed_v1_total_budget_hold(
+    task_max_cpt: i64,
+    replica_count: u16,
+) -> Result<(i64, i64, i64, i64)> {
+    if task_max_cpt <= 0 {
+        anyhow::bail!("managed v1 task-total budget must be positive");
+    }
+    if replica_count == 0 {
+        anyhow::bail!("managed v1 settlement replica count must be positive");
+    }
+    let replica_count_i64 = i64::from(replica_count);
+    let mut low = 1_i64;
+    let mut high = task_max_cpt / replica_count_i64;
+    if high == 0 {
+        anyhow::bail!("managed v1 task-total budget cannot fund a positive replica allowance");
+    }
+    let mut allowance = 0_i64;
+    while low <= high {
+        let candidate = low + (high - low) / 2;
+        let reserved_usage_cpt = candidate
+            .checked_mul(replica_count_i64)
+            .ok_or_else(|| anyhow::anyhow!("managed v1 reserved usage calculation overflowed"))?;
+        let reserved_fee_cpt = managed_v1_fee(reserved_usage_cpt)?;
+        let Some(held_total_cpt) = reserved_usage_cpt.checked_add(reserved_fee_cpt) else {
+            high = candidate - 1;
+            continue;
+        };
+        if held_total_cpt <= task_max_cpt {
+            allowance = candidate;
+            low = candidate + 1;
+        } else {
+            high = candidate - 1;
+        }
+    }
+    if allowance <= 0 {
+        anyhow::bail!("managed v1 task-total budget cannot fund a positive replica allowance");
+    }
+    let (reserved_usage_cpt, reserved_fee_cpt, held_total_cpt) =
+        managed_v1_worst_case_hold(allowance, replica_count)?;
+    if held_total_cpt > task_max_cpt {
+        anyhow::bail!("managed v1 task-total hold exceeds its budget");
+    }
+    Ok((
+        allowance,
+        reserved_usage_cpt,
+        reserved_fee_cpt,
+        held_total_cpt,
+    ))
+}
+
+fn validate_managed_v1_held_allowance(
+    replica_allowance_cpt: i64,
+    replica_count: i32,
+    reserved_usage_cpt: i64,
+    reserved_fee_cpt: i64,
+    held_total_cpt: i64,
+    billing_version: &str,
+    cost_model_version: &str,
+    settlement_basis: &str,
+) -> Result<i64> {
+    if replica_allowance_cpt <= 0
+        || !(2..=7).contains(&replica_count)
+        || (billing_version != MANAGED_CONSENSUS_V1_LEGACY_BILLING_VERSION
+            && billing_version != MANAGED_CONSENSUS_V1_BILLING_VERSION)
+        || cost_model_version != MANAGED_CONSENSUS_V1_COST_MODEL_VERSION
+        || settlement_basis != MANAGED_CONSENSUS_V1_SETTLEMENT_BASIS
+    {
+        anyhow::bail!("managed v1 held allowance metadata is invalid");
+    }
+    let replica_count = u16::try_from(replica_count)
+        .map_err(|_| anyhow::anyhow!("managed v1 held replica count is invalid"))?;
+    let expected = managed_v1_worst_case_hold(replica_allowance_cpt, replica_count)?;
+    if expected != (reserved_usage_cpt, reserved_fee_cpt, held_total_cpt) {
+        anyhow::bail!("managed v1 held allowance reservation is inconsistent");
+    }
+    Ok(replica_allowance_cpt)
+}
+
+fn validate_managed_v1_hold_budget_values(
+    task_max_cpt: i64,
+    billed_amount: i64,
+    replica_allowance_cpt: i64,
+    held_total_cpt: i64,
+    billing_version: &str,
+) -> Result<()> {
+    if billing_version == MANAGED_CONSENSUS_V1_LEGACY_BILLING_VERSION {
+        if replica_allowance_cpt != task_max_cpt {
+            anyhow::bail!("legacy managed v1 allowance is not bound to the task cap");
+        }
+    } else if billing_version == MANAGED_CONSENSUS_V1_BILLING_VERSION {
+        let total = billed_amount
+            .checked_add(held_total_cpt)
+            .ok_or_else(|| anyhow::anyhow!("managed v1 task-total hold calculation overflowed"))?;
+        if task_max_cpt <= 0 || billed_amount < 0 || total > task_max_cpt {
+            anyhow::bail!("managed v1 hold exceeds the remaining task-total budget");
+        }
+    }
+    Ok(())
+}
+
+fn validate_managed_v1_hold_budget(
+    task: &ManagedV1TaskSettlementRow,
+    hold: &ManagedV1UsageHoldRow,
+) -> Result<()> {
+    validate_managed_v1_hold_budget_values(
+        task.max_cpt,
+        task.billed_amount,
+        hold.max_cpt,
+        hold.held_total_cpt,
+        &hold.billing_version,
+    )
 }
 
 fn reject_managed_v1_evidence(
@@ -523,11 +680,24 @@ fn plan_managed_v1_settlement(
     })
 }
 
+fn managed_v1_replica_assignment_identity_matches(
+    task_id: &str,
+    attempt: &ManagedConsensusAttempt,
+    replica: &ManagedConsensusReplica,
+) -> bool {
+    replica.task_id == task_id
+        && replica.attempt_id == attempt.id
+        && replica.execution_id == attempt.execution_id
+        && replica.worker_attempt_id == format!("{}:{}", attempt.round_id, replica.replica_id)
+        && replica.request_digest == attempt.request_digest
+}
+
 fn classify_managed_v1_replica_evidence(
     task_id: &str,
     task: &ManagedV1TaskSettlementRow,
     attempt: &ManagedConsensusAttempt,
     replica: &ManagedConsensusReplica,
+    replica_allowance_cpt: i64,
 ) -> ManagedV1ReplicaEvidence {
     let mut valid = true;
     let mut rejection_reason = None;
@@ -536,11 +706,7 @@ fn classify_managed_v1_replica_evidence(
         (!replica.provider_user.trim().is_empty()).then(|| replica.provider_user.trim().to_owned());
     let usage_units = replica.usage_units.unwrap_or_default();
 
-    if replica.task_id != task_id
-        || replica.attempt_id != attempt.id
-        || replica.execution_id != attempt.execution_id
-        || replica.request_digest != attempt.request_digest
-    {
+    if !managed_v1_replica_assignment_identity_matches(task_id, attempt, replica) {
         reject_managed_v1_evidence(
             &mut valid,
             &mut rejection_reason,
@@ -634,7 +800,7 @@ fn classify_managed_v1_replica_evidence(
             || result.source_sha256 != expected_source_digest
             || result.input_sha256 != expected_input_digest
             || !usage_matches
-            || usage_units > task.max_cpt
+            || usage_units > replica_allowance_cpt
         {
             reject_managed_v1_evidence(
                 &mut valid,
@@ -836,13 +1002,19 @@ async fn settle_managed_v1_hold_without_certificate(
     .fetch_optional(&mut **tx)
     .await?
     .ok_or_else(|| anyhow::anyhow!("managed v1 settlement attempt was not found"))?;
-    if task.managed_consensus_attempt_id != Some(attempt.id) || attempt.mode != "enforce" {
+    if task.managed_consensus_attempt_id != Some(attempt.id) {
         anyhow::bail!("managed v1 settlement attempt is not active for the task");
+    }
+    if attempt.mode == "observe" {
+        return Ok(false);
+    }
+    if attempt.mode != "enforce" {
+        anyhow::bail!("managed v1 settlement attempt mode is invalid");
     }
     let hold = sqlx::query_as::<_, ManagedV1UsageHoldRow>(
         "SELECT id, task_id, attempt_id, owner, max_cpt, replica_count,
                 reserved_usage_cpt, reserved_fee_cpt, held_total_cpt, state,
-                certificate_id
+                certificate_id, billing_version, cost_model_version, settlement_basis
          FROM managed_consensus_usage_holds
          WHERE task_id = $1 AND attempt_id = $2
          FOR UPDATE",
@@ -855,6 +1027,25 @@ async fn settle_managed_v1_hold_without_certificate(
     if hold.state != "held" {
         return Ok(false);
     }
+    if hold.task_id != task_id
+        || hold.attempt_id != attempt.id
+        || hold.owner != task.owner
+        || hold.max_cpt <= 0
+        || hold.replica_count != attempt.replica_count
+    {
+        anyhow::bail!("managed v1 usage hold is not bound to the active attempt");
+    }
+    validate_managed_v1_held_allowance(
+        hold.max_cpt,
+        hold.replica_count,
+        hold.reserved_usage_cpt,
+        hold.reserved_fee_cpt,
+        hold.held_total_cpt,
+        &hold.billing_version,
+        &hold.cost_model_version,
+        &hold.settlement_basis,
+    )?;
+    validate_managed_v1_hold_budget(&task, &hold)?;
     if hold.certificate_id.is_some() {
         anyhow::bail!("managed v1 usage hold has a conflicting certificate");
     }
@@ -877,10 +1068,12 @@ async fn settle_managed_v1_hold_without_certificate(
     }
     let evidence: Vec<_> = replicas
         .iter()
-        .map(|replica| classify_managed_v1_replica_evidence(task_id, &task, &attempt, replica))
+        .map(|replica| {
+            classify_managed_v1_replica_evidence(task_id, &task, &attempt, replica, hold.max_cpt)
+        })
         .collect();
     let plan = plan_managed_v1_settlement(
-        task.max_cpt,
+        hold.max_cpt,
         attempt.replica_count,
         terminal_outcome,
         None,
@@ -1084,6 +1277,7 @@ impl TaskRepository {
     pub(crate) async fn managed_consensus_stop_targets(
         &self,
         task_id: &str,
+        expected_attempt_id: Uuid,
     ) -> Result<Vec<ManagedConsensusStopTarget>> {
         let rows: Vec<ManagedConsensusStopTargetRow> = sqlx::query_as(
             "SELECT r.worker_id, r.worker_ip, r.execution_id, r.worker_attempt_id,
@@ -1094,7 +1288,8 @@ impl TaskRepository {
              JOIN managed_consensus_replicas r
                ON r.attempt_id = a.id
              WHERE t.task_id = $1
-               AND t.managed_consensus_attempt_id IS NOT NULL
+               AND t.managed_consensus_attempt_id = $2
+               AND a.id = $2
                AND t.status IN ('ASSIGNED', 'RUNNING', 'FAILED', 'CANCELLED', 'COMPLETED', 'OBSERVED')
                AND a.state IN (
                     'dispatching', 'running', 'stop_pending', 'cancel_pending',
@@ -1104,6 +1299,7 @@ impl TaskRepository {
              ORDER BY r.replica_id",
         )
         .bind(task_id)
+        .bind(expected_attempt_id)
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter()
@@ -1147,10 +1343,13 @@ impl TaskRepository {
                     a.replica_count, a.quorum, a.mode, a.state, a.deadline
              FROM managed_consensus_attempts a
              JOIN tasks t ON t.managed_consensus_attempt_id = a.id
-             WHERE a.state IN (
-                    'stop_pending', 'cancel_pending', 'quorum_stop_pending', 'shadow_stop_pending'
+             WHERE (
+                    a.state = 'quorum_stop_pending'
+                    AND t.status IN ('ASSIGNED', 'RUNNING')
+               ) OR (
+                    a.state IN ('stop_pending', 'cancel_pending', 'quorum_stop_pending', 'shadow_stop_pending')
+                    AND t.status IN ('FAILED', 'CANCELLED', 'COMPLETED', 'OBSERVED')
                )
-               AND t.status IN ('FAILED', 'CANCELLED', 'COMPLETED', 'OBSERVED')
              ORDER BY a.updated_at",
         )
         .fetch_all(&self.pool)
@@ -1231,105 +1430,427 @@ impl TaskRepository {
         Ok(task)
     }
 
+    pub(crate) async fn mark_managed_consensus_replica_stop_confirmed(
+        &self,
+        task_id: &str,
+        attempt_id: Uuid,
+        replica_id: &str,
+    ) -> Result<bool> {
+        let updated = sqlx::query(
+            "UPDATE managed_consensus_replicas r
+             SET state = 'stopped', rejection_reason = 'worker stop confirmed'
+             FROM tasks t
+             WHERE r.task_id = $1 AND r.attempt_id = $2 AND r.replica_id = $3
+               AND t.task_id = r.task_id AND t.managed_consensus_attempt_id = r.attempt_id
+               AND r.state IN ('assigned', 'running', 'stop_pending', 'cancel_pending', 'stopped')",
+        )
+        .bind(task_id)
+        .bind(attempt_id)
+        .bind(replica_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(updated.rows_affected() == 1)
+    }
+
+    pub(crate) async fn mark_managed_consensus_quorum_stop_pending(
+        &self,
+        task_id: &str,
+        attempt_id: Uuid,
+        certificate: &ConsensusCertificate,
+        output: &str,
+    ) -> Result<Option<Task>> {
+        if certificate.binding.task_id != task_id {
+            anyhow::bail!("managed consensus certificate task binding is invalid");
+        }
+        let marked = if certificate.binding.runtime
+            == general_compute_runtime::MANAGED_DSL_V1_RUNTIME_VERSION
+        {
+            self.complete_managed_consensus_v1(certificate, output, false, true, Some(attempt_id))
+                .await?
+        } else {
+            self.complete_managed_consensus(certificate, output, false)
+                .await?
+        };
+        if !marked {
+            return Ok(None);
+        }
+        self.find_by_task_id(task_id).await
+    }
+
+    async fn load_managed_consensus_pending_certificate(
+        &self,
+        task_id: &str,
+        attempt_id: Uuid,
+    ) -> Result<Option<(ConsensusCertificate, String)>> {
+        let row = sqlx::query_as::<_, ManagedConsensusPendingCertificateRow>(
+            "SELECT t.output, t.id AS task_uuid, t.runtime, t.task_source, t.torrent_source,
+                    t.managed_dsl_backend_id, t.managed_dsl_semantics_manifest_sha256,
+                    t.managed_certificate_id, c.id AS certificate_id, c.execution_id,
+                    c.round_id, c.request_digest, c.protocol_version, c.evidence_level,
+                    c.result_digest, c.output_bytes, c.quorum, c.matching_votes,
+                    c.participant_worker_ids, c.participant_replica_ids, c.certificate_digest,
+                    a.replica_count, a.quorum AS attempt_quorum,
+                    a.execution_id AS attempt_execution_id, a.round_id AS attempt_round_id,
+                    a.request_digest AS attempt_request_digest
+             FROM tasks t
+             JOIN managed_consensus_attempts a ON a.id = $2 AND a.task_id = t.task_id
+             JOIN managed_consensus_certificates c ON c.task_id = t.task_id
+                 AND c.attempt_id = a.id AND c.settlement_authorized = true AND c.mode = 'enforce'
+             WHERE t.task_id = $1 AND t.managed_consensus_attempt_id = a.id",
+        )
+        .bind(task_id)
+        .bind(attempt_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let Some(output) = row.output else {
+            return Ok(None);
+        };
+        if row.managed_certificate_id != Some(row.certificate_id)
+            || row.execution_id != row.attempt_execution_id
+            || row.round_id != row.attempt_round_id
+            || row.request_digest != row.attempt_request_digest
+            || row.quorum != row.attempt_quorum
+            || row.attempt_quorum <= 0
+            || row.replica_count <= 0
+        {
+            return Ok(None);
+        }
+        let Ok(participant_worker_ids) =
+            serde_json::from_value::<Vec<String>>(row.participant_worker_ids)
+        else {
+            return Ok(None);
+        };
+        let Ok(participant_replica_ids) =
+            serde_json::from_value::<Vec<String>>(row.participant_replica_ids)
+        else {
+            return Ok(None);
+        };
+        if participant_worker_ids.is_empty()
+            || participant_worker_ids.len() != participant_replica_ids.len()
+            || participant_worker_ids.len()
+                > hivemind_managed_consensus::MAX_CERTIFICATE_OBSERVATIONS
+        {
+            return Ok(None);
+        }
+        let replicas: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+            "SELECT replica_id, worker_id, worker_attempt_id, result_digest
+             FROM managed_consensus_replicas
+             WHERE attempt_id = $1 AND replica_id = ANY($2)",
+        )
+        .bind(attempt_id)
+        .bind(&participant_replica_ids)
+        .fetch_all(&self.pool)
+        .await?;
+        if replicas.len() != participant_replica_ids.len() {
+            return Ok(None);
+        }
+        let replicas_by_id: HashMap<&str, &(String, String, String, Option<String>)> = replicas
+            .iter()
+            .map(|replica| (replica.0.as_str(), replica))
+            .collect();
+        let Some(result_digest) = decode_managed_consensus_digest(&row.result_digest) else {
+            return Ok(None);
+        };
+        let output_digest = hivemind_managed_consensus::output_digest(output.as_bytes());
+        let Ok(output_bytes) = u64::try_from(row.output_bytes) else {
+            return Ok(None);
+        };
+        if output.len() as u64 != output_bytes {
+            return Ok(None);
+        }
+        let mut participants = Vec::with_capacity(participant_replica_ids.len());
+        for (worker_id, replica_id) in participant_worker_ids
+            .into_iter()
+            .zip(participant_replica_ids)
+        {
+            let Some((
+                persisted_replica_id,
+                persisted_worker_id,
+                worker_attempt_id,
+                persisted_digest,
+            )) = replicas_by_id.get(replica_id.as_str()).copied()
+            else {
+                return Ok(None);
+            };
+            let Some(participant_result_digest) = persisted_digest
+                .as_deref()
+                .and_then(decode_managed_consensus_digest)
+            else {
+                return Ok(None);
+            };
+            if *persisted_replica_id != replica_id
+                || *persisted_worker_id != worker_id
+                || participant_result_digest != result_digest
+            {
+                return Ok(None);
+            }
+            participants.push(hivemind_managed_consensus::ConsensusParticipant {
+                worker_id,
+                replica_id,
+                attempt_id: worker_attempt_id.clone(),
+                output_digest,
+                result_digest: participant_result_digest,
+                output_bytes,
+            });
+        }
+        let Some(certificate_digest) = decode_managed_consensus_digest(&row.certificate_digest)
+        else {
+            return Ok(None);
+        };
+        let protocol_version = u16::try_from(row.protocol_version).ok();
+        let required_quorum = u16::try_from(row.quorum).ok();
+        let replica_count = u16::try_from(row.replica_count).ok();
+        let matching_count = u16::try_from(row.matching_votes).ok();
+        let (
+            Some(protocol_version),
+            Some(required_quorum),
+            Some(replica_count),
+            Some(matching_count),
+        ) = (
+            protocol_version,
+            required_quorum,
+            replica_count,
+            matching_count,
+        )
+        else {
+            return Ok(None);
+        };
+        let runtime = row.runtime.unwrap_or_default();
+        let certificate = ConsensusCertificate {
+            protocol_version,
+            evidence_level: row.evidence_level,
+            binding: hivemind_managed_consensus::ConsensusBinding {
+                task_id: task_id.to_owned(),
+                execution_id: row.execution_id,
+                round_id: row.round_id,
+                idempotency_key: format!("managed-consensus-v1:{}", row.task_uuid.simple()),
+                request_digest: row.request_digest,
+                runtime: runtime.clone(),
+                backend_id: managed_consensus_backend_id(
+                    Some(&runtime),
+                    row.managed_dsl_backend_id.as_deref(),
+                ),
+                semantics_digest: managed_consensus_semantics_digest(
+                    Some(&runtime),
+                    row.managed_dsl_semantics_manifest_sha256.as_deref(),
+                ),
+                source_digest: hivemind_managed_consensus::digest_hex(
+                    row.task_source.as_deref().unwrap_or_default().as_bytes(),
+                ),
+                input_digest: hivemind_managed_consensus::digest_hex(
+                    row.torrent_source.as_deref().unwrap_or_default().as_bytes(),
+                ),
+            },
+            required_quorum,
+            replica_count,
+            matching_count,
+            result_digest,
+            output_digest,
+            output_bytes,
+            participants,
+            certificate_digest,
+        };
+        if hivemind_managed_consensus::certificate_digest(&certificate) != certificate_digest {
+            return Ok(None);
+        }
+        Ok(Some((certificate, output)))
+    }
+
     pub(crate) async fn finalize_managed_consensus_stop_pending(
         &self,
         task_id: &str,
         attempt_id: Uuid,
     ) -> Result<Option<Task>> {
-        let mut tx = self.pool.begin().await?;
-        let current: Option<(String, String, Option<Uuid>, i32)> = sqlx::query_as(
-            "SELECT t.status, a.state, t.managed_consensus_attempt_id,
-                    t.managed_winning_votes
-             FROM tasks t
-             JOIN managed_consensus_attempts a ON a.id = t.managed_consensus_attempt_id
-             WHERE t.task_id = $1 AND a.id = $2 FOR UPDATE",
-        )
-        .bind(task_id)
-        .bind(attempt_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        let Some((task_status, attempt_state, current_attempt_id, winning_votes)) = current else {
-            tx.commit().await?;
-            return Ok(None);
-        };
-        if current_attempt_id != Some(attempt_id)
-            || !matches!(
-                attempt_state.as_str(),
-                "stop_pending" | "cancel_pending" | "quorum_stop_pending" | "shadow_stop_pending"
-            )
-            || !matches!(
-                task_status.as_str(),
-                "FAILED" | "CANCELLED" | "COMPLETED" | "OBSERVED"
-            )
-        {
-            tx.commit().await?;
-            return Ok(None);
-        }
-        sqlx::query(
-            "UPDATE managed_consensus_replicas
-             SET state = 'cancelled', rejection_reason = 'worker stop confirmed'
-             WHERE attempt_id = $1
-               AND state IN ('assigned', 'running', 'stop_pending', 'cancel_pending')",
-        )
-        .bind(attempt_id)
-        .execute(&mut *tx)
-        .await?;
-        let final_attempt_state = if task_status == "CANCELLED" {
-            "cancelled"
-        } else if attempt_state == "quorum_stop_pending" {
-            "quorum_reached"
-        } else if attempt_state == "shadow_stop_pending" {
-            if winning_votes > 0 {
-                "shadow_quorum_reached"
-            } else {
-                "shadow_no_quorum"
+        let mut try_quorum_certificate = true;
+        loop {
+            let mut tx = self.pool.begin().await?;
+            let current: Option<(String, String, Option<Uuid>, i32, Option<String>)> =
+                sqlx::query_as(
+                    "SELECT t.status, a.state, t.managed_consensus_attempt_id,
+                        t.managed_winning_votes, t.runtime
+                 FROM tasks t
+                 JOIN managed_consensus_attempts a ON a.id = t.managed_consensus_attempt_id
+                 WHERE t.task_id = $1 AND a.id = $2 FOR UPDATE",
+                )
+                .bind(task_id)
+                .bind(attempt_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+            let Some((task_status, attempt_state, current_attempt_id, winning_votes, runtime)) =
+                current
+            else {
+                tx.commit().await?;
+                return Ok(None);
+            };
+            let active_quorum_pending = attempt_state == "quorum_stop_pending"
+                && matches!(task_status.as_str(), "ASSIGNED" | "RUNNING");
+            if current_attempt_id != Some(attempt_id)
+                || !matches!(
+                    attempt_state.as_str(),
+                    "stop_pending"
+                        | "cancel_pending"
+                        | "quorum_stop_pending"
+                        | "shadow_stop_pending"
+                )
+                || (!active_quorum_pending
+                    && !matches!(
+                        task_status.as_str(),
+                        "FAILED" | "CANCELLED" | "COMPLETED" | "OBSERVED"
+                    ))
+            {
+                tx.commit().await?;
+                return Ok(None);
             }
-        } else {
-            "no_quorum"
-        };
-        sqlx::query(
-            "UPDATE managed_consensus_attempts
-             SET state = $2, updated_at = NOW(), completed_at = NOW()
-             WHERE id = $1
-               AND state IN ('stop_pending', 'cancel_pending', 'quorum_stop_pending', 'shadow_stop_pending')",
-        )
-        .bind(attempt_id)
-        .bind(final_attempt_state)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "UPDATE managed_consensus_worker_reservations
-             SET state = 'released', released_at = NOW()
-             WHERE attempt_id = $1 AND state = 'active'",
-        )
-        .bind(attempt_id)
-        .execute(&mut *tx)
-        .await?;
-        settle_managed_v1_hold_without_certificate(
-            &mut tx,
-            task_id,
-            attempt_id,
-            final_attempt_state,
-        )
-        .await?;
-        let task = sqlx::query_as::<_, Task>(
-            "UPDATE tasks SET managed_consensus_state = CASE
-                    WHEN status = 'CANCELLED' THEN 'cancelled'
-                    WHEN $2 = 'quorum_stop_pending' THEN 'quorum_reached'
-                    WHEN $2 = 'shadow_stop_pending' AND $3 > 0 THEN 'shadow_quorum_reached'
-                    WHEN $2 = 'shadow_stop_pending' THEN 'shadow_no_quorum'
-                    ELSE 'no_quorum' END,
-                managed_consensus_updated_at = NOW(), last_update = NOW()
-             WHERE task_id = $1
-             RETURNING *",
-        )
-        .bind(task_id)
-        .bind(&attempt_state)
-        .bind(winning_votes)
-        .fetch_optional(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        Ok(task)
+            let expected_replica_count: i64 = sqlx::query_scalar(
+                "SELECT replica_count::BIGINT FROM managed_consensus_attempts
+                 WHERE id = $1 AND task_id = $2",
+            )
+            .bind(attempt_id)
+            .bind(task_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            let (replica_count, unconfirmed_count): (i64, i64) = sqlx::query_as(
+                "SELECT COUNT(*)::BIGINT,
+                        COUNT(*) FILTER (
+                            WHERE state NOT IN ('reported', 'failed', 'stopped', 'cancelled', 'superseded')
+                        )::BIGINT
+                 FROM managed_consensus_replicas
+                 WHERE task_id = $1 AND attempt_id = $2",
+            )
+            .bind(task_id)
+            .bind(attempt_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if replica_count != expected_replica_count || unconfirmed_count != 0 {
+                tx.commit().await?;
+                return Ok(None);
+            }
+            if attempt_state == "quorum_stop_pending" && try_quorum_certificate {
+                tx.commit().await?;
+                if runtime.as_deref()
+                    == Some(general_compute_runtime::MANAGED_DSL_V1_RUNTIME_VERSION)
+                {
+                    if let Some((certificate, output)) = self
+                        .load_managed_consensus_pending_certificate(task_id, attempt_id)
+                        .await?
+                    {
+                        if self
+                            .complete_managed_consensus_v1(
+                                &certificate,
+                                &output,
+                                true,
+                                false,
+                                Some(attempt_id),
+                            )
+                            .await?
+                        {
+                            return self.find_by_task_id(task_id).await;
+                        }
+                    }
+                }
+                try_quorum_certificate = false;
+                continue;
+            }
+            sqlx::query(
+                "UPDATE managed_consensus_replicas
+                 SET state = 'cancelled', rejection_reason = 'worker stop confirmed'
+                 WHERE attempt_id = $1
+                   AND state IN ('assigned', 'running', 'stop_pending', 'cancel_pending')",
+            )
+            .bind(attempt_id)
+            .execute(&mut *tx)
+            .await?;
+            let final_attempt_state = if task_status == "CANCELLED" {
+                "cancelled"
+            } else if attempt_state == "quorum_stop_pending"
+                && task_status == "COMPLETED"
+                && runtime.as_deref()
+                    != Some(general_compute_runtime::MANAGED_DSL_V1_RUNTIME_VERSION)
+            {
+                "quorum_reached"
+            } else if attempt_state == "quorum_stop_pending" {
+                "no_quorum"
+            } else if attempt_state == "shadow_stop_pending" {
+                if winning_votes > 0 {
+                    "shadow_quorum_reached"
+                } else {
+                    "shadow_no_quorum"
+                }
+            } else {
+                "no_quorum"
+            };
+            sqlx::query(
+                "UPDATE managed_consensus_attempts
+                 SET state = $2, updated_at = NOW(), completed_at = NOW()
+                 WHERE id = $1
+                   AND state IN ('stop_pending', 'cancel_pending', 'quorum_stop_pending', 'shadow_stop_pending')",
+            )
+            .bind(attempt_id)
+            .bind(final_attempt_state)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE managed_consensus_worker_reservations
+                 SET state = 'released', released_at = NOW()
+                 WHERE attempt_id = $1 AND state = 'active'",
+            )
+            .bind(attempt_id)
+            .execute(&mut *tx)
+            .await?;
+            settle_managed_v1_hold_without_certificate(
+                &mut tx,
+                task_id,
+                attempt_id,
+                final_attempt_state,
+            )
+            .await?;
+            let task = sqlx::query_as::<_, Task>(
+                "UPDATE tasks SET status = CASE
+                        WHEN $2 = 'no_quorum' AND (
+                            status IN ('ASSIGNED', 'RUNNING') OR
+                            (status = 'COMPLETED' AND managed_consensus_state = 'quorum_stop_pending')
+                        ) THEN 'FAILED'
+                        ELSE status END,
+                    output = CASE
+                        WHEN $2 = 'no_quorum' AND status = 'COMPLETED'
+                          AND managed_consensus_state = 'quorum_stop_pending' THEN NULL
+                        ELSE output END,
+                    managed_result_digest = CASE
+                        WHEN $2 = 'no_quorum' AND status = 'COMPLETED'
+                          AND managed_consensus_state = 'quorum_stop_pending' THEN NULL
+                        ELSE managed_result_digest END,
+                    managed_certificate_id = CASE
+                        WHEN $2 = 'no_quorum' AND status = 'COMPLETED'
+                          AND managed_consensus_state = 'quorum_stop_pending' THEN NULL
+                        ELSE managed_certificate_id END,
+                    status_message = CASE
+                        WHEN $2 = 'no_quorum' AND status = 'COMPLETED'
+                          AND managed_consensus_state = 'quorum_stop_pending'
+                            THEN 'managed consensus settlement certificate was unavailable'
+                        ELSE status_message END,
+                    completed_at = CASE
+                        WHEN $2 = 'no_quorum' AND (
+                            status IN ('ASSIGNED', 'RUNNING') OR
+                            (status = 'COMPLETED' AND managed_consensus_state = 'quorum_stop_pending')
+                        ) THEN NOW()
+                        ELSE completed_at END,
+                    managed_consensus_state = CASE
+                        WHEN status = 'CANCELLED' THEN 'cancelled'
+                        ELSE $2 END,
+                    managed_consensus_updated_at = NOW(), last_update = NOW()
+                 WHERE task_id = $1
+                 RETURNING *",
+            )
+            .bind(task_id)
+            .bind(final_attempt_state)
+            .fetch_optional(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            return Ok(task);
+        }
     }
 
     pub(crate) async fn managed_consensus_attempt_for_task(
@@ -1374,6 +1895,63 @@ impl TaskRepository {
         })
         .transpose()
     }
+    pub(crate) async fn managed_v1_replica_allowance_for_attempt(
+        &self,
+        attempt_id: Uuid,
+    ) -> Result<i64> {
+        let hold: Option<(i64, i32, i64, i64, i64, String, String, String, i64, i64)> =
+            sqlx::query_as(
+                "SELECT h.max_cpt, h.replica_count, h.reserved_usage_cpt,
+                    h.reserved_fee_cpt, h.held_total_cpt, h.billing_version,
+                    h.cost_model_version, h.settlement_basis, t.max_cpt, t.billed_amount
+             FROM managed_consensus_usage_holds h
+             JOIN managed_consensus_attempts a ON a.id = h.attempt_id
+             JOIN tasks t ON t.task_id = h.task_id
+             WHERE h.attempt_id = $1 AND h.state = 'held'
+               AND h.replica_count = a.replica_count AND a.mode = 'enforce'
+               AND a.state IN ('dispatching', 'running')
+               AND t.runtime = 'managed-function-v1'
+               AND t.managed_consensus_attempt_id = a.id
+               AND t.status IN ('ASSIGNED', 'RUNNING')",
+            )
+            .bind(attempt_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some((
+            replica_allowance_cpt,
+            replica_count,
+            reserved_usage_cpt,
+            reserved_fee_cpt,
+            held_total_cpt,
+            billing_version,
+            cost_model_version,
+            settlement_basis,
+            task_max_cpt,
+            billed_amount,
+        )) = hold
+        else {
+            anyhow::bail!("managed v1 held allowance is missing or inactive");
+        };
+        let allowance = validate_managed_v1_held_allowance(
+            replica_allowance_cpt,
+            replica_count,
+            reserved_usage_cpt,
+            reserved_fee_cpt,
+            held_total_cpt,
+            &billing_version,
+            &cost_model_version,
+            &settlement_basis,
+        )?;
+        validate_managed_v1_hold_budget_values(
+            task_max_cpt,
+            billed_amount,
+            allowance,
+            held_total_cpt,
+            &billing_version,
+        )?;
+        Ok(allowance)
+    }
+
     pub(crate) async fn create_managed_consensus_attempt(
         &self,
         task: &Task,
@@ -1432,34 +2010,87 @@ impl TaskRepository {
                     .map_err(|_| anyhow::anyhow!("managed consensus timeout is too large"))?,
             );
         let mut tx = self.pool.begin().await?;
-        let status: String =
-            sqlx::query_scalar("SELECT status FROM tasks WHERE task_id = $1 FOR UPDATE")
-                .bind(&task.task_id)
-                .fetch_one(&mut *tx)
-                .await?;
+        let current: Option<(String, Option<String>, i64, i64, String)> = sqlx::query_as(
+            "SELECT status, runtime, max_cpt, billed_amount, owner
+             FROM tasks WHERE task_id = $1 FOR UPDATE",
+        )
+        .bind(&task.task_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((status, persisted_runtime, persisted_max_cpt, billed_amount, persisted_owner)) =
+            current
+        else {
+            anyhow::bail!("managed consensus task was not found");
+        };
         if !matches!(status.as_str(), "PENDING" | "QUEUED") {
             tx.commit().await?;
             return Ok(None);
         }
-        let managed_v1_enforce = task.runtime.as_deref().map(str::trim)
-            == Some(general_compute_runtime::MANAGED_DSL_V1_RUNTIME_VERSION)
-            && mode == "enforce";
+        let managed_v1_task = persisted_runtime.as_deref().map(str::trim)
+            == Some(general_compute_runtime::MANAGED_DSL_V1_RUNTIME_VERSION);
+        if task.owner != persisted_owner
+            || task.max_cpt != persisted_max_cpt
+            || task.runtime != persisted_runtime
+        {
+            anyhow::bail!("managed consensus task snapshot changed before attempt creation");
+        }
+        let managed_v1_enforce = managed_v1_task && mode == "enforce";
         let v1_hold = if managed_v1_enforce {
-            if task.max_cpt <= 0 {
+            if persisted_max_cpt <= 0 {
                 anyhow::bail!("managed-function-v1 requires a positive max_cpt");
             }
-            let (reserved_usage_cpt, reserved_fee_cpt, held_total_cpt) =
-                managed_v1_worst_case_hold(task.max_cpt, policy.replica_count)?;
+            let prior_enforce_attempt_exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+                    SELECT 1 FROM managed_consensus_attempts
+                    WHERE task_id = $1 AND mode = 'enforce'
+                 )",
+            )
+            .bind(&task.task_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if prior_enforce_attempt_exists {
+                sqlx::query(
+                    "UPDATE tasks SET status = 'FAILED', worker_id = NULL, worker_ip = NULL,
+                        managed_consensus_state = 'no_quorum',
+                        managed_consensus_updated_at = NOW(), last_update = NOW(),
+                        status_message = 'managed-function-v1 retry disabled after prior owner-funded attempt'
+                     WHERE task_id = $1 AND status IN ('PENDING', 'QUEUED')",
+                )
+                .bind(&task.task_id)
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                return Ok(None);
+            }
+            if billed_amount < 0 || billed_amount >= persisted_max_cpt {
+                anyhow::bail!("managed-function-v1 task has no remaining owner-funded budget");
+            }
+            let maximum_remaining_hold =
+                persisted_max_cpt
+                    .checked_sub(billed_amount)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("managed-function-v1 budget calculation underflowed")
+                    })?;
+            let (replica_allowance_cpt, reserved_usage_cpt, reserved_fee_cpt, held_total_cpt) =
+                managed_v1_total_budget_hold(maximum_remaining_hold, policy.replica_count)?;
+            if held_total_cpt > maximum_remaining_hold {
+                anyhow::bail!("managed-function-v1 hold exceeds the remaining task budget");
+            }
             let balance: Option<i64> = sqlx::query_scalar(
                 "SELECT balance FROM users WHERE username = $1 AND is_active = true FOR UPDATE",
             )
-            .bind(&task.owner)
+            .bind(&persisted_owner)
             .fetch_optional(&mut *tx)
             .await?;
             if balance.is_none_or(|balance| balance < held_total_cpt) {
                 anyhow::bail!("managed v1 payer has insufficient balance for the worst-case hold");
             }
-            Some((reserved_usage_cpt, reserved_fee_cpt, held_total_cpt))
+            Some((
+                replica_allowance_cpt,
+                reserved_usage_cpt,
+                reserved_fee_cpt,
+                held_total_cpt,
+            ))
         } else {
             None
         };
@@ -1539,7 +2170,9 @@ impl TaskRepository {
         .bind(deadline)
         .fetch_one(&mut *tx)
         .await?;
-        if let Some((reserved_usage_cpt, reserved_fee_cpt, held_total_cpt)) = v1_hold {
+        if let Some((replica_allowance_cpt, reserved_usage_cpt, reserved_fee_cpt, held_total_cpt)) =
+            v1_hold
+        {
             let charged = sqlx::query(
                 "UPDATE users SET balance = balance - $1, updated_at = NOW()
                  WHERE username = $2 AND is_active = true AND balance >= $1",
@@ -1563,7 +2196,7 @@ impl TaskRepository {
             .bind(&task.task_id)
             .bind(attempt.id)
             .bind(&task.owner)
-            .bind(task.max_cpt)
+            .bind(replica_allowance_cpt)
             .bind(i32::from(policy.replica_count))
             .bind(reserved_usage_cpt)
             .bind(reserved_fee_cpt)
@@ -1706,9 +2339,12 @@ impl TaskRepository {
             managed_dsl_backend_id: task_backend_id,
             managed_dsl_semantics_manifest_sha256: task_semantics_digest,
         } = current;
-        if !matches!(status.as_str(), "ASSIGNED" | "RUNNING")
-            || current_attempt_id != Some(attempt_id)
-        {
+        let task_is_active = matches!(status.as_str(), "ASSIGNED" | "RUNNING");
+        let task_is_stop_pending = matches!(
+            status.as_str(),
+            "FAILED" | "CANCELLED" | "COMPLETED" | "OBSERVED"
+        );
+        if current_attempt_id != Some(attempt_id) || (!task_is_active && !task_is_stop_pending) {
             anyhow::bail!("managed consensus observation belongs to a stale task attempt");
         }
         let expected_runtime = task_runtime.as_deref().unwrap_or_default();
@@ -1746,7 +2382,69 @@ impl TaskRepository {
             {
                 anyhow::bail!("managed consensus usage evidence is inconsistent");
             }
-            if usage_units > max_cpt {
+            let active_attempt_id = current_attempt_id
+                .ok_or_else(|| anyhow::anyhow!("managed v1 consensus attempt is missing"))?;
+            let attempt: Option<(String, i32)> = sqlx::query_as(
+                "SELECT mode, replica_count FROM managed_consensus_attempts
+                 WHERE id = $1 AND task_id = $2
+                   AND state IN (
+                        'dispatching', 'running', 'stop_pending', 'cancel_pending',
+                        'quorum_stop_pending', 'shadow_stop_pending'
+                   )
+                 FOR SHARE",
+            )
+            .bind(active_attempt_id)
+            .bind(task_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let Some((attempt_mode, replica_count)) = attempt else {
+                anyhow::bail!("managed v1 consensus attempt is missing or inactive");
+            };
+            let replica_allowance_cpt = if attempt_mode == "enforce" {
+                let hold: Option<(i64, i32, i64, i64, i64, String, String, String)> =
+                    sqlx::query_as(
+                        "SELECT max_cpt, replica_count, reserved_usage_cpt,
+                                reserved_fee_cpt, held_total_cpt, billing_version,
+                                cost_model_version, settlement_basis
+                         FROM managed_consensus_usage_holds
+                         WHERE attempt_id = $1 AND state = 'held' AND replica_count = $2
+                         FOR SHARE",
+                    )
+                    .bind(active_attempt_id)
+                    .bind(replica_count)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+                let Some((
+                    allowance,
+                    held_replica_count,
+                    reserved_usage_cpt,
+                    reserved_fee_cpt,
+                    held_total_cpt,
+                    billing_version,
+                    cost_model_version,
+                    settlement_basis,
+                )) = hold
+                else {
+                    anyhow::bail!("managed v1 held allowance is missing");
+                };
+                validate_managed_v1_held_allowance(
+                    allowance,
+                    held_replica_count,
+                    reserved_usage_cpt,
+                    reserved_fee_cpt,
+                    held_total_cpt,
+                    &billing_version,
+                    &cost_model_version,
+                    &settlement_basis,
+                )?
+            } else if attempt_mode == "observe" {
+                let replica_count = u16::try_from(replica_count)
+                    .map_err(|_| anyhow::anyhow!("managed v1 replica count is invalid"))?;
+                managed_v1_total_budget_hold(max_cpt, replica_count)?.0
+            } else {
+                anyhow::bail!("managed v1 consensus attempt mode is invalid");
+            };
+            if usage_units > replica_allowance_cpt {
                 anyhow::bail!("managed consensus usage exceeds the replica allowance");
             }
         }
@@ -1758,9 +2456,18 @@ impl TaskRepository {
              JOIN tasks t ON t.managed_consensus_attempt_id = a.id
              WHERE r.task_id = $1 AND r.attempt_id = $2 AND a.round_id = $3
                AND r.replica_id = $4 AND r.worker_id = $5
-               AND t.task_id = $1 AND t.status IN ('ASSIGNED', 'RUNNING')
-               AND a.state IN ('dispatching', 'running')
-               AND a.deadline >= NOW()
+               AND t.task_id = $1
+               AND (
+                    (t.status IN ('ASSIGNED', 'RUNNING')
+                     AND a.state IN ('dispatching', 'running')
+                     AND a.deadline >= NOW())
+                    OR (r.state IN ('stopped', 'reported', 'failed')
+                        AND t.status IN ('ASSIGNED', 'RUNNING', 'FAILED', 'CANCELLED', 'COMPLETED', 'OBSERVED')
+                        AND a.state IN (
+                            'dispatching', 'running', 'stop_pending', 'cancel_pending',
+                            'quorum_stop_pending', 'shadow_stop_pending'
+                        ))
+               )
              FOR UPDATE",
         )
         .bind(task_id)
@@ -1810,8 +2517,18 @@ impl TaskRepository {
                    SELECT 1 FROM managed_consensus_attempts a
                    JOIN tasks t ON t.managed_consensus_attempt_id = a.id
                    WHERE a.id = r.attempt_id AND a.round_id = $5
-                     AND t.task_id = $1 AND t.status IN ('ASSIGNED', 'RUNNING')
-                     AND a.state IN ('dispatching', 'running') AND a.deadline >= NOW()
+                     AND t.task_id = $1
+                     AND (
+                          (t.status IN ('ASSIGNED', 'RUNNING')
+                           AND a.state IN ('dispatching', 'running')
+                           AND a.deadline >= NOW())
+                          OR (r.state IN ('stopped', 'reported', 'failed')
+                              AND t.status IN ('ASSIGNED', 'RUNNING', 'FAILED', 'CANCELLED', 'COMPLETED', 'OBSERVED')
+                              AND a.state IN (
+                                  'dispatching', 'running', 'stop_pending', 'cancel_pending',
+                                  'quorum_stop_pending', 'shadow_stop_pending'
+                              ))
+                     )
                )",
         )
         .bind(task_id)
@@ -1908,7 +2625,8 @@ impl TaskRepository {
         let updated = sqlx::query(
             "UPDATE managed_consensus_replicas
              SET state = 'running'
-             WHERE attempt_id = $1 AND replica_id = $2 AND state = 'assigned'",
+             WHERE attempt_id = $1 AND replica_id = $2
+               AND state IN ('assigned', 'running')",
         )
         .bind(attempt_id)
         .bind(replica_id)
@@ -1941,16 +2659,23 @@ impl TaskRepository {
             anyhow::bail!("managed consensus retry limit must not be negative");
         }
         let mut tx = self.pool.begin().await?;
-        let current: Option<(String, Option<Uuid>)> = sqlx::query_as(
-            "SELECT status, managed_consensus_attempt_id
+        let current: Option<(String, Option<Uuid>, Option<String>)> = sqlx::query_as(
+            "SELECT status, managed_consensus_attempt_id, runtime
              FROM tasks WHERE task_id = $1 FOR UPDATE",
         )
         .bind(task_id)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some((status, current_attempt_id)) = current else {
+        let Some((status, current_attempt_id, task_runtime)) = current else {
             tx.commit().await?;
             return Ok(None);
+        };
+        let managed_v1_retry_disabled = task_runtime.as_deref().map(str::trim)
+            == Some(general_compute_runtime::MANAGED_DSL_V1_RUNTIME_VERSION);
+        let effective_retry_limit = if managed_v1_retry_disabled {
+            0
+        } else {
+            retry_limit
         };
         if !matches!(status.as_str(), "ASSIGNED" | "RUNNING")
             || current_attempt_id != Some(attempt_id)
@@ -2000,7 +2725,7 @@ impl TaskRepository {
                 worker_id = NULL, worker_ip = NULL,
                 managed_consensus_state = CASE WHEN retry_count < $4 THEN 'retry_pending' ELSE 'no_quorum' END,
                 managed_consensus_updated_at = NOW(), last_update = NOW(),
-                retry_count = retry_count + 1,
+                retry_count = retry_count + CASE WHEN $5 THEN 0 ELSE 1 END,
                 status_message = $2
              WHERE task_id = $1 AND managed_consensus_attempt_id = $3
                AND status IN ('ASSIGNED', 'RUNNING')
@@ -2009,7 +2734,8 @@ impl TaskRepository {
         .bind(task_id)
         .bind(reason)
         .bind(attempt_id)
-        .bind(retry_limit)
+        .bind(effective_retry_limit)
+        .bind(managed_v1_retry_disabled)
         .fetch_optional(&mut *tx)
         .await?;
         if updated.is_none() {
@@ -2344,6 +3070,8 @@ impl TaskRepository {
         certificate: &ConsensusCertificate,
         output: &str,
         stops_confirmed: bool,
+        pending_only: bool,
+        expected_attempt_id: Option<Uuid>,
     ) -> Result<bool> {
         let certificate_json = serde_json::to_vec(certificate)?;
         if certificate_json.len() > hivemind_proto::MANAGED_CONSENSUS_CERTIFICATE_MAX_BYTES {
@@ -2388,12 +3116,19 @@ impl TaskRepository {
             tx.commit().await?;
             return Ok(false);
         };
-        if !matches!(task.status.as_str(), "ASSIGNED" | "RUNNING") {
+        let quorum_pending_replay = !pending_only
+            && expected_attempt_id.is_some()
+            && task.status == "COMPLETED"
+            && task.managed_consensus_attempt_id == expected_attempt_id
+            && task.managed_result_digest.as_deref() == Some(expected_result_digest.as_str())
+            && task.output.as_deref() == Some(output)
+            && task.managed_certificate_id.is_some();
+        if !matches!(task.status.as_str(), "ASSIGNED" | "RUNNING") && !quorum_pending_replay {
             let exact_replay = task.status == "COMPLETED"
                 && task.managed_result_digest.as_deref() == Some(expected_result_digest.as_str())
                 && task.output.as_deref() == Some(output)
                 && task.managed_certificate_id.is_some();
-            if exact_replay {
+            if exact_replay && expected_attempt_id.is_none() {
                 tx.commit().await?;
                 return Ok(true);
             }
@@ -2421,8 +3156,10 @@ impl TaskRepository {
             anyhow::bail!("managed v1 certificate attempt was not found");
         };
         if task.managed_consensus_attempt_id != Some(attempt.id)
+            || expected_attempt_id.is_some_and(|expected| expected != attempt.id)
             || attempt.mode != "enforce"
-            || !matches!(attempt.state.as_str(), "dispatching" | "running")
+            || !(matches!(attempt.state.as_str(), "dispatching" | "running")
+                || (!pending_only && attempt.state == "quorum_stop_pending"))
             || attempt.execution_id != certificate.binding.execution_id
             || attempt.request_digest != certificate.binding.request_digest
         {
@@ -2489,7 +3226,8 @@ impl TaskRepository {
         let hold = sqlx::query_as::<_, ManagedV1UsageHoldRow>(
             "SELECT id, task_id, attempt_id, owner, max_cpt, replica_count,
                     reserved_usage_cpt, reserved_fee_cpt, held_total_cpt, state,
-                    terminal_outcome, certificate_id, settlement_plan_hash
+                    certificate_id, billing_version, cost_model_version, settlement_basis,
+                    terminal_outcome, settlement_plan_hash
              FROM managed_consensus_usage_holds
              WHERE task_id = $1 AND attempt_id = $2
              FOR UPDATE",
@@ -2503,11 +3241,22 @@ impl TaskRepository {
             || hold.task_id != certificate.binding.task_id
             || hold.attempt_id != attempt.id
             || hold.owner != task.owner
-            || hold.max_cpt != task.max_cpt
+            || hold.max_cpt <= 0
             || hold.replica_count != attempt.replica_count
         {
             anyhow::bail!("managed v1 usage hold is not active or is not bound to the task");
         }
+        validate_managed_v1_held_allowance(
+            hold.max_cpt,
+            hold.replica_count,
+            hold.reserved_usage_cpt,
+            hold.reserved_fee_cpt,
+            hold.held_total_cpt,
+            &hold.billing_version,
+            &hold.cost_model_version,
+            &hold.settlement_basis,
+        )?;
+        validate_managed_v1_hold_budget(&task, &hold)?;
 
         let replicas = sqlx::query_as::<_, ManagedConsensusReplica>(
             "SELECT r.id, r.task_id, r.attempt_id, r.replica_id, r.worker_id,
@@ -2541,6 +3290,17 @@ impl TaskRepository {
             let mut result_status = None;
             let mut decoded = None;
             let usage_units = replica.usage_units.unwrap_or(0);
+            if !managed_v1_replica_assignment_identity_matches(
+                &certificate.binding.task_id,
+                &attempt,
+                replica,
+            ) {
+                reject_managed_v1_evidence(
+                    &mut valid,
+                    &mut rejection_reason,
+                    "replica assignment identity is stale or inconsistent",
+                );
+            }
             if !matches!(replica.state.as_str(), "reported" | "failed") {
                 reject_managed_v1_evidence(
                     &mut valid,
@@ -2613,7 +3373,7 @@ impl TaskRepository {
                     || result.source_sha256 != certificate.binding.source_digest
                     || result.input_sha256 != certificate.binding.input_digest
                     || !usage_matches
-                    || usage_units > task.max_cpt
+                    || usage_units > hold.max_cpt
                 {
                     reject_managed_v1_evidence(
                         &mut valid,
@@ -2676,7 +3436,7 @@ impl TaskRepository {
             }
         }
         let plan = plan_managed_v1_settlement(
-            task.max_cpt,
+            hold.max_cpt,
             attempt.replica_count,
             "quorum_reached",
             Some(&certificate_digest),
@@ -2695,7 +3455,22 @@ impl TaskRepository {
                  participant_worker_ids, participant_replica_ids, certificate_digest,
                  evidence_level, mode, settlement_authorized)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-             ON CONFLICT (task_id) DO NOTHING
+             ON CONFLICT (task_id) DO UPDATE
+             SET settlement_authorized = EXCLUDED.settlement_authorized
+             WHERE managed_consensus_certificates.attempt_id = EXCLUDED.attempt_id
+               AND managed_consensus_certificates.execution_id = EXCLUDED.execution_id
+               AND managed_consensus_certificates.round_id = EXCLUDED.round_id
+               AND managed_consensus_certificates.protocol_version = EXCLUDED.protocol_version
+               AND managed_consensus_certificates.request_digest = EXCLUDED.request_digest
+               AND managed_consensus_certificates.result_digest = EXCLUDED.result_digest
+               AND managed_consensus_certificates.output_bytes = EXCLUDED.output_bytes
+               AND managed_consensus_certificates.quorum = EXCLUDED.quorum
+               AND managed_consensus_certificates.matching_votes = EXCLUDED.matching_votes
+               AND managed_consensus_certificates.participant_worker_ids = EXCLUDED.participant_worker_ids
+               AND managed_consensus_certificates.participant_replica_ids = EXCLUDED.participant_replica_ids
+               AND managed_consensus_certificates.certificate_digest = EXCLUDED.certificate_digest
+               AND managed_consensus_certificates.evidence_level = EXCLUDED.evidence_level
+               AND managed_consensus_certificates.mode = EXCLUDED.mode
              RETURNING id",
         )
         .bind(&certificate.binding.task_id)
@@ -2719,6 +3494,61 @@ impl TaskRepository {
         let Some(certificate_id) = certificate_id else {
             anyhow::bail!("managed v1 certificate already exists with a conflicting settlement");
         };
+        if pending_only {
+            let updated = sqlx::query(
+                "UPDATE tasks SET status = 'COMPLETED', output = $2,
+                    managed_consensus_state = 'quorum_stop_pending',
+                    managed_result_digest = $3, managed_certificate_id = $4,
+                    managed_votes_received = (
+                        SELECT COUNT(*) FROM managed_consensus_replicas
+                        WHERE attempt_id = $5 AND result_digest IS NOT NULL
+                    )::INTEGER,
+                    managed_winning_votes = $6, managed_output_bytes = $7,
+                    managed_receipt_json = NULL, completed_at = NOW(), last_update = NOW()
+                 WHERE task_id = $1 AND managed_consensus_attempt_id = $5
+                   AND status IN ('ASSIGNED', 'RUNNING')",
+            )
+            .bind(&certificate.binding.task_id)
+            .bind(output)
+            .bind(&expected_result_digest)
+            .bind(certificate_id)
+            .bind(attempt.id)
+            .bind(i32::from(certificate.matching_count))
+            .bind(output_bytes)
+            .execute(&mut *tx)
+            .await?;
+            if updated.rows_affected() != 1 {
+                anyhow::bail!("managed v1 task changed before quorum stop was recorded");
+            }
+            let attempt_updated = sqlx::query(
+                "UPDATE managed_consensus_attempts SET state = 'quorum_stop_pending',
+                    updated_at = NOW(), completed_at = NULL
+                 WHERE id = $1 AND state IN ('dispatching', 'running')",
+            )
+            .bind(attempt.id)
+            .execute(&mut *tx)
+            .await?;
+            if attempt_updated.rows_affected() != 1 {
+                anyhow::bail!("managed v1 attempt changed before quorum stop was recorded");
+            }
+            for replica in &replicas {
+                if !replica_ids.contains(replica.replica_id.as_str()) {
+                    sqlx::query(
+                        "UPDATE managed_consensus_replicas
+                         SET state = CASE
+                                 WHEN state IN ('assigned', 'running') THEN 'stop_pending'
+                                 WHEN result_digest IS NULL THEN 'cancelled' ELSE 'superseded' END,
+                             rejection_reason = 'quorum reached'
+                         WHERE id = $1 AND state IN ('assigned', 'running', 'reported', 'failed')",
+                    )
+                    .bind(replica.id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+            }
+            tx.commit().await?;
+            return Ok(true);
+        }
         let key_prefix = format!(
             "managed-function-v1:{}:{}",
             task.id.simple(),
@@ -2874,7 +3704,10 @@ impl TaskRepository {
                 managed_winning_votes = $9, managed_output_bytes = $10,
                 managed_receipt_json = NULL, completed_at = NOW(), last_update = NOW()
              WHERE task_id = $1 AND managed_consensus_attempt_id = $7
-               AND status IN ('ASSIGNED', 'RUNNING')",
+               AND (status IN ('ASSIGNED', 'RUNNING') OR (
+                    status = 'COMPLETED' AND managed_certificate_id = $6
+                    AND managed_result_digest = $5 AND output = $2
+               ))",
         )
         .bind(&certificate.binding.task_id)
         .bind(output)
@@ -2895,7 +3728,7 @@ impl TaskRepository {
             "UPDATE managed_consensus_attempts SET
                 state = CASE WHEN $2 THEN 'quorum_reached' ELSE 'quorum_stop_pending' END,
                 updated_at = NOW(), completed_at = CASE WHEN $2 THEN NOW() ELSE NULL END
-             WHERE id = $1 AND state IN ('dispatching', 'running')",
+             WHERE id = $1 AND state IN ('dispatching', 'running', 'quorum_stop_pending')",
         )
         .bind(attempt.id)
         .bind(stops_confirmed)
@@ -2971,8 +3804,11 @@ impl TaskRepository {
             );
         }
         if certificate.binding.runtime == general_compute_runtime::MANAGED_DSL_V1_RUNTIME_VERSION {
+            if !stops_confirmed {
+                anyhow::bail!("managed v1 cannot settle before all Worker stops are confirmed");
+            }
             return self
-                .complete_managed_consensus_v1(certificate, output, stops_confirmed)
+                .complete_managed_consensus_v1(certificate, output, true, false, None)
                 .await;
         }
         let certificate_json = serde_json::to_vec(certificate)?;
@@ -3198,7 +4034,22 @@ impl TaskRepository {
                  participant_worker_ids, participant_replica_ids, certificate_digest,
                  evidence_level, mode, settlement_authorized)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-             ON CONFLICT (task_id) DO NOTHING
+             ON CONFLICT (task_id) DO UPDATE
+             SET settlement_authorized = EXCLUDED.settlement_authorized
+             WHERE managed_consensus_certificates.attempt_id = EXCLUDED.attempt_id
+               AND managed_consensus_certificates.execution_id = EXCLUDED.execution_id
+               AND managed_consensus_certificates.round_id = EXCLUDED.round_id
+               AND managed_consensus_certificates.protocol_version = EXCLUDED.protocol_version
+               AND managed_consensus_certificates.request_digest = EXCLUDED.request_digest
+               AND managed_consensus_certificates.result_digest = EXCLUDED.result_digest
+               AND managed_consensus_certificates.output_bytes = EXCLUDED.output_bytes
+               AND managed_consensus_certificates.quorum = EXCLUDED.quorum
+               AND managed_consensus_certificates.matching_votes = EXCLUDED.matching_votes
+               AND managed_consensus_certificates.participant_worker_ids = EXCLUDED.participant_worker_ids
+               AND managed_consensus_certificates.participant_replica_ids = EXCLUDED.participant_replica_ids
+               AND managed_consensus_certificates.certificate_digest = EXCLUDED.certificate_digest
+               AND managed_consensus_certificates.evidence_level = EXCLUDED.evidence_level
+               AND managed_consensus_certificates.mode = EXCLUDED.mode
              RETURNING id",
         )
         .bind(&certificate.binding.task_id)
@@ -3383,7 +4234,7 @@ impl TaskRepository {
             "UPDATE managed_consensus_attempts SET
                 state = CASE WHEN $2 THEN 'quorum_reached' ELSE 'quorum_stop_pending' END,
                 updated_at = NOW(), completed_at = CASE WHEN $2 THEN NOW() ELSE NULL END
-             WHERE id = $1 AND state IN ('dispatching', 'running')",
+             WHERE id = $1 AND state IN ('dispatching', 'running', 'quorum_stop_pending')",
         )
         .bind(attempt.id)
         .bind(stops_confirmed)
@@ -8771,6 +9622,50 @@ mod tests {
     // Ledger row shape: (kind, payer_user, provider_worker_id, provider_user, amount_cpt, status)
     type LedgerRow = (String, String, Option<String>, Option<String>, i64, String);
 
+    #[test]
+    fn managed_v1_total_budget_uses_equal_replica_allowances_and_fee() {
+        assert_eq!(
+            managed_v1_total_budget_hold(100, 3).unwrap(),
+            (30, 90, 9, 99)
+        );
+        assert_eq!(managed_v1_worst_case_hold(100, 3).unwrap(), (300, 30, 330));
+        assert!(managed_v1_total_budget_hold(2, 3).is_err());
+        assert!(managed_v1_total_budget_hold(i64::MAX, 3).is_ok());
+        assert!(managed_v1_fee(i64::MAX).is_ok());
+        assert!(validate_managed_v1_hold_budget_values(
+            100,
+            0,
+            30,
+            99,
+            MANAGED_CONSENSUS_V1_BILLING_VERSION,
+        )
+        .is_ok());
+        assert!(validate_managed_v1_hold_budget_values(
+            100,
+            0,
+            100,
+            330,
+            MANAGED_CONSENSUS_V1_BILLING_VERSION,
+        )
+        .is_err());
+        assert!(validate_managed_v1_hold_budget_values(
+            100,
+            0,
+            100,
+            330,
+            MANAGED_CONSENSUS_V1_LEGACY_BILLING_VERSION,
+        )
+        .is_ok());
+        assert!(validate_managed_v1_hold_budget_values(
+            50,
+            0,
+            100,
+            330,
+            MANAGED_CONSENSUS_V1_LEGACY_BILLING_VERSION,
+        )
+        .is_err());
+    }
+
     async fn pool(test_name: &str) -> Option<(PgPool, IsolatedTestPool)> {
         let fixture = hivemind_database::postgres::create_isolated_test_pool(test_name)
             .await
@@ -13251,6 +14146,20 @@ mod tests {
             .await
             .unwrap()
             .expect("pending task should create a consensus attempt");
+        let allowance: i64 = repo
+            .managed_v1_replica_allowance_for_attempt(attempt.id)
+            .await
+            .unwrap();
+        assert_eq!(allowance, 30);
+        let held_amounts: (i64, i32, i64, i64, i64) = sqlx::query_as(
+            "SELECT max_cpt, replica_count, reserved_usage_cpt, reserved_fee_cpt, held_total_cpt
+             FROM managed_consensus_usage_holds WHERE attempt_id = $1",
+        )
+        .bind(attempt.id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(held_amounts, (30, 3, 90, 9, 99));
         assert_eq!(assignments.len(), 3);
         let legacy_completion = repo
             .complete_for_worker(
@@ -13296,6 +14205,10 @@ mod tests {
                 .mark_managed_consensus_replica_running(attempt.id, &assignment.replica_id)
                 .await
                 .unwrap());
+            assert!(repo
+                .mark_managed_consensus_replica_running(attempt.id, &assignment.replica_id)
+                .await
+                .unwrap());
             assert_eq!(
                 repo.record_managed_consensus_observation(
                     &task.task_id,
@@ -13327,7 +14240,7 @@ mod tests {
                         output.len() as i64,
                         &result_json,
                         7,
-                        11,
+                        7,
                     )
                     .await
                     .unwrap(),
@@ -13342,7 +14255,7 @@ mod tests {
                         &assignment.worker_id,
                         true,
                         &result_digest,
-                        output.len() as i64 + 1,
+                        output.len() as i64,
                         &result_json,
                         7,
                         11,
@@ -13382,24 +14295,19 @@ mod tests {
         assert!(repo
             .complete_managed_consensus(&certificate, "consensus-output", false)
             .await
-            .unwrap());
-        assert!(!repo
-            .complete_managed_consensus(&certificate, "consensus-output", true)
-            .await
-            .unwrap());
-        let pending_reservations: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM managed_consensus_worker_reservations
-             WHERE attempt_id = $1 AND state = 'active'",
+            .is_err());
+        let held_state: (String, i64) = sqlx::query_as(
+            "SELECT state, charged_amount_cpt FROM managed_consensus_usage_holds WHERE attempt_id = $1",
         )
         .bind(attempt.id)
         .fetch_one(&repo.pool)
         .await
         .unwrap();
-        assert_eq!(pending_reservations, 3);
-        repo.finalize_managed_consensus_stop_pending(&task_id, attempt.id)
+        assert_eq!(held_state, ("held".into(), 0));
+        assert!(repo
+            .complete_managed_consensus(&certificate, "consensus-output", true)
             .await
-            .unwrap()
-            .expect("confirmed stop should finalize the quorum round");
+            .unwrap());
 
         let task_state: (String, bool, i64, Option<String>) = sqlx::query_as(
             "SELECT status, billing_settled, billed_amount, managed_consensus_state
@@ -13430,7 +14338,7 @@ mod tests {
         .fetch_one(&repo.pool)
         .await
         .unwrap();
-        assert_eq!(v1_hold, ("settled".into(), 300, 30, 330, 14, 15, 315));
+        assert_eq!(v1_hold, ("settled".into(), 90, 9, 99, 14, 15, 84));
         let active_reservations: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM managed_consensus_worker_reservations
              WHERE attempt_id = $1 AND state = 'active'",
@@ -13614,6 +14522,113 @@ mod tests {
                 0
             )
         );
+
+        for stops_confirmed in [true, false] {
+            let pending_task_id = format!("observe-timeout-{stops_confirmed}-{unique}");
+            let mut pending_task = make_task(&pending_task_id, &owner);
+            pending_task.runtime = Some("managed-function-v1".into());
+            pending_task.task_source = Some("return input".into());
+            pending_task.torrent_source = Some("{}".into());
+            pending_task.deterministic = true;
+            let pending_task = repo.create(&pending_task).await.unwrap();
+            let (pending_attempt, pending_assignments) = repo
+                .create_managed_consensus_attempt(&pending_task, &workers, 3, 2, 120, "observe")
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(repo
+                .complete_managed_consensus_observe(
+                    &pending_task.task_id,
+                    pending_attempt.id,
+                    None,
+                    stops_confirmed,
+                )
+                .await
+                .unwrap());
+
+            let state: (String, i64, i64, i64) = sqlx::query_as(
+                "SELECT a.state,
+                        (SELECT COUNT(*) FROM managed_consensus_worker_reservations r
+                         WHERE r.attempt_id = a.id AND r.state = 'active'),
+                        (SELECT COUNT(*) FROM managed_consensus_usage_holds h
+                         WHERE h.attempt_id = a.id),
+                        (SELECT COUNT(*) FROM managed_consensus_settlements s
+                         WHERE s.task_id = t.task_id)
+                 FROM managed_consensus_attempts a
+                 JOIN tasks t ON t.managed_consensus_attempt_id = a.id
+                 WHERE a.id = $1",
+            )
+            .bind(pending_attempt.id)
+            .fetch_one(&repo.pool)
+            .await
+            .unwrap();
+            if stops_confirmed {
+                assert_eq!(state, ("shadow_no_quorum".into(), 0, 0, 0));
+            } else {
+                assert_eq!(state, ("shadow_stop_pending".into(), 3, 0, 0));
+                assert!(repo
+                    .finalize_managed_consensus_stop_pending(
+                        &pending_task.task_id,
+                        pending_attempt.id,
+                    )
+                    .await
+                    .unwrap()
+                    .is_none());
+                let active_reservations: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM managed_consensus_worker_reservations
+                     WHERE attempt_id = $1 AND state = 'active'",
+                )
+                .bind(pending_attempt.id)
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap();
+                assert_eq!(active_reservations, 3);
+                for assignment in &pending_assignments {
+                    assert!(repo
+                        .mark_managed_consensus_replica_stop_confirmed(
+                            &pending_task.task_id,
+                            pending_attempt.id,
+                            &assignment.replica_id,
+                        )
+                        .await
+                        .unwrap());
+                }
+                repo.finalize_managed_consensus_stop_pending(
+                    &pending_task.task_id,
+                    pending_attempt.id,
+                )
+                .await
+                .unwrap()
+                .expect("confirmed observe stop must finalize without settlement");
+                let finalized: (String, i64, i64, i64, bool, i64) = sqlx::query_as(
+                    "SELECT a.state,
+                            (SELECT COUNT(*) FROM managed_consensus_worker_reservations r
+                             WHERE r.attempt_id = a.id AND r.state = 'active'),
+                            (SELECT COUNT(*) FROM managed_consensus_usage_holds h
+                             WHERE h.attempt_id = a.id),
+                            (SELECT COUNT(*) FROM managed_consensus_settlements s
+                             WHERE s.task_id = t.task_id),
+                            t.billing_settled, t.billed_amount
+                     FROM managed_consensus_attempts a
+                     JOIN tasks t ON t.managed_consensus_attempt_id = a.id
+                     WHERE a.id = $1",
+                )
+                .bind(pending_attempt.id)
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap();
+                assert_eq!(finalized, ("shadow_no_quorum".into(), 0, 0, 0, false, 0));
+            }
+            let observed = repo
+                .find_by_task_id(&pending_task.task_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(observed.status, TaskStatus::Observed);
+            assert!(observed.output.is_none());
+            assert!(!observed.billing_settled);
+            assert_eq!(observed.billed_amount, 0);
+        }
         fixture.cleanup().await.ok();
     }
 
@@ -13639,13 +14654,20 @@ mod tests {
             format!("no-quorum-worker-b-{unique}"),
             format!("no-quorum-worker-c-{unique}"),
         ];
-        for (index, worker_id) in worker_ids.iter().enumerate() {
-            insert_worker(
-                &repo.pool,
-                worker_id,
-                &format!("no-quorum-provider-{unique}-{index}"),
+        let provider_users = [
+            format!("no-quorum-provider-{unique}-0"),
+            format!("no-quorum-provider-{unique}-1"),
+            format!("no-quorum-provider-{unique}-2"),
+        ];
+        for (worker_id, provider_user) in worker_ids.iter().zip(provider_users.iter()) {
+            sqlx::query(
+                "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 0)",
             )
-            .await;
+            .bind(provider_user)
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+            insert_worker(&repo.pool, worker_id, provider_user).await;
         }
         let mut task = make_task(&task_id, &owner);
         task.runtime = Some("managed-function-v1".into());
@@ -13658,7 +14680,9 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(index, worker_id)| {
-                make_worker_node(worker_id, &format!("10.0.1.{}", index + 10))
+                let mut worker = make_worker_node(worker_id, &format!("10.0.1.{}", index + 10));
+                worker.username = provider_users[index].clone();
+                worker
             })
             .collect();
         let (attempt, assignments) = repo
@@ -13666,6 +14690,32 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        // Model a legacy in-progress hold: its escrow total can exceed the
+        // task-total max_cpt while preserving the original per-replica cap.
+        sqlx::query(
+            "UPDATE managed_consensus_usage_holds
+             SET max_cpt = 100, reserved_usage_cpt = 300, reserved_fee_cpt = 30,
+                 held_total_cpt = 330, billing_version = $2
+             WHERE attempt_id = $1",
+        )
+        .bind(attempt.id)
+        .bind(MANAGED_CONSENSUS_V1_LEGACY_BILLING_VERSION)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        let new_hold_total = managed_v1_total_budget_hold(100, 3).unwrap().3;
+        sqlx::query("UPDATE users SET balance = balance - $1 WHERE username = $2")
+            .bind(330 - new_hold_total)
+            .bind(&owner)
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.managed_v1_replica_allowance_for_attempt(attempt.id)
+                .await
+                .unwrap(),
+            100
+        );
         assert!(repo
             .mark_managed_consensus_replica_running(attempt.id, &assignments[0].replica_id)
             .await
@@ -13675,8 +14725,8 @@ mod tests {
             protocol_version: 1,
             status: "completed".into(),
             output: output.clone(),
-            usage_units: 0,
-            executed_ops: 0,
+            usage_units: 60,
+            executed_ops: 60,
             output_bytes: output.len() as u64,
             runtime: "managed-function-v1".into(),
             backend_id: hivemind_managed_consensus::MANAGED_DSL_V1_DEFAULT_BACKEND_ID.into(),
@@ -13703,8 +14753,8 @@ mod tests {
             &result_digest,
             output.len() as i64,
             &result_json,
-            0,
-            0,
+            60,
+            60,
         )
         .await
         .unwrap();
@@ -13718,7 +14768,8 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(updated.status, TaskStatus::Pending);
+        assert_eq!(updated.status, TaskStatus::Failed);
+        assert_eq!(updated.retry_count, 0);
         let late = repo
             .record_managed_consensus_observation(
                 &task.task_id,
@@ -13730,8 +14781,8 @@ mod tests {
                 &result_digest,
                 output.len() as i64,
                 &result_json,
-                0,
-                0,
+                60,
+                60,
             )
             .await;
         assert!(late.is_err());
@@ -13751,6 +14802,578 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(active_reservations, 0);
+        let settled_hold: (String, i64, i64, i64) = sqlx::query_as(
+            "SELECT state, actual_usage_cpt, charged_amount_cpt, refund_cpt
+             FROM managed_consensus_usage_holds WHERE attempt_id = $1",
+        )
+        .bind(attempt.id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(settled_hold, ("settled".into(), 60, 66, 264));
+        let provider_balance: i64 =
+            sqlx::query_scalar("SELECT balance FROM users WHERE username = $1")
+                .bind(&provider_users[0])
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap();
+        assert_eq!(provider_balance, 60);
+        let payout: (i64, i64, bool) = sqlx::query_as(
+            "SELECT usage_units, payout_amount_cpt, eligible
+             FROM managed_consensus_replica_payouts
+             WHERE attempt_id = $1 AND replica_id = 'replica-1'",
+        )
+        .bind(attempt.id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(payout, (60, 60, true));
+        let owner_balance_before_retry: i64 =
+            sqlx::query_scalar("SELECT balance FROM users WHERE username = $1")
+                .bind(&owner)
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap();
+        assert_eq!(owner_balance_before_retry, 934);
+
+        // Simulate a pre-fix persisted retry row. The prior owner-funded attempt
+        // fences creation and terminally fails the row without another debit.
+        sqlx::query("UPDATE tasks SET status = 'PENDING' WHERE task_id = $1")
+            .bind(&task_id)
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+        assert!(repo
+            .create_managed_consensus_attempt(&task, &workers, 3, 2, 120, "enforce")
+            .await
+            .unwrap()
+            .is_none());
+        let retry_state: (String, i64) =
+            sqlx::query_as("SELECT status, billed_amount FROM tasks WHERE task_id = $1")
+                .bind(&task_id)
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap();
+        assert_eq!(retry_state, ("FAILED".into(), 66));
+        let owner_balance_after_retry: i64 =
+            sqlx::query_scalar("SELECT balance FROM users WHERE username = $1")
+                .bind(&owner)
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap();
+        assert_eq!(owner_balance_after_retry, owner_balance_before_retry);
+        let attempt_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM managed_consensus_attempts WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(attempt_count, 1);
+        let hold_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM managed_consensus_usage_holds WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(hold_count, 1);
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn managed_v1_quorum_stop_pending_preserves_certificate_output_and_hold() {
+        let (pool, fixture) = match pool("task_repository_managed_v1_quorum_stop_pending").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(pool);
+        let suffix = Uuid::new_v4();
+        let owner = format!("quorum-stop-pending-owner-{suffix}");
+        let task_id = format!("quorum-stop-pending-task-{suffix}");
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 1000)",
+        )
+        .bind(&owner)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        let worker_ids: Vec<_> = (0..3)
+            .map(|index| format!("quorum-stop-pending-worker-{index}-{suffix}"))
+            .collect();
+        let provider_users: Vec<_> = (0..3)
+            .map(|index| format!("quorum-stop-pending-provider-{index}-{suffix}"))
+            .collect();
+        for (worker_id, provider) in worker_ids.iter().zip(&provider_users) {
+            sqlx::query(
+                "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 0)",
+            )
+            .bind(provider)
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+            insert_worker(&repo.pool, worker_id, provider).await;
+        }
+        let mut task = make_task(&task_id, &owner);
+        task.runtime = Some("managed-function-v1".into());
+        task.task_source = Some("return input".into());
+        task.torrent_source = Some("{}".into());
+        task.deterministic = true;
+        task.max_cpt = 100;
+        let task = repo.create(&task).await.unwrap();
+        let workers: Vec<_> = worker_ids
+            .iter()
+            .enumerate()
+            .map(|(index, worker_id)| {
+                let mut worker = make_worker_node(worker_id, &format!("10.0.6.{}", index + 10));
+                worker.username = provider_users[index].clone();
+                worker
+            })
+            .collect();
+        let (attempt, assignments) = repo
+            .create_managed_consensus_attempt(&task, &workers, 3, 2, 120, "enforce")
+            .await
+            .unwrap()
+            .unwrap();
+        let output = b"quorum-pending-output".to_vec();
+        let result = hivemind_proto::ManagedConsensusResult {
+            protocol_version: 1,
+            status: "completed".into(),
+            output: output.clone(),
+            usage_units: 12,
+            executed_ops: 12,
+            output_bytes: output.len() as u64,
+            runtime: "managed-function-v1".into(),
+            backend_id: hivemind_managed_consensus::MANAGED_DSL_V1_DEFAULT_BACKEND_ID.into(),
+            semantics_manifest_sha256:
+                hivemind_managed_consensus::MANAGED_DSL_V1_DEFAULT_SEMANTICS_DIGEST.into(),
+            source_sha256: hivemind_managed_consensus::digest_hex(
+                task.task_source.as_deref().unwrap().as_bytes(),
+            ),
+            input_sha256: hivemind_managed_consensus::digest_hex(
+                task.torrent_source.as_deref().unwrap().as_bytes(),
+            ),
+            result_digest: hivemind_managed_consensus::digest_hex(&output),
+            ..hivemind_proto::ManagedConsensusResult::default()
+        };
+        let result_json = result.encode_to_vec();
+        let persisted_result_digest = hivemind_proto::managed_consensus_result_digest(&result);
+        let canonical_result_json =
+            hivemind_proto::canonical_managed_consensus_result(&result).encode_to_vec();
+        let binding = crate::dispatcher::managed_consensus_binding(&task, &attempt);
+        let mut observations = Vec::new();
+        for assignment in assignments.iter().take(2) {
+            assert!(repo
+                .mark_managed_consensus_replica_running(attempt.id, &assignment.replica_id)
+                .await
+                .unwrap());
+            repo.record_managed_consensus_observation(
+                &task_id,
+                attempt.id,
+                &attempt.round_id,
+                &assignment.replica_id,
+                &assignment.worker_id,
+                true,
+                &persisted_result_digest,
+                output.len() as i64,
+                &result_json,
+                12,
+                12,
+            )
+            .await
+            .unwrap();
+            observations.push(ConsensusObservation {
+                worker_id: assignment.worker_id.clone(),
+                replica_id: assignment.replica_id.clone(),
+                attempt_id: assignment.worker_attempt_id.clone(),
+                binding: crate::dispatcher::managed_consensus_binding_for_assignment(
+                    &task, assignment,
+                ),
+                success: true,
+                output_digest: hivemind_managed_consensus::output_digest(&output),
+                result_digest: hivemind_managed_consensus::output_digest(&canonical_result_json),
+                output_bytes: output.len() as u64,
+                claimed_usage_units: 12,
+                claimed_executed_ops: 12,
+            });
+        }
+        let nonparticipant = &assignments[2];
+        let nonparticipant_output = b"divergent-nonparticipant-output".to_vec();
+        let nonparticipant_result = hivemind_proto::ManagedConsensusResult {
+            output: nonparticipant_output.clone(),
+            usage_units: 18,
+            executed_ops: 18,
+            output_bytes: nonparticipant_output.len() as u64,
+            result_digest: hivemind_managed_consensus::digest_hex(&nonparticipant_output),
+            ..result.clone()
+        };
+        let nonparticipant_json = nonparticipant_result.encode_to_vec();
+        let nonparticipant_digest =
+            hivemind_proto::managed_consensus_result_digest(&nonparticipant_result);
+        assert!(repo
+            .mark_managed_consensus_replica_running(attempt.id, &nonparticipant.replica_id)
+            .await
+            .unwrap());
+        repo.record_managed_consensus_observation(
+            &task_id,
+            attempt.id,
+            &attempt.round_id,
+            &nonparticipant.replica_id,
+            &nonparticipant.worker_id,
+            true,
+            &nonparticipant_digest,
+            nonparticipant_output.len() as i64,
+            &nonparticipant_json,
+            18,
+            18,
+        )
+        .await
+        .unwrap();
+        let certificate = hivemind_managed_consensus::evaluate_quorum(
+            &binding,
+            QuorumPolicy::new(3, 2).unwrap(),
+            &observations,
+        )
+        .unwrap();
+        let pending = repo
+            .mark_managed_consensus_quorum_stop_pending(
+                &task_id,
+                attempt.id,
+                &certificate,
+                "quorum-pending-output",
+            )
+            .await
+            .unwrap()
+            .expect("valid quorum must persist while a Worker stop is pending");
+        assert_eq!(pending.status, TaskStatus::Completed);
+        assert_eq!(pending.output.as_deref(), Some("quorum-pending-output"));
+        assert!(!pending.billing_settled);
+        let pending_hold: (String, i64) = sqlx::query_as(
+            "SELECT state, charged_amount_cpt FROM managed_consensus_usage_holds WHERE attempt_id = $1",
+        )
+        .bind(attempt.id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(pending_hold, ("held".into(), 0));
+        sqlx::query(
+            "UPDATE managed_consensus_replicas
+             SET worker_attempt_id = 'mismatched-attempt'
+             WHERE attempt_id = $1 AND replica_id = $2",
+        )
+        .bind(attempt.id)
+        .bind(&nonparticipant.replica_id)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        let owner_balance: i64 =
+            sqlx::query_scalar("SELECT balance FROM users WHERE username = $1")
+                .bind(&owner)
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap();
+        assert_eq!(owner_balance, 901);
+        let active_reservations: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM managed_consensus_worker_reservations
+             WHERE attempt_id = $1 AND state = 'active'",
+        )
+        .bind(attempt.id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(active_reservations, 3);
+
+        assert!(repo
+            .mark_managed_consensus_replica_stop_confirmed(
+                &task_id,
+                attempt.id,
+                &assignments[2].replica_id,
+            )
+            .await
+            .unwrap());
+        let settled = repo
+            .finalize_managed_consensus_stop_pending(&task_id, attempt.id)
+            .await
+            .unwrap()
+            .expect("confirmed stop must recover and settle the persisted certificate");
+        assert_eq!(settled.status, TaskStatus::Completed);
+        assert_eq!(settled.output.as_deref(), Some("quorum-pending-output"));
+        assert!(settled.billing_settled);
+        let hold: (String, i64, i64, i64) = sqlx::query_as(
+            "SELECT state, actual_usage_cpt, charged_amount_cpt, refund_cpt
+             FROM managed_consensus_usage_holds WHERE attempt_id = $1",
+        )
+        .bind(attempt.id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(hold, ("settled".into(), 24, 26, 73));
+        let invalid_nonparticipant_payout: (i64, i64, bool) = sqlx::query_as(
+            "SELECT usage_units, payout_amount_cpt, eligible
+             FROM managed_consensus_replica_payouts
+             WHERE attempt_id = $1 AND replica_id = $2",
+        )
+        .bind(attempt.id)
+        .bind(&nonparticipant.replica_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(invalid_nonparticipant_payout, (18, 0, false));
+        let task_state: (String, bool, i64, Option<String>) = sqlx::query_as(
+            "SELECT status, billing_settled, billed_amount, managed_consensus_state
+             FROM tasks WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            task_state,
+            ("COMPLETED".into(), true, 26, Some("quorum_reached".into()))
+        );
+        let owner_balance: i64 =
+            sqlx::query_scalar("SELECT balance FROM users WHERE username = $1")
+                .bind(&owner)
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap();
+        assert_eq!(owner_balance, 974);
+        for provider in provider_users.iter().take(2) {
+            let provider_balance: i64 =
+                sqlx::query_scalar("SELECT balance FROM users WHERE username = $1")
+                    .bind(provider)
+                    .fetch_one(&repo.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(provider_balance, 12);
+        }
+        let active_reservations: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM managed_consensus_worker_reservations
+             WHERE attempt_id = $1 AND state = 'active'",
+        )
+        .bind(attempt.id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(active_reservations, 0);
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn managed_v1_stop_pending_keeps_hold_until_confirmed_then_pays_valid_usage() {
+        let (pool, fixture) = match pool("task_repository_managed_v1_stop_pending").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(pool);
+        let suffix = Uuid::new_v4();
+        let owner = format!("stop-pending-owner-{suffix}");
+        let task_id = format!("stop-pending-task-{suffix}");
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 1000)",
+        )
+        .bind(&owner)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        let worker_ids: Vec<_> = (0..3)
+            .map(|index| format!("stop-pending-worker-{index}-{suffix}"))
+            .collect();
+        let provider_users: Vec<_> = (0..3)
+            .map(|index| format!("stop-pending-provider-{index}-{suffix}"))
+            .collect();
+        for (worker_id, provider) in worker_ids.iter().zip(&provider_users) {
+            sqlx::query(
+                "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 0)",
+            )
+            .bind(provider)
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+            insert_worker(&repo.pool, worker_id, provider).await;
+        }
+        let mut task = make_task(&task_id, &owner);
+        task.runtime = Some("managed-function-v1".into());
+        task.task_source = Some("return input".into());
+        task.torrent_source = Some("{}".into());
+        task.deterministic = true;
+        task.max_cpt = 100;
+        task = repo.create(&task).await.unwrap();
+        let workers: Vec<_> = worker_ids
+            .iter()
+            .enumerate()
+            .map(|(index, worker_id)| {
+                let mut worker = make_worker_node(worker_id, &format!("10.0.5.{}", index + 10));
+                worker.username = provider_users[index].clone();
+                worker
+            })
+            .collect();
+        let (attempt, assignments) = repo
+            .create_managed_consensus_attempt(&task, &workers, 3, 2, 120, "enforce")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(repo
+            .mark_managed_consensus_replica_running(attempt.id, &assignments[0].replica_id)
+            .await
+            .unwrap());
+        let output = b"one-valid-vote".to_vec();
+        let result = hivemind_proto::ManagedConsensusResult {
+            protocol_version: 1,
+            status: "completed".into(),
+            output: output.clone(),
+            usage_units: 12,
+            executed_ops: 12,
+            output_bytes: output.len() as u64,
+            runtime: "managed-function-v1".into(),
+            backend_id: hivemind_managed_consensus::MANAGED_DSL_V1_DEFAULT_BACKEND_ID.into(),
+            semantics_manifest_sha256:
+                hivemind_managed_consensus::MANAGED_DSL_V1_DEFAULT_SEMANTICS_DIGEST.into(),
+            source_sha256: hivemind_managed_consensus::digest_hex(
+                task.task_source.as_deref().unwrap().as_bytes(),
+            ),
+            input_sha256: hivemind_managed_consensus::digest_hex(
+                task.torrent_source.as_deref().unwrap().as_bytes(),
+            ),
+            result_digest: hivemind_managed_consensus::digest_hex(&output),
+            ..hivemind_proto::ManagedConsensusResult::default()
+        };
+        repo.record_managed_consensus_observation(
+            &task_id,
+            attempt.id,
+            &attempt.round_id,
+            &assignments[0].replica_id,
+            &assignments[0].worker_id,
+            true,
+            &hivemind_proto::managed_consensus_result_digest(&result),
+            output.len() as i64,
+            &result.encode_to_vec(),
+            12,
+            12,
+        )
+        .await
+        .unwrap();
+        repo.mark_managed_consensus_stop_pending(&task_id, attempt.id, "stop not confirmed")
+            .await
+            .unwrap()
+            .expect("active task must enter stop-pending");
+        let pending_hold: (String, i64) = sqlx::query_as(
+            "SELECT state, charged_amount_cpt FROM managed_consensus_usage_holds WHERE attempt_id = $1",
+        )
+        .bind(attempt.id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(pending_hold, ("held".into(), 0));
+        let owner_balance: i64 =
+            sqlx::query_scalar("SELECT balance FROM users WHERE username = $1")
+                .bind(&owner)
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap();
+        assert_eq!(owner_balance, 901);
+        let active_reservations: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM managed_consensus_worker_reservations WHERE attempt_id = $1 AND state = 'active'",
+        )
+        .bind(attempt.id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(active_reservations, 3);
+
+        let late_result_json = result.encode_to_vec();
+        let late_result_digest = hivemind_proto::managed_consensus_result_digest(&result);
+        assert!(repo
+            .record_managed_consensus_observation(
+                &task_id,
+                attempt.id,
+                &attempt.round_id,
+                &assignments[1].replica_id,
+                &assignments[1].worker_id,
+                true,
+                &late_result_digest,
+                output.len() as i64,
+                &late_result_json,
+                12,
+                12,
+            )
+            .await
+            .is_err());
+        assert!(repo
+            .mark_managed_consensus_replica_stop_confirmed(
+                &task_id,
+                attempt.id,
+                &assignments[1].replica_id,
+            )
+            .await
+            .unwrap());
+        assert_eq!(
+            repo.record_managed_consensus_observation(
+                &task_id,
+                attempt.id,
+                &attempt.round_id,
+                &assignments[1].replica_id,
+                &assignments[1].worker_id,
+                true,
+                &late_result_digest,
+                output.len() as i64,
+                &late_result_json,
+                12,
+                12,
+            )
+            .await
+            .unwrap(),
+            ManagedConsensusObservationOutcome::Recorded
+        );
+        assert!(repo
+            .mark_managed_consensus_replica_stop_confirmed(
+                &task_id,
+                attempt.id,
+                &assignments[2].replica_id,
+            )
+            .await
+            .unwrap());
+
+        repo.finalize_managed_consensus_stop_pending(&task_id, attempt.id)
+            .await
+            .unwrap()
+            .expect("confirmed stop must finalize the hold");
+        let settled_hold: (String, i64, i64, i64) = sqlx::query_as(
+            "SELECT state, actual_usage_cpt, charged_amount_cpt, refund_cpt
+             FROM managed_consensus_usage_holds WHERE attempt_id = $1",
+        )
+        .bind(attempt.id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(settled_hold, ("settled".into(), 24, 26, 73));
+        let (status, billed, balance): (String, i64, i64) = sqlx::query_as(
+            "SELECT t.status, t.billed_amount, u.balance FROM tasks t
+             JOIN users u ON u.username = t.owner WHERE t.task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!((status.as_str(), billed, balance), ("FAILED", 26, 974));
+        let provider_balance: i64 =
+            sqlx::query_scalar("SELECT balance FROM users WHERE username = $1")
+                .bind(&provider_users[0])
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap();
+        assert_eq!(provider_balance, 12);
+        let late_provider_index = worker_ids
+            .iter()
+            .position(|worker_id| worker_id == &assignments[1].worker_id)
+            .expect("late-receipt Worker belongs to the assigned provider set");
+        let late_provider_balance: i64 =
+            sqlx::query_scalar("SELECT balance FROM users WHERE username = $1")
+                .bind(&provider_users[late_provider_index])
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap();
+        assert_eq!(late_provider_balance, 12);
         fixture.cleanup().await.ok();
     }
 
@@ -13798,7 +15421,7 @@ mod tests {
                 make_worker_node(worker_id, &format!("10.0.2.{}", index + 10))
             })
             .collect();
-        let (attempt, _) = repo
+        let (attempt, assignments) = repo
             .create_managed_consensus_attempt(&task, &workers, 3, 2, 120, "enforce")
             .await
             .unwrap()
@@ -13832,6 +15455,30 @@ mod tests {
         .unwrap();
         assert_eq!(pending_replicas, 3);
 
+        assert!(repo
+            .finalize_managed_consensus_stop_pending(&task_id, attempt.id)
+            .await
+            .unwrap()
+            .is_none());
+        let active_reservations: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM managed_consensus_worker_reservations
+             WHERE attempt_id = $1 AND state = 'active'",
+        )
+        .bind(attempt.id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(active_reservations, 3);
+        for assignment in &assignments {
+            assert!(repo
+                .mark_managed_consensus_replica_stop_confirmed(
+                    &task_id,
+                    attempt.id,
+                    &assignment.replica_id,
+                )
+                .await
+                .unwrap());
+        }
         repo.finalize_managed_consensus_stop_pending(&task_id, attempt.id)
             .await
             .unwrap()
@@ -14004,8 +15651,16 @@ mod tests {
         .unwrap();
         assert_eq!(active_reservations, 3);
 
-        let stop_targets = repo.managed_consensus_stop_targets(&task_id).await.unwrap();
+        let stop_targets = repo
+            .managed_consensus_stop_targets(&task_id, attempt_id)
+            .await
+            .unwrap();
         assert_eq!(stop_targets.len(), 3);
+        let stale_targets = repo
+            .managed_consensus_stop_targets(&task_id, Uuid::new_v4())
+            .await
+            .unwrap();
+        assert!(stale_targets.is_empty());
         assert_eq!(stop_targets[0].worker_id, worker_ids[0]);
         assert_eq!(stop_targets[0].worker_ip, "10.0.4.10");
         assert_eq!(stop_targets[0].execution_id, execution_id);

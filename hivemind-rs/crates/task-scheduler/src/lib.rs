@@ -66,8 +66,11 @@ impl TaskScheduler {
     pub async fn managed_consensus_stop_targets(
         &self,
         task_id: &str,
+        expected_attempt_id: uuid::Uuid,
     ) -> Result<Vec<task_repository::ManagedConsensusStopTarget>> {
-        self.repo.managed_consensus_stop_targets(task_id).await
+        self.repo
+            .managed_consensus_stop_targets(task_id, expected_attempt_id)
+            .await
     }
 
     pub async fn managed_consensus_attempt_for_task(

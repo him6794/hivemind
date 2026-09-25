@@ -26,11 +26,22 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+if (-not [string]::IsNullOrWhiteSpace($WorkerVpnAuthkey)) {
+    throw "VPN auth keys must be supplied at runtime; never embed them in a Worker package."
+}
+
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $rustRoot = Join-Path $repoRoot "hivemind-rs"
 $workerUiRoot = Join-Path $repoRoot "frontend\worker-ui"
 $workerUiDist = Join-Path $workerUiRoot "dist"
 $out = Join-Path $repoRoot $OutputDir
+
+if (Test-Path -LiteralPath $out) {
+    $existing = @(Get-ChildItem -LiteralPath $out -Force)
+    if ($existing.Count -gt 0) {
+        throw "Output directory must be empty to avoid replacing an existing Worker installation: $out"
+    }
+}
 
 if ($Configuration -ne "release" -and $Configuration -ne "debug") {
     throw "Configuration must be 'release' or 'debug'."
@@ -65,9 +76,14 @@ if ($RustTarget -like "*-pc-windows-msvc") {
     }
 }
 
+$packageWebview = $RustTarget -eq "x86_64-pc-windows-msvc"
 Push-Location $rustRoot
 try {
     $cargoArgs = @("build", "--locked", "--target", $RustTarget, "--bin", "hivemind-worker")
+    if ($packageWebview) {
+        $cargoArgs += @("--bin", "hivemind-worker-ui")
+    }
+    $cargoArgs += @("--no-default-features", "--features", $(if ($packageWebview) { "worker,worker-webview" } else { "worker" }))
     if ($Configuration -eq "release") {
         $cargoArgs += "--release"
     }
@@ -78,10 +94,7 @@ try {
         }
         $targetArch = if ($RustTarget.StartsWith("aarch64-")) { "arm64" } else { "x64" }
         $llvmBin = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages\MartinStorsjo.LLVM-MinGW.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\llvm-mingw-20260616-ucrt-x86_64\bin"
-        $cargoCommand = "cargo build --locked --target $RustTarget --bin hivemind-worker"
-        if ($Configuration -eq "release") {
-            $cargoCommand += " --release"
-        }
+        $cargoCommand = "cargo $($cargoArgs -join ' ')"
         $cmdLine = "call `"$vsDevCmd`" -arch=$targetArch -host_arch=x64 && set GOTELEMETRY=off"
         if (Test-Path -LiteralPath (Join-Path $llvmBin "clang.exe")) {
             $cmdLine += " && set PATH=$llvmBin;%PATH%"
@@ -96,12 +109,18 @@ try {
     }
     $profile = if ($Configuration -eq "release") { "release" } else { "debug" }
     $binary = Join-Path $rustRoot "target\$RustTarget\$profile\hivemind-worker.exe"
+    if ($packageWebview) {
+        $webviewBinary = Join-Path $rustRoot "target\$RustTarget\$profile\hivemind-worker-ui.exe"
+    }
 } finally {
     Pop-Location
 }
 
 if (!(Test-Path $binary)) {
     throw "Built Worker binary not found: $binary"
+}
+if ($packageWebview -and !(Test-Path -LiteralPath $webviewBinary -PathType Leaf)) {
+    throw "Built Worker WebView helper not found: $webviewBinary"
 }
 
 Push-Location $workerUiRoot
@@ -113,6 +132,9 @@ try {
     }
     if ($workerControlBase -match '^http://0\.0\.0\.0(?=[:/])') {
         $workerControlBase = $workerControlBase -replace '^http://0\.0\.0\.0', 'http://127.0.0.1'
+    }
+    if ($workerControlBase -match '^http://\[::\](?=[:/])') {
+        $workerControlBase = $workerControlBase -replace '^http://\[::\]', 'http://[::1]'
     }
     $env:VITE_WORKER_CONTROL_BASE = $workerControlBase.TrimEnd('/')
     & npm ci
@@ -143,6 +165,12 @@ if (Test-Path -LiteralPath $staleAllInOneBinary) {
 }
 $packagedBinary = Join-Path $out "hivemind-worker.exe"
 Copy-Item -Force $binary $packagedBinary
+$packagedWebview = Join-Path $out "hivemind-worker-ui.exe"
+if ($packageWebview) {
+    Copy-Item -Force $webviewBinary $packagedWebview
+} elseif (Test-Path -LiteralPath $packagedWebview) {
+    Remove-Item -Force -LiteralPath $packagedWebview
+}
 $packagedWorkerUi = Join-Path $out "worker-ui"
 if (Test-Path -LiteralPath $packagedWorkerUi) {
     Remove-Item -Recurse -Force -LiteralPath $packagedWorkerUi
@@ -209,6 +237,14 @@ $packageArtifacts = @(
         source = $binary
     }
 )
+if ($packageWebview) {
+    $packageArtifacts += [ordered]@{
+        name = "hivemind-worker-ui.exe"
+        size = [UInt64](Get-Item -LiteralPath $packagedWebview).Length
+        sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $packagedWebview).Hash.ToLowerInvariant()
+        source = $webviewBinary
+    }
+}
 Get-ChildItem -LiteralPath $packagedWorkerUi -File -Recurse | ForEach-Object {
     $relativePath = $_.FullName.Substring($packagedWorkerUi.Length).TrimStart('\', '/')
     $packageArtifacts += [ordered]@{
@@ -276,7 +312,7 @@ NODEPOOL_GRPC_ENDPOINT=$NodepoolGrpcEndpoint
 # Leave blank only when using the built-in public default or an explicit role-specific override.
 WEBSITE_API_BASE=$WebsiteApiBase
 HEADSCALE_LOGIN_SERVER=$HeadscaleLoginServer
-WORKER_VPN_AUTHKEY=$WorkerVpnAuthkey
+WORKER_VPN_AUTHKEY=
 WORKER_VPN_HOSTNAME=$WorkerVpnHostname
 VPN_STARTUP_TIMEOUT_SECS=$VpnStartupTimeoutSecs
 WORKER_GRPC_ADDR=$WorkerGrpcAddr
@@ -305,7 +341,6 @@ UPDATE_STAGING_ROOT=
 UPDATE_CHECK_INTERVAL_SECS=21600
 UPDATE_MAX_PACKAGE_BYTES=8589934592
 
-JWT_SECRET=
 EXECUTOR_SANDBOX_DIR=.\sandbox
 EXECUTOR_MAX_CPU_PERCENT=80
 EXECUTOR_MAX_MEMORY_MB=4096
@@ -389,8 +424,6 @@ function New-RandomJwtSecret {
 }
 
 function Ensure-JwtSecret {
-    param([Parameter(Mandatory = $true)][string]$Path)
-
     $jwtSecret = [Environment]::GetEnvironmentVariable("JWT_SECRET", "Process")
     if (-not [string]::IsNullOrWhiteSpace($jwtSecret) -and
         -not $jwtSecret.Trim().Equals("CHANGE_ME_IN_PRODUCTION", [StringComparison]::OrdinalIgnoreCase) -and
@@ -400,19 +433,7 @@ function Ensure-JwtSecret {
 
     $jwtSecret = New-RandomJwtSecret
     [Environment]::SetEnvironmentVariable("JWT_SECRET", $jwtSecret, "Process")
-
-    $contents = Get-Content -LiteralPath $Path -Raw
-    if ($contents -match '(?m)^JWT_SECRET=.*$') {
-        $contents = [regex]::Replace($contents, '(?m)^JWT_SECRET=.*$', "JWT_SECRET=$jwtSecret")
-    } else {
-        if ($contents.Length -gt 0 -and -not $contents.EndsWith("`n")) {
-            $contents += "`r`n"
-        }
-        $contents += "JWT_SECRET=$jwtSecret`r`n"
-    }
-
-    Set-Content -LiteralPath $Path -Value $contents -Encoding ASCII
-    Write-Host "Generated a local JWT_SECRET and stored it in .env.worker."
+    Write-Host "Generated a process-local JWT_SECRET; no user-provided secret is needed."
 }
 
 function Reset-CurrentConsoleOpacity {
@@ -542,7 +563,7 @@ if (!(Test-Path $envFile)) {
 }
 
 Import-DotEnv -Path $envFile
-Ensure-JwtSecret -Path $envFile
+Ensure-JwtSecret
 Assert-RequiredEnv -Names @("WORKER_GRPC_ADDR", "WORKER_CONTROL_HTTP_ADDR")
 # NODEPOOL_GRPC_ENDPOINT/NODEPOOL_GRPC_ADDR are optional: public onboarding
 # discovers the platform transport after website login.
@@ -561,9 +582,9 @@ $launcher | Set-Content -Encoding ASCII (Join-Path $out "start-worker.ps1")
 $readme = @'
 # Hivemind Windows Worker Package
 
-1. Double-click `hivemind-worker.exe`. The Worker page opens in your browser.
-2. Sign in with your Hivemind account. The Worker connects to the network, registers this machine, and starts accepting jobs automatically.
-3. Keep the Worker window open while you want this machine to receive jobs. No `.env` file, terminal command, port choice, or key setup is needed.
+1. Double-click `hivemind-worker.exe`. In the x64 MSVC package, the Worker page opens in an embedded WebView2 window when the WebView2 Runtime is available; otherwise it opens in your browser.
+2. Sign in with your Hivemind account. On the first authenticated login, the Worker automatically obtains one-time VPN enrollment, joins the network, waits for Nodepool readiness, and registers this machine.
+3. Keep the Worker process running while you want this machine to receive jobs. Closing only the WebView window does not stop the Worker; reopen `http://127.0.0.1:18080/` (or your configured control address) in your browser if needed. No `.env` file, terminal command, port choice, `JWT_SECRET`, manually fixed Nodepool IP, or reusable VPN key setup is needed.
 
 For a private deployment or unattended startup, `.env.worker.example` and `start-worker.ps1` are available as optional advanced settings. The normal sign-in flow does not store your password, server key, or reusable VPN key.
 
@@ -600,6 +621,13 @@ $packageFiles += [ordered]@{
     name = "hivemind-worker.exe"
     size = [UInt64](Get-Item -LiteralPath $packagedBinary).Length
     sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $packagedBinary).Hash.ToLowerInvariant()
+}
+if ($packageWebview) {
+    $packageFiles += [ordered]@{
+        name = "hivemind-worker-ui.exe"
+        size = [UInt64](Get-Item -LiteralPath $packagedWebview).Length
+        sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $packagedWebview).Hash.ToLowerInvariant()
+    }
 }
 Get-ChildItem -LiteralPath $packagedWorkerUi -File -Recurse | ForEach-Object {
     $relativePath = $_.FullName.Substring($packagedWorkerUi.Length).TrimStart('\', '/')

@@ -602,6 +602,32 @@ impl Default for HivemindConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DotenvLoadingPolicy {
+    /// Search the current directory and its parents for `.env` (legacy behavior).
+    SearchParents,
+    /// Load `.env` only from the current working directory.
+    CurrentDirectoryOnly,
+    /// Load `.env` beside the executable, independent of its working directory.
+    ExecutableDirectoryOnly,
+}
+
+fn load_dotenv(policy: DotenvLoadingPolicy, executable: Option<&std::path::Path>) {
+    match policy {
+        DotenvLoadingPolicy::SearchParents => {
+            dotenvy::dotenv().ok();
+        }
+        DotenvLoadingPolicy::CurrentDirectoryOnly => {
+            dotenvy::from_path(".env").ok();
+        }
+        DotenvLoadingPolicy::ExecutableDirectoryOnly => {
+            if let Some(directory) = executable.and_then(std::path::Path::parent) {
+                dotenvy::from_path(directory.join(".env")).ok();
+            }
+        }
+    }
+}
+
 impl HivemindConfig {
     pub fn for_test() -> Self {
         let mut config = Self::default();
@@ -616,9 +642,23 @@ impl HivemindConfig {
         config
     }
 
-    /// Loads JSON/default configuration first, then applies process environment overrides.
+    /// Loads configuration using the legacy parent-searching `.env` behavior.
     pub fn load() -> anyhow::Result<Self> {
-        dotenvy::dotenv().ok();
+        Self::load_with_dotenv_policy(DotenvLoadingPolicy::SearchParents)
+    }
+
+    /// Loads JSON/default configuration first, then applies environment overrides.
+    ///
+    /// Packaged clients use `ExecutableDirectoryOnly` so their `.env` cannot be
+    /// inherited from a workspace even when launched from a different directory.
+    pub fn load_with_dotenv_policy(policy: DotenvLoadingPolicy) -> anyhow::Result<Self> {
+        let executable = if policy == DotenvLoadingPolicy::ExecutableDirectoryOnly {
+            std::env::current_exe().ok()
+        } else {
+            None
+        };
+        load_dotenv(policy, executable.as_deref());
+
         let mut config = match std::env::var("HIVEMIND_CONFIG") {
             Ok(path) => {
                 let contents = std::fs::read_to_string(&path)?;
@@ -1634,6 +1674,194 @@ mod tests {
             Some("file-worker:50053")
         );
         assert_eq!(loaded.executor.sandbox_mode, "file-sandbox");
+    }
+
+    #[test]
+    fn current_directory_dotenv_does_not_load_a_parent_package_file() {
+        let _environment_lock = lock_environment();
+        let original_dir = std::env::current_dir().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "hivemind-config-nested-dotenv-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let parent = root.join("release");
+        let package = parent.join("master");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(parent.join(".env"), "MASTER_HTTP_ADDR=parent-dotenv:8082\n").unwrap();
+
+        let old_config = std::env::var_os("HIVEMIND_CONFIG");
+        let old_master_addr = std::env::var_os("MASTER_HTTP_ADDR");
+        std::env::remove_var("HIVEMIND_CONFIG");
+        std::env::remove_var("MASTER_HTTP_ADDR");
+        std::env::set_current_dir(&package).unwrap();
+
+        let isolated =
+            HivemindConfig::load_with_dotenv_policy(DotenvLoadingPolicy::CurrentDirectoryOnly);
+        let legacy = HivemindConfig::load();
+
+        std::env::set_current_dir(original_dir).unwrap();
+        match old_config {
+            Some(value) => std::env::set_var("HIVEMIND_CONFIG", value),
+            None => std::env::remove_var("HIVEMIND_CONFIG"),
+        }
+        match old_master_addr {
+            Some(value) => std::env::set_var("MASTER_HTTP_ADDR", value),
+            None => std::env::remove_var("MASTER_HTTP_ADDR"),
+        }
+        std::fs::remove_dir_all(root).unwrap();
+
+        assert_eq!(
+            isolated.unwrap().server.master_http_addr,
+            "0.0.0.0:8082",
+            "package-local loading must not discover a parent .env"
+        );
+        assert_eq!(
+            legacy.unwrap().server.master_http_addr,
+            "parent-dotenv:8082",
+            "legacy loading must preserve parent-search behavior for all-mode"
+        );
+    }
+
+    #[test]
+    fn executable_dotenv_ignores_the_launch_directory_and_preserves_explicit_env() {
+        let _environment_lock = lock_environment();
+        let original_dir = std::env::current_dir().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "hivemind-config-executable-dotenv-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let package = root.join("master");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(root.join(".env"), "MASTER_HTTP_ADDR=workspace:8082\n").unwrap();
+        std::fs::write(package.join(".env"), "MASTER_HTTP_ADDR=package:8082\n").unwrap();
+
+        let old_master_addr = std::env::var_os("MASTER_HTTP_ADDR");
+        std::env::remove_var("MASTER_HTTP_ADDR");
+        std::env::set_current_dir(&root).unwrap();
+        let executable = package.join("hivemind-master.exe");
+        load_dotenv(
+            DotenvLoadingPolicy::ExecutableDirectoryOnly,
+            Some(&executable),
+        );
+        let packaged = std::env::var("MASTER_HTTP_ADDR").unwrap();
+
+        std::env::set_var("MASTER_HTTP_ADDR", "operator:8082");
+        load_dotenv(
+            DotenvLoadingPolicy::ExecutableDirectoryOnly,
+            Some(&executable),
+        );
+        let explicit = std::env::var("MASTER_HTTP_ADDR").unwrap();
+
+        std::env::remove_var("MASTER_HTTP_ADDR");
+        std::fs::remove_file(package.join(".env")).unwrap();
+        load_dotenv(
+            DotenvLoadingPolicy::ExecutableDirectoryOnly,
+            Some(&executable),
+        );
+        let missing = std::env::var_os("MASTER_HTTP_ADDR");
+
+        std::env::set_current_dir(original_dir).unwrap();
+        match old_master_addr {
+            Some(value) => std::env::set_var("MASTER_HTTP_ADDR", value),
+            None => std::env::remove_var("MASTER_HTTP_ADDR"),
+        }
+        std::fs::remove_dir_all(root).unwrap();
+
+        assert_eq!(packaged, "package:8082");
+        assert_eq!(explicit, "operator:8082");
+        assert!(
+            missing.is_none(),
+            "the launch directory must not supply .env"
+        );
+    }
+
+    #[test]
+    fn current_directory_dotenv_preserves_explicit_config_and_environment_priority() {
+        let _environment_lock = lock_environment();
+        let original_dir = std::env::current_dir().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "hivemind-config-dotenv-priority-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut explicit_config = HivemindConfig::default();
+        explicit_config.database.url = "postgres://config-database".into();
+        explicit_config.redis.url = "redis://explicit-config:6379".into();
+        let mut dotenv_config = HivemindConfig::default();
+        dotenv_config.redis.url = "redis://dotenv-config:6379".into();
+        std::fs::write(
+            root.join("explicit-config.json"),
+            serde_json::to_vec(&explicit_config).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("dotenv-config.json"),
+            serde_json::to_vec(&dotenv_config).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".env"),
+            concat!(
+                "HIVEMIND_CONFIG=dotenv-config.json\n",
+                "DATABASE_URL=postgres://dotenv-database\n",
+                "MASTER_HTTP_ADDR=dotenv-master:8082\n"
+            ),
+        )
+        .unwrap();
+
+        let old_config = std::env::var_os("HIVEMIND_CONFIG");
+        let old_database_url = std::env::var_os("DATABASE_URL");
+        let old_master_addr = std::env::var_os("MASTER_HTTP_ADDR");
+        std::env::set_var("HIVEMIND_CONFIG", "explicit-config.json");
+        std::env::set_var("DATABASE_URL", "postgres://operator-database");
+        std::env::set_var("MASTER_HTTP_ADDR", "operator-master:8082");
+        std::env::set_current_dir(&root).unwrap();
+
+        let explicit =
+            HivemindConfig::load_with_dotenv_policy(DotenvLoadingPolicy::CurrentDirectoryOnly);
+        std::env::remove_var("HIVEMIND_CONFIG");
+        std::env::remove_var("DATABASE_URL");
+        std::env::remove_var("MASTER_HTTP_ADDR");
+        let dotenv =
+            HivemindConfig::load_with_dotenv_policy(DotenvLoadingPolicy::CurrentDirectoryOnly);
+
+        std::env::set_current_dir(original_dir).unwrap();
+        match old_config {
+            Some(value) => std::env::set_var("HIVEMIND_CONFIG", value),
+            None => std::env::remove_var("HIVEMIND_CONFIG"),
+        }
+        match old_database_url {
+            Some(value) => std::env::set_var("DATABASE_URL", value),
+            None => std::env::remove_var("DATABASE_URL"),
+        }
+        match old_master_addr {
+            Some(value) => std::env::set_var("MASTER_HTTP_ADDR", value),
+            None => std::env::remove_var("MASTER_HTTP_ADDR"),
+        }
+        std::fs::remove_dir_all(root).unwrap();
+
+        let explicit = explicit.unwrap();
+        assert_eq!(explicit.redis.url, "redis://explicit-config:6379");
+        assert_eq!(explicit.database.url, "postgres://operator-database");
+        assert_eq!(explicit.server.master_http_addr, "operator-master:8082");
+
+        let dotenv = dotenv.unwrap();
+        assert_eq!(dotenv.redis.url, "redis://dotenv-config:6379");
+        assert_eq!(dotenv.database.url, "postgres://dotenv-database");
+        assert_eq!(dotenv.server.master_http_addr, "dotenv-master:8082");
     }
 
     #[test]

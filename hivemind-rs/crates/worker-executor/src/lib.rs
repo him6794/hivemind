@@ -1,8 +1,10 @@
+pub mod attempt_stop_fence;
 pub mod chunk_transport;
 pub mod control_api;
 pub mod executor;
 pub mod grpc_server;
 pub mod hcs_journal;
+pub mod maintenance;
 pub mod nodepool_client;
 pub mod resource_monitor;
 pub mod runtime_admission;
@@ -10,6 +12,8 @@ pub mod sandbox;
 pub mod windows_hcs_provisioning;
 
 use anyhow::Result;
+use attempt_stop_fence::AttemptStopFenceStore;
+use hivemind_auth::worker_execution::WORKER_EXECUTION_TOKEN_LEEWAY_SECONDS;
 use hivemind_config::HivemindConfig;
 use hivemind_models::{Task, WorkerCapabilityReport};
 use std::collections::HashMap;
@@ -23,6 +27,8 @@ use tokio::sync::watch;
 pub enum StopTaskOutcome {
     StopRequested,
     AlreadyStopping,
+    StoppedBeforeStart,
+    StopConfirmationUnavailable,
     NotRunning,
 }
 
@@ -41,13 +47,25 @@ impl ActiveTaskKey {
     }
 }
 
+fn worker_stop_fence_expiry(token_expiry: usize) -> i64 {
+    i64::try_from(token_expiry)
+        .unwrap_or(i64::MAX)
+        .saturating_add(i64::try_from(WORKER_EXECUTION_TOKEN_LEEWAY_SECONDS).unwrap_or(i64::MAX))
+}
+
 struct ActiveTaskEntry {
     cancellation_tx: watch::Sender<bool>,
     stop_requested: bool,
     result_rx: watch::Receiver<Option<TaskResultMessage>>,
 }
 
-type ActiveTaskMap = Arc<Mutex<HashMap<ActiveTaskKey, ActiveTaskEntry>>>;
+#[derive(Default)]
+struct ActiveTaskRegistry {
+    running: HashMap<ActiveTaskKey, ActiveTaskEntry>,
+    stopped: HashMap<ActiveTaskKey, i64>,
+}
+
+type ActiveTaskMap = Arc<Mutex<ActiveTaskRegistry>>;
 type TaskResultMessage = Result<TaskResult, String>;
 type TaskRunnerFuture = Pin<Box<dyn Future<Output = Result<TaskResult>> + Send>>;
 type TaskRunner = dyn Fn(Task, watch::Receiver<bool>, bool, ExecutionAttemptContext) -> TaskRunnerFuture
@@ -62,6 +80,7 @@ pub struct ExecutionAttemptContext {
 
 pub struct WorkerExecutor {
     active_tasks: ActiveTaskMap,
+    stop_fences: AttemptStopFenceStore,
     task_runner: Arc<TaskRunner>,
     dynamic_capability_report: WorkerCapabilityReport,
     runtime_admission: runtime_admission::WorkerRuntimeAdmission,
@@ -75,6 +94,10 @@ impl WorkerExecutor {
 
     pub fn try_new(config: HivemindConfig) -> Result<Self> {
         let runner_config = config.clone();
+        #[cfg(test)]
+        let stop_fences = AttemptStopFenceStore::in_memory();
+        #[cfg(not(test))]
+        let stop_fences = AttemptStopFenceStore::from_environment_or_default()?;
         let configured_admission = runtime_admission::WorkerRuntimeAdmission::from_environment()?;
         let explicit_operator_admission =
             runtime_admission::WorkerRuntimeAdmission::has_explicit_operator_admission_environment(
@@ -143,9 +166,43 @@ impl WorkerExecutor {
             }
         };
         let cas_store = executor::cas_store_from_environment();
+        if let Some(store) = cas_store.as_ref() {
+            if let Err(error) = store.gc_transfer_metadata(
+                general_compute_runtime::artifact::TRANSFER_METADATA_RETENTION,
+            ) {
+                tracing::warn!(error = %error, "general-compute CAS transfer metadata scavenging failed");
+            }
+        }
         let production_backends = executor::production_backends_from_environment()?;
         let managed_gpu_production_backends =
             executor::managed_gpu_production_backends_from_environment()?;
+        let mut maintenance_roots = Vec::new();
+        if let Some(backends) = production_backends.as_ref() {
+            for backend in backends.registrations() {
+                maintenance_roots.push(backend.bundle_root.clone());
+                maintenance_roots.push(backend.artifact_root.clone());
+            }
+        }
+        if let Some(backends) = managed_gpu_production_backends.as_ref() {
+            for backend in backends.registrations() {
+                maintenance_roots.push(backend.bundle_root.clone());
+                maintenance_roots.push(backend.artifact_root.clone());
+            }
+        }
+        if let Some(backends) = windows_backends.as_ref() {
+            for backend in backends.registrations() {
+                maintenance_roots.push(backend.artifact_root.clone());
+            }
+        }
+        for root in &maintenance_roots {
+            if let Err(error) = maintenance::scavenge_operator_root(root) {
+                tracing::warn!(
+                    root = %root.display(),
+                    error = %error,
+                    "worker cleanup maintenance scavenger failed"
+                );
+            }
+        }
         let capability_matrix = if admission.capability_matrix().backends.is_empty() {
             executor::runtime_capability_matrix_from_environment()
         } else {
@@ -153,7 +210,11 @@ impl WorkerExecutor {
         };
         let runner_hcs_journal = hcs_journal.clone();
         Ok(Self {
-            active_tasks: Arc::new(Mutex::new(HashMap::new())),
+            active_tasks: Arc::new(Mutex::new(ActiveTaskRegistry {
+                running: HashMap::new(),
+                stopped: stop_fences.fences(),
+            })),
+            stop_fences,
             task_runner: Arc::new(
                 move |task, cancellation, _consensus_request, execution_context| {
                     let config = runner_config.clone();
@@ -196,8 +257,29 @@ impl WorkerExecutor {
         F: Fn(Task, watch::Receiver<bool>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<TaskResult>> + Send + 'static,
     {
+        Self::new_with_task_runner_and_stop_fences(
+            _config,
+            task_runner,
+            AttemptStopFenceStore::in_memory(),
+        )
+    }
+
+    #[cfg(test)]
+    fn new_with_task_runner_and_stop_fences<F, Fut>(
+        _config: HivemindConfig,
+        task_runner: F,
+        stop_fences: AttemptStopFenceStore,
+    ) -> Self
+    where
+        F: Fn(Task, watch::Receiver<bool>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<TaskResult>> + Send + 'static,
+    {
         Self {
-            active_tasks: Arc::new(Mutex::new(HashMap::new())),
+            active_tasks: Arc::new(Mutex::new(ActiveTaskRegistry {
+                running: HashMap::new(),
+                stopped: stop_fences.fences(),
+            })),
+            stop_fences,
             task_runner: Arc::new(
                 move |task, cancellation, _consensus_request, _execution_context| {
                     Box::pin(task_runner(task, cancellation))
@@ -268,10 +350,17 @@ impl WorkerExecutor {
                 .active_tasks
                 .lock()
                 .map_err(|_| anyhow::anyhow!("active task registry is unavailable"))?;
-            if let Some(active_task) = active_tasks.get(&active_task_key) {
+            let now = chrono::Utc::now().timestamp();
+            active_tasks
+                .stopped
+                .retain(|_, expires_at| attempt_stop_fence::is_active(*expires_at, now));
+            if active_tasks.stopped.contains_key(&active_task_key) {
+                anyhow::bail!("task attempt was stopped before execution");
+            }
+            if let Some(active_task) = active_tasks.running.get(&active_task_key) {
                 Some(active_task.result_rx.clone())
             } else {
-                active_tasks.insert(
+                active_tasks.running.insert(
                     active_task_key.clone(),
                     ActiveTaskEntry {
                         cancellation_tx,
@@ -328,7 +417,7 @@ impl WorkerExecutor {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let key = ActiveTaskKey::new(task_id, attempt_id.unwrap_or_default());
-        let Some(entry) = active_tasks.get_mut(&key) else {
+        let Some(entry) = active_tasks.running.get_mut(&key) else {
             return StopTaskOutcome::NotRunning;
         };
         if entry.stop_requested {
@@ -338,6 +427,83 @@ impl WorkerExecutor {
         let _ = entry.cancellation_tx.send(true);
         StopTaskOutcome::StopRequested
     }
+
+    pub async fn stop_task_execution_for_attempt_confirmed(
+        &self,
+        task_id: &str,
+        attempt_id: &str,
+        token_expiry: usize,
+    ) -> StopTaskOutcome {
+        if attempt_id.is_empty() {
+            return StopTaskOutcome::NotRunning;
+        }
+        let key = ActiveTaskKey::new(task_id, attempt_id);
+        let (mut result_rx, already_stopping, persistence_failed) = {
+            let mut active_tasks = self
+                .active_tasks
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let now = chrono::Utc::now().timestamp();
+            active_tasks
+                .stopped
+                .retain(|_, expires_at| attempt_stop_fence::is_active(*expires_at, now));
+            let requested_expiry = worker_stop_fence_expiry(token_expiry);
+            let previous_expiry = active_tasks
+                .stopped
+                .get(&key)
+                .copied()
+                .filter(|expires_at| attempt_stop_fence::is_active(*expires_at, now))
+                .unwrap_or(requested_expiry);
+            let requested_expiry = requested_expiry.max(previous_expiry);
+            let persistence = self
+                .stop_fences
+                .record_fence(task_id, attempt_id, requested_expiry);
+            let effective_expiry = persistence
+                .as_ref()
+                .copied()
+                .unwrap_or(requested_expiry)
+                .max(previous_expiry);
+            active_tasks.stopped.insert(key.clone(), effective_expiry);
+            let persistence_failed = if let Err(error) = persistence {
+                tracing::error!(
+                    error = %error,
+                    "confirmed Worker stop could not persist its attempt fence"
+                );
+                true
+            } else {
+                false
+            };
+            let Some(entry) = active_tasks.running.get_mut(&key) else {
+                return if persistence_failed {
+                    StopTaskOutcome::StopConfirmationUnavailable
+                } else {
+                    StopTaskOutcome::StoppedBeforeStart
+                };
+            };
+            let already_stopping = entry.stop_requested;
+            entry.stop_requested = true;
+            let _ = entry.cancellation_tx.send(true);
+            (
+                entry.result_rx.clone(),
+                already_stopping,
+                persistence_failed,
+            )
+        };
+        if persistence_failed {
+            return StopTaskOutcome::StopConfirmationUnavailable;
+        }
+        while result_rx.borrow().is_none() {
+            if result_rx.changed().await.is_err() {
+                return StopTaskOutcome::StopConfirmationUnavailable;
+            }
+        }
+        if already_stopping {
+            StopTaskOutcome::AlreadyStopping
+        } else {
+            StopTaskOutcome::StopRequested
+        }
+    }
+
     pub fn get_system_resources(&self) -> SystemResources {
         resource_monitor::collect_resources()
     }
@@ -525,7 +691,80 @@ impl WorkerExecutor {
         journal
             .append_event(identity, hcs_journal::HcsJournalEvent::Delivered)
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+
+        // The result bytes have already been copied into the response before
+        // this boundary is reached. Only now is it safe to remove the host
+        // artifact tree. Cleanup is deliberately best-effort: Delivered is a
+        // durable fact, so a cleanup failure must not turn an already accepted
+        // result into a misleading gRPC error. Startup maintenance can retry
+        // the retained task root.
+        if let Err(error) = cleanup_delivered_hcs_artifacts(&record) {
+            tracing::error!(
+                task_id = %identity.task_id,
+                execution_id = %identity.execution_id,
+                error = %error,
+                "HCS result was delivered but host artifact cleanup failed"
+            );
+            if let Some(task_root) = record.scratch_path.parent() {
+                if let Err(record_error) = crate::maintenance::record_cleanup_failure(task_root) {
+                    tracing::error!(
+                        task_id = %identity.task_id,
+                        execution_id = %identity.execution_id,
+                        error = %record_error,
+                        "HCS cleanup failure could not be recorded durably"
+                    );
+                }
+            }
+        }
         Ok(())
+    }
+}
+
+fn cleanup_delivered_hcs_artifacts(record: &hcs_journal::HcsJournalRecord) -> Result<()> {
+    if record
+        .scratch_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        != Some("scratch")
+        || record
+            .result_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some("result.json")
+        || record.result_path.parent() != Some(record.scratch_path.as_path())
+    {
+        return Err(anyhow::anyhow!(
+            "HCS journal paths do not describe the owned scratch/result layout"
+        ));
+    }
+
+    let task_root = record
+        .scratch_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("HCS scratch path has no task root"))?;
+    let task_root_name = task_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("HCS task root has no valid name"))?;
+    if task_root_name.len() != 64
+        || !task_root_name.starts_with("exec-")
+        || !task_root_name[5..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(anyhow::anyhow!(
+            "HCS task root is not an execution-scoped directory"
+        ));
+    }
+
+    match std::fs::symlink_metadata(task_root) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            Err(anyhow::anyhow!("HCS task root is not a real directory"))
+        }
+        Ok(_) => std::fs::remove_dir_all(task_root)
+            .map_err(|error| anyhow::anyhow!("remove HCS task root: {error}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(anyhow::anyhow!("inspect HCS task root: {error}")),
     }
 }
 
@@ -644,7 +883,7 @@ impl Drop for ActiveTaskGuard {
             .active_tasks
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        active_tasks.remove(&self.key);
+        active_tasks.running.remove(&self.key);
     }
 }
 

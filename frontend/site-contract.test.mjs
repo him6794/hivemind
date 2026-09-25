@@ -103,9 +103,15 @@ test('billing docs publish receipt-backed examples and a platform support matrix
 
     assert.ok(examples.length >= 3, `${locale} billing needs worked receipt examples`);
     assert.match(docs.billing.body, /replica|副本/i);
-    assert.match(docs.billing.formula, /replica_count|副本數/);
+    assert.match(docs.billing.formula, /replica_budget|確定性/);
+    assert.match(docs.billing.formula, /max_cpt/);
+    assert.match(docs.billing.formula, /charged_cpt.*max_cpt/);
     assert.match(docs.billing.formula, /10%/);
     assert.match(docs.billing.formula, /refund_cpt|退回/);
+    const billingNotes = docs.billing.notes.join(' ');
+    assert.match(billingNotes, locale === 'en' ? /whole-task maximum charge/ : /整份任務的最高總收費/);
+    assert.match(billingNotes, locale === 'en' ? /Automatic paid retries are disabled/ : /自動付費重試會停用/);
+    assert.match(billingNotes, locale === 'en' ? /not retroactively recalculated or refunded/ : /不會追溯重算或退款/);
 
     for (const example of examples) {
       assert.ok(example.program.length > 10, `${locale} ${example.id} needs the program`);

@@ -192,7 +192,7 @@ export default function MasterApp() {
         throw new Error('Input must be valid JSON');
       }
       if (toNumber(maxCpt) <= 0) {
-        throw new Error('Max CPT must be greater than 0 for managed-function tasks');
+        throw new Error('Maximum total charge (CPT, including platform fee) must be greater than 0 for managed-function tasks');
       }
 
       const effectiveTaskId = taskId.trim() || createTaskId();
@@ -541,10 +541,13 @@ export default function MasterApp() {
                   <input type="number" min="1" value={hostCount} onChange={(e) => setHostCount(e.target.value)} className="field" />
                 </label>
                 <label>
-                  Max CPT
+                  Task charge cap (CPT, fee included)
                   <input type="number" min="0" value={maxCpt} onChange={(e) => setMaxCpt(e.target.value)} className="field" />
                 </label>
               </div>
+              <p className="subtle" style={{ margin: '8px 0 0', fontSize: 12 }}>
+                Managed-function-v1 runs three Worker replicas by default. They share this task-wide cap through a deterministic split. The cap includes the platform fee; automatic paid retries are disabled until a funded platform treasury is available, so retry work is not charged to you.
+              </p>
               <div className="actions">
                 <button
                   type="button"
@@ -577,7 +580,6 @@ export default function MasterApp() {
                     const isManagedTask =
                       runtime === 'managed-function-v0' || runtime === 'managed-function-v1';
                     const wallTimeMs = Number(task.wall_time_ms || 0);
-                    const billedAmount = Number(task.billed_amount || 0);
                     const observability = normalizeTaskObservability({
                       ...task,
                       worker_id: task.worker_id,
@@ -586,6 +588,7 @@ export default function MasterApp() {
                       usage_units: task.usage_units,
                       max_cpt: task.max_cpt,
                     });
+                    const historicalOverCap = observability.historicalOverCap;
                     const terminal = isTerminalStatus(statusText);
 
                     const isLogLoading = logLoading === id;
@@ -602,9 +605,8 @@ export default function MasterApp() {
                         <div className="subtle" style={{ marginTop: 4, fontSize: 12 }}>{message}</div>
                         <div className="meta">
                           <span>wall {(wallTimeMs / 1000).toFixed(1)}s</span>
-                          <span>Credits used {observability.billedAmount || billedAmount} CPT</span>
-                          <span>{observability.billingSettled ? 'Charged' : 'Charge pending'}</span>
-                          {observability.retryCount ? <span>tries {observability.retryCount}</span> : null}
+                          <span>{observability.billingSettled ? `Charged ${observability.billedAmount} CPT${historicalOverCap ? ' (above recorded max_cpt; fee included)' : ' (fee included)'}` : 'Charge pending'}</span>
+                          {observability.retryCount ? <span>Retry counter {observability.retryCount}</span> : null}
                         </div>
                         <dl className="observability-grid">
                           <dt>Computer</dt>
@@ -613,9 +615,16 @@ export default function MasterApp() {
                           <dd>{observability.providerUser || 'Not available yet'}</dd>
                           <dt>Progress</dt>
                           <dd>{observability.dispatchStatus}</dd>
-                          <dt>Credits / limit</dt>
-                          <dd>{observability.usageUnits} / {observability.maxCpt || '—'}</dd>
+                          <dt>Aggregate replica usage</dt>
+                          <dd>{observability.usageUnits} CPT before fee</dd>
+                          <dt>{runtime === 'managed-function-v1' ? 'Submitted max_cpt' : 'Task charge cap'}</dt>
+                          <dd>{observability.chargeCapCpt || '—'} CPT{runtime === 'managed-function-v1' ? ' (new v1: task-wide, fee included)' : ', fee included'}</dd>
                         </dl>
+                        {historicalOverCap ? (
+                          <p className="subtle" role="note" style={{ margin: '8px 0 0', fontSize: 12 }}>
+                            This charge exceeds the recorded max_cpt. Earlier v1 billing used max_cpt per replica, but this view does not show the billing version; review the task ledger before attributing the difference. Today’s task-wide cap is not retroactive.
+                          </p>
+                        ) : null}
                         <div className="actions">
                           <button type="button" onClick={() => viewTaskLog(task)} disabled={isLogLoading} className="button">
                             {isLogLoading ? 'Loading...' : 'Log'}

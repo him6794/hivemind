@@ -17,10 +17,12 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs::File;
-use std::io::Read;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Operator-owned registration for the cross-platform closed managed DSL.
 ///
@@ -217,9 +219,19 @@ impl ManagedGpuProductionBackendConfig {
         task_id: &str,
         launch: &ProductionSandboxLaunch,
     ) -> Result<(PathBuf, PathBuf), ProductionBackendRegistryError> {
+        self.materialize_bundle_for_execution(request, task_id, task_id, launch)
+    }
+
+    pub fn materialize_bundle_for_execution(
+        &self,
+        request: &GeneralComputeRequest,
+        task_id: &str,
+        execution_scope: &str,
+        launch: &ProductionSandboxLaunch,
+    ) -> Result<(PathBuf, PathBuf), ProductionBackendRegistryError> {
         self.validate_mount_contract()?;
         self.as_general_compute_config()
-            .materialize_bundle_for_launch(request, task_id, launch)
+            .materialize_bundle_for_execution(request, task_id, execution_scope, launch)
     }
 
     pub fn validate(&self) -> Result<(), ProductionBackendRegistryError> {
@@ -299,6 +311,10 @@ impl ManagedGpuProductionBackendRegistry {
     #[must_use]
     pub fn get(&self, backend_id: &str) -> Option<&ManagedGpuProductionBackendConfig> {
         self.backends.get(backend_id)
+    }
+
+    pub fn registrations(&self) -> impl Iterator<Item = &ManagedGpuProductionBackendConfig> {
+        self.backends.values()
     }
 
     #[must_use]
@@ -706,6 +722,16 @@ impl WindowsProductionBackendConfig {
         Ok((image_root, artifact_task_root))
     }
 
+    /// Remove the per-execution artifact, scratch, and result tree without
+    /// touching the shared guest image or runner.
+    pub fn cleanup_task_root(
+        &self,
+        execution_scope: &str,
+    ) -> Result<(), ProductionBackendRegistryError> {
+        let (_, artifact_root) = self.task_root(execution_scope)?;
+        remove_owned_task_directory(&artifact_root)
+    }
+
     /// Verify the operator-owned Windows image and runner before HCS creation.
     ///
     /// The configured guest image digest is the digest of a deterministic
@@ -732,7 +758,15 @@ impl WindowsProductionBackendConfig {
         &self,
         task_id: &str,
     ) -> Result<WindowsHcsContainerSpec, ProductionBackendRegistryError> {
-        if !is_safe_task_id(task_id) {
+        self.hcs_spec_for_execution(task_id, task_id)
+    }
+
+    pub fn hcs_spec_for_execution(
+        &self,
+        task_id: &str,
+        execution_scope: &str,
+    ) -> Result<WindowsHcsContainerSpec, ProductionBackendRegistryError> {
+        if !is_safe_task_id(task_id) || !is_safe_task_id(execution_scope) {
             return Err(ProductionBackendRegistryError::UnsafeTaskId);
         }
         self.validate()?;
@@ -740,7 +774,7 @@ impl WindowsProductionBackendConfig {
             .policy
             .hcs_enforced_resource_limits()
             .map_err(ProductionBackendRegistryError::WindowsPolicyUnenforceable)?;
-        self.hcs_spec_with_limits(task_id, resource_limits)
+        self.hcs_spec_with_limits(execution_scope, resource_limits)
     }
 
     fn hcs_spec_with_limits(
@@ -1059,6 +1093,27 @@ impl ProductionBackendConfig {
         request: &GeneralComputeRequest,
         task_id: &str,
     ) -> Result<(PathBuf, PathBuf), ProductionBackendRegistryError> {
+        self.materialize_bundle_with_devices(request, task_id, &self.policy.devices)
+    }
+
+    /// Remove only the per-execution roots owned by this backend. Shared
+    /// runner state, templates, and CAS data are deliberately outside this
+    /// boundary.
+    pub fn cleanup_task_root(
+        &self,
+        execution_scope: &str,
+    ) -> Result<(), ProductionBackendRegistryError> {
+        let (bundle_root, artifact_root) = self.task_root(execution_scope)?;
+        remove_owned_task_directory(&bundle_root)?;
+        remove_owned_task_directory(&artifact_root)
+    }
+
+    fn materialize_bundle_with_devices(
+        &self,
+        request: &GeneralComputeRequest,
+        task_id: &str,
+        selected_devices: &[SandboxDevice],
+    ) -> Result<(PathBuf, PathBuf), ProductionBackendRegistryError> {
         self.validate_request_mounts(request)?;
         let seccomp_profile = self.load_seccomp_profile()?;
         let (bundle_root, artifact_root) = self.task_root(task_id)?;
@@ -1088,6 +1143,7 @@ impl ProductionBackendConfig {
         let canonical_artifact_root = std::fs::canonicalize(&artifact_root)
             .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
         let rootfs = bundle_root.join("rootfs");
+        let rootfs_snapshot = rootfs_snapshot_for_template(&template_rootfs, &self.bundle_root)?;
         match std::fs::symlink_metadata(&rootfs) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 return Err(ProductionBackendRegistryError::RootUnavailable(
@@ -1099,9 +1155,12 @@ impl ProductionBackendConfig {
                     "task bundle rootfs must be a directory".into(),
                 ));
             }
-            Ok(_) => {}
+            Ok(_) => {
+                validate_task_rootfs_marker(&rootfs, &rootfs_snapshot)?;
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                copy_directory_no_symlinks(&template_rootfs, &rootfs)?;
+                clone_directory_reflink_or_copy(&rootfs_snapshot.root, &rootfs)?;
+                write_task_rootfs_marker(&rootfs, &rootfs_snapshot)?;
             }
             Err(error) => {
                 return Err(ProductionBackendRegistryError::RootUnavailable(
@@ -1137,7 +1196,7 @@ impl ProductionBackendConfig {
                 .collect::<Vec<_>>(),
         );
         let mut devices = crate::sandbox::standard_linux_devices();
-        devices.extend(self.policy.devices.iter().cloned());
+        devices.extend(selected_devices.iter().cloned());
         let (uid_mappings, gid_mappings) = crate::sandbox::rootless_id_mappings()
             .map_err(ProductionBackendRegistryError::RootUnavailable)?;
         let linux = serde_json::json!({
@@ -1211,20 +1270,34 @@ impl ProductionBackendConfig {
         }
         let bytes = serde_json::to_vec(&config)
             .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
-        std::fs::write(&config_path, bytes)
-            .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
+        atomic_replace_config(&config_path, &bytes)?;
         Ok((bundle_root, artifact_root))
     }
 
     /// Materialize a bundle using the exact device set selected by trusted
-    /// admission. The legacy two-argument method remains available for CPU
-    /// callers and static operator policies.
+    /// admission. The legacy method keeps task-id paths for existing callers.
     pub fn materialize_bundle_for_launch(
         &self,
         request: &GeneralComputeRequest,
         task_id: &str,
         launch: &ProductionSandboxLaunch,
     ) -> Result<(PathBuf, PathBuf), ProductionBackendRegistryError> {
+        self.materialize_bundle_for_execution(request, task_id, task_id, launch)
+    }
+
+    /// Materialize an isolated bundle for one execution attempt. The scope is
+    /// caller-derived from the immutable execution identity, never from a
+    /// Worker-provided filesystem path.
+    pub fn materialize_bundle_for_execution(
+        &self,
+        request: &GeneralComputeRequest,
+        task_id: &str,
+        execution_scope: &str,
+        launch: &ProductionSandboxLaunch,
+    ) -> Result<(PathBuf, PathBuf), ProductionBackendRegistryError> {
+        if !is_safe_task_id(task_id) {
+            return Err(ProductionBackendRegistryError::UnsafeTaskId);
+        }
         if launch.backend_id != self.backend_id
             || launch.guest_image_digest != self.guest_image_digest
         {
@@ -1253,51 +1326,10 @@ impl ProductionBackendConfig {
         {
             return Err(ProductionBackendRegistryError::GpuDevicePolicyConflict);
         }
-        let (bundle_root, artifact_root) = self.materialize_bundle(request, task_id)?;
-        let config_path = bundle_root.join("config.json");
-        let bytes = std::fs::read(&config_path)
-            .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
-        let mut config: serde_json::Value = serde_json::from_slice(&bytes)
-            .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
-        let linux = config
-            .get_mut("linux")
-            .and_then(serde_json::Value::as_object_mut)
-            .ok_or_else(|| {
-                ProductionBackendRegistryError::RootUnavailable(
-                    "materialized OCI config has no linux object".into(),
-                )
-            })?;
-        let mut devices = crate::sandbox::standard_linux_devices();
-        devices.extend(launch.policy.devices.iter().cloned());
-        linux.insert(
-            "devices".into(),
-            serde_json::Value::Array(devices.iter().map(SandboxDevice::oci_spec).collect()),
-        );
-        linux.insert(
-            "resources".into(),
-            serde_json::json!({
-                "devices": devices.iter().map(SandboxDevice::cgroup_rule).collect::<Vec<_>>()
-            }),
-        );
-        let canonical = serde_json::to_vec(&config)
-            .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
-        std::fs::write(config_path, canonical)
-            .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
-        Ok((bundle_root, artifact_root))
+        self.materialize_bundle_with_devices(request, execution_scope, &launch.policy.devices)
     }
 
     fn load_seccomp_profile(&self) -> Result<serde_json::Value, ProductionBackendRegistryError> {
-        let metadata = std::fs::symlink_metadata(&self.seccomp_profile_path).map_err(|error| {
-            ProductionBackendRegistryError::SeccompProfileUnavailable(error.to_string())
-        })?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(ProductionBackendRegistryError::SeccompProfileUnavailable(
-                "seccomp profile must be a regular non-symlink file".into(),
-            ));
-        }
-        let bytes = std::fs::read(&self.seccomp_profile_path).map_err(|error| {
-            ProductionBackendRegistryError::SeccompProfileUnavailable(error.to_string())
-        })?;
         let expected_digest = match &self.policy.seccomp {
             crate::sandbox::SeccompPolicy::DefaultDeny { profile_sha256 } => profile_sha256,
             crate::sandbox::SeccompPolicy::Disabled => {
@@ -1306,97 +1338,643 @@ impl ProductionBackendConfig {
                 ));
             }
         };
-        if crate::sha256_digest(&bytes) != *expected_digest {
-            return Err(ProductionBackendRegistryError::SeccompProfileUnavailable(
-                "seccomp profile SHA-256 does not match the policy pin".into(),
-            ));
-        }
-        let profile: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
-            ProductionBackendRegistryError::SeccompProfileUnavailable(format!(
-                "seccomp profile is not valid JSON: {error}"
-            ))
-        })?;
-        validate_seccomp_profile(&profile).map_err(|message| {
-            ProductionBackendRegistryError::SeccompProfileUnavailable(message)
-        })?;
-        let canonical = serde_json::to_vec(&profile).map_err(|error| {
-            ProductionBackendRegistryError::SeccompProfileUnavailable(error.to_string())
-        })?;
-        if canonical != bytes {
-            return Err(ProductionBackendRegistryError::SeccompProfileUnavailable(
-                "seccomp profile must use canonical JSON bytes".into(),
-            ));
-        }
-        Ok(profile)
+        load_verified_seccomp_profile(&self.seccomp_profile_path, expected_digest)
     }
 }
 
-fn copy_directory_no_symlinks(
-    source: &std::path::Path,
-    destination: &std::path::Path,
-) -> Result<(), ProductionBackendRegistryError> {
-    let mut hardlinks = std::collections::HashMap::new();
-    copy_directory_no_symlinks_inner(source, destination, &mut hardlinks)
+const SECCOMP_FULL_REVERIFY_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const SECCOMP_CACHE_LIMIT: usize = 128;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SeccompCacheKey {
+    path: PathBuf,
+    expected_digest: String,
 }
 
-fn copy_directory_no_symlinks_inner(
-    source: &std::path::Path,
-    destination: &std::path::Path,
-    hardlinks: &mut std::collections::HashMap<(u64, u64), PathBuf>,
-) -> Result<(), ProductionBackendRegistryError> {
-    ensure_no_symlink_ancestors(destination)?;
-    std::fs::create_dir_all(destination)
-        .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
-    ensure_no_symlink_ancestors(destination)?;
-    for entry in std::fs::read_dir(source)
-        .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?
+#[derive(Debug, Clone)]
+struct SeccompCacheEntry {
+    size_bytes: u64,
+    modified: Option<SystemTime>,
+    profile: serde_json::Value,
+    verified_at: Instant,
+}
+
+static SECCOMP_PROFILE_CACHE: OnceLock<Mutex<HashMap<SeccompCacheKey, SeccompCacheEntry>>> =
+    OnceLock::new();
+
+fn load_verified_seccomp_profile(
+    path: &Path,
+    expected_digest: &str,
+) -> Result<serde_json::Value, ProductionBackendRegistryError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        ProductionBackendRegistryError::SeccompProfileUnavailable(error.to_string())
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(ProductionBackendRegistryError::SeccompProfileUnavailable(
+            "seccomp profile must be a regular non-symlink file".into(),
+        ));
+    }
+    if !is_sha256_digest(expected_digest) {
+        return Err(ProductionBackendRegistryError::SeccompProfileUnavailable(
+            "seccomp profile SHA-256 policy pin is invalid".into(),
+        ));
+    }
+    let key = SeccompCacheKey {
+        path: path.to_path_buf(),
+        expected_digest: expected_digest.to_owned(),
+    };
+    let modified = metadata.modified().ok();
+    let now = Instant::now();
+    let cache = SECCOMP_PROFILE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     {
-        let entry = entry
-            .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
-        let metadata = std::fs::symlink_metadata(entry.path())
-            .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
-        let target = destination.join(entry.file_name());
-        if let Ok(target_metadata) = std::fs::symlink_metadata(&target)
-            && target_metadata.file_type().is_symlink()
+        let entries = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = entries.get(&key)
+            && entry.size_bytes == metadata.len()
+            && entry.modified == modified
+            && now.duration_since(entry.verified_at) < SECCOMP_FULL_REVERIFY_INTERVAL
         {
+            return Ok(entry.profile.clone());
+        }
+    }
+
+    let bytes = std::fs::read(path).map_err(|error| {
+        ProductionBackendRegistryError::SeccompProfileUnavailable(error.to_string())
+    })?;
+    if crate::sha256_digest(&bytes) != expected_digest {
+        return Err(ProductionBackendRegistryError::SeccompProfileUnavailable(
+            "seccomp profile SHA-256 does not match the policy pin".into(),
+        ));
+    }
+    let profile: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+        ProductionBackendRegistryError::SeccompProfileUnavailable(format!(
+            "seccomp profile is not valid JSON: {error}"
+        ))
+    })?;
+    validate_seccomp_profile(&profile)
+        .map_err(|message| ProductionBackendRegistryError::SeccompProfileUnavailable(message))?;
+    let canonical = serde_json::to_vec(&profile).map_err(|error| {
+        ProductionBackendRegistryError::SeccompProfileUnavailable(error.to_string())
+    })?;
+    if canonical != bytes {
+        return Err(ProductionBackendRegistryError::SeccompProfileUnavailable(
+            "seccomp profile must use canonical JSON bytes".into(),
+        ));
+    }
+    let after = std::fs::symlink_metadata(path).map_err(|error| {
+        ProductionBackendRegistryError::SeccompProfileUnavailable(error.to_string())
+    })?;
+    if after.file_type().is_symlink()
+        || !after.is_file()
+        || after.len() != metadata.len()
+        || after.modified().ok() != modified
+    {
+        return Err(ProductionBackendRegistryError::SeccompProfileUnavailable(
+            "seccomp profile changed while it was verified".into(),
+        ));
+    }
+
+    let mut entries = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if entries.len() >= SECCOMP_CACHE_LIMIT && !entries.contains_key(&key) {
+        if let Some(oldest) = entries
+            .iter()
+            .min_by_key(|(_, entry)| entry.verified_at)
+            .map(|(key, _)| key.clone())
+        {
+            entries.remove(&oldest);
+        }
+    }
+    entries.insert(
+        key,
+        SeccompCacheEntry {
+            size_bytes: after.len(),
+            modified: after.modified().ok(),
+            profile: profile.clone(),
+            verified_at: now,
+        },
+    );
+    Ok(profile)
+}
+
+const ROOTFS_FULL_REVERIFY_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const ROOTFS_CACHE_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+#[derive(Debug, Clone)]
+struct RootfsSnapshot {
+    root: PathBuf,
+    metadata_fingerprint: String,
+    content_digest: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RootfsSnapshotRecord {
+    metadata_fingerprint: String,
+    content_digest: String,
+    verified_at_ms: u128,
+}
+
+fn rootfs_snapshot_for_template(
+    template_rootfs: &Path,
+    bundle_root: &Path,
+) -> Result<RootfsSnapshot, ProductionBackendRegistryError> {
+    let metadata_fingerprint = hash_rootfs_tree(template_rootfs, false)?;
+    let cache_root = bundle_root.join(".rootfs-cache");
+    if let Ok(metadata) = fs::symlink_metadata(&cache_root) {
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(ProductionBackendRegistryError::RootUnavailable(
-                "task bundle destination contains a symlink".into(),
+                "rootfs cache must be a real directory".into(),
             ));
         }
+    } else {
+        fs::create_dir_all(&cache_root)
+            .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
+    }
+    ensure_no_symlink_ancestors(&cache_root)?;
+
+    let now_ms = unix_time_ms();
+    let mut stale_cache_dirs = Vec::new();
+    if let Ok(entries) = fs::read_dir(&cache_root) {
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                ProductionBackendRegistryError::RootUnavailable(error.to_string())
+            })?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                ProductionBackendRegistryError::RootUnavailable(error.to_string())
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                continue;
+            }
+            let record_path = path.join("record.json");
+            let record_bytes = match fs::read(&record_path) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(ProductionBackendRegistryError::RootUnavailable(
+                        error.to_string(),
+                    ));
+                }
+            };
+            let record: RootfsSnapshotRecord = match serde_json::from_slice(&record_bytes) {
+                Ok(record) => record,
+                Err(_) => continue,
+            };
+            if record.metadata_fingerprint != metadata_fingerprint {
+                continue;
+            }
+            let root = path.join("rootfs");
+            let root_metadata = match fs::symlink_metadata(&root) {
+                Ok(metadata) => metadata,
+                Err(_) => continue,
+            };
+            if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+                continue;
+            }
+            let age_ms = now_ms.saturating_sub(record.verified_at_ms);
+            if age_ms < ROOTFS_FULL_REVERIFY_INTERVAL.as_millis() {
+                return Ok(RootfsSnapshot {
+                    root,
+                    metadata_fingerprint,
+                    content_digest: record.content_digest,
+                });
+            }
+            let content_digest = hash_rootfs_tree(template_rootfs, true)?;
+            if content_digest == record.content_digest
+                && hash_rootfs_tree(&root, true)? == record.content_digest
+            {
+                let refreshed = RootfsSnapshotRecord {
+                    metadata_fingerprint: metadata_fingerprint.clone(),
+                    content_digest: content_digest.clone(),
+                    verified_at_ms: now_ms,
+                };
+                write_json_file_atomically(&record_path, &refreshed)?;
+                return Ok(RootfsSnapshot {
+                    root,
+                    metadata_fingerprint,
+                    content_digest,
+                });
+            }
+            stale_cache_dirs.push(path);
+        }
+    }
+
+    let content_digest = hash_rootfs_tree(template_rootfs, true)?;
+    let content_hex = content_digest
+        .strip_prefix("sha256:")
+        .unwrap_or(&content_digest);
+    let cache_dir = cache_root.join(format!(
+        "{}-{}",
+        metadata_fingerprint
+            .strip_prefix("sha256:")
+            .unwrap_or(&metadata_fingerprint),
+        &content_hex[..16.min(content_hex.len())]
+    ));
+    let root = cache_dir.join("rootfs");
+    if let Ok(metadata) = fs::symlink_metadata(&root) {
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(ProductionBackendRegistryError::RootUnavailable(
+                "rootfs cache snapshot must be a real directory".into(),
+            ));
+        }
+        let record_path = cache_dir.join("record.json");
+        let record: RootfsSnapshotRecord =
+            serde_json::from_slice(&fs::read(&record_path).map_err(|error| {
+                ProductionBackendRegistryError::RootUnavailable(error.to_string())
+            })?)
+            .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
+        if record.metadata_fingerprint == metadata_fingerprint
+            && record.content_digest == content_digest
+            && hash_rootfs_tree(&root, true)? == content_digest
+        {
+            return Ok(RootfsSnapshot {
+                root,
+                metadata_fingerprint,
+                content_digest,
+            });
+        }
+        return Err(ProductionBackendRegistryError::RootUnavailable(
+            "rootfs cache snapshot content does not match its record".into(),
+        ));
+    }
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let temporary = cache_root.join(format!(".building-{}-{nonce}", std::process::id()));
+    fs::create_dir_all(&temporary)
+        .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
+    let temporary_root = temporary.join("rootfs");
+    let result = (|| {
+        clone_directory_reflink_or_copy(template_rootfs, &temporary_root)?;
+        let record = RootfsSnapshotRecord {
+            metadata_fingerprint: metadata_fingerprint.clone(),
+            content_digest: content_digest.clone(),
+            verified_at_ms: now_ms,
+        };
+        write_json_file_atomically(&temporary.join("record.json"), &record)?;
+        fs::rename(&temporary, &cache_dir)
+            .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
+        Ok::<(), ProductionBackendRegistryError>(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&temporary);
+    }
+    result?;
+
+    for stale in stale_cache_dirs {
+        let _ = fs::remove_dir_all(stale);
+    }
+    gc_rootfs_cache(&cache_root, &cache_dir, now_ms);
+    Ok(RootfsSnapshot {
+        root,
+        metadata_fingerprint,
+        content_digest,
+    })
+}
+
+fn gc_rootfs_cache(cache_root: &Path, current: &Path, now_ms: u128) {
+    let Ok(entries) = fs::read_dir(cache_root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == current
+            || !path.is_dir()
+            || path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+        {
+            continue;
+        }
+        let Ok(bytes) = fs::read(path.join("record.json")) else {
+            continue;
+        };
+        let Ok(record) = serde_json::from_slice::<RootfsSnapshotRecord>(&bytes) else {
+            continue;
+        };
+        if now_ms.saturating_sub(record.verified_at_ms) >= ROOTFS_CACHE_RETENTION.as_millis() {
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+}
+
+fn write_task_rootfs_marker(
+    rootfs: &Path,
+    snapshot: &RootfsSnapshot,
+) -> Result<(), ProductionBackendRegistryError> {
+    let marker = rootfs
+        .parent()
+        .ok_or_else(|| {
+            ProductionBackendRegistryError::RootUnavailable("rootfs has no parent".into())
+        })?
+        .join(".hivemind-rootfs.json");
+    let value = serde_json::json!({
+        "metadata_fingerprint": snapshot.metadata_fingerprint,
+        "content_digest": snapshot.content_digest,
+    });
+    write_json_file_atomically(&marker, &value)
+}
+
+fn validate_task_rootfs_marker(
+    rootfs: &Path,
+    snapshot: &RootfsSnapshot,
+) -> Result<(), ProductionBackendRegistryError> {
+    let marker = rootfs
+        .parent()
+        .ok_or_else(|| {
+            ProductionBackendRegistryError::RootUnavailable("rootfs has no parent".into())
+        })?
+        .join(".hivemind-rootfs.json");
+    let metadata = fs::symlink_metadata(&marker).map_err(|error| {
+        ProductionBackendRegistryError::RootUnavailable(format!(
+            "stale task root is missing its rootfs marker: {error}"
+        ))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(ProductionBackendRegistryError::RootUnavailable(
+            "stale task root has an invalid rootfs marker".into(),
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_slice(
+        &fs::read(&marker)
+            .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?,
+    )
+    .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
+    if value
+        .get("metadata_fingerprint")
+        .and_then(serde_json::Value::as_str)
+        != Some(snapshot.metadata_fingerprint.as_str())
+        || value
+            .get("content_digest")
+            .and_then(serde_json::Value::as_str)
+            != Some(snapshot.content_digest.as_str())
+    {
+        return Err(ProductionBackendRegistryError::RootUnavailable(
+            "stale task root does not match the current rootfs template".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn write_json_file_atomically<T: Serialize>(
+    path: &Path,
+    value: &T,
+) -> Result<(), ProductionBackendRegistryError> {
+    let bytes = serde_json::to_vec(value)
+        .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
+    atomic_replace_config(path, &bytes)
+}
+
+fn hash_rootfs_tree(
+    root: &Path,
+    include_content: bool,
+) -> Result<String, ProductionBackendRegistryError> {
+    let mut entries = Vec::new();
+    collect_rootfs_entries(root, "", &mut entries)?;
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut hasher = Sha256::new();
+    hasher.update(if include_content {
+        b"hivemind-rootfs-content-v1\\0".as_slice()
+    } else {
+        b"hivemind-rootfs-metadata-v1\\0".as_slice()
+    });
+    for (relative, path, is_directory) in entries {
+        hasher.update(if is_directory { b"d" } else { b"f" });
+        hasher.update((relative.len() as u64).to_be_bytes());
+        hasher.update(relative.as_bytes());
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
+        if !is_directory {
+            hasher.update(metadata.len().to_be_bytes());
+            if include_content {
+                let bytes = fs::read(&path).map_err(|error| {
+                    ProductionBackendRegistryError::RootUnavailable(error.to_string())
+                })?;
+                hasher.update(&bytes);
+                let after = fs::symlink_metadata(&path).map_err(|error| {
+                    ProductionBackendRegistryError::RootUnavailable(error.to_string())
+                })?;
+                if after.len() != metadata.len()
+                    || after.file_type().is_symlink()
+                    || !after.is_file()
+                {
+                    return Err(ProductionBackendRegistryError::RootUnavailable(
+                        "rootfs file changed while it was hashed".into(),
+                    ));
+                }
+            }
+        } else if !include_content {
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map_or(0, |duration| duration.as_nanos());
+            hasher.update(modified.to_be_bytes());
+        }
+    }
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn collect_rootfs_entries(
+    root: &Path,
+    relative_root: &str,
+    entries: &mut Vec<(String, PathBuf, bool)>,
+) -> Result<(), ProductionBackendRegistryError> {
+    let mut children = fs::read_dir(root)
+        .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
+    children.sort_by_key(|entry| entry.file_name().to_string_lossy().to_string());
+    for child in children {
+        let name = child
+            .file_name()
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                ProductionBackendRegistryError::RootUnavailable(
+                    "rootfs entry name must be valid UTF-8".into(),
+                )
+            })?;
+        if name.is_empty() || name == "." || name == ".." {
+            return Err(ProductionBackendRegistryError::RootUnavailable(
+                "rootfs entry name is invalid".into(),
+            ));
+        }
+        let relative = if relative_root.is_empty() {
+            name
+        } else {
+            format!("{relative_root}/{name}")
+        };
+        let path = child.path();
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
+        if metadata.file_type().is_symlink() {
+            return Err(ProductionBackendRegistryError::RootUnavailable(
+                "rootfs contains a symlink".into(),
+            ));
+        }
+        if metadata.is_dir() {
+            entries.push((relative.clone(), path.clone(), true));
+            collect_rootfs_entries(&path, &relative, entries)?;
+        } else if metadata.is_file() {
+            entries.push((relative, path, false));
+        } else {
+            return Err(ProductionBackendRegistryError::RootUnavailable(
+                "rootfs contains an unsupported filesystem entry".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn unix_time_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
+}
+
+fn remove_owned_task_directory(path: &Path) -> Result<(), ProductionBackendRegistryError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err(ProductionBackendRegistryError::RootUnavailable(
+                    "task cleanup encountered a symlink".into(),
+                ));
+            }
+            if !metadata.is_dir() {
+                return Err(ProductionBackendRegistryError::RootUnavailable(
+                    "task cleanup encountered a non-directory root".into(),
+                ));
+            }
+            fs::remove_dir_all(path)
+                .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(ProductionBackendRegistryError::RootUnavailable(
+            error.to_string(),
+        )),
+    }
+}
+
+fn atomic_replace_config(path: &Path, bytes: &[u8]) -> Result<(), ProductionBackendRegistryError> {
+    let parent = path.parent().ok_or_else(|| {
+        ProductionBackendRegistryError::RootUnavailable(
+            "OCI config path has no parent directory".into(),
+        )
+    })?;
+    ensure_no_symlink_ancestors(parent)?;
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(ProductionBackendRegistryError::RootUnavailable(
+                "OCI config path must be a regular non-symlink file".into(),
+            ));
+        }
+    }
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let temporary = parent.join(format!(".config-{}-{nonce}.tmp", std::process::id()));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
+        file.write_all(bytes)
+            .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
+        file.flush()
+            .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
+        file.sync_all()
+            .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
+        drop(file);
+        atomic_replace_file(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn atomic_replace_file(
+    source: &Path,
+    destination: &Path,
+) -> Result<(), ProductionBackendRegistryError> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+        const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+        unsafe extern "system" {
+            fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+        }
+        let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+        let destination: Vec<u16> = destination
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        if unsafe {
+            MoveFileExW(
+                source.as_ptr(),
+                destination.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        } == 0
+        {
+            return Err(ProductionBackendRegistryError::RootUnavailable(
+                std::io::Error::last_os_error().to_string(),
+            ));
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        fs::rename(source, destination)
+            .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))
+    }
+}
+
+fn clone_directory_reflink_or_copy(
+    source: &Path,
+    destination: &Path,
+) -> Result<(), ProductionBackendRegistryError> {
+    let source_metadata = fs::symlink_metadata(source)
+        .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
+    if source_metadata.file_type().is_symlink() || !source_metadata.is_dir() {
+        return Err(ProductionBackendRegistryError::RootUnavailable(
+            "rootfs source must be a real directory".into(),
+        ));
+    }
+    ensure_no_symlink_ancestors(destination)?;
+    fs::create_dir_all(destination)
+        .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
+    ensure_no_symlink_ancestors(destination)?;
+    let mut entries = fs::read_dir(source)
+        .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
+    entries.sort_by_key(|entry| entry.file_name().to_string_lossy().to_string());
+    for entry in entries {
+        let source_path = entry.path();
+        let target = destination.join(entry.file_name());
+        let metadata = fs::symlink_metadata(&source_path)
+            .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))?;
         if metadata.file_type().is_symlink() {
             return Err(ProductionBackendRegistryError::RootUnavailable(
                 "operator bundle template contains a symlink".into(),
             ));
         }
         if metadata.is_dir() {
-            copy_directory_no_symlinks_inner(&entry.path(), &target, hardlinks)?;
+            clone_directory_reflink_or_copy(&source_path, &target)?;
         } else if metadata.is_file() {
-            #[cfg(unix)]
-            let hardlink_key = {
-                use std::os::unix::fs::MetadataExt;
-                Some((metadata.dev(), metadata.ino()))
-            };
-            #[cfg(not(unix))]
-            let hardlink_key = None;
-
-            if let Some(key) = hardlink_key {
-                if let Some(existing) = hardlinks.get(&key) {
-                    if std::fs::hard_link(existing, &target).is_err() {
-                        std::fs::copy(entry.path(), &target).map_err(|error| {
-                            ProductionBackendRegistryError::RootUnavailable(error.to_string())
-                        })?;
-                    }
-                } else {
-                    std::fs::copy(entry.path(), &target).map_err(|error| {
-                        ProductionBackendRegistryError::RootUnavailable(error.to_string())
-                    })?;
-                    hardlinks.insert(key, target);
-                }
-            } else {
-                std::fs::copy(entry.path(), &target).map_err(|error| {
-                    ProductionBackendRegistryError::RootUnavailable(error.to_string())
-                })?;
-            }
+            clone_file_reflink_or_copy(&source_path, &target)?;
         } else {
             return Err(ProductionBackendRegistryError::RootUnavailable(
                 "operator bundle template contains an unsupported filesystem entry".into(),
@@ -1404,6 +1982,49 @@ fn copy_directory_no_symlinks_inner(
         }
     }
     Ok(())
+}
+
+fn clone_file_reflink_or_copy(
+    source: &Path,
+    destination: &Path,
+) -> Result<(), ProductionBackendRegistryError> {
+    if try_reflink_file(source, destination) {
+        return Ok(());
+    }
+    fs::copy(source, destination)
+        .map(|_| ())
+        .map_err(|error| ProductionBackendRegistryError::RootUnavailable(error.to_string()))
+}
+
+#[cfg(target_os = "linux")]
+fn try_reflink_file(source: &Path, destination: &Path) -> bool {
+    use std::os::fd::AsRawFd;
+    const FICLONE: u64 = 0x4004_9409;
+    let Ok(source) = File::open(source) else {
+        return false;
+    };
+    let destination_path = destination.to_path_buf();
+    let Ok(destination) = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&destination_path)
+    else {
+        return false;
+    };
+    unsafe extern "C" {
+        fn ioctl(file_descriptor: i32, request: u64, ...) -> i32;
+    }
+    let result = unsafe { ioctl(destination.as_raw_fd(), FICLONE, source.as_raw_fd()) } == 0;
+    drop(destination);
+    if !result {
+        let _ = fs::remove_file(destination_path);
+    }
+    result
+}
+
+#[cfg(not(target_os = "linux"))]
+fn try_reflink_file(_source: &Path, _destination: &Path) -> bool {
+    false
 }
 
 impl ProductionBackendRegistry {
@@ -1487,6 +2108,29 @@ impl WindowsProductionBackendRegistry {
     }
 }
 
+const WINDOWS_ASSET_FULL_REVERIFY_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const WINDOWS_ASSET_CACHE_LIMIT: usize = 64;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct WindowsAssetCacheKey {
+    image_root: PathBuf,
+    runner_executable: PathBuf,
+    guest_image_digest: String,
+    runner_sha256: String,
+}
+
+#[derive(Debug, Clone)]
+struct WindowsAssetCacheEntry {
+    image_metadata_fingerprint: String,
+    runner_size_bytes: u64,
+    runner_modified: Option<SystemTime>,
+    binding: WindowsHcsAssetBinding,
+    verified_at: Instant,
+}
+
+static WINDOWS_ASSET_CACHE: OnceLock<Mutex<HashMap<WindowsAssetCacheKey, WindowsAssetCacheEntry>>> =
+    OnceLock::new();
+
 pub(crate) fn verify_windows_hcs_assets(
     image_root: &Path,
     runner_executable: &Path,
@@ -1526,6 +2170,31 @@ pub(crate) fn verify_windows_hcs_assets(
             "Windows runner must be a regular file without a reparse point".into(),
         ));
     }
+    let runner_modified = runner_metadata.modified().ok();
+    let image_metadata_fingerprint = hash_windows_image_metadata(image_root)
+        .map_err(ProductionBackendRegistryError::WindowsImageUnavailable)?;
+    let key = WindowsAssetCacheKey {
+        image_root: image_root.to_path_buf(),
+        runner_executable: runner_executable.to_path_buf(),
+        guest_image_digest: guest_image_digest.to_owned(),
+        runner_sha256: runner_sha256.to_owned(),
+    };
+    let cache = WINDOWS_ASSET_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let now = Instant::now();
+    {
+        let entries = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = entries.get(&key)
+            && entry.image_metadata_fingerprint == image_metadata_fingerprint
+            && entry.runner_size_bytes == runner_metadata.len()
+            && entry.runner_modified == runner_modified
+            && now.duration_since(entry.verified_at) < WINDOWS_ASSET_FULL_REVERIFY_INTERVAL
+        {
+            return Ok(entry.binding.clone());
+        }
+    }
+
     let actual_runner_sha256 = hash_windows_file(runner_executable).map_err(|error| {
         ProductionBackendRegistryError::WindowsRunnerUnavailable(error.to_string())
     })?;
@@ -1542,23 +2211,43 @@ pub(crate) fn verify_windows_hcs_assets(
         .ok_or(ProductionBackendRegistryError::WindowsRunnerOutsideImage)?;
     let runner_name = windows_path_file_name(runner_executable)
         .ok_or(ProductionBackendRegistryError::WindowsRunnerOutsideImage)?;
-    Ok(WindowsHcsAssetBinding {
+    let binding = WindowsHcsAssetBinding {
         image_material_digest,
         runner_sha256: runner_sha256.to_owned(),
         runner_container_path: format!("C:\\{relative_runner}"),
-    })
-    .and_then(|binding| {
-        if binding
-            .runner_container_path
-            .rsplit('\\')
-            .next()
-            .is_some_and(|name| name.eq_ignore_ascii_case(&runner_name))
+    };
+    if !binding
+        .runner_container_path
+        .rsplit('\\')
+        .next()
+        .is_some_and(|name| name.eq_ignore_ascii_case(&runner_name))
+    {
+        return Err(ProductionBackendRegistryError::WindowsRunnerOutsideImage);
+    }
+
+    let mut entries = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if entries.len() >= WINDOWS_ASSET_CACHE_LIMIT && !entries.contains_key(&key) {
+        if let Some(oldest) = entries
+            .iter()
+            .min_by_key(|(_, entry)| entry.verified_at)
+            .map(|(key, _)| key.clone())
         {
-            Ok(binding)
-        } else {
-            Err(ProductionBackendRegistryError::WindowsRunnerOutsideImage)
+            entries.remove(&oldest);
         }
-    })
+    }
+    entries.insert(
+        key,
+        WindowsAssetCacheEntry {
+            image_metadata_fingerprint,
+            runner_size_bytes: runner_metadata.len(),
+            runner_modified,
+            binding: binding.clone(),
+            verified_at: now,
+        },
+    );
+    Ok(binding)
 }
 
 fn hash_windows_file(path: &Path) -> std::io::Result<String> {
@@ -1631,6 +2320,34 @@ fn hash_windows_image_tree(root: &Path) -> Result<String, String> {
                 );
             }
         }
+    }
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn hash_windows_image_metadata(root: &Path) -> Result<String, String> {
+    let mut entries = Vec::new();
+    collect_windows_image_entries(root, "", &mut entries)?;
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    for pair in entries.windows(2) {
+        if pair[0].0 == pair[1].0 {
+            return Err("Windows image contains duplicate case-insensitive paths".into());
+        }
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"hivemind-windows-image-metadata-v1\\0");
+    for (relative, path, is_directory) in entries {
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("Windows image metadata failed: {error}"))?;
+        hasher.update(if is_directory { b"d" } else { b"f" });
+        hasher.update((relative.len() as u64).to_be_bytes());
+        hasher.update(relative.as_bytes());
+        hasher.update(metadata.len().to_be_bytes());
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |duration| duration.as_nanos());
+        hasher.update(modified.to_be_bytes());
     }
     Ok(format!("sha256:{:x}", hasher.finalize()))
 }
@@ -1727,4 +2444,104 @@ fn is_sha256_digest(value: &str) -> bool {
         return false;
     };
     hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seccomp_cache_reuses_valid_profiles_and_invalidates_on_drift() {
+        let root = std::env::temp_dir().join(format!(
+            "hivemind-seccomp-cache-{}-{}",
+            std::process::id(),
+            unix_time_ms()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("seccomp.json");
+        let bytes = br#"{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[{"action":"SCMP_ACT_ALLOW","names":["exit","exit_group"]}]}"#;
+        fs::write(&path, bytes).unwrap();
+        let digest = crate::sha256_digest(bytes);
+
+        let first = load_verified_seccomp_profile(&path, &digest).unwrap();
+        let second = load_verified_seccomp_profile(&path, &digest).unwrap();
+        assert_eq!(
+            first, second,
+            "cached seccomp profile should preserve its value"
+        );
+
+        fs::write(&path, b"{}").unwrap();
+        assert!(matches!(
+            load_verified_seccomp_profile(&path, &digest),
+            Err(ProductionBackendRegistryError::SeccompProfileUnavailable(_))
+        ));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rootfs_snapshot_cache_fails_closed_when_a_snapshot_is_corrupted() {
+        let root = std::env::temp_dir().join(format!(
+            "hivemind-rootfs-cache-{}-{}",
+            std::process::id(),
+            unix_time_ms()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let template = root.join("template");
+        let bundle_root = root.join("bundles");
+        fs::create_dir_all(&template).unwrap();
+        fs::write(template.join("runtime.txt"), b"template").unwrap();
+
+        let snapshot = rootfs_snapshot_for_template(&template, &bundle_root).unwrap();
+        let cache_dir = snapshot.root.parent().unwrap();
+        let record_path = cache_dir.join("record.json");
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+        record["verified_at_ms"] = serde_json::json!(0);
+        fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+        fs::write(snapshot.root.join("runtime.txt"), b"tampered").unwrap();
+
+        let error = rootfs_snapshot_for_template(&template, &bundle_root).unwrap_err();
+        assert!(matches!(
+            error,
+            ProductionBackendRegistryError::RootUnavailable(message)
+                if message.contains("cache snapshot content")
+        ));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_asset_cache_invalidates_when_image_metadata_changes() {
+        let root = std::env::temp_dir().join(format!(
+            "hivemind-windows-asset-cache-{}-{}",
+            std::process::id(),
+            unix_time_ms()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let image = root.join("image");
+        fs::create_dir_all(&image).unwrap();
+        let runner = image.join("runner.exe");
+        fs::write(&runner, b"runner-v1").unwrap();
+        let runner_digest = hash_windows_file(&runner).unwrap();
+        let image_digest = hash_windows_image_tree(&image).unwrap();
+
+        verify_windows_hcs_assets(&image, &runner, &image_digest, &runner_digest)
+            .expect("first Windows asset verification should hash the image");
+        verify_windows_hcs_assets(&image, &runner, &image_digest, &runner_digest)
+            .expect("unchanged Windows assets should use their cache entry");
+
+        fs::write(image.join("runtime.txt"), b"runtime-v1").unwrap();
+        assert_eq!(
+            verify_windows_hcs_assets(&image, &runner, &image_digest, &runner_digest).unwrap_err(),
+            ProductionBackendRegistryError::WindowsImageDigestMismatch
+        );
+        let new_image_digest = hash_windows_image_tree(&image).unwrap();
+        verify_windows_hcs_assets(&image, &runner, &new_image_digest, &runner_digest)
+            .expect("new image digest should create a new verified cache entry");
+
+        let _ = fs::remove_dir_all(root);
+    }
 }

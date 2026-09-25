@@ -45,19 +45,22 @@ A quorum certificate is created and the task is completed in one Nodepool
 transaction. The round, replica assignments, endpoint/provider snapshots,
 observations, worker-slot reservations, certificate, and settlement record are
 persisted independently. No quorum, stale response, conflicting result, or
-single Worker success may complete a consensus task. The certificate is
-persisted as Nodepool evidence; raw replica payloads are not stored or exposed.
+single Worker success may complete a consensus task. The certificate and bounded typed `ManagedConsensusResult` bytes in each
+replica's internal `result_json` are persisted as Nodepool evidence; the raw
+transport envelope and per-replica evidence are not exposed through public APIs.
 Outstanding replicas are explicitly fenced and receive an attempt-bound stop
 request after a quorum, timeout, or cancellation. If a stop cannot be
 confirmed, Nodepool retains the Worker-slot reservation in a durable
 `stop_pending`/`cancel_pending` state and retries the stop rather than
 redispatching the Worker immediately.
 
-Consensus does not authorize variable usage billing. Until a separate usage
-attestation is designed, settlement remains the Nodepool-owned reservation,
-with the provider share split deterministically across the matching Workers.
-Worker usage is diagnostic only. A consensus certificate must never be
-described as independent correctness validation.
+For `managed-function-v1` in enforce mode, settlement uses validated,
+assignment-bound per-replica usage evidence—including valid divergent results—
+within the task-wide `max_cpt` cap. Missing or invalid receipts are not billable;
+`observe` remains non-settling and creates no usage hold. A consensus certificate
+is agreement evidence, not an independent correctness proof or usage attestation.
+Historical `managed-function-v0` billing remains governed by its frozen
+Nodepool-owned fixed-reservation contract.
 
 ## Failure model
 

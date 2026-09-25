@@ -126,7 +126,7 @@ use hivemind_task_scheduler::{
     dispatcher::worker_endpoint,
     dispatcher::Dispatcher,
     task_repository::{
-        managed_v1_worst_case_hold, ManagedConsensusStopTarget,
+        managed_v1_total_budget_hold, ManagedConsensusStopTarget,
         MANAGED_CONSENSUS_POLICY_PENDING_MESSAGE,
     },
     BatchTaskReport, TaskScheduler,
@@ -2017,21 +2017,11 @@ impl MasterNodeService for GrpcMasterNodeService {
             }
         }
 
-        // Balance admission is only a preflight check. Enforce-mode v1 holds
-        // the checked worst-case allowance for every replica plus the maximum
-        // Nodepool fee; the scheduler repeats the check and deduction atomically
-        // while creating the attempt. Observe mode is shadow-only and must not
-        // perform financial admission.
-        let balance_requirement = if managed_v1_runtime
-            && self.state.managed_consensus_rollout_mode == ManagedConsensusRolloutMode::Observe
-        {
-            None
-        } else if managed_v1_runtime {
-            match managed_v1_worst_case_hold(req.max_cpt, consensus_replica_count) {
-                Ok((_, _, held_total_cpt)) => Some((
-                    held_total_cpt,
-                    "the managed-function-v1 worst-case replica hold",
-                )),
+        // V1 requires a positive allowance for every replica, even in
+        // shadow-only observe mode where no financial hold is created.
+        let managed_v1_hold = if managed_v1_runtime {
+            match managed_v1_total_budget_hold(req.max_cpt, consensus_replica_count) {
+                Ok((_, _, _, held_total_cpt)) => Some(held_total_cpt),
                 Err(error) => {
                     return Ok(Response::new(UploadTaskResponse {
                         success: false,
@@ -2039,6 +2029,19 @@ impl MasterNodeService for GrpcMasterNodeService {
                     }));
                 }
             }
+        } else {
+            None
+        };
+        // Balance admission is only a preflight check. Enforce-mode v1 splits
+        // the task-total, fee-inclusive max_cpt across all consensus replicas;
+        // the scheduler repeats the check and deduction atomically when it
+        // creates the attempt. Observe mode remains shadow-only.
+        let balance_requirement = if managed_v1_runtime
+            && self.state.managed_consensus_rollout_mode == ManagedConsensusRolloutMode::Observe
+        {
+            None
+        } else if let Some(held_total_cpt) = managed_v1_hold {
+            Some((held_total_cpt, "the managed-function-v1 total task budget"))
         } else if req.max_cpt > 0 {
             Some((req.max_cpt, "max_cpt"))
         } else {
@@ -2143,7 +2146,9 @@ impl MasterNodeService for GrpcMasterNodeService {
             managed_output_bytes: 0,
             managed_receipt_json: None,
             retry_count: 0,
-            max_retries: 3,
+            // A platform-funded retry account does not exist yet. Never start
+            // another owner-paid managed-function consensus attempt.
+            max_retries: if managed_v1_runtime { 0 } else { 3 },
             deadline: None,
             deterministic: consensus_requested,
             side_effects: false,
@@ -2435,12 +2440,21 @@ impl MasterNodeService for GrpcMasterNodeService {
             }
             Err(e) => return Err(Status::internal(e.to_string())),
         }
-        let consensus_targets = self
+        let consensus_attempt = self
             .state
             .scheduler
-            .managed_consensus_stop_targets(&req.task_id)
+            .managed_consensus_attempt_for_task(&req.task_id)
             .await
             .map_err(|error| Status::internal(error.to_string()))?;
+        let consensus_targets = if let Some(attempt) = consensus_attempt {
+            self.state
+                .scheduler
+                .managed_consensus_stop_targets(&req.task_id, attempt.id)
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?
+        } else {
+            Vec::new()
+        };
         match self.state.scheduler.cancel_task(&req.task_id).await {
             Ok(task) => {
                 if let Some(dispatcher) = self.state.dispatcher.as_ref() {

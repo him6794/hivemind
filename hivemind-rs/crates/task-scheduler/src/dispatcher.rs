@@ -38,9 +38,9 @@ use uuid::Uuid;
 
 use crate::scheduler;
 use crate::task_repository::{
-    is_managed_gpu_binding_integrity_error, ManagedConsensusAssignment, ManagedConsensusAttempt,
-    ManagedConsensusReplica, ManagedConsensusStopTarget, TaskRepository,
-    MANAGED_FUNCTION_V0_RETIREMENT_REASON,
+    is_managed_gpu_binding_integrity_error, managed_v1_total_budget_hold,
+    ManagedConsensusAssignment, ManagedConsensusAttempt, ManagedConsensusReplica,
+    ManagedConsensusStopTarget, TaskRepository, MANAGED_FUNCTION_V0_RETIREMENT_REASON,
 };
 
 pub struct Dispatcher {
@@ -94,6 +94,24 @@ fn classify_managed_task_dispatch(
     // route. Keep it closed until policy creation succeeds; never send it to the
     // legacy single-Worker path.
     ManagedTaskDispatchMode::AwaitingPolicy
+}
+
+fn eligible_managed_consensus_workers(workers: &[WorkerNode]) -> Vec<WorkerNode> {
+    workers
+        .iter()
+        .filter(|worker| {
+            !worker.username.trim().is_empty() && worker_transport_endpoint(&worker.ip).is_ok()
+        })
+        .cloned()
+        .collect()
+}
+
+fn managed_consensus_selection_task(task: &Task, replica_count: u16) -> Result<Task> {
+    let mut selection_task = task.clone();
+    if task.runtime.as_deref().map(str::trim) == Some(MANAGED_DSL_V1_RUNTIME_VERSION) {
+        selection_task.max_cpt = managed_v1_total_budget_hold(task.max_cpt, replica_count)?.0;
+    }
+    Ok(selection_task)
 }
 
 impl Dispatcher {
@@ -172,11 +190,21 @@ impl Dispatcher {
                 self.managed_consensus_max_replicas
             );
         }
-        let mut candidates = self.rank_workers_by_cache_affinity(task, workers).await?;
+        let selection_task = managed_consensus_selection_task(task, policy.replica_count)?;
+        let eligible = eligible_managed_consensus_workers(workers);
+        if eligible.len() != workers.len() {
+            tracing::debug!(
+                task_id = %task.task_id,
+                missing_endpoint_or_provider = workers.len() - eligible.len(),
+                "Skipping managed consensus workers without a callback or provider identity"
+            );
+        }
+        let mut candidates = self.rank_workers_by_cache_affinity(task, &eligible).await?;
         let required = usize::from(policy.replica_count);
         let mut selected = Vec::with_capacity(required);
         for _ in 0..required {
-            let Some(worker) = scheduler::find_best_worker(task, &candidates).await else {
+            let Some(worker) = scheduler::find_best_worker(&selection_task, &candidates).await
+            else {
                 return Ok(None);
             };
             candidates.retain(|candidate| candidate.worker_id != worker.worker_id);
@@ -719,13 +747,18 @@ impl Dispatcher {
     ) -> Result<Option<Task>> {
         let targets = self
             .repo
-            .managed_consensus_stop_targets(&task.task_id)
+            .managed_consensus_stop_targets(&task.task_id, attempt.id)
             .await?;
         let mut all_stopped = true;
         for target in &targets {
-            if let Err(error) =
-                stop_managed_consensus_replica(&self.worker_execution_private_key_pem, task, target)
-                    .await
+            if let Err(error) = stop_and_record_managed_consensus_replica(
+                &self.repo,
+                &self.worker_execution_private_key_pem,
+                task,
+                attempt.id,
+                target,
+            )
+            .await
             {
                 all_stopped = false;
                 warn!(
@@ -736,7 +769,17 @@ impl Dispatcher {
                 );
             }
         }
-        if all_stopped {
+        if attempt.mode == "observe" {
+            if self
+                .repo
+                .complete_managed_consensus_observe(&task.task_id, attempt.id, None, all_stopped)
+                .await?
+            {
+                self.repo.find_by_task_id(&task.task_id).await
+            } else {
+                Ok(None)
+            }
+        } else if all_stopped {
             self.repo
                 .mark_managed_consensus_no_quorum(&task.task_id, attempt.id, reason, retry_limit)
                 .await
@@ -752,13 +795,15 @@ impl Dispatcher {
         for (task, attempt) in self.repo.managed_consensus_pending_stop_attempts().await? {
             let targets = self
                 .repo
-                .managed_consensus_stop_targets(&task.task_id)
+                .managed_consensus_stop_targets(&task.task_id, attempt.id)
                 .await?;
             let mut all_stopped = true;
             for target in &targets {
-                if let Err(error) = stop_managed_consensus_replica(
+                if let Err(error) = stop_and_record_managed_consensus_replica(
+                    &self.repo,
                     &self.worker_execution_private_key_pem,
                     &task,
+                    attempt.id,
                     target,
                 )
                 .await
@@ -1445,6 +1490,11 @@ fn managed_gpu_manifest_is_valid(manifest: &[u8]) -> bool {
 /// negative task limit is treated as zero so it can only fail closed, never
 /// grant an unbounded retry budget.
 fn effective_retry_limit(task: &Task, dispatcher_limit: i32) -> i32 {
+    if task.runtime.as_deref().map(str::trim) == Some(MANAGED_DSL_V1_RUNTIME_VERSION) {
+        // There is no funded platform account for retries. Never create a
+        // second owner-paid managed-function attempt after a no-quorum result.
+        return 0;
+    }
     dispatcher_limit.max(0).min(task.max_retries.max(0))
 }
 
@@ -2052,6 +2102,96 @@ struct ManagedConsensusVote {
     result_digest: String,
 }
 
+async fn record_managed_consensus_vote(
+    repo: &TaskRepository,
+    task: &Task,
+    attempt: &ManagedConsensusAttempt,
+    vote: ManagedConsensusVote,
+) -> Result<(
+    crate::task_repository::ManagedConsensusObservationOutcome,
+    ManagedConsensusVote,
+)> {
+    let outcome = repo
+        .record_managed_consensus_observation(
+            &task.task_id,
+            attempt.id,
+            &attempt.round_id,
+            &vote.observation.replica_id,
+            &vote.observation.worker_id,
+            vote.observation.success,
+            &vote.result_digest,
+            i64::try_from(vote.observation.output_bytes)
+                .map_err(|_| anyhow::anyhow!("consensus output length exceeds database range"))?,
+            &vote.result_json,
+            i64::try_from(vote.observation.claimed_usage_units)
+                .map_err(|_| anyhow::anyhow!("consensus usage exceeds database range"))?,
+            i64::try_from(vote.observation.claimed_executed_ops)
+                .map_err(|_| anyhow::anyhow!("consensus operation count exceeds database range"))?,
+        )
+        .await?;
+    Ok((outcome, vote))
+}
+
+async fn drain_managed_consensus_workers(
+    repo: &TaskRepository,
+    task: &Task,
+    attempt: &ManagedConsensusAttempt,
+    workers: &mut tokio::task::JoinSet<(String, Result<Option<ManagedConsensusVote>>)>,
+) -> Result<()> {
+    let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !workers.is_empty() {
+        let remaining = drain_deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let joined = tokio::time::timeout(remaining, workers.join_next()).await;
+        let Some(joined) = joined.ok().flatten() else {
+            break;
+        };
+        match joined {
+            Ok((replica_id, Ok(Some(vote)))) => {
+                match record_managed_consensus_vote(repo, task, attempt, vote).await {
+                    Ok((outcome, _)) => tracing::debug!(
+                        task_id = %task.task_id,
+                        replica_id,
+                        recorded = outcome == crate::task_repository::ManagedConsensusObservationOutcome::Recorded,
+                        "persisted managed consensus result while draining stopped replicas"
+                    ),
+                    Err(error) => tracing::warn!(
+                        task_id = %task.task_id,
+                        replica_id,
+                        error = %error,
+                        "managed consensus result was rejected while draining stopped replicas"
+                    ),
+                }
+            }
+            Ok((replica_id, Ok(None))) => {
+                tracing::debug!(
+                    task_id = %task.task_id,
+                    replica_id,
+                    "managed consensus replica had no result while draining stopped replicas"
+                );
+            }
+            Ok((replica_id, Err(error))) => {
+                tracing::debug!(
+                    task_id = %task.task_id,
+                    replica_id,
+                    error = %error,
+                    "managed consensus replica result was unavailable while draining stopped replicas"
+                );
+            }
+            Err(error) => {
+                tracing::debug!(
+                    task_id = %task.task_id,
+                    error = %error,
+                    "managed consensus replica task ended while draining stopped replicas"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn persisted_managed_consensus_observation(
     task: &Task,
     attempt: &ManagedConsensusAttempt,
@@ -2171,8 +2311,13 @@ async fn execute_managed_consensus_attempt(
             .ok_or_else(|| anyhow::anyhow!("managed consensus recovery output was not retained"))?;
         let mut stops_confirmed = true;
         for assignment in pending_assignments.values() {
-            if let Err(error) =
-                stop_managed_consensus_assignment(&private_key_pem, &task, assignment).await
+            if let Err(error) = stop_and_record_managed_consensus_assignment(
+                &repo,
+                &private_key_pem,
+                &task,
+                assignment,
+            )
+            .await
             {
                 stops_confirmed = false;
                 warn!(
@@ -2191,13 +2336,23 @@ async fn execute_managed_consensus_attempt(
                 stops_confirmed,
             )
             .await?;
-        } else {
-            repo.complete_managed_consensus(&certificate, &output, stops_confirmed)
+        } else if stops_confirmed {
+            repo.complete_managed_consensus(&certificate, &output, true)
                 .await?;
+        } else {
+            repo.mark_managed_consensus_quorum_stop_pending(
+                &task.task_id,
+                attempt.id,
+                &certificate,
+                &output,
+            )
+            .await?;
         }
         return Ok(());
     }
     let mut workers = tokio::task::JoinSet::new();
+    let enforce = attempt.mode == "enforce";
+    let replica_count = policy.replica_count;
     for assignment in assignments {
         let repo = Arc::clone(&repo);
         let task = task.clone();
@@ -2211,6 +2366,8 @@ async fn execute_managed_consensus_attempt(
                 private_key_pem,
                 max_result_bytes,
                 deadline,
+                enforce,
+                replica_count,
             )
             .await;
             (replica_id, result)
@@ -2235,27 +2392,8 @@ async fn execute_managed_consensus_attempt(
         match joined {
             Ok((replica_id, Ok(Some(vote)))) => {
                 pending_assignments.remove(&replica_id);
-                let outcome = repo
-                    .record_managed_consensus_observation(
-                        &task.task_id,
-                        attempt.id,
-                        &attempt.round_id,
-                        &vote.observation.replica_id,
-                        &vote.observation.worker_id,
-                        vote.observation.success,
-                        &vote.result_digest,
-                        i64::try_from(vote.observation.output_bytes).map_err(|_| {
-                            anyhow::anyhow!("consensus output length exceeds database range")
-                        })?,
-                        &vote.result_json,
-                        i64::try_from(vote.observation.claimed_usage_units).map_err(|_| {
-                            anyhow::anyhow!("consensus usage exceeds database range")
-                        })?,
-                        i64::try_from(vote.observation.claimed_executed_ops).map_err(|_| {
-                            anyhow::anyhow!("consensus operation count exceeds database range")
-                        })?,
-                    )
-                    .await?;
+                let (outcome, vote) =
+                    record_managed_consensus_vote(&repo, &task, &attempt, vote).await?;
                 if outcome == crate::task_repository::ManagedConsensusObservationOutcome::Recorded {
                     let result_key = vote.observation.result_digest;
                     outputs.insert(result_key, vote.output);
@@ -2263,7 +2401,8 @@ async fn execute_managed_consensus_attempt(
                     if let Ok(certificate) = evaluate_quorum(&binding, policy, &observations) {
                         let mut stops_confirmed = true;
                         for assignment in pending_assignments.values() {
-                            if let Err(error) = stop_managed_consensus_assignment(
+                            if let Err(error) = stop_and_record_managed_consensus_assignment(
+                                &repo,
                                 &private_key_pem,
                                 &task,
                                 assignment,
@@ -2279,6 +2418,8 @@ async fn execute_managed_consensus_attempt(
                                 );
                             }
                         }
+                        drain_managed_consensus_workers(&repo, &task, &attempt, &mut workers)
+                            .await?;
                         let output = outputs
                             .get(&certificate.result_digest)
                             .cloned()
@@ -2295,9 +2436,17 @@ async fn execute_managed_consensus_attempt(
                                 stops_confirmed,
                             )
                             .await?;
-                        } else {
-                            repo.complete_managed_consensus(&certificate, &output, stops_confirmed)
+                        } else if stops_confirmed {
+                            repo.complete_managed_consensus(&certificate, &output, true)
                                 .await?;
+                        } else {
+                            repo.mark_managed_consensus_quorum_stop_pending(
+                                &task.task_id,
+                                attempt.id,
+                                &certificate,
+                                &output,
+                            )
+                            .await?;
                         }
                         workers.abort_all();
                         return Ok(());
@@ -2327,7 +2476,8 @@ async fn execute_managed_consensus_attempt(
     let mut stops_confirmed = true;
     for assignment in pending_assignments.values() {
         if let Err(error) =
-            stop_managed_consensus_assignment(&private_key_pem, &task, assignment).await
+            stop_and_record_managed_consensus_assignment(&repo, &private_key_pem, &task, assignment)
+                .await
         {
             stops_confirmed = false;
             warn!(
@@ -2338,6 +2488,7 @@ async fn execute_managed_consensus_attempt(
             );
         }
     }
+    drain_managed_consensus_workers(&repo, &task, &attempt, &mut workers).await?;
     workers.abort_all();
     let reason = "managed consensus quorum was not reached";
     if attempt.mode == "observe" {
@@ -2365,6 +2516,8 @@ async fn execute_managed_consensus_replica(
     private_key_pem: String,
     max_result_bytes: usize,
     deadline: chrono::DateTime<chrono::Utc>,
+    enforce: bool,
+    replica_count: u16,
 ) -> Result<Option<ManagedConsensusVote>> {
     if !repo
         .mark_managed_consensus_replica_running(assignment.attempt_id, &assignment.replica_id)
@@ -2379,6 +2532,16 @@ async fn execute_managed_consensus_replica(
         .max_encoding_message_size(WORKER_RPC_MESSAGE_MAX_BYTES)
         .max_decoding_message_size(WORKER_RPC_MESSAGE_MAX_BYTES);
     let mut request = build_execute_task_request_with_credentials(&task, token);
+    if task.runtime.as_deref().map(str::trim) == Some(MANAGED_DSL_V1_RUNTIME_VERSION) {
+        // Enforce-mode Workers receive the persisted escrow allowance. Observe
+        // mode creates no hold, but still uses an equal share of the task cap.
+        request.managed_budget_units = if enforce {
+            repo.managed_v1_replica_allowance_for_attempt(assignment.attempt_id)
+                .await?
+        } else {
+            managed_v1_total_budget_hold(task.max_cpt, replica_count)?.0
+        };
+    }
     request.execution_id = assignment.execution_id.clone();
     request.attempt_id = assignment.worker_attempt_id.clone();
     request.idempotency_key = managed_consensus_idempotency_key(&task);
@@ -2481,7 +2644,12 @@ async fn stop_managed_consensus_assignment(
     });
     request.set_timeout(Duration::from_secs(5));
     let response = client.stop_task_execution(request).await?.into_inner();
-    if response.success || response.status_message == "Task not running" {
+    if response.success
+        && matches!(
+            response.status_message.as_str(),
+            "Stop confirmed" | "Stop fenced before start"
+        )
+    {
         return Ok(());
     }
     anyhow::bail!(
@@ -2510,6 +2678,53 @@ async fn stop_managed_consensus_replica(
         anyhow::bail!("managed consensus stop target idempotency key is stale");
     }
     stop_managed_consensus_assignment(private_key_pem, task, &assignment).await
+}
+
+async fn stop_and_record_managed_consensus_assignment(
+    repo: &TaskRepository,
+    private_key_pem: &str,
+    task: &Task,
+    assignment: &ManagedConsensusAssignment,
+) -> Result<()> {
+    stop_managed_consensus_assignment(private_key_pem, task, assignment).await?;
+    if !repo
+        .mark_managed_consensus_replica_stop_confirmed(
+            &task.task_id,
+            assignment.attempt_id,
+            &assignment.replica_id,
+        )
+        .await?
+    {
+        anyhow::bail!(
+            "managed consensus stop for replica {} could not be persisted",
+            assignment.replica_id
+        );
+    }
+    Ok(())
+}
+
+async fn stop_and_record_managed_consensus_replica(
+    repo: &TaskRepository,
+    private_key_pem: &str,
+    task: &Task,
+    attempt_id: Uuid,
+    target: &ManagedConsensusStopTarget,
+) -> Result<()> {
+    stop_managed_consensus_replica(private_key_pem, task, target).await?;
+    if !repo
+        .mark_managed_consensus_replica_stop_confirmed(
+            &task.task_id,
+            attempt_id,
+            &target.replica_id,
+        )
+        .await?
+    {
+        anyhow::bail!(
+            "managed consensus stop for replica {} could not be persisted",
+            target.replica_id
+        );
+    }
+    Ok(())
 }
 
 fn managed_consensus_backend_id(task: &Task) -> String {
@@ -3842,10 +4057,11 @@ mod tests {
         TaskOutputUploadResponse, TaskResultUploadRequest, TaskResultUploadResponse,
         TaskUsageRequest, TaskUsageResponse,
     };
+    use std::collections::HashSet;
     use std::net::SocketAddr;
     use std::sync::{Arc, OnceLock};
     use std::time::Duration;
-    use tokio::sync::oneshot;
+    use tokio::sync::{oneshot, watch};
     use tokio_stream::wrappers::TcpListenerStream;
     use tonic::{Request, Response, Status};
 
@@ -4259,6 +4475,10 @@ mod tests {
         task.max_retries = -1;
         assert_eq!(effective_retry_limit(&task, 2), 0);
         assert_eq!(effective_retry_limit(&task, -1), 0);
+
+        task.runtime = Some(MANAGED_DSL_V1_RUNTIME_VERSION.into());
+        task.max_retries = 3;
+        assert_eq!(effective_retry_limit(&task, 2), 0);
     }
 
     fn make_task(id: &str, status: TaskStatus, retry_count: i32) -> Task {
@@ -6513,6 +6733,67 @@ mod tests {
         fixture.cleanup().await.ok();
     }
 
+    #[test]
+    fn managed_consensus_candidates_require_callback_and_provider_identity() {
+        let valid = ["w1", "w2", "w3"].map(|id| make_worker(id, 4, 16, WorkerStatus::Idle));
+        let mut missing_callback = make_worker("w4", 16, 32, WorkerStatus::Idle);
+        missing_callback.ip = "  ".into();
+        let mut missing_provider = make_worker("w5", 16, 32, WorkerStatus::Idle);
+        missing_provider.username = "  ".into();
+        let mut bind_only_callback = make_worker("w6", 16, 32, WorkerStatus::Idle);
+        bind_only_callback.ip = "0.0.0.0:50053".into();
+        let workers = vec![
+            missing_callback,
+            valid[0].clone(),
+            missing_provider,
+            valid[1].clone(),
+            bind_only_callback,
+            valid[2].clone(),
+        ];
+
+        let eligible = super::eligible_managed_consensus_workers(&workers);
+        assert_eq!(
+            eligible
+                .iter()
+                .map(|worker| worker.worker_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["w1", "w2", "w3"]
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_v1_worker_selection_uses_the_per_replica_budget() {
+        let mut task = make_task("share-selection", TaskStatus::Pending, 0);
+        task.runtime = Some(MANAGED_DSL_V1_RUNTIME_VERSION.into());
+        task.max_cpt = 100;
+        let mut worker = make_worker("w1", 4, 16, WorkerStatus::Idle);
+        let mut report = hivemind_models::WorkerCapabilityReport::public_managed_dsl();
+        for capability in &mut report.capabilities {
+            if capability.runtime == MANAGED_DSL_V1_RUNTIME_VERSION {
+                capability.max_usage_units = 30;
+            }
+        }
+        let capabilities_json = report.capabilities_json().unwrap();
+        worker.admission_mode = hivemind_models::PUBLIC_DYNAMIC_ADMISSION_MODE.into();
+        worker.dynamic_capabilities_digest = Some(format!(
+            "sha256:{:x}",
+            Sha256::digest(capabilities_json.as_bytes())
+        ));
+        worker.dynamic_capabilities_json = Some(capabilities_json);
+        worker.dynamic_admission_ready = true;
+        worker.dynamic_observed_at = Some(Utc::now());
+
+        assert!(scheduler::find_best_worker(&task, &[worker.clone()])
+            .await
+            .is_none());
+        let selection_task = super::managed_consensus_selection_task(&task, 3).unwrap();
+        assert_eq!(selection_task.max_cpt, 30);
+        assert_eq!(task.max_cpt, 100);
+        assert!(scheduler::find_best_worker(&selection_task, &[worker])
+            .await
+            .is_some());
+    }
+
     fn make_worker(id: &str, cpu: i32, mem: i32, status: WorkerStatus) -> WorkerNode {
         WorkerNode {
             id: uuid::Uuid::new_v4(),
@@ -7710,7 +7991,7 @@ mod tests {
         }
         let mut task = make_task(&task_id, TaskStatus::Pending, 0);
         task.owner = owner.clone();
-        task.runtime = Some("managed-function-v0".into());
+        task.runtime = Some(MANAGED_DSL_V1_RUNTIME_VERSION.into());
         task.task_source = Some("return input".into());
         task.torrent_source = Some("{}".into());
         task.deterministic = true;
@@ -7989,7 +8270,7 @@ mod tests {
         .fetch_one(&repo.pool)
         .await
         .unwrap();
-        assert_eq!(pending_replicas, 3);
+        assert_eq!(pending_replicas, 1);
         let active_reservations: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM managed_consensus_worker_reservations
              WHERE attempt_id = $1 AND state = 'active'",
@@ -8040,23 +8321,11 @@ mod tests {
             0
         );
 
-        let mut retry_attempt_ids = Vec::new();
-        for _ in 0..3 {
-            let request = tokio::time::timeout(Duration::from_secs(2), stop_requests.recv())
-                .await
-                .unwrap()
-                .expect("reconciliation must retry every pending Worker stop");
-            retry_attempt_ids.push(request.attempt_id);
-        }
-        retry_attempt_ids.sort();
-        assert_eq!(
-            retry_attempt_ids,
-            vec![
-                format!("{round_id}:replica-1"),
-                format!("{round_id}:replica-2"),
-                format!("{round_id}:replica-3"),
-            ]
-        );
+        let retry_request = tokio::time::timeout(Duration::from_secs(2), stop_requests.recv())
+            .await
+            .unwrap()
+            .expect("reconciliation must retry the unconfirmed Worker stop");
+        assert_eq!(retry_request.attempt_id, format!("{round_id}:replica-3"));
 
         let final_attempt_state: String =
             sqlx::query_scalar("SELECT state FROM managed_consensus_attempts WHERE id = $1")
@@ -8065,15 +8334,15 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(final_attempt_state, "cancelled");
-        let cancelled_replicas: i64 = sqlx::query_scalar(
+        let stopped_replicas: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM managed_consensus_replicas
-             WHERE attempt_id = $1 AND state = 'cancelled'",
+             WHERE attempt_id = $1 AND state = 'stopped'",
         )
         .bind(attempt_id)
         .fetch_one(&repo.pool)
         .await
         .unwrap();
-        assert_eq!(cancelled_replicas, 3);
+        assert_eq!(stopped_replicas, 3);
         let released_reservations: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM managed_consensus_worker_reservations
              WHERE attempt_id = $1 AND state = 'released'",
@@ -8109,10 +8378,17 @@ mod tests {
         fixture.cleanup().await.ok();
     }
 
+    #[derive(Default)]
+    struct ConsensusWorkerState {
+        running: HashMap<String, (watch::Sender<bool>, watch::Receiver<bool>)>,
+        stopped: HashSet<String>,
+    }
+
     struct ConsensusWorkerService {
         output: Vec<u8>,
         delay: Duration,
         stop_tx: tokio::sync::mpsc::Sender<StopTaskExecutionRequest>,
+        state: std::sync::Mutex<ConsensusWorkerState>,
     }
 
     #[tonic::async_trait]
@@ -8122,26 +8398,56 @@ mod tests {
             request: Request<ExecuteTaskRequest>,
         ) -> Result<Response<ExecuteTaskResponse>, Status> {
             let request = request.into_inner();
-            if !self.delay.is_zero() {
-                tokio::time::sleep(self.delay).await;
+            let (mut cancellation_rx, finished_tx) = {
+                let mut state = self.state.lock().unwrap();
+                if state.stopped.contains(&request.attempt_id) {
+                    return Err(Status::cancelled("fixture attempt stopped before start"));
+                }
+                let (cancellation_tx, cancellation_rx) = watch::channel(false);
+                let (finished_tx, finished_rx) = watch::channel(false);
+                state
+                    .running
+                    .insert(request.attempt_id.clone(), (cancellation_tx, finished_rx));
+                (cancellation_rx, finished_tx)
+            };
+            let cancelled = tokio::select! {
+                _ = tokio::time::sleep(self.delay) => false,
+                _ = cancellation_rx.changed() => true,
+            };
+            if cancelled {
+                let mut state = self.state.lock().unwrap();
+                state.running.remove(&request.attempt_id);
+                let _ = finished_tx.send(true);
+                return Err(Status::cancelled("fixture attempt stopped"));
             }
             let output = self.output.clone();
+            let (backend_id, semantics_manifest_sha256) =
+                if request.runtime == MANAGED_DSL_V1_RUNTIME_VERSION {
+                    (
+                        hivemind_managed_consensus::MANAGED_DSL_V1_DEFAULT_BACKEND_ID,
+                        hivemind_managed_consensus::MANAGED_DSL_V1_DEFAULT_SEMANTICS_DIGEST,
+                    )
+                } else {
+                    (
+                        hivemind_managed_consensus::MANAGED_DSL_DEFAULT_BACKEND_ID,
+                        hivemind_managed_consensus::MANAGED_DSL_DEFAULT_SEMANTICS_DIGEST,
+                    )
+                };
             let result = ManagedConsensusResult {
                 protocol_version: CONSENSUS_PROTOCOL_VERSION as u32,
                 status: "completed".into(),
                 output: output.clone(),
                 output_bytes: output.len() as u64,
                 runtime: request.runtime.clone(),
-                backend_id: hivemind_managed_consensus::MANAGED_DSL_DEFAULT_BACKEND_ID.into(),
-                semantics_manifest_sha256:
-                    hivemind_managed_consensus::MANAGED_DSL_DEFAULT_SEMANTICS_DIGEST.into(),
+                backend_id: backend_id.into(),
+                semantics_manifest_sha256: semantics_manifest_sha256.into(),
                 source_sha256: digest_hex(request.task_source.as_bytes()),
                 input_sha256: digest_hex(request.torrent.as_bytes()),
                 result_digest: digest_hex(&output),
                 ..ManagedConsensusResult::default()
             };
             let result_digest = digest_hex(&result.encode_to_vec());
-            Ok(Response::new(ExecuteTaskResponse {
+            let response = ExecuteTaskResponse {
                 success: true,
                 status_message: String::from_utf8(output)
                     .map_err(|_| Status::invalid_argument("test consensus output is not UTF-8"))?,
@@ -8155,7 +8461,11 @@ mod tests {
                 consensus_round_id: request.consensus_round_id.clone(),
                 consensus_protocol_version: request.consensus_protocol_version,
                 ..ExecuteTaskResponse::default()
-            }))
+            };
+            let mut state = self.state.lock().unwrap();
+            state.running.remove(&request.attempt_id);
+            let _ = finished_tx.send(true);
+            Ok(Response::new(response))
         }
 
         async fn task_output_upload(
@@ -8187,13 +8497,37 @@ mod tests {
             &self,
             request: Request<StopTaskExecutionRequest>,
         ) -> Result<Response<StopTaskExecutionResponse>, Status> {
+            let request = request.into_inner();
+            let mut finished_rx = {
+                let mut state = self.state.lock().unwrap();
+                state.stopped.insert(request.attempt_id.clone());
+                state
+                    .running
+                    .get(&request.attempt_id)
+                    .map(|(cancellation_tx, finished_rx)| {
+                        let _ = cancellation_tx.send(true);
+                        finished_rx.clone()
+                    })
+            };
             self.stop_tx
-                .send(request.into_inner())
+                .send(request)
                 .await
                 .map_err(|_| Status::internal("consensus stop receiver closed"))?;
+            if let Some(ref mut finished_rx) = finished_rx {
+                while !*finished_rx.borrow() {
+                    finished_rx.changed().await.map_err(|_| {
+                        Status::internal("fixture execution ended without confirmation")
+                    })?;
+                }
+            }
             Ok(Response::new(StopTaskExecutionResponse {
                 success: true,
-                status_message: "Stop requested".into(),
+                status_message: if finished_rx.is_some() {
+                    "Stop confirmed"
+                } else {
+                    "Stop fenced before start"
+                }
+                .into(),
             }))
         }
 
@@ -8221,6 +8555,7 @@ mod tests {
             output,
             delay,
             stop_tx,
+            state: std::sync::Mutex::new(ConsensusWorkerState::default()),
         });
         tokio::spawn(async move {
             let _ = tonic::transport::Server::builder()

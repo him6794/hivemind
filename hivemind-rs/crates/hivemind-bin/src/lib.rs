@@ -2,11 +2,11 @@
 use anyhow::Context;
 use anyhow::Result;
 use hivemind_client_runtime as client_runtime;
-use hivemind_config::HivemindConfig;
+use hivemind_config::{DotenvLoadingPolicy, HivemindConfig};
 use tokio::sync::watch;
 #[cfg(feature = "worker")]
 use tokio_stream::wrappers::TcpListenerStream;
-use tracing::info;
+use tracing::{info, warn};
 
 #[cfg(feature = "cli")]
 mod cli;
@@ -90,6 +90,14 @@ impl ServiceRole {
     }
 }
 
+fn standalone_service_dotenv_policy(role: ServiceRole, is_windows: bool) -> DotenvLoadingPolicy {
+    if is_windows && matches!(role, ServiceRole::Master | ServiceRole::Worker) {
+        DotenvLoadingPolicy::ExecutableDirectoryOnly
+    } else {
+        DotenvLoadingPolicy::SearchParents
+    }
+}
+
 pub async fn run_service(role: ServiceRole) -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if let Some(descriptor) = client_runtime::update::activation_request_path(&args)? {
@@ -99,7 +107,12 @@ pub async fn run_service(role: ServiceRole) -> Result<()> {
     }
     hivemind_common::init_tracing("hivemind");
     ensure_role_supported(role)?;
-    run_service_inner(role, args.into_iter().skip(1).collect()).await
+    run_service_inner(
+        role,
+        args.into_iter().skip(1).collect(),
+        standalone_service_dotenv_policy(role, cfg!(target_os = "windows")),
+    )
+    .await
 }
 
 #[cfg(feature = "cli")]
@@ -136,7 +149,12 @@ pub async fn run_from_cli(args: Vec<String>) -> Result<()> {
         }
     };
     ensure_role_supported(role)?;
-    run_service_inner(role, args.into_iter().skip(1).collect()).await
+    run_service_inner(
+        role,
+        args.into_iter().skip(1).collect(),
+        DotenvLoadingPolicy::SearchParents,
+    )
+    .await
 }
 
 fn ensure_role_supported(role: ServiceRole) -> Result<()> {
@@ -341,23 +359,24 @@ mod worker_owner_tests {
     }
 }
 
-async fn run_service_inner(role: ServiceRole, service_arguments: Vec<String>) -> Result<()> {
+async fn run_service_inner(
+    role: ServiceRole,
+    service_arguments: Vec<String>,
+    dotenv_policy: DotenvLoadingPolicy,
+) -> Result<()> {
     #[cfg(not(any(feature = "master", feature = "worker")))]
     let _ = &service_arguments;
 
+    let config = HivemindConfig::load_with_dotenv_policy(dotenv_policy)?;
+    #[cfg(feature = "worker")]
+    let mut config = config;
     #[cfg(feature = "worker")]
     if role.includes_worker() && std::env::var_os("HIVEMIND_CONFIG").is_none() {
         // Downloaded workers must be runnable with only website credentials.
         // Keep the release egress gate enabled with the platform-safe defaults;
         // explicit operator environment variables still override these values.
-        set_worker_egress_default("EXECUTOR_NETWORK_EGRESS_ENABLED", "true");
-        set_worker_egress_default("EXECUTOR_NETWORK_EGRESS_MODE", "allowlist");
-        set_worker_egress_default(
-            "EXECUTOR_NETWORK_EGRESS_TARGETS",
-            "8.8.8.8,1.1.1.1,100.64.0.0/10",
-        );
+        apply_worker_egress_defaults(&mut config);
     }
-    let config = HivemindConfig::load()?;
 
     let run_master = role.includes_master();
     let run_website = role.includes_website();
@@ -372,6 +391,32 @@ async fn run_service_inner(role: ServiceRole, service_arguments: Vec<String>) ->
     let _ = run_worker;
 
     validate_service_config(&config, role)?;
+
+    if cfg!(target_os = "windows") {
+        for (enabled, client_role) in [
+            (run_master, client_runtime::ClientRole::Master),
+            (run_worker, client_runtime::ClientRole::Worker),
+        ] {
+            if !enabled {
+                continue;
+            }
+            match client_runtime::update_loop::cleanup_activation_helpers_for_role(
+                &config,
+                client_role,
+            ) {
+                Ok(removed) if removed > 0 => info!(
+                    role = client_role.as_str(),
+                    removed, "Cleaned completed signed-update helper copies"
+                ),
+                Ok(_) => {}
+                Err(error) => warn!(
+                    role = client_role.as_str(),
+                    error = %error,
+                    "Could not clean completed signed-update helper copies; retrying later"
+                ),
+            }
+        }
+    }
 
     #[cfg(any(feature = "master", feature = "nodepool", feature = "worker"))]
     let mut shutdown_handles: Vec<watch::Sender<bool>> = Vec::new();
@@ -587,10 +632,16 @@ async fn run_service_inner(role: ServiceRole, service_arguments: Vec<String>) ->
         };
         let worker_advertise_addr = if require_external_overlay {
             match overlay_ip.as_deref() {
-                Some(overlay_ip) => nodepool_client::advertise_addr_from_overlay(&wk_addr, overlay_ip)
-                    .context(
-                        "strict external overlay requires a Nodepool-reachable Worker advertise address",
-                    )?,
+                Some(overlay_ip) => nodepool_client::forwarded_overlay_advertise_addr(
+                    &wk_addr,
+                    config
+                        .server
+                        .worker_advertise_addr
+                        .as_deref()
+                        .unwrap_or_default(),
+                    overlay_ip,
+                )
+                .context("strict external overlay requires a VPN-forwarded Worker callback")?,
                 None => {
                     tracing::info!(
                         "Worker advertise address deferred until external overlay enrollment"
@@ -754,6 +805,7 @@ async fn run_service_inner(role: ServiceRole, service_arguments: Vec<String>) ->
                     worker_id: worker_id.clone(),
                     username: worker_username.clone(),
                     worker_addr: worker_addr_state.clone(),
+                    worker_grpc_addr: wk_addr.clone(),
                     location: std::env::var("WORKER_LOCATION").unwrap_or_else(|_| "local".into()),
                     token: worker_nodepool_token.clone(),
                     interval: std::time::Duration::from_secs(10),
@@ -805,17 +857,44 @@ async fn run_service_inner(role: ServiceRole, service_arguments: Vec<String>) ->
 }
 
 #[cfg(feature = "worker")]
-fn set_worker_egress_default(key: &str, value: &str) {
-    if std::env::var_os(key).is_none() {
-        // The process is the downloaded worker's configuration boundary; these
-        // defaults are set before HivemindConfig applies environment overrides.
-        unsafe { std::env::set_var(key, value) };
+fn apply_worker_egress_defaults(config: &mut HivemindConfig) {
+    if std::env::var_os("EXECUTOR_NETWORK_EGRESS_ENABLED").is_none() {
+        config.executor.network_egress_enabled = true;
+    }
+    if std::env::var_os("EXECUTOR_NETWORK_EGRESS_MODE").is_none() {
+        config.executor.network_egress_mode = "allowlist".into();
+    }
+    if std::env::var_os("EXECUTOR_NETWORK_EGRESS_TARGETS").is_none() {
+        config.executor.network_egress_targets = ["8.8.8.8", "1.1.1.1", "100.64.0.0/10"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_standalone_clients_are_isolated_without_changing_all_mode() {
+        assert_eq!(
+            standalone_service_dotenv_policy(ServiceRole::Master, true),
+            DotenvLoadingPolicy::ExecutableDirectoryOnly
+        );
+        assert_eq!(
+            standalone_service_dotenv_policy(ServiceRole::Worker, true),
+            DotenvLoadingPolicy::ExecutableDirectoryOnly
+        );
+        assert_eq!(
+            standalone_service_dotenv_policy(ServiceRole::All, true),
+            DotenvLoadingPolicy::SearchParents
+        );
+        assert_eq!(
+            standalone_service_dotenv_policy(ServiceRole::Master, false),
+            DotenvLoadingPolicy::SearchParents
+        );
+    }
 
     #[test]
     fn default_user_seed_requires_explicit_truthy_env_value() {

@@ -29,6 +29,12 @@ Raw `docker compose` requires the following release values:
   to sign worker execution tokens.
 - `WORKER_EXECUTION_PUBLIC_KEY_PEM`: the public key matching that private key;
   the worker uses it to verify execution tokens.
+- `HIVEMIND_WORKER_STATE_ROOT`: optional override for an absolute, persistent
+  directory holding stop-fence and other Worker state. Standalone non-Windows
+  Workers default to `$XDG_STATE_HOME/hivemind/worker` or
+  `$HOME/.local/state/hivemind/worker`; Docker Compose mounts a dedicated named
+  volume at `/var/lib/hivemind/worker-state`. Windows defaults to
+  `%LOCALAPPDATA%\Hivemind\Worker` when this variable is absent.
 - `WORKER_NODEPOOL_TOKEN`: optional. Leave it blank when the Worker signs in
   through Website API and registers through Worker UI.
 
@@ -71,22 +77,24 @@ overlay. Do not deploy either downloaded client or the platform
 `HEADSCALE_API_KEY` on the Orange Pi as a substitute for that topology. The API
 key remains server-side and is never distributed in client packages.
 
-To make a local Windows Master or Worker enroll automatically, set
-`WEBSITE_API_BASE` (or the role-specific `MASTER_WEBSITE_API_BASE` /
-`WORKER_WEBSITE_API_BASE`) to the HTTPS origin of the deployed Rust Website API.
-That origin must expose both `POST /api/login` and the protected
+For a local Windows Master or Worker to enroll automatically, its configured
+Website API origin must be the HTTPS origin of the deployed Rust Website API.
+Set `WEBSITE_API_BASE` (or the role-specific `MASTER_WEBSITE_API_BASE` /
+`WORKER_WEBSITE_API_BASE`) only when the package/runtime default does not match
+your deployment. The origin must expose both `POST /api/login` and the protected
 `POST /api/vpn/config`; the official Next BFF is not a VPN-config local executable path unless
 that route is explicitly added there. The downloaded Worker package exposes
 `WEBSITE_API_BASE` in `.env.worker.example`; the runtime also has a baked-in
 public default for deployments that intentionally use it.
 
-After the local Master or Worker starts, its local UI/control surface is available
-without a VPN key. On the first authenticated login, the local process forwards
-the bearer JWT to the Website API, consumes the returned one-time Headscale key
-in memory, joins Headscale, and waits for the Nodepool gRPC protocol probe. Only
-then do Master operations or Worker registration proceed. The browser and
-client package never receive `HEADSCALE_API_KEY`, and no password or reusable
-Headscale key is persisted.
+The ordinary packaged Master and Worker flows do not require a user-provided
+`JWT_SECRET` or a manually fixed Nodepool IP. After the local Master or Worker
+starts, its local UI/control surface is available without a VPN key. On the first
+authenticated login, the local process forwards the bearer JWT to the Website
+API, consumes the returned one-time Headscale key in memory, joins Headscale,
+and waits for the Nodepool gRPC protocol probe. Only then do Master operations
+or Worker registration proceed. The browser and client package never receive
+`HEADSCALE_API_KEY`, and no password or reusable Headscale key is persisted.
 
 On restart, the process first attempts to rehydrate its persisted libtailscale
 state. A restored valid UI session can request a fresh one-time key if that state
@@ -241,12 +249,13 @@ or the local worker control local executable path.
 
 The same rule governs billing for managed tasks. With
 `MANAGED_CONSENSUS_ROLLOUT_MODE=enforce` (the default), Nodepool dispatches
-deterministic, side-effect-free managed DSL tasks to distinct Workers and
-settles only after a strict-majority quorum certificate. Worker usage remains
-a claim, so settlement uses the Nodepool-owned fixed reservation; no single
-Worker result or `observe`/`disabled` mode can authorize settlement. Consensus
-is agreement evidence, not independent correctness validation, and a colluding or
-commonly faulty Worker majority can still agree on a wrong result.
+`managed-function-v1` tasks to distinct Workers and requires a strict-majority
+certificate for completion. Settlement uses only validated, assignment-bound
+per-replica usage evidence, including valid divergent replica results, within the
+task-wide `max_cpt` cap; missing or invalid receipts are not billable. `observe`
+remains non-settling. A certificate proves agreement, not semantic correctness
+or actual usage, and a colluding or commonly faulty Worker majority can still
+agree on a wrong result.
 
 ## Troubleshooting
 

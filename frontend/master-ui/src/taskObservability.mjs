@@ -9,13 +9,38 @@ function nonNegativeNumber(value, fallback = 0) {
 
 export function normalizeTaskObservability(task = {}) {
   const retryCount = nonNegativeNumber(task.retry_count, 0);
-  const dispatchStatus = text(task.dispatch_status) || (
-    retryCount > 0
-      ? 'REDISPATCHED'
-      : text(task.worker_id)
-        ? 'DISPATCHED'
-        : 'NOT_DISPATCHED'
-  );
+  const runtime = text(task.runtime || task.runtime_version || task.Runtime).trim();
+  const isManagedV1 = runtime === 'managed-function-v1';
+  const reportedDispatchStatus = text(task.dispatch_status);
+  const workerId = text(task.worker_id);
+  const taskStatus = text(task.status || task.Status).toUpperCase();
+  const consensusState = text(task.managed_consensus?.state).toUpperCase();
+  const consensusProgress = consensusState === 'NO_QUORUM'
+    ? 'NO_QUORUM'
+    : consensusState === 'STOP_PENDING'
+      ? 'STOP_PENDING'
+      : '';
+  const isNotStarted = ['PENDING', 'QUEUED', 'SUBMITTED', 'CREATED'].includes(taskStatus);
+  let dispatchStatus = reportedDispatchStatus;
+  if (isManagedV1 && consensusProgress) {
+    dispatchStatus = consensusProgress;
+  } else if (isManagedV1 && reportedDispatchStatus === 'REDISPATCHED') {
+    dispatchStatus = 'RETRY_COUNTER_RECORDED';
+  } else if (!dispatchStatus) {
+    if (retryCount > 0) {
+      dispatchStatus = isManagedV1 ? 'RETRY_COUNTER_RECORDED' : 'REDISPATCHED';
+    } else if (workerId) {
+      dispatchStatus = 'DISPATCHED';
+    } else if (isManagedV1 && !isNotStarted) {
+      dispatchStatus = 'UNKNOWN';
+    } else {
+      dispatchStatus = 'NOT_DISPATCHED';
+    }
+  }
+  const chargeCapCpt = nonNegativeNumber(task.max_cpt, 0);
+  const billedAmount = nonNegativeNumber(task.billed_amount, 0);
+  const billingSettled = task.billing_settled === true;
+  const historicalOverCap = isManagedV1 && billingSettled && chargeCapCpt > 0 && billedAmount > chargeCapCpt;
 
   return {
     workerId: text(task.worker_id),
@@ -23,8 +48,9 @@ export function normalizeTaskObservability(task = {}) {
     dispatchStatus,
     retryCount,
     usageUnits: nonNegativeNumber(task.usage_units, nonNegativeNumber(task.managed_executed_ops, 0)),
-    maxCpt: nonNegativeNumber(task.max_cpt, 0),
-    billedAmount: nonNegativeNumber(task.billed_amount, 0),
-    billingSettled: task.billing_settled === true,
+    chargeCapCpt,
+    billedAmount,
+    billingSettled,
+    historicalOverCap,
   };
 }

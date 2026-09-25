@@ -330,3 +330,179 @@ fn cas_transfer_state_fails_closed_when_a_completion_marker_is_corrupt() {
 
     remove_root(&cas_root);
 }
+
+fn set_modified(path: &Path, modified: SystemTime) {
+    fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("transfer metadata should be openable")
+        .set_modified(modified)
+        .expect("transfer metadata mtime should be writable");
+}
+
+fn manifest_for(root: &Path, execution_id: &str) -> PathBuf {
+    fs::read_dir(root)
+        .expect("transfer root should be readable")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".manifest.json"))
+                && serde_json::from_slice::<serde_json::Value>(&fs::read(path).unwrap())
+                    .ok()
+                    .and_then(|value| value.get("execution_id").cloned())
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .as_deref()
+                    == Some(execution_id)
+        })
+        .expect("transfer manifest should exist")
+}
+
+fn transfer_files_for_manifest(root: &Path, manifest: &Path) -> Vec<PathBuf> {
+    let key = manifest
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(".manifest.json"))
+        .expect("manifest name should contain a transfer key");
+    fs::read_dir(root)
+        .expect("transfer root should be readable")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&format!("{key}.")))
+        })
+        .collect()
+}
+
+#[test]
+fn cas_transfer_metadata_gc_retains_recent_active_and_corrupt_state() {
+    let cas_root = temporary_root("cas-transfer-gc");
+    let store = CasChunkStore::new(&cas_root).expect("absolute CAS root is valid");
+    let (artifact, chunks) = chunked_artifact();
+    let transfer_root = cas_root.join(".transfers");
+
+    store
+        .prepare_transfer("old-incomplete", &artifact)
+        .expect("old incomplete transfer should be persisted");
+    let old_incomplete = manifest_for(&transfer_root, "old-incomplete");
+    set_modified(&old_incomplete, UNIX_EPOCH);
+
+    store
+        .put_transfer_chunk("old-complete", &artifact, &artifact.chunks[0], chunks[0])
+        .expect("old completed transfer should be persisted");
+    let old_complete = manifest_for(&transfer_root, "old-complete");
+    let old_complete_files = transfer_files_for_manifest(&transfer_root, &old_complete);
+    for path in &old_complete_files {
+        set_modified(path, UNIX_EPOCH);
+    }
+    set_modified(&old_complete, UNIX_EPOCH);
+
+    store
+        .put_transfer_chunk("active", &artifact, &artifact.chunks[0], chunks[0])
+        .expect("active transfer should be persisted");
+    let active = manifest_for(&transfer_root, "active");
+    let active_files = transfer_files_for_manifest(&transfer_root, &active);
+    let active_marker = active_files
+        .iter()
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".complete"))
+        })
+        .expect("active transfer should have a completion marker")
+        .clone();
+    set_modified(&active, UNIX_EPOCH);
+
+    store
+        .prepare_transfer("recent", &artifact)
+        .expect("recent transfer should be persisted");
+    let recent = manifest_for(&transfer_root, "recent");
+
+    store
+        .prepare_transfer("corrupt", &artifact)
+        .expect("corrupt transfer should start with valid metadata");
+    let corrupt = manifest_for(&transfer_root, "corrupt");
+    fs::write(&corrupt, b"not-json").expect("corrupt metadata should be writable");
+    set_modified(&corrupt, UNIX_EPOCH);
+
+    let removed = store
+        .gc_transfer_metadata(std::time::Duration::from_secs(60 * 60))
+        .expect("transfer metadata GC should succeed");
+    assert!(
+        removed >= 3,
+        "old manifest and marker metadata should be collected"
+    );
+    assert!(
+        !old_incomplete.exists(),
+        "old incomplete metadata should be collected"
+    );
+    assert!(old_complete_files.iter().all(|path| !path.exists()));
+    assert!(
+        active.exists(),
+        "a fresh completion marker keeps active metadata"
+    );
+    assert!(
+        active_marker.exists(),
+        "fresh completion marker must be retained"
+    );
+    assert!(recent.exists(), "recent metadata must be retained");
+    assert!(
+        corrupt.exists(),
+        "corrupt metadata must remain for inspection"
+    );
+    assert!(
+        store
+            .chunk_path(&artifact.chunks[0].sha256)
+            .unwrap()
+            .exists(),
+        "GC must never remove shared CAS chunks"
+    );
+    assert!(
+        !store
+            .chunk_path(&artifact.chunks[1].sha256)
+            .unwrap()
+            .exists(),
+        "GC must not manufacture missing CAS chunks"
+    );
+
+    remove_root(&cas_root);
+}
+
+#[test]
+fn cas_transfer_metadata_gc_retains_corrupt_completion_markers() {
+    let cas_root = temporary_root("cas-transfer-gc-corrupt-marker");
+    let store = CasChunkStore::new(&cas_root).expect("absolute CAS root is valid");
+    let (artifact, chunks) = chunked_artifact();
+    store
+        .put_transfer_chunk("corrupt-marker", &artifact, &artifact.chunks[0], chunks[0])
+        .expect("transfer marker should be persisted");
+
+    let transfer_root = cas_root.join(".transfers");
+    let manifest = manifest_for(&transfer_root, "corrupt-marker");
+    let marker = transfer_files_for_manifest(&transfer_root, &manifest)
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".complete"))
+        })
+        .expect("transfer marker should exist");
+    fs::write(&marker, b"sha256:wrong").expect("corrupt marker should be writable");
+    set_modified(&manifest, UNIX_EPOCH);
+    set_modified(&marker, UNIX_EPOCH);
+
+    assert_eq!(
+        store
+            .gc_transfer_metadata(std::time::Duration::from_secs(60 * 60))
+            .expect("transfer metadata GC should succeed"),
+        0,
+        "corrupt markers must keep their transfer metadata for inspection"
+    );
+    assert!(manifest.exists());
+    assert!(marker.exists());
+
+    remove_root(&cas_root);
+}

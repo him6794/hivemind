@@ -34,6 +34,12 @@ hivemind-auth = { path = "../auth" }
 managed-function-runtime = { path = "../../../executor-rs/crates/managed-function-runtime" }
 general-compute-runtime = { path = "../../../executor-rs/crates/general-compute-runtime" }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
+
 [dev-dependencies]
 jsonwebtoken.workspace = true
 tempfile.workspace = true

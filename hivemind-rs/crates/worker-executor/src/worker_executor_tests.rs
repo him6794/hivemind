@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use hivemind_models::TaskStatus;
+use tempfile::TempDir;
 use tokio::sync::{oneshot, Notify};
 use uuid::Uuid;
 
@@ -24,6 +25,269 @@ fn stop_task_execution_reports_not_running_for_unknown_task() {
     let outcome = executor.stop_task_execution("missing-task");
 
     assert_eq!(outcome, StopTaskOutcome::NotRunning);
+}
+
+#[tokio::test]
+async fn confirmed_attempt_stop_fences_late_execution() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let executor = WorkerExecutor::new_with_task_runner(HivemindConfig::default(), {
+        let calls = Arc::clone(&calls);
+        move |_, _| {
+            let calls = Arc::clone(&calls);
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err(anyhow::anyhow!("runner invoked"))
+            }
+        }
+    });
+    let task = test_task("fenced-attempt");
+    let expiry = (Utc::now().timestamp() + 300) as usize;
+
+    assert_eq!(
+        executor
+            .stop_task_execution_for_attempt_confirmed(&task.task_id, "attempt-a", expiry)
+            .await,
+        StopTaskOutcome::StoppedBeforeStart
+    );
+    let error = executor
+        .execute_task_with_attempt(&task, "attempt-a")
+        .await
+        .expect_err("stopped attempt must not start later");
+    assert!(error.to_string().contains("stopped before execution"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(executor
+        .execute_task_with_attempt(&task, "attempt-b")
+        .await
+        .is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn confirmed_prestart_stop_survives_executor_restart() {
+    let root = TempDir::new().expect("temporary state root should be created");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let executor = WorkerExecutor::new_with_task_runner_and_stop_fences(
+        HivemindConfig::default(),
+        {
+            let calls = Arc::clone(&calls);
+            move |_, _| {
+                let calls = Arc::clone(&calls);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err(anyhow::anyhow!("runner invoked"))
+                }
+            }
+        },
+        AttemptStopFenceStore::open(root.path()).expect("stop-fence store should open"),
+    );
+    let task = test_task("restart-fenced-attempt");
+    let expiry = (Utc::now().timestamp() + 300) as usize;
+
+    assert_eq!(
+        executor
+            .stop_task_execution_for_attempt_confirmed(&task.task_id, "attempt-a", expiry)
+            .await,
+        StopTaskOutcome::StoppedBeforeStart
+    );
+    drop(executor);
+
+    let restarted = WorkerExecutor::new_with_task_runner_and_stop_fences(
+        HivemindConfig::default(),
+        {
+            let calls = Arc::clone(&calls);
+            move |_, _| {
+                let calls = Arc::clone(&calls);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err(anyhow::anyhow!("runner invoked"))
+                }
+            }
+        },
+        AttemptStopFenceStore::open(root.path()).expect("stop-fence store should reload"),
+    );
+
+    let error = restarted
+        .execute_task_with_attempt(&task, "attempt-a")
+        .await
+        .expect_err("persisted stop fence must reject execution after restart");
+    assert!(error.to_string().contains("stopped before execution"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(restarted
+        .execute_task_with_attempt(&task, "attempt-b")
+        .await
+        .is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn failed_stop_fence_persistence_never_confirms_prestart_stop() {
+    let root = TempDir::new().expect("temporary state root should be created");
+    let store = AttemptStopFenceStore::open(root.path()).expect("stop-fence store should open");
+    let fence_directory = root.path().join("attempt-stop-fences");
+    std::fs::remove_dir_all(&fence_directory).expect("fence directory should be removable");
+    std::fs::write(&fence_directory, b"not a directory")
+        .expect("fence path should block durable writes");
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let executor = WorkerExecutor::new_with_task_runner_and_stop_fences(
+        HivemindConfig::default(),
+        {
+            let calls = Arc::clone(&calls);
+            move |_, _| {
+                let calls = Arc::clone(&calls);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err(anyhow::anyhow!("runner invoked"))
+                }
+            }
+        },
+        store,
+    );
+    let task = test_task("failed-persistence-attempt");
+
+    assert_eq!(
+        executor
+            .stop_task_execution_for_attempt_confirmed(
+                &task.task_id,
+                "attempt-a",
+                (Utc::now().timestamp() + 300) as usize,
+            )
+            .await,
+        StopTaskOutcome::StopConfirmationUnavailable
+    );
+    assert!(executor
+        .execute_task_with_attempt(&task, "attempt-a")
+        .await
+        .expect_err("failed persistence must fail closed in this process")
+        .to_string()
+        .contains("stopped before execution"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn confirmed_attempt_stop_waits_until_the_runner_finishes() {
+    let (started_tx, started_rx) = oneshot::channel();
+    let started_tx = Arc::new(Mutex::new(Some(started_tx)));
+    let release = Arc::new(Notify::new());
+    let executor = Arc::new(WorkerExecutor::new_with_task_runner(
+        HivemindConfig::default(),
+        {
+            let started_tx = Arc::clone(&started_tx);
+            let release = Arc::clone(&release);
+            move |_, mut cancellation| {
+                let started_tx = Arc::clone(&started_tx);
+                let release = Arc::clone(&release);
+                async move {
+                    started_tx.lock().unwrap().take().unwrap().send(()).unwrap();
+                    while !*cancellation.borrow() {
+                        cancellation.changed().await.unwrap();
+                    }
+                    release.notified().await;
+                    Err(anyhow::anyhow!("stopped"))
+                }
+            }
+        },
+    ));
+    let task = test_task("running-attempt-stop");
+    let running = {
+        let executor = Arc::clone(&executor);
+        let task = task.clone();
+        tokio::spawn(async move { executor.execute_task_with_attempt(&task, "attempt-a").await })
+    };
+    started_rx.await.unwrap();
+    let stopping = {
+        let executor = Arc::clone(&executor);
+        let task_id = task.task_id.clone();
+        tokio::spawn(async move {
+            executor
+                .stop_task_execution_for_attempt_confirmed(
+                    &task_id,
+                    "attempt-a",
+                    (Utc::now().timestamp() + 300) as usize,
+                )
+                .await
+        })
+    };
+    tokio::task::yield_now().await;
+    assert!(
+        !stopping.is_finished(),
+        "stop must wait for execution cleanup"
+    );
+    release.notify_one();
+    assert!(running.await.unwrap().is_err());
+    assert_eq!(stopping.await.unwrap(), StopTaskOutcome::StopRequested);
+    assert!(executor
+        .execute_task_with_attempt(&task, "attempt-a")
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn confirmed_attempt_stop_does_not_acknowledge_a_panicked_runner() {
+    let (started_tx, started_rx) = oneshot::channel();
+    let started_tx = Arc::new(Mutex::new(Some(started_tx)));
+    let (cancelled_tx, cancelled_rx) = oneshot::channel();
+    let cancelled_tx = Arc::new(Mutex::new(Some(cancelled_tx)));
+    let release = Arc::new(Notify::new());
+    let executor = Arc::new(WorkerExecutor::new_with_task_runner(
+        HivemindConfig::default(),
+        {
+            let started_tx = Arc::clone(&started_tx);
+            let cancelled_tx = Arc::clone(&cancelled_tx);
+            let release = Arc::clone(&release);
+            move |_, mut cancellation| {
+                let started_tx = Arc::clone(&started_tx);
+                let cancelled_tx = Arc::clone(&cancelled_tx);
+                let release = Arc::clone(&release);
+                async move {
+                    started_tx.lock().unwrap().take().unwrap().send(()).unwrap();
+                    while !*cancellation.borrow() {
+                        cancellation.changed().await.unwrap();
+                    }
+                    cancelled_tx
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .unwrap()
+                        .send(())
+                        .unwrap();
+                    release.notified().await;
+                    panic!("fixture runner panicked after cancellation");
+                }
+            }
+        },
+    ));
+    let task = test_task("panicked-stop-attempt");
+    let running = {
+        let executor = Arc::clone(&executor);
+        let task = task.clone();
+        tokio::spawn(async move { executor.execute_task_with_attempt(&task, "attempt-a").await })
+    };
+    started_rx.await.unwrap();
+    let stopping = {
+        let executor = Arc::clone(&executor);
+        let task_id = task.task_id.clone();
+        tokio::spawn(async move {
+            executor
+                .stop_task_execution_for_attempt_confirmed(
+                    &task_id,
+                    "attempt-a",
+                    (Utc::now().timestamp() + 300) as usize,
+                )
+                .await
+        })
+    };
+    cancelled_rx.await.unwrap();
+    release.notify_one();
+    assert!(running.await.unwrap().is_err());
+    assert_eq!(
+        stopping.await.unwrap(),
+        StopTaskOutcome::StopConfirmationUnavailable
+    );
+    assert!(executor
+        .execute_task_with_attempt(&task, "attempt-a")
+        .await
+        .is_err());
 }
 
 #[tokio::test]
@@ -269,6 +533,114 @@ async fn overlapping_attempts_keep_execution_and_cancellation_isolated() {
         .expect("second attempt should succeed");
     assert_eq!(second_result.output.as_deref(), Some("attempt-1"));
     assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn delivered_hcs_result_cleanup_runs_after_delivery_is_journaled() {
+    let temp = TempDir::new().expect("temporary test root");
+    let execution_scope = format!("exec-{}", "a".repeat(59));
+    let task_root = temp.path().join(&execution_scope);
+    let scratch_path = task_root.join("scratch");
+    let result_path = scratch_path.join("result.json");
+    std::fs::create_dir_all(&scratch_path).expect("create HCS scratch root");
+    std::fs::write(&result_path, b"result").expect("create HCS result");
+
+    let digest = |byte: char| format!("sha256:{}", byte.to_string().repeat(64));
+    let identity = hcs_journal::HcsExecutionIdentity {
+        task_id: "task-1".into(),
+        execution_id: "execution-1".into(),
+        attempt_id: "attempt-1".into(),
+        idempotency_key: "idempotency-1".into(),
+        request_digest: digest('a'),
+        transfer_generation: Some(1),
+    };
+    let container_id = format!("hivemind-{execution_scope}");
+    let intent = hcs_journal::HcsExecutionIntent {
+        identity: identity.clone(),
+        worker_id: "worker-1".into(),
+        backend_id: "windows-backend".into(),
+        guest_image_digest: digest('b'),
+        runner_sha256: digest('c'),
+        policy_digest: digest('d'),
+        spec_digest: digest('e'),
+        input_sha256: digest('f'),
+        container_id: container_id.clone(),
+        scratch_path: scratch_path.clone(),
+        result_path: result_path.clone(),
+    };
+    let journal = hcs_journal::HcsExecutionJournal::open(temp.path().join("journal"))
+        .expect("open HCS journal");
+    journal.begin(intent).expect("begin HCS journal");
+    journal
+        .append_event(&identity, hcs_journal::HcsJournalEvent::CreateRequested)
+        .expect("record HCS create request");
+    journal
+        .append_event(
+            &identity,
+            hcs_journal::HcsJournalEvent::Created {
+                system_id: container_id,
+            },
+        )
+        .expect("record HCS create");
+    journal
+        .append_event(&identity, hcs_journal::HcsJournalEvent::Started)
+        .expect("record HCS start");
+    journal
+        .append_event(
+            &identity,
+            hcs_journal::HcsJournalEvent::GuestExited { exit_code: Some(0) },
+        )
+        .expect("record HCS guest exit");
+    journal
+        .append_event(&identity, hcs_journal::HcsJournalEvent::ShutdownStarted)
+        .expect("record HCS shutdown start");
+    journal
+        .append_event(
+            &identity,
+            hcs_journal::HcsJournalEvent::ShutdownCompleted {
+                status: 0,
+                exit_type: "GracefulExit".into(),
+            },
+        )
+        .expect("record HCS shutdown");
+    journal
+        .append_event(&identity, hcs_journal::HcsJournalEvent::Closed)
+        .expect("record HCS close");
+    journal
+        .append_event(
+            &identity,
+            hcs_journal::HcsJournalEvent::ResultRead {
+                sha256: digest('1'),
+                size: 6,
+            },
+        )
+        .expect("record HCS result read");
+    journal
+        .append_event(&identity, hcs_journal::HcsJournalEvent::Completed)
+        .expect("record HCS completion");
+
+    let mut executor = WorkerExecutor::new_with_task_runner(
+        HivemindConfig::default(),
+        |_task, _cancellation| async { Err::<TaskResult, _>(anyhow::anyhow!("unused")) },
+    );
+    executor.hcs_journal = Some(journal.clone());
+    assert!(result_path.exists(), "result must survive before delivery");
+
+    executor
+        .mark_hcs_delivery(&identity)
+        .expect("delivery transition and post-delivery cleanup");
+
+    assert!(
+        !task_root.exists(),
+        "delivered HCS task root must be removed"
+    );
+    assert_eq!(
+        journal
+            .load(&identity)
+            .expect("load delivered record")
+            .delivery,
+        hcs_journal::HcsDeliveryState::Delivered
+    );
 }
 
 fn test_task(task_id: &str) -> Task {

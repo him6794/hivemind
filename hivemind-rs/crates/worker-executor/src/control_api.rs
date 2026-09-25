@@ -145,6 +145,7 @@ impl ControlApiState {
                 worker_id: worker_id.to_string(),
                 username: username.to_string(),
                 worker_addr: self.worker_addr.clone(),
+                worker_grpc_addr: self.config.server.worker_grpc_addr.clone(),
                 location: self.profile.location.clone(),
                 token: token.to_string(),
                 interval: std::time::Duration::from_secs(10),
@@ -373,30 +374,56 @@ pub async fn serve_with_allowed_origins(
     ui_dir: Option<&str>,
 ) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    let open_addr = addr.to_string();
+    let listen_addr = listener.local_addr()?;
+    let ui_available = ui_dir
+        .map(|dir| std::path::Path::new(dir).join("index.html").is_file())
+        .unwrap_or(false);
     tokio::spawn(async move {
-        client_runtime::open_ui_when_ready(&open_addr).await;
+        client_runtime::open_worker_ui_when_ready(listen_addr, ui_available).await;
     });
     axum::serve(listener, router_with_ui_dir(state, allowed_origins, ui_dir)).await?;
     Ok(())
 }
 
-async fn worker_info(State(state): State<ControlApiState>) -> Json<WorkerInfoResponse> {
+async fn worker_info(
+    State(state): State<ControlApiState>,
+) -> std::result::Result<Json<WorkerInfoResponse>, (StatusCode, Json<StatusResponse>)> {
     let mut profile = state.profile.clone();
     if let Some(worker_id) = state.current_worker_identity() {
         profile.worker_id = worker_id;
     }
     if let Some(session) = client_runtime::current_vpn_session(ClientRole::Worker).await {
         if let Some(ip) = session.overlay_ip.as_deref() {
-            let port = profile.ip.rsplit(':').next().unwrap_or("50053");
-            profile.ip = format!("{ip}:{port}");
+            profile.ip = worker_info_overlay_addr(
+                &profile.ip,
+                &state.config.server.worker_grpc_addr,
+                ip,
+            )
+            .map_err(|error| {
+                tracing::warn!(error = %error, "Worker VPN callback address is unavailable");
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(StatusResponse {
+                        success: false,
+                        status_message: "Worker VPN callback address is unavailable".into(),
+                    }),
+                )
+            })?;
         }
     }
     state.set_worker_addr(profile.ip.clone());
-    Json(WorkerInfoResponse {
+    Ok(Json(WorkerInfoResponse {
         success: true,
         profile,
-    })
+    }))
+}
+
+fn worker_info_overlay_addr(
+    profile_ip: &str,
+    worker_grpc_addr: &str,
+    overlay_ip: &str,
+) -> Result<String> {
+    nodepool_client::forwarded_overlay_advertise_addr(worker_grpc_addr, profile_ip, overlay_ip)
 }
 
 async fn bootstrap_vpn(
@@ -1041,7 +1068,11 @@ async fn effective_worker_advertise_addr(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .unwrap_or(requested);
-        return nodepool_client::advertise_addr_from_overlay(port_source, overlay_ip);
+        return nodepool_client::forwarded_overlay_advertise_addr(
+            &state.config.server.worker_grpc_addr,
+            port_source,
+            overlay_ip,
+        );
     }
 
     if let Some(configured) = state
@@ -1190,6 +1221,28 @@ mod tests {
         assert_eq!(profile.gpu_name, "RTX 4090");
         assert_eq!(profile.storage_total_gb, 2000);
         assert_eq!(profile.storage_available_gb, 1500);
+    }
+
+    #[test]
+    fn worker_info_advertises_forwarded_overlay_callback_after_join() {
+        assert_eq!(
+            super::worker_info_overlay_addr("", "0.0.0.0:15054", "100.64.0.16").unwrap(),
+            "100.64.0.16:15054"
+        );
+        assert_eq!(
+            super::worker_info_overlay_addr("0.0.0.0:15054", "0.0.0.0:15054", "100.64.0.16")
+                .unwrap(),
+            "100.64.0.16:15054"
+        );
+        assert!(
+            super::worker_info_overlay_addr("0.0.0.0:50053", "0.0.0.0:15054", "100.64.0.16")
+                .is_err()
+        );
+        assert_eq!(
+            super::worker_info_overlay_addr("", "[::]:15055", "fd7a:115c:a1e0::1").unwrap(),
+            "[fd7a:115c:a1e0::1]:15055"
+        );
+        assert!(super::worker_info_overlay_addr("", "127.0.0.1:18080", "not-an-ip").is_err());
     }
 
     #[tokio::test]

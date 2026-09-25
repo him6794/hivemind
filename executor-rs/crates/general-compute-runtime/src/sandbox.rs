@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::sha256_digest;
 use crate::supervisor::{
@@ -773,6 +774,25 @@ impl std::fmt::Display for ProductionSandboxError {
 
 impl std::error::Error for ProductionSandboxError {}
 
+const RUNNER_FULL_REVERIFY_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const RUNNER_CACHE_LIMIT: usize = 128;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RunnerCacheKey {
+    path: PathBuf,
+    expected_digest: String,
+}
+
+#[derive(Debug, Clone)]
+struct RunnerCacheEntry {
+    size_bytes: u64,
+    modified: Option<SystemTime>,
+    verified_at: Instant,
+}
+
+static RUNNER_DIGEST_CACHE: OnceLock<Mutex<HashMap<RunnerCacheKey, RunnerCacheEntry>>> =
+    OnceLock::new();
+
 /// The only public entry point for a production backend launch.
 ///
 /// It validates the complete isolation envelope and fails closed until a real
@@ -878,26 +898,11 @@ impl ProductionSandboxLauncher {
             .runner_executable
             .as_ref()
             .ok_or(ProductionSandboxError::RunnerUnavailable)?;
-        let runner_metadata =
-            fs::symlink_metadata(runner).map_err(|_| ProductionSandboxError::RunnerNotPinned)?;
-        if !runner.is_absolute()
-            || !runner_metadata.file_type().is_file()
-            || self.runner_sha256.is_none()
-        {
-            return Err(ProductionSandboxError::RunnerNotPinned);
-        }
         let expected_runner_sha256 = self
             .runner_sha256
             .as_deref()
             .ok_or(ProductionSandboxError::RunnerNotPinned)?;
-        if !is_sha256_digest(expected_runner_sha256) {
-            return Err(ProductionSandboxError::RunnerNotPinned);
-        }
-        let actual_runner_sha256 =
-            sha256_digest(&fs::read(runner).map_err(|_| ProductionSandboxError::RunnerSpawn)?);
-        if actual_runner_sha256 != expected_runner_sha256 {
-            return Err(ProductionSandboxError::RunnerDigestMismatch);
-        }
+        verify_pinned_runner(runner, expected_runner_sha256)?;
         validate_oci_bundle(bundle_root, launch)?;
         #[cfg(unix)]
         validate_host_device_sources(launch)?;
@@ -940,26 +945,11 @@ impl ProductionSandboxLauncher {
             .runner_executable
             .as_ref()
             .ok_or(ProductionSandboxError::RunnerUnavailable)?;
-        let runner_metadata =
-            fs::symlink_metadata(runner).map_err(|_| ProductionSandboxError::RunnerNotPinned)?;
-        if !runner.is_absolute()
-            || !runner_metadata.file_type().is_file()
-            || self.runner_sha256.is_none()
-        {
-            return Err(ProductionSandboxError::RunnerNotPinned);
-        }
         let expected_runner_sha256 = self
             .runner_sha256
             .as_deref()
             .ok_or(ProductionSandboxError::RunnerNotPinned)?;
-        if !is_sha256_digest(expected_runner_sha256) {
-            return Err(ProductionSandboxError::RunnerNotPinned);
-        }
-        let actual_runner_sha256 =
-            sha256_digest(&fs::read(runner).map_err(|_| ProductionSandboxError::RunnerSpawn)?);
-        if actual_runner_sha256 != expected_runner_sha256 {
-            return Err(ProductionSandboxError::RunnerDigestMismatch);
-        }
+        verify_pinned_runner(runner, expected_runner_sha256)?;
 
         let runner_state_root = self
             .runner_state_root
@@ -991,6 +981,75 @@ impl ProductionSandboxLauncher {
             .map_err(|error| ProductionSandboxError::RunnerSpawnDetail(format!("{error:?}")))?;
         Ok(result)
     }
+}
+
+fn verify_pinned_runner(
+    runner: &Path,
+    expected_digest: &str,
+) -> Result<(), ProductionSandboxError> {
+    let metadata =
+        fs::symlink_metadata(runner).map_err(|_| ProductionSandboxError::RunnerNotPinned)?;
+    if !runner.is_absolute() || metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(ProductionSandboxError::RunnerNotPinned);
+    }
+    if !is_sha256_digest(expected_digest) {
+        return Err(ProductionSandboxError::RunnerNotPinned);
+    }
+    let modified = metadata.modified().ok();
+    let key = RunnerCacheKey {
+        path: runner.to_path_buf(),
+        expected_digest: expected_digest.to_owned(),
+    };
+    let cache = RUNNER_DIGEST_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let now = Instant::now();
+    {
+        let entries = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = entries.get(&key)
+            && entry.size_bytes == metadata.len()
+            && entry.modified == modified
+            && now.duration_since(entry.verified_at) < RUNNER_FULL_REVERIFY_INTERVAL
+        {
+            return Ok(());
+        }
+    }
+
+    let actual = sha256_digest(&fs::read(runner).map_err(|_| ProductionSandboxError::RunnerSpawn)?);
+    let after =
+        fs::symlink_metadata(runner).map_err(|_| ProductionSandboxError::RunnerNotPinned)?;
+    if after.file_type().is_symlink()
+        || !after.is_file()
+        || after.len() != metadata.len()
+        || after.modified().ok() != modified
+    {
+        return Err(ProductionSandboxError::RunnerDigestMismatch);
+    }
+    if actual != expected_digest {
+        return Err(ProductionSandboxError::RunnerDigestMismatch);
+    }
+
+    let mut entries = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if entries.len() >= RUNNER_CACHE_LIMIT && !entries.contains_key(&key) {
+        if let Some(oldest) = entries
+            .iter()
+            .min_by_key(|(_, entry)| entry.verified_at)
+            .map(|(key, _)| key.clone())
+        {
+            entries.remove(&oldest);
+        }
+    }
+    entries.insert(
+        key,
+        RunnerCacheEntry {
+            size_bytes: after.len(),
+            modified: after.modified().ok(),
+            verified_at: now,
+        },
+    );
+    Ok(())
 }
 
 fn validate_runner_state_root(root: &Path) -> Result<&Path, ProductionSandboxError> {
@@ -1549,4 +1608,41 @@ fn valid_mount_destination(destination: &str) -> bool {
         && destination != "/"
         && !destination.ends_with('/')
         && !destination.split('/').any(|component| component == "..")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pinned_runner_cache_reuses_verified_bytes_and_invalidates_on_drift() {
+        let root = std::env::temp_dir().join(format!(
+            "hivemind-runner-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let runner = root.join("runner");
+        fs::write(&runner, b"runner-v1").unwrap();
+        let digest = sha256_digest(&fs::read(&runner).unwrap());
+
+        verify_pinned_runner(&runner, &digest).expect("first runner verification should hash");
+        verify_pinned_runner(&runner, &digest)
+            .expect("unchanged runner should use its cache entry");
+
+        fs::write(&runner, b"runner-v2-with-different-size").unwrap();
+        assert_eq!(
+            verify_pinned_runner(&runner, &digest),
+            Err(ProductionSandboxError::RunnerDigestMismatch)
+        );
+        let new_digest = sha256_digest(&fs::read(&runner).unwrap());
+        verify_pinned_runner(&runner, &new_digest)
+            .expect("a changed pinned digest should create a new verified cache entry");
+
+        let _ = fs::remove_dir_all(root);
+    }
 }

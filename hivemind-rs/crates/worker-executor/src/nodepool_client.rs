@@ -231,6 +231,23 @@ pub fn advertise_addr_from_overlay(listen_addr: &str, overlay_ip: &str) -> anyho
     validate_advertise_addr(&format!("{host}:{port}"))
 }
 
+/// The embedded VPN forwards the Worker gRPC listen port, not an arbitrary
+/// advertised port. Reject conflicting operator or UI callback settings.
+pub fn forwarded_overlay_advertise_addr(
+    worker_grpc_addr: &str,
+    requested_addr: &str,
+    overlay_ip: &str,
+) -> anyhow::Result<String> {
+    let forwarded_addr = advertise_addr_from_overlay(worker_grpc_addr, overlay_ip)?;
+    if !requested_addr.trim().is_empty() {
+        let requested_addr = advertise_addr_from_overlay(requested_addr, overlay_ip)?;
+        if requested_addr != forwarded_addr {
+            anyhow::bail!("Worker callback port does not match the VPN-forwarded gRPC listen port");
+        }
+    }
+    Ok(forwarded_addr)
+}
+
 pub async fn login_to_nodepool(
     nodepool_addr: &str,
     username: &str,
@@ -543,10 +560,44 @@ pub struct RegistrationLoopConfig {
     pub worker_id: String,
     pub username: String,
     pub worker_addr: Arc<std::sync::Mutex<String>>,
+    pub worker_grpc_addr: String,
     pub location: String,
     pub token: String,
     pub interval: Duration,
     pub require_external_overlay: bool,
+}
+
+async fn current_registration_worker_addr(
+    registration: &RegistrationLoopConfig,
+) -> anyhow::Result<String> {
+    let cached_addr = registration
+        .worker_addr
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone();
+    if !registration.require_external_overlay {
+        return Ok(cached_addr);
+    }
+
+    let session =
+        hivemind_client_runtime::current_vpn_session(hivemind_client_runtime::ClientRole::Worker)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("authenticated Worker overlay session is not ready"))?;
+    if session.transport != hivemind_client_runtime::VpnTransport::Tailscale {
+        anyhow::bail!("strict Worker callback requires the embedded libtailscale transport");
+    }
+    let overlay_ip = session
+        .overlay_ip
+        .as_deref()
+        .filter(|ip| !ip.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("authenticated Worker overlay has no assigned address"))?;
+    let current_addr =
+        forwarded_overlay_advertise_addr(&registration.worker_grpc_addr, &cached_addr, overlay_ip)?;
+    *registration
+        .worker_addr
+        .lock()
+        .unwrap_or_else(|err| err.into_inner()) = current_addr.clone();
+    Ok(current_addr)
 }
 
 pub fn start_registration_loop(
@@ -610,11 +661,18 @@ pub fn start_registration_loop(
                         client = None;
                     }
 
-                    let worker_addr = registration
-                        .worker_addr
-                        .lock()
-                        .unwrap_or_else(|err| err.into_inner())
-                        .clone();
+                    let worker_addr = match current_registration_worker_addr(&registration).await {
+                        Ok(addr) => addr,
+                        Err(error) => {
+                            client = None;
+                            warn!(
+                                worker_id = %registration.worker_id,
+                                error = %error,
+                                "Worker callback is unavailable; deferring registration"
+                            );
+                            continue;
+                        }
+                    };
                     let capability_report = match capability_report_to_proto(
                         &executor.dynamic_capability_report(),
                     ) {
@@ -1375,6 +1433,26 @@ mod tests {
             "[fd7a:115c:a1e0::20]:50054"
         );
         assert!(super::advertise_addr_from_overlay("0.0.0.0:50053", "").is_err());
+    }
+
+    #[test]
+    fn forwarded_overlay_callback_refreshes_ip_but_rejects_wrong_port() {
+        assert_eq!(
+            super::forwarded_overlay_advertise_addr(
+                "0.0.0.0:15054",
+                "100.64.0.15:15054",
+                "100.64.0.16",
+            )
+            .unwrap(),
+            "100.64.0.16:15054"
+        );
+        assert!(super::forwarded_overlay_advertise_addr(
+            "0.0.0.0:15054",
+            "100.64.0.15:50053",
+            "100.64.0.16",
+        )
+        .is_err());
+        assert!(super::forwarded_overlay_advertise_addr("0.0.0.0:15054", "", "not-an-ip").is_err());
     }
 
     #[test]

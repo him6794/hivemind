@@ -49,11 +49,12 @@ impl MasterApiServer {
 
     pub async fn serve_with_ui(self, addr: &str, ui_dir: &str) -> Result<()> {
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        tracing::info!("Master API server listening on {}", addr);
+        let bound_addr = listener.local_addr()?;
+        tracing::info!("Master API server listening on {}", bound_addr);
         tracing::info!("Master UI directory: {}", ui_dir);
-        let open_addr = addr.to_string();
+        let ui_available = std::path::Path::new(ui_dir).join("index.html").is_file();
         tokio::spawn(async move {
-            client_runtime::open_ui_when_ready(&open_addr).await;
+            client_runtime::open_master_ui_when_ready(bound_addr, ui_available).await;
         });
         let app = if std::path::Path::new(ui_dir).is_dir() {
             self.app

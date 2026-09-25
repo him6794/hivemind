@@ -15,9 +15,10 @@ Docker, WSL, a VM, SSH, or a direct host-process fallback.
 ## Active contract
 
 `managed-function-v1` is the only managed-function runtime accepted for new
-submissions. It uses the closed interpreter described below with a versioned
-per-replica usage allowance, checked arithmetic, structural safety limits, and
-Nodepool-coordinated consensus settlement. `managed-function-v0` is retained
+submissions. It uses the closed interpreter described below with versioned
+per-replica metering, a task-wide fee-inclusive charge cap, checked arithmetic,
+structural safety limits, and Nodepool-coordinated consensus settlement.
+`managed-function-v0` is retained
 only so historical tasks, receipts, consensus evidence, and legacy capability
 reports remain readable; it is rejected at every new-work admission boundary.
 
@@ -59,34 +60,56 @@ are pinned by
 and digest
 `c2dc962dcf6762df51fa94af2ee1f00a4d1aabdf84321ec67a3ab7f892692853`.
 
-- Each managed task is executed by the configured replica set (three replicas
-  by default, with a two-replica quorum; at most seven replicas). A single
-  Worker cannot complete, settle, or bill the task.
-- `max_cpt` is an independent execution-credit allowance for each replica. One
-  executed operation is one CPT. The evaluator does not impose a separate
-  fixed `max_ops` or `max_loop_iterations` work ceiling; execution stops before
-  charging an operation that would exceed that replica's allowance.
+- Each managed task is assigned to three distinct Workers by default, with a
+  two-replica quorum; at most seven replicas may be configured. A single Worker
+  cannot establish a quorum or authorize a successful result. Valid work from
+  a lone replica can still be paid and charged when quorum is not reached.
+- For a new v1 task, `max_cpt` is the maximum total charge for the entire task,
+  including the platform fee and all configured replicas (three by default). It
+  is not a per-replica allowance. Nodepool deterministically derives one identical integer execution
+  budget for each replica from the fee-exclusive portion of this task cap. Any
+  indivisible remainder stays with the owner rather than being assigned to a
+  replica. For example, a 100 CPT cap with three replicas gives each replica a
+  30 CPT execution budget; the worst-case hold is 99 CPT (90 usage + 9 fee),
+  and the remaining 1 CPT stays with the owner.
+- One executed operation is one CPT of replica usage. The evaluator does not
+  impose a separate fixed `max_ops` or `max_loop_iterations` work ceiling;
+  execution stops before charging an operation that would exceed that
+  replica's assigned budget. The pinned semantics manifest's per-replica
+  `max_usage_units` remains an internal runtime limit; Nodepool supplies the
+  derived per-replica value from the task-wide `max_cpt`.
 - Results use checked signed-`i64` arithmetic. Overflow fails with
   `integer_arithmetic_overflow`; division by zero remains a separate runtime
   failure.
 - A budget-exhausted result is failed for consensus, but valid work recorded
-  before exhaustion remains billable. Nodepool pays every replica with valid
-  accepted evidence, including a valid divergent result outside the winning
+  before exhaustion remains billable. Nodepool aggregates valid accepted usage
+  across replicas, adds the platform fee, and never charges more than the
+  task's `max_cpt`, including for a valid divergent result outside the winning
   certificate participants.
-- Nodepool holds the worst-case per-replica allowance before enforce-mode
-  dispatch, settles actual accepted usage plus its calculated fee, and refunds
-  the unused hold. Observe mode records shadow evidence only and never creates
-  a hold or financial ledger mutation.
+- Nodepool holds the worst-case charges for the deterministic per-replica
+  budgets before enforce-mode dispatch, settles actual accepted usage plus its
+  calculated fee, and refunds unused held CPT. Observe mode records shadow
+  evidence only and never creates a hold or financial ledger mutation.
+- Automatic paid retries are disabled; no retry work is charged to the task
+  owner. Automatic retries remain off until a funded platform treasury is
+  available.
 - Structural safety limits and the task deadline remain bounded. Missing or
   invalid runtime assets fail closed; no unsafe execution fallback is allowed.
+- The task-wide cap applies to new v1 submissions only. Historical v1 tasks
+  settled under the earlier per-replica `max_cpt` contract remain recorded as
+  billed; the new cap does not retroactively recalculate or refund them.
 
 ## Runtime Contract
 
 Input:
 
 - source text using the supported syntax below
-- a positive per-replica `max_cpt` usage allowance plus structural safety limits
-  such as call depth, value size, output size, and the task deadline
+- a positive task-wide `max_cpt` maximum charge, inclusive of platform fees and
+  all configured replicas (three by default); Nodepool deterministically splits
+  the fee-exclusive execution budget into identical integer per-replica runtime
+  allowances, with any remainder staying with the owner
+- structural safety limits such as call depth, value size, output size, and the
+  task deadline
 - optional function arguments in a later milestone
 
 Output:
@@ -103,6 +126,9 @@ Hivemind task integration:
 - set `task_source` to the managed function source text
 - set `torrent` / `torrent_source` to the JSON input payload when input is
   needed
+- treat `max_cpt` as the task-wide fee-inclusive charge cap, not a per-replica
+  execution allowance; automatic paid retries are disabled until a funded
+  platform treasury is available and do not charge retry work to the task owner
 - v1 submissions are admitted only when their runtime, backend, semantics
   digest, source, and input identities match the Nodepool policy
 - historical v0 task rows and evidence remain readable but cannot be resumed
@@ -130,8 +156,9 @@ Worker `ExecuteTaskResponse` forwards the receipt summary back to the scheduler:
 
 The scheduler stores these fields as typed replica evidence. For v0 they remain
 compatibility and diagnostic data. For v1 Nodepool independently validates the
-current-attempt evidence and uses the accepted per-replica usage for settlement;
-a single Worker receipt or usage claim is never authoritative.
+current-attempt evidence and sums accepted per-replica usage for task-level
+settlement under the fee-inclusive `max_cpt`; a single Worker receipt or usage
+claim is never authoritative.
 
 ## Supported Syntax
 
@@ -189,10 +216,10 @@ Rules:
 - The last expression statement becomes the final value unless an earlier
   `return` exits the program.
 - `input` is available when the caller provides JSON input.
-- `for` only iterates lists. In v1, work is bounded by the per-replica
-  `max_cpt` allowance while structural limits and the task deadline remain
-  active; frozen v0 fixtures additionally retain their historical
-  `max_loop_iterations` limit.
+- `for` only iterates lists. In v1, work is bounded by each replica's
+  deterministically assigned runtime usage budget derived from the task-wide
+  `max_cpt`; structural limits and the task deadline remain active. Frozen v0
+  fixtures additionally retain their historical `max_loop_iterations` limit.
 - Built-in functions currently include `len(value)`, `get(target, key)`, and
   `contains(target, value)`.
 
@@ -260,10 +287,13 @@ configured limit.
 ## Metering v1
 
 The v1 cost vectors use the same evaluator operation accounting, including
-function-call, print, and loop-iteration costs. `max_usage_units` is the
-per-replica work allowance and is the only dynamic work stop; `max_ops` and
-`max_loop_iterations` use the unbounded sentinel. Receipt `usage_units` and
-`executed_ops` are equal and are checked before settlement.
+function-call, print, and loop-iteration costs. The pinned runtime's
+`max_usage_units` is an internal per-replica work allowance and is the only
+dynamic work stop; Nodepool derives that value by evenly splitting the
+fee-exclusive execution budget from task-wide `max_cpt` across the configured
+replicas. `max_ops` and `max_loop_iterations` use the unbounded sentinel.
+Receipt `usage_units` and `executed_ops` are equal per replica and are checked
+before task-level settlement.
 
 ## Billing and consensus
 
@@ -278,20 +308,26 @@ For v1, consensus and payment are deliberately separate:
 canonical result = managed-consensus-result-v1
 output digest    = sha256
 quorum           = Nodepool certificate over the configured replica quorum
-billing          = accepted per-replica executed operations + Nodepool fee
+usage            = sum of valid accepted per-replica executed operations
+charge           = aggregate usage + Nodepool fee, never above task max_cpt
 ```
 
 A managed task is dispatched to distinct eligible Workers. Nodepool validates
 the task, attempt, replica, result, identity, and usage evidence. The winning
-certificate selects the output, while every valid accepted replica in the
-attempt is paid for its own measured work. A valid divergent replica need not be
-a certificate participant to receive payment.
+certificate selects the output, while valid accepted replica work is aggregated
+for settlement. The task-wide `max_cpt` is the hard maximum total charge,
+including the 10% platform fee; accepted usage plus fee cannot exceed it. For
+the default three-replica set, Nodepool assigns the same deterministic integer
+usage budget to each replica from the fee-exclusive cap, leaving any indivisible
+remainder with the owner. A valid divergent replica need not be a certificate
+participant to have its verified work included in the capped task settlement.
 
 No certificate is fabricated merely to justify payment. Accepted terminal
 evidence may settle an enforce-mode hold without a winning certificate, but
 usage-only settlement never marks the task completed. If policy is missing,
 disabled, malformed, or cannot safely execute, the route fails closed. There is
-no single-Worker, receipt-only, fixed-split, or unsafe fallback path.
+no single-Worker, receipt-only, evidence-free settlement, or unsafe fallback
+path.
 
 ## Execution boundary
 

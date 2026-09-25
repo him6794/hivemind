@@ -17,10 +17,18 @@ Submit a task with the source and input contents:
 }
 ```
 
-`max_cpt` is a positive per-replica execution allowance, not a whole-task
-charge ceiling. In enforced consensus mode, Nodepool initially holds the
-allowance for each replica plus the platform fee. Settlement uses valid replica
-usage and refunds the unused part of that hold.
+`max_cpt` is the positive maximum total charge for the whole task, including
+the platform fee and all three default replicas. It is not a per-replica usage
+allowance. Nodepool deterministically assigns the same integer execution budget
+to each replica from the fee-exclusive task budget; any indivisible remainder
+stays with the owner. For example, a 100 CPT cap gives each of three replicas 30
+CPT of execution budget, so the worst-case hold is 99 CPT (90 CPT of usage plus
+9 CPT fee) and the remaining 1 CPT stays with the owner. Settlement aggregates
+valid replica usage, adds the fee, and never exceeds the task cap. Unused held
+CPT is refunded after settlement.
+
+Automatic paid retries are disabled until a funded platform treasury is
+available. Retry work is not charged to the task owner.
 
 The CLI's `--input` option takes inline JSON. For a file-based workflow, read
 the matching `.input.json` file and pass its contents in that option, or submit

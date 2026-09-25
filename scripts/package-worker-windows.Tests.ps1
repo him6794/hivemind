@@ -98,7 +98,14 @@ if ($resetCall -lt 0 -or $importCall -lt 0) {
 Assert-Contains `
     -Haystack $scriptText `
     -Needle 'function Ensure-JwtSecret' `
-    -Message "start-worker launcher must auto-generate a JWT secret when it is blank."
+    -Message "start-worker launcher must generate an internal JWT secret when it is not already available."
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle 'Generated a process-local JWT_SECRET; no user-provided secret is needed.' `
+    -Message "start-worker launcher must keep its generated JWT secret process-local and require no user-provided signing secret."
+if ($scriptText -match 'Ensure-JwtSecret -Path \$envFile|Set-Content -LiteralPath \$Path -Value \$contents') {
+    throw "start-worker launcher must not persist its generated JWT secret into the user configuration file."
+}
 
 Assert-Contains `
     -Haystack $scriptText `
@@ -128,8 +135,8 @@ Assert-Contains `
 
 Assert-Contains `
     -Haystack $scriptText `
-    -Needle 'Ensure-JwtSecret -Path $envFile' `
-    -Message "start-worker launcher must call the JWT secret initializer."
+    -Needle 'Ensure-JwtSecret' `
+    -Message "start-worker launcher must initialize its process-local JWT secret without requiring user configuration."
 
 Assert-Contains `
     -Haystack $scriptText `
@@ -146,6 +153,21 @@ Assert-Contains `
     -Haystack $scriptText `
     -Needle 'hivemind-worker.exe' `
     -Message "Windows worker packaging must ship hivemind-worker.exe."
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle 'Output directory must be empty to avoid replacing an existing Worker installation' `
+    -Message "Windows worker packaging must refuse to overwrite an existing output package."
+foreach ($requiredWebviewContract in @(
+        '$packageWebview = $RustTarget -eq "x86_64-pc-windows-msvc"',
+        '"--bin", "hivemind-worker-ui"',
+        '"--no-default-features", "--features"',
+        '"worker,worker-webview"',
+        'Copy-Item -Force $webviewBinary $packagedWebview',
+        'name = "hivemind-worker-ui.exe"'
+    )) {
+    Assert-Contains -Haystack $scriptText -Needle $requiredWebviewContract `
+        -Message "Windows worker packaging is missing WebView contract '$requiredWebviewContract'."
+}
 if ($scriptText -match '& \(Join-Path \$PSScriptRoot "hivemind-bin\.exe"\)') {
     throw "Windows worker launcher must not start the all-service hivemind-bin.exe."
 }
@@ -171,6 +193,10 @@ Assert-Contains `
     -Haystack $scriptText `
     -Needle '$env:VITE_WORKER_CONTROL_BASE = $workerControlBase' `
     -Message "Windows worker packaging must bake the configured Worker Control address into the UI."
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle '$workerControlBase = $workerControlBase -replace ''^http://\[::\]'', ''http://[::1]''' `
+    -Message "Windows worker packaging must use IPv6 loopback for a wildcard listener."
 Assert-Contains `
     -Haystack $scriptText `
     -Needle '$packagedWorkerUi = Join-Path $out "worker-ui"' `
@@ -228,6 +254,22 @@ Assert-Contains `
     -Haystack $packagedReadme `
     -Needle '`.env.worker.example`' `
     -Message "packaged README must keep its Markdown inline code spans intact."
+Assert-Contains `
+    -Haystack $packagedReadme `
+    -Needle 'WebView2 Runtime' `
+    -Message "packaged README must explain the embedded window prerequisite."
+Assert-Contains `
+    -Haystack $packagedReadme `
+    -Needle 'On the first authenticated login, the Worker automatically obtains one-time VPN enrollment' `
+    -Message "packaged README must explain that first-login VPN enrollment is automatic."
+Assert-Contains `
+    -Haystack $packagedReadme `
+    -Needle 'No `.env` file, terminal command, port choice, `JWT_SECRET`, manually fixed Nodepool IP' `
+    -Message "packaged README must not require JWT_SECRET or a manually fixed Nodepool address for ordinary use."
+Assert-Contains `
+    -Haystack $packagedReadme `
+    -Needle 'Closing only the WebView window does not stop the Worker' `
+    -Message "packaged README must explain Worker lifetime after closing the window."
 
 # The README is written with -Encoding ASCII, which would turn anything else
 # into a literal '?' in the shipped package.
@@ -244,6 +286,16 @@ $packagedEnv = $envMatch.Groups[1].Value
 if ([regex]::IsMatch($packagedEnv, '(?m)^\s*HEADSCALE_API_KEY\s*=')) {
     throw "worker package must never distribute the server-side HEADSCALE_API_KEY."
 }
+if ([regex]::IsMatch($packagedEnv, '(?m)^\s*JWT_SECRET\s*=')) {
+    throw "worker package template must not make a service JWT_SECRET look like an ordinary node setting."
+}
+if (![regex]::IsMatch($packagedEnv, '(?m)^WORKER_VPN_AUTHKEY=\r?$')) {
+    throw "worker package template must not embed a VPN auth key."
+}
+Assert-Contains `
+    -Haystack $scriptText `
+    -Needle 'VPN auth keys must be supplied at runtime; never embed them in a Worker package.' `
+    -Message "worker packaging must reject explicit VPN auth keys before building."
 foreach ($expected in @(
         "NODEPOOL_GRPC_ENDPOINT", "WEBSITE_API_BASE", "HEADSCALE_LOGIN_SERVER",
         "WORKER_VPN_AUTHKEY", "WORKER_VPN_HOSTNAME", "VPN_STARTUP_TIMEOUT_SECS",

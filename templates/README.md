@@ -40,9 +40,12 @@ Submission flags adjust the requested resources and budget:
 - `--gpu-score` - minimum GPU benchmark score
 - `--gpu-memory-gb` - VRAM requirement
 - `--storage-gb` - disk space requirement
-- `--max-cpt` - the positive per-replica managed execution allowance; the
-  initial hold covers every selected replica plus the platform fee, and unused
-  held CPT is refunded after settlement
+- `--max-cpt` - the positive task-wide maximum charge for managed-function-v1,
+  including the platform fee and all three default replicas. Nodepool divides the
+  fee-exclusive execution budget into identical deterministic integer allowances
+  for the replicas; any remainder stays with the owner. Unused held CPT is
+  refunded after settlement. Automatic paid retries are disabled until a funded
+  platform treasury is available, so retry work is not charged to task owners.
 
 The historical `managed-function-v0/` fixtures remain in the repository for
 frozen compatibility tests and old task documentation. New submissions must

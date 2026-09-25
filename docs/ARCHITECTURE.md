@@ -318,8 +318,10 @@ Operator 也可以為 unattended startup 配置角色限定的
    managed DSL backend/semantics binding。
 2. Quorum certificate 與相符的 replica evidence 必須一併持久化；沒有 certificate
    就不能標記完成、寫入 output、billing 或 settlement。
-3. Billing 使用 Nodepool-owned fixed reservation，不採用 Worker 自己回報的價格或
-   usage 作為結算依據。
+3. `managed-function-v1` enforce settlement 使用經驗證且與 assignment 綁定的 replica
+   usage evidence，並受 task-wide `max_cpt` 上限約束；缺失或無效的 receipt 不計費。
+   `observe` 不結算。Frozen `managed-function-v0` 才保留 Nodepool-owned fixed-reservation
+   billing contract。
 4. 已授權的使用者透過 Website/Master API 取得 result、logs 與 lifecycle evidence。
    Secrets 與內部 enrollment material 不會回傳。
 

@@ -21,6 +21,8 @@ nodepool = [
     "dep:hivemind-vpn-service",
 ]
 worker = ["dep:hivemind-worker-executor"]
+worker-webview = ["worker", "dep:tao", "dep:url", "dep:wry"]
+master-webview = ["master", "dep:tao", "dep:url", "dep:wry"]
 cli = ["dep:reqwest"]
 
 [[bin]]
@@ -48,6 +50,16 @@ name = "hivemind-worker"
 path = "src/bin/hivemind-worker.rs"
 required-features = ["worker"]
 
+[[bin]]
+name = "hivemind-worker-ui"
+path = "src/bin/hivemind-worker-ui.rs"
+required-features = ["worker-webview"]
+
+[[bin]]
+name = "hivemind-master-ui"
+path = "src/bin/hivemind-master-ui.rs"
+required-features = ["master-webview"]
+
 [dependencies]
 tokio.workspace = true
 tokio-stream.workspace = true
@@ -74,3 +86,8 @@ hivemind-master-api = { path = "../master-api", optional = true }
 hivemind-website-api = { path = "../website-api", optional = true }
 hivemind-worker-executor = { path = "../worker-executor", optional = true }
 hivemind-vpn-service = { path = "../vpn-service", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+tao = { version = "0.35.3", default-features = false, features = ["rwh_06"], optional = true }
+url = { version = "2.5", optional = true }
+wry = { version = "0.55.1", default-features = false, features = ["os-webview"], optional = true }

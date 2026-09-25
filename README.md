@@ -181,9 +181,18 @@ settling the task, and never falls back to a single-Worker result.
 
 Consensus is agreement evidence, not independent correctness validation: a
 colluding or commonly compromised Worker majority can still agree on an incorrect result.
-Only deterministic, side-effect-free managed tasks are eligible. V1 holds a
-per-replica allowance plus the platform fee, settles validated usage evidence
-from valid replicas, and refunds unused held CPT; quorum output and payment
+Only deterministic, side-effect-free managed tasks are eligible. For v1,
+`max_cpt` is the maximum total task charge, including the 10% platform fee and
+all configured replicas (three by default); it is not a per-replica cap. Nodepool
+derives identical deterministic integer execution budgets from the fee-exclusive
+cap. For a 100 CPT cap and three replicas, each receives 30 CPT of execution
+budget, the worst-case hold is 99 CPT (90 usage + 9 fee), and the remaining 1
+CPT stays with the owner. Settlement aggregates valid replica usage plus the fee
+and never exceeds `max_cpt`; unused held CPT is refunded. Automatic paid retries
+are disabled until a funded platform treasury is available, and retry work is
+not charged to task owners. The task-wide cap applies to new v1 submissions;
+historical tasks billed under the former per-replica contract remain as recorded
+and are not retroactively re-capped or refunded. Quorum output and payment
 eligibility are separate decisions.
 
 The default rollout is `enforce`. Use `observe` for a canary that fans out
@@ -222,7 +231,7 @@ REDIS_URL=redis://localhost:6379 \
 
 ## Configuration
 
-Configuration is via environment variables:
+Configuration is via environment variables. The table below describes server/service deployment settings; it is not a configuration checklist for ordinary packaged Master or Worker nodes. Those users do not set the server `JWT_SECRET` or manually pin a Nodepool IP: first authenticated login performs VPN enrollment, and the client discovers Nodepool through the overlay.
 
 | Variable | Default | Description |
 |----------|---------|-------------|

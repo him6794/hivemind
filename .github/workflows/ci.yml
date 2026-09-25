@@ -238,6 +238,9 @@ jobs:
       - name: Run package worker contract
         shell: pwsh
         run: ./scripts/package-worker-windows.Tests.ps1
+      - name: Run package Master contract
+        shell: pwsh
+        run: ./scripts/package-master-windows.Tests.ps1
       - name: Run native HCS contract
         shell: pwsh
         run: ./scripts/windows-hcs-e2e.Tests.ps1

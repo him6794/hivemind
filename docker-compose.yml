@@ -140,6 +140,7 @@ services:
       WORKER_GRPC_ADDR: 0.0.0.0:50053
       WORKER_ADVERTISE_ADDR: worker:50053
       WORKER_CONTROL_HTTP_ADDR: 0.0.0.0:18080
+      HIVEMIND_WORKER_STATE_ROOT: /var/lib/hivemind/worker-state
       WORKER_CONTROL_CORS_ALLOWED_ORIGINS: ${WORKER_CONTROL_CORS_ALLOWED_ORIGINS:-}
       WORKER_DISABLE_WEBSITE_VPN: ${WORKER_DISABLE_WEBSITE_VPN:-1}
       TORRENT_API_DIR: /app/api/torrents
@@ -172,6 +173,7 @@ services:
     volumes:
       - worker-task-downloads:/app/api/torrents
       - worker-torrents:/app/bt_torrents
+      - worker-state:/var/lib/hivemind/worker-state
       - type: volume
         source: worker-general-compute-config
         target: /etc/hivemind/general-compute
@@ -267,3 +269,5 @@ volumes:
   # are mutable Worker state and stay separate from operator configuration.
   worker-general-compute-state:
     name: ${WORKER_GENERAL_COMPUTE_STATE_VOLUME_NAME:-hivemind-worker-general-compute-state}
+  worker-state:
+    name: ${WORKER_STATE_VOLUME_NAME:-hivemind-worker-state}

@@ -650,6 +650,111 @@ fn production_task_root_rejects_path_traversal_and_materializes_bound_bundle() {
 }
 
 #[test]
+fn production_rootfs_snapshot_cache_materializes_and_validates_task_markers() {
+    let root = std::env::temp_dir().join(format!(
+        "hivemind-production-rootfs-cache-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let mut registration = config();
+    registration.bundle_root = root.join("bundles");
+    registration.artifact_root = root.join("artifacts");
+    registration.runner_executable = root.join("runc");
+    registration.runner_state_root = root.join("runner-state");
+    registration.seccomp_profile_path = root.join("seccomp.json");
+    let template_rootfs = registration.bundle_root.join("rootfs");
+    std::fs::create_dir_all(template_rootfs.join("runtime")).unwrap();
+    std::fs::write(template_rootfs.join("runtime/app.txt"), b"runtime-v1").unwrap();
+    write_seccomp_profile(&registration);
+
+    let registry = ProductionBackendRegistry::new(vec![registration.clone()]).unwrap();
+    let request = request_for_mount_test(&registration, "execution-rootfs-cache");
+    let backend = registry.get(&registration.backend_id).unwrap();
+    let (first_bundle, first_artifacts) = backend
+        .materialize_bundle(&request, "task-rootfs-cache-first")
+        .unwrap();
+    assert_eq!(
+        std::fs::read(first_bundle.join("rootfs/runtime/app.txt")).unwrap(),
+        b"runtime-v1"
+    );
+    let marker = first_bundle.join(".hivemind-rootfs.json");
+    assert!(
+        marker.is_file(),
+        "task rootfs should carry its cache identity marker"
+    );
+    let cache_root = registration.bundle_root.join(".rootfs-cache");
+    assert_eq!(
+        std::fs::read_dir(&cache_root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+            .count(),
+        1,
+        "one template should produce one persistent rootfs snapshot"
+    );
+
+    let (second_bundle, second_artifacts) = backend
+        .materialize_bundle(&request, "task-rootfs-cache-second")
+        .unwrap();
+    assert_eq!(
+        std::fs::read(second_bundle.join("rootfs/runtime/app.txt")).unwrap(),
+        b"runtime-v1"
+    );
+
+    std::fs::write(&marker, b"{}").unwrap();
+    assert!(matches!(
+        backend.materialize_bundle(&request, "task-rootfs-cache-first"),
+        Err(ProductionBackendRegistryError::RootUnavailable(_))
+    ));
+
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(first_bundle);
+    let _ = std::fs::remove_dir_all(first_artifacts);
+    let _ = std::fs::remove_dir_all(second_bundle);
+    let _ = std::fs::remove_dir_all(second_artifacts);
+}
+
+#[test]
+fn production_seccomp_cache_invalidates_when_profile_digest_drifts() {
+    let root = std::env::temp_dir().join(format!(
+        "hivemind-production-seccomp-cache-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let mut registration = config();
+    registration.bundle_root = root.join("bundles");
+    registration.artifact_root = root.join("artifacts");
+    registration.runner_executable = root.join("runc");
+    registration.runner_state_root = root.join("runner-state");
+    registration.seccomp_profile_path = root.join("seccomp.json");
+    std::fs::create_dir_all(registration.bundle_root.join("rootfs")).unwrap();
+    write_seccomp_profile(&registration);
+
+    let registry = ProductionBackendRegistry::new(vec![registration.clone()]).unwrap();
+    let request = request_for_mount_test(&registration, "execution-seccomp-cache");
+    let backend = registry.get(&registration.backend_id).unwrap();
+    backend
+        .materialize_bundle(&request, "task-seccomp-cache-first")
+        .expect("valid seccomp profile should materialize");
+
+    std::fs::write(&registration.seccomp_profile_path, b"{}").unwrap();
+    assert!(matches!(
+        backend.materialize_bundle(&request, "task-seccomp-cache-second"),
+        Err(ProductionBackendRegistryError::SeccompProfileUnavailable(_))
+    ));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn materialize_bundle_for_gpu_launch_emits_exact_device_and_cgroup_entries() {
     let root = std::env::temp_dir().join(format!(
         "hivemind-production-gpu-materialized-{}",

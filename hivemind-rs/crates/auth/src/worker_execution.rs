@@ -13,6 +13,10 @@ pub const DEFAULT_WORKER_EXECUTION_PUBLIC_KEY_PEM: &str = "-----BEGIN PUBLIC KEY
 MCowBQYDK2VwAyEAfG12U4EBcWCj7yKaZUhlUmPvRtLEAZshKvN2WyL7EPs=\n\
 -----END PUBLIC KEY-----\n";
 
+/// JWT expiry grace period used by Worker execution-token validation.
+/// Attempt stop fences must remain active for this full interval as well.
+pub const WORKER_EXECUTION_TOKEN_LEEWAY_SECONDS: u64 = 60;
+
 /// Signs worker-execution JWTs with the platform Ed25519 private key.
 #[derive(Clone)]
 pub struct WorkerExecutionSigner {
@@ -176,6 +180,13 @@ impl WorkerExecutionSigner {
     }
 }
 
+fn worker_execution_validation() -> Validation {
+    let mut validation = Validation::new(Algorithm::EdDSA);
+    validation.validate_exp = true;
+    validation.leeway = WORKER_EXECUTION_TOKEN_LEEWAY_SECONDS;
+    validation
+}
+
 /// Verifies worker-execution JWTs with the platform Ed25519 public key.
 #[derive(Clone)]
 pub struct WorkerExecutionVerifier {
@@ -195,16 +206,14 @@ impl WorkerExecutionVerifier {
     }
 
     pub fn decode(&self, token: &str) -> Result<Claims> {
-        let mut validation = Validation::new(Algorithm::EdDSA);
-        validation.validate_exp = true;
+        let validation = worker_execution_validation();
         let token_data = decode::<Claims>(token, &self.decoding_key, &validation)
             .context("Failed to decode worker execution token")?;
         Ok(token_data.claims)
     }
 
     pub fn decode_execution_claims(&self, token: &str) -> Result<WorkerExecutionClaims> {
-        let mut validation = Validation::new(Algorithm::EdDSA);
-        validation.validate_exp = true;
+        let validation = worker_execution_validation();
         let token_data = decode::<WorkerExecutionClaims>(token, &self.decoding_key, &validation)
             .context("Failed to decode worker execution token")?;
         Ok(token_data.claims)
@@ -248,6 +257,14 @@ mod tests {
             exp: now + 300,
             iat: now,
         }
+    }
+
+    #[test]
+    fn worker_execution_validation_uses_the_stop_fence_grace_period() {
+        let validation = worker_execution_validation();
+
+        assert!(validation.validate_exp);
+        assert_eq!(validation.leeway, WORKER_EXECUTION_TOKEN_LEEWAY_SECONDS);
     }
 
     #[test]

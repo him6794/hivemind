@@ -83,7 +83,7 @@ const definitions = {
     hero: {
       badge: 'Official site',
       title: 'Run tasks on a shared network',
-      body: 'Send a task, set a per-replica execution allowance, and let Hivemind choose available computers. The network validates execution evidence before it settles the charge and refunds unused held credits.',
+      body: 'Set a task-wide maximum charge that includes the platform fee, then let Hivemind choose available computers. The default three managed-function-v1 replicas share the execution budget deterministically; the network validates their evidence before settlement.',
       primaryCta: 'Create account',
       secondaryCta: 'Read the docs',
       bullets: [
@@ -109,8 +109,8 @@ const definitions = {
           body: 'Send the task instructions and input. You do not need to build an image, container, or package.',
         },
         {
-          title: 'Your allowance is per replica',
-          body: 'max_cpt limits one replica’s execution usage. Hivemind holds that allowance for every replica plus a 10% fee, then refunds what valid execution did not use.',
+          title: 'Your cap covers the whole task',
+          body: 'max_cpt is the maximum total charge for the task, including the 10% platform fee—not a per-replica cap. The default three replicas receive identical deterministic integer execution budgets from the fee-exclusive cap; any remainder stays with you. Automatic paid retries are disabled until a funded platform treasury is available, so no retry work is charged to task owners.',
         },
         {
           title: 'Your task can run on any suitable computer',
@@ -150,8 +150,8 @@ const definitions = {
         pipeline: [
           {
             step: '01',
-            title: 'Each replica stays within its allowance',
-            body: 'Hivemind measures each replica’s work and stops it before the per-replica allowance is exceeded. Tasks cannot open files, connect to the network, or start other programs.',
+            title: 'Each replica stays within its share',
+            body: 'Hivemind splits the fee-exclusive execution budget into equal deterministic integer allowances for the three default replicas and stops each at its assigned share. Tasks cannot open files, connect to the network, or start other programs.',
           },
           {
             step: '02',
@@ -247,7 +247,7 @@ const definitions = {
           { name: 'runtime', type: 'string', required: 'yes', note: 'Must be managed-function-v1. managed-function-v0 is retired and rejected for new tasks.' },
           { name: 'task_source', type: 'string', required: 'yes', note: `The managed function source text. Up to ${LIMITS.taskSourceBytes}.` },
           { name: 'torrent', type: 'string', required: 'yes', note: `The JSON input document, sent as a string. Reachable inside the function as input. Up to ${LIMITS.jsonInputBytes}.` },
-          { name: 'max_cpt', type: 'integer', required: 'yes', note: 'A positive per-replica execution allowance. There is no fixed v0-era work ceiling; admission also checks the replica-aware hold against your available CPT.' },
+          { name: 'max_cpt', type: 'integer', required: 'yes', note: 'A positive maximum total task charge, including the 10% platform fee and all replicas (three by default). The fee-exclusive execution budget is split into identical deterministic integer replica allowances; any remainder stays with the owner.' },
           { name: 'cpu_score', type: 'integer', required: 'no', note: 'Minimum CPU capability a worker must have. Non-negative.' },
           { name: 'gpu_score', type: 'integer', required: 'no', note: 'Minimum GPU capability. Non-negative.' },
           { name: 'memory_gb', type: 'integer', required: 'no', note: 'Minimum memory in GB. Non-negative.' },
@@ -257,7 +257,7 @@ const definitions = {
           { name: 'location', type: 'string', required: 'no', note: 'Preferred worker location label.' },
         ],
         language: {
-          intro: 'managed-function-v1 is the supported managed job format. It is a small, metered language: each replica has a usage allowance, structural safety limits remain bounded, and there is no way to reach the host.',
+          intro: 'managed-function-v1 is the supported managed job format. It is a small, metered language: max_cpt is a task-wide maximum charge including fees, and the default three replicas split the fee-exclusive execution budget into identical deterministic allowances. Structural safety limits remain bounded, and there is no way to reach the host.',
           statements: [
             'let name = expression;',
             'fn name(a, b) { return expression; }',
@@ -285,7 +285,7 @@ const definitions = {
             'There is no bare name = value assignment. Rebind with let, or write into an element with target[key] = value.',
             'Identifiers are ASCII letters, digits, and _, and cannot start with a digit.',
             'Strings are UTF-8 and support \\" \\\\ \\n \\r \\t escapes.',
-            'for iterates lists only; its work consumes the per-replica usage allowance.',
+            'for iterates lists only; its work consumes the replica’s deterministic share of the task execution budget.',
             'print appends to the task record output and is bounded by the output limit.',
           ],
           forbidden: [
@@ -300,7 +300,7 @@ const definitions = {
           ],
           example: MANAGED_EXAMPLE,
           exampleInput: MANAGED_EXAMPLE_INPUT,
-          exampleNote: 'Against that input each replica returns 36, prints one line, and records 80 usage units. V1 settlement combines all valid replica evidence, adds a 10% platform fee, and refunds unused held credits; this receipt is not a whole-task charge quote. Note the loop accumulator: a value is rebound with let, because a bare name = value assignment is a parse error.',
+          exampleNote: 'Against that input each replica returns 36, prints one line, and records 80 usage units. The per-replica receipt is not the task charge: V1 aggregates valid replica usage, adds the 10% platform fee within the task-wide max_cpt cap, and refunds unused held credits. Note the loop accumulator: a value is rebound with let, because a bare name = value assignment is a parse error.',
           submitExample: SUBMIT_EXAMPLE,
         },
         limits: [
@@ -317,13 +317,14 @@ const definitions = {
         ],
         billing: {
           title: 'How a managed-function-v1 task is settled',
-          body: 'V1 measures actual valid replica execution, not wall-clock time. max_cpt is one replica’s usage allowance; Hivemind holds an allowance for every replica plus a 10% fee, settles valid evidence, and refunds what was not used.',
-          formula: 'held_cpt = replica_count × max_cpt + 10% hold fee\ncharged_cpt = valid_replica_usage_cpt + 10% actual-usage fee\nrefund_cpt = held_cpt − charged_cpt',
+          body: 'V1 measures actual valid replica execution, not wall-clock time. max_cpt is the task-wide maximum total charge, including the 10% platform fee. The default three replicas receive identical deterministic integer execution budgets from the fee-exclusive cap; any remainder stays with the owner. Nodepool aggregates valid usage and the fee without exceeding max_cpt. Automatic paid retries are disabled until a funded platform treasury is available, so no retry work is charged to the task owner.',
+          formula: 'max_cpt = whole-task charge cap, fee included\nreplica_budget = equal deterministic integer shares of fee-exclusive budget\ncharged_cpt = aggregate_valid_replica_usage + 10% fee\ncharged_cpt ≤ max_cpt\nrefund_cpt = held_cpt − charged_cpt\nexample: max_cpt=100 → 30 CPT × 3 replicas; worst-case hold=99 CPT',
           rows: [
-            { name: 'Per-replica allowance', value: 'max_cpt usage units' },
-            { name: 'Worst-case hold', value: 'replicas × allowance + 10%' },
-            { name: 'Valid execution usage', value: '1 CPT per unit' },
-            { name: 'Platform fee', value: '10% of valid usage' },
+            { name: 'Task-wide charge cap', value: 'max_cpt CPT, including fee' },
+            { name: 'Default replica budgets', value: 'Equal deterministic integer shares; remainder stays with owner' },
+            { name: 'Example at 100 CPT', value: '30 CPT per replica; worst-case hold is 99 CPT' },
+            { name: 'Valid aggregate usage', value: '1 CPT per unit' },
+            { name: 'Platform fee', value: '10% of valid usage, included in cap' },
           ],
           functionRows: [
             {
@@ -421,14 +422,16 @@ const definitions = {
             },
           ],
           notes: [
-            'max_cpt is a per-replica allowance, not a whole-task charge ceiling.',
-            'The initial hold covers every selected replica and a 10% fee; it can therefore exceed one max_cpt.',
-            'Valid replica execution is settled independently of quorum output agreement, and unused held CPT is refunded.',
+            'max_cpt is the whole-task maximum charge, including the 10% fee and all selected replicas; it is not a per-replica allowance.',
+            'The three default replicas receive identical deterministic integer execution budgets from the fee-exclusive cap. At max_cpt=100, each gets 30 CPT and the worst-case hold is 99 CPT; the remaining CPT stays with the owner.',
+            'Valid replica execution is settled independently of quorum output agreement, and unused held CPT is refunded without exceeding max_cpt.',
+            'Automatic paid retries are disabled until a funded platform treasury is available; no retry work is charged to the task owner.',
+            'The task-wide cap applies to new v1 submissions only; historical v1 charges under the earlier per-replica contract remain as recorded and are not retroactively recalculated or refunded.',
           ],
         },
         settlement: {
           title: 'Quorum result and evidence settlement',
-          body: 'Several participating computers report the same supported output to create a quorum result. Settlement separately aggregates signed, valid replica execution evidence: valid divergent replicas may be paid for the work they completed, while the rest of the hold is refunded.',
+          body: 'Several participating computers report the same supported output to create a quorum result. Settlement separately aggregates signed, valid replica execution evidence, adds the platform fee, and remains within the task-wide max_cpt cap. Valid divergent replicas may contribute verified usage; unused held credits are refunded. Automatic paid retries are disabled until a funded platform treasury is available.',
         },
         failures: [
           { code: 'parse_error', note: 'The source did not parse. The message carries line and column.' },
@@ -438,7 +441,7 @@ const definitions = {
           { code: 'key_error', note: 'get was called with a key the map does not have.' },
           { code: 'index_error', note: 'A list index was out of range.' },
           { code: 'input_error', note: 'The JSON input could not be read as expected.' },
-          { code: 'budget_exhausted', note: 'A replica spent its max_cpt allowance before finishing.' },
+          { code: 'budget_exhausted', note: 'A replica used its deterministically assigned share of the task execution budget before finishing.' },
           { code: 'integer_arithmetic_overflow', note: 'A signed 64-bit arithmetic result overflowed; V1 uses checked arithmetic.' },
           { code: 'call_depth_exceeded', note: 'Calls nested deeper than the depth ceiling.' },
           { code: 'output_limit_exceeded', note: 'print produced more than the output ceiling.' },
@@ -491,7 +494,7 @@ const definitions = {
               'No uptime or availability guarantee, and no service level agreement.',
               'No dispute resolution process for charges or task outcomes.',
               'No durability guarantee for task inputs, outputs, or results.',
-              'Availability is best effort. A task can be rejected, tried again, or fail.',
+              'Availability is best effort. A task can be rejected or fail. Automatic paid retries are disabled until a funded platform treasury is available; retry work is not charged to the task owner.',
             ],
           },
           {
@@ -525,7 +528,7 @@ const definitions = {
     hero: {
       badge: '官方網站',
       title: '在共享網路上執行工作',
-      body: '送出工作、設定每個副本的執行額度，讓 Hivemind 選擇可用的電腦。網路會驗證執行證據後結算，並退回未使用的保留額度。',
+      body: '設定包含平台費的整份工作最高收費，再讓 Hivemind 選擇可用的電腦。managed-function-v1 預設由三個副本確定性分配執行額度；網路會先驗證執行證據再結算。',
       primaryCta: '建立帳號',
       secondaryCta: '閱讀文件',
       bullets: [
@@ -551,8 +554,8 @@ const definitions = {
           body: '送出工作說明和輸入資料即可，不需要自己建立映像檔、容器或套件。',
         },
         {
-          title: '額度是每個副本的上限',
-          body: 'max_cpt 限制單一副本的執行用量。Hivemind 會為每個副本保留這份額度及 10% 費用，再退回有效執行未使用的部分。',
+          title: '上限涵蓋整份工作',
+          body: 'max_cpt 是整份工作的最高總收費，包含 10% 平台費，不是單一副本的上限。預設三個副本會從扣除費用後的額度中取得相同且確定性的整數執行預算；餘額會留在你的帳戶。平台資金池尚未備妥前，自動付費重試會停用，因此重試工作不會向任務擁有者收費。',
         },
         {
           title: '工作會跑在合適的電腦上',
@@ -592,8 +595,8 @@ const definitions = {
         pipeline: [
           {
             step: '01',
-            title: '每個副本遵守自己的額度',
-            body: 'Hivemind 會計算每個副本的工作量，在超過該副本額度前停止。工作不能開啟檔案、連接網路或啟動其他程式。',
+            title: '每個副本都不會超出分配額度',
+            body: 'Hivemind 會把扣除平台費後的執行額度，平均且確定性地分配成三個預設副本的整數額度，並在各副本超出分配額度前停止。工作不能開啟檔案、連接網路或啟動其他程式。',
           },
           {
             step: '02',
@@ -689,7 +692,7 @@ const definitions = {
           { name: 'runtime', type: 'string', required: '必填', note: '必須是 managed-function-v1。managed-function-v0 已退役，新工作會被拒絕。' },
           { name: 'task_source', type: 'string', required: '必填', note: `managed function 原始碼，上限 ${LIMITS.taskSourceBytes}。` },
           { name: 'torrent', type: 'string', required: '必填', note: `JSON 輸入文件，以字串傳入，在函式中以 input 取用，上限 ${LIMITS.jsonInputBytes}。` },
-          { name: 'max_cpt', type: 'integer', required: '必填', note: '正整數的單一副本執行額度。沒有舊 V0 的固定工作上限；系統還會確認你的 CPT 足以支付副本數量加費用的保留額度。' },
+          { name: 'max_cpt', type: 'integer', required: '必填', note: '正整數的整份任務最高收費，包含 10% 平台費與所有副本（預設三個）。扣除費用後的執行額度會確定性地分成相同整數副本額度；餘額留在任務擁有者帳戶。' },
           { name: 'cpu_score', type: 'integer', required: '選填', note: 'worker 需具備的最低 CPU 能力，不可為負。' },
           { name: 'gpu_score', type: 'integer', required: '選填', note: '最低 GPU 能力，不可為負。' },
           { name: 'memory_gb', type: 'integer', required: '選填', note: '最低記憶體（GB），不可為負。' },
@@ -699,7 +702,7 @@ const definitions = {
           { name: 'location', type: 'string', required: '選填', note: '偏好的 worker 位置標籤。' },
         ],
         language: {
-          intro: 'managed-function-v1 是目前支援的 managed 工作格式。它是一個小型、會計量的語言：每個副本都有用量額度，結構性安全限制仍受約束，且沒有任何管道可以碰到宿主機。',
+          intro: 'managed-function-v1 是目前支援的 managed 工作格式。它是一個小型、會計量的語言：max_cpt 是包含費用的整份工作最高收費，預設三個副本會確定性地平分扣除平台費後的執行額度。結構性安全限制仍受約束，且沒有任何管道可以碰到宿主機。',
           statements: [
             'let name = expression;',
             'fn name(a, b) { return expression; }',
@@ -727,7 +730,7 @@ const definitions = {
             '沒有裸寫的 name = value 賦值。請用 let 重新綁定，或以 target[key] = value 寫入元素。',
             '識別字由 ASCII 字母、數字與 _ 組成，且不可以數字開頭。',
             '字串為 UTF-8，支援 \\" \\\\ \\n \\r \\t 跳脫。',
-            'for 只能迭代 list；其中的工作會消耗每個副本的用量額度。',
+            'for 只能迭代 list；其中的工作會消耗該副本從任務執行預算中確定性分配到的額度。',
             'print 會寫入工作記錄的輸出，受輸出上限約束。',
           ],
           forbidden: [
@@ -742,7 +745,7 @@ const definitions = {
           ],
           example: MANAGED_EXAMPLE,
           exampleInput: MANAGED_EXAMPLE_INPUT,
-          exampleNote: '搭配這份輸入執行時，每個副本都會回傳 36、印出一行，並記錄 80 個 usage unit。V1 會合計所有有效副本的證據、加上 10% 平台費，並退回未使用的保留額度；這份收據不是整份任務的報價。注意迴圈裡的累加寫法：要用 let 重新綁定，因為裸寫 name = value 會是 parse_error。',
+          exampleNote: '搭配這份輸入執行時，每個副本都會回傳 36、印出一行，並記錄 80 個 usage unit。單一副本收據不是整份任務的扣款：V1 會合計有效副本用量，在整份任務 max_cpt 上限內加上 10% 平台費，並退回未使用的保留額度。注意迴圈裡的累加寫法：要用 let 重新綁定，因為裸寫 name = value 會是 parse_error。',
           submitExample: SUBMIT_EXAMPLE,
         },
         limits: [
@@ -759,13 +762,14 @@ const definitions = {
         ],
         billing: {
           title: 'managed-function-v1 怎麼結算',
-          body: 'V1 依有效副本的實際執行量結算，而不是看牆鐘時間。max_cpt 是單一副本的用量額度；Hivemind 會為每個副本保留額度及 10% 費用，結算有效證據後退回未使用的部分。',
-          formula: 'held_cpt = 副本數 × max_cpt + 10% 保留費\ncharged_cpt = 有效副本用量 + 10% 實際用量費\nrefund_cpt = held_cpt − charged_cpt',
+          body: 'V1 依有效副本的實際執行量結算，而不是看牆鐘時間。max_cpt 是整份任務的最高總收費，包含 10% 平台費。預設三個副本會從扣除費用後的額度中取得相同且確定性的整數執行預算；餘額留在任務擁有者帳戶。Nodepool 合計有效用量與費用，總扣款不會超過 max_cpt。平台資金池尚未備妥前，自動付費重試會停用，不會向任務擁有者收取重試用量。',
+          formula: 'max_cpt = 整份任務最高收費，含費用\nreplica_budget = 扣除費用後額度的相同確定性整數分配\ncharged_cpt = 有效副本用量合計 + 10% 費用\ncharged_cpt ≤ max_cpt\nrefund_cpt = held_cpt − charged_cpt\n例如：max_cpt=100 → 每個副本 30 CPT；最壞情況保留 99 CPT',
           rows: [
-            { name: '每個副本的額度', value: 'max_cpt 個 usage unit' },
-            { name: '最壞情況保留額度', value: '副本數 × 額度 + 10%' },
-            { name: '有效執行用量', value: '每單位 1 CPT' },
-            { name: '平台費', value: '有效用量的 10%' },
+            { name: '整份任務最高收費', value: 'max_cpt CPT，包含費用' },
+            { name: '預設副本額度', value: '相同且確定性的整數分配；餘額留在帳戶' },
+            { name: '100 CPT 範例', value: '每個副本 30 CPT；最壞情況保留 99 CPT' },
+            { name: '有效用量合計', value: '每單位 1 CPT' },
+            { name: '平台費', value: '有效用量的 10%，包含在上限內' },
           ],
           functionRows: [
             {
@@ -863,14 +867,16 @@ const definitions = {
             },
           ],
           notes: [
-            'max_cpt 是每個副本的額度，不是整份任務的最高收費上限。',
-            '初始保留額度涵蓋每個副本與 10% 費用，因此可能大於單一 max_cpt。',
-            '有效副本執行會獨立於共識輸出結果結算，未使用的保留 CPT 會退回。',
+            'max_cpt 是整份任務的最高總收費，包含 10% 費用與所有副本；不是單一副本的額度。',
+            '預設三個副本會取得相同且確定性的整數執行額度。max_cpt=100 時每個副本為 30 CPT，最壞情況保留 99 CPT，剩餘 1 CPT 留在任務擁有者帳戶。',
+            '有效副本執行會獨立於共識輸出結果結算；有效用量加費用不會超過 max_cpt，未使用的保留 CPT 會退回。',
+            '平台資金池尚未備妥前，自動付費重試會停用，不會向任務擁有者收取重試用量。',
+            '整份任務的總額上限只適用於新的 v1 送出工作；舊版以單一副本 max_cpt 結算的歷史 v1 扣款會維持原樣，不會追溯重算或退款。',
           ],
         },
         settlement: {
           title: '共識結果與執行證據結算',
-          body: '多台參與電腦回報相同的支援輸出後，才會產生共識結果。結算則獨立合計已簽署且有效的副本執行證據：結果不同但執行有效的副本仍可能按完成的工作獲得結算，剩餘保留額度會退回。',
+          body: '多台參與電腦回報相同的支援輸出後，才會產生共識結果。結算會另外合計已簽署且有效的副本執行證據、加上平台費，且不會超過整份任務 max_cpt 上限。結果不同但執行有效的副本仍可能計入有效用量；未使用的保留額度會退回。平台資金池尚未備妥前，自動付費重試會停用。',
         },
         failures: [
           { code: 'parse_error', note: '原始碼無法解析，訊息會帶行號與欄位。' },
@@ -880,7 +886,7 @@ const definitions = {
           { code: 'key_error', note: 'get 取用了 map 沒有的鍵。' },
           { code: 'index_error', note: 'list 索引超出範圍。' },
           { code: 'input_error', note: 'JSON 輸入無法依預期讀取。' },
-          { code: 'budget_exhausted', note: '單一副本在完成前用光了自己的 max_cpt 額度。' },
+          { code: 'budget_exhausted', note: '單一副本在完成前用光了從任務執行預算中確定性分配到的額度。' },
           { code: 'integer_arithmetic_overflow', note: '有號 64 位元運算結果溢位；V1 使用 checked arithmetic。' },
           { code: 'call_depth_exceeded', note: '呼叫巢狀超過深度上限。' },
           { code: 'output_limit_exceeded', note: 'print 產生的輸出超過上限。' },
@@ -933,7 +939,7 @@ const definitions = {
               '沒有可用性或正常運行時間保證，也沒有服務等級協議。',
               '沒有針對扣款或工作結果的爭議處理程序。',
               '對工作的輸入、輸出與結果不提供持久性保證。',
-              '電腦供給為盡力而為，工作可能被拒絕、重試或失敗。',
+              '電腦供給為盡力而為，工作可能被拒絕或失敗。平台資金池尚未備妥前，自動付費重試會停用，重試用量不會向任務擁有者收費。',
             ],
           },
           {

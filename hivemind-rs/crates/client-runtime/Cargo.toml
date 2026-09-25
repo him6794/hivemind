@@ -23,3 +23,6 @@ boringtun.workspace = true
 rand.workspace = true
 hex.workspace = true
 dirs = "5"
+
+[dev-dependencies]
+tokio-stream.workspace = true

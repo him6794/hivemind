@@ -34,6 +34,7 @@ const UPDATE_ACTIVATION_DESCRIPTOR_DIR: &str = ".hivemind-update-activation";
 const UPDATE_ACTIVATION_DESCRIPTOR_FILE: &str = "descriptor.json";
 const UPDATE_HASH_BYTES: usize = 32;
 const UPDATE_SIGNATURE_BYTES: usize = 64;
+pub(crate) const UPDATE_FULL_REVERIFY_INTERVAL_SECS: u64 = 6 * 60 * 60;
 
 /// Dedicated update-root key. It is intentionally different from every
 /// Worker execution or Nodepool authentication key.
@@ -132,39 +133,19 @@ impl UpdatePolicy {
     }
 
     #[must_use]
-    pub fn windows_worker(allowed_hosts: &[&str]) -> Self {
-        Self::new(
-            "hivemind-windows-worker",
-            "stable",
-            "windows",
-            current_windows_architecture(),
-            allowed_hosts,
-        )
-    }
-
-    #[must_use]
-    pub fn windows_master(allowed_hosts: &[&str]) -> Self {
-        Self::new(
-            "hivemind-windows-master",
-            "stable",
-            "windows",
-            current_windows_architecture(),
-            allowed_hosts,
-        )
-    }
-
-    #[must_use]
     pub fn with_max_package_bytes(mut self, max_package_bytes: u64) -> Self {
         self.max_package_bytes = max_package_bytes;
         self
     }
 }
 
-fn current_windows_architecture() -> String {
+pub(crate) fn current_windows_architecture() -> &'static str {
     if cfg!(target_arch = "aarch64") {
-        "aarch64".into()
+        "aarch64"
+    } else if cfg!(target_arch = "x86_64") {
+        "x86_64"
     } else {
-        "x86_64".into()
+        "unknown"
     }
 }
 
@@ -258,6 +239,23 @@ impl VerifiedReleaseManifest {
     pub fn manifest_sha256(&self) -> &str {
         &self.manifest_sha256
     }
+}
+
+/// Metadata used by the in-process package cache. The content digest remains
+/// authoritative; this is only a bounded shortcut between periodic full
+/// verifications and is intentionally discarded on process restart.
+#[derive(Debug, Clone)]
+pub(crate) struct PackageVerificationCache {
+    path: PathBuf,
+    size: u64,
+    modified_unix: u64,
+    verified_at_unix: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FileMetadataFingerprint {
+    pub size: u64,
+    pub modified_unix: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -446,12 +444,17 @@ pub fn canonical_keyset_bytes(keyset: &ReleaseKeyset) -> Result<Vec<u8>, UpdateE
 }
 
 pub fn canonical_manifest_bytes(manifest: &ReleaseManifest) -> Result<Vec<u8>, UpdateError> {
+    let canonical = canonical_manifest(manifest)?;
+    serde_json::to_vec(&canonical).map_err(|error| UpdateError::InvalidMetadata(error.to_string()))
+}
+
+fn canonical_manifest(manifest: &ReleaseManifest) -> Result<ReleaseManifest, UpdateError> {
     let mut canonical = manifest.clone();
     validate_file_list(&canonical.files)?;
     canonical
         .files
         .sort_by(|left, right| left.path.cmp(&right.path));
-    serde_json::to_vec(&canonical).map_err(|error| UpdateError::InvalidMetadata(error.to_string()))
+    Ok(canonical)
 }
 
 fn canonical_signed_manifest_bytes(
@@ -463,13 +466,8 @@ fn canonical_signed_manifest_bytes(
         signature: String,
     }
 
-    let mut manifest = signed_manifest.manifest.clone();
-    validate_file_list(&manifest.files)?;
-    manifest
-        .files
-        .sort_by(|left, right| left.path.cmp(&right.path));
     serde_json::to_vec(&CanonicalSignedManifest {
-        manifest,
+        manifest: canonical_manifest(&signed_manifest.manifest)?,
         signature: signed_manifest.signature.clone(),
     })
     .map_err(|error| UpdateError::InvalidMetadata(error.to_string()))
@@ -805,6 +803,118 @@ pub fn verify_active_directory(
     Ok(())
 }
 
+/// Return a cheap tree identity for an installed release. It deliberately
+/// records metadata rather than file contents; callers must still perform a
+/// full digest verification at startup and at the periodic re-verification
+/// boundary before trusting a cached result.
+pub(crate) fn installed_tree_metadata_fingerprint(root: &Path) -> Result<String, UpdateError> {
+    ensure_safe_directory(root)?;
+    let mut entries = BTreeMap::new();
+    collect_tree_metadata(root, "", &mut entries)?;
+    Ok(metadata_fingerprint(entries))
+}
+
+/// Return the metadata identity of the signed files in the active directory.
+/// Runtime-owned files outside the signed manifest are intentionally ignored.
+pub(crate) fn active_signed_metadata_fingerprint(
+    root: &Path,
+    verified: &VerifiedReleaseManifest,
+) -> Result<String, UpdateError> {
+    ensure_safe_directory(root)?;
+    let mut entries = BTreeMap::new();
+    for file in &verified.manifest.files {
+        let path = safe_join(root, &file.path)?;
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                UpdateError::PackageMismatch
+            } else {
+                UpdateError::ActivationFailed(error.to_string())
+            }
+        })?;
+        ensure_metadata_is_not_reparse(&path, &metadata)?;
+        if !metadata.is_file() {
+            return Err(UpdateError::PackageMismatch);
+        }
+        entries.insert(
+            file.path.clone(),
+            format!(
+                "file:{}:{}",
+                metadata.len(),
+                metadata_modified_unix(&metadata)
+            ),
+        );
+    }
+    Ok(metadata_fingerprint(entries))
+}
+
+pub(crate) fn file_metadata_fingerprint(
+    path: &Path,
+) -> Result<FileMetadataFingerprint, UpdateError> {
+    let metadata = fs::symlink_metadata(path)?;
+    ensure_metadata_is_not_reparse(path, &metadata)?;
+    if !metadata.is_file() {
+        return Err(UpdateError::PackageMismatch);
+    }
+    Ok(FileMetadataFingerprint {
+        size: metadata.len(),
+        modified_unix: metadata_modified_unix(&metadata),
+    })
+}
+
+fn collect_tree_metadata(
+    root: &Path,
+    relative: &str,
+    entries: &mut BTreeMap<String, String>,
+) -> Result<(), UpdateError> {
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = if relative.is_empty() {
+            name.clone()
+        } else {
+            format!("{relative}/{name}")
+        };
+        validate_package_path(&path)?;
+        let child = entry.path();
+        let metadata = fs::symlink_metadata(&child)?;
+        ensure_metadata_is_not_reparse(&child, &metadata)?;
+        let value = if metadata.is_dir() {
+            collect_tree_metadata(&child, &path, entries)?;
+            format!("directory:{}", metadata_modified_unix(&metadata))
+        } else if metadata.is_file() {
+            format!(
+                "file:{}:{}",
+                metadata.len(),
+                metadata_modified_unix(&metadata)
+            )
+        } else {
+            return Err(UpdateError::PackageMismatch);
+        };
+        entries.insert(path, value);
+    }
+    Ok(())
+}
+
+fn metadata_fingerprint(entries: BTreeMap<String, String>) -> String {
+    let mut hasher = Sha256::new();
+    for (path, metadata) in entries {
+        hasher.update(path.as_bytes());
+        hasher.update([0]);
+        hasher.update(metadata.as_bytes());
+        hasher.update([0]);
+    }
+    hex::encode(hasher.finalize())
+}
+
+fn metadata_modified_unix(metadata: &fs::Metadata) -> u64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
+
 fn collect_package_files(
     root: &Path,
     relative: &str,
@@ -977,6 +1087,18 @@ pub async fn download_verified_package(
     policy: &UpdatePolicy,
     staging_dir: &Path,
 ) -> Result<PathBuf, UpdateError> {
+    let mut cache = None;
+    let now_unix = unix_now()?;
+    download_verified_package_cached(verified, policy, staging_dir, &mut cache, now_unix).await
+}
+
+pub(crate) async fn download_verified_package_cached(
+    verified: &VerifiedReleaseManifest,
+    policy: &UpdatePolicy,
+    staging_dir: &Path,
+    cache: &mut Option<PackageVerificationCache>,
+    now_unix: u64,
+) -> Result<PathBuf, UpdateError> {
     validate_https_package_url(&verified.manifest.package_url, &policy.allowed_hosts)?;
     ensure_safe_directory(staging_dir)?;
     let final_path = staging_dir.join(format!("package-{}.bin", verified.manifest.package_sha256));
@@ -986,9 +1108,29 @@ pub async fn download_verified_package(
             if !metadata.is_file() {
                 return Err(UpdateError::PackageMismatch);
             }
+            let fingerprint = FileMetadataFingerprint {
+                size: metadata.len(),
+                modified_unix: metadata_modified_unix(&metadata),
+            };
+            if cache.as_ref().is_some_and(|cached| {
+                cached.path == final_path
+                    && cached.size == fingerprint.size
+                    && cached.modified_unix == fingerprint.modified_unix
+                    && now_unix >= cached.verified_at_unix
+                    && now_unix.saturating_sub(cached.verified_at_unix)
+                        < UPDATE_FULL_REVERIFY_INTERVAL_SECS
+            }) {
+                return Ok(final_path);
+            }
             let (size, digest) = hash_file(&final_path)?;
             if size == verified.manifest.package_size && digest == verified.manifest.package_sha256
             {
+                *cache = Some(PackageVerificationCache {
+                    path: final_path.clone(),
+                    size: fingerprint.size,
+                    modified_unix: fingerprint.modified_unix,
+                    verified_at_unix: now_unix,
+                });
                 return Ok(final_path);
             }
             return Err(UpdateError::PackageMismatch);
@@ -1058,7 +1200,15 @@ pub async fn download_verified_package(
     if result.is_err() {
         let _ = fs::remove_file(&temporary_path);
     }
-    result.map(|()| final_path)
+    let path = result.map(|()| final_path)?;
+    let fingerprint = file_metadata_fingerprint(&path)?;
+    *cache = Some(PackageVerificationCache {
+        path: path.clone(),
+        size: fingerprint.size,
+        modified_unix: fingerprint.modified_unix,
+        verified_at_unix: now_unix,
+    });
+    Ok(path)
 }
 
 /// Extract a verified archive into a newly created operator-owned directory.
@@ -1692,9 +1842,21 @@ impl UpdateInstaller {
                 package_sha256: verified.manifest.package_sha256,
                 manifest_sha256: verified.manifest_sha256,
             },
-            last_known_good: current.and_then(|state| state.last_known_good),
+            // The currently running release is the rollback target for the
+            // newly installed release. It has already passed the service's
+            // previous activation boundary; keep it until the new release is
+            // promoted or a later release replaces the target.
+            last_known_good: current.map(|state| state.current),
         };
-        write_state_atomic(&self.state_path, &next_state)?;
+        if let Err(error) = write_state_atomic(&self.state_path, &next_state) {
+            let cleanup = fs::remove_dir_all(&final_dir);
+            return match cleanup {
+                Ok(()) => Err(error),
+                Err(cleanup_error) => Err(UpdateError::Io(format!(
+                    "installed release state write failed: {error}; orphan release cleanup failed: {cleanup_error}"
+                ))),
+            };
+        }
         Ok(next_state)
     }
 
@@ -1723,6 +1885,22 @@ impl UpdateInstaller {
         Ok(state)
     }
 
+    pub(crate) fn verify_current_against_verified_manifest(
+        &self,
+        state: &InstalledPackageState,
+        verified: &VerifiedReleaseManifest,
+        policy: &UpdatePolicy,
+    ) -> Result<(), UpdateError> {
+        validate_state(state)?;
+        if state.product != policy.product || !release_matches_manifest(&state.current, verified) {
+            return Err(UpdateError::CorruptState(
+                "installed state does not match the signed manifest".into(),
+            ));
+        }
+        let release_root = self.release_path(&state.current.release_dir)?;
+        verify_installed_package(&release_root, verified)
+    }
+
     pub fn mark_current_verified(
         &self,
         signed_manifest: &SignedReleaseManifest,
@@ -1731,7 +1909,15 @@ impl UpdateInstaller {
         policy: &UpdatePolicy,
         now_unix: u64,
     ) -> Result<InstalledPackageState, UpdateError> {
-        let mut state = self.verify_current(signed_manifest, keyset, verifier, policy, now_unix)?;
+        let state = self.verify_current(signed_manifest, keyset, verifier, policy, now_unix)?;
+        self.promote_current_verified(state)
+    }
+
+    pub(crate) fn promote_current_verified(
+        &self,
+        mut state: InstalledPackageState,
+    ) -> Result<InstalledPackageState, UpdateError> {
+        validate_state(&state)?;
         state.last_known_good = Some(state.current.clone());
         write_state_atomic(&self.state_path, &state)?;
         Ok(state)
@@ -1792,6 +1978,82 @@ impl UpdateInstaller {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(UpdateError::from(error)),
         }
+    }
+
+    /// Remove superseded managed release directories after the current state has
+    /// passed its verification boundary. Only release directories are touched;
+    /// current, last-known-good, and descriptor-referenced releases are kept.
+    pub fn prune_old_releases(&self) -> Result<usize, UpdateError> {
+        let state = self.load_state()?.ok_or(UpdateError::MissingState)?;
+        let releases = self.root.join("releases");
+        ensure_safe_directory(&releases)?;
+        let mut protected = BTreeSet::new();
+        protected.insert(state.current.release_dir);
+        if let Some(last_known_good) = state.last_known_good {
+            protected.insert(last_known_good.release_dir);
+        }
+        if let Some(descriptor) = self.pending_activation_path()? {
+            let descriptor = read_activation_descriptor(&descriptor)?;
+            protected.insert(descriptor.release_dir);
+        }
+
+        let mut removed = 0;
+        for entry in fs::read_dir(&releases)? {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            ensure_metadata_is_not_reparse(&path, &metadata)?;
+            if !metadata.is_dir() {
+                return Err(UpdateError::CorruptState(
+                    "release root contains a non-directory entry".into(),
+                ));
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with("release-") || protected.contains(&name) {
+                continue;
+            }
+            fs::remove_dir_all(&path)?;
+            removed += 1;
+        }
+        Ok(removed)
+    }
+
+    /// Remove completed activation helper copies when no activation descriptor
+    /// remains. A pending descriptor is never touched so restart recovery stays
+    /// retryable.
+    pub fn cleanup_activation_helpers(&self) -> Result<usize, UpdateError> {
+        let descriptor_dir = self.root.join(UPDATE_ACTIVATION_DESCRIPTOR_DIR);
+        match fs::symlink_metadata(&descriptor_dir) {
+            Ok(metadata) => {
+                ensure_metadata_is_not_reparse(&descriptor_dir, &metadata)?;
+                if !metadata.is_dir() {
+                    return Err(UpdateError::CorruptState(
+                        "update activation root is not a directory".into(),
+                    ));
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(UpdateError::from(error)),
+        }
+        if descriptor_dir
+            .join(UPDATE_ACTIVATION_DESCRIPTOR_FILE)
+            .exists()
+        {
+            return Ok(0);
+        }
+        let mut removed = 0;
+        for entry in fs::read_dir(&descriptor_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            ensure_metadata_is_not_reparse(&path, &metadata)?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if metadata.is_file() && name.starts_with("helper-") && name.ends_with(".exe") {
+                fs::remove_file(path)?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1930,7 +2192,7 @@ impl UpdateInstaller {
     }
 }
 
-fn release_matches_manifest(
+pub(crate) fn release_matches_manifest(
     release: &InstalledRelease,
     verified: &VerifiedReleaseManifest,
 ) -> bool {

@@ -6,9 +6,12 @@
 //! reported as deferred/failed for the next bounded retry.
 
 use crate::update::{
-    download_signed_metadata, download_verified_package, extract_verified_zip, parse_signed_keyset,
-    parse_signed_manifest, spawn_activation_helper, UpdateError, UpdateInstaller, UpdatePolicy,
-    UpdateVerifier, VerifiedReleaseManifest, UPDATE_KEYSET_MAX_BYTES, UPDATE_MANIFEST_MAX_BYTES,
+    active_signed_metadata_fingerprint, download_signed_metadata, download_verified_package_cached,
+    extract_verified_zip, installed_tree_metadata_fingerprint, parse_signed_keyset,
+    parse_signed_manifest, release_matches_manifest, spawn_activation_helper,
+    PackageVerificationCache, UpdateError, UpdateInstaller, UpdatePolicy, UpdateVerifier,
+    VerifiedReleaseManifest, UPDATE_FULL_REVERIFY_INTERVAL_SECS, UPDATE_KEYSET_MAX_BYTES,
+    UPDATE_MANIFEST_MAX_BYTES,
 };
 use crate::ClientRole;
 use hivemind_config::HivemindConfig;
@@ -21,15 +24,35 @@ const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug, Clone)]
 pub struct UpdateLoopConfig {
-    pub role: ClientRole,
     pub policy: UpdatePolicy,
     pub install_root: PathBuf,
     pub staging_root: PathBuf,
     pub keyset_url: String,
     pub manifest_url: String,
-    pub interval: Duration,
-    pub max_backoff: Duration,
     pub service_arguments: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct UpdateVerificationCache {
+    installed: Option<InstalledVerificationCache>,
+    active: Option<ActiveVerificationCache>,
+    package: Option<PackageVerificationCache>,
+}
+
+#[derive(Debug)]
+struct InstalledVerificationCache {
+    release_dir: String,
+    manifest_sha256: String,
+    metadata_fingerprint: String,
+    verified_at_unix: u64,
+}
+
+#[derive(Debug)]
+struct ActiveVerificationCache {
+    root: PathBuf,
+    manifest_sha256: String,
+    metadata_fingerprint: String,
+    verified_at_unix: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,7 +124,7 @@ pub fn config_for_role(
         product,
         channel,
         "windows",
-        current_windows_architecture(),
+        crate::update::current_windows_architecture(),
         &host_refs,
     )
     .with_max_package_bytes(settings.max_package_bytes);
@@ -118,24 +141,32 @@ pub fn config_for_role(
         Some(value) if !value.is_empty() => resolve_absolute_path(value)?,
         _ => install_root.join("staging"),
     };
-    let interval = Duration::from_secs(settings.check_interval_secs);
-    if interval.is_zero() {
+    if settings.check_interval_secs == 0 {
         return Err(UpdateError::InvalidMetadata(
             "signed update check interval is zero".into(),
         ));
     }
 
     Ok(Some(UpdateLoopConfig {
-        role,
         policy,
         install_root,
         staging_root,
         keyset_url,
         manifest_url,
-        interval,
-        max_backoff: MAX_RETRY_BACKOFF,
         service_arguments: current_service_arguments(),
     }))
+}
+
+/// Clean helper copies left by a completed activation before normal service
+/// startup. Pending descriptors are intentionally preserved for recovery.
+pub fn cleanup_activation_helpers_for_role(
+    config: &HivemindConfig,
+    role: ClientRole,
+) -> Result<usize, UpdateError> {
+    let Some(update_config) = config_for_role(config, role)? else {
+        return Ok(0);
+    };
+    UpdateInstaller::new(update_config.install_root)?.cleanup_activation_helpers()
 }
 
 /// Run one fail-closed update check for a client role.
@@ -146,13 +177,15 @@ pub async fn run_update_cycle(
     config: &HivemindConfig,
     role: ClientRole,
 ) -> Result<UpdateCycleOutcome, UpdateError> {
-    run_update_cycle_with_arguments(config, role, &current_service_arguments()).await
+    let mut cache = UpdateVerificationCache::default();
+    run_update_cycle_with_arguments(config, role, &current_service_arguments(), &mut cache).await
 }
 
 async fn run_update_cycle_with_arguments(
     config: &HivemindConfig,
     role: ClientRole,
     service_arguments: &[String],
+    cache: &mut UpdateVerificationCache,
 ) -> Result<UpdateCycleOutcome, UpdateError> {
     if !config.client_updates.enabled {
         return Ok(UpdateCycleOutcome::Disabled);
@@ -171,13 +204,14 @@ async fn run_update_cycle_with_arguments(
         }
     };
     update_config.service_arguments = service_arguments.to_vec();
-    run_configured_update_cycle(&update_config).await
+    run_configured_update_cycle(&update_config, cache).await
 }
 
 /// Execute a validated update configuration. This private boundary keeps
 /// endpoint and storage validation ahead of all filesystem/network activity.
 async fn run_configured_update_cycle(
     config: &UpdateLoopConfig,
+    cache: &mut UpdateVerificationCache,
 ) -> Result<UpdateCycleOutcome, UpdateError> {
     let installer = UpdateInstaller::new(&config.install_root)?;
     let current = installer.load_state()?;
@@ -212,13 +246,6 @@ async fn run_configured_update_cycle(
 
     if let Some(current) = current.as_ref() {
         if signed_manifest.manifest.sequence == current.current.sequence {
-            let state = installer.verify_current(
-                &signed_manifest,
-                &verified_keyset,
-                &verifier,
-                &config.policy,
-                now_unix,
-            )?;
             let verified_current = verifier.verify_manifest(
                 &signed_manifest,
                 &verified_keyset,
@@ -226,7 +253,26 @@ async fn run_configured_update_cycle(
                 None,
                 now_unix,
             )?;
-            if active_package_is_current(&verified_current)? {
+            let state = verify_installed_current_cached(
+                &installer,
+                current,
+                &verified_current,
+                &config.policy,
+                cache,
+                now_unix,
+            )?;
+            if active_package_is_current_cached(&verified_current, cache, now_unix)? {
+                let state = if state.last_known_good.as_ref() == Some(&state.current) {
+                    state
+                } else {
+                    installer.promote_current_verified(state)?
+                };
+                if let Err(error) = installer.prune_old_releases() {
+                    warn!(error = %error, "verified update release eviction failed; retrying later");
+                }
+                if let Err(error) = installer.cleanup_activation_helpers() {
+                    warn!(error = %error, "completed update helper cleanup failed; retrying later");
+                }
                 return Ok(UpdateCycleOutcome::UpToDate {
                     sequence: state.current.sequence,
                 });
@@ -256,8 +302,14 @@ async fn run_configured_update_cycle(
         now_unix,
     )?;
     let package_staging = config.staging_root.join("packages");
-    let package_path =
-        download_verified_package(&verified_manifest, &config.policy, &package_staging).await?;
+    let package_path = download_verified_package_cached(
+        &verified_manifest,
+        &config.policy,
+        &package_staging,
+        &mut cache.package,
+        now_unix,
+    )
+    .await?;
     let extracted_dir = config.staging_root.join(format!(
         ".release-{}-{}-{}",
         verified_manifest.manifest().sequence,
@@ -331,29 +383,35 @@ pub fn start_update_loop(
     tokio::spawn(async move {
         let mut next_wait = Duration::ZERO;
         let mut retry_backoff = Duration::from_secs(1);
+        let mut verification_cache = UpdateVerificationCache::default();
 
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(next_wait) => {
-                    match run_update_cycle_with_arguments(&config, role, &service_arguments).await {
+                    match run_update_cycle_with_arguments(
+                        &config,
+                        role,
+                        &service_arguments,
+                        &mut verification_cache,
+                    ).await {
                         Ok(UpdateCycleOutcome::Disabled) => {
-                            info!(role = role_name(role), "Signed client updates are disabled");
+                            info!(role = role.as_str(), "Signed client updates are disabled");
                             next_wait = interval;
                             retry_backoff = Duration::from_secs(1);
                         }
                         Ok(UpdateCycleOutcome::Deferred(reason)) => {
-                            info!(role = role_name(role), reason = %reason, "Signed client updates are deferred");
+                            info!(role = role.as_str(), reason = %reason, "Signed client updates are deferred");
                             next_wait = interval;
                             retry_backoff = Duration::from_secs(1);
                         }
                         Ok(UpdateCycleOutcome::UpToDate { sequence }) => {
-                            info!(role = role_name(role), sequence, "Signed client update is already installed");
+                            info!(role = role.as_str(), sequence, "Signed client update is already installed");
                             next_wait = interval;
                             retry_backoff = Duration::from_secs(1);
                         }
                         Ok(UpdateCycleOutcome::Activating { sequence, version, descriptor }) => {
                             info!(
-                                role = role_name(role),
+                                role = role.as_str(),
                                 sequence,
                                 version = %version,
                                 descriptor = %descriptor.display(),
@@ -363,7 +421,7 @@ pub fn start_update_loop(
                             break;
                         }
                         Err(error) => {
-                            warn!(role = role_name(role), error = %error, "Signed client update check failed; keeping the current client and retrying");
+                            warn!(role = role.as_str(), error = %error, "Signed client update check failed; keeping the current client and retrying");
                             next_wait = retry_backoff;
                             retry_backoff = retry_backoff
                                 .checked_mul(2)
@@ -374,7 +432,7 @@ pub fn start_update_loop(
                 }
                 changed = shutdown_rx.changed() => {
                     if changed.is_err() || *shutdown_rx.borrow() {
-                        info!(role = role_name(role), "Signed client update loop shutting down");
+                        info!(role = role.as_str(), "Signed client update loop shutting down");
                         break;
                     }
                 }
@@ -391,34 +449,80 @@ fn default_product(role: ClientRole) -> &'static str {
     }
 }
 
-fn role_name(role: ClientRole) -> &'static str {
-    match role {
-        ClientRole::Master => "master",
-        ClientRole::Worker => "worker",
+fn verify_installed_current_cached(
+    installer: &UpdateInstaller,
+    current: &crate::update::InstalledPackageState,
+    verified: &VerifiedReleaseManifest,
+    policy: &UpdatePolicy,
+    cache: &mut UpdateVerificationCache,
+    now_unix: u64,
+) -> Result<crate::update::InstalledPackageState, UpdateError> {
+    if current.product != policy.product || !release_matches_manifest(&current.current, verified) {
+        return Err(UpdateError::CorruptState(
+            "installed state does not match the signed manifest".into(),
+        ));
     }
+    let release_root = installer.verified_release_path(&current.current.release_dir)?;
+    let metadata_fingerprint = installed_tree_metadata_fingerprint(&release_root)?;
+    let cache_hit = cache.installed.as_ref().is_some_and(|cached| {
+        cached.release_dir == current.current.release_dir
+            && cached.manifest_sha256 == verified.manifest_sha256()
+            && cached.metadata_fingerprint == metadata_fingerprint
+            && cache_is_fresh(cached.verified_at_unix, now_unix)
+    });
+    if !cache_hit {
+        installer.verify_current_against_verified_manifest(current, verified, policy)?;
+        cache.installed = Some(InstalledVerificationCache {
+            release_dir: current.current.release_dir.clone(),
+            manifest_sha256: verified.manifest_sha256().to_owned(),
+            metadata_fingerprint,
+            verified_at_unix: now_unix,
+        });
+    }
+    Ok(current.clone())
 }
 
-fn current_windows_architecture() -> &'static str {
-    if cfg!(target_arch = "aarch64") {
-        "aarch64"
-    } else if cfg!(target_arch = "x86_64") {
-        "x86_64"
-    } else {
-        "unknown"
-    }
-}
-
-fn active_package_is_current(verified: &VerifiedReleaseManifest) -> Result<bool, UpdateError> {
+fn active_package_is_current_cached(
+    verified: &VerifiedReleaseManifest,
+    cache: &mut UpdateVerificationCache,
+    now_unix: u64,
+) -> Result<bool, UpdateError> {
     let executable = std::env::current_exe()
         .map_err(|error| UpdateError::ActivationUnavailable(error.to_string()))?;
     let root = executable.parent().ok_or_else(|| {
         UpdateError::ActivationUnavailable("running executable has no parent directory".into())
     })?;
+    let metadata_fingerprint = match active_signed_metadata_fingerprint(root, verified) {
+        Ok(fingerprint) => fingerprint,
+        Err(UpdateError::PackageMismatch) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if cache.active.as_ref().is_some_and(|cached| {
+        cached.root == root
+            && cached.manifest_sha256 == verified.manifest_sha256()
+            && cached.metadata_fingerprint == metadata_fingerprint
+            && cache_is_fresh(cached.verified_at_unix, now_unix)
+    }) {
+        return Ok(true);
+    }
     match crate::update::verify_active_directory(root, verified) {
-        Ok(()) => Ok(true),
+        Ok(()) => {
+            cache.active = Some(ActiveVerificationCache {
+                root: root.to_path_buf(),
+                manifest_sha256: verified.manifest_sha256().to_owned(),
+                metadata_fingerprint,
+                verified_at_unix: now_unix,
+            });
+            Ok(true)
+        }
         Err(UpdateError::PackageMismatch) => Ok(false),
         Err(error) => Err(error),
     }
+}
+
+fn cache_is_fresh(verified_at_unix: u64, now_unix: u64) -> bool {
+    now_unix >= verified_at_unix
+        && now_unix.saturating_sub(verified_at_unix) < UPDATE_FULL_REVERIFY_INTERVAL_SECS
 }
 
 fn current_service_arguments() -> Vec<String> {
@@ -441,7 +545,7 @@ fn resolve_storage_root(
                 })?;
             Ok(base
                 .join("hivemind")
-                .join(format!("{}-{kind}", role_name(role))))
+                .join(format!("{}-{kind}", role.as_str())))
         }
     }
 }
