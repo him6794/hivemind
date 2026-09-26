@@ -3347,9 +3347,9 @@ impl MasterNodeService for GrpcMasterNodeService {
              FROM ledger_entries
              WHERE status = 'settled'
                AND (kind = 'provider_credit' OR kind ~ '^consensus_provider_credit_[0-9]+$')
-               AND (provider_user = $1 OR provider_worker_id IN (
+               AND (provider_user = $1 OR (provider_user IS NULL AND provider_worker_id IN (
                     SELECT worker_id FROM worker_nodes WHERE username = $1
-               ))",
+               )))",
         )
         .bind(&claims.sub)
         .fetch_one(pool)
@@ -3370,9 +3370,9 @@ impl MasterNodeService for GrpcMasterNodeService {
              FROM ledger_entries
              WHERE status = 'settled'
                AND (kind = 'provider_credit' OR kind ~ '^consensus_provider_credit_[0-9]+$')
-               AND (provider_user = $1 OR provider_worker_id IN (
+               AND (provider_user = $1 OR (provider_user IS NULL AND provider_worker_id IN (
                     SELECT worker_id FROM worker_nodes WHERE username = $1
-               ))
+               )))
              ORDER BY created_at DESC
              LIMIT $2",
         )
@@ -8382,13 +8382,14 @@ mod tests {
     async fn provider_earnings_include_only_settled_owned_provider_credits() {
         let lock = grpc_db_lock();
         let _guard = lock.lock().await;
-        let (service, task_id, _other_token, owner) = match test_service().await {
+        let (service, task_id, other_token, owner) = match test_service().await {
             Some(parts) => parts,
             None => return,
         };
         let node_service = GrpcNodeManagerService::new(service.state.clone());
         let worker_id = format!("earnings-owned-worker-{task_id}");
         let owner_token = token_for(&service.state.auth, &owner);
+        let other = service.state.auth.validate_token(&other_token).unwrap().sub;
         register_report_worker(&node_service, &owner, &worker_id).await;
         let rows = [
             (
@@ -8410,6 +8411,13 @@ mod tests {
                 Some(worker_id.as_str()),
                 Some(owner.as_str()),
                 30,
+                "settled",
+            ),
+            (
+                "provider_credit",
+                Some(worker_id.as_str()),
+                None,
+                40,
                 "settled",
             ),
             (
@@ -8463,9 +8471,42 @@ mod tests {
             .unwrap();
         }
 
-        let response = service
+        let owner_response = service
             .get_provider_earnings(Request::new(GetProviderEarningsRequest {
                 token: owner_token,
+                limit: 100,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(owner_response.success);
+        assert_eq!(owner_response.total_earned_cpt, 100);
+        assert_eq!(owner_response.entries.len(), 4);
+        assert!(owner_response
+            .entries
+            .iter()
+            .all(|entry| entry.status == "settled"));
+        let mut owner_amounts = owner_response
+            .entries
+            .iter()
+            .map(|entry| entry.amount_cpt)
+            .collect::<Vec<_>>();
+        owner_amounts.sort_unstable();
+        assert_eq!(owner_amounts, vec![10, 20, 30, 40]);
+        assert_eq!(
+            owner_response
+                .entries
+                .iter()
+                .map(|entry| entry.amount_cpt)
+                .sum::<i64>(),
+            owner_response.total_earned_cpt
+        );
+
+        cleanup_report_worker(&service, &worker_id).await;
+        register_report_worker(&node_service, &other, &worker_id).await;
+        let other_response = service
+            .get_provider_earnings(Request::new(GetProviderEarningsRequest {
+                token: other_token,
                 limit: 100,
             }))
             .await
@@ -8474,20 +8515,18 @@ mod tests {
         cleanup_report_worker(&service, &worker_id).await;
         cleanup(&service.state.scheduler, &task_id, &owner).await;
 
-        assert!(response.success);
-        assert_eq!(response.total_earned_cpt, 60);
-        assert_eq!(response.entries.len(), 3);
-        assert!(response
-            .entries
-            .iter()
-            .all(|entry| entry.status == "settled"));
-        let mut amounts = response
-            .entries
-            .iter()
-            .map(|entry| entry.amount_cpt)
-            .collect::<Vec<_>>();
-        amounts.sort_unstable();
-        assert_eq!(amounts, vec![10, 20, 30]);
+        assert!(other_response.success);
+        assert_eq!(other_response.total_earned_cpt, 40);
+        assert_eq!(other_response.entries.len(), 1);
+        assert_eq!(other_response.entries[0].amount_cpt, 40);
+        assert_eq!(
+            other_response
+                .entries
+                .iter()
+                .map(|entry| entry.amount_cpt)
+                .sum::<i64>(),
+            other_response.total_earned_cpt
+        );
     }
 
     #[tokio::test]
