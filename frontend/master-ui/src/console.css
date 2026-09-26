@@ -29,12 +29,12 @@ input:disabled {
 .app-shell {
   position: relative;
   min-height: 100vh;
-  overflow: hidden;
   padding: 32px 20px 48px;
 }
 
 .app-container {
   width: min(1180px, 100%);
+  min-width: 0;
   margin: 0 auto;
 }
 
@@ -288,6 +288,32 @@ label {
   overflow-wrap: anywhere;
 }
 
+.balance-surface {
+  margin-top: 18px;
+}
+
+.balance-tile {
+  display: flex;
+  min-width: 0;
+  gap: 20px;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.balance-tile h2 {
+  margin-bottom: 5px;
+}
+
+.balance-amount {
+  font-size: clamp(24px, 4vw, 38px);
+  overflow-wrap: anywhere;
+}
+
+.balance-note {
+  margin: 12px 0 0;
+}
+
 .actions {
   display: flex;
   gap: 8px;
@@ -316,6 +342,7 @@ label {
 
 pre {
   min-height: 160px;
+  max-height: min(420px, 60vh);
   overflow: auto;
   padding: 14px;
   border: 1px solid rgb(255 255 255 / 0.1);

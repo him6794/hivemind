@@ -8,13 +8,15 @@ use hivemind_models::{
     ResourceSpec, ResourceUsage, WorkerCapabilityReport as ModelWorkerCapabilityReport,
 };
 use hivemind_proto::{
+    master_node_service_client::MasterNodeServiceClient,
     node_manager_service_client::NodeManagerServiceClient, user_service_client::UserServiceClient,
     worker_node_service_server::WorkerNodeService, worker_session_client_frame,
     worker_session_server_frame, worker_session_service_client::WorkerSessionServiceClient,
-    ExecuteTaskRequest, ExecuteTaskResponse, LoginRequest, RegisterWorkerNodeRequest,
-    ResourceSpec as ProtoResourceSpec, ResourceUsage as ProtoResourceUsage, RunningStatusRequest,
-    TaskOutputUploadRequest, TaskResultUploadRequest, TaskUsageRequest,
-    ValidateGeneralComputeTransferLeaseRequest,
+    ExecuteTaskRequest, ExecuteTaskResponse, GetProviderEarningsRequest,
+    GetProviderEarningsResponse, GetProviderWorkerAssignmentsResponse, LoginRequest,
+    RegisterWorkerNodeRequest, ResourceSpec as ProtoResourceSpec,
+    ResourceUsage as ProtoResourceUsage, RunningStatusRequest, TaskOutputUploadRequest,
+    TaskResultUploadRequest, TaskUsageRequest, ValidateGeneralComputeTransferLeaseRequest,
     WorkerCapabilityReport as ProtoWorkerCapabilityReport, WorkerSessionAck,
     WorkerSessionCancelAck, WorkerSessionClientFrame, WorkerSessionClose, WorkerSessionHeartbeat,
     WorkerSessionHello, WorkerSessionResult,
@@ -285,6 +287,48 @@ pub async fn login_to_nodepool(
         );
     }
     Ok(response.token)
+}
+
+pub async fn get_provider_worker_dashboard_once(
+    endpoint: &str,
+    token: &str,
+    worker_id: &str,
+) -> anyhow::Result<(
+    GetProviderWorkerAssignmentsResponse,
+    GetProviderEarningsResponse,
+)> {
+    let endpoint =
+        Endpoint::from_shared(nodepool_endpoint(endpoint))?.connect_timeout(Duration::from_secs(5));
+    let channel = tokio::time::timeout(Duration::from_secs(10), endpoint.connect())
+        .await
+        .map_err(|_| anyhow::anyhow!("Nodepool dashboard connection timed out"))??;
+    let mut client = MasterNodeServiceClient::new(channel);
+
+    let assignments = tokio::time::timeout(
+        Duration::from_secs(10),
+        client.get_provider_worker_assignments(
+            hivemind_proto::GetProviderWorkerAssignmentsRequest {
+                token: token.to_string(),
+                worker_id: worker_id.to_string(),
+            },
+        ),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("Nodepool Worker assignments request timed out"))??
+    .into_inner();
+
+    let earnings = tokio::time::timeout(
+        Duration::from_secs(10),
+        client.get_provider_earnings(GetProviderEarningsRequest {
+            token: token.to_string(),
+            limit: 100,
+        }),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("Nodepool provider earnings request timed out"))??
+    .into_inner();
+
+    Ok((assignments, earnings))
 }
 
 pub async fn resolve_nodepool_token(

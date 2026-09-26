@@ -10,6 +10,7 @@ import {
   taskResponseFailureMessage,
 } from './taskResponsePolicy.mjs';
 import { normalizeTaskObservability } from './taskObservability.mjs';
+import { parseCptBalance } from './accountBalance.mjs';
 
 function toNumber(value) {
   const parsed = Number(value);
@@ -33,8 +34,12 @@ export default function MasterApp() {
   const [cancelLoading, setCancelLoading] = useState(null);
   const [downloadLoading, setDownloadLoading] = useState(null);
   const [lastRefresh, setLastRefresh] = useState(null);
+  const [balance, setBalance] = useState(null);
+  const [balanceError, setBalanceError] = useState('');
   const [sourceError, setSourceError] = useState(null);
   const vpnReadyToken = useRef('');
+  const tokenRef = useRef(initialSession.token);
+  const balanceRequest = useRef(null);
 
   const [taskId, setTaskId] = useState('');
   const [taskSource, setTaskSource] = useState('');
@@ -103,6 +108,41 @@ export default function MasterApp() {
     }
   }
 
+  function refreshBalance(authToken = token) {
+    if (!authToken) return Promise.resolve(false);
+    if (balanceRequest.current) return balanceRequest.current;
+
+    const request = Promise.resolve().then(async () => {
+      try {
+        const { ok, data } = await api('GET', '/api/balance', undefined, authToken);
+        if (!ok || data.success === false) {
+          throw new Error(data.message || data.status_message || 'Failed to load account balance');
+        }
+        const nextBalance = parseCptBalance(data);
+        if (tokenRef.current !== authToken) return false;
+        setBalance(nextBalance);
+        setBalanceError('');
+        return true;
+      } catch (err) {
+        if (tokenRef.current === authToken) {
+          setBalanceError(err.message || 'Failed to load account balance');
+        }
+        return false;
+      }
+    });
+    const trackedRequest = request.finally(() => {
+      if (balanceRequest.current === trackedRequest) balanceRequest.current = null;
+    });
+    balanceRequest.current = trackedRequest;
+    return trackedRequest;
+  }
+
+  async function refreshBalanceAfterSubmit(authToken) {
+    const pending = balanceRequest.current;
+    if (pending) await pending;
+    if (authToken && authToken === tokenRef.current) await refreshBalance(authToken);
+  }
+
   async function bootstrapVpn(authToken = token) {
     if (!authToken) throw new Error('Login is required before VPN bootstrap');
     if (vpnReadyToken.current === authToken) return { success: true, state: 'ready' };
@@ -141,11 +181,33 @@ export default function MasterApp() {
     };
   }, [token]);
 
+  useEffect(() => {
+    if (!token) {
+      setBalance(null);
+      setBalanceError('');
+      return undefined;
+    }
+
+    let cancelled = false;
+    const loadBalance = () => {
+      if (!cancelled) void refreshBalance(token);
+    };
+    loadBalance();
+    const id = setInterval(loadBalance, 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [token]);
+
   async function handleLogin(e) {
     e.preventDefault();
     setLoginLoading(true);
     setStatus('Logging in...');
+    tokenRef.current = '';
     setToken('');
+    setBalance(null);
+    setBalanceError('');
 
     try {
       const { data } = await api('POST', '/api/login', { username, password }, '');
@@ -161,6 +223,7 @@ export default function MasterApp() {
         token: data.token,
         username: ownerUsername,
       });
+      tokenRef.current = data.token;
       setToken(data.token);
       setUsername(ownerUsername);
       await bootstrapVpn(data.token);
@@ -229,8 +292,11 @@ export default function MasterApp() {
       setTaskInput('');
       setSourceError(null);
       setStatus(`Task submitted: ${validatedTaskId.taskId}`);
-      await refreshTasks();
-      setLastRefresh(Date.now());
+      void refreshBalanceAfterSubmit(token);
+      if (tokenRef.current === token) {
+        await refreshTasks();
+        setLastRefresh(Date.now());
+      }
     } catch (err) {
       setStatus(`Submission failed: ${err.message}`);
     } finally {
@@ -400,7 +466,11 @@ export default function MasterApp() {
   function logout() {
     clearStoredSession(window.sessionStorage, SESSION_KEY);
     vpnReadyToken.current = '';
+    tokenRef.current = '';
+    balanceRequest.current = null;
     setToken('');
+    setBalance(null);
+    setBalanceError('');
     setTasks([]);
     setSelectedTask('');
     setTaskLog('');
@@ -474,6 +544,26 @@ export default function MasterApp() {
             {status}
           </div>
         </section>
+
+        {token ? (
+          <section className="surface balance-surface" aria-label="Account balance">
+            <div className="balance-tile">
+              <div>
+                <p className="eyebrow">Account</p>
+                <h2>CPT balance</h2>
+                <p className="subtle" style={{ marginBottom: 0 }}>Current account balance</p>
+              </div>
+              <strong className="balance-amount" aria-live="polite">
+                {balance === null ? (balanceError ? 'Unavailable' : 'Loading...') : `${balance.toFixed(2)} CPT`}
+              </strong>
+            </div>
+            {balanceError ? (
+              <p className="subtle balance-note" role="note">
+                {balance === null ? 'The account balance could not be loaded.' : 'Could not refresh the balance; showing the last received value.'}
+              </p>
+            ) : null}
+          </section>
+        ) : null}
 
         {token ? (
           <div className="grid two" style={{ marginTop: 18 }}>
@@ -619,6 +709,12 @@ export default function MasterApp() {
                           <dd>{observability.usageUnits} CPT before fee</dd>
                           <dt>{runtime === 'managed-function-v1' ? 'Submitted max_cpt' : 'Task charge cap'}</dt>
                           <dd>{observability.chargeCapCpt || '—'} CPT{runtime === 'managed-function-v1' ? ' (new v1: task-wide, fee included)' : ', fee included'}</dd>
+                          <dt>Settled charge-cap remainder</dt>
+                          <dd>
+                            {observability.settledRemainderCpt === null
+                              ? observability.billingSettled ? 'Unknown' : 'Available after settlement'
+                              : `${observability.settledRemainderCpt} CPT`}
+                          </dd>
                         </dl>
                         {historicalOverCap ? (
                           <p className="subtle" role="note" style={{ margin: '8px 0 0', fontSize: 12 }}>

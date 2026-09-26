@@ -16,7 +16,7 @@ use crate::grpc_server::{GrpcWorkerNodeService, WorkerIdentityHandle};
 use crate::nodepool_client::{
     self, capability_report_to_proto, login_to_nodepool, register_once_with_capability_report,
 };
-use crate::WorkerExecutor;
+use crate::{ResourceSample, WorkerExecutor};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerProfile {
@@ -207,6 +207,44 @@ struct WorkerInfoResponse {
     profile: WorkerProfile,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct WorkerDashboardHost {
+    cpu_cores: i32,
+    cpu_usage_percent: f64,
+    memory_total_gb: i32,
+    memory_available_gb: i32,
+    memory_usage_percent: f64,
+    gpu_count: Option<i32>,
+    gpu_utilization_percent: Option<f64>,
+    vram_total_mb: Option<i64>,
+    vram_available_mb: Option<i64>,
+    storage_total_gb: Option<i64>,
+    storage_available_gb: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WorkerDashboardAssignment {
+    task_id: String,
+    submitter: String,
+    status: String,
+    max_cpt: i64,
+    reported_usage_cpt: Option<i64>,
+    usage_basis: String,
+    usage_updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WorkerDashboardResponse {
+    success: bool,
+    worker_id: String,
+    sampled_at: String,
+    stale: bool,
+    host: WorkerDashboardHost,
+    assignments: Vec<WorkerDashboardAssignment>,
+    settled_provider_credits_cpt: i64,
+    currency: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct LoginBody {
     username: String,
@@ -316,6 +354,7 @@ pub fn router_with_ui_dir(
 
     let app = Router::new()
         .route("/api/worker-info", get(worker_info))
+        .route("/api/worker-dashboard", get(worker_dashboard))
         .route("/api/vpn/bootstrap", post(bootstrap_vpn))
         .route("/api/vpn/status", get(vpn_status))
         .route("/api/login", post(login))
@@ -416,6 +455,168 @@ async fn worker_info(
         success: true,
         profile,
     }))
+}
+
+const RESOURCE_SAMPLE_STALE_AFTER: chrono::Duration = chrono::Duration::seconds(30);
+
+async fn worker_dashboard(
+    State(state): State<ControlApiState>,
+    headers: axum::http::HeaderMap,
+) -> std::result::Result<Json<WorkerDashboardResponse>, (StatusCode, Json<StatusResponse>)> {
+    let token = bearer_token(&headers).ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(StatusResponse {
+                success: false,
+                status_message: "Bearer token is required".into(),
+            }),
+        )
+    })?;
+    let worker_id = state.current_worker_identity().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(StatusResponse {
+                success: false,
+                status_message: "Worker is not registered with Nodepool".into(),
+            }),
+        )
+    })?;
+    let sample = state.executor.latest_resource_sample().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(StatusResponse {
+                success: false,
+                status_message: "Worker resource sample is not yet available".into(),
+            }),
+        )
+    })?;
+    let sampled_at = sample.sampled_at;
+    let stale = resource_sample_is_stale(sampled_at, chrono::Utc::now());
+
+    let (assignments, earnings) = nodepool_client::get_provider_worker_dashboard_once(
+        &state.nodepool_addr(),
+        &token,
+        &worker_id,
+    )
+    .await
+    .map_err(|error| {
+        tracing::warn!(worker_id = %worker_id, error = %error, "Worker dashboard Nodepool request failed");
+        let status = nodepool_dashboard_http_status(&error);
+        (
+            status,
+            Json(StatusResponse {
+                success: false,
+                status_message: match status {
+                    StatusCode::UNAUTHORIZED => "Bearer token was rejected by Nodepool",
+                    StatusCode::FORBIDDEN => "Worker is not owned by the authenticated account",
+                    _ => "Nodepool dashboard data is unavailable",
+                }
+                .into(),
+            }),
+        )
+    })?;
+
+    if !assignments.success || assignments.worker_id != worker_id {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(StatusResponse {
+                success: false,
+                status_message: "Nodepool returned an invalid Worker assignment response".into(),
+            }),
+        ));
+    }
+    if !earnings.success {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(StatusResponse {
+                success: false,
+                status_message: "Nodepool provider earnings data is unavailable".into(),
+            }),
+        ));
+    }
+
+    Ok(Json(WorkerDashboardResponse {
+        success: true,
+        worker_id,
+        sampled_at: sampled_at.to_rfc3339(),
+        stale,
+        host: worker_dashboard_host(&sample),
+        assignments: assignments
+            .assignments
+            .into_iter()
+            .map(|assignment| WorkerDashboardAssignment {
+                task_id: assignment.task_id,
+                submitter: assignment.submitter,
+                status: assignment.status,
+                max_cpt: assignment.max_cpt,
+                reported_usage_cpt: assignment.reported_usage_cpt,
+                usage_basis: assignment.usage_basis,
+                usage_updated_at: assignment.usage_updated_at,
+            })
+            .collect(),
+        settled_provider_credits_cpt: earnings.total_earned_cpt,
+        currency: earnings.currency,
+    }))
+}
+
+fn resource_sample_is_stale(
+    sampled_at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    now.signed_duration_since(sampled_at) > RESOURCE_SAMPLE_STALE_AFTER
+}
+
+fn worker_dashboard_host(sample: &ResourceSample) -> WorkerDashboardHost {
+    let resources = &sample.resources;
+    let has_gpu = resources.gpu_count > 0;
+    let vram_total = resources
+        .gpu_infos
+        .iter()
+        .map(|gpu| gpu.vram_total_mb.max(0))
+        .sum::<i64>();
+    let vram_available = resources
+        .gpu_infos
+        .iter()
+        .map(|gpu| gpu.vram_available_mb.max(0))
+        .sum::<i64>();
+
+    WorkerDashboardHost {
+        cpu_cores: resources.cpu_cores,
+        cpu_usage_percent: resources.cpu_usage_percent,
+        memory_total_gb: resources.total_memory_gb,
+        memory_available_gb: resources.available_memory_gb,
+        memory_usage_percent: resources.memory_usage_percent,
+        gpu_count: resources
+            .gpu_inventory_supported
+            .then_some(resources.gpu_count),
+        gpu_utilization_percent: (resources.gpu_utilization_supported && has_gpu).then(|| {
+            resources
+                .gpu_infos
+                .iter()
+                .map(|gpu| gpu.gpu_utilization_percent)
+                .fold(0.0_f64, f64::max)
+        }),
+        vram_total_mb: (resources.vram_total_supported && has_gpu && vram_total > 0)
+            .then_some(vram_total),
+        vram_available_mb: (resources.vram_available_supported && has_gpu && vram_total > 0)
+            .then_some(vram_available),
+        storage_total_gb: (resources.storage_supported && resources.storage_total_gb > 0)
+            .then_some(resources.storage_total_gb),
+        storage_available_gb: (resources.storage_supported && resources.storage_total_gb > 0)
+            .then_some(resources.storage_available_gb),
+    }
+}
+
+fn nodepool_dashboard_http_status(error: &anyhow::Error) -> StatusCode {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<tonic::Status>())
+        .find_map(|status| match status.code() {
+            tonic::Code::Unauthenticated => Some(StatusCode::UNAUTHORIZED),
+            tonic::Code::PermissionDenied => Some(StatusCode::FORBIDDEN),
+            _ => None,
+        })
+        .unwrap_or(StatusCode::BAD_GATEWAY)
 }
 
 fn worker_info_overlay_addr(
@@ -1108,10 +1309,11 @@ async fn effective_worker_advertise_addr(
 
 fn bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
-    let token = value
-        .strip_prefix("Bearer ")
-        .or_else(|| value.strip_prefix("bearer "))?
-        .trim();
+    let (scheme, token) = value.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    let token = token.trim();
     if token.is_empty() {
         None
     } else {
@@ -1167,6 +1369,166 @@ mod tests {
             registration_shutdown: std::sync::Arc::new(std::sync::Mutex::new(None)),
             session_shutdown: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
+    }
+
+    #[tokio::test]
+    async fn worker_dashboard_requires_bearer_auth_and_registered_identity() {
+        let state = sample_state();
+        let app = super::router_with_allowed_origins(state, &[]);
+        let missing_bearer = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/worker-dashboard")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_bearer.status(), StatusCode::UNAUTHORIZED);
+
+        let mut state = sample_state();
+        state.worker_identity = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let app = super::router_with_allowed_origins(state, &[]);
+        let unregistered = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/worker-dashboard")
+                    .header(axum::http::header::AUTHORIZATION, "Bearer account-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unregistered.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn worker_dashboard_does_not_probe_resources_when_cache_is_empty() {
+        let state = sample_state();
+        let executor = state.executor.clone();
+        let app = super::router_with_allowed_origins(state, &[]);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/worker-dashboard")
+                    .header(axum::http::header::AUTHORIZATION, "Bearer account-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(executor.latest_resource_sample().is_none());
+    }
+
+    #[test]
+    fn dashboard_keeps_individually_unsupported_gpu_metrics_unknown() {
+        let sample = super::ResourceSample {
+            resources: crate::SystemResources {
+                cpu_cores: 8,
+                total_memory_gb: 16,
+                available_memory_gb: 4,
+                cpu_usage_percent: 25.0,
+                memory_usage_percent: 75.0,
+                gpu_count: 1,
+                gpu_infos: vec![crate::GpuInfo {
+                    index: 0,
+                    name: "NVIDIA Example".into(),
+                    vram_total_mb: 0,
+                    vram_used_mb: 0,
+                    vram_available_mb: 0,
+                    gpu_utilization_percent: 0.0,
+                }],
+                gpu_inventory_supported: true,
+                gpu_utilization_supported: false,
+                vram_total_supported: false,
+                vram_available_supported: false,
+                storage_supported: false,
+                storage_total_gb: 0,
+                storage_available_gb: 0,
+            },
+            sampled_at: chrono::Utc::now(),
+        };
+
+        let host = super::worker_dashboard_host(&sample);
+        assert_eq!(host.gpu_count, Some(1));
+        assert_eq!(host.gpu_utilization_percent, None);
+        assert_eq!(host.vram_total_mb, None);
+        assert_eq!(host.vram_available_mb, None);
+    }
+
+    #[test]
+    fn dashboard_marks_unsupported_telemetry_unknown_and_samples_stale() {
+        let now = chrono::Utc::now();
+        let sample = super::ResourceSample {
+            resources: crate::SystemResources {
+                cpu_cores: 8,
+                total_memory_gb: 16,
+                available_memory_gb: 4,
+                cpu_usage_percent: 25.0,
+                memory_usage_percent: 75.0,
+                gpu_count: 0,
+                gpu_infos: Vec::new(),
+                gpu_inventory_supported: false,
+                gpu_utilization_supported: false,
+                vram_total_supported: false,
+                vram_available_supported: false,
+                storage_supported: false,
+                storage_total_gb: 0,
+                storage_available_gb: 0,
+            },
+            sampled_at: now - chrono::Duration::seconds(31),
+        };
+
+        let host = super::worker_dashboard_host(&sample);
+        assert_eq!(host.gpu_count, None);
+        assert_eq!(host.gpu_utilization_percent, None);
+        assert_eq!(host.vram_total_mb, None);
+        assert_eq!(host.vram_available_mb, None);
+        assert_eq!(host.storage_total_gb, None);
+        assert_eq!(host.storage_available_gb, None);
+        assert!(super::resource_sample_is_stale(sample.sampled_at, now));
+        assert!(!super::resource_sample_is_stale(
+            now - chrono::Duration::seconds(30),
+            now
+        ));
+        assert!(!super::resource_sample_is_stale(
+            now - chrono::Duration::seconds(10),
+            now
+        ));
+
+        let response = super::WorkerDashboardResponse {
+            success: true,
+            worker_id: "worker-1".into(),
+            sampled_at: sample.sampled_at.to_rfc3339(),
+            stale: true,
+            host,
+            assignments: vec![super::WorkerDashboardAssignment {
+                task_id: "task-1".into(),
+                submitter: "alice".into(),
+                status: "active".into(),
+                max_cpt: 100,
+                reported_usage_cpt: Some(7),
+                usage_basis: "worker_reported_managed_usage".into(),
+                usage_updated_at: Some(now.to_rfc3339()),
+            }],
+            settled_provider_credits_cpt: 0,
+            currency: "CPT".into(),
+        };
+        let json = serde_json::to_value(response).unwrap();
+        assert!(json["host"]["gpu_count"].is_null());
+        assert!(json["host"]["storage_total_gb"].is_null());
+        assert_eq!(json["assignments"][0]["reported_usage_cpt"], 7);
+        assert_eq!(
+            json["assignments"][0]["usage_basis"],
+            "worker_reported_managed_usage"
+        );
+        assert!(json["assignments"][0].get("task_source").is_none());
+        assert!(json["assignments"][0].get("result").is_none());
+        assert!(json["assignments"][0].get("logs").is_none());
     }
 
     #[tokio::test]

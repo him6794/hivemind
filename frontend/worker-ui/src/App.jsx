@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import './console.css';
 import { clearStoredSession, isExpiredJwt, readStoredSession, saveStoredSession } from './authSession.mjs';
 import {
@@ -8,6 +8,13 @@ import {
   normalizeWorkerProfile,
   registrationOwnerUsername,
 } from './workerProfile.mjs';
+import {
+  buildWorkerDashboardRequest,
+  createNonOverlappingPoll,
+  deriveUsedPercent,
+  hasKnownDashboardMeasurement,
+  normalizeWorkerDashboard,
+} from './workerDashboard.mjs';
 
 const IP_PATTERN = /^[\w.-]+:\d{1,5}$/;
 const SESSION_KEY = 'hivemind.worker.session.v1';
@@ -17,6 +24,55 @@ function validateWorkerEndpoint(value) {
   if (!endpoint) return null; // blank = session-only registration
   if (!IP_PATTERN.test(endpoint)) return 'Invalid format. Expected host:port (e.g. 127.0.0.1:50053)';
   return null;
+}
+
+function formatMetric(value, unit = '', maximumFractionDigits = 1) {
+  if (value === null || value === undefined || !Number.isFinite(value)) return 'Unknown';
+  const formatted = new Intl.NumberFormat(undefined, { maximumFractionDigits }).format(value);
+  return unit ? `${formatted} ${unit}` : formatted;
+}
+
+function formatSampledAt(value) {
+  if (!value) return 'Unknown';
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return value;
+  return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date);
+}
+
+function DashboardStat({ label, value, detail, className = '' }) {
+  return (
+    <article className={`dashboard-stat ${className}`.trim()}>
+      <span className="dashboard-stat-label">{label}</span>
+      <strong className="dashboard-stat-value">{value}</strong>
+      {detail ? <span className="dashboard-stat-detail">{detail}</span> : null}
+    </article>
+  );
+}
+
+function DashboardMeter({ label, value }) {
+  const known = hasKnownDashboardMeasurement(value);
+  const boundedValue = known ? Math.max(0, Math.min(100, value)) : 0;
+  return (
+    <article className="dashboard-stat">
+      <span className="dashboard-stat-label">{label}</span>
+      <strong className="dashboard-stat-value">{formatMetric(value, '%')}</strong>
+      {known ? (
+        <div
+          className="dashboard-meter-track"
+          role="meter"
+          aria-label={label}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={boundedValue}
+          aria-valuetext={formatMetric(value, '%')}
+        >
+          <span className="dashboard-meter-fill" style={{ width: `${boundedValue}%` }} />
+        </div>
+      ) : (
+        <span className="dashboard-stat-detail">Telemetry unavailable</span>
+      )}
+    </article>
+  );
 }
 
 export default function WorkerApp() {
@@ -38,6 +94,11 @@ export default function WorkerApp() {
   const [workerIp, setWorkerIp] = useState('');
   const [profile, setProfile] = useState(emptyProfile);
   const [registration, setRegistration] = useState(null);
+  const [dashboard, setDashboard] = useState(null);
+  const [dashboardLoading, setDashboardLoading] = useState(false);
+  const [dashboardError, setDashboardError] = useState('');
+  const sessionTokenRef = useRef(initialSession.token);
+  const dashboardRefreshRef = useRef(null);
 
   async function readJson(res) {
     const text = await res.text();
@@ -153,12 +214,70 @@ export default function WorkerApp() {
       setRegisterLoading(false);
     }
   }
+  useEffect(() => {
+    if (!token) {
+      setDashboard(null);
+      setDashboardError('');
+      setDashboardLoading(false);
+      dashboardRefreshRef.current = null;
+      return undefined;
+    }
+
+    let cancelled = false;
+    const refreshDashboard = createNonOverlappingPoll(async () => {
+      if (cancelled || sessionTokenRef.current !== token) return;
+      setDashboardLoading(true);
+      try {
+        const request = buildWorkerDashboardRequest(workerControlBase, token);
+        let res;
+        try {
+          res = await fetch(request.url, request.options);
+        } catch {
+          throw new Error('The worker dashboard could not be reached.');
+        }
+        const data = await readJson(res);
+        if (res.status === 401) {
+          if (!cancelled && sessionTokenRef.current === token) {
+            logout();
+            setStatus('Session expired. Please log in again.');
+          }
+          return;
+        }
+        if (!res.ok || !data.success) {
+          throw new Error(data.message || data.status_message || `Dashboard request failed (${res.status})`);
+        }
+        const nextDashboard = normalizeWorkerDashboard(data);
+        if (!cancelled && sessionTokenRef.current === token) {
+          setDashboard(nextDashboard);
+          setDashboardError('');
+        }
+      } catch (err) {
+        if (!cancelled && sessionTokenRef.current === token) {
+          setDashboardError(err.message || 'The worker dashboard could not be refreshed.');
+        }
+      } finally {
+        if (!cancelled && sessionTokenRef.current === token) setDashboardLoading(false);
+      }
+    });
+    dashboardRefreshRef.current = refreshDashboard;
+    void refreshDashboard();
+    const id = setInterval(() => { void refreshDashboard(); }, 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+      if (dashboardRefreshRef.current === refreshDashboard) dashboardRefreshRef.current = null;
+    };
+  }, [token, workerControlBase]);
+
   async function handleLogin(e) {
     e.preventDefault();
     setLoginLoading(true);
     setStatus('Logging in...');
+    sessionTokenRef.current = '';
     setToken('');
     setAuthenticatedUsername('');
+    setDashboard(null);
+    setDashboardError('');
     setRegistration(null);
 
     try {
@@ -186,6 +305,7 @@ export default function WorkerApp() {
         token: authToken,
         username: ownerUsername,
       });
+      sessionTokenRef.current = authToken;
       setToken(authToken);
       setUsername(ownerUsername);
       setAuthenticatedUsername(ownerUsername);
@@ -202,8 +322,12 @@ export default function WorkerApp() {
 
   function logout() {
     clearStoredSession(window.sessionStorage, SESSION_KEY);
+    sessionTokenRef.current = '';
     setToken('');
     setAuthenticatedUsername('');
+    setDashboard(null);
+    setDashboardError('');
+    setDashboardLoading(false);
     setRegistration(null);
     setStatus('Signed out');
   }
@@ -297,6 +421,108 @@ export default function WorkerApp() {
             </div>
           ) : null}
         </section>
+
+        {token ? (
+          <section className="surface dashboard-panel" aria-labelledby="worker-dashboard-title">
+            <div className="toolbar dashboard-toolbar">
+              <div>
+                <p className="eyebrow">Live overview</p>
+                <h2 id="worker-dashboard-title">Worker dashboard</h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => { void dashboardRefreshRef.current?.(); }}
+                disabled={dashboardLoading}
+                className="button"
+              >
+                {dashboardLoading ? 'Refreshing...' : 'Refresh dashboard'}
+              </button>
+            </div>
+
+            {!dashboard ? (
+              <div className={`status ${dashboardError ? 'error' : ''}`} role="status">
+                {dashboardError || (dashboardLoading ? 'Loading worker dashboard...' : 'Worker dashboard is unavailable.')}
+              </div>
+            ) : (
+              <>
+                {dashboardError ? (
+                  <div className="status error" role="status">
+                    Refresh failed; showing the last received dashboard snapshot.
+                  </div>
+                ) : null}
+                <div className={`dashboard-freshness ${dashboard.stale || dashboardError ? 'stale' : ''}`} role="status">
+                  <strong>{dashboard.stale || dashboardError ? 'Stale snapshot' : 'Current snapshot'}</strong>
+                  <span>Sampled {formatSampledAt(dashboard.sampled_at)}</span>
+                </div>
+
+                <div className="dashboard-stat-grid">
+                  <DashboardStat label="Computer ID" value={dashboard.worker_id || 'Unknown'} />
+                  <DashboardStat label="CPU cores" value={formatMetric(dashboard.host.cpu_cores, 'cores', 0)} />
+                  <DashboardMeter label="CPU usage" value={dashboard.host.cpu_usage_percent} />
+                  <DashboardStat label="Memory total" value={formatMetric(dashboard.host.memory_total_gb, 'GB')} />
+                  <DashboardStat label="Memory available" value={formatMetric(dashboard.host.memory_available_gb, 'GB')} />
+                  <DashboardMeter label="Memory usage" value={dashboard.host.memory_usage_percent} />
+                  <DashboardStat label="GPU count" value={formatMetric(dashboard.host.gpu_count, 'GPUs', 0)} />
+                  <DashboardMeter label="GPU utilization" value={dashboard.host.gpu_utilization_percent} />
+                  <DashboardStat label="VRAM total" value={formatMetric(dashboard.host.vram_total_mb, 'MB', 0)} />
+                  <DashboardStat label="VRAM available" value={formatMetric(dashboard.host.vram_available_mb, 'MB', 0)} />
+                  <DashboardMeter
+                    label="VRAM usage"
+                    value={deriveUsedPercent(dashboard.host.vram_total_mb, dashboard.host.vram_available_mb)}
+                  />
+                  <DashboardStat label="Storage total" value={formatMetric(dashboard.host.storage_total_gb, 'GB')} />
+                  <DashboardStat label="Storage available" value={formatMetric(dashboard.host.storage_available_gb, 'GB')} />
+                  <DashboardMeter
+                    label="Storage usage"
+                    value={deriveUsedPercent(dashboard.host.storage_total_gb, dashboard.host.storage_available_gb)}
+                  />
+                  <DashboardStat
+                    className="provider-credits-stat"
+                    label="Account-wide settled provider credits"
+                    value={formatMetric(dashboard.settled_provider_credits_cpt, dashboard.currency || 'CPT', 2)}
+                    detail="Account-wide total; not a per-worker payout."
+                  />
+                </div>
+
+                <section className="dashboard-subsection" aria-labelledby="worker-assignments-title">
+                  <div className="toolbar dashboard-subsection-heading">
+                    <h3 id="worker-assignments-title">Current assignments</h3>
+                    <span className="subtle">{dashboard.assignments.length} listed</span>
+                  </div>
+                  {dashboard.assignments.length === 0 ? (
+                    <p className="subtle">No assignments are currently listed.</p>
+                  ) : (
+                    <ul className="assignment-list">
+                      {dashboard.assignments.map((assignment, index) => (
+                        <li className="assignment-card" key={assignment.task_id || `assignment-${index}`}>
+                          <div className="row-head assignment-head">
+                            <strong>{assignment.task_id || 'Unknown task'}</strong>
+                            <span className="dashboard-assignment-status">{assignment.status || 'Unknown'}</span>
+                          </div>
+                          <dl className="assignment-details">
+                            <dt>Submitter</dt>
+                            <dd>{assignment.submitter || 'Unknown'}</dd>
+                            <dt>Task max CPT</dt>
+                            <dd>{formatMetric(assignment.max_cpt, 'CPT', 2)}</dd>
+                            <dt>Worker-reported usage (observational)</dt>
+                            <dd>{formatMetric(assignment.reported_usage_cpt, 'CPT', 2)}</dd>
+                            <dt>Usage basis</dt>
+                            <dd>{assignment.usage_basis || 'Unknown'}</dd>
+                            <dt>Usage last updated</dt>
+                            <dd>{formatSampledAt(assignment.usage_updated_at)}</dd>
+                          </dl>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <p className="subtle dashboard-observation-note">
+                    Worker-reported usage is observational evidence, not a settled charge or payout.
+                  </p>
+                </section>
+              </>
+            )}
+          </section>
+        ) : null}
 
         <div className="grid two" style={{ marginTop: 18 }}>
           <section className="surface">

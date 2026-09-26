@@ -27,9 +27,15 @@ pub fn collect_resources() -> SystemResources {
         0.0
     };
 
-    let gpu_infos = detect_gpus();
+    let (
+        gpu_infos,
+        gpu_inventory_supported,
+        vram_total_supported,
+        gpu_utilization_supported,
+        vram_available_supported,
+    ) = detect_gpus();
     let gpu_count = gpu_infos.len() as i32;
-    let (storage_total_gb, storage_available_gb) = detect_storage();
+    let (storage_total_gb, storage_available_gb, storage_supported) = detect_storage();
 
     SystemResources {
         cpu_cores,
@@ -39,6 +45,11 @@ pub fn collect_resources() -> SystemResources {
         memory_usage_percent,
         gpu_count,
         gpu_infos,
+        gpu_inventory_supported,
+        gpu_utilization_supported,
+        vram_total_supported,
+        vram_available_supported,
+        storage_supported,
         storage_total_gb,
         storage_available_gb,
     }
@@ -127,7 +138,7 @@ fn calculate_gpu_score(gpu_infos: &[GpuInfo]) -> i32 {
 }
 
 /// Detect NVIDIA GPUs via nvidia-smi
-fn detect_gpus() -> Vec<GpuInfo> {
+fn detect_gpus() -> (Vec<GpuInfo>, bool, bool, bool, bool) {
     let output = Command::new("nvidia-smi")
         .args([
             "--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu",
@@ -138,24 +149,7 @@ fn detect_gpus() -> Vec<GpuInfo> {
     match output {
         Ok(out) if out.status.success() => {
             let stdout = String::from_utf8_lossy(&out.stdout);
-            stdout
-                .lines()
-                .filter_map(|line| {
-                    let parts: Vec<&str> = line.split(", ").map(|s| s.trim()).collect();
-                    if parts.len() >= 6 {
-                        Some(GpuInfo {
-                            index: parts[0].parse().unwrap_or(0),
-                            name: parts[1].to_string(),
-                            vram_total_mb: parts[2].parse().unwrap_or(0),
-                            vram_used_mb: parts[3].parse().unwrap_or(0),
-                            vram_available_mb: parts[4].parse().unwrap_or(0),
-                            gpu_utilization_percent: parts[5].parse().unwrap_or(0.0),
-                        })
-                    } else {
-                        None
-                    }
-                })
-                .collect()
+            parse_nvidia_smi_output(&stdout)
         }
         _ => {
             #[cfg(windows)]
@@ -164,14 +158,69 @@ fn detect_gpus() -> Vec<GpuInfo> {
             }
             #[cfg(not(windows))]
             {
-                Vec::new()
+                (Vec::new(), false, false, false, false)
             }
         }
     }
 }
 
+fn parse_nvidia_smi_output(stdout: &str) -> (Vec<GpuInfo>, bool, bool, bool, bool) {
+    let mut infos = Vec::new();
+    let mut inventory_supported = true;
+    let mut vram_total_supported = true;
+    let mut gpu_utilization_supported = true;
+    let mut vram_available_supported = true;
+
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        let parts: Vec<&str> = line.split(", ").map(str::trim).collect();
+        let Some(index) = parts.first().and_then(|value| value.parse::<i32>().ok()) else {
+            inventory_supported = false;
+            vram_total_supported = false;
+            gpu_utilization_supported = false;
+            vram_available_supported = false;
+            continue;
+        };
+        if parts.len() < 6 || parts[1].is_empty() {
+            inventory_supported = false;
+            vram_total_supported = false;
+            gpu_utilization_supported = false;
+            vram_available_supported = false;
+            continue;
+        }
+
+        let vram_total = parts[2].parse::<i64>().ok().filter(|value| *value >= 0);
+        let vram_used = parts[3].parse::<i64>().ok().filter(|value| *value >= 0);
+        let vram_available = parts[4].parse::<i64>().ok().filter(|value| *value >= 0);
+        let gpu_utilization = parts[5]
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite() && (0.0..=100.0).contains(value));
+
+        vram_total_supported &= vram_total.is_some();
+        vram_available_supported &= vram_available.is_some();
+        gpu_utilization_supported &= gpu_utilization.is_some();
+
+        infos.push(GpuInfo {
+            index,
+            name: parts[1].to_string(),
+            vram_total_mb: vram_total.unwrap_or(0),
+            vram_used_mb: vram_used.unwrap_or(0),
+            vram_available_mb: vram_available.unwrap_or(0),
+            gpu_utilization_percent: gpu_utilization.unwrap_or(0.0),
+        });
+    }
+
+    (
+        infos,
+        inventory_supported,
+        vram_total_supported,
+        gpu_utilization_supported,
+        vram_available_supported,
+    )
+}
+
 #[cfg(windows)]
-fn detect_gpus_windows() -> Vec<GpuInfo> {
+fn detect_gpus_windows() -> (Vec<GpuInfo>, bool, bool, bool, bool) {
     // PowerShell query for GPU info via WMI
     let output = Command::new("powershell")
         .args(["-NoProfile", "-Command",
@@ -181,7 +230,7 @@ fn detect_gpus_windows() -> Vec<GpuInfo> {
     match output {
         Ok(out) if out.status.success() => {
             let stdout = String::from_utf8_lossy(&out.stdout);
-            stdout
+            let infos: Vec<GpuInfo> = stdout
                 .lines()
                 .skip(1)
                 .filter_map(|line| {
@@ -204,17 +253,21 @@ fn detect_gpus_windows() -> Vec<GpuInfo> {
                         None
                     }
                 })
-                .collect()
+                .collect();
+            // WMI only identifies adapters and their advertised capacity; it
+            // does not report live utilization or available VRAM.
+            let vram_total_supported = infos.iter().all(|gpu| gpu.vram_total_mb > 0);
+            (infos, true, vram_total_supported, false, false)
         }
         _ => {
-            tracing::info!("No GPU detected via WMI");
-            Vec::new()
+            tracing::info!("GPU inventory is unavailable via WMI");
+            (Vec::new(), false, false, false, false)
         }
     }
 }
 
 /// Detect storage space using sysinfo
-fn detect_storage() -> (i64, i64) {
+fn detect_storage() -> (i64, i64, bool) {
     use sysinfo::Disks;
     let disks = Disks::new_with_refreshed_list();
     let total: u64 = disks.iter().map(|d| d.total_space()).sum();
@@ -222,6 +275,7 @@ fn detect_storage() -> (i64, i64) {
     (
         (total / (1024 * 1024 * 1024)) as i64,
         (available / (1024 * 1024 * 1024)) as i64,
+        !disks.is_empty() && total > 0,
     )
 }
 
@@ -286,7 +340,13 @@ mod tests {
 
     #[test]
     fn test_gpu_detection_does_not_panic() {
-        let gpus = detect_gpus();
+        let (
+            gpus,
+            _inventory_supported,
+            _vram_total_supported,
+            _utilization_supported,
+            _vram_available_supported,
+        ) = detect_gpus();
         for gpu in &gpus {
             assert!(!gpu.name.is_empty(), "GPU name must not be empty");
             assert!(gpu.vram_total_mb >= 0, "VRAM must be non-negative");
@@ -294,8 +354,44 @@ mod tests {
     }
 
     #[test]
+    fn nvidia_smi_keeps_unavailable_measurements_unknown() {
+        let (gpus, inventory, vram_total, utilization, vram_available) = parse_nvidia_smi_output(
+            "0, NVIDIA Example, N/A, N/A, N/A, N/A\n1, NVIDIA Other, 8192, 1024, 7168, 25\n",
+        );
+
+        assert_eq!(gpus.len(), 2);
+        assert!(inventory);
+        assert!(!vram_total);
+        assert!(!utilization);
+        assert!(!vram_available);
+        assert_eq!(gpus[0].index, 0);
+        assert_eq!(gpus[0].name, "NVIDIA Example");
+        assert_eq!(gpus[0].vram_total_mb, 0);
+        assert_eq!(gpus[0].vram_available_mb, 0);
+        assert_eq!(gpus[0].gpu_utilization_percent, 0.0);
+        assert_eq!(gpus[1].vram_total_mb, 8192);
+        assert_eq!(gpus[1].vram_available_mb, 7168);
+        assert_eq!(gpus[1].gpu_utilization_percent, 25.0);
+    }
+
+    #[test]
+    fn nvidia_smi_preserves_supported_readings_in_a_valid_row() {
+        let (gpus, inventory, vram_total, utilization, vram_available) =
+            parse_nvidia_smi_output("0, NVIDIA Example, 8192, 2048, 6144, 25\n");
+
+        assert_eq!(gpus.len(), 1);
+        assert!(inventory);
+        assert!(vram_total);
+        assert!(utilization);
+        assert!(vram_available);
+        assert_eq!(gpus[0].vram_total_mb, 8192);
+        assert_eq!(gpus[0].vram_available_mb, 6144);
+        assert_eq!(gpus[0].gpu_utilization_percent, 25.0);
+    }
+
+    #[test]
     fn test_storage_detection() {
-        let (total, available) = detect_storage();
+        let (total, available, _supported) = detect_storage();
         assert!(total > 0, "Storage total must be positive, got {}", total);
         assert!(available >= 0, "Storage available must be non-negative");
         assert!(available <= total, "Available cannot exceed total");

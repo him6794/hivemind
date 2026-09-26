@@ -7,6 +7,12 @@ function nonNegativeNumber(value, fallback = 0) {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
+function finiteNumberOrNull(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 export function normalizeTaskObservability(task = {}) {
   const retryCount = nonNegativeNumber(task.retry_count, 0);
   const runtime = text(task.runtime || task.runtime_version || task.Runtime).trim();
@@ -40,6 +46,11 @@ export function normalizeTaskObservability(task = {}) {
   const chargeCapCpt = nonNegativeNumber(task.max_cpt, 0);
   const billedAmount = nonNegativeNumber(task.billed_amount, 0);
   const billingSettled = task.billing_settled === true;
+  const rawChargeCap = finiteNumberOrNull(task.max_cpt);
+  const rawBilledAmount = finiteNumberOrNull(task.billed_amount);
+  const settledRemainderCpt = billingSettled && rawChargeCap !== null && rawBilledAmount !== null
+    ? rawChargeCap - rawBilledAmount
+    : null;
   const historicalOverCap = isManagedV1 && billingSettled && chargeCapCpt > 0 && billedAmount > chargeCapCpt;
 
   return {
@@ -51,6 +62,7 @@ export function normalizeTaskObservability(task = {}) {
     chargeCapCpt,
     billedAmount,
     billingSettled,
+    settledRemainderCpt,
     historicalOverCap,
   };
 }

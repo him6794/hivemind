@@ -34,6 +34,8 @@ use hivemind_proto::{
     GetBalanceResponse,
     GetProviderEarningsRequest,
     GetProviderEarningsResponse,
+    GetProviderWorkerAssignmentsRequest,
+    GetProviderWorkerAssignmentsResponse,
     GetProviderWorkerSettingsRequest,
     GetProviderWorkerSettingsResponse,
     GetTaskResultRequest,
@@ -57,6 +59,7 @@ use hivemind_proto::{
     ManagedConsensusSummary,
     PricingBreakdown,
     ProviderEarningsEntry,
+    ProviderWorkerAssignment,
     ProviderWorkerSettings,
     PullBatchRequest,
     PullBatchResponse,
@@ -3342,7 +3345,8 @@ impl MasterNodeService for GrpcMasterNodeService {
         let total: i64 = sqlx::query_scalar(
             "SELECT COALESCE(SUM(amount_cpt), 0)::BIGINT
              FROM ledger_entries
-             WHERE kind = 'provider_credit'
+             WHERE status = 'settled'
+               AND (kind = 'provider_credit' OR kind ~ '^consensus_provider_credit_[0-9]+$')
                AND (provider_user = $1 OR provider_worker_id IN (
                     SELECT worker_id FROM worker_nodes WHERE username = $1
                ))",
@@ -3364,7 +3368,8 @@ impl MasterNodeService for GrpcMasterNodeService {
         let rows: Vec<EarningsRow> = sqlx::query_as(
             "SELECT task_id, payer_user, provider_worker_id, amount_cpt, status, created_at
              FROM ledger_entries
-             WHERE kind = 'provider_credit'
+             WHERE status = 'settled'
+               AND (kind = 'provider_credit' OR kind ~ '^consensus_provider_credit_[0-9]+$')
                AND (provider_user = $1 OR provider_worker_id IN (
                     SELECT worker_id FROM worker_nodes WHERE username = $1
                ))
@@ -3390,6 +3395,114 @@ impl MasterNodeService for GrpcMasterNodeService {
                     amount_cpt: row.amount_cpt,
                     status: row.status,
                     created_at: row.created_at.to_rfc3339(),
+                })
+                .collect(),
+        }))
+    }
+
+    async fn get_provider_worker_assignments(
+        &self,
+        request: Request<GetProviderWorkerAssignmentsRequest>,
+    ) -> Result<Response<GetProviderWorkerAssignmentsResponse>, Status> {
+        let req = request.into_inner();
+        let claims = self
+            .state
+            .auth
+            .validate_token(&req.token)
+            .map_err(|_| Status::unauthenticated("Invalid token"))?;
+        let worker_id = req.worker_id.trim();
+        if worker_id.is_empty() {
+            return Err(Status::invalid_argument("worker_id is required"));
+        }
+
+        let pool = &self.state.scheduler.database().pool;
+        let owner: Option<String> =
+            sqlx::query_scalar("SELECT username FROM worker_nodes WHERE worker_id = $1")
+                .bind(worker_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+        if owner.as_deref() != Some(claims.sub.as_str()) {
+            return Err(Status::permission_denied(
+                "Worker is not available to this account",
+            ));
+        }
+
+        #[derive(sqlx::FromRow)]
+        struct AssignmentRow {
+            task_id: String,
+            submitter: String,
+            status: String,
+            max_cpt: i64,
+            reported_usage_cpt: Option<i64>,
+            usage_basis: String,
+            usage_updated_at: Option<chrono::DateTime<chrono::Utc>>,
+        }
+
+        let rows: Vec<AssignmentRow> = sqlx::query_as(
+            "SELECT task_id, submitter, status, max_cpt, reported_usage_cpt,
+                    usage_basis, usage_updated_at
+             FROM (
+                SELECT t.task_id,
+                       t.owner AS submitter,
+                       CASE WHEN t.status = 'RUNNING' THEN 'active' ELSE 'queued' END AS status,
+                       t.max_cpt,
+                       NULL::BIGINT AS reported_usage_cpt,
+                       'not_reported'::TEXT AS usage_basis,
+                       NULL::TIMESTAMPTZ AS usage_updated_at,
+                       t.created_at
+                FROM tasks t
+                WHERE t.worker_id = $1
+                  AND (t.managed_consensus_version IS NULL OR t.managed_consensus_version = 0)
+                  AND t.status IN ('ASSIGNED', 'RUNNING')
+
+                UNION ALL
+
+                SELECT t.task_id,
+                       t.owner AS submitter,
+                       CASE
+                           WHEN r.state = 'running' THEN 'active'
+                           ELSE 'queued'
+                       END AS status,
+                       t.max_cpt,
+                       r.usage_units AS reported_usage_cpt,
+                       CASE
+                           WHEN r.usage_units IS NULL THEN 'not_reported'
+                           ELSE 'worker_reported_managed_usage'
+                       END AS usage_basis,
+                       r.reported_at AS usage_updated_at,
+                       t.created_at
+                FROM tasks t
+                JOIN managed_consensus_replicas r
+                  ON r.task_id = t.task_id
+                 AND r.attempt_id = t.managed_consensus_attempt_id
+                WHERE r.worker_id = $1
+                  AND t.managed_consensus_version IS NOT NULL
+                  AND t.managed_consensus_version > 0
+                  AND t.status IN ('ASSIGNED', 'RUNNING')
+                  AND r.state IN ('assigned', 'running')
+             ) assignments
+             ORDER BY created_at DESC, task_id",
+        )
+        .bind(worker_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?;
+
+        Ok(Response::new(GetProviderWorkerAssignmentsResponse {
+            success: true,
+            status_message: "OK".into(),
+            worker_id: worker_id.to_string(),
+            assignments: rows
+                .into_iter()
+                .map(|row| ProviderWorkerAssignment {
+                    task_id: row.task_id,
+                    submitter: row.submitter,
+                    status: row.status,
+                    max_cpt: row.max_cpt,
+                    reported_usage_cpt: row.reported_usage_cpt,
+                    usage_basis: row.usage_basis,
+                    usage_updated_at: row.usage_updated_at.map(|value| value.to_rfc3339()),
                 })
                 .collect(),
         }))
@@ -8042,6 +8155,339 @@ mod tests {
             allowed.trust.as_ref().map(|trust| trust.worker_id.as_str()),
             Some(worker_id.as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn provider_worker_assignments_auth_scope_and_dto_are_narrow() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (service, ordinary_task_id, other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(service.state.clone());
+        let worker_id = format!("dashboard-worker-{ordinary_task_id}");
+        let unrelated_worker_id = format!("dashboard-other-worker-{ordinary_task_id}");
+        let owner_token = token_for(&service.state.auth, &owner);
+        register_report_worker(&node_service, &owner, &worker_id).await;
+        register_report_worker(&node_service, &owner, &unrelated_worker_id).await;
+        service
+            .state
+            .scheduler
+            .assign_task_to_worker(&ordinary_task_id, &worker_id, "10.77.8.10:50053")
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE tasks SET status = 'RUNNING', task_source = 'private source',
+                output = 'private output', result_torrent = 'private result'
+             WHERE task_id = $1",
+        )
+        .bind(&ordinary_task_id)
+        .execute(&service.state.scheduler.database().pool)
+        .await
+        .unwrap();
+
+        let unrelated_task_id = format!("dashboard-unrelated-{ordinary_task_id}");
+        service
+            .state
+            .scheduler
+            .create_task(&make_task(&unrelated_task_id, &owner))
+            .await
+            .unwrap();
+        service
+            .state
+            .scheduler
+            .assign_task_to_worker(&unrelated_task_id, &unrelated_worker_id, "10.77.8.11:50053")
+            .await
+            .unwrap();
+
+        let consensus_task_id = format!("dashboard-consensus-{ordinary_task_id}");
+        service
+            .state
+            .scheduler
+            .create_task(&make_task(&consensus_task_id, &owner))
+            .await
+            .unwrap();
+        let attempt_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO managed_consensus_attempts (
+                id, task_id, execution_id, round_id, request_digest, replica_count,
+                quorum, mode, state, deadline
+             ) VALUES ($1, $2, $3, $4, $5, 3, 2, 'enforce', 'running', NOW() + INTERVAL '5 minutes')",
+        )
+        .bind(attempt_id)
+        .bind(&consensus_task_id)
+        .bind(format!("execution-{consensus_task_id}"))
+        .bind(format!("round-{consensus_task_id}"))
+        .bind("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        .execute(&service.state.scheduler.database().pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE tasks SET status = 'RUNNING', worker_id = $1,
+                managed_consensus_version = 1, managed_consensus_attempt_id = $2
+             WHERE task_id = $3",
+        )
+        .bind(&unrelated_worker_id)
+        .bind(attempt_id)
+        .bind(&consensus_task_id)
+        .execute(&service.state.scheduler.database().pool)
+        .await
+        .unwrap();
+        for (replica_id, replica_worker, worker_attempt_id, usage_units) in [
+            (
+                "target-replica",
+                worker_id.as_str(),
+                "target-attempt",
+                Some(7i64),
+            ),
+            (
+                "unrelated-replica",
+                unrelated_worker_id.as_str(),
+                "unrelated-attempt",
+                None,
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO managed_consensus_replicas (
+                    task_id, attempt_id, replica_id, worker_id, execution_id,
+                    worker_attempt_id, request_digest, state, usage_units, reported_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'running', $8, NOW())",
+            )
+            .bind(&consensus_task_id)
+            .bind(attempt_id)
+            .bind(replica_id)
+            .bind(replica_worker)
+            .bind(format!("execution-{consensus_task_id}"))
+            .bind(worker_attempt_id)
+            .bind("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .bind(usage_units)
+            .execute(&service.state.scheduler.database().pool)
+            .await
+            .unwrap();
+        }
+
+        let assigned_consensus_task_id = format!("dashboard-consensus-assigned-{ordinary_task_id}");
+        service
+            .state
+            .scheduler
+            .create_task(&make_task(&assigned_consensus_task_id, &owner))
+            .await
+            .unwrap();
+        let assigned_attempt_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO managed_consensus_attempts (
+                id, task_id, execution_id, round_id, request_digest, replica_count,
+                quorum, mode, state, deadline
+             ) VALUES ($1, $2, $3, $4, $5, 3, 2, 'enforce', 'running', NOW() + INTERVAL '5 minutes')",
+        )
+        .bind(assigned_attempt_id)
+        .bind(&assigned_consensus_task_id)
+        .bind(format!("execution-{assigned_consensus_task_id}"))
+        .bind(format!("round-{assigned_consensus_task_id}"))
+        .bind("sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        .execute(&service.state.scheduler.database().pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE tasks SET status = 'RUNNING', managed_consensus_version = 1,
+                managed_consensus_attempt_id = $1
+             WHERE task_id = $2",
+        )
+        .bind(assigned_attempt_id)
+        .bind(&assigned_consensus_task_id)
+        .execute(&service.state.scheduler.database().pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO managed_consensus_replicas (
+                task_id, attempt_id, replica_id, worker_id, execution_id,
+                worker_attempt_id, request_digest, state
+             ) VALUES ($1, $2, 'assigned-replica', $3, $4, 'assigned-attempt', $5, 'assigned')",
+        )
+        .bind(&assigned_consensus_task_id)
+        .bind(assigned_attempt_id)
+        .bind(&worker_id)
+        .bind(format!("execution-{assigned_consensus_task_id}"))
+        .bind("sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        .execute(&service.state.scheduler.database().pool)
+        .await
+        .unwrap();
+
+        let invalid_token = service
+            .get_provider_worker_assignments(Request::new(GetProviderWorkerAssignmentsRequest {
+                token: "invalid-token".into(),
+                worker_id: worker_id.clone(),
+            }))
+            .await
+            .unwrap_err();
+        let wrong_owner = service
+            .get_provider_worker_assignments(Request::new(GetProviderWorkerAssignmentsRequest {
+                token: other_token,
+                worker_id: worker_id.clone(),
+            }))
+            .await
+            .unwrap_err();
+        let response = service
+            .get_provider_worker_assignments(Request::new(GetProviderWorkerAssignmentsRequest {
+                token: owner_token,
+                worker_id: worker_id.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        cleanup_report_worker(&service, &worker_id).await;
+        cleanup_report_worker(&service, &unrelated_worker_id).await;
+        cleanup(&service.state.scheduler, &ordinary_task_id, &owner).await;
+        cleanup(&service.state.scheduler, &unrelated_task_id, &owner).await;
+        cleanup(&service.state.scheduler, &consensus_task_id, &owner).await;
+        cleanup(
+            &service.state.scheduler,
+            &assigned_consensus_task_id,
+            &owner,
+        )
+        .await;
+
+        assert_eq!(invalid_token.code(), tonic::Code::Unauthenticated);
+        assert_eq!(wrong_owner.code(), tonic::Code::PermissionDenied);
+        assert!(response.success);
+        assert_eq!(response.worker_id, worker_id);
+        assert_eq!(response.assignments.len(), 3);
+        assert!(response.assignments.iter().any(|assignment| {
+            assignment.task_id == ordinary_task_id && assignment.status == "active"
+        }));
+        let consensus = response
+            .assignments
+            .iter()
+            .find(|assignment| assignment.task_id == consensus_task_id)
+            .expect("consensus assignment should be attributed to the replica worker");
+        assert_eq!(consensus.status, "active");
+        assert_eq!(consensus.reported_usage_cpt, Some(7));
+        assert_eq!(consensus.usage_basis, "worker_reported_managed_usage");
+        let assigned_consensus = response
+            .assignments
+            .iter()
+            .find(|assignment| assignment.task_id == assigned_consensus_task_id)
+            .expect("assigned consensus replica should appear in the provider view");
+        assert_eq!(assigned_consensus.status, "queued");
+        let dto_debug = format!("{response:?}");
+        assert!(!dto_debug.contains("private source"));
+        assert!(!dto_debug.contains("private output"));
+        assert!(!dto_debug.contains("private result"));
+        assert!(!dto_debug.contains("task_source"));
+    }
+
+    #[tokio::test]
+    async fn provider_earnings_include_only_settled_owned_provider_credits() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(service.state.clone());
+        let worker_id = format!("earnings-owned-worker-{task_id}");
+        let owner_token = token_for(&service.state.auth, &owner);
+        register_report_worker(&node_service, &owner, &worker_id).await;
+        let rows = [
+            (
+                "provider_credit",
+                None,
+                Some(owner.as_str()),
+                10i64,
+                "settled",
+            ),
+            (
+                "provider_credit",
+                Some(worker_id.as_str()),
+                Some(owner.as_str()),
+                20,
+                "settled",
+            ),
+            (
+                "consensus_provider_credit_0",
+                Some(worker_id.as_str()),
+                Some(owner.as_str()),
+                30,
+                "settled",
+            ),
+            (
+                "provider_credit",
+                Some(worker_id.as_str()),
+                Some(owner.as_str()),
+                100,
+                "held",
+            ),
+            (
+                "consensus_provider_credit_test",
+                Some(worker_id.as_str()),
+                Some(owner.as_str()),
+                200,
+                "settled",
+            ),
+            (
+                "platform_fee",
+                Some(worker_id.as_str()),
+                Some(owner.as_str()),
+                300,
+                "settled",
+            ),
+            (
+                "consensus_provider_credit_1",
+                Some("not-owned-worker"),
+                Some("someone-else"),
+                400,
+                "settled",
+            ),
+        ];
+        for (index, (kind, provider_worker_id, provider_user, amount, status)) in
+            rows.into_iter().enumerate()
+        {
+            sqlx::query(
+                "INSERT INTO ledger_entries (
+                    task_id, payer_user, provider_worker_id, provider_user,
+                    kind, amount_cpt, currency, status, idempotency_key
+                 ) VALUES ($1, $2, $3, $4, $5, $6, 'CPT', $7, $8)",
+            )
+            .bind(&task_id)
+            .bind(&owner)
+            .bind(provider_worker_id)
+            .bind(provider_user)
+            .bind(kind)
+            .bind(amount)
+            .bind(status)
+            .bind(format!("{task_id}:provider-earnings-test:{index}"))
+            .execute(&service.state.scheduler.database().pool)
+            .await
+            .unwrap();
+        }
+
+        let response = service
+            .get_provider_earnings(Request::new(GetProviderEarningsRequest {
+                token: owner_token,
+                limit: 100,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        cleanup_report_worker(&service, &worker_id).await;
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+
+        assert!(response.success);
+        assert_eq!(response.total_earned_cpt, 60);
+        assert_eq!(response.entries.len(), 3);
+        assert!(response
+            .entries
+            .iter()
+            .all(|entry| entry.status == "settled"));
+        let mut amounts = response
+            .entries
+            .iter()
+            .map(|entry| entry.amount_cpt)
+            .collect::<Vec<_>>();
+        amounts.sort_unstable();
+        assert_eq!(amounts, vec![10, 20, 30]);
     }
 
     #[tokio::test]

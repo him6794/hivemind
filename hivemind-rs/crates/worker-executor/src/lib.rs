@@ -72,6 +72,12 @@ type TaskRunner = dyn Fn(Task, watch::Receiver<bool>, bool, ExecutionAttemptCont
     + Send
     + Sync;
 
+#[derive(Debug, Clone)]
+pub struct ResourceSample {
+    pub resources: SystemResources,
+    pub sampled_at: chrono::DateTime<chrono::Utc>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ExecutionAttemptContext {
     pub worker_id: Option<String>,
@@ -81,6 +87,7 @@ pub struct ExecutionAttemptContext {
 pub struct WorkerExecutor {
     active_tasks: ActiveTaskMap,
     stop_fences: AttemptStopFenceStore,
+    latest_resource_sample: Arc<std::sync::RwLock<Option<ResourceSample>>>,
     task_runner: Arc<TaskRunner>,
     dynamic_capability_report: WorkerCapabilityReport,
     runtime_admission: runtime_admission::WorkerRuntimeAdmission,
@@ -215,6 +222,7 @@ impl WorkerExecutor {
                 stopped: stop_fences.fences(),
             })),
             stop_fences,
+            latest_resource_sample: Arc::new(std::sync::RwLock::new(None)),
             task_runner: Arc::new(
                 move |task, cancellation, _consensus_request, execution_context| {
                     let config = runner_config.clone();
@@ -280,6 +288,7 @@ impl WorkerExecutor {
                 stopped: stop_fences.fences(),
             })),
             stop_fences,
+            latest_resource_sample: Arc::new(std::sync::RwLock::new(None)),
             task_runner: Arc::new(
                 move |task, cancellation, _consensus_request, _execution_context| {
                     Box::pin(task_runner(task, cancellation))
@@ -505,8 +514,25 @@ impl WorkerExecutor {
     }
 
     pub fn get_system_resources(&self) -> SystemResources {
-        resource_monitor::collect_resources()
+        let resources = resource_monitor::collect_resources();
+        *self
+            .latest_resource_sample
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = Some(ResourceSample {
+            resources: resources.clone(),
+            sampled_at: chrono::Utc::now(),
+        });
+        resources
     }
+
+    #[must_use]
+    pub fn latest_resource_sample(&self) -> Option<ResourceSample> {
+        self.latest_resource_sample
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
     pub fn get_resource_spec(&self) -> hivemind_models::ResourceSpec {
         resource_monitor::to_resource_spec(&self.get_system_resources())
     }
@@ -852,6 +878,11 @@ pub struct SystemResources {
     pub memory_usage_percent: f64,
     pub gpu_count: i32,
     pub gpu_infos: Vec<GpuInfo>,
+    pub gpu_inventory_supported: bool,
+    pub gpu_utilization_supported: bool,
+    pub vram_total_supported: bool,
+    pub vram_available_supported: bool,
+    pub storage_supported: bool,
     pub storage_total_gb: i64,
     pub storage_available_gb: i64,
 }

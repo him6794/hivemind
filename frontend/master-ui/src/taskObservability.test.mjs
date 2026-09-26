@@ -25,6 +25,7 @@ test('normalizes managed-v1 retry counter and task billing fields separately', (
       chargeCapCpt: 100,
       billedAmount: 81,
       billingSettled: true,
+      settledRemainderCpt: 19,
       historicalOverCap: false,
     }
   );
@@ -51,6 +52,7 @@ test('uses managed-v1 retry-counter terminology when dispatch fields are absent'
       chargeCapCpt: 20,
       billedAmount: 13,
       billingSettled: false,
+      settledRemainderCpt: null,
       historicalOverCap: false,
     }
   );
@@ -82,4 +84,24 @@ test('uses neutral progress when a failed v1 task has no consensus details', () 
     }).dispatchStatus,
     'STOP_PENDING'
   );
+});
+
+test('exposes charge-cap remainder only after settlement and preserves negative values', () => {
+  assert.equal(
+    normalizeTaskObservability({ max_cpt: 100, billed_amount: 72, billing_settled: false }).settledRemainderCpt,
+    null,
+  );
+  assert.equal(
+    normalizeTaskObservability({ max_cpt: 100, billed_amount: 72, billing_settled: true }).settledRemainderCpt,
+    28,
+  );
+  assert.equal(
+    normalizeTaskObservability({ max_cpt: 100, billed_amount: 125, billing_settled: true }).settledRemainderCpt,
+    -25,
+  );
+});
+
+test('does not infer settled remainder if cap or charge is unavailable', () => {
+  assert.equal(normalizeTaskObservability({ billing_settled: true, billed_amount: 10 }).settledRemainderCpt, null);
+  assert.equal(normalizeTaskObservability({ billing_settled: true, max_cpt: 10 }).settledRemainderCpt, null);
 });

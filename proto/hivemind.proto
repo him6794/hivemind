@@ -344,6 +344,31 @@ message GetProviderEarningsResponse {
     repeated ProviderEarningsEntry entries = 5;
 }
 
+// Narrow owner-authenticated view of one registered Worker's active tasks.
+// Source, result, and task log payloads are intentionally excluded.
+message GetProviderWorkerAssignmentsRequest {
+    string token = 1;
+    string worker_id = 2;
+}
+
+message ProviderWorkerAssignment {
+    string task_id = 1;
+    string submitter = 2;
+    string status = 3;
+    int64 max_cpt = 4;
+    // Worker-reported CPT claim for observation only; settlement validates it separately.
+    optional int64 reported_usage_cpt = 5;
+    string usage_basis = 6;
+    optional string usage_updated_at = 7;
+}
+
+message GetProviderWorkerAssignmentsResponse {
+    bool success = 1;
+    string status_message = 2;
+    string worker_id = 3;
+    repeated ProviderWorkerAssignment assignments = 4;
+}
+
 message GetProviderWorkerSettingsRequest {
     string token = 1;
     string worker_id = 2;
@@ -1121,6 +1146,7 @@ service MasterNodeService {
     rpc DownloadTaskArtifact(DownloadTaskArtifactRequest) returns (DownloadTaskArtifactResponse);
     rpc QuoteTask(QuoteTaskRequest) returns (QuoteTaskResponse);
     rpc GetProviderEarnings(GetProviderEarningsRequest) returns (GetProviderEarningsResponse);
+    rpc GetProviderWorkerAssignments(GetProviderWorkerAssignmentsRequest) returns (GetProviderWorkerAssignmentsResponse);
     rpc GetProviderWorkerSettings(GetProviderWorkerSettingsRequest) returns (GetProviderWorkerSettingsResponse);
     rpc UpdateProviderWorkerSettings(UpdateProviderWorkerSettingsRequest) returns (UpdateProviderWorkerSettingsResponse);
     rpc GetAdminBillingOverview(GetAdminBillingOverviewRequest) returns (GetAdminBillingOverviewResponse);
