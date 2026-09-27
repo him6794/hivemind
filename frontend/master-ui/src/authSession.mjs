@@ -54,3 +54,7 @@ export function clearStoredSession(storage, key) {
   if (!storage) return;
   storage.removeItem(key);
 }
+
+export function shouldLogoutForUnauthorizedRequest(requestToken, currentToken) {
+  return Boolean(requestToken) && requestToken === currentToken;
+}

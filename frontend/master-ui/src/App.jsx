@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import './console.css';
 import { artifactFilenameFromContentDisposition } from './artifactDownloadPolicy.mjs';
-import { clearStoredSession, readStoredSession, saveStoredSession } from './authSession.mjs';
+import {
+  clearStoredSession,
+  readStoredSession,
+  saveStoredSession,
+  shouldLogoutForUnauthorizedRequest,
+} from './authSession.mjs';
 import { createTaskId, validateTaskId } from './taskIdPolicy.mjs';
 import {
   isManagedGpuResult,
@@ -10,7 +15,7 @@ import {
   taskResponseFailureMessage,
 } from './taskResponsePolicy.mjs';
 import { normalizeTaskObservability } from './taskObservability.mjs';
-import { parseCptBalance } from './accountBalance.mjs';
+import { createBalanceRefreshController, parseCptBalance } from './accountBalance.mjs';
 
 function toNumber(value) {
   const parsed = Number(value);
@@ -39,7 +44,7 @@ export default function MasterApp() {
   const [sourceError, setSourceError] = useState(null);
   const vpnReadyToken = useRef('');
   const tokenRef = useRef(initialSession.token);
-  const balanceRequest = useRef(null);
+  const balanceRefresh = useRef(null);
 
   const [taskId, setTaskId] = useState('');
   const [taskSource, setTaskSource] = useState('');
@@ -88,7 +93,7 @@ export default function MasterApp() {
     const data = await readJson(res);
     if (!res.ok) {
       if (res.status === 401) {
-        logout();
+        if (shouldLogoutForUnauthorizedRequest(authToken, tokenRef.current)) logout();
         throw new Error('Session expired. Please log in again.');
       }
       if (res.status >= 500) {
@@ -108,39 +113,31 @@ export default function MasterApp() {
     }
   }
 
-  function refreshBalance(authToken = token) {
-    if (!authToken) return Promise.resolve(false);
-    if (balanceRequest.current) return balanceRequest.current;
-
-    const request = Promise.resolve().then(async () => {
-      try {
-        const { ok, data } = await api('GET', '/api/balance', undefined, authToken);
-        if (!ok || data.success === false) {
-          throw new Error(data.message || data.status_message || 'Failed to load account balance');
-        }
-        const nextBalance = parseCptBalance(data);
-        if (tokenRef.current !== authToken) return false;
-        setBalance(nextBalance);
-        setBalanceError('');
-        return true;
-      } catch (err) {
-        if (tokenRef.current === authToken) {
-          setBalanceError(err.message || 'Failed to load account balance');
-        }
-        return false;
-      }
-    });
-    const trackedRequest = request.finally(() => {
-      if (balanceRequest.current === trackedRequest) balanceRequest.current = null;
-    });
-    balanceRequest.current = trackedRequest;
-    return trackedRequest;
+  function getBalanceRefreshController() {
+    if (!balanceRefresh.current) {
+      balanceRefresh.current = createBalanceRefreshController({
+        loadBalance: async (authToken) => {
+          const { ok, data } = await api('GET', '/api/balance', undefined, authToken);
+          if (!ok || data.success === false) {
+            throw new Error(data.message || data.status_message || 'Failed to load account balance');
+          }
+          return parseCptBalance(data);
+        },
+        getCurrentToken: () => tokenRef.current,
+        setBalance,
+        setError: setBalanceError,
+      });
+    }
+    return balanceRefresh.current;
   }
 
-  async function refreshBalanceAfterSubmit(authToken) {
-    const pending = balanceRequest.current;
-    if (pending) await pending;
-    if (authToken && authToken === tokenRef.current) await refreshBalance(authToken);
+  function refreshBalance(authToken = token) {
+    if (!authToken) return Promise.resolve(false);
+    return getBalanceRefreshController().refresh(authToken);
+  }
+
+  function refreshBalanceAfterSubmit(authToken) {
+    return getBalanceRefreshController().refreshAfter(authToken);
   }
 
   async function bootstrapVpn(authToken = token) {
@@ -205,6 +202,7 @@ export default function MasterApp() {
     setLoginLoading(true);
     setStatus('Logging in...');
     tokenRef.current = '';
+    balanceRefresh.current?.clear();
     setToken('');
     setBalance(null);
     setBalanceError('');
@@ -467,7 +465,7 @@ export default function MasterApp() {
     clearStoredSession(window.sessionStorage, SESSION_KEY);
     vpnReadyToken.current = '';
     tokenRef.current = '';
-    balanceRequest.current = null;
+    balanceRefresh.current?.clear();
     setToken('');
     setBalance(null);
     setBalanceError('');

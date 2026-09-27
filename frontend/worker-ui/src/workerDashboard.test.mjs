@@ -6,6 +6,8 @@ import {
   deriveUsedPercent,
   hasKnownDashboardMeasurement,
   normalizeWorkerDashboard,
+  PROVIDER_CREDITS_DETAIL,
+  PROVIDER_CREDITS_LABEL,
 } from './workerDashboard.mjs';
 
 describe('worker dashboard contract', () => {
@@ -49,9 +51,15 @@ describe('worker dashboard contract', () => {
     assert.equal(dashboard.host.memory_usage_percent, null);
     assert.equal(dashboard.host.gpu_count, 0);
     assert.equal(dashboard.host.vram_total_mb, null);
+    assert.equal(dashboard.assignments[0].submitter, 'alice');
+    assert.equal(dashboard.assignments[0].status, 'RUNNING');
+    assert.equal(dashboard.assignments[0].max_cpt, 80);
     assert.equal(dashboard.assignments[0].reported_usage_cpt, null);
+    assert.equal(dashboard.assignments[0].usage_basis, 'reported_ops');
     assert.equal(dashboard.assignments[0].usage_updated_at, null);
     assert.equal(dashboard.settled_provider_credits_cpt, 125.5);
+    assert.match(PROVIDER_CREDITS_LABEL, /account-wide/i);
+    assert.match(PROVIDER_CREDITS_DETAIL, /not a per-worker payout/i);
   });
 
   it('keeps an unsupported GPU probe unknown instead of showing zero', () => {

@@ -138,7 +138,7 @@ h2 {
 }
 
 .grid.two {
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
 }
 
 .form-grid {

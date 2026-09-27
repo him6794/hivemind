@@ -7,6 +7,7 @@ import {
   isExpiredJwt,
   readStoredSession,
   saveStoredSession,
+  shouldLogoutForUnauthorizedRequest,
 } from './authSession.mjs';
 
 function memoryStorage() {
@@ -70,6 +71,14 @@ function base64Url(value) {
 function makeJwt(payload) {
   return `header.${base64Url(payload)}.signature`;
 }
+
+describe('unauthorized session handling', () => {
+  it('only logs out when the 401 belongs to the active session', () => {
+    assert.equal(shouldLogoutForUnauthorizedRequest('token-a', 'token-a'), true);
+    assert.equal(shouldLogoutForUnauthorizedRequest('token-a', 'token-b'), false);
+    assert.equal(shouldLogoutForUnauthorizedRequest('', ''), false);
+  });
+});
 
 describe('JWT expiry detection', () => {
   const future = Math.floor(Date.now() / 1000) + 3600;

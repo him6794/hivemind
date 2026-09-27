@@ -1,31 +1,55 @@
 use super::{GpuInfo, SystemResources};
 use hivemind_models::{ResourceSpec, ResourceUsage};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+struct SystemProbe {
+    system: sysinfo::System,
+    last_cpu_refresh: Option<Instant>,
+}
 
 pub fn collect_resources() -> SystemResources {
-    use sysinfo::System;
+    static SYSTEM_PROBE: OnceLock<Mutex<SystemProbe>> = OnceLock::new();
+    let probe = SYSTEM_PROBE.get_or_init(|| {
+        Mutex::new(SystemProbe {
+            system: sysinfo::System::new_all(),
+            last_cpu_refresh: None,
+        })
+    });
+    let mut probe = probe.lock().unwrap_or_else(|error| error.into_inner());
+    let now = Instant::now();
+    let cpu_usage_supported = probe
+        .last_cpu_refresh
+        .is_some_and(|last| now.duration_since(last) >= Duration::from_millis(200));
+    probe.system.refresh_all();
+    probe.last_cpu_refresh = Some(now);
 
-    let mut sys = System::new_all();
-    sys.refresh_all();
-
-    let cpu_cores = sys.cpus().len() as i32;
-    let total_memory_bytes = sys.total_memory();
-    let available_memory_bytes = sys.available_memory();
+    let cpu_cores = probe.system.cpus().len() as i32;
+    let total_memory_bytes = probe.system.total_memory();
+    let available_memory_bytes = probe.system.available_memory();
     let total_memory_gb = (total_memory_bytes / (1024 * 1024 * 1024)) as i32;
     let available_memory_gb = (available_memory_bytes / (1024 * 1024 * 1024)) as i32;
+    let memory_supported = total_memory_bytes > 0 && available_memory_bytes <= total_memory_bytes;
 
-    let cpu_usage = sys
+    let cpu_usage = probe
+        .system
         .cpus()
         .iter()
         .map(|cpu| cpu.cpu_usage() as f64)
         .sum::<f64>()
         / cpu_cores.max(1) as f64;
+    let cpu_usage_supported = cpu_usage_supported
+        && cpu_cores > 0
+        && cpu_usage.is_finite()
+        && (0.0..=100.0).contains(&cpu_usage);
 
-    let memory_usage_percent = if total_memory_bytes > 0 {
+    let memory_usage_percent = if memory_supported {
         ((total_memory_bytes - available_memory_bytes) as f64 / total_memory_bytes as f64) * 100.0
     } else {
         0.0
     };
+    drop(probe);
 
     let (
         gpu_infos,
@@ -42,7 +66,9 @@ pub fn collect_resources() -> SystemResources {
         total_memory_gb,
         available_memory_gb,
         cpu_usage_percent: cpu_usage,
+        cpu_usage_supported,
         memory_usage_percent,
+        memory_supported,
         gpu_count,
         gpu_infos,
         gpu_inventory_supported,

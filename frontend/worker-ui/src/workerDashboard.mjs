@@ -1,3 +1,6 @@
+export const PROVIDER_CREDITS_LABEL = 'Account-wide settled provider credits';
+export const PROVIDER_CREDITS_DETAIL = 'Account-wide total; not a per-worker payout.';
+
 const HOST_NUMBER_FIELDS = [
   'cpu_cores',
   'cpu_usage_percent',

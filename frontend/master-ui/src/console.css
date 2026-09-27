@@ -138,7 +138,7 @@ h2 {
 }
 
 .grid.two {
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
 }
 
 .form-grid {
@@ -255,9 +255,15 @@ label {
 
 .row-head {
   display: flex;
+  min-width: 0;
   gap: 12px;
   align-items: center;
   justify-content: space-between;
+}
+
+.row-head > strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .meta {

@@ -209,11 +209,11 @@ struct WorkerInfoResponse {
 
 #[derive(Debug, Clone, Serialize)]
 struct WorkerDashboardHost {
-    cpu_cores: i32,
-    cpu_usage_percent: f64,
-    memory_total_gb: i32,
-    memory_available_gb: i32,
-    memory_usage_percent: f64,
+    cpu_cores: Option<i32>,
+    cpu_usage_percent: Option<f64>,
+    memory_total_gb: Option<i32>,
+    memory_available_gb: Option<i32>,
+    memory_usage_percent: Option<f64>,
     gpu_count: Option<i32>,
     gpu_utilization_percent: Option<f64>,
     vram_total_mb: Option<i64>,
@@ -563,7 +563,7 @@ fn resource_sample_is_stale(
     sampled_at: chrono::DateTime<chrono::Utc>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> bool {
-    now.signed_duration_since(sampled_at) > RESOURCE_SAMPLE_STALE_AFTER
+    sampled_at > now || now.signed_duration_since(sampled_at) > RESOURCE_SAMPLE_STALE_AFTER
 }
 
 fn worker_dashboard_host(sample: &ResourceSample) -> WorkerDashboardHost {
@@ -579,13 +579,26 @@ fn worker_dashboard_host(sample: &ResourceSample) -> WorkerDashboardHost {
         .iter()
         .map(|gpu| gpu.vram_available_mb.max(0))
         .sum::<i64>();
+    let memory_supported = resources.memory_supported
+        && resources.total_memory_gb > 0
+        && resources.available_memory_gb >= 0
+        && resources.available_memory_gb <= resources.total_memory_gb
+        && resources.memory_usage_percent.is_finite()
+        && (0.0..=100.0).contains(&resources.memory_usage_percent);
+    let storage_supported = resources.storage_supported
+        && resources.storage_total_gb > 0
+        && resources.storage_available_gb >= 0
+        && resources.storage_available_gb <= resources.storage_total_gb;
 
     WorkerDashboardHost {
-        cpu_cores: resources.cpu_cores,
-        cpu_usage_percent: resources.cpu_usage_percent,
-        memory_total_gb: resources.total_memory_gb,
-        memory_available_gb: resources.available_memory_gb,
-        memory_usage_percent: resources.memory_usage_percent,
+        cpu_cores: (resources.cpu_cores > 0).then_some(resources.cpu_cores),
+        cpu_usage_percent: (resources.cpu_usage_supported
+            && resources.cpu_usage_percent.is_finite()
+            && (0.0..=100.0).contains(&resources.cpu_usage_percent))
+        .then_some(resources.cpu_usage_percent),
+        memory_total_gb: memory_supported.then_some(resources.total_memory_gb),
+        memory_available_gb: memory_supported.then_some(resources.available_memory_gb),
+        memory_usage_percent: memory_supported.then_some(resources.memory_usage_percent),
         gpu_count: resources
             .gpu_inventory_supported
             .then_some(resources.gpu_count),
@@ -598,12 +611,13 @@ fn worker_dashboard_host(sample: &ResourceSample) -> WorkerDashboardHost {
         }),
         vram_total_mb: (resources.vram_total_supported && has_gpu && vram_total > 0)
             .then_some(vram_total),
-        vram_available_mb: (resources.vram_available_supported && has_gpu && vram_total > 0)
+        vram_available_mb: (resources.vram_available_supported
+            && has_gpu
+            && vram_total > 0
+            && vram_available <= vram_total)
             .then_some(vram_available),
-        storage_total_gb: (resources.storage_supported && resources.storage_total_gb > 0)
-            .then_some(resources.storage_total_gb),
-        storage_available_gb: (resources.storage_supported && resources.storage_total_gb > 0)
-            .then_some(resources.storage_available_gb),
+        storage_total_gb: storage_supported.then_some(resources.storage_total_gb),
+        storage_available_gb: storage_supported.then_some(resources.storage_available_gb),
     }
 }
 
@@ -1432,7 +1446,9 @@ mod tests {
                 total_memory_gb: 16,
                 available_memory_gb: 4,
                 cpu_usage_percent: 25.0,
+                cpu_usage_supported: false,
                 memory_usage_percent: 75.0,
+                memory_supported: false,
                 gpu_count: 1,
                 gpu_infos: vec![crate::GpuInfo {
                     index: 0,
@@ -1454,6 +1470,10 @@ mod tests {
         };
 
         let host = super::worker_dashboard_host(&sample);
+        assert_eq!(host.cpu_usage_percent, None);
+        assert_eq!(host.memory_total_gb, None);
+        assert_eq!(host.memory_available_gb, None);
+        assert_eq!(host.memory_usage_percent, None);
         assert_eq!(host.gpu_count, Some(1));
         assert_eq!(host.gpu_utilization_percent, None);
         assert_eq!(host.vram_total_mb, None);
@@ -1469,7 +1489,9 @@ mod tests {
                 total_memory_gb: 16,
                 available_memory_gb: 4,
                 cpu_usage_percent: 25.0,
+                cpu_usage_supported: true,
                 memory_usage_percent: 75.0,
+                memory_supported: true,
                 gpu_count: 0,
                 gpu_infos: Vec::new(),
                 gpu_inventory_supported: false,
@@ -1484,6 +1506,11 @@ mod tests {
         };
 
         let host = super::worker_dashboard_host(&sample);
+        assert_eq!(host.cpu_cores, Some(8));
+        assert_eq!(host.cpu_usage_percent, Some(25.0));
+        assert_eq!(host.memory_total_gb, Some(16));
+        assert_eq!(host.memory_available_gb, Some(4));
+        assert_eq!(host.memory_usage_percent, Some(75.0));
         assert_eq!(host.gpu_count, None);
         assert_eq!(host.gpu_utilization_percent, None);
         assert_eq!(host.vram_total_mb, None);
@@ -1497,6 +1524,10 @@ mod tests {
         ));
         assert!(!super::resource_sample_is_stale(
             now - chrono::Duration::seconds(10),
+            now
+        ));
+        assert!(super::resource_sample_is_stale(
+            now + chrono::Duration::seconds(1),
             now
         ));
 

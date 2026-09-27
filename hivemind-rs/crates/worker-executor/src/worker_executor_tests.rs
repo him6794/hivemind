@@ -15,7 +15,43 @@ fn test_system_resources_collection() {
     let r = resource_monitor::collect_resources();
     assert!(r.cpu_cores > 0);
     assert!(r.total_memory_gb > 0);
+    assert!(r.memory_supported);
     assert!(r.storage_total_gb > 0);
+}
+
+#[test]
+fn resource_samples_are_cached_for_repeated_capacity_and_usage_reads() {
+    let executor = WorkerExecutor::new(HivemindConfig::default());
+
+    let resources = executor.get_system_resources();
+    let first_sample = executor
+        .latest_resource_sample()
+        .expect("resource collection should publish a timestamped sample");
+    let next_resources = executor.get_system_resources();
+    let next_sample = executor
+        .latest_resource_sample()
+        .expect("cached resource sample should remain available");
+
+    assert_eq!(resources.cpu_cores, next_resources.cpu_cores);
+    assert_eq!(first_sample.sampled_at, next_sample.sampled_at);
+}
+
+#[test]
+fn resource_sample_cache_expires_after_its_refresh_interval() {
+    let now = Utc::now();
+
+    assert!(resource_sample_is_fresh(
+        now - chrono::Duration::seconds(10),
+        now
+    ));
+    assert!(!resource_sample_is_fresh(
+        now - chrono::Duration::seconds(11),
+        now
+    ));
+    assert!(!resource_sample_is_fresh(
+        now + chrono::Duration::seconds(1),
+        now
+    ));
 }
 
 #[test]

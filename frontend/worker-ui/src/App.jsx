@@ -14,6 +14,8 @@ import {
   deriveUsedPercent,
   hasKnownDashboardMeasurement,
   normalizeWorkerDashboard,
+  PROVIDER_CREDITS_DETAIL,
+  PROVIDER_CREDITS_LABEL,
 } from './workerDashboard.mjs';
 
 const IP_PATTERN = /^[\w.-]+:\d{1,5}$/;
@@ -478,9 +480,9 @@ export default function WorkerApp() {
                   />
                   <DashboardStat
                     className="provider-credits-stat"
-                    label="Account-wide settled provider credits"
+                    label={PROVIDER_CREDITS_LABEL}
                     value={formatMetric(dashboard.settled_provider_credits_cpt, dashboard.currency || 'CPT', 2)}
-                    detail="Account-wide total; not a per-worker payout."
+                    detail={PROVIDER_CREDITS_DETAIL}
                   />
                 </div>
 

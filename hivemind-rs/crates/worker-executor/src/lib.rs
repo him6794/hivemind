@@ -72,10 +72,19 @@ type TaskRunner = dyn Fn(Task, watch::Receiver<bool>, bool, ExecutionAttemptCont
     + Send
     + Sync;
 
+const RESOURCE_SAMPLE_REFRESH_INTERVAL: chrono::Duration = chrono::Duration::seconds(10);
+
 #[derive(Debug, Clone)]
 pub struct ResourceSample {
     pub resources: SystemResources,
     pub sampled_at: chrono::DateTime<chrono::Utc>,
+}
+
+fn resource_sample_is_fresh(
+    sampled_at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    sampled_at <= now && now.signed_duration_since(sampled_at) <= RESOURCE_SAMPLE_REFRESH_INTERVAL
 }
 
 #[derive(Debug, Clone, Default)]
@@ -88,6 +97,7 @@ pub struct WorkerExecutor {
     active_tasks: ActiveTaskMap,
     stop_fences: AttemptStopFenceStore,
     latest_resource_sample: Arc<std::sync::RwLock<Option<ResourceSample>>>,
+    resource_refresh_lock: Arc<Mutex<()>>,
     task_runner: Arc<TaskRunner>,
     dynamic_capability_report: WorkerCapabilityReport,
     runtime_admission: runtime_admission::WorkerRuntimeAdmission,
@@ -223,6 +233,7 @@ impl WorkerExecutor {
             })),
             stop_fences,
             latest_resource_sample: Arc::new(std::sync::RwLock::new(None)),
+            resource_refresh_lock: Arc::new(Mutex::new(())),
             task_runner: Arc::new(
                 move |task, cancellation, _consensus_request, execution_context| {
                     let config = runner_config.clone();
@@ -289,6 +300,7 @@ impl WorkerExecutor {
             })),
             stop_fences,
             latest_resource_sample: Arc::new(std::sync::RwLock::new(None)),
+            resource_refresh_lock: Arc::new(Mutex::new(())),
             task_runner: Arc::new(
                 move |task, cancellation, _consensus_request, _execution_context| {
                     Box::pin(task_runner(task, cancellation))
@@ -514,6 +526,16 @@ impl WorkerExecutor {
     }
 
     pub fn get_system_resources(&self) -> SystemResources {
+        let _refresh_guard = self
+            .resource_refresh_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(sample) = self.latest_resource_sample() {
+            if resource_sample_is_fresh(sample.sampled_at, chrono::Utc::now()) {
+                return sample.resources;
+            }
+        }
+
         let resources = resource_monitor::collect_resources();
         *self
             .latest_resource_sample
@@ -875,7 +897,9 @@ pub struct SystemResources {
     pub total_memory_gb: i32,
     pub available_memory_gb: i32,
     pub cpu_usage_percent: f64,
+    pub cpu_usage_supported: bool,
     pub memory_usage_percent: f64,
+    pub memory_supported: bool,
     pub gpu_count: i32,
     pub gpu_infos: Vec<GpuInfo>,
     pub gpu_inventory_supported: bool,
