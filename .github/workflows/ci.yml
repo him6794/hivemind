@@ -213,10 +213,57 @@ jobs:
   powershell-contracts:
     name: Windows and release contract tests
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Set up pinned Hivemind Rust
+        uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          targets: x86_64-pc-windows-msvc,aarch64-pc-windows-msvc,x86_64-pc-windows-gnu
+      - name: Verify pinned Rust
+        shell: pwsh
+        run: |
+          if ((rustc --version) -notmatch '1\.98\.1') { throw "CI requires Hivemind Rust 1.98.1." }
+      - name: Install protobuf compiler
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "30.x"
+      - name: Cache Hivemind Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: hivemind-rs
+      - name: Run Master x64 MSVC helper tests
+        working-directory: hivemind-rs
+        shell: pwsh
+        run: cargo test --locked --target x86_64-pc-windows-msvc --no-default-features --features master,master-webview --bin hivemind-master-ui
+      - name: Build Master x64 MSVC application and helper
+        working-directory: hivemind-rs
+        shell: pwsh
+        run: cargo build --locked --target x86_64-pc-windows-msvc --no-default-features --features master,master-webview --bin hivemind-master --bin hivemind-master-ui
+      - name: Run Worker x64 MSVC helper tests
+        working-directory: hivemind-rs
+        shell: pwsh
+        run: cargo test --locked --target x86_64-pc-windows-msvc --no-default-features --features worker,worker-webview --bin hivemind-worker-ui
+      - name: Build Worker x64 MSVC application and helper
+        working-directory: hivemind-rs
+        shell: pwsh
+        run: cargo build --locked --target x86_64-pc-windows-msvc --no-default-features --features worker,worker-webview --bin hivemind-worker --bin hivemind-worker-ui
+      - name: Check ARM64 MSVC Worker browser-fallback build
+        working-directory: hivemind-rs
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsInstall = & $vswhere -latest -products "*" -property installationPath
+          if ([string]::IsNullOrWhiteSpace($vsInstall)) { throw "Visual Studio Build Tools are required for the ARM64 MSVC fallback check." }
+          $vsDevCmd = Join-Path $vsInstall "Common7\Tools\VsDevCmd.bat"
+          $cargo = "cargo check --locked --target aarch64-pc-windows-msvc --no-default-features --features worker --bin hivemind-worker"
+          & cmd.exe /d /s /c "call `"$vsDevCmd`" -arch=arm64 -host_arch=x64 && set CC_aarch64_pc_windows_msvc=cl && $cargo"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Check x64 GNU Worker browser-fallback build
+        working-directory: hivemind-rs
+        shell: pwsh
+        run: cargo check --locked --target x86_64-pc-windows-gnu --no-default-features --features worker --bin hivemind-worker
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:

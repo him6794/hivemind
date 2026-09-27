@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "local-ui",
+  "description": "The local UI WebView has no Tauri IPC permissions.",
+  "windows": ["local-ui"],
+  "platforms": ["windows"],
+  "permissions": []
+}

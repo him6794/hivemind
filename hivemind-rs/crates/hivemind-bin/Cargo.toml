@@ -21,8 +21,15 @@ nodepool = [
     "dep:hivemind-vpn-service",
 ]
 worker = ["dep:hivemind-worker-executor"]
-worker-webview = ["worker", "dep:tao", "dep:url", "dep:wry"]
-master-webview = ["master", "dep:tao", "dep:url", "dep:wry"]
+local-ui = [
+    "dep:tauri",
+    "dep:tauri-build",
+    "dep:url",
+    "dep:webview2-com",
+    "dep:windows-core",
+]
+worker-webview = ["worker", "local-ui"]
+master-webview = ["master", "local-ui"]
 cli = ["dep:reqwest"]
 
 [[bin]]
@@ -87,7 +94,11 @@ hivemind-website-api = { path = "../website-api", optional = true }
 hivemind-worker-executor = { path = "../worker-executor", optional = true }
 hivemind-vpn-service = { path = "../vpn-service", optional = true }
 
-[target.'cfg(windows)'.dependencies]
-tao = { version = "0.35.3", default-features = false, features = ["rwh_06"], optional = true }
+[target.'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'.dependencies]
+tauri = { version = "2", default-features = false, features = ["wry"], optional = true }
 url = { version = "2.5", optional = true }
-wry = { version = "0.55.1", default-features = false, features = ["os-webview"], optional = true }
+webview2-com = { version = "0.38.2", optional = true }
+windows-core = { version = "0.61", optional = true }
+
+[build-dependencies]
+tauri-build = { version = "2", default-features = false, optional = true }

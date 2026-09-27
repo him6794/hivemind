@@ -161,12 +161,52 @@ foreach ($requiredWebviewContract in @(
         '$packageWebview = $RustTarget -eq "x86_64-pc-windows-msvc"',
         '"--bin", "hivemind-worker-ui"',
         '"--no-default-features", "--features"',
-        '"worker,worker-webview"',
+        '$(if ($packageWebview) { "worker,worker-webview" } else { "worker" })',
         'Copy-Item -Force $webviewBinary $packagedWebview',
-        'name = "hivemind-worker-ui.exe"'
+        'name = "hivemind-worker-ui.exe"',
+        '$vcRuntime140_1Source = Get-ChildItem',
+        'Copy-Item -Force $vcRuntime140_1Source.FullName $packagedVcRuntime140_1',
+        'name = "vcruntime140_1.dll"',
+        '(Join-Path $out "vcruntime140_1.dll")'
     )) {
     Assert-Contains -Haystack $scriptText -Needle $requiredWebviewContract `
         -Message "Windows worker packaging is missing WebView contract '$requiredWebviewContract'."
+}
+foreach ($requiredTargetFallback in @(
+        '"aarch64-pc-windows-msvc"',
+        '"x86_64-pc-windows-gnu"',
+        '"worker" })'
+    )) {
+    Assert-Contains -Haystack $scriptText -Needle $requiredTargetFallback `
+        -Message "Windows Worker ARM64/GNU packages must retain browser fallback through '$requiredTargetFallback'."
+}
+if (![regex]::IsMatch($scriptText, '(?s)if \(\$packageWebview\)\s*\{\s*\$packageArtifacts \+= \[ordered\]@\{\s*name = "hivemind-worker-ui\.exe"')) {
+    throw "Worker helper must be gated into the artifact provenance only for the x64 MSVC package."
+}
+if (![regex]::IsMatch($scriptText, '(?s)if \(\$packageWebview\)\s*\{\s*\$packageFiles \+= \[ordered\]@\{\s*name = "hivemind-worker-ui\.exe"')) {
+    throw "Worker helper must be gated into checksums and update inventory only for the x64 MSVC package."
+}
+foreach ($forbiddenWebviewRuntimeAsset in @("WebView2Loader.dll", "msedgewebview2.exe", "FixedVersionRuntime")) {
+    if ($scriptText.Contains($forbiddenWebviewRuntimeAsset)) {
+        throw "Worker package must not include WebView2 runtime asset '$forbiddenWebviewRuntimeAsset'."
+    }
+}
+$cargoToml = Get-Content -LiteralPath (Join-Path $PSScriptRoot "..\\hivemind-rs\\crates\\hivemind-bin\\Cargo.toml") -Raw
+foreach ($roleIsolationContract in @(
+        'worker-webview = ["worker", "local-ui"]',
+        'required-features = ["worker-webview"]'
+    )) {
+    Assert-Contains -Haystack $cargoToml -Needle $roleIsolationContract `
+        -Message "Worker UI helper role isolation is missing '$roleIsolationContract'."
+}
+$workerUiSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot "..\\hivemind-rs\\crates\\hivemind-bin\\src\\bin\\hivemind-worker-ui.rs") -Raw
+foreach ($helperTargetContract in @(
+        '#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]',
+        '#[cfg(not(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]',
+        'hivemind-worker-ui requires x86_64-pc-windows-msvc'
+    )) {
+    Assert-Contains -Haystack $workerUiSource -Needle $helperTargetContract `
+        -Message "Worker helper must restrict Tauri imports to x64 MSVC and provide a safe fallback ('$helperTargetContract')."
 }
 if ($scriptText -match '& \(Join-Path \$PSScriptRoot "hivemind-bin\.exe"\)') {
     throw "Windows worker launcher must not start the all-service hivemind-bin.exe."
@@ -254,10 +294,15 @@ Assert-Contains `
     -Haystack $packagedReadme `
     -Needle '`.env.worker.example`' `
     -Message "packaged README must keep its Markdown inline code spans intact."
-Assert-Contains `
-    -Haystack $packagedReadme `
-    -Needle 'WebView2 Runtime' `
-    -Message "packaged README must explain the embedded window prerequisite."
+foreach ($webviewDocumentationContract in @(
+        'optional WebView2 Runtime is installed',
+        'The package does not install the runtime',
+        'opens in your system browser',
+        'ARM64 MSVC and x64 GNU packages always use the system browser'
+    )) {
+    Assert-Contains -Haystack $packagedReadme -Needle $webviewDocumentationContract `
+        -Message "packaged README must state the optional, unbundled WebView2 fallback contract '$webviewDocumentationContract'."
+}
 Assert-Contains `
     -Haystack $packagedReadme `
     -Needle 'On the first authenticated login, the Worker automatically obtains one-time VPN enrollment' `

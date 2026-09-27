@@ -36,6 +36,11 @@ $vcRuntime = Get-ChildItem -Path $redistRoot -Recurse -File -Filter "vcruntime14
 if ($null -eq $vcRuntime) {
     throw "Matching x64 vcruntime140.dll was not found below $redistRoot"
 }
+$vcRuntime140_1 = Get-ChildItem -Path $vcRuntime.DirectoryName -File -Filter "vcruntime140_1.dll" |
+    Select-Object -First 1
+if ($null -eq $vcRuntime140_1) {
+    throw "Matching x64 vcruntime140_1.dll was not found beside $($vcRuntime.FullName)"
+}
 
 $previousViteApiBase = $env:VITE_API_BASE
 try {
@@ -106,6 +111,7 @@ Copy-Item -LiteralPath $masterBinary -Destination (Join-Path $out "hivemind-mast
 Copy-Item -LiteralPath $webviewBinary -Destination (Join-Path $out "hivemind-master-ui.exe")
 Copy-Item -LiteralPath $libtailscale -Destination (Join-Path $out "libtailscale.dll")
 Copy-Item -LiteralPath $vcRuntime.FullName -Destination (Join-Path $out "vcruntime140.dll")
+Copy-Item -LiteralPath $vcRuntime140_1.FullName -Destination (Join-Path $out "vcruntime140_1.dll")
 $packagedUi = Join-Path $out "master-ui"
 New-Item -ItemType Directory -Force -Path $packagedUi | Out-Null
 Copy-Item -Path (Join-Path $masterUiDist "*") -Destination $packagedUi -Recurse -Force
@@ -122,7 +128,7 @@ For ordinary public-network use, you do not need to set `JWT_SECRET` or manually
 
 If you use an optional `.env`, place it beside `hivemind-master.exe`; only that file is considered, regardless of the launch directory. Parent workspace `.env` files are ignored. Explicit process environment variables and `HIVEMIND_CONFIG` still work.
 
-The Master serves the bundled UI from `master-ui` and opens it in WebView2 when the WebView2 Runtime is available. If it is unavailable, startup falls back to the system browser. The WebView only navigates to this Master API's loopback origin. Closing the WebView does not stop the Master; stop the Master process separately when it is safe to do so. Set `HIVEMIND_DISABLE_OPEN_UI=1` to disable automatic UI opening.
+The Master serves the bundled UI from `master-ui`. The optional WebView2 Runtime is not installed by this package. When the runtime is present, the UI opens in an embedded WebView2 window; otherwise startup falls back to the system browser. The WebView only navigates to this Master API's loopback origin. Closing the WebView does not stop the Master; stop the Master process separately when it is safe to do so. Set `HIVEMIND_DISABLE_OPEN_UI=1` to disable automatic UI opening.
 '@
 $readmePath = Join-Path $out "README.md"
 $readme | Set-Content -LiteralPath $readmePath -Encoding ASCII

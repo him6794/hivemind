@@ -59,6 +59,7 @@ if (!(Test-Path -LiteralPath $archive) -or !(Test-Path -LiteralPath $header)) {
     throw "Missing ABI-specific libtailscale artifact for $RustTarget. Expected $archive and $header. Run scripts/fetch_libtailscale_windows.sh with the matching target before packaging."
 }
 $vcRuntimeSource = $null
+$vcRuntime140_1Source = $null
 if ($RustTarget -like "*-pc-windows-msvc") {
     $runtimeArchitecture = if ($RustTarget.StartsWith("aarch64-")) { "arm64" } else { "x64" }
     $redistRoot = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\2022\BuildTools\VC\Redist\MSVC"
@@ -73,6 +74,11 @@ if ($RustTarget -like "*-pc-windows-msvc") {
         Select-Object -First 1
     if ($null -eq $vcRuntimeSource) {
         throw "Matching vcruntime140.dll was not found for ${RustTarget} below $redistRoot"
+    }
+    $vcRuntime140_1Source = Get-ChildItem -Path $vcRuntimeSource.DirectoryName -File -Filter "vcruntime140_1.dll" |
+        Select-Object -First 1
+    if ($null -eq $vcRuntime140_1Source) {
+        throw "Matching vcruntime140_1.dll was not found beside $($vcRuntimeSource.FullName)"
     }
 }
 
@@ -282,6 +288,14 @@ if ($RustTarget -like "*-pc-windows-msvc") {
         sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $packagedVcRuntime).Hash.ToLowerInvariant()
         source = $vcRuntimeSource.FullName
     }
+    $packagedVcRuntime140_1 = Join-Path $out "vcruntime140_1.dll"
+    Copy-Item -Force $vcRuntime140_1Source.FullName $packagedVcRuntime140_1
+    $packageArtifacts += [ordered]@{
+        name = "vcruntime140_1.dll"
+        size = [UInt64](Get-Item -LiteralPath $packagedVcRuntime140_1).Length
+        sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $packagedVcRuntime140_1).Hash.ToLowerInvariant()
+        source = $vcRuntime140_1Source.FullName
+    }
 } else {
     $packagedVcRuntime = $null
 }
@@ -295,6 +309,11 @@ $provenance = [ordered]@{
     binarySha256 = $packageArtifacts[0].sha256
     vcruntime140Sha256 = if ($null -ne $packagedVcRuntime) {
         (Get-FileHash -Algorithm SHA256 -LiteralPath $packagedVcRuntime).Hash.ToLowerInvariant()
+    } else {
+        $null
+    }
+    vcruntime140_1Sha256 = if ($null -ne $packagedVcRuntime) {
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $packagedVcRuntime140_1).Hash.ToLowerInvariant()
     } else {
         $null
     }
@@ -582,7 +601,7 @@ $launcher | Set-Content -Encoding ASCII (Join-Path $out "start-worker.ps1")
 $readme = @'
 # Hivemind Windows Worker Package
 
-1. Double-click `hivemind-worker.exe`. In the x64 MSVC package, the Worker page opens in an embedded WebView2 window when the WebView2 Runtime is available; otherwise it opens in your browser.
+1. Double-click `hivemind-worker.exe`. In the x64 MSVC package, the Worker page opens in an embedded WebView2 window when the optional WebView2 Runtime is installed. The package does not install the runtime; if it is absent, the page opens in your system browser. ARM64 MSVC and x64 GNU packages always use the system browser.
 2. Sign in with your Hivemind account. On the first authenticated login, the Worker automatically obtains one-time VPN enrollment, joins the network, waits for Nodepool readiness, and registers this machine.
 3. Keep the Worker process running while you want this machine to receive jobs. Closing only the WebView window does not stop the Worker; reopen `http://127.0.0.1:18080/` (or your configured control address) in your browser if needed. No `.env` file, terminal command, port choice, `JWT_SECRET`, manually fixed Nodepool IP, or reusable VPN key setup is needed.
 
@@ -650,6 +669,7 @@ if (Test-Path -LiteralPath $packagedHcsRuntime -PathType Container) {
 foreach ($optionalPackageFile in @(
         (Join-Path $out "libtailscale.dll"),
         (Join-Path $out "vcruntime140.dll"),
+        (Join-Path $out "vcruntime140_1.dll"),
         (Join-Path $out "native-dependency-provenance.json"),
         (Join-Path $out ".env.worker.example"),
         (Join-Path $out "start-worker.ps1"),

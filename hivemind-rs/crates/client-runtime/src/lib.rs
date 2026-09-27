@@ -28,7 +28,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
-#[cfg(target_os = "windows")]
+#[cfg(any(test, target_os = "windows"))]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(target_os = "windows")]
 use tokio::net::TcpListener;
@@ -2043,6 +2043,95 @@ fn local_webview_url(addr: SocketAddr, ui_available: bool, ui_disabled: bool) ->
     }
 }
 
+#[cfg(any(test, target_os = "windows"))]
+const LOCAL_UI_READY_MARKER: &[u8] = b"HIVEMIND_LOCAL_UI_READY\n";
+#[cfg(any(test, target_os = "windows"))]
+const LOCAL_UI_READY_TIMEOUT: Duration = Duration::from_secs(8);
+#[cfg(any(test, target_os = "windows"))]
+const LOCAL_UI_ENV_ALLOWLIST: &[&str] = &[
+    "SystemRoot",
+    "WINDIR",
+    "USERPROFILE",
+    "LOCALAPPDATA",
+    "APPDATA",
+    "TEMP",
+    "TMP",
+    "PATH",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+];
+
+#[cfg(any(test, target_os = "windows"))]
+fn filtered_local_ui_environment<I>(
+    environment: I,
+) -> impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>
+where
+    I: IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+{
+    environment.into_iter().filter(|(name, _)| {
+        LOCAL_UI_ENV_ALLOWLIST.iter().any(|allowed| {
+            name.to_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case(allowed))
+        })
+    })
+}
+
+#[cfg(any(test, target_os = "windows"))]
+async fn await_local_ui_readiness<R>(reader: &mut R, timeout: Duration) -> Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut marker = [0; LOCAL_UI_READY_MARKER.len()];
+    match tokio::time::timeout(timeout, reader.read_exact(&mut marker)).await {
+        Ok(Ok(_)) if marker == LOCAL_UI_READY_MARKER => Ok(()),
+        outcome => bail!("local UI helper did not become ready: {outcome:?}"),
+    }
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn retain_local_ui_lifetime_pipe<F, P>(helper_wait: F, lifetime_pipe: P, role: &'static str)
+where
+    F: std::future::Future<Output = std::io::Result<()>> + Send + 'static,
+    P: Send + 'static,
+{
+    tokio::spawn(async move {
+        if let Err(error) = helper_wait.await {
+            tracing::warn!("{role} WebView process wait failed: {error}");
+        }
+        drop(lifetime_pipe);
+    });
+}
+
+#[cfg(any(test, target_os = "windows"))]
+async fn open_ui_with_browser_fallback<W, WF, B>(
+    role: ClientUiRole,
+    webview_url: Option<&str>,
+    browser_url: &str,
+    launch_webview: W,
+    open_browser: B,
+) where
+    W: FnOnce(String) -> WF,
+    WF: std::future::Future<Output = Result<()>>,
+    B: FnOnce(&str) -> Result<()>,
+{
+    if let Some(url) = webview_url {
+        match launch_webview(url.to_owned()).await {
+            Ok(()) => return,
+            Err(error) => tracing::warn!(
+                "{} WebView unavailable, opening browser: {error}",
+                role.label()
+            ),
+        }
+    }
+
+    if let Err(error) = open_browser(browser_url) {
+        tracing::warn!(
+            "Failed to open local {} UI browser window: {error}",
+            role.label()
+        );
+    }
+}
+
 /// Open the packaged Master UI in a Windows WebView, falling back to the browser.
 pub async fn open_master_ui_when_ready(addr: SocketAddr, ui_available: bool) {
     open_local_ui_when_ready(addr, ui_available, ClientUiRole::Master).await;
@@ -2065,32 +2154,32 @@ async fn open_local_ui_when_ready(addr: SocketAddr, ui_available: bool, role: Cl
         return;
     }
 
+    let browser_url = local_browser_url(addr);
+
     #[cfg(target_os = "windows")]
-    if let Some(url) = local_webview_url(addr, ui_available, disabled) {
-        match launch_client_webview(role, &url).await {
-            Ok(()) => return,
-            Err(err) => tracing::warn!(
-                "{} WebView unavailable, opening browser: {err}",
-                role.label()
-            ),
-        }
-    }
+    open_ui_with_browser_fallback(
+        role,
+        local_webview_url(addr, ui_available, disabled).as_deref(),
+        &browser_url,
+        |url| async move { launch_client_webview(role, &url).await },
+        open_ui_in_browser,
+    )
+    .await;
 
     #[cfg(not(target_os = "windows"))]
-    let _ = ui_available;
-
-    let url = local_browser_url(addr);
-    if let Err(err) = open_ui_in_browser(&url) {
-        tracing::warn!(
-            "Failed to open local {} UI browser window: {err}",
-            role.label()
-        );
+    {
+        let _ = ui_available;
+        if let Err(error) = open_ui_in_browser(&browser_url) {
+            tracing::warn!(
+                "Failed to open local {} UI browser window: {error}",
+                role.label()
+            );
+        }
     }
 }
 
 #[cfg(target_os = "windows")]
 async fn launch_client_webview(role: ClientUiRole, url: &str) -> Result<()> {
-    const READY: &[u8] = b"HIVEMIND_LOCAL_UI_READY\n";
     let (client_name, helper_name) = role.windows_executables();
     let client_exe = std::env::current_exe().context("cannot locate client executable")?;
     let is_expected_client = client_exe
@@ -2117,22 +2206,7 @@ async fn launch_client_webview(role: ClientUiRole, url: &str) -> Result<()> {
         .stderr(Stdio::inherit())
         .kill_on_drop(true);
     // GUI helpers never inherit credentials, VPN keys, or runtime configuration.
-    for name in [
-        "SystemRoot",
-        "WINDIR",
-        "USERPROFILE",
-        "LOCALAPPDATA",
-        "APPDATA",
-        "TEMP",
-        "TMP",
-        "PATH",
-        "ProgramFiles",
-        "ProgramFiles(x86)",
-    ] {
-        if let Some(value) = std::env::var_os(name) {
-            command.env(name, value);
-        }
-    }
+    command.envs(filtered_local_ui_environment(std::env::vars_os()));
 
     let mut child = command.spawn().with_context(|| {
         format!(
@@ -2145,29 +2219,25 @@ async fn launch_client_webview(role: ClientUiRole, url: &str) -> Result<()> {
         .stdout
         .take()
         .context("WebView readiness pipe missing")?;
-    let mut marker = [0u8; READY.len()];
-    match tokio::time::timeout(Duration::from_secs(8), stdout.read_exact(&mut marker)).await {
-        Ok(Ok(_)) if marker == READY => {
-            tracing::info!("Opened {} WebView at {url}", role.label());
-            // Child::wait closes stdin before waiting. Keep the pipe separately
-            // so the helper remains open until its parent exits or the user closes it.
-            let stdin = child
-                .stdin
-                .take()
-                .context("WebView lifetime pipe missing")?;
-            tokio::spawn(async move {
-                if let Err(err) = child.wait().await {
-                    tracing::warn!("{} WebView process wait failed: {err}", role.label());
-                }
-                drop(stdin);
-            });
-            Ok(())
-        }
-        outcome => {
-            let _ = child.start_kill();
-            bail!("{} WebView did not become ready: {outcome:?}", role.label())
-        }
+    if let Err(error) = await_local_ui_readiness(&mut stdout, LOCAL_UI_READY_TIMEOUT).await {
+        let _ = child.start_kill();
+        return Err(error)
+            .with_context(|| format!("{} WebView did not become ready", role.label()));
     }
+
+    tracing::info!("Opened {} WebView at {url}", role.label());
+    // Keep stdin open while waiting so the separate helper remains alive until
+    // this client exits or the user closes the helper window.
+    let stdin = child
+        .stdin
+        .take()
+        .context("WebView lifetime pipe missing")?;
+    retain_local_ui_lifetime_pipe(
+        async move { child.wait().await.map(|_| ()) },
+        stdin,
+        role.label(),
+    );
+    Ok(())
 }
 
 fn env_auth_key_present(role: ClientRole) -> bool {
@@ -4194,6 +4264,177 @@ mod tests {
             ClientUiRole::Worker.windows_executables(),
             ("hivemind-worker.exe", "hivemind-worker-ui.exe")
         );
+    }
+
+    #[test]
+    fn webview_helper_environment_is_allowlisted() {
+        assert_eq!(
+            LOCAL_UI_ENV_ALLOWLIST,
+            &[
+                "SystemRoot",
+                "WINDIR",
+                "USERPROFILE",
+                "LOCALAPPDATA",
+                "APPDATA",
+                "TEMP",
+                "TMP",
+                "PATH",
+                "ProgramFiles",
+                "ProgramFiles(x86)",
+            ]
+        );
+        let environment = [
+            ("systemroot", "C:\\Windows"),
+            ("WINDIR", "C:\\Windows"),
+            ("USERPROFILE", "C:\\Users\\user"),
+            ("LOCALAPPDATA", "C:\\Users\\user\\AppData\\Local"),
+            ("APPDATA", "C:\\Users\\user\\AppData\\Roaming"),
+            ("TEMP", "C:\\Temp"),
+            ("TMP", "C:\\Temp"),
+            ("PATH", "C:\\Windows\\System32"),
+            ("ProgramFiles", "C:\\Program Files"),
+            ("ProgramFiles(x86)", "C:\\Program Files (x86)"),
+            ("HIVEMIND_CONFIG", "C:\\private\\config.json"),
+            ("JWT_SECRET", "must-not-leak"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.into(), value.into()));
+
+        let filtered = filtered_local_ui_environment(environment).collect::<Vec<_>>();
+        assert_eq!(filtered.len(), LOCAL_UI_ENV_ALLOWLIST.len());
+        assert_eq!(filtered[0], ("systemroot".into(), "C:\\Windows".into()));
+        assert!(!filtered.iter().any(|(name, _)| {
+            name.to_string_lossy()
+                .eq_ignore_ascii_case("HIVEMIND_CONFIG")
+                || name.to_string_lossy().eq_ignore_ascii_case("JWT_SECRET")
+        }));
+    }
+
+    #[tokio::test]
+    async fn webview_readiness_requires_marker_and_times_out() {
+        let (mut reader, mut writer) = tokio::io::duplex(64);
+        writer.write_all(LOCAL_UI_READY_MARKER).await.unwrap();
+        await_local_ui_readiness(&mut reader, Duration::from_millis(100))
+            .await
+            .unwrap();
+
+        let (mut reader, mut writer) = tokio::io::duplex(64);
+        writer.write_all(b"NOT_READY\\n").await.unwrap();
+        assert!(
+            await_local_ui_readiness(&mut reader, Duration::from_millis(100))
+                .await
+                .is_err()
+        );
+
+        let (mut reader, _writer) = tokio::io::duplex(64);
+        assert!(
+            await_local_ui_readiness(&mut reader, Duration::from_millis(10))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_webview_falls_back_to_browser() {
+        let attempted_webview = Arc::new(StdMutex::new(false));
+        let browser_urls = Arc::new(StdMutex::new(Vec::new()));
+        let attempted_webview_for_launch = Arc::clone(&attempted_webview);
+        let browser_urls_for_open = Arc::clone(&browser_urls);
+
+        open_ui_with_browser_fallback(
+            ClientUiRole::Worker,
+            Some("http://127.0.0.1:18080/"),
+            "http://127.0.0.1:18080/",
+            move |_| {
+                *attempted_webview_for_launch
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+                async { Err(anyhow::anyhow!("WebView2 Runtime is unavailable")) }
+            },
+            move |url| {
+                browser_urls_for_open
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(url.to_owned());
+                Ok(())
+            },
+        )
+        .await;
+
+        assert!(*attempted_webview.lock().unwrap());
+        assert_eq!(*browser_urls.lock().unwrap(), ["http://127.0.0.1:18080/"]);
+    }
+
+    #[tokio::test]
+    async fn successful_webview_skips_browser_and_ineligible_webview_uses_browser() {
+        let browser_urls = Arc::new(StdMutex::new(Vec::new()));
+        let browser_urls_for_open = Arc::clone(&browser_urls);
+        open_ui_with_browser_fallback(
+            ClientUiRole::Master,
+            Some("http://127.0.0.1:8082/"),
+            "http://127.0.0.1:8082/",
+            |_| async { Ok(()) },
+            move |url| {
+                browser_urls_for_open
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(url.to_owned());
+                Ok(())
+            },
+        )
+        .await;
+        assert!(browser_urls.lock().unwrap().is_empty());
+
+        open_ui_with_browser_fallback(
+            ClientUiRole::Master,
+            None,
+            "http://127.0.0.1:8082/",
+            |_| async { panic!("ineligible WebView must not launch") },
+            |url| {
+                browser_urls
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(url.to_owned());
+                Ok(())
+            },
+        )
+        .await;
+        assert_eq!(*browser_urls.lock().unwrap(), ["http://127.0.0.1:8082/"]);
+    }
+
+    #[tokio::test]
+    async fn webview_parent_pipe_stays_open_until_helper_exits() {
+        struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                if let Some(signal) = self.0.take() {
+                    let _ = signal.send(());
+                }
+            }
+        }
+
+        let (helper_exit_tx, helper_exit_rx) = tokio::sync::oneshot::channel();
+        let (pipe_dropped_tx, mut pipe_dropped_rx) = tokio::sync::oneshot::channel();
+        retain_local_ui_lifetime_pipe(
+            async move {
+                let _ = helper_exit_rx.await;
+                Ok(())
+            },
+            DropSignal(Some(pipe_dropped_tx)),
+            "Worker",
+        );
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut pipe_dropped_rx)
+                .await
+                .is_err(),
+            "parent pipe must remain open while helper is running"
+        );
+        helper_exit_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), pipe_dropped_rx)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[test]

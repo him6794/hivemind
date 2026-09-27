@@ -1,0 +1,16 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Hivemind Local UI",
+  "version": "0.1.0",
+  "identifier": "com.hivemind.local-ui",
+  "app": {
+    "windows": [],
+    "withGlobalTauri": false,
+    "security": {
+      "capabilities": ["local-ui"]
+    }
+  },
+  "bundle": {
+    "active": false
+  }
+}

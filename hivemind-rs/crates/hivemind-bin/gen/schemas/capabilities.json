@@ -1,0 +1,1 @@
+{"local-ui":{"identifier":"local-ui","description":"The local UI WebView has no Tauri IPC permissions.","local":true,"windows":["local-ui"],"permissions":[],"platforms":["windows"]}}
