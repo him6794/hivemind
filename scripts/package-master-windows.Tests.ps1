@@ -78,12 +78,17 @@ foreach ($nativeRestriction in @(
         'SetAreDefaultContextMenusEnabled(false)',
         'SetAreDevToolsEnabled(false)',
         'SetAreBrowserAcceleratorKeysEnabled(false)',
-        'HIVEMIND_LOCAL_UI_READY\n',
+        'const READY_MARKER: &[u8] = hivemind_client_runtime::LOCAL_UI_READY_MARKER;',
+        'write_pipe_marker(READY_MARKER)',
         'watch_parent_stdin(app_handle)'
     )) {
     Assert-Contains -Haystack $webviewSource -Needle $nativeRestriction `
         -Message "Local UI helper is missing required native restriction '$nativeRestriction'."
 }
+$clientRuntimeSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot "..\\hivemind-rs\\crates\\client-runtime\\src\\lib.rs") -Raw
+Assert-Contains -Haystack $clientRuntimeSource `
+    -Needle 'pub const LOCAL_UI_READY_MARKER: &[u8] = b"HIVEMIND_LOCAL_UI_READY\n";' `
+    -Message "Client runtime must define the exact shared local UI readiness marker."
 if ($webviewSource.IndexOf('watch_parent_stdin(app_handle)?;') -gt $webviewSource.IndexOf('write_readiness_marker()?;')) {
     throw "Local UI helper must install its parent SHOW/EOF monitor before announcing readiness."
 }
