@@ -52,6 +52,12 @@ hivemind-rs/api/
 hivemind-rs/bt_torrents/
 test_tasks/
 
+# Local agent/developer tooling state (keep shared instructions/config tracked)
+/.claude/settings.local.json
+/.claude/worktrees/
+/.claude/scheduled_tasks.lock
+/.codegraph/
+
 # Misc local state
 *.db
 *.sqlite

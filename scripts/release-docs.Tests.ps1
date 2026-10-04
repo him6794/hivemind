@@ -79,7 +79,10 @@ Assert-Contains -DocumentName "docs/ARCHITECTURE.md" -DocumentText $architecture
 Assert-Contains -DocumentName "docs/GETTING_STARTED.md" -DocumentText $gettingStarted -ExpectedValues @(
     "MANAGED_CONSENSUS_ROLLOUT_MODE=enforce",
     "strict-majority quorum certificate",
-    "Nodepool-owned fixed reservation"
+    "validated, assignment-bound",
+    "per-replica usage evidence",
+    'task-wide `max_cpt` cap',
+    "missing or invalid receipts are not billable"
 )
 
 $currentDocuments = @{

@@ -458,8 +458,6 @@ Worker into a settlement authority; only Nodepool can verify a quorum certificat
 ## 目前狀態
 
 - Rust workspace 是 authoritative implementation。
-- `docs_backup_20260611_202024/` 中較舊的 Python-era architecture notes
-  只作為歷史參考。
 - 本文件描述的公開 enrollment、dynamic admission、versioned managed runtime
   與 consensus settlement model 是 authoritative product architecture；未配置
   的外部 credential 或 operator asset 仍必須 fail closed。

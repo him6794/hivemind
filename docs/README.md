@@ -37,9 +37,3 @@ Frontend builds live under:
 - `frontend` for the official site and account center
 - `frontend/master-ui`
 - `frontend/worker-ui`
-
-## Historical Notes
-
-Older mixed-language notes were moved to
-`docs_backup_20260611_202024/`. They are kept as archive material and are not
-the source of truth for the current Rust workspace.
