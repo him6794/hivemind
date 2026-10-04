@@ -215,8 +215,8 @@ if ($scriptText -match '& \(Join-Path \$PSScriptRoot "hivemind-worker\.exe"\) wo
     throw "Dedicated Windows worker launcher must not require a worker role argument."
 }
 
-# The package owns the browser surface: build it with the configured local
-# control address and place it beside the executable for static serving.
+# The package owns the browser surface: call the same local origin at any
+# runtime port and place the UI beside the executable for static serving.
 Assert-Contains `
     -Haystack $scriptText `
     -Needle '$workerUiRoot = Join-Path $repoRoot "frontend\worker-ui"' `
@@ -231,12 +231,8 @@ Assert-Contains `
     -Message "Windows worker packaging must build the Worker UI."
 Assert-Contains `
     -Haystack $scriptText `
-    -Needle '$env:VITE_WORKER_CONTROL_BASE = $workerControlBase' `
-    -Message "Windows worker packaging must bake the configured Worker Control address into the UI."
-Assert-Contains `
-    -Haystack $scriptText `
-    -Needle '$workerControlBase = $workerControlBase -replace ''^http://\[::\]'', ''http://[::1]''' `
-    -Message "Windows worker packaging must use IPv6 loopback for a wildcard listener."
+    -Needle '$env:VITE_WORKER_CONTROL_BASE = "/"' `
+    -Message "Windows worker packaging must call the UI's same-origin control API without a baked-in port."
 Assert-Contains `
     -Haystack $scriptText `
     -Needle '$packagedWorkerUi = Join-Path $out "worker-ui"' `
@@ -311,10 +307,16 @@ Assert-Contains `
     -Haystack $packagedReadme `
     -Needle 'No `.env` file, terminal command, port choice, `JWT_SECRET`, manually fixed Nodepool IP' `
     -Message "packaged README must not require JWT_SECRET or a manually fixed Nodepool address for ordinary use."
-Assert-Contains `
-    -Haystack $packagedReadme `
-    -Needle 'Closing only the WebView window does not stop the Worker' `
-    -Message "packaged README must explain Worker lifetime after closing the window."
+foreach ($lifetimeContract in @(
+        'Closing the native window offers Cancel, Keep in background, and Quit',
+        'Confirmed Quit stops the Worker runtime',
+        'Starting the EXE again restores the existing native window',
+        'including from another extracted directory',
+        'Without WebView2, the system browser has no native tray or close confirmation'
+    )) {
+    Assert-Contains -Haystack $packagedReadme -Needle $lifetimeContract `
+        -Message "packaged README must explain the client lifetime contract '$lifetimeContract'."
+}
 
 # The README is written with -Encoding ASCII, which would turn anything else
 # into a literal '?' in the shipped package.

@@ -24,5 +24,8 @@ rand.workspace = true
 hex.workspace = true
 dirs = "5"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_Pipes", "Win32_UI_WindowsAndMessaging"] }
+
 [dev-dependencies]
 tokio-stream.workspace = true

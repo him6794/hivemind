@@ -8,6 +8,8 @@
 //!
 //! Users must not hand-copy pre-auth keys after install.
 
+#[cfg(target_os = "windows")]
+pub mod local_instance;
 pub mod update;
 pub mod update_loop;
 
@@ -717,28 +719,30 @@ struct VpnReconnectPlan {
     require_external_overlay: bool,
 }
 
+struct VpnReconnectPlanConfig<'a> {
+    role: ClientRole,
+    auth_key: Option<&'a str>,
+    login_server: &'a str,
+    hostname: &'a str,
+    configured_endpoint: &'a str,
+    worker_grpc_addr: Option<&'a str>,
+    startup_timeout: Duration,
+    require_external_overlay: bool,
+}
+
 impl VpnReconnectPlan {
-    fn new(
-        role: ClientRole,
-        auth_key: Option<&str>,
-        login_server: &str,
-        hostname: &str,
-        configured_endpoint: &str,
-        worker_grpc_addr: Option<&str>,
-        startup_timeout: Duration,
-        require_external_overlay: bool,
-    ) -> Self {
+    fn new(config: VpnReconnectPlanConfig<'_>) -> Self {
         Self {
-            role,
-            auth_key: auth_key.map(str::to_string),
-            login_server: login_server.trim_end_matches('/').to_string(),
-            hostname: bounded_hostname(hostname),
-            configured_endpoint: normalize_nodepool_endpoint(configured_endpoint),
+            role: config.role,
+            auth_key: config.auth_key.map(str::to_string),
+            login_server: config.login_server.trim_end_matches('/').to_string(),
+            hostname: bounded_hostname(config.hostname),
+            configured_endpoint: normalize_nodepool_endpoint(config.configured_endpoint),
             advertised_endpoint: None,
             operator_endpoint: false,
-            worker_grpc_addr: worker_grpc_addr.map(str::to_string),
-            startup_timeout: startup_timeout.max(Duration::from_secs(1)),
-            require_external_overlay,
+            worker_grpc_addr: config.worker_grpc_addr.map(str::to_string),
+            startup_timeout: config.startup_timeout.max(Duration::from_secs(1)),
+            require_external_overlay: config.require_external_overlay,
         }
     }
 
@@ -748,22 +752,12 @@ impl VpnReconnectPlan {
     }
 }
 
+#[derive(Default)]
 struct VpnRuntime {
     session: Option<Arc<VpnSession>>,
     generation: u64,
     reconnect_plan: Option<VpnReconnectPlan>,
     keepalive_started: bool,
-}
-
-impl Default for VpnRuntime {
-    fn default() -> Self {
-        Self {
-            session: None,
-            generation: 0,
-            reconnect_plan: None,
-            keepalive_started: false,
-        }
-    }
 }
 
 /// All mutable lifecycle state for a role is kept together so that a new tunnel,
@@ -1192,16 +1186,16 @@ async fn ensure_env_vpn_for_endpoint_with_worker_addr_locked(
             if require_external_overlay && !login_server.starts_with("https://") {
                 bail!("strict external overlay requires an HTTPS Headscale login server");
             }
-            let reconnect_plan = VpnReconnectPlan::new(
+            let reconnect_plan = VpnReconnectPlan::new(VpnReconnectPlanConfig {
                 role,
-                Some(&auth_key),
-                &login_server,
-                &hostname,
+                auth_key: Some(&auth_key),
+                login_server: &login_server,
+                hostname: &hostname,
                 configured_endpoint,
                 worker_grpc_addr,
-                Duration::from_secs(config.vpn.startup_timeout_secs),
+                startup_timeout: Duration::from_secs(config.vpn.startup_timeout_secs),
                 require_external_overlay,
-            )
+            })
             .with_operator_endpoint(config);
             match reusable_vpn_endpoint(&reconnect_plan).await {
                 Ok(Some(endpoint)) => {
@@ -1436,16 +1430,16 @@ async fn ensure_user_vpn_for_token_inner(
     // Website enrollment always uses the bounded role/device label. Rehydrate
     // with that same Headscale identity rather than a process/host alias.
     let hostname = bounded_hostname(&device_name);
-    let rehydrate_plan = VpnReconnectPlan::new(
+    let rehydrate_plan = VpnReconnectPlan::new(VpnReconnectPlanConfig {
         role,
-        None,
-        &login_server,
-        &hostname,
-        &configured_endpoint,
-        worker_grpc_addr_for_role(config, role),
-        Duration::from_secs(config.vpn.startup_timeout_secs),
+        auth_key: None,
+        login_server: &login_server,
+        hostname: &hostname,
+        configured_endpoint: &configured_endpoint,
+        worker_grpc_addr: worker_grpc_addr_for_role(config, role),
+        startup_timeout: Duration::from_secs(config.vpn.startup_timeout_secs),
         require_external_overlay,
-    )
+    })
     .with_operator_endpoint(config);
     match reusable_vpn_endpoint(&rehydrate_plan).await {
         Ok(Some(endpoint)) => {
@@ -1528,16 +1522,16 @@ async fn ensure_user_vpn_for_token_inner(
     // label is already stable and bounded, so use it for the actual node name.
     let join_hostname = bounded_hostname(&device_name);
 
-    let mut fresh_plan = VpnReconnectPlan::new(
+    let mut fresh_plan = VpnReconnectPlan::new(VpnReconnectPlanConfig {
         role,
-        Some(vpn.auth_key.trim()),
-        login_server.trim_end_matches('/'),
-        &join_hostname,
-        &configured_endpoint,
-        worker_grpc_addr_for_role(config, role),
-        Duration::from_secs(config.vpn.startup_timeout_secs),
+        auth_key: Some(vpn.auth_key.trim()),
+        login_server: login_server.trim_end_matches('/'),
+        hostname: &join_hostname,
+        configured_endpoint: &configured_endpoint,
+        worker_grpc_addr: worker_grpc_addr_for_role(config, role),
+        startup_timeout: Duration::from_secs(config.vpn.startup_timeout_secs),
         require_external_overlay,
-    )
+    })
     .with_operator_endpoint(config);
     if !fresh_plan.operator_endpoint {
         fresh_plan.advertised_endpoint = parse_advertised_nodepool_endpoint(&vpn.config_text);
@@ -1564,9 +1558,27 @@ async fn ensure_user_vpn_for_token_inner(
     }
 }
 
+fn same_vpn_login_server(left: &str, right: &str) -> bool {
+    fn parsed(value: &str) -> Option<reqwest::Url> {
+        let mut url = reqwest::Url::parse(value).ok()?;
+        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+            return None;
+        }
+        let path = url.path().trim_end_matches('/').to_string();
+        url.set_path(&path);
+        Some(url)
+    }
+    // URL parsing canonicalizes scheme/host case and default ports, not path case.
+    // Preserve the existing trailing-slash tolerance without merging real servers.
+    match (parsed(left), parsed(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
 fn session_matches_reconnect_plan(session: &VpnSession, plan: &VpnReconnectPlan) -> bool {
     session.role == plan.role
-        && session.login_server.trim_end_matches('/') == plan.login_server
+        && same_vpn_login_server(&session.login_server, &plan.login_server)
         && session.hostname == plan.hostname
         && session.nodepool_target == plan.configured_endpoint
         && session.worker_grpc_port
@@ -2004,6 +2016,14 @@ enum ClientUiRole {
 }
 
 impl ClientUiRole {
+    #[cfg(target_os = "windows")]
+    fn client_role(self) -> ClientRole {
+        match self {
+            Self::Master => ClientRole::Master,
+            Self::Worker => ClientRole::Worker,
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             Self::Master => "Master",
@@ -2044,9 +2064,112 @@ fn local_webview_url(addr: SocketAddr, ui_available: bool, ui_disabled: bool) ->
 }
 
 #[cfg(any(test, target_os = "windows"))]
-const LOCAL_UI_READY_MARKER: &[u8] = b"HIVEMIND_LOCAL_UI_READY\n";
+pub const LOCAL_UI_READY_MARKER: &[u8] = b"HIVEMIND_LOCAL_UI_READY\n";
 #[cfg(any(test, target_os = "windows"))]
 const LOCAL_UI_READY_TIMEOUT: Duration = Duration::from_secs(8);
+#[cfg(any(test, target_os = "windows"))]
+pub const LOCAL_UI_QUIT_MARKER: &[u8] = b"HIVEMIND_LOCAL_UI_QUIT\n";
+pub const LOCAL_UI_SHOW_MARKER: &[u8] = b"HIVEMIND_LOCAL_UI_SHOW_V1\n";
+static LOCAL_UI_SHUTDOWN: OnceLock<tokio::sync::watch::Sender<bool>> = OnceLock::new();
+
+#[cfg(any(test, target_os = "windows"))]
+struct LocalUiActivation {
+    generation: tokio::sync::watch::Sender<u64>,
+    available: std::sync::Mutex<bool>,
+}
+
+#[cfg(any(test, target_os = "windows"))]
+impl LocalUiActivation {
+    fn new() -> Self {
+        Self {
+            generation: tokio::sync::watch::channel(0).0,
+            available: std::sync::Mutex::new(true),
+        }
+    }
+
+    fn request(&self) -> bool {
+        let Ok(available) = self.available.lock() else {
+            return false;
+        };
+        if !*available {
+            return false;
+        }
+        self.generation
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+        true
+    }
+
+    fn unavailable(&self) {
+        if let Ok(mut available) = self.available.lock() {
+            *available = false;
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn local_ui_activation(role: ClientRole) -> &'static LocalUiActivation {
+    static MASTER: OnceLock<LocalUiActivation> = OnceLock::new();
+    static WORKER: OnceLock<LocalUiActivation> = OnceLock::new();
+    match role {
+        ClientRole::Master => MASTER.get_or_init(LocalUiActivation::new),
+        ClientRole::Worker => WORKER.get_or_init(LocalUiActivation::new),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn request_local_ui_activation(role: ClientRole) -> bool {
+    local_ui_activation(role).request()
+}
+
+#[cfg(any(test, target_os = "windows"))]
+async fn next_local_ui_activation(
+    receiver: &mut tokio::sync::watch::Receiver<u64>,
+    delivered: u64,
+) -> Option<u64> {
+    loop {
+        let generation = *receiver.borrow_and_update();
+        if generation != delivered {
+            return Some(generation);
+        }
+        if receiver.changed().await.is_err() {
+            return None;
+        }
+    }
+}
+
+fn local_ui_shutdown_signal() -> &'static tokio::sync::watch::Sender<bool> {
+    LOCAL_UI_SHUTDOWN.get_or_init(|| tokio::sync::watch::channel(false).0)
+}
+
+/// Only the packaged helper's private pipe can request client shutdown.
+/// Browser tabs closing and unexpected helper exits leave the runtime running.
+pub async fn wait_for_local_ui_shutdown() {
+    let mut receiver = local_ui_shutdown_signal().subscribe();
+    loop {
+        if *receiver.borrow_and_update() {
+            return;
+        }
+        if receiver.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+#[cfg(any(test, target_os = "windows"))]
+async fn monitor_local_ui_quit<R>(mut reader: R, shutdown: tokio::sync::watch::Sender<bool>)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut marker = [0_u8; LOCAL_UI_QUIT_MARKER.len()];
+    match reader.read_exact(&mut marker).await {
+        Ok(_) if marker == LOCAL_UI_QUIT_MARKER => {
+            shutdown.send_replace(true);
+        }
+        Ok(_) => tracing::warn!("Ignoring invalid local UI lifecycle marker"),
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {}
+        Err(error) => tracing::warn!(%error, "Local UI lifecycle pipe failed"),
+    }
+}
 #[cfg(any(test, target_os = "windows"))]
 const LOCAL_UI_ENV_ALLOWLIST: &[&str] = &[
     "SystemRoot",
@@ -2089,13 +2212,52 @@ where
 }
 
 #[cfg(any(test, target_os = "windows"))]
-fn retain_local_ui_lifetime_pipe<F, P>(helper_wait: F, lifetime_pipe: P, role: &'static str)
-where
+fn retain_local_ui_lifetime_pipe<F, P, U>(
+    helper_wait: F,
+    mut lifetime_pipe: P,
+    mut activations: tokio::sync::watch::Receiver<u64>,
+    helper_pid: Option<u32>,
+    role: &'static str,
+    unavailable: U,
+) where
     F: std::future::Future<Output = std::io::Result<()>> + Send + 'static,
-    P: Send + 'static,
+    P: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    U: Fn() + Send + 'static,
 {
     tokio::spawn(async move {
-        if let Err(error) = helper_wait.await {
+        let mut helper_wait = std::pin::pin!(helper_wait);
+        let mut delivered = 0;
+        let result = loop {
+            tokio::select! {
+                biased;
+                result = &mut helper_wait => break result,
+                generation = next_local_ui_activation(&mut activations, delivered) => {
+                    let Some(generation) = generation else {
+                        break helper_wait.await;
+                    };
+                    delivered = generation;
+                    #[cfg(target_os = "windows")]
+                    if let Some(pid) = helper_pid {
+                        local_instance::allow_foreground(pid);
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    let _ = helper_pid;
+                    let result = tokio::time::timeout(Duration::from_secs(2), async {
+                        lifetime_pipe.write_all(LOCAL_UI_SHOW_MARKER).await?;
+                        lifetime_pipe.flush().await
+                    }).await;
+                    if !matches!(result, Ok(Ok(()))) {
+                        tracing::warn!("{role} WebView activation pipe failed: {result:?}");
+                        unavailable();
+                        // A failed SHOW must not turn into parent EOF while the
+                        // helper is still running, nor request backend shutdown.
+                        break helper_wait.await;
+                    }
+                }
+            }
+        };
+        unavailable();
+        if let Err(error) = result {
             tracing::warn!("{role} WebView process wait failed: {error}");
         }
         drop(lifetime_pipe);
@@ -2109,14 +2271,15 @@ async fn open_ui_with_browser_fallback<W, WF, B>(
     browser_url: &str,
     launch_webview: W,
     open_browser: B,
-) where
+) -> bool
+where
     W: FnOnce(String) -> WF,
     WF: std::future::Future<Output = Result<()>>,
     B: FnOnce(&str) -> Result<()>,
 {
     if let Some(url) = webview_url {
         match launch_webview(url.to_owned()).await {
-            Ok(()) => return,
+            Ok(()) => return true,
             Err(error) => tracing::warn!(
                 "{} WebView unavailable, opening browser: {error}",
                 role.label()
@@ -2130,6 +2293,7 @@ async fn open_ui_with_browser_fallback<W, WF, B>(
             role.label()
         );
     }
+    false
 }
 
 /// Open the packaged Master UI in a Windows WebView, falling back to the browser.
@@ -2147,6 +2311,8 @@ async fn open_local_ui_when_ready(addr: SocketAddr, ui_available: bool, role: Cl
     sleep(Duration::from_millis(350)).await;
     let disabled = env_truthy("HIVEMIND_DISABLE_OPEN_UI");
     if disabled {
+        #[cfg(target_os = "windows")]
+        local_ui_activation(role.client_role()).unavailable();
         tracing::info!(
             "{} UI open disabled via HIVEMIND_DISABLE_OPEN_UI",
             role.label()
@@ -2157,14 +2323,19 @@ async fn open_local_ui_when_ready(addr: SocketAddr, ui_available: bool, role: Cl
     let browser_url = local_browser_url(addr);
 
     #[cfg(target_os = "windows")]
-    open_ui_with_browser_fallback(
-        role,
-        local_webview_url(addr, ui_available, disabled).as_deref(),
-        &browser_url,
-        |url| async move { launch_client_webview(role, &url).await },
-        open_ui_in_browser,
-    )
-    .await;
+    {
+        let native = open_ui_with_browser_fallback(
+            role,
+            local_webview_url(addr, ui_available, disabled).as_deref(),
+            &browser_url,
+            |url| async move { launch_client_webview(role, &url).await },
+            open_ui_in_browser,
+        )
+        .await;
+        if !native {
+            local_ui_activation(role.client_role()).unavailable();
+        }
+    }
 
     #[cfg(not(target_os = "windows"))]
     {
@@ -2226,16 +2397,25 @@ async fn launch_client_webview(role: ClientUiRole, url: &str) -> Result<()> {
     }
 
     tracing::info!("Opened {} WebView at {url}", role.label());
-    // Keep stdin open while waiting so the separate helper remains alive until
-    // this client exits or the user closes the helper window.
+    tokio::spawn(monitor_local_ui_quit(
+        stdout,
+        local_ui_shutdown_signal().clone(),
+    ));
+    // Keep stdin open while waiting so the helper and its background tray remain
+    // alive until this client exits or the user explicitly chooses Quit.
     let stdin = child
         .stdin
         .take()
         .context("WebView lifetime pipe missing")?;
+    let activation = local_ui_activation(role.client_role());
+    let helper_pid = child.id();
     retain_local_ui_lifetime_pipe(
         async move { child.wait().await.map(|_| ()) },
         stdin,
+        activation.generation.subscribe(),
+        helper_pid,
         role.label(),
+        move || activation.unavailable(),
     );
     Ok(())
 }
@@ -2642,8 +2822,9 @@ async fn wait_for_nodepool_after_join(
     }
 
     let mut last_peer_error = None;
+    let mut local_api_client = None;
     while Instant::now() < deadline {
-        match nodepool_peer_targets(session).await {
+        match nodepool_peer_targets(session, &mut local_api_client).await {
             Ok(peers) => {
                 for target in peers {
                     let remaining = deadline.saturating_duration_since(Instant::now());
@@ -2673,7 +2854,10 @@ async fn wait_for_nodepool_after_join(
     )
 }
 
-async fn nodepool_peer_targets(session: &VpnSession) -> Result<Vec<String>> {
+async fn nodepool_peer_targets(
+    session: &VpnSession,
+    local_api_client: &mut Option<reqwest::Client>,
+) -> Result<Vec<String>> {
     #[cfg(target_os = "windows")]
     {
         let loopback = session
@@ -2684,29 +2868,44 @@ async fn nodepool_peer_targets(session: &VpnSession) -> Result<Vec<String>> {
             .local_api_cred
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("VPN LocalAPI credential is unavailable"))?;
-        let status = local_api_status(loopback, credential).await?;
-        return Ok(extract_nodepool_peer_ips(
-            &status,
-            &[DEFAULT_NODEPOOL_VPN_HOSTNAME.to_string()],
+        let client = cached_local_api_http_client(local_api_client)?;
+        let status = local_api_status(client, loopback, credential).await?;
+        Ok(
+            extract_nodepool_peer_ips(&status, &[DEFAULT_NODEPOOL_VPN_HOSTNAME.to_string()])
+                .into_iter()
+                .map(|ip| format!("{ip}:{DEFAULT_NODEPOOL_GRPC_PORT}"))
+                .collect(),
         )
-        .into_iter()
-        .map(|ip| format!("{ip}:{DEFAULT_NODEPOOL_GRPC_PORT}"))
-        .collect());
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = session;
+        let _ = (session, local_api_client);
         Ok(Vec::new())
     }
 }
 
 #[cfg(target_os = "windows")]
-async fn local_api_status(loopback: &str, credential: &str) -> Result<serde_json::Value> {
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(Duration::from_secs(2))
-        .build()
-        .context("VPN LocalAPI HTTP client is unavailable")?;
+fn cached_local_api_http_client(client: &mut Option<reqwest::Client>) -> Result<&reqwest::Client> {
+    if client.is_none() {
+        *client = Some(
+            reqwest::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .context("VPN LocalAPI HTTP client is unavailable")?,
+        );
+    }
+    client
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("VPN LocalAPI HTTP client is unavailable"))
+}
+
+#[cfg(target_os = "windows")]
+async fn local_api_status(
+    client: &reqwest::Client,
+    loopback: &str,
+    credential: &str,
+) -> Result<serde_json::Value> {
     let response = client
         .get(format!("http://{loopback}/localapi/v0/status?peers=true"))
         .header("Sec-Tailscale", "localapi")
@@ -3421,7 +3620,7 @@ fn marker_matches_reconnect_plan(marker: &serde_json::Value, plan: &VpnReconnect
         && marker
             .get("login_server")
             .and_then(|v| v.as_str())
-            .is_some_and(|server| server.trim_end_matches('/') == plan.login_server)
+            .is_some_and(|server| same_vpn_login_server(server, &plan.login_server))
         && marker.get("hostname").and_then(|v| v.as_str()) == Some(plan.hostname.as_str())
 }
 
@@ -3958,11 +4157,9 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn runtime_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    async fn runtime_lock() -> tokio::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<TokioMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| TokioMutex::new(())).lock().await
     }
 
     fn clear_runtime_for_test(role: ClientRole) {
@@ -3973,16 +4170,16 @@ mod tests {
     }
 
     fn test_reconnect_plan() -> VpnReconnectPlan {
-        VpnReconnectPlan::new(
-            ClientRole::Worker,
-            Some("test-auth-key"),
-            "https://headscale.example",
-            "worker-test",
-            "100.64.0.1:50051",
-            Some("127.0.0.1:50053"),
-            Duration::from_secs(1),
-            true,
-        )
+        VpnReconnectPlan::new(VpnReconnectPlanConfig {
+            role: ClientRole::Worker,
+            auth_key: Some("test-auth-key"),
+            login_server: "https://headscale.example",
+            hostname: "worker-test",
+            configured_endpoint: "100.64.0.1:50051",
+            worker_grpc_addr: Some("127.0.0.1:50053"),
+            startup_timeout: Duration::from_secs(1),
+            require_external_overlay: true,
+        })
     }
 
     fn test_vpn_session() -> VpnSession {
@@ -4335,6 +4532,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn only_explicit_helper_quit_marker_stops_the_client() {
+        for (bytes, expected) in [
+            (LOCAL_UI_QUIT_MARKER.to_vec(), true),
+            (Vec::new(), false),
+            (b"HIVEMIND_LOCAL_UI_NOPE\n".to_vec(), false),
+            (b"HIVEMIND_LOCAL_UI_QUI".to_vec(), false),
+        ] {
+            let (reader, mut writer) = tokio::io::duplex(64);
+            writer.write_all(&bytes).await.unwrap();
+            drop(writer);
+            let (shutdown, receiver) = tokio::sync::watch::channel(false);
+            monitor_local_ui_quit(reader, shutdown).await;
+            assert_eq!(*receiver.borrow(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn background_helper_leaves_shutdown_pending() {
+        let (reader, writer) = tokio::io::duplex(64);
+        let (shutdown, receiver) = tokio::sync::watch::channel(false);
+        let monitor = tokio::spawn(monitor_local_ui_quit(reader, shutdown));
+        tokio::task::yield_now().await;
+        assert!(!monitor.is_finished());
+        assert!(!*receiver.borrow());
+        drop(writer);
+        monitor.await.unwrap();
+        assert!(!*receiver.borrow());
+    }
+
+    #[tokio::test]
     async fn unavailable_webview_falls_back_to_browser() {
         let attempted_webview = Arc::new(StdMutex::new(false));
         let browser_urls = Arc::new(StdMutex::new(Vec::new()));
@@ -4403,38 +4630,67 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn webview_parent_pipe_stays_open_until_helper_exits() {
-        struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
-        impl Drop for DropSignal {
-            fn drop(&mut self) {
-                if let Some(signal) = self.0.take() {
-                    let _ = signal.send(());
-                }
-            }
-        }
+    async fn ui_activation_before_readiness_is_coalesced_and_unavailable_is_rejected() {
+        let activation = LocalUiActivation::new();
+        assert!(activation.request());
+        assert!(activation.request());
+        let mut receiver = activation.generation.subscribe();
+        assert_eq!(next_local_ui_activation(&mut receiver, 0).await, Some(2));
+        assert!(tokio::time::timeout(
+            Duration::from_millis(10),
+            next_local_ui_activation(&mut receiver, 2)
+        )
+        .await
+        .is_err());
+        activation.unavailable();
+        assert!(!activation.request());
+        assert_eq!(*receiver.borrow(), 2);
+    }
 
+    #[tokio::test]
+    async fn webview_parent_pipe_stays_open_until_helper_exits() {
         let (helper_exit_tx, helper_exit_rx) = tokio::sync::oneshot::channel();
-        let (pipe_dropped_tx, mut pipe_dropped_rx) = tokio::sync::oneshot::channel();
+        let (pipe, mut reader) = tokio::io::duplex(128);
+        let (activations, receiver) = tokio::sync::watch::channel(0);
         retain_local_ui_lifetime_pipe(
             async move {
                 let _ = helper_exit_rx.await;
                 Ok(())
             },
-            DropSignal(Some(pipe_dropped_tx)),
+            pipe,
+            receiver,
+            None,
             "Worker",
+            || {},
         );
 
+        let mut byte = [0];
         assert!(
-            tokio::time::timeout(Duration::from_millis(10), &mut pipe_dropped_rx)
+            tokio::time::timeout(Duration::from_millis(10), reader.read(&mut byte))
                 .await
                 .is_err(),
             "parent pipe must remain open while helper is running"
         );
-        helper_exit_tx.send(()).unwrap();
-        tokio::time::timeout(Duration::from_secs(1), pipe_dropped_rx)
+        activations.send_replace(4);
+        let mut frame = [0; LOCAL_UI_SHOW_MARKER.len()];
+        tokio::time::timeout(Duration::from_secs(1), reader.read_exact(&mut frame))
             .await
             .unwrap()
             .unwrap();
+        assert_eq!(frame, LOCAL_UI_SHOW_MARKER);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), reader.read(&mut byte))
+                .await
+                .is_err()
+        );
+        helper_exit_tx.send(()).unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), reader.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -4654,6 +4910,55 @@ mod tests {
     }
 
     #[test]
+    fn vpn_login_server_identity_uses_url_semantics_without_merging_paths() {
+        assert!(same_vpn_login_server(
+            "https://Headscale.justin0711.com/",
+            "https://headscale.justin0711.com"
+        ));
+        assert!(same_vpn_login_server(
+            "HTTPS://HEADSCALE.example:443/control/",
+            "https://headscale.example/control"
+        ));
+        for different in [
+            "http://headscale.example/control",
+            "https://other.example/control",
+            "https://headscale.example:444/control",
+            "https://headscale.example/Control",
+            "https://headscale.example/control?tenant=other",
+            "https://user@headscale.example/control",
+            "not-a-url",
+        ] {
+            assert!(!same_vpn_login_server(
+                "https://headscale.example/control",
+                different
+            ));
+        }
+        assert!(!same_vpn_login_server("not-a-url", "not-a-url"));
+    }
+
+    #[test]
+    fn session_and_persisted_identity_reuse_case_equivalent_login_servers() {
+        let mut plan = test_reconnect_plan();
+        plan.login_server = "https://HEADSCALE.example/".into();
+        assert!(session_matches_reconnect_plan(&test_vpn_session(), &plan));
+        let marker = serde_json::json!({
+            "version": 2,
+            "role": "worker",
+            "login_server": "https://headscale.example",
+            "hostname": "worker-test",
+            "nodepool_target": "100.64.0.4:50051",
+        });
+        assert!(marker_matches_reconnect_plan(&marker, &plan));
+        assert_eq!(
+            persisted_target_from_marker(&marker, &plan).as_deref(),
+            Some("100.64.0.4:50051")
+        );
+        plan.hostname = "other-worker".into();
+        assert!(!session_matches_reconnect_plan(&test_vpn_session(), &plan));
+        assert!(!marker_matches_reconnect_plan(&marker, &plan));
+    }
+
+    #[test]
     fn matching_vpn_session_requires_the_same_non_secret_transport_spec() {
         let session = test_vpn_session();
         let plan = test_reconnect_plan();
@@ -4677,9 +4982,9 @@ mod tests {
         assert!(!session_matches_reconnect_plan(&session, &different_port));
     }
 
-    #[test]
-    fn keepalive_is_claimed_once_per_role_until_its_task_exits() {
-        let _runtime = runtime_lock();
+    #[tokio::test]
+    async fn keepalive_is_claimed_once_per_role_until_its_task_exits() {
+        let _runtime = runtime_lock().await;
         clear_runtime_for_test(ClientRole::Worker);
         assert!(claim_vpn_keepalive(ClientRole::Worker));
         assert!(!claim_vpn_keepalive(ClientRole::Worker));
@@ -4698,7 +5003,7 @@ mod tests {
 
     #[tokio::test]
     async fn stale_keepalive_generation_cannot_retire_a_newer_session() {
-        let _runtime = runtime_lock();
+        let _runtime = runtime_lock().await;
         clear_runtime_for_test(ClientRole::Worker);
         install_vpn_session(Arc::new(test_vpn_session()), test_reconnect_plan());
         let (_, generation, _) = vpn_runtime_snapshot(ClientRole::Worker);
@@ -4736,7 +5041,9 @@ mod tests {
             }}).to_string();
             socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
         });
-        let status = local_api_status(&addr.to_string(), "test-local-cred")
+        let mut client_cache = None;
+        let client = cached_local_api_http_client(&mut client_cache).unwrap();
+        let status = local_api_status(client, &addr.to_string(), "test-local-cred")
             .await
             .unwrap();
         let ips = extract_nodepool_peer_ips(&status, &[DEFAULT_NODEPOOL_VPN_HOSTNAME.to_string()]);
@@ -4760,7 +5067,9 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let error = local_api_status(&addr.to_string(), "secret-password")
+        let mut client_cache = None;
+        let client = cached_local_api_http_client(&mut client_cache).unwrap();
+        let error = local_api_status(client, &addr.to_string(), "secret-password")
             .await
             .unwrap_err()
             .to_string();

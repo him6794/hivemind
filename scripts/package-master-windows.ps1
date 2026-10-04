@@ -45,7 +45,7 @@ if ($null -eq $vcRuntime140_1) {
 $previousViteApiBase = $env:VITE_API_BASE
 try {
     # Packaged Master UI calls the same-origin Master HTTP API.
-    $env:VITE_API_BASE = ""
+    $env:VITE_API_BASE = "/"
     Push-Location $masterUiRoot
     try {
         & npm.cmd ci
@@ -124,11 +124,11 @@ This is a local x64 MSVC test bundle, not a signed production release. It contai
 1. Start `hivemind-master.exe` and sign in to the Master UI with your Hivemind account.
 2. On the first authenticated login, Master automatically requests one-time VPN enrollment from the configured Website API, joins the overlay, and waits for Nodepool readiness before enabling task operations.
 
-For ordinary public-network use, you do not need to set `JWT_SECRET` or manually pin a Nodepool IP. The package contains no server secret, reusable VPN key, or fixed Nodepool address. For a private deployment, configure the Website API origin with `MASTER_WEBSITE_API_BASE` or `WEBSITE_API_BASE`; it must expose `POST /api/login` and the protected `POST /api/vpn/config` route. This is the Website API address, not a manually configured Nodepool address.
+For ordinary public-network use, you do not need to set `JWT_SECRET` or manually pin a Nodepool IP. The package contains no server secret or reusable VPN key. Ordinary onboarding discovers Nodepool through the authenticated VPN flow. For a private deployment, configure the Website API origin with `MASTER_WEBSITE_API_BASE` or `WEBSITE_API_BASE`; it must expose `POST /api/login` and the protected `POST /api/vpn/config` route. This is the Website API address, not a manually configured Nodepool address.
 
 If you use an optional `.env`, place it beside `hivemind-master.exe`; only that file is considered, regardless of the launch directory. Parent workspace `.env` files are ignored. Explicit process environment variables and `HIVEMIND_CONFIG` still work.
 
-The Master serves the bundled UI from `master-ui`. The optional WebView2 Runtime is not installed by this package. When the runtime is present, the UI opens in an embedded WebView2 window; otherwise startup falls back to the system browser. The WebView only navigates to this Master API's loopback origin. Closing the WebView does not stop the Master; stop the Master process separately when it is safe to do so. Set `HIVEMIND_DISABLE_OPEN_UI=1` to disable automatic UI opening.
+The Master serves the bundled UI from `master-ui`. The optional WebView2 Runtime is not installed by this package. When the runtime is present, the UI opens in an embedded WebView2 window; otherwise startup falls back to the system browser. The WebView only navigates to this Master API's loopback origin. Closing the native window offers Cancel, Keep in background, and Quit. Keep in background retains the Master runtime; reopen it from its tray icon. Starting the EXE again restores the existing native window, including from another extracted directory, instead of starting another backend. Instances are scoped to the Windows sign-in session, role, and configured UI port; different UI ports remain independent. Confirmed Quit stops the Master runtime. Without WebView2, the system browser has no native tray or close confirmation; stop the Master process separately when it is safe to do so. Set `HIVEMIND_DISABLE_OPEN_UI=1` to disable automatic UI opening.
 '@
 $readmePath = Join-Path $out "README.md"
 $readme | Set-Content -LiteralPath $readmePath -Encoding ASCII

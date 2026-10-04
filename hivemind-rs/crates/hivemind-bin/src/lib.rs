@@ -10,6 +10,8 @@ use tracing::{info, warn};
 
 #[cfg(feature = "cli")]
 mod cli;
+#[cfg(any(feature = "master", feature = "worker"))]
+mod local_ui_server;
 
 #[cfg(feature = "nodepool")]
 use hivemind_auth::AuthManager;
@@ -181,6 +183,19 @@ fn should_seed_default_user(value: Option<&str>) -> bool {
             || value == "1"
             || value.eq_ignore_ascii_case("yes")
     )
+}
+
+#[cfg(any(feature = "master", feature = "worker", test))]
+async fn initialize_or_shutdown<F, S>(initialization: F, shutdown: S) -> Option<F::Output>
+where
+    F: std::future::Future,
+    S: std::future::Future<Output = ()>,
+{
+    tokio::select! {
+        biased;
+        _ = shutdown => None,
+        result = initialization => Some(result),
+    }
 }
 
 fn validate_service_config(config: &HivemindConfig, role: ServiceRole) -> Result<()> {
@@ -390,6 +405,34 @@ async fn run_service_inner(
     #[cfg(not(feature = "worker"))]
     let _ = run_worker;
 
+    #[cfg(target_os = "windows")]
+    let _local_instance = {
+        let client = match role {
+            ServiceRole::Master => Some((
+                client_runtime::ClientRole::Master,
+                &config.server.master_http_addr,
+            )),
+            ServiceRole::Worker => Some((
+                client_runtime::ClientRole::Worker,
+                &config.server.worker_control_http_addr,
+            )),
+            _ => None,
+        };
+        if let Some((client_role, listen_addr)) = client {
+            match client_runtime::local_instance::acquire_or_activate(client_role, listen_addr)
+                .await?
+            {
+                client_runtime::local_instance::InstanceLaunch::Primary(guard) => Some(guard),
+                client_runtime::local_instance::InstanceLaunch::Activated => {
+                    info!("Activated existing {} client", client_role.as_str());
+                    return Ok(());
+                }
+            }
+        } else {
+            None
+        }
+    };
+
     validate_service_config(&config, role)?;
 
     if cfg!(target_os = "windows") {
@@ -539,28 +582,56 @@ async fn run_service_inner(
         );
     }
 
+    #[cfg(any(feature = "master", feature = "worker"))]
+    let mut local_ui_servers = Vec::new();
+
     #[cfg(feature = "master")]
     if run_master {
-        let nodepool_grpc = nodepool_client_addr(&config, run_nodepool)?;
-        let api = MasterApiServer::new(nodepool_grpc, config.clone()).await?;
-        let addr = config.server.master_http_addr.clone();
-        let master_ui_dir = config.server.master_ui_dir.clone();
-        tokio::spawn(async move {
-            if let Err(e) = api.serve_with_ui(&addr, &master_ui_dir).await {
-                tracing::error!("Master API error: {}", e);
-            }
-        });
-        let update_shutdown = client_runtime::update_loop::start_update_loop(
-            config.clone(),
+        let ui = local_ui_server::LocalUiServer::bind(
+            &config.server.master_http_addr,
+            &config.server.master_ui_dir,
+            &config.server.master_cors_allowed_origins,
             client_runtime::ClientRole::Master,
-            service_arguments.clone(),
-            activation_tx.clone(),
-        );
-        shutdown_handles.push(update_shutdown);
-        info!(
-            "Master HTTP API started on {}",
-            config.server.master_http_addr
-        );
+        )
+        .await?;
+        ui.open_window(client_runtime::ClientRole::Master);
+        ui.phase("connecting").await;
+        let initialized = initialize_or_shutdown(
+            async {
+                let nodepool_grpc = nodepool_client_addr(&config, run_nodepool)?;
+                let api = MasterApiServer::new(nodepool_grpc, config.clone()).await?;
+                let app = api.into_router().fallback_service(
+                    tower_http::services::ServeDir::new(&config.server.master_ui_dir)
+                        .append_index_html_on_directories(true),
+                );
+                ui.publish(app).await;
+                Ok::<(), anyhow::Error>(())
+            },
+            client_runtime::wait_for_local_ui_shutdown(),
+        )
+        .await;
+        let cancelled = initialized.is_none();
+        if let Some(Err(error)) = initialized {
+            ui.fail("runtime_initialization_failed").await;
+            tracing::error!(%error, "Master initialization failed; local UI remains available");
+            if !ui.keep_failure_visible() {
+                return Err(error);
+            }
+        }
+        local_ui_servers.push(ui);
+        if !cancelled {
+            let update_shutdown = client_runtime::update_loop::start_update_loop(
+                config.clone(),
+                client_runtime::ClientRole::Master,
+                service_arguments.clone(),
+                activation_tx.clone(),
+            );
+            shutdown_handles.push(update_shutdown);
+            info!(
+                "Master HTTP API started on {}",
+                config.server.master_http_addr
+            );
+        }
     }
 
     #[cfg(feature = "website")]
@@ -584,6 +655,18 @@ async fn run_service_inner(
 
     #[cfg(feature = "worker")]
     if run_worker {
+        let ui = local_ui_server::LocalUiServer::bind(
+            &config.server.worker_control_http_addr,
+            &config.server.worker_ui_dir,
+            &config.server.worker_control_cors_allowed_origins,
+            client_runtime::ClientRole::Worker,
+        )
+        .await?;
+        ui.open_window(client_runtime::ClientRole::Worker);
+        let shutdown_start = shutdown_handles.len();
+        let mut worker_server = None;
+        let initialized = initialize_or_shutdown(async {
+        ui.phase("connecting").await;
         let configured_nodepool_addr = nodepool_client_addr(&config, run_nodepool)?;
         let require_external_overlay =
             client_runtime::external_overlay_required(&config, client_runtime::ClientRole::Worker);
@@ -603,22 +686,31 @@ async fn run_service_inner(
         };
         let nodepool_addr_state = std::sync::Arc::new(std::sync::Mutex::new(nodepool_addr.clone()));
 
-        let executor = Arc::new(WorkerExecutor::try_new(config.clone())?);
-        let resources = executor.get_system_resources();
-        info!(
-            "Worker executor: {} cores, {} GB RAM",
-            resources.cpu_cores, resources.total_memory_gb
-        );
-
+        ui.phase("resources").await;
         let worker_id = std::env::var("WORKER_ID")
             .or_else(|_| std::env::var("COMPUTERNAME"))
             .or_else(|_| std::env::var("HOSTNAME"))
             .unwrap_or_else(|_| format!("worker-{}", uuid::Uuid::new_v4()));
+        let executor_config = config.clone();
         #[cfg(windows)]
-        executor
-            .reconcile_hcs_startup(&worker_id, std::time::Duration::from_secs(5))
-            .context("native HCS startup reconciliation failed")?;
+        let reconcile_worker_id = worker_id.clone();
+        let executor = tokio::task::spawn_blocking(move || {
+            let executor = Arc::new(WorkerExecutor::try_new(executor_config)?);
+            #[cfg(windows)]
+            executor
+                .reconcile_hcs_startup(&reconcile_worker_id, std::time::Duration::from_secs(5))
+                .context("native HCS startup reconciliation failed")?;
+            let resources = executor.get_system_resources();
+            info!(
+                "Worker executor: {} cores, {} GB RAM",
+                resources.cpu_cores, resources.total_memory_gb
+            );
+            Ok::<_, anyhow::Error>(executor)
+        })
+        .await
+        .context("Worker runtime initialization task failed")??;
 
+        ui.phase("services").await;
         let wk_addr = config.server.worker_grpc_addr.clone();
         // Bind before resolving credentials or scheduling registration. A worker
         // must never advertise/register before its control plane can accept RPCs.
@@ -702,7 +794,7 @@ async fn run_service_inner(
             .max_encoding_message_size(WORKER_RPC_MESSAGE_MAX_BYTES);
 
         let wk_incoming = TcpListenerStream::new(wk_listener);
-        tokio::spawn(async move {
+        worker_server = Some(tokio::spawn(async move {
             if let Err(e) = tonic::transport::Server::builder()
                 .add_service(wk_svc)
                 .add_service(wk_chunk_svc)
@@ -711,7 +803,7 @@ async fn run_service_inner(
             {
                 tracing::error!("Worker gRPC server error: {}", e);
             }
-        });
+        }));
         info!("Worker gRPC server started on {}", wk_addr);
 
         let worker_addr_state =
@@ -733,22 +825,11 @@ async fn run_service_inner(
             registration_shutdown: std::sync::Arc::new(std::sync::Mutex::new(None)),
             session_shutdown: std::sync::Arc::new(std::sync::Mutex::new(None)),
         };
-        let control_addr = config.server.worker_control_http_addr.clone();
-        let worker_control_allowed_origins =
-            config.server.worker_control_cors_allowed_origins.clone();
-        let worker_ui_dir = config.server.worker_ui_dir.clone();
-        tokio::spawn(async move {
-            if let Err(e) = hivemind_worker_executor::control_api::serve_with_allowed_origins(
-                &control_addr,
-                control_state,
-                &worker_control_allowed_origins,
-                Some(&worker_ui_dir),
-            )
-            .await
-            {
-                tracing::error!("Worker control HTTP API error: {}", e);
-            }
-        });
+        let control_router = hivemind_worker_executor::control_api::router_with_ui_dir(
+            control_state,
+            &config.server.worker_control_cors_allowed_origins,
+            Some(&config.server.worker_ui_dir),
+        );
         info!(
             "Worker control HTTP API started on {}",
             config.server.worker_control_http_addr
@@ -834,6 +915,26 @@ async fn run_service_inner(
                 "Worker registration loop deferred until UI login (no WORKER_NODEPOOL_TOKEN/USERNAME/PASSWORD)"
             );
         }
+        ui.publish(control_router).await;
+        Ok::<(), anyhow::Error>(())
+        }, client_runtime::wait_for_local_ui_shutdown())
+        .await;
+        if !matches!(&initialized, Some(Ok(()))) {
+            if let Some(server) = worker_server.take() {
+                server.abort();
+            }
+            for handle in shutdown_handles.drain(shutdown_start..) {
+                let _ = handle.send(true);
+            }
+        }
+        if let Some(Err(error)) = initialized {
+            ui.fail("runtime_initialization_failed").await;
+            tracing::error!(%error, "Worker initialization failed; local UI remains available");
+            if !ui.keep_failure_visible() {
+                return Err(error);
+            }
+        }
+        local_ui_servers.push(ui);
     }
 
     info!("Hivemind running. Press Ctrl+C to stop.");
@@ -846,6 +947,9 @@ async fn run_service_inner(
             if changed.is_ok() && *activation_rx.borrow() {
                 info!("Verified client update activation requested; shutting down for restart");
             }
+        }
+        _ = client_runtime::wait_for_local_ui_shutdown() => {
+            info!("Local UI quit confirmed; shutting down client services");
         }
     }
 
@@ -875,6 +979,56 @@ fn apply_worker_egress_defaults(config: &mut HivemindConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn startup_completion_preserves_its_result() {
+        let result =
+            initialize_or_shutdown(async { Ok::<_, anyhow::Error>(42) }, std::future::pending())
+                .await;
+        assert_eq!(result.unwrap().unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn confirmed_quit_does_not_wait_for_stalled_initialization() {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            initialize_or_shutdown(std::future::pending::<Result<()>>(), async {}),
+        )
+        .await
+        .expect("Quit must interrupt a stalled startup");
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn confirmed_quit_drops_in_flight_startup_resources() {
+        struct StartupResource(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for StartupResource {
+            fn drop(&mut self) {
+                if let Some(released) = self.0.take() {
+                    let _ = released.send(());
+                }
+            }
+        }
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (quit, shutdown) = tokio::sync::oneshot::channel();
+        let (released, release) = tokio::sync::oneshot::channel();
+        let startup = tokio::spawn(initialize_or_shutdown(
+            async move {
+                let _resource = StartupResource(Some(released));
+                let _ = entered.send(());
+                std::future::pending::<Result<()>>().await
+            },
+            async move {
+                let _ = shutdown.await;
+            },
+        ));
+        started.await.unwrap();
+        quit.send(()).unwrap();
+        assert!(startup.await.unwrap().is_none());
+        release
+            .await
+            .expect("cancelled startup must release its resources");
+    }
 
     #[test]
     fn windows_standalone_clients_are_isolated_without_changing_all_mode() {

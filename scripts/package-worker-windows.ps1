@@ -132,17 +132,9 @@ if ($packageWebview -and !(Test-Path -LiteralPath $webviewBinary -PathType Leaf)
 Push-Location $workerUiRoot
 $previousWorkerControlBase = $env:VITE_WORKER_CONTROL_BASE
 try {
-    $workerControlBase = $WorkerControlHttpAddr.Trim()
-    if ($workerControlBase -notmatch '^[a-zA-Z][a-zA-Z0-9+.-]*://') {
-        $workerControlBase = "http://$workerControlBase"
-    }
-    if ($workerControlBase -match '^http://0\.0\.0\.0(?=[:/])') {
-        $workerControlBase = $workerControlBase -replace '^http://0\.0\.0\.0', 'http://127.0.0.1'
-    }
-    if ($workerControlBase -match '^http://\[::\](?=[:/])') {
-        $workerControlBase = $workerControlBase -replace '^http://\[::\]', 'http://[::1]'
-    }
-    $env:VITE_WORKER_CONTROL_BASE = $workerControlBase.TrimEnd('/')
+    # A nonempty slash overrides .env and normalizes to the UI's own origin.
+    # Runtime port changes must not leave the packaged UI calling another worker.
+    $env:VITE_WORKER_CONTROL_BASE = "/"
     & npm ci
     if ($LASTEXITCODE -ne 0) {
         throw "npm ci failed while preparing the Worker UI."
@@ -603,7 +595,7 @@ $readme = @'
 
 1. Double-click `hivemind-worker.exe`. In the x64 MSVC package, the Worker page opens in an embedded WebView2 window when the optional WebView2 Runtime is installed. The package does not install the runtime; if it is absent, the page opens in your system browser. ARM64 MSVC and x64 GNU packages always use the system browser.
 2. Sign in with your Hivemind account. On the first authenticated login, the Worker automatically obtains one-time VPN enrollment, joins the network, waits for Nodepool readiness, and registers this machine.
-3. Keep the Worker process running while you want this machine to receive jobs. Closing only the WebView window does not stop the Worker; reopen `http://127.0.0.1:18080/` (or your configured control address) in your browser if needed. No `.env` file, terminal command, port choice, `JWT_SECRET`, manually fixed Nodepool IP, or reusable VPN key setup is needed.
+3. Keep the Worker process running while you want this machine to receive jobs. Closing the native window offers Cancel, Keep in background, and Quit. Keep in background retains the Worker runtime; reopen it from its tray icon. Starting the EXE again restores the existing native window, including from another extracted directory, instead of starting another backend. Instances are scoped to the Windows sign-in session, role, and configured UI port; different UI ports remain independent. Confirmed Quit stops the Worker runtime. Without WebView2, the system browser has no native tray or close confirmation; closing its page leaves the Worker running. Reopen `http://127.0.0.1:18080/` (or your configured control address) in your browser if needed. No `.env` file, terminal command, port choice, `JWT_SECRET`, manually fixed Nodepool IP, or reusable VPN key setup is needed.
 
 For a private deployment or unattended startup, `.env.worker.example` and `start-worker.ps1` are available as optional advanced settings. The normal sign-in flow does not store your password, server key, or reusable VPN key.
 

@@ -20,7 +20,7 @@ foreach ($requiredContract in @(
         '"--no-default-features", "--features", "master,master-webview"',
         '"--bin", "hivemind-master", "--bin", "hivemind-master-ui"',
         'call `"$vsDevCmd`" -arch=x64 -host_arch=x64',
-        '$env:VITE_API_BASE = ""',
+        '$env:VITE_API_BASE = "/"',
         'Copy-Item -LiteralPath $masterBinary -Destination (Join-Path $out "hivemind-master.exe")',
         'Copy-Item -LiteralPath $webviewBinary -Destination (Join-Path $out "hivemind-master-ui.exe")',
         'Copy-Item -LiteralPath $libtailscale -Destination (Join-Path $out "libtailscale.dll")',
@@ -84,6 +84,9 @@ foreach ($nativeRestriction in @(
     Assert-Contains -Haystack $webviewSource -Needle $nativeRestriction `
         -Message "Local UI helper is missing required native restriction '$nativeRestriction'."
 }
+if ($webviewSource.IndexOf('watch_parent_stdin(app_handle)?;') -gt $webviewSource.IndexOf('write_readiness_marker()?;')) {
+    throw "Local UI helper must install its parent SHOW/EOF monitor before announcing readiness."
+}
 if ($webviewSource -match '\.plugin\s*\(|\.invoke_handler\s*\(') {
     throw "Local UI helper must not register Tauri plugins or command handlers."
 }
@@ -113,6 +116,16 @@ foreach ($webviewDocumentationContract in @(
     )) {
     Assert-Contains -Haystack $packagedReadme -Needle $webviewDocumentationContract `
         -Message "Master README must explain the optional, unbundled WebView2 fallback contract '$webviewDocumentationContract'."
+}
+foreach ($lifetimeContract in @(
+        'Closing the native window offers Cancel, Keep in background, and Quit',
+        'Confirmed Quit stops the Master runtime',
+        'Starting the EXE again restores the existing native window',
+        'including from another extracted directory',
+        'Without WebView2, the system browser has no native tray or close confirmation'
+    )) {
+    Assert-Contains -Haystack $packagedReadme -Needle $lifetimeContract `
+        -Message "Master README must explain the client lifetime contract '$lifetimeContract'."
 }
 
 if ($scriptText -match '(?i)(JWT_SECRET|NODEPOOL.*TOKEN|VPN_AUTHKEY)\s*=\s*[^"\r\n]+') {

@@ -43,6 +43,10 @@ impl MasterApiServer {
         Ok(Self { app })
     }
 
+    pub fn into_router(self) -> Router {
+        self.app
+    }
+
     pub async fn serve(self, addr: &str) -> Result<()> {
         self.serve_with_ui(addr, "./frontend/master-ui/dist").await
     }

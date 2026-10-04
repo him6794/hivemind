@@ -10,7 +10,7 @@ path = "src/lib.rs"
 
 [features]
 default = ["master", "nodepool", "worker", "website", "cli"]
-master = ["dep:hivemind-master-api"]
+master = ["dep:hivemind-master-api", "dep:axum", "dep:tower", "dep:tower-http"]
 website = ["dep:hivemind-website-api"]
 nodepool = [
     "dep:hivemind-auth",
@@ -20,7 +20,7 @@ nodepool = [
     "dep:hivemind-task-scheduler",
     "dep:hivemind-vpn-service",
 ]
-worker = ["dep:hivemind-worker-executor"]
+worker = ["dep:hivemind-worker-executor", "dep:axum", "dep:tower", "dep:tower-http"]
 local-ui = [
     "dep:tauri",
     "dep:tauri-build",
@@ -68,6 +68,9 @@ path = "src/bin/hivemind-master-ui.rs"
 required-features = ["master-webview"]
 
 [dependencies]
+axum = { workspace = true, optional = true }
+tower = { workspace = true, optional = true }
+tower-http = { workspace = true, optional = true }
 tokio.workspace = true
 tokio-stream.workspace = true
 tonic.workspace = true
@@ -95,7 +98,7 @@ hivemind-worker-executor = { path = "../worker-executor", optional = true }
 hivemind-vpn-service = { path = "../vpn-service", optional = true }
 
 [target.'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'.dependencies]
-tauri = { version = "2", default-features = false, features = ["wry"], optional = true }
+tauri = { version = "2", default-features = false, features = ["wry", "tray-icon"], optional = true }
 url = { version = "2.5", optional = true }
 webview2-com = { version = "0.38.2", optional = true }
 windows-core = { version = "0.61", optional = true }
