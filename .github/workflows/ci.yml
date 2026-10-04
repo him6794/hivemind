@@ -186,6 +186,10 @@ jobs:
       - name: Run the complete site test suite
         working-directory: frontend
         run: npm test
+      - name: Run official-site UI and native bridge contracts
+        run: |
+          npm --prefix frontend run test:ui-contract
+          node --test scripts/native-ui-bridge.test.mjs
       - name: Build the official site
         working-directory: frontend
         run: npm run build
@@ -214,9 +218,56 @@ jobs:
     name: Windows and release contract tests
     runs-on: windows-latest
     timeout-minutes: 90
+    env:
+      LIBTAILSCALE_VERSION: 5e89501def80a6579ca5d0f9a02f336be62b8f2e
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Set up pinned Go for libtailscale
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.5'
+          cache: false
+      - name: Install checksum-verified LLVM-MinGW cross compilers
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '20260616'
+          $archive = Join-Path $env:RUNNER_TEMP "llvm-mingw-$version-ucrt-x86_64.zip"
+          $extractRoot = Join-Path $env:RUNNER_TEMP "llvm-mingw-$version-ucrt-x86_64"
+          $uri = "https://github.com/mstorsjo/llvm-mingw/releases/download/$version/llvm-mingw-$version-ucrt-x86_64.zip"
+          $expectedHash = 'b9b68a4d276e16fa25802aaba458e4638f64b3884c290aaccdc2d87083b6ca35'
+          Invoke-WebRequest -Uri $uri -OutFile $archive
+          $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $expectedHash) { throw "LLVM-MinGW SHA-256 mismatch: expected $expectedHash, got $actualHash" }
+          Expand-Archive -LiteralPath $archive -DestinationPath $extractRoot -Force
+          $toolchainBin = Get-ChildItem -LiteralPath $extractRoot -Directory -Recurse |
+            Where-Object {
+              (Test-Path -LiteralPath (Join-Path $_.FullName 'x86_64-w64-mingw32-clang.exe')) -and
+              (Test-Path -LiteralPath (Join-Path $_.FullName 'aarch64-w64-mingw32-clang.exe')) -and
+              (Test-Path -LiteralPath (Join-Path $_.FullName 'llvm-nm.exe')) -and
+              (Test-Path -LiteralPath (Join-Path $_.FullName 'llvm-objdump.exe'))
+            } |
+            Select-Object -First 1
+          if ($null -eq $toolchainBin) { throw 'Pinned LLVM-MinGW archive is missing required cross compilers or validation tools.' }
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value $toolchainBin.FullName
+      - name: Provision and validate pinned Windows libtailscale artifacts
+        working-directory: hivemind-rs
+        shell: bash
+        env:
+          GOTOOLCHAIN: local
+        run: |
+          set -euo pipefail
+          test "$(go version)" = 'go version go1.25.5 windows/amd64'
+          for target in msvc arm64-msvc gnu; do
+            case "$target" in
+              arm64-msvc) compiler=aarch64-w64-mingw32-clang ;;
+              *) compiler=x86_64-w64-mingw32-clang ;;
+            esac
+            echo "Building libtailscale $target from $LIBTAILSCALE_VERSION with $compiler"
+            LIBTAILSCALE_TARGET="$target" CC="$compiler" bash ../scripts/fetch_libtailscale_windows.sh
+            LIBTAILSCALE_TARGET="$target" bash ../scripts/validate_libtailscale_windows.sh
+          done
       - name: Set up pinned Hivemind Rust
         uses: dtolnay/rust-toolchain@1.98.1
         with:
@@ -276,9 +327,10 @@ jobs:
       - name: Install frontend dependencies
         shell: pwsh
         run: |
-          npm.cmd ci --prefix frontend
-          npm.cmd ci --prefix frontend/master-ui
-          npm.cmd ci --prefix frontend/worker-ui
+          foreach ($surface in @('frontend', 'frontend/master-ui', 'frontend/worker-ui')) {
+            npm.cmd ci --prefix $surface
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - name: Build release frontend artifacts
         shell: pwsh
         run: ./scripts/build-release-frontends.ps1
@@ -316,7 +368,7 @@ jobs:
   frontend-browser-smoke:
     name: Hosted frontend browser smoke
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -338,6 +390,16 @@ jobs:
       - name: Install Chromium and ffmpeg
         working-directory: frontend
         run: npx playwright install --with-deps chromium ffmpeg
+      - name: Build all production frontend surfaces
+        run: |
+          npm --prefix frontend run build
+          npm --prefix frontend/master-ui run build
+          npm --prefix frontend/worker-ui run build
+      - name: Run production frontend UI contracts
+        working-directory: frontend
+        env:
+          HIVEMIND_E2E_EVIDENCE_DIR: ${{ runner.temp }}/hivemind-frontend-ui
+        run: npm run test:ui
       - name: Start local frontend servers
         shell: bash
         run: |

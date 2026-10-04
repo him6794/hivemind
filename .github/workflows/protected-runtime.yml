@@ -173,17 +173,14 @@ jobs:
     environment: protected-native-hcs
     env:
       HIVEMIND_WINDOWS_WORKER_EXECUTABLE: ${{ vars.HIVEMIND_WINDOWS_WORKER_EXECUTABLE }}
-      HIVEMIND_WINDOWS_HCS_BACKEND_REGISTRY: ${{ vars.HIVEMIND_WINDOWS_HCS_BACKEND_REGISTRY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Run the native HCS gate
+      - name: Run native HCS prerequisites gate
         shell: pwsh
         run: |
           if ([string]::IsNullOrWhiteSpace($env:HIVEMIND_WINDOWS_WORKER_EXECUTABLE)) { throw 'HIVEMIND_WINDOWS_WORKER_EXECUTABLE is required' }
-          if ([string]::IsNullOrWhiteSpace($env:HIVEMIND_WINDOWS_HCS_BACKEND_REGISTRY)) { throw 'HIVEMIND_WINDOWS_HCS_BACKEND_REGISTRY is required' }
           & ./scripts/windows-hcs-e2e.ps1 `
             -WorkerExecutable $env:HIVEMIND_WINDOWS_WORKER_EXECUTABLE `
-            -BackendRegistry $env:HIVEMIND_WINDOWS_HCS_BACKEND_REGISTRY `
             -EvidenceDirectory (Join-Path $env:GITHUB_WORKSPACE 'test_logs/windows-hcs-e2e')
-          if (!$?) { throw 'native HCS gate failed' }
+          if (!$?) { throw 'native HCS prerequisites gate failed' }
