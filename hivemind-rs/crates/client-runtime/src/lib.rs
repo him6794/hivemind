@@ -2065,7 +2065,7 @@ fn local_webview_url(addr: SocketAddr, ui_available: bool, ui_disabled: bool) ->
 
 #[cfg(any(test, target_os = "windows"))]
 pub const LOCAL_UI_READY_MARKER: &[u8] = b"HIVEMIND_LOCAL_UI_READY\n";
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(target_os = "windows")]
 const LOCAL_UI_READY_TIMEOUT: Duration = Duration::from_secs(8);
 #[cfg(any(test, target_os = "windows"))]
 pub const LOCAL_UI_QUIT_MARKER: &[u8] = b"HIVEMIND_LOCAL_UI_QUIT\n";

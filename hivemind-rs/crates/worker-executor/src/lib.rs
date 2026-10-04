@@ -20,7 +20,6 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use tokio::sync::watch;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -584,7 +583,11 @@ impl WorkerExecutor {
     /// terminated only by exact journal identity; unknown or untrusted systems
     /// quarantine the Worker instead of being guessed at or adopted.
     #[cfg(windows)]
-    pub fn reconcile_hcs_startup(&self, worker_id: &str, timeout: Duration) -> Result<()> {
+    pub fn reconcile_hcs_startup(
+        &self,
+        worker_id: &str,
+        timeout: std::time::Duration,
+    ) -> Result<()> {
         let Some(journal) = self.hcs_journal.as_ref() else {
             return Ok(());
         };
@@ -821,7 +824,7 @@ fn terminate_recorded_hcs_system(
     journal: &hcs_journal::HcsExecutionJournal,
     record: &hcs_journal::HcsJournalRecord,
     system_id: &str,
-    timeout: Duration,
+    timeout: std::time::Duration,
 ) -> Result<()> {
     journal
         .append_event(

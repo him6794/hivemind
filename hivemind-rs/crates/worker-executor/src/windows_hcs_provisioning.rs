@@ -6,19 +6,28 @@
 //! all been checked. Missing or invalid material disables this backend; it never
 //! turns into direct host execution or another isolation implementation.
 
-use general_compute_runtime::production::{
-    WindowsProductionBackendConfig, WindowsProductionBackendRegistry,
-};
-use general_compute_runtime::sandbox::{BackendExecutionMode, WindowsSandboxPolicy};
+#[cfg(any(windows, test))]
+use general_compute_runtime::production::WindowsProductionBackendConfig;
+use general_compute_runtime::production::WindowsProductionBackendRegistry;
+#[cfg(any(windows, test))]
+use general_compute_runtime::sandbox::BackendExecutionMode;
+use general_compute_runtime::sandbox::WindowsSandboxPolicy;
+use general_compute_runtime::TrustedWorkerCapabilityRegistration;
+#[cfg(any(windows, test))]
 use general_compute_runtime::{
-    BackendRegistration, TrustedWorkerCapabilityRegistration, WorkerCapabilities, MAX_OUTPUT_BYTES,
-    MAX_THREADS, MAX_WALL_TIME_MS,
+    BackendRegistration, WorkerCapabilities, MAX_OUTPUT_BYTES, MAX_THREADS, MAX_WALL_TIME_MS,
 };
+#[cfg(any(windows, test))]
 use hivemind_client_runtime::update::{UpdateError, UpdateVerifier};
 use serde::{Deserialize, Serialize};
+#[cfg(any(windows, test))]
 use std::collections::BTreeSet;
+#[cfg(any(windows, test))]
 use std::fs;
-use std::path::{Path, PathBuf};
+#[cfg(any(windows, test))]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(windows)]
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
@@ -29,11 +38,17 @@ pub const WINDOWS_HCS_RUNTIME_MANIFEST_FILE: &str = "bundle-manifest.json";
 pub const WINDOWS_HCS_SCHEMA_MAJOR: u32 = 2;
 pub const WINDOWS_HCS_SCHEMA_MINOR: u32 = 1;
 
+#[cfg(any(windows, test))]
 const MAX_MANIFEST_BYTES: u64 = 256 * 1024;
+#[cfg(any(windows, test))]
 const MAX_BACKENDS: usize = 64;
+#[cfg(any(windows, test))]
 const MAX_FIELD_BYTES: usize = 512;
+#[cfg(any(windows, test))]
 const MAX_PATH_BYTES: usize = 512;
+#[cfg(any(windows, test))]
 const MAX_ENTRYPOINT_PARTS: usize = 64;
+#[cfg(any(windows, test))]
 const CLOCK_SKEW_SECS: u64 = 300;
 
 #[derive(Debug, Error)]
@@ -169,6 +184,7 @@ pub fn load_package_relative(
     }
 }
 
+#[cfg(any(windows, test))]
 fn load_bundle(
     bundle_root: &Path,
     state_root: &Path,
@@ -227,7 +243,7 @@ fn load_bundle(
     #[cfg(not(windows))]
     {
         let _ = configs;
-        return Ok(None);
+        Ok(None)
     }
 
     #[cfg(windows)]
@@ -246,6 +262,7 @@ fn load_bundle(
     }
 }
 
+#[cfg(any(windows, test))]
 fn read_signed_manifest(
     path: &Path,
 ) -> Result<SignedWindowsHcsRuntimeManifest, WindowsHcsProvisioningError> {
@@ -276,6 +293,7 @@ fn read_signed_manifest(
     })
 }
 
+#[cfg(any(windows, test))]
 fn validate_manifest(
     manifest: &WindowsHcsRuntimeManifest,
     now_unix: u64,
@@ -328,6 +346,7 @@ fn validate_manifest(
     Ok(())
 }
 
+#[cfg(any(windows, test))]
 fn validate_backend(
     backend: &WindowsHcsRuntimeBackendManifest,
 ) -> Result<(), WindowsHcsProvisioningError> {
@@ -394,6 +413,7 @@ fn validate_backend(
     Ok(())
 }
 
+#[cfg(any(windows, test))]
 fn trusted_registration(
     backends: &[WindowsHcsRuntimeBackendManifest],
 ) -> TrustedWorkerCapabilityRegistration {
@@ -429,6 +449,7 @@ fn trusted_registration(
     }
 }
 
+#[cfg(any(windows, test))]
 fn current_architecture() -> &'static str {
     match std::env::consts::ARCH {
         "aarch64" => "aarch64",
@@ -436,6 +457,7 @@ fn current_architecture() -> &'static str {
     }
 }
 
+#[cfg(any(windows, test))]
 fn validate_version(value: &str, field: &str) -> Result<(), WindowsHcsProvisioningError> {
     validate_field(value, field, MAX_FIELD_BYTES)?;
     let mut parts = value.split('.');
@@ -459,6 +481,7 @@ fn validate_version(value: &str, field: &str) -> Result<(), WindowsHcsProvisioni
     Ok(())
 }
 
+#[cfg(any(windows, test))]
 fn validate_digest(value: &str, field: &str) -> Result<(), WindowsHcsProvisioningError> {
     let valid = value
         .strip_prefix("sha256:")
@@ -471,6 +494,7 @@ fn validate_digest(value: &str, field: &str) -> Result<(), WindowsHcsProvisionin
     Ok(())
 }
 
+#[cfg(any(windows, test))]
 fn validate_identifier(value: &str, field: &str) -> Result<(), WindowsHcsProvisioningError> {
     validate_field(value, field, MAX_FIELD_BYTES)?;
     if !value
@@ -484,6 +508,7 @@ fn validate_identifier(value: &str, field: &str) -> Result<(), WindowsHcsProvisi
     Ok(())
 }
 
+#[cfg(any(windows, test))]
 fn validate_relative_path(value: &str, field: &str) -> Result<(), WindowsHcsProvisioningError> {
     if value.is_empty() || value.len() > MAX_PATH_BYTES || value.contains('\\') {
         return Err(invalid_manifest(&format!(
@@ -512,10 +537,12 @@ fn validate_relative_path(value: &str, field: &str) -> Result<(), WindowsHcsProv
     Ok(())
 }
 
+#[cfg(any(windows, test))]
 fn path_components(value: &str) -> Vec<&str> {
     value.split('/').collect()
 }
 
+#[cfg(any(windows, test))]
 fn validate_field(
     value: &str,
     field: &str,
@@ -529,10 +556,12 @@ fn validate_field(
     Ok(())
 }
 
+#[cfg(any(windows, test))]
 fn invalid_manifest(message: &str) -> WindowsHcsProvisioningError {
     WindowsHcsProvisioningError::InvalidManifest(message.into())
 }
 
+#[cfg(any(windows, test))]
 fn validate_state_root(path: &Path) -> Result<(), WindowsHcsProvisioningError> {
     if !path.is_absolute() || path.to_string_lossy().chars().any(char::is_control) {
         return Err(WindowsHcsProvisioningError::StateRootUnavailable(
@@ -543,6 +572,7 @@ fn validate_state_root(path: &Path) -> Result<(), WindowsHcsProvisioningError> {
         .map_err(|error| WindowsHcsProvisioningError::StateRootUnavailable(error.to_string()))
 }
 
+#[cfg(any(windows, test))]
 fn ensure_real_directory(path: &Path, label: &str) -> Result<(), WindowsHcsProvisioningError> {
     let metadata = fs::symlink_metadata(path).map_err(|error| {
         WindowsHcsProvisioningError::InvalidBundle(format!("{label} is unavailable: {error}"))
@@ -555,6 +585,7 @@ fn ensure_real_directory(path: &Path, label: &str) -> Result<(), WindowsHcsProvi
     ensure_no_reparse_ancestors(path, label)
 }
 
+#[cfg(any(windows, test))]
 fn ensure_no_reparse_ancestors(
     path: &Path,
     label: &str,
@@ -589,11 +620,12 @@ fn is_reparse_point(metadata: &fs::Metadata) -> bool {
     metadata.file_attributes() & 0x0400 != 0
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), test))]
 fn is_reparse_point(metadata: &fs::Metadata) -> bool {
     metadata.file_type().is_symlink()
 }
 
+#[cfg(windows)]
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -662,6 +694,36 @@ mod tests {
             hcs_schema_minor: WINDOWS_HCS_SCHEMA_MINOR,
             backends: vec![backend()],
         }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn non_windows_loader_does_not_advertise_hcs() {
+        assert!(load_package_relative().unwrap().is_none());
+    }
+
+    #[test]
+    fn registration_preserves_backend_limits_and_isolation() {
+        let backend = backend();
+        let registration = trusted_registration(std::slice::from_ref(&backend));
+        assert_eq!(registration.worker.max_threads, backend.max_threads);
+        assert_eq!(
+            registration.worker.guest_image_digests,
+            vec![backend.guest_image_digest.clone()]
+        );
+        assert!(!registration.worker.gpu_available);
+        assert_eq!(registration.backends.len(), 1);
+        let registered = &registration.backends[0];
+        assert_eq!(registered.backend_id, backend.backend_id);
+        assert_eq!(
+            registered.execution_mode,
+            BackendExecutionMode::ProductionSandboxedWindows
+        );
+        assert_eq!(registered.capabilities, backend.capabilities);
+        assert_eq!(registered.max_threads, backend.max_threads);
+        assert!(!registered.network_allowed);
+        assert!(registered.filesystem_read_only);
+        assert!(!registered.gpu_allowed);
     }
 
     #[test]

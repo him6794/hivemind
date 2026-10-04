@@ -22,6 +22,7 @@ const MAX_FIELD_BYTES: usize = 4096;
 const MAX_RECORD_BYTES: u64 = 1024 * 1024;
 const MAX_ERROR_BYTES: usize = 2048;
 const MAX_ENUMERATED_SYSTEMS: usize = 4096;
+#[cfg(windows)]
 const REPARSE_POINT_ATTRIBUTE: u32 = 0x0400;
 const TERMINAL_RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
 const TEMPORARY_SNAPSHOT_MIN_AGE_MS: u64 = 60 * 60 * 1_000;
